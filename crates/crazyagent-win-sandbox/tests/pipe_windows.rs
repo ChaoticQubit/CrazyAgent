@@ -1,11 +1,17 @@
 #![cfg(windows)]
 
-use crazyagent_win_sandbox::pipe;
-use std::io;
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+use crazyagent_win_sandbox::pipe::{self, Peer};
+use crazyagent_win_sandbox::private::user_sid;
+use std::fs::{File, OpenOptions};
+use std::io::{self, Write};
+use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::{AsHandle, AsRawHandle, FromRawHandle, OwnedHandle};
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU32, Ordering};
-use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_PIPE_BUSY, LocalFree};
+use windows_sys::Win32::Foundation::{
+    ERROR_ACCESS_DENIED, ERROR_IO_PENDING, ERROR_NO_TOKEN, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED,
+    HANDLE, LocalFree,
+};
 use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
 use windows_sys::Win32::Security::{
     CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, DuplicateTokenEx, GetLengthSid, PSID,
@@ -13,10 +19,14 @@ use windows_sys::Win32::Security::{
     TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_TYPE, TokenImpersonation,
     TokenIntegrityLevel, TokenPrimary,
 };
+use windows_sys::Win32::Storage::FileSystem::{ReadFile, SECURITY_IDENTIFICATION};
+use windows_sys::Win32::System::IO::{GetOverlappedResult, OVERLAPPED};
+use windows_sys::Win32::System::Pipes::{ConnectNamedPipe, ImpersonateNamedPipeClient};
 use windows_sys::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
 use windows_sys::Win32::System::Threading::{
-    CreateProcessAsUserW, GetCurrentProcess, GetExitCodeProcess, OpenProcessToken,
-    PROCESS_INFORMATION, STARTUPINFOW, SetThreadToken, WaitForSingleObject,
+    CreateProcessAsUserW, GetCurrentProcess, GetCurrentThread, GetExitCodeProcess,
+    OpenProcessToken, OpenThreadToken, PROCESS_INFORMATION, STARTUPINFOW, SetThreadToken,
+    WaitForSingleObject,
 };
 
 /// The low mandatory level, the level of a sandboxed browser tab or a lowered helper.
@@ -105,11 +115,31 @@ fn low_token(kind: TOKEN_TYPE) -> OwnedHandle {
     token
 }
 
-/// A restricted impersonation copy of this process's token: every privilege but
-/// SeChangeNotify removed and RESTRICTED as its restricting SID. Output: the token.
+/// A restricted impersonation copy of this process's token with RESTRICTED as its
+/// restricting SID, which no engine pipe list grants. Output: the token.
 fn restricted_token() -> OwnedHandle {
-    let token = own_token(TokenImpersonation);
     let restricting = sid(RESTRICTED);
+    let token = restricted_to(restricting);
+    unsafe { LocalFree(restricting) };
+    token
+}
+
+/// The user's own SID copied into 4-byte words, so Windows reads it aligned. Output: the
+/// words.
+fn user_words() -> Vec<u32> {
+    let bytes = user_sid().unwrap();
+    let mut words = vec![0_u32; bytes.len().div_ceil(4)];
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), words.as_mut_ptr().cast(), bytes.len())
+    };
+    words
+}
+
+/// A restricted impersonation copy of this process's token: every privilege but
+/// SeChangeNotify removed and `restricting` as its only restricting SID. Input: the SID,
+/// alive for the call. Output: the token.
+fn restricted_to(restricting: PSID) -> OwnedHandle {
+    let token = own_token(TokenImpersonation);
     let entry = SID_AND_ATTRIBUTES {
         Sid: restricting,
         Attributes: 0,
@@ -128,9 +158,7 @@ fn restricted_token() -> OwnedHandle {
             &mut made,
         )
     };
-    let failure = io::Error::last_os_error();
-    unsafe { LocalFree(restricting) };
-    assert_ne!(done, 0, "{failure}");
+    assert_ne!(done, 0, "{}", io::Error::last_os_error());
     unsafe { OwnedHandle::from_raw_handle(made) }
 }
 
@@ -158,6 +186,126 @@ fn outcome(result: &io::Result<OwnedHandle>) -> String {
         Ok(_) => "created".into(),
         Err(error) => format!("refused {:?} {error}", error.raw_os_error()),
     }
+}
+
+/// The Win32 code of a failed client open, or "opened". Input: the open result. Output:
+/// the text the row logs.
+fn opened(result: &io::Result<File>) -> String {
+    match result {
+        Ok(_) => "opened".into(),
+        Err(error) => format!("refused {:?} {error}", error.raw_os_error()),
+    }
+}
+
+/// What a peer check read, or its Win32 code. Input: the check result. Output: the text
+/// the row logs.
+fn described(result: &io::Result<Peer>) -> String {
+    match result {
+        Ok(peer) => format!(
+            "read: same user {}, app container {}, restricted {}, integrity {:#x}",
+            peer.user == user_sid().unwrap(),
+            peer.app_container,
+            peer.restricted,
+            peer.integrity
+        ),
+        Err(error) => format!("refused {:?} {error}", error.raw_os_error()),
+    }
+}
+
+/// A fresh engine pipe with one instance, and a client end opened at identification level
+/// as the engine's clients open it, as `principal` when one is given. Input: the
+/// impersonation token to open as, if any. Output: the server end, and the client end or
+/// the open error.
+fn connected(principal: Option<&OwnedHandle>) -> (OwnedHandle, io::Result<File>) {
+    let name = unique("engine");
+    let server = pipe::create(&name, true, 1).unwrap();
+    let open = || {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .security_qos_flags(SECURITY_IDENTIFICATION)
+            .open(&name)
+    };
+    let client = match principal {
+        Some(token) => as_principal(token, open),
+        None => open(),
+    };
+    (server, client)
+}
+
+/// Waits for an overlapped call on `server` that may still be pending. Inputs: the server
+/// end, the call's OVERLAPPED and whether the call itself returned success. Output: the
+/// bytes it moved.
+fn finished(server: &OwnedHandle, overlapped: &OVERLAPPED, done: bool) -> u32 {
+    if !done {
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(ERROR_IO_PENDING as i32)
+        );
+    }
+    let mut moved = 0_u32;
+    let waited = unsafe { GetOverlappedResult(server.as_raw_handle(), overlapped, &mut moved, 1) };
+    assert_ne!(waited, 0, "{}", io::Error::last_os_error());
+    moved
+}
+
+/// Accepts the client already waiting on `server` and reads its first bytes, as the D9
+/// server reads the first frame before its peer check. The handle is overlapped, so each
+/// call waits on its own OVERLAPPED. Input: the server end. Output: the bytes read.
+fn first_bytes(server: &OwnedHandle) -> Vec<u8> {
+    let mut overlapped = OVERLAPPED::default();
+    if unsafe { ConnectNamedPipe(server.as_raw_handle(), &mut overlapped) } == 0 {
+        let error = io::Error::last_os_error().raw_os_error();
+        if error != Some(ERROR_PIPE_CONNECTED as i32) {
+            finished(server, &overlapped, false);
+        }
+    }
+    let mut buffer = [0_u8; 16];
+    let mut overlapped = OVERLAPPED::default();
+    let read = unsafe {
+        ReadFile(
+            server.as_raw_handle(),
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            null_mut(),
+            &mut overlapped,
+        )
+    };
+    let moved = finished(server, &overlapped, read != 0) as usize;
+    buffer[..moved].to_vec()
+}
+
+/// Impersonates the client of `server` and opens the thread token with OpenAsSelf false,
+/// then reverts; a failed revert aborts. NOTE-0145 A2's P1 probe. Input: the server end.
+/// Output: "opened", or the step that was refused and its code.
+fn not_as_self(server: &OwnedHandle) -> String {
+    if unsafe { ImpersonateNamedPipeClient(server.as_raw_handle()) } == 0 {
+        return format!("impersonation refused {}", io::Error::last_os_error());
+    }
+    let mut token: HANDLE = null_mut();
+    let opened = unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 0, &mut token) };
+    let failure = io::Error::last_os_error();
+    if unsafe { RevertToSelf() } == 0 {
+        std::process::abort();
+    }
+    if opened == 0 {
+        return format!("refused {:?} {failure}", failure.raw_os_error());
+    }
+    drop(unsafe { OwnedHandle::from_raw_handle(token) });
+    "opened".into()
+}
+
+/// Whether this thread holds a token of its own. Output: Ok when it does, or the code of
+/// the failed open, ERROR_NO_TOKEN when the thread acts as the process.
+fn thread_token() -> Result<(), i32> {
+    let mut token: HANDLE = null_mut();
+    if unsafe { OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, 1, &mut token) } == 0 {
+        return Err(io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or_default());
+    }
+    drop(unsafe { OwnedHandle::from_raw_handle(token) });
+    Ok(())
 }
 
 /// The lowered principals P2 tries, by name, each as an impersonation token.
@@ -315,4 +463,89 @@ fn a_low_integrity_child_starts_from_a_lowered_primary_token() {
         0
     );
     assert_eq!(code, 7);
+}
+
+/// W2 D9 (DESIGN-0140 D9, NOTE-0145 A2): after the first bytes are read, the server's peer
+/// check on a client of this user reads the user's SID, no AppContainer, no restriction and
+/// medium or above, so the judge passes, and the thread holds no token afterwards. A check
+/// before any byte and a thread token opened not as self are logged with their codes.
+#[test]
+fn the_peer_check_reads_a_client_of_this_user_and_leaves_no_thread_token() {
+    let user = user_sid().unwrap();
+    let (server, client) = connected(None);
+    let mut client = client.unwrap();
+    let early = pipe::client(server.as_handle());
+    println!(
+        "D9 peer check before any byte is read: {}",
+        described(&early)
+    );
+    assert_eq!(thread_token(), Err(ERROR_NO_TOKEN as i32));
+    client.write_all(b"x").unwrap();
+    assert_eq!(first_bytes(&server), b"x");
+    println!(
+        "D9 thread token opened not as self: {}",
+        not_as_self(&server)
+    );
+    let peer = pipe::client(server.as_handle());
+    println!("D9 peer check after the first byte: {}", described(&peer));
+    let peer = peer.unwrap();
+    assert_eq!(peer.user, user);
+    assert!(!peer.app_container && !peer.restricted);
+    assert!(peer.integrity >= 0x2000, "{:#x}", peer.integrity);
+    assert_eq!(pipe::judge_peer(&peer, &user), Ok(()));
+    assert_eq!(thread_token(), Err(ERROR_NO_TOKEN as i32));
+}
+
+/// W2 D9 (DESIGN-0140 row 3): a restricted token whose restricting SID is the user's own
+/// passes the pipe's owner-only list, so only the peer check stands between it and the
+/// engine; the check reads it as restricted and the judge refuses it.
+#[test]
+fn a_restricted_client_the_list_lets_in_is_refused_by_the_peer_check() {
+    let user = user_sid().unwrap();
+    let words = user_words();
+    let token = restricted_to(words.as_ptr().cast_mut().cast());
+    let (server, client) = connected(Some(&token));
+    println!(
+        "D9 client restricted to the user opens the engine pipe: {}",
+        opened(&client)
+    );
+    let mut client = client.unwrap();
+    client.write_all(b"x").unwrap();
+    assert_eq!(first_bytes(&server), b"x");
+    let peer = pipe::client(server.as_handle());
+    println!(
+        "D9 peer check on the restricted client: {}",
+        described(&peer)
+    );
+    let peer = peer.unwrap();
+    assert_eq!(peer.user, user);
+    assert!(peer.restricted);
+    assert_eq!(
+        pipe::judge_peer(&peer, &user),
+        Err("a restricted token is at the other end of the pipe")
+    );
+    assert_eq!(thread_token(), Err(ERROR_NO_TOKEN as i32));
+}
+
+/// W2 D9 (DESIGN-0140 row 2): a low integrity client and a client restricted to the
+/// RESTRICTED SID are refused at open by the pipe's list and label, before any peer check,
+/// while the engine's own client opens the same kind of pipe (A6 pairing).
+#[test]
+fn clients_the_pipe_list_refuses_never_reach_the_peer_check() {
+    for (principal, token) in principals() {
+        let (server, client) = connected(Some(&token));
+        println!(
+            "D9 {principal} client opens the engine pipe: {}",
+            opened(&client)
+        );
+        assert!(client.is_err(), "{principal} opened the engine pipe");
+        drop(server);
+    }
+    let (server, client) = connected(None);
+    println!(
+        "D9 engine client opens the engine pipe: {}",
+        opened(&client)
+    );
+    assert!(client.is_ok());
+    drop(server);
 }
