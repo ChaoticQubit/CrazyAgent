@@ -506,6 +506,17 @@ pub(crate) async fn before_cut<F: std::future::Future>(
     DECIDE_BY.scope(decide_by, work).await
 }
 
+/// The instant one submit decides by: its own deadline, or the decide-by instant of the
+/// bounded request it runs in when that is earlier. Input: the caller's deadline. Output:
+/// the earlier instant, never later than the input.
+fn decided_by(deadline: tokio::time::Instant) -> tokio::time::Instant {
+    let decided = DECIDE_BY
+        .try_with(|by| deadline.min(*by))
+        .unwrap_or(deadline);
+    assert!(decided <= deadline);
+    decided
+}
+
 /// Withdraws a timed job's claim that is still queued when its submitter stops waiting
 /// before deciding it, as when the transport cuts an owner request at its deadline, so the
 /// worker skips the job and it never lands. It holds no claim for an access-narrowing job,
@@ -609,11 +620,11 @@ impl Job {
 }
 
 impl Storage {
-    /// Queues one timed job and waits until the worker takes it; only a job that is not
-    /// access-narrowing first waits for the worker to receive. Inputs: the job, the deadline
-    /// for both waits, the refusal for a full queue. Output: `Taken`, so the reply timer starts
-    /// at the take; else storage_starting_not_submitted, storage_busy_not_submitted or `full`
-    /// with nothing run, or access_change_pending for a narrowing job left queued.
+    /// Queues one timed job and waits until the worker takes it, a non-narrowing job first
+    /// waiting for the worker to receive. Inputs: the job, the deadline for both waits (earlier
+    /// inside a `before_cut` request), the refusal for a full queue. Output: `Taken`, the reply
+    /// timer starting at the take; else storage_starting_not_submitted, storage_busy_not_submitted
+    /// or `full` with nothing run, or access_change_pending for a narrowing job left queued.
     pub(crate) async fn submit(
         &self,
         job: Job,
@@ -621,6 +632,7 @@ impl Storage {
         full: &str,
     ) -> Result<Taken, EngineError> {
         assert!(!matches!(job, Job::Claimed(..)));
+        let deadline = decided_by(deadline);
         let narrowing = job.narrows_access();
         if !narrowing {
             let mut receiving = self.receiving.clone();
