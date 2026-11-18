@@ -2373,7 +2373,7 @@ fn a_task_block_carries_the_finding_and_the_acceptance_check() {
 /// (V243-MASTER-WAKE-TEXT-HANDOFF).
 #[test]
 fn a_tools_off_wake_block_carries_the_finding_and_the_acceptance_check() {
-    let text = wake_text(&["- Ada (@docs), finished".into()], false);
+    let text = wake_text(&["- Ada (@docs), finished".into()], false, false);
     for part in HAND_OFF_PHRASES {
         assert!(text.contains(part), "{part}: {text}");
     }
