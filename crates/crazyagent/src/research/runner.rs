@@ -225,6 +225,7 @@ const LISTED_HOOKS: &str = "This project turned hooks on, and this harness can't
 
 /// The line a read-only run on a listed harness ends with (T19b 19b-4, QUESTION-0100 Q5):
 /// project mapping, roadmap status checks and the Overview run on Codex or Claude Code only.
+#[cfg(unix)]
 const LISTED_READ_ONLY: &str = "This harness runs research jobs only. Project mapping, roadmap status checks and the Overview run on Codex or Claude Code.";
 
 /// The coding agents research can run on, named by a job's harness id: Codex, Claude Code,

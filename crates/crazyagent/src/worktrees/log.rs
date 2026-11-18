@@ -157,7 +157,7 @@ fn absolute(path: &str) -> bool {
 
 /// An admission event for rows outside the worktrees module, the repository's identities
 /// made up. Inputs: the project and the repository, an absolute path. Output: the event.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn admitted_for_test(project: &ProjectId, repository: &str) -> Event {
     let identity = |inode| super::Identity { device: 1, inode };
     let admission = Admission {

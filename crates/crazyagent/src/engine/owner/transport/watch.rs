@@ -59,6 +59,7 @@ pub(super) struct Watches {
 
 impl Watches {
     /// No watch waiting and no sampler. Output: the watches.
+    #[cfg(unix)]
     pub(super) fn new() -> Self {
         Self {
             waiting: AtomicUsize::new(0),
