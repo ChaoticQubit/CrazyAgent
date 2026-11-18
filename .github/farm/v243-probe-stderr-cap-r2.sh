@@ -11,6 +11,7 @@ row() { printf '| %s | %s | %s |\n' "$1" "$2" "$3" >> "$summary"; }
 printf '| check | expected | result |\n| --- | --- | --- |\n' >> "$summary"
 uname -r
 git log --oneline -4
+cp .github/farm/v243-probe-stderr-cap-raw.diff "$RUNNER_TEMP/raw.diff"
 code_tip=$(git log -1 --format=%H HEAD -- . ':!.github')
 if [ "$(git rev-parse --short=9 "$code_tip")" != "$tip" ] || [ "$(git rev-parse --short=9 "$code_tip~1")" != "$red" ] || [ "$(git rev-parse --short=9 "$code_tip~2")" != "$first" ]; then
   row tip "$tip on $red on $first" "NOT: $(git log --format=%h --abbrev=9 -3 "$code_tip" | tr '\n' ' ')"
@@ -42,7 +43,7 @@ judge() {
 }
 echo "== red: $tip with the log line written raw"
 git checkout -q "$code_tip"
-git apply .github/farm/v243-probe-stderr-cap-raw.diff
+git apply "$RUNNER_TEMP/raw.diff"
 changed=$(git diff --numstat | tr '\t' ' ')
 echo "$changed"
 if [ "$changed" != "1 1 crates/crazyagent/src/sandbox/linux.rs" ]; then
