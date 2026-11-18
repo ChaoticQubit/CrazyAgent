@@ -549,6 +549,71 @@ async fn a_folder_add_whose_grant_is_revoked_after_its_plan_moves_nothing() {
     owner.stop().await;
 }
 
+/// A folder add whose plan storage cannot take before the exchange deadline is refused
+/// storage_busy_not_submitted by the projects home route itself, rather than cut and heard as
+/// an unknown outcome, and moves nothing (V243-STORAGE-BUSY-ROWS).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_folder_add_whose_plan_storage_cannot_take_is_refused_unsent_and_moves_nothing() {
+    let owner = Usage::start().await;
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let (home, source) = (place.join("projects"), place.join("sources").join("kept"));
+    std::fs::create_dir(&home).unwrap();
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("main.rs"), "fn main() {}\n").unwrap();
+    let mut controller = OwnerController::attach(
+        owner.root.path(),
+        OwnerClientKind::Desktop,
+        Duration::from_secs(20),
+    )
+    .await
+    .unwrap();
+    controller.read(OwnerRead::ProjectsHome).await.unwrap();
+    controller
+        .begin_mutation(
+            OwnerMutation::SetProjectsHome {
+                path: home.to_str().unwrap().into(),
+            },
+            1,
+        )
+        .unwrap();
+    assert!(matches!(
+        controller.send_pending().await.unwrap(),
+        OwnerResponse::Applied { .. }
+    ));
+    controller.read(OwnerRead::ProjectsHome).await.unwrap();
+    controller
+        .begin_mutation(
+            OwnerMutation::AddExistingFolder {
+                source: source.to_str().unwrap().into(),
+                mode: AddMode::Move,
+                overrides: Vec::new(),
+            },
+            2,
+        )
+        .unwrap();
+
+    let release = hold_storage(&owner);
+    let answered = tokio::time::timeout(Duration::from_secs(20), controller.send_pending())
+        .await
+        .unwrap();
+    drop(release);
+    assert!(
+        matches!(
+            &answered,
+            Ok(OwnerResponse::Rejected { code }) if code == "storage_busy_not_submitted"
+        ),
+        "the route answered the refusal itself: {answered:?}"
+    );
+    storage_settled(&owner).await;
+    assert!(
+        source.join("main.rs").is_file() && !home.join("kept").exists(),
+        "a refused add moves nothing"
+    );
+    drop(controller);
+    owner.stop().await;
+}
+
 /// RV-DS241-76: an owner request admitted while a revocation waits on the owner barrier,
 /// and queued behind it, creates nothing once that revocation lapsed and closed the client:
 /// the generic owner path checks the grant again under the barrier, as the foreground path
