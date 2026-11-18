@@ -105,6 +105,7 @@ pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> 
     let folder = setup
         .project_folder()
         .canonicalize()
+        .map(crate::projects_home::one_spelling)
         .map_err(|_| "the project folder is missing".to_owned())?;
     let extra_reads = super::extra_paths::load(&db, project.as_str())
         .map_err(|_| "the project's read-only folders could not be read".to_owned())?;

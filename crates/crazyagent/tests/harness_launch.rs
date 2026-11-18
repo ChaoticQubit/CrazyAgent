@@ -4,7 +4,7 @@ use crazyagent::harnesses::interactive::{self, KEY_FILE, Run};
 use crazyagent::harnesses::launch::{
     AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session, command, route,
 };
-use crazyagent::harnesses::leftovers::{UNCHECKED, Unstopped};
+use crazyagent::harnesses::leftovers::{LEFT, UNCHECKED, Unstopped};
 use crazyagent::harnesses::{HarnessStatus, Search, catalog};
 use crazyagent::model_gateway::relay::{TOKEN_PREFIX, is_placeholder};
 use crazyagent::protocol::CredentialRef;
@@ -1042,14 +1042,12 @@ exec /bin/sleep 30
 "#;
 
 /// SETSID-L2 r1 L2, the SECAUDIT-SETSID-LEFTOVER option (a) residual the owner accepted
-/// (SETSID-A-RESIDUAL): a Full access headless agent's double fork whose middle process
-/// setsids, forks and exits within microseconds, between two tables the follower takes,
-/// leaves a grandchild running a program whose environment macOS hides. No table showed the
-/// middle, so neither the grandchild's parent nor the unique id it was forked from links it to
-/// the agent: the stop reports clean, or unchecked under load, naming nothing, while it keeps
-/// running. Pins today's result; a later fix that catches it turns this row red on purpose.
+/// (SETSID-A-RESIDUAL): a Full access headless agent's double fork whose middle setsids, forks
+/// and exits between two tables the follower takes leaves a grandchild whose environment macOS
+/// hides. The stop names it as left (`perl`) when a table caught the middle, or misses it,
+/// clean or unchecked, while it keeps running; no other answer passes.
 #[test]
-fn a_full_access_headless_stop_misses_an_orphan_made_between_two_tables() {
+fn a_full_access_headless_stop_names_or_misses_an_orphan_made_between_two_tables() {
     let root = private_dir("crazyagent-fast-orphan-");
     let project = private_folder(root.path(), "project");
     let home = private_folder(root.path(), "home");
@@ -1097,17 +1095,25 @@ fn a_full_access_headless_stop_misses_an_orphan_made_between_two_tables() {
     };
     let leftover = Leftover(vec![orphan]);
     assert_ne!(rustix::process::getsid(Some(orphan)), Ok(leader));
-
-    match session.stop() {
-        Ok(_) => {}
-        Err(Unstopped::Left(left)) => assert_eq!(left.code(), UNCHECKED, "{}", left.plain()),
+    let missed = match session.stop() {
+        Ok(_) => true,
+        Err(Unstopped::Left(left)) if left.code() == UNCHECKED => true,
+        Err(Unstopped::Left(left)) => {
+            let report = left.plain();
+            assert_eq!(left.code(), LEFT, "{report}");
+            let named = named_in(&report).remove(&orphan.as_raw_nonzero().get());
+            assert_eq!(named.as_deref(), Some("perl"), "{report}");
+            false
+        }
         Err(other) => panic!("the stop of a Full access agent was reported {other:?}"),
+    };
+    if missed {
+        assert_eq!(
+            rustix::process::test_kill_process(orphan),
+            Ok(()),
+            "a stop that misses the orphan {orphan:?} leaves it running, the accepted residual"
+        );
     }
-    assert_eq!(
-        rustix::process::test_kill_process(orphan),
-        Ok(()),
-        "the orphan {orphan:?} ended with the stop, so the row no longer shows the residual"
-    );
     drop(leftover);
 }
 

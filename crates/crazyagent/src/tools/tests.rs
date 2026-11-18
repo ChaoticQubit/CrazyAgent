@@ -1618,6 +1618,121 @@ fn unread_projects_make_every_place_under_home_but_the_engine_agent_writable() {
     assert!(!read.agent_writable(&home.join(".local/bin")));
 }
 
+/// The data volume's name for an existing path. Input: an absolute path. Output: the long
+/// name.
+#[cfg(target_os = "macos")]
+fn data_volume_name(path: &Path) -> PathBuf {
+    let long = PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+    assert!(long.exists(), "no data volume name for {}", path.display());
+    long
+}
+
+/// V243-FIRMLINK-AGENT-WRITABLE: the engine's data folder and a set-up project are
+/// agent-writable whichever name, short or through the data volume, the path and the engine
+/// folder are given in.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_engine_data_and_a_set_up_project_are_agent_writable_under_either_data_volume_name() {
+    let (_folder, home) = scratch();
+    let root = home.join("engine");
+    let project = home.join("work/older");
+    let agent = root.join("team/agents/agent-7/home/bin");
+    std::fs::create_dir_all(project.join("bin")).unwrap();
+    std::fs::create_dir_all(&agent).unwrap();
+    engine_with_projects(&root, &[&project]);
+    let short = Places::at_roots(Some(&root), None);
+    let long = Places::at_roots(Some(&data_volume_name(&root)), None);
+    for places in [&short, &long] {
+        for path in [agent.clone(), project.join("bin")] {
+            assert!(places.agent_writable(&path), "{}", path.display());
+            let named = data_volume_name(&path);
+            assert!(places.agent_writable(&named), "{}", named.display());
+        }
+    }
+}
+
+/// V243-FIRMLINK-AGENT-WRITABLE guard: the engine's `setup` folder stays out of the
+/// agent-writable places under either name of the path and of the engine folder.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_engine_setup_folder_stays_out_of_agent_writable_under_either_data_volume_name() {
+    let (_folder, home) = scratch();
+    let root = home.join("engine");
+    let setup = root.join("setup/bin");
+    std::fs::create_dir_all(&setup).unwrap();
+    engine_with_projects(&root, &[]);
+    for places in [
+        Places::at_roots(Some(&root), None),
+        Places::at_roots(Some(&data_volume_name(&root)), None),
+    ] {
+        assert!(!places.agent_writable(&setup));
+        assert!(!places.agent_writable(&data_volume_name(&setup)));
+    }
+}
+
+/// V243-FIRMLINK-AGENT-WRITABLE: HOME is never a project, even when it holds a
+/// `.crazyagent` folder, so an owner tool under it stays out of the agent-writable places
+/// whichever name HOME and the tool are given in.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tool_under_a_home_holding_a_crazyagent_folder_stays_out_under_either_data_volume_name() {
+    let (_folder, home) = scratch();
+    std::fs::create_dir_all(home.join(".crazyagent")).unwrap();
+    let tool = program(&home.join(".local/bin/tool"), "#!/bin/sh\nexit 0\n");
+    for named_home in [home.clone(), data_volume_name(&home)] {
+        let places = Places::new(Vec::new(), Some(named_home.clone()));
+        for path in [tool.clone(), data_volume_name(&tool)] {
+            assert!(
+                !places.agent_writable(&path),
+                "HOME {} tool {}",
+                named_home.display(),
+                path.display()
+            );
+        }
+    }
+}
+
+/// V243-FIRMLINK-AGENT-WRITABLE: when the set-up projects cannot be read, every place under
+/// HOME counts as agent-writable whichever name HOME and the place are given in.
+#[cfg(target_os = "macos")]
+#[test]
+fn unread_projects_count_every_place_under_home_under_either_data_volume_name() {
+    let (_folder, home) = scratch();
+    let work = home.join("work/app/bin");
+    std::fs::create_dir_all(&work).unwrap();
+    for named_home in [home.clone(), data_volume_name(&home)] {
+        let places = Places {
+            projects: None,
+            ..Places::new(Vec::new(), Some(named_home.clone()))
+        };
+        for path in [work.clone(), data_volume_name(&work)] {
+            assert!(
+                places.agent_writable(&path),
+                "HOME {} place {}",
+                named_home.display(),
+                path.display()
+            );
+        }
+    }
+}
+
+/// V243-FIRMLINK-AGENT-WRITABLE r2: a set-up project the engine recorded through the data
+/// volume is agent-writable under either name of the place, the short one included.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_set_up_project_recorded_through_the_data_volume_is_agent_writable_under_either_name() {
+    let (_folder, home) = scratch();
+    let root = home.join("engine");
+    let project = home.join("work/older");
+    let bin = project.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    engine_with_projects(&root, &[&data_volume_name(&project)]);
+    let places = Places::at_roots(Some(&root), None);
+    for path in [bin.clone(), data_volume_name(&bin)] {
+        assert!(places.agent_writable(&path), "{}", path.display());
+    }
+}
+
 /// rv-code2 r1 F1, vid 1's race in the shared resolver: `entry_at` reads the entry's real file
 /// before it checks the entry, so the file it hands back must pass the check itself. An owner
 /// entry whose middle link moves between the two leads to a file planted in a project when the

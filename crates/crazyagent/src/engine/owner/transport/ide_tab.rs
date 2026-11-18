@@ -255,7 +255,7 @@ pub(super) async fn serve(
 }
 
 fn public_code(error: EngineError) -> String {
-    if IDE_TAB_CODES.contains(&error.0.as_str()) {
+    if IDE_TAB_CODES.contains(&error.0.as_str()) || crate::storage::storage_answer(&error.0) {
         error.0
     } else {
         "ide_tab_outcome_unknown".into()

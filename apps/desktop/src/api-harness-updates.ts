@@ -1,4 +1,4 @@
-import { call, type Result } from "./api";
+import { call, knownError, type Result } from "./api";
 
 export type UpdateMethod = { kind: "self_update" } | { kind: "homebrew"; cask: string } | { kind: "homebrew_formula"; formula: string } | { kind: "npm"; package: string } | { kind: "with_app" } | { kind: "unknown" };
 export type LatestVersion = { kind: "not_checked" } | { kind: "no_check" } | { kind: "up_to_date" } | { kind: "newer"; version: string } | { kind: "failed"; code: string };
@@ -103,7 +103,7 @@ export function setHarnessUpdateSettings(settings: UpdateSettings): Promise<Resu
 /** The plain sentence for an update or check code. Input: the code. Output: one sentence, the
  * same for no two known codes. */
 export function updateCopy(code: string): string {
-  return COPY[code] ?? COPY.harness_update_outcome_unknown;
+  return COPY[code] ?? knownError(code) ?? COPY.harness_update_outcome_unknown;
 }
 
 /** How a harness was installed, as the Update confirm says it. Input: the install method.

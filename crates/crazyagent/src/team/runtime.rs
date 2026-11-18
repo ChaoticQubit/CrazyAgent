@@ -1144,8 +1144,8 @@ fn prepare_mates_home(
 impl TeamRuntime {
     /// Opens the team runtime over the engine database, with the usage tables its turn ends
     /// write; usage tables that cannot be made are logged by code and leave usage uncounted.
-    /// Takes the database, an engine-owned state directory outside every project, the
-    /// launch executables by harness, a source of live model access and the limits.
+    /// Takes the database, an engine-owned state directory outside every project in its
+    /// one spelling, the launch executables by harness, a source of live access and the limits.
     /// Returns the runtime after returning work interrupted by an earlier engine to the queue.
     pub fn open(
         database: &Path,
@@ -1159,7 +1159,7 @@ impl TeamRuntime {
             return Err(EngineError("team_state_not_canonical".into()));
         }
         private_directory(state)?;
-        if state.canonicalize().map_err(error)? != state {
+        if crate::projects_home::one_spelling(state.canonicalize().map_err(error)?) != state {
             return Err(EngineError("team_state_not_canonical".into()));
         }
         for directory in ["agents", "profiles"] {
@@ -4226,7 +4226,11 @@ impl TeamRuntime {
         if stale.is_empty() {
             return;
         }
-        let root = stored.project_folder().canonicalize().ok();
+        let root = stored
+            .project_folder()
+            .canonicalize()
+            .ok()
+            .map(crate::projects_home::one_spelling);
         for id in stale {
             let worker = self.workers.get_mut(&id).expect("worker exists");
             let running =
@@ -4700,7 +4704,7 @@ impl TeamRuntime {
         let told: BTreeSet<i64> = finished.iter().map(|(agent, _)| *agent).collect();
         let lines: Vec<String> = finished.into_iter().map(|(_, line)| line).collect();
         if !fresh && !told.is_subset(&self.workers[&id].told_finished) {
-            prompt.push_str(&wake_text(&lines, team_tool));
+            prompt.push_str(&wake_text(&lines, team_tool, false));
         }
         if fresh {
             prompt.push_str(&framing(
@@ -8568,6 +8572,7 @@ impl TeamRuntime {
         let sandbox = ProjectSandbox::new(
             &repository
                 .canonicalize()
+                .map(crate::projects_home::one_spelling)
                 .map_err(|_| "lead_sandbox_unavailable")?,
             &agent_home(&self.state, lead),
             &self.agent_folder(lead).join("tmp"),
@@ -9383,6 +9388,7 @@ impl TeamRuntime {
         let root = stored
             .project_folder()
             .canonicalize()
+            .map(crate::projects_home::one_spelling)
             .map_err(|e| with_code("the project folder could not be opened", Some(io_code(&e))))?;
         if root.starts_with(&self.state) {
             return Err("project folder overlaps engine state".into());
@@ -11363,7 +11369,7 @@ fn framing(
 ) -> String {
     let brief = master_brief(stored);
     let team = sub_agent_lines(stored, available);
-    let wake = wake_text(finished, team_tool);
+    let wake = wake_text(finished, team_tool, true);
     let how = if team_tool {
         format!(
             "To hand a task to a sub-agent, call the {} tool of the {} MCP server with the task and, to choose a harness, its name. The engine reads no task from your reply text.\n",
@@ -11382,12 +11388,12 @@ fn framing(
     )
 }
 
-/// Tells a master that is not live how to wake a finished sub-agent, with its `wake` tool
-/// or, without team tools, a `crazyagent-task` block naming it (L6) with what its task
-/// holds (V243-MASTER-WAKE-TEXT-HANDOFF), and which ones it can wake (WK-R5). Input: the
-/// finished sub-agents' lines, newest first, and whether it has the team tools. Output:
-/// the text, or nothing when no sub-agent finished.
-fn wake_text(finished: &[String], team_tool: bool) -> String {
+/// Tells a master that is not live how to wake a finished sub-agent, with its `wake` tool or,
+/// without team tools, a `crazyagent-task` block naming it (L6) with what its task holds
+/// (V243-MASTER-WAKE-TEXT-HANDOFF), and which ones it can wake (WK-R5). Inputs: the lines,
+/// newest first, the team tools, and whether a frame's task block above already says what a
+/// task holds. Output: the text, or nothing when no sub-agent finished.
+fn wake_text(finished: &[String], team_tool: bool, in_frame: bool) -> String {
     if finished.is_empty() {
         return String::new();
     }
@@ -11397,10 +11403,14 @@ fn wake_text(finished: &[String], team_tool: bool) -> String {
             tool::WAKE_TOOL
         )
     } else {
+        let task = if in_frame {
+            "Each task holds what a task block holds, as above.".to_owned()
+        } else {
+            format!("Each task: {}", tool::HAND_OFF_TASK)
+        };
         format!(
-            "put this block on lines of its own in your reply:\n{}\n{{\"wake\": \"<its name or Sub-agent number>\", \"task\": \"<the text>\"}}\n```\nEach task: {}",
-            tool::BLOCK_FENCE,
-            tool::HAND_OFF_TASK
+            "put this block on lines of its own in your reply:\n{}\n{{\"wake\": \"<its name or Sub-agent number>\", \"task\": \"<the text>\"}}\n```\n{task}",
+            tool::BLOCK_FENCE
         )
     };
     format!(
@@ -14680,6 +14690,7 @@ pub fn start_for_engine(
 ) -> Result<TeamService, String> {
     let runtime = runtime
         .canonicalize()
+        .map(crate::projects_home::one_spelling)
         .map_err(|e| format!("team runtime: {e}"))?;
     let state = runtime.join("team");
     private_directory(&state).map_err(|e| e.0)?;

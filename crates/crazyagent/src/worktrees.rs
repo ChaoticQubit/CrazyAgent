@@ -2802,6 +2802,9 @@ fn reconcile_with(
     Ok(())
 }
 
+#[cfg(all(test, windows))]
+mod windows_tests;
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

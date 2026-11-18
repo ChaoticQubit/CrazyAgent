@@ -31,22 +31,11 @@ pub(crate) fn validate(query: &str, limit: u16) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Lists a project's files for `@` tags: the paths git tracks and the untracked paths it
-/// does not ignore, relative to the project folder, whose path contains the query in any
-/// case. Never lists `.git`, a link, or a file reached through a link out of the folder.
-/// Runs the real git with no outside config, hooks or fsmonitor, and stops at the limit,
-/// at a 48 KiB reply or at `stop`, answering with the paths found by then. Inputs: the
-/// absolute project folder, the query, the limit and the time to stop. Output: the paths
-/// in git's order, or `project_files_folder_missing`, `project_files_no_repository` or
-/// `project_files_git_failed`. The git is setup's on Unix
-/// (`research::runner::setup_git`) and on Windows the one the engine's PATH or Git
-/// for Windows names (`crate::github::git_program`), with the engine's PATH and
-/// SystemRoot, which it needs. Paths are made canonical by [`crate::sandbox::canonical`] and
-/// handed to git as `git_path` gives them, so Git for Windows never gets a verbatim path. The
-/// repository's own `core.excludesFile` is never read, and on Windows a `.git` that points
-/// git elsewhere (`redirected`) gives `project_files_no_repository`. Git is given the `.git`
-/// folder as its common folder on every system, so a `commondir` planted after that check,
-/// or on Unix at any time, redirects nothing.
+/// Lists, for `@` tags, tracked and untracked files git does not ignore whose path holds the
+/// query in any case, never `.git`, a link or a file reached through a link out of the folder,
+/// via setup's git (Unix) or Git for Windows, with no outside config, excludes file, hooks or
+/// fsmonitor and `.git` as its common folder, so a planted `commondir` redirects nothing. Inputs:
+/// folder, query, limit, stop time. Output: paths by the limit, 48 KiB or `stop`, or an error.
 pub(crate) fn list(
     folder: &Path,
     query: &str,

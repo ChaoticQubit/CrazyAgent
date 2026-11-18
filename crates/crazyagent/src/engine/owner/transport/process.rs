@@ -1151,7 +1151,7 @@ pub(super) async fn serve(
 }
 
 fn public_code(error: EngineError) -> String {
-    if PROCESS_CODES.contains(&error.0.as_str()) {
+    if PROCESS_CODES.contains(&error.0.as_str()) || crate::storage::storage_answer(&error.0) {
         error.0
     } else {
         "process_outcome_unknown".into()

@@ -7,6 +7,8 @@ use crate::engine::EngineError;
 use crate::project_setup::{StoredSetup, TeamPlan};
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, params};
+#[cfg(target_os = "macos")]
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -913,6 +915,214 @@ fn a_project_stored_through_the_data_volume_moves_into_the_home() {
     );
     assert_eq!(case.stored_folder(), case.target());
     assert!(case.target().join("README").is_file());
+}
+
+/// V243-FIRMLINK-MOVE-ORIGIN (#435 r2 code F1): the move of a project stored by its
+/// /System/Volumes/Data spelling asks again under its hold with the stored spelling, so a
+/// master session that took a working copy under the stored folder after the plan refuses
+/// the move with nothing moved.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_project_stored_through_the_data_volume_rechecks_its_stored_folder_before_it_moves() {
+    let case = Case::at(|base| {
+        PathBuf::from(format!(
+            "/System/Volumes/Data{}",
+            base.join("work").display()
+        ))
+    });
+    assert!(case.repo.starts_with("/System/Volumes/Data"));
+    let planned = case.plan(AddMode::Move, &[]).unwrap();
+    case.db
+        .execute(
+            "INSERT INTO worktree_leases(task,repository,path,body) VALUES ('task-1',?1,?2,?3)",
+            params![
+                text(&case.repo),
+                text(&case.engine.join("lease-1")),
+                r#"{"lease":{"state":"Reserved"}}"#
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        planned
+            .run_with(Duration::ZERO, &super::Tally::default())
+            .unwrap_err()
+            .0,
+        "move_project_master_session"
+    );
+    assert_eq!(case.finish(false), Some(Finished::Left));
+    assert!(case.repo.join("README").is_file());
+}
+
+/// V243-FIRMLINK-MOVE-ORIGIN: the landing holds of a project stored by its
+/// /System/Volumes/Data spelling take a change set's repository recorded under the short
+/// spelling, since landing work takes its hold by the spelling the change set stores.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_long_stored_project_holds_a_change_set_recorded_under_the_short_spelling() {
+    let case = Case::at(|base| {
+        PathBuf::from(format!(
+            "/System/Volumes/Data{}",
+            base.join("work").display()
+        ))
+    });
+    let short = Path::new("/").join(case.repo.strip_prefix("/System/Volumes/Data").unwrap());
+    let worktree = case.worktree(7);
+    case.db
+        .execute(
+            "INSERT INTO landing_change_sets(id,project,agent_kind,agent_id,label,repository,worktree,git_dir,
+             base,head,state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms)
+             VALUES ('set-9',?1,'sub','7','Agent 7',?2,?3,?4,'base','head','pending','succeeded','turn-1',
+             'Add a page',1,1,0,'[]',1,1)",
+            params![
+                PROJECT,
+                text(&short),
+                text(&worktree),
+                text(&crate::agent_git::git_dir(&worktree))
+            ],
+        )
+        .unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let roots = super::move_project::landing_repositories(&case.db, &project, &case.repo).unwrap();
+    assert!(roots.contains(&short), "{roots:?}");
+}
+
+/// V243-FIRMLINK-MOVE-ORIGIN (advisor 19:5x): the landing holds of a project stored by its
+/// /System/Volumes/Data spelling take its folder under both names, since landing work keys
+/// its hold on the path text and an agent's landing runs under the short root.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_long_stored_project_holds_its_folder_under_both_names() {
+    let case = Case::at(|base| {
+        PathBuf::from(format!(
+            "/System/Volumes/Data{}",
+            base.join("work").display()
+        ))
+    });
+    let short = Path::new("/").join(case.repo.strip_prefix("/System/Volumes/Data").unwrap());
+    let project = ProjectId::new(PROJECT).unwrap();
+    let roots = super::move_project::landing_repositories(&case.db, &project, &case.repo).unwrap();
+    assert_eq!(roots, BTreeSet::from([case.repo.clone(), short]));
+}
+
+/// V243-FIRMLINK-MOVE-ORIGIN (leader ask 19:56): a project stored by its
+/// /System/Volumes/Data spelling whose rows name its folder by the short name, as hidden
+/// folders saved through the sandbox's canonical form do, has those rows re-rooted into the
+/// home by its move, not left on the old folder.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_long_stored_project_move_reroots_rows_recorded_under_the_short_name() {
+    let case = Case::at(|base| {
+        PathBuf::from(format!(
+            "/System/Volumes/Data{}",
+            base.join("work").display()
+        ))
+    });
+    let short = Path::new("/").join(case.repo.strip_prefix("/System/Volumes/Data").unwrap());
+    crate::sandbox::hidden_paths::save(&case.db, PROJECT, &[short.join("drafts")]).unwrap();
+    assert_eq!(
+        case.move_project(AddMode::Move, &[]).unwrap(),
+        Finished::Moved { repointed: 1 }
+    );
+    assert_eq!(case.stored_folder(), case.target());
+    assert_eq!(
+        crate::sandbox::hidden_paths::load(&case.db, PROJECT).unwrap(),
+        vec![case.target().join("drafts")]
+    );
+}
+
+/// #460 sec F1 and rv-code4 F2: a project stored by its /System/Volumes/Data spelling with one
+/// worktree's landing base recorded under both names of its folder would lose one of the two
+/// when its move writes both names to one place, so the move is refused with nothing moved
+/// and both rows kept.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_long_stored_project_holding_one_key_under_both_names_is_refused_with_nothing_lost() {
+    let case = Case::at(|base| {
+        PathBuf::from(format!(
+            "/System/Volumes/Data{}",
+            base.join("work").display()
+        ))
+    });
+    let short = Path::new("/").join(case.repo.strip_prefix("/System/Volumes/Data").unwrap());
+    let worktree = case.worktree(7);
+    let inside = worktree.strip_prefix(&case.repo).unwrap();
+    for (folder, base) in [(&case.repo, "base-long"), (&short, "base-short")] {
+        case.db
+            .execute(
+                "INSERT INTO landing_bases(worktree, base) VALUES (?1,?2)",
+                params![text(&folder.join(inside)), base],
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        case.move_project(AddMode::Move, &[]).err().map(|e| e.0),
+        Some("move_project_two_spellings".to_owned())
+    );
+    assert!(pending(&case.db).unwrap().is_none());
+    assert!(case.repo.join("README").is_file());
+    let rows: i64 = case
+        .db
+        .query_row("SELECT COUNT(*) FROM landing_bases", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 2);
+}
+
+/// #460 sec F1, the window after the plan (leader 20:43): a landing base recorded under both
+/// names of a long-stored project's folder only after its move was planned is not lost when
+/// the move finishes. The short name's row, the newer one since rows are written short,
+/// follows the folder into the home, and the stored name's row is kept on the old path.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_move_keeps_a_key_held_under_both_names_after_its_plan() {
+    let case = Case::at(|base| {
+        PathBuf::from(format!(
+            "/System/Volumes/Data{}",
+            base.join("work").display()
+        ))
+    });
+    let short = Path::new("/").join(case.repo.strip_prefix("/System/Volumes/Data").unwrap());
+    let worktree = case.worktree(7);
+    let inside = worktree.strip_prefix(&case.repo).unwrap().to_path_buf();
+    let planned = case.plan(AddMode::Move, &[]).unwrap();
+    for (folder, base) in [(&case.repo, "base-long"), (&short, "base-short")] {
+        case.db
+            .execute(
+                "INSERT INTO landing_bases(worktree, base) VALUES (?1,?2)",
+                params![text(&folder.join(&inside)), base],
+            )
+            .unwrap();
+    }
+    let (placed, landing) = planned
+        .run_with(Duration::ZERO, &super::Tally::default())
+        .map(super::Moved::into_parts)
+        .unwrap();
+    assert!(matches!(case.finish(true), Some(Finished::Moved { .. })));
+    drop(landing);
+    if let Placed::Copied(old) = placed {
+        old.clear().unwrap();
+    }
+    let mut statement = case
+        .db
+        .prepare("SELECT worktree, base FROM landing_bases")
+        .unwrap();
+    let rows: BTreeSet<(String, String)> = statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(
+        rows,
+        BTreeSet::from([
+            (
+                text(&case.repo.join(&inside)).to_owned(),
+                "base-long".to_owned()
+            ),
+            (
+                text(&case.target().join(&inside)).to_owned(),
+                "base-short".to_owned()
+            ),
+        ])
+    );
 }
 
 /// #433 F1 (rv-sec2 18:57): a project stored by its /System/Volumes/Data spelling still sees

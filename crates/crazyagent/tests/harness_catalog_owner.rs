@@ -105,23 +105,27 @@ async fn the_tui_controller_lists_the_harness_catalog_from_a_discovered_engine()
     }));
 }
 
-/// A folder for the row's Claude install where an owner's install would be: outside the
-/// engine's data folder and every folder the agent space holds, the shared temp folder's
-/// `ca-` folders among them; this user's cache folder on macOS, the temp folder elsewhere.
+/// A folder for the row's Claude install where an owner's install would be, outside the engine's
+/// data folder, the agent space and the shared temp folder (a re-pin refuses /tmp as changeable
+/// by others): this user's cache folder, `DARWIN_USER_CACHE_DIR` on macOS, `~/.cache` elsewhere.
 /// Input: the folder name's prefix. Output: the folder, removed when dropped.
 fn owner_folder(prefix: &str) -> tempfile::TempDir {
-    if !cfg!(target_os = "macos") {
-        return tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
-    }
-    let cache = crazyagent::spawn_gate::output(
-        std::process::Command::new("/usr/bin/getconf")
-            .arg("DARWIN_USER_CACHE_DIR")
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null()),
-    )
-    .unwrap();
-    let cache = std::fs::canonicalize(String::from_utf8(cache.stdout).unwrap().trim()).unwrap();
+    let cache = if cfg!(target_os = "macos") {
+        let cache = crazyagent::spawn_gate::output(
+            std::process::Command::new("/usr/bin/getconf")
+                .arg("DARWIN_USER_CACHE_DIR")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null()),
+        )
+        .unwrap();
+        std::path::PathBuf::from(String::from_utf8(cache.stdout).unwrap().trim())
+    } else {
+        let cache = std::path::Path::new(&std::env::var_os("HOME").unwrap()).join(".cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        cache
+    };
+    let cache = std::fs::canonicalize(cache).unwrap();
     let folder = tempfile::Builder::new()
         .prefix(prefix)
         .tempdir_in(cache)

@@ -212,6 +212,27 @@ impl Fixture {
         }
     }
 
+    /// Starts a pane whose process ignores terminate and waits until its shell has set that
+    /// trap, so a terminate sent at once cannot end it before the trap holds (S4B-B1 rows).
+    /// Inputs: the host and the agent. Output: the pane's record.
+    #[cfg(target_os = "macos")]
+    fn pane_ignoring_terminate(&self, host: &Arc<dyn Host>, id: i64) -> PaneRecord {
+        let ready = self.base.join(format!("terminate-ignored-{id}"));
+        let shown = ready.display().to_string();
+        assert!(!shown.contains('\''), "{shown}");
+        let script = format!("trap '' TERM; : > '{shown}'; exec cat");
+        let record = self.pane_running(host, id, &["/bin/sh", "-c", &script]);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the pane never set its trap: {shown}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        record
+    }
+
     fn keep(&self, id: i64, record: &PaneRecord) {
         self.connection
             .execute(
@@ -1813,6 +1834,45 @@ fn work_of_a_removed_project_ends_without_an_error_or_new_rows() {
     }
 }
 
+/// V243-FIRMLINK-STATE (#448 r2 LOW): a team state named through /System/Volumes/Data is
+/// refused, since the launch gates compare it with one-spelled roots and its sandbox rules
+/// would never match, so a project inside it would see other agents' homes and tmp. The
+/// short name of the same folder opens.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_team_state_named_through_the_data_volume_is_refused() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-team-state-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let connection = Connection::open(&database).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let owner = connection.unchecked_transaction().unwrap();
+    crate::conversation::initialize(&owner).unwrap();
+    owner.commit().unwrap();
+    drop(connection);
+    let state = base.join("team");
+    let long = PathBuf::from(format!("/System/Volumes/Data{}", state.display()));
+    let open = |state: &Path| {
+        TeamRuntime::open(
+            &database,
+            state,
+            BTreeMap::new(),
+            Box::new(|| None),
+            TeamLimits::default(),
+        )
+        .map(drop)
+    };
+    assert_eq!(
+        open(&long),
+        Err(EngineError("team_state_not_canonical".into()))
+    );
+    assert_eq!(open(&state), Ok(()));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
@@ -2334,9 +2394,53 @@ fn a_task_block_carries_the_finding_and_the_acceptance_check() {
 /// (V243-MASTER-WAKE-TEXT-HANDOFF).
 #[test]
 fn a_tools_off_wake_block_carries_the_finding_and_the_acceptance_check() {
-    let text = wake_text(&["- Ada (@docs), finished".into()], false);
+    let text = wake_text(&["- Ada (@docs), finished".into()], false, false);
     for part in HAND_OFF_PHRASES {
         assert!(text.contains(part), "{part}: {text}");
+    }
+}
+
+/// A fresh frame without team tools that lists a finished sub-agent says what a task holds
+/// once, in its task block, and its wake block points there, while a wake block sent alone
+/// mid-session still carries the whole text (V243-HANDOFF-TEXT-TWICE, #411 rv-code4 F1).
+#[test]
+fn a_fresh_tools_off_frame_with_a_finished_sub_agent_says_what_a_task_holds_once() {
+    let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let folder = root.path().canonicalize().unwrap().join("project");
+    std::fs::create_dir_all(folder.join("context")).unwrap();
+    std::fs::write(folder.join("context").join("brief.md"), "# Any\n").unwrap();
+    let setup = StoredSetup {
+        project_id: ProjectId::new(PROJECT).unwrap(),
+        name: "Any".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: TeamPlan {
+            master: "claude-code".into(),
+            master_tools: false,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: crate::project_setup::TEAM_AGENTS_MAX,
+        },
+        documents: vec![],
+        folder: folder.to_str().unwrap().into(),
+        created_ms: 1,
+        revision: 1,
+    };
+    let finished = ["- Ada (@docs), finished".to_owned()];
+    let framed = framing(&setup, false, &[], &finished);
+    assert_eq!(framed.matches(tool::HAND_OFF_TASK).count(), 1, "{framed}");
+    assert!(framed.contains(&finished[0]), "{framed}");
+    assert!(
+        framed.contains(
+            "\"task\": \"<the text>\"}\n```\nEach task holds what a task block holds, as above."
+        ),
+        "{framed}"
+    );
+    for part in HAND_OFF_PHRASES {
+        assert!(framed.contains(part), "{part}: {framed}");
     }
 }
 
@@ -2381,11 +2485,16 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     };
     let mut wrong = Vec::new();
 
-    std::fs::write(&brief, "# Panes\n\nPlan the page.\n").unwrap();
+    const NOTE_BYTES_MAX: usize = 128;
+    let normal = "# Panes\n\nPlan the page.\n";
+    std::fs::write(&brief, normal).unwrap();
     let framed = frame();
+    let around_bytes = framed
+        .as_deref()
+        .map_or(0, |text| text.len().saturating_sub(normal.len()));
     if !framed
         .as_deref()
-        .is_some_and(|text| text.contains("Project brief:\n# Panes\n\nPlan the page.\n"))
+        .is_some_and(|text| text.contains(&format!("Project brief:\n{normal}")))
     {
         wrong.push(("normal", framed));
     }
@@ -2428,7 +2537,7 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     if !framed.as_deref().is_some_and(|text| {
         text.contains("Project brief:\n# Panes\n\naaaa")
             && text.contains(&format!("The brief is {huge} bytes"))
-            && text.len() < BRIEF_BYTES_MAX + 2048
+            && text.len() <= around_bytes + BRIEF_BYTES_MAX + NOTE_BYTES_MAX
     }) {
         wrong.push(("oversized", framed.map(|text| bound_text(&text, 200))));
     }
@@ -24793,7 +24902,7 @@ fn a_taken_over_lead_not_proven_gone_reports_an_uncertain_cleanup() {
         ),
     ] {
         let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
-        let record = fixture.pane_running(&host, id, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
+        let record = fixture.pane_ignoring_terminate(&host, id);
         let agent = AgentId::team(id).unwrap();
         let adoption = Adoption {
             host: host.clone(),
@@ -28273,14 +28382,16 @@ fn a_panicking_teammate_end_leaves_no_id_behind_and_reads_as_uncertain() {
 /// #393 F1 (DEC-200): a native teammate's end that fails with a host error other than an
 /// unknown agent leaves its row to a later tick, so its end thread does not wake the team
 /// loop; a wake there would run the loop back to back for as long as the error lasts. The
-/// host here has no tmux, so every end the owner's stop pass starts fails the same way.
+/// host here has no tmux and is set as the terminal as is, since attaching one asks it for
+/// its panes first, so every end the owner's stop pass starts fails the same way.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_failed_teammate_end_leaves_the_team_loop_to_its_tick() {
     const PASSES: u64 = 40;
     let fixture = Fixture::new(1);
     let host: Arc<dyn Host> = Arc::new(Tmux::open(None, &fixture.base.join(FOLDER)));
-    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let mut team = fixture.runtime();
+    team.terminal = Some(host);
     let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
     let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
     fixture
@@ -28459,7 +28570,7 @@ fn a_stopped_teammate_not_proven_gone_is_marked_uncertain() {
             params![mate, lead],
         )
         .unwrap();
-    let _record = fixture.pane_running(&host, mate, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
+    let _record = fixture.pane_ignoring_terminate(&host, mate);
     fixture
         .connection
         .execute(
@@ -34719,6 +34830,108 @@ fn a_codex_agent_with_no_readable_hook_key_list_is_never_taken_as_trusted_and_is
     assert_eq!(
         hook_trust(Ok(keys), asked(Err("codex_bridge_peer_unknown")), true),
         HookTrust::Notice(CODEX_HOOKS_UNCHECKED)
+    );
+}
+
+/// A project stored under the data volume's long name of its folder, with a hidden folder
+/// saved in that name too, still launches an agent: its sandbox is built on the short name,
+/// the only one Seatbelt matches, so the project stays readable, the worktree writable and
+/// the hidden folder closed under either name (V243-FIRMLINK-LAUNCH-ROOT).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_project_stored_under_the_long_name_launches_an_agent_on_the_short_one() {
+    let mut fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let long = |path: &Path| PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+    let project = fixture.base.join("project");
+    assert!(long(&project).is_dir());
+    std::fs::write(project.join("owner.txt"), "owner\n").unwrap();
+    let drafts = project.join("drafts");
+    std::fs::create_dir(&drafts).unwrap();
+    std::fs::write(drafts.join("plan.txt"), "plan\n").unwrap();
+    fixture.setup.folder = long(&project).to_str().unwrap().into();
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
+        )
+        .unwrap();
+    crate::sandbox::hidden_paths::save(&fixture.connection, PROJECT, &[long(&drafts)]).unwrap();
+    let access = fixture.access.clone();
+    let runtime = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap();
+    let account = TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+            key: None,
+        },
+    };
+    assert_eq!(
+        fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting),
+        1
+    );
+    let plan = runtime
+        .prepare(
+            &fixture.setup,
+            1,
+            AgentRole::Sub,
+            "codex",
+            true,
+            &account,
+            false,
+            crate::agent_git::Layout::Linked,
+            false,
+        )
+        .unwrap_or_else(|cause| panic!("a long-stored project must launch an agent: {cause}"))
+        .1;
+    assert!(plan.working_dir.starts_with(&project));
+    let quoted = |path: &Path| format!("'{}'", path.display());
+    let script = format!(
+        "(cat {owner} >/dev/null) 2>/dev/null && echo owner=read || echo owner=refused\n\
+         (cat {plan} >/dev/null) 2>/dev/null && echo plan=read || echo plan=refused\n\
+         (cat {long_plan} >/dev/null) 2>/dev/null && echo long_plan=read || echo long_plan=refused\n\
+         (echo mine > mine.txt) 2>/dev/null && echo wrote || echo write=refused\n",
+        owner = quoted(&project.join("owner.txt")),
+        plan = quoted(&drafts.join("plan.txt")),
+        long_plan = quoted(&long(&drafts).join("plan.txt")),
+    );
+    let output = crate::spawn_gate::output(
+        Command::new("/usr/bin/sandbox-exec")
+            .arg("-f")
+            .arg(&plan.sandbox_profile)
+            .args(["/bin/sh", "-c", &script])
+            .current_dir(&plan.working_dir)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", runtime.agent_folder(1).join("home"))
+            .env("TMPDIR", runtime.agent_folder(1).join("tmp"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "owner=read\nplan=refused\nlong_plan=refused\nwrote\n",
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(plan.working_dir.join("mine.txt")).unwrap(),
+        "mine\n"
     );
 }
 

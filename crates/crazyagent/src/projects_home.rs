@@ -291,10 +291,11 @@ fn same_entry(left: &Path, right: &Path) -> bool {
     }
 }
 
-/// One spelling for a real path: on macOS a path under the data volume that names the same
-/// entry as the path without that prefix is given without it, the spelling `canonicalize`
-/// gives the short form, so both compare equal as text. Input: a canonical path. Output:
-/// the path in that spelling, unchanged elsewhere.
+/// One spelling for a path: on macOS a path under the data volume that names the same entry as
+/// the path without that prefix is given without it, the spelling `canonicalize` gives the
+/// short form, so both compare equal as text. Input: a path, resolved or not; only its text
+/// changes, and the same-entry check stats both names, following links. Output: that spelling,
+/// or the path unchanged when the two names are absent or differ, or off macOS.
 pub(crate) fn one_spelling(real: PathBuf) -> PathBuf {
     #[cfg(target_os = "macos")]
     if let Ok(rest) = real.strip_prefix(DATA_VOLUME) {
@@ -310,14 +311,14 @@ pub(crate) fn one_spelling(real: PathBuf) -> PathBuf {
 /// so a folder above the firmlink, such as the data volume itself, is seen to hold it.
 /// Input: the path. Output: the other name, none for a path with no other.
 #[cfg(target_os = "macos")]
-fn data_twin(path: &Path) -> Option<PathBuf> {
+pub(crate) fn data_twin(path: &Path) -> Option<PathBuf> {
     let twin = Path::new(DATA_VOLUME).join(path.strip_prefix("/").ok()?);
     same_entry(path, &twin).then_some(twin)
 }
 
 /// Off macOS a path has one name. Input: the path. Output: none.
 #[cfg(not(target_os = "macos"))]
-fn data_twin(_path: &Path) -> Option<PathBuf> {
+pub(crate) fn data_twin(_path: &Path) -> Option<PathBuf> {
     None
 }
 
@@ -1534,6 +1535,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "move_project_in_progress" => {
             "A project is still being moved into your projects folder. Try again when it finishes."
+        }
+        "move_project_two_spellings" => {
+            "Some of this project's saved records name its folder in two ways, and a move would overwrite one with the other. Nothing was moved."
         }
         "home_add_in_progress" => {
             "A folder is being added to your projects folder. Try again when it finishes."

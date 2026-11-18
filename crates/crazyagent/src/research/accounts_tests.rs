@@ -89,6 +89,11 @@ fn keyed(harness: &str, member: &str, expected: ResearchAccount) -> AccountPick 
     }
 }
 
+/// Research picks an endpoint account by wire format, with or without a key. A keyed account
+/// reaches codex and Claude Code only through the engine key relay, which starts on Unix
+/// alone ([`crate::model_gateway::relay::available`]: curl cannot inherit the body pipe
+/// elsewhere, and no body is written to disk), so off Unix a keyed account is no usable
+/// account for them while the unkeyed local endpoint still picks.
 #[test]
 fn research_runs_on_endpoint_accounts_with_or_without_a_key_by_wire_format() {
     assert_eq!(

@@ -512,6 +512,7 @@ pub(super) async fn serve(
         Ok(Step::Deleted(outcome)) => Some(outcome.as_ref().map(|_| ()).map_err(String::as_str)),
         _ => None,
     };
+    let replanned = !client && !ran && stale(&step);
     let trashed = deleting && reached_trash(outcome, ran);
     let placed =
         adding.is_some() && ran && (matches!(&step, Ok(Step::Record(Ok(_)))) || tally.clearing());
@@ -519,6 +520,7 @@ pub(super) async fn serve(
         let mut barrier = Some(engine.owner_egress.write().await);
         let changed = disk_changed(trashed, moving, moving_project, adding.is_some(), ran);
         let mut result = match regranted(authority.authenticate(packet), a, changed) {
+            Ok(()) if replanned => Err(failure(crate::storage::versioned::STALE_CODE)),
             Ok(()) => finish(engine, a, request, step).await,
             Err(e) => Err(e),
         };
@@ -868,6 +870,18 @@ async fn files(
         }
         Err(e) => rejected(&e.0),
     })
+}
+
+/// Whether a step is a plan refused because the revision moved, before any disk work: a job
+/// answered so records nothing under its id and plans again under it, while a client's stays
+/// recorded. Input: the step. Output: true for a record, New Project or Delete step refused
+/// with `stale_revision`.
+fn stale(step: &Result<Step, EngineError>) -> bool {
+    matches!(
+        step,
+        Ok(Step::Record(Err(code)) | Step::Staged(Err(code)) | Step::Deleted(Err(code)))
+            if code == crate::storage::versioned::STALE_CODE
+    )
 }
 
 fn rejected(code: &str) -> Step {
