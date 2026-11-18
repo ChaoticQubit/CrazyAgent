@@ -23,10 +23,11 @@ use std::time::Duration;
 pub(super) const ROUTE: &str = "--route";
 pub(super) const EGRESS: &str = "--egress";
 pub(super) const SLIRP: &str = "--slirp";
-/// What slirp4netns reads under its rules ([`confine_slirp`]): its program and libraries,
-/// the loader cache, the resolver file it forwards names to, whose rule binds the file a
-/// link there points to, and the random source, as a trace on the farm runner showed (V243
-/// linux routed r1, arm C). A path missing on this computer adds no rule.
+/// What slirp4netns reads and executes under its rules ([`confine_slirp`]), Landlock's read
+/// rights holding execute: its program and libraries, the loader cache, the resolver file it
+/// forwards names to, whose rule binds the file a link there points to, and the random
+/// source, as a trace on the farm runner showed (V243 linux routed r1, arm C). A path
+/// missing on this computer adds no rule.
 const SLIRP_READ: &[&str] = &[
     "/usr",
     "/lib",
@@ -568,11 +569,11 @@ fn start_slirp(child: u32) -> Result<Slirp, String> {
     }
 }
 
-/// Opens the agent's user and network namespaces, then confines this thread and what it
-/// starts to the files slirp4netns needs, with no new privileges: it reads beneath
-/// [`SLIRP_READ`] and reads and writes [`TUN`], nothing else. The namespaces are opened
-/// first, as Landlock refuses a confined process the agent's `/proc` entries. Input: the
-/// agent's process id. Output: the two open namespaces, user first, or the reason.
+/// Opens the agent's user and network namespaces while Landlock still lets it, then confines
+/// this thread and its children under no new privileges: read and execute beneath
+/// [`SLIRP_READ`], all rights on [`TUN`], signals scoped to its domain where the kernel can,
+/// and no Unix-domain socket, the way to the engine's sockets by path. Input: the agent's
+/// process id. Output: the two namespaces, user first, or the reason.
 pub(super) fn confine_slirp(child: u32) -> Result<[OwnedFd; 2], String> {
     assert!(child > 1);
     let failed = |error: std::io::Error| format!("slirp4netns: {error}");
@@ -596,6 +597,8 @@ pub(super) fn confine_slirp(child: u32) -> Result<[OwnedFd; 2], String> {
             status.ruleset
         ));
     }
+    super::scope_signals().map_err(refused)?;
+    super::refuse_sockets(false, false)?;
     Ok([user.into(), net.into()])
 }
 

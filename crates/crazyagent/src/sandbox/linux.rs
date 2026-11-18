@@ -894,8 +894,9 @@ fn scope_signals() -> Result<RestrictionStatus, RulesetError> {
         .restrict_self()
 }
 
-/// Installs the seccomp filter every agent process and its children keep: a new Unix-domain
-/// socket and a new io_uring ring both fail with `EACCES`, and with `tcp_only` so does every
+/// Installs the seccomp filter every agent process, slirp4netns ([`egress::confine_slirp`])
+/// and their children keep: a new Unix-domain socket and a new io_uring ring both fail with
+/// `EACCES`, and with `tcp_only` so does every
 /// socket but TCP over IPv4 or IPv6 and routing netlink, since Landlock limits TCP only and
 /// a datagram, raw or other family socket reaches any host. Landlock does not mediate a
 /// pathname socket connect, and a ring could create a socket without `socket(2)`;
