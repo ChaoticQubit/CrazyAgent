@@ -338,7 +338,7 @@ run_cell() {
   wait=$(jq -r '.wait_ms | "\(.p50*100|round/100) / \(.p95*100|round/100) / \(.max*100|round/100)"' "$dir/report.json" 2> /dev/null || echo none)
   cell_rows+=("| $cell | $rc | $probes_ok of 3 | $present | $wait | $clip_rc | $clip_passed of ${#clip_steps[@]} | $timeout_rc |")
   if [ "$rc" != 0 ] || [ "$probes_ok" != 3 ] || [ "$clip_rc" != 0 ] || [ "$clip_passed" != "${#clip_steps[@]}" ] \
-    || [ "$timeout_rc" != 0 ] || ! grep -qx "test $timeout_row ... ok" "$dir/timeout.txt"; then
+    || [ "$timeout_rc" != 0 ] || ! grep -qE '^test result: ok\. 1 passed;' "$dir/timeout.txt"; then
     row_ok=1
     cells+=("$cell")
   fi

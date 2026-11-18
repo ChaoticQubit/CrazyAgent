@@ -26,7 +26,7 @@ defaults:
 
 jobs:
   linux:
-    name: V244 Linux L5a, rescale red 85947a2a5 then green c57df7037, timeout row mutation, display rows under Xvfb, weston and sway
+    name: V244 Linux L5a r1 rerun (timeout check reads the result line), rescale red 85947a2a5 then green c57df7037, timeout row mutation, display rows under Xvfb, weston and sway
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
