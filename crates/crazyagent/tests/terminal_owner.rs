@@ -495,6 +495,44 @@ async fn a_revoked_viewer_cannot_type_one_more_key_into_the_terminal() {
     sub.stop().await;
 }
 
+/// The input-only session a native view types through (DEC-203) sends no output, so nothing
+/// but the timed grant check ends it while its owner types nothing. Revoked while it idles,
+/// it closes with the revoke reason within one 5 s check, short of a second check at 10 s.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_input_only_session_closes_within_one_grant_check_of_a_revoke() {
+    use crazyagent::engine::owner::{OwnerControl, OwnerDecision};
+    use crazyagent::protocol::RequestId;
+    let mut sub = SubAgent::start().await;
+    let TerminalSession {
+        mut output,
+        control,
+        ..
+    } = sub
+        .controller
+        .terminal_attach_input(sub.agent.clone(), None, 80, 24)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let host = sub.service.owner_runtime().unwrap();
+    host.control(OwnerControl {
+        operation_id: RequestId::new("revoke-input-only-view").unwrap(),
+        target: OwnerClientKind::Desktop,
+        expected_epoch: host.epoch(OwnerClientKind::Desktop).unwrap(),
+        decision: OwnerDecision::Revoke,
+    })
+    .await
+    .unwrap();
+    let revoked = std::time::Instant::now();
+    assert_eq!(closed(&mut output).await, "owner_grant_stale_or_revoked");
+    let waited = revoked.elapsed();
+    assert!(
+        waited < Duration::from_secs(9),
+        "the idle input-only session closed {waited:?} after the revoke"
+    );
+    drop(control);
+    sub.stop().await;
+}
+
 /// A full scrollback replayed to a viewer that starts reading only after the attach deadline
 /// arrives whole and in order, then live output follows and the view ends with its detach
 /// reason, instead of a rejection written into a session that already opened.

@@ -2712,5 +2712,16 @@ async fn a_reaped_claude_harness_with_a_half_written_turn_is_waited_for_without_
         passes <= 10,
         "{passes} drive passes in a second for a reaped harness"
     );
-    claude.cancel().await.unwrap();
+    let cancelled = claude.cancel().await.map_err(|error| error.0);
+    let ended = ["claude_host_input_failed", "claude_host_native_exit_0"];
+    assert!(
+        cancelled
+            .as_ref()
+            .map_or_else(|code| ended.contains(&code.as_str()), |()| true),
+        "the harness ended inside its turn, so the stop reports that end, as the write or the reap saw it first, or nothing: {cancelled:?}"
+    );
+    assert!(
+        claude.settled(),
+        "nothing the harness started is left running"
+    );
 }

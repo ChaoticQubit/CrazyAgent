@@ -2373,9 +2373,53 @@ fn a_task_block_carries_the_finding_and_the_acceptance_check() {
 /// (V243-MASTER-WAKE-TEXT-HANDOFF).
 #[test]
 fn a_tools_off_wake_block_carries_the_finding_and_the_acceptance_check() {
-    let text = wake_text(&["- Ada (@docs), finished".into()], false);
+    let text = wake_text(&["- Ada (@docs), finished".into()], false, false);
     for part in HAND_OFF_PHRASES {
         assert!(text.contains(part), "{part}: {text}");
+    }
+}
+
+/// A fresh frame without team tools that lists a finished sub-agent says what a task holds
+/// once, in its task block, and its wake block points there, while a wake block sent alone
+/// mid-session still carries the whole text (V243-HANDOFF-TEXT-TWICE, #411 rv-code4 F1).
+#[test]
+fn a_fresh_tools_off_frame_with_a_finished_sub_agent_says_what_a_task_holds_once() {
+    let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let folder = root.path().canonicalize().unwrap().join("project");
+    std::fs::create_dir_all(folder.join("context")).unwrap();
+    std::fs::write(folder.join("context").join("brief.md"), "# Any\n").unwrap();
+    let setup = StoredSetup {
+        project_id: ProjectId::new(PROJECT).unwrap(),
+        name: "Any".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: TeamPlan {
+            master: "claude-code".into(),
+            master_tools: false,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: crate::project_setup::TEAM_AGENTS_MAX,
+        },
+        documents: vec![],
+        folder: folder.to_str().unwrap().into(),
+        created_ms: 1,
+        revision: 1,
+    };
+    let finished = ["- Ada (@docs), finished".to_owned()];
+    let framed = framing(&setup, false, &[], &finished);
+    assert_eq!(framed.matches(tool::HAND_OFF_TASK).count(), 1, "{framed}");
+    assert!(framed.contains(&finished[0]), "{framed}");
+    assert!(
+        framed.contains(
+            "\"task\": \"<the text>\"}\n```\nEach task holds what a task block holds, as above."
+        ),
+        "{framed}"
+    );
+    for part in HAND_OFF_PHRASES {
+        assert!(framed.contains(part), "{part}: {framed}");
     }
 }
 

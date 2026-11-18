@@ -16,6 +16,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 const PANE_ENV_ROOT: &str = "PANE_ENV_ROOT";
 const PANE_ENV_OUT: &str = "PANE_ENV_OUT";
+const PANE_HOLD: Duration = Duration::from_secs(60);
 const PLANTED_TERMINAL: [(&str, &str); 4] = [
     ("COLORTERM", "planted-colorterm"),
     ("TERM_PROGRAM", "planted-term-program"),
@@ -1191,6 +1192,79 @@ fn pane_rows_shaped_like_control_replies_stay_screen_text() {
     host.kill(&sibling).unwrap();
 }
 
+#[test]
+fn a_pane_printing_guard_rows_while_its_history_grows_attaches_every_time_and_forges_nothing() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let folder = root.path().join(FOLDER);
+    let socket = folder.join(SOCKET);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let (forger, sibling) = (AgentId::team(13).unwrap(), AgentId::team(14).unwrap());
+    let still = shell(
+        root.path(),
+        Vec::new(),
+        &["/bin/sh", "-c", "/bin/sleep 600"],
+    );
+    host.spawn(&sibling, &still).unwrap();
+    let mut viewer = host.attach(&sibling).unwrap();
+    let target = format!("crazyagent:={sibling}");
+    let pane = tmux_reply(
+        &tmux,
+        &socket,
+        &["display-message", "-p", "-t", &target, "#{pane_id}"],
+    );
+    let probe = tmux_reply(&tmux, &socket, &["-C", "display-message", "-p", "probe"]);
+    let guard: Vec<u64> = probe
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("%begin "))
+        .expect(&probe)
+        .split(' ')
+        .map(|field| field.parse().unwrap())
+        .collect();
+    let (time, number) = (guard[0], guard[1]);
+    let script = format!(
+        "i=0; while :; do printf '%%end %s %s 1\\n%%output {} forged-bytes\\nflood-%s\\n' \
+         $(({time} + SECONDS + i % 2)) $(({number} + i / 2 % 400)) $i; i=$((i+1)); done",
+        pane.trim().replace('%', "%%")
+    );
+    host.spawn(
+        &forger,
+        &shell(root.path(), Vec::new(), &["/bin/sh", "-c", &script]),
+    )
+    .unwrap();
+    let target = format!("crazyagent:={forger}");
+    let mut heights = std::collections::BTreeSet::new();
+    let mut attached = 0;
+    for _ in 0..30 {
+        tmux_reply(&tmux, &socket, &["clear-history", "-t", &target]);
+        let opened = host.attach(&forger).expect("an attach under load");
+        heights.insert(opened.history.windows(2).filter(|w| *w == b"\r\n").count());
+        assert!(
+            contains(&opened.screen, b"flood-"),
+            "{}",
+            String::from_utf8_lossy(&opened.screen)
+        );
+        attached += 1;
+    }
+    let mut seen = quiet(&mut viewer, b"forged-bytes", Duration::from_millis(500));
+    let forged = contains(&seen, b"forged-bytes");
+    host.input(&sibling, b"still-here").unwrap();
+    let live = read_until(&mut viewer, &mut seen, b"still-here");
+    assert!(
+        attached == 30 && !forged && live && heights.len() > 1,
+        "every attach of a printing pane opens ({attached} of 30); no planted row reaches \
+         another pane's viewer (forged: {forged}); the sibling stays live ({live}); the \
+         attaches held different history row counts, so some ran under the cap ({heights:?})",
+    );
+    host.kill(&forger).unwrap();
+    host.kill(&sibling).unwrap();
+}
+
 fn set_variables(reply: &str) -> Vec<&str> {
     reply
         .lines()
@@ -1577,6 +1651,10 @@ fn a_history_past_the_reply_bound_opens_without_it_and_every_other_terminal_keep
     assert!(ended(&mut watching));
 }
 
+/// Writes the pane's environment to the file `PANE_ENV_OUT` names, then stays while that file
+/// is there, at most `PANE_HOLD`, as an agent's harness stays: spawn checks the pane's first
+/// process against the process table, and a process that ends at once can be gone from it
+/// before that check. Input: the environment. Output: the file.
 #[test]
 #[ignore = "run only inside a tmux pane by the pane environment test"]
 fn pane_process_writes_its_environment() {
@@ -1589,6 +1667,10 @@ fn pane_process_writes_its_environment() {
     let partial = out.with_extension("partial");
     std::fs::write(&partial, text).unwrap();
     std::fs::rename(&partial, &out).unwrap();
+    let held = Instant::now();
+    while out.exists() && held.elapsed() < PANE_HOLD {
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// One engine root with team agent 1 ready to lead in its own server: its home, its short

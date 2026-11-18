@@ -63,7 +63,14 @@ impl Process {
         let err_reader = std::thread::spawn(move || {
             let mut bytes = Vec::new();
             err.take(65536).read_to_end(&mut bytes).unwrap();
-            appended(&captured, &bytes);
+            let untraced: Vec<u8> = bytes
+                .split_inclusive(|byte| *byte == b'\n')
+                .filter(|line| !line.starts_with(b"owner_trace "))
+                .flatten()
+                .copied()
+                .collect();
+            assert!(untraced.len() <= bytes.len());
+            appended(&captured, &untraced);
         });
         Self {
             child,
