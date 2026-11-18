@@ -52,6 +52,7 @@ pub(crate) mod ide;
 pub(crate) mod ide_extensions;
 pub(crate) mod ide_tab;
 mod intake;
+mod narrowing;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod overview;
@@ -519,6 +520,7 @@ struct Authority {
     reproof_left: Mutex<Option<std::collections::BTreeSet<CredentialRef>>>,
     icloud: crate::projects_home::icloud::Downloads,
     intake: intake::Intake,
+    drain: Mutex<narrowing::Drain>,
 }
 
 /// Removes what an earlier engine left at a runner folder's place beside the engine's root
@@ -1162,9 +1164,25 @@ impl OwnerRuntimeHandle {
     /// Orders a trusted host grant change with actor work and response delivery.
     /// Takes an exact control identity, client kind and expected grant epoch. Returns
     /// committed status; prior delivered data cannot be recalled. A revocation that fails in
-    /// any way refuses the client at once; what storage commits late still takes effect.
+    /// any way refuses the client at once; it is kept on disk first, so one storage never
+    /// took lands later or at the next open, and that one is answered pending.
     pub async fn control(&self, control: OwnerControl) -> Result<OwnerControlReply, EngineError> {
         let (target, decision) = (control.target, control.decision);
+        let kept = match decision {
+            OwnerDecision::Revoke => {
+                self.keep_narrowing(crate::storage::narrowing::Change::Revoke {
+                    operation_id: control.operation_id.clone(),
+                    target,
+                    expected_epoch: control.expected_epoch,
+                })
+                .await
+            }
+            OwnerDecision::Reactivate => None,
+        };
+        let pending = kept.clone().map(|id| narrowing::Pending::Revoke {
+            control: control.clone(),
+            id,
+        });
         let barrier =
             tokio::time::timeout(self.engine.timeout, self.engine.owner_egress.write()).await;
         let submitted = self.authority.next_control();
@@ -1174,7 +1192,7 @@ impl OwnerRuntimeHandle {
             let authority = self.authority.clone();
             self.engine
                 .settled_owner_job(
-                    |reply| Job::OwnerControl(self.authority.host.clone(), control, reply),
+                    |reply| Job::OwnerControl(self.authority.host.clone(), control, kept, reply),
                     move |stored| {
                         let (result, registration) = stored?;
                         authority.publish(registration, submitted).map_err(|_| {
@@ -1190,7 +1208,7 @@ impl OwnerRuntimeHandle {
             _ => Ok(()),
         };
         drop(barrier);
-        closed.and(committed)
+        closed.and(self.pending_unless_taken(committed, pending))
     }
 
     /// Looks up an exact host control through the current storage actor.
@@ -1383,6 +1401,7 @@ impl OwnerServer {
                 reproof_left: Mutex::new(None),
                 icloud: crate::projects_home::icloud::Downloads::default(),
                 intake: intake::Intake::default(),
+                drain: Mutex::new(narrowing::Drain::default()),
             });
             Ok::<_, EngineError>((listener, authority))
         })();

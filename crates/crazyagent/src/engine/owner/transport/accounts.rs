@@ -830,16 +830,34 @@ fn view(listed: &Listed, status: AccountStatus) -> AccountView {
         },
         model: (!native).then(|| listed.connection.model.id.clone()),
         status,
-        status_label: if status == AccountStatus::NotSignedIn && listed.rejected {
-            "Sign-in rejected"
-        } else if status == AccountStatus::SigningIn
-            && listed.sign_in == Some(NativeAuthPhase::AuthenticatedObserved)
-        {
-            "Checking sign-in"
-        } else {
-            status.label()
+        status_label: match &listed.sign_out_unfinished {
+            Some(code) if status == AccountStatus::NotSignedIn => {
+                format!("Sign-out not finished: {}", sign_out_reason(code))
+            }
+            _ if status == AccountStatus::NotSignedIn && listed.rejected => {
+                "Sign-in rejected".into()
+            }
+            _ if status == AccountStatus::SigningIn
+                && listed.sign_in == Some(NativeAuthPhase::AuthenticatedObserved) =>
+            {
+                "Checking sign-in".into()
+            }
+            _ => status.label().into(),
+        },
+    }
+}
+
+/// Says in plain words why a sign-out did not finish in the harness, for the Accounts page:
+/// the profile is signed out here, but the harness may still hold its credentials.
+/// Input: the stored code. Output: the reason, a fixed sentence for any code it does not
+/// name, so no harness output ever reaches the page.
+fn sign_out_reason(code: &str) -> &'static str {
+    match code {
+        crate::storage::SIGN_OUT_NOT_RUN => "the engine stopped before the harness signed out",
+        "native_auth_host_unavailable" | "native_auth_host_unregistered" => {
+            "the sign-in helper could not run the harness"
         }
-        .into(),
+        _ => "the harness sign-out failed",
     }
 }
 

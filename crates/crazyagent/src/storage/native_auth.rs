@@ -1762,3 +1762,200 @@ mod retirement_checkpoint {
         )
     }
 }
+
+/// The code a sign-out recorded at open carries until the engine-start re-proof runs the
+/// harness sign-out: the owner signed out, but the harness may still hold its credentials.
+pub(crate) const SIGN_OUT_NOT_RUN: &str = "native_auth_sign_out_not_run";
+
+/// Records a kept sign-out at open as its profile's newest operation, signed out with
+/// `SIGN_OUT_NOT_RUN`, so no launch and no re-proof reads the earlier sign-in until a new
+/// owner sign-in. Inputs: the database, the intent's database id and the sign-out. Output:
+/// the outcome, not applicable once recorded, for another database or a profile that never
+/// signed in; or the storage error, which keeps the intent.
+pub(crate) fn replay_logout(
+    db: &mut Connection,
+    db_instance: &str,
+    logout: &NativeAuthLogout,
+) -> Result<Replayed, EngineError> {
+    assert_eq!(logout.scope.expected_database_instance, db_instance);
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    let tables: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+             AND name IN ('native_auth_operations','owner_meta')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if tables != 2 {
+        return Ok(Replayed::NotApplicable("native_auth_schema_missing"));
+    }
+    let instance: String = tx
+        .query_row(
+            "SELECT db_instance FROM owner_meta WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if instance != db_instance {
+        return Ok(Replayed::NotApplicable("other_database"));
+    }
+    let recorded: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM native_auth_operations WHERE id=?1)",
+            [logout.request_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if recorded {
+        return Ok(Replayed::NotApplicable("already_recorded"));
+    }
+    let Some(newest) = newest_of(&tx, &logout.scope.connection)? else {
+        return Ok(Replayed::NotApplicable("never_signed_in"));
+    };
+    let key = profile_key(&newest.binding.connection)?;
+    ensure_capacity(&tx, true)?;
+    let generation = next_generation(&tx, &key)?;
+    let fact = NativeAuthFact {
+        operation_id: logout.request_id.clone(),
+        action: NativeAuthAction::Logout,
+        binding: newest.binding,
+        generation,
+        phase: NativeAuthPhase::UnauthenticatedObserved,
+        code: Some(SIGN_OUT_NOT_RUN.into()),
+    };
+    let request = Command::Logout(logout.clone()).request_bytes()?;
+    let bytes = encode_fact(&fact)?;
+    assert!(request.len() <= REQUEST_BYTES_MAX && bytes.len() <= FACT_BYTES_MAX);
+    let inserted = tx
+        .execute(
+            "INSERT INTO native_auth_operations(id,profile_key,generation,request,fact,phase)
+             VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                fact.operation_id.as_str(),
+                key,
+                i64::try_from(generation).map_err(|_| error("native_auth_generation_bounds"))?,
+                request,
+                bytes,
+                stored_phase(fact.phase)
+            ],
+        )
+        .map_err(error)?;
+    assert_eq!(inserted, 1);
+    tx.commit().map_err(error)?;
+    Ok(Replayed::Committed)
+}
+
+/// Finds the newest operation of a connection, whatever its settings say now, by the
+/// connection its fact is bound to. Inputs: the transaction and the connection id. Output:
+/// the fact with the highest generation, or none when it never had one.
+fn newest_of(
+    tx: &Transaction<'_>,
+    connection: &CredentialRef,
+) -> Result<Option<NativeAuthFact>, EngineError> {
+    let mut statement = tx
+        .prepare("SELECT fact FROM native_auth_operations LIMIT ?1")
+        .map_err(error)?;
+    let rows = statement
+        .query_map([OPERATIONS_MAX + 1], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(error)?;
+    let mut newest: Option<NativeAuthFact> = None;
+    for bytes in rows {
+        let fact = decode_fact(&bytes.map_err(error)?)?;
+        if &fact.binding.connection.id == connection
+            && newest
+                .as_ref()
+                .is_none_or(|kept| kept.generation < fact.generation)
+        {
+            newest = Some(fact);
+        }
+    }
+    Ok(newest)
+}
+
+/// Lists the managed profiles whose newest operation is a sign-out the harness did not
+/// finish, recorded at open or run and failed, each as a new sign-out the engine-start
+/// re-proof runs through the harness. Inputs: the database, the settings, their sources and
+/// this run's host. Output: the sign-outs, each with the existing-sign-in method of its
+/// harness, which names the executable that runs it.
+pub(crate) fn sign_outs_due(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    host: &HostStamp,
+) -> Result<Vec<(NativeAuthLogout, NativeAuthMethod)>, EngineError> {
+    let tx = db.transaction().map_err(error)?;
+    let source_hash = settings::verified_source_hash(config, sources)?;
+    let connections = config
+        .settings
+        .model_access
+        .as_ref()
+        .map_or(&[][..], |access| &access.connections[..]);
+    let mut due = Vec::new();
+    for connection in connections {
+        let method = match connection.harness.as_str() {
+            "claude" => NativeAuthMethod::ClaudeExisting,
+            "codex" => NativeAuthMethod::CodexExisting,
+            _ => continue,
+        };
+        if !matches!(
+            connection.auth,
+            crate::config::ModelAuthentication::NativeManaged { .. }
+        ) || unfinished_sign_out(&tx, &profile_key(connection)?)?.is_none()
+        {
+            continue;
+        }
+        let logout = NativeAuthLogout {
+            request_id: RequestId::new(crate::engine::owner::random_id()?).map_err(error)?,
+            scope: NativeAuthScope {
+                expected_database_instance: host.db_instance.clone(),
+                connection: connection.id.clone(),
+                expected_config_id: config.id.clone(),
+                expected_source_hash: source_hash.clone(),
+            },
+        };
+        due.push((logout, method));
+    }
+    drop(tx);
+    assert!(due.len() <= connections.len());
+    Ok(due)
+}
+
+/// Names why a profile's newest sign-out did not finish in the harness: recorded at open
+/// and not yet run, or run and failed or unanswered. Inputs: the transaction and the profile
+/// key. Output: the code, or none when its newest operation is no unfinished sign-out.
+pub(crate) fn unfinished_sign_out(
+    tx: &Connection,
+    key: &str,
+) -> Result<Option<String>, EngineError> {
+    let row: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT fact FROM native_auth_operations WHERE profile_key=?1
+             ORDER BY generation DESC LIMIT 1",
+            [key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some(bytes) = row else {
+        return Ok(None);
+    };
+    let fact = decode_fact(&bytes)?;
+    if fact.action != NativeAuthAction::Logout {
+        return Ok(None);
+    }
+    Ok(match fact.phase {
+        NativeAuthPhase::UnauthenticatedObserved => {
+            fact.code.filter(|code| code == SIGN_OUT_NOT_RUN)
+        }
+        NativeAuthPhase::Failed | NativeAuthPhase::Unavailable | NativeAuthPhase::Uncertain => {
+            Some(
+                fact.code
+                    .unwrap_or_else(|| "native_auth_sign_out_failed".into()),
+            )
+        }
+        _ => None,
+    })
+}

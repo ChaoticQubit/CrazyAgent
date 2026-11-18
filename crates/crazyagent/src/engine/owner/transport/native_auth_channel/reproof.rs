@@ -1,6 +1,8 @@
 use super::*;
 use crate::engine::owner::native_auth::Command;
-use crate::engine::owner::{NativeAuthMethod, NativeAuthQuery, NativeAuthStart, random_id};
+use crate::engine::owner::{
+    NativeAuthLogout, NativeAuthMethod, NativeAuthQuery, NativeAuthStart, random_id,
+};
 use crate::protocol::SessionId;
 
 const REPROOF_WAIT: Duration = Duration::from_secs(90);
@@ -18,6 +20,9 @@ impl OwnerRuntimeHandle {
             return;
         };
         let engine_start = session.is_none();
+        if engine_start {
+            self.sign_out_due(&admission).await;
+        }
         let starts = match self
             .engine
             .native_auth_job(|reply| Job::NativeAuthStale(self.identity(), session, reply))
@@ -61,6 +66,74 @@ impl OwnerRuntimeHandle {
                 self.authority.reproof_checked(&connection);
             }
         }
+    }
+
+    /// Runs, one at a time, the harness sign-out of each profile whose newest sign-out the
+    /// harness did not finish, recorded at open from a kept sign-out or run and failed, so
+    /// the harness drops the credentials the owner signed out of. Input: the owner's standing
+    /// admission. Output: none; each sign-out settles in storage, and one that cannot run is
+    /// logged by code while its profile stays signed out.
+    async fn sign_out_due(&self, admission: &Admission) {
+        let due = match self
+            .engine
+            .native_auth_job(|reply| Job::NativeAuthSignOutsDue(self.identity(), reply))
+            .await
+        {
+            Ok(due) => due,
+            Err(error) => {
+                eprintln!(
+                    "native_auth_sign_out_deferred cause={}",
+                    plain_cause(&error, "native_auth_reproof_error_redacted")
+                );
+                return;
+            }
+        };
+        for (logout, method) in due {
+            let harness = method.harness();
+            if let Some(cause) = self.unreprovable(method) {
+                eprintln!("native_auth_sign_out_skipped harness={harness} cause={cause}");
+                continue;
+            }
+            if let Err(error) = self.sign_out_once(admission, logout).await {
+                eprintln!(
+                    "native_auth_sign_out_unsettled harness={harness} cause={}",
+                    plain_cause(&error, "native_auth_reproof_error_redacted")
+                );
+            }
+        }
+    }
+
+    /// Runs one harness sign-out once the account-check host is free and follows it until it
+    /// settles and the host has released the profile, within one bound. Inputs: the
+    /// admission and the sign-out. Output: the settled phase, or the code.
+    async fn sign_out_once(
+        &self,
+        admission: &Admission,
+        logout: NativeAuthLogout,
+    ) -> Result<NativeAuthPhase, EngineError> {
+        let deadline = Instant::now() + REPROOF_WAIT;
+        self.native_auth_idle_by(deadline).await?;
+        let query = NativeAuthQuery {
+            request_id: RequestId::new(random_id()?)
+                .map_err(|_| failure("owner_identity_encoding"))?,
+            scope: logout.scope.clone(),
+            operation_id: logout.request_id.clone(),
+        };
+        let mut reply = self
+            .native_auth_command(admission.clone(), Command::Logout(logout))
+            .await?;
+        while reply.fact.phase.unfinished() {
+            if Instant::now() >= deadline {
+                return Err(failure("native_auth_reproof_deadline"));
+            }
+            tokio::time::sleep(REPROOF_POLL).await;
+            reply = self
+                .native_auth_command(admission.clone(), Command::Read(query.clone()))
+                .await?;
+        }
+        assert_eq!(reply.fact.operation_id, query.operation_id);
+        self.native_auth_idle_by(deadline).await?;
+        Ok(reply.fact.phase)
     }
 
     /// Starts the engine-start re-proof of every earlier sign-in as its own task, after

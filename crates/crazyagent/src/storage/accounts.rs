@@ -35,6 +35,7 @@ pub(crate) struct Listed {
     pub(crate) launchable: bool,
     pub(crate) rejected: bool,
     pub(crate) rechecking: bool,
+    pub(crate) sign_out_unfinished: Option<String>,
 }
 
 pub(crate) enum ResultValue {
@@ -725,9 +726,9 @@ fn list(
 /// passes the launch check every master, team and research turn uses on this engine run, so
 /// status never shows an account as signed in when a launch or the master would refuse it,
 /// and whether a sign-in that fails only that check waits for this run's re-check (DEC-108);
-/// a re-check that cannot be read counts as none, so one account never fails the list.
-/// Inputs: the transaction, the admitted owner, the connection and its details.
-/// Output: the listed account.
+/// a re-check that cannot be read counts as none, so one account never fails the list; and
+/// why its newest sign-out did not finish in the harness, if so. Inputs: the transaction,
+/// the admitted owner, the connection and its details. Output: the listed account.
 fn listed(
     tx: &Transaction<'_>,
     admission: &Admission,
@@ -752,6 +753,16 @@ fn listed(
         && !rejected
         && crate::storage::sign_in_rechecking(tx, &host, &connection).unwrap_or(false);
     assert!(!(launchable && rechecking));
+    let sign_out_unfinished = match (&connection.auth, sign_in) {
+        (ModelAuthentication::NativeManaged { profile_ref }, Some(_)) => {
+            super::native_auth::unfinished_sign_out(
+                tx,
+                &crate::memory::hash(profile_ref.as_str().as_bytes()),
+            )?
+        }
+        _ => None,
+    };
+    assert!(sign_out_unfinished.is_none() || !launchable);
     Ok(Listed {
         connection,
         details,
@@ -759,6 +770,7 @@ fn listed(
         launchable,
         rejected,
         rechecking,
+        sign_out_unfinished,
     })
 }
 

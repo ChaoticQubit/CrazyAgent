@@ -1135,7 +1135,41 @@ impl OwnerRuntimeHandle {
         self.authority.reserve_native_auth(dispatch, false)
     }
 
+    /// Runs one native-auth command for the owner. A sign-out is kept on disk first, and one
+    /// storage refuses to take is queued for the drainer and answered pending, so it lands
+    /// later or at the next open. Inputs: the admission and the command. Output: the reply,
+    /// or the code the owner sees.
     pub(super) async fn native_auth_command(
+        &self,
+        admission: Admission,
+        command: crate::engine::owner::native_auth::Command,
+    ) -> Result<NativeAuthReply, EngineError> {
+        let logout = match &command {
+            crate::engine::owner::native_auth::Command::Logout(logout) => Some(logout.clone()),
+            _ => None,
+        };
+        let Some(logout) = logout else {
+            return self.native_auth_submit(admission, command).await;
+        };
+        command.validate()?;
+        let kept = self
+            .keep_narrowing(crate::storage::narrowing::Change::Logout(logout.clone()))
+            .await;
+        let answer = self.native_auth_submit(admission.clone(), command).await;
+        self.pending_unless_taken(
+            answer,
+            kept.map(|id| super::narrowing::Pending::Logout {
+                admission,
+                logout,
+                id,
+            }),
+        )
+    }
+
+    /// Submits one native-auth command to storage and takes its answer to the next step,
+    /// freezing host registration first for a sign-in or a sign-out. Inputs: the admission
+    /// and the command. Output: the reply, or the storage or validation code.
+    pub(super) async fn native_auth_submit(
         &self,
         admission: Admission,
         command: crate::engine::owner::native_auth::Command,

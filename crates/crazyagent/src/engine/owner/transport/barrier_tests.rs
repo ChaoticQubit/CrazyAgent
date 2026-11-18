@@ -524,7 +524,7 @@ async fn a_folder_add_whose_grant_is_revoked_after_its_plan_moves_nothing() {
     let control = revocation(runtime, OwnerClientKind::Desktop, "revoke-before-add");
     let (revoked, registration) = runtime
         .engine
-        .owner_job(|reply| Job::OwnerControl(runtime.authority.host.clone(), control, reply))
+        .owner_job(|reply| Job::OwnerControl(runtime.authority.host.clone(), control, None, reply))
         .await
         .unwrap();
     runtime
@@ -816,27 +816,6 @@ async fn a_revocation_storage_refuses_still_refuses_the_client_until_a_newer_rea
     assert!(
         admitted(runtime, &fresh_client(&owner)),
         "a newer committed reactivation admits the client again"
-    );
-    owner.stop().await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_revocation_that_never_reaches_storage_still_refuses_the_client() {
-    let owner = Usage::start_waiting(LAPSE_WAIT_MS).await;
-    let runtime = owner.runtime();
-    let held = runtime.engine.owner_egress.read().await;
-    assert_eq!(
-        runtime
-            .control(revocation(runtime, OwnerClientKind::Tui, "revoke-held"))
-            .await
-            .map(|reply| reply.active),
-        Err(failure("owner_control_not_submitted")),
-        "the revocation never gets the owner barrier"
-    );
-    drop(held);
-    assert!(
-        !admitted(runtime, &owner.client),
-        "a revocation that never reached storage still refuses the client"
     );
     owner.stop().await;
 }
