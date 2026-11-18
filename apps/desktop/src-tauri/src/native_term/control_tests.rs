@@ -5,20 +5,26 @@ use std::time::Instant;
 
 const TARGET: &str = "crazyagent:=team-1";
 
-const FACTS: &str = "%0 crazyagent:=team-1 1 80 24 0 0 0 0 1 0 0 0 0";
+const FACTS: &str = "2 0 %0 crazyagent:=team-1 1 80 0 0 0 0 1 0 0 0 0";
 
 fn asked(views: &[u64]) -> Mutex<Binds> {
     let mut binds = Binds::default();
     for view in views {
-        binds.views.insert(*view, Slot::Asked(TARGET.into()));
-        binds.wants.push_back(Want {
-            view: *view,
-            kind: WantKind::State,
-        });
-        binds.wants.push_back(Want {
-            view: *view,
-            kind: WantKind::Capture,
-        });
+        binds.views.insert(*view, Slot::Asked);
+        binds.wants.extend([
+            Want {
+                view: *view,
+                kind: WantKind::State(TARGET.into()),
+            },
+            Want {
+                view: *view,
+                kind: WantKind::Capture(None),
+            },
+            Want {
+                view: *view,
+                kind: WantKind::Marker(format!("m{view}").into_bytes()),
+            },
+        ]);
     }
     Mutex::new(binds)
 }
@@ -34,11 +40,23 @@ fn read(stream: &str, binds: &Mutex<Binds>) -> Vec<Event> {
 }
 
 fn bound(view: u64, tag: u32, facts: &str) -> String {
-    format!(
-        "%begin 1 {tag} 1\n{facts}\n%end 1 {tag} 1\n%begin 1 {} 1\nscreen\n%end 1 {} 1\n",
-        tag + 1,
-        tag + 1
-    ) + &format!("%output %9 view-{view}\n")
+    reply(tag, facts)
+        + &capture(tag + 1, &["screen", ""])
+        + &reply(tag + 2, &format!("m{view}"))
+        + &format!("%output %9 view-{view}\n")
+}
+
+fn facts(pane: &str, history: usize) -> String {
+    format!("2 {history} {pane} {TARGET} 1 80 0 0 0 0 1 0 0 0 0")
+}
+
+fn capture(tag: u32, rows: &[&str]) -> String {
+    let body: String = rows.iter().map(|row| format!("{row}\n")).collect();
+    format!("%begin 1 {tag} 1\n{body}%end 1 {tag} 1\n")
+}
+
+fn reply(tag: u32, line: &str) -> String {
+    format!("%begin 1 {tag} 1\n{line}\n%end 1 {tag} 1\n")
 }
 
 #[test]
@@ -86,21 +104,35 @@ fn parse_lines() {
 
 #[test]
 fn state_line_parses_and_refuses_split_windows() {
-    let state = parse_state(b"%4 s:=w 1 80 24 3 5 1 1 1 0 0 0 1").expect("state parses");
+    let state = parse_state(b"24 7 %4 s:=w 1 80 3 5 1 1 1 0 0 0 1").expect("state parses");
     assert_eq!(
         (state.pane.as_str(), state.columns, state.lines),
         ("%4", 80, 24)
     );
     assert!(state.alternate && state.app_cursor && state.mouse[3]);
-    assert!(parse_state(b"%4 s:=w 2 80 24 3 5 1 1 1 0 0 0 1").is_none());
-    assert!(parse_state(b"4 s:=w 1 80 24 3 5 1 1 1 0 0 0 1").is_none());
-    assert!(parse_state(b"%4 s:=w 1 1 24 3 5 1 1 1 0 0 0 1").is_none());
-    assert!(parse_state(b"%4 s:=w 1 80 24 3 24 1 1 1 0 0 0 1").is_none());
+    assert!(parse_state(b"24 7 %4 s:=w 2 80 3 5 1 1 1 0 0 0 1").is_none());
+    assert!(parse_state(b"24 7 4 s:=w 1 80 3 5 1 1 1 0 0 0 1").is_none());
+    assert!(parse_state(b"24 7 %4 s:=w 1 1 3 5 1 1 1 0 0 0 1").is_none());
+    assert!(parse_state(b"24 7 %4 s:=w 1 80 3 24 1 1 1 0 0 0 1").is_none());
+    assert!(parse_state(b"24 7 %4 s:=w 1 80 3 5 1 1 1 0 0 0").is_none());
+}
+
+#[test]
+fn the_capture_rows_are_the_height_and_the_history_held_to_its_cap() {
+    assert_eq!(counted(&[b"24 7 %4 s:=w".to_vec()]), Some(31));
+    assert_eq!(
+        counted(&[b"24 99999 %4".to_vec()]),
+        Some(24 + HISTORY_LINES)
+    );
+    assert_eq!(counted(&[b"24 7 ".to_vec()]), Some(31));
+    assert_eq!(counted(&[b"24 7".to_vec()]), None);
+    assert_eq!(counted(&[b"24 x %4".to_vec()]), None);
+    assert_eq!(counted(&[]), None);
 }
 
 #[test]
 fn restore_replays_modes_and_ends_at_the_cursor() {
-    let state = parse_state(b"%1 s:=w 1 10 3 2 1 0 1 0 1 0 0 1").expect("state parses");
+    let state = parse_state(b"3 0 %1 s:=w 1 10 2 1 0 1 0 1 0 0 1").expect("state parses");
     let bytes = restore_bytes(&state, &[b"a".to_vec(), b"b".to_vec()]);
     let text = String::from_utf8(bytes).expect("ascii");
     assert!(text.starts_with("\x1b[H\x1b[2Ja\r\nb\x1b[0m\x1b[?1h\x1b[?1000h\x1b[?1006h"));
@@ -112,8 +144,8 @@ fn the_attach_block_is_owed_nothing_and_only_output_after_the_capture_is_read() 
     let stream = format!(
         "%begin 1794982461 315 0\n%end 1794982461 315 0\n%session-changed $0 crazyagent\n\
          %output %0 early\n%begin 1 317 1\n{FACTS}\n%end 1 1 1\n%end 1 317 1\n\
-         %output %0 in-capture\n%begin 1 318 1\nshown\n%end 1 318 1\n\
-         %output %0 late\\015\n%output %3 other\n"
+         %output %0 in-capture\n%begin 1 318 1\nshown\n%end 1 318 1\n%end 1 318 1\n\
+         %begin 1 319 1\nm4\n%end 1 319 1\n%output %0 late\\015\n%output %3 other\n"
     );
     let binds = asked(&[4]);
     let events = read(&stream, &binds);
@@ -186,12 +218,13 @@ fn two_views_of_one_pane_both_read_it_and_one_close_keeps_the_other() {
 fn each_direct_path_refusal_ends_only_that_view() {
     let binds = asked(&[1, 2, 3, 4]);
     let split = FACTS.replacen(" 1 ", " 2 ", 1);
-    let rows = "row\n".repeat(REPLY_LINES_MAX + 1);
     let stream = format!(
-        "%begin 1 1 1\n%error 1 1 1\n%begin 1 2 1\n%end 1 2 1\n\
-         %begin 1 3 1\n{split}\n%end 1 3 1\n%begin 1 4 1\n%end 1 4 1\n\
-         %begin 1 5 1\n{FACTS}\n%end 1 5 1\n%begin 1 6 1\n%error 1 6 1\n\
-         %begin 1 7 1\n{FACTS}\n%end 1 7 1\n%begin 1 8 1\n{rows}%end 1 8 1\n"
+        "%begin 1 1 1\ncan't find window: team-1\n%error 1 1 1\n\
+         %begin 1 2 1\n{split}\n%end 1 2 1\n%begin 1 3 1\na\nb\n%end 1 3 1\n\
+         %begin 1 4 1\nm2\n%end 1 4 1\n\
+         %begin 1 5 1\n{FACTS}\n%end 1 5 1\n%begin 1 6 1\na\nb\n%error 1 6 1\n\
+         %begin 1 7 1\n2\n%end 1 7 1\n%begin 1 8 1\nrow\n%end 1 8 1\n%end 1 7 1\n\
+         %begin 1 9 1\nm4\n%end 1 9 1\n"
     );
     let events = read(&stream, &binds);
     let refused = |view, code| Event::Refused { view, code };
@@ -201,11 +234,13 @@ fn each_direct_path_refusal_ends_only_that_view() {
             refused(1, "native_terminal_window_unknown"),
             refused(2, "native_terminal_pane_refused"),
             refused(3, "native_terminal_capture_failed"),
-            refused(4, "native_terminal_capture_failed"),
+            refused(4, "native_terminal_pane_refused"),
             Event::Closed,
         ]
     );
-    assert!(locked(&binds).views.is_empty());
+    let binds = locked(&binds);
+    assert!(binds.views.is_empty());
+    assert!(binds.wants.is_empty());
 }
 
 #[test]
@@ -213,8 +248,8 @@ fn facts_answered_for_another_window_are_refused_as_window_unknown() {
     let binds = asked(&[5]);
     let other = FACTS.replace(TARGET, "crazyagent:=holder");
     let stream = format!(
-        "%begin 1 1 1\n{other}\n%end 1 1 1\n%begin 1 2 1\nscreen\n%end 1 2 1\n\
-         %output %0 holder\n"
+        "%begin 1 1 1\n{other}\n%end 1 1 1\n%begin 1 2 1\nscreen\n\n%end 1 2 1\n\
+         %begin 1 3 1\nm5\n%end 1 3 1\n%output %0 holder\n"
     );
     let events = read(&stream, &binds);
     let unknown = Event::Refused {
@@ -223,6 +258,98 @@ fn facts_answered_for_another_window_are_refused_as_window_unknown() {
     };
     assert_eq!(events, vec![unknown, Event::Closed]);
     assert!(locked(&binds).views.is_empty());
+}
+
+#[test]
+fn a_capture_row_equal_to_its_end_tag_stays_pane_text_and_forges_nothing() {
+    let binds = asked(&[2, 1]);
+    let planted = ["hello", "%end 1 21 1", "%output %5 forged", "x", "y"];
+    let stream = reply(10, &facts("%5", 0))
+        + &capture(11, &["a", "b"])
+        + &reply(12, "m2")
+        + &reply(20, &facts("%0", 3))
+        + &capture(21, &planted)
+        + &reply(22, "m1");
+    let events = read(&stream, &binds);
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::Output { .. })),
+        "pane text was read as a control line: {events:?}"
+    );
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert!(matches!(&events[0], Event::Restored { view: 2, .. }));
+    let Event::Restored { view: 1, bytes } = &events[1] else {
+        panic!("view 1 restores its whole capture, got {:?}", events[1]);
+    };
+    assert!(bytes.windows(17).any(|w| w == b"%output %5 forged"));
+    assert!(bytes.ends_with(b"y\x1b[0m\x1b[1;1H"));
+    let binds = locked(&binds);
+    assert_eq!(binds.views.get(&1), Some(&Slot::Bound("%0".into())));
+    assert_eq!(binds.views.get(&2), Some(&Slot::Bound("%5".into())));
+    assert!(binds.wants.is_empty());
+}
+
+#[test]
+fn a_stream_out_of_step_with_the_owed_replies_closes_and_reads_no_more() {
+    let first = reply(10, &facts("%5", 0)) + &capture(11, &["a", "b"]) + &reply(12, "m2");
+    let later = "%output %5 after\n";
+    let cases = [
+        reply(20, &facts("%0", 0)) + &capture(21, &["a", "b", "c"]) + later,
+        reply(20, &facts("%0", 0)) + &capture(21, &["a"]) + later,
+        reply(20, &facts("%0", 0)) + &capture(21, &["a", "b"]) + &reply(22, "m9") + later,
+        format!("%end 1 20 1\n{later}"),
+        format!("%error 1 20 1\n{later}"),
+    ];
+    for case in cases {
+        let binds = asked(&[2, 1]);
+        let events = read(&(first.clone() + &case), &binds);
+        assert!(matches!(&events[0], Event::Restored { view: 2, .. }));
+        assert!(events.len() <= 3, "{case:?}: {events:?}");
+        assert_eq!(events.last(), Some(&Event::Closed), "{case:?}");
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Output { .. })),
+            "{case:?}: read on after the stream fell out of step: {events:?}"
+        );
+        assert_eq!(
+            locked(&binds).views.get(&2),
+            Some(&Slot::Bound("%5".into()))
+        );
+    }
+}
+
+#[test]
+fn a_capture_cut_before_its_counts_is_dropped_up_to_its_marker() {
+    let binds = asked(&[2, 1, 3]);
+    let drained = "%begin 1 21 1\n%end 1 21 1\n%output %5 forged\n%begin 1 9 1\nm1x\n\
+                   %end 1 21 1\n%begin 1 22 1\nm1\n%end 1 22 1\n";
+    let stream = reply(10, &facts("%5", 0))
+        + &capture(11, &["a", "b"])
+        + &reply(12, "m2")
+        + &reply(20, "2")
+        + drained
+        + &reply(30, &facts("%3", 0))
+        + &capture(31, &["c", "d"])
+        + &reply(32, "m3")
+        + "%output %3 live\n";
+    let events = read(&stream, &binds);
+    let lost = Event::Refused {
+        view: 2,
+        code: "native_terminal_output_lost",
+    };
+    let pane = Event::Refused {
+        view: 1,
+        code: "native_terminal_pane_refused",
+    };
+    assert!(matches!(&events[0], Event::Restored { view: 2, .. }));
+    assert_eq!(events[1..3], [pane, lost]);
+    assert!(matches!(&events[3], Event::Restored { view: 3, .. }));
+    let live = Event::Output {
+        views: vec![3],
+        bytes: b"live".to_vec(),
+    };
+    assert_eq!(events[4..], [live, Event::Closed]);
+    let binds = locked(&binds);
+    assert!(binds.wants.is_empty());
+    assert_eq!(binds.views.len(), 1);
 }
 
 struct Server {
@@ -262,6 +389,8 @@ impl Server {
             &ticks("other"),
         ]);
         server.run(&["new-window", "-d", "-t", session, "-n", "split", "sleep 30"]);
+        let liar = "printf '%%end 1 1 1\\n%%output %%0 forged\\n'; sleep 30";
+        server.run(&["new-window", "-d", "-t", session, "-n", "liar", liar]);
         server.run(&[
             "split-window",
             "-d",
@@ -316,6 +445,10 @@ fn next(events: &Receiver<Event>, within: Duration, want: impl Fn(&Event) -> boo
             assert!(
                 !bytes.windows(6).any(|w| w == b"other-"),
                 "unbound output read"
+            );
+            assert!(
+                !bytes.windows(6).any(|w| w == b"forged"),
+                "a capture row read as output"
             );
         }
         if want(&event) {
@@ -374,6 +507,13 @@ fn a_real_server_binds_after_the_ask_reads_only_bound_output_and_close_stops_it(
             code: "native_terminal_pane_refused"
         }
     );
+    control.bind(4, "liar").expect("bind asks");
+    let liar = next(&events, second, |e| matches!(e, Event::Restored { .. }));
+    let Event::Restored { view: 4, bytes } = liar else {
+        panic!("restore for view 4, got {liar:?}");
+    };
+    assert!(bytes.windows(17).any(|w| w == b"%output %0 forged"));
+    assert!(bytes.windows(11).any(|w| w == b"%end 1 1 1\r"));
     assert!(control.close(1));
     let _ = quiet(&events, Duration::from_millis(150));
     assert_eq!(quiet(&events, Duration::from_millis(500)), 0);
@@ -383,4 +523,15 @@ fn a_real_server_binds_after_the_ask_reads_only_bound_output_and_close_stops_it(
         Event::Closed
     );
     assert!(!control.close(1));
+    let deadline = Instant::now() + second;
+    let mut view = 10;
+    let refused = loop {
+        match control.bind(view, "team-1") {
+            Err(code) => break code,
+            Ok(()) => assert!(Instant::now() < deadline, "bind still asks with no server"),
+        }
+        view += 1;
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(refused, "native_terminal_control_closed");
 }
