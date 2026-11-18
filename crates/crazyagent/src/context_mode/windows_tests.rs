@@ -458,9 +458,8 @@ fn npm_installs_into_a_fresh_staging_folder() {
 }
 
 /// V244-WIN-NPM: where Node.js's folder is one no app container reads and this standard user
-/// cannot change, as on the test farm's runners, the node probe, an agent launch (r2 F3) and
-/// the npm install all refuse with Node.js's own code before the helper runs, never as a
-/// Node.js too old or a failed set-up.
+/// cannot change, as on the test farm's runners, the node probe and the npm install both
+/// refuse with Node.js's own code before the helper runs, never as a Node.js too old.
 #[test]
 #[ignore = "needs the farm runner's Node.js folder and a standard user (test farm)"]
 fn a_node_folder_only_an_administrator_can_open_to_containers_is_refused_by_its_own_code() {
@@ -473,14 +472,6 @@ fn a_node_folder_only_an_administrator_can_open_to_containers_is_refused_by_its_
     let case = case();
     let unreadable = InstallError("context_mode_node_folder_unreadable");
     assert_eq!(node_supported(&case.root, &bin), Err(unreadable));
-    let npx = ServerSpec::Stdio {
-        command: bin.join("npx.cmd").to_str().unwrap().to_owned(),
-        args: vec!["-y".into(), format!("context-mode@{VERSION}")],
-    };
-    assert_eq!(
-        for_launch(&case.root, npx),
-        Err(ContextModeOff::NodeFolderUnreadable)
-    );
     let npm = case.root.join("setup").join("npm");
     let prefix = format!("{PACKAGE}@{VERSION}");
     let work = staging_folder(&npm, &format!("{prefix}-work")).unwrap();
@@ -491,6 +482,34 @@ fn a_node_folder_only_an_administrator_can_open_to_containers_is_refused_by_its_
         Err(unreadable)
     );
     assert!(!staged.join(MODULES).exists());
+}
+
+/// V244-WIN-NPM r2 F3: an agent launch whose npx folder no app container reads and this
+/// standard user cannot change, since an OWNER RIGHTS entry takes the owner's right to change
+/// its list while the user keeps modify, leaves context-mode out as Node.js's folder, never as
+/// a failed set-up.
+#[test]
+#[ignore = "needs a standard user, whom an OWNER RIGHTS entry stops changing a list (test farm)"]
+fn an_agent_launch_whose_node_folder_this_user_cannot_change_says_so() {
+    let case = case();
+    let user = std::env::var("USERNAME").unwrap();
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let locked = crate::spawn_gate::collected(
+        std::process::Command::new(system.join("icacls.exe"))
+            .arg(&case.bin)
+            .args(["/inheritance:r", "/grant:r", "*S-1-3-4:(OI)(CI)(RX)"])
+            .arg(format!("{user}:(OI)(CI)(M)")),
+    )
+    .unwrap();
+    assert!(locked.status.success(), "{}", shown(&locked));
+    assert!(crazyagent_win_sandbox::unreadable_root(
+        &case.bin,
+        "crazyagent.test.node"
+    ));
+    assert_eq!(
+        for_launch(&case.root, npx_in(&case)),
+        Err(ContextModeOff::NodeFolderUnreadable)
+    );
 }
 
 /// The access list of a folder a job read or wrote, as `icacls` prints it, without the
