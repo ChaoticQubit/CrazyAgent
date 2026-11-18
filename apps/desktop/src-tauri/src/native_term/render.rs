@@ -1,4 +1,4 @@
-use super::screen::{Cursor, Frame, Span};
+use super::screen::{Cursor, Frame, Preedit, Span};
 use super::style::{FaceEm, FontSource, Style, Theme, cell_px};
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use glyphon::cosmic_text::{FeatureTag, FontFeatures};
@@ -75,6 +75,21 @@ pub struct Surface {
     rect_buffer: wgpu::Buffer,
     screen_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+}
+
+/// The underline under marked text: one line as tall as a cursor's underline, along the
+/// bottom of its cells. Inputs: the marked cells, the cell size and the line height in
+/// pixels. Output: x, y, width and height in pixels.
+fn preedit_rect(preedit: Preedit, cell: (f32, f32), line: f32) -> [f32; 4] {
+    let (cw, ch) = cell;
+    assert!(cw > 0.0);
+    assert!(ch > 0.0);
+    assert!(line >= 1.0);
+    assert!(line <= ch);
+    assert!(preedit.cells > 0);
+    let x = preedit.column as f32 * cw;
+    let y = (preedit.row + 1) as f32 * ch - line;
+    [x, y, preedit.cells as f32 * cw, line]
 }
 
 fn linear(channel: u8) -> f64 {
@@ -597,6 +612,12 @@ impl Shared {
             out.extend_from_slice(&[x, y, fill.width as f32 * cw, ch]);
             out.extend_from_slice(&linear_rgba(fill.color, 1.0));
         }
+        assert!(frame.preedit.is_none() || frame.cursor.is_none());
+        if let Some(preedit) = frame.preedit {
+            let line = self.scale.round().max(1.0);
+            out.extend_from_slice(&preedit_rect(preedit, self.cell, line));
+            out.extend_from_slice(&linear_rgba(self.theme.foreground, 1.0));
+        }
         for rect in frame
             .cursor
             .map(|c| self.cursor_rects(c))
@@ -965,5 +986,24 @@ mod tests {
         let loaded = load(&mut db, FontSource::File(path));
         assert_eq!(loaded, Err("native_terminal_style_invalid"));
         assert_eq!(db.len(), 0);
+    }
+
+    #[test]
+    fn marked_text_is_underlined_along_the_bottom_of_its_cells() {
+        let wide = Preedit {
+            row: 2,
+            column: 5,
+            cells: 3,
+        };
+        assert_eq!(
+            preedit_rect(wide, (8.0, 17.0), 2.0),
+            [40.0, 49.0, 24.0, 2.0]
+        );
+        let one = Preedit {
+            row: 0,
+            column: 0,
+            cells: 1,
+        };
+        assert_eq!(preedit_rect(one, (7.0, 15.0), 1.0), [0.0, 14.0, 7.0, 1.0]);
     }
 }

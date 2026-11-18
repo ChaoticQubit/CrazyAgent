@@ -1,6 +1,8 @@
+use super::ime::char_cells;
 use super::style::{Theme, blend};
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::Point;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::{RenderableContent, Term};
@@ -57,12 +59,22 @@ pub struct Cursor {
 }
 
 /// What one frame draws: the spans of every row, a hash per row to skip unchanged rows, the
-/// background fills and the cursor.
+/// background fills, the cursor and the marked text's cells.
 pub struct Frame {
     pub rows: Vec<Vec<Span>>,
     pub keys: Vec<u64>,
     pub fills: Vec<Fill>,
     pub cursor: Option<Cursor>,
+    pub preedit: Option<Preedit>,
+}
+
+/// The cells marked text (an input method's composition) covers: its row, first column and
+/// width in cells, underlined by the renderer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Preedit {
+    pub row: usize,
+    pub column: usize,
+    pub cells: usize,
 }
 
 /// The xterm 256-colour palette entry for an index, with the theme's 16 colours first.
@@ -173,21 +185,77 @@ fn cursor_at(content: &RenderableContent<'_>, lines: usize, shown: bool) -> Opti
     (row < lines).then_some(Cursor { row, column, shape })
 }
 
+/// Where marked text goes: the terminal cursor cell (followed even while the cursor is
+/// hidden, as input methods expect), clipped to the cells left in the row; zero-width
+/// characters are not drawn, since a span cell holds one character. Inputs: the marked
+/// text, the cursor point, the display offset and the screen size. Output: the marked cells
+/// and the text that fits, or none when nothing is marked or the cursor is off the screen.
+fn place_marked(
+    marked: Option<&str>,
+    point: Point,
+    offset: i32,
+    size: (usize, usize),
+) -> Option<(Preedit, String)> {
+    let (columns, lines) = size;
+    assert!(columns > 0 && lines > 0);
+    let marked = marked.filter(|text| !text.is_empty())?;
+    let row = usize::try_from(point.line.0 + offset)
+        .ok()
+        .filter(|row| *row < lines)?;
+    let column = point.column.0.min(columns - 1);
+    let room = columns - column;
+    let mut text = String::new();
+    let mut cells = 0usize;
+    for c in marked.chars() {
+        let width = char_cells(c);
+        assert!(width <= 2);
+        if width == 0 {
+            continue;
+        }
+        if cells + width > room {
+            break;
+        }
+        text.push(c);
+        cells += width;
+    }
+    if cells == 0 {
+        return None;
+    }
+    assert!(column + cells <= columns);
+    Some((Preedit { row, column, cells }, text))
+}
+
+/// Adds one cell's background to the fills, widening the last fill when it is the cell to
+/// its left in the same colour. Inputs: the fills, the cell's row and column, its colour.
+fn push_fill(fills: &mut Vec<Fill>, row: usize, column: usize, color: Rgb) {
+    let count = fills.len();
+    match fills.last_mut() {
+        Some(f) if f.row == row && f.column + f.width == column && f.color == color => f.width += 1,
+        _ => fills.push(Fill {
+            row,
+            column,
+            width: 1,
+            color,
+        }),
+    }
+    assert!(fills.len() == count || fills.len() == count + 1);
+}
+
 /// Appends one cell's character to a row's spans and folds it into the row's key: a plain
 /// narrow character joins the span it continues; a wide one, or one with zero-width
 /// characters after it, is its own span. Inputs: the row's spans and key, the character and
-/// its zero-width characters, its colour and (bold, italic), its column and whether wide.
+/// its zero-width characters, its colour and (bold, italic, marked), its column and wide.
 fn push_char(
     spans: &mut Vec<Span>,
     key: &mut u64,
     (c, zero): (char, &[char]),
-    (fg, (bold, italic)): (Rgb, (bool, bool)),
+    (fg, (bold, italic, marked)): (Rgb, (bool, bool, bool)),
     (column, wide): (usize, bool),
 ) {
     let count = spans.len();
     let packed = (u64::from(fg.r) << 16) | (u64::from(fg.g) << 8) | u64::from(fg.b);
-    let style = (u64::from(bold) << 24) | (u64::from(italic) << 25);
-    *key = mix(mix(*key, c as u64), packed | style);
+    let flags = (u64::from(bold) << 24) | (u64::from(italic) << 25) | (u64::from(marked) << 26);
+    *key = mix(mix(*key, c as u64), packed | flags);
     *key = zero.iter().fold(*key, |key, mark| mix(key, *mark as u64));
     let cluster = !zero.is_empty();
     match spans.last_mut() {
@@ -221,14 +289,23 @@ fn push_char(
     );
 }
 
-/// Builds the frame for the visible screen. Inputs: the terminal, the theme and whether the
-/// cursor shows now (false in a blink's off phase). Output: rows, fills and the cursor;
-/// wide-character spacer cells add no text.
-pub fn frame(term: &Term<VoidListener>, theme: &Theme, cursor_shown: bool) -> Frame {
+/// Builds the frame for the visible screen. Inputs: the terminal, the theme, whether the
+/// cursor shows now (false in a blink's off phase) and the marked text, if any. Output:
+/// rows, fills, the cursor and the marked text's cells; wide-character spacer cells add no
+/// text, and marked text replaces the cells from the terminal cursor on (clipped at the row
+/// end, in the foreground on the background, the cursor hidden while it shows).
+pub fn frame(
+    term: &Term<VoidListener>,
+    theme: &Theme,
+    cursor_shown: bool,
+    marked: Option<&str>,
+) -> Frame {
     let content = term.renderable_content();
     let lines = term.screen_lines();
     let offset = content.display_offset as i32;
-    let cursor = cursor_at(&content, lines, cursor_shown);
+    let size = (term.columns(), lines);
+    let overlay = place_marked(marked, content.cursor.point, offset, size);
+    let cursor = cursor_at(&content, lines, cursor_shown && overlay.is_none());
     let mut rows: Vec<Vec<Span>> = (0..lines).map(|_| Vec::new()).collect();
     let mut keys = vec![0xcbf2_9ce4_8422_2325u64; lines];
     let mut fills: Vec<Fill> = Vec::new();
@@ -237,24 +314,32 @@ pub fn frame(term: &Term<VoidListener>, theme: &Theme, cursor_shown: bool) -> Fr
     for indexed in content.display_iter {
         let row = usize::try_from(indexed.point.line.0 + offset).unwrap_or(usize::MAX);
         assert!(row < lines, "display row inside the screen");
-        let cell = indexed.cell;
         let column = indexed.point.column.0;
+        if let Some((cells, text)) = overlay.as_ref()
+            && cells.row == row
+            && (cells.column..cells.column + cells.cells).contains(&column)
+        {
+            if column == cells.column {
+                let mut at = cells.column;
+                for c in text.chars() {
+                    let wide = char_cells(c) == 2;
+                    let style = (false, false, true);
+                    let fg = theme.foreground;
+                    let place = (at, wide);
+                    push_char(&mut rows[row], &mut keys[row], (c, &[]), (fg, style), place);
+                    at += 1 + usize::from(wide);
+                }
+                assert_eq!(at, cells.column + cells.cells);
+            }
+            continue;
+        }
+        let cell = indexed.cell;
         let block = cursor
             .is_some_and(|c| c.shape == CursorShape::Block && (c.row, c.column) == (row, column));
         let selected = selection.is_some_and(|range| range.contains(indexed.point));
         let (fg, bg) = cell_colors(cell, content.colors, theme, block, selected);
         if bg != theme.background {
-            match fills.last_mut() {
-                Some(f) if f.row == row && f.column + f.width == column && f.color == bg => {
-                    f.width += 1
-                }
-                _ => fills.push(Fill {
-                    row,
-                    column,
-                    width: 1,
-                    color: bg,
-                }),
-            }
+            push_fill(&mut fills, row, column, bg);
         }
         if cell.flags.intersects(spacer) {
             continue;
@@ -262,19 +347,23 @@ pub fn frame(term: &Term<VoidListener>, theme: &Theme, cursor_shown: bool) -> Fr
         let style = (
             cell.flags.contains(Flags::BOLD),
             cell.flags.contains(Flags::ITALIC),
+            false,
         );
         let text = (cell.c, cell.zerowidth().unwrap_or(&[]));
         let at = (column, cell.flags.contains(Flags::WIDE_CHAR));
         push_char(&mut rows[row], &mut keys[row], text, (fg, style), at);
     }
+    let preedit = overlay.map(|(cells, _)| cells);
     assert_eq!(rows.len(), lines);
     assert!(cursor.is_none_or(|c| c.row < lines));
+    assert!(preedit.is_none() || cursor.is_none());
     assert!(rows.iter().flatten().all(|s| !s.wide || s.cells == 2));
     Frame {
         rows,
         keys,
         fills,
         cursor,
+        preedit,
     }
 }
 
@@ -342,7 +431,7 @@ mod tests {
     fn cells_draw_in_the_theme_colours() {
         let theme = Theme::default();
         let term = screen(b"\x1b[1;31mA\x1b[0;31mB\x1b[0;7mC\x1b[0mD");
-        let frame = frame(&term, &theme, true);
+        let frame = frame(&term, &theme, true, None);
         let fg: Vec<Rgb> = frame.rows[0].iter().map(|s| s.fg).collect();
         let (back, fore) = (theme.background, theme.foreground);
         assert_eq!(theme.cursor_accent, back);
@@ -378,7 +467,7 @@ mod tests {
     fn a_wide_character_is_its_own_two_cell_span() {
         let theme = Theme::default();
         let term = screen("a\u{4e2d}b".as_bytes());
-        let frame = frame(&term, &theme, false);
+        let frame = frame(&term, &theme, false, None);
         let spans: Vec<(&str, usize, usize, bool)> = frame.rows[0]
             .iter()
             .map(|s| (s.text.as_str(), s.column, s.cells, s.wide))
@@ -397,8 +486,9 @@ mod tests {
             &screen("e\u{301}x\u{2764}\u{fe0f}y".as_bytes()),
             &theme,
             false,
+            None,
         );
-        let plain = frame(&screen("ex\u{2764}y".as_bytes()), &theme, false);
+        let plain = frame(&screen("ex\u{2764}y".as_bytes()), &theme, false, None);
         let spans: Vec<(&str, usize, usize, bool)> = marked.rows[0]
             .iter()
             .map(|s| (s.text.as_str(), s.column, s.cells, s.cluster))
@@ -421,10 +511,73 @@ mod tests {
     fn a_blink_off_phase_hides_the_cursor_and_its_block() {
         let theme = Theme::default();
         let term = screen(b"AB");
-        let frame = frame(&term, &theme, false);
+        let frame = frame(&term, &theme, false, None);
         assert_eq!(frame.cursor, None);
         assert!(frame.fills.is_empty());
-        let shown = super::frame(&term, &theme, true);
+        let shown = super::frame(&term, &theme, true, None);
         assert_ne!(shown.keys[0], frame.keys[0]);
+    }
+
+    fn sized(columns: usize, lines: usize, bytes: &[u8]) -> Term<VoidListener> {
+        let size = GridSize { columns, lines };
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, bytes);
+        term
+    }
+
+    #[test]
+    fn marked_text_replaces_cells_from_the_cursor_and_changes_only_its_row_key() {
+        let theme = Theme::default();
+        let term = sized(10, 3, b"ab\r\ncd");
+        let plain = frame(&term, &theme, true, None);
+        assert_eq!(plain.preedit, None);
+        assert_eq!(plain.cursor.map(|c| (c.row, c.column)), Some((1, 2)));
+        let marked = frame(&term, &theme, true, Some("\u{306b}x"));
+        assert_eq!(text_rows(&marked), vec!["ab", "cd\u{306b}x", ""]);
+        assert_eq!(marked.keys[0], plain.keys[0]);
+        assert_ne!(marked.keys[1], plain.keys[1]);
+        assert_eq!(marked.keys[2], plain.keys[2]);
+        let cells = Preedit {
+            row: 1,
+            column: 2,
+            cells: 3,
+        };
+        assert_eq!(marked.preedit, Some(cells));
+        assert_eq!(marked.cursor, None);
+        assert!(marked.fills.is_empty());
+        let long = frame(&term, &theme, true, Some(&"\u{754c}".repeat(5)));
+        assert_eq!(text_rows(&long)[1], format!("cd{}", "\u{754c}".repeat(4)));
+        assert_eq!(long.preedit.map(|p| p.cells), Some(8));
+        assert!(frame(&term, &theme, true, Some("")).preedit.is_none());
+    }
+
+    #[test]
+    fn marked_text_covers_the_text_under_it_and_follows_a_hidden_cursor() {
+        let theme = Theme::default();
+        let over = frame(&sized(10, 2, b"abcd\x1b[1;2H"), &theme, true, Some("x"));
+        assert_eq!(text_rows(&over)[0], "axcd");
+        assert_eq!(
+            over.preedit.map(|p| (p.row, p.column, p.cells)),
+            Some((0, 1, 1))
+        );
+        let hidden = frame(&sized(10, 2, b"\x1b[?25lab"), &theme, true, Some("y"));
+        assert_eq!(text_rows(&hidden)[0], "aby");
+        assert_eq!(hidden.preedit.map(|p| p.column), Some(2));
+        let blink = frame(&sized(10, 2, b"ab"), &theme, false, Some("z"));
+        assert_eq!(text_rows(&blink)[0], "abz");
+        assert_eq!(blink.cursor, None);
+    }
+
+    #[test]
+    fn a_marked_character_wider_than_two_cells_takes_two_like_the_grid() {
+        let theme = Theme::default();
+        let typed = frame(&sized(10, 2, "\u{17D8}x".as_bytes()), &theme, true, None);
+        assert_eq!(typed.cursor.map(|c| c.column), Some(3));
+        let marked = frame(&sized(10, 2, b"ab"), &theme, true, Some("\u{17D8}x"));
+        assert_eq!(text_rows(&marked)[0], "ab\u{17D8}x");
+        assert_eq!(marked.preedit.map(|p| (p.column, p.cells)), Some((2, 3)));
+        let wide = marked.rows[0].iter().find(|s| s.column == 2);
+        assert!(wide.is_some_and(|s| s.wide && s.cells == 2));
     }
 }

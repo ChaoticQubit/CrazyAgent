@@ -1,11 +1,19 @@
-use super::keymap::{Press, key_input};
+use super::a11y::{Geometry, Grid};
+use super::ime::{self, Ime, Mods, Route};
 use super::pane::Input;
+use super::view_text::{Access, KeyDown, attributed, range_or_none};
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObjectProtocol};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSEvent, NSEventModifierFlags, NSResponder, NSView};
-use objc2_foundation::{NSPoint, NSRect, NSSize};
-use std::cell::Cell;
+use objc2::runtime::{AnyObject, NSObjectProtocol, Sel};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
+use objc2_app_kit::{
+    NSAccessibilityTextAreaRole, NSEvent, NSEventModifierFlags, NSResponder, NSTextInputClient,
+    NSView,
+};
+use objc2_foundation::{
+    NSArray, NSAttributedString, NSAttributedStringKey, NSInteger, NSNotFound, NSPoint, NSRange,
+    NSRect, NSSize, NSString, NSUInteger,
+};
+use std::cell::{Cell, RefCell};
 
 /// The most clicks a press reports: 1 places the cursor, 2 a word, 3 a line.
 const CLICKS_MAX: u8 = 3;
@@ -19,7 +27,8 @@ pub enum MouseKind {
 }
 
 /// What a native view tells its host, on the main thread, in the order AppKit delivered
-/// it. Points are in the view's own flipped coordinates, in points.
+/// it. Points are in the view's own flipped coordinates, in points. `Marked` asks for a
+/// redraw: the input method's marked text changed (read it with `marked_text`).
 #[derive(Debug, PartialEq)]
 pub enum ViewEvent {
     Key(Input),
@@ -41,15 +50,28 @@ pub enum ViewEvent {
     Paste,
     SelectAll,
     Focus(bool),
+    Marked,
 }
 
 /// The host function a view hands its events to, with the view's id.
 pub type Sink = fn(u64, ViewEvent);
 
-/// The native view's own state: the id of the terminal view it draws and its host.
+/// The host function VoiceOver's text is read from, with the view's id: the visible grid,
+/// or none while the screen is busy, when the last text read serves.
+pub type Screen = fn(u64) -> Option<Grid>;
+
+/// The native view's own state: the id of the terminal view it draws, its host functions,
+/// its marked text, the key `interpretKeyEvents` works on, the cursor cell and geometry of
+/// the last frame, and what VoiceOver reads; nothing a getter needs waits on the host.
 pub struct Ivars {
     id: Cell<u64>,
     sink: Sink,
+    pub(super) screen: Screen,
+    pub(super) ime: RefCell<Ime>,
+    pub(super) key: RefCell<Option<KeyDown>>,
+    pub(super) cursor: Cell<Option<(usize, usize)>>,
+    pub(super) geometry: Cell<Option<Geometry>>,
+    pub(super) access: RefCell<Access>,
 }
 
 define_class!(
@@ -60,6 +82,67 @@ define_class!(
     pub struct TermView;
 
     unsafe impl NSObjectProtocol for TermView {}
+
+    unsafe impl NSTextInputClient for TermView {
+        #[unsafe(method(insertText:replacementRange:))]
+        fn insert_text(&self, string: &AnyObject, _replacement: NSRange) {
+            self.text_inserted(string);
+        }
+
+        #[unsafe(method(doCommandBySelector:))]
+        fn do_command(&self, _selector: Sel) {
+            self.command_passed();
+        }
+
+        #[unsafe(method(setMarkedText:selectedRange:replacementRange:))]
+        fn set_marked_text(&self, string: &AnyObject, selected: NSRange, _replacement: NSRange) {
+            self.marked_set(string, selected);
+        }
+
+        #[unsafe(method(unmarkText))]
+        fn unmark_text(&self) {
+            self.marked_committed();
+        }
+
+        #[unsafe(method(selectedRange))]
+        fn selected_range(&self) -> NSRange {
+            range_or_none(self.ivars().ime.borrow().selected_range())
+        }
+
+        #[unsafe(method(markedRange))]
+        fn marked_range(&self) -> NSRange {
+            range_or_none(self.ivars().ime.borrow().marked_range())
+        }
+
+        #[unsafe(method(hasMarkedText))]
+        fn has_marked_text(&self) -> bool {
+            self.ivars().ime.borrow().composing()
+        }
+
+        #[unsafe(method_id(attributedSubstringForProposedRange:actualRange:))]
+        fn attributed_substring(
+            &self,
+            range: NSRange,
+            actual: *mut NSRange,
+        ) -> Option<Retained<NSAttributedString>> {
+            self.marked_substring(range, actual)
+        }
+
+        #[unsafe(method_id(validAttributesForMarkedText))]
+        fn valid_attributes(&self) -> Retained<NSArray<NSAttributedStringKey>> {
+            NSArray::new()
+        }
+
+        #[unsafe(method(firstRectForCharacterRange:actualRange:))]
+        fn first_rect(&self, range: NSRange, actual: *mut NSRange) -> NSRect {
+            self.marked_rect(range, actual)
+        }
+
+        #[unsafe(method(characterIndexForPoint:))]
+        fn character_index(&self, _point: NSPoint) -> NSUInteger {
+            NSNotFound as NSUInteger
+        }
+    }
 
     impl TermView {
         #[unsafe(method(isFlipped))]
@@ -79,12 +162,108 @@ define_class!(
 
         #[unsafe(method(resignFirstResponder))]
         fn resign_first_responder(&self) -> bool {
+            self.cancel_marked();
             self.focus(unsafe { msg_send![super(self), resignFirstResponder] }, false)
         }
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             self.key(event);
+        }
+
+        #[unsafe(method(isAccessibilityElement))]
+        fn is_accessibility_element(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method_id(accessibilityRole))]
+        fn accessibility_role(&self) -> Option<Retained<NSString>> {
+            Some(unsafe { NSAccessibilityTextAreaRole }.retain())
+        }
+
+        #[unsafe(method_id(accessibilityLabel))]
+        fn accessibility_label(&self) -> Option<Retained<NSString>> {
+            Some(NSString::from_str("Terminal"))
+        }
+
+        #[unsafe(method_id(accessibilityValue))]
+        fn accessibility_value(&self) -> Option<Retained<NSString>> {
+            Some(self.with_text(|text| NSString::from_str(&text.string)))
+        }
+
+        #[unsafe(method(accessibilityNumberOfCharacters))]
+        fn accessibility_characters(&self) -> NSInteger {
+            self.with_text(|text| text.units() as NSInteger)
+        }
+
+        #[unsafe(method(accessibilityVisibleCharacterRange))]
+        fn accessibility_visible_range(&self) -> NSRange {
+            self.with_text(|text| NSRange::new(0, text.units()))
+        }
+
+        #[unsafe(method(accessibilityInsertionPointLineNumber))]
+        fn accessibility_insertion_line(&self) -> NSInteger {
+            self.with_text(|text| text.line_for_index(text.cursor) as NSInteger)
+        }
+
+        #[unsafe(method(accessibilitySelectedTextRange))]
+        fn accessibility_selected_range(&self) -> NSRange {
+            self.with_text(|text| {
+                let (at, length) = text.selection.unwrap_or((text.cursor, 0));
+                NSRange::new(at, length)
+            })
+        }
+
+        #[unsafe(method_id(accessibilitySelectedText))]
+        fn accessibility_selected_text(&self) -> Option<Retained<NSString>> {
+            let selected = self.with_text(|text| {
+                let range = text.selection?;
+                text.string_for_range(range).map(|found| found.0)
+            });
+            Some(NSString::from_str(&selected.unwrap_or_default()))
+        }
+
+        #[unsafe(method(accessibilityLineForIndex:))]
+        fn accessibility_line_for_index(&self, index: NSInteger) -> NSInteger {
+            let index = usize::try_from(index).unwrap_or(0);
+            self.with_text(|text| text.line_for_index(index) as NSInteger)
+        }
+
+        #[unsafe(method(accessibilityRangeForLine:))]
+        fn accessibility_range_for_line(&self, line: NSInteger) -> NSRange {
+            let line = usize::try_from(line).ok();
+            range_or_none(self.with_text(|text| line.and_then(|line| text.range_for_line(line))))
+        }
+
+        #[unsafe(method(accessibilityRangeForIndex:))]
+        fn accessibility_range_for_index(&self, index: NSInteger) -> NSRange {
+            let index = usize::try_from(index).ok();
+            let found = self.with_text(|text| {
+                index.and_then(|index| text.string_for_range((index, 1)).map(|found| found.1))
+            });
+            range_or_none(found)
+        }
+
+        #[unsafe(method_id(accessibilityStringForRange:))]
+        fn accessibility_string_for_range(&self, range: NSRange) -> Option<Retained<NSString>> {
+            let range = (range.location, range.length);
+            let found = self.with_text(|text| text.string_for_range(range));
+            found.map(|(string, _)| NSString::from_str(&string))
+        }
+
+        #[unsafe(method_id(accessibilityAttributedStringForRange:))]
+        fn accessibility_attributed_string_for_range(
+            &self,
+            range: NSRange,
+        ) -> Option<Retained<NSAttributedString>> {
+            let range = (range.location, range.length);
+            let found = self.with_text(|text| text.string_for_range(range));
+            found.map(|(string, _)| attributed(&string))
+        }
+
+        #[unsafe(method(accessibilityFrameForRange:))]
+        fn accessibility_frame_for_range(&self, range: NSRange) -> NSRect {
+            self.range_frame(range)
         }
 
         #[unsafe(method(performKeyEquivalent:))]
@@ -109,6 +288,7 @@ define_class!(
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            self.cancel_marked();
             if let Some(window) = self.window() {
                 let responder: &NSResponder = self;
                 window.makeFirstResponder(Some(responder));
@@ -144,13 +324,19 @@ define_class!(
 
 impl TermView {
     /// Makes a native view for one terminal view, 1 x 1 until placed. Inputs: the main
-    /// thread marker, the terminal view id and the host function its events go to. Output:
-    /// the view.
-    pub fn new(mtm: MainThreadMarker, id: u64, sink: Sink) -> Retained<TermView> {
+    /// thread marker, the terminal view id, the host function its events go to and the one
+    /// VoiceOver's text is read from. Output: the view.
+    pub fn new(mtm: MainThreadMarker, id: u64, sink: Sink, screen: Screen) -> Retained<TermView> {
         assert!(id > 0);
         let this = Self::alloc(mtm).set_ivars(Ivars {
             id: Cell::new(id),
             sink,
+            screen,
+            ime: RefCell::new(Ime::default()),
+            key: RefCell::new(None),
+            cursor: Cell::new(None),
+            geometry: Cell::new(None),
+            access: RefCell::new(Access::default()),
         });
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0));
         let view: Retained<TermView> = unsafe { msg_send![super(this), initWithFrame: frame] };
@@ -163,7 +349,7 @@ impl TermView {
         self.ivars().id.get()
     }
 
-    fn send(&self, event: ViewEvent) {
+    pub(super) fn send(&self, event: ViewEvent) {
         let id = self.ivars().id.get();
         assert!(id > 0);
         (self.ivars().sink)(id, event);
@@ -182,28 +368,21 @@ impl TermView {
         (point.x, point.y)
     }
 
+    /// Routes one key event (ime::route): Command keys go to the key equivalents, Control
+    /// and Option keys straight to the key map, the rest through the input method, whose
+    /// passed-back commands send the key map's bytes. Input: the event.
     fn key(&self, event: &NSEvent) {
         let flags = event.modifierFlags();
-        if flags.contains(NSEventModifierFlags::Command) {
-            return;
-        }
-        let chars = event
-            .characters()
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        let bare = event
-            .charactersIgnoringModifiers()
-            .map(|s| s.to_string())
-            .unwrap_or_default();
-        let press = Press {
-            chars: &chars,
-            bare: &bare,
-            shift: flags.contains(NSEventModifierFlags::Shift),
-            option: flags.contains(NSEventModifierFlags::Option),
+        let mods = Mods {
+            command: flags.contains(NSEventModifierFlags::Command),
             control: flags.contains(NSEventModifierFlags::Control),
+            option: flags.contains(NSEventModifierFlags::Option),
         };
-        if let Some(input) = key_input(&press) {
-            self.send(ViewEvent::Key(input));
+        let composing = self.ivars().ime.borrow().composing();
+        match ime::route(mods, composing) {
+            Route::Ignore => {}
+            Route::Direct => self.key_bytes(&KeyDown::of(event)),
+            Route::Interpret => self.interpret(event, KeyDown::of(event), composing),
         }
     }
 
