@@ -1493,3 +1493,175 @@ fn a_setup_mark_ends_with_its_record_and_a_start_ends_the_rest_naming_the_newest
         None
     );
 }
+
+/// A fresh engine database with the owners started and the revision moved once past the
+/// start, for the plan rows: the folder, the database path, the config, the connection with
+/// its lock, the TUI owner's admission and the current revision.
+struct Moved {
+    root: tempfile::TempDir,
+    path: std::path::PathBuf,
+    cfg: EffectiveConfig,
+    db: Connection,
+    _lock: EngineLock,
+    admission: Admission,
+    now: u64,
+}
+
+impl Moved {
+    /// Opens the database, starts its owners and moves the revision once. Output: the fixture.
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.path().join("db");
+        let cfg =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let (mut db, lock) = open_database(&path, false).unwrap();
+        let admission = owner_start(&mut db).unwrap().owners[0].admission.clone();
+        db.execute("UPDATE state SET revision = revision + 1 WHERE id = 1", [])
+            .unwrap();
+        let now: i64 = db
+            .query_row("SELECT revision FROM state WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        let now = u64::try_from(now).unwrap();
+        assert!(now >= 1);
+        Self {
+            root,
+            path,
+            cfg,
+            db,
+            _lock: lock,
+            admission,
+            now,
+        }
+    }
+
+    /// A change request of the plan rows. Input: the mutation. Output: the request.
+    fn request(mutation: OwnerMutation) -> OwnerRequest {
+        OwnerRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new("plan-1").unwrap(),
+            expected_revision: Cursor::new(0),
+            operation: OwnerOperation::Apply { mutation },
+        }
+    }
+}
+
+/// How a plan ended, as the one code the rows compare. Input: the plan's result. Output:
+/// `planned`, or the refusal or error code.
+fn code<T>(planned: Result<Result<T, String>, EngineError>) -> String {
+    match planned {
+        Ok(Ok(_)) => "planned".into(),
+        Ok(Err(code)) | Err(EngineError(code)) => code,
+    }
+}
+
+/// An AddExistingFolder plan of a folder beside the database. Input: the fixture and the
+/// expected revision. Output: its code.
+fn add_planned(m: &mut Moved, expected: Option<&Cursor>) -> String {
+    let source = m.root.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    code(
+        projects_home::add_plan(
+            &mut m.db,
+            &m.path,
+            &m.admission,
+            expected,
+            &RequestId::new("add-1").unwrap(),
+            source.to_str().unwrap(),
+            crate::projects_home::AddMode::Copy,
+            &[],
+        )
+        .map(Ok),
+    )
+}
+
+/// A MoveProjectHome plan of project `demo`. Input: the fixture and the expected revision.
+/// Output: its code.
+fn project_move_planned(m: &mut Moved, expected: Option<&Cursor>) -> String {
+    code(
+        projects_home::project_move_plan(
+            &mut m.db,
+            &m.path,
+            &m.admission,
+            expected,
+            &ProjectId::new("demo").unwrap(),
+            crate::projects_home::AddMode::Copy,
+            &[],
+            &RequestId::new("move-1").unwrap(),
+            1,
+        )
+        .map(Ok),
+    )
+}
+
+/// A Delete everything plan of project `demo`. Input: the fixture and the expected revision.
+/// Output: its code.
+fn delete_planned(m: &mut Moved, expected: Option<&Cursor>) -> String {
+    let request = Moved::request(OwnerMutation::DeleteProject {
+        project_id: ProjectId::new("demo").unwrap(),
+        name: "Demo".into(),
+    });
+    code(projects_home::delete_plan(
+        &mut m.db,
+        &m.path,
+        &m.admission,
+        &request,
+        expected,
+        1,
+    ))
+}
+
+/// A New Project plan of project `books`. Input: the fixture and the expected revision.
+/// Output: its code.
+fn new_project_planned(m: &mut Moved, expected: Option<&Cursor>) -> String {
+    let request = Moved::request(OwnerMutation::SetupProject {
+        project_id: ProjectId::new("books").unwrap(),
+        spec: ProjectSpec {
+            name: "Books".into(),
+            repositories: vec![],
+        },
+        setup: crate::project_setup::ProjectSetup {
+            about: "Tracks the books I want to read.".into(),
+            tech_stack: vec!["rust".into()],
+            platforms: vec![crate::project_setup::Platform::Website],
+            research: vec![],
+            pool: None,
+            team: None,
+            documents: vec![],
+        },
+    });
+    code(setup_plan(
+        &mut m.db,
+        &m.cfg,
+        &m.path,
+        &m.admission,
+        &request,
+        expected,
+    ))
+}
+
+/// V243-INTAKE-STALE-REVISION-RACE: every plan a job runs skips only the revision compare. At
+/// a revision the engine has moved past, an old revision is refused `stale_revision`, the
+/// current one is not, and a job, which names none, ends exactly as a client at the current
+/// revision does. Each probe gets its own database, so a plan's writes never reach another.
+#[test]
+fn a_job_plan_of_each_kind_skips_only_the_revision_compare() {
+    type Plan = fn(&mut Moved, Option<&Cursor>) -> String;
+    let kinds: [(&str, Plan); 4] = [
+        ("add", add_planned),
+        ("project move", project_move_planned),
+        ("delete", delete_planned),
+        ("new project", new_project_planned),
+    ];
+    for (kind, plan) in kinds {
+        let mut client = Moved::new();
+        let old = Cursor::new(client.now - 1);
+        assert_eq!(plan(&mut client, Some(&old)), "stale_revision", "{kind}");
+        let mut fresh = Moved::new();
+        let now = Cursor::new(fresh.now);
+        let current = plan(&mut fresh, Some(&now));
+        assert_ne!(current, "stale_revision", "{kind}");
+        assert_eq!(plan(&mut Moved::new(), None), current, "{kind}");
+    }
+}
