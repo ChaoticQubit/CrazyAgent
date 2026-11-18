@@ -474,7 +474,8 @@ struct Pasting {
 
 #[cfg(unix)]
 impl Pasting {
-    /// Whether a paste has chunks and waits for its last one. Takes the paste. Returns it.
+    /// Tells whether a paste has chunks and waits for its last one. Takes the paste.
+    /// Returns the answer.
     fn open(&self) -> bool {
         !self.bytes.is_empty()
     }
