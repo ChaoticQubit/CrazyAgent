@@ -164,16 +164,16 @@ jobs:
         run: |
           set -euo pipefail
           cargo clippy -p crazyagent --lib --locked -- -D warnings
-      - name: W1b storage rows on Windows
+      - name: W1b and W1c storage rows on Windows
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         run: |
           set -euo pipefail
-          cargo test -p crazyagent --lib --locked storage::windows_tests -- --test-threads 1
-      - name: Storage migrations rows on Linux
+          cargo test -p crazyagent --lib --locked -- --test-threads 1 storage::windows_tests storage::master_session::windows_tests storage::migrations::windows_tests storage::plugins::windows_tests github::state::windows_tests instruction_files::windows_tests agent_home::
+      - name: Storage rows the port touched on Linux
         if: ${{ !cancelled() && runner.os == 'Linux' }}
         run: |
           set -euo pipefail
-          cargo test -p crazyagent --lib --locked storage::migrations -- --test-threads 1
+          cargo test -p crazyagent --lib --locked -- --test-threads 1 storage::migrations storage::trash storage::accounts storage::plugins storage::master_session storage::settings github::state agent_home:: instruction_files::
 
   rust-linux:
     name: Rust ${{ matrix.os }} ${{ matrix.part }}/${{ matrix.parts }}
