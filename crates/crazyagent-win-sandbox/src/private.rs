@@ -1,7 +1,7 @@
 use crate::dacl::{ADMINISTRATORS, SYSTEM, allowing, label, other_writer, trusted_owner};
 
 #[cfg(windows)]
-pub use crate::win::private::{check, dir, facts, file, free, lock, unlock, user_sid};
+pub use crate::win::private::{check, dir, facts, file, free, lock, same, unlock, user_sid};
 
 const FULL_ACCESS: u32 = 0x001f_01ff;
 const FOLDER_INHERIT: u8 = 0x03;

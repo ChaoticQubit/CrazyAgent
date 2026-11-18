@@ -21,9 +21,10 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, GetFileInformationByHandle, LOCKFILE_EXCLUSIVE_LOCK,
-    LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, OPEN_EXISTING, READ_CONTROL, UnlockFileEx,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo, GetFileInformationByHandle,
+    GetFileInformationByHandleEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
+    OPEN_EXISTING, READ_CONTROL, UnlockFileEx,
 };
 use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
@@ -131,6 +132,32 @@ pub fn free(file: &File) -> io::Result<bool> {
         Err(error) if error.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+/// Says whether two open handles name the same file, by volume serial number and 128-bit
+/// file id, the twin of comparing `dev` and `ino` on Unix. Inputs: both handles. Output:
+/// the answer, or the Windows error.
+pub fn same(one: &File, other: &File) -> io::Result<bool> {
+    Ok(id(one)? == id(other)?)
+}
+
+/// Reads an open object's volume serial number and 128-bit file id. Relies on the handle
+/// staying open for the call and on the buffer being one whole `FILE_ID_INFO`. Input: the
+/// handle. Output: both, or the Windows error.
+fn id(object: &File) -> io::Result<(u64, [u8; 16])> {
+    let mut information = FILE_ID_INFO::default();
+    let read = unsafe {
+        GetFileInformationByHandleEx(
+            object.as_raw_handle(),
+            FileIdInfo,
+            (&raw mut information).cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if read == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((information.VolumeSerialNumber, information.FileId.Identifier))
 }
 
 /// Locks the whole file with `flags`. Relies on the handle staying open for the call and on
