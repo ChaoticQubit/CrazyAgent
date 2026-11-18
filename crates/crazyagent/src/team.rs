@@ -1782,7 +1782,6 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
 /// stopped after a removal leaves no row (HB-S5-I). Apart from [`initialize`] because it
 /// reads `projects`, which only the engine's own schema has. Takes the engine database.
 /// Returns a SQLite failure.
-#[cfg(unix)]
 pub(crate) fn log_status_changes(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(
@@ -4167,7 +4166,6 @@ pub(crate) fn lead_mode(
 /// each task and agent records the lead that started it, NULL for the master's own. A
 /// table the engine has not opened yet gets the column from `initialize`. Takes the
 /// upgrade transaction. Returns any SQLite failure.
-#[cfg(unix)]
 pub(crate) fn add_parent_columns(tx: &Transaction<'_>) -> Result<(), EngineError> {
     for table in ["team_tasks", "team_agents"] {
         let exists: bool = tx

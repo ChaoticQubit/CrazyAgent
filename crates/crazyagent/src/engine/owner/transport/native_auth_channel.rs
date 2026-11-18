@@ -1859,7 +1859,7 @@ impl Drop for Session {
 }
 
 pub(super) async fn serve(
-    mut stream: UnixStream,
+    mut stream: Stream,
     packet: [u8; 37],
     engine: Arc<Engine>,
     authority: Weak<Authority>,
@@ -1921,7 +1921,7 @@ async fn check(engine: &Engine, session: &Session) -> Result<NativeAuthFact, Eng
 }
 
 async fn read_custody_frame(
-    reader: &mut crate::platform::unix_socket::ReadHalf<'_>,
+    reader: &mut crate::ipc::ReadHalf<'_>,
     timeout: Duration,
 ) -> Result<(Vec<u8>, Instant), EngineError> {
     let first = [reader.read_u8().await.map_err(io_error)?];
@@ -2134,7 +2134,7 @@ async fn custody_reply(
     engine: &Engine,
     session: &Session,
     request: &Request,
-    reader: &mut crate::platform::unix_socket::ReadHalf<'_>,
+    reader: &mut crate::ipc::ReadHalf<'_>,
 ) -> Result<Reply, EngineError> {
     session.validate()?;
     let retirement = matches!(
@@ -2241,7 +2241,7 @@ async fn custody_reply(
 }
 
 async fn serve_session(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     engine: &Engine,
     session: &Session,
     timeout: Duration,
@@ -2281,7 +2281,7 @@ async fn serve_session(
 
 #[cfg(unix)]
 pub(crate) struct NativeAuthCustodyChannel {
-    stream: Option<UnixStream>,
+    stream: Option<Stream>,
     binding: NativeBinding,
     root: Root,
     socket: Identity,
@@ -2309,10 +2309,10 @@ impl NativeAuthCustodyChannel {
         let (generation, host, binding) = runner_binding(input)?;
         let root = Root::open(&generation)?;
         let socket = root.socket_identity()?;
-        let mut stream = crate::spawn_gate::connect_unix(root.path.join(SOCKET))
+        let mut stream = crate::ipc::owner_connect(root.path.join(SOCKET))
             .await
             .map_err(io_error)?;
-        verify_peer(&stream)?;
+        verify_server(&stream)?;
         binding.verify()?;
         if root.socket_identity()? != socket {
             return Err(failure("owner_socket_replaced"));

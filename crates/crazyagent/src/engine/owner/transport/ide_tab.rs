@@ -198,10 +198,10 @@ impl OwnerClient {
                 return Err(failure("owner_socket_replaced"));
             }
             let unavailable = |_| failure("ide_tab_owner_unavailable");
-            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
                 .await
                 .map_err(unavailable)?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             let mut packet = [0; 37];
             packet[..4].copy_from_slice(b"CAO1");
             packet[4] = match self.kind {
@@ -231,7 +231,7 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
 }
 
 pub(super) async fn serve(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],

@@ -7,8 +7,11 @@ pub const ALL_APPLICATION_PACKAGES: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 15, 2, 0, 0
 
 const ACL_HEADER_BYTES: usize = 8;
 const ACE_HEADER_BYTES: usize = 8;
+const ACL_REVISION: u8 = 2;
 const ACCESS_ALLOWED: u8 = 0;
 const ACCESS_DENIED: u8 = 1;
+const MANDATORY_LABEL: u8 = 0x11;
+const LABEL_AUTHORITY: [u8; 6] = [0, 0, 0, 0, 0, 16];
 /// The entry types that only take rights away: the plain, object, callback and callback
 /// object deny entries.
 pub const DENY_TYPES: [u8; 4] = [ACCESS_DENIED, 6, 10, 12];
@@ -129,6 +132,101 @@ pub fn without(acl: &[u8], sid: &[u8]) -> Result<Option<Vec<u8>>, &'static str> 
     Ok(Some(list))
 }
 
+/// The rights every app container needs on a fixed drive's root for Node.js to resolve a path
+/// there: read attributes and synchronize, on the root itself (V244-WIN-ADMIN-STEP).
+pub const DRIVE_ROOT_RIGHTS: u32 = 0x0010_0080;
+
+/// Whether the list gives `sid` every right in `mask` on the object itself through one plain
+/// allow entry, explicit or inherited, not inherit-only; callback, object and conditional
+/// allow entries do not count. Inputs: the list, the SID and the rights. Output: true when it
+/// does; false for a malformed list.
+pub fn holds_allow(acl: &[u8], sid: &[u8], mask: u32) -> bool {
+    assert_ne!(mask, 0);
+    entries(acl).is_ok_and(|found| {
+        found.iter().any(|entry| {
+            entry.allows
+                && entry.sid == sid
+                && entry.flags & INHERIT_ONLY == 0
+                && entry.mask & mask == mask
+        })
+    })
+}
+
+/// The size an access list's header gives it. Input: a list whose header [`spans`] checked.
+/// Output: the size in bytes.
+fn list_size(acl: &[u8]) -> usize {
+    let size = usize::from(u16::from_le_bytes([acl[2], acl[3]]));
+    assert!((ACL_HEADER_BYTES..=acl.len()).contains(&size));
+    size
+}
+
+/// The list with one plain allow entry giving `sid` exactly `mask` on this object only (no
+/// flags), placed after the last explicit entry and before the inherited ones; every other
+/// byte, unused room at the end included, is kept. Inputs: the list, the SID and the rights.
+/// Output: the new list, None when [`holds_allow`] already holds, or the reason it is
+/// malformed or would pass an access list's size limit.
+pub fn with_allow(acl: &[u8], sid: &[u8], mask: u32) -> Result<Option<Vec<u8>>, &'static str> {
+    const TOO_BIG: &str = "the access list would grow past its limit";
+    let spans = spans(acl)?;
+    if holds_allow(acl, sid, mask) {
+        return Ok(None);
+    }
+    let size = list_size(acl);
+    let at = spans
+        .iter()
+        .rev()
+        .find(|span| acl[span.range.start + 1] & INHERITED == 0)
+        .map_or(ACL_HEADER_BYTES, |span| span.range.end);
+    let entry = ace_bytes(ACCESS_ALLOWED, 0, mask, sid);
+    let grown = u16::try_from(size + entry.len()).map_err(|_| TOO_BIG)?;
+    let count = u16::try_from(spans.len() + 1).map_err(|_| TOO_BIG)?;
+    let mut list = Vec::with_capacity(usize::from(grown));
+    list.extend_from_slice(&acl[..2]);
+    list.extend(grown.to_le_bytes());
+    list.extend(count.to_le_bytes());
+    list.extend_from_slice(&acl[6..at]);
+    list.extend_from_slice(&entry);
+    list.extend_from_slice(&acl[at..size]);
+    assert_eq!(list.len(), usize::from(grown));
+    assert_eq!(self::spans(&list)?.len(), spans.len() + 1);
+    assert!(holds_allow(&list, sid, mask));
+    Ok(Some(list))
+}
+
+/// The list without each entry byte-equal to the one [`with_allow`] adds for `sid` and
+/// `mask`; every other entry, a wider one for the same SID included, and unused room at the
+/// end are kept. Inputs: the list, the SID and the rights. Output: the new list, None when it
+/// holds no such entry, or the reason it is malformed.
+pub fn without_allow(acl: &[u8], sid: &[u8], mask: u32) -> Result<Option<Vec<u8>>, &'static str> {
+    let spans = spans(acl)?;
+    let entry = ace_bytes(ACCESS_ALLOWED, 0, mask, sid);
+    let ours = |span: &Span<'_>| acl[span.range.clone()] == entry[..];
+    let removed = spans.iter().filter(|span| ours(span)).count();
+    if removed == 0 {
+        return Ok(None);
+    }
+    let size = list_size(acl);
+    let end = spans.last().map_or(ACL_HEADER_BYTES, |span| span.range.end);
+    let shrunk = u16::try_from(size - removed * entry.len()).expect("a list only shrinks");
+    let count = u16::try_from(spans.len() - removed).expect("a list only shrinks");
+    let mut list = Vec::with_capacity(usize::from(shrunk));
+    list.extend_from_slice(&acl[..2]);
+    list.extend(shrunk.to_le_bytes());
+    list.extend(count.to_le_bytes());
+    list.extend_from_slice(&acl[6..ACL_HEADER_BYTES]);
+    for span in spans.iter().filter(|span| !ours(span)) {
+        list.extend_from_slice(&acl[span.range.clone()]);
+    }
+    list.extend_from_slice(&acl[end..size]);
+    assert_eq!(list.len(), usize::from(shrunk));
+    assert!(
+        self::spans(&list)?
+            .iter()
+            .all(|span| list[span.range.clone()] != entry[..])
+    );
+    Ok(Some(list))
+}
+
 fn sid_at(bytes: &[u8]) -> Result<&[u8], &'static str> {
     if bytes.len() < 8 || bytes[0] != 1 {
         return Err("an access entry holds a bad SID");
@@ -153,6 +251,54 @@ pub fn reads(acl: &[u8], sid: &[u8]) -> bool {
         })
     })
 }
+
+/// Whether the list lets `sid` read and run a folder and what lies below it: the folder itself
+/// ([`reads`]), and its files and its subfolders through allow entries that pass read and run
+/// on to every level, inherit-only or generic ones included, as `C:\Program Files` splits them
+/// (rv-code4 #541 F1). Inputs: the access list bytes and the SID bytes. Output: true when it
+/// does; false for a malformed list.
+pub fn reads_tree(acl: &[u8], sid: &[u8]) -> bool {
+    let passes = |inherit: u8| {
+        entries(acl).is_ok_and(|found| {
+            found.iter().any(|entry| {
+                entry.allows
+                    && entry.sid == sid
+                    && entry.flags & inherit == inherit
+                    && entry.flags & NO_PROPAGATE == 0
+                    && specific(entry.mask) & READ_EXECUTE == READ_EXECUTE
+            })
+        })
+    };
+    reads(acl, sid) && passes(OBJECT_INHERIT) && passes(CONTAINER_INHERIT)
+}
+
+/// Whether the list lets `sid` read a read root: a folder with what lies below it
+/// ([`reads_tree`]), a file itself ([`reads`]) (V244-WIN-ROLE-READS-TREE). Inputs: the access
+/// list bytes, the SID bytes and whether the root is a folder. Output: true when it does;
+/// false for a malformed list.
+pub fn reads_root(acl: &[u8], sid: &[u8], folder: bool) -> bool {
+    if folder {
+        reads_tree(acl, sid)
+    } else {
+        reads(acl, sid)
+    }
+}
+
+/// Whether the boundary refuses a read root before its helper runs: neither ALL APPLICATION
+/// PACKAGES nor the container reads the root ([`reads_root`]), so the helper would write the
+/// container's entry, and this user cannot change the list, so that write fails. `changeable`
+/// is asked only for such a root. Inputs: the list, the container SID, whether the root is a
+/// folder and the change probe. Output: true to refuse.
+pub fn read_root_refused(
+    acl: &[u8],
+    container: &[u8],
+    folder: bool,
+    changeable: impl FnOnce() -> bool,
+) -> bool {
+    !reads_root(acl, &ALL_APPLICATION_PACKAGES, folder)
+        && !reads_root(acl, container, folder)
+        && !changeable()
+}
 /// The SID `S-1-5-18` (SYSTEM) as bytes.
 pub const SYSTEM: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 5, 18, 0, 0, 0];
 /// The SID `S-1-5-32-544` (the Administrators group) as bytes.
@@ -165,6 +311,9 @@ pub const TRUSTED_INSTALLER: [u8; 32] = [
 ];
 /// The SID `S-1-3-4` (OWNER RIGHTS) as bytes, which stands for whoever owns the object.
 pub const OWNER_RIGHTS: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
+/// The SID `S-1-3-0` (CREATOR OWNER) as bytes, which an inherited entry turns into whoever
+/// creates the child.
+pub const CREATOR_OWNER: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0];
 
 const WRITE_DATA: u32 = 0x0000_0002;
 const APPEND_DATA: u32 = 0x0000_0004;
@@ -248,6 +397,42 @@ pub fn other_writer<'a>(
             Some(_) => {}
             None if DENY_TYPES.contains(&kind) => {}
             None => return Err("the access list holds an allow entry this check cannot read"),
+        }
+    }
+    Ok(None)
+}
+
+/// The first SID other than SYSTEM, the administrators, TrustedInstaller, CREATOR OWNER,
+/// OWNER RIGHTS and the user that a folder's allow entry hands any right on what is made in
+/// it (object or container inherit, inherit-only or not); an inheritable allow entry this
+/// reader cannot parse is an error. Inputs: the list bytes and the user's SID bytes. Output:
+/// that SID, none, or the reason the list is malformed or unreadable.
+pub fn inherited_grantee<'a>(acl: &'a [u8], user: &[u8]) -> Result<Option<&'a [u8]>, &'static str> {
+    assert!(user.len() >= ACE_HEADER_BYTES);
+    let allowed = [
+        &SYSTEM[..],
+        &ADMINISTRATORS[..],
+        &TRUSTED_INSTALLER[..],
+        &CREATOR_OWNER[..],
+        &OWNER_RIGHTS[..],
+        user,
+    ];
+    for span in spans(acl)? {
+        let kind = acl[span.range.start];
+        if acl[span.range.start + 1] & (OBJECT_INHERIT | CONTAINER_INHERIT) == 0 {
+            continue;
+        }
+        match span.entry {
+            Some(entry) if entry.allows && entry.mask != 0 && !allowed.contains(&entry.sid) => {
+                return Ok(Some(entry.sid));
+            }
+            Some(_) => {}
+            None if DENY_TYPES.contains(&kind) => {}
+            None => {
+                return Err(
+                    "the access list holds an inheritable allow entry this check cannot read",
+                );
+            }
         }
     }
     Ok(None)
@@ -549,6 +734,80 @@ pub fn explicit(acl: &[u8]) -> Result<Vec<u8>, &'static str> {
     Ok(list)
 }
 
+/// An access list of allow entries giving `mask` to each SID in order, all with `flags`, in
+/// the layout Windows reads. Inputs: the SIDs, the entry flags and the rights. Output: the
+/// list bytes.
+pub fn allowing(sids: &[&[u8]], flags: u8, mask: u32) -> Vec<u8> {
+    assert!(!sids.is_empty() && sids.len() <= 16);
+    let aces: Vec<Vec<u8>> = sids
+        .iter()
+        .map(|sid| ace_bytes(ACCESS_ALLOWED, flags, mask, sid))
+        .collect();
+    let list = list_from(&[ACL_REVISION, 0, 0, 0, 0, 0, 0, 0], &aces).expect("a few SIDs fit");
+    assert_eq!(entries(&list).map(|found| found.len()), Ok(sids.len()));
+    list
+}
+
+/// A system access list holding one mandatory label entry with `flags`: integrity `level`,
+/// the label SID's last part, and the `policy` bits, in the layout Windows reads. Inputs:
+/// the level, the policy and the entry flags. Output: the list bytes.
+pub fn labelled(level: u32, policy: u32, flags: u8) -> Vec<u8> {
+    let mut sid = vec![1, 1];
+    sid.extend(LABEL_AUTHORITY);
+    sid.extend(level.to_le_bytes());
+    let ace = ace_bytes(MANDATORY_LABEL, flags, policy, &sid);
+    let list = list_from(&[ACL_REVISION, 0, 0, 0, 0, 0, 0, 0], &[ace]).expect("one label fits");
+    let applies = flags & INHERIT_ONLY == 0;
+    assert_eq!(label(&list), Ok(applies.then_some((level, policy))));
+    list
+}
+
+/// The mandatory label a system access list holds for the object itself: the integrity
+/// level, the label SID's last part, and the policy bits. Inherit-only labels are skipped.
+/// Input: the list bytes Windows copied out with the label asked for. Output: the level and
+/// policy, None when no label applies, or the reason the list or a label is malformed.
+pub fn label(sacl: &[u8]) -> Result<Option<(u32, u32)>, &'static str> {
+    only_label(sacl, |flags| flags & INHERIT_ONLY == 0)
+}
+
+/// The mandatory label a folder's system access list hands what is made in it, an entry with
+/// object or container inherit, inherit-only or not, read as [`label`] reads its own.
+/// Input: the list bytes. Output: the level and policy, None when no label is handed down,
+/// or the reason the list or a label is malformed.
+pub fn inherited_label(sacl: &[u8]) -> Result<Option<(u32, u32)>, &'static str> {
+    only_label(sacl, |flags| {
+        flags & (OBJECT_INHERIT | CONTAINER_INHERIT) != 0
+    })
+}
+
+/// The one mandatory label entry whose flags `wanted` accepts, as its level and policy. A
+/// second such entry is refused, not skipped, since the reader cannot tell which of the two
+/// Windows enforces (#568 rv-code F1). Inputs: the system list bytes and the flag test.
+/// Output: the level and policy, None when no such label exists, or the reason the list or a
+/// label is malformed or a second one is there.
+fn only_label(sacl: &[u8], wanted: fn(u8) -> bool) -> Result<Option<(u32, u32)>, &'static str> {
+    let mut found = None;
+    for span in spans(sacl)? {
+        let at = span.range.start;
+        if sacl[at] != MANDATORY_LABEL || !wanted(sacl[at + 1]) {
+            continue;
+        }
+        if found.is_some() {
+            return Err("a system list holds a second mandatory label for the same objects");
+        }
+        let policy = u32::from_le_bytes([sacl[at + 4], sacl[at + 5], sacl[at + 6], sacl[at + 7]]);
+        let sid = sid_at(&sacl[at + ACE_HEADER_BYTES..span.range.end])?;
+        if sid.len() != 12 || sid[2..8] != LABEL_AUTHORITY {
+            return Err("a mandatory label holds a SID that is not an integrity level");
+        }
+        found = Some((
+            u32::from_le_bytes([sid[8], sid[9], sid[10], sid[11]]),
+            policy,
+        ));
+    }
+    Ok(found)
+}
+
 /// Whether only the trusted accounts may change an object: one of them owns it
 /// ([`trusted_owner`]) and its access list gives no other SID any of `rights`
 /// ([`other_writer`]). Inputs: the owner, the list (None when it has none), the user's SID
@@ -752,6 +1011,219 @@ mod tests {
         assert_eq!(without(&only, &CONTAINER).unwrap(), Some(acl(&[])));
     }
 
+    const EVERYONE: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0];
+
+    fn drive_entry() -> Vec<u8> {
+        ace(
+            ACCESS_ALLOWED,
+            0,
+            DRIVE_ROOT_RIGHTS,
+            &ALL_APPLICATION_PACKAGES,
+        )
+    }
+
+    fn with_slack(list: &[u8], slack: usize) -> Vec<u8> {
+        let mut bytes = list.to_vec();
+        bytes.extend(std::iter::repeat_n(0, slack));
+        let size = u16::try_from(bytes.len()).unwrap();
+        bytes[2..4].copy_from_slice(&size.to_le_bytes());
+        bytes
+    }
+
+    fn drive_root() -> [Vec<u8>; 4] {
+        [
+            ace(ACCESS_DENIED, 0, WRITE_DAC, &EVERYONE),
+            ace(ACCESS_ALLOWED, 0x03, 0x001f_01ff, &ADMINISTRATORS),
+            ace(ACCESS_ALLOWED, 0x03, 0x001f_01ff, &SYSTEM),
+            ace(ACCESS_ALLOWED, 0x03, READ_EXECUTE, &USERS),
+        ]
+    }
+
+    #[test]
+    fn with_allow_adds_one_24_byte_entry_after_the_explicit_entries_and_keeps_every_other_byte() {
+        let entry = drive_entry();
+        assert_eq!(entry.len(), 24);
+        assert_eq!(entry[..4], [0, 0, 24, 0]);
+        let root = drive_root();
+        let added = with_allow(&acl(&root), &ALL_APPLICATION_PACKAGES, DRIVE_ROOT_RIGHTS)
+            .unwrap()
+            .unwrap();
+        let mut expected = root.to_vec();
+        expected.push(entry.clone());
+        assert_eq!(added, acl(&expected));
+        let inherited = ace(ACCESS_ALLOWED, 0x13, READ_EXECUTE, &USERS);
+        let mut mixed = root.to_vec();
+        mixed.push(inherited.clone());
+        let added = with_allow(&acl(&mixed), &ALL_APPLICATION_PACKAGES, DRIVE_ROOT_RIGHTS)
+            .unwrap()
+            .unwrap();
+        let mut expected = root.to_vec();
+        expected.extend([entry.clone(), inherited]);
+        assert_eq!(
+            added,
+            acl(&expected),
+            "it goes before the inherited entries"
+        );
+        let added = with_allow(&acl(&[]), &ALL_APPLICATION_PACKAGES, DRIVE_ROOT_RIGHTS)
+            .unwrap()
+            .unwrap();
+        assert_eq!(added, acl(std::slice::from_ref(&entry)));
+        let roomy = with_slack(&acl(&root), 12);
+        let added = with_allow(&roomy, &ALL_APPLICATION_PACKAGES, DRIVE_ROOT_RIGHTS)
+            .unwrap()
+            .unwrap();
+        let mut expected = root.to_vec();
+        expected.push(entry);
+        assert_eq!(
+            added,
+            with_slack(&acl(&expected), 12),
+            "unused room at the end is kept"
+        );
+        let mut revision = acl(&root);
+        revision[0] = 4;
+        let added = with_allow(&revision, &ALL_APPLICATION_PACKAGES, DRIVE_ROOT_RIGHTS)
+            .unwrap()
+            .unwrap();
+        assert_eq!(added[0], 4, "the list's own revision is kept");
+    }
+
+    #[test]
+    fn holds_allow_counts_a_plain_allow_on_the_object_itself_that_covers_the_rights() {
+        let root = drive_root();
+        let holding = |extra: Vec<u8>| {
+            let mut list = root.to_vec();
+            list.push(extra);
+            acl(&list)
+        };
+        let package = &ALL_APPLICATION_PACKAGES;
+        for (extra, holds, why) in [
+            (drive_entry(), true, "the exact entry"),
+            (
+                ace(ACCESS_ALLOWED, 0x03, READ_EXECUTE, package),
+                true,
+                "a wider inheritable one",
+            ),
+            (
+                ace(ACCESS_ALLOWED, 0x10, DRIVE_ROOT_RIGHTS, package),
+                true,
+                "an inherited one on the object itself",
+            ),
+            (
+                ace(ACCESS_ALLOWED, 0x0b, READ_EXECUTE, package),
+                false,
+                "an inherit-only one",
+            ),
+            (
+                ace(9, 0, DRIVE_ROOT_RIGHTS, package),
+                false,
+                "a callback allow",
+            ),
+            (
+                ace(ACCESS_DENIED, 0, DRIVE_ROOT_RIGHTS, package),
+                false,
+                "a deny",
+            ),
+            (
+                ace(ACCESS_ALLOWED, 0, 0x0000_0080, package),
+                false,
+                "read attributes without synchronize",
+            ),
+            (
+                ace(ACCESS_ALLOWED, 0, DRIVE_ROOT_RIGHTS, &CONTAINER),
+                false,
+                "another SID",
+            ),
+        ] {
+            let list = holding(extra);
+            assert_eq!(
+                holds_allow(&list, package, DRIVE_ROOT_RIGHTS),
+                holds,
+                "{why}"
+            );
+            assert_eq!(
+                with_allow(&list, package, DRIVE_ROOT_RIGHTS)
+                    .unwrap()
+                    .is_none(),
+                holds,
+                "{why}"
+            );
+        }
+        assert!(!holds_allow(&acl(&root)[..7], package, DRIVE_ROOT_RIGHTS));
+        assert!(with_allow(&acl(&root)[..7], package, DRIVE_ROOT_RIGHTS).is_err());
+    }
+
+    #[test]
+    fn without_allow_takes_out_only_the_entries_byte_equal_to_the_added_one() {
+        let package = &ALL_APPLICATION_PACKAGES;
+        let kept = [
+            ace(ACCESS_ALLOWED, 0x03, READ_EXECUTE, package),
+            ace(ACCESS_ALLOWED, 0x08, DRIVE_ROOT_RIGHTS, package),
+            ace(ACCESS_ALLOWED, 0, DRIVE_ROOT_RIGHTS, &CONTAINER),
+            ace(ACCESS_ALLOWED, 0x10, DRIVE_ROOT_RIGHTS, package),
+        ];
+        let mut list = drive_root().to_vec();
+        list.insert(1, drive_entry());
+        list.extend(kept.iter().cloned());
+        list.push(drive_entry());
+        let mut expected = drive_root().to_vec();
+        expected.extend(kept.iter().cloned());
+        assert_eq!(
+            without_allow(&acl(&list), package, DRIVE_ROOT_RIGHTS).unwrap(),
+            Some(acl(&expected))
+        );
+        assert_eq!(
+            without_allow(&acl(&expected), package, DRIVE_ROOT_RIGHTS).unwrap(),
+            None
+        );
+        assert_eq!(
+            without_allow(&with_slack(&acl(&list), 8), package, DRIVE_ROOT_RIGHTS).unwrap(),
+            Some(with_slack(&acl(&expected), 8)),
+            "unused room at the end is kept"
+        );
+        assert!(without_allow(&acl(&list)[..7], package, DRIVE_ROOT_RIGHTS).is_err());
+    }
+
+    #[test]
+    fn with_allow_then_without_allow_gives_back_the_original_bytes() {
+        let package = &ALL_APPLICATION_PACKAGES;
+        let mut inherited = drive_root().to_vec();
+        inherited.push(ace(ACCESS_ALLOWED, 0x13, READ_EXECUTE, &USERS));
+        for original in [
+            acl(&drive_root()),
+            acl(&inherited),
+            acl(&[]),
+            with_slack(&acl(&drive_root()), 20),
+        ] {
+            let added = with_allow(&original, package, DRIVE_ROOT_RIGHTS)
+                .unwrap()
+                .unwrap();
+            assert_eq!(added.len(), original.len() + 24);
+            assert_eq!(
+                without_allow(&added, package, DRIVE_ROOT_RIGHTS).unwrap(),
+                Some(original)
+            );
+        }
+    }
+
+    #[test]
+    fn with_allow_refuses_a_list_that_would_pass_the_size_limit() {
+        let mut long_sid = vec![1, 15, 0, 0, 0, 0, 0, 5];
+        long_sid.extend([7; 60]);
+        assert_eq!(long_sid.len(), SID_BYTES_MAX);
+        let big: Vec<Vec<u8>> = (0..862)
+            .map(|_| ace(ACCESS_ALLOWED, 0, 1, &long_sid))
+            .collect();
+        let list = acl(&big);
+        assert_eq!(list.len(), 65_520);
+        assert!(with_allow(&list, &ALL_APPLICATION_PACKAGES, DRIVE_ROOT_RIGHTS).is_err());
+        let fits = acl(&big[..861]);
+        assert!(
+            with_allow(&fits, &ALL_APPLICATION_PACKAGES, DRIVE_ROOT_RIGHTS)
+                .unwrap()
+                .is_some()
+        );
+    }
+
     #[test]
     fn reads_accepts_inherited_read_grants_for_all_application_packages() {
         let program_files = acl(&[
@@ -780,6 +1252,121 @@ mod tests {
             &ALL_APPLICATION_PACKAGES,
         )]);
         assert!(!reads(&denied, &ALL_APPLICATION_PACKAGES));
+    }
+
+    /// rv-code4 #541 F1: a folder is read with what lies below it only when entries for the
+    /// SID also pass read and run on to files and subfolders at every level, split or whole.
+    #[test]
+    fn reads_tree_needs_read_and_run_passed_on_to_files_and_subfolders() {
+        const AAP: [u8; 16] = ALL_APPLICATION_PACKAGES;
+        let program_files = acl(&[
+            ace(ACCESS_ALLOWED, 0x0b, 0xa000_0000, &AAP),
+            ace(ACCESS_ALLOWED, 0x10, READ_EXECUTE, &AAP),
+        ]);
+        assert!(reads_tree(&program_files, &AAP));
+        let inherited = acl(&[ace(ACCESS_ALLOWED, 0x13, READ_EXECUTE, &CONTAINER)]);
+        assert!(reads_tree(&inherited, &CONTAINER));
+        let halves = acl(&[
+            ace(ACCESS_ALLOWED, 0x00, READ_EXECUTE, &AAP),
+            ace(ACCESS_ALLOWED, 0x09, READ_EXECUTE, &AAP),
+            ace(ACCESS_ALLOWED, 0x0a, 0x1000_0000, &AAP),
+        ]);
+        assert!(reads_tree(&halves, &AAP));
+        let folder_only = acl(&[ace(ACCESS_ALLOWED, 0x00, READ_EXECUTE, &AAP)]);
+        assert!(reads(&folder_only, &AAP) && !reads_tree(&folder_only, &AAP));
+        for flags in [0x01, 0x02, 0x07] {
+            let short = acl(&[ace(ACCESS_ALLOWED, flags, READ_EXECUTE, &AAP)]);
+            assert!(!reads_tree(&short, &AAP), "{flags:#04x}");
+        }
+        let other = acl(&[
+            ace(ACCESS_ALLOWED, 0x00, READ_EXECUTE, &AAP),
+            ace(ACCESS_ALLOWED, 0x0b, READ_EXECUTE, &CONTAINER),
+        ]);
+        assert!(!reads_tree(&other, &AAP));
+        let write_only = acl(&[
+            ace(ACCESS_ALLOWED, 0x00, READ_EXECUTE, &AAP),
+            ace(ACCESS_ALLOWED, 0x0b, 0x4000_0000, &AAP),
+        ]);
+        assert!(!reads_tree(&write_only, &AAP));
+        assert!(!reads_tree(&program_files[..7], &AAP));
+    }
+
+    /// A read root is refused before the helper runs only when no app container may read it
+    /// and this user cannot change its list, and the change probe runs only for such a root.
+    #[test]
+    fn a_read_root_is_refused_only_when_no_package_reads_it_and_this_user_cannot_change_it() {
+        let packages = acl(&[ace(
+            ACCESS_ALLOWED,
+            0x10,
+            READ_EXECUTE,
+            &ALL_APPLICATION_PACKAGES,
+        )]);
+        let unprobed = || -> bool { panic!("a root every package reads was probed") };
+        assert!(!read_root_refused(&packages, &CONTAINER, false, unprobed));
+        let admins_only = acl(&[
+            ace(ACCESS_ALLOWED, 0x03, 0x001f_01ff, &ADMINISTRATORS),
+            ace(ACCESS_ALLOWED, 0x03, 0x001f_01ff, &SYSTEM),
+        ]);
+        let inherit_only = acl(&[ace(
+            ACCESS_ALLOWED,
+            0x0b,
+            READ_EXECUTE,
+            &ALL_APPLICATION_PACKAGES,
+        )]);
+        let mut malformed = packages.clone();
+        malformed[16] = 2;
+        for list in [&admins_only, &inherit_only, &malformed] {
+            for folder in [false, true] {
+                assert!(read_root_refused(list, &CONTAINER, folder, || false));
+                assert!(!read_root_refused(list, &CONTAINER, folder, || true));
+            }
+        }
+    }
+
+    /// V244-WIN-NPM r2 F1: a read root the container's own entry already reads is left to the
+    /// helper, which names the root if it still has to write there, so the pre-check neither
+    /// probes nor refuses it; another container's entry does not count.
+    #[test]
+    fn a_read_root_the_container_already_reads_is_left_to_the_helper() {
+        let own = acl(&[
+            ace(ACCESS_ALLOWED, 0x03, 0x001f_01ff, &ADMINISTRATORS),
+            ace(ACCESS_ALLOWED, 0x00, READ_EXECUTE, &CONTAINER),
+        ]);
+        let unprobed = || -> bool { panic!("a root the container reads was probed") };
+        assert!(!read_root_refused(&own, &CONTAINER, false, unprobed));
+        assert!(read_root_refused(&own, &TEAMMATE, false, || false));
+    }
+
+    /// V244-WIN-ROLE-READS-TREE: a read root folder counts as read only through entries that
+    /// pass read and run on to its files and subfolders, so one every package or the container
+    /// reads for that folder only is refused when this user cannot change it, while the same
+    /// list on a file, the `C:\Program Files` split and a whole inheritable grant are not.
+    #[test]
+    fn a_read_root_folder_read_only_for_itself_is_refused_when_this_user_cannot_change_it() {
+        const AAP: [u8; 16] = ALL_APPLICATION_PACKAGES;
+        let unprobed = || -> bool { panic!("a root that is read was probed") };
+        for sid in [&AAP[..], &CONTAINER[..]] {
+            let folder_only = acl(&[ace(ACCESS_ALLOWED, 0x00, READ_EXECUTE, sid)]);
+            assert!(reads_root(&folder_only, sid, false));
+            assert!(!reads_root(&folder_only, sid, true));
+            assert!(!read_root_refused(
+                &folder_only,
+                &CONTAINER,
+                false,
+                unprobed
+            ));
+            assert!(read_root_refused(&folder_only, &CONTAINER, true, || false));
+            assert!(!read_root_refused(&folder_only, &CONTAINER, true, || true));
+        }
+        let program_files = acl(&[
+            ace(ACCESS_ALLOWED, 0x0b, 0xa000_0000, &AAP),
+            ace(ACCESS_ALLOWED, 0x10, READ_EXECUTE, &AAP),
+        ]);
+        let granted = acl(&[ace(ACCESS_ALLOWED, 0x03, READ_EXECUTE, &CONTAINER)]);
+        for list in [&program_files, &granted] {
+            assert!(!read_root_refused(list, &CONTAINER, true, unprobed));
+        }
+        assert!(read_root_refused(&granted, &TEAMMATE, true, || false));
     }
 
     const TEAMMATE: [u8; 20] = [1, 3, 0, 0, 0, 0, 0, 15, 2, 0, 0, 0, 8, 0, 0, 0, 4, 0, 0, 0];

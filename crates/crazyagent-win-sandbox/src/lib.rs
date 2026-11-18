@@ -3,7 +3,9 @@
 
 pub mod dacl;
 pub mod grants;
+pub mod pipe;
 pub mod plan;
+pub mod private;
 pub mod profile;
 pub mod quote;
 pub mod request;
@@ -14,5 +16,5 @@ mod win;
 #[cfg(windows)]
 pub use win::{
     BoundaryError, ProcessTree, changeable_part, file_id, final_name, listener_beside, owner_only,
-    release, run, system_folder,
+    release, run, system_folder, unreadable_drive_root, unreadable_read_root, unreadable_root,
 };

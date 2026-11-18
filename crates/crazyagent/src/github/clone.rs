@@ -10,9 +10,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 #[cfg(not(windows))]
-const NULL_DEVICE: &str = "/dev/null";
+pub(crate) const NULL_DEVICE: &str = "/dev/null";
 #[cfg(windows)]
-const NULL_DEVICE: &str = "NUL";
+pub(crate) const NULL_DEVICE: &str = "NUL";
 const SESSION_BUS_NAMES: [&str; 2] = ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"];
 const CLONE_TIME: Duration = Duration::from_secs(1800);
 pub(super) const GIT_USER: &str = "x-access-token";
@@ -47,7 +47,7 @@ pub(super) fn full_name(value: &str) -> Result<(&str, &str), EngineError> {
 /// Finds the git the engine runs: first in the engine's own PATH, never an agent's, then
 /// in the platform's fixed folder. Input: the engine's PATH value. Output: the executable
 /// with links resolved, or none when neither holds one.
-pub(super) fn git_program(path: Option<&OsStr>) -> Option<PathBuf> {
+pub(crate) fn git_program(path: Option<&OsStr>) -> Option<PathBuf> {
     crate::paths::find_in_path("git", path).or_else(|| {
         let folder = fixed_git_folder()?;
         crate::paths::find_in_path("git", Some(folder.as_os_str()))

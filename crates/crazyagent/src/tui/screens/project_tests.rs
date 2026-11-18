@@ -5637,3 +5637,17 @@ fn a_draft_that_does_not_fit_after_the_owners_text_leaves_the_input_as_typed() {
         screen.problem
     );
 }
+
+#[test]
+fn the_windows_access_and_loopback_refusals_read_as_the_engine_words_them() {
+    for code in [
+        crate::sandbox::policy::SANDBOX_FULL_UNAVAILABLE_WINDOWS,
+        crate::sandbox::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS,
+    ] {
+        assert_eq!(
+            plain_problem(code),
+            crate::config::plain_problem(code).expect("the code has a plain sentence"),
+            "{code}"
+        );
+    }
+}

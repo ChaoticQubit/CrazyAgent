@@ -1193,7 +1193,6 @@ fn verify(admission: &Admission) -> Result<Admission, EngineError> {
     Ok(current)
 }
 
-#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(
@@ -1557,7 +1556,6 @@ const VERIFY_RETRY_WAIT: Duration = Duration::from_millis(50);
 const GIT_DEADLINE: &str = "git_deadline";
 /// The code of a lease check refused for a git older than the 2.39 floor. It says the
 /// computer's Git needs updating, not that the lease broke a rule (V243-WORKTREE-GIT-FLOOR).
-#[cfg(unix)]
 const GIT_OLD: &str = "worktree_git_old";
 /// The codes of a Git command that failed at once, which is no rule of the engine's about
 /// the repository. `git_deadline` is not among them: a Git command that ran out of time
@@ -2694,7 +2692,6 @@ fn verify_record(record: &LeaseRecord) -> Result<(), EngineError> {
 /// lock, its index exists, and no tracked file differs from that index; staged changes are
 /// its agent's or a turn end's. Read only: `status` honours `--no-optional-locks`, unlike
 /// `diff`, which refreshes the index. Input: the record. Output: success, or the refusal.
-#[cfg(unix)]
 fn worktree_matches_index(record: &LeaseRecord) -> Result<(), EngineError> {
     let metadata = worktree_metadata(record)?;
     match std::fs::symlink_metadata(metadata.join("index.lock")) {
@@ -2744,7 +2741,6 @@ fn worktree_matches_index(record: &LeaseRecord) -> Result<(), EngineError> {
 /// also [`worktree_matches_index`], so a checkout that failed after its folder was pinned
 /// is never requalified on its pins alone. Input: the stored record. Output: success, or
 /// the refusal code.
-#[cfg(unix)]
 fn verify_at_start(record: &LeaseRecord) -> Result<(), EngineError> {
     verify_record(record)?;
     if record.lease.state == LeaseState::Uncertain {
@@ -2756,7 +2752,6 @@ fn verify_at_start(record: &LeaseRecord) -> Result<(), EngineError> {
 /// Settles every stored lease when the engine starts, checking each through
 /// [`verify_at_start`]. Input: the connection, outside any transaction. Output: success,
 /// or `lease_capacity` or the storage failure.
-#[cfg(unix)]
 pub(crate) fn reconcile(connection: &Connection) -> Result<(), EngineError> {
     reconcile_with(connection, verify_at_start)
 }
@@ -2767,7 +2762,6 @@ pub(crate) fn reconcile(connection: &Connection) -> Result<(), EngineError> {
 /// before any use; any other lease is Uncertain. Each failed check is logged. Inputs: the
 /// connection, outside any transaction, and the lease check. Output: success,
 /// `lease_capacity` or the storage error.
-#[cfg(unix)]
 fn reconcile_with(
     connection: &Connection,
     mut verify: impl FnMut(&LeaseRecord) -> Result<(), EngineError>,

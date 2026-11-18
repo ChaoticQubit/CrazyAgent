@@ -3412,6 +3412,13 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
                 str::to_owned,
             );
         }
+        code @ (crate::sandbox::policy::SANDBOX_FULL_UNAVAILABLE_WINDOWS
+        | crate::sandbox::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS) => {
+            return crate::config::plain_problem(code).map_or_else(
+                || coded("That didn't work. Try again.", code),
+                str::to_owned,
+            );
+        }
         _ => return coded("That didn't work. Try again.", code),
     }
     .into()

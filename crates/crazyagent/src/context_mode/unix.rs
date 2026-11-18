@@ -37,6 +37,13 @@ pub(super) fn npm_ready(bin: &Path) -> bool {
     runnable(&bin.join("npm"))
 }
 
+/// The first drive root among `paths` that keeps every app container out: none, as only
+/// Windows boxes read drive roots through access lists. Input: the paths, unread. Output:
+/// none.
+pub(super) fn unreadable_drive_root(_paths: &[&Path]) -> Option<std::path::PathBuf> {
+    None
+}
+
 /// The network the install's npm may reach: HTTPS on any host, nothing else.
 pub(super) fn npm_network() -> SandboxNetwork {
     SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)])
