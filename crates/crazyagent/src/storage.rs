@@ -730,7 +730,7 @@ impl Storage {
                     let root = path
                         .parent()
                         .ok_or_else(|| error("database parent missing"))?;
-                    narrowing::Intents::open(root).map(|intents| Some(Arc::new(intents)))
+                    narrowing::Intents::open(root).map(|intents| intents.map(Arc::new))
                 });
                 let intents = match opened {
                     Ok(intents) => intents,

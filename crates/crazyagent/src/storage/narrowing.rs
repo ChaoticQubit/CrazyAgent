@@ -141,9 +141,9 @@ pub(crate) struct Intents {
 #[cfg(unix)]
 impl Intents {
     /// Opens the intent store of the engine root that holds `engine.db`, without making its
-    /// folder. Input: that root. Output: the store, or `narrowing_intents_unsafe` when the
-    /// root is not a private folder of this user or is a link.
-    pub(crate) fn open(root: &Path) -> Result<Self, EngineError> {
+    /// folder. Input: that root. Output: the store, always some here, or
+    /// `narrowing_intents_unsafe` when the root is not a private folder of this user or a link.
+    pub(crate) fn open(root: &Path) -> Result<Option<Self>, EngineError> {
         use rustix::fs::{CWD, Mode, openat};
         let root = std::fs::File::from(
             openat(CWD, root, FOLDERS, Mode::empty())
@@ -152,7 +152,7 @@ impl Intents {
         if !private_folder(&root, 0o077, 0)? {
             return Err(super::error("narrowing_intents_unsafe"));
         }
-        Ok(Self { root })
+        Ok(Some(Self { root }))
     }
 
     /// Opens the intent folder and judges it: this user's, mode 0700, no link. With `make`, a
@@ -353,33 +353,37 @@ fn private_file(file: &std::fs::File) -> Result<Option<u64>, EngineError> {
         .then_some(metadata.len()))
 }
 
-/// The intent store where storage has no owner-only folder check: it never opens, so no
-/// narrowing change is ever kept where it could not be judged.
+/// The intent store where this platform has no private folder judge yet: it has no value,
+/// so no store exists and no narrowing change is kept where it could not be judged. Storage
+/// opens as a read-only engine does, and a narrowing change is answered as before the store.
 #[cfg(not(unix))]
 #[derive(Debug)]
-pub(crate) struct Intents;
+pub(crate) enum Intents {}
 
 #[cfg(not(unix))]
 impl Intents {
-    /// Refuses the intent store until this platform has its private folder judge.
-    /// Input: the engine root, unused. Output: `narrowing_intents_unavailable`.
-    pub(crate) fn open(_root: &Path) -> Result<Self, EngineError> {
-        Err(super::error("narrowing_intents_unavailable"))
+    /// Opens no store, so storage still opens on this platform.
+    /// Input: the engine root, unused. Output: none, never an error.
+    pub(crate) fn open(_root: &Path) -> Result<Option<Self>, EngineError> {
+        Ok(None)
     }
 
-    /// Never reached: no store opens here. Input: the intent, unused. Output: the refusal.
+    /// Unreachable: no store has a value here. Input: the intent, unused.
+    /// Output: none.
     pub(crate) fn write(&self, _intent: &Intent) -> Result<IntentId, EngineError> {
-        Err(super::error("narrowing_intents_unavailable"))
+        match *self {}
     }
 
-    /// Never reached: no store opens here. Input: the name, unused. Output: the refusal.
+    /// Unreachable: no store has a value here. Input: the name, unused.
+    /// Output: none.
     pub(crate) fn remove(&self, _id: &IntentId) -> Result<(), EngineError> {
-        Err(super::error("narrowing_intents_unavailable"))
+        match *self {}
     }
 
-    /// Never reached: no store opens here. Output: the refusal.
+    /// Unreachable: no store has a value here.
+    /// Output: none.
     pub(crate) fn list(&self) -> Result<Listing, EngineError> {
-        Err(super::error("narrowing_intents_unavailable"))
+        match *self {}
     }
 }
 
