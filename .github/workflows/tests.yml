@@ -21,9 +21,10 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
   TMUX_VERSION: "3.8"
   BASE_SHA: a40e9fc4c35e6b6e22f4a736a1136d543e2fdb8f
-  TIP_SHA: 0f4b1ed77c22970b34330cf74ef77de176fd8dbb
+  TIP_SHA: 0a3eb6695b793ee6bf06160973c7a497dcbe11f6
   ROW: the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui
   RUNS: "5"
+  TIP_ROWS: the_owner_adds_a_folder_sets_it_up_opens_its_team_and_removes_it_in_the_tui the_tui_walks_from_home_into_the_project_team_tree after_every_agent_stops_its_tasks_keep_its_name_and_f_lists_it_in_the_tui
 
 defaults:
   run:
@@ -31,7 +32,7 @@ defaults:
 
 jobs:
   macos:
-    name: macOS remove dialog row, base then tip, five runs each
+    name: macOS e2e_tui wait rows, the remove row at base, then three rows at tip, five runs each
     runs-on: macos-15
     timeout-minutes: 120
     steps:
@@ -84,26 +85,28 @@ jobs:
           add-rust-environment-hash-key: false
           cache-bin: false
           save-if: false
-      - name: Row at base, then at tip, five runs each
+      - name: The remove row at base, then three rows at tip, five runs each
         run: |
           set -uo pipefail
           set +e
           verdict=pass
           for side in base tip; do
-            if [ "$side" = base ]; then sha="$BASE_SHA"; else sha="$TIP_SHA"; fi
+            if [ "$side" = base ]; then sha="$BASE_SHA"; rows="$ROW"; else sha="$TIP_SHA"; rows="$TIP_ROWS"; fi
             out="$RUNNER_TEMP/remove-macos-$side.txt"
             git checkout -q --detach "$sha" || { echo "::error::checkout $sha failed"; exit 1; }
             git log --oneline -1 | tee "$out"
             cargo test -p crazyagent --locked --no-run --test e2e_tui 2>&1 | tee -a "$out"
-            for run in $(seq 1 "$RUNS"); do
-              echo "run $run" | tee -a "$out"
-              cargo test -p crazyagent --locked --test e2e_tui -- --exact "$ROW" --test-threads 1 2>&1 | tee -a "$out"
+            for row in $rows; do
+              for run in $(seq 1 "$RUNS"); do
+                echo "run $run $row" | tee -a "$out"
+                cargo test -p crazyagent --locked --test e2e_tui -- --exact "$row" --test-threads 1 2>&1 | tee -a "$out"
+              done
+              ok=$(grep -cE "^test $row \\.\\.\\. ok$" "$out")
+              failed=$(grep -cE "^test $row \\.\\.\\. FAILED$" "$out")
+              if [ "$side" = tip ] && [ "$ok" != "$RUNS" ]; then verdict=fail; fi
+              echo "VERDICT $side $row ok=$ok failed=$failed of $RUNS verdict_so_far=$verdict"
+              echo "| $side | $row | $ok ok | $failed failed | of $RUNS |" >> "$GITHUB_STEP_SUMMARY"
             done
-            ok=$(grep -cE "^test $ROW \.\.\. ok$" "$out")
-            failed=$(grep -cE "^test $ROW \.\.\. FAILED$" "$out")
-            if [ "$side" = tip ] && [ "$ok" != "$RUNS" ]; then verdict=fail; fi
-            echo "VERDICT $side ok=$ok failed=$failed of $RUNS verdict_so_far=$verdict"
-            echo "| $side | $ok ok | $failed failed | of $RUNS |" >> "$GITHUB_STEP_SUMMARY"
           done
           echo "VERDICT final=$verdict"
           [ "$verdict" = pass ]
