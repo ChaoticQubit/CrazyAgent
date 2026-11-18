@@ -2420,11 +2420,16 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     };
     let mut wrong = Vec::new();
 
-    std::fs::write(&brief, "# Panes\n\nPlan the page.\n").unwrap();
+    const NOTE_BYTES_MAX: usize = 128;
+    let normal = "# Panes\n\nPlan the page.\n";
+    std::fs::write(&brief, normal).unwrap();
     let framed = frame();
+    let around_bytes = framed
+        .as_deref()
+        .map_or(0, |text| text.len().saturating_sub(normal.len()));
     if !framed
         .as_deref()
-        .is_some_and(|text| text.contains("Project brief:\n# Panes\n\nPlan the page.\n"))
+        .is_some_and(|text| text.contains(&format!("Project brief:\n{normal}")))
     {
         wrong.push(("normal", framed));
     }
@@ -2467,7 +2472,7 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     if !framed.as_deref().is_some_and(|text| {
         text.contains("Project brief:\n# Panes\n\naaaa")
             && text.contains(&format!("The brief is {huge} bytes"))
-            && text.len() < BRIEF_BYTES_MAX + 2048
+            && text.len() <= around_bytes + BRIEF_BYTES_MAX + NOTE_BYTES_MAX
     }) {
         wrong.push(("oversized", framed.map(|text| bound_text(&text, 200))));
     }
