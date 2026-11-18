@@ -3153,8 +3153,8 @@ pub(crate) struct AgentGit {
 
 /// Runs one git command in a folder an agent owns with that agent's own rights (DEC-104
 /// K5b): under its installed profile, as the worktree setup steps run, with the
-/// [`GIT_SAFE`] settings and the caller's extra variables, within the setup time limit.
-/// Its output is read while it runs, so a long listing never stalls it. Takes the
+/// [`GIT_SAFE`] settings, the editor `:` git never starts (no path lookup) and the caller's
+/// extra variables, within the setup time limit. Output is read while it runs. Takes the
 /// agent's sandbox, its installed profile, the folder, the arguments, the variables and
 /// the most output bytes kept. Returns how it ended, or the spawn failure.
 #[cfg(unix)]
@@ -3168,7 +3168,7 @@ pub(crate) fn agent_git(
 ) -> Result<AgentGit, RunError> {
     let mut command = worktree_git(sandbox, profile);
     command
-        .env("GIT_EDITOR", "true")
+        .env("GIT_EDITOR", ":")
         .envs(variables.iter().copied())
         .arg("-C")
         .arg(folder)
