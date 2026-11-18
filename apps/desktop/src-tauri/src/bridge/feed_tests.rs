@@ -52,14 +52,14 @@ fn opened(
     let place = terminals.room("main", &key).unwrap();
     let (requests, queue) = mpsc::channel(size);
     terminals
-        .install_viewer("main", &key, place.serial, requests)
+        .install_viewer("main", &key, place.serial(), requests)
         .unwrap();
     feed.slots.lock().unwrap().insert(
         7,
         Slot::Open {
             window: "main".to_owned(),
             key,
-            serial: place.serial,
+            serial: place.serial(),
         },
     );
     queue

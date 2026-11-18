@@ -560,6 +560,12 @@ impl Reservation {
         (&self.window, &self.key)
     }
 
+    /// The serial this place's view lands under, which its detach and its queued requests
+    /// name. Takes the place. Returns the serial.
+    pub fn serial(&self) -> u64 {
+        self.serial
+    }
+
     /// Streams one opened terminal session to its view in order: the attach frame with the
     /// size first, then the screen and live output. A page view's channel takes the attach
     /// frame here; a native view's inbox gets it first from the reader, and its request queue
