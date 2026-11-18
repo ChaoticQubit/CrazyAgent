@@ -1,6 +1,6 @@
 use crate::dacl::{
-    ADMINISTRATORS, SYSTEM, allowing, inherited_grantee, inherited_label, label, other_writer,
-    trusted_owner,
+    ADMINISTRATORS, SYSTEM, allowing, inherited_grantee, inherited_label, label, labelled,
+    other_writer, trusted_owner,
 };
 
 #[cfg(windows)]
@@ -14,6 +14,7 @@ const FOLDER_INHERIT: u8 = 0x03;
 const ANY_RIGHT: u32 = u32::MAX;
 const MEDIUM_LEVEL: u32 = 0x2000;
 const NO_WRITE_UP: u32 = 0x1;
+const NO_READ_UP: u32 = 0x2;
 
 /// What W1's check reads from one opened private folder or file (DESIGN-0140 D1): its owner
 /// SID, its access list (None when it has none), its system list holding the mandatory label
@@ -99,4 +100,13 @@ pub fn list(user: &[u8], folder: bool) -> Vec<u8> {
     );
     assert!(planned.len() > 8);
     planned
+}
+
+/// The system list a new private folder or file is created with (#512 r2, rv-sec2 N1): a
+/// medium label with no-write-up and no-read-up, so a lower integrity process of the user can
+/// neither change nor read it, handed on by a folder to everything made in it, SQLite's side
+/// files included. Input: whether the object is a folder. Output: the list bytes.
+pub fn label_list(folder: bool) -> Vec<u8> {
+    let flags = if folder { FOLDER_INHERIT } else { 0 };
+    labelled(MEDIUM_LEVEL, NO_WRITE_UP | NO_READ_UP, flags)
 }

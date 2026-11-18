@@ -1,7 +1,7 @@
 use crazyagent_win_sandbox::dacl::{
     self, ADMINISTRATORS, ALL_APPLICATION_PACKAGES, OWNER_RIGHTS, SYSTEM, TRUSTED_INSTALLER,
 };
-use crazyagent_win_sandbox::private::{Facts, judge, judge_folder, list};
+use crazyagent_win_sandbox::private::{Facts, judge, judge_folder, label_list, list};
 
 const USER: [u8; 28] = [
     1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 233, 3, 0, 0,
@@ -27,6 +27,7 @@ const DENY: u8 = 1;
 const OBJECT_ALLOW: u8 = 5;
 const LABEL: u8 = 0x11;
 const NO_WRITE_UP: u32 = 0x1;
+const NO_READ_UP: u32 = 0x2;
 const OBJECT_INHERIT: u8 = 0x01;
 const CONTAINER_INHERIT: u8 = 0x02;
 const INHERITABLE: u8 = 0x03;
@@ -276,4 +277,28 @@ fn the_planned_list_is_private_and_names_only_the_trusted_accounts() {
         }
         assert_eq!(judge(&facts(Some(planned)), &USER), Ok(()));
     }
+}
+
+/// #512 r2 (rv-sec2 N1, leader 05:03): a private folder or file is made with a medium label
+/// that keeps a lower integrity process of the user from writing or reading it, handed on by
+/// a folder to what is made in it, and both judges accept it.
+#[test]
+fn the_label_private_objects_are_made_with_keeps_lower_integrity_out() {
+    let both = Ok(Some((0x2000, NO_WRITE_UP | NO_READ_UP)));
+    let mut folder = facts(Some(list(&USER, true)));
+    folder.label = Some(label_list(true));
+    assert_eq!(dacl::label(folder.label.as_deref().unwrap()), both);
+    assert_eq!(
+        dacl::inherited_label(folder.label.as_deref().unwrap()),
+        both
+    );
+    assert_eq!(judge_folder(&folder, &USER), Ok(()));
+    let mut file = facts(Some(list(&USER, false)));
+    file.label = Some(label_list(false));
+    assert_eq!(dacl::label(file.label.as_deref().unwrap()), both);
+    assert_eq!(
+        dacl::inherited_label(file.label.as_deref().unwrap()),
+        Ok(None)
+    );
+    assert_eq!(judge(&file, &USER), Ok(()));
 }

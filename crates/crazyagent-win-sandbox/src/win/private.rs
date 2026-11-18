@@ -2,7 +2,7 @@ use super::acl::{ACL_BYTES_MAX, Local};
 use super::owner::{sid_bytes, user_sid as token_user};
 use super::{Words, final_name, last_error};
 use crate::dacl::trusted_owner;
-use crate::private::{Facts, judge, judge_folder, list};
+use crate::private::{Facts, judge, judge_folder, label_list, list};
 use std::fs::File;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -18,8 +18,9 @@ use windows_sys::Win32::Security::Authorization::{
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, InitializeSecurityDescriptor, LABEL_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-    SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
-    SetSecurityDescriptorDacl, SetSecurityDescriptorOwner,
+    SE_DACL_PROTECTED, SE_SACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR,
+    SetSecurityDescriptorControl, SetSecurityDescriptorDacl, SetSecurityDescriptorOwner,
+    SetSecurityDescriptorSacl,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
@@ -472,12 +473,14 @@ fn open(
     Ok(unsafe { File::from_raw_handle(handle) })
 }
 
-/// The security descriptor a private folder or file is created with: the user as owner and
-/// the protected list of [`list`]. The owner and list live in their own buffers, which do
-/// not move when this value does, so the descriptor's pointers stay valid.
+/// The security descriptor a private folder or file is created with: the user as owner, the
+/// protected list of [`list`] and the protected label of [`label_list`]. The owner, list and
+/// label live in their own buffers, which do not move when this value does, so the
+/// descriptor's pointers stay valid.
 struct Planned {
     owner: Words,
     list: Words,
+    label: Words,
     descriptor: SECURITY_DESCRIPTOR,
 }
 
@@ -488,17 +491,20 @@ impl Planned {
         let mut planned = Self {
             owner: Words::from_bytes(user),
             list: Words::from_bytes(&list(user, folder)),
+            label: Words::from_bytes(&label_list(folder)),
             descriptor: SECURITY_DESCRIPTOR::default(),
         };
         let descriptor: PSECURITY_DESCRIPTOR = (&raw mut planned.descriptor).cast();
         let owner: PSID = planned.owner.words.as_mut_ptr().cast();
         let dacl: *const ACL = planned.list.words.as_ptr().cast();
+        let sacl: *const ACL = planned.label.words.as_ptr().cast();
+        let protected = SE_DACL_PROTECTED | SE_SACL_PROTECTED;
         let built = unsafe {
             InitializeSecurityDescriptor(descriptor, SECURITY_DESCRIPTOR_REVISION) != 0
                 && SetSecurityDescriptorOwner(descriptor, owner, 0) != 0
                 && SetSecurityDescriptorDacl(descriptor, 1, dacl, 0) != 0
-                && SetSecurityDescriptorControl(descriptor, SE_DACL_PROTECTED, SE_DACL_PROTECTED)
-                    != 0
+                && SetSecurityDescriptorSacl(descriptor, 1, sacl, 0) != 0
+                && SetSecurityDescriptorControl(descriptor, protected, protected) != 0
         };
         if !built {
             return Err(io::Error::last_os_error());
