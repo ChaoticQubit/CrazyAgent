@@ -935,7 +935,7 @@ impl Storage {
                                 )
                             };
                             if let Some(request_id) = &logout
-                                && final_answer(&result)
+                                && final_answer(&result, &ask)
                             {
                                 end_logout_intent(intents.as_deref(), request_id);
                             }
@@ -3523,15 +3523,20 @@ fn end_superseded_sign_outs(
     }
 }
 
-/// Whether storage gave a native-auth job a final answer: it ran, or storage refused it by a
-/// name every client shows, a busy profile included, which the owner reads as recovery
-/// required. Any other error is a storage fault, read as outcome unknown, so a kept
-/// sign-out stays for the next open. Input: the answer. Output: the verdict.
-fn final_answer<T>(result: &Result<T, EngineError>) -> bool {
-    result.as_ref().map_or_else(
-        |refused| refused.0 == "native_auth_host_busy" || owner_auth::public_error(&refused.0),
-        |_| true,
-    )
+/// Whether a sign-out's answer is final for its intent: storage ran it, or refused it by a
+/// name the owner hears, an owner ask answered by its due time (a busy profile reads as
+/// recovery required). A drained, engine or late refusal, told pending or never told, and
+/// any storage fault keep it for the next open. Inputs: the answer and who asked.
+/// Output: the verdict.
+fn final_answer<T>(result: &Result<T, EngineError>, ask: &NativeAuthAsk) -> bool {
+    let Err(refused) = result else {
+        return true;
+    };
+    let heard = match ask {
+        NativeAuthAsk::Owner { answer_by } => tokio::time::Instant::now() <= *answer_by,
+        NativeAuthAsk::Drained(_) | NativeAuthAsk::Engine => false,
+    };
+    heard && (refused.0 == "native_auth_host_busy" || owner_auth::public_error(&refused.0))
 }
 
 /// Ends the kept sign-out with this operation id once storage gave it a final answer, so the
