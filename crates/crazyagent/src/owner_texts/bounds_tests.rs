@@ -4,7 +4,7 @@ use super::TEXT_BYTES_MAX;
 /// writer, as traced at chore/v250 e4fd9fb49 (v2.5 L2b, DEC 250-OWNER-TEXT). Each table's
 /// text goes to `owner_texts::keep` once its aggregate is on the log, so each bound must fit
 /// the store's cap.
-const OUTPUT_BOUNDS: [(&str, usize); 7] = [
+const OUTPUT_BOUNDS: [(&str, usize); 10] = [
     (
         "agent_texts: storage/agent_text.rs save",
         crate::agent_home::TEXT_BYTES_MAX,
@@ -32,6 +32,18 @@ const OUTPUT_BOUNDS: [(&str, usize); 7] = [
     (
         "agent_runs.last_text: agents.rs text",
         crate::agents::LAST_TEXT_BYTES_MAX,
+    ),
+    (
+        "team_tasks.result: team/runtime.rs own_turn_ended and finish_task",
+        crate::team::RESULT_BYTES_MAX,
+    ),
+    (
+        "team_tasks.prompt: team.rs admit",
+        crate::team::TASK_PROMPT_BYTES_MAX,
+    ),
+    (
+        "coord_messages.body: coord/messages.rs send and reply",
+        crate::coord::BODY_BYTES_MAX,
     ),
 ];
 
