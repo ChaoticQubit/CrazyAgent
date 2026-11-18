@@ -3822,16 +3822,25 @@ fn a_supervised_agent_ends_with_its_harness_code_and_stops_with_its_group() {
 const STORM: &str = "import os, signal
 signal.signal(signal.SIGALRM, lambda number, frame: None)
 signal.setitimer(signal.ITIMER_REAL, 0.001, 0.001)
+def made(name):
+    for _ in range(10000):
+        try:
+            return os.mkdir(name)
+        except InterruptedError:
+            pass
+    raise SystemExit('mkdir interrupted 10000 times: ' + name)
 for number in range(300):
     os.close(os.open('storm-%d' % number, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
-    os.mkdir('storm-folder-%d' % number)
+    made('storm-folder-%d' % number)
 signal.setitimer(signal.ITIMER_REAL, 0)
 print('made=' + str(len([name for name in os.listdir('.') if name.startswith('storm-')])))
 ";
 
 /// A signal that lands while the supervisor makes an entry must not run the call twice:
-/// the second run would find the entry the first one made. The trapped call waits for its
-/// answer through every signal but a fatal one.
+/// the second run would find the entry the first one made. One that lands before the
+/// supervisor reads the call withdraws it unrun (EINTR, which Python retries for `open` but
+/// not `mkdir`, so the stand-in retries it); once read, the call waits for its answer through
+/// every signal but a fatal one, so a retry that meets the entry fails the row.
 #[test]
 fn a_signal_storm_runs_no_supervised_call_twice() {
     let case = case();
