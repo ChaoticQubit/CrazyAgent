@@ -252,10 +252,7 @@ async fn revoke_settled(owner: &Usage, name: &str) -> OwnerControlReply {
     match runtime.control(control.clone()).await {
         Ok(reply) => reply,
         Err(error) => {
-            assert_eq!(
-                error,
-                failure("owner_outcome_unknown_reconcile_same_identity")
-            );
+            assert_eq!(error, failure("access_change_pending"));
             storage_settled(owner).await;
             runtime.reconcile_control(control).await.unwrap().unwrap()
         }
@@ -633,8 +630,8 @@ async fn a_revocation_that_outlasts_the_owner_wait_refuses_the_client_at_once() 
         .await;
     assert_eq!(
         lapsed.map(|reply| reply.active),
-        Err(failure("owner_outcome_unknown_reconcile_same_identity")),
-        "the revocation outlasts the owner wait"
+        Err(failure("access_change_pending")),
+        "the revocation outlasts the owner wait and stays queued, never withdrawn"
     );
     assert!(
         !admitted(runtime, &owner.client),
@@ -659,7 +656,7 @@ async fn a_revocation_that_outlasts_the_owner_wait_refuses_the_client_at_once() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_reactivation_that_outlasts_the_owner_wait_admits_the_client_once_storage_settles() {
+async fn a_lapsed_reactivation_is_withdrawn_and_admits_no_one() {
     let _disk = super::usage_tests::busy_storage().await;
     let owner = Usage::start_waiting(LAPSE_WAIT_MS).await;
     let runtime = owner.runtime();
@@ -672,10 +669,9 @@ async fn a_reactivation_that_outlasts_the_owner_wait_admits_the_client_once_stor
         .await;
     assert_eq!(
         lapsed.map(|reply| reply.active),
-        Err(failure("owner_outcome_unknown_reconcile_same_identity")),
-        "the reactivation outlasts the owner wait"
+        Err(failure("storage_busy_not_submitted")),
+        "the reactivation outlasts the owner wait and is withdrawn unrun"
     );
-
     tokio::time::timeout(SWEEP_TIME_MAX, sweep)
         .await
         .unwrap()
@@ -683,14 +679,15 @@ async fn a_reactivation_that_outlasts_the_owner_wait_admits_the_client_once_stor
         .unwrap();
     assert!(!swept.exists());
     storage_settled(&owner).await;
-    assert!(
-        published(runtime, revoked.owner_epoch + 1).await,
-        "memory follows the reactivation storage committed"
+    assert_eq!(
+        runtime.epoch(OwnerClientKind::Tui).unwrap(),
+        revoked.owner_epoch,
+        "the withdrawn reactivation never reached storage"
     );
-    assert!(tui_registration(runtime).active);
+    assert!(!tui_registration(runtime).active);
     assert!(
-        admitted(runtime, &fresh_client(&owner)),
-        "the reactivated client is admitted once storage settles"
+        !admitted(runtime, &fresh_client(&owner)),
+        "a withdrawn reactivation admits no one"
     );
     owner.stop().await;
 }
