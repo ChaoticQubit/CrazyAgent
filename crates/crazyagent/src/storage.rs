@@ -50,6 +50,55 @@ pub(crate) use native_auth::doubt_sign_in;
 pub(crate) use native_auth::sign_in_rechecking;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
 #[cfg(all(test, unix))]
+static HELD_STARTS: (
+    std::sync::Mutex<Vec<std::path::PathBuf>>,
+    std::sync::Condvar,
+) = (std::sync::Mutex::new(Vec::new()), std::sync::Condvar::new());
+
+/// Holds the storage worker of the database at `path` before its receive loop, as a slow
+/// start does, until the returned guard drops. Input: the path given to `Storage::open`.
+/// Output: the guard.
+#[cfg(all(test, unix))]
+pub(crate) fn hold_start(path: &Path) -> StartHold {
+    let mut held = HELD_STARTS.0.lock().unwrap();
+    assert!(!held.iter().any(|other| other == path));
+    held.push(path.to_path_buf());
+    StartHold(path.to_path_buf())
+}
+
+/// A start hold from [`hold_start`]; dropping it lets that worker reach its receive loop.
+#[cfg(all(test, unix))]
+pub(crate) struct StartHold(std::path::PathBuf);
+
+#[cfg(all(test, unix))]
+impl Drop for StartHold {
+    fn drop(&mut self) {
+        let mut held = HELD_STARTS
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.retain(|other| *other != self.0);
+        HELD_STARTS.1.notify_all();
+    }
+}
+
+/// Waits while a row holds the start of the worker for `path`. Input: the database path.
+/// Output: none.
+#[cfg(all(test, unix))]
+fn wait_while_start_held(path: &Path) {
+    let mut held = HELD_STARTS
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while held.iter().any(|other| other == path) {
+        held = HELD_STARTS
+            .1
+            .wait(held)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+}
+
+#[cfg(all(test, unix))]
 mod model_access_page_tests;
 #[cfg(all(test, unix))]
 mod native_auth_host_tests;
@@ -439,6 +488,8 @@ impl Storage {
                     }
                     home_watch.restart(&connection);
                 }
+                #[cfg(all(test, unix))]
+                wait_while_start_held(&path);
                 while let Some(job) = receiver.blocking_recv() {
                     match job {
                         Job::Accounts(admission, command, reply) => {

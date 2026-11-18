@@ -823,6 +823,57 @@ impl Engine {
 mod tests {
     use super::*;
 
+    /// One project create as a desktop client sends it. Input: the request and project id.
+    /// Output: the request.
+    fn create_request(id: &str) -> WireRequest {
+        WireRequest {
+            protocol_version: crate::protocol::PROTOCOL_VERSION,
+            client_id: ClientId::new("desktop").unwrap(),
+            request_id: crate::protocol::RequestId::new(id).unwrap(),
+            expected_revision: crate::protocol::Cursor::new(0),
+            command: crate::protocol::Command::CreateProject {
+                project_id: crate::protocol::ProjectId::new(id).unwrap(),
+                spec: crate::protocol::ProjectSpec {
+                    name: "Inventory".into(),
+                    repositories: vec!["/tmp/inventory".into()],
+                },
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn an_apply_before_the_storage_worker_receives_is_refused_unsent() {
+        let root = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("g");
+        std::fs::write(&global, "queue_capacity = 1").unwrap();
+        let cfg = crate::config::resolve_config(&global, &root.path().join("p")).unwrap();
+        let path = root.path().join("db");
+        let hold = crate::storage::hold_start(&path);
+        let engine = Engine::open(&path, cfg).await.unwrap();
+        let started = std::time::Instant::now();
+        let first = engine.apply(create_request("first")).await;
+        let waited = started.elapsed();
+        drop(hold);
+        let after = engine.apply(create_request("after")).await;
+        assert_eq!(
+            first.map(|reply| reply.revision).map_err(|error| error.0),
+            Err("storage_starting_not_submitted".to_owned()),
+            "an apply the worker cannot yet receive is refused, nothing queued, after {waited:?}"
+        );
+        assert!(
+            waited >= engine.timeout,
+            "it waited its own bound: {waited:?}"
+        );
+        assert_eq!(
+            after.map(|reply| reply.revision).map_err(|error| error.0),
+            Ok(crate::protocol::Cursor::new(1)),
+            "the refused create never committed, so the next apply is the first revision"
+        );
+        engine.close().await.unwrap();
+    }
+
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn peer_without_kernel_credentials_is_rejected() {
