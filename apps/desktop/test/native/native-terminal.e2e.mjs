@@ -110,6 +110,25 @@ function turns(seen) {
   return seen.rows.filter((row) => /stand-in turn/.test(row)).length;
 }
 
+/** Lists the displays with their place in top-left screen points and backing scale, read
+ * from AppKit, the first being the main one. Output: { x, y, width, height, scale } each. */
+function screens() {
+  const script = "ObjC.import('AppKit'); JSON.stringify(ObjC.unwrap($.NSScreen.screens).map((s) => ({ x: s.frame.origin.x,"
+    + " y: s.frame.origin.y, width: s.frame.size.width, height: s.frame.size.height, scale: s.backingScaleFactor })))";
+  const result = spawnSync("/usr/bin/osascript", ["-l", "JavaScript", "-e", script], { encoding: "utf8" });
+  assert.equal(result.status, 0, `the display list: ${result.stderr}`);
+  const listed = JSON.parse(result.stdout);
+  assert.ok(listed.length > 0 && listed[0].x === 0 && listed[0].y === 0, "the main display is listed first");
+  return listed.map((each) => ({ ...each, y: listed[0].height - each.y - each.height }));
+}
+
+/** Reads the width of the master's pane on the test engine's server. Output: the columns. */
+function paneWidth() {
+  const width = Number(tmux("list-panes", "-t", `${SESSION}:=${master}`, "-F", "#{pane_width}"));
+  assert.ok(Number.isInteger(width) && width > 0, `the pane width: ${width}`);
+  return width;
+}
+
 /** Closes a view the spec opened. Input: the view. Output: none. */
 async function close(view) {
   opened.delete(view);
@@ -119,6 +138,7 @@ async function close(view) {
 describe("Native terminal views in the real window", () => {
   before(async () => {
     await prepareWindow();
+    assert.notEqual(await browser.execute(() => document.title), "test", "the app embeds the real page, not a placeholder");
     await newProject("native-terminal-shop");
     master = await liveMaster();
   });
@@ -138,6 +158,8 @@ describe("Native terminal views in the real window", () => {
     const shown = await open(true);
     await ready(shown);
     const before = await probe(shown.view, READ);
+    assert.equal(before.focused, false, "a fresh view does not hold the keyboard before focus");
+    console.log(`N2 before ${JSON.stringify({ active: before.active, key: before.key })}`);
     await invoke("desktop_native_terminal_focus", { view: shown.view });
     const after = await seenWhen(shown.view, (seen) => seen.focused, UI_MS, "the view never took the keyboard");
     assert.equal(after.active, before.active, "focus never brings the app forward");
@@ -148,6 +170,7 @@ describe("Native terminal views in the real window", () => {
   it("an input method commit and Return with keys off never reach the terminal (#517)", async () => {
     const shown = await open(false);
     const base = turns(await ready(shown));
+    await invoke("desktop_native_terminal_focus", { view: shown.view });
     await probe(shown.view, { kind: "compose", text: "lo" });
     await probe(shown.view, { kind: "commit", text: "long" });
     await probe(shown.view, RETURN);
@@ -159,6 +182,13 @@ describe("Native terminal views in the real window", () => {
     await probe(shown.view, RETURN);
     await seenWhen(shown.view, (seen) => turns(seen) === base + 2, SHORT_TURN_MS,
       "the first turn was not the short one: text typed with keys off reached the terminal");
+    await probe(shown.view, { kind: "compose", text: "lo" });
+    await probe(shown.view, { kind: "commit", text: "long" });
+    await probe(shown.view, RETURN);
+    await seenWhen(shown.view, (seen) => turns(seen) === base + 3, UI_MS, "the commit and Return with keys on never started a turn");
+    await probe(shown.view, RETURN);
+    await pause(SHORT_TURN_MS);
+    assert.equal(turns(await probe(shown.view, READ)), base + 3, "with keys on the commit reached the terminal: its long turn holds the next Return");
     await close(shown.view);
   });
 
@@ -175,6 +205,28 @@ describe("Native terminal views in the real window", () => {
     } finally {
       tmux("kill-pane", "-t", extra);
     }
+  });
+
+  it("a move to a display of another backing scale refits the grid and the pane follows", async function () {
+    const shown = await open(true);
+    const start = await ready(shown);
+    const target = screens().find((each) => each.scale !== start.scale && each.width > 760 && each.height > 600);
+    if (!target) {
+      await close(shown.view);
+      this.skip();
+    }
+    const width = paneWidth();
+    const place = await browser.getWindowRect();
+    try {
+      await browser.setWindowRect(target.x + 40, target.y + 40, Math.min(1000, target.width - 80), Math.min(700, target.height - 80));
+      await seenWhen(shown.view, (seen) => seen.scale === target.scale, UI_MS, `the window never reached a ${target.scale}x display`);
+      await until(async () => paneWidth() !== width, UI_MS, `the pane stayed ${width} columns after the scale changed`);
+    } finally {
+      await browser.setWindowRect(place.x, place.y, place.width, place.height);
+    }
+    await seenWhen(shown.view, (seen) => seen.scale === start.scale, UI_MS, "the window never came back");
+    await until(async () => paneWidth() === width, UI_MS, `the pane never refit to ${width} columns on the way back`);
+    await close(shown.view);
   });
 
   it("an ended terminal closes the direct view", async () => {

@@ -23,7 +23,8 @@ pub enum Step {
 
 /// What a trial reads after its step: the visible rows, whether the direct path draws the
 /// view, whether the view is its window's first responder, whether the app is active and its
-/// window key, the marked text and the private pasteboard's text.
+/// window key, the window's backing scale (0 with no window), the marked text and the
+/// private pasteboard's text.
 #[derive(serde::Serialize, Debug, PartialEq)]
 pub struct Seen {
     pub rows: Vec<String>,
@@ -31,6 +32,7 @@ pub struct Seen {
     pub focused: bool,
     pub active: bool,
     pub key: bool,
+    pub scale: f64,
     pub marked: Option<String>,
     pub pasteboard: Option<String>,
 }
@@ -129,9 +131,11 @@ fn seen(mtm: MainThreadMarker, look: Look) -> Seen {
         focused,
         active: NSApplication::sharedApplication(mtm).isActive(),
         key: window.as_ref().is_some_and(|window| window.isKeyWindow()),
+        scale: window.as_ref().map_or(0.0, |window| window.backingScaleFactor()),
         marked: look.view.marked_text(),
         pasteboard: look.pasteboard,
     };
     assert!(!seen.focused || window.is_some());
+    assert!(seen.scale >= 0.0 && seen.scale.is_finite());
     seen
 }
