@@ -1445,3 +1445,69 @@ async fn a_pin_that_is_no_pane_id_trips_every_pinned_path() {
         "a pinned liveness check of no pane id panics"
     );
 }
+
+/// V243-NATIVE-INPUT-PIN r2 (#632 F1): the message box's prompt through a pinned input-only
+/// view lands in that pane as one submission, its paste then Enter, never by name, and is
+/// recorded as heard for the master's next turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prompt_through_a_pinned_view_lands_in_its_pane_and_is_heard() {
+    let agent = AgentId::team(1).unwrap();
+    let at = PaneAt {
+        pane: "%3".into(),
+        serial: 7,
+    };
+    let text = "ship it";
+    let recording = Recording::new(vec![agent.clone()]);
+    recording.own_is(Ok(at.clone()));
+    let (queue, mut asked) = tokio::sync::mpsc::channel(8);
+    let running = {
+        let host: Arc<dyn Host> = recording.clone();
+        let (agent, pinned) = (agent.clone(), Some(at.clone()));
+        tokio::spawn(async move {
+            let (mut ours, _theirs) = tokio::io::duplex(1 << 16);
+            let view = View {
+                agent,
+                cols: 80,
+                rows: 24,
+                viewer: None,
+                pinned,
+            };
+            let viewing = Open::default();
+            let reason = pump(&mut ours, view, &mut asked, host, &viewing).await;
+            (reason, viewing.heard.into_inner().unwrap())
+        })
+    };
+    queue
+        .send(TerminalRequest::Prompt { text: text.into() })
+        .await
+        .unwrap();
+    let landed = tokio::time::timeout(WAIT, async {
+        while recording.at_pane.lock().unwrap().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(landed.is_ok(), "the prompt reached the pinned pane");
+    drop(queue);
+    let (reason, heard) = tokio::time::timeout(WAIT, running).await.unwrap().unwrap();
+    assert_eq!(reason, "terminal_detached");
+    let keys = crate::terminal::prompt_keys(text, true).unwrap();
+    assert_eq!(
+        *recording.at_pane.lock().unwrap(),
+        vec![keys, b"\r".to_vec()],
+        "one paste of the prompt, then one Enter, into the pinned pane"
+    );
+    assert!(
+        recording.typed.lock().unwrap().is_empty(),
+        "nothing typed by name"
+    );
+    assert!(
+        recording.pasted.lock().unwrap().is_empty(),
+        "nothing pasted by name"
+    );
+    assert_eq!(
+        heard,
+        vec![text.to_owned()],
+        "the master is told the prompt was heard"
+    );
+}
