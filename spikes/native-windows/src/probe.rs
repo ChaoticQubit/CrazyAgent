@@ -55,6 +55,10 @@ const CLASS: &str = "CrazyNativeSpike";
 /// How long one step waits for the window's thread before the row is logged as timed out.
 const STEP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long the frame-time row waits for its frames: the software adapter on a hosted
+/// runner took over 10 s for them (farm run 44245995942).
+const FRAMES_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// How long the whole run may take before the watchdog ends it, so a stuck runner still
 /// prints its log.
 const WATCHDOG: Duration = Duration::from_secs(240);
@@ -157,13 +161,23 @@ fn class_of(hwnd: HWND) -> String {
 /// Runs a closure on the window's thread and waits for its result up to `STEP_TIMEOUT`.
 /// Input: the closure. Output: its result, or None when the app is gone or it timed out.
 fn on_main<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    on_main_within(STEP_TIMEOUT, work)
+}
+
+/// Runs a closure on the window's thread and waits for its result up to `wait`.
+/// Inputs: the wait and the closure. Output: its result, or None when the app is gone or
+/// it timed out.
+fn on_main_within<T: Send + 'static>(
+    wait: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<T> {
     let (send, receive) = mpsc::sync_channel(1);
     let app = APP.get()?;
     app.run_on_main_thread(move || {
         let _ = send.send(work());
     })
     .ok()?;
-    receive.recv_timeout(STEP_TIMEOUT).ok()
+    receive.recv_timeout(wait).ok()
 }
 
 /// Draws one frame on the window's thread when the view exists and nothing else holds its
@@ -810,7 +824,8 @@ fn key_rows() {
 /// The frame-time row: `FRAMES` text frames drawn back to back on the window's thread,
 /// with build, acquire and interval percentiles.
 fn frame_rows() {
-    let timings = on_main(|| {
+    let start = Instant::now();
+    let timings = on_main_within(FRAMES_TIMEOUT, || {
         let mut out = Vec::with_capacity(FRAMES);
         for _ in 0..FRAMES {
             match draw() {
@@ -836,6 +851,14 @@ fn frame_rows() {
     log("summary_frame_build_ms", &percentiles(&mut builds));
     log("summary_frame_acquire_ms", &percentiles(&mut acquires));
     log("summary_frame_interval_ms", &percentiles(&mut intervals));
+    log(
+        "summary_frames_wall_ms",
+        &format!(
+            "{:.1} n={}",
+            start.elapsed().as_secs_f64() * 1000.0,
+            timings.len()
+        ),
+    );
 }
 
 /// The DPI row: the view's DPI against the parent's and its client size against the
