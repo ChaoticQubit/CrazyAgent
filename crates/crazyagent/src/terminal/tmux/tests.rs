@@ -229,33 +229,286 @@ fn typed_runs(lines: &[String]) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// V243-PASTE-CHUNKS: a full input request typed into a real pane arrives whole and in
-/// order across its `send-keys` commands, read back from what the pane's app received.
+/// V243-PASTE-CHUNKS: a full input request sent into a real pane arrives whole and in order,
+/// now through one paste buffer, read back from what the pane's app received.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_full_input_request_reaches_the_pane_whole_and_in_order_across_its_commands() {
-    use std::os::unix::fs::PermissionsExt;
     let home = tempfile::tempdir().unwrap();
-    let folder = home.path().join("terminal");
+    let (host, _server, agent, received) = raw_cat_pane(home.path(), false);
+    let bytes: Vec<u8> = (0..INPUT_BYTES_MAX)
+        .map(|at| b' ' + (at * 7 % 95) as u8)
+        .collect();
+    host.input(&agent, &bytes).unwrap();
+    assert_eq!(received_bytes(&received, bytes.len()), bytes);
+}
+
+/// V243-PASTE-BUFFER: a request longer than one `send-keys` run is pasted through a tmux
+/// buffer unless it holds a NUL, which would end the buffer; a request of at most one run,
+/// or one holding a NUL, is typed as before.
+#[test]
+fn a_request_is_pasted_only_above_one_run_and_without_a_nul() {
+    for length in [
+        1,
+        SEND_KEYS_BYTES_MAX - 1,
+        SEND_KEYS_BYTES_MAX,
+        SEND_KEYS_BYTES_MAX + 1,
+        2 * SEND_KEYS_BYTES_MAX,
+        INPUT_BYTES_MAX,
+    ] {
+        let bytes = vec![b'a'; length];
+        assert_eq!(
+            pastes(&bytes),
+            length > SEND_KEYS_BYTES_MAX,
+            "{length} bytes"
+        );
+        for at in [0, length / 2, length - 1] {
+            let mut nul = bytes.clone();
+            nul[at] = 0;
+            assert!(!pastes(&nul), "{length} bytes with a NUL at {at}");
+        }
+    }
+}
+
+/// V243-PASTE-BUFFER: every one of the 255 non-NUL bytes round-trips through the
+/// `set-buffer` quoting, which writes only ASCII letters, digits and `\ooo` escapes inside
+/// its double quotes, so tmux's parser expands no `$HOME`, `~` or `#{...}`; `paste-buffer`
+/// then pastes that buffer unchanged into the target and deletes it.
+#[test]
+fn paste_quoting_round_trips_every_non_nul_byte_and_never_expands_a_dollar() {
+    let mut bytes: Vec<u8> = (1..=255u8).collect();
+    bytes.extend_from_slice(b"$HOME ${HOME} ~ #{pane_id} \\ \" ' ; {");
+    let lines = paste_buffer_lines("%7", "crazyagent-paste-1-2", &bytes);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(
+        lines[1],
+        "paste-buffer -d -r -S -b crazyagent-paste-1-2 -t %7"
+    );
+    let quoted = lines[0]
+        .strip_prefix("set-buffer -b crazyagent-paste-1-2 -- \"")
+        .and_then(|rest| rest.strip_suffix('"'))
+        .expect("set-buffer with one double-quoted argument");
+    assert!(!quoted.contains('$'));
+    let mut decoded = Vec::new();
+    let mut chars = quoted.bytes();
+    while let Some(byte) = chars.next() {
+        if byte.is_ascii_alphanumeric() {
+            decoded.push(byte);
+            continue;
+        }
+        assert_eq!(byte, b'\\', "a raw {byte:#04x} inside the quotes");
+        let digits: Vec<u8> = chars.by_ref().take(3).collect();
+        assert_eq!(digits.len(), 3);
+        assert!(digits.iter().all(|digit| (b'0'..=b'7').contains(digit)));
+        let text = std::str::from_utf8(&digits).unwrap();
+        decoded.push(u8::from_str_radix(text, 8).unwrap());
+    }
+    assert_eq!(decoded, bytes);
+}
+
+/// V243-PASTE-BUFFER: the engine pins `set-clipboard external` and `get-clipboard off` after
+/// today's server options, which stay the same and in the same order, on the engine's server
+/// and on a confined lead's.
+#[test]
+fn the_server_options_are_todays_then_the_two_clipboard_pins() {
+    for confined in [false, true] {
+        let mut today = vec![
+            format!("set-option -g default-terminal {TERMINAL_TYPE}"),
+            "set-option -gw allow-rename off".to_owned(),
+            "set-option -gw automatic-rename off".to_owned(),
+            "set-option -gw remain-on-exit off".to_owned(),
+            format!("set-option -g history-limit {SCROLLBACK_LINES}"),
+        ];
+        if confined {
+            today.push(format!("set-option -g default-shell {LEAD_SHELL}"));
+        }
+        let options = server_options(confined);
+        assert_eq!(options[..today.len()], today[..]);
+        assert_eq!(
+            options[today.len()..],
+            [
+                "set-option -sq set-clipboard external",
+                "set-option -sq get-clipboard off"
+            ]
+        );
+    }
+}
+
+/// V243-PASTE-BUFFER: a full request whose `set-buffer` line is the longest one (every byte
+/// value once, then only bytes that need an escape, `$HOME` among them) is pasted to an
+/// agent's window target and reaches its pane byte-exact, with no buffer left behind.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_full_request_of_every_byte_value_is_pasted_byte_exact_with_no_buffer_left() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, _server, agent, received) = raw_cat_pane(home.path(), false);
+    let escaped: Vec<u8> = (1..=255u8)
+        .filter(|byte| !byte.is_ascii_alphanumeric())
+        .collect();
+    let mut bytes: Vec<u8> = (1..=255u8).collect();
+    bytes.extend_from_slice(b"$HOME ${HOME} ~ #{pane_id}");
+    while bytes.len() < INPUT_BYTES_MAX {
+        bytes.push(escaped[bytes.len() % escaped.len()]);
+    }
+    assert!(pastes(&bytes));
+    host.input(&agent, &bytes).unwrap();
+    assert_eq!(received_bytes(&received, bytes.len()), bytes);
+    assert_eq!(buffers_left(&host), 0);
+}
+
+/// V243-PASTE-BUFFER: a full request holding NULs is typed, not pasted, and still reaches
+/// the pane byte-exact.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_request_holding_a_nul_is_typed_byte_exact() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, _server, agent, received) = raw_cat_pane(home.path(), false);
+    let bytes: Vec<u8> = (0..INPUT_BYTES_MAX)
+        .map(|at| {
+            if at % 1000 == 999 {
+                0
+            } else {
+                b' ' + (at * 7 % 95) as u8
+            }
+        })
+        .collect();
+    assert!(!pastes(&bytes));
+    host.input(&agent, &bytes).unwrap();
+    assert_eq!(received_bytes(&received, bytes.len()), bytes);
+}
+
+/// V243-PASTE-BUFFER: a 200 KB paste, sent as the app sends it in full input requests, each
+/// pasted through its own buffer, reaches the pane byte-exact with no buffer left behind.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_200_kb_paste_in_full_requests_arrives_byte_exact_with_no_buffer_left() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, _server, agent, received) = raw_cat_pane(home.path(), false);
+    let bytes: Vec<u8> = (0..50 * INPUT_BYTES_MAX)
+        .map(|at| 1 + (at * 13 % 255) as u8)
+        .collect();
+    assert_eq!(bytes.len(), 204_800);
+    for request in bytes.chunks(INPUT_BYTES_MAX) {
+        assert!(pastes(request));
+        host.input(&agent, request).unwrap();
+    }
+    assert_eq!(received_bytes(&received, bytes.len()), bytes);
+    assert_eq!(buffers_left(&host), 0);
+}
+
+/// V243-PASTE-BUFFER (h4 22:08): while a paste's named buffer waits between `set-buffer`
+/// and `paste-buffer`, a pane's OSC 52 clipboard query gets no reply even with
+/// `set-clipboard on`, since tmux answers that query only from an unnamed buffer; the same
+/// query does get an unnamed buffer back, which shows the row would see a leak.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_pending_named_paste_buffer_is_not_read_by_a_panes_osc_52_query() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, _server, agent, received) = raw_cat_pane(home.path(), true);
+    let control = host.live_control().unwrap();
+    let target = host.agent_target(&control, &agent).unwrap();
+    control.run("set-option -s set-clipboard on").unwrap();
+    control.run("set-option -s get-clipboard buffer").unwrap();
+    let lines = paste_buffer_lines(&target, "crazyagent-paste-osc52-1", b"secret $HOME");
+    assert!(lines[0].starts_with("set-buffer -b crazyagent-paste-osc52-1 -- "));
+    control.run(&lines[0]).unwrap();
+    osc52_query(home.path());
+    assert_eq!(std::fs::read(&received).unwrap_or_default(), b"");
+    control.run("set-buffer -- \"control\"").unwrap();
+    osc52_query(home.path());
+    let reply = b"\x1b]52;c;Y29udHJvbA==";
+    assert!(
+        std::fs::read(&received)
+            .unwrap_or_default()
+            .windows(reply.len())
+            .any(|window| window == reply),
+        "an unnamed buffer never came back to the same query"
+    );
+}
+
+/// V243-PASTE-BUFFER (h4 MUX-RESULTS): a pane's OSC 52 query reads an unnamed buffer with
+/// `set-clipboard on` and `get-clipboard buffer`, but no longer once the engine's clipboard
+/// pins are applied, nor when `set-clipboard on` comes back after them, since
+/// `get-clipboard off` still refuses it.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_clipboard_pins_stop_a_panes_osc_52_query_reading_an_unnamed_buffer() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, _server, _agent, received) = raw_cat_pane(home.path(), true);
+    let control = host.live_control().unwrap();
+    let replies = || {
+        let bytes = std::fs::read(&received).unwrap_or_default();
+        bytes
+            .windows(5)
+            .filter(|window| *window == b"\x1b]52;")
+            .count()
+    };
+    control.run("set-option -s set-clipboard on").unwrap();
+    control.run("set-option -s get-clipboard buffer").unwrap();
+    control.run("set-buffer -- \"control\"").unwrap();
+    osc52_query(home.path());
+    assert_eq!(
+        replies(),
+        1,
+        "the unnamed buffer never came back before the pins"
+    );
+    let pins: Vec<String> = server_options(false)
+        .into_iter()
+        .filter(|option| option.contains("clipboard"))
+        .collect();
+    for pin in &pins {
+        control.run(pin).unwrap();
+    }
+    osc52_query(home.path());
+    assert_eq!(replies(), 1, "a query read the buffer through the pins");
+    control.run("set-option -s set-clipboard on").unwrap();
+    osc52_query(home.path());
+    assert_eq!(
+        replies(),
+        1,
+        "get-clipboard off let a query read the buffer"
+    );
+    assert_eq!(pins.len(), 2);
+}
+
+/// A real tmux server whose one agent pane runs `cat` on a raw terminal, writing what it
+/// receives to a file. With `osc52_queries`, the pane also prints an OSC 52 clipboard query
+/// each time a `go` file appears in the home folder and removes it, for at most 1000 polls
+/// and while `cat` lives. Takes the test's home folder and that choice. Returns the host,
+/// the guard that stops the server, the agent and the file.
+#[cfg(target_os = "macos")]
+fn raw_cat_pane(home: &Path, osc52_queries: bool) -> (Arc<Tmux>, Server, AgentId, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = home.join("terminal");
     std::fs::create_dir(&folder).unwrap();
     std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let tmux = installed(home).expect("tmux is required for this test");
     let host = Arc::new(Tmux::open(Some(tmux.clone()), &folder));
-    let _server = Server {
+    let server = Server {
         tmux,
         socket: host.socket(),
     };
-    let ready = home.path().join("ready");
-    let received = home.path().join("received");
+    let ready = home.join("ready");
+    let received = home.join("received");
+    let queries = if osc52_queries {
+        format!(
+            "( n=0; while [ $n -lt 1000 ] && kill -0 $$ 2>/dev/null; do \
+             if [ -e '{go}' ]; then rm -f '{go}'; printf '\\033]52;c;?\\007'; fi; \
+             n=$((n + 1)); sleep 0.02; done ) & ",
+            go = home.join("go").display()
+        )
+    } else {
+        String::new()
+    };
     let script = format!(
-        "stty raw -echo; : > '{}'; exec /bin/cat > '{}'",
+        "stty raw -echo; : > '{}'; {queries}exec /bin/cat > '{}'",
         ready.display(),
         received.display()
     );
     let agent = AgentId::team(1).unwrap();
     let command = InteractiveCommand {
         argv: vec!["/bin/sh".into(), "-c".into(), script],
-        cwd: home.path().to_path_buf(),
+        cwd: home.to_path_buf(),
         env: Vec::new(),
         transcript: crate::harnesses::interactive::Transcript::Unavailable,
     };
@@ -268,19 +521,49 @@ fn a_full_input_request_reaches_the_pane_whole_and_in_order_across_its_commands(
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    let bytes: Vec<u8> = (0..INPUT_BYTES_MAX)
-        .map(|at| b' ' + (at * 7 % 95) as u8)
-        .collect();
-    host.input(&agent, &bytes).unwrap();
+    (host, server, agent, received)
+}
+
+/// Waits until a file holds at least `length` bytes, for at most ten seconds. Takes the file
+/// and the length. Returns the file's bytes.
+#[cfg(target_os = "macos")]
+fn received_bytes(file: &Path, length: usize) -> Vec<u8> {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while std::fs::metadata(&received).map_or(0, |file| file.len()) < bytes.len() as u64 {
+    while std::fs::metadata(file).map_or(0, |found| found.len()) < length as u64 {
         assert!(
             Instant::now() < deadline,
             "the pane never received every typed byte"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(std::fs::read(&received).unwrap(), bytes);
+    std::fs::read(file).unwrap()
+}
+
+/// Makes the pane of `raw_cat_pane` with OSC 52 queries print one query: writes the `go`
+/// file, waits until the pane took it, then 800 ms for any reply to reach the pane's file.
+/// Takes the test's home folder.
+#[cfg(target_os = "macos")]
+fn osc52_query(home: &Path) {
+    let go = home.join("go");
+    assert!(!go.exists());
+    std::fs::write(&go, b"").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while go.exists() {
+        assert!(Instant::now() < deadline, "the pane never sent its query");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(800));
+}
+
+/// The number of tmux buffers on a host's server now. Takes the host. Returns the count.
+#[cfg(target_os = "macos")]
+fn buffers_left(host: &Tmux) -> usize {
+    let control = host.live_control().unwrap();
+    let names = control
+        .ask(&format!("list-buffers -F '#{{buffer_name}}{FORMAT_END}'"))
+        .unwrap();
+    assert!(names.iter().all(|name| !name.is_empty()));
+    names.len()
 }
 
 #[test]
