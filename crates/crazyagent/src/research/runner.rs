@@ -4638,6 +4638,28 @@ mod tests {
         );
     }
 
+    /// A research job with tools under None on Windows starts no model proxy and reaches its
+    /// hosted model's port on any host, as a team agent there does (DESIGN-0256 O2a, leader
+    /// 06:42); on Linux and macOS the proxy row above still holds.
+    #[test]
+    fn a_windows_research_job_with_tools_under_no_network_starts_no_model_proxy() {
+        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        let none = AgentPolicy {
+            network: AgentNetwork::None,
+            ..AgentPolicy::default()
+        };
+        let account = ResearchAccount::ManagedCodex {
+            connection: codex_connection(),
+            model: None,
+        };
+        let (network, proxy) = job_reach("windows", &none, true, &account, 41, &[]).unwrap();
+        assert!(proxy.is_none(), "{network:?}");
+        assert_eq!(
+            network,
+            SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)])
+        );
+    }
+
     #[test]
     fn linux_and_windows_refuse_team_agents_and_research_with_a_plain_line() {
         assert_eq!(
