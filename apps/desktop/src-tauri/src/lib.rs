@@ -6258,12 +6258,7 @@ pub fn run() {
                             .page_started(window.label());
                     }
                 });
-            #[cfg(feature = "native-webdriver")]
-            let main = match e2e_window::place()? {
-                Some((x, y)) => main.position(x, y).focused(false),
-                None => main,
-            };
-            let main = main.build()?;
+            let main = placed(main)?.build()?;
             let handle = app.handle().clone();
             main.on_window_event(move |event| {
                 if matches!(event, tauri::WindowEvent::Destroyed) {
@@ -6289,6 +6284,19 @@ pub fn run() {
     builder
         .run(tauri::generate_context!())
         .expect("native desktop exited with an error");
+}
+
+/// Opens the main window where a test build's trial asked, unfocused (e2e_window `place`);
+/// every other build opens it as built. Input: the main window's builder. Output: the
+/// builder, or the trial's placement error.
+fn placed<'a, M: Manager<tauri::Wry>>(
+    main: WebviewWindowBuilder<'a, tauri::Wry, M>,
+) -> Result<WebviewWindowBuilder<'a, tauri::Wry, M>, String> {
+    #[cfg(feature = "native-webdriver")]
+    if let Some((x, y)) = e2e_window::place()? {
+        return Ok(main.position(x, y).focused(false));
+    }
+    Ok(main)
 }
 
 /// Test builds only: adds the refresh observer, the WebDriver server and the trial window
