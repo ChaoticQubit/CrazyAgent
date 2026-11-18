@@ -559,13 +559,19 @@ jobs:
           node scripts/ci/junit-summary.mjs "$RUNNER_TEMP/junit" | tee -a "$GITHUB_STEP_SUMMARY"
 
   firmlink-macos:
-    name: Firmlink D8 clippy, green and red on macos-15
+    name: Firmlink D8 r3 clippy, green and red on macos-15
     runs-on: macos-15
     timeout-minutes: 180
     env:
-      RED_SHA: b95f5d096
       FIX_FILES: crates/crazyagent/src/harnesses/finding.rs
-      ROWS: a_chosen_file_inside_the_engine_folder_named_through_the_data_volume_is_refused
+      ROWS: >-
+        a_chosen_file_inside_the_engine_folder_named_through_the_data_volume_is_refused
+        a_link_outside_a_long_named_engine_folder_to_its_agent_file_spelled_long_is_refused
+        a_file_under_a_folder_link_spelled_long_into_a_long_named_engine_folder_is_refused
+      RED_PAIRS: >-
+        b95f5d096:a_chosen_file_inside_the_engine_folder_named_through_the_data_volume_is_refused
+        0c8ca9c2c:a_link_outside_a_long_named_engine_folder_to_its_agent_file_spelled_long_is_refused
+        0c8ca9c2c:a_file_under_a_folder_link_spelled_long_into_a_long_named_engine_folder_is_refused
       MODULES: "test(/^harnesses::/)"
       CRAZYAGENT_TEST_NATIVE_AUTH_HOST: ${{ github.workspace }}/target/debug/crazyagent
     steps:
@@ -661,22 +667,28 @@ jobs:
           farm=$(node scripts/ci/nextest-filter.mjs)
           echo "farm filter: $farm"
           cargo nextest run -p crazyagent --lib --features owner-trace --locked --no-fail-fast --no-tests=fail -E "($MODULES) & ($farm)" 2>&1 | tee "$RUNNER_TEMP/green-modules.txt"
-      - name: Red, each of the six rows fails with the fix files at the red-row commit
+      - name: Red, each row fails with the fix files at its own red-row commit
         if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
           set -euo pipefail
-          git checkout "$RED_SHA" -- $FIX_FILES
-          git status --short
-          cargo nextest run -p crazyagent --lib --features owner-trace --locked --no-run
           bad=0
-          for row in $ROWS; do
+          held=""
+          for pair in $RED_PAIRS; do
+            sha=${pair%%:*}
+            row=${pair#*:}
+            if [ "$sha" != "$held" ]; then
+              git checkout "$sha" -- $FIX_FILES
+              git status --short
+              cargo nextest run -p crazyagent --lib --features owner-trace --locked --no-run
+              held=$sha
+            fi
             set +e
             cargo nextest run -p crazyagent --lib --features owner-trace --locked --no-tests=fail -E "test(/::${row}\$/)" > "$RUNNER_TEMP/red-$row.txt" 2>&1
             code=$?
             set -e
             cat "$RUNNER_TEMP/red-$row.txt"
-            if [ "$code" -eq 100 ]; then echo "RED as expected: $row"; else echo "::error::$row exit $code, want 100 (test failed)"; bad=1; fi
+            if [ "$code" -eq 100 ]; then echo "RED as expected at $sha: $row"; else echo "::error::$row at $sha exit $code, want 100 (test failed)"; bad=1; fi
           done
           exit "$bad"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -692,7 +704,7 @@ jobs:
           retention-days: 14
 
   firmlink-linux-clippy:
-    name: Firmlink D8 clippy on ubuntu-22.04
+    name: Firmlink D8 r3 clippy on ubuntu-22.04
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
@@ -723,7 +735,7 @@ jobs:
         run: cargo clippy -p crazyagent --lib --tests --locked -- -D warnings
 
   firmlink-windows-clippy:
-    name: Firmlink D8 clippy on windows-2022
+    name: Firmlink D8 r3 clippy on windows-2022
     runs-on: windows-2022
     timeout-minutes: 120
     steps:
