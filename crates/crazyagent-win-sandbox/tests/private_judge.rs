@@ -1,7 +1,9 @@
 use crazyagent_win_sandbox::dacl::{
     self, ADMINISTRATORS, ALL_APPLICATION_PACKAGES, OWNER_RIGHTS, SYSTEM, TRUSTED_INSTALLER,
 };
-use crazyagent_win_sandbox::private::{Facts, Store, judge, judge_folder, label_list, list};
+use crazyagent_win_sandbox::private::{
+    Facts, Store, judge, judge_folder, judge_store_before_label, label_list, list,
+};
 
 const USER: [u8; 28] = [
     1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 233, 3, 0, 0,
@@ -348,4 +350,34 @@ fn a_second_label_entry_is_refused_not_skipped() {
     let full = Ok(Some((0x2000, FULL_POLICY)));
     assert_eq!(dacl::label(&apart), full);
     assert_eq!(dacl::inherited_label(&apart), full);
+}
+
+/// V244-WIN-STORE-LABEL-NX (leader 09:13, earlier installs): before a store folder takes its
+/// full label, a medium one an earlier build gave it, own or handed down, with no-write-up
+/// but not the rest, passes so the open can raise it; a label below medium or without
+/// no-write-up, or a second label entry, is still refused, and the strict judge refuses all.
+#[test]
+fn an_earlier_store_label_passes_only_the_judge_before_the_label() {
+    let files = OBJECT_INHERIT | NO_PROPAGATE | INHERIT_ONLY;
+    for (flags, policy, level, before) in [
+        (INHERITABLE, NO_WRITE_UP | NO_READ_UP, &MEDIUM, true),
+        (files, NO_WRITE_UP | NO_READ_UP, &MEDIUM, true),
+        (INHERITABLE, NO_WRITE_UP, &MEDIUM, true),
+        (INHERITABLE, NO_READ_UP | NO_EXECUTE_UP, &MEDIUM, false),
+        (files, NO_READ_UP | NO_EXECUTE_UP, &MEDIUM, false),
+        (INHERITABLE, FULL_POLICY, &LOW, false),
+        (files, FULL_POLICY, &LOW, false),
+    ] {
+        let mut folder = facts(Some(private_list(&[])));
+        folder.label = Some(acl(&[(LABEL, flags, policy, &level[..])]));
+        let seen = judge_store_before_label(&folder, &USER);
+        assert_eq!(seen.is_ok(), before, "{flags} {policy} {seen:?}");
+        assert!(judge_folder(&folder, &USER).is_err(), "{flags} {policy}");
+    }
+    let mut two = facts(Some(private_list(&[])));
+    two.label = Some(acl(&[
+        (LABEL, INHERITABLE, FULL_POLICY, &MEDIUM[..]),
+        (LABEL, INHERITED | INHERITABLE, NO_WRITE_UP, &MEDIUM[..]),
+    ]));
+    assert!(judge_store_before_label(&two, &USER).is_err());
 }
