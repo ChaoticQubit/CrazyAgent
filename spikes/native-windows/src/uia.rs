@@ -36,21 +36,26 @@ const READER_WAIT: Duration = Duration::from_secs(45);
 /// Lines of the reader's error output kept in the log.
 const READER_ERROR_LINES: usize = 6;
 
-/// The emoji picker: Windows PowerShell's UI Automation client finds the emoji panel
-/// ("Windows Input Experience") among the desktop's children, lists its first items and
-/// invokes (or selects) the first named one, as a user's pick would. Lines are "key=value".
-const EMOJI_PICKER: &str = r##"param([Int64]$Unused)
+/// The emoji picker: Windows PowerShell's UI Automation client takes the emoji panel's
+/// window by handle, lists its first items and invokes (or selects) the first named one,
+/// as a user's pick would; with no list item it lists the first elements it sees.
+/// Lines are "key=value".
+const EMOJI_PICKER: &str = r##"param([Int64]$Handle)
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 $element = [System.Windows.Automation.AutomationElement]
 $scope = [System.Windows.Automation.TreeScope]
-$named = New-Object System.Windows.Automation.PropertyCondition($element::NameProperty, "Windows Input Experience")
-$panel = $element::RootElement.FindFirst($scope::Children, $named)
-if ($null -eq $panel) { "picker_panel=missing"; exit 0 }
-"picker_panel=found class=$($panel.Current.ClassName) rect=$($panel.Current.BoundingRectangle)"
+$panel = $null
+try { $panel = $element::FromHandle([IntPtr]$Handle) } catch { "picker_from_handle=$($_.Exception.GetBaseException().GetType().FullName)" }
+if ($null -eq $panel) { "picker_panel=missing handle=$Handle"; exit 0 }
+"picker_panel=found name=$($panel.Current.Name) class=$($panel.Current.ClassName) pid=$($panel.Current.ProcessId) rect=$($panel.Current.BoundingRectangle)"
 $listed = New-Object System.Windows.Automation.PropertyCondition($element::ControlTypeProperty, [System.Windows.Automation.ControlType]::ListItem)
 $items = @($panel.FindAll($scope::Descendants, $listed) | Where-Object { $_.Current.Name -ne "" })
 "picker_items=$($items.Count)"
+if ($items.Count -eq 0) {
+    $seen = @($panel.FindAll($scope::Descendants, [System.Windows.Automation.Condition]::TrueCondition) | Select-Object -First 16 | ForEach-Object { "$($_.Current.ControlType.ProgrammaticName):$($_.Current.Name)" })
+    "picker_tree=$($seen -join ' | ')"
+}
 "picker_first_names=$((@($items | Select-Object -First 6 | ForEach-Object { $_.Current.Name })) -join ' | ')"
 foreach ($item in $items) {
     $pattern = $null
@@ -78,10 +83,10 @@ pub fn read(hwnd: isize) -> Result<Vec<String>, String> {
 }
 
 /// Picks the first emoji in the open emoji panel through UI Automation, from its own
-/// process. Called off the window's thread. Output: the picker's lines with its exit and
-/// time, or why it could not start.
-pub fn pick_emoji() -> Result<Vec<String>, String> {
-    run_script("emoji", EMOJI_PICKER, "0")
+/// process. Called off the window's thread. Input: the panel's window. Output: the
+/// picker's lines with its exit and time, or why it could not start.
+pub fn pick_emoji(panel: isize) -> Result<Vec<String>, String> {
+    run_script("emoji", EMOJI_PICKER, &panel.to_string())
 }
 
 /// Runs one Windows PowerShell script in its own process, killed past `READER_WAIT`.

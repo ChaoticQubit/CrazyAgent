@@ -405,6 +405,10 @@ pub fn emoji_rows() {
     let taken = send_keys(&chord, 0);
     std::thread::sleep(Duration::from_millis(2000));
     let named: Vec<String> = new_windows(&before);
+    let panel = top_windows()
+        .into_iter()
+        .find(|window| before.iter().all(|old| old.hwnd != window.hwnd))
+        .map_or(0, |window| window.hwnd);
     let verdict = if named.is_empty() {
         "INCONCLUSIVE no panel window"
     } else {
@@ -415,7 +419,7 @@ pub fn emoji_rows() {
         &format!("{verdict} events={taken} new={}", named.join(" ; ")),
     );
     log("emoji_chord_got", &take_notes().join(" "));
-    match crate::uia::pick_emoji() {
+    match crate::uia::pick_emoji(panel) {
         Ok(lines) => lines.iter().for_each(|line| log("emoji_uia", line)),
         Err(error) => log("emoji_uia", &format!("error {error}")),
     }
