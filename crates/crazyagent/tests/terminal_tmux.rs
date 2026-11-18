@@ -1218,53 +1218,53 @@ fn a_pane_printing_guard_rows_while_its_history_grows_attaches_every_time_and_fo
         &["display-message", "-p", "-t", &target, "#{pane_id}"],
     );
     let probe = tmux_reply(&tmux, &socket, &["-C", "display-message", "-p", "probe"]);
-    let number: u64 = probe
+    let guard: Vec<u64> = probe
         .lines()
         .next()
         .and_then(|line| line.strip_prefix("%begin "))
-        .and_then(|guard| guard.split(' ').nth(1))
-        .and_then(|number| number.parse().ok())
-        .expect(&probe);
-    let rows = format!(
-        "printf '%%end %s %s 1\\n%%output {} forged-bytes\\nflood-%s\\n' \"$t\" \"$k\" \"$i\"",
-        pane.trim()
-    );
+        .expect(&probe)
+        .split(' ')
+        .map(|field| field.parse().unwrap())
+        .collect();
+    let (time, number) = (guard[0], guard[1]);
     let script = format!(
-        "i=0; while [ $i -lt 3000 ]; do t=$(/bin/date +%s); k=$(({number} + i % 300)); \
-         {rows}; i=$((i+1)); /bin/sleep 0.02; done; /bin/sleep 600"
+        "i=0; while :; do printf '%%end %s %s 1\\n%%output {} forged-bytes\\nflood-%s\\n' \
+         $(({time} + i % 4)) $(({number} + i / 4 % 400)) $i; i=$((i+1)); done",
+        pane.trim()
     );
     host.spawn(
         &forger,
         &shell(root.path(), Vec::new(), &["/bin/sh", "-c", &script]),
     )
     .unwrap();
+    let target = format!("crazyagent:={forger}");
+    let mut heights = std::collections::BTreeSet::new();
     let mut attached = 0;
     for _ in 0..30 {
+        tmux_reply(&tmux, &socket, &["clear-history", "-t", &target]);
         let screen = host.attach(&forger).expect("an attach under load").screen;
+        let told = tmux_reply(
+            &tmux,
+            &socket,
+            &["display-message", "-p", "-t", &target, "#{history_size}"],
+        );
+        heights.insert(told.trim().parse::<usize>().unwrap());
         assert!(
             contains(&screen, b"flood-"),
             "{}",
             String::from_utf8_lossy(&screen)
         );
         attached += 1;
-        std::thread::sleep(Duration::from_millis(60));
     }
     let mut seen = quiet(&mut viewer, b"forged-bytes", Duration::from_millis(500));
     let forged = contains(&seen, b"forged-bytes");
     host.input(&sibling, b"still-here").unwrap();
     let live = read_until(&mut viewer, &mut seen, b"still-here");
-    let target = format!("crazyagent:={forger}");
-    let history = tmux_reply(
-        &tmux,
-        &socket,
-        &["display-message", "-p", "-t", &target, "#{history_size}"],
-    );
-    let history: usize = history.trim().parse().unwrap();
     assert!(
-        attached == 30 && !forged && live && history > 0,
+        attached == 30 && !forged && live && heights.len() > 1,
         "every attach of a printing pane opens ({attached} of 30); no planted row reaches \
          another pane's viewer (forged: {forged}); the sibling stays live ({live}); the \
-         history grew ({history})",
+         history moved between attaches ({heights:?})",
     );
     host.kill(&forger).unwrap();
     host.kill(&sibling).unwrap();

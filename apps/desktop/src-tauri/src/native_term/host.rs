@@ -7,7 +7,7 @@ use super::pane::{Action, GRID_MAX, Input};
 use super::render::{Shared, Surface};
 use super::screen;
 use super::style::Style;
-use super::table::{Entry, Outbox, Table, Told, changes};
+use super::table::{Direct, Entry, Outbox, Table, Told, VIEWS_MAX, changes};
 use super::view::{MouseKind, TermView, ViewEvent};
 use crate::bridge::BridgeError;
 use crate::bridge::feed::{EngineFeed, Fed, FeedEvent, Opener, Opening, Wake};
@@ -18,7 +18,8 @@ use objc2::rc::Retained;
 use objc2_app_kit::{NSResponder, NSView, NSWindowOrderingMode};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry as Slot;
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -34,11 +35,12 @@ const INBOX_MAX: usize = 4096;
 /// The most events one drain applies before it lets the main loop run again.
 const DRAIN_MAX: usize = 512;
 
-/// The most direct-path events waiting for the main thread before the reader stops.
-const DIRECT_MAX: usize = 1 << 16;
-
 /// The most rounds the outermost host call spends on events AppKit sent meanwhile.
 const SETTLE_ROUNDS: usize = 8;
+
+/// The most times work queued for the main thread is queued again while a host call
+/// further up the main thread's stack holds the state.
+const LATER_TRIES: u8 = 8;
 
 /// The cursor blink half period, as the xterm panel blinks.
 const BLINK: Duration = Duration::from_millis(600);
@@ -121,13 +123,12 @@ pub enum Command {
     Close,
 }
 
-/// What the direct path's reader handed the main thread: its events in order, and whether
-/// it stopped on a full queue, which the drain reads as the client closing, so its views
-/// reopen engine-fed instead of waiting for output that never comes.
-#[derive(Default)]
-struct Direct {
-    queue: VecDeque<Event>,
-    lost: bool,
+/// Why host work did not run: no view was ever opened, or a host call further up the main
+/// thread's stack holds the state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Held {
+    Missing,
+    Busy,
 }
 
 /// A view's AppKit and drawing parts: its NSView above the webview, the webview its place
@@ -148,7 +149,7 @@ pub struct Native {
     feed: EngineFeed,
     inbox: mpsc::Receiver<Fed>,
     control: Option<Control>,
-    direct: Arc<Mutex<Direct>>,
+    direct: Arc<Mutex<Direct<Event>>>,
     table: Table<View>,
     shared: HashMap<u32, Shared>,
     style: Option<Style>,
@@ -157,20 +158,27 @@ pub struct Native {
 }
 
 fn scale_key(scale: f64) -> u32 {
-    (scale.clamp(1.0, 4.0) * 100.0).round() as u32
+    let key = (scale.clamp(1.0, 4.0) * 100.0).round() as u32;
+    assert!((100..=400).contains(&key));
+    key
 }
 
 fn backing(view: &NSView) -> f64 {
-    view.window()
-        .map_or(2.0, |window| window.backingScaleFactor())
+    let scale = view
+        .window()
+        .map_or(2.0, |window| window.backingScaleFactor());
+    assert!(scale.is_finite());
+    scale
 }
 
 fn io_code(error: &std::io::Error) -> &'static str {
     let text = error.to_string();
-    OPEN_CODES
+    let code = OPEN_CODES
         .into_iter()
         .find(|code| *code == text)
-        .unwrap_or("native_terminal_open_failed")
+        .unwrap_or("native_terminal_open_failed");
+    assert!(!code.is_empty());
+    code
 }
 
 /// Asks the main loop for one drain, coalesced: a burst of events costs one wake. Runs on
@@ -189,26 +197,44 @@ fn schedule() {
 
 fn drain() {
     SCHEDULED.store(false, Ordering::Release);
-    if with_native(Native::drain).is_none() {
+    if let Err((Held::Busy, _)) = with_native(Native::drain) {
         PENDING.with(|pending| pending.set(true));
     }
 }
 
 /// Runs work on the native state when it exists and nothing further up this thread holds
-/// it, then applies what AppKit sent meanwhile. Input: the work. Output: its result, or
-/// none when the state is missing or in use.
-fn with_native<T>(work: impl FnOnce(&mut Native) -> T) -> Option<T> {
+/// it, then applies what AppKit sent meanwhile. Input: the work. Output: its result, or why
+/// it did not run with the work given back.
+fn with_native<T, W: FnOnce(&mut Native) -> T>(work: W) -> Result<T, (Held, W)> {
     assert!(
         MainThreadMarker::new().is_some(),
         "native state is main-thread only"
     );
     NATIVE.with(|cell| {
-        let mut held = cell.try_borrow_mut().ok()?;
-        let native = held.as_mut()?;
+        let Ok(mut held) = cell.try_borrow_mut() else {
+            return Err((Held::Busy, work));
+        };
+        let Some(native) = held.as_mut() else {
+            return Err((Held::Missing, work));
+        };
         let out = work(native);
         native.settle();
-        Some(out)
+        Ok(out)
     })
+}
+
+/// Runs work on the native state from the main loop, queued again while a host call holds
+/// the state, at most `tries` more times. Inputs: the app, the tries left and the work.
+fn later(app: &AppHandle, tries: u8, work: impl FnOnce(&mut Native) + Send + 'static) {
+    assert!(tries <= LATER_TRIES);
+    let again = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Err((Held::Busy, work)) = with_native(work)
+            && tries > 0
+        {
+            later(&again, tries - 1, work);
+        }
+    });
 }
 
 /// The sink every TermView sends its events to: kept in order, applied by the outermost
@@ -255,6 +281,7 @@ pub fn open(
     pointer: *mut c_void,
     open: Open,
 ) -> Result<u64, &'static str> {
+    assert!(!pointer.is_null());
     let _ = APP.set(app.clone());
     NATIVE.with(|cell| {
         if let Ok(mut held) = cell.try_borrow_mut()
@@ -264,7 +291,7 @@ pub fn open(
         }
     });
     let opened = with_native(|native| native.open(mtm, pointer, open));
-    let page = opened.ok_or("native_terminal_main_busy")??;
+    let page = opened.map_err(|_| "native_terminal_main_busy")??;
     assert!(page > 0);
     Ok(page)
 }
@@ -274,11 +301,11 @@ pub fn open(
 /// call. Output: ok, or a plain code.
 pub fn command(window: &str, page: u64, call: Command) -> Result<(), &'static str> {
     let closing = matches!(call, Command::Close);
-    let done = with_native(|native| native.command(window, page, call));
-    match done {
-        Some(result) => result,
-        None if closing => Ok(()),
-        None => Err("native_terminal_view_unknown"),
+    match with_native(|native| native.command(window, page, call)) {
+        Ok(result) => result,
+        Err((Held::Missing, _)) if closing => Ok(()),
+        Err((Held::Missing, _)) => Err("native_terminal_view_unknown"),
+        Err((Held::Busy, _)) => Err("native_terminal_main_busy"),
     }
 }
 
@@ -289,15 +316,20 @@ pub fn command(window: &str, page: u64, call: Command) -> Result<(), &'static st
 pub fn window_gone(app: &AppHandle, window: &str) {
     assert!(!window.is_empty());
     let window = window.to_owned();
-    let _ = app.run_on_main_thread(move || {
-        let _ = with_native(|native| native.forget_window(&window));
+    later(app, LATER_TRIES, move |native| {
+        native.forget_window(&window)
     });
 }
 
-/// Sets how every view draws and every view opened later; on the main thread. Input: the
-/// checked style. Output: ok, or `native_terminal_style_invalid` with the old style kept.
+/// Sets how every view draws and every view opened later; on the main thread. With no view
+/// open yet the next open brings its own style. Input: the checked style. Output: ok, or a
+/// plain code with the old style kept.
 pub fn style(style: Style) -> Result<(), &'static str> {
-    with_native(|native| native.restyle(style)).unwrap_or(Ok(()))
+    match with_native(|native| native.restyle(style)) {
+        Ok(result) => result,
+        Err((Held::Missing, _)) => Ok(()),
+        Err((Held::Busy, _)) => Err("native_terminal_main_busy"),
+    }
 }
 
 fn blink() {
@@ -308,9 +340,9 @@ fn blink() {
         }
         !native.table.is_empty() && native.style.as_ref().is_some_and(|s| s.blink)
     });
-    if more != Some(true) {
+    if !matches!(more, Ok(true)) {
         BLINKING.store(false, Ordering::Release);
-        with_native(|native| native.shown = true);
+        let _ = with_native(|native| native.shown = true);
     }
 }
 
@@ -354,7 +386,7 @@ impl Native {
         );
         let (sender, inbox) = mpsc::channel(INBOX_MAX);
         let wake: Wake = Arc::new(schedule);
-        Native {
+        let native = Native {
             app: app.clone(),
             feed: EngineFeed::new(terminals, opener, sender, wake),
             inbox,
@@ -365,7 +397,9 @@ impl Native {
             style: None,
             shown: true,
             clip: Clip::new(),
-        }
+        };
+        assert!(native.table.is_empty() && native.control.is_none());
+        native
     }
 
     /// Applies what AppKit sent while this call held the state: overflowed views end, the
@@ -390,6 +424,7 @@ impl Native {
         }
         self.draw_dirty();
         schedule();
+        assert!(self.table.pages().len() <= VIEWS_MAX);
     }
 
     /// Takes waiting engine feed and direct-path events, a bounded batch, and asks for
@@ -405,13 +440,11 @@ impl Native {
                 self.on_feed(event);
             }
         }
-        let (direct, lost) = {
-            let mut waiting = self.direct.lock().unwrap_or_else(PoisonError::into_inner);
-            let count = waiting.queue.len().min(DRAIN_MAX);
-            let direct: Vec<Event> = waiting.queue.drain(..count).collect();
-            let lost = waiting.queue.is_empty() && std::mem::take(&mut waiting.lost);
-            (direct, lost)
-        };
+        let (direct, lost) = self
+            .direct
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take(DRAIN_MAX);
         let more = taken == DRAIN_MAX || direct.len() == DRAIN_MAX;
         for event in direct {
             self.on_direct(event);
@@ -471,7 +504,7 @@ impl Native {
         let entry = Entry {
             window: open.window,
             name: open.name,
-            pane: super::pane::Pane::new(page, open.keys),
+            pane: super::pane::Pane::new(open.keys),
             feed: page,
             direct,
             rect: open.rect,
@@ -502,24 +535,33 @@ impl Native {
     }
 
     fn ensure_control(&mut self, tmux: &std::path::Path, socket: &std::path::Path) -> bool {
+        assert!(tmux.is_absolute());
+        assert!(socket.is_absolute());
         if self.control.is_some() {
             return true;
         }
         let queue = Arc::clone(&self.direct);
         let sink = move |event: Event| {
-            let mut waiting = queue.lock().unwrap_or_else(PoisonError::into_inner);
-            let kept = waiting.queue.len() < DIRECT_MAX && !waiting.lost;
-            if kept {
-                waiting.queue.push_back(event);
-            } else {
-                waiting.lost = true;
-            }
-            drop(waiting);
+            let kept = queue
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(event);
             schedule();
             kept
         };
         self.control = Control::attach(tmux, socket, sink).ok();
         self.control.is_some()
+    }
+
+    /// Lets the direct path's client go: its drop detaches it and joins its reader, and
+    /// what that reader left is forgotten, so no stale `Closed` reaches the next client.
+    fn drop_control(&mut self) {
+        self.control = None;
+        self.direct
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        assert!(self.control.is_none());
     }
 
     fn restyle(&mut self, style: Style) -> Result<(), &'static str> {
@@ -544,7 +586,7 @@ impl Native {
         if blink && !self.table.is_empty() {
             start_blink();
         }
-        assert!(self.style.is_some());
+        assert!(self.style.as_ref().is_some_and(|s| s.blink == blink));
         Ok(())
     }
 }
@@ -555,11 +597,12 @@ fn shared_at<'a>(
     style: &Style,
 ) -> Result<&'a mut Shared, &'static str> {
     assert!((100..=400).contains(&key));
-    if !map.contains_key(&key) {
-        let shared = Shared::new(key as f32 / 100.0, style)?;
-        map.insert(key, shared);
-    }
-    map.get_mut(&key).ok_or("native_terminal_style_invalid")
+    let shared = match map.entry(key) {
+        Slot::Occupied(held) => held.into_mut(),
+        Slot::Vacant(free) => free.insert(Shared::new(key as f32 / 100.0, style)?),
+    };
+    assert!(shared.cell_points().0 > 0.0);
+    Ok(shared)
 }
 
 impl Native {
@@ -604,6 +647,7 @@ impl Native {
             }
             Command::Close => {
                 self.dismiss(page);
+                assert!(self.table.get(page).is_none());
                 return Ok(());
             }
         };
@@ -636,6 +680,7 @@ impl Native {
     }
 
     fn attached(&mut self, feed: u64, cols: u16, rows: u16) {
+        assert!(feed > 0);
         let Some(page) = self.table.page_of(feed) else {
             return;
         };
@@ -662,6 +707,9 @@ impl Native {
         assert!(self.table.get(page).is_none_or(|e| e.pane.ready()));
     }
 
+    /// Applies one direct-path event. A refused view reopens engine-fed, and a closed
+    /// client, including one that bound a view after it closed, reopens every direct view
+    /// engine-fed, so no view waits for output from a client that is gone. Input: the event.
     fn on_direct(&mut self, event: Event) {
         match event {
             Event::Restored { view, bytes } => {
@@ -680,16 +728,11 @@ impl Native {
             }
             Event::Refused { view, .. } => self.reopen(view),
             Event::Closed => {
-                self.control = None;
-                let direct: Vec<u64> = self
-                    .table
-                    .pages()
-                    .into_iter()
-                    .filter(|page| self.table.get(*page).is_some_and(|e| e.direct))
-                    .collect();
-                for page in direct {
+                self.drop_control();
+                for page in self.table.direct_pages() {
                     self.reopen(page);
                 }
+                assert!(self.table.direct_pages().is_empty());
             }
         }
     }
@@ -715,10 +758,15 @@ impl Native {
         let app = self.app.clone();
         tauri::async_runtime::spawn(async move {
             let placed = crate::native_place(&app, &window, &name, project.as_deref()).await;
-            let _ = app.run_on_main_thread(move || {
-                with_native(|native| native.reopened(page, new, placed));
+            later(&app, LATER_TRIES, move |native| {
+                native.reopened(page, new, placed)
             });
         });
+        assert!(
+            self.table
+                .get(page)
+                .is_some_and(|e| !e.direct && e.feed == new)
+        );
     }
 
     fn reopened(&mut self, page: u64, feed: u64, placed: Result<Reservation, BridgeError>) {
@@ -762,10 +810,11 @@ impl Native {
         drop(surface);
         ns.removeFromSuperview();
         if self.table.is_empty() {
-            self.control = None;
+            self.drop_control();
             BLINKING.store(false, Ordering::Release);
         }
         assert!(self.table.page_of(entry.feed).is_none());
+        assert!(self.table.get(page).is_none());
         Some(events)
     }
 
@@ -778,24 +827,20 @@ impl Native {
                 last,
             });
         }
+        assert!(self.table.get(page).is_none());
     }
 
     fn forget_window(&mut self, window: &str) {
-        let owned = |table: &Table<View>| -> Vec<u64> {
-            let pages = table.pages().into_iter();
-            pages
-                .filter(|page| table.get(*page).is_some_and(|e| e.window == window))
-                .collect()
-        };
-        for page in owned(&self.table) {
+        for page in self.table.pages_of(window) {
             let _ = self.dismiss(page);
         }
-        assert!(owned(&self.table).is_empty());
+        assert!(self.table.pages_of(window).is_empty());
     }
 }
 
 impl Native {
     fn on_view(&mut self, page: u64, event: ViewEvent) {
+        assert!(page > 0);
         let Native {
             table,
             shared,
@@ -856,16 +901,18 @@ impl Native {
         };
         self.act(page, action);
         self.tell(page);
+        assert!(self.table.get(page).is_none_or(|e| e.feed > 0));
     }
 
     /// Sends what an input asks for through the engine feed. A refusal needs no answer
-    /// here: a full queue ends the view through the feed's own `Ended`, and input before
-    /// the attach or after an end has no session to reach. Inputs: the page id and the
-    /// action.
+    /// here: a full typing queue ends the view through the feed's own `Ended`, and input
+    /// before the attach or after an end has no session to reach. Inputs: the page id and
+    /// the action.
     fn act(&mut self, page: u64, action: Action) {
         let Some(feed) = self.table.get(page).map(|entry| entry.feed) else {
             return;
         };
+        assert!(feed > 0);
         let sent = match action {
             Action::Input { bytes, wheel } => self.feed.input(feed, &bytes, wheel),
             Action::Paste { text } => self.feed.paste(feed, text.as_bytes()),
@@ -938,6 +985,33 @@ fn wheel(
     entry.pane.apply(Input::Wheel { lines, cell })
 }
 
+/// Draws one view's frame and hands VoiceOver and the input method what it showed. Inputs:
+/// the view, its shared renderer, the style and the blink phase. Output: whether the frame
+/// was drawn; a skipped frame leaves the view dirty for the next pass.
+fn draw_view(entry: &mut Entry<View>, shared: &mut Shared, style: &Style, shown: bool) -> bool {
+    let view = &mut entry.platform;
+    let (Some(surface), Some(term)) = (view.surface.as_mut(), entry.pane.term()) else {
+        return false;
+    };
+    let marked = view.ns.marked_text();
+    let frame = screen::frame(term, &style.theme, shown, marked.as_deref());
+    assert_eq!(frame.rows.len(), term.screen_lines());
+    if shared.draw(surface, &frame).is_err() {
+        return false;
+    }
+    let scale = f64::from(view.scale) / 100.0;
+    let (width, height) = shared.cell_points();
+    assert!(scale >= 1.0 && width > 0.0 && height > 0.0);
+    let geometry = Geometry {
+        cell: (width * scale, height * scale),
+        pad: 0.0,
+        scale,
+    };
+    view.ns
+        .drawn(geometry, a11y::marks(term), a11y::text_key(term));
+    true
+}
+
 impl Native {
     /// Puts a view over its page place, sizes its surface and the agent's window to the
     /// grid that fits, and shows it once its mirror is ready and nothing covers it; a
@@ -953,6 +1027,7 @@ impl Native {
         let (Some(entry), Some(style)) = (table.get_mut(page), style.as_ref()) else {
             return;
         };
+        assert!(entry.rect.iter().all(|side| side.is_finite()));
         let [x, y, width, height] = entry.rect;
         let shown = entry.pane.ready() && !entry.covered && width >= 1.0 && height >= 1.0;
         let view = &mut entry.platform;
@@ -1001,6 +1076,11 @@ impl Native {
         if !made {
             self.end(page, "native_terminal_gpu");
         }
+        assert!(
+            self.table
+                .get(page)
+                .is_none_or(|e| !e.platform.ns.isHidden())
+        );
     }
 
     /// Draws every shown view whose screen changed, refits one whose backing scale changed,
@@ -1030,35 +1110,19 @@ impl Native {
         let Some(style) = style.as_ref() else {
             return;
         };
+        let mut drawn = 0;
         for (_, entry) in table.entries_mut() {
-            let view = &mut entry.platform;
-            let able = view.surface.is_some() && entry.pane.term().is_some();
-            if !entry.pane.dirty || view.ns.isHidden() || !able {
+            if !entry.pane.dirty || entry.platform.ns.isHidden() {
                 continue;
             }
-            entry.pane.dirty = false;
-            let (Some(surface), Some(term), Some(shared)) = (
-                view.surface.as_mut(),
-                entry.pane.term(),
-                shared.get_mut(&view.scale),
-            ) else {
+            let Some(shared) = shared.get_mut(&entry.platform.scale) else {
                 continue;
             };
-            let marked = view.ns.marked_text();
-            let frame = screen::frame(term, &style.theme, *shown, marked.as_deref());
-            assert_eq!(frame.rows.len(), term.screen_lines());
-            if shared.draw(surface, &frame).is_err() {
-                continue;
+            if draw_view(entry, shared, style, *shown) {
+                entry.pane.dirty = false;
+                drawn += 1;
             }
-            let scale = f64::from(view.scale) / 100.0;
-            let (width, height) = shared.cell_points();
-            let geometry = Geometry {
-                cell: (width * scale, height * scale),
-                pad: 0.0,
-                scale,
-            };
-            view.ns
-                .drawn(geometry, a11y::marks(term), a11y::text_key(term));
         }
+        assert!(drawn <= self.table.pages().len());
     }
 }

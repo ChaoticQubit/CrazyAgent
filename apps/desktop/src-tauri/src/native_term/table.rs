@@ -8,6 +8,9 @@ pub const VIEWS_MAX: usize = DESKTOP_VIEWS_MAX;
 /// The most view events held while the host is busy further up the main thread's stack.
 pub const OUTBOX_MAX: usize = 64;
 
+/// The most direct-path events waiting for the main thread before the reader stops.
+pub const DIRECT_MAX: usize = 1 << 16;
+
 /// What a view last told its panel, so `mouse` and `behind` go out only on a change.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct Told {
@@ -142,6 +145,32 @@ impl<P> Table<P> {
         self.views.keys().copied().collect()
     }
 
+    /// The page ids of the views the direct path draws, which reopen engine-fed when its
+    /// client closes. Output: the ids.
+    pub fn direct_pages(&self) -> Vec<u64> {
+        let pages: Vec<u64> = self
+            .views
+            .iter()
+            .filter(|(_, entry)| entry.direct)
+            .map(|(page, _)| *page)
+            .collect();
+        assert!(pages.len() <= self.views.len());
+        pages
+    }
+
+    /// The page ids of the views a window opened. Input: the window label. Output: the ids.
+    pub fn pages_of(&self, window: &str) -> Vec<u64> {
+        assert!(!window.is_empty());
+        let pages: Vec<u64> = self
+            .views
+            .iter()
+            .filter(|(_, entry)| entry.window == window)
+            .map(|(page, _)| *page)
+            .collect();
+        assert!(pages.len() <= self.views.len());
+        pages
+    }
+
     /// Every open view, to draw or restyle. Output: the entries.
     pub fn entries_mut(&mut self) -> impl Iterator<Item = (&u64, &mut Entry<P>)> {
         self.views.iter_mut()
@@ -191,6 +220,58 @@ impl<T> Outbox<T> {
     }
 }
 
+/// What the direct path's reader hands the main thread: its events in order, and whether
+/// it stopped on a full queue. The drain reads a stop, once every event before it is taken,
+/// as the client closing, so its views reopen engine-fed instead of waiting for output that
+/// never comes.
+pub struct Direct<T> {
+    queue: VecDeque<T>,
+    lost: bool,
+}
+
+impl<T> Default for Direct<T> {
+    fn default() -> Self {
+        Direct {
+            queue: VecDeque::new(),
+            lost: false,
+        }
+    }
+}
+
+impl<T> Direct<T> {
+    /// Keeps one reader event. Input: the event. Output: whether it was kept; a full queue
+    /// keeps nothing more until it is cleared, and the reader stops.
+    pub fn push(&mut self, event: T) -> bool {
+        let kept = self.queue.len() < DIRECT_MAX && !self.lost;
+        if kept {
+            self.queue.push_back(event);
+        } else {
+            self.lost = true;
+        }
+        assert!(self.queue.len() <= DIRECT_MAX);
+        assert!(kept || self.lost);
+        kept
+    }
+
+    /// Takes up to `most` events, oldest first. Input: the most to take. Output: the events,
+    /// and whether the reader stopped with nothing left before its stop, said once.
+    pub fn take(&mut self, most: usize) -> (Vec<T>, bool) {
+        assert!(most > 0);
+        let count = self.queue.len().min(most);
+        let taken: Vec<T> = self.queue.drain(..count).collect();
+        let lost = self.queue.is_empty() && std::mem::take(&mut self.lost);
+        assert!(taken.len() <= most);
+        (taken, lost)
+    }
+
+    /// Forgets everything a reader left, as its client is dropped.
+    pub fn clear(&mut self) {
+        self.queue.clear();
+        self.lost = false;
+        assert!(self.queue.is_empty());
+    }
+}
+
 /// What a view must tell its panel after a change: mouse reporting turned on or off, or the
 /// view scrolled off or back to the bottom. Inputs: what it told last and what holds now.
 /// Output: (mouse, behind), each only when it changed.
@@ -210,7 +291,7 @@ mod tests {
         Entry {
             window: window.into(),
             name: "team-1".into(),
-            pane: Pane::new(feed, true),
+            pane: Pane::new(true),
             feed,
             direct: true,
             rect: [0.0, 0.0, 100.0, 50.0],
@@ -291,6 +372,44 @@ mod tests {
         assert_eq!(over, vec![2]);
         let (none, clear) = outbox.take();
         assert!(none.is_empty() && clear.is_empty());
+    }
+
+    #[test]
+    fn a_full_direct_queue_stops_the_reader_and_reads_as_closed_once_drained() {
+        let mut direct = Direct::default();
+        for at in 0..DIRECT_MAX {
+            assert!(direct.push(at));
+        }
+        assert!(!direct.push(DIRECT_MAX));
+        assert!(!direct.push(0), "a stopped reader keeps nothing more");
+        let (first, lost) = direct.take(DIRECT_MAX - 1);
+        assert_eq!(first.len(), DIRECT_MAX - 1);
+        assert!(!lost, "the stop comes after every event before it");
+        let (last, lost) = direct.take(8);
+        assert_eq!(last, vec![DIRECT_MAX - 1]);
+        assert!(lost);
+        assert_eq!(direct.take(8), (Vec::new(), false), "the stop is said once");
+        assert!(!direct.push(1));
+        direct.clear();
+        assert!(direct.push(2));
+        assert_eq!(direct.take(8), (vec![2], false));
+    }
+
+    #[test]
+    fn a_closed_client_reopens_only_its_direct_views_and_a_window_knows_its_own() {
+        let mut table = Table::default();
+        let (one, two) = (table.fresh(), table.fresh());
+        table.insert(one, entry("main", one));
+        let mut fed = entry("wall-1", two);
+        fed.direct = false;
+        table.insert(two, fed);
+        assert_eq!(table.direct_pages(), vec![one]);
+        assert_eq!(table.pages_of("wall-1"), vec![two]);
+        let (_, new) = table.refeed(one).expect("open view");
+        assert!(table.direct_pages().is_empty());
+        assert_eq!(table.page_of(new), Some(one));
+        assert_eq!(table.pages_of("main"), vec![one]);
+        assert!(table.pages_of("wall-2").is_empty());
     }
 
     #[test]

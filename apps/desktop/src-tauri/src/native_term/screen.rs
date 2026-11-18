@@ -371,8 +371,9 @@ pub fn frame(
     }
 }
 
-/// The plain text of each row, for the headless dump. Input: the frame. Output: one string
-/// per row, trailing spaces trimmed.
+/// The plain text of each row, for the rows that check a frame. Input: the frame. Output:
+/// one string per row, trailing spaces trimmed.
+#[cfg(test)]
 pub fn text_rows(frame: &Frame) -> Vec<String> {
     let rows: Vec<String> = frame
         .rows

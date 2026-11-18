@@ -34,7 +34,6 @@ pub enum Named {
     PageDown,
     Insert,
     Delete,
-    BackTab,
     F(u8),
 }
 
@@ -64,7 +63,6 @@ pub fn named_bytes(key: Named, mods: u8, app_cursor: bool) -> Vec<u8> {
         Named::PageDown => tilde(6, mods & CONTROL != 0),
         Named::Insert => tilde(2, false),
         Named::Delete => tilde(3, mods != 0),
-        Named::BackTab => "\x1b[Z".to_owned(),
         Named::F(n @ 1..=4) => {
             let c = char::from(b'P' + n - 1);
             if mods == 0 {
@@ -152,7 +150,6 @@ pub enum Action {
 /// One native view's mirror of its agent's pane: the terminal fed by the attach and then by
 /// live output, its local selection and scrollback, and whether its own keys go through.
 pub struct Pane {
-    pub view: u64,
     term: Option<Term<VoidListener>>,
     parser: Processor,
     pub dirty: bool,
@@ -162,12 +159,10 @@ pub struct Pane {
 
 impl Pane {
     /// A mirror with no terminal until its attach comes, its keys on or off from the start,
-    /// so no input before a later keys call can type. Inputs: the view id and whether its
-    /// keys go through. Output: the pane.
-    pub fn new(view: u64, keys: bool) -> Pane {
-        assert!(view > 0);
+    /// so no input before a later keys call can type. Input: whether its keys go through.
+    /// Output: the pane.
+    pub fn new(keys: bool) -> Pane {
         let pane = Pane {
-            view,
             term: None,
             parser: Processor::new(),
             dirty: false,
