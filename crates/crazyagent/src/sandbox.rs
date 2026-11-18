@@ -5244,10 +5244,9 @@ fn node_package(prefix: &Path, program: &Path) -> Option<PathBuf> {
 }
 
 /// The canonical form of an existing path. On macOS a path named through the data volume
-/// comes back under its short name, the only one Seatbelt matches, so a root given in the
-/// long name is not canonical. On Windows the verbatim `\\?\` prefix that `canonicalize` adds
-/// to a drive path is removed, so the result equals the plain drive path; any other verbatim
-/// form stays as it is and fails [`clean_absolute`]. Input: the path. Output: the canonical
+/// comes back under its short name, so a root given in the long name is not canonical. On
+/// Windows the verbatim `\\?\` prefix `canonicalize` adds to a drive path is removed; any other
+/// verbatim form stays and fails [`clean_absolute`]. Input: the path. Output: the canonical
 /// path, or the I/O error.
 pub(crate) fn canonical(path: &Path) -> io::Result<PathBuf> {
     let resolved = path.canonicalize()?;
