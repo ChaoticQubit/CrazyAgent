@@ -113,8 +113,10 @@ pub fn settings_owner_ports(global: &Path, project: &Path) -> Result<Vec<u16>, &
         .map_or_else(Vec::new, |access| owner_ports(&access)))
 }
 
-/// Why a sandbox with hidden folders does not start on Linux or Windows: their boundaries
-/// grant whole roots and cannot keep a folder inside one out of reach.
+/// Why a sandbox with hidden folders does not start on Windows, nor one with kept-out paths
+/// or open tops on Linux or Windows: those boundaries cannot keep a path inside a granted
+/// root out of reach as Seatbelt does. Linux holds hidden folders on its bubblewrap
+/// backends and names its own refusal otherwise (`linux::HIDDEN_NEEDS_NAMESPACES`).
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
 
 /// Why a native-mode lead's own tmux server does not start off macOS: only Seatbelt holds
@@ -2337,8 +2339,9 @@ impl ProjectSandbox {
     /// Keeps one folder inside a granted root out of the agent's reach, read and write, as
     /// the secret paths are; the graph step hides the project's `.crazyagent/` from graphify.
     /// Input: a clean absolute path below a root, in a real parent folder, absent or a real
-    /// folder. Output: the narrowed sandbox, or `Invalid`. Only Seatbelt holds it, so the
-    /// Linux and Windows boundaries refuse a sandbox with hidden folders.
+    /// folder. Output: the narrowed sandbox, or `Invalid`. Seatbelt holds it, and so do the
+    /// Linux bubblewrap backends (an empty read-only folder over it, no write above it);
+    /// plain Landlock and Windows refuse a sandbox with hidden folders.
     pub fn hide(mut self, folder: &Path) -> Result<Self, SandboxError> {
         if self.hidden.len() >= HIDDEN_MAX {
             return Err(invalid("too many hidden folders"));
@@ -3944,7 +3947,9 @@ impl InstalledSandbox {
         #[cfg(not(target_os = "linux"))]
         let _ = strict;
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() || sandbox.open_tops.is_some()
+        if (cfg!(target_os = "windows") && !sandbox.hidden.is_empty())
+            || !sandbox.kept_out.is_empty()
+            || sandbox.open_tops.is_some()
         {
             return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
         }

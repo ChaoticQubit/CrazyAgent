@@ -239,6 +239,13 @@ const CONFINED_NEEDS_LANDLOCK: &str = "an agent confined to its own worktree or 
      Landlock file rules on Linux (Linux 6.2 or newer), and this Linux runs agents under \
      bubblewrap alone, which cannot give the git folders their own rights";
 
+/// Why an agent whose project hides a folder does not start under Landlock alone: a right
+/// to list a folder covers every folder below it, so the hidden folder's names would stay
+/// in view. It names what makes hidden folders work on this computer (leader 12:25).
+pub const HIDDEN_NEEDS_NAMESPACES: &str = "hidden folders on Linux need bubblewrap to start \
+     agents in namespaces of their own, and this computer does not let it: install \
+     bubblewrap and allow unprivileged user namespaces, then start the agent again";
+
 const LANDLOCK_DEVICES: &[&str] = &[
     "/dev/null",
     "/dev/zero",
@@ -707,15 +714,35 @@ fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
 }
 
 /// Tells whether what follows [`NEST_ARGS`] is what the engine's own nests write: an
-/// optional `--unshare-net`, an optional `--chdir` with a clean absolute folder, then `--`
-/// and the command, so no caller adds a capability, filter, namespace, bind or descriptor
-/// option to the agent's bubblewrap (rv-sa241 SBX-2-R2 N2, rv-code2 N5). Input: the words
-/// after the fixed arguments. Output: true when they are.
+/// optional `--unshare-net`, at most [`crate::sandbox::HIDDEN_MAX`] hidden folder covers
+/// (`--tmpfs P --remount-ro P`, one clean absolute P below the root), an optional `--chdir`
+/// with a clean absolute folder, then `--` and the command, so no caller adds a capability,
+/// filter, namespace, bind or descriptor option to the agent's bubblewrap (rv-sa241
+/// SBX-2-R2 N2, rv-code2 N5). Input: the words after the fixed arguments. Output: true when
+/// they are.
 fn own_options(words: &[OsString]) -> bool {
-    let words = match words {
+    let mut words = match words {
         [unshare, rest @ ..] if unshare == bridge::UNSHARE_NET => rest,
         _ => words,
     };
+    let mut covers = 0;
+    while let [tmpfs, path, remount, again, rest @ ..] = words
+        && tmpfs == "--tmpfs"
+    {
+        let folder = Path::new(path);
+        if remount != "--remount-ro"
+            || again != path
+            || !clean_absolute(folder)
+            || folder.parent().is_none()
+        {
+            return false;
+        }
+        covers += 1;
+        words = rest;
+    }
+    if covers > crate::sandbox::HIDDEN_MAX {
+        return false;
+    }
     let words = match words {
         [chdir, folder, rest @ ..] if chdir == "--chdir" => {
             if !clean_absolute(Path::new(folder)) {
@@ -758,7 +785,8 @@ fn nest_request(
     }
     if !own_options(&args[NEST_ARGS.len()..]) {
         return Err(format!(
-            "{NEST} takes only --unshare-net and an absolute --chdir before `--` and a command"
+            "{NEST} takes only --unshare-net, hidden folder covers and an absolute --chdir \
+             before `--` and a command"
         ));
     }
     Ok(HelperRequest::Nest { bwrap, args })
@@ -1581,10 +1609,14 @@ impl LinuxSandbox {
     /// which keeps no port free ([`LINUX_OPEN_NETWORK_NEEDS_LANDLOCK`]), for a policy confined to one
     /// worktree, whose git denies neither backend can hold, for a limited network the
     /// sockets setting starts no agent on, or on Landlock for a kept port Linux could hand
-    /// out by itself ([`kept_outside_picked`]). Bubblewrap starts only a closed agent, in a
-    /// network of its own, where no port it takes is a host port.
+    /// out by itself ([`kept_outside_picked`]), or on Landlock alone for a hidden folder
+    /// ([`HIDDEN_NEEDS_NAMESPACES`]). Bubblewrap starts only a closed agent, in a network of
+    /// its own, where no port it takes is a host port.
     pub fn new(sandbox: ProjectSandbox, backend: LinuxBackend) -> Result<Self, SandboxError> {
         admitted(&sandbox)?;
+        if matches!(backend, LinuxBackend::Landlock { .. }) && !sandbox.hidden.is_empty() {
+            return Err(SandboxError::Unavailable(HIDDEN_NEEDS_NAMESPACES.into()));
+        }
         let (launcher, inside) = match &backend {
             LinuxBackend::Landlock { helper } => (helper, None),
             LinuxBackend::Nested { bwrap, helper } => (helper, Some(bwrap)),
@@ -2416,7 +2448,15 @@ impl Sandbox for LinuxSandbox {
                     Some(routed) => (routed.bridged.clone(), routed.any.clone()),
                     None => (self.sandbox.bridged_ports().unwrap_or_default(), Vec::new()),
                 };
-                nest_command(bwrap, helper, &policy, cwd, &bridged, &routes)
+                nest_command(
+                    bwrap,
+                    helper,
+                    &policy,
+                    &grants.hidden,
+                    cwd,
+                    &bridged,
+                    &routes,
+                )
             }
             LinuxBackend::Bubblewrap { bwrap, helper } => {
                 bwrap_command(bwrap, helper, &grants, cwd, self.sandbox.network())
@@ -2451,12 +2491,15 @@ impl Sandbox for LinuxSandbox {
 /// under those grants, as the call supervisor holds it (protected paths in a git grant,
 /// [`ADMIN_WRITES`] and [`ADMIN_LINKS`] in the admin folder, the worktree's `.git` link and
 /// a clone's store names, [`clone_store`]), which that supervisor must hold before a
-/// confined launch starts, the nested binds a second layer (DEC-185 S1, S2).
+/// confined launch starts, the nested binds a second layer (DEC-185 S1, S2). No write
+/// grant covers a hidden folder ([`split_above`]); `hidden` names the ones that exist,
+/// which bubblewrap covers with an empty read-only folder.
 struct Grants {
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
     git_write: Vec<PathBuf>,
     guarded: Held,
+    hidden: Vec<PathBuf>,
 }
 
 impl Grants {
@@ -2501,6 +2544,31 @@ impl Grants {
                 writable_children(&state, &[], &protected, &mut write)?;
             }
         }
+        for hidden in &sandbox.hidden {
+            split_above(hidden, &protected, &mut write)?;
+        }
+        if git_write
+            .iter()
+            .any(|root| sandbox.hidden.iter().any(|hidden| hidden.starts_with(root)))
+        {
+            return Err(invalid("a git folder grant holds a hidden folder"));
+        }
+        let mut hidden = Vec::new();
+        for path in &sandbox.hidden {
+            match fs::symlink_metadata(path) {
+                Ok(meta) if meta.is_dir() => hidden.push(path.clone()),
+                Ok(_) => return Err(invalid("a hidden folder is no longer a plain folder")),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        assert!(hidden.len() <= crate::sandbox::HIDDEN_MAX);
+        assert!(write.iter().all(|path| {
+            sandbox
+                .hidden
+                .iter()
+                .all(|hidden| !hidden.starts_with(path))
+        }));
         assert!(
             write
                 .iter()
@@ -2567,8 +2635,42 @@ impl Grants {
             write,
             git_write,
             guarded,
+            hidden,
         })
     }
+}
+
+/// Splits every write grant that covers the hidden folder `folder` so that none does: the
+/// grant goes, each folder from it down to `folder`'s parent keeps only what the read grants
+/// give, its other existing entries are granted as [`writable_children`] grants them, and
+/// `folder` gets nothing, so it cannot be written, made, moved or carried off by a move
+/// above it. Inputs: the folder, the protected paths and the grants. Output: Ok, or why not.
+fn split_above(
+    folder: &Path,
+    protected: &[PathBuf],
+    write: &mut Vec<PathBuf>,
+) -> Result<(), SandboxError> {
+    let covering: Vec<PathBuf> = write
+        .iter()
+        .filter(|grant| folder.starts_with(grant))
+        .cloned()
+        .collect();
+    write.retain(|grant| !folder.starts_with(grant));
+    for grant in covering {
+        let mut above = grant;
+        while above != folder {
+            let step = folder
+                .strip_prefix(&above)
+                .ok()
+                .and_then(|rest| rest.components().next())
+                .ok_or_else(|| invalid("a hidden folder lies outside its grant"))?;
+            let next = above.join(step);
+            writable_children(&above, &[&next], protected, write)?;
+            above = next;
+        }
+    }
+    assert!(write.iter().all(|grant| !folder.starts_with(grant)));
+    Ok(())
 }
 
 fn writable_children(
@@ -2782,13 +2884,15 @@ fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {
 /// The command for a nested agent up to its harness: the helper asked to start bubblewrap
 /// ([`NEST`]) with [`NEST_ARGS`] in the working folder, and inside it the helper again with
 /// the policy. With route or bridged ports the route flags lead, then the bridge flags,
-/// and bubblewrap gives the agent a network of its own. Inputs: bubblewrap, the helper,
-/// the policy, marked nested, the working folder, the bridged ports and the route ports.
-/// Output: the command, which the harness follows after `--`.
+/// and bubblewrap gives the agent a network of its own; each existing hidden folder gets
+/// an empty read-only folder over it ([`own_options`]). Inputs: bubblewrap, the helper,
+/// the policy, marked nested, the hidden folders, the working folder, the bridged ports and
+/// the route ports. Output: the command, which the harness follows after `--`.
 fn nest_command(
     bwrap: &Path,
     helper: &Path,
     policy: &LandlockPolicy,
+    hidden: &[PathBuf],
     cwd: &Path,
     bridged: &[u16],
     routes: &[u16],
@@ -2796,6 +2900,7 @@ fn nest_command(
     assert!(policy.nested);
     assert!(policy.die_with.is_none());
     assert!(routes.len() <= REMOTES_MAX);
+    assert!(hidden.len() <= crate::sandbox::HIDDEN_MAX);
     let mut command = Command::new(helper);
     for port in routes {
         command.arg(egress::ROUTE).arg(port.to_string());
@@ -2806,6 +2911,13 @@ fn nest_command(
     command.arg(NEST).arg("--").arg(bwrap).args(NEST_ARGS);
     if !bridged.is_empty() || !routes.is_empty() {
         command.arg(bridge::UNSHARE_NET);
+    }
+    for folder in hidden {
+        command
+            .arg("--tmpfs")
+            .arg(folder)
+            .arg("--remount-ro")
+            .arg(folder);
     }
     command
         .arg("--chdir")
@@ -2818,9 +2930,9 @@ fn nest_command(
 }
 
 /// The bubblewrap command for a closed agent up to its harness: its own namespaces, the
-/// system folders read-only but the name resolver's ([`RESOLVER_ROOT`]), the grants, then
-/// the helper bound read-only and started to install the TCP-only socket filter
-/// ([`FILTER_SOCKETS`]).
+/// system folders read-only but the name resolver's ([`RESOLVER_ROOT`]), the grants, an
+/// empty read-only folder over each existing hidden folder, then the helper bound
+/// read-only and started to install the TCP-only socket filter ([`FILTER_SOCKETS`]).
 /// Inputs: bwrap, the helper, the grants, the working folder and the network. Output: the
 /// command, which the harness follows after `--`.
 fn bwrap_command(
@@ -2867,6 +2979,13 @@ fn bwrap_command(
     for root in &grants.write {
         command.arg("--bind").arg(root).arg(root);
     }
+    for folder in &grants.hidden {
+        command
+            .arg("--tmpfs")
+            .arg(folder)
+            .arg("--remount-ro")
+            .arg(folder);
+    }
     command.arg("--ro-bind").arg(helper).arg(helper);
     command.arg("--chdir").arg(cwd);
     command.arg("--").arg(helper).arg(FILTER_SOCKETS);
@@ -2897,6 +3016,7 @@ mod tests {
             write: Vec::new(),
             git_write: Vec::new(),
             guarded: Held::default(),
+            hidden: Vec::new(),
         };
         let command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
@@ -2915,6 +3035,7 @@ mod tests {
             write: Vec::new(),
             git_write: Vec::new(),
             guarded: Held::default(),
+            hidden: Vec::new(),
         };
         let unshares = |network: SandboxNetwork| {
             bwrap_command(
@@ -3351,6 +3472,7 @@ mod tests {
             write: Vec::new(),
             git_write: vec![PathBuf::from("/p/.git/worktrees/agent-1")],
             guarded: Held::default(),
+            hidden: Vec::new(),
         };
         let _command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
@@ -3385,6 +3507,7 @@ mod tests {
             write: Vec::new(),
             git_write: Vec::new(),
             guarded: Held::default(),
+            hidden: Vec::new(),
         };
         let policy = landlock_policy(&grants, &sandbox);
         assert!(!policy.limit_network);
@@ -3496,6 +3619,7 @@ mod tests {
             write: Vec::new(),
             git_write: Vec::new(),
             guarded: Held::default(),
+            hidden: Vec::new(),
         };
         let policy = landlock_policy(&grants, &sandbox);
         assert!(policy.limit_network);
@@ -3797,6 +3921,7 @@ mod tests {
             write: Vec::new(),
             git_write: Vec::new(),
             guarded: Held::default(),
+            hidden: Vec::new(),
         };
         let command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
@@ -4009,7 +4134,7 @@ mod tests {
         let bwrap = Path::new(BWRAP_PATHS[0]);
         let helper = helper();
         let words = |bridged: &[u16], routes: &[u16]| -> Vec<OsString> {
-            nest_command(bwrap, &helper, &policy, &cwd, bridged, routes)
+            nest_command(bwrap, &helper, &policy, &[], &cwd, bridged, routes)
                 .get_args()
                 .map(OsStr::to_os_string)
                 .collect()
