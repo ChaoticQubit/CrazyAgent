@@ -449,6 +449,46 @@ mod windows_tests {
         assert_eq!(entries(&root), ["pipes"]);
     }
 
+    /// rv-code #562 F3: a client that holds the pipes file open through every rename try
+    /// fails the publish with the rename's error, and leaves the file it holds as it was
+    /// and nothing staged beside it.
+    #[test]
+    fn a_publish_gives_up_on_a_pipes_file_held_through_every_try() {
+        let (_temp, root) = private_root();
+        let first = publish(&root, "engine.sock", [1; 16]).unwrap();
+        let held = private::read_only(&root.join("pipes")).unwrap();
+        let refused = publish(&root, "engine.sock", [2; 16]).unwrap_err();
+        assert!(matches!(refused.raw_os_error(), Some(5 | 32)), "{refused}");
+        drop(held);
+        assert_eq!(read(&root, "engine.sock").unwrap(), first);
+        assert_eq!(entries(&root), ["pipes"]);
+    }
+
+    /// rv-code #562 F3 (rv-sec3 #562 N4): a staged leftover another account owns fails the
+    /// publish before anything is written, and stays as it was.
+    #[test]
+    fn a_staged_leftover_another_account_owns_is_refused_and_kept() {
+        let (_temp, root) = private_root();
+        let leftover = root.join("pipes.0123456789abcdef.new");
+        std::fs::write(&leftover, "theirs\n").unwrap();
+        let set = crate::spawn_gate::status(
+            std::process::Command::new("icacls")
+                .arg(&leftover)
+                .args(["/setowner", "*S-1-5-32-545"])
+                .stdin(std::process::Stdio::null()),
+        )
+        .unwrap();
+        assert!(set.success());
+        let refused = publish(&root, "engine.sock", [7; 16]).unwrap_err();
+        assert_eq!(
+            refused.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "{refused}"
+        );
+        assert_eq!(std::fs::read(&leftover).unwrap(), b"theirs\n");
+        assert_eq!(entries(&root), ["pipes.0123456789abcdef.new"]);
+    }
+
     /// D7 (leader 07:46): a pipes file already in the root that another account owns is
     /// refused and left as it was, never replaced, and nothing is staged beside it.
     #[test]
