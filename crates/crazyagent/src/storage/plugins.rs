@@ -785,7 +785,6 @@ pub(crate) fn remove_skill_project_folder(root: &Path, project: &str) -> Result<
 
 /// Deletes one stored hook folder the trash names, all its hooks being gone. Inputs: the
 /// engine root and the folder's id. Output: Ok when it is gone, or a plain refusal.
-#[cfg(unix)]
 pub(crate) fn remove_hook_folder(root: &Path, id: &str) -> Result<(), EngineError> {
     if !valid_folder_id(id) {
         return Err(error("plugin_hook_folder_invalid"));
