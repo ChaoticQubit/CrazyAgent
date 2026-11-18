@@ -5,7 +5,9 @@ use crate::protocol::RequestId;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+#[cfg(unix)]
 pub(crate) const FOLDER: &str = "narrowing-intents";
+#[cfg(unix)]
 pub(crate) const MAX_BYTES: usize = 4096;
 pub(crate) const MAX_INTENTS: usize = 1024;
 #[cfg(unix)]
@@ -52,6 +54,7 @@ struct Wire {
 
 /// The name of one intent file: sixteen lowercase hex digits from the system's entropy.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct IntentId(String);
 
 impl IntentId {
@@ -130,6 +133,7 @@ fn created_ns() -> Result<u64, EngineError> {
 /// this user, and its intent folder, made on the first write, judged at every use. Every
 /// file is opened relative to the folder without following links.
 #[cfg(unix)]
+#[derive(Debug)]
 pub(crate) struct Intents {
     root: std::fs::File,
 }
@@ -352,6 +356,7 @@ fn private_file(file: &std::fs::File) -> Result<Option<u64>, EngineError> {
 /// The intent store where storage has no owner-only folder check: it never opens, so no
 /// narrowing change is ever kept where it could not be judged.
 #[cfg(not(unix))]
+#[derive(Debug)]
 pub(crate) struct Intents;
 
 #[cfg(not(unix))]
