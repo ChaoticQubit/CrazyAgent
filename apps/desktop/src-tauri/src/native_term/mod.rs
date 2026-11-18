@@ -1,4 +1,6 @@
 #[cfg(target_os = "macos")]
+mod a11y;
+#[cfg(target_os = "macos")]
 mod clip;
 #[cfg(target_os = "macos")]
 mod codec;
@@ -6,6 +8,8 @@ mod codec;
 mod control;
 #[cfg(target_os = "macos")]
 mod host;
+#[cfg(target_os = "macos")]
+mod ime;
 #[cfg(target_os = "macos")]
 mod pane;
 #[cfg(target_os = "macos")]

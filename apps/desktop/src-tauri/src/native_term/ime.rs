@@ -1,0 +1,261 @@
+use super::pane::Input;
+use super::view::key_input;
+
+/// The most UTF-16 units of marked text a view keeps; an input method never composes this
+/// much, and a longer marked text is kept cut at a character boundary.
+pub const MARKED_UNITS_MAX: usize = 1024;
+
+/// The modifier keys of one key event that decide its route.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Mods {
+    pub command: bool,
+    pub control: bool,
+    pub option: bool,
+}
+
+/// Where one key event goes: nowhere (Command keys go through the key equivalents), to the
+/// pane at once as today's key bytes, to the pane as Meta (Escape then the key, as the
+/// webview's Option-as-Meta did), or through the input method.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    Ignore,
+    Bypass,
+    Meta,
+    Interpret,
+}
+
+/// The route of one key event: Command keys are ignored; while composing every other key
+/// belongs to the input method; else Control keys bypass it, Option keys go as Meta and the
+/// rest go through it. Inputs: the modifiers and whether marked text was shown before the
+/// key. Output: the route.
+pub fn route(mods: Mods, composing: bool) -> Route {
+    let _ = (mods, composing);
+    Route::Interpret
+}
+
+/// The Meta input of an Option key: Escape before its text, or its named key unchanged.
+/// Input: the characters ignoring modifiers (Shift still applied). Output: the input, or
+/// none for keys that send nothing.
+pub fn meta_input(bare: &str) -> Option<Input> {
+    key_input(bare, bare)
+}
+
+/// The text inputs one committed text makes: Apple's private-use function characters
+/// dropped, the rest cut at character boundaries into inputs of at most `TEXT_BYTES_MAX`
+/// bytes, so nothing is lost. Input: the text. Output: the inputs, none for an empty text.
+pub fn text_inputs(text: &str) -> Vec<Input> {
+    let _ = text;
+    Vec::new()
+}
+
+/// The UTF-16 length of a text, the unit of every AppKit text range. Input: the text.
+/// Output: its length in UTF-16 units.
+pub fn units(text: &str) -> usize {
+    text.chars().map(char::len_utf16).sum()
+}
+
+/// The part of a text a UTF-16 range asks for, clamped to the text and widened to whole
+/// characters. Inputs: the text and the location and length. Output: the slice and the
+/// range it covers, or none when the location is past the end, or at the end with a length.
+pub fn slice_units(text: &str, range: (usize, usize)) -> Option<(String, (usize, usize))> {
+    let _ = (text, range);
+    None
+}
+
+/// One view's marked text: what the input method composes, and the part of it the input
+/// method selects, as a UTF-16 location and length inside the marked text.
+#[derive(Debug, Default)]
+pub struct Ime {
+    marked: String,
+    selected: (usize, usize),
+}
+
+impl Ime {
+    /// Whether marked text is shown. Output: true while composing.
+    pub fn composing(&self) -> bool {
+        !self.marked.is_empty()
+    }
+
+    /// The marked text. Output: the text, empty when not composing.
+    pub fn marked(&self) -> &str {
+        &self.marked
+    }
+
+    /// Sets the marked text an input method composes; an empty text ends the composition
+    /// with nothing sent. Inputs: the text and the selected UTF-16 range inside it. Output:
+    /// whether marked text is shown after.
+    pub fn set_marked(&mut self, text: &str, selected: (usize, usize)) -> bool {
+        let _ = (text, selected);
+        false
+    }
+
+    /// Commits a text the input method inserted, ending any composition. Input: the text.
+    /// Output: the inputs to send.
+    pub fn commit(&mut self, text: &str) -> Vec<Input> {
+        let _ = text;
+        Vec::new()
+    }
+
+    /// Commits the marked text itself (the input method asked to unmark it). Output: the
+    /// inputs to send, none when not composing.
+    pub fn unmark(&mut self) -> Vec<Input> {
+        Vec::new()
+    }
+
+    /// Drops the marked text with nothing sent (the view lost focus, hid, closed or was
+    /// clicked). Output: whether it was composing.
+    pub fn cancel(&mut self) -> bool {
+        false
+    }
+
+    /// The marked range of the view's document, which is the marked text alone. Output:
+    /// (0, length in UTF-16 units), or none when not composing.
+    pub fn marked_range(&self) -> Option<(usize, usize)> {
+        None
+    }
+
+    /// The selected range inside the marked text. Output: the UTF-16 location and length,
+    /// or none when not composing.
+    pub fn selected_range(&self) -> Option<(usize, usize)> {
+        None
+    }
+
+    /// The part of the marked text a range asks for, clamped to it. Input: the UTF-16
+    /// location and length. Output: the text and the range it covers, or none when the range
+    /// misses the marked text.
+    pub fn substring(&self, range: (usize, usize)) -> Option<(String, (usize, usize))> {
+        let _ = range;
+        None
+    }
+
+    /// How many terminal cells the marked text before a UTF-16 offset takes, so the input
+    /// method's candidate window follows the composition. Input: the offset. Output: cells.
+    pub fn cells_before(&self, offset: usize) -> usize {
+        let _ = offset;
+        0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(input: &Input) -> &[u8] {
+        match input {
+            Input::Text(bytes) => bytes,
+            _ => panic!("a text input"),
+        }
+    }
+
+    fn mods(command: bool, control: bool, option: bool) -> Mods {
+        Mods {
+            command,
+            control,
+            option,
+        }
+    }
+
+    #[test]
+    fn keys_route_by_modifiers_and_composition() {
+        assert_eq!(route(mods(false, false, false), false), Route::Interpret);
+        assert_eq!(route(mods(false, true, false), false), Route::Bypass);
+        assert_eq!(route(mods(false, false, true), false), Route::Meta);
+        assert_eq!(route(mods(false, true, true), false), Route::Bypass);
+        assert_eq!(route(mods(true, false, false), false), Route::Ignore);
+        assert_eq!(route(mods(true, true, true), false), Route::Ignore);
+        assert_eq!(route(mods(false, false, false), true), Route::Interpret);
+        assert_eq!(route(mods(false, true, false), true), Route::Interpret);
+        assert_eq!(route(mods(false, false, true), true), Route::Interpret);
+        assert_eq!(route(mods(true, false, false), true), Route::Ignore);
+    }
+
+    #[test]
+    fn option_keys_go_as_escape_then_the_key_and_named_keys_unchanged() {
+        assert!(matches!(meta_input("a"), Some(Input::Text(b)) if b == b"\x1ba"));
+        assert!(matches!(meta_input("A"), Some(Input::Text(b)) if b == b"\x1bA"));
+        assert!(matches!(
+            meta_input("\u{F702}"),
+            Some(Input::Key(super::super::pane::Named::Left))
+        ));
+        assert!(meta_input("").is_none());
+        assert!(meta_input("\u{F704}").is_none());
+    }
+
+    #[test]
+    fn committed_text_is_cut_at_character_boundaries_with_nothing_lost() {
+        assert!(text_inputs("").is_empty());
+        let one = text_inputs("日本語😀");
+        assert_eq!(one.len(), 1);
+        assert_eq!(text(&one[0]), "日本語😀".as_bytes());
+        assert!(text_inputs("\u{F700}\u{F8FF}").is_empty());
+        assert_eq!(text(&text_inputs("a\u{F701}b")[0]), b"ab");
+        let long = "界".repeat(super::super::TEXT_BYTES_MAX);
+        let parts = text_inputs(&long);
+        assert!(parts.len() >= 3);
+        let mut joined = Vec::new();
+        for part in &parts {
+            let bytes = text(part);
+            assert!(!bytes.is_empty() && bytes.len() <= super::super::TEXT_BYTES_MAX);
+            assert!(std::str::from_utf8(bytes).is_ok());
+            joined.extend_from_slice(bytes);
+        }
+        assert_eq!(joined, long.as_bytes());
+    }
+
+    #[test]
+    fn marked_text_ranges_are_utf16_and_end_with_commit_or_cancel() {
+        let mut ime = Ime::default();
+        assert!(!ime.composing());
+        assert_eq!(ime.marked_range(), None);
+        assert_eq!(ime.selected_range(), None);
+        assert!(ime.set_marked("に", (1, 0)));
+        assert!(ime.set_marked("にほ😀", (4, 0)));
+        assert_eq!(ime.marked_range(), Some((0, 4)));
+        assert_eq!(ime.selected_range(), Some((4, 0)));
+        assert!(ime.set_marked("ab", (9, 9)));
+        assert_eq!(ime.selected_range(), Some((2, 0)));
+        let sent = ime.commit("日本");
+        assert!(!ime.composing());
+        assert_eq!(sent.len(), 1);
+        assert_eq!(text(&sent[0]), "日本".as_bytes());
+        assert!(ime.set_marked("´", (1, 0)));
+        assert!(!ime.set_marked("", (0, 0)));
+        assert!(!ime.composing());
+        assert!(ime.unmark().is_empty());
+        assert!(ime.set_marked("かな", (2, 0)));
+        let unmarked = ime.unmark();
+        assert_eq!(text(&unmarked[0]), "かな".as_bytes());
+        assert!(!ime.composing());
+        assert!(ime.set_marked("か", (1, 0)));
+        assert!(ime.cancel());
+        assert!(!ime.cancel());
+        assert!(!ime.composing());
+    }
+
+    #[test]
+    fn marked_text_is_kept_bounded_and_sliced_by_utf16_range() {
+        let mut ime = Ime::default();
+        assert!(ime.set_marked(&"😀".repeat(MARKED_UNITS_MAX), (0, 0)));
+        assert!(units(ime.marked()) <= MARKED_UNITS_MAX);
+        assert_eq!(units(ime.marked()) % 2, 0);
+        assert!(ime.set_marked("a😀b", (0, 0)));
+        assert_eq!(ime.substring((1, 2)), Some(("😀".to_owned(), (1, 2))));
+        assert_eq!(ime.substring((3, 10)), Some(("b".to_owned(), (3, 1))));
+        assert_eq!(ime.substring((2, 1)), Some(("😀".to_owned(), (1, 2))));
+        assert_eq!(ime.substring((4, 1)), None);
+        assert!(ime.cancel());
+        assert_eq!(ime.substring((0, 1)), None);
+    }
+
+    #[test]
+    fn candidate_window_follows_wide_marked_cells() {
+        let mut ime = Ime::default();
+        assert!(ime.set_marked("aに😀b", (0, 0)));
+        assert_eq!(ime.cells_before(0), 0);
+        assert_eq!(ime.cells_before(1), 1);
+        assert_eq!(ime.cells_before(2), 3);
+        assert_eq!(ime.cells_before(4), 5);
+        assert_eq!(ime.cells_before(5), 6);
+        assert_eq!(ime.cells_before(99), 6);
+    }
+}
