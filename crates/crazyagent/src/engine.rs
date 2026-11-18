@@ -841,6 +841,71 @@ mod tests {
         }
     }
 
+    /// Opens an engine whose storage queue holds one job, in a private folder.
+    /// Input: the folder. Output: the engine and its database path.
+    async fn one_slot_engine(root: &std::path::Path) -> (Engine, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.join("g");
+        std::fs::write(&global, "queue_capacity = 1").unwrap();
+        let cfg = crate::config::resolve_config(&global, &root.join("p")).unwrap();
+        let path = root.join("db");
+        (Engine::open(&path, cfg).await.unwrap(), path)
+    }
+
+    #[tokio::test]
+    async fn an_apply_the_busy_worker_does_not_take_in_time_is_withdrawn_and_never_lands() {
+        let root = tempfile::tempdir().unwrap();
+        let (engine, _) = one_slot_engine(root.path()).await;
+        let engine = std::sync::Arc::new(engine);
+        let (release, held) = oneshot::channel();
+        engine.storage.sender.try_send(Job::Hold(held)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let queued = engine.apply(create_request("queued")).await;
+        let next = tokio::spawn({
+            let engine = engine.clone();
+            async move { engine.apply(create_request("next")).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(release);
+        let next = next.await.unwrap();
+        assert_eq!(
+            queued.map(|reply| reply.revision).map_err(|error| error.0),
+            Err("storage_busy_not_submitted".to_owned()),
+            "an apply still queued when its bound ran out is withdrawn and answered unsent"
+        );
+        assert_eq!(
+            next.map(|reply| reply.revision).map_err(|error| error.0),
+            Ok(crate::protocol::Cursor::new(1)),
+            "the withdrawn create never landed, and its queue slot was free for the next apply"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_apply_waits_for_a_storage_worker_that_starts_receiving_within_its_bound() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("db");
+        let hold = crate::storage::hold_start(&path);
+        let (engine, opened) = one_slot_engine(root.path()).await;
+        assert_eq!(opened, path);
+        let engine = std::sync::Arc::new(engine);
+        let first = tokio::spawn({
+            let engine = engine.clone();
+            async move { engine.apply(create_request("first")).await }
+        });
+        tokio::time::sleep(engine.timeout / 2).await;
+        drop(hold);
+        assert_eq!(
+            first
+                .await
+                .unwrap()
+                .map(|reply| reply.revision)
+                .map_err(|error| error.0),
+            Ok(crate::protocol::Cursor::new(1)),
+            "an apply sent while the worker starts is answered once the worker receives"
+        );
+    }
+
     #[tokio::test]
     async fn an_apply_before_the_storage_worker_receives_is_refused_unsent() {
         let root = tempfile::tempdir().unwrap();
