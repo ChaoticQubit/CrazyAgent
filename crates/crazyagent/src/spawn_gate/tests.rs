@@ -1,4 +1,4 @@
-use super::{guarded, output, spawn, status};
+use super::{guarded, kept, output, spawn, status};
 use std::process::{Command, Stdio};
 
 /// A command that exits 0 and prints nothing: `true` here.
@@ -45,6 +45,15 @@ fn system_shell() -> std::path::PathBuf {
 #[should_panic(expected = "spawn_gate entered again on a thread that already holds it")]
 fn entering_the_gate_inside_the_gate_panics_instead_of_deadlocking() {
     let _ = guarded(|| spawn(&mut Command::new("/usr/bin/true")));
+}
+
+/// V243 P6: a kept start asked for while this thread holds the gate panics before its keeper
+/// thread starts, as that thread would wait on the gate forever for a start that forks. The
+/// start here forks nothing, so without the guard the call would return and the row fails.
+#[test]
+#[should_panic(expected = "a kept start waits on a thread that already holds the spawn gate")]
+fn a_kept_start_inside_the_gate_panics_instead_of_waiting_for_its_keeper() {
+    let _ = guarded(|| kept(|| Ok(())).map(|(started, _keeper)| started));
 }
 
 #[test]
