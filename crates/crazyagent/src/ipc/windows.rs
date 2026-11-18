@@ -5,6 +5,38 @@ use std::path::Path;
 
 /// The D7 pipes file's name in its protected root.
 const PIPES_FILE: &str = "pipes";
+/// The most entries one sweep of a protected root reads; a root holds a handful.
+const ROOT_ENTRIES_MAX: usize = 1024;
+
+/// Removes the staged pipes files earlier starts left in a held root, each judged private
+/// before it goes, and leaves every other entry (rv-code2 #554 N4). Input: the root. Output:
+/// Ok, or the error reading the root, judging a leftover or removing it.
+fn sweep(root: &Path) -> io::Result<()> {
+    for entry in std::fs::read_dir(root)?.take(ROOT_ENTRIES_MAX) {
+        let name = entry?.file_name();
+        let Some(name) = name.to_str().filter(|name| staged_name(name)) else {
+            continue;
+        };
+        let leftover = root.join(name);
+        drop(private::read_only(&leftover)?);
+        std::fs::remove_file(&leftover)?;
+    }
+    Ok(())
+}
+
+/// Whether a root entry is a staged pipes file: `pipes.`, 16 lowercase hex, `.new`. Input:
+/// the entry name. Output: whether publish made it.
+fn staged_name(name: &str) -> bool {
+    name.strip_prefix(PIPES_FILE)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .and_then(|rest| rest.strip_suffix(".new"))
+        .is_some_and(|hex| {
+            hex.len() == 16
+                && hex
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
 
 /// Publishes a new start of the endpoint `purpose` in its protected root (DESIGN-0256 D7,
 /// leader 07:46): a fresh random part and this engine's pin, staged in a file created private
@@ -23,6 +55,7 @@ pub(super) fn publish(root: &Path, purpose: &str) -> io::Result<Published> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
+    sweep(root)?;
     let (mut random, mut stage) = ([0; 16], [0; 8]);
     getrandom::fill(&mut random)
         .and_then(|()| getrandom::fill(&mut stage))
