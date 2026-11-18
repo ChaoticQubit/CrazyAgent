@@ -502,7 +502,8 @@ pub struct SkippedMore {
     pub files: Option<u64>,
 }
 
-/// Rebuildable folders as a listing gathers them: the first `SKIPPED_LISTED_MAX` named, the
+/// Rebuildable folders as a listing gathers them: `SKIPPED_LISTED_MAX` named, the first found,
+/// except that a folder needing a reinstall takes the place of one that rebuilds itself; the
 /// rest only counted, so the list stays bounded whatever the tree holds.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SkippedFolders {

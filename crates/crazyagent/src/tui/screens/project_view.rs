@@ -1962,6 +1962,9 @@ fn master_view(screen: &ProjectScreen, content: usize, room: usize, look: &Look)
     (lines, cursor, help)
 }
 
+/// The most cells one folder name takes in the reinstall notice; a longer one shows its tail.
+const NOTICE_NAME_CELLS: usize = 40;
+
 /// What the reinstall offer adds while the master's accounts aren't signed in, as the desktop.
 pub(in crate::tui) const REINSTALL_SIGN_IN: &str =
     "Add an account first; the master can reinstall them once one is signed in.";
@@ -1989,7 +1992,8 @@ pub(in crate::tui) fn reinstall_line(offer: &crate::projects_home::reinstall::Of
 
 /// The reinstall offer's rows above the input: its sentence, the sign-in sentence while the
 /// master's accounts aren't signed in, then the keys that act on it on rows of their own, `a`
-/// only while the master can take a message; while typing they come after Tab. At most
+/// only while the master can take a message; while typing they come after Tab. Each folder
+/// name shows its last `NOTICE_NAME_CELLS` cells. At most
 /// `rows_max` rows: the sentence is cut short to fit, and with no room for one row of it
 /// beside the keys nothing is drawn. Takes the screen, the width, the row bound and the
 /// look. Returns the rows, none without an offer.
@@ -2002,7 +2006,16 @@ fn reinstall_rows(
     let Some(offer) = screen.reinstall.as_ref() else {
         return Vec::new();
     };
-    let mut text = reinstall_line(offer);
+    let named = crate::projects_home::reinstall::Offer {
+        folders: offer
+            .folders
+            .iter()
+            .map(|name| shown_tail(name, NOTICE_NAME_CELLS))
+            .collect(),
+        more: offer.more,
+        draft: String::new(),
+    };
+    let mut text = reinstall_line(&named);
     if screen.reinstall_signed_out() {
         text.push(' ');
         text.push_str(REINSTALL_SIGN_IN);
