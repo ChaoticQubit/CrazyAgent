@@ -12,6 +12,11 @@ use std::ffi::c_void;
 use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// The code a view ends with when the GPU refused its work: a wgpu error the device's
+/// handler recorded, or a surface or device that could not be made.
+pub const GPU_FAULT: &str = "native_terminal_gpu";
 
 /// The fallback font files loaded beside the style's family, a fixed set instead of every
 /// system font, to keep memory small; Apple Color Emoji is the only system font with
@@ -33,7 +38,9 @@ struct Row {
     key: u64,
 }
 
-/// The device every native view draws with, made with the first view's surface.
+/// The device every native view draws with, made with the first view's surface: the
+/// largest texture side it allows and whether its error handler recorded a wgpu error
+/// since the last render call took it.
 struct Device {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
@@ -42,6 +49,31 @@ struct Device {
     rects: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     cache: Cache,
+    side_max: u32,
+    faulted: Arc<AtomicBool>,
+}
+
+impl Device {
+    /// Takes the wgpu error the handler recorded since the last call. wgpu reports an
+    /// error inside the call that caused it, so the render call that asks owns it.
+    /// Output: ok, or `native_terminal_gpu`.
+    fn fault(&self) -> Result<(), &'static str> {
+        if self.faulted.swap(false, Ordering::AcqRel) {
+            assert!(!self.faulted.load(Ordering::Acquire));
+            return Err(GPU_FAULT);
+        }
+        Ok(())
+    }
+
+    /// Holds a surface side to what the device can make: at least 1, at most its largest
+    /// texture side, so a view wider than the GPU allows is drawn smaller, never handed to
+    /// wgpu to refuse. Input: the side in pixels. Output: the side to configure.
+    fn fit(&self, side: u32) -> u32 {
+        assert!(self.side_max >= 1);
+        let fitted = side.clamp(1, self.side_max);
+        assert!((1..=self.side_max).contains(&fitted));
+        fitted
+    }
 }
 
 /// What all native views share: one wgpu instance and device, one font system and glyph
@@ -258,7 +290,9 @@ fn rect_pipeline(
     (pipeline, layout)
 }
 
-/// Makes the device for the first surface: the low-power adapter that can present to it.
+/// Makes the device for the first surface: the low-power adapter that can present to it,
+/// with the adapter's own limits instead of wgpu's defaults (a 2D texture side of 8192),
+/// and an error handler that logs a wgpu error and records it instead of panicking.
 fn device_for(
     instance: &wgpu::Instance,
     surface: &wgpu::Surface<'static>,
@@ -271,10 +305,20 @@ fn device_for(
     .map_err(|e| e.to_string())?;
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("native-terminal"),
+        required_limits: adapter.limits(),
         memory_hints: wgpu::MemoryHints::MemoryUsage,
         ..Default::default()
     }))
     .map_err(|e| e.to_string())?;
+    let side_max = device.limits().max_texture_dimension_2d;
+    assert_eq!(side_max, adapter.limits().max_texture_dimension_2d);
+    assert!(side_max >= wgpu::Limits::downlevel_defaults().max_texture_dimension_2d);
+    let faulted = Arc::new(AtomicBool::new(false));
+    let sink = Arc::clone(&faulted);
+    device.on_uncaptured_error(Box::new(move |error| {
+        eprintln!("{GPU_FAULT}: {error}");
+        sink.store(true, Ordering::Release);
+    }));
     let format = surface
         .get_capabilities(&adapter)
         .formats
@@ -291,6 +335,8 @@ fn device_for(
         rects,
         layout,
         cache,
+        side_max,
+        faulted,
     })
 }
 
@@ -389,12 +435,14 @@ impl Shared {
         }
         let set = self.device.as_ref().ok_or("no device")?;
         let mut config = surface
-            .get_default_config(&set.adapter, width.max(1), height.max(1))
+            .get_default_config(&set.adapter, set.fit(width), set.fit(height))
             .ok_or("surface not supported")?;
         config.format = set.format;
         config.present_mode = wgpu::PresentMode::Fifo;
         config.desired_maximum_frame_latency = 1;
         surface.configure(&set.device, &config);
+        set.fault()?;
+        assert!(config.width <= set.side_max && config.height <= set.side_max);
         let viewport = Viewport::new(&set.device, &set.cache);
         let mut atlas = TextAtlas::new(&set.device, &set.queue, &set.cache, set.format);
         let text = TextRenderer::new(
@@ -437,8 +485,9 @@ impl Shared {
         })
     }
 
-    /// Reconfigures a surface for a new size in physical pixels. Inputs: the surface, width
-    /// and height; a zero side is ignored. Output: ok, or the GPU's error code.
+    /// Reconfigures a surface for a new size in physical pixels, held to the device's
+    /// largest texture side. Inputs: the surface, width and height; a zero side is ignored.
+    /// Output: ok, or `native_terminal_gpu` when wgpu refused the configure.
     pub fn resize(
         &self,
         surface: &mut Surface,
@@ -448,17 +497,18 @@ impl Shared {
         let Some(set) = self.device.as_ref() else {
             return Ok(());
         };
-        if width == 0
-            || height == 0
-            || (width, height) == (surface.config.width, surface.config.height)
-        {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        let (width, height) = (set.fit(width), set.fit(height));
+        if (width, height) == (surface.config.width, surface.config.height) {
             return Ok(());
         }
         surface.config.width = width;
         surface.config.height = height;
         surface.surface.configure(&set.device, &surface.config);
         assert_eq!(surface.config.width, width);
-        Ok(())
+        set.fault()
     }
 
     fn row_buffer(&mut self) -> Buffer {
@@ -650,8 +700,8 @@ impl Shared {
     }
 
     /// Draws one frame on a surface: reshapes changed rows, uploads rectangles and glyphs,
-    /// renders and presents. Inputs: the surface and the frame. Output: ok, or why it was
-    /// skipped.
+    /// renders and presents. Inputs: the surface and the frame. Output: ok, why it was
+    /// skipped, or `native_terminal_gpu` when wgpu refused the frame's work.
     pub fn draw(&mut self, surface: &mut Surface, frame: &Frame) -> Result<(), String> {
         self.shape_rows(surface, frame);
         let rects = self.rect_bytes(frame);
@@ -696,16 +746,22 @@ impl Shared {
                 &mut self.swash,
             )
             .map_err(|e| e.to_string())?;
-        let output = surface.surface.get_current_texture().map_err(|e| {
-            surface.surface.configure(&set.device, &surface.config);
-            e.to_string()
-        })?;
+        let output = match surface.surface.get_current_texture() {
+            Ok(output) => output,
+            Err(error) => {
+                let held = (surface.config.width, surface.config.height);
+                assert!(held.0 <= set.side_max && held.1 <= set.side_max);
+                surface.surface.configure(&set.device, &surface.config);
+                set.fault()?;
+                return Err(error.to_string());
+            }
+        };
         let clear = linear_rgba(self.theme.background, 1.0);
         encode(set, surface, &output, rects.len() / 8, clear)?;
         output.present();
         surface.atlas.trim();
         assert_eq!(surface.generation, self.generation);
-        Ok(())
+        set.fault().map_err(String::from)
     }
 }
 
