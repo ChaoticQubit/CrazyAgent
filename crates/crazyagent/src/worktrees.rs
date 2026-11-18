@@ -1144,12 +1144,24 @@ fn validate_config(repository: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Refuses a git older than the 2.39 floor before any other git of an agent worktree runs,
+/// so the owner reads which Git to update (V243-WORKTREE-GIT-FLOOR). Input: the
+/// repository. Output: Ok, else `worktree_git_old`, or `changes_git_unsupported` for a
+/// version line that names no version.
+#[cfg(unix)]
+fn refuse_old_git(repository: &Path) -> Result<(), EngineError> {
+    let found = crate::landing::version_numbers(git(repository, &["version"])?);
+    crate::landing::refuse_older(&found, crate::landing::OPEN_VERSION_MIN, "worktree_git_old")
+}
+
 fn inspect(repository: &str) -> Result<Admission, EngineError> {
     let path = Path::new(repository);
     canonical(path)?;
     let root = identity(path, true)?;
     let metadata = identity(&path.join(".git"), true)?;
     validate_metadata(path)?;
+    #[cfg(unix)]
+    refuse_old_git(path)?;
     validate_config(path)?;
     let actual = git(path, &["rev-parse", "--show-toplevel"])?;
     if actual.strip_suffix(b"\n") != Some(repository.as_bytes()) {

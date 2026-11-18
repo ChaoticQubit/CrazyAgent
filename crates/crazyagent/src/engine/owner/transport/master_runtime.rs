@@ -1561,6 +1561,7 @@ pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
         "codex_host_cancelled" => MasterReason::Cancelled,
         "master_runtime_backend_unsupported" => MasterReason::UnsupportedCapability,
         "master_repository_missing" => MasterReason::RepositoryMissing,
+        "worktree_git_old" => MasterReason::GitTooOld,
         "master_instructions_too_large" => MasterReason::InstructionsTooLarge,
         "codex_host_protocol_invalid_state"
         | "codex_host_protocol_invalid_input"
