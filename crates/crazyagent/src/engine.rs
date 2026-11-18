@@ -1021,6 +1021,62 @@ mod tests {
         );
     }
 
+    /// An apply whose caller stops waiting while its job still waits in the queue, as an
+    /// owner request the transport cuts at its deadline does, is withdrawn: the worker skips
+    /// it, it never lands, and its queue slot is free for the next apply
+    /// (V243-STORAGE-BUSY-ROWS).
+    #[tokio::test]
+    async fn an_apply_its_caller_drops_while_queued_is_withdrawn_and_never_lands() {
+        let root = tempfile::tempdir().unwrap();
+        let (engine, _) = one_slot_engine(root.path(), "").await;
+        let engine = std::sync::Arc::new(engine);
+        let (release, held) = oneshot::channel();
+        engine.storage.sender.try_send(Job::Hold(held)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let cut =
+            tokio::time::timeout(engine.timeout / 4, engine.apply(create_request("cut"))).await;
+        assert!(
+            cut.is_err(),
+            "the caller stopped waiting while its job was queued"
+        );
+        drop(release);
+        let next = engine.apply(create_request("next")).await;
+        assert_eq!(
+            next.map(|reply| reply.revision).map_err(|error| error.0),
+            Ok(crate::protocol::Cursor::new(1)),
+            "the dropped create never landed, and its queue slot was free for the next apply"
+        );
+    }
+
+    /// A settings change whose caller stops waiting while it waits in the queue still lands,
+    /// since storage never withdraws an access-narrowing job (V243-STORAGE-BUSY-ROWS).
+    #[tokio::test]
+    async fn a_narrowing_job_its_caller_drops_while_queued_still_lands() {
+        let root = tempfile::tempdir().unwrap();
+        let (engine, path) = one_slot_engine(root.path(), "").await;
+        let changed = root.path().join("g2");
+        std::fs::write(&changed, "queue_capacity = 1\ntimeout_ms = 4321\n").unwrap();
+        let config = crate::config::resolve_config(&changed, &root.path().join("p")).unwrap();
+        let id = config.id.as_str().to_owned();
+        let (release, held) = oneshot::channel();
+        engine.storage.sender.try_send(Job::Hold(held)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let cut = tokio::time::timeout(engine.timeout / 4, engine.update_config(config)).await;
+        assert!(
+            cut.is_err(),
+            "the caller stopped waiting while its job was queued"
+        );
+        drop(release);
+        engine.close().await.unwrap();
+        let stored: i64 = rusqlite::Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM configs WHERE id=?1", [&id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored, 1, "the dropped narrowing change still landed");
+    }
+
     #[tokio::test]
     async fn an_apply_waits_for_a_storage_worker_that_starts_receiving_within_its_bound() {
         let root = tempfile::tempdir().unwrap();
