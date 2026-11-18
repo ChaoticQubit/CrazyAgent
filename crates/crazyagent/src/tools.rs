@@ -473,13 +473,11 @@ impl Places {
         (self.temp_refused && hops.iter().any(leads)).then_some(Refusal::InTemp)
     }
 
-    /// Whether agents can write a folder or file, read as written, with its links resolved
-    /// and in its one spelling ([`crate::sandbox::canonical`]): inside a `.crazyagent` folder,
-    /// inside a project ([`in_project`]), inside a folder the engine names for agents
-    /// ([`Places::in_set_up_project`]), inside the engine's data folder outside its `setup`
-    /// folder, or inside an agent's short temp folder
-    /// ([`crate::sandbox::toolchains::in_agent_tmp`]). HOME's names are read once per call.
-    /// Input: the path. Output: the answer.
+    /// Whether agents can write a path, read as written, resolved and in its one spelling
+    /// ([`crate::sandbox::canonical`]): in a `.crazyagent` folder, a project ([`in_project`]),
+    /// a folder the engine names for agents, the engine's data folder outside `setup`, or an
+    /// agent's short temp folder. HOME's names are read once per call. Input: the path.
+    /// Output: the answer.
     pub(crate) fn agent_writable(&self, path: &Path) -> bool {
         let real = path.canonicalize().ok();
         let plain = crate::sandbox::canonical(path).ok();
@@ -534,14 +532,11 @@ fn home_names(home: Option<&Path>) -> Vec<PathBuf> {
     names
 }
 
-/// Every folder agents can write whole that `engine.db` names, as recorded, real and in one
-/// spelling ([`crate::sandbox::canonical`]): set-up
-/// project folders, declared repositories, team and leased worktrees with their repositories,
-/// read read-only through engine start's own reader
-/// ([`crate::harnesses::finding::named_folders`]). No database or table names none; a failed
-/// read or a table past [`crate::harnesses::finding::AGENT_ROWS_MAX`] rows gives none; a row
-/// it cannot read is skipped alone and counted in the log. Input: the data folder. Output:
-/// the folders.
+/// Every folder `engine.db` names that agents write whole (set-up projects, declared
+/// repositories, team and leased worktrees with their repositories), as recorded, real and in
+/// one spelling, read through [`crate::harnesses::finding::named_folders`]. No database names
+/// none; a failed read or too many rows gives none; an unreadable row is skipped and counted.
+/// Input: the data folder. Output: the folders.
 fn registered_projects(data_root: &Path) -> Option<Vec<PathBuf>> {
     use crate::harnesses::finding::{BadRow, NAMED_FOLDERS_MAX, named_folders};
     let database = data_root.join("engine.db");

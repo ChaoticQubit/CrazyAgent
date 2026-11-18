@@ -2269,7 +2269,8 @@ fn a_nested_agent_neither_signals_nor_lists_a_process_outside_its_own() {
 
 /// A nested agent started with pipes shares no session or terminal with the engine: the
 /// first process, bubblewrap's outer one, leads a group and a session of its own with no
-/// controlling terminal, and the harness, inside the namespace, reads both as 0.
+/// controlling terminal, and the harness, inside the namespace, reads both as 0. Given its
+/// line, the harness ends with 0.
 #[test]
 fn a_nested_agent_shares_no_session_or_terminal_with_the_engine() {
     let case = case();
@@ -2294,7 +2295,9 @@ fn a_nested_agent_shares_no_session_or_terminal_with_the_engine() {
         [first.as_str(), first.as_str(), "0"],
         "the first process leads its group and session, with no terminal: {outside:?}"
     );
-    drop(child.stdin.take());
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"done\n").unwrap();
+    drop(input);
     let status = exit_within(&mut child, Duration::from_secs(5));
     assert_eq!(status.and_then(|status| status.code()), Some(0));
 }
