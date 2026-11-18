@@ -314,3 +314,38 @@ fn a_store_label_reaches_only_what_the_store_holds() {
     assert_eq!(dacl::inherited_label(sacl), both);
     assert_eq!(judge_folder(&database, &USER), Ok(()));
 }
+
+/// #568 rv-code F1 (leader 09:19): two mandatory labels that both apply to the object, as an
+/// own label beside one a folder handed down, or that both reach what a folder makes, are
+/// refused, not read as the first, since the reader cannot tell which one Windows enforces.
+/// One own label and one handed-down label on a folder read apart.
+#[test]
+fn a_second_label_entry_is_refused_not_skipped() {
+    let own = (LABEL, 0, FULL_POLICY, &MEDIUM[..]);
+    let inherited = (LABEL, INHERITED, NO_WRITE_UP | NO_READ_UP, &MEDIUM[..]);
+    let two = acl(&[own, inherited]);
+    assert!(dacl::label(&two).is_err());
+    let mut object = facts(Some(private_list(&[])));
+    object.label = Some(two);
+    assert!(judge(&object, &USER).is_err());
+    let handed = acl(&[
+        (LABEL, INHERITABLE, FULL_POLICY, &MEDIUM[..]),
+        (
+            LABEL,
+            OBJECT_INHERIT | INHERIT_ONLY,
+            NO_WRITE_UP,
+            &MEDIUM[..],
+        ),
+    ]);
+    assert!(dacl::inherited_label(&handed).is_err());
+    let mut folder = facts(Some(private_list(&[])));
+    folder.label = Some(handed);
+    assert!(judge_folder(&folder, &USER).is_err());
+    let apart = acl(&[
+        own,
+        (LABEL, INHERITABLE | INHERIT_ONLY, FULL_POLICY, &MEDIUM[..]),
+    ]);
+    let full = Ok(Some((0x2000, FULL_POLICY)));
+    assert_eq!(dacl::label(&apart), full);
+    assert_eq!(dacl::inherited_label(&apart), full);
+}
