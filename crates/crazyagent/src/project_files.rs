@@ -34,14 +34,11 @@ pub(crate) fn validate(query: &str, limit: u16) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Lists a project's files for `@` tags: the paths git tracks and the untracked paths it
-/// does not ignore, relative to the project folder, whose path contains the query in any
-/// case. Never lists `.git`, a link, or a file reached through a link out of the folder.
-/// Runs the real git with no outside config, hooks or fsmonitor, and stops at the limit,
-/// at a 48 KiB reply or at `stop`, answering with the paths found by then. Inputs: the
-/// absolute project folder, the query, the limit and the time to stop. Output: the paths
-/// in git's order, or `project_files_folder_missing`, `project_files_no_repository` or
-/// `project_files_git_failed`.
+/// Lists, for `@` tags, the tracked and unignored files whose relative path holds the query in
+/// any case, never `.git`, a link or a file reached through one, via git with no outside
+/// config, hooks or fsmonitor and `.git` as its common folder, so a planted `commondir`
+/// redirects nothing. Stops at the limit, 48 KiB or `stop`. Inputs: the absolute folder,
+/// query, limit and stop time. Output: the paths in git's order, or a `project_files_*` code.
 #[cfg(unix)]
 pub(crate) fn list(
     folder: &Path,
@@ -63,6 +60,12 @@ pub(crate) fn list(
     if !std::fs::symlink_metadata(&git_dir).is_ok_and(|meta| meta.is_dir()) {
         return Err(failure("project_files_no_repository"));
     }
+    #[cfg(test)]
+    AFTER_CHECK.with(|step| {
+        if let Some(step) = step.borrow().as_ref() {
+            step(&git_dir);
+        }
+    });
     let git_failed = |_| failure("project_files_git_failed");
     let mut command = Command::new(crate::research::runner::setup_git());
     command
@@ -70,6 +73,7 @@ pub(crate) fn list(
         .env("PATH", "/usr/bin:/bin")
         .env("LC_ALL", "C")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_COMMON_DIR", &git_dir)
         .envs(crate::research::runner::GIT_SAFE_ENV)
         .arg("--no-optional-locks")
         .args(crate::research::runner::GIT_SAFE)
@@ -198,6 +202,48 @@ fn inside(root: &Path, path: &str) -> bool {
             .is_some_and(|parent| parent.starts_with(root))
 }
 
+/// A test step `list` runs with the `.git` folder it checked. Input: that folder. Output:
+/// none.
+#[cfg(all(test, unix))]
+type AfterCheck = Box<dyn Fn(&Path)>;
+
+#[cfg(all(test, unix))]
+thread_local! {
+    /// A step the tests run once `list` has checked the `.git` folder and before git starts,
+    /// with that folder, standing in for an agent that changes it meanwhile. None runs nothing.
+    static AFTER_CHECK: std::cell::RefCell<Option<AfterCheck>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Lists a repository while a step plants a `commondir` after `list` checked the `.git`
+/// folder, naming a common folder whose `info/exclude` hides `notes.txt`. Inputs: a
+/// repository with an untracked `notes.txt` and a new folder for the common one. Output:
+/// what `list` answered.
+#[cfg(all(test, unix))]
+fn listed_with_commondir_planted_after_check(
+    repo: &Path,
+    store: &Path,
+) -> Result<Vec<String>, EngineError> {
+    for name in ["objects", "refs", "info"] {
+        std::fs::create_dir_all(store.join(name)).unwrap();
+    }
+    std::fs::write(
+        store.join("config"),
+        "[core]\n\trepositoryformatversion = 0\n",
+    )
+    .unwrap();
+    std::fs::write(store.join("info").join("exclude"), "notes.txt\n").unwrap();
+    let common = format!("{}\n", store.display());
+    AFTER_CHECK.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move |git_dir: &Path| {
+            std::fs::write(git_dir.join("commondir"), &common).unwrap();
+        }));
+    });
+    let listed = list(repo, "", FILES_MAX, Instant::now() + LISTING_TIME);
+    AFTER_CHECK.with(|step| *step.borrow_mut() = None);
+    listed
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -265,6 +311,15 @@ mod tests {
         fs::write(repo.join("debug.log"), "ignored").unwrap();
         symlink(&outside, repo.join("outside-link")).unwrap();
         repo
+    }
+
+    #[test]
+    fn a_commondir_planted_after_the_check_redirects_nothing() {
+        let place = tempfile::tempdir().unwrap();
+        let repo = project(place.path());
+        let listed =
+            listed_with_commondir_planted_after_check(&repo, &place.path().join("store")).unwrap();
+        assert!(listed.iter().any(|path| path == "notes.txt"), "{listed:?}");
     }
 
     fn sorted(mut paths: Vec<String>) -> Vec<String> {
