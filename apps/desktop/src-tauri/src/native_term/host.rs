@@ -973,12 +973,11 @@ impl Native {
                 let _ = entry.platform.events.send(NativeEvent::Menu { x, y });
                 Action::Nothing
             }
-            ViewEvent::Copy => {
-                if let Ok(text) = entry.pane.copy(false) {
-                    let _ = clip.write(&text);
-                }
-                Action::Nothing
-            }
+            ViewEvent::Copy => copied(clip, entry.pane.copy(false)),
+            ViewEvent::CopyKey(key) => match entry.pane.copy(false) {
+                Err("native_terminal_copy_empty") => entry.pane.apply(key),
+                copy => copied(clip, copy),
+            },
             ViewEvent::Paste => match clip.read() {
                 Some(text) => entry.pane.apply(Input::Paste { text }),
                 None => Action::Nothing,
@@ -1037,6 +1036,15 @@ impl Native {
         entry.told = now;
         assert_eq!(entry.told, now);
     }
+}
+
+/// Puts a copy's text on the clipboard; a copy with nothing to take or over the cap puts
+/// nothing there. Inputs: the clipboard and the pane's copy. Output: no pane action.
+fn copied(clip: &Clip, copy: Result<String, &'static str>) -> Action {
+    if let Ok(text) = copy {
+        let _ = clip.write(&text);
+    }
+    Action::Nothing
 }
 
 fn cell_of(
