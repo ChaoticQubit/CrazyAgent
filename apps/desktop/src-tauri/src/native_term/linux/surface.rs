@@ -68,6 +68,14 @@ impl Rect {
         let height = u32::try_from(self.h * scale).expect("a positive height");
         (self.x * scale, self.y * scale, width, height)
     }
+
+    /// The part of the rectangle a child may show inside the webview's area. Not clipped
+    /// yet: the whole rectangle. Input: the webview's area in the toplevel's logical
+    /// pixels. Output: the part.
+    pub fn visible(self, bounds: Rect) -> Option<Rect> {
+        let _ = bounds;
+        Some(self)
+    }
 }
 
 /// The host rectangle from the page's CSS pixels, which are GTK logical pixels at zoom 1,
@@ -802,6 +810,34 @@ mod tests {
         };
         assert_eq!(logical.device(1), (-5, 7, 400, 240));
         assert_eq!(logical.device(2), (-10, 14, 800, 480));
+    }
+
+    /// A Wayland subsurface is not clipped to its toplevel, so a child shows only the part
+    /// of its rectangle inside the webview: none past an edge, none outside it.
+    #[test]
+    fn the_visible_part_is_the_rect_inside_the_webview() {
+        let page = Rect {
+            x: 0,
+            y: 40,
+            w: 800,
+            h: 560,
+        };
+        let at = |x, y, w, h| Rect { x, y, w, h };
+        let inside = at(100, 120, 400, 240);
+        assert_eq!(inside.visible(page), Some(inside));
+        assert_eq!(
+            at(600, 500, 400, 240).visible(page),
+            Some(at(600, 500, 200, 100))
+        );
+        assert_eq!(
+            at(-50, 0, 400, 240).visible(page),
+            Some(at(0, 40, 350, 200))
+        );
+        assert_eq!(at(-100, 0, 1000, 700).visible(page), Some(page));
+        assert_eq!(at(800, 120, 400, 240).visible(page), None);
+        assert_eq!(at(100, -200, 400, 240).visible(page), None);
+        assert_eq!(at(-16_384, -16_384, 16_384, 16_384).visible(page), None);
+        assert_eq!(inside.visible(at(0, 40, 0, 0)), None);
     }
 
     #[test]
