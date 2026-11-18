@@ -16,6 +16,7 @@ const ANY_RIGHT: u32 = u32::MAX;
 const MEDIUM_LEVEL: u32 = 0x2000;
 const NO_WRITE_UP: u32 = 0x1;
 const NO_READ_UP: u32 = 0x2;
+const NO_EXECUTE_UP: u32 = 0x4;
 
 /// What W1's check reads from one opened private folder or file (DESIGN-0140 D1): its owner
 /// SID, its access list (None when it has none), its system list holding the mandatory label
@@ -125,9 +126,10 @@ pub fn label_list(store: Store) -> Vec<u8> {
     labelled(MEDIUM_LEVEL, NO_WRITE_UP | NO_READ_UP, flags)
 }
 
-/// The system list a secret file is created with (rv-sec3 #555 N1): the same medium label
-/// with no-write-up and no-read-up, on the file itself with nothing to pass on, so it holds
-/// in a folder that carries no label. Output: the bytes.
+/// The system list a secret file is created with (rv-sec3 #555 N1, rv-code #562 F1): a medium
+/// label with no-write-up, no-read-up and no-execute-up, since a lower integrity process may
+/// otherwise open it for execute only and, sharing nothing, block its rename. It sits on the
+/// file itself with nothing to pass on, so it holds in an unlabelled folder. Output: the bytes.
 pub fn secret_file_label() -> Vec<u8> {
-    labelled(MEDIUM_LEVEL, NO_WRITE_UP | NO_READ_UP, 0)
+    labelled(MEDIUM_LEVEL, NO_WRITE_UP | NO_READ_UP | NO_EXECUTE_UP, 0)
 }

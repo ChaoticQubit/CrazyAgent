@@ -372,10 +372,10 @@ mod windows_tests {
         assert_eq!(entries(&root), ["pipes"]);
     }
 
-    /// V244-WIN-PIPES-LISTENER-REQS (rv-sec3 #555 N1, leader 08:08): the pipes file carries a
-    /// medium label with no-write-up and no-read-up from its creation, in a root that holds no
-    /// label of its own, so no lower integrity process can open it to read, hold it and so
-    /// block the next start's rename.
+    /// V244-WIN-PIPES-LISTENER-REQS (rv-sec3 #555 N1, rv-code #562 F1): the pipes file carries
+    /// a medium label with no-write-up, no-read-up and no-execute-up from its creation, in a
+    /// root that holds no label of its own, so no lower integrity process can open it, hold it
+    /// and so block the next start's rename.
     #[test]
     fn a_pipes_file_is_labelled_medium_no_read_up_in_an_unlabelled_root() {
         let (_temp, root) = private_root();
@@ -394,13 +394,13 @@ mod windows_tests {
             .expect("a labelled pipes file");
         assert_eq!(
             crazyagent_win_sandbox::dacl::label(&sacl),
-            Ok(Some((0x2000, 0x3)))
+            Ok(Some((0x2000, 0x7)))
         );
     }
 
-    /// D7 and #555 N1 in the engine's real root, the database store folder, whose label passes
-    /// to the files made in it: the pipes file still reads back the same and carries the
-    /// medium no-write-up no-read-up label.
+    /// D7, #555 N1 and #562 F1 in the engine's real root, the database store folder, whose
+    /// label passes to the files made in it: the pipes file still reads back the same and
+    /// carries its own medium no-write-up, no-read-up and no-execute-up label.
     #[test]
     fn a_pipes_file_in_the_database_root_reads_back_labelled() {
         let temp = tempfile::tempdir().unwrap();
@@ -415,7 +415,7 @@ mod windows_tests {
             .expect("a labelled pipes file");
         assert_eq!(
             crazyagent_win_sandbox::dacl::label(&sacl),
-            Ok(Some((0x2000, 0x3)))
+            Ok(Some((0x2000, 0x7)))
         );
     }
 
