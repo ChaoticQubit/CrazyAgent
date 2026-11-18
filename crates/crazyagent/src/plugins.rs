@@ -960,10 +960,7 @@ pub fn timed_out_problem(code: &'static str, program: &Path) -> &'static str {
     assert!(!code.is_empty());
     assert!(!program.as_os_str().is_empty());
     let text = program.to_string_lossy();
-    let name = text
-        .rsplit(|unit| unit == '/' || unit == '\\')
-        .next()
-        .unwrap_or_default();
+    let name = text.rsplit(['/', '\\']).next().unwrap_or_default();
     let stem = name.split_once('.').map_or(name, |(stem, _)| stem);
     let powershell = ["powershell", "pwsh"]
         .iter()
