@@ -55,10 +55,7 @@ jobs:
         timeout-minutes: 25
         run: |
           set -euo pipefail
-          sudo apt-get -o Acquire::Retries=2 install -y --no-install-recommends xvfb x11-apps sway wtype xdotool ibus ibus-gtk3 ibus-m17n dbus-x11 mesa-vulkan-drivers libvulkan1 libgl1-mesa-dri libegl1 jq
-      - name: Install wlrctl, the sway pointer driver, if the archive has it
-        timeout-minutes: 10
-        run: sudo apt-get -o Acquire::Retries=2 install -y --no-install-recommends wlrctl || echo "::warning::wlrctl did not install; the sway pointer rows do not run"
+          sudo apt-get -o Acquire::Retries=2 install -y --no-install-recommends xvfb x11-apps sway libxkbcommon-tools xdotool ibus ibus-gtk3 ibus-m17n dbus-x11 mesa-vulkan-drivers libvulkan1 libgl1-mesa-dri libegl1 jq
       - name: Install the Rust toolchain
         run: |
           set -euo pipefail
@@ -77,6 +74,7 @@ jobs:
       - name: Red then green rows, lib build and clippy, one target set per cargo call
         run: |
           set -euo pipefail
+          cp .github/farm/wl-input.py "$RUNNER_TEMP/wl-input.py"
           cp .github/farm/v244-linux-pointer.sh "$RUNNER_TEMP/pointer.sh"
           bash "$RUNNER_TEMP/pointer.sh" linux
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9

@@ -63,10 +63,8 @@ ignored_rows=(
 mkdir -p apps/desktop/dist
 [ -f apps/desktop/dist/index.html ] || printf '<!doctype html><title>farm</title>\n' > apps/desktop/dist/index.html
 log "os $os red $RED1_SHA and $RED2_SHA green $GREEN_SHA $(rustc -V)"
-pointer_driver=none
-command -v wlrctl > /dev/null && pointer_driver=wlrctl
-log "sway pointer driver: $pointer_driver"
-log "$(sway --version 2>&1 | head -1); $(ibus version 2>&1 | head -1); wtype $(command -v wtype > /dev/null && echo present || echo missing); xdotool $(xdotool version 2>&1 | head -1)"
+log "$(sway --version 2>&1 | head -1); $(ibus version 2>&1 | head -1); xkbcli $(command -v xkbcli > /dev/null && echo present || echo missing); xdotool $(xdotool version 2>&1 | head -1)"
+xkbcli compile-keymap --layout us > "$RUNNER_TEMP/keymap-us.xkb" 2> "$RUNNER_TEMP/keymap-us.err" || log "::error::xkbcli did not compile the us keymap: $(head -c 300 "$RUNNER_TEMP/keymap-us.err")"
 
 red_present=0
 red_total=0
@@ -142,7 +140,10 @@ fi
 log "ibus ready $ibus_ready, latn-pre engines $(grep -c 'm17n:t:latn-pre' "$root/ibus-engines.txt" 2> /dev/null)"
 
 display_pid=""
-holder_pid=""
+input_pid=""
+input_fd=""
+input_sent=0
+input_acks=""
 load_pids=()
 
 sway_keyboards() {
@@ -165,6 +166,46 @@ start_x11() {
   return 1
 }
 
+start_seat() {
+  local fifo="$root/seat-$cell.fifo"
+  input_acks="$root/seat-$cell.acks"
+  rm -f "$fifo" "$input_acks"
+  mkfifo "$fifo"
+  : > "$input_acks"
+  python3 -I "$RUNNER_TEMP/wl-input.py" "$fifo" "$input_acks" "$RUNNER_TEMP/keymap-us.xkb" 1280x800 > "$root/seat-$cell.log" 2>&1 &
+  input_pid=$!
+  exec {input_fd}<> "$fifo"
+  input_sent=0
+  for _ in $(seq 1 50); do
+    grep -qx ready "$input_acks" && return 0
+    kill -0 "$input_pid" 2> /dev/null || break
+    sleep 0.1
+  done
+  log "::error::$cell: the farm seat did not start: $(tail -n 3 "$root/seat-$cell.log" | tr '\n' ' ')"
+  return 1
+}
+
+seat_do() {
+  local want=$((input_sent + 1))
+  input_sent=$want
+  printf '%s\n' "$*" >&"$input_fd"
+  for _ in $(seq 1 300); do
+    [ "$(grep -c '^done ' "$input_acks")" -ge "$want" ] && return 0
+    kill -0 "$input_pid" 2> /dev/null || break
+    sleep 0.05
+  done
+  log "::error::$cell: the farm seat did not run $*: $(tail -n 3 "$root/seat-$cell.log" | tr '\n' ' ')"
+  return 1
+}
+
+stop_seat() {
+  [ -n "$input_fd" ] && exec {input_fd}>&-
+  input_fd=""
+  [ -n "$input_pid" ] && kill "$input_pid" 2> /dev/null
+  [ -n "$input_pid" ] && wait "$input_pid" 2> /dev/null
+  input_pid=""
+}
+
 start_sway() {
   export XDG_RUNTIME_DIR="$RUNNER_TEMP/xdg-$cell" GDK_BACKEND=wayland
   mkdir -p -m 700 "$XDG_RUNTIME_DIR"
@@ -177,11 +218,8 @@ start_sway() {
     socket=$(ls "$XDG_RUNTIME_DIR" 2> /dev/null | grep -E '^wayland-[0-9]+$' | head -1)
     if [ -n "$socket" ]; then
       export WAYLAND_DISPLAY=$socket
-      log "  $cell sway keyboards before the holder: $(sway_keyboards)"
-      wtype -s 3600000 -k Shift_L > "$root/holder-$cell.log" 2>&1 &
-      holder_pid=$!
-      sleep 1
-      log "  $cell sway keyboards with the holder: $(sway_keyboards)"
+      start_seat || return 1
+      log "  $cell sway keyboards with the farm seat: $(sway_keyboards)"
       return 0
     fi
     sleep 0.1
@@ -190,8 +228,7 @@ start_sway() {
 }
 
 stop_display() {
-  [ -n "$holder_pid" ] && kill "$holder_pid" 2> /dev/null
-  holder_pid=""
+  stop_seat
   [ -n "$display_pid" ] && kill "$display_pid" 2> /dev/null
   wait "$display_pid" 2> /dev/null
   display_pid=""
@@ -223,7 +260,7 @@ type_text() {
   if [ "$kind" = x11 ]; then
     timeout 30 xdotool type --delay 80 "$text"
   else
-    timeout 30 wtype -s 300 -d 80 "$text"
+    seat_do type "$text"
   fi
 }
 
@@ -233,9 +270,7 @@ type_keys() {
   if [ "$kind" = x11 ]; then
     timeout 30 xdotool key --delay 80 "$@"
   else
-    local args=()
-    for name in "$@"; do args+=(-k "$name"); done
-    timeout 30 wtype -s 300 -d 80 "${args[@]}"
+    seat_do key "$@"
   fi
 }
 
@@ -290,10 +325,10 @@ wait_step() {
 point_click() {
   local kind=$1 x=$2 y=$3 rc
   if [ "$kind" = x11 ]; then
-    timeout 10 xdotool mousemove --sync "$x" "$y" click 1
+    timeout 10 xdotool mousemove "$x" "$y" sleep 0.2 click 1
     rc=$?
   else
-    timeout 5 wlrctl pointer move -4000 -4000 && timeout 5 wlrctl pointer move "$x" "$y" && timeout 5 wlrctl pointer click left
+    seat_do click "$x" "$y" left
     rc=$?
   fi
   log "  $cell click ($x,$y) exit $rc"
@@ -305,7 +340,7 @@ point_wheel() {
     timeout 10 xdotool click 5
     rc=$?
   else
-    timeout 5 wlrctl pointer scroll 10 0
+    seat_do scroll 1
     rc=$?
   fi
   log "  $cell wheel down exit $rc"
@@ -398,12 +433,7 @@ run_cell() {
   timeout 5 ibus engine xkb:us::eng > /dev/null 2>&1
   [ "$load" = loaded ] && load_on
   run_row "$kind" "$dir/keys" keys "$keys_row" page native page-ime native-ime native-preedit covered close-preedit closed
-  if [ "$kind" = x11 ] || [ "$pointer_driver" = wlrctl ]; then
-    run_row "$kind" "$dir/pointer" pointer "$pointer_row" covered uncovered outside
-  else
-    log "$cell pointer: not run, no pointer driver on sway (wlrctl not installed)"
-    cell_rows+=("| $cell | pointer | not run | no pointer driver (wlrctl not installed) | |")
-  fi
+  run_row "$kind" "$dir/pointer" pointer "$pointer_row" covered uncovered outside
   load_off
   stop_display
 }
@@ -434,7 +464,7 @@ red_ok=1
   printf '| native_term rows | %s, %s passed |\n' "$rows_rc" "$passed"
   printf '| named rows ok, none failed, display rows ignored (0 = yes) | %s |\n' "$want"
   printf '| display row cells all pass (0 = yes) | %s %s |\n' "$row_ok" "${cells[*]:-}"
-  printf '| sway pointer driver | %s |\n' "$pointer_driver"
+  printf '| sway input | the farm seat: one virtual keyboard and one virtual pointer for each cell |\n'
   printf '| clippy --lib -D warnings | %s |\n| clippy --tests -D warnings | %s |\n' "$clip" "$clipt"
   printf '\n| cell | row | row exit | steps reached | first panic |\n| --- | --- | --- | --- | --- |\n'
   printf '%s\n' "${cell_rows[@]}"
