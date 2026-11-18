@@ -582,7 +582,7 @@ impl Crop {
         let buffer = Buffer {
             width: size.0,
             height: size.1,
-            scale: placement.scale,
+            scale,
         };
         placement.drawing = Some(buffer);
         self.placement.set(placement);
