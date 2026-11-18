@@ -436,11 +436,15 @@ impl IntakeJob {
         label
     }
 
-    /// Marks a job not yet started as waiting for its turn behind the job named `behind`.
-    /// Input: that job's name.
+    /// Marks a job not yet started as waiting for its turn behind the job named `behind`. A
+    /// job that already ended stays ended: its task's guard can end it, outside the held
+    /// jobs' lock, after an admit found it waiting. Input: that job's name.
     pub fn wait(&self, behind: &str) {
         assert!(!behind.is_empty());
         let mut stage = self.stage.lock().unwrap_or_else(PoisonError::into_inner);
+        if matches!(*stage, Stage::Ended(_)) {
+            return;
+        }
         assert!(
             matches!(*stage, Stage::Waiting(_) | Stage::Downloading),
             "only a job not yet started waits"
