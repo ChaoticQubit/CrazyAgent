@@ -1,0 +1,45 @@
+diff --git a/crates/crazyagent/src/engine/owner/transport/barrier_tests.rs b/crates/crazyagent/src/engine/owner/transport/barrier_tests.rs
+index 802585a0a..435f2e506 100644
+--- a/crates/crazyagent/src/engine/owner/transport/barrier_tests.rs
++++ b/crates/crazyagent/src/engine/owner/transport/barrier_tests.rs
+@@ -387,6 +387,7 @@ async fn a_revocation_waits_for_a_plugin_change_in_flight_and_refuses_the_next()
+     let owner = Usage::start_waiting(PATIENT_WAIT_MS).await;
+     let runtime = owner.runtime();
+     let (swept, sweep) = occupy_storage(&owner);
++    let queued = std::time::Instant::now();
+     let mut added = Box::pin(owner.client.add_mcp_server(
+         Scope::Global,
+         "held-server".into(),
+@@ -406,10 +407,29 @@ async fn a_revocation_waits_for_a_plugin_change_in_flight_and_refuses_the_next()
+     );
+     let control = revocation(runtime, OwnerClientKind::Tui, "revoke-during-plugin-change");
+     let mut revoke = Box::pin(runtime.control(control.clone()));
+-    assert!(
+-        tokio::time::timeout(IN_FLIGHT, &mut revoke).await.is_err(),
+-        "a revocation waits for the change already in flight"
++    let early = tokio::time::timeout(IN_FLIGHT, &mut revoke).await;
++    let left = std::fs::read_dir(&swept).map(|entries| entries.count() as i64).unwrap_or(-1);
++    let mut probe = format!(
++        "PLUGINPROBE ms_since_sweep_queued={} swept_exists={} files_left={} revoke_early={:?}",
++        queued.elapsed().as_millis(),
++        swept.exists(),
++        left,
++        early.as_ref().map(|answer| answer.as_ref().map(|reply| reply.active).map_err(|error| error.0.clone()))
+     );
++    if early.is_ok() {
++        let add = tokio::time::timeout(SWEEP_TIME_MAX, &mut added).await;
++        probe.push_str(&format!(
++            " add={:?} add_ms={}",
++            add.as_ref().map(|answer| answer.as_ref().map(|server| server.id.clone()).map_err(|error| error.0.clone())),
++            queued.elapsed().as_millis()
++        ));
++    }
++    if let Ok(path) = std::env::var("PLUGINPROBE_OUT") {
++        use std::io::Write;
++        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap();
++        writeln!(file, "{probe}").unwrap();
++    }
++    assert!(early.is_err(), "a revocation waits for the change already in flight: {probe}");
+     let answered = tokio::time::timeout(SWEEP_TIME_MAX, added).await.unwrap();
+     let revoked = tokio::time::timeout(SWEEP_TIME_MAX, revoke).await.unwrap();
+     tokio::time::timeout(SWEEP_TIME_MAX, sweep)
