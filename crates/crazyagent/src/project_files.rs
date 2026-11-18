@@ -722,9 +722,12 @@ mod windows_tests {
     /// Replaces one entry of a `.git` folder with a link to a new place outside it: a
     /// junction for a folder, which needs no privilege, a file link for anything else,
     /// which the farm's elevated runner may make. Inputs: the `.git` folder, the entry and
-    /// the outside folder.
+    /// the outside folder. The entry's `/` become `\`, since `mklink` reads a `/` in a path as
+    /// a switch.
     fn linked(git_dir: &Path, entry: &str, outside: &Path) {
-        let inside = git_dir.join(entry);
+        let inside = entry
+            .split('/')
+            .fold(git_dir.to_path_buf(), |at, part| at.join(part));
         let target = outside.join(entry.replace('/', "-"));
         if inside.is_dir() {
             fs::create_dir_all(&target).unwrap();
