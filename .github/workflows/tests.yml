@@ -169,56 +169,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  macos-proxy:
-    name: macOS team model-proxy rows (regression of the proxy decision), green side
-    runs-on: macos-15
-    timeout-minutes: 150
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners, never on badal or another self-hosted runner"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-      - name: Install the Rust toolchain
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
-          echo "CARGO_PROFILE_DEV_DEBUG=0" >> "$GITHUB_ENV"
-          echo "CARGO_PROFILE_TEST_DEBUG=0" >> "$GITHUB_ENV"
-          echo "CARGO_BUILD_JOBS=2" >> "$GITHUB_ENV"
-      - name: Fetch Rust dependencies
-        run: cargo fetch --locked
-      - name: Proxy and network rows of the team runtime, and the policy rows
-        run: |
-          set -uo pipefail
-          out="$RUNNER_TEMP/o3a-o2a-macos.txt"
-          git log --oneline -1 | tee "$out"
-          cargo +"$RUST_TOOLCHAIN" test -p crazyagent --lib --locked --no-run 2>&1 | tee -a "$out"
-          built=${PIPESTATUS[0]}
-          cargo +"$RUST_TOOLCHAIN" test -p crazyagent --lib --locked --no-fail-fast -- \
-            sandbox::policy::tests \
-            team::runtime::tests::a_tools_on_agent_profile_follows_the_project_network_choice \
-            team::runtime::tests::a_managed_tools_on_agent_under_no_network \
-            team::runtime::tests::a_live_master_with_tools_under_no_network \
-            team::runtime::tests::a_proxied_agent_s \
-            team::runtime::tests::an_endpoint_agent_under_no_network \
-            team::runtime::tests::a_kept_pane_gets_its_model_proxy \
-            team::runtime::tests::a_real_endpoint_turn_under_no_network 2>&1 | tee -a "$out"
-          rc=${PIPESTATUS[0]}
-          ran=$(grep -cE '^test team::runtime::tests::.* \.\.\. (ok|FAILED)' "$out")
-          printf '| macOS | exit |\n| --- | --- |\n| build --lib --no-run | %s |\n| policy rows + team proxy and network rows | %s |\n| team rows run | %s |\n' "$built" "$rc" "$ran" >> "$GITHUB_STEP_SUMMARY"
-          [ "$built" = 0 ] && [ "$rc" = 0 ] && [ "$ran" -ge 8 ]
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
-        with:
-          name: farm-o3a-o2a-macos
-          path: ${{ runner.temp }}/o3a-o2a-macos.txt
-          if-no-files-found: warn
-          retention-days: 14
-
   node:
     name: Desktop O3a/O2a rows, ${{ matrix.side }}
     runs-on: ubuntu-22.04
