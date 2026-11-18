@@ -273,12 +273,10 @@ pub struct FaceEm {
     pub descent: f64,
 }
 
-/// The cell size in device pixels, by the rule today's xterm panel uses with its WebGL
-/// renderer, letter spacing 0 and line height 1: the width is the advance at the device
-/// scale, floored; the height is WebKit's font box (ascent and descent each rounded to
-/// whole CSS pixels) at the device scale, ceiled. So one host rect gives one grid. Measured
-/// on the rig (hresearch team4c 02:15, dpr 1): JetBrains Mono 13 px gives 7 x 17 cells.
-/// Inputs: the font metrics, the size in CSS pixels and the backing scale. Output: (width,
+/// The cell size in device pixels by the xterm panel's WebGL rule (letter spacing 0, line
+/// height 1): the advance at the device scale, floored, by WebKit's font box (ascent and
+/// descent each rounded to CSS pixels) at the device scale, ceiled, so one rect gives one
+/// grid. Inputs: the font metrics, the CSS size and the backing scale. Output: (width,
 /// height) in device pixels.
 pub fn cell_px(face: FaceEm, font_px: f64, scale: f64) -> (f64, f64) {
     assert!((FONT_PX_MIN..=FONT_PX_MAX).contains(&font_px));
