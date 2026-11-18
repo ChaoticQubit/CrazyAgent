@@ -156,14 +156,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'marker build failed' }
           $hooks = @('reference-transaction', 'pre-commit', 'commit-msg', 'post-commit', 'post-checkout')
           $planted = @()
-          foreach ($d in 'C', 'D') {
-            $dir = "${d}:\dev\null"
-            New-Item -ItemType Directory -Force $dir | Out-Null
-            foreach ($h in $hooks) {
-              $mark = (Join-Path $marks "$d-$h.txt") -replace '\\', '/'
-              [IO.File]::WriteAllText((Join-Path $dir $h), "#!/bin/sh`necho ""`$0"" >> '$mark'`n")
-              Copy-Item $marker (Join-Path $dir "$h.exe") -Force
-              $planted += (Join-Path $dir "$h.ran")
+          function Plant([string]$kind) {
+            foreach ($d in 'C', 'D') {
+              $dir = "${d}:\dev\null"
+              if (Test-Path $dir) { Remove-Item $dir -Recurse -Force }
+              New-Item -ItemType Directory -Force $dir | Out-Null
+              foreach ($h in $hooks) {
+                if ($kind -eq 'sh') {
+                  $mark = (Join-Path $marks "$d-$h.txt") -replace '\\', '/'
+                  [IO.File]::WriteAllText((Join-Path $dir $h), "#!/bin/sh`necho ""`$0"" >> '$mark'`n")
+                } else {
+                  Copy-Item $marker (Join-Path $dir "$h.exe") -Force
+                }
+                $script:planted += (Join-Path $dir "$h.ran")
+              }
             }
           }
           function Ran {
@@ -177,17 +183,21 @@ jobs:
           }
           function Run([string]$label, [string]$cwd, [hashtable]$vars, [string[]]$gitArgs) {
             $saved = @{}
-            foreach ($k in $vars.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $vars[$k]) }
+            foreach ($k in $vars.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); Set-Item "Env:$k" $vars[$k] }
             Push-Location $cwd
             & $git @gitArgs > (Join-Path $t 'out.txt') 2> (Join-Path $t 'err.txt')
             $rc = $LASTEXITCODE
             Pop-Location
-            foreach ($k in $vars.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+            foreach ($k in $vars.Keys) { if ($null -eq $saved[$k]) { Remove-Item "Env:$k" -ErrorAction SilentlyContinue } else { Set-Item "Env:$k" $saved[$k] } }
+            foreach ($k in 'GIT_DIR', 'GIT_WORK_TREE') { if (Test-Path "Env:$k") { throw "$k leaked after $label" } }
             $err = ((Get-Content (Join-Path $t 'err.txt') -TotalCount 2 -ErrorAction SilentlyContinue) -join ' | ')
             "$label rc=$rc ran=[$(Ran)] err=[$err]"
           }
           $values = @('/dev/null', (([Environment]::SystemDirectory -replace '\\', '/') + '/crazyagent-none'))
-          foreach ($drive in @(@{ name = 'C'; base = (Join-Path $env:USERPROFILE 'hp') }, @{ name = 'D'; base = (Join-Path $t 'hp') })) {
+          foreach ($kind in 'sh', 'exe') {
+          Plant $kind
+          "== hooks planted as $kind only"
+          foreach ($drive in @(@{ name = 'C'; base = (Join-Path $env:USERPROFILE "hp-$kind") }, @{ name = 'D'; base = (Join-Path $t "hp-$kind") })) {
             for ($n = 0; $n -lt $values.Count; $n++) {
               $value = $values[$n]
               $base = Join-Path $drive.base "v$n"
@@ -201,14 +211,15 @@ jobs:
               $null = Ran
               $env1 = @{ HOME = $homeDir; GIT_NO_LAZY_FETCH = '1'; GIT_CONFIG_NOSYSTEM = '1'; GIT_ATTR_NOSYSTEM = '1'; GIT_TERMINAL_PROMPT = '0'; GIT_CONFIG_GLOBAL = 'NUL' }
               $projectVars = $env1.Clone(); $projectVars['GIT_DIR'] = (Join-Path $project '.git'); $projectVars['GIT_WORK_TREE'] = $project
-              Run "hooks drive=$($drive.name) value=$value cmd=publish-project-update-ref" $project $projectVars ((Safe $value) + @('update-ref', 'refs/heads/published', $commit))
-              Run "hooks drive=$($drive.name) value=$value cmd=publish-stage-init" $homeDir $env1 ((Safe $value) + @('init', '--bare', '-q', '--template=', '--', $stage))
+              Run "hooks kind=$kind drive=$($drive.name) value=$value cmd=publish-project-update-ref" $project $projectVars ((Safe $value) + @('update-ref', 'refs/heads/published', $commit))
+              Run "hooks kind=$kind drive=$($drive.name) value=$value cmd=publish-stage-init" $homeDir $env1 ((Safe $value) + @('init', '--bare', '-q', '--template=', '--', $stage))
               $alternates = Join-Path $stage 'objects\info'
               New-Item -ItemType Directory -Force $alternates | Out-Null
               [IO.File]::WriteAllText((Join-Path $alternates 'alternates'), ((Join-Path $project '.git\objects') + "`n"))
               $stageVars = $env1.Clone(); $stageVars['GIT_DIR'] = $stage
-              Run "hooks drive=$($drive.name) value=$value cmd=publish-stage-update-ref" $homeDir $stageVars ((Safe $value) + @('update-ref', 'refs/heads/main', $commit))
-              Run "hooks drive=$($drive.name) value=$value cmd=commit" $project @{} @('-c', "core.hooksPath=$value", '-c', 'user.name=o', '-c', 'user.email=o@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'x')
-              Run "hooks drive=$($drive.name) value=$value cmd=checkout" $project @{} @('-c', "core.hooksPath=$value", 'checkout', '-q', '-b', 'probe2')
+              Run "hooks kind=$kind drive=$($drive.name) value=$value cmd=publish-stage-update-ref" $homeDir $stageVars ((Safe $value) + @('update-ref', 'refs/heads/main', $commit))
+              Run "hooks kind=$kind drive=$($drive.name) value=$value cmd=commit" $project @{} @('-c', "core.hooksPath=$value", '-c', 'user.name=o', '-c', 'user.email=o@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'x')
+              Run "hooks kind=$kind drive=$($drive.name) value=$value cmd=checkout" $project @{} @('-c', "core.hooksPath=$value", 'checkout', '-q', '-b', 'probe2')
             }
+          }
           }
