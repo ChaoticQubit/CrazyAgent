@@ -368,22 +368,15 @@ async fn a_skill_import_slower_than_the_owner_deadline_answers_with_the_skill() 
 }
 
 /// A skill import storage never takes within `IMPORT_TIMEOUT` is refused
-/// storage_busy_not_submitted before the import's own serve bound cuts it, so the owner hears
-/// the refusal rather than no reply, and nothing is imported (V243-STORAGE-BUSY-ROWS).
+/// storage_busy_not_submitted before the import's own serve bound cuts it, so the owner's
+/// client, which waits that bound, hears the refusal rather than no reply, and nothing is
+/// imported (V243-STORAGE-BUSY-ROWS).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_skill_import_storage_never_takes_is_refused_before_its_serve_bound_cuts_it() {
     let owner = Owner::start().await;
     let source = owner.root.path().join("work/release-notes");
     std::fs::create_dir_all(&source).unwrap();
     std::fs::write(source.join("SKILL.md"), SKILL).unwrap();
-    let waits_past_the_bound = OwnerClient::discover(
-        owner.root.path(),
-        OwnerClientKind::Tui,
-        plugins::IMPORT_TIMEOUT + Duration::from_secs(10),
-    )
-    .await
-    .unwrap()
-    .0;
     let (release, held) = oneshot::channel();
     owner
         .service
@@ -396,7 +389,8 @@ async fn a_skill_import_storage_never_takes_is_refused_before_its_serve_bound_cu
         .unwrap();
 
     let started = std::time::Instant::now();
-    let imported = waits_past_the_bound
+    let imported = owner
+        .client
         .import_skill(source.to_str().unwrap().to_owned(), None)
         .await;
     let waited = started.elapsed();
@@ -420,7 +414,6 @@ async fn a_skill_import_storage_never_takes_is_refused_before_its_serve_bound_cu
             .all(|skill| skill.name != "release-notes"),
         "the refused import never landed"
     );
-    drop(waits_past_the_bound);
     owner.stop().await;
 }
 
