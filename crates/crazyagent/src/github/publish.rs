@@ -14,6 +14,8 @@ use std::time::Duration;
 
 #[cfg(all(test, target_os = "macos"))]
 mod publish_tests;
+#[cfg(all(test, windows))]
+mod windows_tests;
 
 const SCAN_FILES_MAX: usize = 20_000;
 const SCAN_BYTES_MAX: u64 = 200 << 20;

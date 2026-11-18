@@ -902,10 +902,10 @@ fn the_ide_git_commits_and_tags_unsigned_in_a_project_that_signs_everything() {
     );
 }
 
-/// V243-WORKTREES-GIT-FLAKE: in a project that asks every log for signatures and names its
-/// own signature programs, with a `false` first on the search path, the IDE's git logs a
-/// commit signed in any armor as its subject alone and runs none of them: no signature
-/// check, and no program a path lookup finds.
+/// V243-WORKTREES-GIT-FLAKE, rv-code #584 F1: in a project that asks every log for signatures
+/// and names its own signature programs, with a `false` first on the search path, the IDE's
+/// git checks a signature in any armor when asked outright and logs the subject alone
+/// otherwise, and runs none of them: its signature programs are no name a lookup finds.
 #[test]
 fn the_ide_git_logs_a_signed_commit_alone_and_runs_no_false_the_path_finds() {
     use crate::landing::signature_tests::{Armor, SUBJECT, signed};
@@ -921,6 +921,26 @@ fn the_ide_git_logs_a_signed_commit_alone_and_runs_no_false_the_path_finds() {
             .copied()
             .chain([("PATH", path.as_str())])
             .collect();
+        let checked = git(
+            &signed.root,
+            &env,
+            &["log", "--show-signature", "-1", "--format=%s"],
+        );
+        assert!(
+            !marker.exists(),
+            "{armor:?}: the IDE's git ran the path's false for a signature check"
+        );
+        assert_eq!(signed.ran(), Vec::<String>::new(), "{armor:?}");
+        assert!(
+            checked.status.success(),
+            "{armor:?}: {}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&checked.stdout).ends_with(&format!("{SUBJECT}\n")),
+            "{armor:?}: {}",
+            String::from_utf8_lossy(&checked.stdout)
+        );
         let logged = git(&signed.root, &env, &["log", "-1", "--format=%s"]);
         assert!(
             !marker.exists(),
