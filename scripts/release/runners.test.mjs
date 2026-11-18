@@ -377,6 +377,16 @@ test("every test farm Linux tmux install first takes group and other write off t
   }
 });
 
+test("every uv the Rust shard action installs puts its folder on the job's PATH, so the rows that run uv find it on macOS as they do on Linux (G1 macOS M1)", async () => {
+  const shard = await readFile(new URL("../../.github/actions/rust-shard/action.yml", import.meta.url), "utf8");
+  const sites = shard.split(/\n(?= {4}- )/).map((step) => `${step}\n`).filter((step) => step.includes('install -m 0755 "$work/uv-$UV_TARGET/uv" "$work/bin/uv"\n'));
+  assert.equal(sites.length, 2, "the Linux uv step and the macOS graphify step");
+  for (const site of sites) {
+    const installed = site.indexOf('install -m 0755 "$work/uv-$UV_TARGET/uv" "$work/bin/uv"\n');
+    assert(site.indexOf('echo "$work/bin" >> "$GITHUB_PATH"\n') > installed, site.split("\n")[0]);
+  }
+});
+
 test("both test farm engine cargo builds turn on the engine's owner-trace feature only where the built tree's engine defines it, so a failed row's captured stderr holds one line per owner exchange and a tree from any other base still builds; the Windows boundary build has no engine and builds without it (leader 02:58, #297 F1; #326 r1 F1; clean_mac_release.rs keeps it out of every release build)", async () => {
   const archive = await readFile(new URL("../../.github/actions/rust-archive/action.yml", import.meta.url), "utf8");
   const parts = archive.split(/\n(?= {4}- )/);
