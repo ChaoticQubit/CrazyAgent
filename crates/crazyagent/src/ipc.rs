@@ -177,8 +177,143 @@ mod name_tests {
     }
 }
 
+#[cfg(test)]
+mod pipes_tests {
+    use super::{Published, encode_pipes, parse_pipes};
+
+    const PUBLISHED: Published = Published {
+        random: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+        pid: 4242,
+        created: 133_000_000_000_000_000,
+    };
+    const SHAPE: &str = "the pipes file is not in the engine's shape";
+
+    /// DESIGN-0256 D7 pipes file (leader 07:46): one line with the version, the endpoint's
+    /// purpose, the per-start random part and the engine's pin, read back the same.
+    #[test]
+    fn a_pipes_file_reads_back_what_the_engine_wrote() {
+        let text = encode_pipes("engine.sock", &PUBLISHED);
+        assert_eq!(
+            text,
+            "crazyagent-pipes-1 engine.sock 000102030405060708090a0b0c0d0e0f 4242 133000000000000000\n"
+        );
+        assert_eq!(parse_pipes(text.as_bytes(), "engine.sock"), Ok(PUBLISHED));
+    }
+
+    /// D7: a client trusts only the exact line the engine writes, so another endpoint's file,
+    /// another version, any other spelling of a field, extra bytes, a zero pin or an oversized
+    /// file is refused.
+    #[test]
+    fn a_pipes_file_in_any_other_shape_is_refused() {
+        let good = encode_pipes("engine.sock", &PUBLISHED);
+        assert_eq!(
+            parse_pipes(good.as_bytes(), "owner.sock"),
+            Err("the pipes file names another endpoint")
+        );
+        let bad = [
+            String::new(),
+            good.trim_end().to_owned(),
+            format!("{good}\n"),
+            good.replace("-pipes-1 ", "-pipes-2 "),
+            good.replace("0a0b", "0A0B"),
+            good.replace("0e0f ", "0e0f0f "),
+            good.replace(" 4242 ", " 04242 "),
+            good.replace(" 4242 ", " +4242 "),
+            good.replace(" 4242 ", "  4242 "),
+            good.replace(" 4242 ", " 0 "),
+            good.replace(" 133000000000000000", " 0"),
+            "x".repeat(200),
+        ];
+        for text in &bad {
+            assert_eq!(
+                parse_pipes(text.as_bytes(), "engine.sock"),
+                Err(SHAPE),
+                "{text:?}"
+            );
+        }
+    }
+
+    /// D7: the purpose is written verbatim, so a purpose outside the plain shape is a
+    /// programming error, never a line a client would split another way.
+    #[test]
+    fn a_pipes_file_for_a_purpose_outside_the_plain_shape_is_a_programming_error() {
+        for purpose in ["", "engine sock", "Engine", "a\nb"] {
+            let written = std::panic::catch_unwind(|| encode_pipes(purpose, &PUBLISHED));
+            assert!(written.is_err(), "{purpose:?}");
+        }
+    }
+}
+
 #[cfg(all(test, windows))]
 mod windows_tests {
+    use super::windows::{publish, read};
+    use crazyagent_win_sandbox::private;
+    use std::path::{Path, PathBuf};
+
+    /// A private root as the engine holds one, inside a fresh temp folder. Output: the temp
+    /// folder, kept alive by the caller, and the root.
+    fn private_root() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        drop(private::dir(&root).unwrap());
+        (temp, root)
+    }
+
+    /// The names in a folder, sorted. Input: the folder. Output: the names.
+    fn entries(folder: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(folder)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// DESIGN-0256 D7 pipes file (leader 07:46): the engine publishes a private file its
+    /// clients read back the same, pinning this process; a later start replaces it with a new
+    /// random part through a staged file in the same root, leaving nothing staged behind.
+    #[test]
+    fn a_published_pipes_file_reads_back_private_and_a_later_start_replaces_it() {
+        let (_temp, root) = private_root();
+        let first = publish(&root, "engine.sock").unwrap();
+        assert_eq!(first.pid, std::process::id());
+        assert_eq!(read(&root, "engine.sock").unwrap(), first);
+        drop(private::read_only(&root.join("pipes")).unwrap());
+        let second = publish(&root, "engine.sock").unwrap();
+        assert_ne!(second.random, first.random);
+        assert_eq!((second.pid, second.created), (first.pid, first.created));
+        assert_eq!(read(&root, "engine.sock").unwrap(), second);
+        assert_eq!(entries(&root), ["pipes"]);
+    }
+
+    /// D7 (leader 07:46): a pipes file already in the root that another account owns is
+    /// refused and left as it was, never replaced, and nothing is staged beside it.
+    #[test]
+    fn a_pipes_file_another_account_owns_is_refused_not_replaced() {
+        let (_temp, root) = private_root();
+        let file = root.join("pipes");
+        std::fs::write(&file, "theirs\n").unwrap();
+        let set = std::process::Command::new("icacls")
+            .arg(&file)
+            .args(["/setowner", "*S-1-5-32-545"])
+            .output()
+            .unwrap();
+        assert!(
+            set.status.success(),
+            "{}",
+            String::from_utf8_lossy(&set.stdout)
+        );
+        let refused = publish(&root, "engine.sock").unwrap_err();
+        assert_eq!(
+            refused.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "{refused}"
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), b"theirs\n");
+        assert!(read(&root, "engine.sock").is_err());
+        assert_eq!(entries(&root), ["pipes"]);
+    }
+
     #[tokio::test]
     async fn an_owner_connect_refuses_until_the_pipe_transport_lands() {
         let root = tempfile::tempdir().unwrap();
