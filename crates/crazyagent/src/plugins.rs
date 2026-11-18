@@ -810,7 +810,11 @@ const PROBLEMS: &[(&str, &str)] = &[
     ),
     (
         "server_node_folder_unreadable",
-        "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and only an administrator can change that, so CrazyAgent did not start it.",
+        "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and this Windows user cannot change that, so CrazyAgent did not start it.",
+    ),
+    (
+        "server_node_drive_root_unreadable",
+        "Windows does not let sandboxed programs read the root of a drive context-mode uses, so CrazyAgent did not start it. Run the CrazyAgent installer again and approve the administrator step.",
     ),
     (
         "server_output_too_large",
