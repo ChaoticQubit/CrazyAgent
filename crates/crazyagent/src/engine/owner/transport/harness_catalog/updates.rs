@@ -203,7 +203,7 @@ impl OwnerClient {
         action: Action,
         read: Option<&'static str>,
     ) -> Result<WireReply, EngineError> {
-        tokio::time::timeout(self.timeout.max(UPDATES_TIMEOUT), async {
+        tokio::time::timeout(deferred_wait(self.timeout, UPDATES_TIMEOUT), async {
             let frame = encode_frame(&Envelope {
                 harness_catalog: action,
             })

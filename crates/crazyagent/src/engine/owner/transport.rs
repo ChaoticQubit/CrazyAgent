@@ -2619,6 +2619,14 @@ async fn within<F: std::future::Future>(bound: Duration, served: F) {
     let _ = tokio::time::timeout_at(cut, crate::storage::before_cut(cut, bound, served)).await;
 }
 
+/// The longest an owner client waits for a request the engine serves past its exchange under
+/// `bound`: the client's own timeout, which covers the engine's admission of the request, plus
+/// the bound, so the engine's answer, a refusal included, always arrives before the client
+/// gives up. Inputs: the client timeout and the bound. Output: the wait.
+fn deferred_wait(timeout: Duration, bound: Duration) -> Duration {
+    timeout + bound
+}
+
 /// One owner request served past its exchange. While it runs it is counted apart from
 /// the client slots, so a long clone or check never refuses other clients, and at most
 /// `DEFERRED_MAX` run at once. Input: the server authority's count. Output: the guard, or

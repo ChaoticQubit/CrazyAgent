@@ -425,7 +425,7 @@ impl OwnerClient {
             .plugins_exchange(
                 Action::ImportScan,
                 Vec::new(),
-                self.timeout.max(IMPORT_TIMEOUT),
+                deferred_wait(self.timeout, IMPORT_TIMEOUT),
             )
             .await?
         {
@@ -447,7 +447,7 @@ impl OwnerClient {
             .plugins_exchange(
                 Action::ImportSkill { folder, replace },
                 Vec::new(),
-                self.timeout.max(IMPORT_TIMEOUT),
+                deferred_wait(self.timeout, IMPORT_TIMEOUT),
             )
             .await?
         {
