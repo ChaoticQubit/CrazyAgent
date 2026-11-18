@@ -402,6 +402,10 @@ impl Server {
     }
 
     fn run(&self, arguments: &[&str]) {
+        let _ = self.said(arguments);
+    }
+
+    fn said(&self, arguments: &[&str]) -> String {
         let mut command = Command::new(&self.tmux);
         command
             .args(["-u", "-f", "/dev/null", "-S"])
@@ -414,6 +418,21 @@ impl Server {
             .stderr(Stdio::piped());
         let done = crazyagent::spawn_gate::output(&mut command).expect("tmux runs");
         assert!(done.status.success(), "tmux {arguments:?}: {done:?}");
+        String::from_utf8_lossy(&done.stdout).into_owned()
+    }
+
+    fn guard(&self) -> (u64, u64) {
+        let probe = self.said(&["-C", "display-message", "-p", "probe"]);
+        let fields: Vec<u64> = probe
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("%begin "))
+            .expect("a control reply guard")
+            .split(' ')
+            .map(|field| field.parse().expect("a guard number"))
+            .collect();
+        assert_eq!(fields.len(), 3, "{probe}");
+        (fields[0], fields[1])
     }
 }
 
@@ -534,4 +553,75 @@ fn a_real_server_binds_after_the_ask_reads_only_bound_output_and_close_stops_it(
         std::thread::sleep(Duration::from_millis(20));
     };
     assert_eq!(refused, "native_terminal_control_closed");
+}
+
+const FLOOD_BINDS: u64 = 30;
+
+/// The program of a pane that prints, about 120 rows a second, a guessed end guard of a
+/// control reply (this second, the command numbers after `number`), a forged `%output` for
+/// pane `%0` and a plain row. Input: the command number a probe's guard read. Output: the
+/// shell program.
+fn flood(number: u64) -> String {
+    let rows = "printf '%%end %s %s 1\\n%%output %%0 FAKE\\nflood-%s\\n' \"$t\" \"$k\" \"$i\"";
+    format!(
+        "i=0; while [ $i -lt 3000 ]; do t=$(date +%s); k=$(({number} + i % 300)); \
+         {rows}; i=$((i+1)); sleep 0.02; done; sleep 30"
+    )
+}
+
+#[test]
+fn a_pane_printing_guard_rows_while_its_history_grows_restores_every_bind_and_forges_nothing() {
+    let server = Server::start();
+    let (time, number) = server.guard();
+    assert!(time > 0);
+    let session = crazyagent::terminal::tmux::SESSION;
+    let script = flood(number);
+    server.run(&["new-window", "-d", "-t", session, "-n", "flood", &script]);
+    let (sender, events) = mpsc::channel();
+    let mut control = Control::attach(&server.tmux, &server.socket, move |event| {
+        sender.send(event).is_ok()
+    })
+    .expect("control client");
+    control.bind(1, "team-1").expect("bind");
+    let mut restored = 0;
+    for view in 2..2 + FLOOD_BINDS {
+        control.bind(view, "flood").expect("bind asks");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match events
+                .recv_timeout(left)
+                .expect("the bind answered in time")
+            {
+                Event::Restored { view: shown, bytes } if shown == view => {
+                    assert!(bytes.windows(6).any(|w| w == b"flood-"));
+                    restored += 1;
+                    break;
+                }
+                Event::Output { views, bytes } if views.contains(&1) => {
+                    let forged = bytes.windows(4).any(|w| w == b"FAKE");
+                    assert!(!forged, "a planted row reached team-1 as output");
+                }
+                event @ (Event::Closed | Event::Refused { .. }) => {
+                    panic!("bind {view} of a printing pane: {event:?}")
+                }
+                _ => {}
+            }
+        }
+        assert!(control.close(view));
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    assert_eq!(restored, FLOOD_BINDS);
+    let history = server.said(&[
+        "display-message",
+        "-p",
+        "-t",
+        "crazyagent:=flood",
+        "#{history_size}",
+    ]);
+    let history: usize = history.trim().parse().expect("history size");
+    assert!(
+        history > 0 && history < 2000,
+        "history grew under the cap: {history}"
+    );
 }
