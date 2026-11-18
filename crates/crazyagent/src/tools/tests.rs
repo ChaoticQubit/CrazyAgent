@@ -695,8 +695,55 @@ fn an_npm_script_starts_with_the_node_of_its_own_prefix() {
     assert_eq!(codex.argv()[0], own.into_os_string());
 }
 
+/// G1 P7: the `node` beside an npm prefix is judged by the resolver's own checks, so a
+/// prefix in this user's folder under a sticky shared folder, as under /tmp on Linux,
+/// starts its harness under that `node`, never another one found later in the places.
+#[test]
+fn an_npm_prefix_under_a_sticky_shared_folder_starts_with_its_own_node() {
+    let (_folder, home) = scratch();
+    program(&home.join(".local/bin/node"), NODE);
+    let shared = home.join("shared");
+    let mine = shared.join("mine");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    std::fs::set_permissions(&mine, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let prefix = mine.join("nvm-like");
+    npm_codex(&prefix);
+    let own = program(&prefix.join("bin/node"), NODE);
+    let codex = resolve_entry(&prefix.join("bin/codex"), &home_only(&home)).unwrap();
+    assert_eq!(codex.interpreter().unwrap().program, own);
+}
+
+/// G1 P7: an npm prefix's own `node` the resolver passes over, here one every user can
+/// write, still falls back to the places' `node`, but never silently: the resolver writes
+/// its engine log line, once per file.
+#[test]
+fn a_passed_over_own_node_falls_back_and_is_logged_once_per_file() {
+    let (_folder, home) = scratch();
+    let places_node = program(&home.join(".local/bin/node"), NODE);
+    let prefix = home.join("nvm-like");
+    npm_codex(&prefix);
+    let own = program(&prefix.join("bin/node"), NODE);
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let places = home_only(&home);
+    let codex = resolve_entry(&prefix.join("bin/codex"), &places).unwrap();
+    assert_eq!(codex.interpreter().unwrap().program, places_node);
+    let passed = entry_at(&own, &places, 0).unwrap_err();
+    assert_eq!(passed.reason, Reason::Refused);
+    assert!(
+        !log_own_node_passed_over(&own, &passed),
+        "the resolver already logged it"
+    );
+    let other = home.join("other/bin/node");
+    assert!(log_own_node_passed_over(&other, &passed));
+    assert!(!log_own_node_passed_over(&other, &passed));
+}
+
 /// R-L2: a folder other users of the group can write, such as a 0775 staff folder made under
 /// umask 002, is passed over; on macOS an admin-group folder, like Intel Homebrew's, is not.
+/// On Linux a folder of this user's private group is not passed over either, by design
+/// (`service::private_group`), while one of a group the user shares, as a supplementary
+/// group, is (G1).
 #[test]
 fn a_group_writable_folder_is_passed_over_unless_its_group_is_admin() {
     let (_folder, home) = scratch();
@@ -708,16 +755,38 @@ fn a_group_writable_folder_is_passed_over_unless_its_group_is_admin() {
         group != 0 && group != 80,
         "the scratch folder has the user's group"
     );
-    assert_eq!(
-        resolve("node", &home_only(&home)).unwrap_err().reason,
-        Reason::Refused
-    );
     #[cfg(target_os = "macos")]
-    if std::os::unix::fs::chown(&bin, None, Some(80)).is_ok() {
-        assert!(
-            resolve("node", &home_only(&home)).is_ok(),
-            "admin's group is trusted"
+    {
+        assert_eq!(
+            resolve("node", &home_only(&home)).unwrap_err().reason,
+            Reason::Refused
         );
+        if std::os::unix::fs::chown(&bin, None, Some(80)).is_ok() {
+            assert!(
+                resolve("node", &home_only(&home)).is_ok(),
+                "admin's group is trusted"
+            );
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        assert_eq!(
+            resolve("node", &home_only(&home)).is_ok(),
+            crate::service::own_group_private(),
+            "only this user's private group is trusted"
+        );
+        let shared = nix::unistd::getgroups()
+            .unwrap()
+            .into_iter()
+            .map(|gid| gid.as_raw())
+            .find(|gid| *gid != 0 && *gid != group);
+        if let Some(shared) = shared {
+            std::os::unix::fs::chown(&bin, None, Some(shared)).unwrap();
+            assert_eq!(
+                resolve("node", &home_only(&home)).unwrap_err().reason,
+                Reason::Refused
+            );
+        }
     }
 }
 

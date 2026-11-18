@@ -1452,7 +1452,7 @@ const ACCOUNTS_BYTES_MAX: u64 = 4 * 1024 * 1024;
 /// a failed lookup or read counts as not private, so its folders fall to the stricter rule.
 /// Output: the answer.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn own_group_private() -> bool {
+pub(crate) fn own_group_private() -> bool {
     static PRIVATE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *PRIVATE.get_or_init(|| {
         let gid = nix::unistd::getegid();
