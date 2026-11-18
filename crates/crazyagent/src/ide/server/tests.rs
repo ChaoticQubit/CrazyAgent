@@ -1447,6 +1447,88 @@ fn a_confined_start_never_reuses_an_earlier_start_s_temp_folder() {
     );
 }
 
+/// Leaves in a temp folder what a session may: a folder it shut with mode 000 and a file it
+/// made immutable. Input: the temp folder. Output: none.
+fn shut_and_pin(tmp: &Path) {
+    let shut = tmp.join("shut");
+    fs::create_dir_all(&shut).unwrap();
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o000)).unwrap();
+    let pinned = tmp.join("pinned");
+    fs::write(&pinned, b"left by a session\n").unwrap();
+    assert!(
+        crate::spawn_gate::status(Command::new("/usr/bin/chflags").arg("uchg").arg(&pinned))
+            .unwrap()
+            .success()
+    );
+}
+
+/// The folders in the system temp folder that [`retire`] made from `tmp`, its name followed
+/// by [`TMP_GONE`]. Input: the temp folder. Output: the folders found.
+fn moved_aside(tmp: &Path) -> Vec<PathBuf> {
+    let mut prefix = tmp.file_name().unwrap().to_os_string();
+    prefix.push(TMP_GONE);
+    let prefix = prefix.into_string().unwrap();
+    fs::read_dir(crate::sandbox::toolchains::TMP_PARENT)
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+        .map(|entry| entry.path())
+        .collect()
+}
+
+/// V243-OWNER-BOOTSTRAP-IDE-TMP-LINE: the temp folder of an earlier confined start whose
+/// session shut a folder with mode 000 and made a file immutable in it is moved aside and
+/// removed by the next start, never left in the system temp folder, where every later
+/// engine start's sweep would report it as `ide_server_tmp_left`.
+#[test]
+fn the_next_confined_start_removes_an_earlier_temp_folder_its_session_shut_and_pinned() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let id = project("shut-its-tmp");
+    let folder = servers.prepare(&id).unwrap();
+    let first = server_tmp(&server_command(&servers, &id, &root, &folder).unwrap());
+    shut_and_pin(&first);
+    let next = server_tmp(&server_command(&servers, &id, &root, &folder).unwrap());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while (first.exists() || !moved_aside(&first).is_empty()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let (kept, left) = (first.exists(), moved_aside(&first));
+    for made in left.iter().chain([&first, &next]) {
+        let _ = crate::team::cleanup::remove_agent_tree(made);
+    }
+    assert_ne!(next, first);
+    assert!(!kept, "the earlier start's temp folder is still there");
+    assert!(left.is_empty(), "left in the system temp folder: {left:?}");
+}
+
+/// V243-OWNER-BOOTSTRAP-IDE-TMP-LINE: a temp folder an earlier engine moved aside and left
+/// behind, holding a folder shut with mode 000 and an immutable file, is removed by the
+/// engine-start sweep, so no later start reports it again.
+#[test]
+fn the_engine_start_sweep_removes_a_left_temp_folder_that_was_shut_and_pinned() {
+    let home = scratch();
+    let tmp = crate::sandbox::toolchains::make_tmp(&home.path().join("left")).unwrap();
+    shut_and_pin(&tmp);
+    let gone = retire(&tmp).expect("the temp folder moves aside");
+    assert!(retired(&gone), "{}", gone.display());
+    let entries = fs::read_dir(crate::sandbox::toolchains::TMP_PARENT)
+        .unwrap()
+        .count();
+    let removed = sweep_retired(entries + GONE_SCAN_MAX)
+        .expect("the sweep starts")
+        .join()
+        .unwrap();
+    let left = gone.exists();
+    let _ = crate::team::cleanup::remove_agent_tree(&gone);
+    assert!(
+        !left,
+        "the sweep left {} ({removed} removed)",
+        gone.display()
+    );
+}
+
 /// The temp folder a built server command gives the server as `TMPDIR`. Input: the command.
 /// Output: the folder.
 fn server_tmp(built: &Command) -> PathBuf {
