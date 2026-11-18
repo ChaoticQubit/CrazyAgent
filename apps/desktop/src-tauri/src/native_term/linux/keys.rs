@@ -35,12 +35,14 @@ fn named(keyval: Key) -> Option<Named> {
 }
 
 /// The characters a GDK key types, as the macOS view reads them: Return and keypad Enter
-/// as a carriage return, Backspace as DEL, else the key's own character. Input: the key.
-/// Output: the text, or none for a key with no character.
+/// as a carriage return, Backspace as DEL, Shift+Tab (ISO_Left_Tab) as the back-tab
+/// character U+0019, else the key's own character. Input: the key. Output: the text, or
+/// none for a key with no character.
 fn text(keyval: Key) -> Option<String> {
     let typed = match keyval {
         key::Return | key::KP_Enter => '\r',
         key::BackSpace => '\u{7f}',
+        key::ISO_Left_Tab => '\u{19}',
         other => other.to_unicode()?,
     };
     Some(typed.to_string())
