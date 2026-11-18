@@ -2274,6 +2274,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
             }],
             context_mode_off: None,
             batch_files: Vec::new(),
+            commands_not_found: Vec::new(),
             left_out: Vec::new(),
         },
         instructions: "# Project context from CrazyAgent\n".into(),
@@ -2402,6 +2403,7 @@ impl LeftPane {
                 }],
                 context_mode_off: None,
                 batch_files: Vec::new(),
+                commands_not_found: Vec::new(),
                 left_out: Vec::new(),
             },
             instructions: "# Project context from CrazyAgent\n".into(),
@@ -2797,6 +2799,7 @@ fn the_context_mode_server_is_declared_under_its_plugin_name_for_claude_and_code
         servers: vec![command_server("context-mode"), command_server("graph")],
         context_mode_off: None,
         batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
 
@@ -2833,6 +2836,7 @@ fn switched_off_tools_reach_claude_as_denied_names_and_codex_as_disabled_tools()
         servers: vec![command_server("context-mode"), command_server("graph")],
         context_mode_off: None,
         batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
     let off = || {
@@ -3310,6 +3314,7 @@ fn every_tools_on_launch_delivers_the_tool_rules_as_firm_rules() {
                 servers: vec![command_server("context-mode")],
                 context_mode_off: None,
                 batch_files: Vec::new(),
+                commands_not_found: Vec::new(),
                 left_out: Vec::new(),
             },
             Vec::new(),
@@ -3391,6 +3396,7 @@ fn the_task_start_reminder_names_the_select_string_and_skills_per_harness_and_no
         },
         context_mode_off: None,
         batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
     let off = |tools: &[&str]| {
@@ -3517,6 +3523,7 @@ fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() 
         servers: vec![command_server("context-mode"), command_server("graph")],
         context_mode_off: None,
         batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
     let off = || {
@@ -3637,6 +3644,7 @@ fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() 
             servers: vec![command_server("graph")],
             context_mode_off: None,
             batch_files: Vec::new(),
+            commands_not_found: Vec::new(),
             left_out: Vec::new(),
         },
         Vec::new(),
@@ -5202,6 +5210,7 @@ fn a_launch_whose_context_mode_was_dropped_on_an_old_node_says_why_in_its_tools_
         servers: vec![command_server("graph")],
         context_mode_off: dropped.then_some(crate::plugins::ContextModeOff::NodeTooOld),
         batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
     let claude = private_home(&root, "claude");
@@ -5270,6 +5279,7 @@ fn a_launch_that_left_context_mode_out_says_why_in_its_tools_section() {
             servers: vec![command_server("graph")],
             context_mode_off: Some(off),
             batch_files: Vec::new(),
+            commands_not_found: Vec::new(),
             left_out: Vec::new(),
         };
         let home = private_home(&root, &format!("{off:?}").to_lowercase());
@@ -5440,6 +5450,7 @@ fn a_codex_launch_config_kept_for_a_real_codex() {
             ],
             context_mode_off: None,
             batch_files: Vec::new(),
+            commands_not_found: Vec::new(),
             left_out: Vec::new(),
         },
         instructions: "# Project context from CrazyAgent\n".into(),

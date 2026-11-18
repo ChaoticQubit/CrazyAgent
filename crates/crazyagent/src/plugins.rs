@@ -490,15 +490,22 @@ pub(crate) fn context_mode_on<'a>(
 /// The spec a harness or a server check runs for one approved server, never through cmd.exe
 /// (V243-WIN-MCP-NPX, #341 sec F1): on Windows a stdio command runs only as a program, as
 /// written and as its real file ([`crate::tools::program_file`]), or as npm's own `npx.cmd`
-/// mapped by its layout ([`npx_spec`]). Every other spec is unchanged. Inputs: the engine
-/// root and the spec. Output: the spec to run, or the check code that leaves the server out.
+/// mapped by its layout ([`npx_spec`]); a batch name that is not there is not found. Inputs:
+/// the engine root and the spec. Output: the spec to run, or the code that leaves it out.
 pub(crate) fn without_cmd_exe(root: &Path, spec: ServerSpec) -> Result<ServerSpec, &'static str> {
     #[cfg(windows)]
     if let ServerSpec::Stdio { command, args } = &spec {
         let command = Path::new(command);
-        let real = command.canonicalize().ok();
+        let found = command.canonicalize();
+        let missing = found
+            .as_ref()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        let real = found.ok();
         let batch = crate::tools::batch_file(command)
             || real.as_deref().is_some_and(crate::tools::batch_file);
+        if batch && missing {
+            return Err("server_command_not_found");
+        }
         if batch {
             let places = crate::tools::Places::from_environment(Some(root));
             return npx_spec(command, args, &places);
@@ -589,17 +596,18 @@ pub(crate) fn exact_version(version: &str) -> bool {
         })
 }
 
-/// The effective set with each server's secret values already read, ready for a harness
-/// launch. Skills are the same folders as in `EffectivePlugins`. `context_mode_off` says why
-/// the default pack's context-mode server was left out, `batch_files` names each server left
-/// out because its command is not a Windows program ([`without_cmd_exe`]), and `left_out`
-/// names every server left out, whose hooks the launch leaves out too.
+/// The effective set with secret values read, ready for a harness launch; skills as in
+/// `EffectivePlugins`. `context_mode_off` says why context-mode was left out, `batch_files`
+/// names each server left out as no Windows program ([`without_cmd_exe`]), `commands_not_found`
+/// each one whose command was not found or whose npx.cmd was refused, and `left_out` every
+/// server left out, whose hooks the launch leaves out too.
 #[derive(Debug, Default)]
 pub struct LaunchPlugins {
     pub skills: Vec<EffectiveSkill>,
     pub servers: Vec<LaunchServer>,
     pub context_mode_off: Option<ContextModeOff>,
     pub batch_files: Vec<String>,
+    pub commands_not_found: Vec<String>,
     pub left_out: Vec<String>,
 }
 
@@ -1234,10 +1242,10 @@ mod windows_tests {
     }
 
     /// V243-WIN-MCP-NPX and #341: npm's `npx.cmd`, found by its layout, runs as the `node.exe`
-    /// beside it with `npx-cli.js` before the approved arguments, in plain drive spelling, and
-    /// one the resolver refuses is not found; any other `.cmd` or `.bat`, and a name with no
-    /// extension or a dotted one with a `.cmd` beside it, there or not, is left out; a `.exe`
-    /// spec is unchanged.
+    /// beside it with `npx-cli.js` before the approved arguments, in plain drive spelling; one
+    /// the resolver refuses, and a `.cmd` that is not there, npx.cmd included, is not found; any
+    /// other `.cmd` or `.bat`, and a name with no extension or a dotted one with a `.cmd` beside
+    /// it, there or not, is a batch file; a `.exe` spec is unchanged.
     #[test]
     fn npm_s_npx_cmd_runs_as_node_and_every_other_batch_command_is_left_out() {
         let folder = tempfile::tempdir().unwrap();
@@ -1296,6 +1304,15 @@ mod windows_tests {
         std::fs::remove_file(real.join("node.exe")).unwrap();
         let lone = npx_spec(&real.join("npx.cmd"), &args, &places);
         assert_eq!(lone, Err("server_batch_file"));
+        assert_eq!(
+            without_cmd_exe(&real, spec("gone.cmd")),
+            Err("server_command_not_found")
+        );
+        std::fs::remove_file(real.join("npx.cmd")).unwrap();
+        assert_eq!(
+            without_cmd_exe(&real, spec("npx.cmd")),
+            Err("server_command_not_found")
+        );
         let program = ServerSpec::Stdio {
             command: text(shipped),
             args: args.clone(),
