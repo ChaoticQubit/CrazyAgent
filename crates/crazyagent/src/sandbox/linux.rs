@@ -40,11 +40,25 @@ pub use egress::{NETWORK_SHARED, SETUP_NOT_CHILD, SETUP_NOT_NEST, SETUP_UNPIPED,
 /// The Landlock helper's file name. It ships next to the engine's own executable.
 pub const HELPER_NAME: &str = "crazyagent-landlock";
 
-/// The Landlock helper for the engine executable at `engine`: the one beside it. Input: the
-/// executable's absolute path. Output: the helper's path.
+/// The Landlock helper for the engine executable at `engine`: the one beside it. Only in a
+/// debug build, an executable whose own folder is cargo's `deps`, as a test binary's is, with
+/// no helper beside it takes cargo's build one folder up, the one candidate, and logs it.
+/// Input: the executable's absolute path. Output: the helper's path.
 pub fn helper_for(engine: &Path) -> PathBuf {
     assert!(engine.is_absolute());
-    engine.with_file_name(HELPER_NAME)
+    let beside = engine.with_file_name(HELPER_NAME);
+    #[cfg(debug_assertions)]
+    if let Some(built) = engine
+        .parent()
+        .filter(|folder| folder.file_name() == Some(OsStr::new("deps")))
+        .map(|deps| deps.with_file_name(HELPER_NAME))
+        && !beside.is_file()
+        && built.is_file()
+    {
+        eprintln!("linux_helper_cargo_build: {}", built.display());
+        return built;
+    }
+    beside
 }
 
 /// The Landlock helper for this engine, as [`helper_for`] picks it. Output: the path, or the
