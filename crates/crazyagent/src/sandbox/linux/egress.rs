@@ -550,6 +550,16 @@ fn start_slirp(slirp: &str, child: u32) -> Result<Slirp, String> {
     }
 }
 
+/// Opens the agent's user and network namespaces, then confines this thread and what it
+/// starts to the files slirp4netns needs, with no new privileges. Input: the agent's
+/// process id. Output: the two open namespaces, user first, or the reason.
+pub(super) fn confine_slirp(child: u32) -> Result<[OwnedFd; 2], String> {
+    let failed = |error: std::io::Error| format!("slirp4netns: {error}");
+    let user = fs::File::open(format!("/proc/{child}/ns/user")).map_err(failed)?;
+    let net = fs::File::open(format!("/proc/{child}/ns/net")).map_err(failed)?;
+    Ok([user.into(), net.into()])
+}
+
 /// Raises exactly [`ambient_wanted`] into the ambient set, after keeping only those in the
 /// permitted, effective and inheritable sets, so the `iptables` programs keep them across
 /// exec and nothing else. No input. Output: Ok, or the reason.
@@ -1331,5 +1341,44 @@ mod tests {
             assert!(asked(words(refused)).is_err(), "{refused:?}");
         }
         assert!(asked(outer).is_err(), "stage 1 takes no go descriptor");
+    }
+
+    /// V243 linux routed: slirp4netns runs confined to the files it needs, so a read and a
+    /// write in a folder outside them are refused, while the loader cache it needs still
+    /// reads. The rules go on a thread of the row's own, so no other row runs under them.
+    #[test]
+    fn slirp_reads_and_writes_only_the_files_it_needs() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret");
+        fs::write(&secret, b"secret").unwrap();
+        assert_eq!(
+            fs::read(&secret).unwrap(),
+            b"secret",
+            "the control: it reads unconfined"
+        );
+        let child = std::process::id();
+        let (opened, read, written, cache) = std::thread::spawn(move || {
+            let opened = confine_slirp(child);
+            let read = fs::read(&secret);
+            let written = fs::write(secret.with_file_name("written"), b"written");
+            let cache = fs::read("/etc/ld.so.cache");
+            (opened, read, written, cache)
+        })
+        .join()
+        .unwrap();
+        assert!(opened.is_ok(), "{opened:?}");
+        let refused = |error: &std::io::Error| error.kind() == std::io::ErrorKind::PermissionDenied;
+        assert!(
+            read.as_ref().is_err_and(refused),
+            "slirp read outside its files: {read:?}"
+        );
+        assert!(
+            written.as_ref().is_err_and(refused),
+            "slirp wrote outside its files: {written:?}"
+        );
+        assert!(
+            cache.is_ok(),
+            "slirp cannot read the loader cache: {cache:?}"
+        );
     }
 }
