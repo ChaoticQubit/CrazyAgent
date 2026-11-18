@@ -5,9 +5,11 @@ import { connect, createServer } from "node:net";
 import { closedPort, freeLowPort, refusingPort } from "./e2e-harness.mjs";
 
 /** The processes lsof names for a local TCP port in one state, either end of a connection
- * included. Input: the port and the TCP state. Output: the distinct pids. */
+ * included; lsof is found on PATH, since macOS keeps it in /usr/sbin and Ubuntu in /usr/bin.
+ * Input: the port and the TCP state. Output: the distinct pids. */
 function holders(port, state) {
-  const result = spawnSync("/usr/sbin/lsof", ["-nP", `-iTCP:${port}`, `-sTCP:${state}`, "-t"], { encoding: "utf8", timeout: 10000, killSignal: "SIGKILL" });
+  const result = spawnSync("lsof", ["-nP", `-iTCP:${port}`, `-sTCP:${state}`, "-t"], { encoding: "utf8", timeout: 10000, killSignal: "SIGKILL" });
+  assert.equal(result.error, undefined, "lsof runs from PATH");
   assert.equal(result.signal, null, "lsof did not finish");
   return [...new Set(result.stdout.split("\n").filter(Boolean).map(Number))];
 }
@@ -44,9 +46,12 @@ test("a closed port refuses a connect, nothing listens there, and this process k
 
 test("a refusing port stays held with no listener until it is freed, and then nothing holds it", async () => {
   const { port, free } = await refusingPort();
-  assert.deepEqual(holders(port, "LISTEN"), []);
-  assert.deepEqual(holders(port, "ESTABLISHED"), [process.pid], `port ${port} is not held`);
-  free();
+  try {
+    assert.deepEqual(holders(port, "LISTEN"), []);
+    assert.deepEqual(holders(port, "ESTABLISHED"), [process.pid], `port ${port} is not held`);
+  } finally {
+    free();
+  }
   await new Promise((done) => setTimeout(done, 200));
   assert.deepEqual(holders(port, "ESTABLISHED"), []);
 });

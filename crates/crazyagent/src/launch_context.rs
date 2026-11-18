@@ -111,8 +111,13 @@ const CONTEXT_MODE_TOOLS: [&str; 5] = [
     "ctx_search",
 ];
 /// The most bytes of the section that tells a tools-on launch when to use context-mode,
-/// graphify and its skills.
-pub const TOOL_USE_BYTES_MAX: usize = 2 * 1024;
+/// graphify and its skills, and which MCP servers it left out.
+pub const TOOL_USE_BYTES_MAX: usize = 3 * 1024;
+/// The most server names each tools-section line about servers left out, as no Windows
+/// program or as not found, shows before it says how many more there are.
+const BATCH_NAMES_SHOWN_MAX: usize = 4;
+/// The most bytes of each such line: its words, the names shown and the count of the rest.
+const BATCH_LINE_BYTES_MAX: usize = 640;
 /// The most bytes of the Task-start reminder the first turn of a task carries (T3-15).
 pub const TASK_START_BYTES_MAX: usize = 1024;
 const TEAMMATE_COMMAND: &str = "teammate";
@@ -1156,6 +1161,8 @@ impl AgentContext {
                     false,
                     servers,
                     self.plugins.context_mode_off,
+                    &self.plugins.batch_files,
+                    &self.plugins.commands_not_found,
                     &self.off_tools,
                     first_skill,
                 ));
@@ -1211,6 +1218,12 @@ impl AgentContext {
                     sub_agents.as_ref(),
                 )?,
             )?;
+            let keys = codex_hook_keys(&config_hooks, &source.to_string_lossy());
+            write_private(
+                &state.join(CODEX_HOOK_KEYS),
+                &serde_json::to_vec(&keys)
+                    .map_err(|_| failure("launch_context_hook_unavailable"))?,
+            )?;
         } else {
             installed.denied = denied_tools(servers, &self.off_tools);
             let mcp = state.join("mcp.json");
@@ -1228,6 +1241,8 @@ impl AgentContext {
                     true,
                     servers,
                     self.plugins.context_mode_off,
+                    &self.plugins.batch_files,
+                    &self.plugins.commands_not_found,
                     &self.off_tools,
                     first_skill,
                 ));
@@ -1697,18 +1712,63 @@ fn context_mode_off_line(off: crate::plugins::ContextModeOff) -> &'static str {
     }
 }
 
+/// The tools-section line naming the MCP servers a launch left out because each one's
+/// command is not a Windows program ([`crate::plugins::without_cmd_exe`]) and what to tell the
+/// owner. Input: the names. Output: one line ending in a newline, none without names.
+fn batch_files_line(names: &[String]) -> Option<String> {
+    let list = left_out_list(names)?;
+    let line = format!(
+        "- MCP servers off for this launch: {list}. Each one's command is not a Windows program (.exe or .com), which Windows may start through cmd.exe, so CrazyAgent did not start it. Tell the owner in your report to set its command to the tool's .exe, or to node.exe with the tool's script as the first argument.\n"
+    );
+    assert!(line.len() <= BATCH_LINE_BYTES_MAX);
+    Some(line)
+}
+
+/// The tools-section line naming the MCP servers a launch left out because each one's command
+/// was not found, a missing npx.cmd included, or the tool checks refused its npx.cmd, and what
+/// to tell the owner (V243-MCP-NPX-LAUNCH-LINE). Input: the names. Output: one line ending in
+/// a newline, none without names.
+fn not_found_line(names: &[String]) -> Option<String> {
+    let list = left_out_list(names)?;
+    let line = format!(
+        "- MCP servers off for this launch: {list}. Each one's command was not found on this computer, or CrazyAgent's tool checks refused it, so CrazyAgent did not start it. Tell the owner in your report to check these servers in Settings.\n"
+    );
+    assert!(line.len() <= BATCH_LINE_BYTES_MAX);
+    Some(line)
+}
+
+/// The names a left-out line shows: at most [`BATCH_NAMES_SHOWN_MAX`], each clipped to a
+/// server name's bound and in backticks, then how many more. Input: the names. Output: the
+/// list, none without names.
+fn left_out_list(names: &[String]) -> Option<String> {
+    if names.is_empty() {
+        return None;
+    }
+    let shown: Vec<String> = names
+        .iter()
+        .take(BATCH_NAMES_SHOWN_MAX)
+        .map(|name| format!("`{}`", clip(name, crate::plugins::SERVER_NAME_BYTES_MAX)))
+        .collect();
+    Some(match names.len() - shown.len() {
+        0 => shown.join(", "),
+        more => format!("{} and {more} more", shown.join(", ")),
+    })
+}
+
 /// Tells a tools-on launch the rules for the tools it has (18.15.1), as firm rules for every
 /// task (DEC-116): the context-mode tools left on, by the names its harness gives them, for
 /// all output that is not short and fixed, a graphify query before any source read and a
-/// check of the approved skills by the names the skills index uses. A launch that left the
-/// context-mode server out is told why. Inputs: whether the harness is Claude Code, the
-/// launch's servers, why context-mode was left out if it was, the tools switched off and the
-/// first approved skill's name, none without skills. Output: at most `TOOL_USE_BYTES_MAX`
-/// bytes.
+/// check of the approved skills by the names the skills index uses. A launch that left out
+/// context-mode, or servers as no Windows program or as not found, is told why, one line per
+/// cause. Inputs: the harness, the launch's servers, why context-mode was left out, the servers
+/// left out per cause, the tools switched off and the first approved skill's name, none without
+/// skills. Output: at most `TOOL_USE_BYTES_MAX` bytes.
 fn tool_use_section(
     claude: bool,
     servers: &[LaunchServer],
     context_mode_off: Option<crate::plugins::ContextModeOff>,
+    batch_files: &[String],
+    commands_not_found: &[String],
     off_tools: &[(String, Vec<String>)],
     skill: Option<&str>,
 ) -> String {
@@ -1737,6 +1797,12 @@ fn tool_use_section(
     }
     if let Some(off) = context_mode_off.filter(|_| !context_mode) {
         section.push_str(context_mode_off_line(off));
+    }
+    if let Some(line) = batch_files_line(batch_files) {
+        section.push_str(&line);
+    }
+    if let Some(line) = not_found_line(commands_not_found) {
+        section.push_str(&line);
     }
     section.push_str("- graphify: query the project graph before you read or search source. Run `graphify query \"<question>\"` in the shell first, `graphify path \"<A>\" \"<B>\"` for how two parts connect and `graphify explain \"<name>\"` for one part. If your worktree has no `graphify-out/graph.json`, say so in your report.\n");
     if let Some(name) = skill {
@@ -2147,7 +2213,8 @@ fn codex_hook_table(hooks: &[CodexHook], source: &str) -> toml_edit::Table {
     table.set_implicit(true);
     let mut state = toml_edit::Table::new();
     state.set_implicit(true);
-    for hook in hooks {
+    let keys = codex_hook_keys(hooks, source);
+    for (hook, key) in hooks.iter().zip(&keys) {
         let mut handler = toml_edit::Table::new();
         handler["type"] = toml_edit::value("command");
         handler["command"] = toml_edit::value(hook.command.as_str());
@@ -2168,44 +2235,97 @@ fn codex_hook_table(hooks: &[CodexHook], source: &str) -> toml_edit::Table {
         else {
             unreachable!("each event holds a list of groups");
         };
-        let key = format!("{source}:{}:{}:0", hook.label, groups.len());
+        assert_eq!(*key, format!("{source}:{}:{}:0", hook.label, groups.len()));
         groups.push(group);
         let mut pinned = toml_edit::Table::new();
         pinned["trusted_hash"] = toml_edit::value(codex_hook_hash(hook));
-        state.insert(&key, toml_edit::Item::Table(pinned));
+        state.insert(key, toml_edit::Item::Table(pinned));
     }
     assert_eq!(state.len(), hooks.len());
     table.insert("state", toml_edit::Item::Table(state));
     table
 }
 
-/// The most bytes of a Codex home's `config.toml` `codex_pinned_keys` reads.
-const CODEX_CONFIG_BYTES_MAX: u64 = 256 * 1024;
+/// The trust key Codex 0.167.1 reads for each hook a launch pins, in launch order:
+/// `<source>:<label>:<group>:0`, the group counting the earlier hooks on the same event.
+/// Inputs: the hooks and the canonical `config.toml` path. Output: one key per hook.
+fn codex_hook_keys(hooks: &[CodexHook], source: &str) -> Vec<String> {
+    let mut groups: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    hooks
+        .iter()
+        .map(|hook| {
+            let group = groups.entry(hook.event).or_insert(0);
+            let key = format!("{source}:{}:{group}:0", hook.label);
+            *group += 1;
+            key
+        })
+        .collect()
+}
 
-/// The hook trust keys a Codex launch pinned under `[hooks.state]` in its home's
-/// `config.toml`, so the engine can ask Codex whether it trusts each one (PA1213R2-F2).
-/// Takes the agent's `CODEX_HOME`. Returns the keys, empty when the launch pinned none, or
-/// None for a config that cannot be read whole within `CODEX_CONFIG_BYTES_MAX` or parsed.
-pub fn codex_pinned_keys(home: &Path) -> Option<Vec<String>> {
-    let file = File::open(home.join("config.toml")).ok()?;
-    let mut text = String::new();
-    std::io::Read::read_to_string(
-        &mut std::io::Read::take(file, CODEX_CONFIG_BYTES_MAX + 1),
-        &mut text,
+/// The launch state file holding the hook trust keys a Codex launch pinned under
+/// `[hooks.state]`, as one JSON list of strings, so the engine reads them back without
+/// parsing `config.toml`, whose MCP tables hold secrets (SECRET-PARSE-COPIES R2).
+const CODEX_HOOK_KEYS: &str = "codex-hook-keys.json";
+
+/// The most bytes of a Codex launch's hook key list `codex_pinned_keys` reads.
+const CODEX_HOOK_KEYS_BYTES_MAX: u64 = 256 * 1024;
+
+/// Why a Codex home gave no hook keys: its launch left no key list, as for an agent an
+/// earlier CrazyAgent started, or the list there cannot be read (#166 N0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookKeysUnread {
+    Absent,
+    Unreadable,
+}
+
+/// The hook trust keys a Codex launch pinned in its home's `config.toml`, read from the
+/// launch's own key list ([`CODEX_HOOK_KEYS`]) and never from the config, so the engine can
+/// ask Codex whether it trusts each one (PA1213R2-F2). Takes the agent's `CODEX_HOME`.
+/// Returns the keys, empty when the launch pinned none, or why there are none.
+pub fn codex_pinned_keys(home: &Path) -> Result<Vec<String>, HookKeysUnread> {
+    let file = match open_unfollowed(&home.join(STATE).join(CODEX_HOOK_KEYS)) {
+        Ok(file) => file,
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {
+            return Err(HookKeysUnread::Absent);
+        }
+        Err(_) => return Err(HookKeysUnread::Unreadable),
+    };
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(
+        &mut std::io::Read::take(file, CODEX_HOOK_KEYS_BYTES_MAX + 1),
+        &mut bytes,
     )
-    .ok()?;
-    if text.len() as u64 > CODEX_CONFIG_BYTES_MAX {
-        return None;
+    .map_err(|_| HookKeysUnread::Unreadable)?;
+    if bytes.len() as u64 > CODEX_HOOK_KEYS_BYTES_MAX {
+        return Err(HookKeysUnread::Unreadable);
     }
-    let config = text.parse::<toml_edit::DocumentMut>().ok()?;
-    Some(
-        config
-            .get("hooks")
-            .and_then(|hooks| hooks.get("state"))
-            .and_then(toml_edit::Item::as_table_like)
-            .map(|state| state.iter().map(|(key, _)| key.to_owned()).collect())
-            .unwrap_or_default(),
+    serde_json::from_slice(&bytes).map_err(|_| HookKeysUnread::Unreadable)
+}
+
+/// Opens a launch file for reading without following a link in its place or waiting on a
+/// FIFO there, so a link, FIFO, folder or device planted there is refused instead of read or
+/// left holding the caller (#166 N1, #168 F1). Input: the path. Output: the plain file, or
+/// the error, `NotFound` when nothing is there.
+#[cfg(unix)]
+fn open_unfollowed(path: &Path) -> std::io::Result<File> {
+    let file = rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
     )
+    .map(File::from)
+    .map_err(std::io::Error::from)?;
+    if !plain_file(&file) {
+        return Err(std::io::Error::other("launch_file_not_plain"));
+    }
+    Ok(file)
+}
+
+/// Opens a launch file for reading where no-follow opening does not exist; no launch writes
+/// one there, since `write_private` refuses. Input: the path. Output: the file or the error.
+#[cfg(not(unix))]
+fn open_unfollowed(path: &Path) -> std::io::Result<File> {
+    File::open(path)
 }
 
 /// The owner's hooks a Codex launch runs (PA-12): those on an event Codex has, each copied

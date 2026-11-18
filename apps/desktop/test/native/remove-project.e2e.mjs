@@ -252,8 +252,8 @@ async function setUpFromHome(page, me, folder) {
 /** Waits until the engine's delete job ends done. Input: the started job. Output: none. */
 async function deleted(job) {
   for (const deadline = Date.now() + JOB_MS; ; await pause(POLL_MS)) {
-    const now = await value(run.bridge, "desktop_intake_status");
-    if (now?.id === job.id && now.state.state === "done") return;
+    const now = (await value(run.bridge, "desktop_intake_status")).find((held) => held.id === job.id);
+    if (now?.state.state === "done") return;
     assert.ok(Date.now() < deadline, `the delete never ended done: ${JSON.stringify(now)}`);
   }
 }
@@ -468,7 +468,7 @@ test("a delete an engine stop cut short shows on the project with Keep the proje
     INSERT INTO ledger_actions(kind,action_key,payload,started_ms) VALUES ('project_delete','${id}','{"project":"${id}","exchange":900}',${Date.now()});`));
   assert.equal(sql("SELECT count(*) FROM projects_delete_pending"), "0", "the start still forgets the plan, so a home move may go");
   const held = await value(run.bridge, "desktop_intake_status");
-  assert.ok(held === null || held.project_id !== id, `a 2.4.1 mark names no job, so Home shows none for it: ${JSON.stringify(held)}`);
+  assert.ok(held.every((job) => job.project_id !== id), `a 2.4.1 mark names no job, so Home shows none for it: ${JSON.stringify(held)}`);
   await onPage("cut-short", async (page, me) => {
     await page.send("Page.navigate", { url: `http://127.0.0.1:${run.site.port}/#/projects/${encodeURIComponent(id)}/overview` });
     await me.waitFor("the delete cut short on the project", (text) => text.includes(CUT_SHORT) && text.includes("its agents stay stopped until you start them again"));
@@ -489,7 +489,7 @@ test("a delete an engine stop cut short shows on the project with Keep the proje
   assert.equal(sql(`SELECT count(*) FROM ledger_actions WHERE kind='project_delete' AND action_key='${id}' AND outcome IS NULL`), "0", "Keep the project clears the mark");
 });
 
-test("a delete waits on Home for the project's agents to stop, refuses another project's delete naming it, is found again by the same project's start and a new window, and moves both its folders to the Trash once they stopped (DEC-177)", { timeout: 300000 }, async () => {
+test("a delete waits on Home for the project's agents to stop, another project's delete waits its turn behind it, the same project's start and a new window find it, and both delete once the agents stopped (DEC-177, DEC-197)", { timeout: 300000 }, async () => {
   const name = "Slow Stop";
   const { id, folder } = await made(name);
   const other = await made("Waits Its Turn");
@@ -512,31 +512,34 @@ test("a delete waits on Home for the project's agents to stop, refuses another p
     await me.capture("delete-job-stopping");
     await openRemove(page, me, other.id, "Waits Its Turn");
     await confirmDelete(page, me, "Waits Its Turn");
-    await me.waitFor("the busy note in the dialog", (text) => text.includes(`Deleting ${name} is running. Wait for it to finish on Home.`), JOB_MS);
-    await me.capture("delete-job-busy");
+    await me.waitFor("the other delete waiting its turn", (text) => text.includes(`Waiting for ${name} to finish...`), JOB_MS);
+    await me.capture("delete-job-waiting");
   });
-  const running = await value(run.bridge, "desktop_intake_status");
+  const running = (await value(run.bridge, "desktop_intake_status")).find((job) => job.project_id === id);
   assert.equal(running?.kind, "delete", JSON.stringify(running));
   assert.equal((await startDelete(id, name)).id, running.id, "the same project's start finds the running delete");
   await onPage("delete-reopened", async (page, me) => {
     await openHome(page);
-    await me.waitFor("the running delete in a new window", (text) => text.includes(waiting), JOB_MS);
+    await me.waitFor("both deletes in a new window", (text) => text.includes(waiting) && text.includes(`Waiting for ${name} to finish...`), JOB_MS);
     const spent = Date.now() - asked;
     assert.ok(asked > 0 && spent < STOP_GUARD_MS, `the agents stop ${spent} ms after Delete, past ${STOP_GUARD_MS} ms inside the engine's 30 s agent wait: this run was too slow, not the delete`);
     sql("UPDATE team_agents SET status='stopped' WHERE id=81");
-    await me.waitFor("the deleted line", (text) => text.includes(`${name} is deleted. Its files are in the Trash.`), JOB_MS);
-    assert.deepEqual(await rowButtons(page), ["Dismiss"]);
+    await me.waitFor("both deleted lines", (text) => text.includes(`${name} is deleted. Its files are in the Trash.`)
+      && text.includes("Waits Its Turn is deleted. Its files are in the Trash."), JOB_MS);
+    assert.deepEqual(await rowButtons(page), ["Dismiss", "Dismiss"]);
     await me.capture("delete-job-done");
     await me.click("Dismiss", "div.in-row button");
-    await me.waitFor("the row gone", (text) => !text.includes(`${name} is deleted`), JOB_MS);
+    await me.waitFor("the first row gone", (text) => !text.includes(`${name} is deleted`), JOB_MS);
+    await me.click("Dismiss", "div.in-row button");
+    await me.waitFor("the second row gone", (text) => !text.includes("Waits Its Turn is deleted"), JOB_MS);
   });
   assert.equal(await listed(id), false, "the engine no longer lists the project");
-  assert.equal(await listed(other.id), true, "the refused delete left the other project");
+  assert.equal(await listed(other.id), false, "the waiting delete ran once the first ended");
   assert.ok(!existsSync(folder), "the folder left the projects folder");
   assert.ok(inVolumeTrash(folder), "the folder is in the test volume's Trash");
   assert.ok(!existsSync(library), "its repository left the projects folder");
   assert.ok(inVolumeTrash(library), "its repository is in the test volume's Trash too: a delete of 2 folders ends Done");
-  assert.equal(await value(run.bridge, "desktop_intake_status"), null, "Dismiss forgets the ended delete");
+  assert.deepEqual(await value(run.bridge, "desktop_intake_status"), [], "Dismiss forgets the ended delete");
 });
 
 test("Stop on Home while a delete waits for its agents keeps the project and its folder, says nothing went to the Trash, and Try again opens the remove ask on Delete everything (DEC-177)", { timeout: 300000 }, async () => {
@@ -567,7 +570,7 @@ test("Stop on Home while a delete waits for its agents keeps the project and its
     await me.click("Dismiss", "div.in-row button");
     await me.waitFor("the row gone", (text) => !text.includes(stopped), JOB_MS);
   });
-  assert.equal(await value(run.bridge, "desktop_intake_status"), null, "Dismiss forgets the stopped delete");
+  assert.deepEqual(await value(run.bridge, "desktop_intake_status"), [], "Dismiss forgets the stopped delete");
   assert.equal(await listed(id), true, "a stopped delete keeps the project");
   assert.ok(existsSync(join(folder, ".crazyagent")), "its folder stays where it is");
   sql("UPDATE team_agents SET status='stopped' WHERE id=82");
@@ -587,7 +590,7 @@ test("a delete whose agents do not stop within the wait fails on Home with the r
     await me.click("Dismiss", "div.in-row button");
     await me.waitFor("the row gone", (text) => !text.includes(failed), JOB_MS);
   });
-  assert.equal(await value(run.bridge, "desktop_intake_status"), null, "Dismiss forgets the failed delete");
+  assert.deepEqual(await value(run.bridge, "desktop_intake_status"), [], "Dismiss forgets the failed delete");
   assert.equal(await listed(id), true, "a failed delete keeps the project");
   assert.ok(existsSync(join(folder, ".crazyagent")), "its folder stays where it is");
   sql("UPDATE team_agents SET status='stopped' WHERE id=83");
@@ -639,10 +642,10 @@ test("Keep the project on Home clears the project's cut-short banner, and the ba
   });
   assert.equal(sql(`SELECT count(*) FROM ledger_actions WHERE kind='project_delete' AND action_key='${first.id}' AND outcome IS NULL`), "0", "Keep the project on Home ends the banner's mark");
   assert.equal(await deletes(first.id), 0, "Keep the project on Home clears the project's cut-short banner");
-  assert.equal(await value(run.bridge, "desktop_intake_status"), null, "Keep the project forgets the job");
+  assert.deepEqual(await value(run.bridge, "desktop_intake_status"), [], "Keep the project forgets the job");
   const second = await made("Kept From Banner");
   await restart(() => sql(cutShortMark(second.id, "Kept From Banner", 903, 2)));
-  const restored = await value(run.bridge, "desktop_intake_status");
+  const restored = (await value(run.bridge, "desktop_intake_status")).at(-1);
   assert.deepEqual([restored?.project_id, restored?.state], [second.id, { state: "cut_short", trashed: 1, total: 2 }], JSON.stringify(restored));
   await onPage("delete-keep-banner", async (page, me) => {
     await page.send("Page.navigate", { url: `http://127.0.0.1:${run.site.port}/#/projects/${encodeURIComponent(second.id)}/overview` });
@@ -651,7 +654,7 @@ test("Keep the project on Home clears the project's cut-short banner, and the ba
     await me.waitFor("the banner without the delete", (text) => !text.includes(CUT_SHORT), JOB_MS);
     await me.capture("delete-job-kept-banner");
   });
-  assert.equal(await value(run.bridge, "desktop_intake_status"), null, "the banner's Keep the project forgets Home's job");
+  assert.deepEqual(await value(run.bridge, "desktop_intake_status"), [], "the banner's Keep the project forgets Home's job");
   assert.equal(await listed(first.id), true);
   assert.equal(await listed(second.id), true);
 });

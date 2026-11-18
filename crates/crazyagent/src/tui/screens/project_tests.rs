@@ -955,6 +955,7 @@ fn the_agent_activity_lists_only_what_the_engine_recorded() {
         started_ms: None,
         heartbeat_ms: None,
         finished_ms: None,
+        retryable: false,
     };
     let steps = |job: &ResearchJob| -> Vec<(Option<i64>, String)> {
         activity(job, &look)
@@ -1005,224 +1006,9 @@ fn the_agent_activity_lists_only_what_the_engine_recorded() {
     assert_eq!(steps(&job).last().unwrap().1, "Stopped");
 }
 
-#[tokio::test]
-async fn agents_stop_after_a_yes_run_again_and_show_the_agents_latest_output() {
-    let root = tempfile::Builder::new()
-        .prefix("ca-tui-agents-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let (_stop, stopped) = tokio::sync::watch::channel(false);
-    let config = crate::tui::test_home::engine_config();
-    let _service = EngineService::start(root.path(), "e.sock", &config, &stopped)
-        .await
-        .unwrap();
-    let ordinary = Client::new(
-        root.path().join("e.sock"),
-        crate::tui::test_home::ENGINE_WAIT,
-    )
-    .unwrap();
-    let (_, mut controller) = OwnerController::attach_configured(ordinary, OwnerClientKind::Tui)
-        .await
-        .unwrap();
-    let _home = crate::tui::test_home::projects_home(&mut controller, 1).await;
-    let project = ProjectId::new("buoy-watch").unwrap();
-    let created = controller
-        .setup_project(
-            project.clone(),
-            ProjectSpec {
-                name: "Buoy Watch".into(),
-                repositories: vec![],
-            },
-            ProjectSetup {
-                about: "Alerts when buoy readings look wrong.".into(),
-                tech_stack: vec![],
-                platforms: vec![Platform::Cli],
-                research: vec![
-                    ResearchKind::MarketResearch,
-                    ResearchKind::CompetitorResearch,
-                ],
-                pool: None,
-                team: None,
-                documents: vec![],
-            },
-            1,
-        )
-        .await
-        .unwrap();
-    assert!(matches!(
-        created,
-        OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
-    ));
-
-    let mut screen = ProjectScreen::new(project.clone(), String::new(), None);
-    let start = 1_793_000_000_000;
-    assert_eq!(
-        settle(&mut screen, &mut controller, start).await,
-        ["setup", "jobs", "overview", "context", "memories"],
-        "no agent output is read outside the Agents tab"
-    );
-    screen.open(Tab::Agents);
-    assert_eq!(
-        settle(&mut screen, &mut controller, start + 1_000).await,
-        ["log"]
-    );
-    let first = screen.focused_job().unwrap().clone();
-    assert_eq!(first.status, ResearchStatus::NeedsPool);
-    assert_eq!(
-        screen.log.as_ref().map(|log| (log.job, log.lines.clone())),
-        Some((first.id, Some(Vec::new())))
-    );
-    assert!(
-        settle(&mut screen, &mut controller, start + 2_000)
-            .await
-            .is_empty(),
-        "a waiting agent's output is not read again until its status changes"
-    );
-    let look = Look::plain();
-    let drawn = project_screen(&mut screen, 80, 24, &look);
-    assert_eq!(drawn.help[1], ("x", "Stop"));
-    assert!(!text(&drawn.rows).contains("No output yet."));
-
-    assert_eq!(screen.key(key(KeyCode::Char('r'))), ProjectReply::Handled);
-    assert_eq!(
-        screen.problem.as_deref(),
-        Some("Only failed or stopped research can run again.")
-    );
-    assert_eq!(screen.key(key(KeyCode::Char('x'))), ProjectReply::Handled);
-    assert_eq!(screen.confirm_stop, Some(first.id));
-    let drawn = project_screen(&mut screen, 80, 24, &look);
-    assert!(text(&drawn.rows).contains("Stop Market research?"));
-    assert_eq!(drawn.help[0], ("y", "Stop"));
-    assert_eq!(screen.key(key(KeyCode::Char('n'))), ProjectReply::Handled);
-    assert_eq!(screen.confirm_stop, None);
-    screen.key(key(KeyCode::Char('x')));
-    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
-    assert_eq!(
-        screen.confirm_stop,
-        Some(first.id),
-        "only y, n or Esc answer"
-    );
-    let stop = screen.key(key(KeyCode::Char('y')));
-    assert_eq!(
-        stop,
-        ProjectReply::Change(Box::new(SetupAction::CancelResearch {
-            project_id: project.clone(),
-            job: first.id,
-        }))
-    );
-    assert_eq!(screen.confirm_stop, None);
-    let ProjectReply::Change(action) = stop else {
-        unreachable!()
-    };
-    send(
-        &mut screen,
-        &mut controller,
-        SetupQuery::Change {
-            action: *action,
-            generation: 2,
-        },
-    )
-    .await;
-
-    let run = root
-        .path()
-        .join("research/agents")
-        .join(format!("job-{}-1", first.id));
-    std::fs::create_dir_all(&run).unwrap();
-    std::fs::write(
-        run.join("stderr.log"),
-        "Searching ocean sensor pricing\nRead buoywatch.io/pricing\nwarning:\tslow network\n",
-    )
-    .unwrap();
-    assert_eq!(
-        settle(&mut screen, &mut controller, start + 3_000).await,
-        ["jobs", "log"]
-    );
-    assert_eq!(
-        screen.focused_job().map(|job| job.status),
-        Some(ResearchStatus::Cancelled)
-    );
-    assert_eq!(
-        screen.log.as_ref().and_then(|log| log.lines.clone()),
-        Some(vec![
-            "Searching ocean sensor pricing".to_owned(),
-            "Read buoywatch.io/pricing".to_owned(),
-            "warning: slow network".to_owned(),
-        ])
-    );
-    let drawn = project_screen(&mut screen, 80, 24, &look);
-    let shown = text(&drawn.rows);
-    assert!(shown.contains("Stopped"), "{shown}");
-    assert!(
-        shown.contains("       Read buoywatch.io/pricing"),
-        "{shown}"
-    );
-    assert!(shown.contains("warning: slow network"), "{shown}");
-    assert_eq!(drawn.help[1], ("r", "Retry"));
-    assert_eq!(screen.key(key(KeyCode::Char('x'))), ProjectReply::Handled);
-    assert_eq!(
-        screen.problem.as_deref(),
-        Some("This research is not running.")
-    );
-    assert_eq!(screen.confirm_stop, None);
-
-    let again = screen.key(key(KeyCode::Char('r')));
-    assert_eq!(
-        again,
-        ProjectReply::Change(Box::new(SetupAction::RetryResearch {
-            project_id: project.clone(),
-            job: first.id,
-        }))
-    );
-    let ProjectReply::Change(action) = again else {
-        unreachable!()
-    };
-    send(
-        &mut screen,
-        &mut controller,
-        SetupQuery::Change {
-            action: *action,
-            generation: 3,
-        },
-    )
-    .await;
-    assert_eq!(
-        settle(&mut screen, &mut controller, start + 4_000).await,
-        ["setup", "jobs", "log"],
-        "a retry may turn its research back on, so the setup is read again"
-    );
-    assert_eq!(
-        screen.focused_job().map(|job| (job.status, job.attempts)),
-        Some((ResearchStatus::NeedsPool, 0)),
-        "with no pool the retried research waits for one"
-    );
-
-    let stale = SetupQuery::Change {
-        action: SetupAction::RetryResearch {
-            project_id: project.clone(),
-            job: first.id,
-        },
-        generation: 4,
-    };
-    let refused = serve(&mut controller, stale.clone()).await;
-    assert_eq!(
-        refused,
-        Ok(SetupView::Changed(OwnerResult::Rejected {
-            code: "research_job_not_retryable".into()
-        }))
-    );
-    screen.apply(&stale, refused);
-    assert_eq!(
-        screen.problem.as_deref(),
-        Some("Only failed or stopped research can run again.")
-    );
-    assert_eq!(
-        settle(&mut screen, &mut controller, start + 4_500).await,
-        ["jobs"],
-        "a refused change reads the jobs again"
-    );
-}
+/// The Agents tab against a real engine: stop after a yes, run again where the engine runs
+/// research and its refusal where it does not, and the agent's latest output.
+mod agents_engine;
 
 #[test]
 fn a_job_waiting_on_a_rate_limit_reads_rate_limited_until_its_local_end() {
@@ -1248,6 +1034,7 @@ fn a_job_waiting_on_a_rate_limit_reads_rate_limited_until_its_local_end() {
         started_ms: None,
         heartbeat_ms: None,
         finished_ms: None,
+        retryable: false,
     };
     assert_eq!(
         text(&[job_status(&limited, 0, 3_600, &look)]),
@@ -1490,6 +1277,7 @@ fn the_agents_tab_shows_only_the_newest_output_lines_that_fit() {
         started_ms: Some(2_000),
         heartbeat_ms: Some(3_000),
         finished_ms: None,
+        retryable: false,
     }]);
     screen.open(Tab::Agents);
     let look = Look::plain();
@@ -1571,6 +1359,7 @@ fn a_queued_research_job_shows_why_it_waits_on_its_status() {
         started_ms: None,
         heartbeat_ms: None,
         finished_ms: None,
+        retryable: false,
     };
     let look = Look::plain();
     let status = text(&[job_status(&queued, 0, 3_600, &look)]);
@@ -1644,6 +1433,7 @@ fn a_research_job_queued_again_shows_why_and_is_not_drawn_as_running() {
         started_ms: Some(2_000),
         heartbeat_ms: Some(3_000),
         finished_ms: None,
+        retryable: false,
     }]);
     screen.open(Tab::Agents);
     let look = Look::plain();
@@ -3150,6 +2940,7 @@ fn a_stale_hidden_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_rea
             paths: vec!["/Users/owner/project/secret".into()],
             version: 3,
             runs: Vec::new(),
+            unavailable: false,
         })),
     );
     assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Handled);
@@ -3195,6 +2986,7 @@ fn a_stale_hidden_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_rea
             ],
             version: 4,
             runs: Vec::new(),
+            unavailable: false,
         })),
     );
     let hidden = screen.hidden.as_ref().unwrap();
@@ -3226,6 +3018,7 @@ fn a_stale_hidden_folders_save_keeps_the_list_and_enter_saves_it_over_the_re_rea
             paths: vec!["/Users/owner/project/secret".into()],
             version: 5,
             runs: Vec::new(),
+            unavailable: false,
         })),
     );
     assert!(screen.hidden.is_none(), "Esc keeps the saved one");
@@ -3257,6 +3050,7 @@ fn settings_plans_a_roadmap_with_p_and_edits_hidden_folders_with_k() {
         paths: vec!["/Users/owner/secret".into()],
         version: 0,
         runs: Vec::new(),
+        unavailable: false,
     });
     screen.context = Some(crate::project_setup::ProjectContext {
         project_id: project.clone(),
@@ -3293,6 +3087,40 @@ fn settings_plans_a_roadmap_with_p_and_edits_hidden_folders_with_k() {
         screen.hidden.as_ref().unwrap().input.value(),
         "/Users/owner/secret"
     );
+}
+
+/// Where the engine says this system has no hidden folders (DEC-194, Windows until its git
+/// check lands), the Settings tab shows no Hidden line and no run that could open one, and
+/// `k` opens no box, even for a list saved earlier; the engine's refusal stays the guard.
+#[test]
+fn settings_offers_no_hidden_folders_where_the_engine_says_they_are_unavailable() {
+    let look = Look::plain();
+    let project = ProjectId::new("hidden").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    screen.hidden_paths = Some(crate::project_setup::HiddenPaths {
+        paths: vec!["/Users/owner/secret".into()],
+        version: 0,
+        runs: vec![crate::sandbox::hidden_paths::RunKind::Master],
+        unavailable: true,
+    });
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(!shown.contains("Hidden    "), "{shown}");
+    assert!(!shown.contains("k Edit hidden folders"), "{shown}");
+    assert!(!shown.contains("can still open a hidden folder"), "{shown}");
+    assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Ignored);
+    assert!(screen.hidden.is_none());
+}
+
+/// A hidden folder refused as not plain is told in this system's own path form: on Windows
+/// a drive path joined by backslashes, elsewhere a path with no quote or backslash.
+#[test]
+fn a_hidden_folder_refused_as_not_plain_is_told_in_this_systems_path_form() {
+    #[cfg(windows)]
+    let wanted = r"A folder path must be a plain drive path such as C:\Users\you\project\secrets, with no quotes, / or control characters.";
+    #[cfg(not(windows))]
+    let wanted = "A folder path can't hold quotes, backslashes or control characters.";
+    assert_eq!(plain_problem("hidden_path_not_plain"), wanted);
 }
 
 #[test]
@@ -3339,6 +3167,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
             paths: vec!["/Users/owner/secret".into()],
             version: 1,
             runs: Vec::new(),
+            unavailable: false,
         })),
     );
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
@@ -3421,6 +3250,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
         paths: vec![],
         version: 2,
         runs: Vec::new(),
+        unavailable: false,
     });
     screen.key(key(KeyCode::Char('k')));
     screen.paste(&format!("/{}", "d".repeat(1100)));
@@ -4645,19 +4475,182 @@ fn the_access_box_keeps_its_save_line_and_the_cursor_row_in_a_short_window() {
     }
 }
 
-/// The Settings key m asks before a project moves into the projects home: the ask says the
+/// #383 code F1 r2 (leader 16:30, B): a failed folder read lets m and c go on, says the move
+/// downloads everything, offers no switch, and both moves send Download everything.
+#[test]
+fn a_failed_move_read_says_the_move_downloads_everything_and_sends_it() {
+    use crate::projects_home::AddMode;
+    let project = ProjectId::new("kept").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Kept".into(), None);
+    screen.open(Tab::Settings);
+    screen.setup = Some(stored(&project));
+    for (key_char, mode) in [('m', AddMode::Move), ('c', AddMode::Copy)] {
+        assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::MoveRead);
+        screen.move_read_failed();
+        let drawn = project_screen(&mut screen, 80, 30, &Look::plain());
+        let shown = text(&drawn.rows);
+        assert!(
+            shown.contains("CrazyAgent couldn't read this folder."),
+            "{shown}"
+        );
+        assert!(shown.contains("rebuildable folders too"), "{shown}");
+        assert!(!shown.contains("Download everything (slow)"), "{shown}");
+        assert!(!drawn.help.iter().any(|(key, _)| *key == "Space"));
+        assert_eq!(screen.key(key(KeyCode::Char(' '))), ProjectReply::Handled);
+        assert_eq!(
+            screen.key(key(KeyCode::Char(key_char))),
+            ProjectReply::MoveHome(mode, true)
+        );
+        assert!(!screen.confirm_move);
+    }
+}
+
+/// #383 code F1 r2: in an 80x24 terminal the move ask with left folders keeps its switch, its
+/// buttons and its bottom border inside the screen, folding every folder into the count.
+#[test]
+fn the_move_ask_with_left_folders_fits_an_80_by_24_terminal() {
+    use crate::projects_home::icloud::{Skipped, SkippedFolders, SkippedMore};
+    let project = ProjectId::new("kept").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Kept".into(), None);
+    screen.open(Tab::Settings);
+    screen.setup = Some(stored(&project));
+    screen.key(key(KeyCode::Char('M')));
+    screen.move_read(SkippedFolders {
+        listed: vec![Skipped {
+            path: "node_modules".into(),
+            files: Some(57_108),
+        }],
+        more: Some(SkippedMore {
+            folders: 40,
+            files: None,
+        }),
+    });
+    let look = Look::plain();
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(drawn.rows.len() <= 20, "{}", drawn.rows.len());
+    let lines: Vec<String> = drawn.rows.iter().map(Row::text).collect();
+    let shown = lines.join("\n");
+    assert!(
+        shown.contains("and 41 more folders (files not counted)"),
+        "{shown}"
+    );
+    assert!(shown.contains("[ ] Download everything (slow)"), "{shown}");
+    let buttons = lines
+        .iter()
+        .position(|line| line.contains("[> Keep it here ]"))
+        .unwrap_or_else(|| panic!("no buttons: {shown}"));
+    let corner = look.glyph("\u{2514}");
+    assert!(
+        lines
+            .get(buttons + 1)
+            .is_some_and(|line| line.contains(corner)),
+        "{shown}"
+    );
+}
+
+/// #383 code F1 (DEC-198): the move ask reads the folder first; until the read lands m and c
+/// wait. It then lists the rebuildable folders a move leaves in iCloud, with the ones only
+/// counted, says where they stay, and Space switches Download everything, which m sends.
+#[test]
+fn the_move_ask_lists_the_folders_a_move_leaves_in_icloud_and_space_downloads_everything() {
+    use crate::projects_home::AddMode;
+    use crate::projects_home::icloud::{Skipped, SkippedFolders, SkippedMore};
+    let project = ProjectId::new("kept").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Kept".into(), None);
+    screen.open(Tab::Settings);
+    screen.setup = Some(stored(&project));
+    assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::MoveRead);
+    let reading = text(&project_screen(&mut screen, 80, 30, &Look::plain()).rows);
+    assert!(reading.contains("Reading the folder..."), "{reading}");
+    assert_eq!(screen.key(key(KeyCode::Char('m'))), ProjectReply::Handled);
+    assert!(screen.confirm_move, "no move before the read");
+    screen.move_read(SkippedFolders {
+        listed: vec![
+            Skipped {
+                path: "node_modules".into(),
+                files: Some(57_108),
+            },
+            Skipped {
+                path: "web/.venv".into(),
+                files: None,
+            },
+        ],
+        more: Some(SkippedMore {
+            folders: 1968,
+            files: Some(1968),
+        }),
+    });
+    let shown = text(&project_screen(&mut screen, 80, 40, &Look::plain()).rows);
+    for line in [
+        "Left in iCloud, as they can be rebuilt:",
+        "node_modules (57108 files)",
+        "web/.venv (files not counted)",
+        "and 1968 more folders (1968 files)",
+        "They stay in /private/tmp/ca-notes-cli;",
+        "[ ] Download everything (slow)",
+    ] {
+        assert!(shown.contains(line), "{line} missing: {shown}");
+    }
+    assert_eq!(screen.key(key(KeyCode::Char(' '))), ProjectReply::Handled);
+    let shown = text(&project_screen(&mut screen, 80, 40, &Look::plain()).rows);
+    assert!(shown.contains("[x] Download everything (slow)"), "{shown}");
+    assert!(shown.contains("Downloaded too:"), "{shown}");
+    assert_eq!(
+        screen.key(key(KeyCode::Char('m'))),
+        ProjectReply::MoveHome(AddMode::Move, true)
+    );
+    assert!(!screen.confirm_move);
+    screen.key(key(KeyCode::Char('M')));
+    let opened = text(&project_screen(&mut screen, 80, 30, &Look::plain()).rows);
+    assert!(
+        opened.contains("Reading the folder..."),
+        "a new ask reads again: {opened}"
+    );
+    assert!(
+        !screen.move_everything,
+        "a new ask starts with the switch off"
+    );
+}
+
+/// The Settings key M asks before a project moves into the projects home: the ask says the
 /// team must be stopped and its work follows, m sends a Move, c a Copy, and n or Esc keeps the
 /// project where it is. A refused start of the move job shows as a plain line (DEC-177).
 #[test]
 fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
     use crate::projects_home::AddMode;
+    use crate::projects_home::icloud::SkippedFolders;
     let project = ProjectId::new("kept").unwrap();
     let mut screen = ProjectScreen::new(project.clone(), "Kept".into(), None);
     screen.open(Tab::Settings);
+    screen.setup_missing = true;
+    assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::Handled);
+    assert!(
+        !screen.confirm_move,
+        "a project with no saved setup has no folder to move"
+    );
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some(plain_problem("project_setup_missing").as_str()),
+        "#383 code F1 r2 (rv-code2 F1): the same sentence as g, not Still loading"
+    );
+    screen.setup_missing = false;
+    screen.problem = None;
+    assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::Handled);
+    assert!(
+        !screen.confirm_move,
+        "no ask before the project folder is known"
+    );
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("Still loading the project folder. Try again.")
+    );
+    screen.problem = None;
+    screen.setup = Some(stored(&project));
     let shown = text(&project_screen(&mut screen, 120, 30, &Look::plain()).rows);
-    assert!(shown.contains("m Move into CrazyAgent folder"), "{shown}");
-    assert_eq!(screen.key(key(KeyCode::Char('m'))), ProjectReply::Handled);
+    assert!(shown.contains("M Move into CrazyAgent folder"), "{shown}");
+    assert_eq!(screen.key(key(KeyCode::Char('M'))), ProjectReply::MoveRead);
     assert!(screen.confirm_move);
+    screen.move_read(SkippedFolders::default());
     let drawn = project_screen(&mut screen, 80, 24, &Look::plain());
     let shown = text(&drawn.rows);
     assert!(
@@ -4679,23 +4672,26 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
     assert!(screen.confirm_move);
     assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
     assert!(!screen.confirm_move);
-    screen.key(key(KeyCode::Char('m')));
+    screen.key(key(KeyCode::Char('M')));
+    screen.move_read(SkippedFolders::default());
     assert_eq!(screen.key(key(KeyCode::Char('n'))), ProjectReply::Handled);
     assert!(!screen.confirm_move);
-    screen.key(key(KeyCode::Char('m')));
+    screen.key(key(KeyCode::Char('M')));
+    screen.move_read(SkippedFolders::default());
     assert_eq!(
         screen.key(key(KeyCode::Char('m'))),
-        ProjectReply::MoveHome(AddMode::Move)
+        ProjectReply::MoveHome(AddMode::Move, false)
     );
     assert!(!screen.confirm_move);
-    screen.key(key(KeyCode::Char('m')));
+    screen.key(key(KeyCode::Char('M')));
+    screen.move_read(SkippedFolders::default());
     assert_eq!(
         screen.key(key(KeyCode::Char('c'))),
-        ProjectReply::MoveHome(AddMode::Copy)
+        ProjectReply::MoveHome(AddMode::Copy, false)
     );
     assert!(!screen.confirm_move);
 
-    screen.job_refused("move_project_busy", None);
+    screen.job_refused("move_project_busy");
     assert!(
         screen
             .problem
@@ -4704,42 +4700,29 @@ fn move_into_the_projects_home_asks_first_and_sends_move_or_copy() {
         "{:?}",
         screen.problem
     );
-    screen.job_refused("move_project_already_home", None);
+    screen.job_refused("move_project_already_home");
     assert_eq!(
         screen.problem.as_deref(),
         Some("This project is already in your projects folder.")
     );
-    screen.job_refused("job_busy", None);
+    screen.job_refused("job_busy");
     assert_eq!(
         screen.problem.as_deref(),
-        Some("Another job is running. Wait for it to finish on Home.")
+        Some("Several folders are already waiting. Wait for one to finish on Home.")
     );
-    let adding = crate::projects_home::job::JobView {
-        id: crate::protocol::RequestId::new("add-1").unwrap(),
-        kind: crate::projects_home::job::JobKind::Add,
-        project_id: None,
-        source: "/Users/mira/Code/shop".into(),
-        mode: crate::projects_home::AddMode::Copy,
-        overrides: Vec::new(),
-        stopping: false,
-        state: crate::projects_home::job::JobState::Copying {
-            copied: 3,
-            checked: 0,
-        },
-    };
-    screen.job_refused("job_busy", Some(&adding));
+    screen.job_refused("job_same_folder");
     assert_eq!(
         screen.problem.as_deref(),
-        Some("Adding shop is running. Wait for it to finish on Home."),
-        "a busy refusal names the job that runs"
+        Some("This folder is already being moved or added. See it on Home."),
+        "a move whose folder a running add holds says so"
     );
-    screen.job_refused("home_add_in_progress", None);
+    screen.job_refused("home_add_in_progress");
     assert_eq!(
         screen.problem.as_deref(),
         Some("A folder is being added to your projects folder. Try again when it finishes."),
         "a move while an add runs says so in plain words"
     );
-    screen.job_refused("home_move_worktrees", None);
+    screen.job_refused("home_move_worktrees");
     assert!(
         screen
             .problem
@@ -5272,12 +5255,12 @@ fn a_folder_cut_to_its_tail_fits_its_cells() {
 }
 
 /// SA-VID14-A: on the Settings tab the running agents that can still open a folder hidden
-/// after they started are named under the hidden folders, with h to restart them, which
-/// sends Restart them for the project; with none listed h sends nothing. The editor says the
+/// after they started are named under the hidden folders, with R to restart them, which
+/// sends Restart them for the project; with none listed R sends nothing. The editor says the
 /// list covers team agents, and that engine runs started before are named too (r1,
 /// SA-VID14-R2-N1, SA-VID14-R2-N2).
 #[test]
-fn settings_name_agents_that_can_still_open_a_hidden_folder_and_h_restarts_them() {
+fn settings_name_agents_that_can_still_open_a_hidden_folder_and_r_restarts_them() {
     use crate::team::{GraphNode, NodeKind, TeamAction, TeamGraph};
     let look = Look::plain();
     let project = ProjectId::new("hidden").unwrap();
@@ -5288,6 +5271,7 @@ fn settings_name_agents_that_can_still_open_a_hidden_folder_and_h_restarts_them(
         paths: vec!["/Users/owner/secret".into()],
         version: 0,
         runs: Vec::new(),
+        unavailable: false,
     });
     let node = |id: &str, kind, label: &str, sees_hidden: bool| GraphNode {
         id: id.into(),
@@ -5331,7 +5315,7 @@ fn settings_name_agents_that_can_still_open_a_hidden_folder_and_h_restarts_them(
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     assert!(!shown.contains("can still open"), "{shown}");
     assert!(!matches!(
-        screen.key(key(KeyCode::Char('h'))),
+        screen.key(key(KeyCode::Char('R'))),
         ProjectReply::TeamChange(_)
     ));
 
@@ -5346,11 +5330,11 @@ fn settings_name_agents_that_can_still_open_a_hidden_folder_and_h_restarts_them(
         "{shown}"
     );
     assert!(
-        shown.contains("          Master, Ada can still open a hidden folder   h Restart them"),
+        shown.contains("          Master, Ada can still open a hidden folder   R Restart them"),
         "{shown}"
     );
     assert_eq!(
-        screen.key(key(KeyCode::Char('h'))),
+        screen.key(key(KeyCode::Char('R'))),
         ProjectReply::TeamChange(Box::new(TeamAction::RestartHiddenSeers {
             project_id: project.clone(),
         }))
@@ -5386,6 +5370,7 @@ fn settings_name_engine_runs_that_can_still_open_a_hidden_folder() {
         paths: vec!["/Users/owner/secret".into()],
         version: 0,
         runs,
+        unavailable: false,
     };
     screen.hidden_paths = Some(saved(vec![
         RunKind::Master,
@@ -5411,7 +5396,7 @@ fn settings_name_engine_runs_that_can_still_open_a_hidden_folder() {
         "{shown}"
     );
     assert!(
-        !shown.contains("h Restart them"),
+        !shown.contains("R Restart them"),
         "a run has no restart key: {shown}"
     );
     screen.hidden_paths = Some(saved(Vec::new()));
@@ -5435,6 +5420,7 @@ fn settings_read_the_hidden_folders_again_while_runs_are_listed() {
             paths: vec!["/Users/owner/secret".into()],
             version: 1,
             runs,
+            unavailable: false,
         }))
     };
     let first = next_hidden_read(&mut screen, 20);
@@ -5458,4 +5444,137 @@ fn settings_read_the_hidden_folders_again_while_runs_are_listed() {
         );
         screen.apply(&query, Err("trusted_connection_unavailable".into()));
     }
+}
+
+/// A Notes CLI screen on the Conversation tab with pool Main assigned, a stopped master in
+/// the given state and a kept reinstall offer for node_modules and api/.venv. Takes the
+/// master's state. Returns the screen, typing as the tab opens.
+fn reinstall_screen(status: MasterStatus) -> ProjectScreen {
+    let mut screen = ProjectScreen::new(
+        ProjectId::new("notes-cli").unwrap(),
+        "Notes CLI".into(),
+        None,
+    );
+    screen.pool = Some(PoolInfo {
+        id: CredentialRef::new("pool-main").unwrap(),
+        name: "Main".into(),
+        accounts: 1,
+        assigned: true,
+    });
+    screen.transcript = Some(Transcript {
+        harness: "RCLI".into(),
+        account: None,
+        tools: true,
+        open: false,
+        status,
+        messages: Vec::new(),
+    });
+    screen.reinstall = Some(crate::projects_home::reinstall::Offer {
+        folders: vec!["node_modules".into(), "api/.venv".into()],
+        more: 0,
+        draft: "Please reinstall them.".into(),
+    });
+    screen.open(Tab::Conversation);
+    screen
+}
+
+/// The drawn rows as one line of words, so a sentence reads whole across its wraps.
+fn words(rows: &[Row]) -> String {
+    text(rows).split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// DEC-198 slice 3: a kept reinstall offer reads under the master with its keys after Tab
+/// while typing; out of the input, a puts the drafted message after what the owner typed and
+/// starts typing again, the offer staying, and d asks for the dismiss.
+#[test]
+fn a_kept_reinstall_offer_asks_the_master_with_a_and_dismisses_with_d() {
+    let mut screen = reinstall_screen(MasterStatus::Stopped);
+    let look = Look::plain();
+    let shown = words(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains(
+            "node_modules and api/.venv were left out when this project came into your projects \
+             folder, as they can be rebuilt. Press Tab, then a to put the drafted message in \
+             your input, d to dismiss this."
+        ),
+        "{shown}"
+    );
+    screen.input.set("Hi");
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    assert!(!screen.typing);
+    let shown = words(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Press a to put the drafted message in your input, d to dismiss this."),
+        "{shown}"
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('a'))), ProjectReply::Handled);
+    assert!(screen.typing);
+    assert_eq!(screen.input.value(), "Hi\n\nPlease reinstall them.");
+    assert!(screen.reinstall.is_some(), "asking keeps the offer");
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    assert_eq!(
+        screen.key(key(KeyCode::Char('d'))),
+        ProjectReply::ReinstallDismiss
+    );
+}
+
+/// DEC-198 slice 3: while the master's accounts aren't signed in the offer adds that an
+/// account is needed first and takes no a; d still dismisses it.
+#[test]
+fn a_reinstall_offer_while_the_master_is_not_signed_in_says_so_and_takes_no_a() {
+    let mut screen = reinstall_screen(MasterStatus::NotSignedIn);
+    assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
+    assert!(!screen.typing);
+    let look = Look::plain();
+    let shown = words(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains(&format!(
+            "as they can be rebuilt. {} Press d to dismiss this.",
+            super::project_view::REINSTALL_SIGN_IN
+        )),
+        "{shown}"
+    );
+    assert!(!shown.contains("Press a"), "{shown}");
+    assert_ne!(screen.key(key(KeyCode::Char('a'))), ProjectReply::Handled);
+    assert_eq!(screen.input.value(), "");
+    assert!(!screen.typing);
+    assert_eq!(
+        screen.key(key(KeyCode::Char('d'))),
+        ProjectReply::ReinstallDismiss
+    );
+}
+
+/// DEC-198 slice 3: the offer's sentence names one folder, two, and three with the rest
+/// counted, as the desktop; the draft goes alone into an empty input and after a blank line
+/// into one the owner typed in.
+#[test]
+fn the_reinstall_line_counts_like_the_desktop_and_the_draft_keeps_typed_text() {
+    let line = |folders: &[&str], more| {
+        super::project_view::reinstall_line(&crate::projects_home::reinstall::Offer {
+            folders: folders.iter().map(|folder| (*folder).to_owned()).collect(),
+            more,
+            draft: String::new(),
+        })
+    };
+    let came = "left out when this project came into your projects folder";
+    assert_eq!(
+        line(&["node_modules"], 0),
+        format!("node_modules was {came}, as it can be rebuilt.")
+    );
+    assert_eq!(
+        line(&["node_modules", "api/.venv"], 0),
+        format!("node_modules and api/.venv were {came}, as they can be rebuilt.")
+    );
+    assert_eq!(
+        line(&["a/node_modules", "b/node_modules", "c/dist"], 4),
+        format!(
+            "a/node_modules, b/node_modules, c/dist and 4 more were {came}, as they can be rebuilt."
+        )
+    );
+    assert_eq!(super::console::seeded("", "Reinstall."), "Reinstall.");
+    assert_eq!(super::console::seeded("  \n", "Reinstall."), "Reinstall.");
+    assert_eq!(
+        super::console::seeded("Hello", "Reinstall."),
+        "Hello\n\nReinstall."
+    );
 }

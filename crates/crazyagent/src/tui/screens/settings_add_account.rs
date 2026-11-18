@@ -1,6 +1,6 @@
 use super::settings::draw_page;
 use super::settings_accounts::{Accounts, plain, provider_word, send, settings_event};
-use super::settings_harnesses::{last_line, plain_update, refusal};
+use super::settings_harnesses::{last_line, plain_update, refusal, running_line};
 use super::{Flow, Screen, SettingsSection};
 use crate::accounts::{
     AccountDraft, AccountStatus, AccountView, Field, MethodEntry, Provider, ProviderEntry,
@@ -698,7 +698,10 @@ impl TooOld {
             }
             (UpdateOffer::Running, _) => lines.push(Line::from(vec![
                 Span::styled(ctx.spinner(), theme.running),
-                Span::raw(format!(" Updating {harness}...")),
+                Span::raw(format!(
+                    " {}",
+                    update_running_line(harness, self.versions.as_ref())
+                )),
             ])),
             (UpdateOffer::Command(command), _) => {
                 lines.push(Line::raw(format!(
@@ -1274,6 +1277,7 @@ impl AddAccount {
         };
         match event {
             SettingsEvent::HarnessVersions(id, Ok(versions)) if id == harness_id(native) => {
+                old.polls = follow_polls(old.polls, old.versions.as_ref(), versions);
                 old.versions = Some(versions.clone());
                 if old.mode.is_none() {
                     self.read_harness(ctx);
@@ -1804,7 +1808,7 @@ const SIGN_IN_SENTENCES: [(&str, &str); 31] = [
     ),
     (
         "native_auth_claude_launch_failed",
-        "Claude Code couldn't start. Check that Claude Code is installed and opens on this Mac, then try again.",
+        "Claude Code couldn't start. Check that Claude Code is installed and opens on {computer}, then try again.",
     ),
     (
         "native_auth_claude_native_exit",
@@ -1848,15 +1852,15 @@ const SIGN_IN_SENTENCES: [(&str, &str); 31] = [
     ),
     (
         "native_auth_host_executable_changed",
-        "{harness} changed on this Mac after CrazyAgent checked it, perhaps from an update. Try again.",
+        "{harness} changed on {computer} after CrazyAgent checked it, perhaps from an update. Try again.",
     ),
     (
         "native_auth_host_executable_unsafe",
-        "{harness} on this Mac isn't safe to start, so CrazyAgent didn't start it. Reinstall {harness}, then try again.",
+        "{harness} on {computer} isn't safe to start, so CrazyAgent didn't start it. Reinstall {harness}, then try again.",
     ),
     (
         "native_auth_host_unavailable",
-        "CrazyAgent didn't find a {harness} it can run on this Mac, so {name} sign-in isn't available. Install {harness}, then choose Check again, or choose its file.",
+        "CrazyAgent didn't find a {harness} it can run on {computer}, so {name} sign-in isn't available. Install {harness}, then choose Check again, or choose its file.",
     ),
     (
         "native_auth_interrupted",
@@ -1885,7 +1889,7 @@ const SIGN_IN_SENTENCES: [(&str, &str); 31] = [
     ),
     (
         "native_profile_custody_unsafe",
-        "CrazyAgent couldn't safely use this account's sign-in folder on this Mac, so it stopped. Delete the account, then add it again.",
+        "CrazyAgent couldn't safely use this account's sign-in folder on {computer}, so it stopped. Delete the account, then add it again.",
     ),
     (
         "native_profile_identity_changed",
@@ -1959,6 +1963,31 @@ pub(super) enum UpdateOffer {
     Nothing,
 }
 
+/// What the too-old panel says while the harness's update runs: the harness whose job it
+/// waits behind, named from the catalog as Settings, Harnesses names it, else that it updates.
+/// Inputs: the harness name and its versions row. Output: the sentence.
+pub(super) fn update_running_line(harness: &str, versions: Option<&HarnessVersions>) -> String {
+    let waits = versions
+        .and_then(|versions| versions.waiting.as_deref())
+        .map(|id| crate::harnesses::spec(id).map_or(id, |spec| spec.name));
+    running_line(waits, &format!("Updating {harness}..."))
+}
+
+/// The reads of a running update the too-old panel has used after a fresh read: none once the
+/// job it waits behind changed, so each wait and the update's own run get their own reads.
+/// Inputs: the reads used, the row before and the fresh row. Output: the reads used.
+pub(super) fn follow_polls(
+    polls: u32,
+    before: Option<&HarnessVersions>,
+    after: &HarnessVersions,
+) -> u32 {
+    if before.is_some_and(|before| before.waiting != after.waiting) {
+        0
+    } else {
+        polls
+    }
+}
+
 /// Picks the too-old panel's update offer as Settings, Harnesses would: Update where updates
 /// may run and the harness has an update line, else that line to run in Terminal, else why it
 /// can't be updated here. Inputs: the versions row and update mode, None until read.
@@ -1980,15 +2009,15 @@ pub(super) fn update_offer(
     }
 }
 
-/// The plain sentence for a sign-in failure code. Inputs: the code and the sign-in method,
-/// which names the harness. Output: the listed sentence, the TUI's own for a code the engine
-/// does not record, the config sentence, or the coded fallback.
+/// The plain sentence for a sign-in failure code, naming the computer per platform. Inputs:
+/// the code and the sign-in method, which names the harness. Output: the listed sentence, the
+/// TUI's own for a code the engine does not record, the config sentence, or the coded fallback.
 fn plain_sign_in(code: &str, native: Option<NativeAuthMethod>) -> String {
     let (harness, name) = harness_words(native);
     if let Some((_, sentence)) = SIGN_IN_SENTENCES.iter().find(|(listed, _)| *listed == code) {
-        return sentence
-            .replace("{harness}", harness)
-            .replace("{name}", name);
+        let text = sentence.replace("{harness}", harness);
+        let text = text.replace("{name}", name);
+        return text.replace("{computer}", super::THIS_COMPUTER);
     }
     match code {
         "native_auth_claude_input_outcome_unknown" => {
@@ -2039,7 +2068,7 @@ pub(super) fn sign_in_problem(native: Option<NativeAuthMethod>, view: &SignInVie
         (_, _, Some(code)) => plain_sign_in(code, native),
         (NativeAuthPhase::Cancelled, _, None) => "The sign-in was cancelled.".into(),
         (NativeAuthPhase::Unavailable, _, None) => {
-            "This sign-in is not available on this Mac.".into()
+            format!("This sign-in is not available on {}.", super::THIS_COMPUTER)
         }
         (_, Some(NativeAuthMethod::CodexDeviceCode), None) if view.device_code.is_some() => {
             "The code expired or was not approved.".into()

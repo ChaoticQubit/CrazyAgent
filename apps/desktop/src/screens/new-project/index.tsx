@@ -1,7 +1,7 @@
 import { harnessCatalog, poolSummaries } from "../../api";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
 import { useContext, useEffect, useRef, useState } from "react";
-import { dismissIntake, loadIntakeJob, newProjectCopy, stopIntake } from "../../api-intake";
+import { dismissIntake, newProjectCopy, stopIntake } from "../../api-intake";
 import {
   failureCopy, loadPools, loadProjectCatalog, loadProjects, pickDocuments, startSetupJob,
 } from "../../api-projects";
@@ -10,7 +10,7 @@ import type { IntakeJob } from "../../engine-client";
 import { SessionContext } from "../../state";
 import { Button, ConfirmDialog, Icon, Notice, PageHeader } from "../../ui";
 import { displayText } from "../conversation";
-import { jobActions, jobLine, refusalLine, setupFollow } from "../intake/intake";
+import { jobActions, jobLine, setupFollow } from "../intake/intake";
 import { flash, go } from "../project/flash";
 import { homePath } from "../settings/harnesses";
 import { NotReady } from "../project/shared";
@@ -47,25 +47,24 @@ const KEPT_LINE = "Couldn't create the project. Your answers are kept.";
  * with the answers kept. */
 export type SetupStarted = { kind: "started"; job: IntakeJob } | { kind: "refused"; note: string };
 
-/** Starts the engine's New Project job (DEC-177 add.2). Inputs: the name spec, the setup, the
- * start and the job read a busy refusal names the running job from. Output: the started job,
- * or the note the page shows. */
-export async function setupStart(spec: ProjectSpec, setup: ProjectSetup, start = startSetupJob,
-  read: () => Promise<Result<IntakeJob | null>> = loadIntakeJob): Promise<SetupStarted> {
+/** Starts the engine's New Project job (DEC-177 add.2), which may wait its turn behind other
+ * jobs (DEC-197). Inputs: the name spec, the setup and the start. Output: the started job, or
+ * the note the page shows. */
+export async function setupStart(spec: ProjectSpec, setup: ProjectSetup, start = startSetupJob): Promise<SetupStarted> {
   const result = await start(spec, setup);
   if (result.kind === "ok") return { kind: "started", job: result.value };
   if (result.kind === "not_ready") return { kind: "refused", note: "Not ready yet: creating a project with research isn't in this build." };
-  return { kind: "refused", note: `${KEPT_LINE} ${await refusalLine(result.code, newProjectCopy(result), read)}` };
+  return { kind: "refused", note: `${KEPT_LINE} ${newProjectCopy(result)}` };
 }
 
 /** What New Project opened again keeps of the job it started before the owner left it
  * (DEC-177 add.2 Q1 A): it follows one still building and keeps the answers of one that failed
  * or stopped; a project the job made keeps no answers, read from the job ended done or, once
- * the job left Home, from the projects listing it (rv-code bgjobs-3b F3). Inputs: the job read,
+ * the job left Home, from the projects listing it (rv-code bgjobs-3b F3). Inputs: the jobs read,
  * the started job and the project ids the session lists. Output: the job id to follow, or null,
  * and whether the answers stay. */
-export function reopened(job: IntakeJob | null, started: { id: string; project: string }, projects: readonly string[]): { follow: string | null; keep: boolean } {
-  const now = setupFollow(job, started.id);
+export function reopened(jobs: readonly IntakeJob[], started: { id: string; project: string }, projects: readonly string[]): { follow: string | null; keep: boolean } {
+  const now = setupFollow(jobs, started.id);
   switch (now.kind) {
     case "running":
       return { follow: started.id, keep: true };
@@ -81,12 +80,12 @@ export function reopened(job: IntakeJob | null, started: { id: string; project: 
 /** Reads the New Project job this page started before the owner left it, as the page opens
  * again, by `reopened`: it follows one still building, else lets go, dropping the answers of a
  * project already made, whose follow-ups Home's poll ran, Home saying how it ended. Inputs:
- * Home's read of the engine's job and the project ids the session lists. Output: the job id to
+ * Home's read of the engine's jobs and the project ids the session lists. Output: the job id to
  * follow, or null. */
-function resumeSetup(job: IntakeJob | null, projects: readonly string[]): string | null {
+function resumeSetup(jobs: readonly IntakeJob[], projects: readonly string[]): string | null {
   const started = startedJob();
   if (started === null) return null;
-  const now = reopened(job, started, projects);
+  const now = reopened(jobs, started, projects);
   if (now.follow !== null) return now.follow;
   if (!now.keep) kept = null;
   dropStarted();
@@ -98,7 +97,7 @@ function resumeSetup(job: IntakeJob | null, projects: readonly string[]): string
  * Output: the page; answers are kept if the owner leaves and comes back. */
 export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: string; navigate?: (path: string) => void }) {
   const session = useContext(SessionContext);
-  const [following, setFollowing] = useState<string | null>(() => resumeSetup(session?.intake ?? null,
+  const [following, setFollowing] = useState<string | null>(() => resumeSetup(session?.intake ?? [],
     session?.projects.kind === "ok" ? session.projects.value.map((row) => row.id) : []));
   const initialStep = STEPS.some((item) => item.id === routeStep) ? routeStep as StepId : kept?.step ?? "basics";
   const [draft, setDraftState] = useState<ProjectDraft>(() => kept?.draft ?? emptyDraft());
@@ -118,7 +117,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
   const [createError, setCreateError] = useState("");
   const [discarding, setDiscarding] = useState(false);
   const mounted = useRef(true);
-  const follow = following === null ? null : setupFollow(session?.intake ?? null, following);
+  const follow = following === null ? null : setupFollow(session?.intake ?? [], following);
   const creating = starting || finishing || following !== null;
   const github = useGitHubPublish();
 

@@ -498,8 +498,11 @@ fn a_setup_run_already_going_refuses_another() {
     progress::with(root, |state| state.running = false);
 }
 
+/// V243-SETUP-PARALLEL (DEC-199): the owner installs one dependency during a setup run,
+/// which takes its turn on that tool, and not while a lone install of the same tool runs;
+/// a lone job on another tool does not hold it.
 #[test]
-fn the_owner_installs_one_dependency_alone_and_not_while_setup_runs() {
+fn the_owner_installs_one_dependency_during_a_run_and_not_while_its_own_job_runs() {
     let (dir, mut connection) = database();
     let root = dir.path();
     let install = || SetupAction::Install {
@@ -508,11 +511,20 @@ fn the_owner_installs_one_dependency_alone_and_not_while_setup_runs() {
     assert_eq!(owner(&mut connection, root, install()), Outcome::Applied);
     assert!(!progress::snapshot(root).graph_tool);
     progress::with(root, |state| state.running = true);
+    assert_eq!(owner(&mut connection, root, install()), Outcome::Applied);
+    progress::with(root, |state| {
+        state.running = false;
+        state.jobs.insert(crate::setup::Dependency::Uv);
+    });
+    assert_eq!(owner(&mut connection, root, install()), Outcome::Applied);
+    progress::with(root, |state| {
+        state.jobs.insert(crate::setup::Dependency::Node);
+    });
     assert_eq!(
         rejected_with(owner(&mut connection, root, install())),
         "setup_busy"
     );
-    progress::with(root, |state| state.running = false);
+    progress::with(root, |state| state.jobs.clear());
 }
 
 #[test]
@@ -1421,8 +1433,9 @@ fn the_refused_tool_setting_reads_fix_button_until_command_only_is_saved() {
 
 /// DEC-162 Q1: Show command only is enforced in the engine, inside the owner transaction
 /// so a replay answers the same: a fix request answers `tool_fix_off` while it is chosen,
-/// `setup_busy` while a setup run or another fix goes on, `tool_fix_changed` for a target
-/// that is no absolute bounded path, and is admitted otherwise.
+/// `setup_busy` while a lone job on the same tool goes on (V243-SETUP-PARALLEL: a setup run
+/// or a job on another tool does not hold it), `tool_fix_changed` for a target that is no
+/// absolute bounded path, and is admitted otherwise.
 #[test]
 fn command_only_refuses_the_permission_fix_in_the_engine() {
     let (root, mut connection) = database();
@@ -1448,12 +1461,23 @@ fn command_only_refuses_the_permission_fix_in_the_engine() {
             "{bad:?}"
         );
     }
-    progress::with(root.path(), |state| state.running = true);
+    progress::with(root.path(), |state| {
+        state.running = true;
+        state.jobs.insert(crate::setup::Dependency::Uv);
+    });
+    assert_eq!(
+        owner(&mut connection, root.path(), fix(tree)),
+        Outcome::Applied
+    );
+    progress::with(root.path(), |state| {
+        state.running = false;
+        state.jobs.insert(crate::setup::Dependency::Graphify);
+    });
     assert_eq!(
         rejected_with(owner(&mut connection, root.path(), fix(tree))),
         "setup_busy"
     );
-    progress::with(root.path(), |state| state.running = false);
+    progress::with(root.path(), |state| state.jobs.clear());
     owner(
         &mut connection,
         root.path(),

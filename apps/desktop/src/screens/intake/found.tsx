@@ -12,7 +12,7 @@ import { folderLabel } from "../project/overview";
 import { NotReady } from "../project/shared";
 import { AnywayDialog } from "./add-folder";
 import { HomeFolderPicker } from "./home-folder";
-import { foundRow, homeLine, jobActions, jobLine, jobName, jobQuestion, pendingFolders, refusalLine, restartJob, retryRoute, startedProject, type FoundAction } from "./intake";
+import { foundRow, homeLine, jobActions, jobLine, jobName, jobQuestion, pendingFolders, reinstallRoute, restartJob, retryRoute, startedProject, type FoundAction } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -25,6 +25,7 @@ const ACTION_ICONS: Record<Exclude<FoundAction, null>, IconName> = {
 };
 
 const JOB_BADGES: Record<IntakeJobState["state"], { word: string; tone: Tone }> = {
+  waiting: { word: "Waiting", tone: "neutral" },
   downloading: { word: "Downloading", tone: "info" }, stopping: { word: "Waiting", tone: "info" }, copying: { word: "Adding", tone: "info" },
   clearing: { word: "Finishing", tone: "info" }, trashing: { word: "Deleting", tone: "info" }, done: { word: "Added", tone: "ok" },
   failed: { word: "Failed", tone: "danger" }, cancelled: { word: "Stopped", tone: "neutral" }, needs_answer: { word: "Needs answer", tone: "warn" },
@@ -36,7 +37,7 @@ const KIND_BADGES: Record<IntakeJob["kind"], Partial<Record<IntakeJobState["stat
   add: {}, move_project: { copying: "Moving", done: "Moved" }, delete: { copying: "Deleting", done: "Deleted" }, setup: { done: "Set up" },
 };
 
-const JOB_LABELS: Record<ReturnType<typeof jobActions>[number], string> = { stop: "Stop", retry: "Try again", answer: "Answer", dismiss: "Dismiss" };
+const JOB_LABELS: Record<ReturnType<typeof jobActions>[number], string> = { stop: "Stop", retry: "Try again", answer: "Answer", reinstall: "Reinstall in the project", dismiss: "Dismiss" };
 
 /** The button words a delete cut short shows in place of Try again and Dismiss (DEC-177 add.1). */
 const CUT_SHORT_LABELS: Partial<Record<ReturnType<typeof jobActions>[number], string>> = { retry: "Finish delete", dismiss: "Keep the project" };
@@ -45,18 +46,19 @@ const CUT_SHORT_LABELS: Partial<Record<ReturnType<typeof jobActions>[number], st
  * for its state, its line with the counts as files land, and only the actions its state allows,
  * with Can't stop now, disabled, while a delete moves folders to the Trash. Inputs: the job, a
  * busy flag and the four action handlers. Output: the row. */
-export function IntakeJobView({ job, busy, onStop, onRetry, onAnswer, onDismiss }: {
+export function IntakeJobView({ job, busy, onStop, onRetry, onAnswer, onDismiss, onReinstall = () => go(reinstallRoute(job)) }: {
   job: IntakeJob;
   busy: boolean;
   onStop: () => void;
   onRetry: () => void;
   onAnswer: () => void;
   onDismiss: () => void;
+  onReinstall?: () => void;
 }) {
   const shown = JOB_BADGES[job.state.state];
   const word = KIND_BADGES[job.kind][job.state.state];
   const badge = word === undefined ? shown : { word, tone: shown.tone };
-  const handlers = { stop: onStop, retry: onRetry, answer: onAnswer, dismiss: onDismiss };
+  const handlers = { stop: onStop, retry: onRetry, answer: onAnswer, reinstall: onReinstall, dismiss: onDismiss };
   const labels = job.state.state === "cut_short" ? { ...JOB_LABELS, ...CUT_SHORT_LABELS } : JOB_LABELS;
   return <div className="in-row">
     <span className="in-row-main">
@@ -195,23 +197,30 @@ export function SetUpDialog({ folder, onClose, onStarted }: { folder: SetUpFolde
   </Dialog>;
 }
 
-/** Home's job: the row for the job the session reads, Stop, Try again as the same kind of job
- * with the same way and overrides, the Move anyway or Copy anyway question for a soft refusal,
- * asked once a fresh read of the folder says which git link or other issue it has, whose Use
- * where it is opens setup in place for an add and keeps a moved project where it is, and Dismiss.
- * Input: what Use where it is opens. Output: the row and its question, or nothing without a job. */
-function IntakeJobPanel({ onSetUp }: { onSetUp: (folder: SetUpFolder) => void }) {
+/** Home's jobs: a row for every job the session reads, running, waiting its turn or ended, in
+ * start order (DEC-197). Input: what Use where it is opens. Output: the rows, or nothing
+ * without a job. */
+export function IntakeJobPanel({ onSetUp }: { onSetUp: (folder: SetUpFolder) => void }) {
   const session = useAppSession();
-  const job = session.intake;
+  if (session.intake.length === 0) return null;
+  return <>{session.intake.map((job) => <IntakeJobItem key={job.id} job={job} onSetUp={onSetUp} />)}</>;
+}
+
+/** One job's row on Home: Stop, Try again as the same kind of job with the same way and
+ * overrides, the Move anyway or Copy anyway question for a soft refusal, asked once a fresh read
+ * of the folder says which git link or other issue it has, whose Use where it is opens setup in
+ * place for an add and keeps a moved project where it is, and Dismiss. Inputs: the job and what
+ * Use where it is opens. Output: the row and its question. */
+function IntakeJobItem({ job, onSetUp }: { job: IntakeJob; onSetUp: (folder: SetUpFolder) => void }) {
+  const session = useAppSession();
   const [busy, setBusy] = useState(false);
   const [answering, setAnswering] = useState<{ id: string; size: Loaded<FolderSize> } | null>(null);
-  if (job === null) return null;
   const run = async <T,>(call: () => Promise<Result<T>>, started: (value: T) => IntakeJob | undefined = () => undefined) => {
     if (busy) return;
     setBusy(true);
     const result = await call();
     setBusy(false);
-    if (result.kind === "error") session.showToast(await refusalLine(result.code, result.message));
+    if (result.kind === "error") session.showToast(result.message);
     if (result.kind === "not_ready") session.showToast("Adding a folder isn't in this build.");
     session.refreshIntake(result.kind === "ok" ? started(result.value) : undefined);
   };

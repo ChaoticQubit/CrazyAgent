@@ -1,41 +1,50 @@
-#[cfg(unix)]
 use super::{TOOL_NAME_BYTES_MAX, TOOLS_MAX};
-#[cfg(unix)]
 use serde_json::{Value, json};
-#[cfg(unix)]
+use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Read, Write};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-#[cfg(unix)]
 use std::process::{ChildStdin, ChildStdout};
-#[cfg(unix)]
 use std::process::{Command, Stdio};
-#[cfg(unix)]
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender};
-#[cfg(unix)]
 use std::sync::mpsc::{channel, sync_channel};
 use std::time::Duration;
-#[cfg(unix)]
 use std::time::Instant;
 
 pub const CHECK_TIME: Duration = Duration::from_secs(10);
 pub const LINE_BYTES_MAX: usize = 1024 * 1024;
 pub const OUTPUT_BYTES_MAX: usize = 4 * 1024 * 1024;
-#[cfg(unix)]
 const PAGES_MAX: u64 = 8;
 #[cfg(unix)]
 const ENV_KEPT: [&str; 6] = ["PATH", "HOME", "USER", "LOGNAME", "LANG", "TMPDIR"];
+#[cfg(windows)]
+pub(crate) const ENV_KEPT: [&str; 12] = [
+    "PATH",
+    "PATHEXT",
+    "SystemRoot",
+    "SystemDrive",
+    "windir",
+    "ComSpec",
+    "USERPROFILE",
+    "USERNAME",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "TEMP",
+    "TMP",
+];
+#[cfg(windows)]
+const CREATE_SUSPENDED: u32 = 0x0000_0004;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-#[cfg(unix)]
 type Line = Result<Vec<u8>, &'static str>;
 
 /// Starts a command MCP server as the engine's own user with no boundary, for trusted
 /// commands such as the engine's own team tool, then checks it like [`check_command`].
 /// Inputs: the absolute command, its arguments, secret environment values and the time
 /// bound. Output: the tool names, or a plain rejection code.
-#[cfg(unix)]
 pub fn check_stdio(
     command: &str,
     args: &[String],
@@ -53,9 +62,36 @@ pub fn check_stdio(
         }
     }
     for (name, value) in secrets {
-        process.env(name, std::ffi::OsStr::from_bytes(value));
+        process.env(name, env_value(value)?);
     }
     check_command(process, limit, crate::sandbox::LineageCheck::Unneeded)
+}
+
+/// A secret environment value as Unix takes it: its bytes. Input: the bytes. Output: the
+/// value, never refused here.
+#[cfg(unix)]
+pub(crate) fn env_value(value: &[u8]) -> Result<&OsStr, &'static str> {
+    Ok(OsStr::from_bytes(value))
+}
+
+/// A secret environment value as Windows takes it: its text, as every stored secret is
+/// already checked to be UTF-8. Input: the bytes. Output: the value, or
+/// `server_secret_invalid` for bytes that are not UTF-8.
+#[cfg(windows)]
+pub(crate) fn env_value(value: &[u8]) -> Result<&OsStr, &'static str> {
+    std::str::from_utf8(value)
+        .map(OsStr::new)
+        .map_err(|_| "server_secret_invalid")
+}
+
+/// The rejection code for a server command that did not start. Input: the start error.
+/// Output: `server_command_not_found`, `server_command_not_runnable` or `server_cant_start`.
+fn start_refused(error: std::io::Error) -> &'static str {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => "server_command_not_found",
+        std::io::ErrorKind::PermissionDenied => "server_command_not_runnable",
+        _ => "server_cant_start",
+    }
 }
 
 /// Starts an already built MCP server command, such as one wrapped in the agent boundary,
@@ -91,12 +127,7 @@ pub fn check_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
-    let (mut child, warden) =
-        crate::sandbox::warden::spawn(&mut process).map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => "server_command_not_found",
-            std::io::ErrorKind::PermissionDenied => "server_command_not_runnable",
-            _ => "server_cant_start",
-        })?;
+    let (mut child, warden) = crate::sandbox::warden::spawn(&mut process).map_err(start_refused)?;
     let pid = child.id();
     let (stdin, stdout) = match (child.stdin.take(), child.stdout.take()) {
         (Some(stdin), Some(stdout)) => (stdin, stdout),
@@ -110,14 +141,7 @@ pub fn check_command(
     };
     let follower = Follower::start(pid, token, check);
     assert_eq!(follower.is_some(), check != LineageCheck::Unneeded);
-    let (send, receive) = sync_channel::<Line>(16);
-    let reader = std::thread::Builder::new()
-        .name("crazyagent-mcp-check".into())
-        .spawn(move || read_lines(stdout, send));
-    let result = match reader {
-        Ok(_) => talk(stdin, &receive, Instant::now() + limit),
-        Err(_) => Err("server_cant_start"),
-    };
+    let result = converse(stdin, stdout, limit);
     let lineage = follower.map(Follower::stop);
     stop(pid);
     let _ = child.kill();
@@ -142,17 +166,63 @@ pub fn check_command(
     result
 }
 
-/// Refuses to start a command MCP server where its whole process group, which holds the
-/// secret environment values, cannot be stopped. Takes the command, arguments, secrets
-/// and time bound, all unused. Returns `server_check_unavailable`.
-#[cfg(not(unix))]
-pub fn check_stdio(
-    _command: &str,
-    _args: &[String],
-    _secrets: &[(String, Vec<u8>)],
-    _limit: Duration,
+/// Starts an already built MCP server command, such as one wrapped in the agent boundary,
+/// suspended in a kill-on-close job of its own before it runs, runs `initialize` and
+/// `tools/list`, then ends the job, so every process the server started ends with it and
+/// none of them keeps the secret environment values. The boundary's own job ends the
+/// agent's tree too, so a Windows check never follows a lineage.
+/// Inputs: the command with its arguments, environment and folder set, the time bound and
+/// the lineage check, always [`crate::sandbox::LineageCheck::Unneeded`] here. Output: the
+/// tool names, or a plain rejection code.
+#[cfg(windows)]
+pub fn check_command(
+    mut process: Command,
+    limit: Duration,
+    check: crate::sandbox::LineageCheck,
 ) -> Result<Vec<String>, &'static str> {
-    Err("server_check_unavailable")
+    use std::os::windows::process::CommandExt;
+    assert_eq!(check, crate::sandbox::LineageCheck::Unneeded);
+    process
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
+    let mut child = crate::spawn_gate::spawn(&mut process).map_err(start_refused)?;
+    let tree = match crazyagent_win_sandbox::ProcessTree::hold(&child) {
+        Ok(tree) => tree,
+        Err(error) => {
+            eprintln!("server_check_tree_refused cause={error}");
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("server_cant_start");
+        }
+    };
+    let result = match (child.stdin.take(), child.stdout.take()) {
+        (Some(stdin), Some(stdout)) => converse(stdin, stdout, limit),
+        _ => Err("server_cant_start"),
+    };
+    drop(tree);
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
+/// Reads the server's output on a thread of its own and talks to it until the time bound.
+/// Inputs: the server's input and output and the bound. Output: the tool names, or a plain
+/// rejection code.
+fn converse(
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+    limit: Duration,
+) -> Result<Vec<String>, &'static str> {
+    let (send, receive) = sync_channel::<Line>(16);
+    let reader = std::thread::Builder::new()
+        .name("crazyagent-mcp-check".into())
+        .spawn(move || read_lines(stdout, send));
+    match reader {
+        Ok(_) => talk(stdin, &receive, Instant::now() + limit),
+        Err(_) => Err("server_cant_start"),
+    }
 }
 
 #[cfg(unix)]
@@ -166,7 +236,6 @@ fn stop(pid: u32) {
     }
 }
 
-#[cfg(unix)]
 fn read_lines(stdout: ChildStdout, send: SyncSender<Line>) {
     let mut reader = BufReader::new(stdout);
     let mut total = 0usize;
@@ -198,7 +267,6 @@ fn read_lines(stdout: ChildStdout, send: SyncSender<Line>) {
 /// thread, so a server that stops reading blocks only this writer and never the check's
 /// deadline; stopping the server's process group ends a blocked write. Inputs: the input
 /// and the queue. Output: none; the input closes when it returns.
-#[cfg(unix)]
 fn write_lines(mut stdin: ChildStdin, lines: Receiver<Vec<u8>>) {
     for line in lines {
         if stdin.write_all(&line).and_then(|()| stdin.flush()).is_err() {
@@ -207,14 +275,12 @@ fn write_lines(mut stdin: ChildStdin, lines: Receiver<Vec<u8>>) {
     }
 }
 
-#[cfg(unix)]
 fn send(writer: &Sender<Vec<u8>>, message: &Value) -> Result<(), &'static str> {
     let mut line = serde_json::to_vec(message).map_err(|_| "server_cant_start")?;
     line.push(b'\n');
     writer.send(line).map_err(|_| "server_exited")
 }
 
-#[cfg(unix)]
 fn answer(receive: &Receiver<Line>, id: u64, deadline: Instant) -> Result<Value, &'static str> {
     loop {
         let left = deadline
@@ -243,7 +309,6 @@ fn answer(receive: &Receiver<Line>, id: u64, deadline: Instant) -> Result<Value,
     }
 }
 
-#[cfg(unix)]
 fn talk(
     stdin: ChildStdin,
     receive: &Receiver<Line>,
@@ -508,5 +573,121 @@ mod tests {
             crate::plugins::check_problem(crate::harnesses::leftovers::SANDBOX_LEFT),
             "The server left processes running after its check. CrazyAgent ends them."
         );
+    }
+}
+
+#[cfg(all(test, windows))]
+pub(crate) mod windows_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    /// The environment name a row sets to the file a grandchild holder writes its
+    /// grandchild's process id to.
+    const HOLDER_MARKER: &str = "CRAZYAGENT_TEST_GRANDCHILD_MARKER";
+
+    /// The file whose presence in a holder's working folder asks it to write the id to
+    /// `grandchild.pid` beside it, for a run whose environment a row cannot set.
+    pub(crate) const HOLDER_REQUEST: &str = "grandchild.request";
+
+    /// The test binary as a silent server that starts a grandchild, in place of a shell
+    /// whose start time varies: the program and the arguments that run
+    /// [`a_grandchild_holder_in_its_own_process`] alone. Output: the program, then its
+    /// arguments.
+    pub(crate) fn grandchild_holder() -> (PathBuf, [&'static str; 5]) {
+        (
+            std::env::current_exe().unwrap(),
+            [
+                "--exact",
+                "plugins::check::windows_tests::a_grandchild_holder_in_its_own_process",
+                "--ignored",
+                "--test-threads",
+                "1",
+            ],
+        )
+    }
+
+    /// Runs only in the process a row starts, when [`HOLDER_MARKER`] names a file or its
+    /// working folder holds [`HOLDER_REQUEST`]: starts ping for two minutes with no streams,
+    /// writes ping's process id to that file, then waits two minutes reading nothing, as a
+    /// silent server. Run any other way it does nothing.
+    #[test]
+    #[ignore]
+    fn a_grandchild_holder_in_its_own_process() {
+        let requested = std::env::current_dir()
+            .ok()
+            .filter(|folder| folder.join(HOLDER_REQUEST).is_file())
+            .map(|folder| folder.join("grandchild.pid"));
+        let Some(marker) = std::env::var_os(HOLDER_MARKER)
+            .map(PathBuf::from)
+            .or(requested)
+        else {
+            return;
+        };
+        let ping = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("PING.EXE");
+        let mut command = Command::new(ping);
+        command
+            .args(["-n", "120", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut grandchild = crate::spawn_gate::spawn(&mut command).unwrap();
+        std::fs::write(&marker, grandchild.id().to_string()).unwrap();
+        std::thread::sleep(Duration::from_secs(120));
+        let _ = grandchild.kill();
+        let _ = grandchild.wait();
+    }
+
+    /// Whether a process id still runs, as `tasklist` lists it. Input: the id. Output: the
+    /// answer.
+    fn running(pid: u32) -> bool {
+        let mut tasklist = Command::new("tasklist");
+        tasklist.args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"]);
+        let listed = crate::spawn_gate::collected(&mut tasklist).unwrap();
+        String::from_utf8_lossy(&listed.stdout).contains(&format!("\"{pid}\""))
+    }
+
+    #[test]
+    fn a_missing_server_command_answers_with_a_plain_reason() {
+        let folder = tempfile::tempdir().unwrap();
+        let missing = folder.path().join("missing-server.exe");
+        assert_eq!(
+            check_stdio(missing.to_str().unwrap(), &[], &[], Duration::from_secs(5)).unwrap_err(),
+            "server_command_not_found"
+        );
+    }
+
+    /// A server that starts a grandchild and never answers times out, and the grandchild
+    /// ends with the check's job. The server is the test binary
+    /// ([`a_grandchild_holder_in_its_own_process`]), which writes the grandchild's id at
+    /// once, so the row never waits on a shell's start.
+    #[test]
+    fn a_silent_server_times_out_and_every_process_it_started_ends_with_it() {
+        let folder = tempfile::tempdir().unwrap();
+        let marker = folder.path().join("grandchild.pid");
+        let (holder, args) = grandchild_holder();
+        let secrets = [(
+            HOLDER_MARKER.to_owned(),
+            marker.to_str().unwrap().as_bytes().to_vec(),
+        )];
+        let checked = check_stdio(
+            holder.to_str().unwrap(),
+            &args.map(String::from),
+            &secrets,
+            Duration::from_secs(20),
+        );
+        assert_eq!(checked.unwrap_err(), "server_check_timeout");
+        let pid: u32 = std::fs::read_to_string(&marker)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(pid > 4);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while running(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(!running(pid), "the server's child {pid} outlived its check");
     }
 }

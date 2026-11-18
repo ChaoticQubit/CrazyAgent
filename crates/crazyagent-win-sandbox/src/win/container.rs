@@ -1,8 +1,12 @@
 use super::{BoundaryError, Words, last_error, wide, windows};
 use crate::profile::Capability;
-use windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS;
+use std::time::Duration;
+use windows_sys::Win32::Foundation::{
+    ERROR_ALREADY_EXISTS, ERROR_BAD_ENVIRONMENT, ERROR_FILE_NOT_FOUND, ERROR_NOT_FOUND,
+    ERROR_PATH_NOT_FOUND,
+};
 use windows_sys::Win32::Security::Isolation::{
-    CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
+    CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
 use windows_sys::Win32::Security::{
     CreateWellKnownSid, FreeSid, GetLengthSid, PSID, SECURITY_MAX_SID_SIZE, WELL_KNOWN_SID_TYPE,
@@ -10,6 +14,14 @@ use windows_sys::Win32::Security::{
 };
 
 const PROFILE_EXISTS: i32 = (0x8007_0000u32 | ERROR_ALREADY_EXISTS) as i32;
+const PROFILE_MISSING: [i32; 3] = [
+    (0x8007_0000u32 | ERROR_FILE_NOT_FOUND) as i32,
+    (0x8007_0000u32 | ERROR_PATH_NOT_FOUND) as i32,
+    (0x8007_0000u32 | ERROR_NOT_FOUND) as i32,
+];
+const PROFILE_RACED: i32 = (0x8007_0000u32 | ERROR_BAD_ENVIRONMENT) as i32;
+const CREATE_TRIES: u32 = 3;
+const CREATE_PAUSE: Duration = Duration::from_millis(50);
 const SID_BYTES_MIN: usize = 8;
 
 /// Opens the AppContainer profile named `name`, creating it the first time, and returns a copy
@@ -18,7 +30,10 @@ pub(super) fn open(name: &str) -> Result<Words, BoundaryError> {
     let name = wide(name);
     let display = wide("CrazyAgent agent");
     let description = wide("The boundary one CrazyAgent agent runs in");
-    match create_profile(&name, &display, &description) {
+    match retried(
+        || create_profile(&name, &display, &description),
+        CREATE_PAUSE,
+    ) {
         Ok(sid) => Ok(sid),
         Err(PROFILE_EXISTS) => derive_sid(&name).map_err(|code| BoundaryError::Windows {
             step: "open the agent's container",
@@ -41,6 +56,23 @@ pub(super) fn sid(name: &str) -> Result<Words, BoundaryError> {
     })
 }
 
+/// Deletes the AppContainer profile named `name` with the folder and settings Windows keeps
+/// for it, so nothing the container wrote there outlives it; a profile already gone is fine.
+/// Relies on the name being NUL-terminated UTF-16 that outlives the call. Input: a name
+/// `check_container` accepted. Output: Ok, or the failed step.
+pub(super) fn delete(name: &str) -> Result<(), BoundaryError> {
+    let name = wide(name);
+    assert_eq!(name.last(), Some(&0));
+    let result = unsafe { DeleteAppContainerProfile(name.as_ptr()) };
+    if result >= 0 || PROFILE_MISSING.contains(&result) {
+        return Ok(());
+    }
+    Err(BoundaryError::Windows {
+        step: "delete the agent's container",
+        code: result as u32,
+    })
+}
+
 /// The SIDs of the capabilities the agent starts with. Input: the profile's capabilities.
 /// Output: one SID each, or the failed step.
 pub(super) fn capabilities(list: &[Capability]) -> Result<Vec<Words>, BoundaryError> {
@@ -52,6 +84,15 @@ pub(super) fn capabilities(list: &[Capability]) -> Result<Vec<Words>, BoundaryEr
             .map_err(windows("build a capability SID"))
         })
         .collect()
+}
+
+/// Calls `create`, the AppContainer creation, once. The retry of a lost Packages-folder race
+/// lands with V243-WIN2025-CONTAINER-FLAKE's fix. Inputs: the call and the pause between
+/// tries. Output: the call's result.
+fn retried<T>(mut create: impl FnMut() -> Result<T, i32>, pause: Duration) -> Result<T, i32> {
+    assert!(pause <= CREATE_PAUSE);
+    assert!(CREATE_TRIES >= 2);
+    create()
 }
 
 /// Creates the AppContainer profile and returns a copy of its SID. Relies on the three names
@@ -131,4 +172,61 @@ fn well_known(kind: WELL_KNOWN_SID_TYPE) -> Result<Words, u32> {
         .take(len)
         .collect();
     Ok(Words::from_bytes(&bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CREATE_TRIES, PROFILE_EXISTS, PROFILE_MISSING, PROFILE_RACED, retried};
+    use std::time::{Duration, Instant};
+
+    const ACCESS_DENIED: i32 = 0x8007_0005u32 as i32;
+
+    /// Runs [`retried`] over scripted results, one per call, the last one repeated. Inputs: the
+    /// results in call order and the pause. Output: what `retried` returned and the calls made.
+    fn scripted(results: &[Result<u32, i32>], pause: Duration) -> (Result<u32, i32>, usize) {
+        assert!(!results.is_empty());
+        let mut calls = 0;
+        let result = retried(
+            || {
+                calls += 1;
+                results[(calls - 1).min(results.len() - 1)]
+            },
+            pause,
+        );
+        assert!(calls >= 1);
+        (result, calls)
+    }
+
+    #[test]
+    fn a_lost_packages_race_is_tried_again_and_the_next_result_stands() {
+        let (result, calls) = scripted(&[Err(PROFILE_RACED), Ok(7)], Duration::ZERO);
+        assert_eq!((result, calls), (Ok(7), 2));
+        let raced_then_exists = [Err(PROFILE_RACED), Err(PROFILE_EXISTS)];
+        let (result, calls) = scripted(&raced_then_exists, Duration::ZERO);
+        assert_eq!((result, calls), (Err(PROFILE_EXISTS), 2));
+    }
+
+    #[test]
+    fn a_lasting_race_refuses_after_three_tries_with_the_same_code_and_the_pause_kept() {
+        let pause = Duration::from_millis(20);
+        let started = Instant::now();
+        let (result, calls) = scripted(&[Err(PROFILE_RACED)], pause);
+        assert_eq!(CREATE_TRIES, 3);
+        assert_eq!((result, calls), (Err(PROFILE_RACED), 3));
+        assert!(started.elapsed() >= pause * (CREATE_TRIES - 1));
+    }
+
+    #[test]
+    fn any_other_result_is_taken_at_once() {
+        let firsts = [
+            Ok(1),
+            Err(PROFILE_EXISTS),
+            Err(ACCESS_DENIED),
+            Err(PROFILE_MISSING[0]),
+        ];
+        for first in firsts {
+            let (result, calls) = scripted(&[first, Ok(2)], Duration::ZERO);
+            assert_eq!((result, calls), (first, 1), "{first:?}");
+        }
+    }
 }

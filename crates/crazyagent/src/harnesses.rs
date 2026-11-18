@@ -270,10 +270,14 @@ impl Search {
         };
         let mut folders = self.set_aside_holding(spec);
         for folder in self.places(spec) {
-            let leads = spec.binaries.iter().any(|binary| {
-                let file = folder.join(binary);
-                executable_file(&file) && self.links_into_temp(&file)
-            });
+            let leads = spec
+                .binaries
+                .iter()
+                .flat_map(|binary| crate::paths::executable_names(binary))
+                .any(|name| {
+                    let file = folder.join(name);
+                    executable_file(&file) && self.links_into_temp(&file)
+                });
             if leads && !folders.contains(&folder) {
                 folders.push(folder);
             }
@@ -298,7 +302,8 @@ impl Search {
             .filter(|folder| {
                 spec.binaries
                     .iter()
-                    .any(|binary| executable_file(&folder.join(binary)))
+                    .flat_map(|binary| crate::paths::executable_names(binary))
+                    .any(|name| executable_file(&folder.join(name)))
             })
             .cloned()
             .collect()
@@ -451,18 +456,20 @@ impl Search {
         for binary in spec.binaries {
             assert!(!binary.contains('/'));
             for directory in &directories {
-                let candidate = directory.join(binary);
-                if found.contains(&candidate)
-                    || !executable_file(&candidate)
-                    || self.links_into_temp(&candidate)
-                    || (!shims && is_shim(self.home(), &candidate))
-                {
-                    continue;
-                }
-                assert!(candidate.is_absolute());
-                found.push(candidate);
-                if found.len() == limit {
-                    return found;
+                for name in crate::paths::executable_names(binary) {
+                    let candidate = directory.join(name);
+                    if found.contains(&candidate)
+                        || !executable_file(&candidate)
+                        || self.links_into_temp(&candidate)
+                        || (!shims && is_shim(self.home(), &candidate))
+                    {
+                        continue;
+                    }
+                    assert!(candidate.is_absolute());
+                    found.push(candidate);
+                    if found.len() == limit {
+                        return found;
+                    }
                 }
             }
         }
@@ -625,8 +632,17 @@ fn usable_path(path: &Path) -> bool {
         && path.as_os_str() != OsStr::new("/")
 }
 
+#[cfg(unix)]
 fn executable_file(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && runnable(&metadata))
+}
+
+/// Whether a file a search finds is one a Windows launch runs: a program, or an npm
+/// cmd-shim whose script is there ([`crate::paths::executable_file`]); any other batch file
+/// is no hit. Input: the file. Output: the answer.
+#[cfg(not(unix))]
+fn executable_file(path: &Path) -> bool {
+    crate::paths::executable_file(path).is_some()
 }
 
 /// Reports whether file metadata grants any execute permission.
@@ -672,7 +688,7 @@ pub fn catalog(search: &Search) -> Vec<HarnessEntry> {
                         reason: reason.into(),
                     }),
                 model_selection: spec.model_selection,
-                account_kinds: spec.account_kinds.to_vec(),
+                account_kinds: account_kinds_here(spec),
                 team: match interactive::support(spec.id) {
                     interactive::Support::Terminal => TeamUse::Available,
                     interactive::Support::HeadlessOnly { reason }
@@ -970,14 +986,43 @@ pub fn account_fits(harness: &str, connection: &crate::config::ModelConnection) 
         (
             ModelEndpoint::Http { .. },
             ModelAuthentication::ApiKey { .. } | ModelAuthentication::None {},
-        ) => match id {
-            "codex" => protocol.starts_with("openai"),
-            "claude-code" => protocol == "anthropic-messages",
-            "rcli" => true,
-            _ => false,
-        },
+        ) => {
+            let keyed = matches!(connection.auth, ModelAuthentication::ApiKey { .. });
+            (!keyed || keyed_runs_here(id))
+                && match id {
+                    "codex" => protocol.starts_with("openai"),
+                    "claude-code" => protocol == "anthropic-messages",
+                    "rcli" => true,
+                    _ => false,
+                }
+        }
         _ => false,
     }
+}
+
+/// The harnesses that reach an account holding a provider key only through the engine key
+/// relay, which [`launch::route`] starts for them.
+pub const KEY_RELAYED: [&str; 2] = ["codex", "claude-code"];
+
+/// Whether a harness can run on an account that holds a provider key on this system: one the
+/// key relay does not carry always can, a relayed one only where the relay can start.
+/// Input: the catalog id. Output: the answer.
+pub fn keyed_runs_here(id: &str) -> bool {
+    !KEY_RELAYED.contains(&id) || crate::model_gateway::relay::available()
+}
+
+/// The account kinds a harness can use on this system, which every client's account picker
+/// filters on: its catalog kinds, without API keys for a relayed harness where the relay
+/// cannot start. Input: the harness spec. Output: the kinds, in catalog order.
+pub fn account_kinds_here(spec: &HarnessSpec) -> Vec<AccountKind> {
+    let kinds: Vec<AccountKind> = spec
+        .account_kinds
+        .iter()
+        .copied()
+        .filter(|kind| *kind != AccountKind::ApiKey || keyed_runs_here(spec.id))
+        .collect();
+    assert!(kinds.len() <= spec.account_kinds.len());
+    kinds
 }
 
 /// The base URL a harness is given for an endpoint account. Claude Code adds `/v1/messages`

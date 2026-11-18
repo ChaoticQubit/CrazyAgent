@@ -146,13 +146,12 @@ fn main() {
         "desktop_github_rules",
         "desktop_github_rule_set",
         "desktop_clone_repo",
-        "desktop_icloud_download",
-        "desktop_icloud_progress",
-        "desktop_icloud_cancel",
         "desktop_intake_start",
         "desktop_intake_status",
         "desktop_intake_stop",
         "desktop_intake_dismiss",
+        "desktop_reinstall_offer",
+        "desktop_reinstall_dismiss",
         "desktop_setup_status",
         "desktop_run_setup",
         "desktop_install_dependency",
@@ -361,6 +360,33 @@ fn main() {
         "desktop_overview_set_refresh",
         "desktop_overview_set_apply",
     ]);
-    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
-        .expect("desktop build configuration failed");
+    let windows = tauri_build::WindowsAttributes::new_without_app_manifest();
+    tauri_build::try_build(
+        tauri_build::Attributes::new()
+            .app_manifest(manifest)
+            .windows_attributes(windows),
+    )
+    .expect("desktop build configuration failed");
+    link_common_controls_manifest();
+}
+
+/// Has the MSVC linker embed one Common-Controls v6 application manifest in every exe of this
+/// crate, the app and its test exes alike, since tauri-build embeds its own in the app binaries
+/// only and a test exe without it aborts at load (0xc0000139). Input: Cargo's target cfg
+/// variables. Output: link arguments on stdout for a Windows target, nothing elsewhere.
+fn link_common_controls_manifest() {
+    let os = std::env::var("CARGO_CFG_TARGET_OS").expect("cargo sets CARGO_CFG_TARGET_OS");
+    if os != "windows" {
+        return;
+    }
+    let env = std::env::var("CARGO_CFG_TARGET_ENV").expect("cargo sets CARGO_CFG_TARGET_ENV");
+    assert_eq!(
+        env, "msvc",
+        "the desktop app builds for Windows with the MSVC linker only"
+    );
+    println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+    println!("cargo:rustc-link-arg=/MANIFESTUAC:NO");
+    println!(
+        "cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
+    );
 }
