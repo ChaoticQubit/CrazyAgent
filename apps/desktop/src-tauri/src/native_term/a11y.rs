@@ -4,6 +4,9 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::{Cell, Flags};
 
+#[cfg(any(windows, test))]
+pub mod range;
+
 /// The most zero-width characters one cell gives the accessibility text; more are dropped.
 pub const ZERO_WIDTH_MAX: usize = 4;
 
