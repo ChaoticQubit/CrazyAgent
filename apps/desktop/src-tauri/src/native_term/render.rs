@@ -1,5 +1,5 @@
 use super::screen::{Cursor, Frame, Span};
-use super::style::{FaceEm, FontSource, Style, Theme, cell_px};
+use super::style::{FaceEm, FontSource, JETBRAINS_MONO, Style, Theme, cell_px};
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use glyphon::cosmic_text::{FeatureTag, FontFeatures};
 use glyphon::{
@@ -135,8 +135,10 @@ fn linear_rgba(color: Rgb, alpha: f32) -> [f32; 4] {
     ]
 }
 
-/// Loads the fallback font files that are present into a new font system. Input: the
-/// files. Output: the font system.
+/// Loads the fallback font files that are present, then the four built-in JetBrains Mono
+/// faces last, so a span of any style and weight has a face even with no system font:
+/// cosmic-text panics while shaping a span no loaded face matches. Input: the files.
+/// Output: the font system.
 fn load_fallbacks(files: &[FontSource]) -> FontSystem {
     let mut db = fontdb::Database::new();
     for path in files.iter().filter_map(FontSource::file) {
@@ -144,6 +146,9 @@ fn load_fallbacks(files: &[FontSource]) -> FontSystem {
             continue;
         }
     }
+    let before = db.len();
+    load(&mut db, FontSource::Built(&JETBRAINS_MONO)).expect("the built-in faces load");
+    assert_eq!(db.len(), before + JETBRAINS_MONO.len());
     FontSystem::new_with_locale_and_db("en-US".into(), db)
 }
 
