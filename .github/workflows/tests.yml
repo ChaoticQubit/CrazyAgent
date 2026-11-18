@@ -17,8 +17,9 @@ env:
   RUST_TOOLCHAIN: "1.98.1"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
-  RED_SHA: 5b36b2771
-  GREEN_SHA: 3cdc805f6
+  RED1_SHA: 5b36b2771
+  RED2_SHA: a82b22646
+  GREEN_SHA: fa31456d8
 
 defaults:
   run:
@@ -26,7 +27,7 @@ defaults:
 
 jobs:
   linux:
-    name: V244 L3a Linux view keys and focus, red 5b36b2771 then green 3cdc805f6, display row with IBus under Xvfb and sway
+    name: V244 L3a Linux view keys, focus and commit gate, reds 5b36b2771 a82b22646 then green fa31456d8, display row with IBus under Xvfb and sway
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
@@ -42,7 +43,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          fetch-depth: 5
+          fetch-depth: 12
       - name: Drop the Microsoft apt source the farm does not use
         run: |
           set -euo pipefail
