@@ -1514,6 +1514,10 @@ pub(crate) fn type_prompt_at(
     text: &str,
 ) -> Result<bool, HostError> {
     assert!(pane_id_valid(&at.pane), "a pin is a pane id");
+    assert!(
+        at.serial > 0,
+        "a pin names the control connection that found it"
+    );
     let bracketed = host.input_live(agent)?;
     prompt_into(text, bracketed, |keys| {
         match host.input_at(agent, at, keys)? {
@@ -1535,9 +1539,7 @@ fn prompt_into(
     let Some(keys) = prompt_keys(text, bracketed) else {
         return Ok(false);
     };
-    assert!(!keys.is_empty(), "a prompt that types has keys");
     for chunk in keys.chunks(INPUT_BYTES_MAX) {
-        assert!(chunk.len() <= INPUT_BYTES_MAX);
         typing(chunk)?;
     }
     if bracketed {

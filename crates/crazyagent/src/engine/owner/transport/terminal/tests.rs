@@ -1416,8 +1416,9 @@ async fn a_pinned_input_only_view_sends_only_to_its_pane_and_ends_once_it_cannot
     );
 }
 
-/// V243-NATIVE-INPUT-PIN: a pin that is no pane id is a programmer error, so a pinned paste,
-/// send or liveness check stops at once instead of handing the host a name-like target.
+/// V243-NATIVE-INPUT-PIN: a pin that is no pane id, or a prompt pin with no control serial, is
+/// a programmer error, so a pinned paste, send, prompt or liveness check stops at once instead
+/// of handing the host a name-like target.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_pin_that_is_no_pane_id_trips_every_pinned_path() {
     let agent = AgentId::team(1).unwrap();
@@ -1438,6 +1439,21 @@ async fn a_pin_that_is_no_pane_id_trips_every_pinned_path() {
         send(&host, &agent, None, Some(bogus.clone()), request)
     }));
     assert!(sending.is_err(), "a pinned send to no pane id panics");
+    let prompting = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::terminal::type_prompt_at(host.as_ref(), &agent, &bogus, "hi")
+    }));
+    assert!(prompting.is_err(), "a pinned prompt to no pane id panics");
+    let unserialed = PaneAt {
+        pane: "%3".into(),
+        serial: 0,
+    };
+    let prompting = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::terminal::type_prompt_at(host.as_ref(), &agent, &unserialed, "hi")
+    }));
+    assert!(
+        prompting.is_err(),
+        "a pinned prompt with no control serial panics"
+    );
     let checking = tokio::spawn(async move { agent_gone(&host, &agent, Some(&bogus)).await });
     assert!(
         checking.await.is_err_and(|join| join.is_panic()),
