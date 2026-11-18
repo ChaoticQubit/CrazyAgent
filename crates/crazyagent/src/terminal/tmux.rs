@@ -2376,6 +2376,10 @@ impl Host for Tmux {
         let Some(control) = self.control_at(at)? else {
             return Ok(false);
         };
+        assert_eq!(
+            control.serial, at.serial,
+            "a pinned send uses the connection that found it"
+        );
         Self::send_bytes(&control, &at.pane, bytes).map(|()| true)
     }
 
@@ -2389,6 +2393,7 @@ impl Host for Tmux {
         if !pane_id_valid(&pane) {
             return Err(failure("terminal_command_failed"));
         }
+        assert!(control.serial > 0, "control serials start at 1");
         Ok(PaneAt {
             pane,
             serial: control.serial,
@@ -2402,6 +2407,10 @@ impl Host for Tmux {
         let Some(control) = self.control_at(at)? else {
             return Ok(false);
         };
+        assert_eq!(
+            control.serial, at.serial,
+            "a pinned send uses the connection that found it"
+        );
         Self::send_paste(&control, &at.pane, keys).map(|()| true)
     }
 
@@ -2419,6 +2428,10 @@ impl Host for Tmux {
         let Some(control) = self.control_at(at)? else {
             return Ok(false);
         };
+        assert_eq!(
+            control.serial, at.serial,
+            "a pinned send uses the connection that found it"
+        );
         let line = format!("resize-window -t {} -x {cols} -y {rows}", at.pane);
         control.run(&line).map(|_| true)
     }

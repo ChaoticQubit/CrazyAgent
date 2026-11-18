@@ -4,13 +4,12 @@ use crate::protocol::encode_frame;
 #[cfg(unix)]
 use crate::terminal::buffer::Chunk;
 use crate::terminal::{
-    AgentId, Host, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, TerminalFrame, TerminalRequest,
-    TerminalStream,
+    AgentId, Host, HostError, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, PaneAt, TerminalFrame,
+    TerminalRequest, TerminalStream,
 };
 #[cfg(unix)]
 use crate::terminal::{
-    CHUNK_BYTES_MAX, HostError, PASTE_BYTES_MAX, PaneAt, attach_again, paste_keys, type_into,
-    type_prompt,
+    CHUNK_BYTES_MAX, PASTE_BYTES_MAX, attach_again, paste_keys, type_into, type_prompt,
 };
 use tokio::io::AsyncWrite;
 
@@ -487,7 +486,11 @@ impl View {
 fn pin(host: &dyn Host, agent: &AgentId) -> Result<Option<PaneAt>, HostError> {
     match host.own_pane_at(agent) {
         Ok(at) => {
-            assert!(crate::terminal::pane_id_valid(&at.pane));
+            assert!(
+                crate::terminal::pane_id_valid(&at.pane),
+                "a pin is a pane id"
+            );
+            assert!(at.serial > 0, "a pin names the connection that found it");
             Ok(Some(at))
         }
         Err(error) if error.0 == "terminal_unavailable" => Ok(None),
@@ -503,6 +506,35 @@ fn sent_at(answer: Result<bool, HostError>) -> Result<Option<String>, HostError>
         true => Ok(None),
         false => Err(HostError("terminal_agent_unknown".into())),
     }
+}
+
+/// Pins an input-only view's pane as it opens, then sizes the window of a sized or
+/// input-only attach: through the pin when there is one, else by name as before. Takes the
+/// host, the agent, the size and whether the view is input-only. Returns the pin, none for
+/// a full view or a host with no pane ids, or the host's error.
+fn pin_and_size(
+    host: &dyn Host,
+    agent: &AgentId,
+    size: Option<(u16, u16)>,
+    input_only: bool,
+) -> Result<Option<PaneAt>, HostError> {
+    assert!(
+        !input_only || size.is_some(),
+        "an input-only attach has a size"
+    );
+    let pinned = if input_only { pin(host, agent)? } else { None };
+    match (size, &pinned) {
+        (Some(size), Some(at)) => {
+            sent_at(host.resize_at(agent, at, size))?;
+        }
+        (Some((cols, rows)), None) => host.resize(agent, cols, rows)?,
+        (None, _) => {}
+    }
+    assert!(
+        pinned.is_none() || input_only,
+        "only an input-only view is pinned"
+    );
+    Ok(pinned)
 }
 
 /// One owner paste the engine gathers from its `Paste` chunks before it filters and pastes
@@ -681,18 +713,7 @@ async fn open(
     };
     let attaching = host.clone();
     let view = tokio::task::spawn_blocking(move || {
-        let pinned = if input_only {
-            pin(attaching.as_ref(), &agent_id)?
-        } else {
-            None
-        };
-        match (size, &pinned) {
-            (Some(size), Some(at)) => {
-                sent_at(attaching.resize_at(&agent_id, at, size))?;
-            }
-            (Some((cols, rows)), None) => attaching.resize(&agent_id, cols, rows)?,
-            (None, _) => {}
-        }
+        let pinned = pin_and_size(attaching.as_ref(), &agent_id, size, input_only)?;
         match size.filter(|_| input_only) {
             Some((cols, rows)) => {
                 attaching.input_live(&agent_id)?;
