@@ -606,6 +606,12 @@ impl Process {
         assert!(self.child.stdout.is_none());
         assert!(self.child.stderr.is_none());
         if self.status.is_none() {
+            #[cfg(all(test, unix))]
+            let held = crate::engine::master_host_fixture::reap_lock();
+            #[cfg(all(test, unix))]
+            if held.contains(&self.child.id()) {
+                return;
+            }
             match self.child.try_wait() {
                 Ok(status) => self.status = status,
                 Err(_) => self.fail(Fault::Host("claude_host_wait_failed")),

@@ -364,37 +364,48 @@ impl Drop for HarnessProcesses {
     }
 }
 
-/// Kills the host's own child while a waiter already blocks on it, so the waiter, not the
-/// host, reaps it, after which the host can never reap its harness. That child is the
-/// harness itself, or the bubblewrap whose process namespace holds it. The host polls its
-/// child too, so it can still win: the caller then starts over. Takes the stand-in's working
-/// folder and the host's child, none before it started. Returns whether the waiter reaped
-/// the child.
-pub(in crate::engine) fn reap_before_the_host(
-    folder: &Path,
-    child: impl Fn() -> Option<u32>,
-) -> bool {
+/// The host children a row holds back from their host's reap ([`reap_before_the_host`]).
+static HELD_REAPS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+/// The children held from their host's reap, locked. A host checks its child and reaps it
+/// under this one guard, so a hold taken before the kill always wins the reap race. Output:
+/// the guard.
+pub(in crate::engine) fn reap_lock() -> std::sync::MutexGuard<'static, Vec<u32>> {
+    HELD_REAPS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Kills the host's own child while its host's reap of it is held ([`reap_lock`]) and a
+/// waiter blocks on it, so the waiter, never the host, reaps it, after which the host can
+/// never reap its harness. That child is the harness itself, or the bubblewrap whose process
+/// namespace holds it. Takes the stand-in's working folder and the host's child, none before
+/// it started. Returns once the waiter reaped the child.
+pub(in crate::engine) fn reap_before_the_host(folder: &Path, child: impl Fn() -> Option<u32>) {
     let deadline = Instant::now() + Duration::from_secs(5);
-    let child = loop {
+    let (id, child) = loop {
         if let (Some(id), Some(_)) = (child(), written(folder, "leader.pid")) {
-            break Pid::from_raw(i32::try_from(id).unwrap()).unwrap();
+            break (id, Pid::from_raw(i32::try_from(id).unwrap()).unwrap());
         }
         assert!(Instant::now() < deadline, "stand-in harness never started");
         std::thread::sleep(Duration::from_millis(10));
     };
     assert!(child.as_raw_nonzero().get() > 1);
+    reap_lock().push(id);
     let waiter = std::thread::spawn(move || {
         rustix::process::waitpid(Some(child), rustix::process::WaitOptions::empty())
     });
     std::thread::sleep(Duration::from_millis(50));
     rustix::process::kill_process(child, rustix::process::Signal::KILL).unwrap();
-    match waiter.join().unwrap() {
-        Ok(Some((reaped, _))) => {
-            assert_eq!(reaped, child);
-            true
-        }
-        Err(rustix::io::Errno::CHILD) => false,
-        waited => panic!("waiting for the host's child failed: {waited:?}"),
+    let waited = waiter.join().unwrap();
+    let mut held = reap_lock();
+    let before = held.len();
+    held.retain(|other| *other != id);
+    assert_eq!(held.len() + 1, before, "the hold on {id} was taken once");
+    drop(held);
+    match waited {
+        Ok(Some((reaped, _))) => assert_eq!(reaped, child),
+        waited => panic!("the waiter did not reap the held child: {waited:?}"),
     }
 }
 

@@ -441,7 +441,16 @@ fn b18_the_owner_changes_agent_access_and_toolchains_in_settings() {
         .iter()
         .position(|row| row.toolchain == Toolchain::Rust)
         .expect("the Rust toolchain folder in the owner's home is listed");
-    assert!(start.toolchains[rust].installed && !start.toolchains[rust].allowed);
+    assert!(
+        start.toolchains[rust].installed,
+        "the Rust folder in the owner's home reads as installed: {:?}",
+        start.toolchains
+    );
+    assert!(
+        !start.toolchains[rust].allowed,
+        "a new project starts with Rust not allowed: {:?}",
+        start.toolchains
+    );
 
     let pty = Pty::launch(tmux, &engine.socket());
     open_tab(&pty, "Settings");

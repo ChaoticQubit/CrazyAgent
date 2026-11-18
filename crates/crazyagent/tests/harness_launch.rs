@@ -1041,13 +1041,13 @@ echo $$ > leader.pid
 exec /bin/sleep 30
 "#;
 
-/// SETSID-A-RESIDUAL: a Full access headless agent's double fork whose middle process setsids,
-/// forks and exits between two process tables leaves a grandchild no table links to the agent.
-/// The stop reports clean or unchecked, or names that grandchild as left on a slower machine
-/// where a table saw the middle (the macos-15 runner), and in every case the grandchild keeps
-/// running: the stop never ends it.
+/// SETSID-L2 r1 L2, the SECAUDIT-SETSID-LEFTOVER option (a) residual the owner accepted
+/// (SETSID-A-RESIDUAL): a Full access headless agent's double fork whose middle setsids, forks
+/// and exits between two tables the follower takes leaves a grandchild whose environment macOS
+/// hides. The stop names it as left (`perl`) when a table caught the middle, or misses it,
+/// clean or unchecked, while it keeps running; no other answer passes.
 #[test]
-fn a_full_access_headless_stop_misses_an_orphan_made_between_two_tables() {
+fn a_full_access_headless_stop_names_or_misses_an_orphan_made_between_two_tables() {
     let root = private_dir("crazyagent-fast-orphan-");
     let project = private_folder(root.path(), "project");
     let home = private_folder(root.path(), "home");
@@ -1095,25 +1095,36 @@ fn a_full_access_headless_stop_misses_an_orphan_made_between_two_tables() {
     };
     let leftover = Leftover(vec![orphan]);
     assert_ne!(rustix::process::getsid(Some(orphan)), Ok(leader));
-
-    match session.stop() {
-        Ok(_) => {}
-        Err(Unstopped::Left(left)) if left.code() == UNCHECKED => {}
-        Err(Unstopped::Left(left)) if left.code() == LEFT => {
-            let named = named_in(&left.plain());
+    let missed = match session.stop() {
+        Ok(_) => true,
+        Err(Unstopped::Left(left)) if left.code() == UNCHECKED => true,
+        Err(Unstopped::Left(left)) => {
+            let report = left.plain();
+            assert_eq!(left.code(), LEFT, "{report}");
+            let named = named_in(&report);
             assert_eq!(
                 named.keys().copied().collect::<Vec<_>>(),
                 [orphan.as_raw_nonzero().get()],
-                "a table saw the middle, so the stop names only the orphan: {named:?}"
+                "a table saw the middle, so the stop names only the orphan: {report}"
             );
+            assert_eq!(
+                named
+                    .get(&orphan.as_raw_nonzero().get())
+                    .map(String::as_str),
+                Some("perl"),
+                "{report}"
+            );
+            false
         }
         Err(other) => panic!("the stop of a Full access agent was reported {other:?}"),
+    };
+    if missed {
+        assert_eq!(
+            rustix::process::test_kill_process(orphan),
+            Ok(()),
+            "a stop that misses the orphan {orphan:?} leaves it running, the accepted residual"
+        );
     }
-    assert_eq!(
-        rustix::process::test_kill_process(orphan),
-        Ok(()),
-        "the orphan {orphan:?} ended with the stop, so the row no longer shows the residual"
-    );
     drop(leftover);
 }
 

@@ -1050,9 +1050,9 @@ pub fn run(arguments: &[OsString], out: &mut dyn Write) -> i32 {
         }
     };
     let _ = writeln!(out, "{NO_LANE}");
-    match crate::spawn_gate::status(
-        std::process::Command::new(&request.program).args(&request.arguments),
-    ) {
+    match own_program(&request.program).and_then(|program| {
+        crate::spawn_gate::status(std::process::Command::new(program).args(&request.arguments))
+    }) {
         Ok(status) => status.code().unwrap_or(LANE_FAILED),
         Err(problem) => {
             let _ = writeln!(
@@ -1064,5 +1064,34 @@ pub fn run(arguments: &[OsString], out: &mut dyn Write) -> i32 {
     }
 }
 
+/// The program an agent named: an absolute or bare one as it is, one relative to this
+/// command's current folder made absolute against it, and one named from a drive root or a
+/// drive's own folder refused as the spawn gate refuses it, since another local user may plant
+/// it there (V244-WIN-ROOT-RELATIVE-PROGRAM, rv-code2 #537 F1). Input: the program. Output:
+/// the program to start, or the refusal or why it could not be made absolute.
+#[cfg(not(unix))]
+fn own_program(program: &OsStr) -> std::io::Result<OsString> {
+    let path = Path::new(program);
+    if crate::tools::fixed_program(path) {
+        return Ok(program.to_owned());
+    }
+    if path.has_root()
+        || matches!(
+            path.components().next(),
+            Some(std::path::Component::Prefix(_))
+        )
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "spawn_relative_program_refused",
+        ));
+    }
+    let absolute = std::path::absolute(path)?;
+    assert!(crate::tools::fixed_program(&absolute));
+    Ok(absolute.into_os_string())
+}
+
 #[cfg(all(test, unix))]
 mod tests;
+#[cfg(all(test, windows))]
+mod windows_tests;

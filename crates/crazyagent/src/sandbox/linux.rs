@@ -409,8 +409,8 @@ pub(crate) fn holds_file_rules(helper: &Path) -> bool {
 /// the socket filter and start a harness, start bubblewrap from a fixed place with
 /// [`NEST_ARGS`], which then starts the helper again inside its namespaces, tell whether
 /// the kernel scopes signals, carry a nested agent's bridged ports as its broker, build a
-/// routed agent's network as its setup child, tell whether this machine runs the call
-/// supervisor, or be the check that question starts.
+/// routed agent's network as its setup child, start that network's slirp4netns confined,
+/// tell whether this machine runs the call supervisor, or be the check that question starts.
 #[derive(Debug, PartialEq, Eq)]
 pub enum HelperRequest {
     Probe {
@@ -440,6 +440,10 @@ pub enum HelperRequest {
         parent: u32,
         ports: Vec<u16>,
     },
+    Slirp {
+        child: u32,
+        ready: RawFd,
+    },
     Supervisor {
         folder: PathBuf,
     },
@@ -456,7 +460,7 @@ impl HelperRequest {
     /// with a port, or `--filter-sockets` alone then `--` and the harness, or `--nest`
     /// alone then `--` and what [`nest_request`] takes, or `--scoped` with nothing else, or
     /// `--broker` with what [`bridge::broker_request`] takes, or `--egress` with what
-    /// [`egress::request`] takes.
+    /// [`egress::request`] takes, or `--slirp` with what [`egress::slirp_request`] takes.
     /// `--open-sockets` needs `--limit-network`. Output: the request, or the reason the
     /// arguments are refused.
     pub fn parse(args: Vec<OsString>) -> Result<Self, String> {
@@ -470,6 +474,9 @@ impl HelperRequest {
         }
         if args.first().is_some_and(|flag| flag == egress::EGRESS) {
             return egress::request(args);
+        }
+        if args.first().is_some_and(|flag| flag == egress::SLIRP) {
+            return egress::slirp_request(args);
         }
         if let Some(probe) = supervisor_probe(&args) {
             return probe;
@@ -886,16 +893,11 @@ fn scope_signals() -> Result<RestrictionStatus, RulesetError> {
         .restrict_self()
 }
 
-/// Installs the seccomp filter every agent process and its children keep: a new Unix-domain
-/// socket and a new io_uring ring both fail with `EACCES`, and with `tcp_only` so does every
-/// socket but TCP over IPv4 or IPv6 and routing netlink, since Landlock limits TCP only and
-/// a datagram, raw or other family socket reaches any host. Landlock does not mediate a
-/// pathname socket connect, and a ring could create a socket without `socket(2)`;
-/// `socketpair(2)` stays allowed since it reaches no path. With `plain_tcp` the filter also
-/// refuses the stream sockets that hold a TCP port without being plain TCP, which
-/// Landlock's bind rules do not see on every kernel. Inputs: whether only TCP sockets may open, and whether
-/// Landlock keeps TCP ports free of this agent. Output: the installed filter, or the reason
-/// this kernel or architecture cannot hold it.
+/// Installs the seccomp filter that agents, slirp4netns ([`egress::confine_slirp`]) and their
+/// children keep: a Unix-domain `socket(2)` and `io_uring_setup` fail with `EACCES`, with
+/// `tcp_only` so does every socket but TCP and routing netlink, and with `plain_tcp` so does
+/// a stream socket that holds a TCP port without being plain TCP. Inputs: the two switches.
+/// Output: the installed filter, or the reason this kernel or architecture cannot hold it.
 fn refuse_sockets(tcp_only: bool, plain_tcp: bool) -> Result<(), String> {
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
     rules.insert(libc::SYS_socket, refused_sockets(tcp_only, plain_tcp)?);
@@ -1040,10 +1042,11 @@ fn die_with_parent(parent: u32) -> Result<(), String> {
 /// a nest becomes bubblewrap, which starts a run inside its namespaces ([`nest`]).
 /// Route and bridge flags may lead a nest, and bridge flags the run or probe inside it
 /// ([`read_request`]). No mode runs while the environment holds a variable that loads code
-/// ([`LOADER_REFUSED`]).
+/// ([`LOADER_REFUSED`]), or before it closed the descriptors it inherited unnamed
+/// ([`close_inherited`]).
 /// Output: the exit code, 2 for refused arguments or such a variable, 3 when the kernel
-/// cannot hold the policy, the session or the signal mask, or the process it dies with is
-/// gone, 126 when the harness or bubblewrap cannot start.
+/// cannot hold the policy, the session or the signal mask, the process it dies with is gone
+/// or an inherited descriptor stays open, 126 when the harness or bubblewrap cannot start.
 pub fn helper_main(args: Vec<OsString>) -> ExitCode {
     let loader = std::env::vars_os()
         .map(|(name, _)| name)
@@ -1062,6 +1065,18 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let named: Vec<RawFd> = [
+        bridge.as_ref().and_then(|bridge| bridge.fd),
+        started,
+        named_descriptor(&request),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if let Err(reason) = close_inherited(&named) {
+        eprintln!("crazyagent-landlock: {reason}");
+        return ExitCode::from(3);
+    }
     let (policy, launch) = match request {
         HelperRequest::Filter { program, args } => return filtered(&program, args),
         HelperRequest::Nest { bwrap, args } => {
@@ -1070,6 +1085,7 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         HelperRequest::Scoped => return scoped(),
         HelperRequest::Broker { parent, ports } => return bridge::broker(parent, &ports),
         HelperRequest::Egress { parent, ports } => return egress::setup(parent, &ports),
+        HelperRequest::Slirp { child, ready } => return egress::slirp(child, ready),
         HelperRequest::Supervisor { folder } => return probe_supervisor(&folder),
         HelperRequest::Supervised { port, folder } => return probe_supervised(port, &folder),
         HelperRequest::Probe {
@@ -1118,6 +1134,52 @@ fn read_request(args: Vec<OsString>) -> Result<Asked, String> {
 /// What [`read_request`] reads: the route ports, the bridge, the go descriptor and the
 /// request.
 type Asked = (Vec<u16>, Option<Bridge>, Option<RawFd>, HelperRequest);
+
+/// The descriptor a request names in its own arguments, which [`close_inherited`] must leave
+/// open for it. Every request is listed, so a mode that takes a descriptor answers here.
+/// Input: the request. Output: the descriptor, or none.
+fn named_descriptor(request: &HelperRequest) -> Option<RawFd> {
+    match request {
+        HelperRequest::Slirp { ready, .. } => Some(*ready),
+        HelperRequest::Probe { .. }
+        | HelperRequest::Run { .. }
+        | HelperRequest::Filter { .. }
+        | HelperRequest::Nest { .. }
+        | HelperRequest::Scoped
+        | HelperRequest::Broker { .. }
+        | HelperRequest::Egress { .. }
+        | HelperRequest::Supervisor { .. }
+        | HelperRequest::Supervised { .. } => None,
+    }
+}
+
+/// Closes every descriptor above the standard three that this process holds and `named`
+/// leaves out, before any mode runs. One the engine's own parent left open, not closed on
+/// exec, would otherwise reach bubblewrap, slirp4netns and the harness, or stay readable
+/// through `/proc` in a helper that stays a parent (V243-LINUX-HARNESS-FD-LEAK). Input: the
+/// named descriptors. Output: Ok, or the reason one cannot be listed or closed.
+fn close_inherited(named: &[RawFd]) -> Result<(), String> {
+    assert!(named.iter().all(|fd| *fd > 2));
+    let failed = |error: std::io::Error| format!("inherited descriptors: {error}");
+    let mut open = Vec::new();
+    for entry in fs::read_dir("/proc/self/fd").map_err(failed)? {
+        let name = entry.map_err(failed)?.file_name();
+        let fd = name
+            .to_str()
+            .and_then(|text| text.parse::<RawFd>().ok())
+            .ok_or("inherited descriptors: /proc/self/fd lists a name that is not a number")?;
+        if fd > 2 && !named.contains(&fd) {
+            open.push(fd);
+        }
+    }
+    for fd in open {
+        match nix::unistd::close(fd) {
+            Ok(()) | Err(nix::errno::Errno::EBADF | nix::errno::Errno::EINTR) => {}
+            Err(error) => return Err(format!("inherited descriptor {fd}: {error}")),
+        }
+    }
+    Ok(())
+}
 
 /// Holds a policy on this process, then becomes the harness, or with a guard stays as its
 /// parent ([`supervise`]); for a probe it only tells whether this kernel held it. In a
@@ -3486,6 +3548,45 @@ mod tests {
         assert!(parse(&[PROBE, SCOPED]).is_err());
         assert!(parse(&[SCOPED, "--", "/bin/true"]).is_err());
         assert!(parse(&[READ, "/usr", SCOPED, "--", "/bin/true"]).is_err());
+    }
+
+    #[test]
+    fn the_slirp_request_takes_a_process_above_one_and_a_descriptor_above_two() {
+        let parse =
+            |words: &[&str]| HelperRequest::parse(words.iter().map(OsString::from).collect());
+        let slirp = egress::SLIRP;
+        assert_eq!(
+            parse(&[slirp, "4242", "5"]),
+            Ok(HelperRequest::Slirp {
+                child: 4242,
+                ready: 5
+            })
+        );
+        assert_eq!(
+            parse(&[slirp, "2147483647", "3"]),
+            Ok(HelperRequest::Slirp {
+                child: 2_147_483_647,
+                ready: 3
+            })
+        );
+        for refused in [
+            &[slirp][..],
+            &[slirp, "4242"],
+            &[slirp, "4242", "5", "6"],
+            &[slirp, "1", "5"],
+            &[slirp, "0", "5"],
+            &[slirp, "2147483648", "5"],
+            &[slirp, "+4242", "5"],
+            &[slirp, "-4242", "5"],
+            &[slirp, "4242", "2"],
+            &[slirp, "4242", " 5"],
+            &[slirp, "4242", "0x5"],
+            &[slirp, "", "5"],
+        ] {
+            assert!(parse(refused).is_err(), "{refused:?}");
+        }
+        assert!(parse(&[READ, "/usr", slirp, "4242", "5"]).is_err());
+        assert!(parse(&[PROBE, slirp, "4242", "5"]).is_err());
     }
 
     #[test]

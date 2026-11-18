@@ -19,6 +19,8 @@ use std::fs;
 
 use std::io::{BufRead, BufReader, Read, Write};
 
+use std::os::fd::AsRawFd;
+
 use std::path::{Path, PathBuf};
 
 use std::process::{Child, ChildStdout, Command, ExitStatus, Output, Stdio};
@@ -31,10 +33,25 @@ const HELPER: &str = env!("CARGO_BIN_EXE_crazyagent-landlock");
 /// helper refuses ([`loader_variable`]), such as the `LD_LIBRARY_PATH` cargo sets for
 /// tests (DEC-179 SBX-3 fold, rv-ds241 F2). No input. Output: the command.
 fn helper_command() -> Command {
-    let mut command = Command::new(HELPER);
-    for (name, _) in std::env::vars_os().filter(|(name, _)| loader_variable(name)) {
+    without_loader(Command::new(HELPER))
+}
+
+/// A command that runs with this test's environment less every variable the helper refuses
+/// ([`loader_variable`]), for the helper itself or a shell that starts it (G1). Input: the
+/// command. Output: the same command, each such variable removed.
+fn without_loader(mut command: Command) -> Command {
+    let loaders: Vec<OsString> = std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| loader_variable(name))
+        .collect();
+    for name in &loaders {
         command.env_remove(name);
     }
+    assert!(loaders.iter().all(|name| {
+        command
+            .get_envs()
+            .any(|(set, value)| set == name.as_os_str() && value.is_none())
+    }));
     command
 }
 
@@ -190,13 +207,14 @@ fn process_state(pid: u32) -> Option<char> {
 /// git step is) starts its program, which the helper became, and that program is killed once
 /// its parent exits, so a git step never outlives the engine that took its lock. A parent id
 /// that is not the helper's parent is refused (exit 3) before the program starts, and
-/// process 1 is never named.
+/// process 1 is never named. The shell that starts the helper runs without the loader
+/// variables the helper refuses, as every other row's helper does (G1).
 #[test]
 fn a_helper_told_to_die_with_its_parent_is_killed_when_that_parent_exits() {
     let case = case();
     let started = case.tmp.join("started");
     let parent = crazyagent::spawn_gate::status(
-        Command::new("/bin/sh")
+        without_loader(Command::new("/bin/sh"))
             .arg("-c")
             .arg(
                 "\"$0\" --die-with $$ --read / --write \"$1\" -- \
@@ -2690,6 +2708,104 @@ fn the_bridge_leaves_no_descriptor_in_the_harness() {
     assert_eq!(open(&bridged), open(&shared));
 }
 
+/// Lists the descriptors a wrapped `/bin/sh` holds when its starter also hands it `/dev/null`
+/// under that descriptor's own number, not closed on exec, as a parent of the engine leaves
+/// one open. Inputs: the sandbox and the case. Output: the harness's `ls /proc/self/fd`.
+fn listed_with_inherited(sandbox: &dyn Sandbox, case: &Case) -> String {
+    let mut harness = Command::new("/bin/sh");
+    harness
+        .args(["-c", "ls /proc/self/fd"])
+        .current_dir(case.project.join("worktrees"));
+    let mut wrapped = sandbox.wrap(&harness).unwrap();
+    wrapped
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let inherited = fs::File::open("/dev/null").unwrap();
+    let output = crazyagent::spawn_gate::spawn_handing(&mut wrapped, inherited.into())
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// A guard, V243-LINUX-HARNESS-FD-LEAK: a descriptor the engine inherited and does not close
+/// on exec reaches no harness, plain, nested or bridged, where a GitHub runner's two open
+/// pipes reached every one. The control shows a plain child does inherit it.
+#[test]
+fn a_descriptor_the_engine_inherited_reaches_no_harness() {
+    let case = case();
+    let inherited = fs::File::open("/dev/null").unwrap();
+    let number = inherited.as_raw_fd().to_string();
+    let mut plain = Command::new("/bin/ls");
+    plain
+        .arg("/proc/self/fd")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped());
+    let control = crazyagent::spawn_gate::spawn_handing(&mut plain, inherited.into())
+        .unwrap()
+        .wait_with_output()
+        .unwrap();
+    assert!(
+        String::from_utf8(control.stdout)
+            .unwrap()
+            .lines()
+            .any(|line| line == number),
+        "the control: a plain child inherits descriptor {number}"
+    );
+    let bridged = SandboxNetwork::Only(vec![SandboxRemote::Loopback(18_080)]);
+    let mut sandboxes = vec![pinned(policy(&case, SandboxNetwork::Open))];
+    sandboxes.extend(nested(policy(&case, SandboxNetwork::Open)));
+    sandboxes.extend(nested(policy(&case, bridged)));
+    for sandbox in &sandboxes {
+        assert_eq!(
+            listed_with_inherited(sandbox, &case),
+            "0\n1\n2\n3\n",
+            "{:?}",
+            sandbox.backend()
+        );
+    }
+}
+
+/// A guard, V243-FD-SWEEP-EXIT3-ROW: a helper that cannot list the descriptors it inherited
+/// starts nothing and exits 3 with that reason, shown under bubblewrap with an empty `/proc`.
+/// Skipped where this machine cannot nest.
+#[test]
+fn a_helper_that_cannot_list_its_inherited_descriptors_starts_nothing() {
+    let Some(bwrap) = nesting_bwrap() else {
+        return;
+    };
+    let case = case();
+    let ran = case.tmp.join("ran");
+    let (shared, proc) = NEST_ARGS.split_last_chunk::<2>().unwrap();
+    assert_eq!(proc, &["--proc", "/proc"]);
+    let mut nest = Command::new(bwrap);
+    for (name, _) in std::env::vars_os().filter(|(name, _)| loader_variable(name)) {
+        nest.env_remove(name);
+    }
+    let output = crazyagent::spawn_gate::collected(
+        nest.args(shared)
+            .args(["--tmpfs", "/proc", "--", HELPER, "--read", "/", "--write"])
+            .arg(&case.tmp)
+            .args(["--", "/bin/sh", "-c", "echo ran > \"$0\""])
+            .arg(&ran)
+            .stdin(Stdio::null()),
+    )
+    .unwrap();
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(3), "{said}");
+    assert!(
+        said.contains("crazyagent-landlock: inherited descriptors:"),
+        "{said}"
+    );
+    assert!(!ran.exists(), "nothing started without the descriptor list");
+}
+
 /// Tells whether a broker that carries a port runs on this machine, by its arguments.
 /// Input: the port. Output: true when one does.
 fn broker_runs(port: u16) -> bool {
@@ -2822,6 +2938,28 @@ fn a_routed_agent_reaches_its_any_host_port_and_not_a_bridged_port_on_another_ho
         "any=pong\nother=refused\nloopback=pong\n"
     );
     assert_eq!(bash(&sandbox, &case, &gateway), "gateway=refused\n");
+}
+
+/// V243-LINUX-EGRESS-REJECT: a routed agent's refused connect, to another host's port and to
+/// slirp's gateway, fails at once instead of waiting out its SYN retries, about 127 s each.
+/// The bound covers the whole run, the routed network's start included.
+#[test]
+fn a_refused_connect_from_a_routed_agent_fails_at_once() {
+    let case = case();
+    let other = outward_address();
+    let (any, port) = (pong_everywhere(), pong_everywhere());
+    let network = SandboxNetwork::Only(vec![SandboxRemote::AnyHost(any)]);
+    let Some(sandbox) = routed(policy(&case, network)) else {
+        return;
+    };
+    for host in [other.to_string(), "10.0.2.2".to_owned()] {
+        let refused =
+            format!("(exec 4<>/dev/tcp/{host}/{port}) 2>/dev/null && echo reached || echo refused");
+        let started = Instant::now();
+        assert_eq!(bash(&sandbox, &case, &refused), "refused\n", "{host}");
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(30), "{host}: {took:?}");
+    }
 }
 
 #[test]
@@ -3324,9 +3462,11 @@ fn told(output: &Output) -> String {
 
 /// Rows about the call supervisor need a kernel that runs it: seccomp user notification
 /// whose wait only a fatal signal cuts (Linux 5.19) and a ptrace scope that lets a parent
-/// read the programs it started. The check itself fails where nothing supervises it.
+/// read the programs it started. The probe runs as the engine runs it, in a new empty folder
+/// only this user may open (G1). The check itself fails where nothing supervises it.
 #[test]
 fn the_call_supervisor_probe_holds_on_this_machine_and_fails_with_nothing_supervising() {
+    use std::os::unix::fs::PermissionsExt;
     let quiet = |command: &mut Command| {
         let silenced = command
             .stdin(Stdio::null())
@@ -3334,7 +3474,11 @@ fn the_call_supervisor_probe_holds_on_this_machine_and_fails_with_nothing_superv
             .stderr(Stdio::null());
         crazyagent::spawn_gate::status(silenced).unwrap()
     };
-    let probe = quiet(helper_command().arg("--probe-supervisor"));
+    let held = tempfile::tempdir().unwrap();
+    let folder = held.path().canonicalize().unwrap().join("probe");
+    fs::create_dir(&folder).unwrap();
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o700)).unwrap();
+    let probe = quiet(helper_command().arg("--probe-supervisor").arg(&folder));
     assert!(
         probe.success(),
         "Linux test machines need Linux 5.19 or newer and a ptrace scope below 2: {probe:?}"
