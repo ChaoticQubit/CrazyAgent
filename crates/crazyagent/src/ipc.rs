@@ -103,13 +103,7 @@ mod tests {
 pub(crate) fn pipe_name(root: &[u16], purpose: &str, random: &[u8; 16]) -> String {
     use sha2::{Digest, Sha256};
     assert!(!root.is_empty(), "a protected root has a final name");
-    assert!(
-        (1..=32).contains(&purpose.len())
-            && purpose
-                .bytes()
-                .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-')),
-        "a pipe purpose is a plain name"
-    );
+    assert!(plain_purpose(purpose), "a pipe purpose is a plain name");
     let bytes: Vec<u8> = root.iter().flat_map(|unit| unit.to_le_bytes()).collect();
     let digest = Sha256::digest(&bytes);
     let hex = |part: &[u8]| -> String { part.iter().map(|byte| format!("{byte:02x}")).collect() };
@@ -121,6 +115,96 @@ pub(crate) fn pipe_name(root: &[u16], purpose: &str, random: &[u8; 16]) -> Strin
     assert!(name.len() <= 256);
     name
 }
+
+/// Whether a purpose is the plain name D7 places verbatim in a pipe name and its pipes file:
+/// 1-32 of a-z, 0-9, '.' and '-'. Input: the purpose. Output: whether it is plain.
+#[cfg(any(windows, test))]
+fn plain_purpose(purpose: &str) -> bool {
+    (1..=32).contains(&purpose.len())
+        && purpose
+            .bytes()
+            .all(|byte| matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'-'))
+}
+
+/// The first field of every D7 pipes file, naming its version.
+#[cfg(any(windows, test))]
+const PIPES_VERSION: &str = "crazyagent-pipes-1";
+/// The most bytes a D7 pipes file may take; the longest line the engine writes is 117.
+#[cfg(any(windows, test))]
+const PIPES_BYTES_MAX: usize = 128;
+
+/// What the D7 pipes file in a protected root holds for its one owner-class endpoint
+/// (DESIGN-0256 D7 and D10 step 1, leader 07:46): the per-start random part of the pipe name
+/// and the pin, process ID and creation time, of the engine that serves it.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Published {
+    pub(crate) random: [u8; 16],
+    pub(crate) pid: u32,
+    pub(crate) created: u64,
+}
+
+/// The one line the engine writes as a D7 pipes file: the version, the purpose, the random
+/// part as 32 lowercase hex and the pin in decimal. Inputs: the endpoint's plain purpose and
+/// what is published. Output: the line, newline included.
+#[cfg(any(windows, test))]
+fn encode_pipes(purpose: &str, published: &Published) -> String {
+    assert!(plain_purpose(purpose), "a pipe purpose is a plain name");
+    let random: String = published
+        .random
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let text = format!(
+        "{PIPES_VERSION} {purpose} {random} {} {}\n",
+        published.pid, published.created
+    );
+    assert!(text.len() <= PIPES_BYTES_MAX);
+    text
+}
+
+/// Reads a D7 pipes file a client opened through the private judge, trusting only the exact
+/// line [`encode_pipes`] writes for this purpose with a nonzero pin. Inputs: the file's bytes,
+/// at most one past the cap, and the purpose. Output: what the engine published, or why the
+/// file is refused.
+#[cfg(any(windows, test))]
+fn parse_pipes(bytes: &[u8], purpose: &str) -> Result<Published, &'static str> {
+    const SHAPE: &str = "the pipes file is not in the engine's shape";
+    if bytes.len() > PIPES_BYTES_MAX {
+        return Err(SHAPE);
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| SHAPE)?;
+    let fields: Vec<&str> = text.strip_suffix('\n').ok_or(SHAPE)?.split(' ').collect();
+    let [version, named, hex, pid, created] = fields[..] else {
+        return Err(SHAPE);
+    };
+    if version != PIPES_VERSION {
+        return Err(SHAPE);
+    }
+    if named != purpose {
+        return Err("the pipes file names another endpoint");
+    }
+    if hex.len() != 32 || !hex.is_ascii() {
+        return Err(SHAPE);
+    }
+    let mut random = [0; 16];
+    for (slot, pair) in random.iter_mut().zip(hex.as_bytes().chunks(2)) {
+        let pair = std::str::from_utf8(pair).map_err(|_| SHAPE)?;
+        *slot = u8::from_str_radix(pair, 16).map_err(|_| SHAPE)?;
+    }
+    let published = Published {
+        random,
+        pid: pid.parse().map_err(|_| SHAPE)?,
+        created: created.parse().map_err(|_| SHAPE)?,
+    };
+    if published.pid == 0 || published.created == 0 || encode_pipes(purpose, &published) != text {
+        return Err(SHAPE);
+    }
+    Ok(published)
+}
+
+#[cfg(windows)]
+mod windows;
 
 #[cfg(test)]
 mod name_tests {
