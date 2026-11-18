@@ -1333,11 +1333,13 @@ pub fn linux_other_git(project: &Path) -> bool {
     }
 }
 
-/// Refusal to build or install a project sandbox, with a plain reason.
+/// Refusal to build or install a project sandbox, with a plain reason, or, on Windows, the
+/// read root no app container may read and this user cannot change (V244-WIN-NPM).
 #[derive(Debug)]
 pub enum SandboxError {
     Invalid(String),
     Unavailable(String),
+    Unreadable(PathBuf),
     Io(io::Error),
 }
 
@@ -1346,9 +1348,22 @@ impl fmt::Display for SandboxError {
         match self {
             Self::Invalid(reason) => write!(f, "sandbox refused: {reason}"),
             Self::Unavailable(reason) => write!(f, "sandbox unavailable: {reason}"),
+            Self::Unreadable(folder) => {
+                write!(f, "sandbox unavailable: {}", unreadable_reason(folder))
+            }
             Self::Io(error) => write!(f, "sandbox I/O: {error}"),
         }
     }
+}
+
+/// Why a Windows read root refuses a launch, in plain words naming the folder: no app
+/// container may read it and this Windows user cannot change who may. Input: the folder.
+/// Output: the reason.
+pub fn unreadable_reason(folder: &Path) -> String {
+    format!(
+        "Windows does not let sandboxed programs read {}, and this Windows user cannot change who reads it",
+        folder.display()
+    )
 }
 
 impl std::error::Error for SandboxError {}

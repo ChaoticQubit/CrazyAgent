@@ -13875,7 +13875,7 @@ fn sandbox_code(error: &SandboxError) -> &'static str {
         SandboxError::Unavailable(_) if crate::sandbox::model_loopback_windows(error) => {
             crate::sandbox::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS
         }
-        SandboxError::Unavailable(_) => "sandbox_unavailable",
+        SandboxError::Unavailable(_) | SandboxError::Unreadable(_) => "sandbox_unavailable",
         SandboxError::Io(error) => io_code(error),
     }
 }

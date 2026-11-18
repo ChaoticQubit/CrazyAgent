@@ -319,6 +319,7 @@ export function errorMessage(error: unknown): string {
     server_installs_busy: "Too many installs are running. Check again in a minute.",
     server_node_too_old: "context-mode needs Node.js 22.5 or newer. Update Node.js, then check again.",
     server_npx_not_found: "CrazyAgent did not find the npx this context-mode server runs on this computer, so it did not start it.",
+    server_node_folder_unreadable: "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and only an administrator can change that, so CrazyAgent did not start it.",
     server_output_too_large: "The server sent too much output.",
     server_refused: "The server refused the request.",
     server_reply_invalid: "The server's answer was not valid MCP.",

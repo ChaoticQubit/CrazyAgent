@@ -807,6 +807,10 @@ const PROBLEMS: &[(&str, &str)] = &[
         "CrazyAgent did not find the npx this context-mode server runs on this computer, so it did not start it.",
     ),
     (
+        "server_node_folder_unreadable",
+        "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and only an administrator can change that, so CrazyAgent did not start it.",
+    ),
+    (
         "server_output_too_large",
         "The server sent too much output.",
     ),
@@ -889,7 +893,7 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
 pub const CHECK_REFUSED: &str = "server_check_refused:";
 
 /// The longest boundary reason a recorded check problem carries.
-const CHECK_REASON_BYTES_MAX: usize = 1024;
+pub const CHECK_REASON_BYTES_MAX: usize = 1024;
 
 /// Records a boundary refusal of a server check with the boundary's reason. Input: the plain
 /// reason, never empty. Output: the problem to record, which [`check_problem`] shows.
@@ -1309,6 +1313,24 @@ mod tests {
             known_code("server_npx_not_found"),
             Some("server_npx_not_found")
         );
+    }
+
+    /// V244-WIN-NPM: a check whose context-mode install met a Node.js folder no Windows
+    /// sandbox may read, and only an administrator can open, reads one sentence of its own,
+    /// a code the desktop knows; a boundary reason that names a folder shows that folder.
+    #[test]
+    fn a_check_on_a_node_folder_windows_sandboxes_cannot_read_says_so_in_one_sentence() {
+        let words = "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and only an administrator can change that, so CrazyAgent did not start it.";
+        assert_eq!(check_problem("server_node_folder_unreadable"), words);
+        assert_eq!(plain_problem("server_node_folder_unreadable"), Some(words));
+        assert_eq!(
+            known_code("server_node_folder_unreadable"),
+            Some("server_node_folder_unreadable")
+        );
+        let folder = std::path::Path::new(r"C:\Program Files\nodejs");
+        let reason = crate::sandbox::unreadable_reason(folder);
+        assert!(reason.contains(r"C:\Program Files\nodejs"), "{reason}");
+        assert!(check_problem(&check_refused(&reason)).contains(&reason));
     }
 
     /// RV-DS241-153: the pinned context-mode launch is read from the full npx path that
