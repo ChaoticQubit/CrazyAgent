@@ -59,6 +59,16 @@ pub fn commit_input(text: &str) -> Option<Input> {
     Some(Input::Text(text.as_bytes().to_vec()))
 }
 
+/// The event an input method commit makes for a view: its text input while the view is
+/// active, none otherwise, so a commit that comes after a cover, a focus loss or a
+/// close never lands. Inputs: the view's focus and the committed text. Output: the event.
+pub fn commit_event(focus: Focus, text: &str) -> Option<ViewEvent> {
+    if !focus.active() {
+        return None;
+    }
+    commit_input(text).map(ViewEvent::Key)
+}
+
 /// Where keyboard focus stands for one view: whether it holds native focus, whether its
 /// toplevel has keyboard focus and whether a page element covers it. Keys go to the view
 /// only while it is active: native, in a focused toplevel and uncovered. A cover drops
@@ -130,8 +140,10 @@ fn edit(focus: &Cell<Focus>, change: impl FnOnce(&mut Focus) -> Option<bool>) ->
     changed
 }
 
-/// Moves the input method's focus with the view's and tells the host. Inputs: the change,
-/// the context, the view id and the sink. Output: none.
+/// Moves the input method's focus with the view's and tells the host; losing activity
+/// cancels any open preedit first. Callers store the new focus before this runs, so a
+/// commit the reset makes is dropped. Inputs: the change, the context, the view id and
+/// the sink. Output: none.
 fn apply(change: Option<bool>, im: &gtk::IMMulticontext, id: u64, sink: Sink) {
     let Some(active) = change else {
         return;
@@ -139,9 +151,15 @@ fn apply(change: Option<bool>, im: &gtk::IMMulticontext, id: u64, sink: Sink) {
     if active {
         im.focus_in();
     } else {
-        im.focus_out();
+        release(im);
     }
     sink(id, ViewEvent::Focus(active));
+}
+
+/// Cancels the context's preedit and takes its focus. Input: the context. Output: none.
+fn release(im: &gtk::IMMulticontext) {
+    im.reset();
+    im.focus_out();
 }
 
 /// Takes one key press while the view is active, ahead of the webview: a chord becomes
@@ -199,12 +217,15 @@ impl View {
             .ok_or("native_terminal_surface_unavailable")?;
         let im = gtk::IMMulticontext::new();
         im.set_client_window(Some(&gdk));
-        let commit = im.connect_commit(move |_, text| {
-            if let Some(input) = commit_input(text) {
-                sink(id, ViewEvent::Key(input));
-            }
-        });
         let focus = Rc::new(Cell::new(Focus::new(toplevel.has_toplevel_focus())));
+        let commit = {
+            let focus = Rc::clone(&focus);
+            im.connect_commit(move |_, text| {
+                if let Some(event) = commit_event(focus.get(), text) {
+                    sink(id, event);
+                }
+            })
+        };
         let on_press = {
             let (im, focus) = (im.clone(), Rc::clone(&focus));
             toplevel.connect_key_press_event(move |_, event| press(&im, &focus, id, sink, event))
@@ -316,8 +337,9 @@ impl View {
 }
 
 impl Drop for View {
-    /// Disconnects the toplevel and input method handlers, releases the context and
-    /// gives GTK focus back to the page if the view held native focus. Output: none.
+    /// Disconnects the toplevel and input method handlers, cancels any open preedit,
+    /// releases the context and gives GTK focus back to the page if the view held native
+    /// focus. Output: none.
     fn drop(&mut self) {
         let native = self.focus.get().is_native();
         for handler in self.handlers.drain(..) {
@@ -327,7 +349,7 @@ impl Drop for View {
             self.im.disconnect(commit);
         }
         if self.focus.get().active() {
-            self.im.focus_out();
+            release(&self.im);
         }
         self.im.set_client_window(None::<&gtk::gdk::Window>);
         if native {
