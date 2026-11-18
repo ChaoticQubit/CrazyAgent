@@ -2005,7 +2005,7 @@ mod tests {
         });
         shell.ctx.say(Message::success("Saved.", ""));
         shell.arrive(status_arrival(vec![running.clone()]));
-        assert_eq!(shell.ctx.store.intake, [running.clone()]);
+        assert_eq!(shell.ctx.store.intake, std::slice::from_ref(&running));
         assert_eq!(
             shell.ctx.message().map(|said| said.lead.as_str()),
             Some("Saved.")
@@ -2038,7 +2038,7 @@ mod tests {
         );
         assert_eq!(
             shell.ctx.store.intake,
-            [done.clone()],
+            std::slice::from_ref(&done),
             "a failed read keeps it"
         );
         assert!(intake_asks(&mut shell).is_empty());
