@@ -185,6 +185,7 @@ test("V243-NATIVE-ONLY: a closed panel keeps its native view covered, the third 
     await F.stage();
     const one = await F.live("a", F.agent("sub", "Ada", "team-1"));
     F.unmount("a");
+    await F.until(() => F.calls("desktop_native_terminal_cover").at(-1)?.args.covered === true);
     const parked = F.calls("desktop_native_terminal_cover").at(-1)?.args ?? null;
     const two = await F.live("a", F.agent("sub", "Brook", "team-2"));
     F.unmount("a");

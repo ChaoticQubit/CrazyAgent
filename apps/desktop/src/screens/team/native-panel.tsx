@@ -53,7 +53,7 @@ function assert(condition: boolean, message: string): asserts condition {
  * cursor and the 21 terminal colours. Output: the style. */
 export function nativeStyle(): NativeStyle {
   const options = terminalOptions();
-  const colours: Partial<Record<string, string>> = { ...options.theme };
+  const colours: Record<string, unknown> = { ...options.theme };
   const theme = {} as NativeTheme;
   for (const key of THEME_KEYS) {
     const colour = colours[key];
@@ -174,6 +174,12 @@ export class NativeView implements Held {
     else this.watch();
   }
 
+  private again(): void {
+    if (this.dropped || this.open !== null) return;
+    if (this.shown || this.size !== null) this.connect();
+    else this.started = false;
+  }
+
   /** Hides the view: covers it, keeping its terminal and output live. Output: none. */
   hide(): void {
     this.shown = false;
@@ -224,7 +230,7 @@ export class NativeView implements Held {
     window.clearTimeout(this.againTimer);
     this.release();
     this.set({ view: { kind: "connecting" }, behind: false, mouse: false, menu: null });
-    this.connect();
+    this.again();
   }
 
   /** Lets the view go: closes it on the desktop, or once its open answers. The agent keeps
@@ -263,6 +269,7 @@ export class NativeView implements Held {
     const covered = screen === null;
     assert(!covered || this.size !== null, "a covered open knows its size");
     const rect = screen ? rectOf(screen) : { x: 0, y: 0, width: this.size?.width ?? 0, height: this.size?.height ?? 0 };
+    if (rect.width >= 1 && rect.height >= 1) this.size = { width: rect.width, height: rect.height };
     const open: Opened = { id: null, ended: false, closed: false, liveAt: null };
     this.open = open;
     this.told = covered;
@@ -314,9 +321,7 @@ export class NativeView implements Held {
     this.tries = next;
     this.set({ view: { kind: "connecting", reason: copy, tries: next }, behind: false, mouse: false, menu: null });
     window.clearTimeout(this.againTimer);
-    this.againTimer = window.setTimeout(() => {
-      if (!this.dropped && this.open === null) this.connect();
-    }, FOLLOW_MS);
+    this.againTimer = window.setTimeout(() => this.again(), FOLLOW_MS);
   }
 
   private stopTyping(): void {
@@ -329,7 +334,7 @@ export class NativeView implements Held {
   private watch(): void {
     this.unwatch();
     const screen = this.screen;
-    if (!this.shown || screen === null || this.open?.id == null) return;
+    if (!this.shown || screen === null || (this.open?.id ?? null) === null) return;
     const soon = () => {
       if (this.frame !== 0) return;
       this.frame = window.requestAnimationFrame(() => {
