@@ -66,6 +66,12 @@ pub(crate) fn list(
     {
         return Err(failure("project_files_no_repository"));
     }
+    #[cfg(test)]
+    AFTER_CHECK.with(|step| {
+        if let Some(step) = step.borrow().as_ref() {
+            step(&git_dir);
+        }
+    });
     let git_root = git_path(&root);
     let git_failed = |_| failure("project_files_git_failed");
     #[cfg(unix)]
@@ -249,6 +255,43 @@ fn redirected(git_dir: &Path) -> bool {
         })
 }
 
+#[cfg(test)]
+thread_local! {
+    /// A step the tests run once `list` has checked the `.git` folder and before git starts,
+    /// with that folder, standing in for an agent that changes it meanwhile. None runs nothing.
+    static AFTER_CHECK: std::cell::RefCell<Option<Box<dyn Fn(&Path)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Lists a repository while a step plants a `commondir` after `list` checked the `.git`
+/// folder, naming a common folder whose `info/exclude` hides `notes.txt`. Inputs: a
+/// repository with an untracked `notes.txt` and a new folder for the common one. Output:
+/// what `list` answered.
+#[cfg(test)]
+fn listed_with_commondir_planted_after_check(
+    repo: &Path,
+    store: &Path,
+) -> Result<Vec<String>, EngineError> {
+    for name in ["objects", "refs", "info"] {
+        std::fs::create_dir_all(store.join(name)).unwrap();
+    }
+    std::fs::write(
+        store.join("config"),
+        "[core]\n\trepositoryformatversion = 0\n",
+    )
+    .unwrap();
+    std::fs::write(store.join("info").join("exclude"), "notes.txt\n").unwrap();
+    let common = format!("{}\n", store.display());
+    AFTER_CHECK.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move |git_dir: &Path| {
+            std::fs::write(git_dir.join("commondir"), &common).unwrap();
+        }));
+    });
+    let listed = list(repo, "", FILES_MAX, Instant::now() + LISTING_TIME);
+    AFTER_CHECK.with(|step| *step.borrow_mut() = None);
+    listed
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -316,6 +359,15 @@ mod tests {
         fs::write(repo.join("debug.log"), "ignored").unwrap();
         symlink(&outside, repo.join("outside-link")).unwrap();
         repo
+    }
+
+    #[test]
+    fn a_commondir_planted_after_the_check_redirects_nothing() {
+        let place = tempfile::tempdir().unwrap();
+        let repo = project(place.path());
+        let listed =
+            listed_with_commondir_planted_after_check(&repo, &place.path().join("store")).unwrap();
+        assert!(listed.iter().any(|path| path == "notes.txt"), "{listed:?}");
     }
 
     fn sorted(mut paths: Vec<String>) -> Vec<String> {
@@ -548,6 +600,16 @@ mod windows_tests {
         }
         fs::write(&config, &kept).unwrap();
         assert_eq!(list(&repo, "", FILES_MAX, stop).unwrap(), ["README.md"]);
+    }
+
+    #[test]
+    fn a_windows_commondir_planted_after_the_check_redirects_nothing() {
+        let place = tempfile::tempdir().unwrap();
+        let (repo, _home) = repository(place.path());
+        fs::write(repo.join("notes.txt"), "untracked").unwrap();
+        let listed =
+            listed_with_commondir_planted_after_check(&repo, &place.path().join("store")).unwrap();
+        assert_eq!(listed, ["notes.txt"]);
     }
 
     #[test]
