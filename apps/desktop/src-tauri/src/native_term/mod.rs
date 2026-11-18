@@ -6,6 +6,8 @@ mod clip;
 mod codec;
 #[cfg(target_os = "macos")]
 mod control;
+#[cfg(all(target_os = "macos", feature = "native-webdriver"))]
+mod hook_text;
 #[cfg(target_os = "macos")]
 mod host;
 #[cfg(target_os = "macos")]
@@ -161,20 +163,54 @@ impl Rect {
 #[derive(serde::Deserialize, Debug)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum HookInput {
-    Text { text: String },
-    Key { key: String, ctrl: bool },
-    Wheel { dy: f64, mode: u32, x: f64, y: f64 },
-    Press { x: f64, y: f64, option: bool },
-    Drag { x: f64, y: f64, option: bool },
-    Release { x: f64, y: f64, option: bool },
+    Text {
+        text: String,
+    },
+    Key {
+        key: String,
+        ctrl: bool,
+    },
+    Wheel {
+        dy: f64,
+        mode: u32,
+        x: f64,
+        y: f64,
+    },
+    Press {
+        x: f64,
+        y: f64,
+        option: bool,
+    },
+    Drag {
+        x: f64,
+        y: f64,
+        option: bool,
+    },
+    Release {
+        x: f64,
+        y: f64,
+        option: bool,
+    },
     Copy,
-    Paste { text: String },
-    Marked { text: String, at: usize },
-    Insert { text: String },
+    Paste {
+        text: String,
+    },
+    #[cfg(feature = "native-webdriver")]
+    Marked {
+        text: String,
+        at: usize,
+    },
+    #[cfg(feature = "native-webdriver")]
+    Insert {
+        text: String,
+    },
+    #[cfg(feature = "native-webdriver")]
     Unmark,
+    #[cfg(feature = "native-webdriver")]
     Access,
 }
 
+#[cfg(feature = "native-webdriver")]
 impl HookInput {
     /// Whether the input is a text operation the view's own selectors run (marked text,
     /// insert, unmark, accessibility read) rather than a timed input. Output: true for those.
@@ -241,10 +277,13 @@ impl HookEvent {
             | HookInput::Release { x, y, .. } => point(*x) && point(*y),
             HookInput::Copy => true,
             HookInput::Paste { text } => text.len() <= PASTE_BYTES_MAX,
+            #[cfg(feature = "native-webdriver")]
             HookInput::Marked { text, at } => {
                 text.len() <= TEXT_BYTES_MAX && *at <= text.encode_utf16().count()
             }
+            #[cfg(feature = "native-webdriver")]
             HookInput::Insert { text } => text.len() <= TEXT_BYTES_MAX,
+            #[cfg(feature = "native-webdriver")]
             HookInput::Unmark | HookInput::Access => true,
         };
         self.t0.is_finite() && expect && input
@@ -259,8 +298,8 @@ pub enum Report {
     Ready,
     #[cfg(target_os = "macos")]
     Probe(pane::Probe),
-    #[cfg(target_os = "macos")]
-    Access(view_text::AccessReport),
+    #[cfg(all(target_os = "macos", feature = "native-webdriver"))]
+    Access(hook_text::AccessReport),
     Ended {
         code: String,
     },

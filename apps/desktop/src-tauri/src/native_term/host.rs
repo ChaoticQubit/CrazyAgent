@@ -2,11 +2,12 @@ use super::a11y::{self, Geometry};
 use super::clip::Clip;
 use super::codec;
 use super::control::{Control, Feed, Want, WantKind};
+#[cfg(feature = "native-webdriver")]
+use super::hook_text;
 use super::pane::{self, Effect, Input, Named, Pane, Probe};
 use super::render::{Shared, Surface};
 use super::screen;
 use super::view::{MouseKind, TermView};
-use super::view_text;
 use super::{HookEvent, HookInput, Rect, Report};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
@@ -543,6 +544,7 @@ pub fn input(
     event: HookEvent,
 ) -> Result<(), String> {
     assert!(event.valid());
+    #[cfg(feature = "native-webdriver")]
     if event.input.text_op() {
         return text_op(app, window, id, event.input);
     }
@@ -641,6 +643,7 @@ impl Native {
                     option,
                 }),
             ),
+            #[cfg(feature = "native-webdriver")]
             HookInput::Marked { .. }
             | HookInput::Insert { .. }
             | HookInput::Unmark
@@ -723,6 +726,7 @@ pub fn close(app: &tauri::AppHandle, window: String, id: Option<u64>) -> Result<
     })?
 }
 
+#[cfg(feature = "native-webdriver")]
 /// Runs a hook text operation (marked text, insert, unmark, accessibility read) through a
 /// view's own selectors, outside the native state, so the inputs it makes reach the pane the
 /// way AppKit's would. Inputs: the app, the window label, the view id and the operation.
@@ -743,7 +747,7 @@ fn text_op(
         let Some((ns, output)) = found else {
             return Err("native_terminal_view_unknown".to_owned());
         };
-        if let Some(report) = view_text::hook_text(&ns, &input) {
+        if let Some(report) = hook_text::hook_text(&ns, &input) {
             let _ = output.send(Report::Access(report));
         }
         Ok(())
