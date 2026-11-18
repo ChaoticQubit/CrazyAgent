@@ -9,6 +9,9 @@ pub const MARKED_UNITS_MAX: usize = 1024;
 /// Apple's private-use range for function keys, which never reaches a pane as text.
 const FUNCTION_CHARS: std::ops::RangeInclusive<char> = '\u{F700}'..='\u{F8FF}';
 
+/// What AppKit reports for the keypad Enter key, which types Return like the main one.
+pub const ENTER_KEYPAD: &str = "\u{3}";
+
 /// The modifier keys of one key event that decide its route.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Mods {
@@ -37,11 +40,13 @@ pub enum Route {
 /// modifiers, the characters ignoring modifiers (Return is "\r", keypad Enter "\u{3}") and
 /// whether marked text was shown before the key. Output: the route.
 pub fn route(mods: Mods, bare: &str, composing: bool) -> Route {
-    let _ = bare;
+    let enter = bare == "\r" || bare == ENTER_KEYPAD;
     let route = if mods.command {
         Route::Ignore
     } else if composing {
         Route::Interpret
+    } else if enter && mods.shift && !mods.control && !mods.option {
+        Route::NewLine
     } else if mods.control {
         Route::Bypass
     } else if mods.option {
@@ -51,6 +56,7 @@ pub fn route(mods: Mods, bare: &str, composing: bool) -> Route {
     };
     assert!(!mods.command || route == Route::Ignore);
     assert!(!composing || matches!(route, Route::Ignore | Route::Interpret));
+    assert!(route != Route::NewLine || (enter && mods.shift));
     route
 }
 

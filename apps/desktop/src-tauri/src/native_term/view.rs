@@ -165,6 +165,9 @@ pub fn key_input(chars: &str, bare: &str) -> Option<Input> {
     if chars == "\u{19}" {
         return Some(Input::Key(Named::BackTab));
     }
+    if bare == super::ime::ENTER_KEYPAD {
+        return Some(Input::Text(b"\r".to_vec()));
+    }
     let private = chars
         .chars()
         .any(|c| ('\u{F700}'..='\u{F8FF}').contains(&c));
