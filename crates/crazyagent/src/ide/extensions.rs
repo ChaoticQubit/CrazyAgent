@@ -995,3 +995,22 @@ fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn an_extension_file_that_is_a_link_is_not_opened() {
+        let folder = tempfile::tempdir().unwrap();
+        let target = folder.path().join("secret.json");
+        std::fs::write(&target, "{}").unwrap();
+        let link = folder.path().join("package.json");
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        assert!(open_plain(&target).is_ok());
+        assert!(
+            open_plain(&link).is_err(),
+            "the open followed the link to its target"
+        );
+    }
+}
