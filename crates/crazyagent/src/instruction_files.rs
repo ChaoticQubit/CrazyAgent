@@ -1640,3 +1640,26 @@ fn real_folder(folder: &Path) -> std::io::Result<()> {
 #[cfg(all(test, unix))]
 #[path = "instruction_files/tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    /// C6 (DESIGN-0256): owner text on Windows is a file the engine's user owns, read from
+    /// the open file; a file whose owner is the administrators group is unsafe, as a file of
+    /// another uid is on Unix. Setting that owner needs the elevated runner (P0).
+    #[test]
+    fn owner_text_is_a_file_this_user_owns() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("AGENTS.md");
+        std::fs::write(&file, "# rules").unwrap();
+        assert_eq!(super::owned_text(&file).unwrap(), "# rules");
+        let status = std::process::Command::new("icacls")
+            .args([file.to_str().unwrap(), "/setowner", "*S-1-5-32-544"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert_eq!(
+            super::owned_text(&file).unwrap_err(),
+            "process_import_unsafe"
+        );
+    }
+}

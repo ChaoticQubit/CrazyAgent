@@ -2095,3 +2095,51 @@ pub use transcript::{LoadedFile, Observed, observed};
 #[cfg(test)]
 #[path = "agent_home/tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::Kept;
+
+    /// C6 (DESIGN-0256): a home file is read on Windows only while it has one link and the
+    /// engine's user owns it, both read from the open file, so a second hard link makes it
+    /// unsafe as on Unix.
+    #[test]
+    fn a_home_file_with_a_second_hard_link_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("CLAUDE.md");
+        std::fs::write(&file, "# rules").unwrap();
+        assert_eq!(super::read_home_file(&file, 64).unwrap(), "# rules");
+        std::fs::hard_link(&file, root.path().join("linked")).unwrap();
+        assert_eq!(
+            super::read_home_file(&file, 64).unwrap_err().0,
+            "agent_instructions_unsafe"
+        );
+    }
+
+    /// C6 (DESIGN-0256): a home cleanup on Windows keeps a file it keeps only while it has
+    /// one link and the engine's user owns it; a kept name with a second hard link is
+    /// removed as any entry it does not keep.
+    #[test]
+    fn a_kept_home_file_with_a_second_hard_link_is_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        let (kept, linked) = (home.join("kept"), home.join("linked"));
+        std::fs::write(&kept, "x").unwrap();
+        std::fs::write(&linked, "y").unwrap();
+        std::fs::hard_link(&linked, root.path().join("outside")).unwrap();
+        let mut held = Vec::new();
+        super::keep_only(
+            &home,
+            &[("kept", Kept::File), ("linked", Kept::File)],
+            &mut held,
+        )
+        .unwrap();
+        assert!(kept.is_file());
+        assert!(!linked.exists());
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("outside")).unwrap(),
+            "y"
+        );
+    }
+}
