@@ -697,3 +697,140 @@ mod project_creation {
         assert_persisted_project(root.path(), spec);
     }
 }
+
+/// Farm probe for the G1 macOS red: the saturation row's timeline, one line per round, never
+/// failing on what it measures. Input: whether one read goes through the worker before the
+/// blocker, and the `G1_ROUNDS` count. Output: `G1PROBE` lines on stderr.
+async fn g1_probe(warm: bool) {
+    let rounds: usize = std::env::var("G1_ROUNDS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(20);
+    std::thread::spawn(|| eprintln!("G1PROBE worker-thread stderr visible"))
+        .join()
+        .unwrap();
+    let mut first_full = 0;
+    let mut late_landed = 0;
+    for round in 0..rounds {
+        let started = std::time::Instant::now();
+        let ms = |at: std::time::Instant| at.duration_since(started).as_millis();
+        let root = private_root();
+        let g = root.path().join("g");
+        std::fs::write(&g, "queue_capacity = 1").unwrap();
+        let cfg = resolve_config(&g, &root.path().join("p")).unwrap();
+        let path = root.path().join("db");
+        let engine = std::sync::Arc::new(Engine::open(&path, cfg).await.unwrap());
+        let opened = ms(std::time::Instant::now());
+        let warmed = if warm {
+            let reply = engine
+                .apply(request(
+                    "warm",
+                    0,
+                    Command::Events {
+                        after: Cursor::new(0),
+                    },
+                ))
+                .await;
+            format!("{}:{}", ms(std::time::Instant::now()), reply.is_ok())
+        } else {
+            "-".into()
+        };
+        let blocker = rusqlite::Connection::open(&path).unwrap();
+        if round == 0 {
+            let version: String = blocker
+                .query_row("SELECT sqlite_version()", [], |row| row.get(0))
+                .unwrap();
+            let journal: String = blocker
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
+            let mut options = blocker.prepare("PRAGMA compile_options").unwrap();
+            let options: Vec<String> = options
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            eprintln!(
+                "G1PROBE sqlite={version} journal={journal} options={}",
+                options.join(",")
+            );
+        }
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let blocked = ms(std::time::Instant::now());
+        let mut jobs = tokio::task::JoinSet::new();
+        for i in 0..16 {
+            let engine = engine.clone();
+            jobs.spawn(async move {
+                let result = engine
+                    .apply(request(
+                        &format!("saturation-{i}"),
+                        0,
+                        create(&format!("p-{i}")),
+                    ))
+                    .await;
+                (i, std::time::Instant::now(), result)
+            });
+        }
+        let mut seen = Vec::new();
+        while let Some(joined) = jobs.join_next().await {
+            let (i, at, result) = joined.unwrap();
+            let kind = match &result {
+                Ok(_) => "ok".to_owned(),
+                Err(e) if e.0.contains("queue unavailable") => "full".to_owned(),
+                Err(e) if e.0.contains("outcome_unknown") => "unknown".to_owned(),
+                Err(e) => e.0.chars().take(48).collect(),
+            };
+            seen.push((i, ms(at), kind));
+        }
+        seen.sort();
+        let returned = ms(std::time::Instant::now());
+        blocker.execute_batch("ROLLBACK").unwrap();
+        let mut first = None;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let outcome = loop {
+            let tried = engine
+                .apply(request("after-contention", 0, create("real")))
+                .await;
+            let full = matches!(&tried, Err(e) if e.0.contains("queue unavailable"));
+            first.get_or_insert(full);
+            if !full || std::time::Instant::now() > deadline {
+                break match tried {
+                    Ok(reply) => format!("rev={:?}", reply.revision),
+                    Err(e) => format!("err={}", e.0),
+                };
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        };
+        let freed = ms(std::time::Instant::now());
+        if first == Some(true) {
+            first_full += 1;
+        }
+        if outcome != format!("rev={:?}", Cursor::new(1)) {
+            late_landed += 1;
+        }
+        let accepted = seen.iter().filter(|(_, _, kind)| kind != "full").count();
+        let tasks: Vec<String> = seen
+            .iter()
+            .filter(|(_, _, kind)| kind != "full")
+            .map(|(i, at, kind)| format!("{i}:{at}:{kind}"))
+            .collect();
+        eprintln!(
+            "G1PROBE warm={warm} round={round} open={opened} warmed={warmed} blocked={blocked} accepted={accepted} tasks=[{}] returned={returned} first_full={} after={outcome} at={freed}",
+            tasks.join(" "),
+            first == Some(true)
+        );
+        engine.close().await.unwrap();
+    }
+    eprintln!(
+        "G1PROBE-SUMMARY warm={warm} rounds={rounds} first_full={first_full} after_not_rev1={late_landed}"
+    );
+}
+
+#[tokio::test]
+async fn g1_probe_saturation_timeline() {
+    g1_probe(false).await;
+}
+
+#[tokio::test]
+async fn g1_probe_saturation_timeline_after_a_read() {
+    g1_probe(true).await;
+}
