@@ -922,6 +922,7 @@ fn cancel_turn(
     if queued {
         let changed = tx.execute("UPDATE master_turns SET phase='cancelled',body=?1 WHERE session=?2 AND id=?3 AND phase='queued'", params![encode(&turn)?, turn.session_id.as_str(), turn.id.as_str()]).map_err(error)?;
         assert_eq!(changed, 1);
+        crate::sessions_log::mark_turn(tx, turn.input_cursor.value())?;
         assert!(turn.attempt.is_none() && turn.runtime.is_none() && turn.reply.is_none());
     } else {
         save_turn(tx, &turn)?;
@@ -1323,6 +1324,7 @@ fn save_turn(tx: &Transaction<'_>, turn: &MasterTurnView) -> Result<(), EngineEr
         )
         .map_err(error)?;
     assert_eq!(changed, 1);
+    crate::sessions_log::mark_turn(tx, turn.input_cursor.value())?;
     if let Some(reply) = &turn.reply {
         crate::master_sessions::one_turn_reply(
             tx,
@@ -3151,6 +3153,7 @@ fn prepare_turn(
             )
             .map_err(error)?;
         assert_eq!(inserted, 1);
+        crate::sessions_log::mark_preparation(tx, session.session_id.as_str(), turn.id.as_str())?;
         turn.attempt = Some(attempt);
         turn.phase = MasterTurnPhase::Prepared;
         persist_runtime(tx, config, session, turn)?;
@@ -3659,6 +3662,7 @@ fn publish_rcli_profile(
                 return Ok(record.proof);
             }
             Err(failure) if failure.0 == "master_configured_receipt_stale" => {
+                crate::sessions_log::mark_profile(tx, record.proof.registration_id.as_str())?;
                 let removed = tx
                     .execute(
                         "DELETE FROM configured_master_profiles WHERE id=?1",
@@ -3681,6 +3685,7 @@ fn publish_rcli_profile(
     let most = i64::try_from(CONFIGURED_PROFILES_MAX).map_err(error)?;
     let mut count = counted()?;
     if count >= most {
+        crate::sessions_log::mark_profiles(tx)?;
         tx.execute(
             "DELETE FROM configured_master_profiles WHERE rowid IN (SELECT p.rowid FROM configured_master_profiles p WHERE NOT EXISTS (SELECT 1 FROM master_sessions s WHERE s.id=p.session AND s.phase='configured') ORDER BY p.rowid LIMIT ?1)",
             [count - (most - 1)],
@@ -3721,6 +3726,7 @@ fn publish_rcli_profile(
         )
         .map_err(error)?;
     assert_eq!(inserted, 1);
+    crate::sessions_log::mark_profile(tx, proof.registration_id.as_str())?;
     Ok(proof)
 }
 
@@ -4144,6 +4150,9 @@ fn record_rcli_registration(
         &serde_json::to_vec(&result).map_err(error)?,
     )?;
     assert_eq!(owner_revision(tx)?, provenance.revision_after.value());
+    if registered {
+        crate::sessions_log::close_owner(tx, next, admission)?;
+    }
     Ok(OwnerApplied {
         result,
         provenance,
@@ -4813,6 +4822,7 @@ fn queue_turn(
     };
     let changed = tx.execute("INSERT INTO master_turns(session,ordinal,id,input,phase,body) VALUES (?1,?2,?3,?4,'queued',?5)", params![session.session_id.as_str(), signed(turn.ordinal)?, turn.id.as_str(), signed(turn.input_cursor.value())?, encode(&turn)?]).map_err(error)?;
     assert_eq!(changed, 1);
+    crate::sessions_log::mark_turn(tx, turn.input_cursor.value())?;
     note_asked(tx, session, &turn)?;
     session.current_turn = Some(turn.id);
     Ok(())
@@ -4867,7 +4877,7 @@ fn wait_resolve(
         ],
     )
     .map_err(error)?;
-    Ok(())
+    crate::sessions_log::mark_resolve(tx, session.project_id.as_str(), session.session_id.as_str())
 }
 
 /// Starts the Resolve the owner asked for while this session's turn was outstanding, once
@@ -4902,6 +4912,7 @@ fn start_waiting(
     let Some(mut session) = session.filter(|session| {
         &session.project_id == project && session.phase == MasterSessionPhase::Configured
     }) else {
+        crate::sessions_log::mark_resolve(tx, project.as_str(), session_id.as_str())?;
         tx.execute(
             "DELETE FROM master_waiting_resolves WHERE session=?1",
             [session_id.as_str()],
@@ -4916,6 +4927,7 @@ fn start_waiting(
             return Ok(None);
         }
     }
+    crate::sessions_log::mark_resolve(tx, project.as_str(), session_id.as_str())?;
     tx.execute(
         "DELETE FROM master_waiting_resolves WHERE session=?1",
         [session_id.as_str()],

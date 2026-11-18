@@ -143,7 +143,7 @@ fn put_text(db: &Connection, agent: i64, project: &str, text: &str) {
     mark(db, Table::Texts, &agent.to_string(), project).unwrap();
 }
 
-/// The three tables, each ordered by all its columns. Input: the store. Output: the rows.
+/// The seven tables, each ordered by all its columns. Input: the store. Output: the rows.
 pub(super) fn tables(db: &Connection) -> Vec<Vec<Vec<Column>>> {
     TABLES
         .iter()
@@ -207,7 +207,7 @@ pub(super) fn code<T>(result: Result<T, EngineError>) -> Option<String> {
     result.err().map(|error| error.0)
 }
 
-/// Asserts that replay of the log rebuilds the three tables as they stand. Input: the
+/// Asserts that replay of the log rebuilds the seven tables as they stand. Input: the
 /// store. Output: none.
 pub(super) fn replays_to_live(db: &mut Connection) {
     let live = tables(db);

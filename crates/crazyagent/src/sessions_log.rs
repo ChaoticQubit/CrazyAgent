@@ -1,7 +1,7 @@
 use crate::conversation::ConversationMutation;
 use crate::engine::EngineError;
 use crate::engine::owner::Admission;
-use crate::master_session::{MasterSessionView, SESSION_DELETED};
+use crate::master_session::{MasterSessionView, SESSION_DELETED, SessionDeleted};
 use crate::owner_texts::TextDigest;
 use crate::protocol::{Outcome, ProjectId, SessionId};
 use crate::state_log::fence::Fence;
@@ -12,7 +12,7 @@ use crate::storage::opening::Opening;
 use crate::storage::versioned::{Refusal, Writer};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
 #[cfg(test)]
@@ -51,22 +51,37 @@ pub const KIND_RESOLVES_DROPPED: &str = "WaitingResolveDropped";
 pub const KIND_PROFILE: &str = "ConfiguredProfileSaved";
 /// The kind of the event that logs configured profile receipts gone from their table.
 pub const KIND_PROFILES_DROPPED: &str = "ConfiguredProfileDropped";
-/// Every kind this module writes; L12's [`SESSION_DELETED`] is the delete's own.
-pub const KINDS: [&str; 5] = [
+/// Every kind this module writes, L13c's six from the sixth on; L12's [`SESSION_DELETED`]
+/// is the delete's own.
+pub const KINDS: [&str; 11] = [
     KIND_SESSION,
     KIND_ENTRY,
     KIND_ENTRIES_DROPPED,
     KIND_TEXT,
     KIND_TEXTS_DROPPED,
+    KIND_TURN,
+    KIND_PREPARATION,
+    KIND_RESOLVE,
+    KIND_RESOLVES_DROPPED,
+    KIND_PROFILE,
+    KIND_PROFILES_DROPPED,
 ];
 /// The schema every sessions event is written and read at.
 const SCHEMA: u16 = 1;
-/// The three tables on the log, in snapshot order.
-const TABLES: [&str; 3] = ["master_sessions", "conversation_entries", "agent_texts"];
+/// The seven tables on the log, in snapshot order: L13's three, then L13c's four.
+const TABLES: [&str; 7] = [
+    "master_sessions",
+    "conversation_entries",
+    "agent_texts",
+    "master_turns",
+    "master_preparations",
+    "master_waiting_resolves",
+    "configured_master_profiles",
+];
 /// The keys a write marks for the next close, made on first use; the `project` column lets
 /// a demo clear of the project delete its marks with its rows.
 const TOUCHED: &str = "CREATE TABLE IF NOT EXISTS sessions_touched (
-    tbl TEXT NOT NULL CHECK (tbl IN ('master_sessions','conversation_entries','agent_texts')),
+    tbl TEXT NOT NULL CHECK (tbl IN ('master_sessions','conversation_entries','agent_texts','master_turns','master_preparations','master_waiting_resolves','configured_master_profiles')),
     key TEXT NOT NULL CHECK (length(key) BETWEEN 1 AND 128),
     project TEXT NOT NULL CHECK (length(project) BETWEEN 1 AND 128),
     PRIMARY KEY (tbl, key))";
@@ -171,6 +186,12 @@ pub enum Event {
     EntriesDropped(EntriesDropped),
     Text(TextSaved),
     TextsDropped(TextsDropped),
+    Turn(TurnSaved),
+    Preparation(PreparationSaved),
+    Resolve(ResolveSaved),
+    ResolvesDropped(ResolvesDropped),
+    Profile(ProfileSaved),
+    ProfilesDropped(ProfilesDropped),
 }
 
 impl Event {
@@ -182,6 +203,12 @@ impl Event {
             Self::EntriesDropped(_) => KIND_ENTRIES_DROPPED,
             Self::Text(_) => KIND_TEXT,
             Self::TextsDropped(_) => KIND_TEXTS_DROPPED,
+            Self::Turn(_) => KIND_TURN,
+            Self::Preparation(_) => KIND_PREPARATION,
+            Self::Resolve(_) => KIND_RESOLVE,
+            Self::ResolvesDropped(_) => KIND_RESOLVES_DROPPED,
+            Self::Profile(_) => KIND_PROFILE,
+            Self::ProfilesDropped(_) => KIND_PROFILES_DROPPED,
         }
     }
 
@@ -193,6 +220,12 @@ impl Event {
             Self::EntriesDropped(event) => serde_json::to_vec(event),
             Self::Text(event) => serde_json::to_vec(event),
             Self::TextsDropped(event) => serde_json::to_vec(event),
+            Self::Turn(event) => serde_json::to_vec(event),
+            Self::Preparation(event) => serde_json::to_vec(event),
+            Self::Resolve(event) => serde_json::to_vec(event),
+            Self::ResolvesDropped(event) => serde_json::to_vec(event),
+            Self::Profile(event) => serde_json::to_vec(event),
+            Self::ProfilesDropped(event) => serde_json::to_vec(event),
         }
         .map_err(error)
     }
@@ -204,15 +237,34 @@ enum Table {
     Sessions,
     Entries,
     Texts,
+    Turns,
+    Preparations,
+    Resolves,
+    Profiles,
 }
 
 impl Table {
+    /// Every table, in [`TABLES`] order.
+    const ALL: [Self; 7] = [
+        Self::Sessions,
+        Self::Entries,
+        Self::Texts,
+        Self::Turns,
+        Self::Preparations,
+        Self::Resolves,
+        Self::Profiles,
+    ];
+
     /// The table's name, as `sessions_touched` stores it. Output: the name.
     fn name(self) -> &'static str {
         match self {
             Self::Sessions => TABLES[0],
             Self::Entries => TABLES[1],
             Self::Texts => TABLES[2],
+            Self::Turns => TABLES[3],
+            Self::Preparations => TABLES[4],
+            Self::Resolves => TABLES[5],
+            Self::Profiles => TABLES[6],
         }
     }
 }
@@ -459,6 +511,48 @@ fn append(log: &mut Appender<'_, '_>, at_ms: u64, event: &Event) -> Result<u64, 
             at_ms,
             body: &body,
         }),
+        Event::Turn(_) => log.append(&Draft {
+            aggregate,
+            kind: KIND_TURN,
+            schema: SCHEMA,
+            at_ms,
+            body: &body,
+        }),
+        Event::Preparation(_) => log.append(&Draft {
+            aggregate,
+            kind: KIND_PREPARATION,
+            schema: SCHEMA,
+            at_ms,
+            body: &body,
+        }),
+        Event::Resolve(_) => log.append(&Draft {
+            aggregate,
+            kind: KIND_RESOLVE,
+            schema: SCHEMA,
+            at_ms,
+            body: &body,
+        }),
+        Event::ResolvesDropped(_) => log.append(&Draft {
+            aggregate,
+            kind: KIND_RESOLVES_DROPPED,
+            schema: SCHEMA,
+            at_ms,
+            body: &body,
+        }),
+        Event::Profile(_) => log.append(&Draft {
+            aggregate,
+            kind: KIND_PROFILE,
+            schema: SCHEMA,
+            at_ms,
+            body: &body,
+        }),
+        Event::ProfilesDropped(_) => log.append(&Draft {
+            aggregate,
+            kind: KIND_PROFILES_DROPPED,
+            schema: SCHEMA,
+            at_ms,
+            body: &body,
+        }),
     }?;
     assert!(seq > 0, "a logged event has a seq");
     assert!(
@@ -480,15 +574,15 @@ fn touched(db: &Connection) -> Result<bool, EngineError> {
     .map_err(error)
 }
 
-/// The marked keys, sessions first, then entries, then agent texts, each in key order, at
-/// most [`MARKS_MAX`]. Input: the connection. Output: the marks, or `sessions_log_mark_invalid`.
+/// The marked keys in [`TABLES`] order, each table's in key order, at most [`MARKS_MAX`].
+/// Input: the connection. Output: the marks, or `sessions_log_mark_invalid`.
 fn marks(db: &Connection) -> Result<Vec<Mark>, EngineError> {
     if !exists(db, "sessions_touched")? {
         return Ok(Vec::new());
     }
     let mut statement = db
         .prepare(
-            "SELECT tbl, key, project FROM sessions_touched ORDER BY CASE tbl WHEN 'master_sessions' THEN 0 WHEN 'conversation_entries' THEN 1 ELSE 2 END, length(key), key LIMIT ?1",
+            "SELECT tbl, key, project FROM sessions_touched ORDER BY CASE tbl WHEN 'master_sessions' THEN 0 WHEN 'conversation_entries' THEN 1 WHEN 'agent_texts' THEN 2 WHEN 'master_turns' THEN 3 WHEN 'master_preparations' THEN 4 WHEN 'master_waiting_resolves' THEN 5 ELSE 6 END, length(key), key LIMIT ?1",
         )
         .map_err(error)?;
     let stored = statement
@@ -505,7 +599,7 @@ fn marks(db: &Connection) -> Result<Vec<Mark>, EngineError> {
     let marks = stored
         .into_iter()
         .map(|(table, key, project)| {
-            let table = [Table::Sessions, Table::Entries, Table::Texts]
+            let table = Table::ALL
                 .into_iter()
                 .find(|known| known.name() == table)
                 .ok_or_else(|| error("sessions_log_mark_invalid"))?;
@@ -521,15 +615,20 @@ fn marks(db: &Connection) -> Result<Vec<Mark>, EngineError> {
 }
 
 /// Reads each marked key back into its event: a present row whole, its text kept again
-/// under its holder; an absent entry or agent text released and gathered per project into
-/// dropped events. Inputs: the transaction and the marks. Output: the events in mark order,
-/// the dropped ones last, or the first refusal.
+/// under its holder; an absent entry, agent text, waiting Resolve or profile receipt
+/// released and gathered per project into dropped events; an absent turn or preparation
+/// only released. Inputs: the transaction and the marks. Output: the events in mark order,
+/// the dropped ones after them and the saved receipts last, or the first refusal.
 fn settle(db: &Connection, marks: &[Mark]) -> Result<Vec<Event>, EngineError> {
     let mut events = Vec::new();
     let mut entries_gone: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
     let mut texts_gone: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
+    let mut rest = turns::Rest::default();
     for mark in marks {
         match mark.table {
+            Table::Turns | Table::Preparations | Table::Resolves | Table::Profiles => {
+                events.extend(rest.settle(db, mark.table.name(), &mark.key, &mark.project)?);
+            }
             Table::Sessions => events.extend(session_row(db, &mark.key)?.map(Event::Session)),
             Table::Entries => {
                 let cursor = number(&mark.key)?;
@@ -576,6 +675,7 @@ fn settle(db: &Connection, marks: &[Mark]) -> Result<Vec<Event>, EngineError> {
             }));
         }
     }
+    events.extend(rest.finish()?);
     assert!(events.len() <= marks.len());
     Ok(events)
 }
@@ -764,6 +864,49 @@ pub fn apply(db: &Connection, event: &Event) -> Result<(), EngineError> {
                 .map_err(error)?;
             }
         }
+        Event::Turn(row) => turns::replace(
+            db,
+            TABLES[3],
+            json!([
+                row.session,
+                row.ordinal,
+                row.id,
+                row.input,
+                row.phase,
+                row.body
+            ]),
+        )?,
+        Event::Preparation(row) => {
+            turns::replace(db, TABLES[4], json!([row.session, row.turn, row.body]))?;
+        }
+        Event::Resolve(row) => turns::replace(
+            db,
+            TABLES[5],
+            json!([row.session, row.project, row.operation, row.input, row.body]),
+        )?,
+        Event::ResolvesDropped(rows) => {
+            for session in &rows.sessions {
+                db.execute(
+                    "DELETE FROM master_waiting_resolves WHERE session=?1 AND project=?2",
+                    params![session.as_str(), rows.project.as_str()],
+                )
+                .map_err(error)?;
+            }
+        }
+        Event::Profile(row) => turns::replace(
+            db,
+            TABLES[6],
+            json!([row.id, row.session, row.profile, row.body]),
+        )?,
+        Event::ProfilesDropped(rows) => {
+            for id in &rows.ids {
+                db.execute(
+                    "DELETE FROM configured_master_profiles WHERE id=?1",
+                    [id.as_str()],
+                )
+                .map_err(error)?;
+            }
+        }
     }
     assert!(missing.len() <= 1, "one event names one text");
     Ok(())
@@ -785,12 +928,30 @@ pub fn decode(logged: &Logged) -> Result<Event, EngineError> {
         KIND_ENTRIES_DROPPED => serde_json::from_slice(body).map(Event::EntriesDropped),
         KIND_TEXT => serde_json::from_slice(body).map(Event::Text),
         KIND_TEXTS_DROPPED => serde_json::from_slice(body).map(Event::TextsDropped),
+        KIND_TURN => serde_json::from_slice(body).map(Event::Turn),
+        KIND_PREPARATION => serde_json::from_slice(body).map(Event::Preparation),
+        KIND_RESOLVE => serde_json::from_slice(body).map(Event::Resolve),
+        KIND_RESOLVES_DROPPED => serde_json::from_slice(body).map(Event::ResolvesDropped),
+        KIND_PROFILE => serde_json::from_slice(body).map(Event::Profile),
+        KIND_PROFILES_DROPPED => serde_json::from_slice(body).map(Event::ProfilesDropped),
         _ => return Err(invalid()),
     }
     .map_err(|_| invalid())?;
+    if !valid(&event) {
+        return Err(invalid());
+    }
+    assert_eq!(event.kind(), logged.kind);
+    Ok(event)
+}
+
+/// Whether an event's fields hold what its rows can: an entry's kind matching its version,
+/// a turn's ordinal 1 to [`turns::ORDINAL_MAX`], each id and input above 0 and each
+/// dropped list 1 to its bound long. Input: the event. Output: the answer.
+fn valid(event: &Event) -> bool {
     let listed =
         |keys: &[u64]| (1..=DROPPED_MAX).contains(&keys.len()) && keys.iter().all(|key| *key > 0);
-    let valid = match &event {
+    let named = |count: usize| (1..=turns::NAMES_MAX).contains(&count);
+    match event {
         Event::Session(row) => {
             row.view.session_id == row.session && row.view.project_id == row.project
         }
@@ -804,26 +965,30 @@ pub fn decode(logged: &Logged) -> Result<Event, EngineError> {
         Event::EntriesDropped(rows) => listed(&rows.cursors),
         Event::Text(row) => row.agent > 0,
         Event::TextsDropped(rows) => listed(&rows.agents),
-    };
-    if !valid {
-        return Err(invalid());
+        Event::Turn(row) => (1..=turns::ORDINAL_MAX).contains(&row.ordinal) && row.input > 0,
+        Event::Preparation(row) => row.input > 0,
+        Event::Resolve(row) => row.input > 0,
+        Event::ResolvesDropped(rows) => named(rows.sessions.len()),
+        Event::Profile(_) => true,
+        Event::ProfilesDropped(rows) => named(rows.ids.len()),
     }
-    assert_eq!(event.kind(), logged.kind);
-    Ok(event)
 }
 
-/// Rebuilds the three tables from the log: clears them, then replays every sessions event in
-/// order, passing over L12's delete, which the team projection reads. A snapshot run holds
-/// every row of all three, so its first chunk clears them again; a chunk opens a run unless
-/// it follows another chunk at the previous `seq`. Replay never reads `master_turns`. Input:
-/// the transaction, on a store whose open made the tables. Output: the last `seq` read.
+/// Rebuilds the seven tables from the log: clears them, then replays every sessions event in
+/// order; L12's delete, which the team projection also reads, deletes the session's turns
+/// and preparations as the live Delete does. A snapshot run holds every row of all seven,
+/// so its first chunk clears them again; a chunk opens a run unless it follows another
+/// chunk at the previous `seq`. Input: the transaction, on a store whose open made the
+/// tables. Output: the last `seq` read.
 pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
     crate::storage::agent_text::ensure(tx)?;
     clear(tx)?;
     let mut chunk_seq = 0;
     let last = replay::replay(tx, Aggregate::Sessions, 0, |logged| {
         if logged.kind == SESSION_DELETED {
-            return Ok(());
+            let deleted: SessionDeleted = serde_json::from_slice(&logged.body)
+                .map_err(|_| error("sessions_log_event_invalid"))?;
+            return turns::delete_session_turns(tx, deleted.session.as_str());
         }
         if logged.kind != SNAPSHOT_CHUNK {
             return apply(tx, &decode(logged)?);
@@ -841,9 +1006,9 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
     Ok(last)
 }
 
-/// Appends a snapshot run of the three tables as they stand, at least one chunk each, a
-/// missing table as an empty one; texts go as digests, each kept again under its holder in
-/// the run's live transaction. Inputs: the log writer and its clock. Output: the `seq` of
+/// Appends a snapshot run of the seven tables as they stand, at least one chunk each, a
+/// missing table as an empty one; texts and bodies go as digests, each kept again under its
+/// holder in the run's live transaction. Inputs: the log writer and its clock. Output: the `seq` of
 /// the run's closing event, or `sessions_log_snapshot_rows` or the log's refusal.
 pub fn snapshot(log: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineError> {
     let mut chunks = Vec::new();
@@ -856,18 +1021,39 @@ pub fn snapshot(log: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineErr
     log.snapshot(Aggregate::Sessions, at_ms, chunks)
 }
 
-/// The first snapshot run of the three tables, for the schema step that puts sessions on
+/// The first snapshot run of the seven tables, for the schema step that puts sessions on
 /// the log (step 16): rows written before the log reach replay through it, through the
 /// open's proof. A store without the `state` table, or with no row in any of the tables
 /// that exist, gets no run and moves no revision. Inputs: the step's transaction and the
 /// open's proof. Output: whether a run was appended, or the first refusal.
 #[cfg(any(unix, test))]
 pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, EngineError> {
-    if !exists(tx, "state")? {
+    if !exists(tx, "state")? || stored_rows(tx, &TABLES)? == 0 {
         return Ok(false);
     }
+    run_once(tx, opening)
+}
+
+/// The schema step that puts master turns, preparations, waiting Resolves and profile
+/// receipts on the log (v2.5 L13c): gives `sessions_touched` the seven-table check when an
+/// older shape exists, then one full sessions snapshot run when the four tables hold rows
+/// that no event or chunk of theirs reached. Inputs: the step's transaction and the open's
+/// proof. Output: whether a run was appended, or the first refusal.
+#[cfg(any(unix, test))]
+pub(crate) fn first_run_turns(tx: &Transaction<'_>, opening: Opening) -> Result<bool, EngineError> {
+    turns::widen_touched(tx)?;
+    if !exists(tx, "state")? || stored_rows(tx, &TABLES[3..])? == 0 || turns::on_the_log(tx)? {
+        return Ok(false);
+    }
+    run_once(tx, opening)
+}
+
+/// How many rows the tables that exist of a list hold. Inputs: the transaction and the
+/// tables. Output: the count, or the store's refusal.
+#[cfg(any(unix, test))]
+fn stored_rows(tx: &Transaction<'_>, tables: &[&str]) -> Result<i64, EngineError> {
     let mut rows = 0;
-    for table in TABLES {
+    for table in tables {
         if exists(tx, table)? {
             let count: i64 = tx
                 .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
@@ -877,24 +1063,19 @@ pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, 
             rows += count;
         }
     }
-    if rows == 0 {
-        return Ok(false);
-    }
+    assert!(rows >= 0);
+    Ok(rows)
+}
+
+/// Appends one snapshot run of the seven tables through the open's proof. Inputs: the
+/// step's transaction and the proof. Output: true once the run closed, or the refusal.
+#[cfg(any(unix, test))]
+fn run_once(tx: &Transaction<'_>, opening: Opening) -> Result<bool, EngineError> {
     let at_ms = opening.at_ms();
     let mut log = Appender::opening(tx, opening)?;
     let done = snapshot(&mut log, at_ms)?;
     assert!(done > 0, "a run closes at a seq");
     Ok(true)
-}
-
-/// The schema step that puts master turns, preparations, waiting Resolves and profile
-/// receipts on the log (v2.5 L13c): gives `sessions_touched` the seven-table check when an
-/// older shape exists, then one full sessions snapshot run when the four tables hold rows
-/// that no event of theirs reached. Inputs: the step's transaction and the open's proof.
-/// Output: whether a run was appended, or the first refusal.
-#[cfg(any(unix, test))]
-pub(crate) fn first_run_turns(_: &Transaction<'_>, _: Opening) -> Result<bool, EngineError> {
-    Err(error("sessions_log_unwritten"))
 }
 
 /// Tombstones, for a demo clear of an earlier id, every logged sessions event naming the
@@ -920,8 +1101,8 @@ pub(crate) fn forget_project(
     Ok(redacted)
 }
 
-/// Every row of one of the three tables in key order as a JSON array of its columns, a
-/// text column as its kept digest; none for a missing table. Inputs: the transaction and
+/// Every row of one of the seven tables in key order as a JSON array of its columns, a
+/// text or body column as its kept digest; none for a missing table. Inputs: the transaction and
 /// the table. Output: the rows, or `sessions_log_snapshot_rows` past [`SNAPSHOT_ROWS_MAX`].
 fn table_rows(db: &Connection, table: &str) -> Result<Vec<Value>, EngineError> {
     if !exists(db, table)? {
@@ -972,6 +1153,7 @@ fn table_rows(db: &Connection, table: &str) -> Result<Vec<Value>, EngineError> {
             }
             rows
         }
+        table if TABLES[3..].contains(&table) => turns::table_rows(db, table)?,
         _ => {
             let stored: Vec<(i64, String, String)> = db
                 .prepare("SELECT agent,project,text FROM agent_texts ORDER BY agent LIMIT ?1")
@@ -1038,8 +1220,8 @@ fn pack(table: &str, rows: Vec<Value>) -> Result<Vec<Chunk>, EngineError> {
     Ok(chunks)
 }
 
-/// Inserts one snapshot chunk's rows into its table, an entry's or agent text's text from
-/// the digest it carries; a text no longer kept is skipped as replay skips it. Inputs: the
+/// Inserts one snapshot chunk's rows into its table, a text or body from the digest it
+/// carries; a text no longer kept is skipped as replay skips it. Inputs: the
 /// connection and the chunk. Output: Ok, or `sessions_log_chunk_invalid` for an unknown
 /// table, a row that is not that table's columns, or a row the table refuses.
 fn restore(db: &Connection, chunk: &Chunk) -> Result<(), EngineError> {
@@ -1056,6 +1238,10 @@ fn restore(db: &Connection, chunk: &Chunk) -> Result<(), EngineError> {
             String::from_utf8(bytes).map_err(|_| invalid())
         };
         let written = match (chunk.table.as_str(), values) {
+            (table, _) if TABLES[3..].contains(&table) => {
+                turns::write(db, table, values, "INSERT")?;
+                continue;
+            }
             (
                 "master_sessions",
                 [
@@ -1106,10 +1292,10 @@ fn restore(db: &Connection, chunk: &Chunk) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Deletes every row of the three tables. Input: the connection. Output: Ok or the store's
-/// refusal.
+/// Deletes every row of the seven tables, the last first, so preparations go before the
+/// turns they name. Input: the connection. Output: Ok or the store's refusal.
 fn clear(db: &Connection) -> Result<(), EngineError> {
-    for table in TABLES {
+    for table in TABLES.into_iter().rev() {
         db.execute(&format!("DELETE FROM {table}"), [])
             .map_err(error)?;
     }

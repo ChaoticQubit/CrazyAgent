@@ -32,3 +32,19 @@ pub(super) fn sessions_on_the_log(tx: &Transaction<'_>) -> Result<(), EngineErro
     );
     Ok(())
 }
+
+/// The step after it (v2.5 L13c): master turns, preparations, waiting Resolves and profile
+/// receipts go on the state log. It gives the sessions marks table its seven-table check,
+/// then rows of the four written before the log reach replay through one snapshot run of
+/// all seven sessions tables, unless the log already holds an event or chunk of them. Input:
+/// the open upgrade transaction. Output: Ok or the log's refusal.
+pub(super) fn session_turns_on_the_log(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    let at_ms = crate::state_log::replay::Clock::System.now_ms();
+    let opening = crate::storage::opening::Opening::new(at_ms);
+    crate::sessions_log::first_run_turns(tx, opening)?;
+    assert!(
+        !tx.is_autocommit(),
+        "a step leaves the upgrade transaction open"
+    );
+    Ok(())
+}

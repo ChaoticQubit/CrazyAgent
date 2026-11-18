@@ -97,22 +97,29 @@ fn session_with_turn(db: &Connection) {
     put_profile(db, "reg-1", "s1", "cred-1");
 }
 
-/// v2.5 L13c replay row: a turn, its preparation, a waiting Resolve and a profile receipt
-/// close into one event each with their bodies as kept digests; a second close logs the
-/// turn's new phase, the Resolve gone and a receipt replaced, the dropped receipt before
-/// the new one, their bodies let go; replay equals the live tables.
+/// v2.5 L13c replay row: a session, a turn, its preparation, a waiting Resolve and a
+/// profile receipt close into one event each with their bodies as kept digests; a second
+/// close logs the turn's new phase, the Resolve gone and a receipt replaced, the dropped
+/// receipt before the new one, their bodies let go; replay equals the live tables.
 #[test]
 fn every_marked_turn_table_write_closes_into_events_whose_replay_equals_the_live_rows() {
     let mut db = store();
     let tx = db.transaction().unwrap();
     session_with_turn(&tx);
+    mark_session(&tx, "p1", "s1").unwrap();
     let mut log = Appender::own(&tx, engine()).unwrap();
-    assert_eq!(close(&mut log).unwrap(), 4);
+    assert_eq!(close(&mut log).unwrap(), 5);
     drop(log);
     tx.commit().unwrap();
     assert_eq!(
         kinds(&db),
-        [KIND_TURN, KIND_PREPARATION, KIND_RESOLVE, KIND_PROFILE]
+        [
+            KIND_SESSION,
+            KIND_TURN,
+            KIND_PREPARATION,
+            KIND_RESOLVE,
+            KIND_PROFILE
+        ]
     );
     assert_eq!(left_marks(&db), 0, "a close logs every mark it reads");
     for holder in [
@@ -161,7 +168,7 @@ fn every_marked_turn_table_write_closes_into_events_whose_replay_equals_the_live
     drop(log);
     tx.commit().unwrap();
     assert_eq!(
-        kinds(&db)[4..],
+        kinds(&db)[5..],
         [
             KIND_TURN,
             KIND_RESOLVES_DROPPED,
