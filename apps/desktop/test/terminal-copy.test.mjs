@@ -359,3 +359,45 @@ test("copy works in the master and agent terminal of every harness kind at every
     assert.equal(run.fromMenu, run.withKey, `${run.name}: the menu's Copy put the same dragged text on the clipboard`);
   }
 });
+
+/** The user agent and platform of Chrome on Linux, so a page on any host takes the paths the
+ * app and xterm take off a Mac: Shift forces a drag to select and Ctrl+C copies. */
+const LINUX_PAGE = { userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36", platform: "Linux x86_64" };
+
+test("off a Mac, a Shift drag on the normal screen selects the dragged text with nothing selected before and after a click elsewhere, and a Shift click still extends a selection that shows", async () => {
+  let server = null;
+  const seen = await withPage(async ({ evaluate, send, context }) => {
+    await send("Emulation.setUserAgentOverride", LINUX_PAGE);
+    server = await securePage(evaluate, send, context);
+    await send("Emulation.setDeviceMetricsOverride", { width: 1000, height: 700, deviceScaleFactor: 1, mobile: false });
+    await evaluate(harnessPanel);
+    const platform = await evaluate("navigator.platform");
+    await evaluate('Fixture.open("master", "claude-code")');
+    assert.equal(await evaluate("Fixture.until(() => Fixture.view().live)"), true, "the terminal went live");
+    await evaluate(`Fixture.output(${JSON.stringify(`${APP_STARTS["claude-code"].classic}first line of output\r\nsecond line`)})`);
+    assert.equal(await evaluate('Fixture.until(() => Fixture.view().text.includes("second line"))'), true, "the app's output drew");
+    await evaluate("new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)))");
+    const at = await evaluate("Fixture.view()");
+    const spot = (px, line) => ({ x: Math.round(at.screen.left + px), y: Math.round(at.screen.top + at.rowHeight * (line + 0.5)) });
+    const copied = async () => {
+      await evaluate(`navigator.clipboard.writeText(${JSON.stringify(NOTHING_COPIED)})`);
+      await evaluate(keyInPage("c", "KeyC", 2));
+      return evaluate("navigator.clipboard.readText()");
+    };
+    await drag(send, spot(2, 0), spot(140, 0), 8);
+    const fresh = await copied();
+    await mouse(send, spot(200, 1).x, spot(200, 1).y, "left");
+    await drag(send, spot(2, 0), spot(140, 0), 8);
+    const afterClick = await copied();
+    await drag(send, spot(2, 0), spot(60, 0));
+    await send("Input.dispatchMouseEvent", { type: "mousePressed", ...spot(140, 0), button: "left", buttons: 1, clickCount: 1, modifiers: 8 });
+    await send("Input.dispatchMouseEvent", { type: "mouseReleased", ...spot(140, 0), button: "left", buttons: 0, clickCount: 1, modifiers: 8 });
+    const extended = await copied();
+    return { platform, fresh, afterClick, extended };
+  }).finally(() => server?.close());
+  assert.equal(seen.platform, "Linux x86_64", "the page took the Linux platform");
+  const dragged = (text) => text.trimEnd().length >= 5 && "first line of output".startsWith(text.trimEnd());
+  assert.ok(dragged(seen.fresh), `with nothing selected, the Shift drag selected the start of the first row and Ctrl+C copied it, got ${JSON.stringify(seen.fresh)}`);
+  assert.equal(seen.afterClick, seen.fresh, "after a click elsewhere, the Shift drag selected the dragged text, not from the click");
+  assert.equal(seen.extended, seen.fresh, "a Shift click extended the selection that showed to the click");
+});
