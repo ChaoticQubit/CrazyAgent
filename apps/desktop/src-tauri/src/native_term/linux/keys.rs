@@ -194,4 +194,53 @@ mod tests {
         assert_eq!(key_input(k::Insert, M::CONTROL_MASK), None);
         assert_eq!(key_input(k::Shift_L, M::SHIFT_MASK), None);
     }
+
+    /// The C key's keymap entries on a us,ru layout pair, as GDK lists them: group, level
+    /// and keyval.
+    fn ru_c() -> Vec<(i32, i32, Key)> {
+        vec![
+            (0, 0, k::c),
+            (0, 1, k::C),
+            (1, 0, k::Cyrillic_es),
+            (1, 1, k::Cyrillic_ES),
+        ]
+    }
+
+    #[test]
+    fn control_on_a_non_latin_layout_uses_the_keys_latin_group() {
+        let c = control_latin(k::Cyrillic_es, M::CONTROL_MASK, ru_c);
+        assert_eq!(c, k::c);
+        assert_eq!(text(c, M::CONTROL_MASK).as_deref(), Some(&b"\x03"[..]));
+        assert_eq!(
+            control_latin(k::Cyrillic_ES, M::CONTROL_MASK | M::SHIFT_MASK, ru_c),
+            k::C
+        );
+        let greek_c = || vec![(0, 0, k::c), (0, 1, k::C), (1, 0, k::Greek_psi)];
+        assert_eq!(control_latin(k::Greek_psi, M::CONTROL_MASK, greek_c), k::c);
+        assert_eq!(
+            control_latin(k::Cyrillic_es, M::CONTROL_MASK | M::MOD1_MASK, ru_c),
+            k::c
+        );
+    }
+
+    #[test]
+    fn without_control_or_a_latin_entry_the_keyval_stays() {
+        let none = || -> Vec<(i32, i32, Key)> { panic!("no keymap lookup expected") };
+        assert_eq!(
+            control_latin(k::Cyrillic_es, M::empty(), none),
+            k::Cyrillic_es
+        );
+        assert_eq!(
+            control_latin(k::Cyrillic_es, M::MOD1_MASK, none),
+            k::Cyrillic_es
+        );
+        assert_eq!(control_latin(k::c, M::CONTROL_MASK, none), k::c);
+        assert_eq!(control_latin(k::Return, M::CONTROL_MASK, none), k::Return);
+        assert_eq!(control_latin(k::Up, M::CONTROL_MASK, none), k::Up);
+        let cyrillic_only = || vec![(0, 0, k::Cyrillic_es)];
+        assert_eq!(
+            control_latin(k::Cyrillic_es, M::CONTROL_MASK, cyrillic_only),
+            k::Cyrillic_es
+        );
+    }
 }

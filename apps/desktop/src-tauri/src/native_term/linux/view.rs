@@ -780,6 +780,21 @@ mod tests {
     }
 
     #[test]
+    fn a_chord_on_a_non_latin_layout_uses_the_keys_latin_group() {
+        let ru_c = || {
+            vec![
+                (0, 0, key::c),
+                (0, 1, key::C),
+                (1, 0, key::Cyrillic_es),
+                (1, 1, key::Cyrillic_ES),
+            ]
+        };
+        let control_shift = ModifierType::CONTROL_MASK | ModifierType::SHIFT_MASK;
+        let keyval = keys::control_latin(key::Cyrillic_ES, control_shift, ru_c);
+        assert_eq!(chord(keyval, control_shift), Some(ViewEvent::Copy));
+    }
+
+    #[test]
     fn other_chords_stay_keys() {
         let control = ModifierType::CONTROL_MASK;
         let shift = ModifierType::SHIFT_MASK;
