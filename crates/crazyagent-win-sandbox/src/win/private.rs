@@ -177,7 +177,7 @@ fn read(object: &File) -> io::Result<(Facts, u32)> {
     if unsafe { GetFileInformationByHandle(object.as_raw_handle(), &mut information) } == 0 {
         return Err(io::Error::last_os_error());
     }
-    let (owner, list, label) = security(object)?;
+    let Security { owner, list, label } = security(object)?;
     let place = String::from_utf16_lossy(&final_name(object)?);
     let remote = place
         .get(..REMOTE_PREFIX.len())
@@ -194,11 +194,19 @@ fn read(object: &File) -> io::Result<(Facts, u32)> {
     Ok((facts, attributes))
 }
 
+/// What [`security`] reads from one object: its owner SID, its access list and its system
+/// list holding the mandatory label, each list None when the object has none.
+struct Security {
+    owner: Vec<u8>,
+    list: Option<Vec<u8>>,
+    label: Option<Vec<u8>>,
+}
+
 /// Reads the owner SID, the access list and the mandatory label list of an open object.
 /// Relies on the handle staying open for the call, and on the owner and lists pointing into
 /// the descriptor the call allocated, which stays alive until all three are copied. Input:
-/// the handle. Output: the owner and the two lists (None when absent), or the error.
-fn security(object: &File) -> io::Result<(Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>)> {
+/// the handle. Output: what was read, or the error.
+fn security(object: &File) -> io::Result<Security> {
     let mut owner: PSID = std::ptr::null_mut();
     let mut dacl: *mut ACL = std::ptr::null_mut();
     let mut sacl: *mut ACL = std::ptr::null_mut();
@@ -223,7 +231,7 @@ fn security(object: &File) -> io::Result<(Vec<u8>, Option<Vec<u8>>, Option<Vec<u
     let list = unsafe { copied(dacl) };
     let label = unsafe { copied(sacl) };
     drop(descriptor);
-    Ok((owner, list, label))
+    Ok(Security { owner, list, label })
 }
 
 /// Copies an access list Windows returned, or none for a null pointer.
