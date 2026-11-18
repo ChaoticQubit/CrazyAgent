@@ -12,6 +12,7 @@ const PATH_BYTES_MAX: usize = 512;
 const REPLY_BYTES_MAX: usize = 48 * 1024;
 const LISTING_BYTES_MAX: u64 = 32 * 1024 * 1024;
 const POLL: Duration = Duration::from_millis(2);
+const CONFIG_BYTES_MAX: u64 = 1024 * 1024;
 
 fn failure(code: &str) -> EngineError {
     EngineError(code.into())
@@ -40,8 +41,10 @@ pub(crate) fn validate(query: &str, limit: u16) -> Result<(), EngineError> {
 /// `project_files_git_failed`. The git is setup's on Unix
 /// (`research::runner::setup_git`) and on Windows the one the engine's PATH or Git
 /// for Windows names ([`crate::github::git_program`]), with the engine's PATH and
-/// SystemRoot, which it needs. Paths are made canonical by [`crate::sandbox::canonical`], so
-/// Git for Windows never gets a `\\?\` path.
+/// SystemRoot, which it needs. Paths are made canonical by [`crate::sandbox::canonical`] and
+/// handed to git as `git_path` gives them, so Git for Windows never gets a verbatim path. The
+/// repository's own `core.excludesFile` is never read, and on Windows a `.git` that points
+/// git elsewhere (`redirected`) gives `project_files_no_repository`.
 pub(crate) fn list(
     folder: &Path,
     query: &str,
@@ -58,9 +61,12 @@ pub(crate) fn list(
         .filter(|root| root.is_dir())
         .ok_or_else(|| failure("project_files_folder_missing"))?;
     let git_dir = root.join(".git");
-    if !std::fs::symlink_metadata(&git_dir).is_ok_and(|meta| meta.is_dir()) {
+    if !std::fs::symlink_metadata(&git_dir).is_ok_and(|meta| meta.is_dir())
+        || (cfg!(windows) && redirected(&git_dir))
+    {
         return Err(failure("project_files_no_repository"));
     }
+    let git_root = git_path(&root);
     let git_failed = |_| failure("project_files_git_failed");
     #[cfg(unix)]
     let git = crate::research::runner::setup_git().to_path_buf();
@@ -75,12 +81,13 @@ pub(crate) fn list(
         .envs(crate::research::runner::GIT_SAFE_ENV)
         .arg("--no-optional-locks")
         .args(crate::research::runner::GIT_SAFE)
-        .args(["-c", "core.untrackedCache=false"])
+        .args(["-c", "core.untrackedCache=false", "-c"])
+        .arg(format!("core.excludesFile={}", crate::github::NULL_DEVICE))
         .arg("--git-dir")
-        .arg(&git_dir)
+        .arg(git_root.join(".git"))
         .arg("--work-tree")
-        .arg(&root)
-        .current_dir(&root)
+        .arg(&git_root)
+        .current_dir(&git_root)
         .args([
             "ls-files",
             "-z",
@@ -174,7 +181,8 @@ fn collect(
 /// True when a listed path names a regular file in the project: a plain relative path of
 /// at most 512 bytes with no part a case-insensitive volume opens as `.git`
 /// ([`crate::instruction_files::names_git`]) and no control character, not itself a link,
-/// in a folder that resolves inside the project. Inputs: the canonical folder and the path.
+/// in a folder that resolves inside the project with no `.git` part, so a name NTFS opens
+/// as `.git` (`.git.`, `git~1`) is refused too. Inputs: the canonical folder and the path.
 fn inside(root: &Path, path: &str) -> bool {
     let relative = Path::new(path);
     let plain = relative.components().all(|part| match part {
@@ -191,7 +199,54 @@ fn inside(root: &Path, path: &str) -> bool {
         && full
             .parent()
             .and_then(|parent| crate::sandbox::canonical(parent).ok())
-            .is_some_and(|parent| parent.starts_with(root))
+            .is_some_and(|parent| {
+                parent.strip_prefix(root).is_ok_and(|below| {
+                    below.components().all(|part| {
+                        !crate::instruction_files::names_git(&part.as_os_str().to_string_lossy())
+                    })
+                })
+            })
+}
+
+/// A canonical folder as git is given it: a share's verbatim `\\?\UNC\server\share` form
+/// as `\\server\share`, any other path unchanged. Input: the folder. Output: the path.
+fn git_path(folder: &Path) -> std::path::PathBuf {
+    match folder
+        .to_str()
+        .and_then(|text| text.strip_prefix(r"\\?\UNC\"))
+    {
+        Some(share) => format!(r"\\{share}").into(),
+        None => folder.to_path_buf(),
+    }
+}
+
+/// True when a `.git` folder points git at another place, which Git for Windows would open as
+/// the owner, a share among them: a `commondir` entry of any kind, or an `include` or
+/// `includeIf` section in its config or worktree config, or either file that is a link, over
+/// 1 MiB or unreadable (rv-sec2 #492 F1). Input: the `.git` folder. Output: the answer.
+fn redirected(git_dir: &Path) -> bool {
+    use std::io::Read;
+    let absent = |found: std::io::Result<std::fs::Metadata>| {
+        found.is_err_and(|problem| problem.kind() == std::io::ErrorKind::NotFound)
+    };
+    !absent(std::fs::symlink_metadata(git_dir.join("commondir")))
+        || ["config", "config.worktree"].iter().any(|name| {
+            let file = match crate::platform::open_plain(&git_dir.join(name)) {
+                Ok(file) => file,
+                Err(problem) => return problem.kind() != std::io::ErrorKind::NotFound,
+            };
+            let mut text = Vec::new();
+            !file.metadata().is_ok_and(|meta| meta.is_file())
+                || file
+                    .take(CONFIG_BYTES_MAX + 1)
+                    .read_to_end(&mut text)
+                    .is_err()
+                || text.len() as u64 > CONFIG_BYTES_MAX
+                || text
+                    .to_ascii_lowercase()
+                    .windows(b"[include".len())
+                    .any(|part| part == b"[include")
+        })
 }
 
 #[cfg(all(test, unix))]
@@ -506,6 +561,15 @@ mod windows_tests {
         fs::write(repo.join("notes.txt"), "untracked").unwrap();
         let stop = Instant::now() + LISTING_TIME;
         assert_eq!(list(&repo, "", FILES_MAX, stop).unwrap(), ["notes.txt"]);
+    }
+
+    #[test]
+    fn a_verbatim_share_folder_reaches_git_in_its_plain_form() {
+        assert_eq!(
+            git_path(Path::new(r"\\?\UNC\server\share\repo")),
+            Path::new(r"\\server\share\repo")
+        );
+        assert_eq!(git_path(Path::new(r"C:\repo")), Path::new(r"C:\repo"));
     }
 
     #[test]
