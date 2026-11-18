@@ -179,3 +179,40 @@ fn a_second_lock_on_the_engine_lock_file_is_refused() {
     drop((second, first, held));
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+/// W1 F2 (rv-code4): the twin of `engine_lock_released` says the lock file is free before
+/// an engine locks it, held while one does, and free again once that hold is unlocked, and
+/// its own probe leaves nothing locked behind.
+#[test]
+fn the_lock_probe_sees_a_held_engine_lock_and_leaves_none_of_its_own() {
+    let root = scratch("probe");
+    let held = private::dir(&root).unwrap();
+    let path = root.join("engine.engine-lock");
+    let engine = private::file(&path, true).unwrap();
+    let probe = private::file(&path, false).unwrap();
+    assert!(private::free(&probe).unwrap());
+    private::lock(&engine).expect("the probe unlocked its own shared lock");
+    assert!(!private::free(&probe).unwrap());
+    private::unlock(&engine).unwrap();
+    assert!(private::free(&probe).unwrap());
+    drop((probe, engine, held));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// W1 D1 (rv-sec3 N4): a private file given a low mandatory label, which lets a low
+/// integrity process of the user write it, is refused on open.
+#[test]
+fn a_private_file_with_a_low_label_is_refused() {
+    let root = scratch("label");
+    let held = private::dir(&root).unwrap();
+    let path = root.join("engine.db");
+    drop(private::file(&path, true).unwrap());
+    drop(private::file(&path, false).expect("a file with no label opens"));
+    run(
+        "icacls",
+        &[path.to_str().unwrap(), "/setintegritylevel", "low"],
+    );
+    assert!(private::file(&path, false).is_err());
+    drop(held);
+    std::fs::remove_dir_all(&root).unwrap();
+}

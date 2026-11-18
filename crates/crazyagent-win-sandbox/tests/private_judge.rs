@@ -1,5 +1,7 @@
-use crazyagent_win_sandbox::dacl::{ADMINISTRATORS, ALL_APPLICATION_PACKAGES, SYSTEM};
-use crazyagent_win_sandbox::private::{Facts, judge};
+use crazyagent_win_sandbox::dacl::{
+    self, ADMINISTRATORS, ALL_APPLICATION_PACKAGES, OWNER_RIGHTS, SYSTEM, TRUSTED_INSTALLER,
+};
+use crazyagent_win_sandbox::private::{Facts, judge, list};
 
 const USER: [u8; 28] = [
     1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 233, 3, 0, 0,
@@ -15,9 +17,15 @@ const CONTAINER: [u8; 40] = [
     0, 6, 0, 0, 0, 7, 0, 0, 0,
 ];
 
+const LOW: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 16, 0, 0x10, 0, 0];
+const MEDIUM: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 16, 0, 0x20, 0, 0];
+const HIGH: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 16, 0, 0x30, 0, 0];
+
 const ALLOW: u8 = 0;
 const DENY: u8 = 1;
 const OBJECT_ALLOW: u8 = 5;
+const LABEL: u8 = 0x11;
+const NO_WRITE_UP: u32 = 0x1;
 const INHERITABLE: u8 = 0x03;
 const INHERIT_ONLY: u8 = 0x08;
 const INHERITED: u8 = 0x10;
@@ -56,12 +64,14 @@ fn private_list(extra: &[(u8, u8, u32, &[u8])]) -> Vec<u8> {
     acl(&entries)
 }
 
-/// What a private object reads as on Windows: the user owns it, it is no reparse point,
-/// it has one link and it sits on a local volume. Input: its access list. Output: the facts.
+/// What a private object reads as on Windows: the user owns it, it has no mandatory label,
+/// it is no reparse point, it has one link and it sits on a local volume. Input: its access
+/// list. Output: the facts.
 fn facts(list: Option<Vec<u8>>) -> Facts {
     Facts {
         owner: USER.to_vec(),
         list,
+        label: None,
         reparse: false,
         links: 1,
         remote: false,
@@ -157,5 +167,62 @@ fn a_reparse_point_a_second_link_or_a_remote_volume_is_refused() {
     remote.remote = true;
     for object in [reparse, linked, remote] {
         assert!(judge(&object, &USER).is_err());
+    }
+}
+
+/// W1 D1 decision (rv-code4 N1): TrustedInstaller may own a private object and OWNER RIGHTS
+/// may hold an entry, as for programs: TrustedInstaller has no more power than SYSTEM, and
+/// OWNER RIGHTS names the owner, who is already one of the trusted accounts.
+#[test]
+fn trusted_installer_as_owner_and_an_owner_rights_entry_are_private() {
+    let mut installed = facts(Some(private_list(&[])));
+    installed.owner = TRUSTED_INSTALLER.to_vec();
+    assert_eq!(judge(&installed, &USER), Ok(()));
+    let owner_rights = facts(Some(private_list(&[(ALLOW, 0, FULL, &OWNER_RIGHTS[..])])));
+    assert_eq!(judge(&owner_rights, &USER), Ok(()));
+}
+
+/// W1 D1 (rv-sec3 N4): a mandatory label below medium, or one that lets a lower integrity
+/// process write up, is refused; no label, which Windows reads as medium, and a medium or
+/// high label that keeps lower writers out are private.
+#[test]
+fn a_label_that_lets_a_lower_integrity_process_write_is_refused() {
+    for (level, policy, private) in [
+        (&LOW, NO_WRITE_UP, false),
+        (&MEDIUM, 0, false),
+        (&HIGH, 0, false),
+        (&MEDIUM, NO_WRITE_UP, true),
+        (&HIGH, NO_WRITE_UP, true),
+    ] {
+        let mut object = facts(Some(private_list(&[])));
+        object.label = Some(acl(&[(LABEL, 0, policy, &level[..])]));
+        assert_eq!(judge(&object, &USER).is_ok(), private, "{level:?} {policy}");
+    }
+    let mut inherit_only = facts(Some(private_list(&[])));
+    inherit_only.label = Some(acl(&[(
+        LABEL,
+        INHERITABLE | INHERIT_ONLY,
+        NO_WRITE_UP,
+        &LOW[..],
+    )]));
+    assert_eq!(judge(&inherit_only, &USER), Ok(()));
+}
+
+/// W1 D1: the list a new private folder or file gets holds full access for exactly the
+/// user, SYSTEM and the administrators, inheritable only on a folder, and is judged private.
+#[test]
+fn the_planned_list_is_private_and_names_only_the_trusted_accounts() {
+    for (folder, flags) in [(true, INHERITABLE), (false, 0)] {
+        let planned = list(&USER, folder);
+        let found = dacl::entries(&planned).unwrap();
+        let sids: Vec<&[u8]> = found.iter().map(|entry| entry.sid).collect();
+        assert_eq!(sids, [&USER[..], &SYSTEM[..], &ADMINISTRATORS[..]]);
+        for entry in &found {
+            assert!(
+                entry.allows && entry.mask == FULL && entry.flags == flags,
+                "{entry:?}"
+            );
+        }
+        assert_eq!(judge(&facts(Some(planned)), &USER), Ok(()));
     }
 }
