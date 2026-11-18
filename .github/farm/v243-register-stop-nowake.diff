@@ -1,0 +1,12 @@
+diff --git a/crates/crazyagent/src/agents.rs b/crates/crazyagent/src/agents.rs
+index fe155772a..8578d29bd 100644
+--- a/crates/crazyagent/src/agents.rs
++++ b/crates/crazyagent/src/agents.rs
+@@ -1429,7 +1429,6 @@ impl Agents {
+     /// `control` is read at once (DEC-200), then waits until the host has ended the agent or
+     /// `deadline` passes. Inputs: the agent's id, its control and the deadline.
+     fn await_host(&self, id: &str, control: &Arc<Control>, deadline: Instant) {
+-        crate::team::runtime::wake_loops();
+         while Instant::now() < deadline {
+             let held = match self.live() {
+                 Ok(live) => {
