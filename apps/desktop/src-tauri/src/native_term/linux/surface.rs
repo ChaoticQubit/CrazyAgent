@@ -1368,10 +1368,10 @@ mod tests {
         (shared, surface, frame)
     }
 
-    /// A blue toplevel the size of the farm's output, and a white 640x480 one transient for it,
-    /// so weston's kiosk shell centres it and sway floats it; X11 runs no window manager, so
-    /// it is moved. The white one holds a page widget at its top left. Input: the page size.
-    /// Output: the blue toplevel, the white one and the page.
+    /// A blue toplevel the size of the farm's output under a white one fixed at 640x480, which
+    /// sway floats and weston's kiosk shell centres, both clamped to that size; X11 runs no
+    /// window manager, so it is moved. The white one holds a page widget at its top left.
+    /// Input: the page size. Output: the blue toplevel, the white one and the page.
     fn toplevel_over_back(size: (i32, i32)) -> (gtk::Window, gtk::Window, gtk::DrawingArea) {
         gtk::init().expect("a display");
         let back = gtk::Window::new(gtk::WindowType::Toplevel);
@@ -1387,7 +1387,8 @@ mod tests {
         let window = gtk::Window::new(gtk::WindowType::Toplevel);
         window.set_widget_name("native-row");
         window.set_decorated(false);
-        window.set_default_size(640, 480);
+        window.set_size_request(640, 480);
+        window.set_resizable(false);
         window.set_transient_for(Some(&back));
         window.move_(320, 160);
         let fixed = gtk::Fixed::new();
@@ -1398,6 +1399,11 @@ mod tests {
         window.show_all();
         wait_mapped(&window);
         pump_for(Duration::from_millis(500));
+        assert_eq!(
+            (window.allocated_width(), window.allocated_height()),
+            (640, 480),
+            "the compositor keeps the row's toplevel at 640x480"
+        );
         (back, window, page)
     }
 
