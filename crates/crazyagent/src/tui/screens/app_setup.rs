@@ -21,7 +21,7 @@ use crate::setup::{
 use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob, PackChange};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::{Ctx, Load};
-use crate::tui::frame::{Hint, Message, draw_lines, hint};
+use crate::tui::frame::{Hint, Message, Tone, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::seam::{Arrival, NOT_READY};
 use crate::tui::text::{
@@ -833,9 +833,9 @@ impl AppSetup {
         };
         self.setup = Load::Ready(status.clone());
         self.selected = self.selected.min(status.pack.len().saturating_sub(1));
-        let mut spoke = false;
+        let mut said = None;
         if let Some(name) = self.fixing {
-            spoke = self.fixed(name, status, ctx);
+            said = self.fixed(name, status, ctx);
             if !self.started {
                 return Flow::Handled;
             }
@@ -856,7 +856,7 @@ impl AppSetup {
             if self.first_run {
                 return Self::next_step(ctx);
             }
-            if !spoke {
+            if said.is_none() {
                 ctx.say(Message::success(
                     "Setup finished.",
                     "Everything is installed.",
@@ -865,14 +865,20 @@ impl AppSetup {
             return Flow::Handled;
         }
         self.finished_with_problems = true;
-        if spoke {
-            return Flow::Handled;
-        }
         let items = if problems == 1 { "item" } else { "items" };
-        ctx.say(Message::warning(
-            &format!("Setup finished, but {problems} {items} did not install."),
-            "See the reasons below.",
-        ));
+        ctx.say(match said {
+            Some(fix) => {
+                let rest = format!("{problems} {items} failed.");
+                match fix.tone {
+                    Tone::Error => Message::error(&fix.lead, &rest),
+                    Tone::Success | Tone::Warning => Message::warning(&fix.lead, &rest),
+                }
+            }
+            None => Message::warning(
+                &format!("Setup finished, but {problems} {items} did not install."),
+                "See the reasons below.",
+            ),
+        });
         Flow::Handled
     }
 
@@ -916,38 +922,36 @@ impl AppSetup {
 
     /// Ends a permission fix once a status read shows it finished, its row no longer busy
     /// (DEC-199), and the tool checked again, saying how the tool's row reads now. Inputs: the
-    /// tool, the status read and the context. Output: whether it said the fix's outcome.
-    fn fixed(&mut self, name: Dependency, status: &SetupStatus, ctx: &mut Ctx) -> bool {
+    /// tool, the status read and the context. Output: the fix's outcome it said, or none.
+    fn fixed(&mut self, name: Dependency, status: &SetupStatus, ctx: &mut Ctx) -> Option<Message> {
         let Some(row) = status.dependencies.iter().find(|tool| tool.name == name) else {
             self.fixing = None;
-            return false;
+            return None;
         };
         if row.busy {
-            return false;
+            return None;
         }
-        match &row.state {
-            DependencyState::Checking => return false,
+        let said = match &row.state {
+            DependencyState::Checking => return None,
             DependencyState::Refused {
                 fix_failed: Some(failed),
                 ..
-            } => ctx.say(Message::error(
-                &super::new_project_view::printable(failed.clone()),
-                "",
-            )),
+            } => Message::error(&super::new_project_view::printable(failed.clone()), ""),
             DependencyState::Refused { .. }
             | DependencyState::Missing { .. }
             | DependencyState::Failed { .. }
-            | DependencyState::Unsupported => ctx.say(Message::warning(
+            | DependencyState::Unsupported => Message::warning(
                 &format!("Permissions changed, but {} is still not used.", row.label),
                 "See the reason below.",
-            )),
-            _ => ctx.say(Message::success(
+            ),
+            _ => Message::success(
                 &format!("Permissions fixed. {} can run now.", row.label),
                 "",
-            )),
-        }
+            ),
+        };
+        ctx.say(said.clone());
         self.fixing = None;
-        true
+        Some(said)
     }
 
     /// The first tool found and passed over whose row offers a permission fix and has no
