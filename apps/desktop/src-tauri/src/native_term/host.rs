@@ -1149,10 +1149,7 @@ impl Native {
             return;
         };
         let made = match view.surface.as_mut() {
-            Some(surface) => {
-                shared.resize(surface, pixels.0, pixels.1);
-                true
-            }
+            Some(surface) => shared.resize(surface, pixels.0, pixels.1).is_ok(),
             None => {
                 let pointer = Retained::as_ptr(&view.ns) as *mut c_void;
                 let made = shared.surface(pointer, pixels.0, pixels.1);

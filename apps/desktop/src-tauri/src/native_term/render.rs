@@ -370,6 +370,18 @@ impl Shared {
             ),
             raw_window_handle: raw_window_handle::RawWindowHandle::AppKit(handle),
         };
+        self.surface_on(target, width, height)
+    }
+
+    /// Makes one view's surface on a surface target that outlives it: the device on the
+    /// first, then the configure and the view's drawing state. Inputs: the target, width
+    /// and height in physical pixels. Output: the surface, or the setup error.
+    fn surface_on(
+        &mut self,
+        target: wgpu::SurfaceTargetUnsafe,
+        width: u32,
+        height: u32,
+    ) -> Result<Surface, String> {
         let surface =
             unsafe { self.instance.create_surface_unsafe(target) }.map_err(|e| e.to_string())?;
         if self.device.is_none() {
@@ -426,21 +438,27 @@ impl Shared {
     }
 
     /// Reconfigures a surface for a new size in physical pixels. Inputs: the surface, width
-    /// and height; a zero side is ignored.
-    pub fn resize(&self, surface: &mut Surface, width: u32, height: u32) {
+    /// and height; a zero side is ignored. Output: ok, or the GPU's error code.
+    pub fn resize(
+        &self,
+        surface: &mut Surface,
+        width: u32,
+        height: u32,
+    ) -> Result<(), &'static str> {
         let Some(set) = self.device.as_ref() else {
-            return;
+            return Ok(());
         };
         if width == 0
             || height == 0
             || (width, height) == (surface.config.width, surface.config.height)
         {
-            return;
+            return Ok(());
         }
         surface.config.width = width;
         surface.config.height = height;
         surface.surface.configure(&set.device, &surface.config);
         assert_eq!(surface.config.width, width);
+        Ok(())
     }
 
     fn row_buffer(&mut self) -> Buffer {
@@ -859,6 +877,127 @@ mod tests {
             bold: false,
             italic: false,
         }
+    }
+
+    /// A bare CAMetalLayer: a surface target a row can draw on off the main thread, where
+    /// an NSView target cannot be made. Output: the layer, which must outlive its surface.
+    fn metal_layer() -> objc2::rc::Retained<objc2::runtime::AnyObject> {
+        let class = objc2::runtime::AnyClass::get(c"CAMetalLayer").expect("QuartzCore loaded");
+        let layer: objc2::rc::Retained<objc2::runtime::AnyObject> =
+            unsafe { objc2::msg_send![class, new] };
+        layer
+    }
+
+    /// The surface target for a layer. Input: the layer. Output: the target.
+    fn on_layer(layer: &objc2::runtime::AnyObject) -> wgpu::SurfaceTargetUnsafe {
+        let pointer: *const objc2::runtime::AnyObject = layer;
+        wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(pointer.cast_mut().cast())
+    }
+
+    /// A one-row frame of text. Input: the text. Output: the frame.
+    fn frame_of(text: &str) -> Frame {
+        Frame {
+            rows: vec![vec![span(text, 0, false)]],
+            keys: vec![1],
+            fills: Vec::new(),
+            cursor: None,
+            preedit: None,
+        }
+    }
+
+    /// A view past wgpu's default texture side (8192) but within the adapter's, as a window
+    /// across two 6K displays (12032 px), configures at its full width and draws: the device
+    /// asks the adapter's own limits (#569).
+    #[test]
+    fn a_surface_past_the_default_texture_limit_configures_at_full_width_and_draws() {
+        let mut shared = shared_at(2.0);
+        let layer = metal_layer();
+        let mut surface = shared
+            .surface_on(on_layer(&layer), 64, 64)
+            .expect("a surface");
+        let set = shared.device.as_ref().expect("a device");
+        let adapter_max = set.adapter.limits().max_texture_dimension_2d;
+        assert!(
+            adapter_max >= 12032,
+            "this GPU's largest side is {adapter_max}"
+        );
+        shared.resize(&mut surface, 12032, 64).expect("a resize");
+        assert_eq!((surface.config.width, surface.config.height), (12032, 64));
+        shared
+            .draw(&mut surface, &frame_of("wide"))
+            .expect("drawn at its full width");
+        drop(surface);
+        drop(layer);
+    }
+
+    /// A view past the device's own largest texture side is held to it, made and resized
+    /// alike, and still draws with no GPU fault, never handed to wgpu to panic on (#569).
+    #[test]
+    fn a_surface_past_the_device_texture_limit_is_held_to_it_and_still_draws() {
+        let mut shared = shared_at(2.0);
+        let layer = metal_layer();
+        let mut surface = shared
+            .surface_on(on_layer(&layer), 64, 64)
+            .expect("a surface");
+        let side_max = shared
+            .device
+            .as_ref()
+            .expect("a device")
+            .device
+            .limits()
+            .max_texture_dimension_2d;
+        shared
+            .resize(&mut surface, side_max + 1, 64)
+            .expect("a resize past the limit");
+        assert_eq!(
+            (surface.config.width, surface.config.height),
+            (side_max, 64)
+        );
+        shared
+            .draw(&mut surface, &frame_of("held"))
+            .expect("drawn at the held size, no fault");
+        let tall = metal_layer();
+        let made = shared
+            .surface_on(on_layer(&tall), 64, side_max * 2)
+            .expect("a surface made past the limit");
+        assert_eq!((made.config.width, made.config.height), (64, side_max));
+        drop((surface, made));
+        drop((layer, tall));
+    }
+
+    /// A GPU validation error never panics: the device's handler records it, and the next
+    /// render call for a view reports `native_terminal_gpu` so the host ends that view; the
+    /// call after it draws again (#569).
+    #[test]
+    fn a_gpu_validation_error_is_reported_as_the_gpu_code_not_a_panic() {
+        let mut shared = shared_at(2.0);
+        let layer = metal_layer();
+        let mut surface = shared
+            .surface_on(on_layer(&layer), 64, 64)
+            .expect("a surface");
+        let set = shared.device.as_ref().expect("a device");
+        let side = set.device.limits().max_texture_dimension_2d + 1;
+        let _texture = set.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("past the limit"),
+            size: wgpu::Extent3d {
+                width: side,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let faulted = shared.draw(&mut surface, &frame_of("fault"));
+        assert_eq!(faulted, Err("native_terminal_gpu".to_owned()));
+        shared
+            .draw(&mut surface, &frame_of("after"))
+            .expect("the fault is reported once");
+        drop(surface);
+        drop(layer);
     }
 
     fn cluster(text: &str, column: usize) -> Span {
