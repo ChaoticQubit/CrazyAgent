@@ -29,6 +29,9 @@ pub enum ViewEvent {
         point: (f64, f64),
     },
     Copy,
+    /// The copy chord of a host without Cmd (Ctrl+C, Ctrl+Shift+C): the host copies the
+    /// selection if there is one, else applies this input (^C).
+    CopyKey(Input),
     Paste,
     SelectAll,
     Focus(bool),
