@@ -880,7 +880,10 @@ mod tests {
                 OsString::from_wide(&[0x6f, 0xd800])
             }
         };
-        assert_eq!(setup_role(&[unpaired.clone()]), Err(ARGUMENTS_REFUSED));
+        assert_eq!(
+            setup_role(std::slice::from_ref(&unpaired)),
+            Err(ARGUMENTS_REFUSED)
+        );
         assert_eq!(
             setup_role(&[
                 OsString::from("apply"),
