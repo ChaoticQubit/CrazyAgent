@@ -1,10 +1,10 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk::gdk::keys::Key;
 use gtk::gdk::keys::constants as key;
 use gtk::gdk::{EventKey, ModifierType};
-use gtk::glib::{Propagation, SignalHandlerId};
+use gtk::glib::{Propagation, SignalHandlerId, WeakRef};
 use gtk::prelude::*;
 
 use super::keys;
@@ -84,6 +84,11 @@ impl Focus {
     /// Whether keys go to the view. Output: the answer.
     pub fn active(self) -> bool {
         self.native && self.toplevel && !self.covered
+    }
+
+    /// Whether the view holds native focus, whatever its toplevel's. Output: the answer.
+    pub fn is_native(self) -> bool {
+        self.native
     }
 
     /// Gives or takes native focus; a covered view refuses it. Input: on or off. Output:
@@ -169,13 +174,16 @@ fn press(
 
 /// The Linux side of one native terminal view's input: it takes the toplevel's keys
 /// ahead of the webview while active, through its own input method context, and hands
-/// each key, commit and focus change to the host's sink with the view's id.
+/// each key, commit and focus change to the host's sink with the view's id. Native focus
+/// takes GTK focus off the page, as the macOS view takes first responder, and gives it
+/// back on release; the page taking GTK focus releases native focus.
 pub struct View {
     id: u64,
     sink: Sink,
     im: gtk::IMMulticontext,
     focus: Rc<Cell<Focus>>,
     toplevel: gtk::Window,
+    page: RefCell<Option<WeakRef<gtk::Widget>>>,
     handlers: Vec<SignalHandlerId>,
     commit: Option<SignalHandlerId>,
 }
@@ -225,13 +233,28 @@ impl View {
                 Propagation::Proceed
             })
         };
+        let on_page_focus = {
+            let (im, focus) = (im.clone(), Rc::clone(&focus));
+            toplevel.connect_set_focus(move |_, widget| {
+                if widget.is_some() && focus.get().is_native() {
+                    apply(edit(&focus, |f| f.native(false)), &im, id, sink);
+                }
+            })
+        };
         Ok(View {
             id,
             sink,
             im,
             focus,
             toplevel: toplevel.clone(),
-            handlers: vec![on_press, on_release, on_focus_in, on_focus_out],
+            page: RefCell::new(None),
+            handlers: vec![
+                on_press,
+                on_release,
+                on_focus_in,
+                on_focus_out,
+                on_page_focus,
+            ],
             commit: Some(commit),
         })
     }
@@ -239,22 +262,64 @@ impl View {
     /// Gives or takes native focus, as a click in the host rectangle or the page asks;
     /// refused while covered. Input: on or off. Output: none.
     pub fn focus(&self, on: bool) {
-        let change = edit(&self.focus, |f| f.native(on));
-        apply(change, &self.im, self.id, self.sink);
+        self.moving(|f| f.native(on));
     }
 
     /// Covers or uncovers the view as the page reports an element over it; covering
-    /// sends keys back to the page. Input: covered or not. Output: none.
+    /// releases native focus, so keys go back to the page. Input: covered or not.
+    /// Output: none.
     pub fn cover(&self, covered: bool) {
-        let change = edit(&self.focus, |f| f.cover(covered));
-        apply(change, &self.im, self.id, self.sink);
+        self.moving(|f| f.cover(covered));
+    }
+
+    /// Applies a focus change, moving GTK focus off the page before the view's input
+    /// method takes focus, and back to it after the view's lets go. Input: the change.
+    /// Output: none.
+    fn moving(&self, change: impl FnOnce(&mut Focus) -> Option<bool>) {
+        let was = self.focus.get().is_native();
+        let mut next = self.focus.get();
+        let changed = change(&mut next);
+        if !was && next.is_native() {
+            self.take_page_focus();
+        }
+        self.focus.set(next);
+        apply(changed, &self.im, self.id, self.sink);
+        if was && !next.is_native() {
+            self.give_page_focus();
+        }
+    }
+
+    fn take_page_focus(&self) {
+        let page = self
+            .toplevel
+            .focused_widget()
+            .map(|widget| widget.downgrade());
+        *self.page.borrow_mut() = page;
+        self.toplevel.set_focus(None::<&gtk::Widget>);
+        assert!(self.toplevel.focused_widget().is_none());
+    }
+
+    fn give_page_focus(&self) {
+        let Some(page) = self
+            .page
+            .borrow_mut()
+            .take()
+            .and_then(|weak| weak.upgrade())
+        else {
+            return;
+        };
+        let toplevel: &gtk::Widget = self.toplevel.upcast_ref();
+        if page.toplevel().as_ref() == Some(toplevel) {
+            page.grab_focus();
+        }
     }
 }
 
 impl Drop for View {
-    /// Disconnects the toplevel and input method handlers and releases the context.
-    /// Output: none.
+    /// Disconnects the toplevel and input method handlers, releases the context and
+    /// gives GTK focus back to the page if the view held native focus. Output: none.
     fn drop(&mut self) {
+        let native = self.focus.get().is_native();
         for handler in self.handlers.drain(..) {
             self.toplevel.disconnect(handler);
         }
@@ -265,6 +330,9 @@ impl Drop for View {
             self.im.focus_out();
         }
         self.im.set_client_window(None::<&gtk::gdk::Window>);
+        if native {
+            self.give_page_focus();
+        }
     }
 }
 
@@ -423,8 +491,13 @@ mod tests {
         pump_until("page typing", || page_text(&page) == "v:xy");
         assert_eq!(take_seen(), Vec::new());
 
+        assert!(page.is_focus());
         view.focus(true);
         assert_eq!(take_seen(), vec![ViewEvent::Focus(true)]);
+        assert!(
+            !page.is_focus(),
+            "native focus takes GTK focus off the page"
+        );
         step("native");
         pump_until("view keys", || seen_count() >= 4);
         pump_for(Duration::from_millis(200));
@@ -442,14 +515,18 @@ mod tests {
         );
         assert_eq!(page_text(&page), "v:xy");
 
-        view.focus(false);
-        assert_eq!(take_seen(), vec![ViewEvent::Focus(false)]);
         page.grab_focus();
+        assert_eq!(
+            take_seen(),
+            vec![ViewEvent::Focus(false)],
+            "the page taking GTK focus releases native focus"
+        );
         step("page-ime");
         pump_until("page composition", || page_text(&page) == "v:xyé");
 
         view.focus(true);
         assert_eq!(take_seen(), vec![ViewEvent::Focus(true)]);
+        assert!(!page.is_focus());
         step("native-ime");
         pump_until("view composition", || seen_count() >= 1);
         pump_for(Duration::from_millis(300));
@@ -458,7 +535,13 @@ mod tests {
 
         view.cover(true);
         assert_eq!(take_seen(), vec![ViewEvent::Focus(false)]);
-        page.grab_focus();
+        assert!(page.is_focus(), "a cover gives GTK focus back to the page");
+        view.focus(true);
+        assert_eq!(
+            take_seen(),
+            Vec::new(),
+            "a covered view refuses native focus"
+        );
         step("covered");
         pump_until("covered typing", || page_text(&page) == "v:xyéz");
         assert_eq!(take_seen(), Vec::new());
