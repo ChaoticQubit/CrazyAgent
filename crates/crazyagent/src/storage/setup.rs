@@ -806,6 +806,12 @@ fn save_refused_tool(tx: &Transaction<'_>, choice: RefusedTool) -> Result<(), En
 }
 
 fn sweep(connection: &mut Connection, root: &Path) -> Result<(), EngineError> {
+    eprintln!(
+        "diag_sweep_start t={}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_micros())
+    );
     let tx = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
@@ -856,6 +862,12 @@ fn sweep(connection: &mut Connection, root: &Path) -> Result<(), EngineError> {
         tx.execute("DELETE FROM setup_trash WHERE reference=?1", [reference])
             .map_err(error)?;
     }
+    eprintln!(
+        "diag_sweep_end t={}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_micros())
+    );
     tx.commit().map_err(error)
 }
 

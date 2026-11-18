@@ -582,6 +582,15 @@ impl Storage {
     ) -> Result<Taken, EngineError> {
         assert!(!matches!(job, Job::Claimed(..)));
         let narrowing = job.narrows_access();
+        eprintln!(
+            "diag_submit_enter t={} narrowing={narrowing} left_ms={}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_micros()),
+            deadline
+                .saturating_duration_since(tokio::time::Instant::now())
+                .as_millis()
+        );
         if !narrowing {
             let mut receiving = self.receiving.clone();
             match tokio::time::timeout_at(deadline, receiving.wait_for(|on| *on)).await {
@@ -606,6 +615,12 @@ impl Storage {
         let late = tokio::time::timeout_at(deadline, claim.taken.notified())
             .await
             .is_err();
+        eprintln!(
+            "diag_submit t={} narrowing={narrowing} late={late}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_micros())
+        );
         if late && narrowing {
             return Err(error(ACCESS_CHANGE_PENDING));
         }
@@ -733,6 +748,7 @@ impl Storage {
                                 continue;
                             }
                             claim.taken.notify_one();
+                            eprintln!("diag_take t={}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_micros()));
                             *job
                         }
                         job => job,

@@ -567,7 +567,15 @@ impl Engine {
             .await?;
         tokio::time::timeout(wait, receive)
             .await
-            .map_err(|_| taken.lost(owner::native_auth::outcome_unknown()))?
+            .map_err(|_| {
+                eprintln!(
+                    "diag_within_late t={}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_micros())
+                );
+                taken.lost(owner::native_auth::outcome_unknown())
+            })?
             .map_err(|_| owner::native_auth::outcome_unknown())?
     }
 
@@ -607,11 +615,26 @@ impl Engine {
             let result = receive
                 .await
                 .map_err(|_| owner::native_auth::outcome_unknown())?;
+            eprintln!(
+                "diag_settled_answer t={} ok={}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_micros()),
+                result.is_ok()
+            );
             settle(&result).and(result)
         });
         tokio::time::timeout(self.timeout, answered)
             .await
-            .map_err(|_| taken.lost(owner::native_auth::outcome_unknown()))?
+            .map_err(|_| {
+                eprintln!(
+                    "diag_settled_late t={}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |d| d.as_micros())
+                );
+                taken.lost(owner::native_auth::outcome_unknown())
+            })?
             .map_err(|_| owner::native_auth::outcome_unknown())?
     }
 
