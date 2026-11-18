@@ -25,12 +25,15 @@ impl Dimensions for GridSize {
 }
 
 /// A run of cells in one row that share colour and style: `cells` cells from `column` on,
-/// one character per cell, or a single wide character over two cells.
+/// one character per cell; or one cell group drawn as a whole, a wide character over two
+/// cells (`wide`) or a character with its zero-width characters, such as combining marks,
+/// variation selectors and joiners (`cluster`).
 pub struct Span {
     pub text: String,
     pub column: usize,
     pub cells: usize,
     pub wide: bool,
+    pub cluster: bool,
     pub fg: Rgb,
     pub bold: bool,
     pub italic: bool,
@@ -116,12 +119,11 @@ fn mix(hash: u64, value: u64) -> u64 {
     (hash ^ value).wrapping_mul(0x0000_0100_0000_01b3)
 }
 
-/// The colours one cell draws in, as today's xterm panel draws them: bold text in one of
-/// the 8 base colours takes its bright twin, inverse video swaps, the block cursor shows
-/// the theme's cursor behind the cursor accent, faint text is the foreground at half over
-/// the background, hidden text equals the background and a selected cell has the
-/// selection laid over its background. Inputs: the cell, the palette, the theme, whether
-/// the block cursor is on it and whether it is selected. Output: (foreground, background).
+/// The colours one cell draws in, as the xterm panel draws them: bold base colours take
+/// their bright twin, inverse swaps, the block cursor is the cursor over its accent, faint
+/// is half foreground, hidden is the background, selection lies over the background.
+/// Inputs: the cell, the palette, the theme, whether the block cursor is on it and whether
+/// it is selected. Output: (foreground, background).
 fn cell_colors(
     cell: &Cell,
     colors: &Colors,
@@ -171,6 +173,54 @@ fn cursor_at(content: &RenderableContent<'_>, lines: usize, shown: bool) -> Opti
     (row < lines).then_some(Cursor { row, column, shape })
 }
 
+/// Appends one cell's character to a row's spans and folds it into the row's key: a plain
+/// narrow character joins the span it continues; a wide one, or one with zero-width
+/// characters after it, is its own span. Inputs: the row's spans and key, the character and
+/// its zero-width characters, its colour and (bold, italic), its column and whether wide.
+fn push_char(
+    spans: &mut Vec<Span>,
+    key: &mut u64,
+    (c, zero): (char, &[char]),
+    (fg, (bold, italic)): (Rgb, (bool, bool)),
+    (column, wide): (usize, bool),
+) {
+    let count = spans.len();
+    let packed = (u64::from(fg.r) << 16) | (u64::from(fg.g) << 8) | u64::from(fg.b);
+    let style = (u64::from(bold) << 24) | (u64::from(italic) << 25);
+    *key = mix(mix(*key, c as u64), packed | style);
+    *key = zero.iter().fold(*key, |key, mark| mix(key, *mark as u64));
+    let cluster = !zero.is_empty();
+    match spans.last_mut() {
+        Some(s)
+            if !wide
+                && !cluster
+                && !s.wide
+                && !s.cluster
+                && s.column + s.cells == column
+                && (s.fg, s.bold, s.italic) == (fg, bold, italic) =>
+        {
+            s.text.push(c);
+            s.cells += 1;
+        }
+        _ => spans.push(Span {
+            text: std::iter::once(c).chain(zero.iter().copied()).collect(),
+            column,
+            cells: if wide { 2 } else { 1 },
+            wide,
+            cluster,
+            fg,
+            bold,
+            italic,
+        }),
+    }
+    assert!(spans.len() == count || spans.len() == count + 1);
+    assert!(
+        spans
+            .last()
+            .is_some_and(|s| s.column + s.cells == column + 1 + usize::from(wide))
+    );
+}
+
 /// Builds the frame for the visible screen. Inputs: the terminal, the theme and whether the
 /// cursor shows now (false in a blink's off phase). Output: rows, fills and the cursor;
 /// wide-character spacer cells add no text.
@@ -209,33 +259,13 @@ pub fn frame(term: &Term<VoidListener>, theme: &Theme, cursor_shown: bool) -> Fr
         if cell.flags.intersects(spacer) {
             continue;
         }
-        let bold = cell.flags.contains(Flags::BOLD);
-        let italic = cell.flags.contains(Flags::ITALIC);
-        let packed = (u64::from(fg.r) << 16) | (u64::from(fg.g) << 8) | u64::from(fg.b);
-        let style = (u64::from(bold) << 24) | (u64::from(italic) << 25);
-        keys[row] = mix(mix(keys[row], cell.c as u64), packed | style);
-        let wide = cell.flags.contains(Flags::WIDE_CHAR);
-        let spans = &mut rows[row];
-        match spans.last_mut() {
-            Some(s)
-                if !wide
-                    && !s.wide
-                    && s.column + s.cells == column
-                    && (s.fg, s.bold, s.italic) == (fg, bold, italic) =>
-            {
-                s.text.push(cell.c);
-                s.cells += 1;
-            }
-            _ => spans.push(Span {
-                text: cell.c.to_string(),
-                column,
-                cells: if wide { 2 } else { 1 },
-                wide,
-                fg,
-                bold,
-                italic,
-            }),
-        }
+        let style = (
+            cell.flags.contains(Flags::BOLD),
+            cell.flags.contains(Flags::ITALIC),
+        );
+        let text = (cell.c, cell.zerowidth().unwrap_or(&[]));
+        let at = (column, cell.flags.contains(Flags::WIDE_CHAR));
+        push_char(&mut rows[row], &mut keys[row], text, (fg, style), at);
     }
     assert_eq!(rows.len(), lines);
     assert!(cursor.is_none_or(|c| c.row < lines));
@@ -358,6 +388,33 @@ mod tests {
             spans,
             vec![("a", 0, 1, false), wide, ("b      ", 3, 7, false)]
         );
+    }
+
+    #[test]
+    fn zero_width_characters_stay_in_their_cell_and_change_the_row_key() {
+        let theme = Theme::default();
+        let marked = frame(
+            &screen("e\u{301}x\u{2764}\u{fe0f}y".as_bytes()),
+            &theme,
+            false,
+        );
+        let plain = frame(&screen("ex\u{2764}y".as_bytes()), &theme, false);
+        let spans: Vec<(&str, usize, usize, bool)> = marked.rows[0]
+            .iter()
+            .map(|s| (s.text.as_str(), s.column, s.cells, s.cluster))
+            .collect();
+        assert_eq!(
+            spans,
+            vec![
+                ("e\u{301}", 0, 1, true),
+                ("x", 1, 1, false),
+                ("\u{2764}\u{fe0f}", 2, 1, true),
+                ("y      ", 3, 7, false),
+            ]
+        );
+        assert_ne!(marked.keys[0], plain.keys[0]);
+        assert_eq!(text_rows(&marked)[0], "e\u{301}x\u{2764}\u{fe0f}y");
+        assert_eq!(text_rows(&plain)[0], "ex\u{2764}y");
     }
 
     #[test]

@@ -137,6 +137,9 @@ fn load(db: &mut fontdb::Database, source: FontSource) -> Result<(), &'static st
             }
         }
     }
+    if db.len() == before {
+        return Err(invalid);
+    }
     assert!(db.len() > before);
     Ok(())
 }
@@ -717,8 +720,9 @@ fn text_color(color: Rgb) -> TextColor {
     TextColor::rgb(color.r, color.g, color.b)
 }
 
-/// One character of a row: its byte in the row's text, its span, its byte and length in
-/// that span's text, and the cells it covers.
+/// One cell group of a row: its byte in the row's text, its span, its byte and length in
+/// that span's text, and the cells it covers. A plain character is one place; a wide or
+/// clustered span is one place, so zero-width characters take no cell of their own.
 struct Place {
     byte: usize,
     span: usize,
@@ -731,7 +735,19 @@ fn places(spans: &[Span]) -> Vec<Place> {
     let mut out = Vec::new();
     let mut byte = 0;
     for (index, span) in spans.iter().enumerate() {
-        let cells = if span.wide { 2 } else { 1 };
+        if span.wide || span.cluster {
+            let len = span.text.len();
+            let cells = span.cells;
+            out.push(Place {
+                byte,
+                span: index,
+                local: 0,
+                len,
+                cells,
+            });
+            byte += len;
+            continue;
+        }
         for (local, c) in span.text.char_indices() {
             let len = c.len_utf8();
             out.push(Place {
@@ -739,7 +755,7 @@ fn places(spans: &[Span]) -> Vec<Place> {
                 span: index,
                 local,
                 len,
-                cells,
+                cells: 1,
             });
             byte += len;
         }
@@ -817,9 +833,18 @@ mod tests {
             column,
             cells,
             wide,
+            cluster: false,
             fg,
             bold: false,
             italic: false,
+        }
+    }
+
+    fn cluster(text: &str, column: usize) -> Span {
+        Span {
+            cells: 1,
+            cluster: true,
+            ..span(text, column, false)
         }
     }
 
@@ -854,6 +879,31 @@ mod tests {
             assert_eq!(xs.len(), 4);
             for (x, column) in xs.iter().zip([0.0, 1.0, 2.0, 4.0]) {
                 assert!((x - column * cell).abs() < 0.05, "{scale}x glyph at {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn zero_width_characters_draw_in_their_cell_and_shift_nothing() {
+        for scale in [1.0, 2.0] {
+            let mut shared = shared_at(scale);
+            let cell = shared.cell.0;
+            let mut buffer = shared.row_buffer();
+            for first in ["e\u{301}", "\u{2764}\u{fe0f}"] {
+                let row = [cluster(first, 0), span("xy", 1, false)];
+                assert_eq!(places(&row).len(), 3);
+                shared.shape_row(&mut buffer, &row);
+                let all = glyphs(&buffer);
+                assert!(all.iter().any(|g| g.0 == 0), "{first:?} draws");
+                let after: Vec<f32> = all
+                    .iter()
+                    .filter(|g| g.0 >= first.len())
+                    .map(|g| g.1)
+                    .collect();
+                assert_eq!(after.len(), 2, "{first:?}");
+                for (x, column) in after.iter().zip([1.0, 2.0]) {
+                    assert!((x - column * cell).abs() < 0.05, "{scale}x {first:?} {x}");
+                }
             }
         }
     }
@@ -903,5 +953,17 @@ mod tests {
         assert_eq!(db.len(), 4);
         assert!(face_for(&db, "JetBrains Mono").is_some());
         assert_eq!(face_for(&db, "Menlo"), None);
+    }
+
+    #[test]
+    fn a_font_file_with_no_face_is_refused_not_asserted() {
+        let folder = tempfile::tempdir().expect("temp folder");
+        let path = folder.path().join("Empty.ttc");
+        std::fs::write(&path, b"not a font").expect("write");
+        let path: &'static str = Box::leak(path.to_string_lossy().into_owned().into_boxed_str());
+        let mut db = fontdb::Database::new();
+        let loaded = load(&mut db, FontSource::File(path));
+        assert_eq!(loaded, Err("native_terminal_style_invalid"));
+        assert_eq!(db.len(), 0);
     }
 }
