@@ -693,3 +693,13 @@ fn a_short_status_list_keeps_every_left_folder_named() {
     fit_left(&mut fitted, crate::protocol::FRAME_BYTES_MAX - 64);
     assert_eq!(fitted, views);
 }
+
+/// A job that started its copy never waits again: only a job not yet started takes a wait,
+/// and one that already ended keeps its end (V243-INTAKE-WAIT-ASSERT r2).
+#[test]
+#[should_panic(expected = "only a job not yet started waits")]
+fn a_job_that_started_its_copy_never_waits() {
+    let job = job();
+    job.copying();
+    job.wait("site");
+}
