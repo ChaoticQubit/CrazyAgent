@@ -312,7 +312,12 @@ fn device_for(
     .map_err(|e| e.to_string())?;
     let side_max = device.limits().max_texture_dimension_2d;
     assert_eq!(side_max, adapter.limits().max_texture_dimension_2d);
-    assert!(side_max >= wgpu::Limits::downlevel_defaults().max_texture_dimension_2d);
+    let side_floor = wgpu::Limits::downlevel_defaults().max_texture_dimension_2d;
+    if side_max < side_floor {
+        return Err(format!(
+            "{GPU_FAULT}: largest texture side {side_max} < {side_floor}"
+        ));
+    }
     let faulted = Arc::new(AtomicBool::new(false));
     let sink = Arc::clone(&faulted);
     device.on_uncaptured_error(Box::new(move |error| {
@@ -441,8 +446,8 @@ impl Shared {
         config.present_mode = wgpu::PresentMode::Fifo;
         config.desired_maximum_frame_latency = 1;
         surface.configure(&set.device, &config);
-        set.fault()?;
-        assert!(config.width <= set.side_max && config.height <= set.side_max);
+        assert!(config.width <= set.side_max);
+        assert!(config.height <= set.side_max);
         let viewport = Viewport::new(&set.device, &set.cache);
         let mut atlas = TextAtlas::new(&set.device, &set.queue, &set.cache, set.format);
         let text = TextRenderer::new(
@@ -471,6 +476,7 @@ impl Shared {
                 resource: screen_buffer.as_entire_binding(),
             }],
         });
+        set.fault()?;
         Ok(Surface {
             surface,
             config,
@@ -699,10 +705,25 @@ impl Shared {
         out
     }
 
-    /// Draws one frame on a surface: reshapes changed rows, uploads rectangles and glyphs,
-    /// renders and presents. Inputs: the surface and the frame. Output: ok, why it was
-    /// skipped, or `native_terminal_gpu` when wgpu refused the frame's work.
+    /// Draws one frame on a surface and takes any wgpu error the frame raised, on every
+    /// exit, so the error is reported for this view and never for the next one drawn.
+    /// Inputs: the surface and the frame. Output: ok, why it was skipped, or
+    /// `native_terminal_gpu` when wgpu refused the frame's work.
     pub fn draw(&mut self, surface: &mut Surface, frame: &Frame) -> Result<(), String> {
+        let painted = self.paint(surface, frame);
+        let Some(set) = self.device.as_ref() else {
+            return painted;
+        };
+        set.fault()?;
+        assert!(surface.config.width <= set.side_max);
+        assert!(surface.config.height <= set.side_max);
+        painted
+    }
+
+    /// Paints one frame: reshapes changed rows, uploads rectangles and glyphs, renders and
+    /// presents; a lost surface is reconfigured at its held size. Inputs: the surface and
+    /// the frame. Output: ok, or why it was skipped.
+    fn paint(&mut self, surface: &mut Surface, frame: &Frame) -> Result<(), String> {
         self.shape_rows(surface, frame);
         let rects = self.rect_bytes(frame);
         let set = self.device.as_ref().ok_or("no device")?;
@@ -749,10 +770,7 @@ impl Shared {
         let output = match surface.surface.get_current_texture() {
             Ok(output) => output,
             Err(error) => {
-                let held = (surface.config.width, surface.config.height);
-                assert!(held.0 <= set.side_max && held.1 <= set.side_max);
                 surface.surface.configure(&set.device, &surface.config);
-                set.fault()?;
                 return Err(error.to_string());
             }
         };
@@ -761,7 +779,7 @@ impl Shared {
         output.present();
         surface.atlas.trim();
         assert_eq!(surface.generation, self.generation);
-        set.fault().map_err(String::from)
+        Ok(())
     }
 }
 
