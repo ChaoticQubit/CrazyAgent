@@ -1143,12 +1143,9 @@ fn between_program_and_check(entry: &Path) -> Option<Step> {
 }
 
 /// Finds the interpreter a script's first line asks `env` for by name: for `node`, first the
-/// one in the script's own npm prefix ([`crate::harnesses::npm_prefix`]), judged by the
-/// resolver's own checks alone (G1 P7), so a harness installed under one Node starts under
-/// that Node; else the places in order, as `<name>.exe` on Windows, the only file it starts
-/// by itself, a passed-over own `node` named in the engine log ([`log_own_node_passed_over`]).
-/// Inputs: the name, the script's real file, the places and the depth. Output: the
-/// interpreter, or why.
+/// one in its own npm prefix ([`crate::harnesses::npm_prefix`]) when the resolver's checks
+/// pass it, else the places in order, as `<name>.exe` on Windows. Inputs: the name, the
+/// script's real file, the places and the depth. Output: the interpreter, or why.
 fn named_interpreter(
     name: &str,
     script: &Path,
