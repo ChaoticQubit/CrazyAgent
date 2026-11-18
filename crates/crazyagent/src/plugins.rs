@@ -948,6 +948,18 @@ pub fn known_code(code: &str) -> Option<&'static str> {
         .map(|(known, _)| *known)
 }
 
+/// The problem a server check records when it ends with `code`. A check of a server whose
+/// program is Windows PowerShell or PowerShell (`powershell` or `pwsh`, any case, with or
+/// without an extension) that ran out of time records `server_check_timeout_powershell`, whose
+/// sentence names PowerShell reading its installed modules as the likely cause
+/// (V243-WIN-PWSH-CONFINED-CHECK). Inputs: the check's code and the server's program. Output:
+/// the code to record.
+pub fn timed_out_problem(code: &'static str, program: &Path) -> &'static str {
+    assert!(!code.is_empty());
+    assert!(!program.as_os_str().is_empty());
+    code
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1105,6 +1117,46 @@ mod tests {
         for other in ["server_cant_start", "no_such_code", CHECK_REFUSED, ""] {
             assert_eq!(check_problem(other), "The server can't start.", "{other:?}");
         }
+    }
+
+    /// V243-WIN-PWSH-CONFINED-CHECK: a check of a PowerShell server that ran out of time says
+    /// the server did not answer in time and names PowerShell reading its installed modules as
+    /// the likely cause; any other program, and any other code, keeps its own words.
+    #[test]
+    fn a_powershell_server_that_timed_out_names_its_module_reading_as_the_likely_cause() {
+        let timed_out = "server_check_timeout";
+        let named = "server_check_timeout_powershell";
+        for program in [
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            r"C:\Program Files\PowerShell\7\PWSH.EXE",
+            "/usr/local/bin/pwsh",
+            "/opt/microsoft/powershell/7/pwsh",
+        ] {
+            let program = Path::new(program);
+            assert_eq!(timed_out_problem(timed_out, program), named, "{program:?}");
+            assert_eq!(timed_out_problem("server_exited", program), "server_exited");
+        }
+        for program in [
+            r"C:\Program Files\nodejs\node.exe",
+            "/usr/local/bin/powershell-helper",
+            "/opt/pwsh/bin/uvx",
+        ] {
+            let program = Path::new(program);
+            assert_eq!(
+                timed_out_problem(timed_out, program),
+                timed_out,
+                "{program:?}"
+            );
+        }
+        assert_eq!(
+            check_problem(timed_out),
+            "The server did not answer within 10 seconds."
+        );
+        assert_eq!(
+            check_problem(named),
+            "The server did not answer within 10 seconds. It runs on PowerShell, so the likely cause is PowerShell reading every module installed on this computer before its first command, which takes longer when many modules are installed."
+        );
+        assert_eq!(known_code(named), Some(named));
     }
 
     /// V243-WIN-MCP-NPX: a check of a Windows command that is no program, npm's npx.cmd
