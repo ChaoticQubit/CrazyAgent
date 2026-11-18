@@ -588,7 +588,6 @@ pub struct AppSetup {
     reading: [bool; 10],
     sent: Option<Sent>,
     started: bool,
-    held: bool,
     finished_with_problems: bool,
     ask: Option<Ask>,
     fixing: Option<Dependency>,
@@ -619,7 +618,6 @@ impl AppSetup {
             reading: [false; 10],
             sent: None,
             started: false,
-            held: false,
             finished_with_problems: false,
             ask: None,
             fixing: None,
@@ -851,23 +849,23 @@ impl AppSetup {
         }
         let problems = self.problems();
         if problems == 0 && self.first_run && self.fixing.is_some() {
-            self.held = true;
             return Flow::Handled;
         }
-        let held = std::mem::take(&mut self.held);
         self.started = false;
         if problems == 0 {
             if self.first_run {
                 return Self::next_step(ctx);
             }
-            ctx.say(Message::success(
-                "Setup finished.",
-                "Everything is installed.",
-            ));
+            if !spoke {
+                ctx.say(Message::success(
+                    "Setup finished.",
+                    "Everything is installed.",
+                ));
+            }
             return Flow::Handled;
         }
         self.finished_with_problems = true;
-        if held && spoke {
+        if spoke {
             return Flow::Handled;
         }
         let items = if problems == 1 { "item" } else { "items" };
