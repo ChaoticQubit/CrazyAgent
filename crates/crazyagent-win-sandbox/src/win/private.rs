@@ -2,15 +2,15 @@ use super::acl::{ACL_BYTES_MAX, Local};
 use super::owner::{sid_bytes, user_sid as token_user};
 use super::{Words, final_name, last_error};
 use crate::dacl::trusted_owner;
-use crate::private::{Facts, judge, list};
+use crate::private::{Facts, judge, judge_folder, list};
 use std::fs::File;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
 use windows_sys::Win32::Foundation::{
-    ERROR_ALREADY_EXISTS, ERROR_LOCK_VIOLATION, ERROR_SUCCESS, GENERIC_READ, GENERIC_WRITE,
-    INVALID_HANDLE_VALUE,
+    ERROR_ALREADY_EXISTS, ERROR_LOCK_VIOLATION, ERROR_NO_MORE_FILES, ERROR_SUCCESS, GENERIC_READ,
+    GENERIC_WRITE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::Authorization::{
     GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo,
@@ -24,8 +24,9 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FileIdInfo, GetFileInformationByHandle,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FileFullDirectoryInfo,
+    FileFullDirectoryRestartInfo, FileIdInfo, GetFileInformationByHandle,
     GetFileInformationByHandleEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
     OPEN_EXISTING, READ_CONTROL, UnlockFileEx, WRITE_DAC,
 };
@@ -67,12 +68,10 @@ pub fn dir(path: &Path) -> io::Result<File> {
     Ok(folder)
 }
 
-/// Makes an existing folder of the engine's user private again when an older build or a
-/// copy left it open to others, the twin of a Unix chmod to 0700: opened without following a
-/// link, it must be a local folder whose owner [`judge`] trusts, the user or, for an elevated
-/// user's folder, the administrators; its list is replaced by the protected list of [`list`]
-/// and then judged as [`dir`] judges. Input: the absolute path. Output: the held folder, or
-/// why it is not this user's folder or did not become private.
+/// Makes an empty folder of this user private again, the twin of a Unix chmod to 0700: opened
+/// as itself, it must be local, trusted-owned and empty, as files in it would keep their own
+/// lists; nothing changes unless it is. Its list becomes [`list`]'s, judged as [`dir`]
+/// judges. Input: the absolute path. Output: the held folder, or why it was refused.
 pub fn repair(path: &Path) -> io::Result<File> {
     let user = user_sid()?;
     let name = wide_path(path)?;
@@ -91,6 +90,11 @@ pub fn repair(path: &Path) -> io::Result<File> {
     {
         return Err(refused("only a local folder of this user is made private"));
     }
+    if holds_entries(&folder)? {
+        return Err(refused(
+            "a folder that already holds files is not made private, as they keep their own lists",
+        ));
+    }
     let wanted = Words::from_bytes(&list(&user, true));
     let status = unsafe {
         SetSecurityInfo(
@@ -107,7 +111,66 @@ pub fn repair(path: &Path) -> io::Result<File> {
         return Err(code(status));
     }
     private_as(&folder, &user, true)?;
+    if holds_entries(&folder)? {
+        return Err(refused(
+            "a file appeared in a folder while it was made private",
+        ));
+    }
     Ok(folder)
+}
+
+/// Whether an open folder holds any entry other than `.` and `..`, listed from its handle so
+/// no path is followed. Relies on the handle listing the folder and on Windows writing whole
+/// records inside the buffer, each at an offset it names. Input: the folder. Output: the
+/// answer, or the Windows error.
+fn holds_entries(folder: &File) -> io::Result<bool> {
+    const DOT: u16 = b'.' as u16;
+    let mut buffer = vec![0u64; 1024];
+    let bytes = buffer.len() * size_of::<u64>();
+    let next_at = std::mem::offset_of!(FILE_FULL_DIR_INFO, NextEntryOffset);
+    let length_at = std::mem::offset_of!(FILE_FULL_DIR_INFO, FileNameLength);
+    let name_at = std::mem::offset_of!(FILE_FULL_DIR_INFO, FileName);
+    let mut class = FileFullDirectoryRestartInfo;
+    loop {
+        let listed = unsafe {
+            GetFileInformationByHandleEx(
+                folder.as_raw_handle(),
+                class,
+                buffer.as_mut_ptr().cast(),
+                bytes as u32,
+            )
+        };
+        if listed == 0 {
+            let error = last_error();
+            return if error == ERROR_NO_MORE_FILES {
+                Ok(false)
+            } else {
+                Err(code(error))
+            };
+        }
+        class = FileFullDirectoryInfo;
+        let base = buffer.as_ptr().cast::<u8>();
+        let mut at = 0;
+        loop {
+            assert!(at + name_at <= bytes);
+            let next = unsafe { base.add(at + next_at).cast::<u32>().read_unaligned() } as usize;
+            let length = unsafe { base.add(at + length_at).cast::<u32>().read_unaligned() };
+            let units = length as usize / 2;
+            assert!(at + name_at + units * 2 <= bytes);
+            let unit = |index: usize| unsafe {
+                base.add(at + name_at + index * 2)
+                    .cast::<u16>()
+                    .read_unaligned()
+            };
+            if !matches!(units, 1 | 2) || (0..units).any(|index| unit(index) != DOT) {
+                return Ok(true);
+            }
+            if next == 0 {
+                break;
+            }
+            at += next;
+        }
+    }
 }
 
 /// Opens the private file at `path` for reading and writing, never following a link: with
@@ -182,13 +245,13 @@ pub fn facts(object: &File) -> io::Result<Facts> {
     read(object).map(|(facts, _)| facts)
 }
 
-/// Refuses an open folder or file that is not private to the engine's user ([`judge`]),
-/// the check every store runs on what it opens. Input: the handle. Output: Ok, or a
-/// `PermissionDenied` error with the reason.
+/// Refuses an open folder or file that is not private to the engine's user ([`judge`], and
+/// [`judge_folder`] for a folder), the check every store runs on what it opens. Input: the
+/// handle. Output: Ok, or a `PermissionDenied` error with the reason.
 pub fn check(object: &File) -> io::Result<()> {
     let user = user_sid()?;
-    let (facts, _) = read(object)?;
-    judge(&facts, &user).map_err(refused)
+    let (facts, attributes) = read(object)?;
+    judged(&facts, &user, attributes & FILE_ATTRIBUTE_DIRECTORY != 0)
 }
 
 /// Takes the exclusive lock on the whole of an open file at once, or fails at once when any
@@ -273,7 +336,7 @@ fn take(file: &File, flags: u32) -> io::Result<()> {
 }
 
 /// Refuses an opened object that is a folder where a file is wanted or the reverse, or that
-/// [`judge`] does not find private. Inputs: the handle, the user's SID and whether a folder
+/// [`judged`] does not find private. Inputs: the handle, the user's SID and whether a folder
 /// is wanted. Output: Ok, or a `PermissionDenied` error with the reason.
 fn private_as(object: &File, user: &[u8], folder: bool) -> io::Result<()> {
     let (facts, attributes) = read(object)?;
@@ -284,7 +347,19 @@ fn private_as(object: &File, user: &[u8], folder: bool) -> io::Result<()> {
             "a private file is a folder"
         }));
     }
-    judge(&facts, user).map_err(refused)
+    judged(&facts, user, folder)
+}
+
+/// Judges an object's facts as a folder ([`judge_folder`]) or a file ([`judge`]).
+/// Inputs: the facts, the user's SID and whether the object is a folder. Output: Ok, or a
+/// `PermissionDenied` error with the reason.
+fn judged(facts: &Facts, user: &[u8], folder: bool) -> io::Result<()> {
+    let verdict = if folder {
+        judge_folder(facts, user)
+    } else {
+        judge(facts, user)
+    };
+    verdict.map_err(refused)
 }
 
 /// Reads an open object's owner, lists, attributes, link count and real place. Relies on the

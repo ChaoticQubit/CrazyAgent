@@ -1,4 +1,7 @@
-use crate::dacl::{ADMINISTRATORS, SYSTEM, allowing, label, other_writer, trusted_owner};
+use crate::dacl::{
+    ADMINISTRATORS, SYSTEM, allowing, inherited_grantee, inherited_label, label, other_writer,
+    trusted_owner,
+};
 
 #[cfg(windows)]
 pub use crate::win::private::{
@@ -56,6 +59,29 @@ pub fn judge(facts: &Facts, user: &[u8]) -> Result<(), &'static str> {
         && (level < MEDIUM_LEVEL || policy & NO_WRITE_UP == 0)
     {
         return Err("a lower integrity process may change a private path");
+    }
+    Ok(())
+}
+
+/// Judges a private folder: [`judge`] on the folder itself, and, since on Windows a child is
+/// opened by its own path whatever its folder allows, no inheritable allow entry for another
+/// account and no inheritable label below medium or without no-write-up, so what is made in
+/// it, SQLite's side files included, starts private. Inputs: the facts and the user's SID.
+/// Output: Ok, or the reason it is not private.
+pub fn judge_folder(facts: &Facts, user: &[u8]) -> Result<(), &'static str> {
+    judge(facts, user)?;
+    let list = facts
+        .list
+        .as_deref()
+        .expect("judge refuses an object with no access list");
+    if inherited_grantee(list, user)?.is_some() {
+        return Err("a private folder hands another account access to what is made in it");
+    }
+    if let Some(sacl) = facts.label.as_deref()
+        && let Some((level, policy)) = inherited_label(sacl)?
+        && (level < MEDIUM_LEVEL || policy & NO_WRITE_UP == 0)
+    {
+        return Err("a private folder hands a lower integrity label to what is made in it");
     }
     Ok(())
 }

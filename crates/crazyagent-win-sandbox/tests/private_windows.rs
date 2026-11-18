@@ -291,24 +291,22 @@ fn a_private_file_with_a_low_label_is_refused() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
-/// W1c D5 (F36): an existing folder of this user that other users may change is made
-/// private again by repair, keeping what it holds, and a junction in place of such a folder
-/// is refused and its target left as it was.
+/// W1c D5 (F36): an existing empty folder of this user that other users may change is made
+/// private again by repair, and a junction in place of such a folder is refused and its
+/// target left as it was.
 #[test]
 fn repair_makes_an_open_folder_of_this_user_private_and_refuses_a_junction() {
     let folder = scratch("repair");
     std::fs::create_dir(&folder).unwrap();
-    std::fs::write(folder.join("kept"), "x").unwrap();
     grant(&folder, "S-1-5-11", "M");
     assert!(private::dir(&folder).is_err());
     let user = private::user_sid().unwrap();
     let held = private::repair(&folder).unwrap();
     let facts = private::facts(&held).unwrap();
     only_trusted(facts.list.as_deref().unwrap(), &user);
-    assert_eq!(private::judge(&facts, &user), Ok(()));
+    assert_eq!(private::judge_folder(&facts, &user), Ok(()));
     drop(held);
     drop(private::dir(&folder).unwrap());
-    assert_eq!(std::fs::read_to_string(folder.join("kept")).unwrap(), "x");
     let target = scratch("repair-target");
     std::fs::create_dir(&target).unwrap();
     grant(&target, "S-1-5-11", "M");
@@ -327,5 +325,39 @@ fn repair_makes_an_open_folder_of_this_user_private_and_refuses_a_junction() {
     assert!(private::dir(&target).is_err());
     std::fs::remove_dir(&junction).unwrap();
     std::fs::remove_dir_all(&target).unwrap();
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+/// #512 r2 (rv-sec2 F1, rv-code4 F2): a private folder whose inherit-only entry hands
+/// authenticated users read on what is made in it is refused by `dir`, so SQLite's side
+/// files never start open to them.
+#[test]
+fn a_folder_handing_other_users_access_to_what_is_made_in_it_is_refused() {
+    let folder = scratch("handed");
+    drop(private::dir(&folder).unwrap());
+    let entry = "*S-1-5-11:(OI)(IO)(R)";
+    run("icacls", &[folder.to_str().unwrap(), "/grant", entry]);
+    assert!(private::dir(&folder).is_err());
+    std::fs::remove_dir_all(&folder).unwrap();
+}
+
+/// #512 r2: repair refuses a folder that already holds a file, which keeps its own explicit
+/// entries whatever the folder's new list says, and changes nothing, so `dir` still refuses
+/// the folder and a second repair refuses it again.
+#[test]
+fn repair_refuses_a_folder_that_already_holds_a_file_and_changes_nothing() {
+    let folder = scratch("repair-held");
+    std::fs::create_dir(&folder).unwrap();
+    grant(&folder, "S-1-5-11", "M");
+    let kept = folder.join("kept");
+    std::fs::write(&kept, "x").unwrap();
+    run(
+        "icacls",
+        &[kept.to_str().unwrap(), "/grant", "*S-1-5-11:(R)"],
+    );
+    assert!(private::repair(&folder).is_err());
+    assert!(private::dir(&folder).is_err());
+    assert!(private::repair(&folder).is_err());
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), "x");
     std::fs::remove_dir_all(&folder).unwrap();
 }

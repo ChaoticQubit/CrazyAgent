@@ -168,6 +168,9 @@ pub const TRUSTED_INSTALLER: [u8; 32] = [
 ];
 /// The SID `S-1-3-4` (OWNER RIGHTS) as bytes, which stands for whoever owns the object.
 pub const OWNER_RIGHTS: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 3, 4, 0, 0, 0];
+/// The SID `S-1-3-0` (CREATOR OWNER) as bytes, which an inherited entry turns into whoever
+/// creates the child.
+pub const CREATOR_OWNER: [u8; 12] = [1, 1, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0];
 
 const WRITE_DATA: u32 = 0x0000_0002;
 const APPEND_DATA: u32 = 0x0000_0004;
@@ -251,6 +254,42 @@ pub fn other_writer<'a>(
             Some(_) => {}
             None if DENY_TYPES.contains(&kind) => {}
             None => return Err("the access list holds an allow entry this check cannot read"),
+        }
+    }
+    Ok(None)
+}
+
+/// The first SID other than SYSTEM, the administrators, TrustedInstaller, CREATOR OWNER,
+/// OWNER RIGHTS and the user that a folder's allow entry hands any right on what is made in
+/// it (object or container inherit, inherit-only or not); an inheritable allow entry this
+/// reader cannot parse is an error. Inputs: the list bytes and the user's SID bytes. Output:
+/// that SID, none, or the reason the list is malformed or unreadable.
+pub fn inherited_grantee<'a>(acl: &'a [u8], user: &[u8]) -> Result<Option<&'a [u8]>, &'static str> {
+    assert!(user.len() >= ACE_HEADER_BYTES);
+    let allowed = [
+        &SYSTEM[..],
+        &ADMINISTRATORS[..],
+        &TRUSTED_INSTALLER[..],
+        &CREATOR_OWNER[..],
+        &OWNER_RIGHTS[..],
+        user,
+    ];
+    for span in spans(acl)? {
+        let kind = acl[span.range.start];
+        if acl[span.range.start + 1] & (OBJECT_INHERIT | CONTAINER_INHERIT) == 0 {
+            continue;
+        }
+        match span.entry {
+            Some(entry) if entry.allows && entry.mask != 0 && !allowed.contains(&entry.sid) => {
+                return Ok(Some(entry.sid));
+            }
+            Some(_) => {}
+            None if DENY_TYPES.contains(&kind) => {}
+            None => {
+                return Err(
+                    "the access list holds an inheritable allow entry this check cannot read",
+                );
+            }
         }
     }
     Ok(None)
@@ -571,9 +610,26 @@ pub fn allowing(sids: &[&[u8]], flags: u8, mask: u32) -> Vec<u8> {
 /// Input: the list bytes Windows copied out with the label asked for. Output: the level and
 /// policy, None when no label applies, or the reason the list or a label is malformed.
 pub fn label(sacl: &[u8]) -> Result<Option<(u32, u32)>, &'static str> {
+    first_label(sacl, |flags| flags & INHERIT_ONLY == 0)
+}
+
+/// The mandatory label a folder's system access list hands what is made in it, an entry with
+/// object or container inherit, inherit-only or not, read as [`label`] reads its own.
+/// Input: the list bytes. Output: the level and policy, None when no label is handed down,
+/// or the reason the list or a label is malformed.
+pub fn inherited_label(sacl: &[u8]) -> Result<Option<(u32, u32)>, &'static str> {
+    first_label(sacl, |flags| {
+        flags & (OBJECT_INHERIT | CONTAINER_INHERIT) != 0
+    })
+}
+
+/// The first mandatory label entry whose flags `wanted` accepts, as its level and policy.
+/// Inputs: the system list bytes and the flag test. Output: the level and policy, None when
+/// no such label exists, or the reason the list or the label is malformed.
+fn first_label(sacl: &[u8], wanted: fn(u8) -> bool) -> Result<Option<(u32, u32)>, &'static str> {
     for span in spans(sacl)? {
         let at = span.range.start;
-        if sacl[at] != MANDATORY_LABEL || sacl[at + 1] & INHERIT_ONLY != 0 {
+        if sacl[at] != MANDATORY_LABEL || !wanted(sacl[at + 1]) {
             continue;
         }
         let policy = u32::from_le_bytes([sacl[at + 4], sacl[at + 5], sacl[at + 6], sacl[at + 7]]);
