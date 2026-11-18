@@ -96,6 +96,24 @@ pub fn engine_socket(raw: &OsStr) -> Result<PathBuf, &'static str> {
     }
 }
 
+/// Whether the agent has its own tmux server, as a native-mode lead does inside its sandbox:
+/// any file at that server's private socket path, read by `lstat` only and never connected
+/// to, since a tmux server can make its client run a command. Such an agent keeps today's
+/// renderer, whose engine reaches that server only from inside the lead's profile. Inputs:
+/// the engine root and the checked window name. Output: the answer; a name that is not a team
+/// agent has no own server.
+pub fn own_server(engine_root: &std::path::Path, name: &str) -> bool {
+    assert!(engine_root.is_absolute());
+    let Ok(agent) = crate::bridge::terminal::agent(name) else {
+        return false;
+    };
+    let Ok(socket) = crazyagent::terminal::harness_socket(engine_root, &agent) else {
+        return false;
+    };
+    assert!(!socket.starts_with(engine_root.join("terminal")));
+    std::fs::symlink_metadata(socket).is_ok()
+}
+
 /// Checks the agent window name a page asks for: a team agent id, plain letters, digits,
 /// dashes and underscores. Input: the name. Output: the name, or a plain code.
 pub fn window_name(name: &str) -> Result<String, &'static str> {
