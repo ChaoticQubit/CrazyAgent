@@ -448,7 +448,7 @@ pub fn git_tracks(project_root: &Path, folder: &Path) -> Result<bool, &'static s
         .envs(crate::research::runner::GIT_SAFE_ENV)
         .env("GIT_LITERAL_PATHSPECS", "1")
         .arg("--no-optional-locks")
-        .args(crate::research::runner::GIT_SAFE)
+        .args(crate::research::runner::git_safe())
         .arg("--git-dir")
         .arg(&git_dir)
         .arg("--work-tree")

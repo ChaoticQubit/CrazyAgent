@@ -3,6 +3,7 @@ use crate::engine::owner::failure;
 use serde_json::{Map, Value};
 use std::ffi::OsString;
 use std::path::Path;
+use std::sync::LazyLock;
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -26,52 +27,61 @@ const KEYS: usize = 17;
 /// command and the signature programs are [`NO_PROGRAM`], never a `false` a path lookup
 /// finds on Unix (V243-WORKTREES-GIT-FLAKE). The server's environment adds them after its
 /// allowlist.
-pub const CONFIG_ENV: [(&str, &str); 1 + 2 * KEYS] = [
-    ("GIT_CONFIG_COUNT", "17"),
-    ("GIT_CONFIG_KEY_0", "diff.ignoreSubmodules"),
-    ("GIT_CONFIG_VALUE_0", "all"),
-    ("GIT_CONFIG_KEY_1", "safe.bareRepository"),
-    ("GIT_CONFIG_VALUE_1", "explicit"),
-    ("GIT_CONFIG_KEY_2", "core.fsmonitor"),
-    ("GIT_CONFIG_VALUE_2", "false"),
-    ("GIT_CONFIG_KEY_3", "core.sshCommand"),
-    ("GIT_CONFIG_VALUE_3", NO_PROGRAM),
-    ("GIT_CONFIG_KEY_4", "core.pager"),
-    ("GIT_CONFIG_VALUE_4", "cat"),
-    ("GIT_CONFIG_KEY_5", "credential.helper"),
-    ("GIT_CONFIG_VALUE_5", ""),
-    ("GIT_CONFIG_KEY_6", "gpg.program"),
-    ("GIT_CONFIG_VALUE_6", NO_PROGRAM),
-    ("GIT_CONFIG_KEY_7", "gpg.ssh.program"),
-    ("GIT_CONFIG_VALUE_7", NO_PROGRAM),
-    ("GIT_CONFIG_KEY_8", "gpg.x509.program"),
-    ("GIT_CONFIG_VALUE_8", NO_PROGRAM),
-    ("GIT_CONFIG_KEY_9", "gc.worktreePruneExpire"),
-    ("GIT_CONFIG_VALUE_9", "never"),
-    ("GIT_CONFIG_KEY_10", "commit.gpgSign"),
-    ("GIT_CONFIG_VALUE_10", "false"),
-    ("GIT_CONFIG_KEY_11", "tag.gpgSign"),
-    ("GIT_CONFIG_VALUE_11", "false"),
-    ("GIT_CONFIG_KEY_12", "tag.forceSignAnnotated"),
-    ("GIT_CONFIG_VALUE_12", "false"),
-    ("GIT_CONFIG_KEY_13", "gc.reflogExpire"),
-    ("GIT_CONFIG_VALUE_13", "never"),
-    ("GIT_CONFIG_KEY_14", "gc.reflogExpireUnreachable"),
-    ("GIT_CONFIG_VALUE_14", "never"),
-    ("GIT_CONFIG_KEY_15", "log.showSignature"),
-    ("GIT_CONFIG_VALUE_15", "false"),
-    ("GIT_CONFIG_KEY_16", "core.hooksPath"),
-    ("GIT_CONFIG_VALUE_16", "/dev/null"),
-];
+pub fn config_env() -> &'static [(&'static str, &'static str); CONFIG_ENV_LEN] {
+    static ENV: LazyLock<[(&'static str, &'static str); CONFIG_ENV_LEN]> = LazyLock::new(|| {
+        [
+            ("GIT_CONFIG_COUNT", "17"),
+            ("GIT_CONFIG_KEY_0", "diff.ignoreSubmodules"),
+            ("GIT_CONFIG_VALUE_0", "all"),
+            ("GIT_CONFIG_KEY_1", "safe.bareRepository"),
+            ("GIT_CONFIG_VALUE_1", "explicit"),
+            ("GIT_CONFIG_KEY_2", "core.fsmonitor"),
+            ("GIT_CONFIG_VALUE_2", "false"),
+            ("GIT_CONFIG_KEY_3", "core.sshCommand"),
+            ("GIT_CONFIG_VALUE_3", NO_PROGRAM),
+            ("GIT_CONFIG_KEY_4", "core.pager"),
+            ("GIT_CONFIG_VALUE_4", "cat"),
+            ("GIT_CONFIG_KEY_5", "credential.helper"),
+            ("GIT_CONFIG_VALUE_5", ""),
+            ("GIT_CONFIG_KEY_6", "gpg.program"),
+            ("GIT_CONFIG_VALUE_6", NO_PROGRAM),
+            ("GIT_CONFIG_KEY_7", "gpg.ssh.program"),
+            ("GIT_CONFIG_VALUE_7", NO_PROGRAM),
+            ("GIT_CONFIG_KEY_8", "gpg.x509.program"),
+            ("GIT_CONFIG_VALUE_8", NO_PROGRAM),
+            ("GIT_CONFIG_KEY_9", "gc.worktreePruneExpire"),
+            ("GIT_CONFIG_VALUE_9", "never"),
+            ("GIT_CONFIG_KEY_10", "commit.gpgSign"),
+            ("GIT_CONFIG_VALUE_10", "false"),
+            ("GIT_CONFIG_KEY_11", "tag.gpgSign"),
+            ("GIT_CONFIG_VALUE_11", "false"),
+            ("GIT_CONFIG_KEY_12", "tag.forceSignAnnotated"),
+            ("GIT_CONFIG_VALUE_12", "false"),
+            ("GIT_CONFIG_KEY_13", "gc.reflogExpire"),
+            ("GIT_CONFIG_VALUE_13", "never"),
+            ("GIT_CONFIG_KEY_14", "gc.reflogExpireUnreachable"),
+            ("GIT_CONFIG_VALUE_14", "never"),
+            ("GIT_CONFIG_KEY_15", "log.showSignature"),
+            ("GIT_CONFIG_VALUE_15", "false"),
+            ("GIT_CONFIG_KEY_16", "core.hooksPath"),
+            ("GIT_CONFIG_VALUE_16", "/dev/null"),
+        ]
+    });
+    LazyLock::force(&ENV)
+}
 
-/// The ssh command and every signature program under [`CONFIG_ENV`]: on Unix `/dev/null`,
+/// How many variables [`config_env`] holds: `GIT_CONFIG_COUNT` and a key and a value for
+/// each of the `KEYS` settings.
+pub const CONFIG_ENV_LEN: usize = 1 + 2 * KEYS;
+
+/// The ssh command and every signature program under [`config_env`]: on Unix `/dev/null`,
 /// an absolute path git cannot start, so the transport or check fails and nothing runs;
 /// elsewhere the bare `false` for now, which a path lookup resolves
 /// (V244-WIN-GIT-SAFE-PROGRAM-PATH).
 const NO_PROGRAM: &str = if cfg!(unix) { "/dev/null" } else { "false" };
 
 /// The `GIT_CONFIG_COUNT` the shim sets for the project folder when the owner lets the IDE
-/// run the project's hooks: every [`CONFIG_ENV`] key but the last, `core.hooksPath`.
+/// run the project's hooks: every [`config_env`] key but the last, `core.hooksPath`.
 const PROJECT_HOOKS_COUNT: &str = "16";
 
 /// The variable that ends git's search for a repository at the project's agents root
@@ -347,7 +357,7 @@ if [ \"$code\" -ne 0 ]; then\n  exit \"$code\"\nfi\nexit \"$step\"\n"
 /// character, it keeps the PATH's git. With a project folder the owner let run its own hooks,
 /// it first sets `GIT_CONFIG_COUNT` to [`PROJECT_HOOKS_COUNT`] when its physical working
 /// directory is exactly that folder, so git there runs the project's hooks and every other
-/// [`CONFIG_ENV`] key stays forced. With `index`, it ends in [`private_flow`]; a later Full
+/// [`config_env`] key stays forced. With `index`, it ends in [`private_flow`]; a later Full
 /// access server, with no profile, passes none. Inputs: the hooks folder or None, the
 /// absolute git ([`crate::research::runner::sandboxed_git`]) and the project and private
 /// folders or None. Output: the text, or `ide_settings_invalid` for a folder that is not
@@ -357,10 +367,10 @@ pub fn shim_text(
     git: &Path,
     index: Option<(&Path, &Path)>,
 ) -> Result<String, EngineError> {
-    assert_eq!(CONFIG_ENV[0].1.parse::<usize>(), Ok(KEYS));
+    assert_eq!(config_env()[0].1.parse::<usize>(), Ok(KEYS));
     assert_eq!(PROJECT_HOOKS_COUNT.parse::<usize>(), Ok(KEYS - 1));
     assert_eq!(
-        CONFIG_ENV[2 * KEYS - 1],
+        config_env()[2 * KEYS - 1],
         ("GIT_CONFIG_KEY_16", "core.hooksPath")
     );
     assert!(

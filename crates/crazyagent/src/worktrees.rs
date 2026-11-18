@@ -301,7 +301,7 @@ fn git_command(repository: &Path, args: &[&str]) -> Process {
         .env("GIT_GRAFT_FILE", "/dev/null")
         .arg("--no-replace-objects")
         .arg("--no-optional-locks")
-        .args(crate::research::runner::GIT_SAFE)
+        .args(crate::research::runner::git_safe())
         .args([
             "-c",
             "core.attributesFile=/dev/null",

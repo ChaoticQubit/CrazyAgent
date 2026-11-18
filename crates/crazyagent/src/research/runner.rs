@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -44,42 +44,52 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub(crate) const GIT: &str = "/usr/bin/git";
 /// The settings every engine git runs with, whatever the repository configures: no hooks,
 /// fsmonitor, pager, submodule recursion or transport, no signature check on a log or show
-/// (RV-DS241-39 r2 F2), and no signature program the repository names (RV-DS241-39). On
-/// Unix each program is `/dev/null`, which git cannot start and goes on without; a started
-/// `/usr/bin/false` could exit before git wrote it an ssh payload and kill git with SIGPIPE
-/// (V243-WORKTREES-GIT-FLAKE). Windows keeps `/usr/bin/false` (V244-WIN-GIT-SAFE-PROGRAM-PATH).
-pub(crate) const GIT_SAFE: [&str; 18] = [
-    "-c",
-    "core.hooksPath=/dev/null",
-    "-c",
-    "core.fsmonitor=false",
-    "-c",
-    "core.pager=cat",
-    "-c",
-    "submodule.recurse=false",
-    "-c",
-    "protocol.allow=never",
-    "-c",
+/// (RV-DS241-39 r2 F2), and [`no_program`] for every signature program the repository could
+/// name (RV-DS241-39). Output: the nine `-c` pairs, built once.
+pub(crate) fn git_safe() -> &'static [String; GIT_SAFE_LEN] {
+    static SAFE: LazyLock<[String; GIT_SAFE_LEN]> = LazyLock::new(|| safe_settings(no_program()));
+    LazyLock::force(&SAFE)
+}
+
+/// How many arguments [`git_safe`] holds: nine `-c` pairs.
+const GIT_SAFE_LEN: usize = 18;
+
+/// The [`git_safe`] arguments, naming `program` for every signature program. Input: the
+/// value. Output: the nine `-c` pairs.
+fn safe_settings(program: &str) -> [String; GIT_SAFE_LEN] {
+    [
+        "-c".to_owned(),
+        "core.hooksPath=/dev/null".to_owned(),
+        "-c".to_owned(),
+        "core.fsmonitor=false".to_owned(),
+        "-c".to_owned(),
+        "core.pager=cat".to_owned(),
+        "-c".to_owned(),
+        "submodule.recurse=false".to_owned(),
+        "-c".to_owned(),
+        "protocol.allow=never".to_owned(),
+        "-c".to_owned(),
+        format!("gpg.program={program}"),
+        "-c".to_owned(),
+        format!("gpg.x509.program={program}"),
+        "-c".to_owned(),
+        format!("gpg.ssh.program={program}"),
+        "-c".to_owned(),
+        "log.showSignature=false".to_owned(),
+    ]
+}
+
+/// What a git the engine starts names for a program it must never run: on Unix `/dev/null`,
+/// which git cannot start and goes on without, where a started `/usr/bin/false` could exit
+/// before git wrote it an ssh payload and kill git with SIGPIPE (V243-WORKTREES-GIT-FLAKE);
+/// elsewhere `/usr/bin/false` for now (V244-WIN-GIT-SAFE-PROGRAM-PATH). Output: the value.
+pub(crate) fn no_program() -> &'static str {
     if cfg!(unix) {
-        "gpg.program=/dev/null"
+        "/dev/null"
     } else {
-        "gpg.program=/usr/bin/false"
-    },
-    "-c",
-    if cfg!(unix) {
-        "gpg.x509.program=/dev/null"
-    } else {
-        "gpg.x509.program=/usr/bin/false"
-    },
-    "-c",
-    if cfg!(unix) {
-        "gpg.ssh.program=/dev/null"
-    } else {
-        "gpg.ssh.program=/usr/bin/false"
-    },
-    "-c",
-    "log.showSignature=false",
-];
+        "/usr/bin/false"
+    }
+}
 /// The variables every engine git sets whatever else it needs: no lazy fetch of an object a
 /// partial clone lacks, so a repository's own promisor remote never runs a command on a read
 /// (RV-DS241-71), no system config or attributes and no prompt.
@@ -2778,7 +2788,7 @@ pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<
         command.process_group(0);
     }
     command
-        .args(GIT_SAFE)
+        .args(git_safe())
         .args(arguments)
         .current_dir(root)
         .env_clear()
@@ -3126,14 +3136,14 @@ fn real_git() -> Option<PathBuf> {
 }
 
 /// A git command for the engine's own worktree steps under the agent's installed profile:
-/// no global config, no lazy fetch and the [`GIT_SAFE`] settings, with no input or output.
+/// no global config, no lazy fetch and the [`git_safe`] settings, with no input or output.
 /// Takes the sandbox and its installed profile. Returns the command, ready for arguments.
 #[cfg(unix)]
 fn worktree_git(sandbox: &ProjectSandbox, profile: &Path) -> Command {
     let mut git = sandbox.command(profile, sandboxed_git());
     git.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .envs(GIT_SAFE_ENV)
-        .args(GIT_SAFE)
+        .args(git_safe())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(setup_debug_stderr());
@@ -3153,7 +3163,7 @@ pub(crate) struct AgentGit {
 
 /// Runs one git command in a folder an agent owns with that agent's own rights (DEC-104
 /// K5b): under its installed profile, as the worktree setup steps run, with the
-/// [`GIT_SAFE`] settings, the editor `:` git never starts (no path lookup) and the caller's
+/// [`git_safe`] settings, the editor `:` git never starts (no path lookup) and the caller's
 /// extra variables, within the setup time limit. Output is read while it runs. Takes the
 /// agent's sandbox, its installed profile, the folder, the arguments, the variables and
 /// the most output bytes kept. Returns how it ended, or the spawn failure.

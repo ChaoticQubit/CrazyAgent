@@ -76,7 +76,7 @@ pub(crate) fn list(
         .env("GIT_COMMON_DIR", &git_dir)
         .envs(crate::research::runner::GIT_SAFE_ENV)
         .arg("--no-optional-locks")
-        .args(crate::research::runner::GIT_SAFE)
+        .args(crate::research::runner::git_safe())
         .args(["-c", "core.untrackedCache=false"])
         .arg("--git-dir")
         .arg(&git_dir)

@@ -529,7 +529,7 @@ fn server_env_holds_only_allowlisted_names() {
         crate::ide::git::CEILING_VARIABLE,
         "/private/tmp/project/.crazyagent/worktrees",
     ));
-    expected.extend(crate::ide::git::CONFIG_ENV);
+    expected.extend(crate::ide::git::config_env());
     expected.push(("GIT_CONFIG_GLOBAL", "/private/tmp/ide/project/gitconfig"));
     expected.push(("GIT_CONFIG_NOSYSTEM", "1"));
     expected.sort();
@@ -544,7 +544,7 @@ fn server_env_holds_only_allowlisted_names() {
             || *name == crate::ide::git::CEILING_VARIABLE
             || *name == "GIT_CONFIG_GLOBAL"
             || *name == "GIT_CONFIG_NOSYSTEM"
-            || crate::ide::git::CONFIG_ENV
+            || crate::ide::git::config_env()
                 .iter()
                 .any(|(fixed, _)| name == fixed)
     }));
@@ -2098,7 +2098,7 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
         "the server starts in a folder its profile lets it read, so getcwd works under Seatbelt"
     );
     let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = command.get_envs().collect();
-    for (name, value) in crate::ide::git::CONFIG_ENV {
+    for (name, value) in crate::ide::git::config_env() {
         assert!(
             envs.contains(&(
                 std::ffi::OsStr::new(name),
