@@ -3,13 +3,15 @@ use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::terminal::windows::ConptyHost;
 use crate::terminal::{AgentId, Host};
 use std::io::Read;
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::time::Instant;
 
-const CONNECT: &str = "PROBE_CONNECT_PORT";
+const CONNECT: &str = "PROBE_CONNECT_ADDRESS";
 const EXEMPT: &str = "PROBE_LOOPBACK_EXEMPT";
+const OUTSIDE_HOST: &str = "github.com:443";
 const SEEN_WAIT: Duration = Duration::from_secs(30);
 const CONNECT_WAIT: Duration = Duration::from_secs(5);
+const READ_WAIT: Duration = Duration::from_secs(2);
 
 /// Turns a command into the pane command a terminal host starts: its program and arguments
 /// as text, its folder and the variables it sets. Input: the command, plain or wrapped by
@@ -31,19 +33,23 @@ fn pane_command(command: &Command) -> InteractiveCommand {
     }
 }
 
-/// Waits until a pane's screen shows `text` at least `times` times, or [`SEEN_WAIT`] ends.
-/// Inputs: the host, the pane, the text and the count. Output: whether it was seen, and the
-/// last screen as text.
-fn shows(host: &dyn Host, agent: &AgentId, text: &str, times: usize) -> (bool, String) {
-    assert!(times > 0);
+/// Waits until a pane's screen shows `text`, or [`SEEN_WAIT`] ends. The text is one only a
+/// command's output prints, never the typed line, so a prompt that wraps cannot hide it.
+/// Inputs: the host, the pane and the text. Output: whether it was seen, and the last
+/// screen as text, or the last refusal of the screen read.
+fn shows(host: &dyn Host, agent: &AgentId, text: &str) -> (bool, String) {
+    assert!(!text.is_empty());
     let start = Instant::now();
     let mut last = String::new();
     while start.elapsed() < SEEN_WAIT {
-        if let Ok(screen) = host.screen(agent) {
-            last = String::from_utf8_lossy(&screen).into_owned();
-            if last.matches(text).count() >= times {
-                return (true, last);
+        match host.screen(agent) {
+            Ok(screen) => {
+                last = String::from_utf8_lossy(&screen).into_owned();
+                if last.contains(text) {
+                    return (true, last);
+                }
             }
+            Err(error) => last = format!("screen refused {error:?}"),
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -62,10 +68,10 @@ fn p5_a_contained_shell_on_a_pseudoconsole() {
     plain.arg("/K").current_dir(&folders.project);
     let control = AgentId::new("p5-control").unwrap();
     host.spawn(&control, &pane_command(&plain)).unwrap();
-    host.input(&control, b"echo p5 control 4242\r").unwrap();
-    let (seen, screen) = shows(&host, &control, "p5 control 4242", 2);
-    assert!(seen, "the plain control shell never echoed: {screen}");
-    println!("PROBE P5 control: echoed");
+    host.input(&control, b"set /a 21*202\r").unwrap();
+    let (seen, screen) = shows(&host, &control, "4242");
+    assert!(seen, "the plain control shell never answered: {screen}");
+    println!("PROBE P5 control: answered");
     host.kill(&control).unwrap();
     let installed = WindowsSandbox::install(
         policy(&folders, SandboxNetwork::Only(Vec::new())),
@@ -83,11 +89,11 @@ fn p5_a_contained_shell_on_a_pseudoconsole() {
         return;
     }
     println!("PROBE P5 spawn: started");
-    let (drawn, screen) = shows(&host, &agent, ">", 1);
+    let (drawn, screen) = shows(&host, &agent, ">");
     println!("PROBE P5 screen: drawn={drawn} {:?}", screen.trim());
-    host.input(&agent, b"echo p5 typed 4242\r").unwrap();
-    let (typed, screen) = shows(&host, &agent, "p5 typed 4242", 2);
-    println!("PROBE P5 keys: echoed={typed} {:?}", screen.trim());
+    host.input(&agent, b"set /a 21*202\r").unwrap();
+    let (typed, screen) = shows(&host, &agent, "4242");
+    println!("PROBE P5 keys: answered={typed} {:?}", screen.trim());
     let brief = folders.project.join("context").join("brief.md");
     host.input(&agent, b"echo p5>p5.txt\r").unwrap();
     host.input(
@@ -95,8 +101,8 @@ fn p5_a_contained_shell_on_a_pseudoconsole() {
         format!("echo changed>\"{}\"\r", brief.display()).as_bytes(),
     )
     .unwrap();
-    host.input(&agent, b"echo p5 done 4242\r").unwrap();
-    let (done, _) = shows(&host, &agent, "p5 done 4242", 2);
+    host.input(&agent, b"set /a 1000+3243\r").unwrap();
+    let (done, _) = shows(&host, &agent, "4243");
     println!(
         "PROBE P5 contained: done={done} project_write={} protected_unchanged={}",
         folders.project.join("p5.txt").is_file(),
@@ -105,10 +111,10 @@ fn p5_a_contained_shell_on_a_pseudoconsole() {
     host.kill(&agent).unwrap();
 }
 
-/// The loopback probe command: the test binary copy run as [`net_child`] with the port, in
-/// the project folder. Inputs: the copy, the folders and the port. Output: the command,
-/// still to be wrapped for a container run.
-fn net_command(probe: &Path, folders: &Folders, port: u16) -> Command {
+/// The connect probe command: the test binary copy run as [`net_child`] with one address,
+/// in the project folder. Inputs: the copy, the folders and the address. Output: the
+/// command, still to be wrapped for a container run.
+fn net_command(probe: &Path, folders: &Folders, address: SocketAddr) -> Command {
     let mut command = Command::new(probe);
     command
         .args([
@@ -118,63 +124,69 @@ fn net_command(probe: &Path, folders: &Folders, port: u16) -> Command {
             "--test-threads",
             "1",
         ])
-        .env(CONNECT, port.to_string())
+        .env(CONNECT, address.to_string())
         .current_dir(&folders.project);
     command
 }
 
-/// Runs a loopback probe command and keeps its one NET line. Input: the command, plain or
-/// wrapped. Output: the line, or what the run printed and how it ended when no line came.
+/// Runs a connect probe command and keeps what follows `NET ` in its output, which the test
+/// runner may print on the same line as the test's name. Input: the command, plain or
+/// wrapped. Output: that text, or what the run printed and how it ended without one.
 fn net_line(mut command: Command) -> String {
     let output = crate::spawn_gate::collected(&mut command).unwrap();
     let text = String::from_utf8_lossy(&output.stdout).into_owned();
     text.lines()
-        .find(|line| line.starts_with("NET "))
-        .map_or_else(
-            || format!("no NET line, {}: {}", output.status, text.trim()),
-            str::to_owned,
-        )
+        .find_map(|line| line.find("NET ").map(|at| line[at..].to_owned()))
+        .unwrap_or_else(|| format!("no NET line, {}: {}", output.status, text.trim()))
 }
 
-/// Runs CheckNetIsolation with one loopback exemption verb for a container by name.
-/// Inputs: the verb (`-a` adds, `-d` removes) and the container name. Output: the exit and
-/// what it printed, as one line.
-fn exemption(verb: &str, container: &str) -> String {
+/// Runs CheckNetIsolation's loopback exemption tool with its arguments and gives its exit
+/// and both streams as one line. Input: the arguments after `LoopbackExempt`. Output: the
+/// line.
+fn exemption(arguments: &[&str]) -> String {
     let tool = PathBuf::from(system_root())
         .join("System32")
         .join("CheckNetIsolation.exe");
     let mut command = Command::new(tool);
-    command.args(["LoopbackExempt", verb, &format!("-n={container}")]);
+    command.arg("LoopbackExempt").args(arguments);
     let output = crate::spawn_gate::collected(&mut command).unwrap();
     format!(
-        "{} {}",
+        "{} out={:?} err={:?}",
         output.status,
-        String::from_utf8_lossy(&output.stdout).trim()
+        String::from_utf8_lossy(&output.stdout).trim(),
+        String::from_utf8_lossy(&output.stderr).trim()
     )
 }
 
 /// P6 (NOTE-0207): does a container started through the real helper reach a port the engine
-/// listens on at 127.0.0.1, with the internet client capability and with no network, beside
-/// an unconfined copy as the control. With PROBE_LOOPBACK_EXEMPT set it also exempts the
-/// open container through CheckNetIsolation, tries again and removes the exemption.
+/// listens on at 127.0.0.1, and an outside host on 443, with the internet client capability
+/// and with no network, beside an unconfined copy as the asserted control for both. With
+/// PROBE_LOOPBACK_EXEMPT set it also exempts the open container, tries again and removes it.
 #[test]
 fn p6_a_container_and_the_engine_loopback_port() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let loopback = listener.local_addr().unwrap();
     std::thread::spawn(move || {
         for mut stream in listener.incoming().flatten() {
             let _ = stream.write_all(b"ok");
         }
     });
+    let outside = OUTSIDE_HOST
+        .to_socket_addrs()
+        .unwrap()
+        .find(SocketAddr::is_ipv4)
+        .unwrap();
     let folders = folders();
     let probe = folders.home.join("net-call.exe");
     fs::copy(std::env::current_exe().unwrap(), &probe).unwrap();
-    let control = net_line(net_command(&probe, &folders, port));
-    assert!(
-        control.starts_with("NET connected"),
-        "the unconfined control did not connect: {control}"
-    );
-    println!("PROBE P6 control: {control}");
+    for (target, address) in [("loopback", loopback), ("outside", outside)] {
+        let control = net_line(net_command(&probe, &folders, address));
+        assert!(
+            control.starts_with("NET connected"),
+            "the unconfined control did not reach {target}: {control}"
+        );
+        println!("PROBE P6 control {target}: {control}");
+    }
     for (label, network) in [
         ("open", SandboxNetwork::Open),
         ("none", SandboxNetwork::Only(Vec::new())),
@@ -187,29 +199,34 @@ fn p6_a_container_and_the_engine_loopback_port() {
             &folders.grants,
         )
         .unwrap();
-        let contained =
-            || net_line(Sandbox::wrap(&installed, &net_command(&probe, &folders, port)).unwrap());
-        println!("PROBE P6 {label}: {}", contained());
+        let contained = |address: SocketAddr| {
+            net_line(Sandbox::wrap(&installed, &net_command(&probe, &folders, address)).unwrap())
+        };
+        println!("PROBE P6 {label} loopback: {}", contained(loopback));
+        println!("PROBE P6 {label} outside: {}", contained(outside));
         if label == "open" && std::env::var_os(EXEMPT).is_some() {
             let container = BoundaryProfile::load(&profile).unwrap().container;
-            println!("PROBE P6 exempt add: {}", exemption("-a", &container));
-            println!("PROBE P6 open exempt: {}", contained());
-            println!("PROBE P6 exempt remove: {}", exemption("-d", &container));
+            let name = format!("-n={container}");
+            println!("PROBE P6 exempt add: {}", exemption(&["-a", &name]));
+            println!("PROBE P6 exempt list: {}", exemption(&["-s"]));
+            println!("PROBE P6 open loopback exempt: {}", contained(loopback));
+            println!("PROBE P6 exempt remove: {}", exemption(&["-d", &name]));
         }
     }
 }
 
-/// The loopback child P6 starts: connects to 127.0.0.1 at the port in [`CONNECT`] within
-/// [`CONNECT_WAIT`] and prints one NET line with what it read or the error and its code.
-/// Without the variable, as in a normal test run, it does nothing.
+/// The connect child P6 starts: connects to the address in [`CONNECT`] within
+/// [`CONNECT_WAIT`], reads for at most [`READ_WAIT`] and prints one NET line with what it
+/// read or the error and its code. Without the variable, as in a normal run, it does nothing.
 #[test]
 fn net_child() {
-    let Ok(port) = std::env::var(CONNECT) else {
+    let Ok(address) = std::env::var(CONNECT) else {
         return;
     };
-    let address = SocketAddr::from(([127, 0, 0, 1], port.parse::<u16>().unwrap()));
+    let address: SocketAddr = address.parse().unwrap();
     match TcpStream::connect_timeout(&address, CONNECT_WAIT) {
         Ok(mut stream) => {
+            stream.set_read_timeout(Some(READ_WAIT)).unwrap();
             let mut reply = [0u8; 2];
             let read = stream
                 .read(&mut reply)
