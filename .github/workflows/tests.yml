@@ -19,7 +19,7 @@ env:
   TMUX_VERSION: "3.8"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
-  TIP: 7514d126217e255282aa6ef9b4ee0b83cda8ce04
+  TIP: 92e3e19982f1141dc6f34fe4da01996f5a66bdc2
   RED: dbef54bdc4c7e573416fec26e9f675133f291ce9
   VALUE_WIN: research::runner::program_tests::engine_and_ide_git_name_a_missing_system_folder_file_for_hooks_programs_and_ssh
   VALUE_UNIX: research::runner::program_tests::engine_and_ide_git_name_dev_null_for_hooks_programs_and_ssh
@@ -97,7 +97,7 @@ jobs:
           }
           reason "$RUNNER_TEMP/red-value.txt" "$VALUE_WIN" "a git names a program a user could plant"
           reason "$RUNNER_TEMP/red-effect.txt" "$EFFECT" "a Windows git ran a planted program or ended wrong"
-          for want in "publish update-ref: ran" "stage init: ran" " commit: ran" "reference-transaction.exe"; do
+          for want in "publish update-ref: ran" "stage init: ran" " commit: ran" "reference-transaction.exe" "ssh signature check with TEMP: ran" "pgp signature check with TEMP: ran" "x509 signature check with TEMP: ran"; do
             grep -qF -- "$want" "$RUNNER_TEMP/red-effect.txt" || { echo "RED: the effect row names no '$want'"; exit 1; }
           done
           for left in /c/usr/bin/false /c/usr/bin/false.exe /c/dev/null.exe /c/dev/null/reference-transaction.exe /d/usr/bin/false /d/dev/null/reference-transaction.exe; do
