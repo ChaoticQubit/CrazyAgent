@@ -3,7 +3,6 @@ use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
 use crate::engine::owner::OwnerData;
 use crate::protocol::{FRAME_BYTES_MAX, Outcome, ProjectId, RequestId};
-#[cfg(unix)]
 use rusqlite::Connection;
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -25,7 +24,6 @@ const RENDER_HEADER_BYTES_MAX: usize = 1024;
 const RESEARCH_ROWS_MAX: i64 = 4096;
 const FORGET_ROWS_MAX: i64 = 16384;
 
-#[cfg(unix)]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS memory_library (
     ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
     id TEXT NOT NULL UNIQUE,
@@ -471,7 +469,6 @@ const ORPHAN_AGENT_ROW: &str = "project IS NOT NULL
     AND NOT EXISTS (SELECT 1 FROM projects WHERE projects.id=memory_library.project)
     AND (CASE WHEN json_valid(origin) THEN json_extract(origin,'$.kind') END)='agent'";
 
-#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(error)?;
     let forgotten = forget_orphan_agent_memories(connection)?;

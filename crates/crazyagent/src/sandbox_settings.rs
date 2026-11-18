@@ -7,16 +7,13 @@ use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-#[cfg(any(unix, test))]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS sandbox_settings (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     linux_sockets TEXT NOT NULL CHECK(linux_sockets IN ('tcp_only', 'refuse', 'tcp_ports')),
     linux_supervisor TEXT NOT NULL DEFAULT 'on' CHECK(linux_supervisor IN ('on', 'off')),
     linux_strict TEXT NOT NULL DEFAULT 'off' CHECK(linux_strict IN ('off', 'on'))
 )";
-#[cfg(any(unix, test))]
 const SUPERVISOR_COLUMN: &str = "ALTER TABLE sandbox_settings ADD COLUMN linux_supervisor TEXT NOT NULL DEFAULT 'on' CHECK(linux_supervisor IN ('on', 'off'))";
-#[cfg(any(unix, test))]
 const STRICT_COLUMN: &str = "ALTER TABLE sandbox_settings ADD COLUMN linux_strict TEXT NOT NULL DEFAULT 'off' CHECK(linux_strict IN ('off', 'on'))";
 
 /// The owner's app-wide sandbox settings: how a limited-network agent's sockets are held
@@ -69,7 +66,6 @@ fn value<T: DeserializeOwned>(word: String) -> Result<T, EngineError> {
 /// columns to a table made before them, holding `on` and `off` for a row already saved, so
 /// the owner's other choices stay. Input: the engine database. Output: Ok, or the database
 /// error.
-#[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(error)?;
     for (name, column) in [

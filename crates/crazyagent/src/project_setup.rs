@@ -3310,7 +3310,6 @@ fn declared(spec: &ProjectSpec, stored: &StoredSetup) -> Result<ProjectSpec, Eng
 /// folder, repairing projects recorded before the folder was declared. Runs
 /// when the engine opens its database, at most 256 projects. Takes the
 /// connection. Returns any storage failure.
-#[cfg(unix)]
 pub(crate) fn repair_repositories(connection: &Connection) -> Result<(), EngineError> {
     const REPAIRED_MAX: i64 = 256;
     let tx = connection.unchecked_transaction().map_err(error)?;

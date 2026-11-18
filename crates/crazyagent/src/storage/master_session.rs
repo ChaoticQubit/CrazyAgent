@@ -35,7 +35,6 @@ use crate::worktrees::{LeaseState, WorktreeLease};
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-#[cfg(unix)]
 use std::collections::BTreeMap;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -314,14 +313,12 @@ struct ConfiguredRegistration {
     database_identity: (u64, u64),
 }
 
-#[cfg(unix)]
 const LEGACY_CONFIGURED_PROFILES: &str = "CREATE TABLE configured_master_profiles (
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
     session TEXT NOT NULL UNIQUE CHECK(length(session) BETWEEN 1 AND 128),
     body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 16384)
 )";
 
-#[cfg(unix)]
 const CONFIGURED_PROFILES: &str = "CREATE TABLE configured_master_profiles (
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
     session TEXT NOT NULL CHECK(length(session) BETWEEN 1 AND 128),
@@ -333,7 +330,6 @@ const CONFIGURED_PROFILES: &str = "CREATE TABLE configured_master_profiles (
 /// The most configured RCLI registrations kept: one per pool member of every open master.
 const CONFIGURED_PROFILES_MAX: usize = SESSIONS_MAX * crate::config::POOL_MEMBERS_MAX;
 
-#[cfg(unix)]
 const SESSIONS: &str = "CREATE TABLE master_sessions (
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
     project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
@@ -342,7 +338,6 @@ const SESSIONS: &str = "CREATE TABLE master_sessions (
     phase TEXT NOT NULL CHECK(phase IN ('configured','parked','closed')),
     body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 16384)
 )";
-#[cfg(unix)]
 const UNPARKED_SESSIONS: &str = "CREATE TABLE master_sessions (
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
     project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
@@ -351,9 +346,7 @@ const UNPARKED_SESSIONS: &str = "CREATE TABLE master_sessions (
     phase TEXT NOT NULL CHECK(phase IN ('configured','closed')),
     body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 1 AND 16384)
 )";
-#[cfg(unix)]
 const CURRENT: &str = "CREATE UNIQUE INDEX master_current_project ON master_sessions(project) WHERE phase='configured'";
-#[cfg(unix)]
 const LATEST: &str = "CREATE INDEX master_latest_project ON master_sessions(project,created DESC)";
 
 /// Migration part that lets master sessions be parked (DEC-096 addendum 4b): rebuilds
@@ -361,7 +354,6 @@ const LATEST: &str = "CREATE INDEX master_latest_project ON master_sessions(proj
 /// row and both indexes, and parks the sessions the owner ended in projects that still
 /// exist, so they can be resumed. Takes the upgrade transaction. Returns Ok, also when
 /// the table was never created, or `master_schema_conflict` for an unknown layout.
-#[cfg(unix)]
 pub(super) fn allow_parked(tx: &Transaction<'_>) -> Result<(), EngineError> {
     let found: Option<String> = tx
         .query_row(
@@ -399,7 +391,6 @@ pub(super) fn allow_parked(tx: &Transaction<'_>) -> Result<(), EngineError> {
     .map_err(error)?;
     Ok(())
 }
-#[cfg(unix)]
 const LEGACY_TURNS: &str = "CREATE TABLE master_turns (
     session TEXT NOT NULL CHECK(length(session) BETWEEN 1 AND 128),
     ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 1 AND 1024),
@@ -410,10 +401,8 @@ const LEGACY_TURNS: &str = "CREATE TABLE master_turns (
     PRIMARY KEY(session,ordinal),
     UNIQUE(session,id)
 )";
-#[cfg(unix)]
 const LEGACY_OUTSTANDING: &str =
     "CREATE UNIQUE INDEX master_outstanding ON master_turns(session) WHERE phase='queued'";
-#[cfg(unix)]
 const TURNS: &str = "CREATE TABLE master_turns (
     session TEXT NOT NULL CHECK(length(session) BETWEEN 1 AND 128),
     ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 1 AND 1024),
@@ -424,9 +413,7 @@ const TURNS: &str = "CREATE TABLE master_turns (
     PRIMARY KEY(session,ordinal),
     UNIQUE(session,id)
 )";
-#[cfg(unix)]
 const OUTSTANDING: &str = "CREATE UNIQUE INDEX master_outstanding ON master_turns(session) WHERE phase IN ('queued','prepared','delivering','running','waiting_approval','uncertain')";
-#[cfg(unix)]
 const PREPARATIONS: &str = "CREATE TABLE master_preparations (
     session TEXT NOT NULL,
     turn TEXT NOT NULL,
@@ -434,7 +421,6 @@ const PREPARATIONS: &str = "CREATE TABLE master_preparations (
     PRIMARY KEY(session,turn),
     FOREIGN KEY(session,turn) REFERENCES master_turns(session,id)
 )";
-#[cfg(unix)]
 const WAITING_RESOLVES: &str = "CREATE TABLE master_waiting_resolves (
     session TEXT PRIMARY KEY,
     project TEXT NOT NULL,
@@ -445,7 +431,6 @@ const WAITING_RESOLVES: &str = "CREATE TABLE master_waiting_resolves (
 const SESSION_COLUMNS: &str = "CASE WHEN length(CAST(id AS BLOB))<=128 THEN id END,CASE WHEN length(CAST(project AS BLOB))<=128 THEN project END,created,version,CASE WHEN length(phase)<=10 THEN phase END,CASE WHEN length(CAST(body AS BLOB))<=16384 THEN body END";
 const TURN_COLUMNS: &str = "CASE WHEN length(CAST(session AS BLOB))<=128 THEN session END,ordinal,CASE WHEN length(CAST(id AS BLOB))<=128 THEN id END,input,CASE WHEN length(phase)<=16 THEN phase END,CASE WHEN length(CAST(body AS BLOB))<=16384 THEN body END";
 
-#[cfg(unix)]
 pub(super) fn initialize(db: &Connection) -> Result<(), EngineError> {
     let tx = db.unchecked_transaction().map_err(error)?;
     let expected: BTreeMap<_, _> = [

@@ -2,13 +2,16 @@ use super::error;
 use super::settings::SettingsSources;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
+#[cfg(windows)]
+use crazyagent_win_sandbox::private;
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 
 /// The folder beside engine.db that holds one folder per upgrade backup, each with a full
@@ -529,10 +532,13 @@ fn backup(
         .ok_or_else(|| backup_failed("the database has no folder"))?;
     let folder = backups_folder(root)?;
     let target = folder.join(format!("{from}-to-{to}-{}", stamp(SystemTime::now())?));
+    #[cfg(unix)]
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&target)
         .map_err(backup_failed)?;
+    #[cfg(windows)]
+    std::fs::create_dir(&target).map_err(backup_failed)?;
     if let Err(cause) = fill(db, &target, settings) {
         let _ = std::fs::remove_dir_all(&target);
         return Err(cause);
@@ -545,6 +551,7 @@ fn backup(
 /// again when an older build or a copy left it open to others (F36), and checks it. A link,
 /// a file or a folder of another user is refused. Input: the engine root. Output: the
 /// backups folder path.
+#[cfg(unix)]
 fn backups_folder(root: &Path) -> Result<PathBuf, EngineError> {
     let folder = root.join(BACKUPS);
     match std::fs::DirBuilder::new().mode(0o700).create(&folder) {
@@ -577,9 +584,26 @@ fn backups_folder(root: &Path) -> Result<PathBuf, EngineError> {
     Ok(folder)
 }
 
+/// Creates `<root>/backups` as a W1 private folder when missing, or opens and checks the one
+/// there (DESIGN-0256 D5). A folder that is not private is refused as unsafe; repairing it
+/// the way Unix does is W1c. Input: the engine root. Output: the backups folder path.
+#[cfg(windows)]
+fn backups_folder(root: &Path) -> Result<PathBuf, EngineError> {
+    let folder = root.join(BACKUPS);
+    match private::dir(&folder) {
+        Ok(_) => Ok(folder),
+        Err(cause) if cause.kind() == std::io::ErrorKind::PermissionDenied => Err(error(format!(
+            "{BACKUP_UNSAFE}: {} must be a private folder of this user",
+            folder.display()
+        ))),
+        Err(cause) => Err(backup_failed(cause)),
+    }
+}
+
 /// Sets one folder of this user to 0700 through a handle opened without following a link,
 /// only when it is still the folder that was checked. Inputs: the folder and its checked
 /// metadata. Output: done, or the refusal or I/O error.
+#[cfg(unix)]
 fn make_private(folder: &Path, checked: &std::fs::Metadata) -> Result<(), EngineError> {
     use rustix::fs::{Mode, OFlags};
     let handle = std::fs::File::from(
@@ -653,18 +677,26 @@ fn forget_backup_failure(path: &Path) {
 /// `storage_backup_failed`, or none.
 pub fn backup_failure(root: &Path) -> Option<&'static str> {
     use std::io::Read;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
-        .open(root.join(BACKUP_FAILURE_FILE))
-        .ok()?;
-    let metadata = file.metadata().ok()?;
-    if !metadata.is_file()
-        || metadata.uid() != rustix::process::getuid().as_raw()
-        || metadata.mode() & 0o077 != 0
-    {
-        return None;
-    }
+    #[cfg(unix)]
+    let file = {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(
+                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+            )
+            .open(root.join(BACKUP_FAILURE_FILE))
+            .ok()?;
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file()
+            || metadata.uid() != rustix::process::getuid().as_raw()
+            || metadata.mode() & 0o077 != 0
+        {
+            return None;
+        }
+        file
+    };
+    #[cfg(windows)]
+    let file = private::file(&root.join(BACKUP_FAILURE_FILE), false).ok()?;
     let mut text = String::new();
     file.take(64).read_to_string(&mut text).ok()?;
     [BACKUP_UNSAFE, BACKUP_FAILED]
@@ -695,12 +727,15 @@ fn fill(
 /// Creates a new file readable only by this user and writes it to disk.
 /// Inputs: the path, which must not exist, and the bytes. Output: Ok once synced.
 fn private_file(path: &Path, bytes: &[u8]) -> Result<(), EngineError> {
+    #[cfg(unix)]
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(path)
         .map_err(backup_failed)?;
+    #[cfg(windows)]
+    let mut file = private::file(path, true).map_err(backup_failed)?;
     file.write_all(bytes).map_err(backup_failed)?;
     file.sync_all().map_err(backup_failed)
 }
