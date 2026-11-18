@@ -292,10 +292,11 @@ fn same_entry(left: &Path, right: &Path) -> bool {
     }
 }
 
-/// One spelling for a real path: on macOS a path under the data volume that names the same
-/// entry as the path without that prefix is given without it, the spelling `canonicalize`
-/// gives the short form, so both compare equal as text. Input: a canonical path. Output:
-/// the path in that spelling, unchanged elsewhere.
+/// One spelling for a path: on macOS a path under the data volume that names the same entry as
+/// the path without that prefix is given without it, the spelling `canonicalize` gives the
+/// short form, so both compare equal as text. Input: a path, resolved or not; only its text
+/// changes, and the same-entry check stats both names, following links. Output: that spelling,
+/// or the path unchanged when the two names are absent or differ, or off macOS.
 pub(crate) fn one_spelling(real: PathBuf) -> PathBuf {
     #[cfg(target_os = "macos")]
     if let Ok(rest) = real.strip_prefix(DATA_VOLUME) {

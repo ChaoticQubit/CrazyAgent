@@ -434,12 +434,10 @@ pub fn bind_tcp_std_exclusive(address: std::net::SocketAddr) -> io::Result<std::
 }
 
 /// Holds a free loopback TCP port from the low block that refuses every connect, as a model
-/// provider that is down, where an owner's model port would be: outside every range the
-/// system hands out by itself, which a kept model port on Linux must stay out of. A listener
-/// takes one connection from this process and is closed, so the port stays in use by that
-/// connection with nothing listening on it, and on unix a bind that names it without
-/// `SO_REUSEADDR` fails. Input: none. Output: the connection's two ends, which free the port
-/// when dropped, and the port.
+/// provider that is down, where an owner's model port would be: a listener takes one connection
+/// from this process and is closed, so nothing listens and a unix bind without `SO_REUSEADDR`
+/// fails. Input: none. Output: the connection's two ends, which free the port when dropped,
+/// and the port.
 pub fn refusing_tcp_port() -> io::Result<([std::net::TcpStream; 2], u16)> {
     let listener = low_tcp_listener()?;
     let address = listener.local_addr()?;
