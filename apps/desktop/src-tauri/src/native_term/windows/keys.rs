@@ -213,7 +213,7 @@ mod tests {
     use super::*;
     use crate::native_term::pane::{ALT, CONTROL, SHIFT};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        VK_F5, VK_OEM_4, VK_OEM_MINUS, VK_Q, VK_SHIFT, VK_X,
+        VK_F5, VK_OEM_1, VK_OEM_4, VK_OEM_MINUS, VK_Q, VK_SHIFT, VK_X,
     };
 
     const NONE: Mods = Mods {
@@ -405,5 +405,24 @@ mod tests {
         assert_eq!(typed(8, None), Typed::Dropped);
         assert_eq!(typed(0x7f, None), Typed::Dropped);
         assert_eq!(typed(3, None), Typed::Dropped);
+    }
+
+    #[test]
+    fn a_private_use_character_from_the_layout_passes_and_never_names_a_key() {
+        for (mods, bare) in [
+            (CTRL, '\u{F700}'),
+            (ALTED, '\u{F727}'),
+            (CTRL_ALT, '\u{F72D}'),
+            (CTRL, '\u{E000}'),
+            (ALTED, '\u{F0000}'),
+        ] {
+            let down = down(VK_OEM_1, mods, Next::Nothing, Some(bare));
+            assert_eq!(down.event, None, "{mods:?} {bare:?}");
+            assert!(!down.swallow, "{mods:?} {bare:?}");
+        }
+        assert_eq!(
+            down(VK_OEM_1, ALTED, Next::Nothing, Some(';')).event,
+            text(b"\x1b;")
+        );
     }
 }
