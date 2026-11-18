@@ -30,6 +30,11 @@ const FALLBACK_PATHS: [&str; 3] = [
 /// The most background rectangles one frame draws.
 const RECTS_MAX: usize = 1 << 16;
 
+/// Device attempts each backing scale's renderer may make after its first lost device in
+/// one app run, failed ones counted: a GPU lost more often keeps its views ended until a
+/// restart, and each attempt blocks the main thread on an adapter and device request.
+const DEVICE_REPLACE_MAX: u32 = 2;
+
 /// Bytes of one rectangle: position, size and colour as f32.
 const RECT_BYTES: usize = 32;
 
@@ -1093,6 +1098,101 @@ mod tests {
         assert_eq!(hand_back(set, output, refused), Err(GPU_FAULT.to_owned()));
         drop(surface);
         drop(layer);
+    }
+
+    /// A view made after the device is lost draws on a fresh device, so Open again brings
+    /// the terminal back (V243-NATIVE-DEVICE-REPLACE). With `--nocapture` it prints how
+    /// long making that view took, the fresh device included.
+    #[test]
+    fn a_view_made_after_a_loss_draws_on_a_fresh_device() {
+        let mut shared = shared_at(2.0);
+        let layer = metal_layer();
+        let mut old = shared
+            .surface_on(on_layer(&layer), 64, 64)
+            .expect("a surface");
+        lose(&shared);
+        assert_eq!(
+            shared.draw(&mut old, &frame_of("a")),
+            Err(GPU_FAULT.to_owned())
+        );
+        let fresh = metal_layer();
+        let started = std::time::Instant::now();
+        let made = shared.surface_on(on_layer(&fresh), 64, 64);
+        eprintln!("a view after a loss made in {:?}", started.elapsed());
+        let mut new = made.expect("a surface on a fresh device");
+        assert_eq!(shared.draw(&mut new, &frame_of("b")), Ok(()));
+        assert_eq!(shared.draw(&mut new, &frame_of("c")), Ok(()));
+        drop((old, new));
+        drop((layer, fresh));
+    }
+
+    /// A view from the lost device never moves onto the fresh one: its resize and draw
+    /// report `native_terminal_gpu` with no GPU work, and dropping it leaves the fresh view
+    /// drawing. Without its own lost flag, the resize configures it onto the fresh device
+    /// and its draw raises device-mismatch errors there (probe 5aedcf53d).
+    #[test]
+    fn a_view_from_the_lost_device_never_moves_to_the_new_one() {
+        let mut shared = shared_at(2.0);
+        let layer = metal_layer();
+        let mut old = shared
+            .surface_on(on_layer(&layer), 64, 64)
+            .expect("a surface");
+        lose(&shared);
+        let fresh = metal_layer();
+        let mut new = shared
+            .surface_on(on_layer(&fresh), 64, 64)
+            .expect("a surface on a fresh device");
+        assert_eq!(shared.resize(&mut old, 128, 96), Err(GPU_FAULT));
+        assert_eq!((old.config.width, old.config.height), (64, 64));
+        assert_eq!(
+            shared.draw(&mut old, &frame_of("a")),
+            Err(GPU_FAULT.to_owned())
+        );
+        drop(old);
+        assert_eq!(shared.draw(&mut new, &frame_of("b")), Ok(()));
+        drop(new);
+        drop((layer, fresh));
+    }
+
+    /// Device attempts after a loss stop at the budget: each loss within it gets a fresh
+    /// device, and the next one ends the new view with `native_terminal_gpu` without
+    /// asking wgpu for another device.
+    #[test]
+    fn device_attempts_after_a_loss_stop_at_the_budget() {
+        let mut shared = shared_at(2.0);
+        let rounds = DEVICE_REPLACE_MAX as usize;
+        let layers: Vec<_> = (0..rounds + 2).map(|_| metal_layer()).collect();
+        let first = shared.surface_on(on_layer(&layers[0]), 64, 64);
+        let mut views = vec![first.expect("a surface")];
+        for layer in &layers[1..=rounds] {
+            lose(&shared);
+            let made = shared.surface_on(on_layer(layer), 64, 64);
+            views.push(made.expect("a fresh device within the budget"));
+        }
+        lose(&shared);
+        let refused = shared.surface_on(on_layer(&layers[rounds + 1]), 64, 64);
+        assert_eq!(refused.err(), Some(GPU_FAULT.to_owned()));
+        assert!(shared.device.is_none());
+        drop(views);
+        drop(layers);
+    }
+
+    /// A surface drawn by a renderer other than the one whose device made it is a
+    /// programmer error: the host draws a view with the renderer of the scale it was made
+    /// at (host:1148-1163, :1216), so the draw asserts it instead of mixing two devices.
+    #[test]
+    #[should_panic(expected = "a surface drawn by the renderer that made it")]
+    fn a_surface_drawn_by_another_renderer_trips_the_device_assert() {
+        let mut maker = shared_at(2.0);
+        let mut other = shared_at(2.0);
+        let (layer, second) = (metal_layer(), metal_layer());
+        let mut surface = maker
+            .surface_on(on_layer(&layer), 64, 64)
+            .expect("a surface");
+        let _held = other
+            .surface_on(on_layer(&second), 64, 64)
+            .expect("a device for the other renderer");
+        let _ = other.draw(&mut surface, &frame_of("a"));
     }
 
     /// A view as wide as the adapter's own largest texture side, past wgpu's default 8192
