@@ -326,8 +326,8 @@ export class NativeView implements Held {
     this.told = covered;
     this.placed = `${rect.x},${rect.y},${rect.width},${rect.height}`;
     const events = new Channel<NativeEvent>((event) => this.heardEvent(open, event));
-    const { terminal: name, pane } = this.key;
-    void openNativeTerminal({ name, pane, label: this.label, rect, style: nativeStyle(), events, covered, keys: this.keys }).then((result) => {
+    const { terminal: name, pane, project } = this.key;
+    void openNativeTerminal({ name, pane, label: this.label, rect, style: nativeStyle(), events, covered, keys: this.keys, project }).then((result) => {
       if (open.closed) {
         if (result.kind === "ok" && !open.ended) void closeNativeTerminal(result.value);
         return;
