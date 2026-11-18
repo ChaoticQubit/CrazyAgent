@@ -6830,6 +6830,9 @@ impl TeamRuntime {
                 .collect::<Result<_, _>>()
                 .map_err(error)?
         };
+        if queued.is_empty() {
+            return self.wait_beyond_dispatch(project, &queued);
+        }
         let subs_max = usize::from(stored.team.max_agents.saturating_sub(1));
         let harness_cap = super::caps::read(&self.connection, project)?.harnesses;
         let reserved: BTreeSet<i64> = crate::recovery::open_runs(&self.connection, project)?
