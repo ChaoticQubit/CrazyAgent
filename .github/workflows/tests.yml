@@ -20,6 +20,8 @@ env:
 
 defaults:
   run:
+    shell: bash
+
 jobs:
   storage-macos:
     name: Storage submit red, mutant and green on macos-15
