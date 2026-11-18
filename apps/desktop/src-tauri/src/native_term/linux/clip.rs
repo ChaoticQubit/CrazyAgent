@@ -1,7 +1,132 @@
+use std::cell::RefCell;
+
+use gtk::gdk::{self, EventType};
+
+use crate::native_term::codec::COPY_BYTES_MAX;
+
+/// A desktop board: the clipboard that Copy and Paste use, or the primary selection that
+/// a selection fills and a middle click pastes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Board {
+    Clipboard,
+    Primary,
+}
+
+impl Board {
+    fn slot(self) -> usize {
+        match self {
+            Board::Clipboard => 0,
+            Board::Primary => 1,
+        }
+    }
+
+    fn atom(self) -> gdk::Atom {
+        match self {
+            Board::Clipboard => gdk::SELECTION_CLIPBOARD,
+            Board::Primary => gdk::SELECTION_PRIMARY,
+        }
+    }
+}
+
+/// The seat guard: whether an event the user made is being handled, so a board may be
+/// read or written. Only a key press or a button press or release counts. Input: the
+/// type of GTK's current event, if any. Output: the answer.
+pub fn user_input(kind: Option<EventType>) -> bool {
+    matches!(
+        kind,
+        Some(
+            EventType::KeyPress
+                | EventType::ButtonPress
+                | EventType::DoubleButtonPress
+                | EventType::TripleButtonPress
+                | EventType::ButtonRelease
+        )
+    )
+}
+
+/// The type of the event GTK is handling now, for the seat guard. Output: it, or none
+/// outside an event handler.
+pub fn current_input() -> Option<EventType> {
+    gtk::current_event().map(|event| event.event_type())
+}
+
+/// A board's text as a paste takes it: 1 to `COPY_BYTES_MAX` bytes, else none. Input:
+/// the text read. Output: the text kept.
+pub fn bounded(text: Option<&str>) -> Option<String> {
+    let kept = text.filter(|text| !text.is_empty() && text.len() <= COPY_BYTES_MAX)?;
+    assert!(kept.len() <= COPY_BYTES_MAX);
+    Some(kept.to_owned())
+}
+
+/// The boards the views copy to and paste from: the desktop's CLIPBOARD and PRIMARY
+/// through GTK, or in a `native-webdriver` build both kept in process memory, so a driven
+/// copy or paste never touches the owner's boards. Every read and write passes the seat
+/// guard; a desktop read is async and never runs a nested main loop.
+pub struct Clip {
+    private: Option<RefCell<[Option<String>; 2]>>,
+}
+
+impl Clip {
+    /// The desktop's boards through GTK. Output: them.
+    pub fn desktop() -> Clip {
+        Clip { private: None }
+    }
+
+    /// Empty boards kept in process memory. Output: them.
+    pub fn private() -> Clip {
+        Clip {
+            private: Some(RefCell::new([None, None])),
+        }
+    }
+
+    /// Whether the boards are the in-process ones. Output: the answer.
+    pub fn is_private(&self) -> bool {
+        self.private.is_some()
+    }
+
+    /// Puts plain text on a board in place of what it held, inside a user event only.
+    /// Inputs: the board, 1 to `COPY_BYTES_MAX` bytes of text and the current event type.
+    /// Output: whether the write was made; a desktop board takes it as GTK hands it on.
+    pub fn write(&self, board: Board, text: &str, input: Option<EventType>) -> bool {
+        if !user_input(input) || text.is_empty() || text.len() > COPY_BYTES_MAX {
+            return false;
+        }
+        match &self.private {
+            Some(boards) => boards.borrow_mut()[board.slot()] = Some(text.to_owned()),
+            None => gtk::Clipboard::get(&board.atom()).set_text(text),
+        }
+        true
+    }
+
+    /// Reads a board's plain text inside a user event only; the reply comes at once from
+    /// a private board or a refused read, and from GTK's main loop for a desktop board.
+    /// Inputs: the board, the current event type and the reply. Output: none; the reply
+    /// gets the text, bounded as a paste takes it, or none.
+    pub fn read(
+        &self,
+        board: Board,
+        input: Option<EventType>,
+        reply: impl FnOnce(Option<String>) + 'static,
+    ) {
+        if !user_input(input) {
+            reply(None);
+            return;
+        }
+        match &self.private {
+            Some(boards) => {
+                let text = boards.borrow()[board.slot()].clone();
+                reply(bounded(text.as_deref()));
+            }
+            None => {
+                gtk::Clipboard::get(&board.atom()).request_text(move |_, text| reply(bounded(text)))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native_term::codec::COPY_BYTES_MAX;
     use crate::native_term::linux::rows::{checkpoint, pump_for, pump_until, row_dir};
     use gtk::gdk::EventType;
     use gtk::prelude::*;
