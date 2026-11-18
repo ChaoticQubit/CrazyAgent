@@ -189,7 +189,13 @@ pub fn build(grid: &Grid) -> Text {
         .map_or(text.units, |(row, column)| text.index_at(row, column));
     text.selection = grid.selection.map(|(first, last)| {
         let start = text.index_at(first.0, first.1);
-        let end = text.index_at(last.0, (last.1 + 1).min(grid.columns));
+        let past = (last.1 + 1).min(grid.columns);
+        let spacer = grid.rows[last.0]
+            .get(past)
+            .is_some_and(|glyph| glyph.spacer);
+        let past = past + usize::from(spacer);
+        assert!(past <= grid.columns);
+        let end = text.index_at(last.0, past);
         (start, end.max(start) - start)
     });
     text
