@@ -2507,8 +2507,9 @@ struct Grants {
     write: Vec<PathBuf>,
     git_write: Vec<PathBuf>,
     guarded: Held,
-    /// The hidden folders that exist, each covered by bubblewrap with an empty read-only
-    /// folder; no write grant covers any hidden folder ([`split_above`]).
+    /// The hidden folders, each made empty first when absent so a folder made during the
+    /// run lands under the cover (rv-sec2 F2), each covered by bubblewrap with an empty
+    /// read-only folder; no write grant covers any hidden folder ([`split_above`]).
     hidden: Vec<PathBuf>,
 }
 
@@ -2566,13 +2567,17 @@ impl Grants {
         }
         let mut hidden = Vec::new();
         for path in &sandbox.hidden {
-            match fs::symlink_metadata(path) {
-                Ok(meta) if meta.is_dir() => hidden.push(path.clone()),
-                Ok(_) => return Err(invalid("a hidden folder is no longer a plain folder")),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            match fs::create_dir(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
                 Err(error) => return Err(error.into()),
             }
+            if !fs::symlink_metadata(path)?.is_dir() {
+                return Err(invalid("a hidden folder is no longer a plain folder"));
+            }
+            hidden.push(path.clone());
         }
+        assert_eq!(hidden.len(), sandbox.hidden.len());
         assert!(hidden.len() <= crate::sandbox::HIDDEN_MAX);
         assert!(write.iter().all(|path| {
             sandbox
@@ -2653,8 +2658,9 @@ impl Grants {
 
 /// Refuses a launch whose hidden folders a second mount of their disk shows
 /// ([`mounted_again`]), reading this computer's mount list only when the policy hides a
-/// folder. A mount made after this check, at install and again at wrap, is not seen.
-/// Input: the policy. Output: Ok, or the refusal.
+/// folder, at install and again at wrap. A stated limit: a mount made after the start
+/// still reaches the running agent (run 44410206144). Input: the policy. Output: Ok, or
+/// the refusal.
 fn mounts_hold(sandbox: &ProjectSandbox) -> Result<(), SandboxError> {
     if sandbox.hidden.is_empty() {
         return Ok(());
@@ -2665,11 +2671,92 @@ fn mounts_hold(sandbox: &ProjectSandbox) -> Result<(), SandboxError> {
 }
 
 /// Refuses hidden folders whose disk the mount list shows mounted a second time at the
-/// folder, above it or inside it. Inputs: the hidden folders and the mount list text.
-/// Output: Ok, or the refusal.
+/// folder, above it or inside it, wherever that mount sits: a folder's own mount is the
+/// deepest one holding its path. Inputs: the hidden folders and the mount list text.
+/// Output: Ok, or the refusal; a list that does not read plainly refuses too.
 fn mounted_again(hidden: &[PathBuf], text: &str) -> Result<(), SandboxError> {
-    let _ = (hidden, text);
+    let unread = || SandboxError::Unavailable(HIDDEN_MOUNTS_UNREAD.into());
+    let mounts = mounts(text).ok_or_else(unread)?;
+    for folder in hidden {
+        assert!(folder.is_absolute());
+        let own = mounts
+            .iter()
+            .filter(|mount| folder.starts_with(&mount.point))
+            .max_by_key(|mount| mount.point.components().count())
+            .filter(|mount| mount.root.is_absolute())
+            .ok_or_else(unread)?;
+        let below = folder
+            .strip_prefix(&own.point)
+            .expect("a folder's own mount holds its path");
+        let inside = own.root.join(below);
+        let shows = |root: &Path| root.starts_with(&inside) || inside.starts_with(root);
+        if mounts
+            .iter()
+            .any(|mount| mount.id != own.id && mount.device == own.device && shows(&mount.root))
+        {
+            return Err(SandboxError::Unavailable(HIDDEN_MOUNTED_AGAIN.into()));
+        }
+    }
     Ok(())
+}
+
+/// One line of the mount list: the mount's id, its disk's device number, the folder of
+/// that disk it shows and the folder it is mounted on.
+struct Mount {
+    id: u64,
+    device: String,
+    root: PathBuf,
+    point: PathBuf,
+}
+
+/// Reads the mount list text, one mount per line as `/proc/self/mountinfo` writes it.
+/// Input: the text. Output: the mounts, or none when a line does not read plainly.
+fn mounts(text: &str) -> Option<Vec<Mount>> {
+    text.lines()
+        .map(|line| {
+            let mut fields = line.split(' ');
+            let id = fields.next()?.parse().ok()?;
+            fields.next()?;
+            let device = fields.next()?;
+            let (major, minor) = device.split_once(':')?;
+            major.parse::<u32>().ok()?;
+            minor.parse::<u32>().ok()?;
+            let root = unescaped(fields.next()?)?;
+            let point = unescaped(fields.next()?)?;
+            point.is_absolute().then(|| Mount {
+                id,
+                device: device.to_owned(),
+                root,
+                point,
+            })
+        })
+        .collect()
+}
+
+/// Undoes the mount list's octal escapes, such as `\040` for a space. Input: one field.
+/// Output: the path, or none for an escape that is not three octal digits.
+fn unescaped(field: &str) -> Option<PathBuf> {
+    let bytes = field.as_bytes();
+    let mut path = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] != b'\\' {
+            path.push(bytes[at]);
+            at += 1;
+            continue;
+        }
+        let digits = bytes.get(at + 1..at + 4)?;
+        if !digits.iter().all(|digit| (b'0'..=b'7').contains(digit)) {
+            return None;
+        }
+        let value = digits
+            .iter()
+            .fold(0u32, |value, digit| value * 8 + u32::from(digit - b'0'));
+        path.push(u8::try_from(value).ok()?);
+        at += 4;
+    }
+    assert_eq!(at, bytes.len());
+    Some(PathBuf::from(OsStr::from_bytes(&path)))
 }
 
 /// Splits every write grant that covers the hidden folder `folder` so that none does: the

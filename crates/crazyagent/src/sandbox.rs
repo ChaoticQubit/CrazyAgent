@@ -116,7 +116,8 @@ pub fn settings_owner_ports(global: &Path, project: &Path) -> Result<Vec<u16>, &
 /// Why a sandbox with hidden folders does not start on Windows, nor one with kept-out paths
 /// or open tops on Linux or Windows: those boundaries cannot keep a path inside a granted
 /// root out of reach as Seatbelt does. Linux holds hidden folders on its bubblewrap
-/// backends and names its own refusal otherwise (`linux::HIDDEN_NEEDS_NAMESPACES`).
+/// backends and names its own refusals otherwise (`linux::HIDDEN_NEEDS_NAMESPACES`,
+/// `linux::HIDDEN_MOUNTED_AGAIN`).
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
 
 /// Why a native-mode lead's own tmux server does not start off macOS: only Seatbelt holds
@@ -986,14 +987,19 @@ pub const LINUX_HIDDEN_NEEDS_NAMESPACES: &str = "linux_hidden_needs_namespaces";
 pub const LINUX_HIDDEN_MOUNTED_AGAIN: &str = "linux_hidden_mounted_again";
 
 /// The code a launch refusal has of its own, so a caller shows its plain line: the strict
-/// setting's ([`LINUX_NOT_FULL`]). Input: the refusal. Output: the code, or none for a
-/// refusal with no code of its own.
+/// setting's ([`LINUX_NOT_FULL`]) and, on Linux, the hidden folders' two
+/// ([`LINUX_HIDDEN_NEEDS_NAMESPACES`], [`LINUX_HIDDEN_MOUNTED_AGAIN`]). Input: the
+/// refusal. Output: the code, or none for a refusal with no code of its own.
 pub fn refusal_code(error: &SandboxError) -> Option<&'static str> {
     let SandboxError::Unavailable(reason) = error else {
         return None;
     };
     match reason.as_str() {
         LINUX_NOT_FULL_LINE => Some(LINUX_NOT_FULL),
+        #[cfg(target_os = "linux")]
+        linux::HIDDEN_NEEDS_NAMESPACES => Some(LINUX_HIDDEN_NEEDS_NAMESPACES),
+        #[cfg(target_os = "linux")]
+        linux::HIDDEN_MOUNTED_AGAIN => Some(LINUX_HIDDEN_MOUNTED_AGAIN),
         _ => None,
     }
 }
@@ -2353,8 +2359,8 @@ impl ProjectSandbox {
     /// Keeps one folder inside a granted root out of the agent's reach, read and write, as
     /// the secret paths are; the graph step hides the project's `.crazyagent/` from graphify.
     /// Input: a clean absolute path below a root, in a real parent folder, absent or a real
-    /// folder. Output: the narrowed sandbox, or `Invalid`. Seatbelt and the Linux bubblewrap
-    /// backends hold it; plain Landlock and Windows refuse a sandbox with hidden folders.
+    /// folder. Output: the narrowed sandbox, or `Invalid`. Seatbelt holds it, the Linux
+    /// bubblewrap backends too where no second mount shows it; plain Landlock and Windows refuse.
     pub fn hide(mut self, folder: &Path) -> Result<Self, SandboxError> {
         if self.hidden.len() >= HIDDEN_MAX {
             return Err(invalid("too many hidden folders"));
@@ -5652,7 +5658,11 @@ mod linux_sockets_tests {
             (
                 linux::HIDDEN_MOUNTED_AGAIN,
                 LINUX_HIDDEN_MOUNTED_AGAIN,
-                ["mounted a second time", "remove that mount", "Hidden folders"],
+                [
+                    "mounted a second time",
+                    "remove that mount",
+                    "Hidden folders",
+                ],
             ),
         ] {
             let refused = SandboxError::Unavailable(reason.into());
