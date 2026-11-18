@@ -99,12 +99,14 @@ pub(crate) struct Asked<'a> {
 }
 
 /// A checked move of one registered project into the projects home, recorded as pending
-/// before any disk work: the engine database, the project and the folder plan. Built only
-/// by [`plan`].
+/// before any disk work: the engine database, the project, its folder in the spelling it is
+/// stored under, which the engine's records name, and the folder plan. Built only by
+/// [`plan`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectMove {
     database: PathBuf,
     project: ProjectId,
+    origin: PathBuf,
     add: AddPlan,
 }
 
@@ -183,7 +185,7 @@ impl ProjectMove {
     /// blank or other text, a folder that cannot be read or no engine data folder.
     fn written_text(&self) -> Option<String> {
         let data = self.database.parent()?;
-        let source = self.add.source();
+        let source = self.origin.as_path();
         let text = crate::agent_home::read_project(source).ok()?;
         let owners = !text.trim().is_empty() && !crate::agent_home::outside(data, source, &text);
         owners.then_some(text)
@@ -217,7 +219,7 @@ impl ProjectMove {
                 Ok(0) | Err(_) => tally.waited(),
                 Ok(left) => tally.wait_for(left),
             }
-            if active == 0 && !crate::onboarding::service::refreshing_in(self.add.source()) {
+            if active == 0 && !crate::onboarding::service::refreshing_in(&self.origin) {
                 break;
             }
             if Instant::now() >= deadline {
@@ -227,13 +229,12 @@ impl ProjectMove {
         }
         assert!(!tally.waiting());
         let origin = self
-            .add
-            .source()
+            .origin
             .to_str()
             .ok_or_else(|| refused("move_project_unavailable"))?;
-        assert!(self.add.source().is_absolute());
+        assert!(self.origin.is_absolute());
         let landing = crate::landing::hold_repositories(
-            &landing_repositories(&db, &self.project, self.add.source())?,
+            &landing_repositories(&db, &self.project, &self.origin)?,
             deadline.saturating_duration_since(Instant::now()),
         )
         .ok_or_else(|| refused("move_project_busy"))?;
@@ -323,10 +324,10 @@ pub(crate) fn pending(connection: &Connection) -> Result<Option<Pending>, Engine
 }
 
 /// The owner repositories landing work of the project runs in: the project's folder, and
-/// each repository one of its change sets names that is that folder or inside it, under
-/// the spelling the change set stores, since landing work takes its hold by that. Inputs:
-/// an engine connection, the project and its real folder. Output: the roots, or
-/// `move_project_unavailable` (also for more than [`LANDING_REPOSITORIES_MAX`]).
+/// each repository one of its change sets names that is that folder or inside it under
+/// either name of a data-volume folder, in the spelling the change set stores, since landing
+/// work takes its hold by that. Inputs: an engine connection, the project and its stored
+/// folder. Output: the roots, or `move_project_unavailable` (also past the max).
 pub(super) fn landing_repositories(
     db: &Connection,
     project: &ProjectId,
@@ -345,10 +346,13 @@ pub(super) fn landing_repositories(
             |row| row.get::<_, String>(0),
         )
         .map_err(sql)?;
+    let short = one_spelling(origin.to_path_buf());
+    let under_origin = |path: &Path| path.starts_with(origin) || path.starts_with(&short);
     for repository in stored {
         let repository = PathBuf::from(repository.map_err(sql)?);
-        let inside = repository.starts_with(origin)
-            || std::fs::canonicalize(&repository).is_ok_and(|real| real.starts_with(origin));
+        let inside = under_origin(&repository)
+            || std::fs::canonicalize(&repository)
+                .is_ok_and(|real| under_origin(&one_spelling(real)));
         if inside {
             roots.insert(repository);
         }
@@ -660,6 +664,7 @@ pub(crate) fn plan(
     Ok(ProjectMove {
         database: database.to_path_buf(),
         project: asked.project.clone(),
+        origin: real,
         add,
     })
 }
