@@ -885,12 +885,31 @@ impl Tmux {
     }
 
     /// Reads whether bracketed paste is on in one tmux target. Takes the control client and
-    /// the target. Returns the answer.
+    /// the target. Returns the answer, or `terminal_agent_unknown` once the target is gone.
     fn paste_on(control: &Control, target: &str) -> Result<bool, HostError> {
+        Ok(Self::displayed(control, target, "#{bracket_paste_flag}")? == "1")
+    }
+
+    /// Reads one format of one tmux target. `display-message` answers for the current pane,
+    /// with success, when its target is gone (tmux 3.8), so the answer also names its pane
+    /// and window, and one of them must be the target. Takes the control client, a `%N` pane
+    /// or `session:=window` target and a format without spaces in its text. Returns the
+    /// format's text, or `terminal_agent_unknown` once the target is gone.
+    fn displayed(control: &Control, target: &str, format: &str) -> Result<String, HostError> {
         let lines = control.ask(&format!(
-            "display-message -p -t {target} '#{{bracket_paste_flag}}{FORMAT_END}'"
+            "display-message -p -t {target} '#{{pane_id}} #{{session_name}}:=#{{window_name}} {format}{FORMAT_END}'"
         ))?;
-        Ok(lines.first().is_some_and(|line| line.as_slice() == b"1"))
+        let unread = || failure("terminal_command_failed");
+        let line = lines
+            .first()
+            .and_then(|line| std::str::from_utf8(line).ok())
+            .ok_or_else(unread)?;
+        let (pane, rest) = line.split_once(' ').ok_or_else(unread)?;
+        let (window, text) = rest.split_once(' ').ok_or_else(unread)?;
+        if pane != target && window != target {
+            return Err(failure("terminal_agent_unknown"));
+        }
+        Ok(text.to_owned())
     }
 }
 
@@ -2424,14 +2443,10 @@ impl Host for Tmux {
     fn quiet(&self, agent: &AgentId) -> Result<Option<Duration>, HostError> {
         let control = self.live_control()?;
         let target = self.agent_target(&control, agent)?;
-        let lines = control.ask(&format!(
-            "display-message -p -t {target} '#{{window_activity}}{FORMAT_END}'"
-        ))?;
-        let activity = lines
-            .first()
-            .and_then(|line| std::str::from_utf8(line).ok())
-            .and_then(|text| text.trim().parse::<u64>().ok())
-            .ok_or_else(|| failure("terminal_command_failed"))?;
+        let activity = Self::displayed(&control, &target, "#{window_activity}")?
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| failure("terminal_command_failed"))?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| failure("terminal_command_failed"))?

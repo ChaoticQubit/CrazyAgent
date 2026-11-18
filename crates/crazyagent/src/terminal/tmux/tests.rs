@@ -3544,3 +3544,41 @@ fn an_owner_paste_is_bracketed_once_only_when_the_pane_asked() {
         assert_eq!(buffers_left(&host), 0);
     }
 }
+
+/// #477 r2 / #483: tmux 3.8 answers `display-message -t` for a gone window with success and
+/// the current pane's values, so a terminal whose window is gone, on the engine's own server
+/// where no lookup runs first, must read as `terminal_agent_unknown`, never as that other
+/// pane's paste mode or activity; a live terminal still reads its own.
+#[test]
+fn a_gone_window_reads_as_unknown_not_as_the_current_pane() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let _server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let agent = AgentId::team(1).unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sleep".into(), "60".into()],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    host.spawn(&agent, &command).unwrap();
+    assert_eq!(host.input_live(&agent).map_err(|error| error.0), Ok(false));
+    assert!(host.quiet(&agent).unwrap().is_some());
+    let gone = AgentId::team(9).unwrap();
+    assert_eq!(
+        host.input_live(&gone).map_err(|error| error.0),
+        Err("terminal_agent_unknown".to_owned())
+    );
+    assert_eq!(
+        host.quiet(&gone).map_err(|error| error.0),
+        Err("terminal_agent_unknown".to_owned())
+    );
+}
