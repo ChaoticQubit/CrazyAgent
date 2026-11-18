@@ -157,11 +157,57 @@ test("V243-NATIVE-ONLY: a following panel whose agent ended opens a new view, sa
     const trying = await F.until(() => F.shown("a").status.includes(line));
     const reopened = await F.until(() => F.calls("desktop_native_terminal_open").length === 2, 3000);
     await pause(300);
-    return { trying, reopened, onEnded: F.callsOn(view, mark), status: F.shown("a").status };
+    F.event(view, { type: "behind", behind: true });
+    await pause(200);
+    return { trying, reopened, onEnded: F.callsOn(view, mark), status: F.shown("a").status, stale: F.shown("a").buttons.includes("Jump to latest") };
   `);
   assert.equal(seen.trying, true, JSON.stringify(seen.status));
   assert.equal(seen.reopened, true);
   assert.deepEqual(seen.onEnded, [], "an ended view is gone: no place, cover or close on it");
+  assert.equal(seen.stale, false, "an event of the ended view changes nothing");
+});
+
+test("V243-NATIVE-ONLY: an open the desktop refuses after its view already ended counts as one end, so a following panel tries once, not twice", async () => {
+  const seen = await page(`
+    await F.stage();
+    F.hold();
+    F.mount("a", ${MASTER}, { follow: true });
+    await F.until(() => F.calls("desktop_native_terminal_open").length === 1);
+    F.event(1, { type: "ended", code: "terminal_ended", final: false });
+    const words = F.words("x", "terminal_ended");
+    const first = await F.until(() => F.shown("a").status.includes("Connecting to the terminal again, try 1 of 30. Last try: " + words.ended));
+    F.release({ code: "terminal_ended" });
+    await pause(300);
+    const status = F.shown("a").status;
+    const reopened = await F.until(() => F.calls("desktop_native_terminal_open").length === 2, 3000);
+    await pause(1500);
+    return { first, status, reopened, opens: F.calls("desktop_native_terminal_open").length };
+  `);
+  assert.equal(seen.first, true);
+  assert.ok(seen.status.some((line) => line.includes("try 1 of 30")), JSON.stringify(seen.status));
+  assert.ok(!seen.status.some((line) => line.includes("try 2 of 30")), JSON.stringify(seen.status));
+  assert.equal(seen.reopened, true);
+  assert.equal(seen.opens, 2, "one end, one new open");
+});
+
+test("V243-NATIVE-ONLY: after a prompt stops reaching the agent and the owner opens the terminal again, the message box sends again", async () => {
+  const seen = await page(`
+    await F.stage();
+    F.input("box");
+    const view = await F.live("a", ${MASTER});
+    F.fail("prompt", { code: "terminal_gone" });
+    const first = await F.promptBox("a", "first");
+    const stopped = await F.until(() => F.shown("a").alerts.some((line) => line.startsWith("Typing stopped reaching this agent.")));
+    F.fail("prompt", null);
+    F.press("a", "Open again");
+    await F.until(() => F.calls("desktop_native_terminal_open").length === 2);
+    F.event(2, { type: "ready", cols: 80, rows: 24 });
+    await F.until(() => F.shown("a").status.some((line) => line.startsWith("The terminal shows Master")));
+    const second = await F.promptBox("a", "second");
+    const sent = await F.until(() => F.calls("desktop_terminal_prompt").some((entry) => entry.args.text === "second"));
+    return { view, first, stopped, second, sent, prompts: F.calls("desktop_terminal_prompt").map((entry) => entry.args.text) };
+  `);
+  assert.deepEqual(seen, { view: 1, first: true, stopped: true, second: true, sent: true, prompts: ["first", "second"] });
 });
 
 test("V243-NATIVE-ONLY: a native view that ended for good shows why with Open again, does not follow, and Open again opens a new view", async () => {
