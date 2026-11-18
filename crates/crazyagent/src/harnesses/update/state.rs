@@ -287,12 +287,15 @@ fn tool_check(id: &str, method: &Method, real: &Path, roots: &Roots, installed: 
 
 /// What an installed harness lacks before it can run, read as a launch reads it: the program
 /// its first line asks for when the tool resolver finds none, or the resolver's refusal of the
-/// file or its interpreter, such as one agents can write, with the resolver's owner line. Any
-/// other read leaves the file to run as it is. Nothing is run. Inputs: the catalog's file
-/// and the resolver's places. Output: the need, or none.
+/// file, its interpreter or its own npm prefix's `node` ([`crate::tools::own_node_refused`]),
+/// with the resolver's owner line. Any other read leaves the file to run as it is. Nothing is
+/// run. Inputs: the catalog's file and the resolver's places. Output: the need, or none.
 pub(crate) fn needs(executable: &Path, places: &crate::tools::Places) -> Option<HarnessNeeds> {
     use crate::tools::Reason;
-    let missing = crate::tools::resolve_entry(executable, places).err()?;
+    let missing = match crate::tools::resolve_entry(executable, places) {
+        Ok(tool) => crate::tools::own_node_refused(&tool, places)?,
+        Err(missing) => missing,
+    };
     matches!(missing.reason, Reason::NeedsInterpreter | Reason::Refused).then(|| HarnessNeeds {
         line: missing.line(),
         program: missing.needs,

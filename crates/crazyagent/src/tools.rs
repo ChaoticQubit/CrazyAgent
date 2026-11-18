@@ -1153,17 +1153,14 @@ fn named_interpreter(
     depth: usize,
 ) -> Result<Resolved, Missing> {
     assert!(depth <= INTERPRETER_DEPTH_MAX);
-    let own = (name == "node")
-        .then(|| crate::harnesses::npm_prefix(script))
-        .flatten()
-        .map(|prefix| prefix.join("bin").join(name));
-    if let Some(node) = own {
-        match entry_at(&node, places, depth) {
+    if name == "node"
+        && let Some((node, judged)) = own_node(script, places, depth)
+    {
+        match judged {
             Ok(found) => return Ok(found),
-            Err(passed) if passed.reason != Reason::NotFound => {
+            Err(passed) => {
                 log_own_node_passed_over(&node, &passed);
             }
-            Err(_) => {}
         }
     }
     #[cfg(windows)]
@@ -1171,11 +1168,59 @@ fn named_interpreter(
     resolve_at(name, places, depth)
 }
 
-/// Why a resolved script would start under a `node` other than its own npm prefix's, so a
-/// harness launch refuses instead of falling back (V243-OWN-PREFIX-NODE-REFUSE). Inputs:
-/// the tool and the places. Output: why, or none.
-pub(crate) fn own_node_refused(_tool: &Resolved, _places: &Places) -> Option<Missing> {
-    todo!("V243-OWN-PREFIX-NODE-REFUSE: own_node_refused")
+/// The `node` file in a script's own npm prefix ([`crate::harnesses::npm_prefix`]) and how
+/// the resolver's checks judge it at the depth given: none when the script has no prefix or
+/// the prefix has no `node`, else that `node` or why it is passed over. Inputs: the script's
+/// real file, the places and the depth. Output: the file and its judgement, or none.
+fn own_node(
+    script: &Path,
+    places: &Places,
+    depth: usize,
+) -> Option<(PathBuf, Result<Resolved, Missing>)> {
+    assert!(depth <= INTERPRETER_DEPTH_MAX);
+    assert!(script.is_absolute());
+    let node = crate::harnesses::npm_prefix(script)?
+        .join("bin")
+        .join("node");
+    let judged = entry_at(&node, places, depth);
+    if judged
+        .as_ref()
+        .is_err_and(|missing| missing.reason == Reason::NotFound)
+    {
+        return None;
+    }
+    Some((node, judged))
+}
+
+/// Why a resolved script that runs `node` by name would start under a `node` other than its
+/// own npm prefix's: why the resolver passes that prefix's `node` over, named for the tool,
+/// so a harness launch refuses where npm falls back (V243-OWN-PREFIX-NODE-REFUSE). The tool
+/// is one resolved at depth 0, so its `node` is judged at depth 1, as [`named_interpreter`]
+/// does. Inputs: the tool and the places. Output: why, or none.
+pub(crate) fn own_node_refused(tool: &Resolved, places: &Places) -> Option<Missing> {
+    assert!(tool.program.is_absolute());
+    let Kind::Script {
+        interpreter,
+        by_name: true,
+        ..
+    } = &tool.kind
+    else {
+        return None;
+    };
+    if interpreter.entry.file_stem() != Some(OsStr::new("node")) {
+        return None;
+    }
+    let passed = own_node(&tool.program, places, 1)?.1.err()?;
+    assert_ne!(passed.reason, Reason::NotFound);
+    let name = tool
+        .entry
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("the program");
+    Some(Missing {
+        tool: name.to_owned(),
+        ..passed
+    })
 }
 
 /// The most own-prefix `node` files the engine log names, each once per process.
