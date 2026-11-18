@@ -3524,13 +3524,14 @@ fn end_superseded_sign_outs(
 }
 
 /// Whether storage gave a native-auth job a final answer: it ran, or storage refused it by a
-/// name every client shows. Any other error is a storage fault, which the client reads as
-/// outcome unknown, so a kept sign-out stays for the next open. Input: the answer.
-/// Output: the verdict.
+/// name every client shows, a busy profile included, which the owner reads as recovery
+/// required. Any other error is a storage fault, read as outcome unknown, so a kept
+/// sign-out stays for the next open. Input: the answer. Output: the verdict.
 fn final_answer<T>(result: &Result<T, EngineError>) -> bool {
-    result
-        .as_ref()
-        .map_or_else(|refused| owner_auth::public_error(&refused.0), |_| true)
+    result.as_ref().map_or_else(
+        |refused| refused.0 == "native_auth_host_busy" || owner_auth::public_error(&refused.0),
+        |_| true,
+    )
 }
 
 /// Ends the kept sign-out with this operation id once storage gave it a final answer, so the
