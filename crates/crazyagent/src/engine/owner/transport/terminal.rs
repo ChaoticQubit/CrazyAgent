@@ -2,6 +2,8 @@ use super::*;
 use crate::platform::unix_socket::{OwnedReadHalf, OwnedWriteHalf};
 use crate::protocol::encode_frame;
 #[cfg(unix)]
+use crate::protocol::plain_code;
+#[cfg(unix)]
 use crate::terminal::buffer::Chunk;
 use crate::terminal::{
     AgentId, Host, HostError, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, PaneAt, TerminalFrame,
@@ -1070,10 +1072,7 @@ async fn pump(
                 sending = None;
                 match sent.unwrap_or_else(|_| Err(HostError("terminal_unavailable".into()))) {
                     Err(error) if crate::terminal::ended_code(&error.0) => break "terminal_ended",
-                    Err(error) => {
-                        let code = crate::protocol::plain_code(&error.0);
-                        eprintln!("terminal_send_refused code={code}");
-                    }
+                    Err(error) => eprintln!("terminal_send_refused code={}", plain_code(&error.0)),
                     Ok(None) => {}
                     Ok(Some(text)) => viewing.heard(text).await,
                 }
