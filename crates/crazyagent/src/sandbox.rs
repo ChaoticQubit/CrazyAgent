@@ -3982,7 +3982,7 @@ impl InstalledSandbox {
             assert!(profile.is_file());
             #[cfg(target_os = "linux")]
             let linux = {
-                let helper = std::env::current_exe()?.with_file_name(linux::HELPER_NAME);
+                let helper = linux::helper_beside_engine()?;
                 let data = crate::tools::engine_root();
                 linux::LinuxSandbox::detect(sandbox.clone(), &helper)?.supervise(calls, data)
             };
