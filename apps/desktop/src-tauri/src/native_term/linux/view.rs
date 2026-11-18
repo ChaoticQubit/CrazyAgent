@@ -7,6 +7,7 @@ use gtk::gdk::{self, EventKey, EventType, ModifierType, ScrollDirection};
 use gtk::glib::{Propagation, SignalHandlerId, WeakRef};
 use gtk::prelude::*;
 
+use super::clip::{self, Board, Clip};
 use super::keys;
 use super::surface::Rect;
 use crate::native_term::event::{MouseKind, Sink, ViewEvent};
@@ -68,6 +69,18 @@ pub fn commit_event(focus: Focus, text: &str) -> Option<ViewEvent> {
         return None;
     }
     commit_input(text).map(ViewEvent::Key)
+}
+
+/// The event a middle click's PRIMARY read makes when it comes back: the same paste input
+/// Cmd-V makes, so the pane's paste checks and bracketed paste apply, and only while the
+/// view is still placed and uncovered. Inputs: the view's focus, whether it is placed and
+/// the text read. Output: the event.
+pub fn primary_paste(focus: Focus, placed: bool, text: Option<String>) -> Option<ViewEvent> {
+    if !placed || focus.is_covered() {
+        return None;
+    }
+    let text = text.filter(|text| !text.is_empty())?;
+    Some(ViewEvent::Key(Input::Paste { text }))
 }
 
 /// Where keyboard focus stands for one view: whether it holds native focus, whether its
@@ -179,11 +192,13 @@ impl DoubleClick {
     }
 }
 
-/// Where one pointer event goes: on to the page, or to the view, which takes native focus
-/// first when `focus` is set and then hands `event`, if any, to its host.
+/// Where one pointer event goes: on to the page; to the view, which takes native focus
+/// first when `focus` is set and then hands `event`, if any, to its host; or to the view
+/// as a middle click, which reads PRIMARY and pastes it.
 #[derive(Debug, PartialEq)]
 pub enum Route {
     Page,
+    Primary,
     View {
         focus: bool,
         event: Option<ViewEvent>,
@@ -236,10 +251,15 @@ impl Pointer {
         self.pressing = None;
     }
 
+    /// Whether the view has a rectangle. Output: the answer.
+    pub fn is_placed(&self) -> bool {
+        self.rect.is_some()
+    }
+
     /// Routes a button press: the left button presses with a click count and takes focus,
-    /// the right opens the menu, others are held without events. Inputs: the button, the
-    /// point, the event time in ms, whether Alt is held, whether the view is covered and
-    /// the double-click limits. Output: the route.
+    /// the right opens the menu, the middle pastes PRIMARY, others are held without
+    /// events. Inputs: the button, the point, the event time in ms, whether Alt is held,
+    /// whether the view is covered and the double-click limits. Output: the route.
     pub fn press(
         &mut self,
         button: u32,
@@ -259,6 +279,12 @@ impl Pointer {
             return Route::Page;
         };
         self.pressing = Some(button);
+        if button != 1 {
+            self.last = None;
+        }
+        if button == 2 {
+            return Route::Primary;
+        }
         let event = match button {
             1 => {
                 self.clicks = self.count(time, at, double);
@@ -272,9 +298,6 @@ impl Pointer {
             3 => Some(ViewEvent::Menu { point }),
             _ => None,
         };
-        if button != 1 {
-            self.last = None;
-        }
         Route::View {
             focus: button == 1,
             event,
@@ -427,6 +450,7 @@ struct Inner {
     page: RefCell<Option<WeakRef<gtk::Widget>>>,
     pointer: RefCell<Pointer>,
     double: DoubleClick,
+    clip: Rc<Clip>,
 }
 
 impl Inner {
@@ -535,9 +559,10 @@ impl Inner {
     }
 
     /// Routes one pointer event in GTK's capture phase, ahead of the webview. A press
-    /// the page gets releases native focus. Input: the event. Output: whether it goes on
-    /// to the page.
-    fn pointer_event(&self, event: &gdk::Event) -> Propagation {
+    /// the page gets releases native focus; a middle press reads PRIMARY, whose text
+    /// lands only if the view is still alive, placed and uncovered when it comes back.
+    /// Input: the event. Output: whether it goes on to the page.
+    fn pointer_event(self: &Rc<Self>, event: &gdk::Event) -> Propagation {
         let kind = event.event_type();
         let pointer_kind = matches!(
             kind,
@@ -581,6 +606,20 @@ impl Inner {
                 }
                 Propagation::Proceed
             }
+            Route::Primary => {
+                let me = Rc::downgrade(self);
+                self.clip
+                    .read(Board::Primary, clip::current_input(), move |text| {
+                        let Some(me) = me.upgrade() else {
+                            return;
+                        };
+                        let placed = me.pointer.borrow().is_placed();
+                        if let Some(event) = primary_paste(me.focus.get(), placed, text) {
+                            me.send(event);
+                        }
+                    });
+                Propagation::Stop
+            }
             Route::View { focus, event } => {
                 if focus {
                     self.moving(|f| f.native(true), true);
@@ -615,9 +654,15 @@ pub struct View {
 
 impl View {
     /// Wires a view to a realized toplevel, unplaced and without native focus. Inputs: the
-    /// toplevel, the view id and the sink. Output: the view, or
-    /// `native_terminal_surface_unavailable` when the toplevel has no GDK window.
-    pub fn new(toplevel: &gtk::Window, id: u64, sink: Sink) -> Result<View, &'static str> {
+    /// toplevel, the view id, the sink and the host's boards for the middle-click paste.
+    /// Output: the view, or `native_terminal_surface_unavailable` when the toplevel has no
+    /// GDK window.
+    pub fn new(
+        toplevel: &gtk::Window,
+        id: u64,
+        sink: Sink,
+        clip: Rc<Clip>,
+    ) -> Result<View, &'static str> {
         assert!(id > 0);
         let gdk = toplevel
             .window()
@@ -633,6 +678,7 @@ impl View {
             page: RefCell::new(None),
             pointer: RefCell::new(Pointer::new()),
             double: DoubleClick::from_settings(),
+            clip,
         });
         let commit = {
             let me = Rc::clone(&inner);
