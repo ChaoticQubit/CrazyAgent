@@ -1171,7 +1171,7 @@ fn removing_an_agent_tree_never_changes_an_owner_folder_a_swapped_folder_points_
         }
     }
     for folder in &owned {
-        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o500)).unwrap();
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o555)).unwrap();
     }
     let stop = Arc::new(AtomicBool::new(false));
     let swapper = {
@@ -1213,7 +1213,7 @@ fn removing_an_agent_tree_never_changes_an_owner_folder_a_swapped_folder_points_
             .permissions()
             .mode();
         assert!(denies(folder), "{folder:?} lost its ACL");
-        assert_eq!(mode & 0o777, 0o500, "{folder:?} was opened up");
+        assert_eq!(mode & 0o777, 0o555, "{folder:?} was opened up");
     }
 }
 
@@ -1252,7 +1252,7 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
         }
     }
     for folder in &owned {
-        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o500)).unwrap();
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o555)).unwrap();
     }
     let stop = Arc::new(AtomicBool::new(false));
     let planted = Arc::new(AtomicUsize::new(0));
@@ -1308,7 +1308,7 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
             .permissions()
             .mode();
         assert!(denies(folder), "{folder:?} lost its ACL");
-        assert_eq!(mode & 0o777, 0o500, "{folder:?} was opened up");
+        assert_eq!(mode & 0o777, 0o555, "{folder:?} was opened up");
     }
 }
 
