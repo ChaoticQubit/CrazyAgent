@@ -113,14 +113,23 @@ fn failure(code: &'static str) -> BridgeError {
     }
 }
 
+/// The engine codes every route keeps as they are, whatever codes the route lists: an
+/// engine version mismatch, so the window shows its restart sentence, and storage's own
+/// answers, so a request that never ran or an access change still pending is never read as
+/// an unknown outcome. Input: the raw engine code. Output: that code, if it is one of them.
+fn kept_code(engine: &str) -> Option<&'static str> {
+    std::iter::once(ENGINE_VERSION_MISMATCH)
+        .chain(crazyagent::storage::STORAGE_ANSWERS.iter().copied())
+        .find(|kept| *kept == engine)
+}
+
 /// A bridge failure that keeps the engine code behind it, so the window names it after its
-/// own sentence instead of hiding it. An engine version mismatch stays that code, so the
-/// window shows its restart sentence. Inputs: the bridge code and the raw engine code.
-/// Output: the error; the cause is the engine code made plain by `plain_code`, absent when
-/// it equals the bridge code.
+/// own sentence instead of hiding it. A code `kept_code` names stays that code on every
+/// route. Inputs: the bridge code and the raw engine code. Output: the error; the cause is
+/// the engine code made plain by `plain_code`, absent when it equals the bridge code.
 fn caused(code: &'static str, engine: &str) -> BridgeError {
-    if engine == ENGINE_VERSION_MISMATCH {
-        return failure(ENGINE_VERSION_MISMATCH);
+    if let Some(kept) = kept_code(engine) {
+        return failure(kept);
     }
     let cause = crazyagent::protocol::plain_code(engine);
     BridgeError {
@@ -130,15 +139,11 @@ fn caused(code: &'static str, engine: &str) -> BridgeError {
     }
 }
 
-/// A bridge failure on a route that shows no engine cause. An engine version mismatch stays
-/// that code, so the window shows its restart sentence. Inputs: the bridge code and the raw
-/// engine code. Output: the error.
+/// A bridge failure on a route that shows no engine cause. A code `kept_code` names stays
+/// that code on every route. Inputs: the bridge code and the raw engine code. Output: the
+/// error.
 fn uncaused(code: &'static str, engine: &str) -> BridgeError {
-    failure(if engine == ENGINE_VERSION_MISMATCH {
-        ENGINE_VERSION_MISMATCH
-    } else {
-        code
-    })
+    failure(kept_code(engine).unwrap_or(code))
 }
 
 #[derive(Debug, Serialize)]

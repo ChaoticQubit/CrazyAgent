@@ -1,4 +1,4 @@
-import type { ModelAccessDetail } from "./engine-client";
+import { STORAGE_COPY, type ModelAccessDetail } from "./engine-client";
 import { displayText } from "./screens/conversation";
 
 export type NativeAuthMethod = "codex_browser" | "codex_device_code" | "codex_existing" | "claude_official" | "claude_existing";
@@ -313,6 +313,7 @@ export function reduceNativeAuth(state: NativeAuthState | undefined,
 }
 
 export function nativeAuthError(code: string): string {
+  if (Object.hasOwn(STORAGE_COPY, code)) return STORAGE_COPY[code];
   switch (code) {
     case "native_auth_cannot_display_safely":
       return "The challenge cannot display safely. No partial code or URL is shown.";
@@ -330,14 +331,6 @@ export function nativeAuthError(code: string): string {
       return "Paste the complete code and state shown by the official Claude sign-in page.";
     case "owner_busy":
       return "CrazyAgent is busy with other requests. Try again in a moment.";
-    case "owner_queue_not_submitted":
-      return "CrazyAgent had too many requests waiting, so nothing changed. It's safe to do it again now.";
-    case "storage_starting_not_submitted":
-      return "CrazyAgent's database was still starting, so nothing changed. It's safe to do it again now.";
-    case "access_change_pending":
-      return "CrazyAgent's database is busy, so this change is waiting its turn and takes effect when the database gets to it. If CrazyAgent stops before then, make the change again.";
-    case "storage_busy_not_submitted":
-      return "CrazyAgent's database was busy with earlier work, so nothing changed. It's safe to do it again now.";
     default:
       return "The native authentication action is unavailable. " +
         "Refresh Settings and inspect its reason.";
