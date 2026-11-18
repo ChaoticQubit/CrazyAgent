@@ -54,7 +54,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked
-      - name: Probe P1 recheck, P2b git in the container with owner-opened std handles, P3 contained latency
+      - name: Probe P2c NUL granted to app containers as the DEC-195 boot task does, then P2 and P3 contained latency
         shell: pwsh
         timeout-minutes: 50
         run: ./.github/farm/probe-git-unc.ps1

@@ -156,29 +156,6 @@ function Get-Load {
 
 $rows = @()
 
-$p1Nocap = Write-Profile 'p1-nocap' 'crazyagent.probe-p1-nocap' @() @("$base\p1w")
-$p1Net = Write-Profile 'p1-net' 'crazyagent.probe-p1-net' @('internetClient') @("$base\p1w")
-$targets = [ordered]@{
-    ip = "\\$ip\pf\f.txt"
-    host = "\\$hostName\pf\f.txt"
-    loopback = "\\127.0.0.1\pf\f.txt"
-    adminshare = "\\localhost\C$\Windows\win.ini"
-}
-$nonLoopback = @('ip', 'host')
-$rows += Measure-Open 'P1-launch' 'nocap' { Invoke-Contained $p1Nocap $cmd @('/d', '/c', 'echo launched') }
-foreach ($name in $targets.Keys) {
-    $target = $targets[$name]
-    $rows += Measure-Open 'P1-nocap' $name { Invoke-Contained $p1Nocap $cmd @('/d', '/c', "type $target") }
-}
-foreach ($name in $targets.Keys) {
-    $target = $targets[$name]
-    $rows += Measure-Open 'P1-net' $name { Invoke-Contained $p1Net $cmd @('/d', '/c', "type $target") }
-}
-foreach ($name in $targets.Keys) {
-    $target = $targets[$name]
-    $rows += Measure-Open 'P1-owner' $name { Invoke-Owner $cmd @('/d', '/c', "type $target") }
-}
-$rows += Measure-Open 'P1-owner-bad-share' 'ip' { Invoke-Owner $cmd @('/d', '/c', "type \\$ip\missing-share\f.txt") }
 
 $env:GIT_CONFIG_NOSYSTEM = '1'
 $env:GIT_ATTR_NOSYSTEM = '1'
@@ -237,12 +214,73 @@ Remove-Item -LiteralPath "$base\work\r-excludelink\.git\info\exclude" -Force
 Write-Host "P2 link $((& $cmd /d /c mklink "$base\work\r-excludelink\.git\info\exclude" "\\$ip\pl\exclude" 2>&1 | Out-String) -replace '\s+', ' ')"
 $gitProfile = Write-Profile 'p2-git' 'crazyagent.probe-git' @() @("$base\work")
 $rows += Measure-Open 'P2-first-launch' 'grant-over-planted-tree' { Invoke-ContainedGit $gitProfile @('--version') }
-try {
-    $nulStdin = Start-Process -FilePath $helper -ArgumentList ('--profile ' + $gitProfile + ' -- ' + (Format-Argument $git) + ' --version') -RedirectStandardInput 'NUL' -RedirectStandardOutput "$base\io\nul-out.txt" -RedirectStandardError "$base\io\nul-err.txt" -NoNewWindow -Wait -PassThru -ErrorAction Stop
-    Write-Host "P2 stdin-nul exit=$($nulStdin.ExitCode) out=[$((Get-Content -Raw "$base\io\nul-out.txt") -replace '\s+', ' ')] err=[$((Get-Content -Raw "$base\io\nul-err.txt") -replace '\s+', ' ')]"
-} catch {
-    Write-Host "P2 stdin-nul start failed: $($_.Exception.Message)"
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using Microsoft.Win32.SafeHandles;
+public static class NulAccess {
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr attributes, uint disposition, uint flags, IntPtr template);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool GetKernelObjectSecurity(SafeFileHandle handle, uint information, byte[] descriptor, uint length, out uint needed);
+    [DllImport("advapi32.dll", SetLastError = true)]
+    static extern bool SetKernelObjectSecurity(SafeFileHandle handle, uint information, byte[] descriptor);
+    const uint ReadControl = 0x20000;
+    const uint WriteDac = 0x40000;
+    const uint Dacl = 4;
+    static SafeFileHandle Open() {
+        SafeFileHandle handle = CreateFileW(@"\\.\NUL", ReadControl | WriteDac, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        if (handle.IsInvalid) { throw new Win32Exception(Marshal.GetLastWin32Error()); }
+        return handle;
+    }
+    static RawSecurityDescriptor Read(SafeFileHandle handle) {
+        uint needed;
+        GetKernelObjectSecurity(handle, Dacl, null, 0, out needed);
+        byte[] bytes = new byte[needed];
+        if (!GetKernelObjectSecurity(handle, Dacl, bytes, needed, out needed)) { throw new Win32Exception(Marshal.GetLastWin32Error()); }
+        return new RawSecurityDescriptor(bytes, 0);
+    }
+    public static string Sddl() {
+        using (SafeFileHandle handle = Open()) { return Read(handle).GetSddlForm(AccessControlSections.Access); }
+    }
+    public static string Grant(int mask) {
+        using (SafeFileHandle handle = Open()) {
+            RawSecurityDescriptor descriptor = Read(handle);
+            SecurityIdentifier packages = new SecurityIdentifier("S-1-15-2-1");
+            RawAcl list = descriptor.DiscretionaryAcl;
+            for (int at = list.Count - 1; at >= 0; at--) {
+                CommonAce entry = list[at] as CommonAce;
+                if (entry != null && entry.SecurityIdentifier == packages) { list.RemoveAce(at); }
+            }
+            list.InsertAce(list.Count, new CommonAce(AceFlags.None, AceQualifier.AccessAllowed, mask, packages, false, null));
+            descriptor.DiscretionaryAcl = list;
+            byte[] bytes = new byte[descriptor.BinaryLength];
+            descriptor.GetBinaryForm(bytes, 0);
+            if (!SetKernelObjectSecurity(handle, Dacl, bytes)) { throw new Win32Exception(Marshal.GetLastWin32Error()); }
+            return Read(handle).GetSddlForm(AccessControlSections.Access);
+        }
+    }
 }
+'@
+
+function Test-Nul([string]$stage, [string]$boundary) {
+    $read = Invoke-Contained $boundary $cmd @('/d', '/c', 'type NUL')
+    $write = Invoke-Contained $boundary $cmd @('/d', '/c', 'echo x>NUL')
+    $version = Invoke-ContainedGit $boundary @('--version')
+    Write-Host "NUL $stage read-exit=$($read.Exit) [$(($read.Output -replace '\s+', ' ').Trim())] write-exit=$($write.Exit) [$(($write.Output -replace '\s+', ' ').Trim())] git-version-exit=$($version.Exit) [$(($version.Output -replace '\s+', ' ').Trim())]"
+}
+
+$netProfile = Write-Profile 'p2-net' 'crazyagent.probe-git-net' @('internetClient') @("$base\p1w")
+Write-Host "NUL dacl-before $([NulAccess]::Sddl())"
+Test-Nul 'before nocap' $gitProfile
+Write-Host "NUL dacl-read $([NulAccess]::Grant(0x120089))"
+Test-Nul 'read-only nocap' $gitProfile
+Write-Host "NUL dacl-readwrite $([NulAccess]::Grant(0x12019F))"
+Test-Nul 'read-write nocap' $gitProfile
+Test-Nul 'read-write internetClient' $netProfile
 
 $chosen = $null
 foreach ($variant in @($emptyConfig, 'NUL')) {
@@ -292,6 +330,8 @@ $probeLines = @(($probe.Output -split "`n") | Where-Object { $_.Trim() -ne '' })
 Write-Host "P3 contained list check exit=$($probe.Exit) lines=$probeLines tracked=$latFiles excludes=[$($script:excludes)]"
 Write-Host "P3 latency quiet direct $(Measure-Runs 20 { Invoke-OwnerGit $latArgs }) load=[$(Get-Load)]"
 Write-Host "P3 latency quiet contained $(Measure-Runs 20 { Invoke-ContainedGit $latProfile $latArgs }) load=[$(Get-Load)]"
+Write-Host "P3 latency quiet direct-call $(Measure-Runs 20 { Invoke-Owner $git $latArgs }) load=[$(Get-Load)]"
+Write-Host "P3 latency quiet contained-call $(Measure-Runs 20 { Invoke-Contained $latProfile $git $latArgs }) load=[$(Get-Load)]"
 
 $loop = "$base\load\loop.ps1"
 Set-Content -Path $loop -Value @'
@@ -310,22 +350,12 @@ Start-Sleep -Seconds 20
 Write-Host "P3 loaded start after $waited s: [$(Get-Load)]"
 Write-Host "P3 latency loaded direct $(Measure-Runs 20 { Invoke-OwnerGit $latArgs }) load=[$(Get-Load)]"
 Write-Host "P3 latency loaded contained $(Measure-Runs 20 { Invoke-ContainedGit $latProfile $latArgs }) load=[$(Get-Load)]"
+Write-Host "P3 latency loaded direct-call $(Measure-Runs 20 { Invoke-Owner $git $latArgs }) load=[$(Get-Load)]"
+Write-Host "P3 latency loaded contained-call $(Measure-Runs 20 { Invoke-Contained $latProfile $git $latArgs }) load=[$(Get-Load)]"
 New-Item -ItemType File -Force -Path "$base\load\stop" | Out-Null
 Get-Process -Name cargo, rustc -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 $load | Stop-Process -Force -ErrorAction SilentlyContinue
 
-$p1 = @($rows | Where-Object { $_.Phase -eq 'P1-nocap' -and $nonLoopback -contains $_.Label })
-$opened = @($p1 | Where-Object { $_.Exit -eq 0 }).Count
-$logged = @($p1 | Where-Object { $_.Logons -gt 0 }).Count
-$sessioned = @($p1 | Where-Object { $_.Session }).Count
-$control = @($rows | Where-Object { $_.Phase -eq 'P1-owner' -and $nonLoopback -contains $_.Label -and $_.Exit -eq 0 -and $_.Session })
-$controlLogons = @($rows | Where-Object { $_.Phase -like 'P1-owner*' -and $_.Logons -gt 0 }).Count
-$controlValid = $control.Count -eq $nonLoopback.Count
-Write-Host "P1 CONTROL owner non-loopback opens with a server session=$controlValid owner rows with a network logon event=$controlLogons"
-Write-Host "P1 VERDICT nocap non-loopback names: opened=$opened logons=$logged sessions=$sessioned A-holds=$($controlValid -and $opened -eq 0 -and $logged -eq 0 -and $sessioned -eq 0)"
-foreach ($row in @($rows | Where-Object { $_.Phase -like 'P1-*' })) {
-    Write-Host "P1 SUMMARY $($row.Phase) $($row.Label) exit=$($row.Exit) logons=$($row.Logons) failed=$($row.Failed) session=$($row.Session)"
-}
 foreach ($row in @($rows | Where-Object { $_.Phase -like 'P2-*' })) {
     Write-Host "P2 SUMMARY $($row.Phase) $($row.Label) exit=$($row.Exit) logons=$($row.Logons) failed=$($row.Failed) session=$($row.Session)"
 }
