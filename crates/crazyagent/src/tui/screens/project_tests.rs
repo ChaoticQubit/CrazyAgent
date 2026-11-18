@@ -5579,9 +5579,10 @@ fn the_reinstall_line_counts_like_the_desktop_and_the_draft_keeps_typed_text() {
     );
 }
 
-/// NOTE-1845: a notice naming folders with long paths takes at most half the rows the master
-/// tab has free, its sentence cut short, so on an 80 by 24 terminal its keys and the master's
-/// input row stay drawn.
+/// NOTE-1845: a notice naming folders with long paths shows each name by its tail, so on an
+/// 80 by 24 terminal its whole sentence, its keys and the master's input row are drawn; on 80
+/// by 16, where the old notice pushed the input off, it takes at most half the free rows, its
+/// sentence cut short, and the keys and the input stay.
 #[test]
 fn a_long_reinstall_notice_keeps_its_keys_and_the_input_on_a_small_terminal() {
     let mut screen = reinstall_screen(MasterStatus::Stopped);
@@ -5593,15 +5594,25 @@ fn a_long_reinstall_notice_keeps_its_keys_and_the_input_on_a_small_terminal() {
     });
     assert_eq!(screen.key(key(KeyCode::Tab)), ProjectReply::Handled);
     let look = Look::plain();
+    let keys = "Press a to put the drafted message in your input, d to dismiss this.";
     let drawn = project_screen(&mut screen, 80, 24, &look);
     let shown = text(&drawn.rows);
+    let said = words(&drawn.rows);
+    assert!(said.contains("deep/node_modules, "), "{shown}");
     assert!(
-        words(&drawn.rows)
-            .contains("Press a to put the drafted message in your input, d to dismiss this."),
+        said.contains(
+            "deep/.venv and 4 more were left out when this project came into your projects \
+             folder, as they can be rebuilt."
+        ),
         "{shown}"
     );
+    assert!(said.contains(keys), "{shown}");
     assert!(shown.contains("> Message the master"), "{shown}");
-    assert!(shown.contains("deepdeep"), "{shown}");
+    let drawn = project_screen(&mut screen, 80, 16, &look);
+    let shown = text(&drawn.rows);
+    assert!(words(&drawn.rows).contains(keys), "{shown}");
+    assert!(shown.contains("> Message the master"), "{shown}");
+    assert!(shown.contains("deep"), "{shown}");
     assert!(!shown.contains("can be rebuilt"), "{shown}");
 }
 
