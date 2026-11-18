@@ -1304,15 +1304,17 @@ fn sole_own_link(file: &File, _metadata: &fs::Metadata) -> bool {
     sole_trusted_link(file).unwrap_or(false)
 }
 
-/// Reads from an open file's handle on Windows whether it has one link and an owner W1's
-/// judge trusts: the engine's user, SYSTEM, the administrators or TrustedInstaller, as an
-/// elevated user's new files are owned by the administrators (DESIGN-0256 C6). Input: the
-/// open file. Output: the answer, or the Windows error.
+/// Reads from an open file's handle on Windows whether it is no link, has one name and an
+/// owner W1's judge trusts: the engine's user, SYSTEM, the administrators or TrustedInstaller,
+/// as an elevated user's new files are owned by the administrators (DESIGN-0256 C6). Input:
+/// the open file. Output: the answer, or the Windows error.
 #[cfg(windows)]
 fn sole_trusted_link(file: &File) -> std::io::Result<bool> {
     use crazyagent_win_sandbox::{dacl, private};
     let facts = private::facts(file)?;
-    Ok(facts.links == 1 && dacl::trusted_owner(&facts.owner, &private::user_sid()?))
+    Ok(!facts.reparse
+        && facts.links == 1
+        && dacl::trusted_owner(&facts.owner, &private::user_sid()?))
 }
 
 /// Tells whether a home entry kept as a file on Windows has one link and a trusted owner,

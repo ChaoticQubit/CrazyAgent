@@ -705,7 +705,7 @@ pub fn backup_failure(root: &Path) -> Option<&'static str> {
         file
     };
     #[cfg(windows)]
-    let file = private::file(&root.join(BACKUP_FAILURE_FILE), false).ok()?;
+    let file = private::read_only(&root.join(BACKUP_FAILURE_FILE)).ok()?;
     let mut text = String::new();
     file.take(64).read_to_string(&mut text).ok()?;
     [BACKUP_UNSAFE, BACKUP_FAILED]
