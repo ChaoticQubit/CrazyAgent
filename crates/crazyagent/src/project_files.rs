@@ -289,6 +289,21 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Runs `work` and counts the gits `owner_git` gave meanwhile on this thread: one each time it
+/// checked a `.git` folder and went on to build the command. Input: the work. Output: the
+/// count.
+#[cfg(test)]
+pub(crate) fn owner_git_runs(work: impl FnOnce()) -> usize {
+    let runs = std::rc::Rc::new(std::cell::Cell::new(0_usize));
+    let counted = std::rc::Rc::clone(&runs);
+    AFTER_CHECK.with(|step| {
+        *step.borrow_mut() = Some(Box::new(move |_: &Path| counted.set(counted.get() + 1)));
+    });
+    work();
+    AFTER_CHECK.with(|step| *step.borrow_mut() = None);
+    runs.get()
+}
+
 /// Lists a repository while a step plants a `commondir` after `owner_git` checked the `.git`
 /// folder, naming a common folder whose `info/exclude` hides `notes.txt`. Inputs: a
 /// repository with an untracked `notes.txt` and a new folder for the common one. Output:

@@ -666,10 +666,38 @@ mod tests {
         }
     }
 
-    /// V243-WIN-HIDDEN-GIT (leader 08:33): times `none_tracked` per call on one untracked
-    /// folder, one git run as each launch gate makes it, over 20 calls, and prints the median
-    /// and the slowest. The farm runs it quiet and under a CPU load step; it asserts only the
-    /// answers.
+    /// V243-WIN-HIDDEN-GIT (leader 09:21): a saved list of several folders costs one git run,
+    /// wherever the tracked folder stands in it, and an empty list runs no git at all.
+    #[test]
+    fn a_list_of_folders_is_checked_with_one_git_run() {
+        let root = project();
+        let path = canonical(root.path()).unwrap();
+        let (tracked, untracked) = tracked_and_untracked(&path);
+        let mut folders = vec![untracked];
+        for name in ["plain-a", "plain-b", "plain-c"] {
+            let folder = path.join(name);
+            std::fs::create_dir(&folder).unwrap();
+            folders.push(folder);
+        }
+        let runs = crate::project_files::owner_git_runs(|| {
+            assert_eq!(none_tracked(&path, &folders), Ok(()));
+        });
+        assert_eq!(runs, 1, "four untracked folders");
+        folders.push(tracked);
+        let runs = crate::project_files::owner_git_runs(|| {
+            assert_eq!(none_tracked(&path, &folders), Err("hidden_path_tracked"));
+        });
+        assert_eq!(runs, 1, "the tracked folder last of five");
+        let runs = crate::project_files::owner_git_runs(|| {
+            assert_eq!(none_tracked(&path, &[]), Ok(()));
+        });
+        assert_eq!(runs, 0, "no folder");
+    }
+
+    /// V243-WIN-HIDDEN-GIT (leader 08:33, 09:21): times `none_tracked` per call, as each launch
+    /// gate makes it, on one untracked folder and on a full list of untracked folders, 20 calls
+    /// each, and prints the median and the slowest of each. The farm runs it quiet and under a
+    /// CPU load step; it asserts only the answers.
     #[test]
     #[ignore = "timing, run by the farm quiet and under a CPU load step"]
     fn none_tracked_time_per_call() {
@@ -677,23 +705,29 @@ mod tests {
         let path = canonical(root.path()).unwrap();
         let (tracked, untracked) = tracked_and_untracked(&path);
         assert_eq!(none_tracked(&path, &[tracked]), Err("hidden_path_tracked"));
-        let mut times: Vec<std::time::Duration> = (0..20)
-            .map(|_| {
-                let start = std::time::Instant::now();
-                assert_eq!(
-                    none_tracked(&path, std::slice::from_ref(&untracked)),
-                    Ok(())
-                );
-                start.elapsed()
-            })
-            .collect();
-        times.sort();
+        let mut full = vec![untracked.clone()];
+        for n in 1..HIDDEN_PATHS_MAX {
+            let folder = path.join(format!("plain-{n}"));
+            std::fs::create_dir(&folder).unwrap();
+            full.push(folder);
+        }
         let ms = |time: std::time::Duration| time.as_secs_f64() * 1000.0;
-        println!(
-            "TIMING none_tracked calls=20 median_ms={:.1} max_ms={:.1}",
-            ms(times[10]),
-            ms(times[19])
-        );
+        for folders in [std::slice::from_ref(&untracked), &full[..]] {
+            let mut times: Vec<std::time::Duration> = (0..20)
+                .map(|_| {
+                    let start = std::time::Instant::now();
+                    assert_eq!(none_tracked(&path, folders), Ok(()));
+                    start.elapsed()
+                })
+                .collect();
+            times.sort();
+            println!(
+                "TIMING none_tracked folders={} calls=20 median_ms={:.1} max_ms={:.1}",
+                folders.len(),
+                ms(times[10]),
+                ms(times[19])
+            );
+        }
     }
 
     #[test]
