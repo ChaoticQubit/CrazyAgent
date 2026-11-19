@@ -1,4 +1,6 @@
-use super::a11y::{self, Geometry};
+#[cfg(target_os = "macos")]
+use super::a11y;
+use super::a11y::Geometry;
 use super::codec;
 use super::control::{Control, Event};
 use super::ended::ended_final;
