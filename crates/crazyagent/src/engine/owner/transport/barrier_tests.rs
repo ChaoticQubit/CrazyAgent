@@ -12,6 +12,8 @@ const LAPSE_WAIT_MS: u64 = 250;
 const QUEUED_WAIT_MS: u64 = 3000;
 const CHANGE_CUT_MS: u64 = 1500;
 const CHANGE_CLIENT_MS: u64 = 1200;
+const REMOVAL_CUT_MS: u64 = 1000;
+const REMOVAL_BARRIER_HELD: Duration = Duration::from_millis(600);
 const PUBLISHED_WAIT: Duration = Duration::from_secs(5);
 
 /// The owner control that revokes one client kind at its current epoch.
@@ -833,6 +835,76 @@ async fn a_plugin_change_storage_cannot_take_is_refused_to_a_client_whose_wait_e
     assert!(
         stored_servers(&owner, "late-server").await.is_empty(),
         "the refused change never landed"
+    );
+    owner.stop().await;
+}
+
+/// An account removal that waits for the owner barrier inside its serve bound, then behind
+/// busy storage, is answered access_change_pending before that bound cuts it: its storage
+/// job is decided by the serve's own cut, not by a bound counted from its later submit, so
+/// the owner hears the pending removal, not accounts_outcome_unknown, and it lands once
+/// storage is free (V243-STORAGE-BUSY-ROWS, #629 r2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_removal_held_at_the_barrier_then_behind_storage_is_pending_before_its_cut() {
+    let owner = Usage::start_waiting(REMOVAL_CUT_MS).await;
+    let runtime = owner.runtime();
+    let listener = crate::spawn_gate::bind_tcp("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    let added = owner
+        .client
+        .add_account(
+            crate::accounts::AccountDraft {
+                provider: crate::accounts::Provider::OpenaiCompatible,
+                method: crate::accounts::SignInMethod::Url,
+                name: "Held removal".into(),
+                url: Some(url),
+                model: Some("lab-model".into()),
+            },
+            Some(
+                crate::engine::owner::AccountSecret::new(
+                    format!("sk-held-removal-{}", std::process::id()).into_bytes(),
+                )
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    let held = runtime.engine.owner_egress.write().await;
+    let release = hold_storage(&owner);
+    assert!(
+        storage_queue_reaches(&owner, 0).await,
+        "storage took the hold"
+    );
+    let mut removed = Box::pin(owner.client.remove_account(added.id.clone()));
+    assert!(
+        tokio::time::timeout(REMOVAL_BARRIER_HELD, &mut removed)
+            .await
+            .is_err(),
+        "the removal waits for the owner barrier inside its serve bound"
+    );
+    drop(held);
+    let removed = tokio::time::timeout(Duration::from_secs(10), removed)
+        .await
+        .unwrap();
+    assert_eq!(
+        removed.map(|_| ()).map_err(|error| error.0),
+        Err("access_change_pending".to_owned()),
+        "the owner hears the pending removal, decided before the serve's cut"
+    );
+    drop(release);
+    storage_settled(&owner).await;
+    assert!(
+        owner
+            .client
+            .list_accounts(None, 10)
+            .await
+            .unwrap()
+            .accounts
+            .is_empty(),
+        "the pending removal landed once storage was free"
     );
     owner.stop().await;
 }
