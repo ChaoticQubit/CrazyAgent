@@ -1085,7 +1085,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let root = scratch();
         let home = private_home(root.path(), "home");
-        for folder in ["Library", "Library/Keychains"] {
+        for folder in ["Library", "Library/Keychains", "Library/Preferences"] {
             std::fs::create_dir(home.join(folder)).unwrap();
             std::fs::set_permissions(home.join(folder), std::fs::Permissions::from_mode(0o700))
                 .unwrap();
