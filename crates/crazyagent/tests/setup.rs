@@ -309,8 +309,8 @@ const CLEAN_ENV_KEPT: [&str; 4] = [
 /// Runs the named row again in a child process with a private HOME and only the system
 /// PATH, as the engine finds the PATH's and HOME's tools ahead of its own setup folder, so a
 /// graphify the owner or the farm installed never answers for a fixture. Input: the row's
-/// name. Output: true in the child, which runs the row; false in the parent once the child
-/// passed. Panics with the child's output when it fails or outlives `CLEAN_ENV_WAIT`.
+/// name. Output: true in the child; false in the parent once the child passed exactly one
+/// test. Panics with the child's output when it fails, outlives `CLEAN_ENV_WAIT` or runs none.
 fn in_clean_env(row: &str) -> bool {
     if std::env::var_os(CLEAN_ENV_CHILD).is_some() {
         return true;
@@ -354,6 +354,10 @@ fn in_clean_env(row: &str) -> bool {
     assert!(
         status.is_some_and(|status| status.success()),
         "{row} in a clean HOME and PATH: {status:?}\n{output}"
+    );
+    assert!(
+        output.contains("test result: ok. 1 passed;"),
+        "{row} in a clean HOME and PATH ran no test or more than one:\n{output}"
     );
     false
 }
