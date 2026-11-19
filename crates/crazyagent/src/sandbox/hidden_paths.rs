@@ -454,6 +454,28 @@ fn within(listed: &str, names: &[String]) -> bool {
         .all(|name| parts.next().is_some_and(|part| same_name(part, name)))
 }
 
+/// A listed path's first name as the hidden folders' first names are kept: its ASCII lowercase
+/// for an ASCII name, which is its fold, else its fold. Input: the first name. Output: the
+/// folded name.
+fn first_key(head: &str) -> String {
+    let key = if head.is_ascii() {
+        head.to_ascii_lowercase()
+    } else {
+        fold(head)
+    };
+    assert_eq!(key.is_empty(), head.is_empty());
+    assert!(!head.is_ascii() || key.is_ascii());
+    key
+}
+
+/// Whether the rest of a listed path, after a first name that matched a folder's first name,
+/// lies in that folder: always when the folder has no more names, never when the path ends
+/// before them. Inputs: the rest of the path and the folder's remaining names. Output: whether
+/// it falls in.
+fn below(rest: &str, names: &[String]) -> bool {
+    names.is_empty() || (!rest.is_empty() && within(rest, names))
+}
+
 /// What [`scan`] found in git's NUL-separated index listing.
 #[derive(Debug, PartialEq, Eq)]
 enum Scan {
@@ -467,16 +489,26 @@ enum Scan {
 }
 
 /// Reads git's `ls-files -z` listing path by path and stops at the first path in one of the
-/// folders, each given as its folded names, so the rest is never read. Inputs: the listing
-/// and the folders. Output: what it found.
+/// folders, each given as its folded names, so the rest is never read. A path's first name is
+/// folded once and looked up among the folders' first names, and reused while the sorted
+/// listing stays under it, so one pass costs the same for any number of folders. Inputs: the
+/// listing and the folders. Output: what it found.
 fn scan(listing: impl std::io::Read, folders: &[Vec<String>]) -> Scan {
     use std::io::{BufRead, Read};
     assert!(!folders.is_empty());
     assert!(folders.iter().all(|names| !names.is_empty()));
+    let mut openers: std::collections::HashMap<&str, Vec<&[String]>> =
+        std::collections::HashMap::with_capacity(folders.len());
+    for names in folders {
+        openers.entry(names[0].as_str()).or_default().push(&names[1..]);
+    }
+    assert!(openers.len() <= folders.len());
     let capped = listing.take(CHECK_BYTES_MAX + 1);
     let mut reader = std::io::BufReader::with_capacity(CHECK_BUFFER_BYTES, capped);
     let mut line = Vec::with_capacity(256);
     let mut total: u64 = 0;
+    let mut head_seen: Option<String> = None;
+    let mut opened: Option<&Vec<&[String]>> = None;
     for _ in 0..=CHECK_BYTES_MAX {
         line.clear();
         let cap = CHECK_LINE_BYTES_MAX as u64 + 1;
@@ -498,7 +530,13 @@ fn scan(listing: impl std::io::Read, folders: &[Vec<String>]) -> Scan {
         if path.is_empty() {
             return Scan::Doubt;
         }
-        if folders.iter().any(|names| within(path, names)) {
+        let (head, rest) = path.split_once('/').unwrap_or((path, ""));
+        if head_seen.as_deref() != Some(head) {
+            opened = openers.get(first_key(head).as_str());
+            head_seen = Some(head.to_owned());
+        }
+        if opened.is_some_and(|rests| rests.iter().any(|names| below(rest, names))) {
+            assert!(folders.iter().any(|names| within(path, names)));
             return Scan::Tracked;
         }
     }
@@ -785,12 +823,17 @@ mod tests {
             &b"Secret/x\0"[..],
             &b"CONF/Keys/y/z\0"[..],
             &b"secret\0"[..],
+            &b"conf/key\0conf/keys/x\0"[..],
+            &b"secrets/a\0secret/b\0"[..],
             "\u{17f}ecret/k\0".as_bytes(),
             "conf/\u{212a}eys/x\0".as_bytes(),
         ] {
             let shown = String::from_utf8_lossy(tracked).into_owned();
             assert_eq!(scanned(tracked), Scan::Tracked, "{shown:?}");
         }
+        let shared = vec![vec![fold("conf"), fold("keys")], vec![fold("CONF"), fold("certs")]];
+        assert_eq!(scan(&b"conf/keys2\0Conf/certs/a\0"[..], &shared), Scan::Tracked);
+        assert_eq!(scan(&b"conf/keys2\0conf/cert\0conf\0"[..], &shared), Scan::End);
         for doubt in [
             &b"secret/key.txt"[..],
             &b"\0"[..],

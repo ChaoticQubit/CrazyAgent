@@ -26,3 +26,21 @@ opt-level = 3
 
 [profile.test.package.crazyagent]
 opt-level = 3
+
+[profile.dev.package.icu_normalizer]
+opt-level = 3
+
+[profile.test.package.icu_normalizer]
+opt-level = 3
+
+[profile.dev.package.icu_collections]
+opt-level = 3
+
+[profile.test.package.icu_collections]
+opt-level = 3
+
+[profile.dev.package.zerovec]
+opt-level = 3
+
+[profile.test.package.zerovec]
+opt-level = 3
