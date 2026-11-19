@@ -895,19 +895,7 @@ impl Native {
                 point,
                 option,
                 clicks,
-            } => {
-                let cell = cell_of(shared, entry, point);
-                let input = match kind {
-                    MouseKind::Press => Input::Press {
-                        cell,
-                        option,
-                        clicks,
-                    },
-                    MouseKind::Drag => Input::Drag { cell, option },
-                    MouseKind::Release => Input::Release { cell, option },
-                };
-                entry.pane.apply(input)
-            }
+            } => mouse(shared, entry, kind, point, option, clicks),
             ViewEvent::Menu { point } => {
                 let (x, y) = (entry.rect[0] + point.0, entry.rect[1] + point.1);
                 let _ = entry.platform.events.send(NativeEvent::Menu { x, y });
@@ -1016,6 +1004,30 @@ fn cell_of(
     let cell = codec::cell_at(point.0, point.1, shared.cell_points(), columns, lines);
     assert!(cell.0 < columns && cell.1 < lines);
     cell
+}
+
+/// A press, drag or release at a view point, sent to the pane at the cell under it. Inputs:
+/// the scale table, the view's entry, the kind, the point, whether Option or Shift is held,
+/// and the click count. Output: what the pane asks for.
+fn mouse(
+    shared: &HashMap<u32, Shared>,
+    entry: &mut Entry<View>,
+    kind: MouseKind,
+    point: (f64, f64),
+    option: bool,
+    clicks: u8,
+) -> Action {
+    let cell = cell_of(shared, entry, point);
+    let input = match kind {
+        MouseKind::Press => Input::Press {
+            cell,
+            option,
+            clicks,
+        },
+        MouseKind::Drag => Input::Drag { cell, option },
+        MouseKind::Release => Input::Release { cell, option },
+    };
+    entry.pane.apply(input)
 }
 
 fn wheel(
