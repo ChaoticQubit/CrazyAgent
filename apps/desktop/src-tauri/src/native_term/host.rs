@@ -899,6 +899,11 @@ impl Native {
             }
             #[cfg(windows)]
             ViewEvent::CopyKey(input) => copy_key(&mut entry.pane, clip, input),
+            #[cfg(windows)]
+            ViewEvent::Faulted => {
+                self.end(page, GPU_FAULT);
+                return;
+            }
             ViewEvent::Paste => match clip.read() {
                 Some(text) => entry.pane.apply(Input::Paste { text }),
                 None => Action::Nothing,

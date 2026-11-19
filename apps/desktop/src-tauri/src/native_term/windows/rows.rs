@@ -54,6 +54,7 @@ use super::super::style::{Style, Theme, font_for};
 use super::draw;
 use super::place;
 use super::view::{self, View};
+use std::cell::RefCell;
 
 /// The longest a farm step waits for the render thread, on a loaded software adapter.
 const FARM_WAIT: Duration = Duration::from_secs(60);
@@ -960,6 +961,15 @@ fn faulted_unheard(view: &View, id: u64) {
     );
 }
 
+/// How many faults the sink heard for a view, taking all it heard. Input: the view id.
+/// Output: the count.
+fn faults_heard(id: u64) -> usize {
+    take_seen()
+        .into_iter()
+        .filter(|(seen, event)| *seen == id && *event == ViewEvent::Faulted)
+        .count()
+}
+
 /// What the sink heard besides focus changes, taken. Output: the count.
 fn typed() -> usize {
     take_seen()
@@ -1009,6 +1019,17 @@ fn a_faulted_focused_view_types_nothing_hides_and_the_page_takes_the_next_key() 
         unsafe { GetFocus() },
         webview,
         "the page holds focus after the fault"
+    );
+    assert_eq!(
+        faults_heard(FAULTED_FOCUSED),
+        1,
+        "the window tells the host of the fault once"
+    );
+    view.focus();
+    assert_eq!(
+        unsafe { GetFocus() },
+        webview,
+        "a page's focus call gives a faulted view no keys"
     );
     page_takes_the_next_key(webview);
     view.place(Some(PAGE)).expect("the box again");
@@ -2019,4 +2040,47 @@ impl IUIAutomationEventHandler_Impl for Seen_Impl {
         }
         Ok(())
     }
+}
+
+/// The view whose sink drops it on its fault.
+const DROPPED_ON_FAULT: u64 = 8;
+
+thread_local! {
+    static HELD: RefCell<Option<View>> = const { RefCell::new(None) };
+}
+
+/// A sink that drops the held view when it hears the fault, as the host ends a view from
+/// inside the fault's window message. It runs in a window procedure, where a panic aborts,
+/// so it asserts nothing; the row reads what it did. Inputs: the view id and the event.
+fn dropping_sink(id: u64, event: ViewEvent) {
+    if id == DROPPED_ON_FAULT && event == ViewEvent::Faulted {
+        let held = HELD.with(|held| held.borrow_mut().take());
+        drop(held);
+    }
+}
+
+/// The host ends a faulted view from inside the fault's own window message: the window
+/// procedure reads nothing of the view after its sink, so the view and its window go
+/// while that message runs and the thread goes on.
+#[test]
+#[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
+fn a_view_its_sink_drops_on_the_fault_goes_from_inside_the_fault_message() {
+    let (parent, webview) = stand_ins();
+    let view =
+        View::new(parent, webview, DROPPED_ON_FAULT, dropping_sink, &style()).expect("a view");
+    let _ = placed_shown_and_drawn(parent, &view);
+    faulted_unheard(&view, DROPPED_ON_FAULT);
+    let hwnd = view.hwnd();
+    HELD.with(|held| *held.borrow_mut() = Some(view));
+    pump_until("the fault drops the view", FARM_WAIT, || {
+        HELD.with(|held| held.borrow().is_none())
+    });
+    assert_eq!(
+        unsafe { IsWindow(hwnd) },
+        0,
+        "the view's window went with it"
+    );
+    pump_for(Duration::from_millis(300));
+    println!("h5 row: the sink dropped the view inside its fault message, its window went");
+    assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the stand-in goes");
 }
