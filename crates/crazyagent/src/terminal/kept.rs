@@ -225,6 +225,16 @@ impl<H: Host> Host for LastScreenHost<H> {
         self.inner.resize_at(agent, at, size)
     }
 
+    /// Names the unit a resize of the agent sizes, as the platform host does; a terminal it
+    /// no longer finds, whose view may show a kept screen, gets the agent's own key, since no
+    /// resize can land on it and its attach decides. Takes the agent. Returns the key.
+    fn unit(&self, agent: &AgentId) -> Result<String, HostError> {
+        match self.inner.unit(agent) {
+            Err(problem) if problem.0 == "terminal_agent_unknown" => Ok(super::agent_unit(agent)),
+            named => named,
+        }
+    }
+
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         self.inner.input_live(agent)
     }

@@ -975,6 +975,13 @@ impl Host for Servers {
         Ok(true)
     }
 
+    /// Names the window a resize of the agent sizes on the server that runs it; a lead's
+    /// teammates' window is sized along with it, so it never counts apart. Takes the agent.
+    /// Returns that server's unit key.
+    fn unit(&self, agent: &AgentId) -> Result<String, HostError> {
+        self.on(agent, |server| server.unit(agent))
+    }
+
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         self.on(agent, |server| server.input_live(agent))
     }

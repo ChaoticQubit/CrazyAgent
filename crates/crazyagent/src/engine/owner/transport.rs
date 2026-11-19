@@ -63,6 +63,7 @@ pub(crate) mod questions;
 pub(crate) mod recovery;
 pub(crate) mod roadmap;
 mod setup;
+pub(crate) mod sizing;
 pub(crate) mod terminal;
 pub(crate) mod usage;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
