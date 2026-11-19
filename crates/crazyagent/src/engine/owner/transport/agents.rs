@@ -276,7 +276,7 @@ impl OwnerClient {
 
     async fn agents_exchange(&self, action: Action) -> Result<Reply, EngineError> {
         action.validate()?;
-        tokio::time::timeout(self.timeout.max(CONTROL_TIMEOUT), async {
+        tokio::time::timeout(deferred_wait(self.timeout, CONTROL_TIMEOUT), async {
             let read = read_kind(&action);
             let frame = encode_frame(&Envelope { agents: action })
                 .map_err(|_| failure("agents_request_bounds"))?;

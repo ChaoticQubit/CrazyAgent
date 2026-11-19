@@ -397,7 +397,7 @@ pub(super) async fn serve(
         true => match authority.intake.direct() {
             Ok(direct) => (Some(direct), None),
             Err(busy) => {
-                let replay = tokio::time::timeout_at(deadline, replayed(engine, a, &request))
+                let replay = by_deadline(engine, deadline, replayed(engine, a, &request))
                     .await
                     .unwrap_or_else(|_| Err(failure(UNKNOWN)));
                 match replay {
@@ -414,7 +414,7 @@ pub(super) async fn serve(
         None => {
             let expected = client.then(|| request.expected_revision.clone());
             let planning = plan(engine, a, &request, expected, deadline, exchange);
-            tokio::time::timeout_at(deadline, planning)
+            by_deadline(engine, deadline, planning)
                 .await
                 .unwrap_or_else(|_| Err(failure(UNKNOWN)))
         }
@@ -461,7 +461,8 @@ pub(super) async fn serve(
             .await
             .unwrap_or_else(|_| Err(failure(UNKNOWN)));
             let admitted = match (admitted, &work) {
-                (Ok(()), Work::Move(_)) => tokio::time::timeout_at(
+                (Ok(()), Work::Move(_)) => by_deadline(
+                    engine,
                     deadline,
                     engine.owner_job(|reply| Job::HomeMoveRecheck(exchange, reply)),
                 )
@@ -571,7 +572,10 @@ pub(super) async fn serve(
         drop(barrier);
         (written, removed, forgotten)
     };
-    let answered = tokio::time::timeout_at(deadline, answer).await;
+    let answered = match ran {
+        true => tokio::time::timeout_at(deadline, answer).await,
+        false => by_deadline(engine, deadline, answer).await,
+    };
     if let (Ok((_, true, _)), Some((database, files))) = (&answered, deleted) {
         tally.mark_clearing();
         let done = tokio::task::spawn_blocking(move || {
@@ -610,6 +614,20 @@ pub(super) async fn serve(
         .await;
     }
     answered.map_err(|_| failure(UNKNOWN))?
+}
+
+/// Runs one step of a projects home exchange under its deadline, each timed storage job in it
+/// decided before the deadline cuts it, so the route answers that decision itself. Only for
+/// steps before the disk work: a refusal after it would deny an effect that already ran.
+/// Inputs: the engine, the deadline and the step. Output: the step's output, or the elapsed
+/// error when the deadline cut it.
+async fn by_deadline<F: std::future::Future>(
+    engine: &Engine,
+    deadline: Instant,
+    step: F,
+) -> Result<F::Output, tokio::time::error::Elapsed> {
+    let decided = crate::storage::before_cut(deadline, engine.timeout, step);
+    tokio::time::timeout_at(deadline, decided).await
 }
 
 /// Forgets a Delete everything's plan and ends or shows its mark. Inputs: the engine, the

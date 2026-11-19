@@ -150,7 +150,7 @@ impl OwnerClient {
     }
 
     async fn cleanup_exchange(&self, action: Action) -> Result<Reply, EngineError> {
-        tokio::time::timeout(self.timeout.max(CLEANUP_TIMEOUT), async {
+        tokio::time::timeout(deferred_wait(self.timeout, CLEANUP_TIMEOUT), async {
             let read = read_kind(&action);
             let frame = encode_frame(&Envelope { cleanup: action })
                 .map_err(|_| failure("cleanup_request_bounds"))?;

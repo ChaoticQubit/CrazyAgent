@@ -440,9 +440,9 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
 }
 
 /// Serves one GitHub owner request after the owner exchange deadline: the action runs
-/// under its own budget ([`Action::time`]) and the reply write under the owner wait.
-/// Inputs: the stream, engine, authority, owner packet, admission and request bytes.
-/// Output: the reply written, a rejection code included.
+/// under its own budget ([`Action::time`]), each storage job in it decided just before that
+/// budget cuts it, and the reply write under the owner wait. Inputs: the stream, engine,
+/// authority, owner packet, admission and request bytes. Output: the reply written.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -467,7 +467,8 @@ pub(super) async fn serve(
             Err(error) => Err(error),
         }
     };
-    let outcome = tokio::time::timeout(time, work)
+    let cut = tokio::time::Instant::now() + time;
+    let outcome = tokio::time::timeout_at(cut, crate::storage::before_cut(cut, time, work))
         .await
         .unwrap_or_else(|_| Err(unknown()));
     let reply = match outcome {
