@@ -72,9 +72,10 @@ async function open(keys) {
     const id = window.__TAURI_INTERNALS__.transformCallback((raw) => (kept[id] ??= []).push(raw));
     return id;
   });
+  const viewport = await browser.execute(() => window.innerHeight);
   const view = await invoke("desktop_native_terminal_open", {
-    name: master, pane: null, label: "Native terminal trial", rect: RECT, style: STYLE,
-    covered: false, keys, project: run.project, events: `__CHANNEL__:${tag}`,
+    name: master, pane: null, label: "Native terminal trial", rect: { ...RECT, viewport },
+    style: STYLE, covered: false, keys, project: run.project, events: `__CHANNEL__:${tag}`,
   });
   assert.ok(Number.isInteger(view) && view > 0, `the open answered a view id: ${view}`);
   opened.add(view);
