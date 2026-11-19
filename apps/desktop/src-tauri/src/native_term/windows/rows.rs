@@ -2400,7 +2400,7 @@ fn covered_and_hidden_views_send_no_mouse(view: &View, centre: POINT) {
     let at = view_point(view, centre);
     let mut client = centre;
     unsafe { ScreenToClient(hwnd, &mut client) };
-    let packed = |p: POINT| (isize::from(p.y as i16) << 16) | isize::from(p.x as u16);
+    let packed = |p: POINT| ((p.y as u16 as isize) << 16) | (p.x as u16 as isize);
     let cut = |what: &str, hide: &dyn Fn()| {
         take_seen();
         unsafe { SendMessageW(hwnd, WM_LBUTTONDOWN, 0, packed(client)) };
