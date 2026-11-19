@@ -735,7 +735,7 @@ pub(crate) mod farm {
                 owner.git().display()
             )
         });
-        let ran = wrapped.stdin(Stdio::null()).output().unwrap();
+        let ran = crate::spawn_gate::collected(&mut wrapped).unwrap();
         assert!(
             ran.status.success(),
             "owner git --version in its container: {:?}, stderr: {}",
