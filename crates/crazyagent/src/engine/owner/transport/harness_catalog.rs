@@ -139,12 +139,18 @@ impl OwnerClient {
     }
 }
 
-/// How long a client waits for a harness catalog reply: a List the request timeout, a Check,
-/// which the engine serves past its exchange deadline, at least `UPDATES_TIMEOUT`. Inputs:
-/// the client's request timeout and whether the request is a Check. Output: the wait.
+/// How long a client waits for a Check, which the engine serves past its exchange deadline:
+/// a read's wait, as an overview's, since screens send one as they open and the slowest seen
+/// took 3.8 s. It stays under the engine's `UPDATES_TIMEOUT` bound on the deferred serve.
+const CHECK_WAIT: Duration = Duration::from_secs(30);
+const _: () = assert!(CHECK_WAIT.as_secs() < UPDATES_TIMEOUT.as_secs());
+
+/// How long a client waits for a harness catalog reply: a List the request timeout, a Check
+/// at least `CHECK_WAIT`. Inputs: the client's request timeout and whether the request is a
+/// Check. Output: the wait.
 fn catalog_wait(timeout: Duration, check: bool) -> Duration {
     if check {
-        timeout.max(UPDATES_TIMEOUT)
+        timeout.max(CHECK_WAIT)
     } else {
         timeout
     }

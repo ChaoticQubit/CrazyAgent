@@ -712,8 +712,7 @@ impl BridgeQueue {
     /// query. Returns at most 200 paths in git's order, or `busy` when no place or bridge
     /// comes free within the queue's wait.
     pub async fn project_files(&self, id: &str, query: &str) -> Result<Vec<String>, BridgeError> {
-        let _place = self.listing().await?;
-        let listing = self.read().await?.project_files(id, query)?;
-        listing.await
+        self.unlocked(|bridge| bridge.project_files(id, query))
+            .await
     }
 }

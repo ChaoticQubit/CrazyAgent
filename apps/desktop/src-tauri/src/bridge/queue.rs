@@ -20,7 +20,8 @@ const _: () =
 
 /// The one native bridge the window's calls share. A call that changes the bridge
 /// or the engine has it alone; plain reads share it, at most `PLAIN_READERS_MAX` at
-/// once, and file listings let it go once started, at most `LISTINGS_MAX` at once.
+/// once, and file listings and harness Checks let it go once started, at most
+/// `LISTINGS_MAX` at once.
 /// Each takes one engine connection, so with the connections they are still closing
 /// the `BRIDGE_READERS_MAX` of them take at most half of the engine's
 /// `OWNER_CLIENTS_MAX` and leave the rest to the terminal app and agents' team tools.
@@ -66,24 +67,26 @@ impl BridgeQueue {
         self.queued(self.bridge.read()).await
     }
 
-    /// Takes one of the `LISTINGS_MAX` places for a file listing that runs after it lets
-    /// the bridge go, with the same bounds as `enter`. Output: the place, held until the
-    /// listing ends, or `busy`.
+    /// Takes one of the `LISTINGS_MAX` places for a call that runs after it lets the
+    /// bridge go, a file listing or a harness Check, with the same bounds as `enter`.
+    /// Output: the place, held until the call ends, or `busy`.
     pub(super) async fn listing(&self) -> Result<OwnedSemaphorePermit, BridgeError> {
         self.queued(Arc::clone(&self.listings).acquire_owned())
             .await?
             .map_err(|_| super::failure("busy"))
     }
 
-    /// Runs an engine call that `start` prepares from the shared bridge, with the same
-    /// bounds as `read`. Input: the step that prepares the call from the bridge. Output:
-    /// the call's result, or `busy`.
+    /// Runs an engine call that may take long, a file listing or a harness Check: takes a
+    /// listing place, then the shared bridge only while `start` prepares the call, and awaits
+    /// it with the bridge let go, so a change asked meanwhile does not wait for it. Input: the
+    /// step that prepares the call from the bridge. Output: the call's result, or `busy`.
     pub(super) async fn unlocked<T>(
         &self,
         start: impl FnOnce(&NativeBridge) -> Result<Unlocked<T>, BridgeError>,
     ) -> Result<T, BridgeError> {
-        let bridge = self.read().await?;
-        start(&*bridge)?.await
+        let _place = self.listing().await?;
+        let call = start(&*self.read().await?)?;
+        call.await
     }
 
     async fn queued<G>(&self, lock: impl Future<Output = G>) -> Result<G, BridgeError> {
