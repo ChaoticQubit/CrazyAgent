@@ -266,9 +266,12 @@ impl View {
         let _ = self.inner.apply(self.hwnd);
     }
 
-    /// Gives the view keyboard focus.
+    /// Gives the view keyboard focus, unless the render thread faulted it: a faulted view is
+    /// hidden and types nothing, so a page's focus call never hands it the keys.
     pub fn focus(&self) {
-        unsafe { SetFocus(self.hwnd) };
+        if !self.faulted() {
+            unsafe { SetFocus(self.hwnd) };
+        }
     }
 
     /// Hands the render thread the view's newest screen, keeping its cursor cell and its
@@ -825,7 +828,9 @@ unsafe extern "system" fn window_proc(
             0
         }
         FAULTED => {
+            let (sink, id) = (inner.sink, inner.id);
             inner.fail_closed(hwnd);
+            sink(id, ViewEvent::Faulted);
             0
         }
         WM_GETOBJECT => inner
