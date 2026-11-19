@@ -732,9 +732,10 @@ impl OwnerClient {
     }
 
     /// The longest this client waits for one plugins request: its own timeout, which covers
-    /// the engine's admission, plus the bound the engine serves the request under, the import
-    /// bound for a skill import and the owner timeout for any other, so the engine's answer, a
-    /// refusal included, always comes first. Input: the request. Output: the wait.
+    /// the engine's admission, plus the bound the engine serves the request under: the import
+    /// bound for a skill import, and for any other request the client's own timeout standing in
+    /// for the engine's owner timeout. So the engine's answer, a refusal included, comes first
+    /// when the two timeouts match. Input: the request. Output: the wait.
     fn wait(&self, action: &Action) -> Duration {
         let bound = match action {
             Action::ImportScan | Action::ImportSkill { .. } => IMPORT_TIMEOUT,
