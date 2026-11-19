@@ -11,6 +11,7 @@ use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::collections::HashMap;
 #[cfg(target_os = "macos")]
 use std::ffi::c_void;
+use std::panic::{self, AssertUnwindSafe};
 #[cfg(target_os = "macos")]
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -968,8 +969,9 @@ impl Shared {
 
     /// Builds one frame's GPU input: reshapes changed rows, uploads the rectangles, the
     /// screen size and the glyphs. On a lost device it does no GPU work, since glyphon's
-    /// buffer map then panics in wgpu 25. Inputs: the surface and the frame. Output: the
-    /// rectangle data, why the frame is skipped, or `native_terminal_gpu`.
+    /// buffer map then panics in wgpu 25; a loss found inside glyphon's own buffer creation
+    /// goes through `guarded`. Inputs: the surface and the frame. Output: the rectangle
+    /// data, why the frame is skipped, or `native_terminal_gpu`.
     fn build(&mut self, surface: &mut Surface, frame: &Frame) -> Result<Vec<f32>, String> {
         self.shape_rows(surface, frame);
         let rects = self.rect_bytes(frame);
@@ -1005,9 +1007,8 @@ impl Shared {
                 default_color: text_color(self.theme.foreground),
                 custom_glyphs: &[],
             });
-        surface
-            .text
-            .prepare(
+        let prepared = guarded(&set.lost, || {
+            surface.text.prepare(
                 &set.device,
                 &set.queue,
                 &mut self.fonts,
@@ -1016,7 +1017,8 @@ impl Shared {
                 areas,
                 &mut self.swash,
             )
-            .map_err(|e| e.to_string())?;
+        });
+        prepared?.map_err(|e| e.to_string())?;
         assert_eq!(rects.len() % 8, 0);
         Ok(rects)
     }
@@ -1024,8 +1026,9 @@ impl Shared {
 
 /// Hands an acquired frame back to wgpu: presents it once encoded, or lets it drop, which
 /// discards it, when encoding failed. On a lost device both panic in wgpu 25, so the frame
-/// is forgotten instead: one frame leaks, and its view ends. Inputs: the device, the frame
-/// and the encode result. Output: ok, the encode error, or `native_terminal_gpu`.
+/// is forgotten instead: one frame leaks, and its view ends. A loss that present itself
+/// finds, as DX12's does on a driver reset, goes through `guarded`. Inputs: the device,
+/// the frame and the encode result. Output: ok, the encode error, or `native_terminal_gpu`.
 fn hand_back(
     set: &Device,
     output: wgpu::SurfaceTexture,
@@ -1039,8 +1042,22 @@ fn hand_back(
     }
     encoded?;
     at_present(set);
-    output.present();
-    Ok(())
+    guarded(&set.lost, || output.present()).map_err(str::to_owned)
+}
+
+#[cfg(panic = "abort")]
+compile_error!("the native terminal turns wgpu's panic on a lost GPU into an end: it must unwind");
+
+/// Runs one wgpu call that can find the device lost inside itself: wgpu 25 marks the device
+/// lost, which runs its callback, then panics. That panic on a lost device becomes
+/// `native_terminal_gpu`, so the render thread lives and the view ends; any other panic
+/// goes on. Inputs: the device's lost flag and the call. Output: its value, or the code.
+fn guarded<T>(lost: &AtomicBool, call: impl FnOnce() -> T) -> Result<T, &'static str> {
+    match panic::catch_unwind(AssertUnwindSafe(call)) {
+        Ok(value) => Ok(value),
+        Err(_) if lost.load(Ordering::Acquire) => Err(GPU_FAULT),
+        Err(raised) => panic::resume_unwind(raised),
+    }
 }
 
 #[cfg(all(windows, test))]
@@ -1221,6 +1238,29 @@ fn span_attrs<'a>(span: &Span, family: &'a str) -> Attrs<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A panic inside a guarded call once the call marked the device lost is the GPU code,
+    /// so the render thread lives: wgpu 25 does that when DX12's present finds the loss
+    /// itself. Synthetic: the call marks the flag and panics as wgpu's fatal handler does.
+    #[test]
+    fn a_panic_inside_a_guarded_call_that_lost_the_device_is_the_gpu_code() {
+        let lost = AtomicBool::new(false);
+        let caught = guarded(&lost, || -> u8 {
+            lost.store(true, Ordering::Release);
+            panic!("Error in Surface::present: Parent device is lost")
+        });
+        assert_eq!(caught, Err(GPU_FAULT));
+    }
+
+    /// A guarded call that returns gives its value, and a panic inside one on a live device
+    /// goes on: only a loss is caught.
+    #[test]
+    #[should_panic(expected = "not a loss")]
+    fn a_panic_inside_a_guarded_call_on_a_live_device_goes_on() {
+        let lost = AtomicBool::new(false);
+        assert_eq!(guarded(&lost, || 7_u8), Ok(7));
+        let _ = guarded(&lost, || -> u8 { panic!("not a loss") });
+    }
     use crate::native_term::codec::grid_for;
     use crate::native_term::style::font_for;
 
