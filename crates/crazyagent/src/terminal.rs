@@ -486,6 +486,14 @@ pub trait Host: Send + Sync {
         Err(failure("terminal_unavailable"))
     }
 
+    /// Marks the pane of an agent's window whose first process is `pid` as the agent's app
+    /// pane, the one its prompts go to, for a pane an older engine started without that mark.
+    /// Takes the name and the pid its pane record kept. Returns Ok once marked, or at once on
+    /// a host with no pane ids.
+    fn tag_app(&self, _agent: &AgentId, _pid: u32) -> Result<(), HostError> {
+        Ok(())
+    }
+
     /// Pastes keys straight into the pane a view stays on, as `paste` does by name, while the
     /// connection that found that pane still serves it. Takes the name, the pane and 1 to
     /// `PASTE_BYTES_MAX` keys. Returns true once pasted, false when this host cannot use it.

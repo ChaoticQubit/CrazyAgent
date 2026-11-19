@@ -245,6 +245,88 @@ mod own_turns {
         );
     }
 
+    /// V243-PASTE-INTERLEAVE-N0 R4: a prompt the session types reaches its own app pane,
+    /// paste and Enter, while the active pane moves after the first command to a teammate
+    /// split off its window, as a native lead's split or a focus change can move it.
+    #[test]
+    fn a_session_prompt_stays_in_its_own_pane_when_the_active_pane_moves() {
+        let name = "own-pane-once-1";
+        let mut pane = start(name);
+        let server = &pane._server;
+        let client = |args: &[&str]| -> String {
+            let output = crate::spawn_gate::output(
+                Command::new(&server.tmux)
+                    .arg("-S")
+                    .arg(&server.socket)
+                    .args(args)
+                    .env_clear()
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )
+            .unwrap();
+            assert!(output.status.success(), "tmux {args:?} failed");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        let own = format!("#{{==:#{{window_name}},{name}}}");
+        let app = client(&["list-panes", "-a", "-f", &own, "-F", "#{pane_id}"]);
+        assert!(crate::terminal::pane_id_valid(&app), "one app pane: {app}");
+        let (ready, theirs) = (pane.home.join("teammate.ready"), pane.home.join("teammate"));
+        let script = format!(
+            "stty raw -echo; : > '{}'; exec /bin/cat > '{}'",
+            ready.display(),
+            theirs.display()
+        );
+        let split = [
+            "split-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            &app,
+            "--",
+        ];
+        let mate = client(&[&split[..], &["/bin/sh", "-c", &script]].concat());
+        let split_until = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() {
+            assert!(
+                Instant::now() < split_until,
+                "the teammate pane never got ready"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let moved = format!("select-pane -t {mate}");
+        client(&["set-hook", "-w", "-t", &app, "after-send-keys", &moved]);
+        pane.session.send("typed prompt").unwrap();
+        for target in [&app, &mate] {
+            client(&["send-keys", "-t", target, "-H", "23"]);
+        }
+        let marks_until = Instant::now() + Duration::from_secs(10);
+        let marked = |file: &Path| loop {
+            let bytes = std::fs::read(file).unwrap_or_default();
+            if bytes.ends_with(b"#") {
+                break bytes;
+            }
+            assert!(
+                Instant::now() < marks_until,
+                "no mark reached {}",
+                file.display()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let typed = marked(&pane.home.join("typed"));
+        assert_eq!(
+            typed, b"\x1b[200~typed prompt\x1b[201~\r#",
+            "paste and Enter in one pane"
+        );
+        assert_eq!(
+            marked(&theirs),
+            b"#",
+            "nothing of the prompt reaches the teammate"
+        );
+    }
+
     #[test]
     fn own_turn_facts_kept_between_typed_turns() {
         let mut pane = start("own-turns-1");
