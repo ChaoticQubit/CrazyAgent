@@ -187,7 +187,7 @@ impl OwnerClient {
     }
 
     async fn recovery_exchange(&self, action: Action) -> Result<Reply, EngineError> {
-        tokio::time::timeout(self.timeout.max(RECOVERY_TIMEOUT), async {
+        tokio::time::timeout(deferred_wait(self.timeout, RECOVERY_TIMEOUT), async {
             let read = read_kind(&action);
             let frame = encode_frame(&Envelope { recovery: action })
                 .map_err(|_| failure("recovery_request_bounds"))?;
