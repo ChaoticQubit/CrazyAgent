@@ -277,6 +277,12 @@ fn owner_home() -> Result<PathBuf, EngineError> {
     std::fs::canonicalize(&user.dir).map_err(|_| failure())
 }
 
+/// Refuses a profile home the engine may not settle a keychain in, before any rename or
+/// `security` call. Input: the home. Output: done, or a failure.
+fn profile_home_guard(_home: &Path) -> Result<(), EngineError> {
+    Ok(())
+}
+
 /// Refuses a home the engine may not give an agent keychain, before any `security` call: it
 /// must be its own canonical path, so no link sits anywhere on it, lie strictly below the
 /// canonical engine-owned `root`, not be the owner's own home, and hold no keychain name a
@@ -1045,6 +1051,33 @@ mod tests {
                 "{name} passed as an agent keychain"
             );
         }
+    }
+
+    #[test]
+    fn the_owners_own_home_is_refused_as_a_profile_home_before_any_rename() {
+        let owner = owner_home().unwrap();
+        assert_eq!(profile_home_guard(&owner), Err(failure()));
+        let root = scratch();
+        let home = private_home(root.path(), "home");
+        assert_eq!(profile_home_guard(&home), Ok(()));
+        let link = root.path().canonicalize().unwrap().join("link");
+        std::os::unix::fs::symlink(&home, &link).unwrap();
+        assert_eq!(profile_home_guard(&link), Err(failure()));
+        assert_eq!(profile_home_guard(Path::new("home")), Err(failure()));
+    }
+
+    #[test]
+    fn a_profile_home_reached_through_a_link_keeps_its_login_keychain_name() {
+        let root = scratch();
+        let home = private_home(root.path(), "home");
+        let legacy = TestKeychain::create_named(&home, LOGIN_KEYCHAIN);
+        let link = root.path().canonicalize().unwrap().join("link");
+        std::os::unix::fs::symlink(&home, &link).unwrap();
+        let before = identity(legacy.path());
+        assert_eq!(open_profile_keychain(&link), Err(failure()));
+        assert_eq!(prepare_profile_keychain(&link, true), Err(failure()));
+        assert_eq!(identity(legacy.path()), before);
+        assert!(std::fs::symlink_metadata(profile_keychain_path(&home)).is_err());
     }
 
     #[test]
