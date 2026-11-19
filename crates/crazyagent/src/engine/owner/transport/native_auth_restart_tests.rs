@@ -162,6 +162,19 @@ impl Restart {
         if self.installed { 6000 } else { 200 }
     }
 
+    /// The one profile home the case's engine made under its root. Output: the home, or a
+    /// panic when there is none or more than one.
+    fn profile_home(&self) -> PathBuf {
+        let profiles = self.root.path().join("native-profiles");
+        let homes: Vec<PathBuf> = std::fs::read_dir(&profiles)
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("home"))
+            .filter(|home| home.is_dir())
+            .collect();
+        assert_eq!(homes.len(), 1, "{homes:?}");
+        homes[0].clone()
+    }
+
     async fn start(&self) -> Run {
         let (mut service, handle, stop) = self.ready().await;
         service.register_native_auth_host(&custodian()).unwrap();
@@ -803,6 +816,14 @@ impl Run {
     }
 
     async fn log_out(&self, restart: &Restart) -> NativeAuthFact {
+        let fact = self.logout_finished(restart).await;
+        assert_eq!(fact.phase, NativeAuthPhase::UnauthenticatedObserved);
+        fact
+    }
+
+    /// Runs one real logout of the account through the owner and follows it until it
+    /// finishes, whatever it observed. Input: the case. Output: the final fact.
+    async fn logout_finished(&self, restart: &Restart) -> NativeAuthFact {
         let scope = self.scope(restart.config().id).await;
         let client = self.client();
         let started = client
@@ -823,7 +844,6 @@ impl Run {
                 .unwrap();
             if !read.fact.phase.unfinished() {
                 assert_eq!(read.fact.action, NativeAuthAction::Logout);
-                assert_eq!(read.fact.phase, NativeAuthPhase::UnauthenticatedObserved);
                 return read.fact;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1452,6 +1472,62 @@ async fn an_idle_team_agent_whose_account_sign_in_is_rejected_stops_and_the_next
     })
     .await
     .expect("the idle team agent rejection case exceeded 60 seconds");
+}
+
+/// V243-PROFILE-KEYCHAIN-PROMPT (#646 code F2): only a Claude login sets aside a profile
+/// keychain the empty password cannot open. A check of the existing sign-in and a logout
+/// fail closed with the file in place, and the login after them sets it aside for a new one.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_a_claude_login_sets_aside_a_keychain_the_empty_password_cannot_open() {
+    use crate::credentials::test_keychain::TestKeychain;
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let run = restart.start().await;
+        run.sign_in(&restart).await;
+        let home = restart.profile_home();
+        let keychain = home.join("Library/Keychains/profile.keychain-db");
+        let aside = home.join("Library/Keychains/profile-locked.keychain-db");
+        drop(TestKeychain::adopt(&home, keychain.clone()));
+        let locked = TestKeychain::adopt(&home, keychain.clone());
+        let text = keychain.to_str().unwrap().to_owned();
+        locked.security(&["create-keychain", "-p", "crazyagent-dummy", &text], None);
+        locked.security(&["lock-keychain", &text], None);
+        let before = std::fs::read(&keychain).unwrap();
+        let existing = run
+            .finished(
+                &restart,
+                connection(),
+                "check-locked",
+                NativeAuthMethod::ClaudeExisting,
+            )
+            .await;
+        let logout = run.logout_finished(&restart).await;
+        let unavailable = Some("native_auth_claude_keychain_unavailable");
+        assert_eq!(
+            (
+                (existing.phase, existing.code.as_deref()),
+                (logout.phase, logout.code.as_deref()),
+                std::fs::read(&keychain).unwrap() == before,
+                std::fs::symlink_metadata(&aside).is_ok(),
+            ),
+            (
+                (NativeAuthPhase::Failed, unavailable),
+                (NativeAuthPhase::Failed, unavailable),
+                true,
+                false,
+            ),
+            "a check or a logout moved the keychain or did not fail closed"
+        );
+        run.sign_in_to(&restart, connection(), "restart-sign-in-locked")
+            .await;
+        let _aside = TestKeychain::adopt(&home, aside.clone());
+        assert_eq!(std::fs::read(&aside).unwrap(), before);
+        assert_ne!(std::fs::read(&keychain).unwrap(), before);
+        run.stop().await;
+    })
+    .await
+    .expect("the locked keychain sign-in case exceeded 90 seconds");
 }
 
 #[cfg(target_os = "macos")]
