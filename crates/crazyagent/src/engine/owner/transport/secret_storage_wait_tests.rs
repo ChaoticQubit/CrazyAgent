@@ -840,7 +840,8 @@ async fn a_key_replaced_after_its_connection_was_removed_stays_for_the_other_on_
         AccountSecret::new(after.as_bytes().to_vec()).unwrap(),
     )
     .unwrap();
-    let replaced = super::accounts::key_replaced(&handle.engine, &admission, first, shared).await;
+    let replaced =
+        super::accounts::key_replaced(&handle.engine, &admission, first, shared, None).await;
     assert_eq!(
         replaced.err().map(|error| error.0).as_deref(),
         Some("account_not_found")
