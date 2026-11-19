@@ -2765,7 +2765,7 @@ fn removing_an_agent_tree_whose_own_folder_refuses_a_look_clears_that_acl_and_re
 
 /// #616 r2 rv-sec3 N1: a folder an agent shut at mode 000 under a deny entry, swapped for a
 /// hard link to an owner file after the refused look and before the clear by name, is
-/// reported once as `cleanup_open_up_swapped`; the owner's file keeps its mode and bytes, and
+/// reported once as the trace `open_up_swapped`; the owner's file keeps its mode and bytes, and
 /// the tree still goes.
 #[cfg(target_os = "macos")]
 #[test]
