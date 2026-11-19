@@ -360,6 +360,37 @@ fn system_bin() -> PathBuf {
     npm.parent().unwrap().to_path_buf()
 }
 
+/// Copies the real `node` into a prefix's `bin`, as setup lays out the engine's own Node. A
+/// node linked to its own `libnode`, as Homebrew's is through `@rpath`, gets each `.dylib` of
+/// its `lib` folder beside it, where `@loader_path` finds it. Inputs: the real node and the
+/// `bin` folder. Output: none; a node that still cannot start from the copy is reported
+/// unavailable with what it printed.
+fn copy_node(node: &Path, bin: &Path) {
+    let own = bin.join("node");
+    fs::copy(node, &own).unwrap();
+    let start =
+        || crate::spawn_gate::collected(std::process::Command::new(&own).arg("--version")).unwrap();
+    if start().status.success() {
+        return;
+    }
+    let libs = node.parent().and_then(Path::parent).unwrap().join("lib");
+    for entry in fs::read_dir(&libs).into_iter().flatten().flatten() {
+        let name = entry.file_name();
+        if name.to_str().is_some_and(|name| name.ends_with(".dylib")) && entry.path().is_file() {
+            fs::copy(entry.path(), bin.join(&name)).unwrap();
+        }
+    }
+    let started = start();
+    if !started.status.success() {
+        panic!(
+            "UNAVAILABLE: a node that starts from a copy, not {node:?} with the libraries of \
+             {libs:?} beside it: {:?} {}",
+            started.status,
+            String::from_utf8_lossy(&started.stderr)
+        );
+    }
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn npm_starts_under_the_install_sandbox_profile() {
@@ -385,10 +416,11 @@ fn npm_starts_under_the_install_sandbox_profile() {
 }
 
 /// V243-CONTEXT-MODE-NPM-LINK-GRANT: npm in a setup-node layout, `bin/npm` a link into
-/// `../lib/node_modules/npm` and `bin/node` a copy of the real node, in a prefix under no
-/// granted root, starts under the install profile: the grant follows `bin/npm` to npm's
-/// package, read only. The prefix sits in the build folder, which no other user can change;
-/// the root holds the settings store Linux reads. A failed start shows npm's standard error.
+/// `../lib/node_modules/npm` and `bin/node` a copy of the real node ([`copy_node`]), in a
+/// prefix under no granted root, starts under the install profile: the grant follows
+/// `bin/npm` to npm's package, read only. The prefix sits in the build folder, which no other
+/// user can change; the root holds the settings store Linux reads. A failed start shows npm's
+/// standard error.
 #[test]
 fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_install_profile() {
     let real = system_bin();
@@ -425,7 +457,7 @@ fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_insta
     .unwrap();
     assert!(writable.success(), "{modules:?}");
     let node = crate::sandbox::canonical(&real.join("node")).unwrap();
-    fs::copy(&node, bin.join("node")).unwrap();
+    copy_node(&node, &bin);
     std::os::unix::fs::symlink("../lib/node_modules/npm/bin/npm-cli.js", bin.join("npm")).unwrap();
     let program = crate::sandbox::canonical(&bin.join("npm")).unwrap();
     assert_eq!(
@@ -464,8 +496,9 @@ fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_insta
 
 /// V243-CONTEXT-MODE-ENGINE-NODE: context-mode on the engine's own Node, laid out as setup
 /// lays it out (`setup/bin/{node,npm,npx}` links into `setup/node/bin`, a copy of the real
-/// Node tree), in an engine root no other user can change: the Node check reads a supported
-/// version and npm starts under the install profile. A failed start shows its standard error.
+/// Node tree, [`copy_node`]), in an engine root no other user can change: the Node check
+/// reads a supported version and npm starts under the install profile. A failed start shows
+/// its standard error.
 #[test]
 fn the_engine_s_own_node_passes_the_node_check_and_starts_npm_under_the_install_profile() {
     let real = system_bin();
@@ -510,17 +543,7 @@ fn the_engine_s_own_node_passes_the_node_check_and_starts_npm_under_the_install_
     .unwrap();
     assert!(writable.success(), "{modules:?}");
     let node = crate::sandbox::canonical(&real.join("node")).unwrap();
-    let own = tree.join("bin").join("node");
-    fs::copy(&node, &own).unwrap();
-    let alone = crate::spawn_gate::collected(std::process::Command::new(&own).arg("--version"))
-        .unwrap()
-        .status
-        .success();
-    if !alone {
-        let quoted = node.to_str().filter(|path| !path.contains('\'')).unwrap();
-        fs::write(&own, format!("#!/bin/sh\nexec '{quoted}' \"$@\"\n")).unwrap();
-        fs::set_permissions(&own, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    copy_node(&node, &tree.join("bin"));
     for (name, script) in [("npm", "npm-cli.js"), ("npx", "npx-cli.js")] {
         let target = format!("../lib/node_modules/npm/bin/{script}");
         std::os::unix::fs::symlink(target, tree.join("bin").join(name)).unwrap();
