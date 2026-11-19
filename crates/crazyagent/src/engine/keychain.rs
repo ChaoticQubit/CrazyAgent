@@ -71,10 +71,10 @@ fn present(path: &Path, folder: bool) -> Result<bool, EngineError> {
     }
 }
 
-/// Tries the empty password the engine gives every keychain it makes on one keychain.
-/// `security` refuses a password unlock of any file named `login.keychain-db`, so no keychain
-/// this module opens has that name. Inputs: the home and the keychain file. Output: true when
-/// it opened, false when `security` refused that password, or a failure for any other answer.
+/// Tries the empty password the engine gives every keychain it makes on one keychain. On
+/// macOS 26 `security` refuses a password unlock of any file named `login.keychain-db`, so no
+/// keychain this module opens has that name. Inputs: the home and the keychain file. Output:
+/// true when it opened, false when `security` refused that password, or a failure otherwise.
 fn opens(home: &Path, keychain: &Path) -> Result<bool, EngineError> {
     assert!(keychain.is_absolute());
     assert_ne!(
@@ -1318,7 +1318,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "assertion `left != right` failed")]
-    fn unlocking_trips_on_a_login_keychain_security_refuses_to_unlock() {
+    fn unlocking_trips_on_a_login_keychain_macos_26_refuses_to_unlock() {
         let root = scratch();
         let home = private_home(root.path(), "home");
         let _ = unlock(&home, &home.join("Library/Keychains").join(LOGIN_KEYCHAIN));
