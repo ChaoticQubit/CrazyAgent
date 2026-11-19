@@ -860,19 +860,44 @@ fn read_from_an_agent_container(hwnd: HWND) -> Vec<String> {
     read_view("h3 row: agent container reader", command, |_| {})
 }
 
-/// A screen reader outside any container reads the view's text, its second line, the empty
-/// selection at the cursor, bounds inside the view, a refused Select and a text-changed
-/// event after a new screen; then a reader started in an agent's AppContainer must start
-/// and read nothing. Input: the view, placed and drawn.
+/// A screen reader outside any container reads the view's text, and a reader started in an
+/// agent's AppContainer must reach the view's own window and read nothing of it (the wall);
+/// then a screen reader reads lines, the selection, bounds, a refused Select and a
+/// text-changed event after a new screen. Input: the view, placed and drawn.
 fn read_by_a_screen_reader_and_not_by_an_agent(view: &View) {
     fed_and_posted(view, b"ab\r\ncd");
     let temp = tempfile::tempdir().expect("a temporary folder");
     let script = temp.path().join("reader.ps1");
     std::fs::write(&script, READER).expect("the reader script");
+    let shown = read_view(
+        "h3 row: screen reader text",
+        reader_command(&script, view.hwnd(), "text"),
+        |_| {},
+    );
+    found_the_view(&shown, view.hwnd());
+    assert_eq!(value(&shown, "reader_control"), Some(DOCUMENT));
+    assert_eq!(value(&shown, "reader_name"), Some("Terminal"));
+    assert_eq!(value(&shown, "reader_text_pattern"), Some("True"));
+    assert!(value(&shown, "reader_text").is_some_and(|text| text.starts_with("ab|cd|")));
+    let contained = read_from_an_agent_container(view.hwnd());
+    assert!(
+        value(&contained, "reader_stage") == Some("lookup"),
+        "the container reader never reached the UIA lookup: {contained:?}"
+    );
+    found_the_view(&contained, view.hwnd());
+    contained_read_nothing(&contained);
+    println!("h3 row: agent container read nothing: {contained:?}");
+    read_in_full(view, &script);
+}
+
+/// A screen reader reads the view's second line, the empty selection at the cursor, the
+/// line's bounds inside the window, a refused Select and the text after a new screen, and
+/// counts text-changed events. Inputs: the view, showing "ab" and "cd", and the reader.
+fn read_in_full(view: &View, script: &std::path::Path) {
     let mut posted = false;
     let lines = read_view(
         "h3 row: screen reader",
-        reader_command(&script, view.hwnd(), "full"),
+        reader_command(script, view.hwnd(), "full"),
         |line| {
             if line == "reader_listening" && !posted {
                 posted = true;
@@ -881,10 +906,6 @@ fn read_by_a_screen_reader_and_not_by_an_agent(view: &View) {
         },
     );
     found_the_view(&lines, view.hwnd());
-    assert_eq!(value(&lines, "reader_control"), Some(DOCUMENT));
-    assert_eq!(value(&lines, "reader_name"), Some("Terminal"));
-    assert_eq!(value(&lines, "reader_text_pattern"), Some("True"));
-    assert!(value(&lines, "reader_text").is_some_and(|text| text.starts_with("ab|cd|")));
     assert_eq!(value(&lines, "reader_line_moved"), Some("1"));
     assert_eq!(value(&lines, "reader_line"), Some("cd|"));
     assert_eq!(value(&lines, "reader_selection"), Some("1:0"));
@@ -911,14 +932,6 @@ fn read_by_a_screen_reader_and_not_by_an_agent(view: &View) {
     assert!(value(&lines, "reader_text_after").is_some_and(|text| text.starts_with("ab|cd|ef|")));
     let events = value(&lines, "reader_text_changed").unwrap_or("none");
     println!("h3 row: text changed events {events}");
-    let contained = read_from_an_agent_container(view.hwnd());
-    assert!(
-        value(&contained, "reader_stage") == Some("lookup"),
-        "the container reader never reached the UIA lookup: {contained:?}"
-    );
-    found_the_view(&contained, view.hwnd());
-    contained_read_nothing(&contained);
-    println!("h3 row: agent container read nothing: {contained:?}");
 }
 
 /// The UIA control type id of a Document, the type the view's provider answers; the system's
@@ -978,4 +991,26 @@ fn a_screen_reader_reads_the_view_and_an_agent_container_reads_nothing() {
         0,
         "no surface setup, swap-chain wait or draw failed"
     );
+}
+
+#[test]
+#[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
+fn each_kind_of_range_is_read_by_its_own_reader_and_recorded() {
+    let (parent, webview) = stand_ins();
+    let view = View::new(parent, webview, 1, sink, &style()).expect("a view");
+    placed_shown_and_drawn(parent, &view);
+    fed_and_posted(&view, b"ab\r\ncd");
+    let temp = tempfile::tempdir().expect("a temporary folder");
+    let script = temp.path().join("reader.ps1");
+    std::fs::write(&script, READER).expect("the reader script");
+    for probe in ["probe_visible", "probe_empty", "probe_selection"] {
+        let what = format!("h3 row: {probe}");
+        let lines = read_view(&what, reader_command(&script, view.hwnd(), probe), |_| {});
+        assert_eq!(
+            value(&lines, "reader_stage"),
+            Some("lookup"),
+            "{what} reached its lookup: {lines:?}"
+        );
+    }
+    drop(view);
 }

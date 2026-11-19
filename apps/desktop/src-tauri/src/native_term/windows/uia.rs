@@ -617,10 +617,10 @@ impl ITextRangeProvider_Impl for TextRange_Impl {
     }
 }
 
-/// A string a client reads, always allocated, an empty one too: a null BSTR for no text
-/// crashed the windows-2022 UI Automation client (run 44437021009), and the windows-strings
-/// constructors panic on a failed allocation, which would abort inside a COM call. Input:
-/// the UTF-16 text. Output: the string, or `E_OUTOFMEMORY`.
+/// A string a client reads, always allocated, an empty one too, so no client gets a null
+/// BSTR, and never a panic: the windows-strings constructors panic on a failed allocation,
+/// which would abort inside a COM call. Input: the UTF-16 text. Output: the string, or
+/// `E_OUTOFMEMORY`.
 fn allocated(wide: &[u16]) -> Result<BSTR> {
     let raw = unsafe { SysAllocStringLen(Some(wide)) }.into_raw();
     if raw.is_null() {
