@@ -42,7 +42,11 @@ impl Term {
     /// shown place, so until then it is owed and applied right after that place. Output:
     /// none.
     pub fn focus(&mut self) {
-        self.view.focus(true);
+        if self.child.is_none() {
+            self.focus_owed = true;
+        } else {
+            self.view.focus(true);
+        }
     }
 
     /// Puts the term over its host rectangle at the toplevel's scale and shows it, or takes
@@ -68,7 +72,7 @@ impl Term {
             self.child = Some(Child::new(&self.toplevel, &self.page, rect)?);
         }
         let child = self.child.as_mut().expect("a child made above");
-        child.place(rect);
+        child.place_scaled(rect, scale);
         child.show();
         let drawn = child.scale();
         self.view.place(Some(rect));
@@ -84,6 +88,9 @@ impl Term {
     /// puts the child back. Input: covered or not. Output: none.
     pub fn cover(&mut self, covered: bool) {
         self.view.cover(covered);
+        if covered && let Some(child) = &mut self.child {
+            child.hide();
+        }
     }
 
     /// Whether the host may present now: the child exists, shows and owes a frame that its
