@@ -603,3 +603,47 @@ test("V243-NATIVE-INPUT r2 (fix11 05:22): each native open carries the project i
   `);
   assert.deepEqual(panels, [["team-2", "p2"], ["team-3", null]]);
 });
+
+test("V243-NATIVE-SESSION-HEADER: every open and place of a native view carries the page's viewport height, so the desktop frames it below the title bar", async () => {
+  const seen = await page(`
+    await F.stage();
+    F.mount("a", ${MASTER});
+    await F.until(() => F.calls("desktop_native_terminal_open").length === 1);
+    F.event(1, { type: "ready", cols: 80, rows: 24 });
+    document.getElementById("a").style.height = "400px";
+    const placed = await F.until(() => F.calls("desktop_native_terminal_place").length > 0);
+    const rect = (command) => F.calls(command).at(-1)?.args.rect ?? null;
+    return { placed, viewport: window.innerHeight, open: rect("desktop_native_terminal_open"), place: rect("desktop_native_terminal_place") };
+  `);
+  assert.equal(seen.placed, true, "a resized screen places its view");
+  assert.equal(seen.viewport, 800);
+  assert.equal(seen.open.viewport, 800, JSON.stringify(seen.open));
+  assert.equal(seen.place.viewport, 800, JSON.stringify(seen.place));
+});
+
+test("V243-NATIVE-SESSION-HEADER: a window height change that leaves the screen's rect alone places the view again with the new viewport", async () => {
+  const seen = await withPage(async ({ evaluate, send }) => {
+    const size = (height) => send("Emulation.setDeviceMetricsOverride", { width: 1200, height, deviceScaleFactor: 1, mobile: false });
+    const run = (script) => evaluate(`(async () => { const F = Fixture; ${script} })()`);
+    await size(800);
+    await evaluate(fixture);
+    const before = await run(`
+      await F.stage();
+      F.mount("a", ${MASTER});
+      await F.until(() => F.calls("desktop_native_terminal_open").length === 1);
+      F.event(1, { type: "ready", cols: 80, rows: 24 });
+      await new Promise((done) => setTimeout(done, 700));
+      return F.screenRect("a");
+    `);
+    await size(760);
+    const after = await run(`
+      const placed = await F.until(() => F.calls("desktop_native_terminal_place").some((entry) => entry.args.rect.viewport === 760));
+      return { placed, rect: F.screenRect("a"), place: F.calls("desktop_native_terminal_place").at(-1)?.args.rect ?? null };
+    `);
+    return { before, after };
+  });
+  const box = ({ x, y, width, height }) => ({ x, y, width, height });
+  assert.deepEqual(box(seen.after.rect), box(seen.before), "the screen's rect stayed where it was");
+  assert.equal(seen.after.placed, true, JSON.stringify(seen.after.place));
+  assert.deepEqual(seen.after.place, { ...box(seen.before), viewport: 760 });
+});

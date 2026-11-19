@@ -1234,3 +1234,20 @@ impl Native {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::page_frame;
+
+    /// V243-NATIVE-SESSION-HEADER: the frame a view gets for its host's page rect keeps the
+    /// rect's x and size and sits below the page's inset, so a host under the sessions bar
+    /// at page y 306 in a 900-point webview with an 868-point page is drawn at 338, not 306.
+    #[test]
+    fn a_host_rect_is_framed_below_the_page_inset() {
+        let frame = page_frame([245.0, 306.0, 694.0, 513.0], 900.0, 868.0);
+        assert_eq!((frame.origin.x, frame.origin.y), (245.0, 338.0));
+        assert_eq!((frame.size.width, frame.size.height), (694.0, 513.0));
+        let whole = page_frame([245.0, 306.0, 694.0, 513.0], 868.0, 868.0);
+        assert_eq!(whole.origin.y, 306.0, "native full screen has no inset");
+    }
+}

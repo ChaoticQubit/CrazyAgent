@@ -6361,6 +6361,48 @@ mod tests {
         .map(|_| ())
     }
 
+    /// V243-NATIVE-SESSION-HEADER: a y counted from the page's top moves to the view the page
+    /// draws in by how much shorter the page is: 32 points under a macOS title bar, none in
+    /// native full screen, and none for a page read mid-resize that is taller than its view.
+    #[test]
+    fn a_page_y_moves_below_the_title_bar_by_how_much_shorter_the_page_is() {
+        assert_eq!(page_to_view_y(306.0, 900.0, 868.0), 338.0);
+        assert_eq!(page_to_view_y(306.0, 868.0, 868.0), 306.0, "full screen");
+        assert_eq!(page_to_view_y(306.0, 860.0, 868.0), 306.0, "a page read mid-resize");
+        assert_eq!(page_to_view_y(0.0, 900.0, 868.0), 32.0);
+    }
+
+    /// V243-NATIVE-SESSION-HEADER: a place with no finite size is a caller's bug, never a
+    /// place: the page values were checked before they got here.
+    #[test]
+    #[should_panic(expected = "a finite page place")]
+    fn a_page_y_with_no_finite_viewport_is_a_bug() {
+        page_to_view_y(306.0, 900.0, f64::NAN);
+    }
+
+    /// V243-NATIVE-SESSION-HEADER: a native view's place carries the page's viewport height
+    /// beside its rect, and a place with none, a zero, a fraction below one point, a NaN or an
+    /// unbounded one is refused with the rect's named code.
+    #[test]
+    fn a_native_place_carries_the_page_viewport_or_is_refused() {
+        let rect = |viewport: Option<f64>| NativeRect {
+            x: 40.0,
+            y: 120.0,
+            width: 640.0,
+            height: 400.0,
+            viewport,
+        };
+        let placed = rect(Some(868.0)).checked().unwrap();
+        assert_eq!(placed, ([40.0, 120.0, 640.0, 400.0], 868.0));
+        for refused in [None, Some(0.0), Some(0.5), Some(f64::NAN), Some(1.0e9)] {
+            let code = rect(refused).checked().unwrap_err().code;
+            assert_eq!(code, "native_terminal_rect_invalid", "{refused:?}");
+        }
+        let body = json!({ "x": 40.0, "y": 120.0, "width": 640.0, "height": 400.0 });
+        let read: NativeRect = serde_json::from_value(body).unwrap();
+        assert_eq!(read.checked().unwrap_err().code, "native_terminal_rect_invalid");
+    }
+
     /// DEC-134 addendum 1: the app replaces an engine on its own only when the engine's
     /// version is older than the app's. A dev build sorts below its stable; an equal, newer or
     /// unreadable version is never replaced, so the app never downgrades an engine.
