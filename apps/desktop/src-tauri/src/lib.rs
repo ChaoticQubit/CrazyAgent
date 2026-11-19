@@ -1966,7 +1966,8 @@ type NativeEvents = Channel<serde_json::Value>;
 const NATIVE_RECT_MAX: f64 = 100_000.0;
 
 /// A native view's place on its page: the host element's rect in CSS pixels of the
-/// webview's viewport.
+/// webview's viewport, and that viewport's height, which says how far the page starts
+/// below the top of the webview the view is framed in.
 #[derive(serde::Deserialize, Clone, Copy, Debug)]
 #[serde(deny_unknown_fields)]
 struct NativeRect {
@@ -1974,22 +1975,45 @@ struct NativeRect {
     y: f64,
     width: f64,
     height: f64,
+    #[serde(default)]
+    viewport: Option<f64>,
 }
 
 impl NativeRect {
-    /// The place as `[x, y, width, height]`, finite, bounded and with no negative side.
-    /// Output: the place, or `native_terminal_rect_invalid`.
-    fn checked(self) -> Result<[f64; 4], BridgeError> {
+    /// The place as `[x, y, width, height]`, finite, bounded and with no negative side,
+    /// and the viewport height, finite, at least one point and bounded. Output: both, or
+    /// `native_terminal_rect_invalid`.
+    fn checked(self) -> Result<([f64; 4], f64), BridgeError> {
         let place = [self.x, self.y, self.width, self.height];
         let bounded = place
             .iter()
             .all(|side| side.is_finite() && side.abs() <= NATIVE_RECT_MAX);
-        if !bounded || self.width < 0.0 || self.height < 0.0 {
+        let sides = bounded && self.width >= 0.0 && self.height >= 0.0;
+        let viewport = self
+            .viewport
+            .filter(|height| sides && (1.0..=NATIVE_RECT_MAX).contains(height));
+        let Some(viewport) = viewport else {
             return Err(engine_failure("native_terminal_rect_invalid"));
-        }
+        };
         assert!(place[2] >= 0.0 && place[3] >= 0.0);
-        Ok(place)
+        assert!(viewport >= 1.0);
+        Ok((place, viewport))
     }
+}
+
+/// Moves a y counted from the top of a page to one counted from the top of the view the page
+/// draws in. On macOS that view reaches under the title bar and the page starts below it, so
+/// they differ by how much shorter the page is; a page read mid-resize that is taller than its
+/// view moves nothing. Inputs: the y, the view's height and the page's, in logical points.
+/// Output: the moved y.
+pub(crate) fn page_to_view_y(y: f64, view_height: f64, viewport: f64) -> f64 {
+    let finite = [y, view_height, viewport]
+        .iter()
+        .all(|side| side.is_finite());
+    assert!(finite, "a finite page place: {y} {view_height} {viewport}");
+    let moved = y + (view_height - viewport).max(0.0);
+    assert!(moved >= y);
+    moved
 }
 
 /// What a native copy takes: the selection, or the whole output the view holds.
@@ -2117,7 +2141,7 @@ async fn desktop_native_terminal_open(
     events: NativeEvents,
 ) -> Result<u64, BridgeError> {
     terminal_window(&webview)?;
-    let rect = rect.checked()?;
+    let (rect, viewport) = rect.checked()?;
     #[cfg(target_os = "macos")]
     {
         let style = native_term::style::Style::from_text(&style).map_err(engine_failure)?;
@@ -2137,6 +2161,7 @@ async fn desktop_native_terminal_open(
             place,
             direct,
             rect,
+            viewport,
             style,
             covered,
             keys,
@@ -2148,7 +2173,7 @@ async fn desktop_native_terminal_open(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (
-            app, state, terminals, name, pane, label, rect, style, covered, keys,
+            app, state, terminals, name, pane, label, rect, viewport, style, covered, keys,
         );
         let _ = (project, events);
         native_unsupported()
@@ -2192,20 +2217,20 @@ async fn desktop_native_terminal_place(
     rect: NativeRect,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    let rect = rect.checked()?;
+    let (rect, viewport) = rect.checked()?;
     #[cfg(target_os = "macos")]
     {
         native_call(
             &webview,
             &app,
             view,
-            native_term::host::Command::Place(rect),
+            native_term::host::Command::Place(rect, viewport),
         )
         .await
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = (app, view, rect);
+        let _ = (app, view, rect, viewport);
         native_unsupported()
     }
 }
@@ -6368,7 +6393,11 @@ mod tests {
     fn a_page_y_moves_below_the_title_bar_by_how_much_shorter_the_page_is() {
         assert_eq!(page_to_view_y(306.0, 900.0, 868.0), 338.0);
         assert_eq!(page_to_view_y(306.0, 868.0, 868.0), 306.0, "full screen");
-        assert_eq!(page_to_view_y(306.0, 860.0, 868.0), 306.0, "a page read mid-resize");
+        assert_eq!(
+            page_to_view_y(306.0, 860.0, 868.0),
+            306.0,
+            "a page read mid-resize"
+        );
         assert_eq!(page_to_view_y(0.0, 900.0, 868.0), 32.0);
     }
 
@@ -6400,7 +6429,10 @@ mod tests {
         }
         let body = json!({ "x": 40.0, "y": 120.0, "width": 640.0, "height": 400.0 });
         let read: NativeRect = serde_json::from_value(body).unwrap();
-        assert_eq!(read.checked().unwrap_err().code, "native_terminal_rect_invalid");
+        assert_eq!(
+            read.checked().unwrap_err().code,
+            "native_terminal_rect_invalid"
+        );
     }
 
     /// DEC-134 addendum 1: the app replaces an engine on its own only when the engine's
