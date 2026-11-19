@@ -1218,4 +1218,22 @@ mod tests {
         };
         assert_eq!(sent, interrupt);
     }
+
+    #[test]
+    fn a_second_copy_chord_after_a_copy_sends_the_interrupt() {
+        let mut pane = selected(b"hello world", 4);
+        let clip = platform::Clip::new();
+        let _ = copy_key(&mut pane, &clip, Input::Text(vec![0x03]));
+        assert_eq!(
+            clip.read().as_deref(),
+            Some("hello"),
+            "the first chord copies"
+        );
+        let sent = copy_key(&mut pane, &clip, Input::Text(vec![0x03]));
+        let interrupt = Action::Input {
+            bytes: vec![0x03],
+            wheel: false,
+        };
+        assert_eq!(sent, interrupt, "the copy used the selection up");
+    }
 }
