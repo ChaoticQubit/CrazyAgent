@@ -118,6 +118,7 @@ fn launch_plugins_carry_secret_values_only_for_approved_servers() {
         Command::DetachSecret {
             id: first.clone(),
             name: "API_TOKEN".into(),
+            ask: None,
         },
     )
     .unwrap() else {

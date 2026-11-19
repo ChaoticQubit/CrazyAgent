@@ -657,7 +657,13 @@ async fn a_key_replaced_after_its_account_was_removed_leaves_no_key_on_disk() {
 
     let (swept, sweep) = busy.occupy_storage();
     let replaced =
-        super::accounts::key_replaced(&handle.engine, &admission, added.id.clone(), credential_ref)
+        super::accounts::key_replaced(
+            &handle.engine,
+            &admission,
+            added.id.clone(),
+            credential_ref,
+            None,
+        )
             .await;
     outlasted_the_owner_wait(replaced.map(|_| ()), "access_change_pending");
     settled(&swept, sweep).await;

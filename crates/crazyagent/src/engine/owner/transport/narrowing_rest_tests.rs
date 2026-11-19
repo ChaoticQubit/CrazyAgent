@@ -399,9 +399,14 @@ async fn key_reference(owner: &Usage, id: &CredentialRef) -> CredentialRef {
 }
 
 /// Lands a key replace's storage job in an engine that dies at that job's claim, so storage
-/// never hears of the new key. Inputs: the engine, the account and its key reference.
-/// Output: none once the worker stopped.
-async fn key_replaced_lost(owner: &Usage, id: &CredentialRef, credential: &CredentialRef) {
+/// never hears of the new key. Inputs: the engine, the account, its key reference and the
+/// kept intent. Output: none once the worker stopped.
+async fn key_replaced_lost(
+    owner: &Usage,
+    id: &CredentialRef,
+    credential: &CredentialRef,
+    intent: Option<IntentId>,
+) {
     let path = database(owner);
     crate::storage::die_at_claim(&path);
     let lost = super::accounts::key_replaced(
@@ -409,6 +414,7 @@ async fn key_replaced_lost(owner: &Usage, id: &CredentialRef, credential: &Crede
         &tui_admission(owner),
         id.clone(),
         credential.clone(),
+        intent.map(crate::storage::narrowing::NarrowingAsk::Owner),
     )
     .await;
     assert!(lost.is_err(), "a job the dying worker never ran is not committed");
@@ -554,7 +560,7 @@ async fn a_key_replaced_after_its_account_was_removed_and_lost_with_the_engine_l
         1,
         "a replace that read the account before the Remove recreates its key file"
     );
-    key_replaced_lost(&owner, &id, &credential).await;
+    key_replaced_lost(&owner, &id, &credential, intent).await;
     let restarted = owner.restarted().await;
     assert!(
         none_hold(&root, second.as_bytes()).await,
@@ -576,7 +582,7 @@ async fn a_key_replace_lost_after_its_key_rename_leaves_no_orphan_key() {
         AccountSecret::new(second.as_bytes().to_vec()).unwrap(),
     )
     .unwrap();
-    key_replaced_lost(&owner, &id, &credential).await;
+    key_replaced_lost(&owner, &id, &credential, None).await;
     let path = database(&owner);
     let restarted = owner.restarted().await;
     let root = engine_root(restarted.root.path());

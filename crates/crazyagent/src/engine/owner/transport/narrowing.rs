@@ -1,6 +1,7 @@
 use super::*;
 use crate::engine::owner::native_auth::Command;
-use crate::storage::narrowing::{Change, Intent, IntentId, MAX_INTENTS};
+use crate::protocol::CredentialRef;
+use crate::storage::narrowing::{Change, Intent, IntentId, MAX_INTENTS, NarrowingAsk};
 use std::collections::VecDeque;
 
 const DRAIN_FIRST_WAIT: Duration = Duration::from_millis(100);
@@ -52,8 +53,9 @@ async fn wait_while_drain_held(root: &Path) {
 
 /// A narrowing change whose submit storage refused while the engine runs, kept on disk and
 /// queued for the one drainer, which submits the same job again until storage takes it. Each
-/// carries its intent's name: storage ends a revocation's by it, and runs a sign-out only
-/// while its intent is kept, so a newer owner sign-in is never undone.
+/// carries its intent's name: storage ends a revocation's, an account change's and a detach's
+/// by it, and runs a sign-out or a detach only while its intent is kept, so a newer owner
+/// sign-in or attach is never undone.
 #[derive(Clone)]
 pub(super) enum Pending {
     Revoke {
@@ -65,6 +67,24 @@ pub(super) enum Pending {
         logout: NativeAuthLogout,
         id: IntentId,
     },
+    Account {
+        admission: Admission,
+        change: AccountChange,
+        id: IntentId,
+    },
+    Secret {
+        server: String,
+        name: String,
+        id: IntentId,
+    },
+}
+
+/// The account change a kept removal or key replace asks storage for again: the account, and
+/// for a key replace its key reference.
+#[derive(Clone)]
+pub(super) enum AccountChange {
+    Remove(CredentialRef),
+    KeyReplaced(CredentialRef, CredentialRef),
 }
 
 /// The drainer's queue, in the order the changes were made, and its one task, which runs
@@ -83,6 +103,17 @@ fn unsubmitted<T>(answer: &Result<T, EngineError>) -> bool {
     answer.as_ref().is_err_and(|refused| {
         crate::storage::not_submitted(&refused.0) || refused.0 == "owner_control_not_submitted"
     })
+}
+
+/// Whether storage took a drained job, logging a refusal it answered, which keeps the
+/// intent for the next open. Input: the answer. Output: the verdict.
+fn drain_taken<T>(answer: &Result<T, EngineError>) -> bool {
+    if let Err(refused) = answer
+        && !unsubmitted(answer)
+    {
+        eprintln!("narrowing_drain_answered cause={}", refused.0);
+    }
+    !unsubmitted(answer)
 }
 
 /// Whether an answer is a refusal the owner hears by name, so the kept sign-out it answers
@@ -153,6 +184,13 @@ impl OwnerRuntimeHandle {
         if !refused_by_name(answer) {
             return;
         }
+        self.end_kept(id).await;
+    }
+
+    /// Ends a kept narrowing change whose refusal the owner is about to hear by name, since
+    /// the owner then knows nothing changed. Input: the intent. Output: none; a removal that
+    /// fails is logged, and the change then replays at the next open.
+    pub(super) async fn end_kept(&self, id: &IntentId) {
         let Some(intents) = self.engine.storage.intents.clone() else {
             return;
         };
@@ -236,12 +274,43 @@ impl OwnerRuntimeHandle {
                             crate::storage::NativeAuthAsk::Drained(id.clone()),
                         )
                         .await;
-                    if let Err(refused) = &answer
-                        && !unsubmitted(&answer)
-                    {
-                        eprintln!("narrowing_drain_answered cause={}", refused.0);
-                    }
-                    !unsubmitted(&answer)
+                    drain_taken(&answer)
+                }
+                Pending::Account {
+                    admission,
+                    change,
+                    id,
+                } => {
+                    let ask = Some(NarrowingAsk::Drained(id.clone()));
+                    let command = match change {
+                        AccountChange::Remove(account) => {
+                            crate::storage::accounts::Command::Remove(account.clone(), ask)
+                        }
+                        AccountChange::KeyReplaced(account, credential) => {
+                            crate::storage::accounts::Command::KeyReplaced(
+                                account.clone(),
+                                credential.clone(),
+                                ask,
+                            )
+                        }
+                    };
+                    let answer = self
+                        .engine
+                        .native_auth_job(|reply| Job::Accounts(admission.clone(), command, reply))
+                        .await;
+                    drain_taken(&answer)
+                }
+                Pending::Secret { server, name, id } => {
+                    let detach = crate::storage::plugins::Command::DetachSecret {
+                        id: server.clone(),
+                        name: name.clone(),
+                        ask: Some(NarrowingAsk::Drained(id.clone())),
+                    };
+                    let answer = self
+                        .engine
+                        .settled_job(|reply| Job::Plugins(detach, reply), |_| Ok(()))
+                        .await;
+                    drain_taken(&answer)
                 }
             };
             if taken {

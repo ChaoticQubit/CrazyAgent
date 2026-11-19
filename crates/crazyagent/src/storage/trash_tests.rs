@@ -225,6 +225,7 @@ fn replaced_and_detached_secrets_are_swept_and_the_attached_one_stays() {
         Command::DetachSecret {
             id: id.clone(),
             name: "OTHER_TOKEN".into(),
+            ask: None,
         },
     )
     .unwrap();
@@ -713,7 +714,7 @@ impl Catalogued {
             &mut self.config,
             Some(&self.sources),
             &self.admission,
-            super::super::accounts::Command::Remove(CredentialRef::new(id).unwrap()),
+            super::super::accounts::Command::Remove(CredentialRef::new(id).unwrap(), None),
         )
         .unwrap();
         assert!(matches!(

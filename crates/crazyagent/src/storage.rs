@@ -620,7 +620,7 @@ impl Job {
             ),
             Self::Accounts(_, command, _) => matches!(
                 command,
-                accounts::Command::Remove(_) | accounts::Command::KeyReplaced(..)
+                accounts::Command::Remove(..) | accounts::Command::KeyReplaced(..)
             ),
             Self::Plugins(command, _) => plugin_narrows_access(command),
             Self::OwnerApply(_, request, _) => match &request.operation {
@@ -777,7 +777,7 @@ impl Storage {
                 };
                 #[cfg(unix)]
                 if let Some(intents) = &intents {
-                    replay_intents(&mut connection, intents);
+                    replay_intents(&mut connection, &mut config, sources.as_ref(), &path, intents);
                 }
                 let _ = ready_send.send(Ok((config.clone(), intents.clone())));
                 let mut owner_runtime = None;
@@ -836,11 +836,18 @@ impl Storage {
                     };
                     match job {
                         Job::Accounts(admission, command, reply) => {
+                            let kept = command.kept();
                             let result = if readonly {
                                 Err(error("accounts_readonly"))
                             } else {
                                 accounts::execute(&mut connection, &mut config, sources.as_ref(), &admission, command)
                             };
+                            if let Some(ask) = &kept {
+                                let ends = result
+                                    .as_ref()
+                                    .map_or_else(|refused| refused.0 == "account_not_found", |_| true);
+                                end_intent(intents.as_deref(), ask.id(), ends);
+                            }
                             let _ = reply.send(result);
                         }
                         Job::AccountProfile(admission, command, reply) => {
@@ -1580,6 +1587,10 @@ impl Storage {
                         Job::Plugins(command, reply) => {
                             #[cfg(all(test, unix))]
                             let attach = matches!(command, plugins::Command::AttachSecret { .. });
+                            let detach = match &command {
+                                plugins::Command::DetachSecret { ask, .. } => Some(ask.clone()),
+                                _ => None,
+                            };
                             let result = if readonly {
                                 Err(error("plugins_readonly"))
                             } else {
@@ -1591,6 +1602,26 @@ impl Storage {
                             #[cfg(all(test, unix))]
                             if attach && result.is_ok() && dies(&path, Death::AttachCommitted) {
                                 break;
+                            }
+                            if let Some(ask) = detach {
+                                #[cfg(unix)]
+                                if let (Ok(plugins::ResultValue::Secret(_, Some(reference))), Some(root)) =
+                                    (&result, path.parent())
+                                {
+                                    plugins::settle_detached(&connection, root, reference);
+                                }
+                                if let Some(ask) = &ask {
+                                    let ends = result.as_ref().map_or_else(
+                                        |refused| {
+                                            matches!(
+                                                refused.0.as_str(),
+                                                "server_not_found" | "server_secret_not_found"
+                                            )
+                                        },
+                                        |_| true,
+                                    );
+                                    end_intent(intents.as_deref(), ask.id(), ends);
+                                }
                             }
                             let _ = reply.send(result);
                         }
@@ -3425,13 +3456,19 @@ pub(crate) enum Replayed {
     NotApplicable(&'static str),
 }
 
-/// Applies the revocations and sign-outs kept in the intent folder at open, before the
-/// worker takes any job, so a change a dead or stopped engine never committed takes effect
-/// first. An intent ends once committed or no longer applicable; one storage could not apply
-/// stays for the next open. Inputs: the database and the store. Output: none; every outcome
-/// is logged.
+/// Applies the narrowing changes kept in the intent folder at open, before the worker takes
+/// any job, so a change a dead or stopped engine never committed takes effect first. An
+/// intent ends once committed or no longer applicable; one that fails stays, retried at each
+/// open, and only the log line `narrowing_intent_kept id= cause=` shows it (a stated limit).
+/// Inputs: the database, config, sources, database path and store. Output: none; all logged.
 #[cfg(unix)]
-fn replay_intents(db: &mut Connection, intents: &narrowing::Intents) {
+fn replay_intents(
+    db: &mut Connection,
+    config: &mut EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    path: &Path,
+    intents: &narrowing::Intents,
+) {
     let listing = match intents.list() {
         Ok(listing) => listing,
         Err(refused) => {
@@ -3461,9 +3498,25 @@ fn replay_intents(db: &mut Connection, intents: &narrowing::Intents) {
             narrowing::Change::Logout(logout) => {
                 native_auth::replay_logout(db, &intent.db_instance, logout)
             }
-            narrowing::Change::RemoveAccount { .. }
-            | narrowing::Change::KeyReplaced { .. }
-            | narrowing::Change::DetachSecret { .. } => Err(error("narrowing_replay_unbuilt")),
+            narrowing::Change::RemoveAccount { id: account } => {
+                replay_kept(db, &intent.db_instance, |db| {
+                    accounts::replay_remove(db, config, sources, &id, account)
+                })
+            }
+            narrowing::Change::KeyReplaced {
+                id: account,
+                credential,
+            } => replay_kept(db, &intent.db_instance, |db| {
+                accounts::replay_key_replaced(db, config, account, credential)
+            }),
+            narrowing::Change::DetachSecret { id: server, name } => {
+                replay_kept(db, &intent.db_instance, |db| {
+                    let root = path
+                        .parent()
+                        .ok_or_else(|| error("plugin_store_unavailable"))?;
+                    plugins::replay_detach(db, root, server, name)
+                })
+            }
         };
         match replayed {
             Ok(outcome) => {
@@ -3478,6 +3531,34 @@ fn replay_intents(db: &mut Connection, intents: &narrowing::Intents) {
             Err(kept) => eprintln!("narrowing_intent_kept id={} cause={}", id.as_str(), kept.0),
         }
     }
+}
+
+/// Applies one kept account or secret change at open, only to the database it was kept
+/// for: one kept for another database, or a database with no owner tables, does nothing.
+/// Inputs: the database, the intent's database id and the change. Output: the outcome, or
+/// the storage error, which keeps the intent.
+#[cfg(unix)]
+fn replay_kept(
+    db: &mut Connection,
+    db_instance: &str,
+    apply: impl FnOnce(&mut Connection) -> Result<Replayed, EngineError>,
+) -> Result<Replayed, EngineError> {
+    let ours = {
+        let tx = db.transaction().map_err(error)?;
+        owner_schema(&tx)?
+            && tx
+                .query_row(
+                    "SELECT db_instance FROM owner_meta WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(error)?
+                == db_instance
+    };
+    if !ours {
+        return Ok(Replayed::NotApplicable("other_database"));
+    }
+    apply(db)
 }
 
 /// Applies one kept revocation at open, guarded by its database and epoch: for another
@@ -4232,6 +4313,7 @@ mod owner_actor_tests {
         let secret = plugins::Command::DetachSecret {
             id: "server".into(),
             name: "token".into(),
+            ask: None,
         };
         let removed = plugins::Command::RemoveServer {
             id: "server".into(),

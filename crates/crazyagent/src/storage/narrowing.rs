@@ -56,6 +56,25 @@ pub(crate) enum Change {
     },
 }
 
+/// Who submits a kept account or secret narrowing, by the name of the intent it was kept
+/// under: the owner, who wrote the intent just before the submit, or the drainer, whose
+/// detach runs only while that intent is still kept. Storage ends the intent once the change
+/// commits or no longer applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NarrowingAsk {
+    Owner(IntentId),
+    Drained(IntentId),
+}
+
+impl NarrowingAsk {
+    /// The name of the intent this ask was kept under. Output: the name.
+    pub(crate) fn id(&self) -> &IntentId {
+        match self {
+            Self::Owner(id) | Self::Drained(id) => id,
+        }
+    }
+}
+
 #[cfg(unix)]
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

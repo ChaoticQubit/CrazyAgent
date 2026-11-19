@@ -540,6 +540,7 @@ impl SettingsSources {
 /// replay's journal names its origin, so an owner's journal reads as before this field.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(not(unix), allow(dead_code))]
 enum Origin {
     #[default]
     Owner,
@@ -550,7 +551,21 @@ impl Origin {
     fn is_owner(&self) -> bool {
         *self == Self::Owner
     }
+
+    /// The origin a journal's change is recorded under: the owner's own, or the trusted
+    /// host's for a replay, as the revocation replay records. Output: the origin column.
+    fn recorded(self) -> &'static str {
+        match self {
+            Self::Owner => "native_owner",
+            Self::NarrowingReplay => "trusted_host",
+        }
+    }
 }
+
+/// The owner id a replay journal records. It is not 64 hex digits, so it never names a real
+/// owner: owner ids are made only by `random_id` at the owner tables' start, and the
+/// owner_identities column holds exactly 64 bytes.
+const REPLAY_OWNER: &str = "narrowing_replay";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -700,6 +715,26 @@ pub(super) fn recover(
     else {
         return Err(error("settings_journal_invalid"));
     };
+    if pending.origin == Origin::NarrowingReplay {
+        let ours: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM owner_meta WHERE singleton=1 AND db_instance=?1)",
+                [&pending.admission.db_instance],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        let removal = matches!(
+            edit,
+            crate::config::ModelAccessEdit::RemoveConnectedAccount { .. }
+        );
+        if !ours
+            || !removal
+            || pending.admission.owner_id != REPLAY_OWNER
+            || pending.admission.owner_epoch != 1
+        {
+            return Err(error("settings_journal_invalid"));
+        }
+    }
     let old_config = pending.old.config()?;
     let registered = super::accounts::pool_materialization(db, &old_config, edit)?;
     let (new_global, next) = edit_model_access(
@@ -721,8 +756,11 @@ pub(super) fn recover(
     {
         return Err(error("settings_journal_invalid"));
     }
-    let valid_admission: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM owner_meta m JOIN owner_identities i ON i.owner_id=?1 WHERE m.singleton=1 AND m.db_instance=?2 AND i.owner_epoch>=?3)",
-        params![pending.admission.owner_id, pending.admission.db_instance, pending.admission.owner_epoch], |r| r.get(0)).map_err(error)?;
+    let valid_admission: bool = match pending.origin {
+        Origin::Owner => db.query_row("SELECT EXISTS(SELECT 1 FROM owner_meta m JOIN owner_identities i ON i.owner_id=?1 WHERE m.singleton=1 AND m.db_instance=?2 AND i.owner_epoch>=?3)",
+            params![pending.admission.owner_id, pending.admission.db_instance, pending.admission.owner_epoch], |r| r.get(0)).map_err(error)?,
+        Origin::NarrowingReplay => true,
+    };
     if !valid_admission
         || !is_hex_id(&pending.admission.engine_epoch)
         || pending.admission.owner_epoch < 1
@@ -782,7 +820,7 @@ fn finalize(
     let request = &pending.request;
     let hash = request.mutation_hash()?;
     let provenance = OwnerProvenance {
-        origin: "native_owner".into(),
+        origin: pending.origin.recorded().into(),
         owner_id: pending.admission.owner_id.clone(),
         operation_id: request.request_id.clone(),
         request_hash: hash,
@@ -932,6 +970,100 @@ pub(super) fn apply(
     }
 }
 
+/// Takes one account's connection out of the model-access catalog at open, for the replay of
+/// a kept removal, which has no owner. It journals and publishes as an owner's edit does,
+/// with origin `narrowing_replay`, and makes no other edit; recover accepts only that.
+/// Inputs: the database, config, sources, the intent's name and the account id. Output: any
+/// failure, which keeps the intent for the next open.
+#[cfg(unix)]
+pub(super) fn replay_remove_connection(
+    db: &mut Connection,
+    config: &mut EffectiveConfig,
+    sources: Option<&SettingsSources>,
+    intent: &super::narrowing::IntentId,
+    id: &CredentialRef,
+) -> Result<(), EngineError> {
+    assert!(!is_hex_id(REPLAY_OWNER));
+    let sources = sources.ok_or_else(|| error("settings_read_only"))?;
+    let edit = crate::config::ModelAccessEdit::RemoveConnectedAccount { id: id.clone() };
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    if pending(&tx)? {
+        return Err(error("settings_publication_pending"));
+    }
+    let (db_instance, engine_epoch): (String, String) = tx
+        .query_row(
+            "SELECT db_instance,engine_epoch FROM owner_meta WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(error)?;
+    let revision = owner_revision(&tx)?;
+    if revision == i64::MAX as u64 {
+        return Err(error("revision_exhausted"));
+    }
+    let old = sources.snapshot()?;
+    if old.config()?.id != config.id {
+        return Err(error("settings_source_conflict"));
+    }
+    let registered = super::accounts::pool_materialization(&tx, config, &edit)?;
+    let (new_global, next) =
+        edit_model_access(&old.global.bytes, &old.project.bytes, &edit, &registered)
+            .map_err(|e| error(e.0))?;
+    let attempt = crate::engine::owner::random_id()?;
+    let request = OwnerRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: RequestId::new(format!(
+            "narrowing-replay:{}:{}",
+            intent.as_str(),
+            &attempt[..16]
+        ))
+        .map_err(error)?,
+        expected_revision: Cursor::new(revision),
+        operation: OwnerOperation::Apply {
+            mutation: OwnerMutation::ModelAccess {
+                expected_config_id: config.id.clone(),
+                expected_source_hash: old.hash()?,
+                edit,
+            },
+        },
+    };
+    request.validate()?;
+    let hash = request.mutation_hash()?;
+    let mut pending = Pending {
+        request,
+        admission: Admission {
+            db_instance,
+            engine_epoch,
+            owner_id: REPLAY_OWNER.into(),
+            owner_epoch: 1,
+        },
+        origin: Origin::NarrowingReplay,
+        revision,
+        old,
+        new_global,
+        temporary: format!(".crazyagent-publication-{hash}"),
+        new_identity: None,
+        renumber: None,
+    };
+    let body = serde_json::to_vec(&pending).map_err(error)?;
+    if body.len() > SETTINGS_JOURNAL_MAX {
+        return Err(error("settings_journal_bounds"));
+    }
+    store_config(&tx, config)?;
+    tx.execute("INSERT INTO settings_publication VALUES(1,?1)", [body])
+        .map_err(error)?;
+    tx.commit().map_err(error)?;
+    if !sources.publish(db, &mut pending)? {
+        abandon(db, sources, &pending)?;
+        return Err(error("settings_source_conflict"));
+    }
+    finalize(db, &pending, &next)?;
+    *config = next;
+    Ok(())
+}
+
 /// Settles a journaled change that another edit overtook before the rename: records the
 /// request as rejected with settings_source_conflict and clears the journal, then removes
 /// the staged file, leaving that edit on disk. Inputs: the database, sources and change.
@@ -946,6 +1078,7 @@ fn abandon(
         .map_err(error)?;
     let applied = rejected(
         &tx,
+        pending.origin,
         &pending.admission,
         &pending.request,
         "settings_source_conflict".into(),
@@ -967,16 +1100,17 @@ fn reject(
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
     check_owner_admission(&tx, a)?;
-    let applied = rejected(&tx, a, request, code)?;
+    let applied = rejected(&tx, Origin::Owner, a, request, code)?;
     tx.commit().map_err(error)?;
     Ok(applied)
 }
 
-/// Records an owner request as rejected, with no revision change and no event.
-/// Inputs: an open transaction, the request's admission, the request and the code.
-/// Output: the recorded result and its provenance.
+/// Records an owner request, or a replay's, as rejected, with no revision change and no
+/// event. Inputs: an open transaction, who journaled it, the request's admission, the
+/// request and the code. Output: the recorded result and its provenance.
 fn rejected(
     tx: &Transaction<'_>,
+    origin: Origin,
     a: &Admission,
     request: &OwnerRequest,
     code: String,
@@ -984,7 +1118,7 @@ fn rejected(
     let revision = owner_revision(tx)?;
     let result = OwnerResult::Rejected { code };
     let provenance = OwnerProvenance {
-        origin: "native_owner".into(),
+        origin: origin.recorded().into(),
         owner_id: a.owner_id.clone(),
         operation_id: request.request_id.clone(),
         request_hash: request.mutation_hash()?,
