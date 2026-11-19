@@ -1,4 +1,4 @@
-use super::{COMMIT_BYTES_MAX, Ime, MARKED_UNITS_MAX, text_inputs, units};
+use super::{COMMIT_BYTES_MAX, Ime, MARKED_UNITS_MAX, units};
 use crate::native_term::pane::Input;
 use crate::native_term::screen::Preedit;
 
@@ -47,87 +47,157 @@ pub struct Composed {
     pub redraw: bool,
 }
 
-/// The reads a WM_IME_COMPOSITION's flags ask for. Input: the flags (its lParam). Output:
-/// the reads.
+/// The flags and struct size above are IMM32's own, checked where IMM32 is built.
+#[cfg(windows)]
+const _: () = {
+    use windows_sys::Win32::UI::Input::Ime::{
+        GCS_COMPSTR, GCS_CURSORPOS, GCS_RESULTSTR, IMECHARPOSITION,
+    };
+    assert!(COMPOSING == GCS_COMPSTR);
+    assert!(CARET == GCS_CURSORPOS);
+    assert!(RESULT == GCS_RESULTSTR);
+    assert!(size_of::<IMECHARPOSITION>() == CHAR_POSITION_BYTES as usize);
+};
+
+/// The reads a WM_IME_COMPOSITION's flags ask for: the result when one is committed, the
+/// composition string when it changed or when the message names neither a result nor a
+/// caret (an IME clearing its composition sends no flags), and the caret with the string or
+/// alone. Input: the flags (its lParam). Output: the reads.
 pub fn reads(flags: u32) -> Reads {
-    let _ = flags;
-    Reads {
-        result: false,
-        marked: false,
-        caret: false,
-    }
+    let result = flags & RESULT != 0;
+    let caret = flags & CARET != 0;
+    let marked = flags & COMPOSING != 0 || flags & (RESULT | CARET) == 0;
+    let reads = Reads {
+        result,
+        marked,
+        caret,
+    };
+    assert!(reads.result || reads.marked || reads.caret);
+    reads
 }
 
-/// The UTF-16 units to allocate for a string ImmGetCompositionStringW measured. Inputs: the
-/// measured bytes and the cap in units. Output: the units, or none.
-pub fn wanted_units(bytes: i32, cap: usize) -> Option<usize> {
-    let _ = cap;
-    usize::try_from(bytes).ok().map(|bytes| bytes / 2)
-}
-
-/// The UTF-16 units a read copied. Inputs: the copied bytes and the buffer's units. Output:
+/// The UTF-16 units to allocate for a string ImmGetCompositionStringW measured, held to a
+/// cap before any allocation: none for an error (a negative result) or an odd byte count,
+/// the cap for anything past it. Inputs: the measured bytes and the cap in units. Output:
 /// the units, or none.
+pub fn wanted_units(bytes: i32, cap: usize) -> Option<usize> {
+    let bytes = usize::try_from(bytes).ok()?;
+    if bytes % 2 != 0 {
+        return None;
+    }
+    let wanted = (bytes / 2).min(cap);
+    assert!(wanted <= cap);
+    Some(wanted)
+}
+
+/// The UTF-16 units a read copied, never trusted past its buffer: none for an error, an odd
+/// byte count or more units than the buffer holds. Inputs: the copied bytes and the
+/// buffer's units. Output: the units, or none.
 pub fn copied_units(bytes: i32, buffer: usize) -> Option<usize> {
-    let _ = buffer;
-    usize::try_from(bytes).ok().map(|bytes| bytes / 2)
+    let bytes = usize::try_from(bytes).ok()?;
+    let copied = (bytes % 2 == 0)
+        .then_some(bytes / 2)
+        .filter(|units| *units <= buffer)?;
+    assert!(copied <= buffer);
+    Some(copied)
 }
 
-/// A composition string's text from its UTF-16 units. Input: the units. Output: the text.
+/// A composition string's text from its UTF-16 units, any surrogate without its pair
+/// dropped, since a read cut at its cap can end inside a pair. Input: the units. Output:
+/// the text.
 pub fn text_of(read: &[u16]) -> String {
-    String::from_utf16_lossy(read)
+    let text: String = char::decode_utf16(read.iter().copied())
+        .filter_map(Result::ok)
+        .collect();
+    assert!(units(&text) <= read.len());
+    text
 }
 
-/// The caret GCS_CURSORPOS reads, inside the composition. Inputs: the read and the
+/// The caret GCS_CURSORPOS reads, held inside the composition: an offset past its end, or
+/// an error (a negative result), puts it at the end. Inputs: the read and the
 /// composition's units. Output: the caret offset.
 pub fn caret(read: i32, marked_units: usize) -> usize {
-    let _ = marked_units;
-    read.unsigned_abs() as usize
+    let caret = usize::try_from(read).map_or(marked_units, |at| at.min(marked_units));
+    assert!(caret <= marked_units);
+    caret
 }
 
-/// Whether an IMECHARPOSITION's dwSize holds the whole struct. Input: the size. Output:
-/// whether the view may read and write it.
+/// Whether an IMECHARPOSITION's dwSize holds the whole struct, so the view may read its
+/// offset and write its answer. Input: the size. Output: whether it fits.
 pub fn fits(size: u32) -> bool {
-    let _ = size;
-    true
+    size >= CHAR_POSITION_BYTES
 }
 
-/// The character offset IMR_QUERYCHARPOSITION may be answered for. Inputs: the asked
-/// dwCharPos and the marked text. Output: the offset, or none.
+/// The character offset IMR_QUERYCHARPOSITION may be answered for: none with no marked
+/// text or for an offset past it; its end is allowed, the caret after the last character.
+/// Inputs: the asked dwCharPos and the marked text. Output: the offset, or none.
 pub fn char_offset(offset: u32, ime: &Ime) -> Option<usize> {
-    let _ = ime;
-    usize::try_from(offset).ok()
+    let (_, length) = ime.marked_range()?;
+    let offset = usize::try_from(offset).ok().filter(|at| *at <= length)?;
+    assert!(offset <= length);
+    Some(offset)
 }
 
-/// The cell a character of the marked text is drawn in. Inputs: the cursor cell, the drawn
-/// preedit and the cells before the character. Output: the cell's row and column.
+/// The cell a character of the marked text is drawn in: the drawn preedit's row, and its
+/// column plus the cells before the character, held to the cell after the drawn ones (the
+/// screen clips marked text at the row's end); the cursor cell when nothing is drawn.
+/// Inputs: the cursor cell, the drawn preedit and the cells before the character. Output:
+/// the cell's row and column.
 pub fn char_cell(
     cursor: (usize, usize),
     preedit: Option<Preedit>,
     before: usize,
 ) -> (usize, usize) {
-    let _ = (preedit, before);
-    cursor
+    let Some(drawn) = preedit else {
+        return cursor;
+    };
+    let column = drawn.column + before.min(drawn.cells);
+    assert!(column >= drawn.column);
+    assert!(column <= drawn.column + drawn.cells);
+    (drawn.row, column)
 }
 
-/// Applies one composition message to a view's marked text. Inputs: the marked text,
-/// whether the view is active and the read. Output: what it did.
+/// Applies one composition message to a view's marked text. A view that is not active
+/// sends nothing and keeps no marked text. Else a result commits first, through
+/// `Ime::commit` and so `text_inputs` and its caps; then a new string marks with its caret
+/// (at its end when unread), a caret alone moves, and with neither the caret stays. Inputs:
+/// the marked text, whether the view is active and the read. Output: what it did.
 pub fn compose(ime: &mut Ime, active: bool, read: Read) -> Composed {
-    let _ = (active, text_inputs, units);
+    if !active {
+        let redraw = ime.cancel();
+        assert!(!ime.composing());
+        return Composed {
+            inputs: Vec::new(),
+            redraw,
+        };
+    }
+    let before = (ime.marked().to_owned(), ime.selected_range());
     let inputs = read
         .result
-        .map(|text| vec![Input::Text(text.into_bytes())])
+        .map(|text| ime.commit(&text))
         .unwrap_or_default();
-    if let Some(text) = read.marked {
-        ime.set_marked(&text, (0, 0));
-    }
-    Composed {
-        inputs,
-        redraw: false,
-    }
+    let (text, kept) = match read.marked {
+        Some(text) => (text, None),
+        None => (
+            ime.marked().to_owned(),
+            ime.selected_range().map(|(at, _)| at),
+        ),
+    };
+    let length = units(&text);
+    let at = match read.caret {
+        Some(read) => caret(read, length),
+        None => kept.unwrap_or(length),
+    };
+    assert!(at <= length);
+    ime.set_marked(&text, (at, 0));
+    assert!(ime.selected_range().is_none_or(|(at, _)| at <= length));
+    let redraw = before != (ime.marked().to_owned(), ime.selected_range());
+    Composed { inputs, redraw }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::text_inputs;
     use super::*;
     use crazyagent::terminal::INPUT_BYTES_MAX;
 
@@ -318,6 +388,15 @@ mod tests {
             ..Read::default()
         };
         assert_eq!(compose(&mut ime, true, same), Composed::default());
+        assert_eq!(
+            compose(&mut ime, true, Read::default()),
+            Composed::default()
+        );
+        assert_eq!(
+            ime.selected_range(),
+            Some((0, 0)),
+            "a refused read keeps the caret"
+        );
         let cleared = Read {
             marked: Some(String::new()),
             ..Read::default()

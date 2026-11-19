@@ -3,13 +3,16 @@ use std::ptr;
 use std::sync::OnceLock;
 
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows_sys::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT, ScreenToClient};
+use windows_sys::Win32::Graphics::Gdi::{
+    BeginPaint, ClientToScreen, EndPaint, PAINTSTRUCT, ScreenToClient,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::Ime::{
-    CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM, CPS_CANCEL, ImmGetContext,
-    ImmNotifyIME, ImmReleaseContext, ImmSetCandidateWindow, ImmSetCompositionWindow,
-    NI_COMPOSITIONSTR,
+    CANDIDATEFORM, CFS_EXCLUDE, CFS_POINT, COMPOSITIONFORM, CPS_CANCEL, GCS_COMPSTR, GCS_CURSORPOS,
+    GCS_RESULTSTR, HIMC, IMECHARPOSITION, IMR_QUERYCHARPOSITION, ISC_SHOWUICOMPOSITIONWINDOW,
+    ImmGetCompositionStringW, ImmGetContext, ImmNotifyIME, ImmReleaseContext,
+    ImmSetCandidateWindow, ImmSetCompositionWindow, NI_COMPOSITIONSTR,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, GetKeyboardLayout, SetFocus, ToUnicodeEx, VK_CONTROL, VK_LWIN, VK_MENU,
@@ -20,7 +23,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowRect, HWND_TOP, IDC_IBEAM, ISMEX_REPLIED, ISMEX_SEND, InSendMessageEx, LoadCursorW,
     MA_ACTIVATE, MSG, PM_NOREMOVE, PeekMessageW, RegisterClassExW, SW_HIDE, SWP_NOACTIVATE,
     SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CHAR, WM_DEADCHAR, WM_DESTROY,
-    WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND, WM_GETOBJECT, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
+    WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND, WM_GETOBJECT, WM_IME_COMPOSITION,
+    WM_IME_ENDCOMPOSITION, WM_IME_REQUEST, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
     WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_NCDESTROY, WM_PAINT, WM_SETFOCUS,
     WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WNDCLASSEXW, WS_CHILD, WS_CLIPSIBLINGS,
     WS_EX_NOPARENTNOTIFY,
@@ -28,7 +32,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use super::super::a11y::Grid;
 use super::super::event::{Sink, ViewEvent};
-use super::super::screen::Frame;
+use super::super::ime::Ime;
+use super::super::ime::compose::{self, Read};
+use super::super::screen::{Frame, Preedit};
 use super::super::style::Style;
 use super::board::Geometry;
 use super::draw::{self, BOARD, DROP_WAIT};
@@ -70,6 +76,27 @@ pub fn trial_composition(answers: Option<Answers>) {
         TRIAL_COMPOSITION.with(|trial| trial.borrow().is_some()),
         set
     );
+}
+
+/// Test builds only: the trial's answer to one read, copying at most the buffer's units
+/// and reporting the count it was given, true or not. Inputs: the kind, the buffer (null
+/// to measure) and its bytes. Output: the reported count, or none without a trial.
+#[cfg(test)]
+fn trial_read(kind: u32, buffer: *mut u16, bytes: u32) -> Option<i32> {
+    TRIAL_COMPOSITION.with(|trial| {
+        let trial = trial.borrow();
+        let answers = trial.as_ref()?;
+        let Some((_, reported, held)) = answers.iter().find(|(asked, _, _)| *asked == kind) else {
+            return Some(-1);
+        };
+        if !buffer.is_null() {
+            let room = usize::try_from(bytes / 2).expect("a u32 fits a usize");
+            let count = room.min(held.len());
+            assert!(count <= room);
+            unsafe { ptr::copy_nonoverlapping(held.as_ptr(), buffer, count) };
+        }
+        Some(*reported)
+    })
 }
 
 /// Test builds only: makes this thread's views read this scale key in place of their
@@ -129,6 +156,8 @@ struct Inner {
     swallow: Cell<bool>,
     held: Cell<Option<u16>>,
     cursor: Cell<Option<(usize, usize)>>,
+    preedit: Cell<Option<Preedit>>,
+    ime: RefCell<Ime>,
     alive: Cell<bool>,
     root: Root,
 }
@@ -189,6 +218,8 @@ impl View {
             swallow: Cell::new(false),
             held: Cell::new(None),
             cursor: Cell::new(None),
+            preedit: Cell::new(None),
+            ime: RefCell::new(Ime::default()),
             alive: Cell::new(true),
             root: Root::new(Access::new(id, key)),
         });
@@ -230,25 +261,31 @@ impl View {
         unsafe { SetFocus(self.hwnd) };
     }
 
-    /// Hands the render thread the view's newest screen, keeping its cursor cell for the
-    /// IME. Input: the frame. Output: whether a live view took it.
+    /// Hands the render thread the view's newest screen, keeping its cursor cell and its
+    /// drawn marked text's cells for the IME. Input: the frame. Output: whether a live view
+    /// took it.
     pub fn feed(&self, frame: Frame) -> bool {
         let cursor = frame
             .cursor
             .as_ref()
             .map(|cursor| (cursor.row, cursor.column));
+        let cursor = cursor.or_else(|| frame.preedit.map(|drawn| (drawn.row, drawn.column)));
         self.inner.cursor.set(cursor);
+        self.inner.preedit.set(frame.preedit);
         BOARD.post_frame(self.inner.id, frame)
     }
 
     /// The marked text the next frame draws, for the host's `screen::frame`, as the macOS
     /// view's. Output: the text, or none when not composing.
     pub fn marked_text(&self) -> Option<String> {
-        None
+        let ime = self.inner.ime.borrow();
+        ime.composing().then(|| ime.marked().to_owned())
     }
 
     /// Drops any marked text with nothing sent, as the host does on hide and close.
-    pub fn cancel_marked(&self) {}
+    pub fn cancel_marked(&self) {
+        self.inner.cancel_marked(self.hwnd);
+    }
 
     /// Hands UI Automation the screen a frame drew and raises its text and selection events
     /// for what changed, as the macOS view's `drawn` posts VoiceOver's. Inputs: the visible
@@ -263,7 +300,7 @@ impl Inner {
     fn hide(&self, hwnd: HWND) {
         unsafe { ShowWindow(hwnd, SW_HIDE) };
         if self.shown.replace(false) {
-            cancel_composition(hwnd);
+            self.cancel_marked(hwnd);
             BOARD.post_shown(self.id, false);
         }
     }
@@ -393,39 +430,51 @@ impl Inner {
         0
     }
 
-    /// Puts the IME's composition window at the view's cursor cell and keeps its candidate
-    /// list clear of that cell, from the cell size the render thread posted; with no
-    /// cursor, cell or input context the IME keeps its own placement.
+    /// Puts the IME's composition window at the view's cursor cell and its candidate list
+    /// clear of the caret's cell inside the drawn marked text, from the cell size the render
+    /// thread posted; with no cursor, cell or input context the IME keeps its own placement.
     fn place_ime(&self, hwnd: HWND) {
-        let cell = BOARD.cell(self.id);
-        let spot = self.cursor.get().zip(cell);
-        let spot = spot.and_then(|(cursor, cell)| place::ime_spot(cursor, cell, self.key.get()));
-        let Some(spot) = spot else {
+        let (Some(cursor), Some(cell)) = (self.cursor.get(), BOARD.cell(self.id)) else {
+            return;
+        };
+        let before = {
+            let ime = self.ime.borrow();
+            ime.selected_range()
+                .map_or(0, |(at, _)| ime.cells_before(at))
+        };
+        let caret = compose::char_cell(cursor, self.preedit.get(), before);
+        let key = self.key.get();
+        let spots = place::ime_spot(cursor, cell, key).zip(place::ime_spot(caret, cell, key));
+        let Some((spot, at)) = spots else {
             return;
         };
         let context = unsafe { ImmGetContext(hwnd) };
         if context.is_null() {
             return;
         }
-        let point = POINT {
-            x: spot.point.0,
-            y: spot.point.1,
-        };
         assert_eq!(
             spot.point,
             (spot.cell.0, spot.cell.1),
             "the point is the cell's corner"
         );
+        assert_eq!(
+            at.point,
+            (at.cell.0, at.cell.1),
+            "the point is the cell's corner"
+        );
         let composition = COMPOSITIONFORM {
             dwStyle: CFS_POINT,
-            ptCurrentPos: point,
+            ptCurrentPos: POINT {
+                x: spot.point.0,
+                y: spot.point.1,
+            },
             rcArea: RECT::default(),
         };
-        let (left, top, right, bottom) = spot.cell;
+        let (left, top, right, bottom) = at.cell;
         let candidate = CANDIDATEFORM {
             dwIndex: 0,
             dwStyle: CFS_EXCLUDE,
-            ptCurrentPos: point,
+            ptCurrentPos: POINT { x: left, y: top },
             rcArea: RECT {
                 left,
                 top,
@@ -438,13 +487,150 @@ impl Inner {
         unsafe { ImmReleaseContext(hwnd, context) };
     }
 
+    /// A WM_IME_COMPOSITION: reads what its flags name from the input context (a refused
+    /// read leaves that part as it was), applies it to the marked text, sends a commit's
+    /// inputs, asks for a redraw when the marked text changed and moves the candidate list
+    /// to the caret. Inputs: the window and the message's flags.
+    fn composition(&self, hwnd: HWND, flags: LPARAM) {
+        let reads = compose::reads(flags as u32);
+        let context = unsafe { ImmGetContext(hwnd) };
+        if context.is_null() {
+            return;
+        }
+        let string = |kind, cap| composition_string(context, kind, cap);
+        let result = reads
+            .result
+            .then(|| string(GCS_RESULTSTR, compose::RESULT_READ_UNITS));
+        let marked = reads
+            .marked
+            .then(|| string(GCS_COMPSTR, compose::MARKED_READ_UNITS));
+        let caret = reads
+            .caret
+            .then(|| unsafe { composition_read(context, GCS_CURSORPOS, ptr::null_mut(), 0) });
+        unsafe { ImmReleaseContext(hwnd, context) };
+        let read = Read {
+            result: result.flatten(),
+            marked: marked.flatten(),
+            caret,
+        };
+        let done = compose::compose(&mut self.ime.borrow_mut(), self.active(), read);
+        for input in done.inputs {
+            (self.sink)(self.id, ViewEvent::Key(input));
+        }
+        if done.redraw {
+            (self.sink)(self.id, ViewEvent::Marked);
+        }
+        self.place_ime(hwnd);
+    }
+
+    /// A WM_IME_ENDCOMPOSITION: any marked text left goes with nothing sent, and the host
+    /// hears to redraw.
+    fn end_composition(&self) {
+        if self.ime.borrow_mut().cancel() {
+            (self.sink)(self.id, ViewEvent::Marked);
+        }
+        assert!(!self.ime.borrow().composing());
+    }
+
+    /// Drops any marked text with nothing sent (hidden, focus lost, clicked, destroyed):
+    /// the state clears first, so a composition message the cancel sends back finds none,
+    /// then the IME's composition is cancelled and, when there was marked text, the host
+    /// hears to redraw. Input: the view's window.
+    fn cancel_marked(&self, hwnd: HWND) {
+        let was = self.ime.borrow_mut().cancel();
+        assert!(!self.ime.borrow().composing());
+        cancel_composition(hwnd);
+        if was {
+            (self.sink)(self.id, ViewEvent::Marked);
+        }
+    }
+
+    /// An IME message. The IME's own composition window stays hidden, as the view draws the
+    /// marked text; a composition never reaches the default procedure, so no WM_IME_CHAR
+    /// follows a commit; a request other than a character's position goes to the default
+    /// procedure. Inputs: the message. Output: its result.
+    fn ime_message(&self, hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        match message {
+            WM_IME_SETCONTEXT => {
+                let inline = lparam & !(ISC_SHOWUICOMPOSITIONWINDOW as LPARAM);
+                unsafe { DefWindowProcW(hwnd, message, wparam, inline) }
+            }
+            WM_IME_STARTCOMPOSITION => {
+                self.place_ime(hwnd);
+                0
+            }
+            WM_IME_COMPOSITION => {
+                self.composition(hwnd, lparam);
+                0
+            }
+            WM_IME_ENDCOMPOSITION => {
+                self.end_composition();
+                0
+            }
+            WM_IME_REQUEST if wparam == IMR_QUERYCHARPOSITION as WPARAM => {
+                self.char_position(hwnd, lparam)
+            }
+            _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+        }
+    }
+
+    /// IMR_QUERYCHARPOSITION: writes character N's cell (its screen point, the line height
+    /// and the view's screen rectangle) into the IME's IMECHARPOSITION once its address, its
+    /// dwSize and its dwCharPos pass; anything refused answers 0 and writes nothing. Inputs:
+    /// the window and the struct's address. Output: 1 when answered.
+    fn char_position(&self, hwnd: HWND, lparam: LPARAM) -> LRESULT {
+        let asked = lparam as *mut IMECHARPOSITION;
+        if asked.is_null() {
+            return 0;
+        }
+        let size = unsafe { (&raw const (*asked).dwSize).read_unaligned() };
+        if !compose::fits(size) {
+            return 0;
+        }
+        let offset = unsafe { (&raw const (*asked).dwCharPos).read_unaligned() };
+        let before = {
+            let ime = self.ime.borrow();
+            let Some(offset) = compose::char_offset(offset, &ime) else {
+                return 0;
+            };
+            ime.cells_before(offset)
+        };
+        let at = self
+            .cursor
+            .get()
+            .zip(BOARD.cell(self.id))
+            .and_then(|(cursor, cell)| {
+                let char_cell = compose::char_cell(cursor, self.preedit.get(), before);
+                place::ime_spot(char_cell, cell, self.key.get())
+            });
+        let Some(at) = at else {
+            return 0;
+        };
+        let mut point = POINT {
+            x: at.point.0,
+            y: at.point.1,
+        };
+        let mut window = RECT::default();
+        let placed = unsafe { ClientToScreen(hwnd, &mut point) } != 0
+            && unsafe { GetWindowRect(hwnd, &mut window) } != 0;
+        if !placed {
+            return 0;
+        }
+        let height = u32::try_from(at.cell.3 - at.cell.1).expect("a spot's cell has height");
+        assert!(height > 0);
+        unsafe { (&raw mut (*asked).pt).write_unaligned(point) };
+        unsafe { (&raw mut (*asked).cLineHeight).write_unaligned(height) };
+        unsafe { (&raw mut (*asked).rcDocument).write_unaligned(window) };
+        1
+    }
+
     /// Focus leaves the view: keys stop, any composition is cancelled and the host hears.
     fn lose_focus(&self, hwnd: HWND) {
         self.focused.set(false);
         self.root.access().focus(false);
         self.swallow.set(false);
         self.held.set(None);
-        cancel_composition(hwnd);
+        self.cancel_marked(hwnd);
         (self.sink)(self.id, ViewEvent::Focus(false));
     }
 }
@@ -501,8 +687,38 @@ fn shift_only_char(vk: u16, lparam: LPARAM, shift: bool) -> Option<char> {
     char::from_u32(u32::from(buffer[0]))
 }
 
-/// Cancels the IME composition on a view that hides or loses focus, so no commit lands
-/// after it. Input: the view's window.
+/// ImmGetCompositionStringW, or in test builds the trial's answer. Inputs: the context, the
+/// kind, a buffer of at least `bytes` (null to measure) and its bytes. Output: the count or
+/// caret IMM32 reports.
+unsafe fn composition_read(context: HIMC, kind: u32, buffer: *mut u16, bytes: u32) -> i32 {
+    #[cfg(test)]
+    if let Some(answer) = trial_read(kind, buffer, bytes) {
+        return answer;
+    }
+    unsafe { ImmGetCompositionStringW(context, kind, buffer.cast(), bytes) }
+}
+
+/// One composition string of an input context, sized by IMM32's measure but held to a cap
+/// before any allocation, its copy count never trusted past the buffer. Inputs: the
+/// context, the kind (GCS_COMPSTR or GCS_RESULTSTR) and the cap in UTF-16 units. Output:
+/// the text, or none when the IME's answer is refused.
+fn composition_string(context: HIMC, kind: u32, cap: usize) -> Option<String> {
+    let measured = unsafe { composition_read(context, kind, ptr::null_mut(), 0) };
+    let wanted = compose::wanted_units(measured, cap)?;
+    if wanted == 0 {
+        return Some(String::new());
+    }
+    let mut buffer = vec![0u16; wanted];
+    let bytes = u32::try_from(wanted * 2).ok()?;
+    let copied = unsafe { composition_read(context, kind, buffer.as_mut_ptr(), bytes) };
+    let copied = compose::copied_units(copied, buffer.len())?;
+    assert!(copied <= wanted);
+    assert!(wanted <= cap);
+    Some(compose::text_of(&buffer[..copied]))
+}
+
+/// Cancels the IME composition on a view that hides, loses focus, is clicked or goes, so no
+/// commit lands after it. Input: the view's window.
 fn cancel_composition(hwnd: HWND) {
     let context = unsafe { ImmGetContext(hwnd) };
     if context.is_null() {
@@ -532,6 +748,7 @@ unsafe extern "system" fn window_proc(
     match message {
         WM_MOUSEACTIVATE => MA_ACTIVATE as LRESULT,
         WM_LBUTTONDOWN => {
+            inner.cancel_marked(hwnd);
             unsafe { SetFocus(hwnd) };
             0
         }
@@ -547,10 +764,11 @@ unsafe extern "system" fn window_proc(
         }
         WM_KEYDOWN | WM_SYSKEYDOWN => inner.key_down(hwnd, message, wparam, lparam),
         WM_CHAR | WM_SYSCHAR => inner.character(hwnd, message, wparam, lparam),
-        WM_IME_STARTCOMPOSITION => {
-            inner.place_ime(hwnd);
-            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
-        }
+        WM_IME_SETCONTEXT
+        | WM_IME_STARTCOMPOSITION
+        | WM_IME_COMPOSITION
+        | WM_IME_ENDCOMPOSITION
+        | WM_IME_REQUEST => inner.ime_message(hwnd, message, wparam, lparam),
         WM_ERASEBKGND => 1,
         WM_PAINT => {
             let mut paint = PAINTSTRUCT::default();
@@ -567,6 +785,7 @@ unsafe extern "system" fn window_proc(
             .answer(hwnd as isize, wparam, lparam)
             .unwrap_or_else(|| unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }),
         WM_DESTROY => {
+            inner.cancel_marked(hwnd);
             inner.root.end(hwnd as isize, in_send());
             BOARD.remove(inner.id, DROP_WAIT);
             0
