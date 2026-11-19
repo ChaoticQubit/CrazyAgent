@@ -468,8 +468,8 @@ mod tests {
     }
 
     /// V243-PANE-SIZE-ACROSS-WINDOWS: a view shorter than its pane draws the rows that end at
-    /// the cursor's row, with their fills and the cursor moved up with them; a view its pane
-    /// fits draws every row from the top.
+    /// the cursor's row, with their fills (the red run and the block cursor's cell) and the
+    /// cursor moved up with them; a view its pane fits draws every row from the top.
     #[test]
     fn a_clipped_view_draws_the_rows_that_end_at_the_cursor() {
         let size = GridSize {
@@ -490,7 +490,16 @@ mod tests {
         assert_eq!(top, 2, "rows 2 to 4, the cursor's row last");
         let shown = clipped(frame(&term, &theme, true, None), top, 3);
         assert_eq!(text_rows(&shown), ["r2", "r3", "r4"]);
-        assert!(!shown.fills.is_empty() && shown.fills.iter().all(|fill| fill.row == 1));
+        let fills: Vec<(usize, usize, usize)> = shown
+            .fills
+            .iter()
+            .map(|fill| (fill.row, fill.column, fill.width))
+            .collect();
+        assert_eq!(
+            fills,
+            [(1, 0, 2), (2, 2, 1)],
+            "the red run, then the block cursor"
+        );
         assert_eq!(
             shown.cursor.map(|cursor| (cursor.row, cursor.column)),
             Some((2, 2))
