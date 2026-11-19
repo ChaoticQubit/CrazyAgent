@@ -41,7 +41,8 @@ struct Drag {
 }
 
 /// The mouse state of one view: the last left press with its time and pixels and the run of
-/// clicks it counts, the wheel delta carried below a line, and the drag under capture.
+/// clicks it counts, the part of a line the wheel carries in 120ths of a line, and the drag
+/// under capture.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Mouse {
     last: Option<(u32, (i32, i32))>,
@@ -105,10 +106,11 @@ impl Mouse {
         self.last = None;
     }
 
-    /// One wheel message: adds its delta to the carry, dropped first when the wheel turned
-    /// the other way, and answers the whole lines it reaches, the rest carried. A page notch
-    /// scrolls the visible lines; a setting of none scrolls nothing. Inputs: the delta, the
-    /// notch, the visible lines and the point. Output: the wheel, or none below a line.
+    /// One wheel message: adds its delta times the lines a notch to the carry, dropped first
+    /// when the wheel turned the other way, and answers the whole lines (120ths) it reaches,
+    /// the exact rest carried. A page notch scrolls the visible lines; a setting of none
+    /// scrolls nothing. Inputs: the delta, the notch, the visible lines and the point.
+    /// Output: the wheel, or none below a line.
     pub fn wheel(
         &mut self,
         delta: i16,
@@ -122,14 +124,13 @@ impl Mouse {
         };
         let per = per.min(NOTCH_LINES_MAX);
         let turned = (self.carry > 0 && delta < 0) || (self.carry < 0 && delta > 0);
-        let carry = if turned { 0 } else { i64::from(self.carry) } + i64::from(delta);
         if per == 0 {
             self.carry = 0;
             return None;
         }
-        let lines = carry * per / NOTCH_DELTA;
-        let rest = carry - lines * NOTCH_DELTA / per;
-        self.carry = rest.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i32;
+        let total = if turned { 0 } else { i64::from(self.carry) } + i64::from(delta) * per;
+        let lines = total / NOTCH_DELTA;
+        self.carry = (total - lines * NOTCH_DELTA) as i32;
         let lines = lines.clamp(-NOTCH_LINES_MAX, NOTCH_LINES_MAX);
         (lines != 0).then_some(ViewEvent::Wheel {
             point,
