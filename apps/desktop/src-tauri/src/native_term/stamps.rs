@@ -2,11 +2,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// When a native view last turned from hidden to shown, and the first frame it presented
 /// after that, in ms since 1970, so a native-webdriver trial times a switch by the host's
-/// own stamps (DEC-187). Both are none while the view is hidden.
+/// own stamps (DEC-187), with the draws it skipped since that uncover and the first one's
+/// reason. All are none or 0 while the view is hidden.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ShowStamps {
     pub uncovered_ms: Option<f64>,
     pub presented_ms: Option<f64>,
+    pub skipped: u32,
+    pub skip_first: Option<&'static str>,
 }
 
 impl ShowStamps {
@@ -15,6 +18,7 @@ impl ShowStamps {
         *self = ShowStamps::default();
         assert!(self.uncovered_ms.is_none());
         assert!(self.presented_ms.is_none());
+        assert_eq!(self.skipped, 0);
     }
 
     /// Stamps the uncover when the view was hidden until now; a view placed again while
@@ -25,7 +29,7 @@ impl ShowStamps {
         if was_hidden {
             *self = ShowStamps {
                 uncovered_ms: Some(now_ms),
-                presented_ms: None,
+                ..ShowStamps::default()
             };
         }
         assert!(self.uncovered_ms.is_some(), "a shown view was uncovered");
@@ -40,6 +44,20 @@ impl ShowStamps {
             self.presented_ms = Some(now_ms);
         }
         assert!(self.presented_ms.is_some());
+    }
+
+    /// Counts one draw skipped since the uncover and keeps the first one's reason. Input:
+    /// the fixed reason. Output: none.
+    pub fn skipped(&mut self, reason: &'static str) {
+        assert!(
+            self.uncovered_ms.is_some(),
+            "only a shown view skips a draw"
+        );
+        assert!(!reason.is_empty());
+        self.skipped = self.skipped.saturating_add(1);
+        self.skip_first.get_or_insert(reason);
+        assert!(self.skipped >= 1);
+        assert!(self.skip_first.is_some());
     }
 }
 

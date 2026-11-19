@@ -25,6 +25,8 @@ use std::collections::hash_map::Entry as Slot;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::path::PathBuf;
+#[cfg(feature = "native-webdriver")]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
@@ -75,6 +77,10 @@ thread_local! {
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
 static SCHEDULED: AtomicBool = AtomicBool::new(false);
+#[cfg(feature = "native-webdriver")]
+static BUSY_ANSWERS: AtomicU64 = AtomicU64::new(0);
+#[cfg(feature = "native-webdriver")]
+static COVERS_REFUSED: AtomicU64 = AtomicU64::new(0);
 static BLINKING: AtomicBool = AtomicBool::new(false);
 
 /// What a native view tells its panel, as `NativeEvent` in native-terminal.ts.
@@ -364,8 +370,12 @@ pub fn command(window: &str, page: u64, call: Command) -> Result<(), &'static st
         Err((Held::Missing, _)) if closing => Ok(()),
         Err((Held::Missing, _)) => Err("native_terminal_view_unknown"),
         Err((Held::Busy, _)) => {
+            #[cfg(feature = "native-webdriver")]
+            BUSY_ANSWERS.fetch_add(1, Ordering::Relaxed);
             if hiding && page > 0 && REFUSALS.with(|refusals| refusals.borrow_mut().refused(page)) {
                 eprintln!("native_terminal_cover_refused view={page}");
+                #[cfg(feature = "native-webdriver")]
+                COVERS_REFUSED.fetch_add(1, Ordering::Relaxed);
             }
             Err("native_terminal_main_busy")
         }
@@ -401,7 +411,8 @@ pub fn style(style: Style) -> Result<(), &'static str> {
 
 /// What a native-webdriver trial reads of one view: its NSView, its visible rows, whether
 /// the direct path draws it, the private pasteboard's text, whether the view is hidden, its
-/// show stamps and the host's clock at the read, in ms since 1970.
+/// show stamps, the host's clock at the read, in ms since 1970, and the app-wide counts of
+/// page commands answered busy and of covers told refused.
 #[cfg(feature = "native-webdriver")]
 pub struct Look {
     pub view: Retained<TermView>,
@@ -411,6 +422,8 @@ pub struct Look {
     pub hidden: bool,
     pub stamps: ShowStamps,
     pub now_ms: f64,
+    pub busy_answers: u64,
+    pub cover_refused: u64,
 }
 
 /// Reads one view a window opened for a native-webdriver trial; on the main thread. Inputs:
@@ -441,6 +454,8 @@ pub fn look(window: &str, page: u64) -> Result<Look, &'static str> {
             hidden,
             stamps: entry.platform.stamps,
             now_ms: stamps::now_ms(),
+            busy_answers: BUSY_ANSWERS.load(Ordering::Relaxed),
+            cover_refused: COVERS_REFUSED.load(Ordering::Relaxed),
         })
     });
     match looked {
@@ -1273,11 +1288,15 @@ impl Native {
                     entry.platform.stamps.presented(stamps::now_ms());
                     drawn += 1;
                 }
-                Ok(Draw::Skipped(reason)) => match entry.platform.skips.skipped(reason) {
-                    Next::Again => again = true,
-                    Next::Bound => bounded.push((*page, entry.platform.skips.first())),
-                    Next::Wait => {}
-                },
+                Ok(Draw::Skipped(reason)) => {
+                    #[cfg(feature = "native-webdriver")]
+                    entry.platform.stamps.skipped(reason);
+                    match entry.platform.skips.skipped(reason) {
+                        Next::Again => again = true,
+                        Next::Bound => bounded.push((*page, entry.platform.skips.first())),
+                        Next::Wait => {}
+                    }
+                }
                 Err(code) => refused.push((*page, code)),
             }
         }

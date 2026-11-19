@@ -1,13 +1,46 @@
 use super::host::{self, Look};
+use super::stamps;
 use super::view::TermView;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{ClassType, MainThreadMarker, msg_send};
 use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSResponder};
 use objc2_foundation::{NSNotFound, NSPoint, NSRange, NSString};
+use std::collections::VecDeque;
+use std::sync::{Mutex, PoisonError};
 
 /// The longest text one trial step types or composes, in bytes.
 pub const TEXT_BYTES_MAX: usize = 4096;
+
+/// The most views whose last cover(false) entry stamp is kept, the oldest going first.
+const ASKED_MAX: usize = 32;
+
+static ASKED: Mutex<VecDeque<(u64, f64)>> = Mutex::new(VecDeque::new());
+
+/// Stamps a cover(false) as its bridge command starts, before the main-thread hop, so a
+/// trial splits a switch into the page's share and the host's. Input: the view id the page
+/// named. Output: none.
+pub fn asked(page: u64) {
+    let now = stamps::now_ms();
+    let mut asked = ASKED.lock().unwrap_or_else(PoisonError::into_inner);
+    asked.retain(|(held, _)| *held != page);
+    if asked.len() == ASKED_MAX {
+        asked.pop_front();
+    }
+    asked.push_back((page, now));
+    assert!(asked.len() <= ASKED_MAX);
+    assert!(asked.iter().filter(|(held, _)| *held == page).count() == 1);
+}
+
+fn asked_at(page: u64) -> Option<f64> {
+    let asked = ASKED.lock().unwrap_or_else(PoisonError::into_inner);
+    let at = asked
+        .iter()
+        .find(|(held, _)| *held == page)
+        .map(|(_, at)| *at);
+    assert!(at.is_none_or(|at| at.is_finite() && at > 0.0));
+    at
+}
 
 /// One step a native-webdriver trial takes on an open native view, through the view's own
 /// AppKit selectors so its input reaches the pane as the owner's would: a key down, an input
@@ -27,7 +60,9 @@ pub enum Step {
 /// view, whether the view is its window's first responder, whether the app is active and its
 /// window key, the window's backing scale (0 with no window), the marked text, the private
 /// pasteboard's text, whether the view is hidden, its show stamps (`ShowStamps`) and the
-/// host's clock at the read, both in ms since 1970.
+/// host's clock at the read, both in ms since 1970, when its last cover(false) command
+/// started, the draws it skipped since its uncover with the first reason, and the app-wide
+/// counts of page commands answered busy and of covers told refused.
 #[derive(serde::Serialize, Debug, PartialEq)]
 pub struct Seen {
     pub rows: Vec<String>,
@@ -42,6 +77,11 @@ pub struct Seen {
     pub uncovered_ms: Option<f64>,
     pub presented_ms: Option<f64>,
     pub now_ms: f64,
+    pub asked_ms: Option<f64>,
+    pub skipped: u32,
+    pub skip_first: Option<&'static str>,
+    pub busy_answers: u64,
+    pub cover_refused: u64,
 }
 
 /// Takes one trial step on a view the calling window opened, then reads it. Inputs: the
@@ -77,7 +117,7 @@ pub fn take(
         Step::Read => {}
     }
     let look = host::look(window, page)?;
-    Ok(seen(mtm, look))
+    Ok(seen(mtm, look, asked_at(page)))
 }
 
 fn checked(text: &str) -> Result<Retained<NSString>, &'static str> {
@@ -139,7 +179,7 @@ fn commit(view: &TermView, text: &NSString) {
     let () = unsafe { msg_send![view, insertText: text, replacementRange: no_replacement()] };
 }
 
-fn seen(mtm: MainThreadMarker, look: Look) -> Seen {
+fn seen(mtm: MainThreadMarker, look: Look, asked_ms: Option<f64>) -> Seen {
     let window = look.view.window();
     let responder: &NSResponder = &look.view;
     let focused = window
@@ -161,10 +201,17 @@ fn seen(mtm: MainThreadMarker, look: Look) -> Seen {
         uncovered_ms: look.stamps.uncovered_ms,
         presented_ms: look.stamps.presented_ms,
         now_ms: look.now_ms,
+        asked_ms,
+        skipped: look.stamps.skipped,
+        skip_first: look.stamps.skip_first,
+        busy_answers: look.busy_answers,
+        cover_refused: look.cover_refused,
     };
     assert!(!seen.focused || window.is_some());
     assert!(seen.scale >= 0.0 && seen.scale.is_finite());
     assert!(seen.hidden == seen.uncovered_ms.is_none());
     assert!(seen.presented_ms.is_none() || seen.uncovered_ms.is_some());
+    assert!(seen.skipped == 0 || seen.uncovered_ms.is_some());
+    assert_eq!(seen.skip_first.is_some(), seen.skipped > 0);
     seen
 }

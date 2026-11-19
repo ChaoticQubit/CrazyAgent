@@ -3,7 +3,7 @@ import { writeFileSync } from "node:fs";
 import { loadavg } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
-import { LIMIT_MS, SWITCHES, TARGET_MS, clockSkew, line, nativeSample, nativeShown, report } from "./switch-time-kit.mjs";
+import { LIMIT_MS, SWITCHES, TARGET_MS, clockSkew, line, nativeCounts, nativeLook, nativeSample, nativeShown, report } from "./switch-time-kit.mjs";
 
 /** How long one switch may take to show its target before it counts as never shown, in ms.
  * It is far under the WebDriver request limit, so a stuck switch is a sample, not a lost run. */
@@ -184,8 +184,9 @@ export async function nativeViewShowing(text) {
 /** Times one switch back to a native view in the real window (DEC-203) by the host's show
  * stamps: stamps the click in the page, reads the view `NATIVE_FIRST_READ_MS` after it, then
  * every `LOOK_MS` until it is on screen or `SHOW_MS_MAX` passed. Inputs: `{ click, target }`.
- * Output: `{ ms, uncovered_ms, reads, skew_ms, load1 }`, ms null for a view never shown;
- * throws for no link, a view on screen before the click, or one gone. */
+ * Output: `{ ms, uncovered_ms, asked_ms, skipped, skip_first, busy, refused, reads, skew_ms,
+ * load1 }`, ms null for a view never shown, which keeps its last read as `last`
+ * (`nativeLook`); throws for no link, a view on screen before the click, or one gone. */
 async function timeNativeSwitch({ click, target }) {
   const load1 = loadavg()[0];
   const gone = `native view ${target.view} is gone: it ended or opened again, so the switch is not timed`;
@@ -209,11 +210,14 @@ async function timeNativeSwitch({ click, target }) {
     assert.ok(read !== null, gone);
     skew = read.skew_ms;
     const sample = nativeSample(clickAt, read.seen, target.text);
-    if (sample !== null) return { ...sample, reads, skew_ms: skew, load1 };
-    if (Date.now() >= deadline) return { ms: null, uncovered_ms: null, reads, skew_ms: skew, load1 };
+    const counts = nativeCounts(first.seen, read.seen);
+    if (sample !== null) return { ...sample, ...counts, reads, skew_ms: skew, load1 };
+    if (Date.now() >= deadline || reads === readsMax) {
+      return { ms: null, uncovered_ms: null, last: nativeLook(clickAt, read.seen, target.text), ...counts, reads, skew_ms: skew, load1 };
+    }
     await pause(LOOK_MS);
   }
-  return { ms: null, uncovered_ms: null, reads: readsMax, skew_ms: skew, load1 };
+  throw new Error(`native view ${target.view} was read more than ${readsMax} times for one switch`);
 }
 
 function checked(request) {
@@ -270,16 +274,27 @@ export async function timeSwitch({ click, target }) {
   return { ms: answer.ms, frame_ms: answer.frame_ms, frames: answer.frames, load1 };
 }
 
-/** The native share of a row's switches as a line: the median and worst time to the uncover,
- * the page and bridge share, the worst clock skew and the most reads one switch took. Input:
- * the timed native samples. Output: the line. */
+/** The native share of a row's switches as a line: the median and worst time to the start of
+ * the cover(false) command (the page's share) and to the uncover (the page and bridge share),
+ * the draws skipped and the switches that skipped one, the busy answers and refused covers,
+ * the worst clock skew, the most reads one switch took, and each never-shown switch's last
+ * read. Input: the timed native samples. Output: the line. */
 function nativeLine(samples) {
   assert.ok(samples.length > 0 && samples.every((sample) => Number.isInteger(sample.reads)), "native samples count their reads");
-  const uncovered = samples.map((sample) => sample.uncovered_ms).filter((ms) => ms !== null).sort((left, right) => left - right);
-  const skews = samples.map((sample) => sample.skew_ms).filter((ms) => ms !== null);
+  const sorted = (field) => samples.map((sample) => sample[field]).filter((ms) => ms !== null && ms !== undefined).sort((left, right) => left - right);
+  const uncovered = sorted("uncovered_ms");
+  const asked = sorted("asked_ms");
+  const skews = sorted("skew_ms");
+  const shown = samples.filter((sample) => sample.ms !== null);
+  const sum = (field) => samples.reduce((total, sample) => total + sample[field], 0);
   const ms = (value) => (value === undefined ? "none" : `${value.toFixed(1)} ms`);
-  return `uncover p50 ${ms(uncovered[Math.floor(uncovered.length / 2)])}, max ${ms(uncovered.at(-1))}; `
-    + `clock skew max ${ms(skews.length === 0 ? undefined : Math.max(...skews))}; reads max ${Math.max(...samples.map((sample) => sample.reads))}`;
+  const never = samples.flatMap((sample, index) => (sample.ms === null ? [`#${index + 1} ${JSON.stringify(sample.last)}`] : []));
+  return `cover asked p50 ${ms(asked[Math.floor(asked.length / 2)])}, max ${ms(asked.at(-1))}; `
+    + `uncover p50 ${ms(uncovered[Math.floor(uncovered.length / 2)])}, max ${ms(uncovered.at(-1))}; `
+    + `draws skipped ${shown.reduce((total, sample) => total + sample.skipped, 0)} in ${shown.filter((sample) => sample.skipped > 0).length} of ${shown.length} shown; `
+    + `busy answers ${sum("busy")}, covers refused ${sum("refused")}; `
+    + `clock skew max ${ms(skews.at(-1))}; reads max ${Math.max(...samples.map((sample) => sample.reads))}`
+    + (never.length === 0 ? "" : `; never shown: ${never.join(", ")}`);
 }
 
 /** Runs one row (DEC-187): a warm-up switch, then `SWITCHES` timed ones. Each leaves with

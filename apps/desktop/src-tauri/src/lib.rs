@@ -2219,6 +2219,10 @@ async fn desktop_native_terminal_cover(
     view: u64,
     covered: bool,
 ) -> Result<(), BridgeError> {
+    #[cfg(all(target_os = "macos", feature = "native-webdriver"))]
+    if !covered {
+        native_term::probe::asked(view);
+    }
     terminal_window(&webview)?;
     #[cfg(target_os = "macos")]
     {

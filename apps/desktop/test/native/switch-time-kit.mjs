@@ -58,18 +58,70 @@ export function nativeShown(seen, text) {
   return seen.rows.join("\n").includes(text);
 }
 
+/** When a read's last cover(false) command started, from the click: null when none started
+ * since it, as an earlier one was another switch's. Inputs: the click's stamp and the read.
+ * Output: the ms, or null. */
+function askedSince(clickAt, seen) {
+  assert.ok(seen.asked_ms === null || (Number.isFinite(seen.asked_ms) && seen.asked_ms > 0), `a cover entry stamp is a time or null: ${seen.asked_ms}`);
+  return seen.asked_ms === null || seen.asked_ms < clickAt ? null : seen.asked_ms - clickAt;
+}
+
+/** The draws a read's view skipped since its uncover and the first one's reason. Input: the
+ * read. Output: `{ skipped, skip_first }`. */
+function skipsOf(seen) {
+  assert.ok(Number.isInteger(seen.skipped) && seen.skipped >= 0, `a read counts its skipped draws: ${seen.skipped}`);
+  assert.equal(seen.skip_first !== null, seen.skipped > 0, "a read names its first skip exactly when it skipped a draw");
+  return { skipped: seen.skipped, skip_first: seen.skip_first };
+}
+
 /** One native switch from the click's stamp and one probe read, both in ms since 1970 on the
  * Mac's one clock: once the view is on screen (`nativeShown`), `ms` runs from the click to
- * the first frame it presented and `uncovered_ms` to its uncover, the page and bridge share.
- * Inputs: the click's stamp, the read and the text. Output: `{ ms, uncovered_ms }`, or null
- * while it is not on screen; throws for a view shown before the click. */
+ * the first frame it presented, `uncovered_ms` to its uncover (the page and bridge share) and
+ * `asked_ms` to the start of its cover(false) command (the page's share), with the draws
+ * skipped since the uncover. Inputs: the click's stamp, the read and the text. Output:
+ * `{ ms, uncovered_ms, asked_ms, skipped, skip_first }`, or null while it is not on screen;
+ * throws for a view shown before the click. */
 export function nativeSample(clickAt, seen, text) {
   assert.ok(Number.isFinite(clickAt) && clickAt > 0, `a click stamp is a time: ${clickAt}`);
   if (!nativeShown(seen, text)) return null;
   assert.ok(seen.uncovered_ms >= clickAt, `the view was shown before the click: uncovered ${clickAt - seen.uncovered_ms} ms before it`);
   const { ms } = stampSample(clickAt, [seen.presented_ms]);
   assert.ok(ms !== null && ms >= seen.uncovered_ms - clickAt);
-  return { ms, uncovered_ms: seen.uncovered_ms - clickAt };
+  return { ms, uncovered_ms: seen.uncovered_ms - clickAt, asked_ms: askedSince(clickAt, seen), ...skipsOf(seen) };
+}
+
+/** The last read of a switch the view never showed in, kept so the run says why: whether the
+ * view was hidden, its stamps and its cover(false) command's start from the click, its draws
+ * skipped since the uncover and whether its rows held the marker. Inputs: the click's stamp,
+ * the read and the text. Output: `{ hidden, uncovered_ms, presented_ms, asked_ms, marker,
+ * skipped, skip_first }`. */
+export function nativeLook(clickAt, seen, text) {
+  assert.ok(Number.isFinite(clickAt) && clickAt > 0, `a click stamp is a time: ${clickAt}`);
+  assert.equal(typeof seen?.hidden, "boolean", `a native read says whether the view is hidden: ${JSON.stringify(seen)}`);
+  assert.ok(Array.isArray(seen.rows), "a native read has the view's rows");
+  assert.match(text ?? "", /\S/, "a native target names its text");
+  const from = (stamp) => (stamp === null ? null : stamp - clickAt);
+  return {
+    hidden: seen.hidden,
+    uncovered_ms: from(seen.uncovered_ms),
+    presented_ms: from(seen.presented_ms),
+    asked_ms: askedSince(clickAt, seen),
+    marker: seen.rows.join("\n").includes(text),
+    ...skipsOf(seen),
+  };
+}
+
+/** The page commands the host answered busy, and the covers it told refused, between two
+ * reads of one switch: the read before the click and the last one. Inputs: both reads.
+ * Output: `{ busy, refused }`. */
+export function nativeCounts(before, after) {
+  for (const read of [before, after]) {
+    for (const count of ["busy_answers", "cover_refused"]) {
+      assert.ok(Number.isInteger(read?.[count]) && read[count] >= 0, `a native read has its ${count} count: ${read?.[count]}`);
+    }
+  }
+  assert.ok(after.busy_answers >= before.busy_answers && after.cover_refused >= before.cover_refused, "the host's counts never fall");
+  return { busy: after.busy_answers - before.busy_answers, refused: after.cover_refused - before.cover_refused };
 }
 
 /** How far the host's clock at a read falls outside the page's stamps just before and after
