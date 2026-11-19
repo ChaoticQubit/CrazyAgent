@@ -18,7 +18,9 @@ if [ "$RUNNER_OS" = Windows ]; then
 fi
 git checkout -q -f --detach "$1" || { echo "checkout $1 failed"; exit 1; }
 echo "######## at $(git log --oneline -1)"
-python3 "$RUNNER_TEMP/trips.py" || { note "| trips | the injections did not apply |"; exit 1; }
+py=python3
+[ "$RUNNER_OS" != Windows ] || py=python
+"$py" "$RUNNER_TEMP/trips.py" || { note "| trips | the injections did not apply |"; exit 1; }
 git diff --stat
 cargo test -p crazyagent --locked --lib --no-run > "$RUNNER_TEMP/lib.txt" 2>&1 || { grep -E '^error' -A 6 "$RUNNER_TEMP/lib.txt" | head -n 60; note "| trips build | FAILED |"; exit 1; }
 failed=0
