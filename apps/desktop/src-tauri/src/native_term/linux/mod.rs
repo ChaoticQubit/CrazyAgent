@@ -4,4 +4,5 @@ mod keys;
 mod rows;
 mod signals;
 mod surface;
+mod term;
 mod view;

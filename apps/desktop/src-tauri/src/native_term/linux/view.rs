@@ -892,6 +892,20 @@ impl View {
     }
 }
 
+#[cfg(test)]
+impl View {
+    /// The view's focus state, for rows outside this module. Output: the state.
+    pub(super) fn focus_state(&self) -> Focus {
+        self.inner.focus.get()
+    }
+
+    /// Marks the toplevel focused, as GTK does when the window manager gives it focus,
+    /// which no window manager does under Xvfb. Output: none.
+    pub(super) fn toplevel_focused(&self) {
+        self.inner.moving(|f| f.toplevel(true), false);
+    }
+}
+
 impl Drop for View {
     /// Disconnects the toplevel, page and input method handlers, cancels any open preedit,
     /// releases the context and, if the view held native focus, stops owning it and gives

@@ -36,7 +36,7 @@ const UNAVAILABLE: &str = "native_terminal_surface_unavailable";
 pub const RECT_MAX: i32 = 16_384;
 
 /// The largest display scale a child is made at.
-const SCALE_MAX: i32 = 8;
+pub const SCALE_MAX: i32 = 8;
 
 /// The X11 Shape extension's input shape kind, which XFixes empties so clicks reach the
 /// toplevel.
@@ -755,10 +755,10 @@ impl Child {
         self.place_scaled(rect, scale);
     }
 
-    /// Moves the child to a host rectangle at a scale, which a row sets apart from the
-    /// toplevel's to stand in for a rescale; a scale outside 1 to 8 leaves it in place.
-    /// Inputs: the rectangle and the scale. Output: none.
-    fn place_scaled(&mut self, rect: Rect, scale: i32) {
+    /// Moves the child to a host rectangle at a scale: the toplevel's, as the host reads it
+    /// when it places, or one a row sets apart from it to stand in for a rescale. A scale
+    /// outside 1 to 8 leaves it in place. Inputs: the rectangle and the scale. Output: none.
+    pub fn place_scaled(&mut self, rect: Rect, scale: i32) {
         if self.pacing.get().is_gone() || !(1..=SCALE_MAX).contains(&scale) {
             return;
         }
@@ -886,7 +886,7 @@ impl Child {
 impl Child {
     /// Where the child sits on the X11 root, for the farm's pixel checks. Output: the root
     /// origin, or none on Wayland, where the toplevel sits at the output's origin.
-    fn root_origin(&self) -> Option<(i32, i32)> {
+    pub(super) fn root_origin(&self) -> Option<(i32, i32)> {
         let Native::X11 { x11, .. } = &self.native else {
             return None;
         };
@@ -911,6 +911,14 @@ impl Child {
     /// Output: the part, or none while the child is off screen.
     fn part(&self) -> Option<Rect> {
         self.crop.placement.get().part
+    }
+
+    /// The size and scale of the buffer the last present attached. Output: them, or none
+    /// before the first present.
+    pub(super) fn attached(&self) -> Option<((u32, u32), i32)> {
+        let buffer = self.crop.placement.get().attached?;
+        assert!((1..=SCALE_MAX).contains(&buffer.scale));
+        Some(((buffer.width, buffer.height), buffer.scale))
     }
 }
 
