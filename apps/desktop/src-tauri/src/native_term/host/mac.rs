@@ -93,8 +93,8 @@ pub fn open_view(
     }
 }
 
-/// Makes the view its window's first responder; it never activates the app or makes a
-/// window key. Input: the view.
+/// Makes the view its window's first responder; the app and its key window stay as they
+/// are. Input: the view.
 pub fn focus_view(view: &View) {
     let responder: &NSResponder = &view.ns;
     if let Some(window) = view.ns.window() {

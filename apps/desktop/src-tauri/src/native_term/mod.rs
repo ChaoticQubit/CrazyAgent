@@ -131,6 +131,22 @@ mod tests {
             .find(|needle| text.contains(needle.as_str()))
     }
 
+    fn scan(folder: &str, call: fn(&str) -> Option<String>) -> usize {
+        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(folder);
+        let mut read = 0;
+        for entry in std::fs::read_dir(&folder).expect("native folder") {
+            let path = entry.expect("folder entry").path();
+            if path.extension() != Some(std::ffi::OsStr::new("rs")) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("source file");
+            let shown = path.display();
+            assert_eq!(call(&text), None, "{shown}");
+            read += 1;
+        }
+        read
+    }
+
     #[test]
     fn the_focus_scan_finds_a_planted_call() {
         let planted = format!("window.{}{}();", "makeKey", "Window");
@@ -145,19 +161,14 @@ mod tests {
 
     #[test]
     fn no_native_file_brings_the_app_forward_or_makes_a_window_key() {
-        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native_term");
-        let mut read = 0;
-        for entry in std::fs::read_dir(&folder).expect("native_term folder") {
-            let path = entry.expect("folder entry").path();
-            if path.extension() != Some(std::ffi::OsStr::new("rs")) {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path).expect("source file");
-            let shown = path.display();
-            assert_eq!(focus_call(&text), None, "{shown}");
-            read += 1;
-        }
+        let read = scan("src/native_term", focus_call);
         assert!(read >= 14, "read {read} files");
+    }
+
+    #[test]
+    fn no_host_platform_file_brings_the_app_forward_or_makes_a_window_key() {
+        let read = scan("src/native_term/host", focus_call);
+        assert!(read >= 2, "read {read} files");
     }
 
     #[cfg(unix)]
