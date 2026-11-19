@@ -1624,34 +1624,33 @@ impl Storage {
                                     end_ended(&connection, intents.as_deref(), id);
                                 }
                             }
-                            if let Some(ask) = detach {
-                                #[cfg(unix)]
-                                if let (Ok(plugins::ResultValue::Secret(_, Some(reference))), Some(root)) =
+                            #[cfg(unix)]
+                            if detach.is_some()
+                                && let (Ok(plugins::ResultValue::Secret(_, Some(reference))), Some(root)) =
                                     (&result, path.parent())
-                                {
-                                    plugins::settle_detached(&connection, root, reference);
+                            {
+                                plugins::settle_detached(&connection, root, reference);
+                            }
+                            if let Some(Some(ask)) = &detach {
+                                let superseded = result.as_ref().is_err_and(|refused| {
+                                    refused.0 == "server_secret_detach_superseded"
+                                });
+                                let ends = result.as_ref().map_or_else(
+                                    |refused| {
+                                        matches!(
+                                            refused.0.as_str(),
+                                            "server_not_found" | "server_secret_not_found"
+                                        )
+                                    },
+                                    |_| true,
+                                );
+                                #[cfg(unix)]
+                                if superseded {
+                                    end_ended(&connection, intents.as_deref(), ask.id());
                                 }
-                                if let Some(ask) = &ask {
-                                    let superseded = result.as_ref().is_err_and(|refused| {
-                                        refused.0 == "server_secret_detach_superseded"
-                                    });
-                                    let ends = result.as_ref().map_or_else(
-                                        |refused| {
-                                            matches!(
-                                                refused.0.as_str(),
-                                                "server_not_found" | "server_secret_not_found"
-                                            )
-                                        },
-                                        |_| true,
-                                    );
-                                    #[cfg(unix)]
-                                    if superseded {
-                                        end_ended(&connection, intents.as_deref(), ask.id());
-                                    }
-                                    #[cfg(not(unix))]
-                                    let _ = superseded;
-                                    end_intent(intents.as_deref(), ask.id(), ends);
-                                }
+                                #[cfg(not(unix))]
+                                let _ = superseded;
+                                end_intent(intents.as_deref(), ask.id(), ends);
                             }
                             let _ = reply.send(result);
                         }

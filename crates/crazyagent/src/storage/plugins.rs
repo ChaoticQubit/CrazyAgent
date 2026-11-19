@@ -1751,9 +1751,6 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
     })
 }
 
-/// Runs one plugins command inside a single transaction.
-/// Inputs: the engine connection, the engine root holding the plugin store and the command.
-/// Output: the changed or listed items, or a plain rejection code with nothing changed.
 /// Applies a kept secret detach at open: the server stops naming the secret, and its file
 /// is deleted unless another record names it. A server or secret already gone is applied.
 /// Inputs: the database, the engine root, the server id and the secret's name. Output: the
@@ -1797,6 +1794,10 @@ pub(crate) fn settle_detached(connection: &Connection, root: &Path, reference: &
     }
 }
 
+/// Runs one plugins command inside a single transaction.
+/// Inputs: the engine connection, the engine root holding the plugin store and the command.
+/// Output: the changed or listed items, or a plain rejection code with nothing changed.
+#[cfg(any(unix, test))]
 pub(crate) fn execute(
     connection: &mut Connection,
     root: &Path,

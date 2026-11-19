@@ -408,6 +408,8 @@ fn remove_record(
     id: &CredentialRef,
     connection: &ModelConnection,
 ) -> Result<(), EngineError> {
+    #[cfg(not(unix))]
+    let _ = config;
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
