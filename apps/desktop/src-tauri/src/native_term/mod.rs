@@ -11,6 +11,8 @@ mod pane;
 pub(crate) mod probe;
 mod render;
 mod screen;
+#[cfg(test)]
+mod stamps_tests;
 pub(crate) mod style;
 mod table;
 mod view;
