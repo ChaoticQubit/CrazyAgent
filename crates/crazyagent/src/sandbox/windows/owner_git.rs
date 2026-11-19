@@ -366,6 +366,22 @@ mod tests {
     }
 
     #[test]
+    fn owner_git_refuses_a_verbatim_program_whose_plain_path_opens_another_file() {
+        let made = made();
+        for tail in [".", " "] {
+            let verbatim = PathBuf::from(format!(r"\\?\{}{tail}", made.git.display()));
+            fs::write(&verbatim, "another git").unwrap();
+            refused_install(
+                &made,
+                &made.folder,
+                &made.project,
+                &verbatim,
+                "another file",
+            );
+        }
+    }
+
+    #[test]
     fn owner_git_refuses_a_git_outside_a_git_for_windows_install_before_any_profile() {
         let made = made();
         let loose = made.root.join("tools").join("git.exe");
