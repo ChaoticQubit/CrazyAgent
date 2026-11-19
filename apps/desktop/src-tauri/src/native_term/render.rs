@@ -842,6 +842,14 @@ impl Shared {
         self.device.as_ref().is_some_and(Device::is_lost)
     }
 
+    /// Takes the wgpu error the device recorded since the last render call took it, as
+    /// `taken` does after a frame; none before the first surface. Output: ok, or
+    /// `native_terminal_gpu`.
+    #[cfg(windows)]
+    pub fn take_fault(&self) -> Result<(), &'static str> {
+        self.device.as_ref().map_or(Ok(()), Device::fault)
+    }
+
     /// Test builds only: records a wgpu error on the device, as the error handler does for
     /// a reconfigure wgpu refused; the next render call that takes errors meets it.
     #[cfg(all(windows, test))]

@@ -314,9 +314,10 @@ impl Painter {
         }
     }
 
-    /// Waits for a view's next texture and draws its newest frame into it. Input: the
-    /// view's index. Output: ok, with a failed wait on a live device left to the board's
-    /// bounded retry, or `native_terminal_gpu`.
+    /// Waits for a view's next texture and draws its newest frame into it. A failed wait
+    /// takes the error its reconfigure recorded, so that error faults this view, never the
+    /// next one drawn. Input: the view's index. Output: ok, with a failed wait that recorded
+    /// none left to the board's bounded retry, or `native_terminal_gpu`.
     fn present(&mut self, index: usize) -> Result<(), &'static str> {
         let Painter { shared, views, .. } = self;
         let view = &mut views[index];
@@ -325,7 +326,7 @@ impl Painter {
         let (_, shared) = held.expect("a live view's scale has its shared state");
         let surface = view.surface.as_mut().expect("a live view has a surface");
         let Ok(output) = waited(view.id, shared, surface) else {
-            if shared.lost() {
+            if shared.lost() || shared.take_fault().is_err() {
                 return Err(GPU_FAULT);
             }
             failed();
