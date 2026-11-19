@@ -326,7 +326,7 @@ fn placed_shown_and_drawn(parent: HWND, view: &View) -> POINT {
 }
 
 fn covered_and_shown_again(view: &View, centre: POINT) {
-    view.cover(true);
+    view.place(None).expect("the host hides a covered view");
     assert_eq!(
         unsafe { IsWindowVisible(view.hwnd()) },
         0,
@@ -337,7 +337,8 @@ fn covered_and_shown_again(view: &View, centre: POINT) {
     pump_for(Duration::from_millis(500));
     assert_eq!(presents(), hidden, "a covered view never presents");
     assert_color(centre, WEBVIEW_RGB, "the webview shows where the view was");
-    view.cover(false);
+    view.place(Some(PAGE))
+        .expect("the host places an uncovered view again");
     assert_ne!(
         unsafe { IsWindowVisible(view.hwnd()) },
         0,
@@ -864,12 +865,13 @@ fn inactive_views_type_nothing(view: &View, webview: HWND, centre: POINT) {
             .filter(|(_, event)| !matches!(event, ViewEvent::Focus(_)))
             .count()
     };
-    view.cover(true);
+    view.place(None).expect("the host hides a covered view");
     take_seen();
     send(&chord(&[], VK_A));
     pump_for(KEY_TAIL);
     assert_eq!(typing(), 0, "a covered view types nothing");
-    view.cover(false);
+    view.place(Some(PAGE))
+        .expect("the host places an uncovered view again");
     click(centre);
     pump_until(
         "focus again",
@@ -1361,7 +1363,7 @@ fn inactive_views_compose_nothing(view: &View, webview: HWND, centre: POINT) {
     let both = || vec![told(GCS_RESULTSTR, "x"), told(GCS_COMPSTR, "かな")];
     let seen = composed(view, GCS_COMPSTR, vec![told(GCS_COMPSTR, "か")]);
     assert_eq!(seen, [ViewEvent::Marked]);
-    view.cover(true);
+    view.place(None).expect("the host hides a covered view");
     let seen = composed(view, GCS_RESULTSTR | GCS_COMPSTR, both());
     let typed = |seen: &[ViewEvent]| seen.iter().any(|event| matches!(event, ViewEvent::Key(_)));
     assert!(!typed(&seen), "a covered view commits nothing: {seen:?}");
@@ -1370,7 +1372,8 @@ fn inactive_views_compose_nothing(view: &View, webview: HWND, centre: POINT) {
         None,
         "a covered view keeps no marked text"
     );
-    view.cover(false);
+    view.place(Some(PAGE))
+        .expect("the host places an uncovered view again");
     unsafe { SetFocus(webview) };
     pump_for(KEY_TAIL);
     take_seen();

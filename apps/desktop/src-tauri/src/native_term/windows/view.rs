@@ -158,7 +158,6 @@ struct Inner {
     parent: HWND,
     webview: HWND,
     page: Cell<Option<(f64, f64, f64, f64)>>,
-    covered: Cell<bool>,
     key: Cell<u32>,
     placed: Cell<Option<Geometry>>,
     shown: Cell<bool>,
@@ -220,7 +219,6 @@ impl View {
             parent,
             webview,
             page: Cell::new(None),
-            covered: Cell::new(false),
             key: Cell::new(key),
             placed: Cell::new(None),
             shown: Cell::new(false),
@@ -256,14 +254,6 @@ impl View {
     pub fn place(&self, page: Option<(f64, f64, f64, f64)>) -> Result<(), &'static str> {
         self.inner.page.set(page);
         self.inner.apply(self.hwnd)
-    }
-
-    /// Hides the view while a page popover, menu or dialog covers its box, and shows it
-    /// again after; a box that cannot be placed, or a fault, keeps it hidden, as `place`
-    /// does. Input: whether it is covered.
-    pub fn cover(&self, covered: bool) {
-        self.inner.covered.set(covered);
-        let _ = self.inner.apply(self.hwnd);
     }
 
     /// Gives the view keyboard focus, unless the render thread faulted it: a faulted view is
@@ -342,12 +332,12 @@ impl Inner {
         }
     }
 
-    /// Whether keys and text reach the sink: the view is live, not faulted, shown, uncovered
-    /// and holds keyboard focus. The fault is read here too, since a key can come before
+    /// Whether keys and text reach the sink: the view is live, not faulted, shown and holds
+    /// keyboard focus. The fault is read here too, since a key can come before
     /// the render thread's `FAULTED` message.
     fn active(&self) -> bool {
         let open = self.alive.get() && !BOARD.faulted(self.id);
-        open && self.shown.get() && !self.covered.get() && self.focused.get()
+        open && self.shown.get() && self.focused.get()
     }
 
     /// A faulted view fails closed before the host ends it: a held focus goes to the page
@@ -396,7 +386,7 @@ impl Inner {
     }
 
     /// Moves the view to its page box at its scale, on top of the webview, and shows it,
-    /// or hides it with no box, covered, faulted, or a box that cannot be placed. Output:
+    /// or hides it with no box, faulted, or a box that cannot be placed. Output:
     /// ok, or why the box cannot be placed.
     fn apply(&self, hwnd: HWND) -> Result<(), &'static str> {
         let placed = self.move_to_box(hwnd);
@@ -418,7 +408,7 @@ impl Inner {
         let rect = place::rect(page, key, offset)?;
         let width = i32::try_from(rect.w).expect("a bounded width");
         let height = i32::try_from(rect.h).expect("a bounded height");
-        let shown = !self.covered.get() && !BOARD.faulted(self.id);
+        let shown = !BOARD.faulted(self.id);
         let flags = SWP_NOACTIVATE | if shown { SWP_SHOWWINDOW } else { 0 };
         unsafe { SetWindowPos(hwnd, HWND_TOP, rect.x, rect.y, width, height, flags) };
         let geometry = Geometry {
