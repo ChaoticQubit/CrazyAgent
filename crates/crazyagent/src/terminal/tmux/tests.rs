@@ -3580,3 +3580,58 @@ fn a_gone_window_reads_as_unknown_not_as_the_current_pane() {
         Err("terminal_agent_unknown".to_owned())
     );
 }
+
+/// rv-code2 #488 r2 F1: a window name with spaces never shifts what `displayed` reads. On a
+/// lead's server the target is the agent's `%N` pane, and a harness there can rename its
+/// window, so a pane whose app turned bracketed paste on still reads it on, and its activity
+/// still reads a number, once its window is named with spaces (V243-NATIVE-FEED-FIXES).
+#[test]
+fn a_spaced_window_name_never_shifts_a_pane_targets_reading() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let _server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let agent = AgentId::team(1).unwrap();
+    let command = InteractiveCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "printf '\\033[?2004h'; exec /bin/sleep 60".into(),
+        ],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    host.spawn(&agent, &command).unwrap();
+    let control = host.live_control().unwrap();
+    let pane = Tmux::displayed(&control, &target(&agent), "#{pane_id}").unwrap();
+    assert!(pane_id_valid(&pane), "{pane:?}");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while Tmux::paste_on(&control, &pane).map_err(|error| error.0) != Ok(true) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pane never turned bracketed paste on"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    control
+        .run(&format!("rename-window -t {pane} 'an agent window'"))
+        .unwrap();
+    assert_eq!(
+        Tmux::paste_on(&control, &pane).map_err(|error| error.0),
+        Ok(true),
+        "the spaced window name never shifts the paste flag"
+    );
+    let activity = Tmux::displayed(&control, &pane, "#{window_activity}").unwrap();
+    assert!(
+        activity.parse::<u64>().is_ok(),
+        "the spaced window name never shifts the activity: {activity:?}"
+    );
+}

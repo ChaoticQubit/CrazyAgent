@@ -892,12 +892,13 @@ impl Tmux {
     /// Reads one format of one tmux target. `display-message` answers for the current pane,
     /// with success, when its target is gone (tmux 3.8), so the answer also names its pane
     /// and window, and one of them must be the target. Takes the control client, a `%N` pane
-    /// or `session:=window` target, whose names hold no space, and the format. Returns the
-    /// format's text, or `terminal_agent_unknown` once the target is gone.
+    /// or `session:=window` target, and a format whose text holds no space; the names come
+    /// last and may. Returns the format's text, or `terminal_agent_unknown` once the target
+    /// is gone.
     fn displayed(control: &Control, target: &str, format: &str) -> Result<String, HostError> {
-        let named = "#{pane_id} #{session_name}:=#{window_name}";
+        let named = "#{session_name}:=#{window_name}";
         let lines = control.ask(&format!(
-            "display-message -p -t {target} '{named} {format}{FORMAT_END}'"
+            "display-message -p -t {target} '#{{pane_id}} {format} {named}{FORMAT_END}'"
         ))?;
         let unread = || failure("terminal_command_failed");
         let line = lines
@@ -905,7 +906,7 @@ impl Tmux {
             .and_then(|line| std::str::from_utf8(line).ok())
             .ok_or_else(unread)?;
         let (pane, rest) = line.split_once(' ').ok_or_else(unread)?;
-        let (window, text) = rest.split_once(' ').ok_or_else(unread)?;
+        let (text, window) = rest.split_once(' ').ok_or_else(unread)?;
         if pane != target && window != target {
             return Err(failure("terminal_agent_unknown"));
         }
