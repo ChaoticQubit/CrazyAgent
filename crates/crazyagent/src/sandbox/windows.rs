@@ -1365,4 +1365,62 @@ mod tests {
             "an app container read a hidden file through its own grant"
         );
     }
+
+    /// V244-WIN-HIDDEN-BOUNDARY Q5: while one agent runs with a folder hidden, a second agent of
+    /// the same project, in a container of its own whose policy does not hide the folder, cannot
+    /// read it either, since the hidden role narrows every other container's entries there.
+    #[test]
+    fn a_second_container_cannot_read_a_folder_another_run_hides() {
+        let helper = helper();
+        let folders = folders();
+        let vault = folders.project.join("vault");
+        fs::create_dir(&vault).unwrap();
+        fs::write(vault.join("key.txt"), "key\r\n").unwrap();
+        let other = folders.home.with_file_name("other-home");
+        fs::create_dir_all(&other).unwrap();
+        let network = SandboxNetwork::Only(Vec::new());
+        let plain = ProjectSandbox::new(&folders.project, &other, &folders.tmp, network).unwrap();
+        let open_profile = folders.profiles.join("open.sb");
+        let open = WindowsSandbox::install(plain, &helper, &open_profile, &folders.grants).unwrap();
+        assert_ne!(container_name(&open.sandbox), container_name(&policy(&folders, SandboxNetwork::Open)));
+        let read = r"type vault\key.txt";
+        assert!(shell(&open, &folders, read), "unhidden, the second agent reads it");
+        let hiding = policy(&folders, SandboxNetwork::Only(Vec::new()))
+            .hide(&vault)
+            .unwrap();
+        let hiding_profile = folders.profiles.join("hiding.sb");
+        let hiding =
+            WindowsSandbox::install(hiding, &helper, &hiding_profile, &folders.grants).unwrap();
+        let mut shell_command = Command::new(cmd());
+        shell_command.arg("/K").current_dir(&folders.project);
+        let mut running = crate::spawn_gate::spawn(
+            Sandbox::wrap(&hiding, &shell_command)
+                .unwrap()
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
+        let mut stdin = running.stdin.take().unwrap();
+        let stdout = running.stdout.take().unwrap();
+        let (events, received) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|read| read > 0) {
+                if line.trim() == "ready" {
+                    let _ = events.send("ready");
+                }
+                line.clear();
+            }
+        });
+        stdin.write_all(b"echo ready\r\n").unwrap();
+        stdin.flush().unwrap();
+        assert_eq!(received.recv_timeout(Duration::from_secs(30)), Ok("ready"));
+        let second = shell(&open, &folders, read);
+        running.kill().unwrap();
+        running.wait().unwrap();
+        drop(stdin);
+        assert!(!second, "the second container read a folder another run hides");
+    }
 }
