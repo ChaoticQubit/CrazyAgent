@@ -1334,6 +1334,7 @@ fn compositions_end_and_cancel_with_nothing_sent(view: &View, webview: HWND, cen
         "the end clears the marked text"
     );
     assert_eq!(view.marked_text(), None);
+    past_a_double_click();
     mark();
     clicked_into(view, centre);
     pump_for(KEY_TAIL);
