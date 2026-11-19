@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ptr;
 use std::sync::OnceLock;
 
@@ -48,9 +48,28 @@ const KEEP_KEYBOARD_STATE: u32 = 0x4;
 
 static CLASS: OnceLock<Option<Vec<u16>>> = OnceLock::new();
 
+/// A composition trial's answers: per string kind, the count IMM32 reports and the units the
+/// IME holds.
+#[cfg(test)]
+type Answers = Vec<(u32, i32, Vec<u16>)>;
+
 #[cfg(test)]
 thread_local! {
     static TRIAL_KEY: Cell<Option<u32>> = const { Cell::new(None) };
+    static TRIAL_COMPOSITION: RefCell<Option<Answers>> = const { RefCell::new(None) };
+}
+
+/// Test builds only: makes this thread's views read these answers in place of
+/// ImmGetCompositionStringW, as an IME gives them; a kind they lack reads as
+/// IMM_ERROR_NODATA. Input: the answers, or none to read the real input context.
+#[cfg(test)]
+pub fn trial_composition(answers: Option<Answers>) {
+    let set = answers.is_some();
+    TRIAL_COMPOSITION.with(|trial| *trial.borrow_mut() = answers);
+    assert_eq!(
+        TRIAL_COMPOSITION.with(|trial| trial.borrow().is_some()),
+        set
+    );
 }
 
 /// Test builds only: makes this thread's views read this scale key in place of their
@@ -221,6 +240,15 @@ impl View {
         self.inner.cursor.set(cursor);
         BOARD.post_frame(self.inner.id, frame)
     }
+
+    /// The marked text the next frame draws, for the host's `screen::frame`, as the macOS
+    /// view's. Output: the text, or none when not composing.
+    pub fn marked_text(&self) -> Option<String> {
+        None
+    }
+
+    /// Drops any marked text with nothing sent, as the host does on hide and close.
+    pub fn cancel_marked(&self) {}
 
     /// Hands UI Automation the screen a frame drew and raises its text and selection events
     /// for what changed, as the macOS view's `drawn` posts VoiceOver's. Inputs: the visible
