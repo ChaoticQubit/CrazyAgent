@@ -761,12 +761,12 @@ fn reader_command(script: &std::path::Path, hwnd: HWND, mode: &str) -> std::proc
 
 /// Runs a reader to its end while this thread pumps the view's messages, handing each line
 /// to `on_line` as it arrives. Inputs: what reads, the command and the line callback.
-/// Output: every line the reader printed.
+/// Output: every line the reader printed, and its exit code.
 fn read_view(
     what: &str,
     mut command: std::process::Command,
     mut on_line: impl FnMut(&str),
-) -> Vec<String> {
+) -> (Vec<String>, Option<i32>) {
     use std::io::BufRead;
     command
         .stdin(std::process::Stdio::null())
@@ -805,12 +805,9 @@ fn read_view(
     seen.extend(lines.try_iter());
     let output = child.wait_with_output().expect("the reader's end");
     let errors = String::from_utf8_lossy(&output.stderr);
-    println!(
-        "{what}: {seen:?} rc {:?} stderr {}",
-        output.status.code(),
-        errors.trim()
-    );
-    seen
+    let code = output.status.code();
+    println!("{what}: {seen:?} rc {code:?} stderr {}", errors.trim());
+    (seen, code)
 }
 
 /// The value of the reader line with this key. Inputs: the lines and the key. Output: the
@@ -891,18 +888,25 @@ fn read_from_an_agent_container(hwnd: HWND, client: Client) -> Vec<String> {
     harness.current_dir(&project);
     let command = installed.wrap(&harness).expect("an agent command");
     let what = format!("h3 row: agent container reader {client:?}");
-    read_view(&what, command, |_| {})
+    let (lines, code) = read_view(&what, command, |_| {});
+    assert_eq!(
+        code,
+        Some(0),
+        "the {client:?} container reader ran to its end: {lines:?}"
+    );
+    lines
 }
 
 /// The wall: a screen reader outside any container reads the view's text, and each client,
 /// started in an agent's AppContainer, must reach the view's own window in this process and
 /// read nothing of it. Inputs: the view, showing "ab" and "cd", and the reader script.
 fn the_wall(view: &View, script: &std::path::Path) {
-    let shown = read_view(
+    let (shown, code) = read_view(
         "h3 row: screen reader text",
         reader_command(script, view.hwnd(), "text"),
         |_| {},
     );
+    assert_eq!(code, Some(0), "the screen reader ran to its end: {shown:?}");
     found_the_view(&shown, view.hwnd());
     assert_eq!(value(&shown, "reader_control"), Some(DOCUMENT));
     assert_eq!(value(&shown, "reader_name"), Some("Terminal"));
@@ -940,7 +944,7 @@ fn shown_for_readers(parent: HWND, webview: HWND) -> (View, tempfile::TempDir) {
 fn read_in_full(view: &View) {
     let mut posted = false;
     let this = std::env::current_exe().expect("this test binary");
-    let lines = read_view(
+    let (lines, _) = read_view(
         "h3 row: screen reader",
         compiled_command(&this, view.hwnd(), "full"),
         |line| {
@@ -1005,8 +1009,9 @@ fn found_the_view(lines: &[String], hwnd: HWND) {
 }
 
 /// Checks a reader in an agent's AppContainer reached none of the view's provider: not its
-/// Document type, its name, its Text pattern or its text, only the system's window proxy.
-/// Input: the reader's lines, its lookup stage reached on the view's own window.
+/// Document type, its name, its Text pattern or its text, only the system's window proxy,
+/// whose answer of no Text pattern it must print. Input: the lines of a reader that ran to
+/// its end on the view's own window.
 fn contained_read_nothing(contained: &[String]) {
     let read = "an agent's AppContainer read the view";
     assert!(
@@ -1017,9 +1022,10 @@ fn contained_read_nothing(contained: &[String]) {
         value(contained, "reader_name").is_none_or(|name| name != "Terminal"),
         "{read}: its name, {contained:?}"
     );
-    assert!(
-        value(contained, "reader_text_pattern").is_none_or(|has| has != "True"),
-        "{read}: its Text pattern, {contained:?}"
+    assert_eq!(
+        value(contained, "reader_text_pattern"),
+        Some("False"),
+        "{read}: its Text pattern, or the reader never asked: {contained:?}"
     );
     assert!(
         value(contained, "reader_text").is_none(),
@@ -1063,7 +1069,7 @@ fn each_kind_of_range_is_read_by_its_own_reader_and_recorded() {
     let script = temp.path().join("reader.ps1");
     for probe in ["probe_visible", "probe_empty", "probe_selection"] {
         let what = format!("h3 row: {probe}");
-        let lines = read_view(&what, reader_command(&script, view.hwnd(), probe), |_| {});
+        let (lines, _) = read_view(&what, reader_command(&script, view.hwnd(), probe), |_| {});
         assert_eq!(
             value(&lines, "reader_stage"),
             Some("lookup"),
@@ -1072,7 +1078,7 @@ fn each_kind_of_range_is_read_by_its_own_reader_and_recorded() {
     }
     let this = std::env::current_exe().expect("this test binary");
     let command = compiled_command(&this, view.hwnd(), "probe");
-    let lines = read_view("h3 row: compiled reader", command, |_| {});
+    let (lines, _) = read_view("h3 row: compiled reader", command, |_| {});
     assert_eq!(
         value(&lines, "reader_stage"),
         Some("lookup"),
@@ -1080,7 +1086,7 @@ fn each_kind_of_range_is_read_by_its_own_reader_and_recorded() {
     );
     let control = rich_edit();
     let command = reader_command(&script, control, "probe_visible");
-    let lines = read_view("h3 row: rich edit control probe_visible", command, |_| {});
+    let (lines, _) = read_view("h3 row: rich edit control probe_visible", command, |_| {});
     assert_eq!(
         value(&lines, "reader_stage"),
         Some("lookup"),
