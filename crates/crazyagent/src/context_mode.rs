@@ -424,9 +424,10 @@ fn end_left_checks(parent: &Path) {
 
 /// The `node --version` command of npx's folder inside the boundary npm installs in, with no
 /// network: the scratch folder's own project, home and temp folders, the engine's secrets
-/// denied, Node's tool folders and npx's folder read, a cleared environment (RV-DS241-150)
-/// and, on Linux, the owner's call supervisor choice. Inputs: the engine root, the scratch
-/// folder and npx's folder. Output: the command, or `context_mode_sandbox_unavailable`.
+/// denied, Node's tool folders and npx's folder read, on Unix with npm's grant
+/// ([`ProjectSandbox::allow_node_for`]) so the engine's own `setup/node` runs, a cleared
+/// environment (RV-DS241-150) and, on Linux, the owner's call supervisor choice. Inputs: the
+/// engine root, the scratch folder and npx's folder. Output: the command, or the refusal.
 fn node_command(
     root: &Path,
     scratch: &Path,
@@ -451,6 +452,10 @@ fn node_command(
     .and_then(|sandbox| sandbox.allow_tools(&Toolchains::grant(&homes, &[Toolchain::Node])))
     .map_err(refused)?;
     let sandbox = sandbox.allow_read(&canonical(bin)?).map_err(refused)?;
+    #[cfg(unix)]
+    let sandbox = sandbox
+        .allow_node_for(&canonical(&bin.join("npm"))?)
+        .map_err(refused)?;
     let settings = os::boundary_settings(root)?;
     let (calls, strict) = (settings.linux_supervisor, settings.linux_strict);
     let profile = scratch.join(NODE_PROFILE);
