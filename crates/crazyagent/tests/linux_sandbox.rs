@@ -903,6 +903,7 @@ fn the_helper_reads_back_the_policy_the_engine_wrote_without_protected_paths_or_
             limit_network: true,
             open_sockets: false,
             keep_free: false,
+            cut: None,
         })
     );
     assert_eq!(
@@ -911,6 +912,7 @@ fn the_helper_reads_back_the_policy_the_engine_wrote_without_protected_paths_or_
             limit_network: true,
             open_sockets: true,
             keep_free: false,
+            cut: None,
         })
     );
     assert!(parse(&["--probe", "--open-sockets"]).is_err());
@@ -4103,4 +4105,554 @@ fn a_signal_storm_runs_no_supervised_call_twice() {
     let script = ["-I", "-u", "-c", STORM];
     let held = finished(supervised(&case, &guard, "/usr/bin/python3", &script));
     assert_eq!(told(&held), "made=600\n");
+}
+
+const SECRET: &str = "hidden secret words\n";
+
+/// A hidden folder two levels down a writable child of the project, with a secret file in
+/// it and a plain file in the folder above it, as the hidden folder rows use it. Input:
+/// the case. Output: the hidden folder, the folder above it and the plain file beside it.
+struct Hidden {
+    folder: PathBuf,
+    above: PathBuf,
+    plain: PathBuf,
+}
+
+fn hidden(case: &Case) -> Hidden {
+    let above = case.project.join("notes").join("inner");
+    let folder = above.join("private");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(folder.join("secret.txt"), SECRET).unwrap();
+    let plain = above.join("plain.txt");
+    fs::write(&plain, "plain\n").unwrap();
+    Hidden {
+        folder,
+        above,
+        plain,
+    }
+}
+
+/// The two backends that can hide a folder: the helper nested in bubblewrap, and bubblewrap
+/// alone, each putting an empty read-only folder over it. Plain Landlock cannot keep a
+/// folder's names out, so it refuses one instead.
+#[derive(Debug, Clone, Copy)]
+enum Hiding {
+    Nested,
+    Bubblewrap,
+}
+
+const HIDING: [Hiding; 2] = [Hiding::Nested, Hiding::Bubblewrap];
+
+/// The sandbox for a policy on one hiding backend. Inputs: the backend and the policy.
+/// Output: the sandbox, or none for the nested backend where this machine cannot nest.
+fn hiding(backend: Hiding, sandbox: ProjectSandbox) -> Option<LinuxSandbox> {
+    match backend {
+        Hiding::Nested => nested(sandbox),
+        Hiding::Bubblewrap => {
+            let bwrap = BWRAP_PATHS
+                .iter()
+                .map(Path::new)
+                .find(|path| path.is_file())
+                .expect("Linux test machines need bubblewrap installed");
+            let sandbox = LinuxSandbox::new(
+                sandbox,
+                LinuxBackend::Bubblewrap {
+                    bwrap: bwrap.to_path_buf(),
+                    helper: PathBuf::from(HELPER),
+                },
+            )
+            .unwrap();
+            assert!(matches!(sandbox.backend(), LinuxBackend::Bubblewrap { .. }));
+            Some(sandbox)
+        }
+    }
+}
+
+/// The agent's tries on a hidden folder, after it reads and writes the plain file beside it:
+/// read, list, link to, hard link from and unmount it ([`namespace_legs`]), then write in,
+/// move and remove it and move the folder above it. Each try drops its errors, so only what
+/// reached the agent prints, beside the namespace legs' own lines. Input: the hidden folder.
+/// Output: the script, which prints `done` last.
+fn hiding_script(hidden: &Hidden) -> String {
+    let folder = quoted(&hidden.folder);
+    let above = quoted(&hidden.above);
+    let moved = quoted(&hidden.above.with_file_name("inner.moved"));
+    format!(
+        "cat {plain}; echo agent >> {plain}; \
+         cat {folder}/secret.txt 2>/dev/null; ls -A {folder} 2>/dev/null; \
+         ln {folder}/secret.txt hard 2>/dev/null; cat hard 2>/dev/null; \
+         {legs}(echo made > {folder}/made) 2>/dev/null; \
+         mv {folder} {folder}.moved 2>/dev/null; rm -rf {folder} 2>/dev/null; \
+         mv {above} {moved} 2>/dev/null; echo done",
+        plain = quoted(&hidden.plain),
+        legs = namespace_legs(&folder),
+    )
+}
+
+/// The namespaces [`namespace_legs`] makes, by name, command and extra call: `mapped` is a user
+/// and mount namespace with the agent as root, `unmapped` one that keeps its unmapped id and
+/// the propagation it had, which starts on both hiding backends and calls [`UMOUNT2`].
+const NAMESPACE_LEGS: [(&str, &str, &str); 2] = [
+    ("mapped", "unshare -Urm", ""),
+    ("unmapped", "unshare -Um --propagation unchanged", UMOUNT2),
+];
+
+/// A direct umount2 call on the folder, plain then detached, through Python's ctypes, so no
+/// umount tool can refuse before the kernel does. It prints `umount2` and each call's errno
+/// name, or 0 where a call unmounted.
+const UMOUNT2: &str = "echo umount2 $(python3 -I -c \"import ctypes, errno, sys; \
+    c = ctypes.CDLL(None, use_errno=True); p = sys.argv[1].encode(); \
+    print(*[c.umount2(p, f) and errno.errorcode.get(ctypes.get_errno(), ctypes.get_errno()) \
+    for f in (0, 2)])\" \"$0\"); ";
+
+/// Nested's refusal of the `mapped` leg, unshare's own line: the agent may make a user
+/// namespace there, but unshare cannot open its uid map to map the agent to root, so it exits
+/// 1 before its inner shell runs.
+const MAPPED_REFUSAL: &str = "unshare: cannot open /proc/self/uid_map: Permission denied";
+
+/// The `held` leg, one Python process with no exec in it, so it keeps every capability over the
+/// user and mount namespace it makes: it prints `inner held`, its CapEff, then [`UMOUNT2`]'s
+/// line for its own calls, then each name the folder lists. Where unshare fails it prints
+/// `unshare` and the errno name and exits 1. Input (argv): the folder.
+const HELD: &str = "import ctypes, errno, os, sys; c = ctypes.CDLL(None, use_errno=True); \
+    name = lambda r: r and errno.errorcode.get(ctypes.get_errno(), ctypes.get_errno()); \
+    r = c.unshare(0x10000000 | 0x00020000); r and (print(\"unshare\", name(r)), sys.exit(1)); \
+    print(\"inner held\"); print(\"capeff\", [l.split()[1] \
+    for l in open(\"/proc/self/status\") if l.startswith(\"CapEff\")][0]); \
+    p = sys.argv[1].encode(); print(\"umount2\", *[name(c.umount2(p, f)) for f in (0, 2)]); \
+    [print(e) for e in os.listdir(sys.argv[1])]";
+
+/// The shell legs that unmount, list and read a hidden folder from a namespace of the agent's
+/// own, one per [`NAMESPACE_LEGS`] entry, then [`HELD`]. Each inner shell prints `inner <name>`
+/// first and drops its own errors, so an error line can only be unshare's own; the outer shell
+/// then prints `<name> rc=` and the exit. Input: the quoted folder. Output: the legs.
+fn namespace_legs(folder: &str) -> String {
+    let legs: String = NAMESPACE_LEGS
+        .iter()
+        .map(|(name, command, call)| {
+            format!(
+                "{command} sh -c 'exec 2>/dev/null; echo inner {name}; umount -l \"$0\"; \
+                 umount \"$0\"; {call}ls -A \"$0\"; cat \"$0\"/secret.txt; exit 0' {folder} \
+                 2>&1; echo \"{name} rc=$?\"; "
+            )
+        })
+        .collect();
+    format!("{legs}python3 -I -c '{HELD}' {folder} 2>&1; echo \"held rc=$?\"; ")
+}
+
+/// The output with each [`namespace_legs`] leg's lines taken out, when each ran (its marker, a
+/// [`UMOUNT2`] line of EPERM or EINVAL only where it calls umount2, for [`HELD`] a CapEff with
+/// CAP_SYS_ADMIN first, then `<name> rc=0`) or, for `mapped` on Nested only, [`MAPPED_REFUSAL`]
+/// then `mapped rc=1`. Silence never counts. Inputs: the backend and the output. Output: the
+/// rest, or none when a leg shows neither.
+fn without_namespace_legs(backend: Hiding, stdout: &str) -> Option<String> {
+    let lines: Vec<&str> = stdout.lines().collect();
+    let refused_by_the_kernel = |line: &str| {
+        let words: Vec<&str> = line.split(' ').collect();
+        words.len() == 3
+            && words[0] == "umount2"
+            && words[1..]
+                .iter()
+                .all(|word| ["EPERM", "EINVAL"].contains(word))
+    };
+    let mut taken = Vec::new();
+    for (name, _, call) in NAMESPACE_LEGS {
+        let exit = format!("{name} rc=");
+        let exits: Vec<usize> = (0..lines.len())
+            .filter(|index| lines[*index].starts_with(&exit))
+            .collect();
+        let [at] = exits[..] else { return None };
+        let calls = usize::from(!call.is_empty());
+        let marker = at.checked_sub(1 + calls)?;
+        let ran = lines[marker] == format!("inner {name}")
+            && (calls == 0 || refused_by_the_kernel(lines[at - 1]))
+            && lines[at] == format!("{exit}0");
+        let refused = matches!(backend, Hiding::Nested)
+            && name == "mapped"
+            && calls == 0
+            && lines[marker] == MAPPED_REFUSAL
+            && lines[at] == format!("{exit}1");
+        if !ran && !refused {
+            return None;
+        }
+        taken.extend(marker..=at);
+    }
+    let exits: Vec<usize> = (0..lines.len())
+        .filter(|index| lines[*index].starts_with("held rc="))
+        .collect();
+    let [at] = exits[..] else { return None };
+    let marker = at.checked_sub(3)?;
+    let sys_admin = lines[marker + 1]
+        .strip_prefix("capeff ")
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+        .is_some_and(|caps| caps & (1 << 21) != 0);
+    if lines[marker] != "inner held"
+        || !sys_admin
+        || !refused_by_the_kernel(lines[at - 1])
+        || lines[at] != "held rc=0"
+    {
+        return None;
+    }
+    taken.extend(marker..=at);
+    let legs: usize = NAMESPACE_LEGS
+        .iter()
+        .map(|(_, _, call)| 2 + usize::from(!call.is_empty()))
+        .sum();
+    assert_eq!(taken.len(), legs + 4);
+    let rest: String = (0..lines.len())
+        .filter(|index| !taken.contains(index))
+        .map(|index| format!("{}\n", lines[index]))
+        .collect();
+    assert!(rest.len() < stdout.len());
+    Some(rest)
+}
+
+/// Asserts that a run of [`hiding_script`] read and wrote the plain file, showed its namespace
+/// legs ([`without_namespace_legs`]) and reached nothing of the hidden folder, which is
+/// unchanged on the host with the folder above it. Inputs: the backend, folder and output.
+fn assert_hidden(backend: Hiding, hidden: &Hidden, output: &Output) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        without_namespace_legs(backend, &stdout).is_some(),
+        "{backend:?}: a namespace leg neither ran nor was refused aloud: {stdout}"
+    );
+    assert!(stdout.starts_with("plain\n"), "{backend:?}: {stdout}");
+    assert!(stdout.ends_with("done\n"), "{backend:?}: {stdout}");
+    assert!(!stdout.contains("secret"), "{backend:?}: {stdout}");
+    assert_eq!(fs::read_to_string(&hidden.plain).unwrap(), "plain\nagent\n");
+    assert_eq!(
+        fs::read_to_string(hidden.folder.join("secret.txt")).unwrap(),
+        SECRET,
+        "{backend:?}"
+    );
+    assert!(!hidden.folder.join("made").exists(), "{backend:?}");
+    assert!(
+        !hidden.folder.with_extension("moved").exists(),
+        "{backend:?}"
+    );
+    assert!(
+        !hidden.above.with_file_name("inner.moved").exists(),
+        "{backend:?}"
+    );
+    assert_eq!(
+        fs::read_dir(&hidden.folder).unwrap().count(),
+        1,
+        "{backend:?}"
+    );
+}
+
+/// A hidden folder two levels down a writable child is out of the agent's reach on both
+/// backends that hide one: it reads, lists, links to, unmounts, writes in, moves and
+/// removes nothing there and cannot move the folder above it, while the plain file beside
+/// it is still read and written.
+#[test]
+fn a_hidden_folder_is_out_of_reach_on_both_bubblewrap_backends() {
+    for backend in HIDING {
+        let case = case();
+        let hidden = hidden(&case);
+        let policy = policy(&case, SandboxNetwork::Only(Vec::new()))
+            .hide(&hidden.folder)
+            .unwrap();
+        let Some(sandbox) = hiding(backend, policy) else {
+            continue;
+        };
+        assert_hidden(
+            backend,
+            &hidden,
+            &run(&sandbox, &case, &hiding_script(&hidden)),
+        );
+    }
+}
+
+/// V24x-LINUX-NEST-MOUNT-PROPAGATION: with a hidden folder, the agent's mount tree on both
+/// hiding backends takes no mount event from this computer, no line of its mount list
+/// carries `shared:` or `master:`, and the agent holds no capability in any of the five
+/// sets; without one, the tree still takes them (Q1, run 44438218667 P6: 27 lines).
+#[test]
+fn a_hidden_folder_gives_the_agent_a_mount_tree_of_its_own_and_no_capability() {
+    let script = "grep -c 'shared:\\|master:' /proc/self/mountinfo; \
+                  grep '^Cap' /proc/self/status; echo done";
+    let bare = "0\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\n\
+                CapEff:\t0000000000000000\nCapBnd:\t0000000000000000\n\
+                CapAmb:\t0000000000000000\ndone\n";
+    let mut wrong = Vec::new();
+    for backend in HIDING {
+        let case = case();
+        let hidden = hidden(&case);
+        let hides = policy(&case, SandboxNetwork::Only(Vec::new()))
+            .hide(&hidden.folder)
+            .unwrap();
+        let Some(sandbox) = hiding(backend, hides) else {
+            continue;
+        };
+        let output = run(&sandbox, &case, script);
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        if stdout != bare {
+            wrong.push(format!("{backend:?}: {stdout:?}"));
+        }
+        let plain = hiding(backend, policy(&case, SandboxNetwork::Only(Vec::new())))
+            .expect("the backend that hid a folder starts a plain agent");
+        let output = run(&plain, &case, script);
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let taking = stdout
+            .lines()
+            .next()
+            .and_then(|count| count.parse::<u32>().ok());
+        if !taking.is_some_and(|count| count > 0) {
+            wrong.push(format!("{backend:?} without a hidden folder: {stdout:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// V24x-LINUX-NEST-MOUNT-PROPAGATION: the cover over a hidden folder stays on after the cut
+/// on both hiding backends. The agent's plain and lazy unmounts fail, and so do both from the
+/// namespaces of its own that start, the held one with CAP_SYS_ADMIN over its own tree and a
+/// direct umount2 ([`without_namespace_legs`]); the folder lists empty, its file reads nowhere.
+#[test]
+fn a_hidden_folders_cover_stays_on_whatever_the_agent_unmounts() {
+    let mut wrong = Vec::new();
+    for backend in HIDING {
+        let case = case();
+        let hidden = hidden(&case);
+        let policy = policy(&case, SandboxNetwork::Only(Vec::new()))
+            .hide(&hidden.folder)
+            .unwrap();
+        let Some(sandbox) = hiding(backend, policy) else {
+            continue;
+        };
+        let folder = quoted(&hidden.folder);
+        let script = format!(
+            "umount {folder} 2>/dev/null; umount -l {folder} 2>/dev/null; {legs}\
+             ls -A {folder} 2>/dev/null; cat {folder}/secret.txt 2>/dev/null; \
+             grep -c ' {path} ' /proc/self/mountinfo; echo done",
+            legs = namespace_legs(&folder),
+            path = hidden.folder.display(),
+        );
+        let output = run(&sandbox, &case, &script);
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        if without_namespace_legs(backend, &stdout).as_deref() != Some("1\ndone\n") {
+            wrong.push(format!("{backend:?}: {stdout:?}"));
+        }
+        assert_eq!(
+            fs::read_to_string(hidden.folder.join("secret.txt")).unwrap(),
+            SECRET,
+            "{backend:?}"
+        );
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// A link the agent makes inside its own grant to a hidden folder leads to the empty
+/// folder bubblewrap puts there, never the owner's: the link is a folder with no entry,
+/// and no read through it reaches the secret file (leader 12:25).
+#[test]
+fn a_link_the_agent_makes_to_a_hidden_folder_reads_only_the_empty_folder() {
+    for backend in HIDING {
+        let case = case();
+        let hidden = hidden(&case);
+        let policy = policy(&case, SandboxNetwork::Only(Vec::new()))
+            .hide(&hidden.folder)
+            .unwrap();
+        let Some(sandbox) = hiding(backend, policy) else {
+            continue;
+        };
+        let script = format!(
+            "ln -s {folder} link && test -d link && echo \"linked $(ls -A link | wc -l)\"; \
+             cat link/secret.txt 2>/dev/null; echo done",
+            folder = quoted(&hidden.folder)
+        );
+        let output = run(&sandbox, &case, &script);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(stdout, "linked 0\ndone\n", "{backend:?}");
+        assert!(
+            fs::symlink_metadata(case.project.join("worktrees").join("link"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+}
+
+/// A hidden folder that is gone when the agent starts comes back only as the engine's
+/// empty folder under the cover (rv-sec2 F2, #622): the folder above it, a writable
+/// child's folder, takes no new entry, so the agent cannot make the folder or fill it,
+/// while the plain file beside it is still written.
+#[test]
+fn an_absent_hidden_folder_cannot_be_made_on_both_bubblewrap_backends() {
+    for backend in HIDING {
+        let case = case();
+        let hidden = hidden(&case);
+        fs::remove_dir_all(&hidden.folder).unwrap();
+        let policy = policy(&case, SandboxNetwork::Only(Vec::new()))
+            .hide(&hidden.folder)
+            .unwrap();
+        let Some(sandbox) = hiding(backend, policy) else {
+            continue;
+        };
+        let script = format!(
+            "echo agent >> {plain}; mkdir {folder} 2>/dev/null; \
+             (echo made > {folder}/made) 2>/dev/null; echo done",
+            plain = quoted(&hidden.plain),
+            folder = quoted(&hidden.folder)
+        );
+        let output = run(&sandbox, &case, &script);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "done\n",
+            "{backend:?}"
+        );
+        assert_eq!(fs::read_to_string(&hidden.plain).unwrap(), "plain\nagent\n");
+        assert!(
+            fs::read_dir(&hidden.folder).is_ok_and(|mut entries| entries.next().is_none()),
+            "{backend:?}"
+        );
+    }
+}
+
+/// rv-sec2 F2 (#622): a hidden folder that is gone when the agent starts and that the
+/// owner makes while it runs stays out of its reach on both hiding backends, since the
+/// engine makes it empty before the cover and the owner's file lands under the cover,
+/// while the plain file beside it is still read.
+#[test]
+fn a_hidden_folder_made_during_the_run_stays_out_of_reach_on_both_bubblewrap_backends() {
+    for backend in HIDING {
+        let case = case();
+        let hidden = hidden(&case);
+        fs::remove_dir_all(&hidden.folder).unwrap();
+        let policy = policy(&case, SandboxNetwork::Only(Vec::new()))
+            .hide(&hidden.folder)
+            .unwrap();
+        let Some(sandbox) = hiding(backend, policy) else {
+            continue;
+        };
+        let script = format!(
+            "echo ready; read go; cat {plain}; cat {folder}/secret.txt 2>/dev/null; \
+             ls -A {folder} 2>/dev/null; echo done",
+            plain = quoted(&hidden.plain),
+            folder = quoted(&hidden.folder)
+        );
+        let (mut child, mut output) = started(&sandbox, &case, &script);
+        fs::create_dir_all(&hidden.folder).unwrap();
+        fs::write(hidden.folder.join("secret.txt"), SECRET).unwrap();
+        child.stdin.take().unwrap().write_all(b"go\n").unwrap();
+        let mut rest = String::new();
+        output.read_to_string(&mut rest).unwrap();
+        assert!(child.wait().unwrap().success(), "{backend:?}");
+        assert_eq!(rest, "plain\ndone\n", "{backend:?}");
+    }
+}
+
+/// A hidden folder inside a folder the agent may only read is out of its reach on both
+/// hiding backends: no read or listing of it prints, while a file beside it in that
+/// folder is still read.
+#[test]
+fn a_hidden_folder_in_a_read_root_is_out_of_reach_on_both_bubblewrap_backends() {
+    for backend in HIDING {
+        let case = case();
+        let folder = case.outside.join("private");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("secret.txt"), SECRET).unwrap();
+        let policy = policy(&case, SandboxNetwork::Only(Vec::new()))
+            .allow_read(&case.outside)
+            .unwrap()
+            .hide(&folder)
+            .unwrap();
+        let Some(sandbox) = hiding(backend, policy) else {
+            continue;
+        };
+        let script = format!(
+            "cat {fixture}; cat {folder}/secret.txt 2>/dev/null; ls -A {folder} 2>/dev/null; \
+             echo done",
+            fixture = quoted(&case.outside.join("fixture.txt")),
+            folder = quoted(&folder)
+        );
+        let output = run(&sandbox, &case, &script);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "outside fixture\ndone\n",
+            "{backend:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(folder.join("secret.txt")).unwrap(),
+            SECRET
+        );
+    }
+}
+
+/// Plain Landlock cannot keep a hidden folder's names out of an agent that may list the
+/// folder above it, so it starts no agent with one; the refusal names what makes hidden
+/// folders work on this computer (leader 12:25).
+#[test]
+fn landlock_alone_refuses_a_hidden_folder_and_names_what_makes_it_work() {
+    let case = case();
+    let hidden = hidden(&case);
+    let policy = policy(&case, SandboxNetwork::Open)
+        .hide(&hidden.folder)
+        .unwrap();
+    let refused = LinuxSandbox::detect_among(policy, Path::new(HELPER), &[]).err();
+    assert!(
+        matches!(&refused, Some(SandboxError::Unavailable(reason))
+            if reason.contains("hidden folders") && reason.contains("bubblewrap")),
+        "{refused:?}"
+    );
+}
+
+/// The installed Linux sandbox starts an agent whose project hides a folder, where this
+/// machine nests, and keeps the folder out as the backend rows do; where it cannot nest,
+/// it refuses the agent for its hidden folder rather than start it under Landlock alone.
+#[test]
+fn an_installed_sandbox_with_a_hidden_folder_keeps_it_out_or_refuses_it() {
+    let case = case();
+    let hidden = hidden(&case);
+    let profiles = case.outside.join("profiles");
+    fs::create_dir_all(&profiles).unwrap();
+    let installed = InstalledSandbox::install(
+        policy(&case, SandboxNetwork::Only(Vec::new()))
+            .hide(&hidden.folder)
+            .unwrap(),
+        &profiles.join("agent.sb"),
+        LinuxSupervisor::On,
+        LinuxStrict::Off,
+    );
+    if nesting_bwrap().is_none() {
+        assert!(
+            matches!(&installed, Err(SandboxError::Unavailable(reason))
+                if reason.contains("hidden folders") && reason.contains("bubblewrap")),
+            "{:?}",
+            installed.err()
+        );
+        return;
+    }
+    let installed =
+        installed.expect("a Linux machine that nests starts an agent with a hidden folder");
+    assert_hidden(
+        Hiding::Nested,
+        &hidden,
+        &run(&installed, &case, &hiding_script(&hidden)),
+    );
+}
+
+/// A confined agent whose project hides a folder is still refused on Linux, for its
+/// confinement and not for the folder, since neither backend holds a confined agent yet:
+/// team and research launches stay refused as they were (leader 12:25).
+#[test]
+fn a_confined_agent_with_a_hidden_folder_is_refused_as_confined_not_for_the_folder() {
+    let checkouts = checkouts();
+    let folder = checkouts.project.join("private");
+    fs::create_dir(&folder).unwrap();
+    let profiles = checkouts.project.parent().unwrap().join("profiles");
+    fs::create_dir_all(&profiles).unwrap();
+    let refused = InstalledSandbox::install(
+        confined(&checkouts).hide(&folder).unwrap(),
+        &profiles.join("agent.sb"),
+        LinuxSupervisor::On,
+        LinuxStrict::Off,
+    )
+    .err();
+    assert!(
+        matches!(&refused, Some(SandboxError::Unavailable(reason))
+            if reason.contains("confined") && !reason.contains("hidden")),
+        "{refused:?}"
+    );
 }

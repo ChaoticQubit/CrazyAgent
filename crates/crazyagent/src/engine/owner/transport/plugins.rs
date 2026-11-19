@@ -359,7 +359,7 @@ impl OwnerClient {
         offset: u16,
     ) -> Result<SkillPage, EngineError> {
         match self
-            .plugins_exchange(Action::Skills { project, offset }, Vec::new(), self.timeout)
+            .plugins_exchange(Action::Skills { project, offset }, Vec::new())
             .await?
         {
             Reply::Skills { page } => Ok(page),
@@ -386,7 +386,6 @@ impl OwnerClient {
                     offset,
                 },
                 Vec::new(),
-                self.timeout,
             )
             .await?
         {
@@ -403,11 +402,7 @@ impl OwnerClient {
         offset: u16,
     ) -> Result<ServerPage, EngineError> {
         match self
-            .plugins_exchange(
-                Action::Servers { project, offset },
-                Vec::new(),
-                self.timeout,
-            )
+            .plugins_exchange(Action::Servers { project, offset }, Vec::new())
             .await?
         {
             Reply::Servers { page } => Ok(page),
@@ -433,11 +428,7 @@ impl OwnerClient {
         &self,
     ) -> Result<crate::skills::import::ImportList, EngineError> {
         match self
-            .plugins_exchange(
-                Action::ImportScan,
-                Vec::new(),
-                self.timeout.max(IMPORT_TIMEOUT),
-            )
+            .plugins_exchange(Action::ImportScan, Vec::new())
             .await?
         {
             Reply::ImportScan { list } => Ok(list),
@@ -455,11 +446,7 @@ impl OwnerClient {
         replace: Option<String>,
     ) -> Result<crate::skills::import::Imported, EngineError> {
         match self
-            .plugins_exchange(
-                Action::ImportSkill { folder, replace },
-                Vec::new(),
-                self.timeout.max(IMPORT_TIMEOUT),
-            )
+            .plugins_exchange(Action::ImportSkill { folder, replace }, Vec::new())
             .await?
         {
             Reply::Imported { imported } => Ok(imported),
@@ -497,7 +484,7 @@ impl OwnerClient {
         offset: u16,
     ) -> Result<HookPage, EngineError> {
         match self
-            .plugins_exchange(Action::Hooks { project, offset }, Vec::new(), self.timeout)
+            .plugins_exchange(Action::Hooks { project, offset }, Vec::new())
             .await?
         {
             Reply::Hooks { page } => Ok(page),
@@ -510,7 +497,7 @@ impl OwnerClient {
     /// global or project scope and the absolute plugin folder. Output: the added hooks.
     pub async fn add_hooks(&self, scope: Scope, folder: String) -> Result<HookPage, EngineError> {
         match self
-            .plugins_exchange(Action::AddHooks { scope, folder }, Vec::new(), self.timeout)
+            .plugins_exchange(Action::AddHooks { scope, folder }, Vec::new())
             .await?
         {
             Reply::Hooks { page } => Ok(page),
@@ -525,7 +512,7 @@ impl OwnerClient {
         enabled: bool,
     ) -> Result<HookView, EngineError> {
         match self
-            .plugins_exchange(Action::SetHook { id, enabled }, Vec::new(), self.timeout)
+            .plugins_exchange(Action::SetHook { id, enabled }, Vec::new())
             .await?
         {
             Reply::Hook { hook } => Ok(hook),
@@ -709,10 +696,7 @@ impl OwnerClient {
     }
 
     async fn tools_reply(&self, action: Action) -> Result<Vec<ToolView>, EngineError> {
-        match self
-            .plugins_exchange(action, Vec::new(), self.timeout)
-            .await?
-        {
+        match self.plugins_exchange(action, Vec::new()).await? {
             Reply::Tools { tools } => Ok(tools),
             _ => Err(unknown()),
         }
@@ -725,7 +709,7 @@ impl OwnerClient {
         project: ProjectId,
     ) -> Result<EffectivePlugins, EngineError> {
         match self
-            .plugins_exchange(Action::Effective { project }, Vec::new(), self.timeout)
+            .plugins_exchange(Action::Effective { project }, Vec::new())
             .await?
         {
             Reply::Effective { plugins } => Ok(plugins),
@@ -734,10 +718,7 @@ impl OwnerClient {
     }
 
     async fn skill_reply(&self, action: Action) -> Result<SkillView, EngineError> {
-        match self
-            .plugins_exchange(action, Vec::new(), self.timeout)
-            .await?
-        {
+        match self.plugins_exchange(action, Vec::new()).await? {
             Reply::Skill { skill } => Ok(skill),
             _ => Err(unknown()),
         }
@@ -748,29 +729,39 @@ impl OwnerClient {
         action: Action,
         secrets: Vec<AccountSecret>,
     ) -> Result<ServerView, EngineError> {
-        match self.plugins_exchange(action, secrets, self.timeout).await? {
+        match self.plugins_exchange(action, secrets).await? {
             Reply::Server { server } => Ok(server),
             _ => Err(unknown()),
         }
     }
 
     async fn done_reply(&self, action: Action) -> Result<(), EngineError> {
-        match self
-            .plugins_exchange(action, Vec::new(), self.timeout)
-            .await?
-        {
+        match self.plugins_exchange(action, Vec::new()).await? {
             Reply::Done => Ok(()),
             _ => Err(unknown()),
         }
+    }
+
+    /// The longest this client waits for one plugins request: its own timeout, which covers
+    /// the engine's admission, plus the bound the engine serves the request under: the import
+    /// bound for a skill import, and for any other request the client's own timeout standing in
+    /// for the engine's owner timeout. So the engine's answer, a refusal included, comes first
+    /// when the two timeouts match. Input: the request. Output: the wait.
+    fn wait(&self, action: &Action) -> Duration {
+        let bound = match action {
+            Action::ImportScan | Action::ImportSkill { .. } => IMPORT_TIMEOUT,
+            _ => self.timeout,
+        };
+        deferred_wait(self.timeout, bound)
     }
 
     async fn plugins_exchange(
         &self,
         action: Action,
         secrets: Vec<AccountSecret>,
-        timeout: Duration,
     ) -> Result<Reply, EngineError> {
         action.validate()?;
+        let timeout = self.wait(&action);
         tokio::time::timeout(timeout, async {
             let read = read_kind(&action);
             let envelope = Envelope {

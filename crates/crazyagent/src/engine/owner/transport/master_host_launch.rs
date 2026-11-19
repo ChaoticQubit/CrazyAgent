@@ -1077,10 +1077,9 @@ fn turn_sandbox(
     let profile = runtime.path.join(MASTER_PROFILE);
     let installed =
         InstalledSandbox::install(sandbox, &profile, calls, strict).map_err(|error| {
-            if crate::sandbox::linux_not_full(&error) {
-                failure(crate::sandbox::LINUX_NOT_FULL)
-            } else {
-                refused(error)
+            match crate::sandbox::refusal_code(&error) {
+                Some(code) => failure(code),
+                None => refused(error),
             }
         })?;
     let installed = if policy.access == AgentAccess::Full {
@@ -2572,8 +2571,8 @@ mod tests {
 
     /// A hidden folder inside the project reaches the master's own boundary: the installed
     /// master profile denies it and a real sandboxed read of a file inside it is refused,
-    /// while a plain file elsewhere in the repository stays readable. Runs on macOS only:
-    /// hiding a folder needs Seatbelt, and Linux refuses it (next test).
+    /// while a plain file elsewhere in the repository stays readable. Runs on macOS, where
+    /// Seatbelt hides it; the Linux twin follows.
     #[cfg(target_os = "macos")]
     #[test]
     fn master_sandbox_hides_a_listed_folder_from_a_real_child() {
@@ -2635,11 +2634,14 @@ mod tests {
         );
     }
 
-    /// Off macOS a master asked to hide a folder is refused as `master_sandbox_unavailable`,
-    /// since only Seatbelt can hide one, while the same master with nothing hidden starts.
-    #[cfg(not(target_os = "macos"))]
+    /// The same hidden folder reaches the master's Linux boundary on a computer whose
+    /// bubblewrap nests agents, as the Linux farm's does: a real sandboxed read of a file
+    /// inside it is refused, a plain file elsewhere in the repository stays readable, and
+    /// the file is unchanged (V243-LINUX-HIDDEN-BOUNDARY).
+    #[cfg(target_os = "linux")]
     #[test]
-    fn master_sandbox_refuses_a_listed_folder_off_macos() {
+    fn master_sandbox_hides_a_listed_folder_from_a_real_child_on_linux() {
+        use std::process::{Command, Stdio};
         let temporary = private_root();
         let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
@@ -2651,32 +2653,57 @@ mod tests {
         for directory in [&repository, &worktree, &home, &install, &hidden] {
             private_directory(directory);
         }
+        std::fs::write(hidden.join("key.txt"), "owner secret\n").unwrap();
+        std::fs::write(repository.join("open.txt"), "open\n").unwrap();
         let executable = install.join("codex");
         std::fs::write(&executable, "#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let start = |listed: &[PathBuf]| {
-            let (runtime_ref, _, capture) = allocate_master_capture(&root).unwrap();
-            let started = master_sandbox(
-                &root,
-                &runtime_ref,
-                &repository,
-                &worktree,
-                &home,
-                &executable,
-                &ModelEndpoint::Native {},
-                &AgentPolicy::default(),
-                listed,
-            )
-            .map(drop)
-            .map_err(|error| error.0);
-            drop(capture);
-            drop(MasterRuntimeFolder::new(&root, &runtime_ref));
-            started
+        let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+        let sandbox = master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &home,
+            &executable,
+            &ModelEndpoint::Native {},
+            &AgentPolicy::default(),
+            std::slice::from_ref(&hidden),
+        )
+        .map_err(|error| error.0)
+        .expect("a Linux master with a hidden folder starts where bubblewrap nests");
+        let read = |target: &Path| {
+            let mut harness = Command::new("/bin/sh");
+            harness
+                .arg("-c")
+                .arg("cat \"$0\"")
+                .arg(target)
+                .current_dir(&worktree);
+            let mut child = sandbox.wrap(&harness).unwrap();
+            child
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            crate::spawn_gate::output(&mut child).unwrap()
         };
-        assert_eq!(start(&[]), Ok(()));
+        let open = read(&repository.join("open.txt"));
+        assert!(
+            open.status.success() && open.stdout == b"open\n",
+            "{:?} {} {}",
+            open.status,
+            String::from_utf8_lossy(&open.stdout),
+            String::from_utf8_lossy(&open.stderr)
+        );
+        let key = read(&hidden.join("key.txt"));
+        assert!(
+            !key.status.success() && !String::from_utf8_lossy(&key.stdout).contains("secret"),
+            "{:?} {}",
+            key.status,
+            String::from_utf8_lossy(&key.stderr)
+        );
         assert_eq!(
-            start(std::slice::from_ref(&hidden)),
-            Err("master_sandbox_unavailable".to_owned())
+            std::fs::read_to_string(hidden.join("key.txt")).unwrap(),
+            "owner secret\n"
         );
     }
 

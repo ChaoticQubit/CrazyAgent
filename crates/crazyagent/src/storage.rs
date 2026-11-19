@@ -559,6 +559,57 @@ impl Claim {
     }
 }
 
+tokio::task_local! {
+    /// The instant by which a timed job submitted inside a bounded owner request is decided,
+    /// so the request still answers it before the request's bound cuts it.
+    static DECIDE_BY: tokio::time::Instant;
+}
+
+/// The time a bounded request keeps after a submit decision to encode and write its reply,
+/// at most a quarter of the bound.
+const REPLY_ROOM: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Runs one bounded owner request's work so every timed job it submits is decided before
+/// the bound cuts the work, leaving the request room to answer the decision itself.
+/// Inputs: the cut instant, the bound's length and the work. Output: the work's output.
+pub(crate) async fn before_cut<F: std::future::Future>(
+    cut: tokio::time::Instant,
+    bound: std::time::Duration,
+    work: F,
+) -> F::Output {
+    let room = REPLY_ROOM.min(bound / 4);
+    let decide_by = cut.checked_sub(room).unwrap_or(cut);
+    assert!(decide_by <= cut);
+    DECIDE_BY.scope(decide_by, work).await
+}
+
+/// The instant one submit decides by: its own deadline, or the decide-by instant of the
+/// bounded request it runs in when that is earlier. Input: the caller's deadline. Output:
+/// the earlier instant, never later than the input.
+fn decided_by(deadline: tokio::time::Instant) -> tokio::time::Instant {
+    let decided = DECIDE_BY
+        .try_with(|by| deadline.min(*by))
+        .unwrap_or(deadline);
+    assert!(decided <= deadline);
+    decided
+}
+
+/// Withdraws a timed job's claim that is still queued when its submitter stops waiting
+/// before deciding it, as when the transport cuts an owner request at its deadline, so the
+/// worker skips the job and it never lands. It holds no claim for an access-narrowing job,
+/// which always lands.
+struct WithdrawnOnDrop(Option<Arc<Claim>>);
+
+impl Drop for WithdrawnOnDrop {
+    fn drop(&mut self) {
+        if let Some(claim) = self.0.take() {
+            claim.decide(WITHDRAWN);
+            let state = claim.state.load(std::sync::atomic::Ordering::Acquire);
+            assert!(state == TAKEN || state == WITHDRAWN);
+        }
+    }
+}
+
 /// The answer for an access-narrowing job whose bound ran out: it stays queued or running
 /// and takes effect when storage gets to it, unless the engine stops first.
 pub(crate) const ACCESS_CHANGE_PENDING: &str = "access_change_pending";
@@ -632,6 +683,20 @@ impl Job {
         }
     }
 
+    /// Tells whether this job records a projects home step whose disk work may already have
+    /// run, so a wait its caller drops leaves it queued to land late rather than withdrawn.
+    /// Input: the job. Output: true for HomeRecord, SetupRecord, DeleteRecord and
+    /// HomeProjectMoveCleared.
+    fn records_disk_work(&self) -> bool {
+        matches!(
+            self,
+            Self::HomeRecord(..)
+                | Self::SetupRecord(..)
+                | Self::DeleteRecord(..)
+                | Self::HomeProjectMoveCleared(..)
+        )
+    }
+
     /// Chooses how long a caller waits for this job's reply.
     /// Input: the owner request timeout from settings. Output: that timeout, or at
     /// least MASTER_RUNTIME_TIMEOUT for a master runtime job.
@@ -646,11 +711,23 @@ impl Job {
 }
 
 impl Storage {
-    /// Queues one timed job and waits until the worker takes it; only a job that is not
-    /// access-narrowing first waits for the worker to receive. Inputs: the job, the deadline
-    /// for both waits, the refusal for a full queue. Output: `Taken`, so the reply timer starts
-    /// at the take; else storage_starting_not_submitted, storage_busy_not_submitted or `full`
-    /// with nothing run, or access_change_pending for a narrowing job left queued.
+    /// Waits until the storage worker has run its start steps and receives jobs, so a test
+    /// can begin a timed race only once the start can no longer refuse it. Output: none; it
+    /// panics when the worker ended before receiving.
+    #[cfg(all(test, unix))]
+    pub(crate) async fn started(&self) {
+        let mut receiving = self.receiving.clone();
+        assert!(
+            receiving.wait_for(|on| *on).await.is_ok(),
+            "the storage worker ended before it received"
+        );
+    }
+
+    /// Queues one timed job and waits until the worker takes it, a non-narrowing job first
+    /// waiting for the worker to receive. Inputs: the job, the deadline for both waits (earlier
+    /// inside a `before_cut` request), the refusal for a full queue. Output: `Taken`; else a
+    /// not-submitted refusal with nothing run, or access_change_pending for a narrowing job left
+    /// queued. A dropped wait withdraws the job unless it narrows access or records disk work.
     pub(crate) async fn submit(
         &self,
         job: Job,
@@ -658,7 +735,9 @@ impl Storage {
         full: &str,
     ) -> Result<Taken, EngineError> {
         assert!(!matches!(job, Job::Claimed(..)));
+        let deadline = decided_by(deadline);
         let narrowing = job.narrows_access();
+        let kept = narrowing || job.records_disk_work();
         if !narrowing {
             let mut receiving = self.receiving.clone();
             match tokio::time::timeout_at(deadline, receiving.wait_for(|on| *on)).await {
@@ -680,9 +759,11 @@ impl Storage {
         self.sender
             .try_send(Job::Claimed(Box::new(job), claim.clone()))
             .map_err(|_| error(full))?;
+        let mut dropped = WithdrawnOnDrop((!kept).then(|| claim.clone()));
         let late = tokio::time::timeout_at(deadline, claim.taken.notified())
             .await
             .is_err();
+        dropped.0 = None;
         if late && narrowing {
             return Err(error(ACCESS_CHANGE_PENDING));
         }

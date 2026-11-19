@@ -162,7 +162,7 @@ impl OwnerClient {
     }
 
     async fn ide_exchange(&self, action: Action) -> Result<Reply, EngineError> {
-        tokio::time::timeout(self.timeout.max(IDE_TIMEOUT), async {
+        tokio::time::timeout(deferred_wait(self.timeout, IDE_TIMEOUT), async {
             let frame = encode_frame(&Envelope { ide: action })
                 .map_err(|_| failure("ide_request_bounds"))?;
             self.root.verify()?;

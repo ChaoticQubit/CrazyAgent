@@ -113,8 +113,11 @@ pub fn settings_owner_ports(global: &Path, project: &Path) -> Result<Vec<u16>, &
         .map_or_else(Vec::new, |access| owner_ports(&access)))
 }
 
-/// Why a sandbox with hidden folders does not start on Linux or Windows: their boundaries
-/// grant whole roots and cannot keep a folder inside one out of reach.
+/// Why a sandbox with hidden folders does not start on Windows, nor one with kept-out paths
+/// or open tops on Linux or Windows: those boundaries cannot keep a path inside a granted
+/// root out of reach as Seatbelt does. Linux holds hidden folders on its bubblewrap
+/// backends and names its own refusals otherwise (`linux::HIDDEN_NEEDS_NAMESPACES`,
+/// `linux::HIDDEN_MOUNTED_AGAIN`).
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
 
 /// Why a native-mode lead's own tmux server does not start off macOS: only Seatbelt holds
@@ -975,11 +978,37 @@ pub fn linux_holds_fully(
     })
 }
 
-/// Tells whether a launch refusal is the strict setting's ([`LINUX_NOT_FULL_LINE`]), so a
-/// caller can give it its own code ([`LINUX_NOT_FULL`]). Input: the refusal. Output: the
-/// answer.
-pub fn linux_not_full(error: &SandboxError) -> bool {
-    matches!(error, SandboxError::Unavailable(reason) if reason == LINUX_NOT_FULL_LINE)
+/// The engine refusal code of a Linux launch whose project hides folders on a computer
+/// where bubblewrap cannot start agents in namespaces of their own.
+pub const LINUX_HIDDEN_NEEDS_NAMESPACES: &str = "linux_hidden_needs_namespaces";
+
+/// The engine refusal code of a Linux launch whose project hides a folder that this
+/// computer mounts a second time where it shows that folder.
+pub const LINUX_HIDDEN_MOUNTED_AGAIN: &str = "linux_hidden_mounted_again";
+
+/// The engine refusal code of a Linux launch whose project hides folders on a computer
+/// where the sandbox helper cannot cut the agent's mounts off from this computer's.
+pub const LINUX_HIDDEN_MOUNTS_NOT_PRIVATE: &str = "linux_hidden_mounts_not_private";
+
+/// The code a launch refusal has of its own, so a caller shows its plain line: the strict
+/// setting's ([`LINUX_NOT_FULL`]) and, on Linux, the hidden folders' three
+/// ([`LINUX_HIDDEN_NEEDS_NAMESPACES`], [`LINUX_HIDDEN_MOUNTED_AGAIN`],
+/// [`LINUX_HIDDEN_MOUNTS_NOT_PRIVATE`]). Input: the refusal. Output: the code, or none
+/// for a refusal with no code of its own.
+pub fn refusal_code(error: &SandboxError) -> Option<&'static str> {
+    let SandboxError::Unavailable(reason) = error else {
+        return None;
+    };
+    match reason.as_str() {
+        LINUX_NOT_FULL_LINE => Some(LINUX_NOT_FULL),
+        #[cfg(target_os = "linux")]
+        linux::HIDDEN_NEEDS_NAMESPACES => Some(LINUX_HIDDEN_NEEDS_NAMESPACES),
+        #[cfg(target_os = "linux")]
+        linux::HIDDEN_MOUNTED_AGAIN => Some(LINUX_HIDDEN_MOUNTED_AGAIN),
+        #[cfg(target_os = "linux")]
+        linux::HIDDEN_MOUNTS_NOT_PRIVATE => Some(LINUX_HIDDEN_MOUNTS_NOT_PRIVATE),
+        _ => None,
+    }
 }
 
 /// The launch refusal when the Linux sockets setting starts no limited-network agent.
@@ -2337,8 +2366,8 @@ impl ProjectSandbox {
     /// Keeps one folder inside a granted root out of the agent's reach, read and write, as
     /// the secret paths are; the graph step hides the project's `.crazyagent/` from graphify.
     /// Input: a clean absolute path below a root, in a real parent folder, absent or a real
-    /// folder. Output: the narrowed sandbox, or `Invalid`. Only Seatbelt holds it, so the
-    /// Linux and Windows boundaries refuse a sandbox with hidden folders.
+    /// folder. Output: the narrowed sandbox, or `Invalid`. Seatbelt holds it, the Linux
+    /// bubblewrap backends too where no second mount shows it; plain Landlock and Windows refuse.
     pub fn hide(mut self, folder: &Path) -> Result<Self, SandboxError> {
         if self.hidden.len() >= HIDDEN_MAX {
             return Err(invalid("too many hidden folders"));
@@ -3944,7 +3973,9 @@ impl InstalledSandbox {
         #[cfg(not(target_os = "linux"))]
         let _ = strict;
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() || sandbox.open_tops.is_some()
+        if (cfg!(target_os = "windows") && !sandbox.hidden.is_empty())
+            || !sandbox.kept_out.is_empty()
+            || sandbox.open_tops.is_some()
         {
             return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
         }
@@ -5595,13 +5626,18 @@ mod linux_sockets_tests {
 
     #[test]
     fn the_strict_refusal_has_its_own_code_and_reads_plainly() {
-        assert!(linux_not_full(&SandboxError::Unavailable(
-            LINUX_NOT_FULL_LINE.into()
-        )));
-        assert!(!linux_not_full(&SandboxError::Unavailable("other".into())));
-        assert!(!linux_not_full(&SandboxError::Invalid(
-            LINUX_NOT_FULL_LINE.into()
-        )));
+        assert_eq!(
+            refusal_code(&SandboxError::Unavailable(LINUX_NOT_FULL_LINE.into())),
+            Some(LINUX_NOT_FULL)
+        );
+        assert_eq!(
+            refusal_code(&SandboxError::Unavailable("other".into())),
+            None
+        );
+        assert_eq!(
+            refusal_code(&SandboxError::Invalid(LINUX_NOT_FULL_LINE.into())),
+            None
+        );
         let line = crate::config::plain_problem(LINUX_NOT_FULL);
         assert!(line.is_some(), "the strict refusal has a plain sentence");
         let line = line.unwrap();
@@ -5611,6 +5647,45 @@ mod linux_sockets_tests {
             "Settings",
         ] {
             assert!(line.contains(part), "{line}");
+        }
+    }
+
+    /// rv-code4 F2 (#622): each Linux refusal of hidden folders, where bubblewrap cannot
+    /// start agents in namespaces of their own, where a second mount shows the folder and
+    /// where the helper cannot cut the agent's mounts off (V24x-LINUX-NEST-MOUNT-PROPAGATION),
+    /// has its own code, so the owner reads what to change instead of the generic line.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_hidden_folder_refusals_have_their_own_codes_and_read_plainly() {
+        for (reason, code, parts) in [
+            (
+                linux::HIDDEN_NEEDS_NAMESPACES,
+                LINUX_HIDDEN_NEEDS_NAMESPACES,
+                ["bubblewrap", "namespaces", "Hidden folders"],
+            ),
+            (
+                linux::HIDDEN_MOUNTED_AGAIN,
+                LINUX_HIDDEN_MOUNTED_AGAIN,
+                [
+                    "mounted a second time",
+                    "remove that mount",
+                    "Hidden folders",
+                ],
+            ),
+            (
+                linux::HIDDEN_MOUNTS_NOT_PRIVATE,
+                LINUX_HIDDEN_MOUNTS_NOT_PRIVATE,
+                ["user namespaces", "later mount", "Hidden folders"],
+            ),
+        ] {
+            let refused = SandboxError::Unavailable(reason.into());
+            assert_eq!(refusal_code(&refused), Some(code));
+            let line = crate::config::plain_problem(code);
+            assert!(line.is_some(), "{code} has a plain sentence");
+            let line = line.unwrap();
+            for part in parts {
+                assert!(line.contains(part), "{line}");
+            }
         }
     }
 

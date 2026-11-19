@@ -759,7 +759,7 @@ impl OwnerClient {
         pool: Option<CredentialRef>,
     ) -> Result<Proposal, EngineError> {
         cleanup::cleanup_pool(project.as_ref(), pool.as_ref()).map_err(failure)?;
-        let limit = self.timeout.max(PROPOSE_TIMEOUT);
+        let limit = deferred_wait(self.timeout, PROPOSE_TIMEOUT);
         match self
             .process_exchange_within(Action::Propose { project, pool }, None, limit)
             .await?
@@ -860,7 +860,7 @@ impl OwnerClient {
         text: Option<String>,
         limit: Duration,
     ) -> Result<(Reply, Option<String>), EngineError> {
-        assert!(limit >= self.timeout && limit <= self.timeout.max(PROPOSE_TIMEOUT));
+        assert!(limit >= self.timeout && limit <= deferred_wait(self.timeout, PROPOSE_TIMEOUT));
         tokio::time::timeout(limit, async {
             let read = read_kind(&action);
             let envelope = Envelope {
