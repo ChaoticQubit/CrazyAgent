@@ -14,37 +14,156 @@ impl Text {
     /// An endpoint held over a text change: clamped to the text and moved back to the start
     /// of the character it falls in. Input: a UTF-16 index. Output: a character boundary.
     pub fn snap(&self, index: usize) -> usize {
-        index
+        if index >= self.units {
+            return self.units;
+        }
+        let snapped = self.before(index + 1, Unit::Character);
+        let snapped = snapped.expect("an index before the end has a character start");
+        assert!(snapped <= index);
+        snapped
     }
 
     /// The unit holding an index, as start and end; at the text's end a Character is empty
     /// there and a Line is the last line. Inputs: the UTF-16 index and the unit. Output: the
     /// two endpoints, start at or before end.
     pub fn enclosing(&self, index: usize, unit: Unit) -> (usize, usize) {
-        let _ = unit;
-        (index, index)
+        let at = self.snap(index);
+        let start = match unit {
+            Unit::Character => at,
+            Unit::Line if self.starts.is_empty() => 0,
+            Unit::Line => self.starts[self.line_for_index(at)],
+            Unit::Document => 0,
+        };
+        let end = self.after(start, unit).unwrap_or(start);
+        assert!(start <= at);
+        assert!(at < end || at == self.units);
+        assert!(end <= self.units);
+        (start, end)
     }
 
     /// Moves an endpoint by whole units, stopping at either end of the text. Inputs: the
     /// UTF-16 index, the unit and the signed count. Output: the new index and how many units
     /// it moved, with the count's sign.
     pub fn moved(&self, index: usize, unit: Unit, count: i32) -> (usize, i32) {
-        let _ = (unit, count);
-        (index, 0)
+        let mut at = self.snap(index);
+        let forward = count > 0;
+        let bound = u32::try_from(self.units + 1).unwrap_or(u32::MAX);
+        let steps = count.unsigned_abs().min(bound);
+        let mut moved = 0u32;
+        for _ in 0..steps {
+            let next = if forward {
+                self.after(at, unit)
+            } else {
+                self.before(at, unit)
+            };
+            let Some(next) = next else {
+                break;
+            };
+            at = next;
+            moved += 1;
+        }
+        let moved = i32::try_from(moved).expect("moves are bounded by the text");
+        let signed = if forward { moved } else { -moved };
+        assert!(signed.unsigned_abs() <= count.unsigned_abs());
+        assert!(at <= self.units);
+        (at, signed)
     }
 
     /// The cells of a range line by line, for its bounding rectangles: each line holding at
     /// least one of its characters, the newline left out. Inputs: the start and end. Output:
     /// row, first and past-the-last column per line; none for an empty range.
     pub fn lines_of(&self, start: usize, end: usize) -> Vec<(usize, usize, usize)> {
-        let _ = (start, end);
-        Vec::new()
+        let end = end.min(self.units);
+        if start >= end {
+            return Vec::new();
+        }
+        let first = self.line_for_index(start);
+        let last = self.line_for_index(end - 1);
+        assert!(first <= last);
+        let mut lines = Vec::with_capacity(last - first + 1);
+        for line in first..=last {
+            let line_start = self.starts[line];
+            let row_end = line_start + self.offsets[line][self.offsets[line].len() - 1];
+            let from = start.max(line_start);
+            let to = end.min(row_end);
+            if from >= to {
+                continue;
+            }
+            let cells = self.cells_for_range((from, to - from));
+            let cells = cells.expect("a range inside a row has cells");
+            assert_eq!(cells.0, line);
+            lines.push(cells);
+        }
+        assert!(lines.len() <= self.starts.len());
+        lines
     }
 
     /// The selection as start and end, or an empty range at the cursor when nothing is
     /// selected. Output: the two endpoints.
     pub fn marked(&self) -> (usize, usize) {
-        (0, 0)
+        let marked = self
+            .selection
+            .map_or((self.cursor, self.cursor), |(start, length)| {
+                (start, start + length)
+            });
+        assert!(marked.0 <= marked.1);
+        assert!(marked.1 <= self.units);
+        marked
+    }
+
+    /// The next unit boundary after an index. Inputs: a boundary index and the unit. Output:
+    /// the boundary, or none at the text's end.
+    fn after(&self, index: usize, unit: Unit) -> Option<usize> {
+        if index >= self.units {
+            return None;
+        }
+        let line = self.line_for_index(index);
+        let following = self.starts.get(line + 1).copied().unwrap_or(self.units);
+        let next = match unit {
+            Unit::Document => self.units,
+            Unit::Line => following,
+            Unit::Character => {
+                let offsets = &self.offsets[line];
+                let local = index - self.starts[line];
+                if local < offsets[offsets.len() - 1] {
+                    self.starts[line] + offsets[offsets.partition_point(|at| *at <= local)]
+                } else {
+                    following
+                }
+            }
+        };
+        assert!(next > index);
+        assert!(next <= self.units);
+        Some(next)
+    }
+
+    /// The unit boundary before an index, clamped to the text. Inputs: the index and the
+    /// unit. Output: the boundary, or none at the text's start.
+    fn before(&self, index: usize, unit: Unit) -> Option<usize> {
+        let index = index.min(self.units);
+        if index == 0 {
+            return None;
+        }
+        let inside = index - 1;
+        let line = self.line_for_index(inside);
+        let start = self.starts[line];
+        let previous = match unit {
+            Unit::Document => 0,
+            Unit::Line => start,
+            Unit::Character => {
+                let offsets = &self.offsets[line];
+                let local = inside - start;
+                let end = offsets[offsets.len() - 1];
+                if local >= end {
+                    start + end
+                } else {
+                    start + offsets[offsets.partition_point(|at| *at <= local) - 1]
+                }
+            }
+        };
+        assert!(previous < index);
+        assert!(previous >= start || unit == Unit::Document);
+        Some(previous)
     }
 }
 
@@ -58,8 +177,29 @@ pub fn cell_near(
     rows: usize,
     columns: usize,
 ) -> (usize, usize) {
-    let _ = (geometry, point, rows, columns);
-    (0, 0)
+    assert!(rows >= 1);
+    assert!(columns >= 1);
+    let Geometry { cell, pad, scale } = geometry;
+    assert!((1.0..=4.0).contains(&scale));
+    assert!(cell.0 > 0.0 && cell.1 > 0.0 && pad >= 0.0);
+    if !(point.0.is_finite() && point.1.is_finite()) {
+        return (0, 0);
+    }
+    let index = |at: f64, size: f64, count: usize| -> usize {
+        let cells = ((at * scale - pad) / size).floor();
+        if cells <= 0.0 {
+            0
+        } else {
+            cells.min((count - 1) as f64) as usize
+        }
+    };
+    let near = (
+        index(point.1, cell.1, rows),
+        index(point.0, cell.0, columns),
+    );
+    assert!(near.0 < rows);
+    assert!(near.1 < columns);
+    near
 }
 
 #[cfg(test)]
