@@ -143,7 +143,7 @@ impl OwnerClient {
     }
 
     async fn ide_extensions_exchange(&self, action: Action) -> Result<Reply, EngineError> {
-        tokio::time::timeout(self.timeout.max(IDE_EXTENSIONS_TIMEOUT), async {
+        tokio::time::timeout(deferred_wait(self.timeout, IDE_EXTENSIONS_TIMEOUT), async {
             let read = read_kind(&action);
             let frame = encode_frame(&Envelope {
                 ide_extensions: action,
