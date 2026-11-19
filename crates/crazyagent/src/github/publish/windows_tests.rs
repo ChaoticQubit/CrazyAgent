@@ -1,4 +1,4 @@
-use super::{clone, git_safe, project_git};
+use super::{PublishGit, clone, git_safe, project_git};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
