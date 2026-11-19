@@ -835,7 +835,6 @@ impl Inner {
     }
 }
 
-/// The modifier keys held now, as the key message's own thread state reads them.
 /// The lines a wheel notch scrolls by the system's setting (`SPI_GETWHEELSCROLLLINES`), or
 /// the system's own default of three when it cannot be read. Output: the setting.
 fn wheel_setting() -> u32 {
@@ -849,6 +848,7 @@ fn wheel_setting() -> u32 {
     }
 }
 
+/// The modifier keys held now, as the key message's own thread state reads them.
 fn held_mods() -> Mods {
     let down = |vk: u16| unsafe { GetKeyState(i32::from(vk)) } < 0;
     Mods {
