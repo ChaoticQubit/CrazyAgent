@@ -303,8 +303,8 @@ pub struct LandlockPolicy {
     pub die_with: Option<u32>,
     pub nested: bool,
     pub guard: Guard,
-    /// With `nested` only: asks the helper for a mount tree of its own that no later mount on
-    /// this computer reaches, and names the covers it proves locked there first ([`cut`]).
+    /// With `nested` or a probe: asks the helper for a mount tree of its own that no later mount
+    /// on this computer reaches, and names the covers it proves locked there first ([`cut`]).
     pub cut: Option<Vec<PathBuf>>,
 }
 
@@ -1321,13 +1321,11 @@ fn close_inherited(named: &[RawFd]) -> Result<(), String> {
     Ok(())
 }
 
-/// Holds a policy on this process, then becomes the harness, or with a guard stays as its
-/// parent ([`supervise`]); for a probe it only tells whether this kernel held it. In a
-/// routed nest it first waits for the go byte and refuses without it
-/// ([`egress::started`]). Under a bridge it then hands the bridged listeners to the broker,
-/// before any rule; the ports it would keep free are then ports of a network of its own, so
-/// the picked range is not asked. Inputs: the policy, the harness if any, the bridge and
-/// the go descriptor. Output: the exit code as [`helper_main`] gives it.
+/// Holds a policy on this process, then becomes the harness, or with a guard stays as its parent
+/// ([`supervise`]); a probe only tells whether this kernel held it. In order: in a routed nest the
+/// go byte ([`egress::started`]), under a bridge the bridged listeners to the broker (so kept ports
+/// are a private network's), the private mount tree when it hides folders ([`cut`]), the rules.
+/// Inputs: the policy, the harness if any, the bridge and the go descriptor. Output: the exit code.
 fn hold(
     policy: &LandlockPolicy,
     launch: Option<(PathBuf, Vec<OsString>)>,
@@ -1626,14 +1624,11 @@ fn placed(nested: bool) -> Result<(), String> {
         .map_err(|error| format!("signal mask: {error}"))
 }
 
-/// Starts a harness bubblewrap launched, behind the socket filter alone, the one a Landlock
-/// agent with a network limit gets ([`refuse_sockets`] with `tcp_only`): no Unix-domain
-/// socket, so a closed agent reaches no socket in the folders bound for it, no io_uring
-/// ring, and no socket but TCP over IPv4 or IPv6 and routing netlink, so no AF_VSOCK or
-/// other family that `--unshare-net` does not isolate reaches outside the closed network
-/// (RV-DS241-84 r2). Bubblewrap already holds the files, the network namespace and the
-/// session. Inputs: the harness and the covers of a private tree first ([`cut`]). Output: 3
-/// when the cut or the filter fails, 126 when the harness cannot start.
+/// Starts a harness bubblewrap launched, after a private mount tree if it hides folders ([`cut`]),
+/// behind the socket filter a Landlock agent with a network limit gets ([`refuse_sockets`] with
+/// `tcp_only`): no Unix-domain socket, no io_uring ring, no family but TCP and routing netlink, so
+/// no AF_VSOCK leaves the closed network (RV-DS241-84 r2). Inputs: the harness and the covers.
+/// Output: 3 when the cut or the filter fails, 126 when the harness cannot start.
 fn filtered(program: &Path, args: Vec<OsString>, covers: Option<&[PathBuf]>) -> ExitCode {
     if let Some(covers) = covers
         && let Err(reason) = cut(covers)
@@ -1692,16 +1687,11 @@ struct Supervision {
 }
 
 impl LinuxSandbox {
-    /// Binds the policy to one backend. Input: the project policy and the helper, or bwrap
-    /// and the helper, each an absolute file. Output: the sandbox, `Invalid` for a bad
-    /// executable, or `Unavailable` for a network limit or an open network on bubblewrap,
-    /// which keeps no port free ([`LINUX_OPEN_NETWORK_NEEDS_LANDLOCK`]), for a policy confined to one
-    /// worktree, whose git denies neither backend can hold, for a limited network the
-    /// sockets setting starts no agent on, or on Landlock for a kept port Linux could hand
-    /// out by itself ([`kept_outside_picked`]) or a hidden folder ([`HIDDEN_NEEDS_NAMESPACES`]),
-    /// and with hidden folders where the helper gets no mount tree of its own on the
-    /// backend ([`cuts`], [`HIDDEN_MOUNTS_NOT_PRIVATE`]).
-    /// Bubblewrap starts only a closed agent, in a network of its own with no host port.
+    /// Binds the policy to one backend; Bubblewrap starts only a closed agent, with no host port.
+    /// Input: the policy and the backend's absolute files. Output: the sandbox, `Invalid` for a
+    /// bad executable, or `Unavailable` for a network limit or open network on bubblewrap, a
+    /// one-worktree policy, a limited network the sockets setting refuses, on Landlock a kept port
+    /// or hidden folder, or hidden folders with no private mount tree on the backend ([`cuts`]).
     pub fn new(sandbox: ProjectSandbox, backend: LinuxBackend) -> Result<Self, SandboxError> {
         admitted(&sandbox)?;
         if matches!(backend, LinuxBackend::Landlock { .. }) && !sandbox.hidden.is_empty() {
@@ -2767,12 +2757,11 @@ impl Grants {
     }
 }
 
-/// Refuses a launch whose hidden folders a second mount of their disk shows
-/// ([`mounted_again`]), reading this computer's mount list only when the policy hides a
-/// folder, at install and again at wrap. A mount made after the start stays out, since the
-/// helper cuts the agent's tree off first ([`cut`]); a stated limit (leader 19:09 Q6): one
-/// made between this read and that cut still reaches the agent. Input: the policy.
-/// Output: Ok, or the refusal.
+/// Refuses a launch whose hidden folders a second mount of their disk shows ([`mounted_again`]),
+/// reading this computer's mount list only when the policy hides a folder, at install and at
+/// wrap. A later mount stays out, since the helper cuts the agent's tree first ([`cut`]); stated
+/// limit (leader 19:09 Q6): one made between this read and that cut still reaches the agent.
+/// Input: the policy. Output: Ok, or the refusal.
 fn mounts_hold(sandbox: &ProjectSandbox) -> Result<(), SandboxError> {
     if sandbox.hidden.is_empty() {
         return Ok(());
@@ -3260,13 +3249,11 @@ fn nest_command(
     command
 }
 
-/// The bubblewrap command for a closed agent up to its harness: its own namespaces, the
-/// system folders read-only but the name resolver's ([`RESOLVER_ROOT`]), the grants, an
-/// empty read-only folder over each existing hidden folder, then the helper bound
-/// read-only and started to install the TCP-only socket filter ([`FILTER_SOCKETS`]), with
-/// a private mount tree first when it hides folders ([`cut`]).
-/// Inputs: bwrap, the helper, the grants, the working folder and the network. Output: the
-/// command, which the harness follows after `--`.
+/// The bubblewrap command for a closed agent up to its harness: its own namespaces, the system
+/// folders read-only but the name resolver's ([`RESOLVER_ROOT`]), the grants, an empty read-only
+/// folder over each existing hidden folder, then the helper read-only for the socket filter
+/// ([`FILTER_SOCKETS`]), with a private mount tree first when it hides folders ([`cut`]). Inputs:
+/// bwrap, the helper, the grants, the working folder and the network. Output: the command.
 fn bwrap_command(
     bwrap: &Path,
     helper: &Path,

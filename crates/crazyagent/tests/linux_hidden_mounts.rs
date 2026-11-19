@@ -314,12 +314,11 @@ fn set_limit(value: &str) -> bool {
     .is_ok_and(|status| status.success())
 }
 
-/// V24x-LINUX-NEST-MOUNT-PROPAGATION Q5 (leader 19:09): where no user namespace can be made,
-/// as with `user.max_user_namespaces` at 0, the helper asked for a private tree, started with
-/// a clear environment as the engine starts it, exits 3 with the named line before it starts
-/// anything, and a build with a hidden folder refuses with the named line on both backends;
-/// at this machine's own limit, before each, both hold. The limit is 0, not 1: under 1 the
-/// row's own bubblewrap check failed (run 44442220795).
+/// V24x-LINUX-NEST-MOUNT-PROPAGATION Q5 (leader 19:09): with `user.max_user_namespaces` at 0 the
+/// helper asked for a private tree, started with a clear environment as the engine starts it,
+/// exits 3 with the named line, and a build with a hidden folder refuses with it on both backends;
+/// at this machine's own limit, before each, both hold. Limit 0, not 1: under 1 the row's own
+/// bubblewrap check failed (run 44442220795).
 #[test]
 #[ignore = "needs passwordless sudo for sysctl; the farm runs it with --ignored"]
 fn the_helper_and_both_builds_fail_closed_where_no_user_namespace_can_be_made() {
