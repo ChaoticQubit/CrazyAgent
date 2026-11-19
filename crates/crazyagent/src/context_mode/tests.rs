@@ -531,7 +531,7 @@ fn the_engine_s_own_node_passes_the_node_check_and_starts_npm_under_the_install_
     let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     crate::sandbox_settings::initialize(&connection).unwrap();
     drop(connection);
-    let checked = node_supported(&root, &bin).unwrap();
+    let checked = node_supported(&root, &bin) == Ok(true);
     let check_error = if checked {
         String::new()
     } else {

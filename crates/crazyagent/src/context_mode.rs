@@ -24,6 +24,7 @@ const INSTALL_TIME: Duration = Duration::from_secs(900);
 const NODE_CHECK_TIME: Duration = Duration::from_secs(10);
 const NODE_OLDEST: (u32, u32) = (22, 5);
 const NODE_TOO_OLD: &str = "context_mode_node_too_old";
+const NODE_CHECK_FAILED: &str = "context_mode_node_check_failed";
 const NPX_NOT_FOUND: &str = "context_mode_npx_not_found";
 const NODE_CHECK: &str = "node-check";
 const NODE_PROFILE: &str = "node.sb";
@@ -363,9 +364,10 @@ fn fixture_program(_: Option<&str>) -> bool {
 /// before the run, and the scratch folder is removed, after a refused release too, which is
 /// logged, so a lasting refusal adds no folder per probe. Every probe holds the check lock
 /// shared while it runs; one that finds it free first ends what crashed probes left
-/// ([`end_left_checks`]). Inputs: the engine root and npx's folder. Output: false when it is
-/// older, fails or names no version, or `context_mode_sandbox_unavailable` when no boundary
-/// can hold it.
+/// ([`end_left_checks`]). Inputs: the engine root and npx's folder. Output: false when it
+/// names an older version or no version, `context_mode_node_check_failed` when it did not run
+/// to an answer (a refused start, a failed exit, no output or past its bound), so a refusal
+/// never reads as too old, or `context_mode_sandbox_unavailable` when no boundary holds it.
 fn node_supported(root: &Path, bin: &Path) -> Result<bool, InstallError> {
     let parent = root.join("setup").join("npm");
     private_folder(&parent)?;
@@ -379,9 +381,11 @@ fn node_supported(root: &Path, bin: &Path) -> Result<bool, InstallError> {
         let _ = std::fs::remove_dir_all(&scratch);
         return Err(InstallError("setup_store_unavailable"));
     };
-    let supported = node_command(root, &scratch, bin).map(|command| {
-        run_command(command, NODE_CHECK_TIME)
-            .is_ok_and(|(ok, output)| ok && supported_node(&output))
+    let supported = node_command(root, &scratch, bin).and_then(|command| {
+        match run_command(command, NODE_CHECK_TIME) {
+            Ok((true, output)) if !output.trim_ascii().is_empty() => Ok(supported_node(&output)),
+            _ => Err(InstallError(NODE_CHECK_FAILED)),
+        }
     });
     end_check(&scratch, &base);
     supported
