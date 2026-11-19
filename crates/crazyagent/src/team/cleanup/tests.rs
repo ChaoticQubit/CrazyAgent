@@ -1218,14 +1218,11 @@ fn removing_an_agent_tree_never_changes_an_owner_folder_a_swapped_folder_points_
     }
 }
 
-/// RV-DS241-204: the owner's IDE terminal home is reset with no warden, so a process left in
-/// a terminal may keep swapping the folders its own cargo `git` cache holds, each at mode
-/// 000, for links to owner folders while the next terminal's launch gives that cache's name
-/// to the owner's ([`crate::sandbox::toolchains::prepare_cargo_home`]). No ACL or mode of an
-/// owner folder changes, since each clear goes through an entry read from the walk's own
-/// handles (ds181), and a launch with nothing swapping still links the owner's cache. A macOS
-/// 15 runner refuses renaming a folder at mode 000, so the swapper gives each folder write
-/// before it moves it and puts its mode back once it is in place again.
+/// RV-DS241-204: while the next IDE terminal's launch gives its cargo `git` cache's name to the
+/// owner's ([`crate::sandbox::toolchains::prepare_cargo_home`]), a process left in a terminal
+/// keeps swapping that cache's folders, each at mode 000, for links to owner folders. No ACL
+/// or mode of an owner folder changes, and a launch with nothing swapping still links the
+/// owner's cache.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_folder_points_to() {
@@ -1324,13 +1321,10 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
     }
 }
 
-/// RV-DS241-204 pinned (w-v3-ka NOTE-1535): the swap the row above races for, run at a fixed
-/// point of [`open_up`]: as it starts and just before it changes the mode, a process left in
-/// a terminal swaps a cache folder at mode 000 for a link to an owner folder at 0555 under a
-/// deny entry. Neither look nor mode change follows that link, so the owner's folder keeps
-/// its mode and ACL every time, and a walk that follows it fails the row every time. The
-/// swap gives the cache folder write before it moves it aside and shuts it again after, since
-/// a macOS 15 runner refuses renaming a folder at mode 000.
+/// RV-DS241-204 pinned (w-v3-ka NOTE-1535): the row above's swap, run as [`open_up`] starts
+/// and just before it changes the mode: a cache folder at mode 000 is swapped for a link to an
+/// owner folder at 0555 under a deny entry. Neither the look nor the mode change follows that
+/// link, so the owner's folder keeps its mode and ACL every time.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_ide_terminal_cargo_cache_reset_never_opens_up_an_owner_folder_swapped_in_at_open_up() {
@@ -2646,10 +2640,7 @@ fn a_home_removal_caller_keeps_the_walk_code_and_gives_any_other_error_its_own()
 /// V243-CLEANUP-OPEN-UP-FOLDER-PROOF (#571 sec F1): a folder an agent shut, swapped for a
 /// hard link to the owner's read-only file while Clean up opens it up, never makes that
 /// file writable: swapped before the folder check the file keeps its mode, and swapped just
-/// after it, the worst case, the file gains no write bit. A macOS 15 runner refuses both a
-/// link to a read-only file and a rename of a folder at mode 000 with EACCES, so the link is
-/// made before the file is read-only, and the swap gives the folder write, moves it aside and
-/// shuts it again before it renames the link in.
+/// after it, the worst case, the file gains no write bit.
 #[cfg(target_os = "macos")]
 #[test]
 fn opening_up_a_shut_folder_swapped_for_a_link_to_an_owner_file_never_makes_it_writable() {
@@ -2772,13 +2763,10 @@ fn removing_an_agent_tree_whose_own_folder_refuses_a_look_clears_that_acl_and_re
     }
 }
 
-/// #616 r2 rv-sec3 N1: a process an agent left that swaps a folder it shut at mode 000 under
-/// a deny entry for a hard link to an owner file, after the look the entry refused and before
-/// the clear by name, has that file's ACL cleared, which no handle can stop. The look after
-/// the clear then shows no folder, so it is reported once as `cleanup_open_up_swapped`, the
-/// owner's file keeps its mode and bytes, and the tree still goes. A macOS 15 runner refuses
-/// renaming a folder at mode 000, so the swap first clears that folder's ACL and gives it
-/// write, as the agent that owns it can, and shuts it again once it is aside.
+/// #616 r2 rv-sec3 N1: a folder an agent shut at mode 000 under a deny entry, swapped for a
+/// hard link to an owner file after the refused look and before the clear by name, is
+/// reported once as `cleanup_open_up_swapped`; the owner's file keeps its mode and bytes, and
+/// the tree still goes.
 #[cfg(target_os = "macos")]
 #[test]
 fn removing_an_agent_tree_reports_an_owner_file_link_swapped_in_before_an_acl_clear() {
