@@ -131,9 +131,7 @@ fn set_aside(directory: &Path) -> Result<(), EngineError> {
         &aside,
         rustix::fs::RenameFlags::NOREPLACE,
     )
-    .map_err(|_| failure())?;
-    eprintln!("native_profile_keychain_set_aside file={ASIDE_KEYCHAIN}");
-    Ok(())
+    .map_err(|_| failure())
 }
 
 /// The keychain a profile home holds, under its current name: a `login.keychain-db` an
