@@ -10,6 +10,8 @@ const PATIENT_WAIT_MS: u64 = 30_000;
 const SWEEP_TIME_MAX: Duration = Duration::from_secs(60);
 const LAPSE_WAIT_MS: u64 = 250;
 const QUEUED_WAIT_MS: u64 = 3000;
+const CHANGE_CUT_MS: u64 = 1500;
+const CHANGE_CLIENT_MS: u64 = 1200;
 const PUBLISHED_WAIT: Duration = Duration::from_secs(5);
 
 /// The owner control that revokes one client kind at its current epoch.
@@ -781,6 +783,57 @@ async fn a_new_project_record_its_cut_drops_lands_once_storage_is_free() {
         names(false)
     );
     drop(controller);
+    owner.stop().await;
+}
+
+/// A plugin change storage cannot take in time is refused storage_busy_not_submitted to a
+/// client whose wait ends before the engine's exchange deadline, as a desktop client's fixed
+/// wait does under a longer owner timeout, or any wait whose connect outlasts the engine's
+/// reply room. The client waits past that deadline, so it hears the refusal, not
+/// plugins_outcome_unknown, and the change never lands (V243-STORAGE-BUSY-ROWS, #629 r2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plugin_change_storage_cannot_take_is_refused_to_a_client_whose_wait_ends_first() {
+    let owner = Usage::start_waiting(CHANGE_CUT_MS).await;
+    let client = OwnerClient::discover(
+        owner.root.path(),
+        OwnerClientKind::Tui,
+        Duration::from_millis(CHANGE_CLIENT_MS),
+    )
+    .await
+    .unwrap()
+    .0;
+    let release = hold_storage(&owner);
+    assert!(
+        storage_queue_reaches(&owner, 0).await,
+        "storage took the hold"
+    );
+    let started = tokio::time::Instant::now();
+    let added = client
+        .add_mcp_server(
+            Scope::Global,
+            "late-server".into(),
+            ServerSpec::Stdio {
+                command: "/usr/bin/true".into(),
+                args: Vec::new(),
+            },
+            Vec::new(),
+        )
+        .await;
+    let waited = started.elapsed();
+    assert_eq!(
+        added.map(|server| server.id).map_err(|error| error.0),
+        Err("storage_busy_not_submitted".to_owned()),
+        "the client heard the engine's refusal after {waited:?}"
+    );
+    assert!(
+        waited >= Duration::from_millis(CHANGE_CLIENT_MS),
+        "the refusal came at the engine's cut, past the client's own timeout: {waited:?}"
+    );
+    drop(release);
+    assert!(
+        stored_servers(&owner, "late-server").await.is_empty(),
+        "the refused change never landed"
+    );
     owner.stop().await;
 }
 
