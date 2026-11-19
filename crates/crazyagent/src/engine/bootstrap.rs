@@ -1613,9 +1613,12 @@ mod tests {
         }
         let root = tempfile::tempdir().unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let mut config =
-            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
-        config.settings.timeout_ms = 3000;
+        let global = root.path().join("global.toml");
+        std::fs::write(&global, "version = 1\ntimeout_ms = 3000\n").unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let config =
+            crate::config::resolve_config(&global, &root.path().join("project.toml")).unwrap();
+        assert_eq!(config.settings.timeout_ms, 3000);
         let (_stop, stopped) = watch::channel(false);
         let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
             .await
