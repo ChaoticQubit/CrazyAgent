@@ -25,6 +25,7 @@ mod cleanup;
 mod coord;
 mod coord_questions;
 mod demo;
+pub mod feed;
 mod harnesses;
 pub mod ide;
 mod ide_extensions;

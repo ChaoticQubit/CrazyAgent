@@ -1,5 +1,6 @@
 import { Fragment, createElement } from "react";
 import { Settings } from "../../src/screens/settings/index.tsx";
+import { loadTerminalKind } from "../../src/screens/team/terminal-kind.ts";
 import { UserMenuDialog } from "../../src/screens/user-menu.tsx";
 import { isUserMenuTab } from "../../src/ui/router.ts";
 import { RULE_LABELS } from "../../src/screens/project/publish-job.ts";
@@ -49,14 +50,15 @@ function answer(scene, command, args) {
 
 /** Mounts a Settings page section, or GitHub or Profile in its user menu dialog (DEC-151),
  * or a user menu dialog (`over`) open over a Settings section as the app keeps the page under
- * it, against a fake engine. Inputs: the scene, naming the tab, the route action, `over` and
- * each read, and the theme. Output: nothing. */
+ * it, against a fake engine. Inputs: the scene, naming the tab, the route action, `over`, each
+ * read and `native` (a build that draws every terminal natively), and the theme. Output: nothing. */
 export async function mount(scene, theme = "light") {
   const session = { profile: PROFILES[scene.profile ?? "ok"], refreshProfile: async () => {} };
   const dialog = (tab) => createElement(UserMenuDialog, { tab, onClose: () => {} });
   const page = () => createElement(Settings, { tab: scene.tab, action: scene.action });
   const panel = isUserMenuTab(scene.tab) ? dialog(scene.tab) : scene.over ? createElement(Fragment, null, page(), dialog(scene.over)) : page();
   defaultsSaved = null;
+  await loadTerminalKind(async () => ({ kind: "ok", value: scene.native === true }));
   await mountTab(panel, (command, args) => answer(scene, command, args), theme, session);
 }
 

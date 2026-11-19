@@ -213,6 +213,18 @@ impl<H: Host> Host for LastScreenHost<H> {
         self.inner.input_at(agent, at, bytes)
     }
 
+    fn own_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        self.inner.own_pane_at(agent)
+    }
+
+    fn paste_at(&self, agent: &AgentId, at: &PaneAt, keys: &[u8]) -> Result<bool, HostError> {
+        self.inner.paste_at(agent, at, keys)
+    }
+
+    fn resize_at(&self, agent: &AgentId, at: &PaneAt, size: (u16, u16)) -> Result<bool, HostError> {
+        self.inner.resize_at(agent, at, size)
+    }
+
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         self.inner.input_live(agent)
     }
@@ -263,6 +275,14 @@ impl<H: Host> Host for LastScreenHost<H> {
 
     fn input_live_pane(&self, agent: &AgentId, pane: &str) -> Result<bool, HostError> {
         self.inner.input_live_pane(agent, pane)
+    }
+
+    fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
+        self.inner.paste(agent, keys)
+    }
+
+    fn paste_pane(&self, agent: &AgentId, pane: &str, keys: &[u8]) -> Result<(), HostError> {
+        self.inner.paste_pane(agent, pane, keys)
     }
 
     fn adopt_pane(&self, agent: &AgentId, lead: &AgentId, pane: &str) -> Result<(), HostError> {
