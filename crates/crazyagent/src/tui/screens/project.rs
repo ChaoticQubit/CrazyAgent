@@ -3343,7 +3343,12 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "hidden_path_in_nested_repository" => {
             "That folder is inside another git repository in this project, whose history agents can read. Only folders outside a nested repository can be hidden."
         }
-        "hidden_path_unchecked" => "CrazyAgent couldn't check that folder against git. Try again.",
+        "hidden_path_index_unreadable" => {
+            "CrazyAgent can't check hidden folders in this project: its git index has a path that isn't UTF-8 or is over 32 KiB, or over 64 MiB of paths in all. Rename or untrack those paths, or hide no folders here."
+        }
+        "hidden_path_unchecked" => {
+            "CrazyAgent couldn't check that folder against git: git gave an error or took over 5 seconds. Run git status in the project, fix what it reports, then try again."
+        }
         "hidden_paths_need_macos" => {
             "Hidden folders work only on macOS for now, so a list with folders can't be saved here. Remove them all and save."
         }

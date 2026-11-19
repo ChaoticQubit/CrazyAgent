@@ -173,7 +173,9 @@ pub(crate) fn update(
         ));
     };
     if let Err(code) = crate::sandbox::hidden_paths::none_tracked(repo, hidden) {
-        return Ok(GraphEnding::Failed(code));
+        return Ok(GraphEnding::Failed(crate::sandbox::hidden_paths::refusal(
+            code,
+        )));
     }
     let kept = kept_paths(repo, &kept_out);
     if kept.len() > crate::sandbox::KEPT_OUT_MAX

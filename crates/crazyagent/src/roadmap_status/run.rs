@@ -193,7 +193,7 @@ pub(super) fn answer(
     let hidden = crate::sandbox::hidden_paths::load(db, project.as_str())
         .map_err(|_| failed(HIDDEN_UNREADABLE))?;
     crate::sandbox::hidden_paths::none_tracked(root, &hidden)
-        .map_err(|_| failed(HIDDEN_UNREADABLE))?;
+        .map_err(|code| failed(crate::sandbox::hidden_paths::refusal(code)))?;
     let check = prepare(db, project, root).map_err(failed)?;
     let name = run_name(project, crate::team::now_ms());
     let run = ReadOnlyRun {

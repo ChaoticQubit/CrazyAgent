@@ -405,10 +405,10 @@ pub fn load(connection: &Connection, project: &str) -> rusqlite::Result<Vec<Path
 const CHECK_TIME: std::time::Duration = std::time::Duration::from_secs(5);
 const CHECK_POLL: std::time::Duration = std::time::Duration::from_millis(2);
 /// The most of git's index listing the check reads, 64 MiB, about 600,000 paths of 100 bytes;
-/// a longer listing is refused as unchecked.
+/// a longer listing is refused as unreadable.
 const CHECK_BYTES_MAX: u64 = 64 * 1024 * 1024;
 /// The longest one path in git's index listing may be, 32 KiB, eight times Linux's 4096-byte
-/// path limit; a longer path is refused as unchecked.
+/// path limit; a longer path is refused as unreadable.
 const CHECK_LINE_BYTES_MAX: usize = 32 * 1024;
 /// The read buffer of the tracked-files check, 64 KiB.
 const CHECK_BUFFER_BYTES: usize = 64 * 1024;
@@ -485,19 +485,18 @@ enum Scan {
     Tracked,
     /// The whole listing was read, each path ended by a NUL, and none falls in the folders.
     End,
-    /// A path was empty, cut short or past [`CHECK_LINE_BYTES_MAX`], the listing passed
-    /// [`CHECK_BYTES_MAX`], or it could not be read.
+    /// A path is not UTF-8 or is past [`CHECK_LINE_BYTES_MAX`], or the listing passed
+    /// [`CHECK_BYTES_MAX`]: a cause that lasts while the path stays in the index.
+    Unreadable,
+    /// A path was empty or cut short, or the listing could not be read.
     Doubt,
 }
 
-/// Reads git's `ls-files -z` listing path by path and stops at the first path in one of the
-/// folders, each given as its folded names, so the rest is never read. A path that is not
-/// UTF-8 is read with each bad run of bytes as U+FFFD (rv-sec3 N2): the folders' names are
-/// UTF-8, so a bad name can match none of them on any file system, while the names around it
-/// read as they are and `/` still splits them. A path's first name is folded once and looked
-/// up among the folders' first names, and reused while the sorted listing stays under it, so
-/// one pass costs the same for any number of folders. Inputs: the listing and the folders.
-/// Output: what it found.
+/// Reads git's `ls-files -z` listing path by path, stopping at the first path in a folder
+/// (given as folded names). A path that is not UTF-8 is unreadable: Git for Windows writes it
+/// with bytes 0xa0 to 0xff as U+00A0 to U+00FF (rv-sec3 N2). A first name is folded and looked
+/// up once per run of paths under it; a path it opens is compared with each folder sharing it,
+/// at most [`HIDDEN_PATHS_MAX`]. Inputs: the listing and the folders. Output: what it found.
 fn scan(listing: impl std::io::Read, folders: &[Vec<String>]) -> Scan {
     use std::io::{BufRead, Read};
     assert!(!folders.is_empty());
@@ -529,17 +528,21 @@ fn scan(listing: impl std::io::Read, folders: &[Vec<String>]) -> Scan {
         assert_eq!(read, line.len());
         assert!(read <= CHECK_LINE_BYTES_MAX + 1);
         total += read as u64;
-        if total > CHECK_BYTES_MAX || line.pop() != Some(0) {
-            return Scan::Doubt;
+        if total > CHECK_BYTES_MAX {
+            return Scan::Unreadable;
         }
-        let decoded = String::from_utf8_lossy(&line);
-        let path: &str = &decoded;
+        if line.pop() != Some(0) {
+            return if read as u64 == cap {
+                Scan::Unreadable
+            } else {
+                Scan::Doubt
+            };
+        }
+        let Ok(path) = std::str::from_utf8(&line) else {
+            return Scan::Unreadable;
+        };
         if path.is_empty() {
             return Scan::Doubt;
-        }
-        if matches!(decoded, std::borrow::Cow::Owned(_)) {
-            let slashes = line.iter().filter(|byte| **byte == b'/').count();
-            assert_eq!(path.matches('/').count(), slashes);
         }
         let (head, rest) = path.split_once('/').unwrap_or((path, ""));
         if head_seen.as_deref() != Some(head) {
@@ -554,12 +557,10 @@ fn scan(listing: impl std::io::Read, folders: &[Vec<String>]) -> Scan {
     unreachable!("each path read is at least one byte, so the listing cap ends the loop")
 }
 
-/// Whether a folder sits in another git repository of the project, whose history the
-/// project's index never lists (rv-sec3 F1): a `.git` entry of any kind, read without following
-/// a link, in any folder from the first one below the root down to the folder itself. The
-/// root's own `.git` is the project's repository, which [`scan`] reads. Inputs: the canonical
-/// root and the folder's path below it. Output: the answer, or unchecked when an entry cannot
-/// be read.
+/// Whether a folder sits in another git repository of the project, whose history the index
+/// never lists (rv-sec3 F1): a `.git` entry of any kind, not followed, in any folder from the
+/// first one below the root down to the folder itself. Inputs: the canonical root and the
+/// folder's path below it. Output: the answer, or unchecked when an entry cannot be read.
 fn in_nested_repository(root: &Path, relative: &Path) -> Result<bool, &'static str> {
     assert!(relative.is_relative());
     let mut folder = root.to_path_buf();
@@ -618,7 +619,8 @@ fn stop(child: &mut std::process::Child) {
 /// Waits up to [`CHECK_TIME`] for [`scan`]'s verdict on git's listing, and kills git unless
 /// the whole listing was read and git then exits clean in that time. Inputs: the running git
 /// and the verdict. Output: `Ok(true)` for a tracked path, `Ok(false)` for a whole listing
-/// with none and a clean exit, else unchecked.
+/// with none and a clean exit, `hidden_path_index_unreadable` for [`Scan::Unreadable`], else
+/// unchecked.
 fn listing_answer(
     child: &mut std::process::Child,
     verdict: &std::sync::mpsc::Receiver<Scan>,
@@ -628,10 +630,10 @@ fn listing_answer(
     let found = verdict.recv_timeout(CHECK_TIME).unwrap_or(Scan::Doubt);
     if found != Scan::End {
         stop(child);
-        return if found == Scan::Tracked {
-            Ok(true)
-        } else {
-            Err(unchecked)
+        return match found {
+            Scan::Tracked => Ok(true),
+            Scan::Unreadable => Err("hidden_path_index_unreadable"),
+            Scan::Doubt | Scan::End => Err(unchecked),
         };
     }
     let polls_max = CHECK_TIME.as_millis() / CHECK_POLL.as_millis() + 1;
@@ -652,12 +654,10 @@ fn listing_answer(
     Err(unchecked)
 }
 
-/// Whether git tracks any file inside any of these folders: one `ls-files -z` run of the whole
-/// index through [`crate::project_files::owner_git`], read as it streams by [`scan`], names
-/// compared after [`fold`], git killed once the answer is known or after 5 s; a tracked file
-/// lives in every agent's worktree and in history. A folder in a nested repository is refused
-/// first ([`folded_folders`]), with or without a `.git` at the root. Inputs: the project root
-/// and the folders. Output: `Ok(false)` with no folder inside the root or no `.git`, a
+/// Whether git tracks any file inside any of these folders, after [`folded_folders`] refuses
+/// one in a nested repository: one `ls-files -z` run of the whole index through
+/// [`crate::project_files::owner_git`], read by [`scan`] as it streams. Inputs: the project
+/// root and the folders. Output: `Ok(false)` with no folder inside the root or no `.git`, a
 /// [`folded_folders`] refusal, else [`listing_answer`]'s.
 fn any_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<bool, &'static str> {
     use crate::project_files::NoOwnerGit;
@@ -693,12 +693,34 @@ fn any_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<bool, &'stati
 /// Refuses a list that holds a folder git tracks, and refuses the whole list when the check
 /// cannot answer for it, with one git run for the whole list (`any_tracked`). Inputs: the
 /// project root and the checked folders. Output: ok, `hidden_path_tracked`,
-/// `hidden_path_in_nested_repository` or `hidden_path_unchecked`.
+/// `hidden_path_in_nested_repository`, `hidden_path_index_unreadable` or
+/// `hidden_path_unchecked`.
 pub fn none_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<(), &'static str> {
     if any_tracked(project_root, folders)? {
         Err("hidden_path_tracked")
     } else {
         Ok(())
+    }
+}
+
+/// The owner's words for a launch that [`none_tracked`] refused, naming the cause and the way
+/// out (rv-code2 F1), for the runs that store a line rather than show a code. Input: the
+/// refusal code. Output: one sentence with no final stop.
+pub fn refusal(code: &str) -> &'static str {
+    assert!(code.starts_with("hidden_path_"));
+    match code {
+        "hidden_path_tracked" => {
+            "Git tracks a file in a hidden folder, or in one whose name differs only in letter case; untrack it or stop hiding that folder"
+        }
+        "hidden_path_in_nested_repository" => {
+            "A hidden folder is inside another git repository in this project; stop hiding that folder"
+        }
+        "hidden_path_index_unreadable" => {
+            "The project's git index has a path that isn't UTF-8 or is over 32 KiB, or over 64 MiB of paths in all, so hidden folders can't be checked; rename or untrack those paths, or stop hiding folders here"
+        }
+        _ => {
+            "The project's hidden folders could not be checked: git gave an error or took over 5 seconds; run git status in the project, fix what it reports, then try again"
+        }
     }
 }
 
@@ -858,9 +880,10 @@ mod tests {
 
     /// V244-HIDDEN-GIT-NONASCII-CASE: a listing is tracked by a whole path in a folder, at any
     /// depth and in any fold-equal spelling, or by a path that ends before the folder's names
-    /// (r2, rv-sec3 F1), and only then; a sibling sharing a name's start is not. An empty path,
-    /// a path cut short or one past the line cap is doubt, and so is a listing past the total
-    /// cap; the scan stops at a tracked path.
+    /// (r2, rv-sec3 F1), and only then; a sibling sharing a name's start is not. An empty path
+    /// or one cut short is doubt; a path past the line cap, with or without its NUL, and a
+    /// listing past the total cap are unreadable (r2, rv-code2 F1); the scan stops at a tracked
+    /// path.
     #[test]
     fn a_listing_is_tracked_only_by_a_whole_path_in_a_folder_and_doubt_on_a_broken_one() {
         use std::io::Read;
@@ -868,7 +891,7 @@ mod tests {
         let scanned = |bytes: &[u8]| scan(bytes, &folders);
         assert_eq!(scanned(b""), Scan::End);
         assert_eq!(
-            scanned(b"secrets/key.txt\0conf/key\0Secrets/x\0confs\0\xff/x\0"),
+            scanned(b"secrets/key.txt\0conf/key\0Secrets/x\0confs\0"),
             Scan::End
         );
         for tracked in [
@@ -907,13 +930,18 @@ mod tests {
         let longest = [b"x".repeat(CHECK_LINE_BYTES_MAX), vec![0]].concat();
         assert_eq!(scanned(&longest), Scan::End);
         let longer = [b"x".repeat(CHECK_LINE_BYTES_MAX + 1), vec![0]].concat();
-        assert_eq!(scanned(&longer), Scan::Doubt);
+        assert_eq!(scanned(&longer), Scan::Unreadable);
+        assert_eq!(
+            scanned(&b"x".repeat(CHECK_LINE_BYTES_MAX + 1)),
+            Scan::Unreadable
+        );
+        assert_eq!(scanned(&b"x".repeat(CHECK_LINE_BYTES_MAX)), Scan::Doubt);
         let line = b"plain/x.txt\0";
         let whole = CHECK_BYTES_MAX - CHECK_BYTES_MAX % line.len() as u64;
         assert_eq!(scan(Cycle(line, 0).take(whole), &folders), Scan::End);
         let past = whole + line.len() as u64;
         assert!(past > CHECK_BYTES_MAX);
-        assert_eq!(scan(Cycle(line, 0).take(past), &folders), Scan::Doubt);
+        assert_eq!(scan(Cycle(line, 0).take(past), &folders), Scan::Unreadable);
         let broken = b"plain/x.txt\0secret/key.txt\0".chain(Broken);
         assert_eq!(scan(broken, &folders), Scan::Tracked);
         assert_eq!(scan(b"plain/x.txt\0".chain(Broken), &folders), Scan::Doubt);
@@ -1173,21 +1201,45 @@ mod tests {
         }
     }
 
-    /// V244-HIDDEN-GIT-NONASCII-CASE r2 (rv-sec3 N2): a listed path that is not UTF-8 is read
-    /// with each bad run of bytes as U+FFFD. Elsewhere in the listing it leaves the folders
-    /// untracked, below a folder it is found tracked, and a bad first name never matches a
-    /// folder's name, which is UTF-8; a `/` after a cut sequence still ends a name.
+    /// V244-HIDDEN-GIT-NONASCII-CASE r2 (rv-sec3 N2): a listed path that is not UTF-8 is
+    /// unreadable wherever it stands, first or after other paths, in a folder or not, unless a
+    /// path found tracked ended the scan before it.
     #[test]
-    fn a_listed_path_that_is_not_utf8_is_read_with_replacement_characters() {
+    fn a_listed_path_that_is_not_utf8_is_unreadable_wherever_it_stands() {
         let folders = vec![vec![fold("secret")], vec![fold("conf"), fold("keys")]];
-        assert_eq!(scan(&b"caf\xe9/x\0other\0"[..], &folders), Scan::End);
-        assert_eq!(scan(&b"secret/\xff.txt\0"[..], &folders), Scan::Tracked);
-        assert_eq!(scan(&b"conf/keys/\xc3\0"[..], &folders), Scan::Tracked);
+        let unreadable: [&[u8]; 5] = [
+            b"caf\xe9/x\0",
+            b"other\0caf\xe9/x\0",
+            b"secret/\xff.txt\0",
+            b"conf/keys/\xc3\0",
+            b"\xffsecret/x\0",
+        ];
+        for listing in unreadable {
+            let shown = String::from_utf8_lossy(listing).into_owned();
+            assert_eq!(scan(listing, &folders), Scan::Unreadable, "{shown:?}");
+        }
+        assert_eq!(scan(&b"secret/x\0caf\xe9/x\0"[..], &folders), Scan::Tracked);
+    }
+
+    /// V244-HIDDEN-GIT-NONASCII-CASE r2 (rv-code2 F1): each refusal of [`none_tracked`] has its
+    /// own launch sentence, and an unknown code reads as unchecked.
+    #[test]
+    fn each_refusal_has_its_own_launch_sentence() {
+        let codes = [
+            "hidden_path_tracked",
+            "hidden_path_in_nested_repository",
+            "hidden_path_index_unreadable",
+            "hidden_path_unchecked",
+        ];
+        let sentences: BTreeSet<&str> = codes.iter().map(|code| refusal(code)).collect();
+        assert_eq!(sentences.len(), codes.len());
+        assert!(sentences.iter().all(|line| !line.ends_with('.')));
         assert_eq!(
-            scan(&b"\xffsecret/x\0secret\xc3/y\0"[..], &folders),
-            Scan::End
+            refusal("hidden_path_other"),
+            refusal("hidden_path_unchecked")
         );
-        assert_eq!(scan(&b"conf\xc3/keys/x\0"[..], &folders), Scan::End);
+        assert!(refusal("hidden_path_index_unreadable").contains("isn't UTF-8"));
+        assert!(refusal("hidden_path_unchecked").contains("git status"));
     }
 
     /// V244-HIDDEN-GIT-NONASCII-CASE r2 (rv-sec3 N2, rv-code2 F1): Git for Windows writes an

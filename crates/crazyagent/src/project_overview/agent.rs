@@ -134,7 +134,7 @@ pub(super) fn answer(
     let hidden = crate::sandbox::hidden_paths::load(db, project.as_str())
         .map_err(|_| failed(HIDDEN_UNREADABLE))?;
     crate::sandbox::hidden_paths::none_tracked(root, &hidden)
-        .map_err(|_| failed(HIDDEN_UNREADABLE))?;
+        .map_err(|code| failed(crate::sandbox::hidden_paths::refusal(code)))?;
     let research = research(db, project, root).ok_or_else(|| failed(EVIDENCE_UNREADABLE))?;
     let tree = if root.join(".git").exists() {
         crate::landing::evidence::tracked_paths(root, |_| true, TREE_PATHS_MAX)
