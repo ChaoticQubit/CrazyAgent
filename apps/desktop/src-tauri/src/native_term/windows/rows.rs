@@ -2074,9 +2074,11 @@ fn a_view_its_sink_drops_on_the_fault_goes_from_inside_the_fault_message() {
         View::new(parent, webview, DROPPED_ON_FAULT, dropping_sink, &style()).expect("a view");
     let _ = placed_shown_and_drawn(parent, &view);
     view.focus();
-    pump_until("the view's focus", FARM_WAIT, || {
-        unsafe { GetFocus() } == view.hwnd()
-    });
+    pump_until(
+        "the view's focus",
+        FARM_WAIT,
+        || unsafe { GetFocus() } == view.hwnd(),
+    );
     faulted_unheard(&view, DROPPED_ON_FAULT);
     let hwnd = view.hwnd();
     HELD.with(|held| *held.borrow_mut() = Some(view));
