@@ -99,6 +99,7 @@ fallback_allowed = false
                     scope: scope.clone(),
                     method: NativeAuthMethod::ClaudeOfficial,
                 }),
+                crate::storage::NativeAuthAsk::Engine,
                 reply,
             )
         })

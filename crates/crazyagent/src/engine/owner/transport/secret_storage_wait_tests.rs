@@ -148,7 +148,7 @@ async fn settled(swept: &Path, sweep: Sweep) {
         .unwrap();
 }
 
-fn holders(root: &Path, secret: &[u8]) -> usize {
+pub(super) fn holders(root: &Path, secret: &[u8]) -> usize {
     let mut found = 0;
     for entry in std::fs::read_dir(root).unwrap() {
         let path = entry.unwrap().path();
@@ -325,7 +325,7 @@ async fn a_server_added_with_secrets_while_storage_is_busy_is_withdrawn_with_eve
 /// Waits up to ten seconds until no file under the engine root holds the secret: once
 /// storage answers late, the engine deletes it in a task of its own after the owner's
 /// wait. Inputs: the root and the secret. Output: true once no file holds it.
-async fn none_hold(root: &Path, secret: &[u8]) -> bool {
+pub(super) async fn none_hold(root: &Path, secret: &[u8]) -> bool {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while holders(root, secret) > 0 {
         if tokio::time::Instant::now() >= deadline {
@@ -653,7 +653,13 @@ async fn a_key_replaced_after_its_account_was_removed_leaves_no_key_on_disk() {
 
     let (swept, sweep) = busy.occupy_storage();
     let replaced =
-        super::accounts::key_replaced(&handle.engine, &admission, added.id.clone(), credential_ref)
+        super::accounts::key_replaced(
+            &handle.engine,
+            &admission,
+            added.id.clone(),
+            credential_ref,
+            None,
+        )
             .await;
     outlasted_the_owner_wait(replaced.map(|_| ()), "access_change_pending");
     settled(&swept, sweep).await;
@@ -830,7 +836,8 @@ async fn a_key_replaced_after_its_connection_was_removed_stays_for_the_other_on_
         AccountSecret::new(after.as_bytes().to_vec()).unwrap(),
     )
     .unwrap();
-    let replaced = super::accounts::key_replaced(&handle.engine, &admission, first, shared).await;
+    let replaced =
+        super::accounts::key_replaced(&handle.engine, &admission, first, shared, None).await;
     assert_eq!(
         replaced.err().map(|error| error.0).as_deref(),
         Some("account_not_found")

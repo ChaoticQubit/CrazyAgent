@@ -220,6 +220,17 @@ fn unknown() -> EngineError {
     failure("plugins_outcome_unknown")
 }
 
+/// Whether the owner hears a refusal of a kept detach by its own name, so the detach's
+/// intent ends: a code this route sends as it is, neither a storage answer nor an outcome
+/// unknown. Input: the answer. Output: the verdict.
+fn heard<T>(answer: &Result<T, EngineError>) -> bool {
+    answer.as_ref().is_err_and(|refused| {
+        !crate::storage::storage_answer(&refused.0)
+            && *refused != unknown()
+            && public_code(refused.clone()) == refused.0
+    })
+}
+
 fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
@@ -1302,19 +1313,36 @@ async fn handle(
             Reply::Server { server: *view }
         }
         Action::RemoveSecret { id, name } => {
-            let root = engine_root(authority)?;
-            let detached = engine
+            let runtime = OwnerRuntimeHandle {
+                engine: engine.clone(),
+                authority: authority.clone(),
+            };
+            let kept = runtime
+                .keep_narrowing(crate::storage::narrowing::Change::DetachSecret {
+                    id: id.clone(),
+                    name: name.clone(),
+                })
+                .await;
+            let pending = kept.clone().map(|intent| super::narrowing::Pending::Secret {
+                server: id.clone(),
+                name: name.clone(),
+                id: intent,
+            });
+            let ask = kept
+                .clone()
+                .map(crate::storage::narrowing::NarrowingAsk::Owner);
+            let answer = engine
                 .settled_job(
-                    |reply| Job::Plugins(Command::DetachSecret { id, name }, reply),
-                    move |result| match result {
-                        Ok(ResultValue::Secret(_, Some(reference))) => {
-                            crate::storage::plugins::remove_secret(&root, reference)
-                        }
-                        _ => Ok(()),
-                    },
+                    |reply| Job::Plugins(Command::DetachSecret { id, name, ask }, reply),
+                    |_| Ok(()),
                 )
-                .await?;
-            let ResultValue::Secret(view, _) = detached else {
+                .await;
+            if let Some(intent) = &kept
+                && heard(&answer)
+            {
+                runtime.end_kept(intent).await;
+            }
+            let ResultValue::Secret(view, _) = runtime.pending_unless_taken(answer, pending)? else {
                 return Err(unknown());
             };
             Reply::Server { server: *view }

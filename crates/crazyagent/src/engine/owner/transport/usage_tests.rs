@@ -34,13 +34,19 @@ impl Usage {
     /// Starts the engine with its owner wait. Input: the wait in milliseconds.
     /// Output: the engine with a TUI owner client.
     pub(super) async fn start_waiting(wait_ms: u64) -> Self {
+        Self::start_settings(&format!("timeout_ms = {wait_ms}\n")).await
+    }
+
+    /// Starts the engine with these global settings lines after the version line.
+    /// Input: the settings lines. Output: the engine with a TUI owner client.
+    pub(super) async fn start_settings(settings: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-usage-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
-        std::fs::write(&global, format!("version = 1\ntimeout_ms = {wait_ms}\n")).unwrap();
+        std::fs::write(&global, format!("version = 1\n{settings}")).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(false);
         let service = EngineService::start_with_settings_sources(
@@ -82,6 +88,114 @@ impl Usage {
 
     pub(super) async fn stop(mut self) {
         drop(self.client);
+        tokio::time::timeout(Duration::from_secs(10), self.service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(self.root);
+    }
+
+    /// Stops the engine without asking for a clean close, as after its storage worker died,
+    /// then starts an engine again on the same folder and settings. Input: the engine.
+    /// Output: the engine started again, with no owner client, since a revoked one may
+    /// not attach.
+    pub(super) async fn restarted(self) -> Restarted {
+        let (root, stop) = self.stopped().await;
+        let service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &root.path().join("global.toml"),
+            &root.path().join("project.toml"),
+            &stop.subscribe(),
+        )
+        .await
+        .unwrap();
+        Restarted {
+            root,
+            service,
+            _stop: stop,
+        }
+    }
+
+    /// Stops the engine without asking for a clean close and starts one again on the same
+    /// folder and settings, for a row whose next start must refuse to open.
+    /// Input: the engine. Output: the start's refusal and the folder.
+    pub(super) async fn refused_restart(self) -> (EngineError, tempfile::TempDir) {
+        let (root, stop) = self.stopped().await;
+        let refused = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &root.path().join("global.toml"),
+            &root.path().join("project.toml"),
+            &stop.subscribe(),
+        )
+        .await
+        .err()
+        .expect("the start refuses to open");
+        (refused, root)
+    }
+
+    /// Stops the engine without asking for a clean close. Input: the engine.
+    /// Output: its folder and stop signal, for the next start on the same folder.
+    async fn stopped(self) -> (tempfile::TempDir, tokio::sync::watch::Sender<bool>) {
+        let Usage {
+            root,
+            mut service,
+            _stop: stop,
+            client,
+            ..
+        } = self;
+        drop(client);
+        let _ = tokio::time::timeout(Duration::from_secs(10), service.shutdown())
+            .await
+            .unwrap();
+        drop(service);
+        (root, stop)
+    }
+}
+
+/// An engine started again on a folder an earlier engine used, for rows that read what its
+/// start applied.
+pub(super) struct Restarted {
+    pub(super) root: tempfile::TempDir,
+    service: EngineService,
+    _stop: tokio::sync::watch::Sender<bool>,
+}
+
+impl Restarted {
+    /// Stops this engine and starts one again on the same folder and settings, for rows that
+    /// change the disk between two starts. Input: the engine. Output: the engine started again.
+    pub(super) async fn restarted(self) -> Restarted {
+        let Restarted {
+            root,
+            mut service,
+            _stop: stop,
+        } = self;
+        let _ = tokio::time::timeout(Duration::from_secs(10), service.shutdown())
+            .await
+            .unwrap();
+        drop(service);
+        let service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &root.path().join("global.toml"),
+            &root.path().join("project.toml"),
+            &stop.subscribe(),
+        )
+        .await
+        .unwrap();
+        Restarted {
+            root,
+            service,
+            _stop: stop,
+        }
+    }
+
+    pub(super) fn runtime(&self) -> &OwnerRuntimeHandle {
+        self.service.owner_runtime().unwrap()
+    }
+
+    pub(super) async fn stop(mut self) {
         tokio::time::timeout(Duration::from_secs(10), self.service.shutdown())
             .await
             .unwrap()

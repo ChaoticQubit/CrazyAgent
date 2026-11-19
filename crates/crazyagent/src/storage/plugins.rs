@@ -123,6 +123,7 @@ pub(crate) enum Command {
     DetachSecret {
         id: String,
         name: String,
+        ask: Option<super::narrowing::NarrowingAsk>,
     },
     GetServer {
         id: String,
@@ -1753,11 +1754,68 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
 /// Runs one plugins command inside a single transaction.
 /// Inputs: the engine connection, the engine root holding the plugin store and the command.
 /// Output: the changed or listed items, or a plain rejection code with nothing changed.
+/// Applies a kept secret detach at open: the server stops naming the secret, and its file
+/// is deleted unless another record names it. A server or secret already gone is applied.
+/// Inputs: the database, the engine root, the server id and the secret's name. Output: the
+/// outcome, or the failure, which keeps the intent for the next open.
+#[cfg(unix)]
+pub(crate) fn replay_detach(
+    connection: &mut Connection,
+    root: &Path,
+    id: &str,
+    name: &str,
+) -> Result<super::Replayed, EngineError> {
+    let detach = Command::DetachSecret {
+        id: id.into(),
+        name: name.into(),
+        ask: None,
+    };
+    match execute(connection, root, detach) {
+        Ok(ResultValue::Secret(_, Some(reference))) => {
+            settle_detached(connection, root, &reference);
+            Ok(super::Replayed::Committed)
+        }
+        Ok(_) => Err(error("server_secret_detach_unexpected")),
+        Err(gone) if gone.0 == "server_not_found" => {
+            Ok(super::Replayed::NotApplicable("server_not_found"))
+        }
+        Err(gone) if gone.0 == "server_secret_not_found" => {
+            Ok(super::Replayed::NotApplicable("server_secret_not_found"))
+        }
+        Err(problem) => Err(problem),
+    }
+}
+
+/// Deletes a detached secret's file straight after the detach commits, unless another record
+/// names it; a file that cannot go now stays noted for the next start. Storage does this for
+/// every detach, so the file has one owner. Inputs: the connection, root and reference.
+#[cfg(unix)]
+pub(crate) fn settle_detached(connection: &Connection, root: &Path, reference: &str) {
+    let kind = super::trash::MCP_SECRET;
+    if let Err(problem) = super::trash::settle(connection, root, None, kind, reference) {
+        eprintln!("file_trash_not_removed kind={kind} cause={}", problem.0);
+    }
+}
+
 pub(crate) fn execute(
     connection: &mut Connection,
     root: &Path,
     command: Command,
 ) -> Result<ResultValue, EngineError> {
+    execute_ending(connection, root, command, &[])
+}
+
+/// Runs one plugin change as [`execute`] does, and records in the same transaction the kept
+/// intents it ends, so a crash after its commit never replays them: an attach ends the kept
+/// detaches of the secret it replaces. Inputs: the connection, root, change and the intents
+/// it ends. Output: the change's result.
+pub(crate) fn execute_ending(
+    connection: &mut Connection,
+    root: &Path,
+    command: Command,
+    ends: &[super::narrowing::IntentId],
+) -> Result<ResultValue, EngineError> {
+    assert!(ends.is_empty() || matches!(command, Command::AttachSecret { .. }));
     let tx = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
@@ -1774,6 +1832,8 @@ pub(crate) fn execute(
         super::setup::plugin_changed(&tx, id, removed)?;
     }
     let value = run(&tx, root, command)?;
+    #[cfg(unix)]
+    super::narrowing::note_ended(&tx, ends)?;
     let committed = tx.commit().map_err(error);
     match (&value, committed) {
         (ResultValue::Skill(skill) | ResultValue::Imported(skill, ..), Err(problem))
@@ -2006,7 +2066,7 @@ pub(super) fn run(
             }
             ResultValue::Secret(Box::new(server_view(tx, &record, root, None)?), replaced)
         }
-        Command::DetachSecret { id, name } => {
+        Command::DetachSecret { id, name, .. } => {
             let mut record: ServerRecord = load(tx, "server", &id)?;
             let index = record
                 .secrets

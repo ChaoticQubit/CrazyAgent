@@ -965,7 +965,12 @@ impl EngineService {
             ordinary_socket,
         )?;
         drop(stream);
-        for kind in [OwnerClientKind::Tui, OwnerClientKind::Desktop] {
+        let kinds = self
+            .owner_runtime
+            .as_ref()
+            .ok_or_else(|| fail("owner_runtime_missing"))?
+            .active_kinds()?;
+        for kind in kinds {
             let client = OwnerClient::attach(&generation, kind, self.timeout)?;
             capabilities(&client).await?;
             cancelled(shutdown)?;
@@ -1356,6 +1361,7 @@ impl EngineService {
         assert!(!self.closed);
         let mut errors = Vec::new();
         if let Some(owner) = self.owner_runtime.as_ref() {
+            owner.stop_narrowing_drain().await;
             if let Err(error) = owner.invalidate_native_auth_dispatch() {
                 errors.push(error.0);
             }
@@ -1453,6 +1459,9 @@ impl Drop for EngineService {
     /// dropped without a completed shutdown, so no custodian outlives its engine.
     /// Inputs: the service being dropped. Output: none; an unconfirmed cleanup is logged.
     fn drop(&mut self) {
+        if let Some(owner) = self.owner_runtime.as_ref() {
+            owner.abort_narrowing_drain();
+        }
         if let Some(owner) = self.owner_runtime.as_ref()
             && let Err(error) = owner.invalidate_native_auth_dispatch()
         {
