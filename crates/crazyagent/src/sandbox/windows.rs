@@ -1241,11 +1241,12 @@ mod tests {
     /// volume keeps no short names. Input: an existing path. Output: the path cmd.exe prints.
     fn short_path(path: &Path) -> PathBuf {
         use std::os::windows::process::CommandExt;
-        let output = Command::new(cmd())
-            .arg("/C")
-            .raw_arg(format!("for %I in (\"{}\") do @echo %~sI", path.display()))
-            .output()
-            .unwrap();
+        let output = crate::spawn_gate::collected(
+            Command::new(cmd())
+                .arg("/C")
+                .raw_arg(format!("for %I in (\"{}\") do @echo %~sI", path.display())),
+        )
+        .unwrap();
         assert!(output.status.success(), "{output:?}");
         let short = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
         assert!(short.is_absolute(), "{}", short.display());
@@ -1303,7 +1304,8 @@ mod tests {
         fs::write(vault.join("key.txt"), "key\r\n").unwrap();
         let door = project.join("door");
         let line = format!("mklink /J {} {}", door.display(), vault.display());
-        assert!(Command::new(cmd()).arg("/C").arg(line).status().unwrap().success());
+        let made = crate::spawn_gate::collected(Command::new(cmd()).arg("/C").arg(line)).unwrap();
+        assert!(made.status.success(), "{made:?}");
         let mut names = vec![vault.clone(), project.join("VAULT-OF-KEYS"), door];
         let short = short_path(&vault);
         if short != vault {
@@ -1347,12 +1349,13 @@ mod tests {
         fs::create_dir(&vault).unwrap();
         let open = vault.join("open.txt");
         fs::write(&open, "open\r\n").unwrap();
-        let granted = Command::new("icacls")
-            .arg(&open)
-            .args(["/inheritance:r", "/grant:r", "*S-1-15-2-1:(R)"])
-            .args(["*S-1-3-4:(F)", "*S-1-5-32-544:(F)"])
-            .output()
-            .unwrap();
+        let granted = crate::spawn_gate::collected(
+            Command::new("icacls")
+                .arg(&open)
+                .args(["/inheritance:r", "/grant:r", "*S-1-15-2-1:(R)"])
+                .args(["*S-1-3-4:(F)", "*S-1-5-32-544:(F)"]),
+        )
+        .unwrap();
         assert!(granted.status.success(), "{granted:?}");
         let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()))
             .hide(&vault)
