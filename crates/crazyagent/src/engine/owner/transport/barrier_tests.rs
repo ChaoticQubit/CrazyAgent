@@ -659,9 +659,9 @@ async fn a_folder_add_whose_plan_storage_cannot_take_is_refused_unsent_and_moves
 }
 
 /// A New Project whose seed is done but whose record waits behind the owner barrier and busy
-/// storage until the post-disk cut drops its wait still lands once storage is free: the owner
-/// hears unknown, which stays true, and the project folder replaces its staging folder
-/// (V243-STORAGE-BUSY-ROWS, #629 F1).
+/// storage until the post-disk cut drops its wait still lands once storage is free: the cut
+/// closes the exchange unanswered, the client reads unknown, which stays true, and the
+/// project folder replaces its staging folder (V243-STORAGE-BUSY-ROWS, #629 F1).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_new_project_record_its_cut_drops_lands_once_storage_is_free() {
     let owner = Usage::start().await;
@@ -763,8 +763,11 @@ async fn a_new_project_record_its_cut_drops_lands_once_storage_is_free() {
     );
     let answered = answered.await.unwrap();
     assert!(
-        matches!(&answered, Ok(OwnerResponse::OutcomeUnknown { .. })),
-        "the cut answered unknown: {answered:?}"
+        matches!(
+            &answered,
+            Err(error) if error.0 == "owner_outcome_unknown_reconcile_same_identity"
+        ),
+        "the cut closed the exchange unanswered, which the client reads as unknown: {answered:?}"
     );
     assert_eq!(names(false), visible, "the record has not landed yet");
 
