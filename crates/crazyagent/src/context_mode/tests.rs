@@ -1051,17 +1051,18 @@ fn on_a_node_older_than_22_5_no_install_starts_and_an_agent_launch_drops_the_ser
 
 /// V243-CONTEXT-MODE-ENGINE-NODE: a node check that did not run to an answer answers its own
 /// code, so the owner is not told to update a Node that never answered; no install starts and
-/// no failure is recorded. The cases: node exits with a failure, prints nothing, or sits in an
-/// app bundle outside every granted root, which both boundaries refuse to start though run
-/// alone it names a supported version. Input: none. Output: none; panics on another answer.
+/// no failure is recorded. The cases: a `node` script that exits 1 or exits 0 printing nothing,
+/// whatever its arguments, and a node in an app bundle outside every granted root, which both
+/// boundaries refuse to start though run alone it names a supported version. Input: none.
+/// Output: none; panics on another answer.
 #[test]
 fn a_node_check_that_did_not_run_answers_its_own_code_not_too_old() {
-    for program in ["/usr/bin/false", "/usr/bin/true", "a refused start"] {
+    for why in ["a failed exit", "no output", "a refused start"] {
         let case = case("/usr/bin/false");
         case.store();
-        let node = if program.starts_with('/') {
-            PathBuf::from(program)
-        } else {
+        let node = case.bin.join("node");
+        fs::remove_file(&node).unwrap();
+        if why == "a refused start" {
             let bundle = case
                 .root
                 .parent()
@@ -1074,35 +1075,37 @@ fn a_node_check_that_did_not_run_answers_its_own_code_not_too_old() {
             )
             .unwrap();
             assert_eq!(alone.stdout, b"v24.0.0\n", "run alone it answers");
-            bundle.join("node")
-        };
-        fs::remove_file(case.bin.join("node")).unwrap();
-        std::os::unix::fs::symlink(&node, case.bin.join("node")).unwrap();
+            std::os::unix::fs::symlink(bundle.join("node"), &node).unwrap();
+        } else {
+            let code = if why == "a failed exit" { 1 } else { 0 };
+            fs::write(&node, format!("#!/bin/sh\nexit {code}\n")).unwrap();
+            fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).unwrap();
+        }
         assert_eq!(
             case.install().unwrap_err().0,
             "context_mode_node_check_failed",
-            "{program}"
+            "{why}"
         );
         assert_eq!(
             for_check(&case.root, npx_in(&case, VERSION)),
             ForCheck::Refused("context_mode_node_check_failed"),
-            "{program}"
+            "{why}"
         );
         assert_eq!(
             for_launch(&case.root, npx_in(&case, VERSION)),
             Err(ContextModeOff::Failed),
-            "{program}"
+            "{why}"
         );
-        assert!(!registered(&case.folder()), "{program}");
+        assert!(!registered(&case.folder()), "{why}");
         assert!(
             !case.npm().join(FAILED).exists(),
-            "{program}: no failure is recorded"
+            "{why}: no failure is recorded"
         );
         assert!(
             !case.npm().join(PROFILE).exists(),
-            "{program}: npm never started"
+            "{why}: npm never started"
         );
-        assert!(case.staged().is_empty(), "{program}");
+        assert!(case.staged().is_empty(), "{why}");
     }
 }
 
