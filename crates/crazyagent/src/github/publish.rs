@@ -409,6 +409,38 @@ thread_local! {
     /// step that fails says why. None sends it nowhere, as outside the rows.
     static CONTAINED_STDERR: std::cell::RefCell<Option<std::fs::File>> =
         const { std::cell::RefCell::new(None) };
+    /// Set only through the Windows rows' `Unwrapped` guard: a contained step on this thread
+    /// skips owner git's wrap while its container still turns the nested-repository check
+    /// off, so a row can show its check catches a plant that reaches outside. False runs
+    /// every step wrapped.
+    static UNWRAPPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A row's scope in which contained steps on its own thread run unwrapped ([`UNWRAPPED`]),
+/// reset when it is dropped, a failing row's unwind included, so no other row runs unwrapped.
+#[cfg(all(test, windows))]
+struct Unwrapped;
+
+#[cfg(all(test, windows))]
+impl Unwrapped {
+    /// Starts the scope. Output: the guard; a scope already open on this thread fails the row.
+    fn start() -> Self {
+        UNWRAPPED.with(|on| {
+            assert!(
+                !on.get(),
+                "an unwrapped scope is already open on this thread"
+            );
+            on.set(true);
+        });
+        Self
+    }
+}
+
+#[cfg(all(test, windows))]
+impl Drop for Unwrapped {
+    fn drop(&mut self) {
+        UNWRAPPED.with(|on| on.set(false));
+    }
 }
 
 /// Whether `command` starts where its relative `GIT_DIR` is meant to resolve: in the folder
@@ -444,14 +476,18 @@ fn started(
     if let Some(step) = BEFORE_SPAWN.with(|next| next.borrow_mut().take()) {
         step();
     }
+    if contained.is_some() {
+        assert!(
+            starts_at_its_work_tree(command),
+            "a contained git with a relative GIT_DIR starts in its work tree"
+        );
+    }
     let mut wrapped;
     let command = match contained {
         None => command,
+        #[cfg(test)]
+        Some(_) if UNWRAPPED.with(std::cell::Cell::get) => command,
         Some(owner) => {
-            assert!(
-                starts_at_its_work_tree(command),
-                "a contained git with a relative GIT_DIR starts in its work tree"
-            );
             wrapped = owner
                 .wrap(command)
                 .map_err(|_| failure("github_publish_failed"))?;

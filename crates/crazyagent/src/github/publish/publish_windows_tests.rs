@@ -497,6 +497,27 @@ fn a_contained_windows_publish_commits_a_new_file_with_the_project_author_first(
     );
 }
 
+/// Judges a commit of an unborn project whose `sub\.git` gitfile names the share's
+/// repository, as the planted row does: right only when it is `github_publish_failed` for
+/// git's "'sub/' does not have a commit checked out", with no branch made. Inputs: the
+/// commit's answer, the project and what contained git said. Output: what is wrong, or none.
+fn gitfile_commit_wrong(
+    answer: &Result<GitHubCommitted, EngineError>,
+    folder: &Path,
+    said: &str,
+) -> Option<String> {
+    let refused = matches!(answer, Err(EngineError(code)) if code == "github_publish_failed");
+    let unborn = !folder
+        .join(".git")
+        .join("refs")
+        .join("heads")
+        .join("main")
+        .exists();
+    let named = said.contains("'sub/' does not have a commit checked out");
+    (!(refused && unborn && named))
+        .then(|| format!("{answer:?}, refused {refused}, unborn {unborn}, sub named {named}"))
+}
+
 #[test]
 #[ignore = "needs unc-share-setup.ps1's shares and device entries on an elevated runner (test farm)"]
 fn a_contained_windows_publish_reads_no_git_folder_or_gitfile_planted_below_the_project() {
@@ -557,28 +578,23 @@ fn a_contained_windows_publish_reads_no_git_folder_or_gitfile_planted_below_the_
                     Ok(local) if local.branch.as_deref() == Some("main") => None,
                     other => Some(format!("{other:?}")),
                 },
-                "commit" => match (shape, commit(&git, home, &folder, &[], &ada)) {
-                    ("folder", Ok(made_commit))
-                        if made_commit.branch == "main" && made_commit.commit == made.head() =>
-                    {
-                        None
+                "commit" => {
+                    let answer = commit(&git, home, &folder, &[], &ada);
+                    match (shape, answer) {
+                        ("folder", Ok(made_commit))
+                            if made_commit.branch == "main"
+                                && made_commit.commit == made.head() =>
+                        {
+                            None
+                        }
+                        ("folder", other) => Some(format!("{other:?}")),
+                        (_, answer) => gitfile_commit_wrong(
+                            &answer,
+                            &folder,
+                            &std::fs::read_to_string(&said).unwrap_or_default(),
+                        ),
                     }
-                    ("gitfile", Err(EngineError(code)))
-                        if code == "github_publish_failed"
-                            && !folder
-                                .join(".git")
-                                .join("refs")
-                                .join("heads")
-                                .join("main")
-                                .exists()
-                            && std::fs::read_to_string(&said)
-                                .unwrap_or_default()
-                                .contains("'sub/' does not have a commit checked out") =>
-                    {
-                        None
-                    }
-                    other => Some(format!("{other:?}")),
-                },
+                }
                 "author" => match configured_author(&git, made.owner_home.path(), home, &folder) {
                     Some(author) if author.name == "Owner" => None,
                     other => Some(format!("{other:?}")),
@@ -727,5 +743,71 @@ fn a_contained_windows_git_started_below_the_project_trips_the_start_assertion()
         command
             .current_dir(folder.join("inner"))
             .args(["rev-parse", "HEAD"]),
+    );
+}
+
+#[test]
+fn the_unwrapped_scope_holds_only_on_its_own_thread_until_dropped() {
+    let on = || UNWRAPPED.with(std::cell::Cell::get);
+    assert!(!on(), "a row starts wrapped");
+    {
+        let _unwrapped = Unwrapped::start();
+        assert!(on(), "the scope unwraps its own thread");
+        assert!(
+            !std::thread::spawn(|| UNWRAPPED.with(std::cell::Cell::get))
+                .join()
+                .unwrap(),
+            "another row's thread stays wrapped"
+        );
+    }
+    assert!(!on(), "the scope ends wrapped");
+    let failed = std::panic::catch_unwind(|| {
+        let _unwrapped = Unwrapped::start();
+        assert!(!UNWRAPPED.with(std::cell::Cell::get), "a failing row");
+    });
+    assert!(failed.is_err());
+    assert!(!on(), "a failing row's unwind leaves its thread wrapped");
+}
+
+#[test]
+#[ignore = "needs unc-share-setup.ps1's shares and device entries on an elevated runner (test farm)"]
+fn a_planted_share_gitfile_fails_the_planted_check_when_the_commit_runs_unwrapped() {
+    use crate::sandbox::windows::owner_git::farm;
+    let nested_head = std::env::var("CRAZYAGENT_FARM_NESTED_HEAD")
+        .expect("CRAZYAGENT_FARM_NESTED_HEAD is set by unc-share-setup.ps1 on the test farm");
+    let made = unborn();
+    let folder = contained_folder(&made);
+    farm::plant(&folder, "nested");
+    let git = routed(&made, &folder);
+    let ada = Author {
+        name: "Ada".into(),
+        email: "ada@example.invalid".into(),
+    };
+    farm::reset_sessions();
+    let answer = {
+        let _unwrapped = Unwrapped::start();
+        commit(&git, made.home.path(), &folder, &[], &ada)
+    };
+    let reached = farm::server_session();
+    assert!(
+        !UNWRAPPED.with(std::cell::Cell::get),
+        "the row ends wrapped"
+    );
+    assert!(
+        gitfile_commit_wrong(&answer, &folder, "").is_some(),
+        "the planted check passed an unwrapped commit: {answer:?}"
+    );
+    assert!(
+        reached,
+        "the unwrapped commit opened no server session: {answer:?}"
+    );
+    assert!(
+        answer.is_ok(),
+        "the unwrapped commit reached the share's repository: {answer:?}"
+    );
+    assert_eq!(
+        owner_git(&folder, &["ls-tree", "HEAD", "sub"]).trim_end(),
+        format!("160000 commit {nested_head}\tsub"),
+        "the unwrapped commit records sub as a gitlink at the share's commit"
     );
 }
