@@ -137,7 +137,7 @@ describe("Native terminal views in the real window", () => {
     master = await liveMaster();
   });
 
-  after(async () => {
+  afterEach(async () => {
     for (const view of [...opened]) await close(view).catch(() => {});
   });
 
