@@ -17,6 +17,8 @@ const SHORT_TURN_MS = 6000;
 /** How long a stand-in turn for a line with "long" in it may hold the next line: its
  * TURN_S of 90 seconds in master-switch.wdio.conf.mjs, with room for a loaded machine. */
 const LONG_TURN_MS = 120000;
+/** The pause before a following page view opens again, FOLLOW_MS in terminal-panel.tsx. */
+const FOLLOW_MS = 1000;
 const RUNNING = ["starting", "idle", "working"];
 const READ = { kind: "read" };
 const RETURN = { kind: "key", characters: "\r", code: 36 };
@@ -42,9 +44,10 @@ function tmux(...args) {
   return result.stdout.trim();
 }
 
-/** Starts the project's team and waits until the master runs in a terminal, then leaves the
- * Conversation tab so the page's own master view closes and the spec's views own the
- * terminal. Output: the master's terminal name. */
+/** Starts the project's team and waits until the master runs in a terminal and the page's
+ * own master panel is live, then leaves the Conversation tab. The page keeps that view
+ * hidden with its terminal live (DEC-187), so every row opens over a hidden following view
+ * of the same key, as the app does, never by a race (#632). Output: the terminal name. */
 async function liveMaster() {
   await tab("conversation");
   await startIfPaused(kit, run.project);
@@ -53,6 +56,7 @@ async function liveMaster() {
     node = (await teamNodes(run.project)).find((each) => each.kind === "master") ?? null;
     return { done: Boolean(node?.terminal) && RUNNING.includes(node.status), seen: JSON.stringify(node).slice(0, 300) };
   }, MASTER_MS, "the master never ran in a terminal");
+  await until(async () => (await masterPanel()).live, UI_MS, "the page's master panel never went live");
   await tab("overview");
   await pause(1500);
   assert.ok(node.terminal);
@@ -82,6 +86,22 @@ async function open(keys) {
 function events(tag) {
   return browser.execute((tag) => (window.__w5?.[tag] ?? []).slice().sort((a, b) => a.index - b.index)
     .map((raw) => ("end" in raw ? { end: true } : raw.message)), tag);
+}
+
+/** Names a view's events in order: each type with its code, and "end" for the end marker.
+ * Input: the events. Output: the names. */
+function named(list) {
+  return list.map((event) => (event.end ? "end" : `${event.type}${event.code ? `:${event.code}` : ""}`));
+}
+
+/** Reads the page's own embedded master panel on the Conversation tab. Output: whether its
+ * view is live, and the text of its ended alert, or null while it has none. */
+function masterPanel() {
+  return browser.execute(() => {
+    const panel = document.querySelector("section.tg-terminal.embedded");
+    const alert = panel?.querySelector('.tg-terminal-state[role="alert"] span');
+    return { live: Boolean(panel?.querySelector(".tg-terminal-note")), ended: alert?.textContent ?? null };
+  });
 }
 
 /** Takes one probe step on a view. Inputs: the view and the step. Output: what the view
@@ -134,7 +154,7 @@ async function turnsShown({ view, tag }, count, timeout, label) {
   try {
     return await seenWhen(view, (seen) => turns(seen) === count, timeout, label);
   } catch (error) {
-    const told = (await events(tag)).map((event) => (event.end ? "end" : `${event.type}${event.code ? `:${event.code}` : ""}`));
+    const told = named(await events(tag));
     const clients = tmux("list-clients", "-F", "#{client_pid} #{client_flags} created=#{client_created}").split("\n");
     throw new Error(`${error.message}; the pane printed ${paneTurns()} stand-in turns in all; view events ${JSON.stringify(told)}; clients ${JSON.stringify(clients)}; now ${Math.floor(Date.now() / 1000)}`);
   }
@@ -259,6 +279,34 @@ describe("Native terminal views in the real window", () => {
     await until(async () => (await probe(shown.view, READ)) && paneWidth() === width, UI_MS,
       `the pane never came back to ${width} columns at the window's own scale`);
     await close(shown.view);
+  });
+
+  it("a hidden page view a newer view replaced opens nothing on its own and takes the master back once its panel shows (#632)", async () => {
+    const shown = await open(false);
+    await ready(shown);
+    await pause(2 * FOLLOW_MS + 500);
+    assert.deepEqual(named(await events(shown.tag)), ["ready"], "nothing took the master from the newer view");
+    await assert.rejects(probe(shown.view + 1, READ), /native_terminal_view_unknown/, "no view opened after the newer one");
+    await tab("conversation");
+    await until(async () => (await events(shown.tag)).some((event) => event.type === "ended"), UI_MS, "the shown panel never took the master back");
+    assert.equal((await events(shown.tag)).find((event) => event.type === "ended").code, "terminal_view_replaced");
+    opened.delete(shown.view);
+    await until(async () => (await masterPanel()).live, UI_MS, "the shown panel never went live");
+  });
+
+  it("an on-screen following panel a newer view replaces says so and opens nothing more (#632)", async () => {
+    await tab("conversation");
+    await until(async () => (await masterPanel()).live, UI_MS, "the page's master panel is not live on screen");
+    const shown = await open(false);
+    await ready(shown);
+    await until(async () => /newer view/.test((await masterPanel()).ended ?? ""), UI_MS, "the replaced panel never said a newer view took the terminal");
+    await pause(5000);
+    assert.deepEqual(named(await events(shown.tag)), ["ready"], "the replaced panel never took the master back");
+    await assert.rejects(probe(shown.view + 1, READ), /native_terminal_view_unknown/, "no view opened after the newer one");
+    assert.match((await masterPanel()).ended ?? "", /newer view/, "the panel still says why it closed");
+    await close(shown.view);
+    await tab("overview");
+    await pause(1500);
   });
 
   it("an ended terminal closes the direct view", async () => {
