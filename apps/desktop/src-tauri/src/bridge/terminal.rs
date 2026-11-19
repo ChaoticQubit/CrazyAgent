@@ -1012,6 +1012,47 @@ mod tests {
         );
     }
 
+    /// V243-INPUT-PIN-TOLD-END-KEY-SCOPE: only a newer view of a view's own key replaces it.
+    /// A newer view of another key in the same window leaves its detached end detached, before
+    /// and after its own key is replaced, so that view's follower may still take its key back.
+    #[test]
+    fn a_newer_view_of_another_key_in_the_window_replaces_nothing() {
+        let terminals = Arc::new(Terminals::default());
+        terminals.page_started("main");
+        let (first, second) = (team(3), team(4));
+        let (requests, _queue) = mpsc::channel(1);
+        let told = |key: &ViewKey, serial: u64| {
+            terminals.told_end("main", key, serial, closed("terminal_detached"))
+        };
+        let older = terminals.room("main", &first).unwrap();
+        terminals
+            .install_viewer("main", &first, older.serial, requests.clone())
+            .unwrap();
+        let other = terminals.room("main", &second).unwrap();
+        terminals
+            .install_viewer("main", &second, other.serial, requests.clone())
+            .unwrap();
+        assert!(other.serial > older.serial);
+        let detached = closed("terminal_detached");
+        assert_eq!(
+            told(&first, older.serial),
+            detached,
+            "a newer view of another key replaces nothing"
+        );
+        let newer = terminals.room("main", &first).unwrap();
+        terminals
+            .install_viewer("main", &first, newer.serial, requests)
+            .unwrap();
+        assert!(newer.serial > other.serial);
+        assert_eq!(told(&first, older.serial), closed("terminal_view_replaced"));
+        assert_eq!(
+            told(&second, other.serial),
+            detached,
+            "a newer view of the first key leaves the second key's view its own end"
+        );
+        assert_eq!(told(&first, newer.serial), detached);
+    }
+
     /// A wall window's page reloads while an attach waits on its team graph read: the place
     /// that attach took is refused when it lands, so the old page's view never holds a slot,
     /// and an attach whose read refuses the window gives its place back (RV-DS241-46).
