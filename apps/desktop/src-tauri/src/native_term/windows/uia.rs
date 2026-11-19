@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use windows::Win32::Foundation::{E_INVALIDARG, E_NOTIMPL, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{E_INVALIDARG, HWND, LPARAM, WPARAM};
 use windows::Win32::System::Com::SAFEARRAY;
 use windows::Win32::System::Ole::{SafeArrayCreateVector, SafeArrayDestroy, SafeArrayPutElement};
 use windows::Win32::System::Variant::{VARIANT, VT_R8, VT_UNKNOWN};
@@ -258,48 +258,78 @@ fn unit_of(unit: TextUnit) -> Result<Unit> {
 
 impl IRawElementProviderSimple_Impl for Terminal_Impl {
     fn ProviderOptions(&self) -> Result<ProviderOptions> {
-        Err(E_NOTIMPL.into())
+        Ok(ProviderOptions_ServerSideProvider)
     }
 
     fn GetPatternProvider(&self, patternid: UIA_PATTERN_ID) -> Result<IUnknown> {
-        Err(E_NOTIMPL.into())
+        self.access.shape()?;
+        if patternid != UIA_TextPatternId {
+            return Err(Error::empty());
+        }
+        let text: ITextProvider = self.to_interface();
+        text.cast()
     }
 
     fn GetPropertyValue(&self, propertyid: UIA_PROPERTY_ID) -> Result<VARIANT> {
-        Err(E_NOTIMPL.into())
+        let (_, _, focused, _) = self.access.shape()?;
+        let value = match propertyid {
+            UIA_ControlTypePropertyId => VARIANT::from(UIA_DocumentControlTypeId.0),
+            UIA_NamePropertyId => VARIANT::from(NAME),
+            UIA_IsKeyboardFocusablePropertyId => VARIANT::from(true),
+            UIA_HasKeyboardFocusPropertyId => VARIANT::from(focused),
+            _ => VARIANT::default(),
+        };
+        Ok(value)
     }
 
     fn HostRawElementProvider(&self) -> Result<IRawElementProviderSimple> {
-        Err(E_NOTIMPL.into())
+        self.access.shape()?;
+        unsafe { UiaHostProviderFromHwnd(HWND(self.hwnd as *mut core::ffi::c_void)) }
     }
 }
 
 impl ITextProvider_Impl for Terminal_Impl {
     fn GetSelection(&self) -> Result<*mut SAFEARRAY> {
-        Err(E_NOTIMPL.into())
+        let marked = self.access.text()?.marked();
+        ranges_array(&[self.range(marked)])
     }
 
     fn GetVisibleRanges(&self) -> Result<*mut SAFEARRAY> {
-        Err(E_NOTIMPL.into())
+        let units = self.access.text()?.units();
+        ranges_array(&[self.range((0, units))])
     }
 
     fn RangeFromChild(
         &self,
         _childelement: Ref<IRawElementProviderSimple>,
     ) -> Result<ITextRangeProvider> {
-        Err(E_NOTIMPL.into())
+        self.access.shape()?;
+        Err(Error::from(E_INVALIDARG))
     }
 
     fn RangeFromPoint(&self, point: &UiaPoint) -> Result<ITextRangeProvider> {
-        Err(E_NOTIMPL.into())
+        let (_, _, _, key) = self.access.shape()?;
+        let (text, (rows, columns)) = self.access.read()?;
+        let Some((origin, cell)) = screen_cells(self.hwnd, self.access.id, key) else {
+            return Ok(self.range((0, 0)));
+        };
+        if rows == 0 || columns == 0 {
+            return Ok(self.range((0, 0)));
+        }
+        let at = (point.x - origin.0, point.y - origin.1);
+        let (row, column) = cell_near(pixels(cell), at, rows, columns);
+        let index = text.index_at(row, column);
+        Ok(self.range((index, index)))
     }
 
     fn DocumentRange(&self) -> Result<ITextRangeProvider> {
-        Err(E_NOTIMPL.into())
+        let units = self.access.text()?.units();
+        Ok(self.range((0, units)))
     }
 
     fn SupportedTextSelection(&self) -> Result<SupportedTextSelection> {
-        Err(E_NOTIMPL.into())
+        self.access.shape()?;
+        Ok(SupportedTextSelection_Single)
     }
 }
 
@@ -407,11 +437,13 @@ fn with_endpoint(
 
 impl ITextRangeProvider_Impl for TextRange_Impl {
     fn Clone(&self) -> Result<ITextRangeProvider> {
-        Err(E_NOTIMPL.into())
+        let (_, span) = self.fresh()?;
+        Ok(range_of(self.hwnd, &self.access, span))
     }
 
     fn Compare(&self, range: Ref<ITextRangeProvider>) -> Result<BOOL> {
-        Err(E_NOTIMPL.into())
+        let (text, span) = self.fresh()?;
+        Ok((self.other(range, &text)? == span).into())
     }
 
     fn CompareEndpoints(
@@ -420,11 +452,21 @@ impl ITextRangeProvider_Impl for TextRange_Impl {
         targetrange: Ref<ITextRangeProvider>,
         targetendpoint: TextPatternRangeEndpoint,
     ) -> Result<i32> {
-        Err(E_NOTIMPL.into())
+        let (text, span) = self.fresh()?;
+        let mine = endpoint(span, endpoint_mine)?;
+        let theirs = endpoint(self.other(targetrange, &text)?, targetendpoint)?;
+        Ok(match mine.cmp(&theirs) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        })
     }
 
     fn ExpandToEnclosingUnit(&self, unit: TextUnit) -> Result<()> {
-        Err(E_NOTIMPL.into())
+        let unit = unit_of(unit)?;
+        let (text, span) = self.fresh()?;
+        self.set(text.enclosing(span.0, unit));
+        Ok(())
     }
 
     fn FindAttribute(
@@ -433,7 +475,8 @@ impl ITextRangeProvider_Impl for TextRange_Impl {
         _val: &VARIANT,
         _backward: BOOL,
     ) -> Result<ITextRangeProvider> {
-        Err(E_NOTIMPL.into())
+        self.fresh()?;
+        Err(Error::empty())
     }
 
     fn FindText(
@@ -442,27 +485,69 @@ impl ITextRangeProvider_Impl for TextRange_Impl {
         _backward: BOOL,
         _ignorecase: BOOL,
     ) -> Result<ITextRangeProvider> {
-        Err(E_NOTIMPL.into())
+        self.fresh()?;
+        Err(Error::empty())
     }
 
     fn GetAttributeValue(&self, _attributeid: UIA_TEXTATTRIBUTE_ID) -> Result<VARIANT> {
-        Err(E_NOTIMPL.into())
+        self.fresh()?;
+        let unsupported = unsafe { UiaGetReservedNotSupportedValue() }?;
+        Ok(VARIANT::from(unsupported))
     }
 
     fn GetBoundingRectangles(&self) -> Result<*mut SAFEARRAY> {
-        Err(E_NOTIMPL.into())
+        let (text, span) = self.fresh()?;
+        let (_, _, _, key) = self.access.shape()?;
+        let lines = text.lines_of(span.0, span.1);
+        let placed = screen_cells(self.hwnd, self.access.id, key);
+        let mut sides = Vec::with_capacity(lines.len() * 4);
+        if let Some((origin, cell)) = placed {
+            for (row, first, past) in lines {
+                let (x, y, width, height) = a11y::cell_rect(pixels(cell), row, first, past - first);
+                sides.extend([origin.0 + x, origin.1 + y, width, height]);
+            }
+        }
+        doubles_array(&sides)
     }
 
     fn GetEnclosingElement(&self) -> Result<IRawElementProviderSimple> {
-        Err(E_NOTIMPL.into())
+        self.fresh()?;
+        Ok(Terminal::new(self.hwnd, Arc::clone(&self.access)).into())
     }
 
     fn GetText(&self, maxlength: i32) -> Result<BSTR> {
-        Err(E_NOTIMPL.into())
+        let (text, span) = self.fresh()?;
+        let read = text.string_for_range((span.0, span.1 - span.0));
+        let string = read.map(|(string, _)| string).unwrap_or_default();
+        let mut wide: Vec<u16> = string.encode_utf16().collect();
+        if let Ok(keep) = usize::try_from(maxlength) {
+            if keep < wide.len() {
+                let cuts_pair = keep > 0 && (0xD800..0xDC00).contains(&wide[keep - 1]);
+                wide.truncate(keep - usize::from(cuts_pair));
+            }
+        }
+        Ok(BSTR::from_wide(&wide))
     }
 
     fn Move(&self, unit: TextUnit, count: i32) -> Result<i32> {
-        Err(E_NOTIMPL.into())
+        let unit = unit_of(unit)?;
+        let (text, span) = self.fresh()?;
+        if count == 0 {
+            return Ok(0);
+        }
+        if span.0 == span.1 {
+            let (at, moved) = text.moved(span.0, unit, count);
+            self.set((at, at));
+            return Ok(moved);
+        }
+        let start = text.enclosing(span.0, unit).0;
+        let (mut at, mut moved) = text.moved(start, unit, count);
+        if at == text.units() && moved > 0 {
+            at = text.moved(at, unit, -1).0;
+            moved -= 1;
+        }
+        self.set(text.enclosing(at, unit));
+        Ok(moved)
     }
 
     fn MoveEndpointByUnit(
@@ -471,7 +556,11 @@ impl ITextRangeProvider_Impl for TextRange_Impl {
         unit: TextUnit,
         count: i32,
     ) -> Result<i32> {
-        Err(E_NOTIMPL.into())
+        let unit = unit_of(unit)?;
+        let (text, span) = self.fresh()?;
+        let (at, moved) = text.moved(endpoint(span, which)?, unit, count);
+        self.set(with_endpoint(span, which, at)?);
+        Ok(moved)
     }
 
     fn MoveEndpointByRange(
@@ -480,27 +569,32 @@ impl ITextRangeProvider_Impl for TextRange_Impl {
         targetrange: Ref<ITextRangeProvider>,
         targetendpoint: TextPatternRangeEndpoint,
     ) -> Result<()> {
-        Err(E_NOTIMPL.into())
+        let (text, span) = self.fresh()?;
+        let at = endpoint(self.other(targetrange, &text)?, targetendpoint)?;
+        self.set(with_endpoint(span, which, at)?);
+        Ok(())
     }
 
     fn Select(&self) -> Result<()> {
-        Err(E_NOTIMPL.into())
+        Err(refused())
     }
 
     fn AddToSelection(&self) -> Result<()> {
-        Err(E_NOTIMPL.into())
+        Err(refused())
     }
 
     fn RemoveFromSelection(&self) -> Result<()> {
-        Err(E_NOTIMPL.into())
+        Err(refused())
     }
 
     fn ScrollIntoView(&self, _aligntotop: BOOL) -> Result<()> {
-        Err(E_NOTIMPL.into())
+        self.fresh()?;
+        Ok(())
     }
 
     fn GetChildren(&self) -> Result<*mut SAFEARRAY> {
-        Err(E_NOTIMPL.into())
+        self.fresh()?;
+        ranges_array(&[])
     }
 }
 
