@@ -879,7 +879,7 @@ dependencies = [
 
 [[package]]
 name = "crazyagent"
-version = "2.4.2"
+version = "2.4.3"
 dependencies = [
  "base64 0.22.1",
  "crazyagent-linux-supervisor",
@@ -918,7 +918,7 @@ dependencies = [
 
 [[package]]
 name = "crazyagent-desktop"
-version = "2.4.2"
+version = "2.4.3"
 dependencies = [
  "alacritty_terminal",
  "bytemuck",
@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "crazyagent-linux-supervisor"
-version = "2.4.2"
+version = "2.4.3"
 dependencies = [
  "libc",
  "rustix 1.1.5",
@@ -956,14 +956,14 @@ dependencies = [
 
 [[package]]
 name = "crazyagent-macos-fs"
-version = "2.4.2"
+version = "2.4.3"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "crazyagent-win-sandbox"
-version = "2.4.2"
+version = "2.4.3"
 dependencies = [
  "tempfile",
  "windows-sys 0.61.2",
