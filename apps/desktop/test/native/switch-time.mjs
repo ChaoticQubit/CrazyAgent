@@ -30,6 +30,19 @@ export const VIEW_IDS_MAX = 64;
 const BUSY_TRIES_MAX = 20;
 const BUSY_MS = 10;
 
+/** The page overlays a native panel counts as covering its view: the panel's own `OVERLAYS`
+ * (native-panel.tsx), copied since a spec reads no app source at run time; a row keeps the
+ * two equal. */
+export const PAGE_OVERLAYS = '[role="dialog"],[role="menu"],[role="listbox"],[role="tooltip"],dialog[open],[popover],.toast';
+
+/** The native panels' screens a page read finds. */
+export const NATIVE_SCREENS = ".tg-terminal-native";
+
+/** How many screens and how many overlays one page read keeps, and how many characters of an
+ * overlay's text. */
+export const PAGE_LOOK_MAX = 16;
+export const PAGE_TEXT_MAX = 40;
+
 /** How many frame gaps a row times in its idle window before it switches. */
 export const PERIOD_FRAMES = 30;
 
@@ -145,6 +158,53 @@ export function inPageNativeRead(request, done) {
   );
 }
 
+/** Runs inside the app page and uses nothing outside itself: what of the page could keep a
+ * native view covered after a switch never shown. Input: `{ screens, overlays, max,
+ * text_max }`, the selectors and bounds. Output: `{ screens, overlays, more }`: each native
+ * screen's terminal name, hidden flag and rect; each overlay with a size as tag, role and
+ * class, its rect, its first `text_max` characters and the screens it lies over as the panel
+ * counts it (not inside nor around one); and how many past `max` were left out. */
+export function inPageCovers(request) {
+  const box = (node) => {
+    const rect = node.getBoundingClientRect();
+    return { x: Math.round(rect.left), y: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height) };
+  };
+  const sized = (node) => {
+    const rect = node.getBoundingClientRect();
+    return rect.width >= 1 && rect.height >= 1;
+  };
+  const meets = (screen, node) => {
+    const a = screen.getBoundingClientRect();
+    const b = node.getBoundingClientRect();
+    return b.left < a.right && b.right > a.left && b.top < a.bottom && b.bottom > a.top;
+  };
+  const screens = [...document.querySelectorAll(request.screens)];
+  const overlays = [...document.querySelectorAll(request.overlays)].filter(sized);
+  const over = (node) => screens
+    .filter((screen) => sized(screen) && !screen.contains(node) && !node.contains(screen) && meets(screen, node))
+    .map((screen) => screen.getAttribute("data-native-terminal"));
+  return {
+    screens: screens.slice(0, request.max).map((node) => ({ name: node.getAttribute("data-native-terminal"), hidden: node.hidden === true, rect: box(node) })),
+    overlays: overlays.slice(0, request.max).map((node) => ({
+      what: [node.tagName.toLowerCase(), node.getAttribute("role"), node.getAttribute("class")].filter(Boolean).join(" "),
+      rect: box(node),
+      text: (node.textContent ?? "").replace(/\s+/g, " ").trim().slice(0, request.text_max),
+      over: over(node),
+    })),
+    more: Math.max(0, screens.length - request.max) + Math.max(0, overlays.length - request.max),
+  };
+}
+
+/** The page read of a switch never shown, in the real window (`inPageCovers`). Output: its
+ * answer, checked for shape and bound. */
+async function pageCovers() {
+  const answer = await browser.execute(inPageCovers, { screens: NATIVE_SCREENS, overlays: PAGE_OVERLAYS, max: PAGE_LOOK_MAX, text_max: PAGE_TEXT_MAX });
+  assert.ok(Array.isArray(answer?.screens) && Array.isArray(answer.overlays), `the page answered its cover read: ${JSON.stringify(answer)}`);
+  assert.ok(answer.screens.length <= PAGE_LOOK_MAX && answer.overlays.length <= PAGE_LOOK_MAX, "a page read keeps at most its bound");
+  assert.ok(Number.isInteger(answer.more) && answer.more >= 0, "a page read counts what it left out");
+  return answer;
+}
+
 function checkedNative(target) {
   assert.ok(Number.isInteger(target.view) && target.view > 0 && target.view <= VIEW_IDS_MAX, `a native target names a view id up to ${VIEW_IDS_MAX}`);
   assert.match(target.text ?? "", /\S/, "a native target names its text");
@@ -186,7 +246,8 @@ export async function nativeViewShowing(text) {
  * every `LOOK_MS` until it is on screen or `SHOW_MS_MAX` passed. Inputs: `{ click, target }`.
  * Output: `{ ms, uncovered_ms, asked_ms, skipped, skip_first, busy, refused, reads, skew_ms,
  * load1 }`, ms null for a view never shown, which keeps its last read as `last`
- * (`nativeLook`); throws for no link, a view on screen before the click, or one gone. */
+ * (`nativeLook`, with the page read as `last.page`, `inPageCovers`); throws for no link, a
+ * view on screen before the click, or one gone. */
 async function timeNativeSwitch({ click, target }) {
   const load1 = loadavg()[0];
   const gone = `native view ${target.view} is gone: it ended or opened again, so the switch is not timed`;
@@ -213,7 +274,8 @@ async function timeNativeSwitch({ click, target }) {
     const counts = nativeCounts(first.seen, read.seen);
     if (sample !== null) return { ...sample, ...counts, reads, skew_ms: skew, load1 };
     if (Date.now() >= deadline || reads === readsMax) {
-      return { ms: null, uncovered_ms: null, last: nativeLook(clickAt, read.seen, target.text), ...counts, reads, skew_ms: skew, load1 };
+      const last = { ...nativeLook(clickAt, read.seen, target.text), page: await pageCovers() };
+      return { ms: null, uncovered_ms: null, last, ...counts, reads, skew_ms: skew, load1 };
     }
     await pause(LOOK_MS);
   }
