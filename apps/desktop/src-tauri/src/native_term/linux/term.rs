@@ -218,7 +218,7 @@ mod tests {
 
     /// The page asks a new term for focus before the host's first place, which the view
     /// refuses unplaced; the term owes it and applies it right after that place, once. A
-    /// focus asked once the term shows applies at once.
+    /// focus asked once the term shows applies at once, and a cover takes it back.
     #[test]
     #[ignore = "needs a display: the farm runs it under Xvfb and sway"]
     fn focus_asked_before_the_first_place_is_applied_right_after_it() {
@@ -251,13 +251,17 @@ mod tests {
             term.view.focus_state().active(),
             "focus asked after the first place applies at once"
         );
+        term.cover(true);
+        assert!(
+            !term.view.focus_state().is_native(),
+            "a cover gives the keys back to the page"
+        );
         close(window, term);
     }
 
-    /// A shown term with native focus is covered: the keys go back to the page and its child
-    /// leaves the screen, so the farm's screenshot reads the page's white over the rectangle,
-    /// and it never presents while covered. Uncovered and placed again, it draws green again;
-    /// a hidden place takes the child off screen as a cover does.
+    /// A shown term is covered: its child leaves the screen, so the farm's screenshot reads
+    /// the page's white over the rectangle, and it never presents while covered; uncovered
+    /// and placed again, it draws green again. A hidden place takes the child off screen too.
     #[test]
     #[ignore = "needs a display: the farm runs it under Xvfb, weston and sway"]
     fn a_cover_takes_the_child_off_screen_until_the_next_shown_place() {
@@ -269,14 +273,7 @@ mod tests {
         let (mut shared, mut surface, frame) = green_terminal(child);
         show_frames(&mut term, &mut shared, &mut surface, &frame);
         step("shown", &term);
-        term.view.toplevel_focused();
-        term.focus();
-        assert!(term.view.focus_state().active(), "a shown term takes focus");
         term.cover(true);
-        assert!(
-            !term.view.focus_state().is_native(),
-            "a cover gives the keys back to the page"
-        );
         never_presents(&mut term, "a covered term's child never presents");
         step("covered", &term);
         term.cover(false);
