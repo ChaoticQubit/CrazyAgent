@@ -15,8 +15,9 @@ use windows_sys::Win32::UI::Input::Ime::{
     ImmSetCandidateWindow, ImmSetCompositionWindow, NI_COMPOSITIONSTR,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetDoubleClickTime, GetFocus, GetKeyState, GetKeyboardLayout, ReleaseCapture, SetCapture,
-    SetFocus, ToUnicodeEx, VK_CONTROL, VK_LWIN, VK_MENU, VK_PROCESSKEY, VK_RWIN, VK_SHIFT,
+    GetCapture, GetDoubleClickTime, GetFocus, GetKeyState, GetKeyboardLayout, ReleaseCapture,
+    SetCapture, SetFocus, ToUnicodeEx, VK_CONTROL, VK_LWIN, VK_MENU, VK_PROCESSKEY, VK_RWIN,
+    VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetMessageTime,
@@ -272,6 +273,9 @@ impl View {
     /// again after; a box that cannot be placed, or a fault, keeps it hidden, as `place`
     /// does. Input: whether it is covered.
     pub fn cover(&self, covered: bool) {
+        if covered {
+            self.inner.end_drag(self.hwnd);
+        }
         self.inner.covered.set(covered);
         let _ = self.inner.apply(self.hwnd);
     }
@@ -346,6 +350,7 @@ impl View {
 
 impl Inner {
     fn hide(&self, hwnd: HWND) {
+        self.end_drag(hwnd);
         unsafe { ShowWindow(hwnd, SW_HIDE) };
         if self.shown.replace(false) {
             self.cancel_marked(hwnd);
@@ -360,10 +365,24 @@ impl Inner {
         self.open() && self.shown.get() && !self.covered.get() && self.focused.get()
     }
 
-    /// Whether mouse input reaches the sink: the view is live and not faulted. A hidden or
-    /// covered view gets no mouse messages, and a press needs no focus, as on macOS.
+    /// Whether the view is live and not faulted.
     fn open(&self) -> bool {
         self.alive.get() && !BOARD.faulted(self.id)
+    }
+
+    /// Whether mouse input reaches the sink: the view is open, shown and not covered. A press
+    /// needs no focus, as on macOS. A hidden or covered view that kept focus still gets the
+    /// wheel and the menu key from Windows, so they stop here.
+    fn mouse_open(&self) -> bool {
+        self.open() && self.shown.get() && !self.covered.get()
+    }
+
+    /// Ends a drag this view holds the capture for, while the view still shows, so the
+    /// drag's release reaches the sink before a cover or a hide. Input: the view's window.
+    fn end_drag(&self, hwnd: HWND) {
+        if unsafe { GetCapture() } == hwnd {
+            unsafe { ReleaseCapture() };
+        }
     }
 
     /// The pixels and the view's point a mouse message carries, at the view's scale.
@@ -436,13 +455,13 @@ impl Inner {
         unsafe { SetCapture(hwnd) };
     }
 
-    /// Runs one step of the view's mouse state and sends the event it makes, while the
-    /// view is open. Input: the step.
+    /// Runs one step of the view's mouse state and sends the event it makes, while mouse
+    /// input reaches the sink (`mouse_open`). Input: the step.
     fn step(&self, step: impl FnOnce(&mut Mouse) -> Option<ViewEvent>) {
         let mut state = self.mouse.get();
         let event = step(&mut state);
         self.mouse.set(state);
-        if let Some(event) = event.filter(|_| self.open()) {
+        if let Some(event) = event.filter(|_| self.mouse_open()) {
             (self.sink)(self.id, event);
         }
     }
