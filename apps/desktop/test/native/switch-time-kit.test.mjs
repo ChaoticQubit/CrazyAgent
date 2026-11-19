@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { GATE_SHARE, LIMIT_MS, SAMPLES_MAX, SWITCHES, TARGET_MS, line, rank, report, stampSample } from "./switch-time-kit.mjs";
-import { inPageFramePeriod, inPageSwitch, switchExpression } from "./switch-time.mjs";
+import { NATIVE_SCREENS, PAGE_LOOK_MAX, PAGE_OVERLAYS, PAGE_TEXT_MAX, inPageCovers, inPageFramePeriod, inPageSwitch, switchExpression } from "./switch-time.mjs";
 
 const row = (times) => times.map((ms) => ({ ms }));
 const twenty = (fill, ...worst) => [...Array(SWITCHES - worst.length).fill(fill), ...worst];
@@ -198,4 +199,65 @@ test("the frame period is the median gap between frames, with the shortest besid
   stuck.clock.timers[0].callback();
   stuck.step();
   assert.deepEqual(seen, [{ period_ms: null, min_ms: null, frames: 1 }], "a window that stopped drawing has no period");
+});
+
+/** A stand-in element for `inPageCovers`. Input: its tag, role, class, terminal name, hidden
+ * flag, text, box as [left, top, width, height] and the elements inside it. Output: the
+ * element. */
+function node(parts) {
+  const { tag = "div", role = null, cls = null, name = null, hidden = false, text = "", box, inside = [] } = parts;
+  const attributes = { role, class: cls, "data-native-terminal": name };
+  const element = {
+    tagName: tag.toUpperCase(),
+    hidden,
+    textContent: text,
+    getAttribute: (key) => attributes[key] ?? null,
+    getBoundingClientRect: () => ({ left: box[0], top: box[1], width: box[2], height: box[3], right: box[0] + box[2], bottom: box[1] + box[3] }),
+    contains: (other) => other === element || inside.includes(other),
+  };
+  return element;
+}
+
+/** Runs `inPageCovers` from its own text, as a page gets it, over stand-in screens and
+ * overlays. Inputs: the screens and the overlays. Output: its answer. */
+function covers(screens, overlays) {
+  const document = { querySelectorAll: (selector) => (selector === NATIVE_SCREENS ? screens : selector === PAGE_OVERLAYS ? overlays : []) };
+  const run = new Function("document", `return (${inPageCovers.toString()})`)(document);
+  return run({ screens: NATIVE_SCREENS, overlays: PAGE_OVERLAYS, max: PAGE_LOOK_MAX, text_max: PAGE_TEXT_MAX });
+}
+
+test("V243-NATIVE-SWITCH-TIME: the page read of a switch never shown names each native screen and each sized overlay with the screens it lies over, as the panel counts them", () => {
+  const menu = node({ role: "menu", box: [40, 60, 120, 80], text: "Copy" });
+  const screen = node({ cls: "tg-terminal-screen tg-terminal-native", name: "agent-1", box: [10, 20, 600, 400], inside: [menu] });
+  const parked = node({ cls: "tg-terminal-screen tg-terminal-native", name: "agent-2", hidden: true, box: [0, 0, 0, 0] });
+  const toast = node({ tag: "p", role: "status", cls: "toast", box: [500, 380, 240, 40], text: "  Can't reach the model provider at\n 127.0.0.1:9. Start it or pick another account." });
+  const dialog = node({ role: "dialog", box: [700, 0, 100, 100], text: "Settings" });
+  const tip = node({ role: "tooltip", box: [30, 30, 0, 0], text: "Copy output" });
+  assert.deepEqual(covers([screen, parked], [menu, toast, dialog, tip]), {
+    screens: [
+      { name: "agent-1", hidden: false, rect: { x: 10, y: 20, width: 600, height: 400 } },
+      { name: "agent-2", hidden: true, rect: { x: 0, y: 0, width: 0, height: 0 } },
+    ],
+    overlays: [
+      { what: "div menu", rect: { x: 40, y: 60, width: 120, height: 80 }, text: "Copy", over: [] },
+      { what: "p status toast", rect: { x: 500, y: 380, width: 240, height: 40 }, text: "Can't reach the model provider at 127.0.", over: ["agent-1"] },
+      { what: "div dialog", rect: { x: 700, y: 0, width: 100, height: 100 }, text: "Settings", over: [] },
+    ],
+    more: 0,
+  });
+});
+
+test("V243-NATIVE-SWITCH-TIME: a page read keeps at most its bound of screens and of overlays and counts the rest", () => {
+  const screens = Array.from({ length: PAGE_LOOK_MAX + 2 }, (_, index) => node({ name: `agent-${index + 1}`, box: [0, 0, 10, 10] }));
+  const toasts = Array.from({ length: PAGE_LOOK_MAX + 3 }, () => node({ cls: "toast", box: [100, 100, 10, 10], text: "Saved" }));
+  const answer = covers(screens, toasts);
+  assert.deepEqual([answer.screens.length, answer.overlays.length, answer.more], [PAGE_LOOK_MAX, PAGE_LOOK_MAX, 5]);
+  assert.deepEqual([PAGE_LOOK_MAX, PAGE_TEXT_MAX], [16, 40]);
+});
+
+test("V243-NATIVE-SWITCH-TIME: the page read looks for the native panel's own overlays and screens", () => {
+  const panel = readFileSync(new URL("../../src/screens/team/native-panel.tsx", import.meta.url), "utf8");
+  assert.equal(PAGE_OVERLAYS, panel.match(/^const OVERLAYS = '([^']+)';$/m)?.[1], "the page read and the panel count the same overlays");
+  assert.ok(panel.includes('className="tg-terminal-screen tg-terminal-native"'), "the panel's native screen keeps its class");
+  assert.equal(NATIVE_SCREENS, ".tg-terminal-native");
 });
