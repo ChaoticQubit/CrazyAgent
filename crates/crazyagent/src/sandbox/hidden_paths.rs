@@ -404,43 +404,186 @@ pub fn load(connection: &Connection, project: &str) -> rusqlite::Result<Vec<Path
 /// refused as unchecked.
 const CHECK_TIME: std::time::Duration = std::time::Duration::from_secs(5);
 const CHECK_POLL: std::time::Duration = std::time::Duration::from_millis(2);
-/// The most of git's answer the check reads; a tracked folder shows in the first bytes.
-const CHECK_BYTES_MAX: u64 = 64 * 1024;
+/// The most of git's index listing the check reads, 64 MiB, about 600,000 paths of 100 bytes;
+/// a longer listing is refused as unchecked.
+const CHECK_BYTES_MAX: u64 = 64 * 1024 * 1024;
+/// The longest one path in git's index listing may be, 32 KiB, eight times Linux's 4096-byte
+/// path limit; a longer path is refused as unchecked.
+const CHECK_LINE_BYTES_MAX: usize = 32 * 1024;
+/// The read buffer of the tracked-files check, 64 KiB.
+const CHECK_BUFFER_BYTES: usize = 64 * 1024;
+const _: () = assert!(CHECK_LINE_BYTES_MAX as u64 <= CHECK_BYTES_MAX);
+const _: () = assert!(CHECK_POLL.as_millis() < CHECK_TIME.as_millis());
 
-/// Whether git tracks any file inside any of these folders, asked with one `ls-files -z` run
-/// through [`crate::project_files::owner_git`] on their paths joined by `/`, each as
-/// `:(literal,icase)`, killed after 5 s; a tracked file lives in every agent's worktree and in
-/// history. Inputs: the project root and the folders. Output: [`answer`]'s, `Ok(false)` with no
-/// folder inside the root or no `.git`, else unchecked when a folder or git cannot be read.
+/// Folds a file name so that names NTFS (simple uppercase) or APFS (full case folding, NFC or
+/// NFD) take for one fold equal, and names Linux keeps apart too, on purpose: NFD, then std's
+/// full lowercase, uppercase and lowercase again (`ẞ` and `ß` to `ss`, `ﬁ` to `fi`, `ı` to
+/// `i`), then NFC. Too wide refuses a folder; too narrow lets a tracked file into a hidden one.
+/// Input: the name. Output: its fold.
+fn fold(name: &str) -> String {
+    let decomposed = icu_normalizer::DecomposingNormalizerBorrowed::new_nfd().normalize(name);
+    let cased = decomposed.to_lowercase().to_uppercase().to_lowercase();
+    let folded = icu_normalizer::ComposingNormalizerBorrowed::new_nfc()
+        .normalize(&cased)
+        .into_owned();
+    assert_eq!(folded.is_empty(), name.is_empty());
+    assert_eq!(folded.contains('/'), name.contains('/'));
+    folded
+}
+
+/// Whether a name from git's listing is this folded folder name: an ASCII name when it is with
+/// ASCII case ignored, as its fold is its lowercase, any other name when its fold is. Inputs:
+/// the listed name and the folded name. Output: whether they are one name.
+fn same_name(listed: &str, folded: &str) -> bool {
+    if listed.is_ascii() {
+        listed.eq_ignore_ascii_case(folded)
+    } else {
+        fold(listed) == folded
+    }
+}
+
+/// Whether a path from git's listing is a folder given as its folded names, or lies below it,
+/// compared name by name with [`same_name`]. Inputs: the listed path and the folder's names.
+/// Output: whether the path falls in the folder.
+fn within(listed: &str, names: &[String]) -> bool {
+    assert!(!names.is_empty());
+    assert!(!listed.is_empty());
+    let mut parts = listed.split('/');
+    names
+        .iter()
+        .all(|name| parts.next().is_some_and(|part| same_name(part, name)))
+}
+
+/// What [`scan`] found in git's NUL-separated index listing.
+#[derive(Debug, PartialEq, Eq)]
+enum Scan {
+    /// A listed path lies in one of the folders.
+    Tracked,
+    /// The whole listing was read, each path ended by a NUL, and none lies in the folders.
+    End,
+    /// A path was empty, not UTF-8, cut short or past [`CHECK_LINE_BYTES_MAX`], the listing
+    /// passed [`CHECK_BYTES_MAX`], or it could not be read.
+    Doubt,
+}
+
+/// Reads git's `ls-files -z` listing path by path and stops at the first path in one of the
+/// folders, each given as its folded names, so the rest is never read. Inputs: the listing
+/// and the folders. Output: what it found.
+fn scan(listing: impl std::io::Read, folders: &[Vec<String>]) -> Scan {
+    use std::io::{BufRead, Read};
+    assert!(!folders.is_empty());
+    assert!(folders.iter().all(|names| !names.is_empty()));
+    let capped = listing.take(CHECK_BYTES_MAX + 1);
+    let mut reader = std::io::BufReader::with_capacity(CHECK_BUFFER_BYTES, capped);
+    let mut line = Vec::with_capacity(256);
+    let mut total: u64 = 0;
+    for _ in 0..=CHECK_BYTES_MAX {
+        line.clear();
+        let cap = CHECK_LINE_BYTES_MAX as u64 + 1;
+        let Ok(read) = (&mut reader).take(cap).read_until(0, &mut line) else {
+            return Scan::Doubt;
+        };
+        if read == 0 {
+            return Scan::End;
+        }
+        assert_eq!(read, line.len());
+        assert!(read <= CHECK_LINE_BYTES_MAX + 1);
+        total += read as u64;
+        if total > CHECK_BYTES_MAX || line.pop() != Some(0) {
+            return Scan::Doubt;
+        }
+        let Ok(path) = std::str::from_utf8(&line) else {
+            return Scan::Doubt;
+        };
+        if path.is_empty() {
+            return Scan::Doubt;
+        }
+        if folders.iter().any(|names| within(path, names)) {
+            return Scan::Tracked;
+        }
+    }
+    unreachable!("each path read is at least one byte, so the listing cap ends the loop")
+}
+
+/// Each folder inside the root as its names below the root, folded. Inputs: the canonical
+/// root and the folders. Output: the folded names of each folder inside the root, or
+/// unchecked when a folder cannot be resolved or a name is not plain UTF-8.
+fn folded_folders(root: &Path, folders: &[PathBuf]) -> Result<Vec<Vec<String>>, &'static str> {
+    use std::path::Component;
+    let unchecked = "hidden_path_unchecked";
+    let mut wanted = Vec::with_capacity(folders.len());
+    for folder in folders {
+        let real = canonical(folder).map_err(|_| unchecked)?;
+        let Ok(relative) = real.strip_prefix(root) else {
+            continue;
+        };
+        let names = relative
+            .components()
+            .map(|part| match part {
+                Component::Normal(name) => name.to_str().map(fold),
+                _ => None,
+            })
+            .collect::<Option<Vec<String>>>()
+            .filter(|names| !names.is_empty())
+            .ok_or(unchecked)?;
+        assert!(names.iter().all(|name| !name.is_empty() && fold(name) == *name));
+        wanted.push(names);
+    }
+    assert!(wanted.len() <= folders.len());
+    Ok(wanted)
+}
+
+/// Kills git and reaps it, whether or not it already exited. Input: the running git.
+fn stop(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Waits up to [`CHECK_TIME`] for [`scan`]'s verdict on git's listing, and kills git unless
+/// the whole listing was read and git then exits clean in that time. Inputs: the running git
+/// and the verdict. Output: `Ok(true)` for a tracked path, `Ok(false)` for a whole listing
+/// with none and a clean exit, else unchecked.
+fn listing_answer(
+    child: &mut std::process::Child,
+    verdict: &std::sync::mpsc::Receiver<Scan>,
+) -> Result<bool, &'static str> {
+    let unchecked = "hidden_path_unchecked";
+    let deadline = std::time::Instant::now() + CHECK_TIME;
+    let found = verdict.recv_timeout(CHECK_TIME).unwrap_or(Scan::Doubt);
+    if found != Scan::End {
+        stop(child);
+        return if found == Scan::Tracked {
+            Ok(true)
+        } else {
+            Err(unchecked)
+        };
+    }
+    let polls_max = CHECK_TIME.as_millis() / CHECK_POLL.as_millis() + 1;
+    for _ in 0..polls_max {
+        match child.try_wait() {
+            Ok(Some(status)) => return if status.success() { Ok(false) } else { Err(unchecked) },
+            Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(CHECK_POLL),
+            Ok(None) | Err(_) => break,
+        }
+    }
+    stop(child);
+    Err(unchecked)
+}
+
+/// Whether git tracks any file inside any of these folders: one `ls-files -z` run of the whole
+/// index through [`crate::project_files::owner_git`], read as it streams by [`scan`], names
+/// compared after [`fold`], git killed once the answer is known or after 5 s; a tracked file
+/// lives in every agent's worktree and in history. Inputs: the project root and the folders.
+/// Output: `Ok(false)` with no folder inside the root or no `.git`, else [`listing_answer`]'s.
 fn any_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<bool, &'static str> {
     use crate::project_files::NoOwnerGit;
-    use std::io::Read;
-    use std::path::Component;
-    use std::process::Stdio;
     let unchecked = "hidden_path_unchecked";
     if folders.is_empty() {
         return Ok(false);
     }
     let root = canonical(project_root).map_err(|_| unchecked)?;
-    let mut specs = Vec::with_capacity(folders.len());
-    for folder in folders {
-        let real = canonical(folder).map_err(|_| unchecked)?;
-        let Ok(relative) = real.strip_prefix(&root) else {
-            continue;
-        };
-        let parts = relative
-            .components()
-            .map(|part| match part {
-                Component::Normal(name) => name.to_str(),
-                _ => None,
-            })
-            .collect::<Option<Vec<&str>>>()
-            .filter(|parts| !parts.is_empty())
-            .ok_or(unchecked)?;
-        specs.push(parts.join("/"));
-    }
-    assert!(specs.len() <= folders.len());
-    if specs.is_empty() {
+    let wanted = folded_folders(&root, folders)?;
+    if wanted.is_empty() {
         return Ok(false);
     }
     let mut command = match crate::project_files::owner_git(&root) {
@@ -448,86 +591,25 @@ fn any_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<bool, &'stati
         Err(NoOwnerGit::Absent) => return Ok(false),
         Err(NoOwnerGit::Refused | NoOwnerGit::Unavailable) => return Err(unchecked),
     };
-    if cfg!(any(windows, target_os = "macos")) && !specs.iter().all(|spec| spec.is_ascii()) {
-        return Err("hidden_path_name_unchecked");
-    }
-    let magic = ":(literal,icase)";
-    let pathspecs: Vec<String> = specs.iter().map(|spec| format!("{magic}{spec}")).collect();
-    assert!(
-        pathspecs
-            .iter()
-            .zip(&specs)
-            .all(|(pathspec, spec)| pathspec.strip_prefix(magic) == Some(spec.as_str()))
-    );
     command
-        .args(["ls-files", "-z", "--"])
-        .args(&pathspecs)
-        .stdout(Stdio::piped());
+        .args(["ls-files", "-z"])
+        .stdout(std::process::Stdio::piped());
     let mut child = crate::spawn_gate::spawn(&mut command).map_err(|_| unchecked)?;
-    let mut stdout = child.stdout.take().ok_or(unchecked)?;
-    let reader = std::thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let _ = (&mut stdout).take(CHECK_BYTES_MAX).read_to_end(&mut buffer);
-        buffer
+    let Some(listing) = child.stdout.take() else {
+        stop(&mut child);
+        return Err(unchecked);
+    };
+    let (sender, verdict) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = sender.send(scan(listing, &wanted));
     });
-    let deadline = std::time::Instant::now() + CHECK_TIME;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {}
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(unchecked);
-            }
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(unchecked);
-        }
-        std::thread::sleep(CHECK_POLL);
-    };
-    let bytes = reader.join().map_err(|_| unchecked)?;
-    assert!(bytes.len() as u64 <= CHECK_BYTES_MAX);
-    answer(&bytes, &specs, status.success())
-}
-
-/// Judges git's NUL-separated answer for these paths: `Ok(true)` when it names a path in one of
-/// them, ASCII case ignored as git's `icase` does, `Ok(false)` when it is empty and git exited
-/// clean, else unchecked, also when any line is empty, falls in none of them, or is cut short
-/// before the read cap. Inputs: the bytes read, the paths joined by `/` and whether git exited
-/// clean. Output: the answer.
-fn answer(bytes: &[u8], specs: &[String], clean: bool) -> Result<bool, &'static str> {
-    let unchecked = "hidden_path_unchecked";
-    let capped = bytes.len() as u64 >= CHECK_BYTES_MAX;
-    let mut lines: Vec<&[u8]> = bytes.split(|byte| *byte == 0).collect();
-    let tail = lines.pop().unwrap_or_default();
-    if !tail.is_empty() && !capped {
-        return Err(unchecked);
-    }
-    let within = |line: &[u8]| {
-        specs.iter().any(|spec| {
-            let spec = spec.as_bytes();
-            line.get(..spec.len())
-                .is_some_and(|head| head.eq_ignore_ascii_case(spec))
-                && matches!(line.get(spec.len()), None | Some(&b'/'))
-        })
-    };
-    if !lines.iter().all(|line| within(line)) {
-        return Err(unchecked);
-    }
-    match (lines.is_empty(), capped, clean) {
-        (false, _, _) => Ok(true),
-        (true, false, true) => Ok(false),
-        _ => Err(unchecked),
-    }
+    listing_answer(&mut child, &verdict)
 }
 
 /// Refuses a list that holds a folder git tracks, and refuses the whole list when the check
 /// cannot answer for it, with one git run for the whole list (`any_tracked`). Inputs: the
-/// project root and the checked folders. Output: ok, `hidden_path_tracked`,
-/// `hidden_path_unchecked` or `hidden_path_name_unchecked`.
+/// project root and the checked folders. Output: ok, `hidden_path_tracked` or
+/// `hidden_path_unchecked`.
 pub fn none_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<(), &'static str> {
     if any_tracked(project_root, folders)? {
         Err("hidden_path_tracked")
@@ -644,37 +726,117 @@ mod tests {
         any_tracked(project_root, &[folder.to_path_buf()])
     }
 
-    /// V243-WIN-HIDDEN-GIT (leader 09:21, #590): git's answer counts only when every line is
-    /// whole and falls in an asked folder, itself or below it, ASCII case ignored as git's
-    /// `icase` does; an empty line, a line in no asked folder (a sibling sharing the name's
-    /// start), or one cut short before the read cap is unchecked. Past the cap the cut tail is
-    /// dropped and the whole lines still count.
+    /// V244-HIDDEN-GIT-NONASCII-CASE (leader FROM-LEADER-2006): names any supported file system
+    /// takes for one fold equal, among them `ẞ`, `ß` and `ss` (APFS), long s and `S` (NTFS),
+    /// and the fold is the same for a letter's fold, uppercase and lowercase over every cased
+    /// letter, which a fold of NFC(lower(upper(NFD))) misses for `ẞ`; other names stay apart.
     #[test]
-    fn an_answer_line_cut_short_or_in_no_asked_folder_is_unchecked() {
-        let specs = ["secret".to_owned(), "conf/keys".to_owned()];
-        let unchecked = Err("hidden_path_unchecked");
-        assert_eq!(answer(b"", &specs, true), Ok(false));
-        assert_eq!(answer(b"", &specs, false), unchecked);
-        assert_eq!(answer(b"secret/key.txt\0", &specs, true), Ok(true));
-        assert_eq!(answer(b"conf/keys\0secret/a/b\0", &specs, false), Ok(true));
-        assert_eq!(answer(b"Secret/x\0CONF/Keys/y\0", &specs, true), Ok(true));
+    fn names_a_file_system_takes_for_one_fold_equal_and_others_do_not() {
+        for (one, other) in [
+            ("\u{c9}crits", "\u{e9}crits"),
+            ("cl\u{e9}", "cle\u{301}"),
+            ("\u{17f}ecret", "SECRET"),
+            ("\u{212a}eys", "keys"),
+            ("stra\u{df}e", "STRASSE"),
+            ("\u{1e9e}", "ss"),
+            ("\u{1e9e}", "\u{df}"),
+            ("\u{fb01}le", "FILE"),
+            ("\u{3a3}\u{391}\u{3a3}", "\u{3c3}\u{3b1}\u{3c2}"),
+            ("\u{131}", "I"),
+            ("\u{1f80}", "\u{1f88}"),
+        ] {
+            assert_eq!(fold(one), fold(other), "{one:?} {other:?}");
+        }
+        for (one, other) in [("secret", "secrets"), ("secret", "secre"), ("cle", "cl\u{e9}")] {
+            assert_ne!(fold(one), fold(other), "{one:?} {other:?}");
+        }
+        assert_eq!(fold("Conf.D"), "conf.d");
+        let mut cased = 0;
+        for letter in char::MIN..=char::MAX {
+            let upper: String = letter.to_uppercase().collect();
+            let lower: String = letter.to_lowercase().collect();
+            let alone = letter.to_string();
+            if upper == alone && lower == alone {
+                continue;
+            }
+            cased += 1;
+            let folded = fold(&alone);
+            assert_eq!(fold(&folded), folded, "{letter:?}");
+            assert_eq!(fold(&upper), folded, "{letter:?}");
+            assert_eq!(fold(&lower), folded, "{letter:?}");
+        }
+        assert!(cased > 2_000, "{cased}");
+    }
+
+    /// V244-HIDDEN-GIT-NONASCII-CASE: a listing is tracked by a whole path in a folder, at any
+    /// depth and in any fold-equal spelling, and only then; a sibling sharing a name's start
+    /// is not. An empty path, a path cut short, one not UTF-8 or one past the line cap is
+    /// doubt, and so is a listing past the total cap; the scan stops at a tracked path.
+    #[test]
+    fn a_listing_is_tracked_only_by_a_whole_path_in_a_folder_and_doubt_on_a_broken_one() {
+        use std::io::Read;
+        let folders = vec![vec![fold("secret")], vec![fold("conf"), fold("keys")]];
+        let scanned = |bytes: &[u8]| scan(bytes, &folders);
+        assert_eq!(scanned(b""), Scan::End);
+        assert_eq!(scanned(b"secrets/key.txt\0conf/key\0Secrets/x\0conf\0"), Scan::End);
+        for tracked in [
+            &b"secret/key.txt\0"[..],
+            &b"a\0conf/keys\0"[..],
+            &b"Secret/x\0"[..],
+            &b"CONF/Keys/y/z\0"[..],
+            &b"secret\0"[..],
+            "\u{17f}ecret/k\0".as_bytes(),
+            "conf/\u{212a}eys/x\0".as_bytes(),
+        ] {
+            let shown = String::from_utf8_lossy(tracked).into_owned();
+            assert_eq!(scanned(tracked), Scan::Tracked, "{shown:?}");
+        }
         for doubt in [
-            &b"secrets/key.txt\0"[..],
-            &b"conf/key\0"[..],
-            &b"Secrets/x\0"[..],
-            &b"secret/key.txt\0\0"[..],
             &b"secret/key.txt"[..],
             &b"\0"[..],
+            &b"a\0\0secret/x\0"[..],
+            &b"\xff/x\0"[..],
         ] {
             let shown = String::from_utf8_lossy(doubt).into_owned();
-            assert_eq!(answer(doubt, &specs, true), unchecked, "{shown:?}");
+            assert_eq!(scanned(doubt), Scan::Doubt, "{shown:?}");
         }
-        let cap = usize::try_from(CHECK_BYTES_MAX).unwrap();
-        let mut full = b"secret/key.txt\0".repeat(cap / 15 + 1);
-        full.truncate(cap);
-        assert_ne!(full.last(), Some(&0));
-        assert_eq!(answer(&full, &specs, false), Ok(true));
-        assert_eq!(answer(&b"x".repeat(cap), &specs, false), unchecked);
+        let longest = [b"x".repeat(CHECK_LINE_BYTES_MAX), vec![0]].concat();
+        assert_eq!(scanned(&longest), Scan::End);
+        let longer = [b"x".repeat(CHECK_LINE_BYTES_MAX + 1), vec![0]].concat();
+        assert_eq!(scanned(&longer), Scan::Doubt);
+        let line = b"plain/x.txt\0";
+        let whole = CHECK_BYTES_MAX - CHECK_BYTES_MAX % line.len() as u64;
+        assert_eq!(scan(Cycle(line, 0).take(whole), &folders), Scan::End);
+        let past = whole + line.len() as u64;
+        assert!(past > CHECK_BYTES_MAX);
+        assert_eq!(scan(Cycle(line, 0).take(past), &folders), Scan::Doubt);
+        let broken = b"plain/x.txt\0secret/key.txt\0".chain(Broken);
+        assert_eq!(scan(broken, &folders), Scan::Tracked);
+        assert_eq!(scan(b"plain/x.txt\0".chain(Broken), &folders), Scan::Doubt);
+    }
+
+    /// A listing that repeats one line without end, from a byte offset into it.
+    struct Cycle(&'static [u8], usize);
+
+    impl std::io::Read for Cycle {
+        /// Fills the buffer with the line repeated. Input: the buffer. Output: its length.
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            for byte in buffer.iter_mut() {
+                *byte = self.0[self.1];
+                self.1 = (self.1 + 1) % self.0.len();
+            }
+            Ok(buffer.len())
+        }
+    }
+
+    /// A listing whose every read fails, so a scan that reads it answers doubt.
+    struct Broken;
+
+    impl std::io::Read for Broken {
+        /// Fails. Input: the buffer, untouched. Output: an error.
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("broken listing"))
+        }
     }
 
     /// Runs the test's own git in `path` with no system or global config, as the owner makes
@@ -902,10 +1064,36 @@ mod tests {
         assert_eq!(runs, 0, "no folder");
     }
 
-    /// V243-WIN-HIDDEN-GIT (leader 08:33, 09:21): times `none_tracked` per call, as each launch
-    /// gate makes it, on one untracked folder and on a full list of untracked folders, 20 calls
-    /// each, and prints the median and the slowest of each. The farm runs it quiet and under a
-    /// CPU load step; it asserts only the answers.
+    /// Adds an index entry naming the empty file for each of these paths, with one
+    /// `update-index --index-info` run of the test's own git after it writes that file's
+    /// object. Inputs: the repository and the paths.
+    fn add_to_index(path: &Path, listed: &[String]) {
+        use std::io::Write;
+        git_in(path, &["hash-object", "-w", "--stdin"]);
+        let program = if cfg!(unix) { "/usr/bin/git" } else { "git" };
+        let mut command = std::process::Command::new(program);
+        command
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE)
+            .current_dir(path)
+            .args(["update-index", "--add", "--index-info"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+        let lines: String = listed
+            .iter()
+            .map(|name| format!("100644 {EMPTY_BLOB}\t{name}\n"))
+            .collect();
+        child.stdin.take().unwrap().write_all(lines.as_bytes()).unwrap();
+        assert!(child.wait().unwrap().success(), "{} entries", listed.len());
+    }
+
+    /// V243-WIN-HIDDEN-GIT (leader 08:33, 09:21), V244-HIDDEN-GIT-NONASCII-CASE (leader
+    /// FROM-LEADER-2006): times `none_tracked` per call as each launch gate makes it, on one
+    /// untracked folder and on a full list, 20 calls each, in a tiny index and in one of 100,000
+    /// paths (two fifths under non-ASCII names) read whole; prints the median and the slowest.
+    /// The farm runs it quiet and under a CPU load step; it asserts only the answers.
     #[test]
     #[ignore = "timing, run by the farm quiet and under a CPU load step"]
     fn none_tracked_time_per_call() {
@@ -915,26 +1103,35 @@ mod tests {
         assert_eq!(none_tracked(&path, &[tracked]), Err("hidden_path_tracked"));
         let mut full = vec![untracked.clone()];
         for n in 1..HIDDEN_PATHS_MAX {
-            let folder = path.join(format!("plain-{n}"));
+            let folder = path.join(format!("plain-{n}-\u{e9}"));
             std::fs::create_dir(&folder).unwrap();
             full.push(folder);
         }
+        let tops = ["src", "docs", "Donn\u{e9}es", "\u{30c6}\u{30b9}\u{30c8}", "vendor"];
+        let bulk: Vec<String> = (1..100_000)
+            .map(|n| format!("{}/d{:03}/file-{n:06}.txt", tops[n % 5], n / 100))
+            .collect();
         let ms = |time: std::time::Duration| time.as_secs_f64() * 1000.0;
-        for folders in [std::slice::from_ref(&untracked), &full[..]] {
-            let mut times: Vec<std::time::Duration> = (0..20)
-                .map(|_| {
-                    let start = std::time::Instant::now();
-                    assert_eq!(none_tracked(&path, folders), Ok(()));
-                    start.elapsed()
-                })
-                .collect();
-            times.sort();
-            println!(
-                "TIMING none_tracked folders={} calls=20 median_ms={:.1} max_ms={:.1}",
-                folders.len(),
-                ms(times[10]),
-                ms(times[19])
-            );
+        for entries in [1, 100_000] {
+            if entries > 1 {
+                add_to_index(&path, &bulk);
+            }
+            for folders in [std::slice::from_ref(&untracked), &full[..]] {
+                let mut times: Vec<std::time::Duration> = (0..20)
+                    .map(|_| {
+                        let start = std::time::Instant::now();
+                        assert_eq!(none_tracked(&path, folders), Ok(()));
+                        start.elapsed()
+                    })
+                    .collect();
+                times.sort();
+                println!(
+                    "TIMING none_tracked entries={entries} folders={} calls=20 median_ms={:.1} max_ms={:.1}",
+                    folders.len(),
+                    ms(times[10]),
+                    ms(times[19])
+                );
+            }
         }
     }
 
@@ -1032,35 +1229,21 @@ mod tests {
         assert_eq!(none_tracked(&path, &[folder]), Err("hidden_path_unchecked"));
     }
 
-    #[cfg(unix)]
+    /// V244-HIDDEN-GIT-NONASCII-CASE: a tracked folder listed after more than 64 KiB of other
+    /// paths, the old read cap, is still found, and so is the folder those paths fill.
     #[test]
-    fn a_folder_with_more_than_64_kib_of_tracked_names_is_still_tracked() {
+    fn a_tracked_folder_listed_after_64_kib_of_other_paths_is_still_tracked() {
         let root = project();
-        let path = root.path().canonicalize().unwrap();
-        let git = |args: &[&str]| {
-            let mut command = std::process::Command::new("/usr/bin/git");
-            command
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .current_dir(&path)
-                .args(args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            assert!(crate::spawn_gate::status(&mut command).unwrap().success());
-        };
-        git(&["init", "-q"]);
+        let path = canonical(root.path()).unwrap();
+        let (tracked, _) = tracked_and_untracked(&path);
         let folder = path.join("bulk");
         std::fs::create_dir(&folder).unwrap();
-        let mut total = 0usize;
-        let mut index = 0usize;
-        while total <= CHECK_BYTES_MAX as usize {
-            let name = format!("{index:06}-{}.txt", "x".repeat(200));
-            std::fs::write(folder.join(&name), "t\n").unwrap();
-            total += "bulk/".len() + name.len() + 1;
-            index += 1;
-        }
-        git(&["add", "bulk"]);
+        let listed: Vec<String> = (0..320)
+            .map(|n| format!("bulk/{n:06}-{}.txt", "x".repeat(200)))
+            .collect();
+        assert!(listed.iter().map(|name| name.len() + 1).sum::<usize>() > 64 * 1024);
+        add_to_index(&path, &listed);
+        assert_eq!(git_tracks(&path, &tracked), Ok(true));
         assert_eq!(git_tracks(&path, &folder), Ok(true));
         assert_eq!(none_tracked(&path, &[folder]), Err("hidden_path_tracked"));
     }

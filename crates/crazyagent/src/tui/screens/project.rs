@@ -3338,12 +3338,9 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         }
         "hidden_path_not_plain" => HIDDEN_NOT_PLAIN,
         "hidden_path_tracked" => {
-            "git tracks a file in that folder. Only folders git does not track can be hidden."
+            "A path git tracks matches this folder when letter case is ignored. Only folders git doesn't track can be hidden."
         }
         "hidden_path_unchecked" => "CrazyAgent couldn't check that folder against git. Try again.",
-        "hidden_path_name_unchecked" => {
-            "A folder path with non-English letters or symbols can't be checked against git on this system yet. Rename the folder or pick another."
-        }
         "hidden_paths_need_macos" => {
             "Hidden folders work only on macOS for now, so a list with folders can't be saved here. Remove them all and save."
         }

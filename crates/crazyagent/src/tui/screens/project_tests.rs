@@ -3112,16 +3112,6 @@ fn a_hidden_folder_refused_as_tracked_is_told_a_path_matches_when_case_is_ignore
     );
 }
 
-/// #590 (leader 10:34): a hidden folder refused because its path holds non-English letters
-/// is told that cause in plain words, the same words the desktop app shows.
-#[test]
-fn a_hidden_folder_refused_for_its_non_english_name_is_told_why() {
-    assert_eq!(
-        plain_problem("hidden_path_name_unchecked"),
-        "A folder path with non-English letters or symbols can't be checked against git on this system yet. Rename the folder or pick another."
-    );
-}
-
 /// #590 (leader 10:37): where the engine says this system's boundary cannot hold hidden
 /// folders, the Settings tab says so in one plain line and `k` opens no box; a list saved
 /// before still shows with how to clear it and `k` opens the box, and the save's refusal

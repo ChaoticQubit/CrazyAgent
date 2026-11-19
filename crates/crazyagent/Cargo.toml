@@ -17,6 +17,7 @@ owner-trace = []
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["raw_value"] }
 url = "=2.5.8"
+icu_normalizer = { version = "=2.3.0", default-features = false, features = ["compiled_data"] }
 sha2 = "=0.10.9"
 getrandom = "=0.4.3"
 subtle = "=2.6.1"
