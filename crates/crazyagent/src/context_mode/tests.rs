@@ -1049,17 +1049,35 @@ fn on_a_node_older_than_22_5_no_install_starts_and_an_agent_launch_drops_the_ser
     );
 }
 
-/// V243-CONTEXT-MODE-ENGINE-NODE: a node check that did not run to an answer, as when the
-/// boundary refuses the start, node exits with a failure or prints nothing, answers its own
-/// code, so the owner is not told to update a Node that never answered; no install starts
-/// and no failure is recorded. Input: none. Output: none; panics on a too-old answer.
+/// V243-CONTEXT-MODE-ENGINE-NODE: a node check that did not run to an answer answers its own
+/// code, so the owner is not told to update a Node that never answered; no install starts and
+/// no failure is recorded. The cases: node exits with a failure, prints nothing, or sits in an
+/// app bundle outside every granted root, which both boundaries refuse to start though run
+/// alone it names a supported version. Input: none. Output: none; panics on another answer.
 #[test]
 fn a_node_check_that_did_not_run_answers_its_own_code_not_too_old() {
-    for program in ["/usr/bin/false", "/usr/bin/true"] {
+    for program in ["/usr/bin/false", "/usr/bin/true", "a refused start"] {
         let case = case("/usr/bin/false");
         case.store();
+        let node = if program.starts_with('/') {
+            PathBuf::from(program)
+        } else {
+            let bundle = case
+                .root
+                .parent()
+                .unwrap()
+                .join("Refused.app/Contents/MacOS");
+            fs::create_dir_all(&bundle).unwrap();
+            node_reports(&bundle, "v24.0.0");
+            let alone = crate::spawn_gate::collected(
+                std::process::Command::new(bundle.join("node")).arg("--version"),
+            )
+            .unwrap();
+            assert_eq!(alone.stdout, b"v24.0.0\n", "run alone it answers");
+            bundle.join("node")
+        };
         fs::remove_file(case.bin.join("node")).unwrap();
-        std::os::unix::fs::symlink(program, case.bin.join("node")).unwrap();
+        std::os::unix::fs::symlink(&node, case.bin.join("node")).unwrap();
         assert_eq!(
             case.install().unwrap_err().0,
             "context_mode_node_check_failed",
