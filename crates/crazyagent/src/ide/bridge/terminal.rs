@@ -364,6 +364,8 @@ async fn relay(
                     TerminalRequest::Attach { .. }
                     | TerminalRequest::AttachPane { .. }
                     | TerminalRequest::AttachSized { .. }
+                    | TerminalRequest::AttachInput { .. }
+                    | TerminalRequest::Paste { .. }
                     | TerminalRequest::Prompt { .. },
                 ) => {
                     break "terminal_request_invalid";
@@ -430,6 +432,8 @@ async fn act(
         TerminalRequest::Attach { .. }
         | TerminalRequest::AttachPane { .. }
         | TerminalRequest::AttachSized { .. }
+        | TerminalRequest::AttachInput { .. }
+        | TerminalRequest::Paste { .. }
         | TerminalRequest::Prompt { .. }
         | TerminalRequest::Detach => Ok(()),
     })
