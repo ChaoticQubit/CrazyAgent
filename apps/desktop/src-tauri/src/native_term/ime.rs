@@ -2,6 +2,9 @@ use super::pane::Input;
 use crazyagent::terminal::INPUT_BYTES_MAX;
 use unicode_width::UnicodeWidthChar;
 
+#[cfg(any(windows, test))]
+pub mod compose;
+
 /// The most UTF-16 units of marked text a view keeps; an input method never composes this
 /// much, and a longer marked text is kept cut at a character boundary.
 pub const MARKED_UNITS_MAX: usize = 1024;

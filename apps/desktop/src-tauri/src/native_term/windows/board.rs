@@ -20,7 +20,9 @@ pub struct Geometry {
 }
 
 impl Geometry {
-    fn check(self) {
+    /// Checks a geometry the view's thread posts and the render thread refits to: a size of
+    /// at least one device pixel each way and a known scale key.
+    pub(super) fn check(self) {
         assert!(self.size.0 >= 1, "a placed width");
         assert!(self.size.1 >= 1, "a placed height");
         assert!(SCALE_KEYS.contains(&self.scale_key), "a scale key");
@@ -64,11 +66,12 @@ struct Slot<T> {
     cell: Option<(f64, f64)>,
     fresh: bool,
     removing: bool,
+    faulted: bool,
 }
 
 impl<T> Slot<T> {
     fn ready(&self) -> bool {
-        self.shown && self.changed && self.framed && !self.fresh && !self.removing
+        self.shown && self.changed && self.framed && !self.fresh && !self.removing && !self.faulted
     }
 }
 
@@ -118,6 +121,7 @@ impl<T> Board<T> {
             cell: None,
             fresh: true,
             removing: false,
+            faulted: false,
         });
         assert!(slots.len() <= VIEWS_MAX);
         drop(slots);
@@ -271,6 +275,26 @@ impl<T> Board<T> {
             slot.misses = 0;
         }
         owed
+    }
+
+    /// The render thread's word that a view's GPU work failed for good: the view is never
+    /// drawn or remade again, and its removal still drops it. Input: the view id, which the
+    /// board handed over and the render side has not dropped.
+    pub fn fault(&self, id: u64) {
+        let mut slots = self.lock();
+        let slot = slots.iter_mut().find(|slot| slot.id == id);
+        let slot = slot.expect("a faulted view is on the board");
+        assert!(!slot.fresh, "a view faults only after the hand-over");
+        slot.faulted = true;
+        slot.changed = false;
+    }
+
+    /// Whether the render thread faulted a view. Input: the view id. Output: true once
+    /// faulted, false for a live view or one off the board.
+    pub fn faulted(&self, id: u64) -> bool {
+        let slots = self.lock();
+        let slot = slots.iter().find(|slot| slot.id == id);
+        slot.is_some_and(|slot| slot.faulted)
     }
 
     /// A view's newest frame, taken after the swap-chain wait, so a frame posted during
@@ -557,5 +581,87 @@ mod tests {
         assert_eq!(board.cell(1), Some((7.0, 17.0)));
         assert!(!board.post_cell(2, (7.0, 17.0)));
         assert_eq!(board.cell(2), None);
+    }
+
+    #[test]
+    fn a_faulted_view_is_never_drawn_again_and_its_removal_still_drops_it() {
+        let board = shown_board();
+        assert!(board.post_frame(1, "a"));
+        assert_eq!(board.wait().ready, vec![1]);
+        assert!(!board.faulted(1), "a drawn view has not faulted");
+        board.fault(1);
+        assert!(board.faulted(1), "the render side faulted it");
+        assert!(board.post_frame(1, "b"), "a faulted view still takes posts");
+        assert!(board.post_geometry(
+            1,
+            Geometry {
+                size: (10, 10),
+                ..ONE
+            }
+        ));
+        assert!(board.post_shown(1, true));
+        let (send, receive) = mpsc::channel();
+        let render = Arc::clone(&board);
+        let dropper = thread::spawn(move || {
+            let round = render.wait();
+            let gone = round.gone.contains(&1);
+            send.send(round).expect("the round");
+            if gone {
+                render.dropped(1);
+            }
+        });
+        let idle = receive.recv_timeout(Duration::from_millis(300));
+        assert!(idle.is_err(), "a faulted view is never drawn: {idle:?}");
+        assert!(board.remove(1, WAIT), "the render side dropped it");
+        let round = receive.recv_timeout(WAIT).expect("the removal's round");
+        assert_eq!(round.gone, vec![1]);
+        assert!(round.ready.is_empty(), "{round:?}");
+        dropper.join().expect("the dropper");
+        assert!(!board.faulted(1), "off the board");
+    }
+
+    #[test]
+    #[should_panic(expected = "a view faults only after the hand-over")]
+    fn faulting_a_view_before_the_hand_over_is_a_bug() {
+        let board: Board<&str> = Board::new();
+        board.add(9, 99, ONE).expect("a view");
+        board.fault(9);
+    }
+
+    #[test]
+    #[should_panic(expected = "a placed width")]
+    fn a_zero_width_is_a_bug() {
+        Geometry {
+            size: (0, 1),
+            ..ONE
+        }
+        .check();
+    }
+
+    #[test]
+    #[should_panic(expected = "a placed height")]
+    fn a_zero_height_is_a_bug() {
+        Geometry {
+            size: (1, 0),
+            ..ONE
+        }
+        .check();
+    }
+
+    #[test]
+    #[should_panic(expected = "a scale key")]
+    fn an_unknown_scale_key_is_a_bug() {
+        Geometry {
+            scale_key: 99,
+            ..ONE
+        }
+        .check();
+    }
+
+    #[test]
+    #[should_panic(expected = "a faulted view is on the board")]
+    fn faulting_a_view_off_the_board_is_a_bug() {
+        let board: Board<&str> = Board::new();
+        board.fault(9);
     }
 }
