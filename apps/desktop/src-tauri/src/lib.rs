@@ -2038,7 +2038,13 @@ fn native_direct(name: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)>
 /// Takes a fresh place through the shared gate for a native view the host reopens
 /// engine-fed. Inputs: the app, the window label, the agent window name and the wall
 /// window's project. Output: the place, or the refusal.
-#[cfg(target_os = "macos")]
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(
+        dead_code,
+        reason = "the Linux and Windows hosts reopen views engine-fed through it (DEC-203)"
+    )
+)]
 async fn native_place(
     app: &AppHandle,
     window: &str,
