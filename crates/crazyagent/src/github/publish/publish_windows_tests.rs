@@ -794,8 +794,13 @@ fn a_planted_share_gitfile_fails_the_planted_check_when_the_commit_runs_unwrappe
         "the row ends wrapped"
     );
     assert!(
-        gitfile_commit_wrong(&answer, &folder, "").is_some(),
-        "the planted check passed an unwrapped commit: {answer:?}"
+        gitfile_commit_wrong(
+            &answer,
+            &folder,
+            "fatal: 'sub/' does not have a commit checked out"
+        )
+        .is_some(),
+        "the planted check passed an unwrapped commit even granted git's refusal: {answer:?}"
     );
     assert!(
         reached,
@@ -803,7 +808,7 @@ fn a_planted_share_gitfile_fails_the_planted_check_when_the_commit_runs_unwrappe
     );
     assert!(
         answer.is_ok(),
-        "the unwrapped commit reached the share's repository: {answer:?}"
+        "the unwrapped commit did not reach the share's repository: {answer:?}"
     );
     assert_eq!(
         owner_git(&folder, &["ls-tree", "HEAD", "sub"]).trim_end(),
