@@ -15,19 +15,22 @@ use windows_sys::Win32::UI::Input::Ime::{
     ImmSetCandidateWindow, ImmSetCompositionWindow, NI_COMPOSITIONSTR,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetFocus, GetKeyState, GetKeyboardLayout, SetFocus, ToUnicodeEx, VK_CONTROL, VK_LWIN, VK_MENU,
-    VK_PROCESSKEY, VK_RWIN, VK_SHIFT,
+    GetCapture, GetDoubleClickTime, GetFocus, GetKeyState, GetKeyboardLayout, ReleaseCapture,
+    SetCapture, SetFocus, ToUnicodeEx, VK_CONTROL, VK_LWIN, VK_MENU, VK_PROCESSKEY, VK_RWIN,
+    VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW,
-    GetWindowRect, HWND_TOP, IDC_IBEAM, ISMEX_REPLIED, ISMEX_SEND, InSendMessageEx, LoadCursorW,
-    MA_ACTIVATE, MSG, PM_NOREMOVE, PeekMessageW, PostMessageW, RegisterClassExW, SW_HIDE,
-    SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_APP, WM_CHAR,
-    WM_DEADCHAR, WM_DESTROY, WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND, WM_GETOBJECT,
-    WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_REQUEST, WM_IME_SETCONTEXT,
-    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEACTIVATE,
-    WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WNDCLASSEXW,
-    WS_CHILD, WS_CLIPSIBLINGS, WS_EX_NOPARENTNOTIFY,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetMessageTime,
+    GetSystemMetrics, GetWindowLongPtrW, GetWindowRect, HWND_TOP, IDC_IBEAM, ISMEX_REPLIED,
+    ISMEX_SEND, InSendMessageEx, LoadCursorW, MA_ACTIVATE, MSG, PM_NOREMOVE, PeekMessageW,
+    PostMessageW, RegisterClassExW, SM_CXDOUBLECLK, SM_CYDOUBLECLK, SPI_GETWHEELSCROLLLINES,
+    SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    SystemParametersInfoW, WM_APP, WM_CAPTURECHANGED, WM_CHAR, WM_CONTEXTMENU, WM_DEADCHAR,
+    WM_DESTROY, WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND, WM_GETOBJECT, WM_IME_COMPOSITION,
+    WM_IME_ENDCOMPOSITION, WM_IME_REQUEST, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
+    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCDESTROY, WM_PAINT, WM_RBUTTONDOWN, WM_SETFOCUS, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN,
+    WNDCLASSEXW, WS_CHILD, WS_CLIPSIBLINGS, WS_EX_NOPARENTNOTIFY,
 };
 
 use super::super::a11y::Grid;
@@ -39,6 +42,7 @@ use super::super::style::Style;
 use super::board::Geometry;
 use super::draw::{self, BOARD, DROP_WAIT};
 use super::keys::{self, Mods, Next, Typed};
+use super::mouse::{self, Mouse};
 use super::place::{self, SCALE_KEYS};
 use super::uia::{Access, Root};
 
@@ -51,6 +55,9 @@ const KEY_DEFAULT: u32 = *SCALE_KEYS.start();
 /// ToUnicodeEx's flag that leaves the keyboard state, a pending dead key included, as it
 /// was (Windows 10 1607 and later), so reading a chord's character never eats a dead key.
 const KEEP_KEYBOARD_STATE: u32 = 0x4;
+
+/// The lines a wheel notch scrolls when the system's setting cannot be read, its default.
+const NOTCH_LINES_DEFAULT: u32 = 3;
 
 static CLASS: OnceLock<Option<Vec<u16>>> = OnceLock::new();
 
@@ -165,6 +172,8 @@ struct Inner {
     swallow: Cell<bool>,
     held: Cell<Option<u16>>,
     cursor: Cell<Option<(usize, usize)>>,
+    lines: Cell<usize>,
+    mouse: Cell<Mouse>,
     preedit: Cell<Option<Preedit>>,
     ime: RefCell<Ime>,
     alive: Cell<bool>,
@@ -226,6 +235,8 @@ impl View {
             swallow: Cell::new(false),
             held: Cell::new(None),
             cursor: Cell::new(None),
+            lines: Cell::new(0),
+            mouse: Cell::new(Mouse::default()),
             preedit: Cell::new(None),
             ime: RefCell::new(Ime::default()),
             alive: Cell::new(true),
@@ -292,6 +303,7 @@ impl View {
             .map(|cursor| (cursor.row, cursor.column));
         let cursor = cursor.or_else(|| frame.preedit.map(|drawn| (drawn.row, drawn.column)));
         self.inner.cursor.set(cursor);
+        self.inner.lines.set(frame.rows.len());
         self.inner.preedit.set(frame.preedit);
         BOARD.post_frame(self.inner.id, frame)
     }
@@ -326,6 +338,7 @@ impl View {
 
 impl Inner {
     fn hide(&self, hwnd: HWND) {
+        self.end_drag(hwnd);
         unsafe { ShowWindow(hwnd, SW_HIDE) };
         if self.shown.replace(false) {
             self.cancel_marked(hwnd);
@@ -337,8 +350,128 @@ impl Inner {
     /// keyboard focus. The fault is read here too, since a key can come before
     /// the render thread's `FAULTED` message.
     fn active(&self) -> bool {
-        let open = self.alive.get() && !BOARD.faulted(self.id);
-        open && self.shown.get() && self.focused.get()
+        self.open() && self.shown.get() && self.focused.get()
+    }
+
+    /// Whether the view is live and not faulted.
+    fn open(&self) -> bool {
+        self.alive.get() && !BOARD.faulted(self.id)
+    }
+
+    /// Whether mouse input reaches the sink: the view is open and shown. A press needs no
+    /// focus, as on macOS. A view hidden for a cover that kept focus still gets the wheel
+    /// and the menu key from Windows, so they stop here.
+    fn mouse_open(&self) -> bool {
+        self.open() && self.shown.get()
+    }
+
+    /// Ends a drag this view holds the capture for, while the view still shows, so the
+    /// drag's release reaches the sink before a hide. Input: the view's window.
+    fn end_drag(&self, hwnd: HWND) {
+        if unsafe { GetCapture() } == hwnd {
+            unsafe { ReleaseCapture() };
+        }
+    }
+
+    /// The pixels and the view's point a mouse message carries, at the view's scale.
+    /// Input: its lParam. Output: the client pixels and the point.
+    fn mouse_at(&self, lparam: LPARAM) -> ((i32, i32), (f64, f64)) {
+        let px = mouse::client_px(lparam);
+        (px, mouse::point(px, self.key.get()))
+    }
+
+    /// The view's point for a screen point a wheel or menu message carries. Inputs: the
+    /// window and the lParam. Output: the point.
+    fn screen_at(&self, hwnd: HWND, lparam: LPARAM) -> (f64, f64) {
+        let (x, y) = mouse::client_px(lparam);
+        let mut at = POINT { x, y };
+        unsafe { ScreenToClient(hwnd, &mut at) };
+        mouse::point((at.x, at.y), self.key.get())
+    }
+
+    /// One mouse message: a left press focuses the view and takes the capture; moves, the
+    /// button going up and a lost capture step the drag; a right press ends a run of
+    /// clicks; the wheel and the menu go to the sink. Inputs: the message. Output: its result.
+    fn mouse_message(&self, hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        let shift = held_mods().shift;
+        match message {
+            WM_LBUTTONDOWN => {
+                self.cancel_marked(hwnd);
+                unsafe { SetFocus(hwnd) };
+                self.press(hwnd, lparam);
+            }
+            WM_MOUSEMOVE => {
+                let (_, point) = self.mouse_at(lparam);
+                self.step(|state| state.moved(point, shift));
+            }
+            WM_LBUTTONUP => {
+                let (_, point) = self.mouse_at(lparam);
+                self.step(|state| state.release(point, shift));
+                unsafe { ReleaseCapture() };
+            }
+            WM_CAPTURECHANGED => self.step(Mouse::lost),
+            WM_RBUTTONDOWN => {
+                self.step(|state| {
+                    state.right();
+                    None
+                });
+                return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
+            }
+            WM_MOUSEWHEEL => self.wheel(hwnd, wparam, lparam),
+            WM_CONTEXTMENU => self.menu(hwnd, lparam),
+            _ => return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+        }
+        0
+    }
+
+    /// A left press, counted against the system's double-click limits: it takes the
+    /// capture for its drag and goes to the sink. Inputs: the window and the lParam.
+    fn press(&self, hwnd: HWND, lparam: LPARAM) {
+        let (px, point) = self.mouse_at(lparam);
+        let limits = mouse::Limits {
+            time_ms: unsafe { GetDoubleClickTime() },
+            box_px: unsafe {
+                (
+                    GetSystemMetrics(SM_CXDOUBLECLK),
+                    GetSystemMetrics(SM_CYDOUBLECLK),
+                )
+            },
+        };
+        let time_ms = unsafe { GetMessageTime() } as u32;
+        let shift = held_mods().shift;
+        self.step(|state| Some(state.press(time_ms, px, point, shift, limits)));
+        unsafe { SetCapture(hwnd) };
+    }
+
+    /// Runs one step of the view's mouse state and sends the event it makes, while mouse
+    /// input reaches the sink (`mouse_open`). Input: the step.
+    fn step(&self, step: impl FnOnce(&mut Mouse) -> Option<ViewEvent>) {
+        let mut state = self.mouse.get();
+        let event = step(&mut state);
+        self.mouse.set(state);
+        if let Some(event) = event.filter(|_| self.mouse_open()) {
+            (self.sink)(self.id, event);
+        }
+    }
+
+    /// One wheel message at the screen point it carries, scrolled by the system's lines a
+    /// notch, or a page of the last frame's lines. Inputs: the window and the message.
+    fn wheel(&self, hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
+        let point = self.screen_at(hwnd, lparam);
+        let notch = mouse::notch(wheel_setting());
+        let (delta, lines) = (mouse::wheel_delta(wparam), self.lines.get());
+        self.step(|state| state.wheel(delta, notch, lines, point));
+    }
+
+    /// The menu: at the pointer after a right click, or under the cursor cell for Shift+F10
+    /// or the menu key. Inputs: the window and the lParam.
+    fn menu(&self, hwnd: HWND, lparam: LPARAM) {
+        let point = if mouse::keyboard_menu(lparam) {
+            mouse::cursor_point(self.cursor.get(), BOARD.cell(self.id))
+        } else {
+            self.screen_at(hwnd, lparam)
+        };
+        self.step(|_| Some(ViewEvent::Menu { point }));
     }
 
     /// A faulted view fails closed before the host ends it: a held focus goes to the page
@@ -690,6 +823,19 @@ impl Inner {
     }
 }
 
+/// The lines a wheel notch scrolls by the system's setting (`SPI_GETWHEELSCROLLLINES`), or
+/// the system's own default of three when it cannot be read. Output: the setting.
+fn wheel_setting() -> u32 {
+    let mut lines = NOTCH_LINES_DEFAULT;
+    let to = ptr::from_mut(&mut lines).cast();
+    let read = unsafe { SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, to, 0) };
+    if read == 0 {
+        NOTCH_LINES_DEFAULT
+    } else {
+        lines
+    }
+}
+
 /// The modifier keys held now, as the key message's own thread state reads them.
 fn held_mods() -> Mods {
     let down = |vk: u16| unsafe { GetKeyState(i32::from(vk)) } < 0;
@@ -802,11 +948,8 @@ unsafe extern "system" fn window_proc(
     };
     match message {
         WM_MOUSEACTIVATE => MA_ACTIVATE as LRESULT,
-        WM_LBUTTONDOWN => {
-            inner.cancel_marked(hwnd);
-            unsafe { SetFocus(hwnd) };
-            0
-        }
+        WM_LBUTTONDOWN | WM_MOUSEMOVE | WM_LBUTTONUP | WM_CAPTURECHANGED | WM_RBUTTONDOWN
+        | WM_MOUSEWHEEL | WM_CONTEXTMENU => inner.mouse_message(hwnd, message, wparam, lparam),
         WM_SETFOCUS => {
             inner.focused.set(true);
             inner.root.access().focus(true);

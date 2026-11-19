@@ -2,6 +2,7 @@ mod board;
 mod clip;
 mod draw;
 mod keys;
+mod mouse;
 mod place;
 #[cfg(test)]
 mod rows;

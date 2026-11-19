@@ -28,32 +28,36 @@ use windows_sys::Win32::UI::Input::Ime::{
     ImmGetCompositionWindow, ImmGetContext, ImmReleaseContext,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    ActivateKeyboardLayout, GetFocus, GetKeyboardLayout, INPUT, INPUT_0, INPUT_KEYBOARD,
-    INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-    KLF_ACTIVATE, LoadKeyboardLayoutW, MAPVK_VK_TO_VSC, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_LEFTDOWN,
-    MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEINPUT, MapVirtualKeyExW, SendInput, SetFocus, VK_A,
-    VK_BACK, VK_C, VK_CONTROL, VK_DELETE, VK_DOWN, VK_E, VK_END, VK_ESCAPE, VK_F5, VK_HOME,
-    VK_INSERT, VK_LEFT, VK_MENU, VK_NEXT, VK_OEM_7, VK_PRIOR, VK_Q, VK_RETURN, VK_RIGHT, VK_RMENU,
-    VK_SHIFT, VK_TAB, VK_UP, VK_V,
+    ActivateKeyboardLayout, GetDoubleClickTime, GetFocus, GetKeyboardLayout, INPUT, INPUT_0,
+    INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+    KEYEVENTF_UNICODE, KLF_ACTIVATE, LoadKeyboardLayoutW, MAPVK_VK_TO_VSC, MOUSEEVENTF_ABSOLUTE,
+    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
+    MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, MapVirtualKeyExW, ReleaseCapture,
+    SendInput, SetCapture, SetFocus, VK_A, VK_APPS, VK_BACK, VK_C, VK_CONTROL, VK_DELETE, VK_DOWN,
+    VK_E, VK_END, VK_ESCAPE, VK_F5, VK_F10, VK_HOME, VK_INSERT, VK_LEFT, VK_MENU, VK_NEXT,
+    VK_OEM_7, VK_PRIOR, VK_Q, VK_RETURN, VK_RIGHT, VK_RMENU, VK_SHIFT, VK_TAB, VK_UP, VK_V,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, ES_MULTILINE, GW_CHILD,
     GWLP_WNDPROC, GetSystemMetrics, GetWindow, GetWindowRect, IsWindow, IsWindowVisible, MSG,
     PM_NOREMOVE, PM_QS_SENDMESSAGE, PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassExW,
-    SM_CXSCREEN, SM_CYSCREEN, SW_MINIMIZE, SW_RESTORE, SendMessageW, SetWindowLongPtrW, ShowWindow,
-    TranslateMessage, WM_CHAR, WM_DPICHANGED_AFTERPARENT, WM_IME_CHAR, WM_IME_COMPOSITION,
-    WM_IME_ENDCOMPOSITION, WM_IME_REQUEST, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WNDCLASSEXW,
-    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    SM_CXSCREEN, SM_CYSCREEN, SPI_GETWHEELSCROLLLINES, SW_MINIMIZE, SW_RESTORE, SendMessageW,
+    SetWindowLongPtrW, ShowWindow, SystemParametersInfoW, TranslateMessage, WM_CHAR,
+    WM_CONTEXTMENU, WM_DPICHANGED_AFTERPARENT, WM_IME_CHAR, WM_IME_COMPOSITION,
+    WM_IME_ENDCOMPOSITION, WM_IME_REQUEST, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_MOUSEWHEEL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_TOPMOST,
+    WS_POPUP, WS_VISIBLE,
 };
 
 use super::super::a11y;
-use super::super::event::ViewEvent;
+use super::super::event::{MouseKind, ViewEvent};
 use super::super::host::windows as platform;
 use super::super::pane::{CONTROL, Input, Named, Pane};
 use super::super::render::{GPU_FAULT, Shared};
 use super::super::screen::{self, Frame};
 use super::super::style::{Style, Theme, font_for};
 use super::draw;
+use super::mouse;
 use super::place;
 use super::view::{self, View};
 use std::cell::RefCell;
@@ -270,27 +274,32 @@ fn text_samples(origin: POINT) -> usize {
     drawn
 }
 
-fn click(at: POINT) {
+/// One mouse input at a screen point: an absolute move with the button or wheel flags and
+/// the wheel's delta. Inputs: the point, the flags and the delta. Output: the input.
+fn pointer(at: POINT, flags: u32, delta: i32) -> INPUT {
     let width = unsafe { GetSystemMetrics(SM_CXSCREEN) }.max(2);
     let height = unsafe { GetSystemMetrics(SM_CYSCREEN) }.max(2);
     let (dx, dy) = (at.x * 65_535 / (width - 1), at.y * 65_535 / (height - 1));
-    let mouse = |flags| INPUT {
+    INPUT {
         r#type: INPUT_MOUSE,
         Anonymous: INPUT_0 {
             mi: MOUSEINPUT {
                 dx,
                 dy,
-                mouseData: 0,
+                mouseData: delta as u32,
                 dwFlags: flags | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE,
                 time: 0,
                 dwExtraInfo: 0,
             },
         },
-    };
+    }
+}
+
+fn click(at: POINT) {
     let inputs = [
-        mouse(0),
-        mouse(MOUSEEVENTF_LEFTDOWN),
-        mouse(MOUSEEVENTF_LEFTUP),
+        pointer(at, 0, 0),
+        pointer(at, MOUSEEVENTF_LEFTDOWN, 0),
+        pointer(at, MOUSEEVENTF_LEFTUP, 0),
     ];
     let size = i32::try_from(size_of::<INPUT>()).expect("an input size");
     let sent = unsafe { SendInput(3, inputs.as_ptr(), size) };
@@ -359,21 +368,23 @@ fn focus_follows_clicks(view: &View, webview: HWND, centre: POINT) {
     );
     unsafe { SetFocus(webview) };
     pump_for(Duration::from_millis(100));
-    click(centre);
-    pump_until(
-        "the click's focus",
-        FARM_WAIT,
-        || unsafe { GetFocus() } == view.hwnd(),
-    );
+    clicked_into(view, centre);
     let seen = take_seen();
+    assert!(seen.iter().all(|(id, _)| *id == 1), "{seen:?}");
+    let (focus, clicked): (Vec<ViewEvent>, Vec<ViewEvent>) = seen
+        .into_iter()
+        .map(|(_, event)| event)
+        .partition(|event| matches!(event, ViewEvent::Focus(_)));
     let want = [
         ViewEvent::Focus(true),
         ViewEvent::Focus(false),
         ViewEvent::Focus(true),
     ];
-    let events: Vec<&ViewEvent> = seen.iter().map(|(_, event)| event).collect();
-    assert_eq!(events, want.iter().collect::<Vec<_>>(), "{seen:?}");
-    assert!(seen.iter().all(|(id, _)| *id == 1));
+    assert_eq!(
+        focus, want,
+        "focus(), the webview's focus, then the click's"
+    );
+    one_click(&clicked, view_point(view, centre));
 }
 
 /// A move to a 150 percent display: the view takes the new device rectangle and the render
@@ -872,12 +883,7 @@ fn inactive_views_type_nothing(view: &View, webview: HWND, centre: POINT) {
     assert_eq!(typing(), 0, "a covered view types nothing");
     view.place(Some(PAGE))
         .expect("the host places an uncovered view again");
-    click(centre);
-    pump_until(
-        "focus again",
-        FARM_WAIT,
-        || unsafe { GetFocus() } == view.hwnd(),
-    );
+    clicked_into(view, centre);
     unsafe { SetFocus(webview) };
     pump_for(KEY_TAIL);
     take_seen();
@@ -894,12 +900,7 @@ fn each_key_reaches_the_sink_once_as_the_panel_sends_it_and_nothing_while_inacti
     let (parent, webview) = stand_ins();
     let view = View::new(parent, webview, 3, sink, &style()).expect("a view");
     let centre = placed_shown_and_drawn(parent, &view);
-    click(centre);
-    pump_until(
-        "the click's focus",
-        FARM_WAIT,
-        || unsafe { GetFocus() } == view.hwnd(),
-    );
+    clicked_into(&view, centre);
     keys_send_once();
     layouts_type_their_characters();
     unicode_and_ime_text_types_once(&view);
@@ -930,15 +931,37 @@ unsafe extern "system" fn page_proc(
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
-/// Clicks into a drawn view and waits until it holds focus. Inputs: the view and its
-/// centre on the screen.
+/// Clicks into a drawn view and waits until it holds focus and the click's release has
+/// reached the sink, so no late release lands in a later step's events. Inputs: the view
+/// and its centre on the screen.
 fn clicked_into(view: &View, centre: POINT) {
+    let releases = || {
+        let seen = SEEN.lock().expect("the seen events");
+        let release = |event: &ViewEvent| {
+            matches!(
+                event,
+                ViewEvent::Mouse {
+                    kind: MouseKind::Release,
+                    ..
+                }
+            )
+        };
+        seen.iter().filter(|(_, event)| release(event)).count()
+    };
+    let before = releases();
     click(centre);
-    pump_until(
-        "the click's focus",
-        FARM_WAIT,
-        || unsafe { GetFocus() } == view.hwnd(),
-    );
+    pump_until("the click's focus and release", FARM_WAIT, || {
+        let focused = unsafe { GetFocus() } == view.hwnd();
+        focused && releases() > before
+    });
+}
+
+/// Checks that events are one left click at a point: a single press, then its release.
+/// Inputs: the events and the point.
+fn one_click(events: &[ViewEvent], at: (f64, f64)) {
+    assert_eq!(events.len(), 2, "one press and its release: {events:?}");
+    assert_eq!(mouse_event(&events[0], MouseKind::Press, at), (false, 1));
+    assert!(!mouse_event(&events[1], MouseKind::Release, at).0);
 }
 
 /// Faults a focused view by a refused resize and waits for the board's fault while this
@@ -1313,14 +1336,18 @@ fn compositions_end_and_cancel_with_nothing_sent(view: &View, webview: HWND, cen
         "the end clears the marked text"
     );
     assert_eq!(view.marked_text(), None);
+    past_a_double_click();
     mark();
-    click(centre);
+    clicked_into(view, centre);
     pump_for(KEY_TAIL);
+    let clicked = sent();
+    let (cancel, pressed) = clicked.split_first().expect("the click sent the cancel");
     assert_eq!(
-        sent(),
-        [ViewEvent::Marked],
+        *cancel,
+        ViewEvent::Marked,
         "a click cancels the marked text"
     );
+    one_click(pressed, view_point(view, centre));
     assert_eq!(view.marked_text(), None);
     mark();
     unsafe { SetFocus(webview) };
@@ -1331,12 +1358,7 @@ fn compositions_end_and_cancel_with_nothing_sent(view: &View, webview: HWND, cen
         "a focus loss cancels the marked text"
     );
     assert_eq!(view.marked_text(), None);
-    click(centre);
-    pump_until(
-        "focus again",
-        FARM_WAIT,
-        || unsafe { GetFocus() } == view.hwnd(),
-    );
+    clicked_into(view, centre);
     take_seen();
     mark();
     view.place(None).expect("hidden");
@@ -1348,12 +1370,7 @@ fn compositions_end_and_cancel_with_nothing_sent(view: &View, webview: HWND, cen
     );
     assert_eq!(view.marked_text(), None);
     view.place(Some(PAGE)).expect("shown again");
-    click(centre);
-    pump_until(
-        "focus again",
-        FARM_WAIT,
-        || unsafe { GetFocus() } == view.hwnd(),
-    );
+    clicked_into(view, centre);
     println!("h2b row: end, click, focus loss and hide each cancelled once");
 }
 
@@ -1387,12 +1404,7 @@ fn inactive_views_compose_nothing(view: &View, webview: HWND, centre: POINT) {
         None,
         "a view without focus keeps no marked text"
     );
-    click(centre);
-    pump_until(
-        "focus again",
-        FARM_WAIT,
-        || unsafe { GetFocus() } == view.hwnd(),
-    );
+    clicked_into(view, centre);
     println!("h2b row: covered and unfocused views composed nothing");
 }
 
@@ -1402,12 +1414,7 @@ fn the_ime_marks_inline_commits_once_refuses_bad_answers_and_nothing_while_inact
     let (parent, webview) = stand_ins();
     let view = View::new(parent, webview, IME_VIEW, sink, &style()).expect("a view");
     let centre = placed_shown_and_drawn(parent, &view);
-    click(centre);
-    pump_until(
-        "the click's focus",
-        FARM_WAIT,
-        || unsafe { GetFocus() } == view.hwnd(),
-    );
+    clicked_into(&view, centre);
     marks_and_answers_where_its_characters_are(&view);
     refuses_what_it_cannot_trust(&view);
     commits_once_as_typed_text(&view);
@@ -2190,4 +2197,246 @@ fn host_fault(view: &mut platform::View, shared: &mut Shared) {
     assert_eq!(platform::paint(view, shared, late), Err(GPU_FAULT));
     pump_for(Duration::from_millis(300));
     assert!(!platform::shown(view), "a faulted view hides");
+}
+
+/// The view id of the mouse row.
+const MOUSE_VIEW: u64 = 8;
+
+/// The events the mouse row's view sent for some input, focus changes left out: exactly
+/// `want` of them, once they came and the tail passed. Inputs: what is awaited, the input
+/// and how many events. Output: the events.
+fn heard(what: &str, inputs: &[INPUT], want: usize) -> Vec<ViewEvent> {
+    let counted = |seen: &[(u64, ViewEvent)]| {
+        seen.iter()
+            .filter(|(_, event)| !matches!(event, ViewEvent::Focus(_)))
+            .count()
+    };
+    take_seen();
+    send(inputs);
+    pump_until(what, KEY_WAIT, || {
+        counted(&SEEN.lock().expect("the seen events")) >= want
+    });
+    pump_for(KEY_TAIL);
+    let seen = take_seen();
+    assert!(
+        seen.iter().all(|(id, _)| *id == MOUSE_VIEW),
+        "{what}: {seen:?}"
+    );
+    let events: Vec<ViewEvent> = seen
+        .into_iter()
+        .map(|(_, event)| event)
+        .filter(|event| !matches!(event, ViewEvent::Focus(_)))
+        .collect();
+    assert_eq!(events.len(), want, "{what}: {events:?}");
+    events
+}
+
+/// The view's point for a screen point, at the view's scale. Inputs: the view and the
+/// point. Output: the point.
+fn view_point(view: &View, at: POINT) -> (f64, f64) {
+    let mut client = at;
+    unsafe { ScreenToClient(view.hwnd(), &mut client) };
+    let scale = view.scale();
+    (f64::from(client.x) / scale, f64::from(client.y) / scale)
+}
+
+/// Whether two points are within a pixel, the absolute input's rounding.
+fn close(seen: (f64, f64), want: (f64, f64)) -> bool {
+    (seen.0 - want.0).abs() <= 1.0 && (seen.1 - want.1).abs() <= 1.0
+}
+
+/// Checks a mouse event's kind and point. Inputs: the event, the kind and the point.
+/// Output: the Shift and the click count it carried.
+fn mouse_event(event: &ViewEvent, kind: MouseKind, want: (f64, f64)) -> (bool, u8) {
+    let ViewEvent::Mouse {
+        kind: seen,
+        point,
+        option,
+        clicks,
+    } = event
+    else {
+        panic!("a mouse event, got {event:?}");
+    };
+    assert_eq!(*seen, kind, "{event:?}");
+    assert!(close(*point, want), "{event:?} at about {want:?}");
+    (*option, *clicks)
+}
+
+/// Waits past the system's double-click time, so the next press counts one.
+fn past_a_double_click() {
+    let time_ms = u64::from(unsafe { GetDoubleClickTime() });
+    pump_for(Duration::from_millis(time_ms + 100));
+}
+
+fn presses_count_clicks(view: &View, centre: POINT) {
+    past_a_double_click();
+    let tap = [
+        pointer(centre, MOUSEEVENTF_LEFTDOWN, 0),
+        pointer(centre, MOUSEEVENTF_LEFTUP, 0),
+    ];
+    let inputs: Vec<INPUT> = tap.iter().cycle().take(6).copied().collect();
+    let events = heard("a triple click", &inputs, 6);
+    let at = view_point(view, centre);
+    let presses = events.iter().step_by(2);
+    let counts: Vec<u8> = presses
+        .map(|event| mouse_event(event, MouseKind::Press, at).1)
+        .collect();
+    assert_eq!(counts, [1, 2, 3], "one, a double, then a triple click");
+    for release in events.iter().skip(1).step_by(2) {
+        mouse_event(release, MouseKind::Release, at);
+    }
+}
+
+fn shift_drag_selects(view: &View, centre: POINT) {
+    past_a_double_click();
+    let beside = POINT {
+        x: centre.x + 40,
+        y: centre.y,
+    };
+    let inputs = [
+        keyboard(VK_SHIFT, 0, 0),
+        pointer(centre, MOUSEEVENTF_LEFTDOWN, 0),
+        pointer(beside, 0, 0),
+        pointer(beside, MOUSEEVENTF_LEFTUP, 0),
+        keyboard(VK_SHIFT, 0, KEYEVENTF_KEYUP),
+    ];
+    let events = heard("a Shift drag", &inputs, 3);
+    let (from, to) = (view_point(view, centre), view_point(view, beside));
+    let press = mouse_event(&events[0], MouseKind::Press, from);
+    assert_eq!(press, (true, 1), "Shift forces a local selection");
+    assert!(
+        mouse_event(&events[1], MouseKind::Drag, to).0,
+        "the drag holds Shift"
+    );
+    assert!(
+        mouse_event(&events[2], MouseKind::Release, to).0,
+        "so does the release"
+    );
+}
+
+fn a_lost_capture_releases(view: &View, webview: HWND, centre: POINT) {
+    past_a_double_click();
+    let at = view_point(view, centre);
+    let pressed = heard("a press", &[pointer(centre, MOUSEEVENTF_LEFTDOWN, 0)], 1);
+    mouse_event(&pressed[0], MouseKind::Press, at);
+    unsafe { SetCapture(webview) };
+    let lost = take_seen();
+    assert_eq!(lost.len(), 1, "one release for the lost capture: {lost:?}");
+    let (option, _) = mouse_event(&lost[0].1, MouseKind::Release, at);
+    assert!(!option, "the press held no Shift");
+    send(&[pointer(centre, MOUSEEVENTF_LEFTUP, 0)]);
+    pump_for(KEY_TAIL);
+    assert_ne!(unsafe { ReleaseCapture() }, 0, "the stand-in lets go");
+    let after = take_seen();
+    assert!(
+        after.is_empty(),
+        "the button went up on the capture's window: {after:?}"
+    );
+}
+
+fn wheel_and_right_click(view: &View, centre: POINT) {
+    let mut setting = 0u32;
+    let to = ptr::from_mut(&mut setting).cast();
+    let read = unsafe { SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, to, 0) };
+    assert_ne!(read, 0, "the wheel setting reads");
+    assert!(
+        (1..=100).contains(&setting),
+        "lines a notch on the farm, got {setting}"
+    );
+    let at = view_point(view, centre);
+    let lines = f64::from(setting);
+    for (what, delta, want) in [("a notch up", 120, lines), ("a notch down", -120, -lines)] {
+        let notch = heard(what, &[pointer(centre, MOUSEEVENTF_WHEEL, delta)], 1);
+        let ViewEvent::Wheel {
+            point,
+            delta,
+            precise,
+        } = &notch[0]
+        else {
+            panic!("{what}: a wheel, got {notch:?}");
+        };
+        assert!(close(*point, at) && !*precise, "{what}: {notch:?}");
+        assert_eq!(*delta, want, "{what} scrolls the setting's lines");
+    }
+    let right = [
+        pointer(centre, MOUSEEVENTF_RIGHTDOWN, 0),
+        pointer(centre, MOUSEEVENTF_RIGHTUP, 0),
+    ];
+    let menu = heard("a right click", &right, 1);
+    let opened = matches!(menu[0], ViewEvent::Menu { point } if close(point, at));
+    assert!(opened, "the menu opens at the pointer: {menu:?}");
+}
+
+fn keyboard_menus(view: &View) {
+    let frame = fed_frame(&Theme::default(), b"native rows H1\r\n");
+    let cursor = frame
+        .cursor
+        .as_ref()
+        .map(|cursor| (cursor.row, cursor.column));
+    assert!(
+        cursor.is_some() && view.cell().is_some(),
+        "a cursor cell to open at"
+    );
+    let point = mouse::cursor_point(cursor, view.cell());
+    let up = KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP;
+    let menu_key = vec![
+        keyboard(VK_APPS, 0, KEYEVENTF_EXTENDEDKEY),
+        keyboard(VK_APPS, 0, up),
+    ];
+    for (what, inputs) in [
+        ("Shift+F10", chord(&[VK_SHIFT], VK_F10)),
+        ("the menu key", menu_key),
+    ] {
+        let opened = heard(what, &inputs, 1);
+        let want = [ViewEvent::Menu { point }];
+        assert_eq!(opened, want, "{what} opens the menu under the cursor");
+        let typed = heard("a key after the menu", &chord(&[], VK_A), 1);
+        assert_eq!(typed, [text(b"a")], "keys still type after {what}");
+    }
+}
+
+/// A drag that a hide cuts, as the host hides a covered view, ends with its release first,
+/// and a hidden view that kept focus sends no wheel and no menu, as macOS sends none to a
+/// hidden view. Inputs: the view and its centre on the screen.
+fn hidden_views_send_no_mouse(view: &View, centre: POINT) {
+    let hwnd = view.hwnd();
+    let at = view_point(view, centre);
+    let mut client = centre;
+    unsafe { ScreenToClient(hwnd, &mut client) };
+    let packed = |p: POINT| ((p.y as u16 as isize) << 16) | (p.x as u16 as isize);
+    take_seen();
+    unsafe { SendMessageW(hwnd, WM_LBUTTONDOWN, 0, packed(client)) };
+    view.place(None).expect("hidden");
+    let seen = sent();
+    assert_eq!(
+        seen.len(),
+        2,
+        "a press, then the hide ends the drag: {seen:?}"
+    );
+    let _ = mouse_event(&seen[0], MouseKind::Press, at);
+    let _ = mouse_event(&seen[1], MouseKind::Release, at);
+    unsafe { SendMessageW(hwnd, WM_MOUSEWHEEL, 120 << 16, packed(centre)) };
+    unsafe { SendMessageW(hwnd, WM_CONTEXTMENU, hwnd as usize, -1) };
+    let seen = sent();
+    assert!(seen.is_empty(), "no wheel or menu after the hide: {seen:?}");
+    view.place(Some(PAGE)).expect("shown again");
+    pump_for(KEY_TAIL);
+    take_seen();
+}
+
+#[test]
+#[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
+fn the_mouse_selects_scrolls_and_opens_the_menu_as_the_panel_does() {
+    let (parent, webview) = stand_ins();
+    let view = View::new(parent, webview, MOUSE_VIEW, sink, &style()).expect("a view");
+    let centre = placed_shown_and_drawn(parent, &view);
+    clicked_into(&view, centre);
+    presses_count_clicks(&view, centre);
+    shift_drag_selects(&view, centre);
+    a_lost_capture_releases(&view, webview, centre);
+    wheel_and_right_click(&view, centre);
+    keyboard_menus(&view);
+    hidden_views_send_no_mouse(&view, centre);
+    drop(view);
+    assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the stand-in goes");
 }
