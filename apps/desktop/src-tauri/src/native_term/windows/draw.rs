@@ -465,6 +465,21 @@ mod tests {
     }
 
     #[test]
+    fn a_view_retired_earlier_in_its_round_is_not_drawn() {
+        let id = u64::MAX - 1;
+        let geometry = faulted(id).geometry;
+        BOARD.add(id, 1, geometry).expect("a view on the board");
+        let round = BOARD.wait();
+        assert!(
+            round.fresh.iter().any(|fresh| fresh.id == id),
+            "the board handed the view over"
+        );
+        BOARD.fault(id);
+        painter(vec![faulted(id)]).draw(id);
+        assert!(BOARD.faulted(id), "the retired view stays faulted");
+    }
+
+    #[test]
     #[should_panic(expected = "a ready view has a drawn entry")]
     fn drawing_a_view_the_render_side_never_made_is_a_bug() {
         painter(Vec::new()).draw(7);
