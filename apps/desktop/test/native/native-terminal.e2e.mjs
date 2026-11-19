@@ -124,17 +124,19 @@ function paneTurns() {
 }
 
 /** Waits until a view shows a turn count; on a timeout the failure adds the turns the pane
- * printed in all and the view's events, so a red tells a prompt never typed from one typed
- * but never drawn (V243-DIRECT-VIEW-DRAW-MISS). It reads nothing before the wait, so the
- * caller's timing is unchanged. Inputs: the view, the count, the limit and the label. */
+ * printed in all, the view's events with their codes and the server's clients with their
+ * start times, so a red tells a prompt never typed from one typed but never drawn
+ * (V243-DIRECT-VIEW-DRAW-MISS). It reads nothing before the wait, so the caller's timing
+ * is unchanged. Inputs: the view, the count, the limit and the label. Output: the state. */
 async function turnsShown({ view, tag }, count, timeout, label) {
   assert.ok(Number.isInteger(count) && count > 0, `a turn count: ${count}`);
   assert.ok(timeout > 0 && timeout <= LONG_TURN_MS, `a time limit: ${timeout}`);
   try {
     return await seenWhen(view, (seen) => turns(seen) === count, timeout, label);
   } catch (error) {
-    const told = (await events(tag)).map((event) => (event.end ? "end" : event.type));
-    throw new Error(`${error.message}; the pane printed ${paneTurns()} stand-in turns in all; view events ${JSON.stringify(told)}`);
+    const told = (await events(tag)).map((event) => (event.end ? "end" : `${event.type}${event.code ? `:${event.code}` : ""}`));
+    const clients = tmux("list-clients", "-F", "#{client_pid} #{client_flags} created=#{client_created}").split("\n");
+    throw new Error(`${error.message}; the pane printed ${paneTurns()} stand-in turns in all; view events ${JSON.stringify(told)}; clients ${JSON.stringify(clients)}; now ${Math.floor(Date.now() / 1000)}`);
   }
 }
 
