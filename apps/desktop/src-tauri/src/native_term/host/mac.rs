@@ -1,6 +1,6 @@
-use super::NativeEvent;
 #[cfg(feature = "native-webdriver")]
-use super::{Held, Native, SKIPPED, with_native};
+use super::{Held, Native, with_native};
+use super::{NativeEvent, SKIPPED};
 use super::{screen, sink};
 use crate::native_term::a11y::{self, Geometry};
 #[cfg(feature = "native-webdriver")]
