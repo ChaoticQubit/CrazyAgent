@@ -384,12 +384,11 @@ fn npm_starts_under_the_install_sandbox_profile() {
     assert!(profile.contains("(remote ip \"*:443\")"));
 }
 
-/// V243-CONTEXT-MODE-NPM-LINK-GRANT: npm laid out as setup-node lays it out, in a prefix under
-/// no system or toolchain root with `bin/npm` a link into `../lib/node_modules/npm`, starts
-/// under the install profile, as a farm runner's npm must: the grant follows `bin/npm` to
-/// npm's own package folder and the `node` beside it, read only. The prefix sits in the
-/// build folder beside the test program, since a shared `/tmp` would let another user change
-/// it; a failed start shows npm's standard error.
+/// V243-CONTEXT-MODE-NPM-LINK-GRANT: npm in a setup-node layout, `bin/npm` a link into
+/// `../lib/node_modules/npm` in a prefix under no granted root, starts under the install
+/// profile: the grant follows `bin/npm` to npm's package and the `node` beside it, read only.
+/// The prefix sits in the build folder, as another user can change a shared `/tmp`; the engine
+/// root holds the settings store Linux reads. A failed start shows npm's standard error.
 #[test]
 fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_install_profile() {
     let real = system_bin();
@@ -428,7 +427,15 @@ fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_insta
     let node = crate::sandbox::canonical(&real.join("node")).unwrap();
     std::os::unix::fs::symlink(&node, bin.join("node")).unwrap();
     std::os::unix::fs::symlink("../lib/node_modules/npm/bin/npm-cli.js", bin.join("npm")).unwrap();
+    let program = crate::sandbox::canonical(&bin.join("npm")).unwrap();
+    assert_eq!(
+        crate::harnesses::node_prefix(&program).as_deref(),
+        Some(prefix.as_path()),
+        "the grant takes this prefix as npm's; changeable: {:?}",
+        crate::service::changeable_by_others(&bin.join("node"))
+    );
     let case = case("/usr/bin/false");
+    case.store();
     let name = format!("context-mode@{VERSION}");
     let staged = staging_folder(&case.npm(), &name).unwrap();
     let work = staging_folder(&case.npm(), &format!("{name}-work")).unwrap();
