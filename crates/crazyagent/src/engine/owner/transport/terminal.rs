@@ -2,15 +2,17 @@ use super::*;
 use crate::platform::unix_socket::{OwnedReadHalf, OwnedWriteHalf};
 use crate::protocol::encode_frame;
 #[cfg(unix)]
+use crate::protocol::plain_code;
+#[cfg(unix)]
 use crate::terminal::buffer::Chunk;
 use crate::terminal::{
-    AgentId, Host, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, TerminalFrame, TerminalRequest,
-    TerminalStream,
+    AgentId, Host, HostError, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, PaneAt, TerminalFrame,
+    TerminalRequest, TerminalStream,
 };
 #[cfg(unix)]
 use crate::terminal::{
-    CHUNK_BYTES_MAX, HostError, PASTE_BYTES_MAX, PaneAt, attach_again, paste_keys, type_into,
-    type_prompt,
+    CHUNK_BYTES_MAX, PASTE_BYTES_MAX, attach_again, paste_keys, type_into, type_prompt,
+    type_prompt_at,
 };
 use tokio::io::AsyncWrite;
 
@@ -454,14 +456,16 @@ async fn redraw(
 #[cfg(unix)]
 type Sending = tokio::task::JoinHandle<Result<Option<String>, HostError>>;
 
-/// What one attach opened: the agent and the size its view starts at, and the viewer whose
-/// history, screen and output it streams, none for an input-only view.
+/// What one attach opened: the agent and the size its view starts at, the viewer whose
+/// history, screen and output it streams, none for an input-only view, and for an input-only
+/// view of an agent's own terminal the pane it stays on (see [`pin`]).
 #[cfg_attr(not(unix), allow(dead_code))]
 struct View {
     agent: AgentId,
     cols: u16,
     rows: u16,
     viewer: Option<TerminalStream>,
+    pinned: Option<PaneAt>,
 }
 
 impl View {
@@ -473,8 +477,67 @@ impl View {
             cols: viewer.cols,
             rows: viewer.rows,
             viewer: Some(viewer),
+            pinned: None,
         }
     }
+}
+
+/// The pane an input-only view of an agent's own terminal stays on, read once as it opens:
+/// its keys, paste and resize then go to that pane id only, never by name, and it ends once
+/// the agent's own pane is another one, as after the engine restarts the agent. Takes the
+/// host and the agent. Returns the pane, none for a host with no pane ids, or its error.
+fn pin(host: &dyn Host, agent: &AgentId) -> Result<Option<PaneAt>, HostError> {
+    match host.own_pane_at(agent) {
+        Ok(at) => {
+            assert!(
+                crate::terminal::pane_id_valid(&at.pane),
+                "a pin is a pane id"
+            );
+            assert!(at.serial > 0, "a pin names the connection that found it");
+            Ok(Some(at))
+        }
+        Err(error) if error.0 == "terminal_unavailable" => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Reads a send to a view's pinned pane: done, or once the host can no longer use that pane
+/// the terminal's end, so the view ends instead of typing anywhere by name. Takes the host's
+/// answer. Returns none, `terminal_agent_unknown` or the host's error.
+fn sent_at(answer: Result<bool, HostError>) -> Result<Option<String>, HostError> {
+    match answer? {
+        true => Ok(None),
+        false => Err(HostError("terminal_agent_unknown".into())),
+    }
+}
+
+/// Pins an input-only view's pane as it opens, then sizes the window of a sized or
+/// input-only attach: through the pin when there is one, else by name as before. Takes the
+/// host, the agent, the size and whether the view is input-only. Returns the pin, none for
+/// a full view or a host with no pane ids, or the host's error.
+fn pin_and_size(
+    host: &dyn Host,
+    agent: &AgentId,
+    size: Option<(u16, u16)>,
+    input_only: bool,
+) -> Result<Option<PaneAt>, HostError> {
+    assert!(
+        !input_only || size.is_some(),
+        "an input-only attach has a size"
+    );
+    let pinned = if input_only { pin(host, agent)? } else { None };
+    match (size, &pinned) {
+        (Some(size), Some(at)) => {
+            sent_at(host.resize_at(agent, at, size))?;
+        }
+        (Some((cols, rows)), None) => host.resize(agent, cols, rows)?,
+        (None, _) => {}
+    }
+    assert!(
+        pinned.is_none() || input_only,
+        "only an input-only view is pinned"
+    );
+    Ok(pinned)
 }
 
 /// One owner paste the engine gathers from its `Paste` chunks before it filters and pastes
@@ -515,62 +578,111 @@ impl Pasting {
     }
 }
 
-/// Starts pasting one owner paste's filtered keys into the view's pane on a blocking thread.
-/// Takes the host, the agent and the keys. Returns the send, which answers none.
+/// Starts pasting one owner paste's filtered keys into the view's pane on a blocking thread:
+/// its pinned pane only when it has one, else the agent's by name. Takes the host, the agent,
+/// the pinned pane and the keys. Returns the send, which answers none.
 #[cfg(unix)]
-fn paste(host: &Arc<dyn Host>, agent: &AgentId, keys: Vec<u8>) -> Sending {
+fn paste(host: &Arc<dyn Host>, agent: &AgentId, pinned: Option<PaneAt>, keys: Vec<u8>) -> Sending {
     assert!(!keys.is_empty() && keys.len() <= PASTE_BYTES_MAX);
+    assert!(
+        pinned
+            .as_ref()
+            .is_none_or(|at| crate::terminal::pane_id_valid(&at.pane)),
+        "a pin is a pane id"
+    );
     let host = host.clone();
     let agent = agent.clone();
-    tokio::task::spawn_blocking(move || host.paste(&agent, &keys).map(|()| None))
+    tokio::task::spawn_blocking(move || match &pinned {
+        Some(at) => sent_at(host.paste_at(&agent, at, &keys)),
+        None => host.paste(&agent, &keys).map(|()| None),
+    })
 }
 
 /// Tells whether an input-only view's terminal is gone, read on a blocking thread through
 /// the call its keys take, routed as they are, so an adopted teammate counts while its pane
-/// lives: gone once that call answers ended, or fails while the host no longer lists the
-/// agent; a host that cannot tell leaves the view open. Takes the host and the agent.
-/// Returns the answer.
+/// lives: for a pinned view gone once the agent's own pane is another one, else once that
+/// call answers ended, or fails while the host no longer lists the agent; a host that
+/// cannot tell leaves the view open. Takes the host, the agent and the pin. Returns it.
 #[cfg(unix)]
-async fn agent_gone(host: &Arc<dyn Host>, agent: &AgentId) -> bool {
+async fn agent_gone(host: &Arc<dyn Host>, agent: &AgentId, pinned: Option<&PaneAt>) -> bool {
     let host = host.clone();
     let agent = agent.clone();
-    tokio::task::spawn_blocking(move || match host.input_live(&agent) {
-        Ok(_) => false,
-        Err(error) if crate::terminal::ended_code(&error.0) => true,
-        Err(error) if error.0 == "terminal_pane_unknown" => true,
-        Err(_) => host.alive().is_ok_and(|alive| !alive.contains(&agent)),
+    let pinned = pinned.cloned();
+    assert!(
+        pinned
+            .as_ref()
+            .is_none_or(|at| crate::terminal::pane_id_valid(&at.pane)),
+        "a pin is a pane id"
+    );
+    tokio::task::spawn_blocking(move || {
+        let stays = match &pinned {
+            Some(at) => host.own_pane_at(&agent).map(|now| now == *at),
+            None => host.input_live(&agent).map(|_| true),
+        };
+        match stays {
+            Ok(stays) => !stays,
+            Err(error) if crate::terminal::ended_code(&error.0) => true,
+            Err(error) if error.0 == "terminal_pane_unknown" => true,
+            Err(_) => host.alive().is_ok_and(|alive| !alive.contains(&agent)),
+        }
     })
     .await
     .unwrap_or(false)
 }
 
 /// Starts sending one owner request to the host on a blocking thread: typed and wheel keys
-/// into the view's pane, a prompt, or a resize. Takes the host, the agent, the view's pane
-/// and the request. Returns the send, which answers the prompt's text once the agent took
-/// it as a prompt, none for any other request, or the host's error.
+/// into the view's pane, a prompt, or a resize; a pinned view's keys, prompt and resize go
+/// to its pane only, never by name. Takes the host, the agent, the view's pane, its pin and
+/// the request. Returns the send, which answers the prompt's text once the agent took it as
+/// a prompt, none for any other request, or the host's error.
 #[cfg(unix)]
 fn send(
     host: &Arc<dyn Host>,
     agent: &AgentId,
     at: Option<PaneAt>,
+    pinned: Option<PaneAt>,
     request: TerminalRequest,
 ) -> Sending {
+    assert!(
+        at.is_none() || pinned.is_none(),
+        "a pinned view has no viewer pane"
+    );
+    assert!(
+        pinned
+            .as_ref()
+            .is_none_or(|at| crate::terminal::pane_id_valid(&at.pane)),
+        "a pin is a pane id"
+    );
     let host = host.clone();
     let agent = agent.clone();
-    tokio::task::spawn_blocking(move || match request {
-        TerminalRequest::Input { bytes } | TerminalRequest::Scroll { bytes } => {
+    tokio::task::spawn_blocking(move || match (request, &pinned) {
+        (TerminalRequest::Input { bytes } | TerminalRequest::Scroll { bytes }, Some(pin)) => {
+            sent_at(host.input_at(&agent, pin, &bytes))
+        }
+        (TerminalRequest::Input { bytes } | TerminalRequest::Scroll { bytes }, None) => {
             type_into(host.as_ref(), at.as_ref(), &agent, &bytes).map(|()| None)
         }
-        TerminalRequest::Prompt { text } => {
+        (TerminalRequest::Prompt { text }, Some(pin)) => {
+            type_prompt_at(host.as_ref(), &agent, pin, &text).map(|heard| heard.then_some(text))
+        }
+        (TerminalRequest::Prompt { text }, None) => {
             type_prompt(host.as_ref(), &agent, &text).map(|heard| heard.then_some(text))
         }
-        TerminalRequest::Resize { cols, rows } => host.resize(&agent, cols, rows).map(|()| None),
-        TerminalRequest::Attach { .. }
-        | TerminalRequest::AttachPane { .. }
-        | TerminalRequest::AttachSized { .. }
-        | TerminalRequest::AttachInput { .. }
-        | TerminalRequest::Paste { .. }
-        | TerminalRequest::Detach => Ok(None),
+        (TerminalRequest::Resize { cols, rows }, Some(pin)) => {
+            sent_at(host.resize_at(&agent, pin, (cols, rows)))
+        }
+        (TerminalRequest::Resize { cols, rows }, None) => {
+            host.resize(&agent, cols, rows).map(|()| None)
+        }
+        (
+            TerminalRequest::Attach { .. }
+            | TerminalRequest::AttachPane { .. }
+            | TerminalRequest::AttachSized { .. }
+            | TerminalRequest::AttachInput { .. }
+            | TerminalRequest::Paste { .. }
+            | TerminalRequest::Detach,
+            _,
+        ) => Ok(None),
     })
 }
 
@@ -622,9 +734,7 @@ async fn open(
     };
     let attaching = host.clone();
     let view = tokio::task::spawn_blocking(move || {
-        if let Some((cols, rows)) = size {
-            attaching.resize(&agent_id, cols, rows)?;
-        }
+        let pinned = pin_and_size(attaching.as_ref(), &agent_id, size, input_only)?;
         match size.filter(|_| input_only) {
             Some((cols, rows)) => {
                 attaching.input_live(&agent_id)?;
@@ -633,6 +743,7 @@ async fn open(
                     cols,
                     rows,
                     viewer: None,
+                    pinned,
                 })
             }
             None => Ok(View::of(attaching.attach(&agent_id)?)),
@@ -641,6 +752,10 @@ async fn open(
     .await
     .map_err(|_| failure("terminal_unavailable"))??;
     assert_eq!(view.viewer.is_none(), input_only);
+    assert!(
+        view.pinned.is_none() || input_only,
+        "only an input-only view is pinned"
+    );
     Ok((admission, view, host, member))
 }
 
@@ -921,7 +1036,10 @@ async fn pump(
     viewing: &impl Viewing,
 ) -> &'static str {
     let View {
-        agent, mut viewer, ..
+        agent,
+        mut viewer,
+        pinned,
+        ..
     } = view;
     let mut check = tokio::time::interval(GRANT_CHECK);
     let mut sending: Option<Sending> = None;
@@ -954,7 +1072,8 @@ async fn pump(
                 sending = None;
                 match sent.unwrap_or_else(|_| Err(HostError("terminal_unavailable".into()))) {
                     Err(error) if crate::terminal::ended_code(&error.0) => break "terminal_ended",
-                    Err(_) | Ok(None) => {}
+                    Err(error) => refused(&error),
+                    Ok(None) => {}
                     Ok(Some(text)) => viewing.heard(text).await,
                 }
             },
@@ -977,7 +1096,7 @@ async fn pump(
                     };
                     viewing.typed(&TerminalRequest::Paste { bytes, last });
                     if let Some(keys) = pasted.filter(|keys| !keys.is_empty()) {
-                        sending = Some(paste(&host, &agent, keys));
+                        sending = Some(paste(&host, &agent, pinned.clone(), keys));
                     }
                 }
                 Some(_) if pasting.open() => {
@@ -986,25 +1105,48 @@ async fn pump(
                 Some(request) => {
                     viewing.typed(&request);
                     let at = viewer.as_ref().and_then(|viewer| viewer.at.clone());
-                    sending = Some(send(&host, &agent, at, request));
+                    sending = Some(send(&host, &agent, at, pinned.clone(), request));
                 }
             },
             _ = check.tick() => {
                 if !viewing.holds().await {
                     break GRANT_ENDED;
                 }
-                if viewer.is_none() && agent_gone(&host, &agent).await {
+                if viewer.is_none() && agent_gone(&host, &agent, pinned.as_ref()).await {
                     break "terminal_ended";
                 }
             }
         }
     };
-    if let Some(sending) = sending
-        && let Ok(Ok(Some(text))) = sending.await
-    {
-        viewing.heard(text).await;
-    }
+    finish(sending, viewing).await;
     reason
+}
+
+/// Finishes the send still running when a view ends, so a prompt it took is heard and a
+/// refusal is logged. Takes the send, if any, and the grant. Returns once it finished.
+#[cfg(unix)]
+async fn finish(sending: Option<Sending>, viewing: &impl Viewing) {
+    let Some(sending) = sending else {
+        return;
+    };
+    match sending
+        .await
+        .unwrap_or_else(|_| Err(HostError("terminal_unavailable".into())))
+    {
+        Ok(Some(text)) => viewing.heard(text).await,
+        Ok(None) => {}
+        Err(error) => refused(&error),
+    }
+}
+
+/// Logs a send the host refused with a code that does not end the view, by its plain code
+/// only, so a dropped request is never silent. Takes the host's error. An ended code is the
+/// view's own end, which the pump reports, so it logs nothing for one.
+#[cfg(unix)]
+fn refused(error: &HostError) {
+    if !crate::terminal::ended_code(&error.0) {
+        eprintln!("terminal_send_refused code={}", plain_code(&error.0));
+    }
 }
 
 /// Serves one owner terminal connection: checks the owner and attaches within the attach

@@ -428,7 +428,6 @@ struct Views {
 }
 
 impl Views {
-    #[cfg(test)]
     fn serial(&self, window: &str, key: &ViewKey) -> Option<u64> {
         let viewer = self.windows.get(window)?.viewers.get(key)?;
         Some(viewer.serial)
@@ -803,6 +802,35 @@ impl Terminals {
             shown.viewers.remove(key);
         }
     }
+
+    /// The end a view is told when the engine ends its session: a view that a newer view of
+    /// its key replaced in its window, which the engine ends as `terminal_detached`, ends with
+    /// the final `terminal_view_replaced`, so a following view never takes the key back on a
+    /// timer (#632). Takes the window label, the key, the view's serial and the engine's
+    /// frame. Returns the frame to deliver; any other frame or view keeps the engine's.
+    fn told_end(
+        &self,
+        window: &str,
+        key: &ViewKey,
+        serial: u64,
+        frame: TerminalFrame,
+    ) -> TerminalFrame {
+        assert!(window_label_valid(window));
+        assert!(serial > 0);
+        if !matches!(&frame, TerminalFrame::Closed { reason } if reason == "terminal_detached") {
+            return frame;
+        }
+        let replaced = self
+            .views()
+            .ok()
+            .and_then(|views| views.serial(window, key))
+            .is_some_and(|shown| shown > serial);
+        if replaced {
+            closed("terminal_view_replaced")
+        } else {
+            frame
+        }
+    }
 }
 
 async fn write(mut control: TerminalControl, mut queue: mpsc::Receiver<TerminalRequest>) {
@@ -846,6 +874,7 @@ async fn read(
                 Err(error) if error.0 == "terminal_closed" => closed("terminal_connection_closed"),
                 Err(error) => closed(&plain_code(&error.0, "terminal_connection_lost")),
             };
+            let frame = terminals.told_end(&window, &key, serial, frame);
             if sink.deliver(&key.agent, frame).await != Ok(false) {
                 break;
             }
@@ -931,6 +960,56 @@ mod tests {
         terminals.detach("main", &agent.agent, new.serial).unwrap();
         assert_eq!(shown(&terminals, "main", &agent), None);
         terminals.detach("main", &agent.agent, new.serial).unwrap();
+    }
+
+    /// #632 (V243-NATIVE-INPUT-PIN r3): a view that a newer view of its key replaced in its
+    /// window, which the engine ends as detached, is told the final `terminal_view_replaced`,
+    /// so a following view never takes the key back on a timer; the newer view, a view in
+    /// another window, an agent's own end and a page load keep the engine's code.
+    #[test]
+    fn a_view_a_newer_view_of_its_key_replaced_is_told_replaced_not_detached() {
+        let terminals = Arc::new(Terminals::default());
+        terminals.page_started("main");
+        terminals.page_started(WALL);
+        let agent = team(3);
+        let (requests, _queue) = mpsc::channel(1);
+        let told = |window: &str, serial: u64, code: &str| {
+            terminals.told_end(window, &agent, serial, closed(code))
+        };
+        let older = terminals.room("main", &agent).unwrap();
+        terminals
+            .install_viewer("main", &agent, older.serial, requests.clone())
+            .unwrap();
+        let detached = closed("terminal_detached");
+        assert_eq!(told("main", older.serial, "terminal_detached"), detached);
+        let wall = terminals.room(WALL, &agent).unwrap();
+        terminals
+            .install_viewer(WALL, &agent, wall.serial, requests.clone())
+            .unwrap();
+        assert_eq!(
+            told("main", older.serial, "terminal_detached"),
+            detached,
+            "a newer view in another window replaces nothing"
+        );
+        let newer = terminals.room("main", &agent).unwrap();
+        terminals
+            .install_viewer("main", &agent, newer.serial, requests)
+            .unwrap();
+        assert_eq!(
+            told("main", older.serial, "terminal_detached"),
+            closed("terminal_view_replaced"),
+            "the replaced view's end is final, so its follower stops"
+        );
+        assert_eq!(told("main", newer.serial, "terminal_detached"), detached);
+        assert_eq!(told(WALL, wall.serial, "terminal_detached"), detached);
+        let ended = closed("terminal_ended");
+        assert_eq!(told("main", older.serial, "terminal_ended"), ended);
+        terminals.page_started("main");
+        assert_eq!(
+            told("main", newer.serial, "terminal_detached"),
+            detached,
+            "a page load ends every view of the window and replaces none"
+        );
     }
 
     /// A wall window's page reloads while an attach waits on its team graph read: the place

@@ -625,14 +625,18 @@ async fn fifty_typed_keys_echo_back_within_budget() {
         .unwrap();
 }
 
-/// A host that records each owner paste and typed request it takes, lists the agents a row
-/// gives it as alive, none when it cannot list, and answers `input_live` as the row sets it;
-/// every other call answers at once.
+/// A host that records each owner paste and typed request it takes, by name or straight into
+/// a pinned pane, lists the agents a row gives it as alive, none when it cannot list, and
+/// answers `input_live` and the agent's own pane as the row sets them, no pane ids unless set;
+/// a pinned send lands only while that pane is still the agent's own. Every other call
+/// answers at once.
 struct Recording {
     pasted: std::sync::Mutex<Vec<(AgentId, Vec<u8>)>>,
     typed: std::sync::Mutex<Vec<Vec<u8>>>,
     alive: Option<Vec<AgentId>>,
     live: std::sync::Mutex<Result<bool, String>>,
+    own: std::sync::Mutex<Result<PaneAt, String>>,
+    at_pane: std::sync::Mutex<Vec<Vec<u8>>>,
 }
 
 impl Recording {
@@ -646,7 +650,25 @@ impl Recording {
             typed: std::sync::Mutex::new(Vec::new()),
             alive,
             live: std::sync::Mutex::new(live.map_err(str::to_owned)),
+            own: std::sync::Mutex::new(Err("terminal_unavailable".into())),
+            at_pane: std::sync::Mutex::new(Vec::new()),
         })
+    }
+
+    /// Sets what the agent's own pane answers. Takes the answer. Returns nothing.
+    fn own_is(&self, own: Result<PaneAt, &str>) {
+        *self.own.lock().unwrap() = own.map_err(str::to_owned);
+    }
+
+    /// Records a send to a pinned pane while that pane is still the agent's own, as a host
+    /// that still serves it types there. Takes the pane and the bytes. Returns whether it
+    /// landed.
+    fn lands_at(&self, at: &PaneAt, bytes: &[u8]) -> bool {
+        let lands = self.own.lock().unwrap().as_ref().is_ok_and(|own| own == at);
+        if lands {
+            self.at_pane.lock().unwrap().push(bytes.to_vec());
+        }
+        lands
     }
 }
 
@@ -686,6 +708,22 @@ impl Host for Recording {
 
     fn input_live(&self, _: &AgentId) -> Result<bool, HostError> {
         self.live.lock().unwrap().clone().map_err(HostError)
+    }
+
+    fn own_pane_at(&self, _: &AgentId) -> Result<PaneAt, HostError> {
+        self.own.lock().unwrap().clone().map_err(HostError)
+    }
+
+    fn input_at(&self, _: &AgentId, at: &PaneAt, bytes: &[u8]) -> Result<bool, HostError> {
+        Ok(self.lands_at(at, bytes))
+    }
+
+    fn paste_at(&self, _: &AgentId, at: &PaneAt, keys: &[u8]) -> Result<bool, HostError> {
+        Ok(self.lands_at(at, keys))
+    }
+
+    fn resize_at(&self, _: &AgentId, at: &PaneAt, size: (u16, u16)) -> Result<bool, HostError> {
+        Ok(self.lands_at(at, format!("{}x{}", size.0, size.1).as_bytes()))
     }
 
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
@@ -753,6 +791,7 @@ async fn pumped(
         cols: 80,
         rows: 24,
         viewer: None,
+        pinned: None,
     };
     let host: Arc<dyn Host> = host;
     tokio::time::timeout(WAIT, pump(&mut ours, view, &mut asked, host, viewing))
@@ -915,6 +954,7 @@ async fn an_input_only_view_types_writes_nothing_and_ends_when_its_agent_is_gone
         cols: 80,
         rows: 24,
         viewer: None,
+        pinned: None,
     };
     let viewing = Counted::allowing(usize::MAX);
     let reason =
@@ -1066,7 +1106,7 @@ async fn an_input_only_view_is_gone_only_by_the_call_its_keys_take() {
     ] {
         let host: Arc<dyn Host> = Recording::living(alive.clone(), live);
         assert_eq!(
-            agent_gone(&host, &agent).await,
+            agent_gone(&host, &agent, None).await,
             gone,
             "listed {alive:?}, answer {live:?}"
         );
@@ -1090,6 +1130,7 @@ async fn an_input_only_view_of_a_teammate_its_host_does_not_list_stays_open() {
                 cols: 80,
                 rows: 24,
                 viewer: None,
+                pinned: None,
             };
             let viewing = Counted::allowing(usize::MAX);
             pump(&mut ours, view, &mut asked, host, &viewing).await
@@ -1112,4 +1153,466 @@ async fn an_input_only_view_of_a_teammate_its_host_does_not_list_stays_open() {
         tokio::time::timeout(WAIT, running).await.unwrap().unwrap(),
         "terminal_detached"
     );
+}
+
+/// Reads an agent terminal's screen until a check passes or the wait runs out. Takes the
+/// host, the agent, the check and the wait. Returns the last screen read, as text.
+async fn screen_when(
+    host: &Arc<Tmux>,
+    agent: &AgentId,
+    check: fn(&str) -> bool,
+    wait: Duration,
+) -> String {
+    assert!(wait > Duration::ZERO && wait <= WAIT);
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let (host, agent) = (host.clone(), agent.clone());
+        let screen = tokio::task::spawn_blocking(move || host.screen(&agent))
+            .await
+            .unwrap()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        if check(&screen) || tokio::time::Instant::now() >= deadline {
+            return screen;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// V243-NATIVE-INPUT-PIN: an input-only view stays on the pane it opened on. Once that pane
+/// ends and a new terminal takes the agent's name, as the engine's restart of an agent does,
+/// the view's keys, paste and resize never reach the new pane, and the view ends as
+/// `terminal_ended` at a grant check, while before the end it typed into its own pane.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_input_only_view_never_moves_to_a_new_terminal_under_its_agents_name() {
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-term-pin-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root = tmp.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let global = root.join("g.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 2000\n").unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let tmux = installed(root).expect("tmux must be installed on this machine");
+    let folder = root.join(FOLDER);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: folder.join(SOCKET),
+    };
+    let agent = AgentId::team(1).unwrap();
+    let first = InteractiveCommand {
+        argv: vec!["/bin/sh".into()],
+        cwd: root.to_path_buf(),
+        env: vec![("PS1".into(), "first$ ".into())],
+        transcript: Transcript::Unavailable,
+    };
+    let second = InteractiveCommand {
+        env: vec![("PS1".into(), "second$ ".into())],
+        ..first.clone()
+    };
+    let launcher = {
+        let (agent, folder) = (agent.clone(), folder.clone());
+        tokio::task::spawn_blocking(move || {
+            let launcher = Tmux::open(Some(tmux), &folder);
+            launcher.spawn(&agent, &first).unwrap();
+            Arc::new(launcher)
+        })
+        .await
+        .unwrap()
+    };
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root,
+        "e.sock",
+        &global,
+        &root.join("p.toml"),
+        &stopped,
+    )
+    .await
+    .unwrap();
+    let (_, owner, _) = Client::new(root.join("e.sock"), WAIT)
+        .unwrap()
+        .with_owner(OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let TerminalSession {
+        mut output,
+        mut control,
+        ..
+    } = owner
+        .terminal_attach_input(agent.clone(), None, 100, 30)
+        .await
+        .unwrap();
+    control.input(b"echo own-pane\r".to_vec()).await.unwrap();
+    let own = screen_when(
+        &launcher,
+        &agent,
+        |s| s.matches("own-pane").count() >= 2,
+        WAIT,
+    )
+    .await;
+    assert!(
+        own.matches("own-pane").count() >= 2,
+        "the view typed into its own pane: {own}"
+    );
+
+    {
+        let (launcher, agent) = (launcher.clone(), agent.clone());
+        tokio::task::spawn_blocking(move || {
+            launcher.kill(&agent).unwrap();
+            launcher.spawn(&agent, &second).unwrap();
+        })
+        .await
+        .unwrap();
+    }
+    let fresh = screen_when(&launcher, &agent, |s| s.contains("second$"), WAIT).await;
+    assert!(fresh.contains("second$"), "the new terminal runs: {fresh}");
+    let TerminalSession { cols, rows, .. } = owner.terminal_attach(agent.clone()).await.unwrap();
+    let before = (cols, rows);
+    let _ = control.input(b"echo stale-keys\r".to_vec()).await;
+    let _ = control.paste(b"echo stale-paste".to_vec(), true).await;
+    let _ = control.input(b"\r".to_vec()).await;
+    let _ = control.resize(before.0 - 20, before.1 - 4).await;
+
+    let quiet = Duration::from_secs(2);
+    let new = screen_when(&launcher, &agent, |s| s.contains("stale"), quiet).await;
+    assert!(
+        !new.contains("stale"),
+        "a stale view's keys reached the new terminal: {new}"
+    );
+    let TerminalSession { cols, rows, .. } = owner.terminal_attach(agent).await.unwrap();
+    assert_eq!(
+        (cols, rows),
+        before,
+        "a stale view's resize sized the new terminal"
+    );
+    assert_eq!(closed(&mut output).await, "terminal_ended");
+
+    drop(control);
+    drop(owner);
+    tokio::time::timeout(WAIT, service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+/// V243-NATIVE-INPUT-PIN: a pinned input-only view is gone once its agent's own pane is
+/// another one, or the same id on another connection, or its terminal answers ended; a host
+/// that fails otherwise counts it gone only once it no longer lists the agent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pinned_input_only_view_is_gone_once_its_agents_own_pane_is_another() {
+    let agent = AgentId::team(1).unwrap();
+    let pane = |pane: &str, serial| PaneAt {
+        pane: pane.into(),
+        serial,
+    };
+    let at = pane("%3", 7);
+    let listed = || Some(vec![agent.clone()]);
+    for (alive, own, gone) in [
+        (listed(), Ok(at.clone()), false),
+        (listed(), Ok(pane("%4", 7)), true),
+        (listed(), Ok(pane("%3", 8)), true),
+        (listed(), Err("terminal_agent_unknown"), true),
+        (listed(), Err("terminal_command_failed"), false),
+        (Some(Vec::new()), Err("terminal_command_failed"), true),
+    ] {
+        let recording = Recording::living(alive.clone(), Ok(true));
+        recording.own_is(own.clone());
+        let host: Arc<dyn Host> = recording;
+        assert_eq!(
+            agent_gone(&host, &agent, Some(&at)).await,
+            gone,
+            "listed {alive:?}, own pane {own:?}"
+        );
+    }
+}
+
+/// V243-NATIVE-INPUT-PIN: a pinned input-only view types, pastes and sizes only its pane,
+/// never by name, and ends as `terminal_ended` at its first send once that pane is no longer
+/// its agent's own. Its prompt has its own row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pinned_input_only_view_sends_only_to_its_pane_and_ends_once_it_cannot() {
+    let agent = AgentId::team(1).unwrap();
+    let at = PaneAt {
+        pane: "%3".into(),
+        serial: 7,
+    };
+    let recording = Recording::new(vec![agent.clone()]);
+    recording.own_is(Ok(at.clone()));
+    let (queue, mut asked) = tokio::sync::mpsc::channel(8);
+    let running = {
+        let host: Arc<dyn Host> = recording.clone();
+        let (agent, pinned) = (agent.clone(), Some(at.clone()));
+        tokio::spawn(async move {
+            let (mut ours, _theirs) = tokio::io::duplex(1 << 16);
+            let view = View {
+                agent,
+                cols: 80,
+                rows: 24,
+                viewer: None,
+                pinned,
+            };
+            let viewing = Counted::allowing(usize::MAX);
+            pump(&mut ours, view, &mut asked, host, &viewing).await
+        })
+    };
+    for request in [
+        TerminalRequest::Input {
+            bytes: b"a".to_vec(),
+        },
+        TerminalRequest::Paste {
+            bytes: b"p".to_vec(),
+            last: true,
+        },
+        TerminalRequest::Resize { cols: 90, rows: 30 },
+    ] {
+        queue.send(request).await.unwrap();
+    }
+    let landed = tokio::time::timeout(WAIT, async {
+        loop {
+            let count = recording.at_pane.lock().unwrap().len();
+            if count >= 3 {
+                return count;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert_eq!(
+        landed,
+        Ok(3),
+        "the key, paste and resize reached the pinned pane"
+    );
+    assert_eq!(
+        *recording.at_pane.lock().unwrap(),
+        vec![b"a".to_vec(), b"p".to_vec(), b"90x30".to_vec()]
+    );
+
+    recording.own_is(Ok(PaneAt {
+        pane: "%4".into(),
+        serial: 7,
+    }));
+    queue
+        .send(TerminalRequest::Input {
+            bytes: b"b".to_vec(),
+        })
+        .await
+        .unwrap();
+    let reason = tokio::time::timeout(WAIT, running).await.unwrap().unwrap();
+    assert_eq!(reason, "terminal_ended");
+    assert!(
+        recording.typed.lock().unwrap().is_empty(),
+        "nothing was typed by name"
+    );
+    assert!(
+        recording.pasted.lock().unwrap().is_empty(),
+        "nothing was pasted by name"
+    );
+    assert_eq!(
+        recording.at_pane.lock().unwrap().len(),
+        3,
+        "the key after the move never landed"
+    );
+}
+
+/// V243-NATIVE-INPUT-PIN: a pin that is no pane id, or a prompt pin with no control serial, is
+/// a programmer error, so a pinned paste, send, prompt or liveness check stops at once instead
+/// of handing the host a name-like target.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pin_that_is_no_pane_id_trips_every_pinned_path() {
+    let agent = AgentId::team(1).unwrap();
+    let bogus = PaneAt {
+        pane: "first".into(),
+        serial: 7,
+    };
+    assert!(!crate::terminal::pane_id_valid(&bogus.pane));
+    let host: Arc<dyn Host> = Recording::new(vec![agent.clone()]);
+    let pasting = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        paste(&host, &agent, Some(bogus.clone()), b"p".to_vec())
+    }));
+    assert!(pasting.is_err(), "a pinned paste to no pane id panics");
+    let sending = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let request = TerminalRequest::Input {
+            bytes: b"a".to_vec(),
+        };
+        send(&host, &agent, None, Some(bogus.clone()), request)
+    }));
+    assert!(sending.is_err(), "a pinned send to no pane id panics");
+    let prompting = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::terminal::type_prompt_at(host.as_ref(), &agent, &bogus, "hi")
+    }));
+    assert!(prompting.is_err(), "a pinned prompt to no pane id panics");
+    let unserialed = PaneAt {
+        pane: "%3".into(),
+        serial: 0,
+    };
+    let prompting = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::terminal::type_prompt_at(host.as_ref(), &agent, &unserialed, "hi")
+    }));
+    assert!(
+        prompting.is_err(),
+        "a pinned prompt with no control serial panics"
+    );
+    let checking = tokio::spawn(async move { agent_gone(&host, &agent, Some(&bogus)).await });
+    assert!(
+        checking.await.is_err_and(|join| join.is_panic()),
+        "a pinned liveness check of no pane id panics"
+    );
+}
+
+/// V243-NATIVE-INPUT-PIN r2 (#632 F1): the message box's prompt through a pinned input-only
+/// view lands in that pane as one submission, its paste then Enter, never by name, and is
+/// recorded as heard for the master's next turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prompt_through_a_pinned_view_lands_in_its_pane_and_is_heard() {
+    let agent = AgentId::team(1).unwrap();
+    let at = PaneAt {
+        pane: "%3".into(),
+        serial: 7,
+    };
+    let text = "ship it";
+    let recording = Recording::new(vec![agent.clone()]);
+    recording.own_is(Ok(at.clone()));
+    let (queue, mut asked) = tokio::sync::mpsc::channel(8);
+    let running = {
+        let host: Arc<dyn Host> = recording.clone();
+        let (agent, pinned) = (agent.clone(), Some(at.clone()));
+        tokio::spawn(async move {
+            let (mut ours, _theirs) = tokio::io::duplex(1 << 16);
+            let view = View {
+                agent,
+                cols: 80,
+                rows: 24,
+                viewer: None,
+                pinned,
+            };
+            let viewing = Open::default();
+            let reason = pump(&mut ours, view, &mut asked, host, &viewing).await;
+            (reason, viewing.heard.into_inner().unwrap())
+        })
+    };
+    queue
+        .send(TerminalRequest::Prompt { text: text.into() })
+        .await
+        .unwrap();
+    let landed = tokio::time::timeout(WAIT, async {
+        while recording.at_pane.lock().unwrap().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(landed.is_ok(), "the prompt reached the pinned pane");
+    drop(queue);
+    let (reason, heard) = tokio::time::timeout(WAIT, running).await.unwrap().unwrap();
+    assert_eq!(reason, "terminal_detached");
+    let keys = crate::terminal::prompt_keys(text, true).unwrap();
+    assert_eq!(
+        *recording.at_pane.lock().unwrap(),
+        vec![keys, b"\r".to_vec()],
+        "one paste of the prompt, then one Enter, into the pinned pane"
+    );
+    assert!(
+        recording.typed.lock().unwrap().is_empty(),
+        "nothing typed by name"
+    );
+    assert!(
+        recording.pasted.lock().unwrap().is_empty(),
+        "nothing pasted by name"
+    );
+    assert_eq!(
+        heard,
+        vec![text.to_owned()],
+        "the master is told the prompt was heard"
+    );
+}
+
+/// V243-NATIVE-INPUT-PIN r3 (#632 W5 row 7): on a real tmux server, a prompt the native
+/// panel's message box sends through an input-only view lands in the agent's pane as one
+/// submission: the pasted text between the bracket marks the pane asked for, then Enter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prompt_through_an_input_only_view_lands_in_a_real_tmux_pane() {
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-term-prompt-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root = tmp.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let global = root.join("g.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 2000\n").unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let script = root.join("stand-in.sh");
+    std::fs::write(
+        &script,
+        "/bin/stty -echo 2>/dev/null\nprintf '\\033[?2004hstand-in ready\\n'\n\
+         while IFS= read -r line; do\n\
+         printf 'turn %s\\n' \"$(printf '%s' \"$line\" | /usr/bin/tr -d '\\033')\"\ndone\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(root).expect("tmux must be installed on this machine");
+    let folder = root.join(FOLDER);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: folder.join(SOCKET),
+    };
+    let agent = AgentId::team(1).unwrap();
+    let stand_in = InteractiveCommand {
+        argv: vec!["/bin/sh".into(), script.to_str().unwrap().into()],
+        cwd: root.to_path_buf(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    let launcher = {
+        let (agent, folder) = (agent.clone(), folder.clone());
+        tokio::task::spawn_blocking(move || {
+            let launcher = Tmux::open(Some(tmux), &folder);
+            launcher.spawn(&agent, &stand_in).unwrap();
+            Arc::new(launcher)
+        })
+        .await
+        .unwrap()
+    };
+    let ready = screen_when(&launcher, &agent, |s| s.contains("stand-in ready"), WAIT).await;
+    assert!(
+        ready.contains("stand-in ready"),
+        "the stand-in runs: {ready}"
+    );
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root,
+        "e.sock",
+        &global,
+        &root.join("p.toml"),
+        &stopped,
+    )
+    .await
+    .unwrap();
+    let (_, owner, _) = Client::new(root.join("e.sock"), WAIT)
+        .unwrap()
+        .with_owner(OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let TerminalSession { mut control, .. } = owner
+        .terminal_attach_input(agent.clone(), None, 100, 30)
+        .await
+        .unwrap();
+    control.prompt("pinned prompt".into()).await.unwrap();
+    let landed = screen_when(&launcher, &agent, |s| s.contains("turn"), WAIT).await;
+    assert!(
+        landed.contains("turn [200~pinned prompt[201~"),
+        "the prompt landed as one bracketed submission: {landed}"
+    );
+    assert_eq!(
+        landed.matches("turn").count(),
+        1,
+        "one submission: {landed}"
+    );
+
+    drop(control);
+    drop(owner);
+    tokio::time::timeout(WAIT, service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
 }
