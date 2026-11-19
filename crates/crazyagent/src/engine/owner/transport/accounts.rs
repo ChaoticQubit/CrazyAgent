@@ -278,10 +278,16 @@ pub(super) async fn serve(
     };
     let time = envelope.accounts.time(engine.timeout);
     let cut = tokio::time::Instant::now() + time;
+    eprintln!("diag_accounts_start us={} time_ms={}", crate::storage::diag_us(), time.as_millis());
     let work = handle(engine, authority, packet, admission, envelope.accounts, key);
-    let outcome = tokio::time::timeout_at(cut, crate::storage::before_cut(cut, time, work))
-        .await
-        .unwrap_or_else(|_| Err(unknown()));
+    let raced = tokio::time::timeout_at(cut, crate::storage::before_cut(cut, time, work)).await;
+    eprintln!(
+        "diag_accounts_end us={} cut_fired={} answer={:?}",
+        crate::storage::diag_us(),
+        raced.is_err(),
+        raced.as_ref().ok().map(|answer| answer.as_ref().err().map(|e| e.0.clone()))
+    );
+    let outcome = raced.unwrap_or_else(|_| Err(unknown()));
     let reply = match outcome {
         Ok(reply) => reply,
         Err(error) => Reply::Rejected {

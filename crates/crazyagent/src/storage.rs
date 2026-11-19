@@ -221,6 +221,22 @@ pub(crate) enum NativeAuthAsk {
     Engine,
 }
 
+pub(crate) fn diag_us() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros())
+        .unwrap_or(0)
+}
+
+pub(crate) fn diag_tag(job: &Job) -> &'static str {
+    match job {
+        Job::Accounts(..) => "accounts",
+        Job::Plugins(..) => "plugins",
+        Job::Setup(..) => "setup",
+        _ => "other",
+    }
+}
+
 pub(crate) enum Job {
     Accounts(
         Admission,
@@ -723,8 +739,16 @@ impl Storage {
         full: &str,
     ) -> Result<Taken, EngineError> {
         assert!(!matches!(job, Job::Claimed(..)));
+        let asked = deadline;
         let deadline = decided_by(deadline);
         let narrowing = job.narrows_access();
+        let tag = diag_tag(&job);
+        eprintln!(
+            "diag_submit_start us={} job={tag} narrowing={narrowing} asked_left_ms={} decide_left_ms={}",
+            diag_us(),
+            asked.saturating_duration_since(tokio::time::Instant::now()).as_millis(),
+            deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis()
+        );
         let kept = narrowing || job.records_disk_work();
         if !narrowing {
             let mut receiving = self.receiving.clone();
@@ -752,6 +776,7 @@ impl Storage {
             .await
             .is_err();
         dropped.0 = None;
+        eprintln!("diag_submit_end us={} job={tag} late={late}", diag_us());
         if late && narrowing {
             return Err(error(ACCESS_CHANGE_PENDING));
         }
@@ -899,6 +924,7 @@ impl Storage {
                                 continue;
                             }
                             claim.taken.notify_one();
+                            eprintln!("diag_take us={} job={}", diag_us(), diag_tag(&job));
                             *job
                         }
                         job => job,

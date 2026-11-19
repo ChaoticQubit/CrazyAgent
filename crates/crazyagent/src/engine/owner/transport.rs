@@ -2571,7 +2571,19 @@ async fn serve_admitted(
             .map(|()| None)
     });
     let exchange = crate::storage::before_cut(deadline, engine.timeout, exchange);
-    let Ok(Ok(Some(deferred))) = tokio::time::timeout_at(deadline, exchange).await else {
+    eprintln!(
+        "diag_fg_start us={} left_ms={}",
+        crate::storage::diag_us(),
+        deadline.saturating_duration_since(Instant::now()).as_millis()
+    );
+    let raced = tokio::time::timeout_at(deadline, exchange).await;
+    eprintln!(
+        "diag_fg_end us={} cut_fired={} error={:?}",
+        crate::storage::diag_us(),
+        raced.is_err(),
+        raced.as_ref().ok().and_then(|served| served.as_ref().err().map(|e| e.0.clone()))
+    );
+    let Ok(Ok(Some(deferred))) = raced else {
         return;
     };
     let Some(_deferral) = Deferral::take(&authority.deferred) else {
