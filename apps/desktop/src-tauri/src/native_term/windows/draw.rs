@@ -344,8 +344,8 @@ impl Painter {
     }
 
     /// Gives up on a view's GPU work for good: its surface goes and the board never hands
-    /// it out as ready again, so its host ends it as macOS does on `native_terminal_gpu`.
-    /// Input: the view's index.
+    /// it out as ready again, for H5b's host, which ends it with `native_terminal_gpu`; a
+    /// lost device then retires every view on it. Input: the view's index.
     fn fault(&mut self, index: usize) {
         let view = &mut self.views[index];
         view.surface = None;

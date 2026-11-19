@@ -275,9 +275,9 @@ impl View {
         BOARD.post_frame(self.inner.id, frame)
     }
 
-    /// Whether the render thread gave up on the view's GPU work for good, so the host ends
-    /// it with `native_terminal_gpu`, as macOS ends a view whose frame the GPU refused.
-    /// Output: the answer.
+    /// Whether the render thread gave up on the view's GPU work for good, for H5b's host,
+    /// which ends it with `native_terminal_gpu`, as macOS ends a view whose frame the GPU
+    /// refused. Output: the answer.
     pub fn faulted(&self) -> bool {
         BOARD.faulted(self.inner.id)
     }
