@@ -282,6 +282,10 @@ describe("Native terminal views in the real window", () => {
   });
 
   it("a hidden page view a newer view replaced opens nothing on its own and takes the master back once its panel shows (#632)", async () => {
+    await tab("conversation");
+    await until(async () => (await masterPanel()).live, UI_MS, "the page's master panel never went live");
+    await tab("overview");
+    await pause(1500);
     const shown = await open(false);
     await ready(shown);
     await pause(2 * FOLLOW_MS + 500);
