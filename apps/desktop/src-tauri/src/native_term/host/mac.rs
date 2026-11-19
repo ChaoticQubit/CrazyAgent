@@ -77,7 +77,6 @@ pub fn open_view(
     events: Channel<NativeEvent>,
     project: Option<String>,
 ) -> View {
-    assert!(page > 0);
     let Parent { webview, host } = parent;
     let ns = TermView::new(mtm, page, sink, screen);
     ns.set_label(label);

@@ -47,13 +47,12 @@ pub fn parent_scale(_parent: &Parent) -> f64 {
 pub fn open_view(
     _mtm: Main,
     _parent: Parent,
-    page: u64,
+    _page: u64,
     key: u32,
     _label: &str,
     events: Channel<NativeEvent>,
     project: Option<String>,
 ) -> View {
-    assert!(page > 0);
     View {
         surface: None,
         scale: key,
