@@ -979,20 +979,22 @@ impl Native {
     }
 }
 
-/// The copy chord of a host without Cmd (Ctrl+C, Ctrl+Shift+C): a selection goes to the
-/// board, and with none the chord's own input (^C) goes to the pane. A selection the board
-/// refuses as too large sends nothing, so a copy never interrupts the agent. Inputs: the
-/// pane, the board and the chord's input. Output: what the pane asks for.
+/// The copy chord of a host without Cmd (Ctrl+C, Ctrl+Shift+C), as the panel off a Mac: a
+/// selection goes to the board and is dropped, so the next chord interrupts; with none the
+/// chord's own input (^C) goes to the pane. A selection too large for the board is dropped
+/// and sends nothing. Inputs: the pane, the board and the chord's input. Output: what the
+/// pane asks for.
 #[cfg(windows)]
 fn copy_key(pane: &mut Pane, clip: &platform::Clip, input: Input) -> Action {
-    match pane.copy(false) {
-        Ok(text) => {
-            let _ = clip.write(&text);
-            Action::Nothing
-        }
-        Err(code) if code == COPY_EMPTY => pane.apply(input),
-        Err(_) => Action::Nothing,
+    let copied = match pane.copy(false) {
+        Err(code) if code == COPY_EMPTY => return pane.apply(input),
+        copied => copied,
+    };
+    if let Ok(text) = copied {
+        let _ = clip.write(&text);
     }
+    pane.clear_selection();
+    Action::Local
 }
 
 fn cell_of(
@@ -1201,7 +1203,7 @@ mod tests {
         let mut pane = selected(b"hello world", 4);
         let clip = platform::Clip::new();
         let chord = Input::Text(vec![0x03]);
-        assert_eq!(copy_key(&mut pane, &clip, chord), Action::Nothing);
+        assert_eq!(copy_key(&mut pane, &clip, chord), Action::Local);
         assert_eq!(clip.read().as_deref(), Some("hello"), "the board holds it");
     }
 

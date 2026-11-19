@@ -246,6 +246,14 @@ impl Pane {
             .is_some_and(|t| t.grid().display_offset() > 0)
     }
 
+    /// Drops the local selection, as the copy chord off a Mac does once it copied, and marks
+    /// the pane for a redraw when there was one.
+    #[cfg(windows)]
+    pub fn clear_selection(&mut self) {
+        let dropped = self.term.as_mut().and_then(|term| term.selection.take());
+        self.dirty |= dropped.is_some();
+    }
+
     /// Selects the whole output the view holds, as Cmd-A does. Output: whether there was a
     /// terminal to select in.
     pub fn select_all(&mut self) -> bool {
