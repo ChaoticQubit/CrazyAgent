@@ -46,6 +46,40 @@ async fn closed(output: &mut TerminalOutput) -> String {
     .unwrap_or_else(|_| "no close within ten seconds".into())
 }
 
+/// A detach the engine served and closed the connection on before the viewer shut its half
+/// is still a detach: macOS refuses that shutdown as not connected, Linux takes it. A viewer
+/// whose engine is still there shuts its half, and the engine reads the end of its stream.
+#[tokio::test]
+async fn a_detach_the_engine_already_closed_on_is_a_detach() {
+    use tokio::io::AsyncReadExt;
+    let (viewer, mut engine) = UnixStream::pair().unwrap();
+    let (_reader, writer) = viewer.into_split();
+    let mut control = TerminalControl { writer };
+    control.send(&TerminalRequest::Detach).await.unwrap();
+    let frame = read_frame(&mut engine).await.unwrap();
+    assert!(matches!(
+        serde_json::from_slice::<TerminalRequest>(&frame[4..]).unwrap(),
+        TerminalRequest::Detach
+    ));
+    drop(engine);
+    assert_eq!(
+        close_detached(&mut control.writer)
+            .await
+            .map_err(|error| error.0),
+        Ok(()),
+        "a detach the engine closed on first is a detach"
+    );
+
+    let (viewer, mut engine) = UnixStream::pair().unwrap();
+    let (_reader, mut writer) = viewer.into_split();
+    assert_eq!(
+        close_detached(&mut writer).await.map_err(|error| error.0),
+        Ok(())
+    );
+    let mut rest = Vec::new();
+    assert_eq!(engine.read_to_end(&mut rest).await.unwrap(), 0);
+}
+
 /// A sized attach is only an opening request: sent inside a live session it ends that
 /// session as an invalid request and never resizes the agent's window.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

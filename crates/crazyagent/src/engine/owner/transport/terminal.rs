@@ -119,10 +119,7 @@ impl TerminalControl {
     /// Returns once the engine was told and the connection closed.
     pub async fn detach(mut self) -> Result<(), EngineError> {
         self.send(&TerminalRequest::Detach).await?;
-        self.writer
-            .shutdown()
-            .await
-            .map_err(|_| failure("terminal_closed"))
+        close_detached(&mut self.writer).await
     }
 
     async fn send(&mut self, request: &TerminalRequest) -> Result<(), EngineError> {
@@ -132,6 +129,16 @@ impl TerminalControl {
             .map_err(|_| failure("terminal_closed"))?
             .map_err(|_| failure("terminal_closed"))
     }
+}
+
+/// Shuts the viewer's half of a connection whose `Detach` was already sent.
+/// Takes that write half.
+/// Returns once it is shut, or `terminal_closed`.
+async fn close_detached(writer: &mut OwnedWriteHalf) -> Result<(), EngineError> {
+    writer
+        .shutdown()
+        .await
+        .map_err(|_| failure("terminal_closed"))
 }
 
 impl OwnerClient {
