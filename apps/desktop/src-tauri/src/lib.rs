@@ -1996,7 +1996,6 @@ impl NativeRect {
             return Err(engine_failure("native_terminal_rect_invalid"));
         };
         assert!(place[2] >= 0.0 && place[3] >= 0.0);
-        assert!(viewport >= 1.0);
         Ok((place, viewport))
     }
 }
@@ -2007,13 +2006,13 @@ impl NativeRect {
 /// view moves nothing. Inputs: the y, the view's height and the page's, in logical points.
 /// Output: the moved y.
 pub(crate) fn page_to_view_y(y: f64, view_height: f64, viewport: f64) -> f64 {
-    let finite = [y, view_height, viewport]
-        .iter()
-        .all(|side| side.is_finite());
-    assert!(finite, "a finite page place: {y} {view_height} {viewport}");
-    let moved = y + (view_height - viewport).max(0.0);
-    assert!(moved >= y);
-    moved
+    assert!(y.is_finite(), "a finite page y: {y}");
+    let heights = view_height.is_finite() && viewport.is_finite();
+    assert!(
+        heights,
+        "finite view and page heights: {view_height} {viewport}"
+    );
+    y + (view_height - viewport).max(0.0)
 }
 
 /// What a native copy takes: the selection, or the whole output the view holds.
@@ -6401,12 +6400,19 @@ mod tests {
         assert_eq!(page_to_view_y(0.0, 900.0, 868.0), 32.0);
     }
 
-    /// V243-NATIVE-SESSION-HEADER: a place with no finite size is a caller's bug, never a
-    /// place: the page values were checked before they got here.
+    /// V243-NATIVE-SESSION-HEADER: a page place with no finite height is a caller's bug,
+    /// never a place: the page values were checked before they got here.
     #[test]
-    #[should_panic(expected = "a finite page place")]
+    #[should_panic(expected = "finite view and page heights")]
     fn a_page_y_with_no_finite_viewport_is_a_bug() {
         page_to_view_y(306.0, 900.0, f64::NAN);
+    }
+
+    /// V243-NATIVE-SESSION-HEADER: a page y that is not finite is a caller's bug too.
+    #[test]
+    #[should_panic(expected = "a finite page y")]
+    fn a_page_y_that_is_not_finite_is_a_bug() {
+        page_to_view_y(f64::INFINITY, 900.0, 868.0);
     }
 
     /// V243-NATIVE-SESSION-HEADER: a native view's place carries the page's viewport height

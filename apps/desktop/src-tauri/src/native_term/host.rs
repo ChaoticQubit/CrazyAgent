@@ -1247,7 +1247,10 @@ impl Native {
 fn page_frame(rect: [f64; 4], webview_height: f64, viewport: f64) -> NSRect {
     let [x, y, width, height] = rect;
     let top = crate::page_to_view_y(y, webview_height, viewport);
-    assert!(width >= 0.0 && height >= 0.0);
+    assert!(
+        width >= 0.0 && height >= 0.0,
+        "a page rect with no negative side"
+    );
     NSRect::new(NSPoint::new(x, top), NSSize::new(width, height))
 }
 
@@ -1265,5 +1268,13 @@ mod tests {
         assert_eq!((frame.size.width, frame.size.height), (694.0, 513.0));
         let whole = page_frame([245.0, 306.0, 694.0, 513.0], 868.0, 868.0);
         assert_eq!(whole.origin.y, 306.0, "native full screen has no inset");
+    }
+
+    /// V243-NATIVE-SESSION-HEADER: a rect with a negative side never reaches AppKit:
+    /// NativeRect::checked refused it, so one here is a caller's bug.
+    #[test]
+    #[should_panic(expected = "a page rect with no negative side")]
+    fn a_host_rect_with_a_negative_side_is_a_bug() {
+        page_frame([245.0, 306.0, -1.0, 513.0], 900.0, 868.0);
     }
 }
