@@ -184,10 +184,10 @@ pub(crate) fn open_profile_keychain(home: &Path) -> Result<PathBuf, EngineError>
 
 /// Gives a private Claude profile home its own unlocked macOS keychain, so the official CLI
 /// uses it instead of asking macOS for a login keychain; an earlier `login.keychain-db` is
-/// renamed, and one the empty password cannot open is set aside, never deleted. Input: the
-/// absolute private profile home. Output: the keychain path, set as that home's default and
-/// only search-list keychain; the owner's real keychain settings are untouched.
-pub(crate) fn prepare_profile_keychain(home: &Path) -> Result<PathBuf, EngineError> {
+/// renamed, and on a `login` sign-in one the empty password cannot open is set aside, never
+/// deleted. Inputs: the absolute private profile home and whether a login follows. Output:
+/// the keychain, the home's default and only search-list one; the owner's stay untouched.
+pub(crate) fn prepare_profile_keychain(home: &Path, login: bool) -> Result<PathBuf, EngineError> {
     if !home.is_absolute() || !home.is_dir() {
         return Err(failure());
     }
@@ -214,6 +214,9 @@ pub(crate) fn prepare_profile_keychain(home: &Path) -> Result<PathBuf, EngineErr
         None => create_keychain(home, &directory)?,
     };
     if !opens(home, &keychain)? {
+        if !login {
+            return Err(failure());
+        }
         set_aside(&directory)?;
         create_keychain(home, &directory)?;
     }
@@ -574,7 +577,7 @@ mod tests {
         for folder in [&home, &other] {
             std::fs::create_dir(folder).unwrap();
         }
-        let keychain = prepare_profile_keychain(&home).unwrap();
+        let keychain = prepare_profile_keychain(&home, false).unwrap();
         assert_eq!(keychain, profile_keychain_path(&home));
         let text = keychain.to_str().unwrap().to_owned();
         assert!(read(&home, &["default-keychain", "-d", "user"]).contains(&text));
@@ -582,7 +585,7 @@ mod tests {
         let adopted = TestKeychain::adopt(&home, keychain.clone());
         adopted.add("probe", "crazyagent-keychain-test", "value");
         assert_eq!(adopted.find("crazyagent-keychain-test"), "value");
-        assert_eq!(prepare_profile_keychain(&home).unwrap(), keychain);
+        assert_eq!(prepare_profile_keychain(&home, false).unwrap(), keychain);
         assert_eq!(adopted.find("crazyagent-keychain-test"), "value");
         for args in [
             ["default-keychain", "-d", "user"],
@@ -598,7 +601,7 @@ mod tests {
             std::fs::metadata(&keychain).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        assert!(prepare_profile_keychain(Path::new("relative")).is_err());
+        assert!(prepare_profile_keychain(Path::new("relative"), false).is_err());
     }
 
     fn entries(folder: &Path) -> Vec<String> {
@@ -640,7 +643,7 @@ mod tests {
         std::fs::create_dir_all(home.join("Library")).unwrap();
         symlink(&preferences, home.join("Library/Preferences")).unwrap();
         symlink(&keychains, home.join("Library/Keychains")).unwrap();
-        assert!(prepare_profile_keychain(&home).is_err());
+        assert!(prepare_profile_keychain(&home, false).is_err());
         assert!(fresh_profile_keychain(root.path(), &home, &[]).is_err());
         assert!(
             forget_record(
@@ -667,7 +670,7 @@ mod tests {
         std::fs::remove_file(home.join("Library/Keychains")).unwrap();
         std::fs::create_dir(home.join("Library/Keychains")).unwrap();
         symlink(&planted, home.join("Library/Keychains/login.keychain-db")).unwrap();
-        assert!(prepare_profile_keychain(&home).is_err());
+        assert!(prepare_profile_keychain(&home, false).is_err());
         assert!(fresh_profile_keychain(root.path(), &home, &[]).is_err());
         assert!(
             forget_record(
@@ -682,7 +685,7 @@ mod tests {
             profile_keychain_path(&home),
         )
         .unwrap();
-        assert!(prepare_profile_keychain(&home).is_err());
+        assert!(prepare_profile_keychain(&home, false).is_err());
         assert!(open_profile_keychain(&home).is_err());
         assert!(
             std::fs::symlink_metadata(profile_keychain_path(&home))
@@ -763,7 +766,8 @@ mod tests {
             .is_err()
         );
         let profile = private_home(root.path(), "profile");
-        let login = TestKeychain::adopt(&profile, prepare_profile_keychain(&profile).unwrap());
+        let login =
+            TestKeychain::adopt(&profile, prepare_profile_keychain(&profile, false).unwrap());
         login.add("probe", "crazyagent-forget-test", "signed in");
         for named in [
             login.path().to_path_buf(),
@@ -835,7 +839,7 @@ mod tests {
         let first = private_home(root.path(), "first");
         let second = private_home(root.path(), "second");
         let second_keychain =
-            TestKeychain::adopt(&second, prepare_profile_keychain(&second).unwrap());
+            TestKeychain::adopt(&second, prepare_profile_keychain(&second, false).unwrap());
         let settings = |keychain: &TestKeychain| {
             [
                 keychain.setting("default-keychain"),
@@ -843,7 +847,8 @@ mod tests {
             ]
         };
         let before = settings(&second_keychain);
-        let first_keychain = TestKeychain::adopt(&first, prepare_profile_keychain(&first).unwrap());
+        let first_keychain =
+            TestKeychain::adopt(&first, prepare_profile_keychain(&first, false).unwrap());
         assert_eq!(settings(&second_keychain), before);
         let second_text = second_keychain.path().to_str().unwrap();
         let first_text = first_keychain.path().to_str().unwrap();
@@ -859,7 +864,7 @@ mod tests {
     fn a_write_naming_no_keychain_lands_in_the_prepared_keychain_the_sandbox_sees_as_default() {
         let root = scratch();
         let home = private_home(root.path(), "home");
-        let keychain = TestKeychain::adopt(&home, prepare_profile_keychain(&home).unwrap());
+        let keychain = TestKeychain::adopt(&home, prepare_profile_keychain(&home, false).unwrap());
         let text = keychain.path().to_str().unwrap().to_owned();
         assert!(
             keychain.setting("default-keychain").contains(&text),
@@ -906,7 +911,7 @@ mod tests {
     fn a_sandboxed_agent_cannot_move_link_or_rewrite_its_keychain_or_search_list() {
         let root = scratch();
         let home = private_home(root.path(), "home");
-        let keychain = TestKeychain::adopt(&home, prepare_profile_keychain(&home).unwrap());
+        let keychain = TestKeychain::adopt(&home, prepare_profile_keychain(&home, false).unwrap());
         let before = [
             keychain.setting("default-keychain"),
             keychain.setting("list-keychains"),
@@ -945,7 +950,10 @@ mod tests {
             ],
             before
         );
-        assert_eq!(prepare_profile_keychain(&home).unwrap(), keychain.path());
+        assert_eq!(
+            prepare_profile_keychain(&home, false).unwrap(),
+            keychain.path()
+        );
     }
 
     #[test]
@@ -955,7 +963,8 @@ mod tests {
         std::fs::create_dir(&team).unwrap();
         let home = private_home(&team, "agents/agent-7/home");
         let other = private_home(root.path(), "other");
-        let other_keychain = TestKeychain::adopt(&other, prepare_profile_keychain(&other).unwrap());
+        let other_keychain =
+            TestKeychain::adopt(&other, prepare_profile_keychain(&other, false).unwrap());
         let before = [
             other_keychain.setting("default-keychain"),
             other_keychain.setting("list-keychains"),
@@ -985,7 +994,8 @@ mod tests {
         let engine = private_home(root.path(), "engine");
         let outside = private_home(root.path(), "outside");
         let profile = private_home(&engine, "native-profiles/k/home");
-        let login = TestKeychain::adopt(&profile, prepare_profile_keychain(&profile).unwrap());
+        let login =
+            TestKeychain::adopt(&profile, prepare_profile_keychain(&profile, false).unwrap());
         login.add("probe", "crazyagent-guard-test", "signed in");
         let before = login.setting("default-keychain");
         let agent = private_home(&engine, "agents/agent-1/home");
@@ -1173,7 +1183,7 @@ mod tests {
         let keychain = locked_with_another_password(&home, profile_keychain_path(&home));
         let old = identity(keychain.path());
         assert_eq!(
-            prepare_profile_keychain(&home).unwrap(),
+            prepare_profile_keychain(&home, true).unwrap(),
             profile_keychain_path(&home)
         );
         let _aside = TestKeychain::adopt(&home, aside_path(&home));
@@ -1182,8 +1192,21 @@ mod tests {
         let text = keychain.path().to_str().unwrap().to_owned();
         keychain.security(&["lock-keychain", &text], None);
         keychain.security(&["unlock-keychain", "-p", "", &text], None);
+        keychain.add("crazyagent", "crazyagent-aside-test", "new");
+        assert_eq!(keychain.find("crazyagent-aside-test"), "new");
         assert!(keychain.setting("default-keychain").contains(&text));
         assert!(keychain.setting("list-keychains").contains(&text));
+    }
+
+    #[test]
+    fn a_keychain_the_empty_password_cannot_open_stays_in_place_unless_a_login_follows() {
+        let root = scratch();
+        let home = private_home(root.path(), "home");
+        let keychain = locked_with_another_password(&home, profile_keychain_path(&home));
+        let before = identity(keychain.path());
+        assert!(prepare_profile_keychain(&home, false).is_err());
+        assert_eq!(identity(keychain.path()), before);
+        assert!(std::fs::symlink_metadata(aside_path(&home)).is_err());
     }
 
     #[test]
@@ -1201,7 +1224,7 @@ mod tests {
             )
         };
         let before = state();
-        assert!(prepare_profile_keychain(&home).is_err());
+        assert!(prepare_profile_keychain(&home, true).is_err());
         assert_eq!(state(), before);
     }
 
@@ -1212,7 +1235,7 @@ mod tests {
         let target = locked_with_another_password(&home, home.join("target.keychain-db"));
         std::os::unix::fs::symlink(target.path(), profile_keychain_path(&home)).unwrap();
         let before = identity(target.path());
-        assert!(prepare_profile_keychain(&home).is_err());
+        assert!(prepare_profile_keychain(&home, true).is_err());
         assert_eq!(identity(target.path()), before);
         assert_eq!(
             std::fs::read_link(profile_keychain_path(&home)).unwrap(),
@@ -1265,13 +1288,16 @@ mod tests {
     fn a_locked_profile_keychain_opens_with_the_empty_password_without_a_prompt() {
         let root = scratch();
         let home = private_home(root.path(), "home");
-        let keychain = TestKeychain::adopt(&home, prepare_profile_keychain(&home).unwrap());
+        let keychain = TestKeychain::adopt(&home, prepare_profile_keychain(&home, false).unwrap());
         let text = keychain.path().to_str().unwrap().to_owned();
         keychain.add("probe", "crazyagent-locked-test", "signed in");
         keychain.security(&["lock-keychain", &text], None);
         keychain.security(&["unlock-keychain", "-p", "", &text], None);
         keychain.security(&["lock-keychain", &text], None);
-        assert_eq!(prepare_profile_keychain(&home).unwrap(), keychain.path());
+        assert_eq!(
+            prepare_profile_keychain(&home, false).unwrap(),
+            keychain.path()
+        );
         assert_eq!(keychain.find("crazyagent-locked-test"), "signed in");
     }
 
@@ -1281,7 +1307,7 @@ mod tests {
         let home = private_home(root.path(), "home");
         let legacy = TestKeychain::create_named(&home, LOGIN_KEYCHAIN);
         legacy.add("probe", "crazyagent-rename-test", "signed in");
-        let keychain = prepare_profile_keychain(&home).unwrap();
+        let keychain = prepare_profile_keychain(&home, false).unwrap();
         assert_eq!(keychain, profile_keychain_path(&home));
         assert!(!legacy.path().exists());
         let keychain = TestKeychain::adopt(&home, keychain);
@@ -1310,7 +1336,7 @@ mod tests {
         legacy.add("probe", "crazyagent-locked-rename-test", "signed in");
         let text = legacy.path().to_str().unwrap().to_owned();
         legacy.security(&["lock-keychain", &text], None);
-        let keychain = TestKeychain::adopt(&home, prepare_profile_keychain(&home).unwrap());
+        let keychain = TestKeychain::adopt(&home, prepare_profile_keychain(&home, false).unwrap());
         assert_eq!(keychain.path(), profile_keychain_path(&home));
         assert!(!legacy.path().exists());
         assert_eq!(keychain.find("crazyagent-locked-rename-test"), "signed in");
@@ -1324,7 +1350,7 @@ mod tests {
         legacy.add("probe", "crazyagent-both-test", "old");
         let current = TestKeychain::create_named(&home, "profile.keychain-db");
         current.add("probe", "crazyagent-both-test", "new");
-        assert!(prepare_profile_keychain(&home).is_err());
+        assert!(prepare_profile_keychain(&home, false).is_err());
         assert_eq!(legacy.find("crazyagent-both-test"), "old");
         assert_eq!(current.find("crazyagent-both-test"), "new");
     }

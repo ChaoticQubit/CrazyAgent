@@ -400,6 +400,10 @@ fn a_removed_native_account_loses_its_sign_in_files_and_keeps_the_rest_of_its_sl
     let (dir, connection) = database();
     let root = dir.path();
     let slot = slot(root, "lab-profile");
+    let aside = slot
+        .home
+        .join("Library/Keychains/profile-locked.keychain-db");
+    private_file(&aside);
     put(&connection, NATIVE_SIGN_IN, "lab-profile").unwrap();
 
     assert_eq!(sweep(&connection, root, None).unwrap(), 0);
@@ -408,6 +412,7 @@ fn a_removed_native_account_loses_its_sign_in_files_and_keeps_the_rest_of_its_sl
     }
     assert!(slot.folder.join("identity.json").exists());
     assert!(slot.home.join("keep.txt").exists());
+    assert!(aside.exists());
     assert!(notes(&connection).is_empty());
 }
 
