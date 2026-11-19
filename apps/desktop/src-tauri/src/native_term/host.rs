@@ -11,7 +11,7 @@ use super::table::{Direct, Entry, Outbox, Table, Told, VIEWS_MAX, changes};
 use super::view::{MouseKind, TermView, ViewEvent};
 use crate::bridge::BridgeError;
 use crate::bridge::feed::{EngineFeed, Fed, FeedEvent, Opener, Opening, Wake};
-use crate::bridge::terminal::{NATIVE_OVERFLOW, Reservation, ViewKey};
+use crate::bridge::terminal::{NATIVE_OVERFLOW, Reservation, Session, ViewKey};
 use alacritty_terminal::grid::Dimensions;
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
@@ -116,6 +116,7 @@ pub struct Open {
     pub style: Style,
     pub covered: bool,
     pub keys: bool,
+    pub tile: bool,
     pub project: Option<String>,
     pub events: Channel<NativeEvent>,
 }
@@ -463,13 +464,13 @@ impl Native {
         let terminals = Arc::clone(&app.state::<crate::TerminalState>().0);
         let opening = app.clone();
         let opener: Opener = Arc::new(
-            move |key: ViewKey, grid: (u16, u16), input_only: bool| -> Opening {
+            move |key: ViewKey, grid: (u16, u16), kind: Session| -> Opening {
                 let app = opening.clone();
                 Box::pin(async move {
                     let state = app.state::<crate::NativeState>();
                     let mut bridge = crate::lock(&state).await?;
                     bridge
-                        .open_terminal(key.agent, key.pane, Some(grid), input_only)
+                        .open_terminal(key.agent, key.pane, Some(grid), kind)
                         .await
                 })
             },
@@ -578,8 +579,12 @@ impl Native {
             None => false,
         };
         let page = self.table.fresh();
+        let kind = match direct {
+            true => Session::Input,
+            false => Session::Full,
+        };
         self.feed
-            .bind(page, open.place, direct)
+            .bind(page, open.place, kind)
             .map_err(|error| error.code)?;
         if let Err(error) = self.feed.open(page, grid) {
             self.feed.close(page);
@@ -603,6 +608,8 @@ impl Native {
             pane: super::pane::Pane::new(open.keys),
             feed: page,
             direct,
+            tile: open.tile,
+            asked: grid,
             rect: open.rect,
             viewport: open.viewport,
             covered: open.covered,
@@ -810,12 +817,14 @@ impl Native {
     /// engine-fed, so no view waits for output from a client that is gone. Input: the event.
     fn on_direct(&mut self, event: Event) {
         match event {
-            Event::Restored { view, bytes } => {
+            Event::Restored { view, bytes, grid } => {
                 if let Some(entry) = self.table.get_mut(view).filter(|e| e.direct) {
+                    let _ = grid;
                     entry.pane.on_output(&bytes);
                 }
                 self.tell(view);
             }
+            Event::Sized { .. } => {}
             Event::Output { views, bytes } => {
                 for page in views {
                     if let Some(entry) = self.table.get_mut(page).filter(|e| e.direct) {
@@ -880,7 +889,7 @@ impl Native {
             Ok(grid) => grid,
             Err(code) => return self.end(page, code),
         };
-        if let Err(error) = self.feed.bind(feed, place, false) {
+        if let Err(error) = self.feed.bind(feed, place, Session::Full) {
             return self.end(page, error.code);
         }
         if let Err(error) = self.feed.open(feed, grid) {
@@ -1093,6 +1102,7 @@ fn draw_view(
     style: &Style,
     shown: bool,
 ) -> Result<bool, &'static str> {
+    let rect = entry.rect;
     let view = &mut entry.platform;
     let (Some(surface), Some(term)) = (view.surface.as_mut(), entry.pane.term()) else {
         return Ok(false);
@@ -1100,6 +1110,7 @@ fn draw_view(
     let marked = view.ns.marked_text();
     let frame = screen::frame(term, &style.theme, shown, marked.as_deref());
     assert_eq!(frame.rows.len(), term.screen_lines());
+    let _ = rect;
     match shared.draw(surface, &frame) {
         Ok(()) => {}
         Err(code) if code == GPU_FAULT => return Err(GPU_FAULT),
@@ -1112,6 +1123,7 @@ fn draw_view(
         cell: (width * scale, height * scale),
         pad: 0.0,
         scale,
+        top: 0,
     };
     view.ns
         .drawn(geometry, a11y::marks(term), a11y::text_key(term));
@@ -1174,6 +1186,7 @@ impl Native {
         };
         let grid = codec::grid_for(width, height, shared.cell_points(), GRID_MAX);
         if let Some(size) = entry.pane.resize(grid) {
+            entry.asked = size;
             let _ = feed.resize(entry.feed, size);
         }
         entry.pane.dirty = true;

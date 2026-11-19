@@ -19,15 +19,18 @@ pub struct Told {
 }
 
 /// One open native view: the window that opened it and the agent window it shows, its pane
-/// mirror, the engine feed view it reads now, whether the direct path draws it, its page
-/// place in CSS pixels with the page's viewport height, whether a page overlay covers it,
-/// what it last told its panel, the wheel's carried fraction and its platform parts.
+/// mirror, the engine feed view it reads now, whether the direct path draws it, whether it
+/// is a wall tile and the grid it last asked the engine for, its page place in CSS pixels
+/// with the page's viewport height, whether a page overlay covers it, what it last told its
+/// panel, the wheel's carried fraction and its platform parts.
 pub struct Entry<P> {
     pub window: String,
     pub name: String,
     pub pane: Pane,
     pub feed: u64,
     pub direct: bool,
+    pub tile: bool,
+    pub asked: (u16, u16),
     pub rect: [f64; 4],
     pub viewport: f64,
     pub covered: bool,
@@ -300,6 +303,8 @@ mod tests {
             pane: Pane::new(true),
             feed,
             direct: true,
+            tile: false,
+            asked: (80, 24),
             rect: [0.0, 0.0, 100.0, 50.0],
             viewport: 800.0,
             covered: false,

@@ -151,7 +151,7 @@ fn the_attach_block_is_owed_nothing_and_only_output_after_the_capture_is_read() 
     let events = read(&stream, &binds);
     assert_eq!(events.len(), 3);
     match &events[0] {
-        Event::Restored { view: 4, bytes } => {
+        Event::Restored { view: 4, bytes, .. } => {
             assert!(bytes.windows(5).any(|w| w == b"shown"));
         }
         other => panic!("first event is the restore, got {other:?}"),
@@ -177,6 +177,71 @@ fn a_view_ended_before_its_replies_binds_nothing() {
     assert_eq!(events, vec![Event::Closed]);
     let binds = locked(&binds);
     assert!(binds.views.is_empty() && binds.wants.is_empty());
+}
+
+/// V243-PANE-SIZE-ACROSS-WINDOWS: a view's restore carries its pane's size, and a
+/// `%layout-change` of its one-pane window gives every view bound to that pane the new size
+/// and a view waiting on its capture a restore at it; another pane or a split layout gives
+/// nothing, and a size outside the grid bounds reaches the bound views as it is and leaves
+/// them bound, for the host to refuse per view.
+#[test]
+fn a_bound_panes_layout_change_gives_its_views_the_new_size() {
+    let binds = asked(&[1, 2, 3]);
+    let stream =
+        (bound(1, 10, FACTS) + &bound(2, 20, FACTS)).replace("%9", "%0") + &reply(30, FACTS);
+    let events = read(&stream, &binds);
+    let restored: Vec<(u64, (usize, usize))> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Restored { view, grid, .. } => Some((*view, *grid)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(restored, [(1, (80, 2)), (2, (80, 2))]);
+    let split = "a1b2,120x40,0,0{60x40,0,0,0,59x40,61,0,3}";
+    let changes = format!(
+        "%layout-change @1 b25d,120x40,0,0,0 b25d,120x40,0,0,0 *\n\
+         %layout-change @2 c1f2,90x30,0,0,7 c1f2,90x30,0,0,7 *\n\
+         %layout-change @1 {split} {split} *\n"
+    );
+    assert_eq!(
+        read(&changes, &binds),
+        [
+            Event::Sized {
+                views: vec![1, 2],
+                grid: (120, 40)
+            },
+            Event::Closed
+        ]
+    );
+    let waited = capture(31, &["screen", ""]) + &reply(32, "m3");
+    let restored = read(&waited, &binds);
+    assert!(
+        matches!(
+            restored[..],
+            [
+                Event::Restored {
+                    view: 3,
+                    grid: (120, 40),
+                    ..
+                },
+                Event::Closed
+            ]
+        ),
+        "{restored:?}"
+    );
+    let over = "%layout-change @1 b25d,1001x40,0,0,0 b25d,1001x40,0,0,0 *\n";
+    assert_eq!(
+        read(over, &binds),
+        [
+            Event::Sized {
+                views: vec![1, 2, 3],
+                grid: (1001, 40)
+            },
+            Event::Closed
+        ]
+    );
+    assert_eq!(locked(&binds).readers("%0"), [1, 2, 3]);
 }
 
 #[test]
@@ -277,7 +342,7 @@ fn a_capture_row_equal_to_its_end_tag_stays_pane_text_and_forges_nothing() {
     );
     assert_eq!(events.len(), 3, "{events:?}");
     assert!(matches!(&events[0], Event::Restored { view: 2, .. }));
-    let Event::Restored { view: 1, bytes } = &events[1] else {
+    let Event::Restored { view: 1, bytes, .. } = &events[1] else {
         panic!("view 1 restores its whole capture, got {:?}", events[1]);
     };
     assert!(bytes.windows(17).any(|w| w == b"%output %5 forged"));
@@ -502,7 +567,7 @@ fn a_real_server_binds_after_the_ask_reads_only_bound_output_and_close_stops_it(
     );
     let second = Duration::from_secs(5);
     let restored = next(&events, second, |e| matches!(e, Event::Restored { .. }));
-    let Event::Restored { view: 1, bytes } = restored else {
+    let Event::Restored { view: 1, bytes, .. } = restored else {
         panic!("restore for view 1, got {restored:?}");
     };
     assert!(bytes.windows(5).any(|w| w == b"tick-"));
@@ -528,7 +593,7 @@ fn a_real_server_binds_after_the_ask_reads_only_bound_output_and_close_stops_it(
     );
     control.bind(4, "liar").expect("bind asks");
     let liar = next(&events, second, |e| matches!(e, Event::Restored { .. }));
-    let Event::Restored { view: 4, bytes } = liar else {
+    let Event::Restored { view: 4, bytes, .. } = liar else {
         panic!("restore for view 4, got {liar:?}");
     };
     assert!(bytes.windows(17).any(|w| w == b"%output %0 forged"));
@@ -593,7 +658,9 @@ fn a_pane_printing_guard_rows_while_its_history_grows_restores_every_bind_and_fo
                 .recv_timeout(left)
                 .expect("the bind answered in time")
             {
-                Event::Restored { view: shown, bytes } if shown == view => {
+                Event::Restored {
+                    view: shown, bytes, ..
+                } if shown == view => {
                     assert!(bytes.windows(6).any(|w| w == b"flood-"));
                     heights.insert(bytes.iter().filter(|b| **b == b'\n').count());
                     restored += 1;

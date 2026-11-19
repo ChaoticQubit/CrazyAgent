@@ -40,13 +40,14 @@ pub struct Marks {
     pub selection: Option<((usize, usize), (usize, usize))>,
 }
 
-/// The size of one cell and the padding in physical pixels, and the display scale, which
-/// turn cells into view points.
+/// The size of one cell and the padding in physical pixels, the display scale and the
+/// first screen row the view draws, which turn cells into view points.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Geometry {
     pub cell: (f64, f64),
     pub pad: f64,
     pub scale: f64,
+    pub top: usize,
 }
 
 /// The text VoiceOver reads for one view: the visible rows joined by newlines, each row's
@@ -333,7 +334,9 @@ pub fn cell_rect(
     column: usize,
     width: usize,
 ) -> (f64, f64, f64, f64) {
-    let Geometry { cell, pad, scale } = geometry;
+    let Geometry {
+        cell, pad, scale, ..
+    } = geometry;
     assert!((1.0..=4.0).contains(&scale));
     assert!(cell.0 > 0.0 && cell.1 > 0.0 && pad >= 0.0 && width >= 1);
     let x = (pad + column as f64 * cell.0) / scale;
@@ -499,8 +502,15 @@ mod tests {
             cell: (16.0, 32.0),
             pad: 8.0,
             scale: 2.0,
+            top: 0,
         };
         assert_eq!(cell_rect(geometry, 0, 0, 1), (4.0, 4.0, 8.0, 16.0));
         assert_eq!(cell_rect(geometry, 1, 2, 3), (20.0, 20.0, 24.0, 16.0));
+        let clipped = Geometry { top: 1, ..geometry };
+        assert_eq!(
+            cell_rect(clipped, 1, 2, 3),
+            (20.0, 4.0, 24.0, 16.0),
+            "a clipped view's first row"
+        );
     }
 }

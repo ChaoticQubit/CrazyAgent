@@ -272,6 +272,27 @@ fn a_paste_larger_than_the_free_queue_is_refused_whole_and_ends_the_view() {
     );
 }
 
+/// V243-PANE-SIZE-ACROSS-WINDOWS: each bound view's engine session opens as it was bound, at
+/// its grid: a direct wall tile as a follower, a direct view input-only, any other full.
+#[test]
+fn a_bound_views_session_kind_reaches_its_opener() {
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::clone(&asked);
+    let opener: Opener = Arc::new(move |_, grid, kind| {
+        kept.lock().unwrap().push((grid, kind));
+        Box::pin(async move { Err(failure("terminal_unavailable")) })
+    });
+    let (terminals, mut feed, _inbox, _) = started(opener, 4);
+    let kinds = [Session::Follow, Session::Input, Session::Full];
+    for (index, kind) in (5..).zip(kinds) {
+        let place = terminals.room("main", &team(index)).unwrap();
+        feed.bind(index.unsigned_abs(), place, kind).unwrap();
+        feed.open(index.unsigned_abs(), (47, 11)).unwrap();
+    }
+    let opened: Vec<((u16, u16), Session)> = kinds.iter().map(|kind| ((47, 11), *kind)).collect();
+    assert_eq!(*asked.lock().unwrap(), opened);
+}
+
 /// Slice C: keys, wheel keys and resizes of an open view reach its queue in order as
 /// `Input`, `Scroll` and `Resize`, each checked against the engine's bounds first; a view
 /// that is not open takes nothing.
@@ -322,10 +343,12 @@ fn a_failed_open_gives_the_place_back_and_ends_the_view_with_its_code() {
     let (terminals, mut feed, mut inbox, woken) = started(failing("terminal_agent_unknown"), 4);
     let key = team(1);
     let place = terminals.room("main", &key).unwrap();
-    feed.bind(5, place, false).unwrap();
+    feed.bind(5, place, Session::Full).unwrap();
     let again = terminals.room("main", &team(2)).unwrap();
     assert_eq!(
-        feed.bind(5, again, true).err().map(|error| error.code),
+        feed.bind(5, again, Session::Input)
+            .err()
+            .map(|error| error.code),
         Some("native_view_taken")
     );
     assert_eq!(
@@ -364,7 +387,7 @@ fn a_failed_open_gives_the_place_back_and_ends_the_view_with_its_code() {
         std::mem::forget(terminals.room("main", &team(index)).unwrap());
     }
     let last = team(crate::bridge::terminal::VIEWERS_MAX as i64);
-    feed.bind(9, terminals.room("main", &last).unwrap(), true)
+    feed.bind(9, terminals.room("main", &last).unwrap(), Session::Input)
         .unwrap();
     assert!(
         terminals.room("main", &team(99)).is_err(),
@@ -390,7 +413,7 @@ fn an_event_of_a_closed_open_never_reaches_the_view_opened_again_in_another_wind
         view,
         code: "terminal_agent_unknown".to_owned(),
     };
-    feed.bind(5, terminals.room("main", &team(1)).unwrap(), false)
+    feed.bind(5, terminals.room("main", &team(1)).unwrap(), Session::Full)
         .unwrap();
     feed.open(5, (80, 24)).unwrap();
     let first = received(&mut inbox);
@@ -409,7 +432,7 @@ fn an_event_of_a_closed_open_never_reaches_the_view_opened_again_in_another_wind
         None,
         "a closed view's event is dropped"
     );
-    feed.bind(5, terminals.room(WALL, &team(1)).unwrap(), false)
+    feed.bind(5, terminals.room(WALL, &team(1)).unwrap(), Session::Full)
         .unwrap();
     feed.open(5, (80, 24)).unwrap();
     let second = received(&mut inbox);

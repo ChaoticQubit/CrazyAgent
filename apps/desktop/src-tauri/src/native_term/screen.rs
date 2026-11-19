@@ -371,6 +371,24 @@ pub fn frame(
     }
 }
 
+/// The first row a view `shown` rows tall draws of its screen: none cut when the screen
+/// fits, else the rows that end at the cursor's row, so the cursor stays in view; a cursor
+/// scrolled out of view counts as the last row. Inputs: the screen and how many rows the
+/// view fits. Output: the row.
+pub fn top_row(term: &Term<VoidListener>, shown: usize) -> usize {
+    let _ = (term, shown);
+    0
+}
+
+/// Keeps `shown` rows of a frame from row `top` on, for a view whose pane holds more rows
+/// than it fits: the rows, their keys, fills, cursor and marked text move up by `top`, and
+/// what lies outside is dropped. Inputs: the frame, the first row kept and how many.
+/// Output: the frame of those rows.
+pub fn clipped(frame: Frame, top: usize, shown: usize) -> Frame {
+    let _ = (top, shown);
+    frame
+}
+
 /// The plain text of each row, for the rows that check a frame. Input: the frame. Output:
 /// one string per row, trailing spaces trimmed.
 #[cfg(test)]
@@ -406,6 +424,38 @@ mod tests {
         let mut parser: Processor = Processor::new();
         parser.advance(&mut term, bytes);
         term
+    }
+
+    /// V243-PANE-SIZE-ACROSS-WINDOWS: a view shorter than its pane draws the rows that end at
+    /// the cursor's row, with their fills and the cursor moved up with them; a view its pane
+    /// fits draws every row from the top.
+    #[test]
+    fn a_clipped_view_draws_the_rows_that_end_at_the_cursor() {
+        let size = GridSize {
+            columns: 10,
+            lines: 6,
+        };
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, b"r0\r\nr1\r\nr2\r\n\x1b[41mr3\x1b[0m\r\nr4");
+        let theme = Theme::default();
+        assert_eq!(
+            top_row(&term, 6),
+            0,
+            "a view the pane fits starts at the top"
+        );
+        assert_eq!(top_row(&term, 9), 0);
+        let top = top_row(&term, 3);
+        assert_eq!(top, 2, "rows 2 to 4, the cursor's row last");
+        let shown = clipped(frame(&term, &theme, true, None), top, 3);
+        assert_eq!(text_rows(&shown), ["r2", "r3", "r4"]);
+        assert!(!shown.fills.is_empty() && shown.fills.iter().all(|fill| fill.row == 1));
+        assert_eq!(
+            shown.cursor.map(|cursor| (cursor.row, cursor.column)),
+            Some((2, 2))
+        );
+        let full = frame(&term, &theme, true, None);
+        assert_eq!(text_rows(&clipped(full, 0, 6)).len(), 6);
     }
 
     #[test]

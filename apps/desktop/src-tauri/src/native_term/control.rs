@@ -56,14 +56,29 @@ pub struct Want {
     pub kind: WantKind,
 }
 
-/// One event from the reader: a view's restored screen (its first bytes), live output for
-/// the views bound to a pane, a view the direct path refused with a plain code, or the end
-/// of the stream, which ends the direct path of every view.
+/// One event from the reader: a view's restored screen (its first bytes) with its pane's
+/// columns and lines, live output for the views bound to a pane, a bound pane's new size,
+/// a view the direct path refused with a plain code, or the end of the stream, which ends
+/// the direct path of every view.
 #[derive(Debug, PartialEq)]
 pub enum Event {
-    Restored { view: u64, bytes: Vec<u8> },
-    Output { views: Vec<u64>, bytes: Vec<u8> },
-    Refused { view: u64, code: &'static str },
+    Restored {
+        view: u64,
+        bytes: Vec<u8>,
+        grid: (usize, usize),
+    },
+    Output {
+        views: Vec<u64>,
+        bytes: Vec<u8>,
+    },
+    Sized {
+        views: Vec<u64>,
+        grid: (usize, usize),
+    },
+    Refused {
+        view: u64,
+        code: &'static str,
+    },
     Closed,
 }
 
@@ -73,6 +88,7 @@ pub enum Notice<'a> {
     Output { pane: &'a str, escaped: &'a [u8] },
     Begin { flags: u32, tag: &'a [u8] },
     End { flags: u32, ok: bool, tag: &'a [u8] },
+    Layout { pane: String, grid: (usize, usize) },
     Exit,
     Other,
 }
@@ -403,8 +419,9 @@ impl Binds {
         };
         let event = if whole {
             let bytes = restore_bytes(&state, lines);
+            let grid = (state.columns, state.lines);
             self.views.insert(view, Slot::Bound(state.pane));
-            Event::Restored { view, bytes }
+            Event::Restored { view, bytes, grid }
         } else {
             self.views.remove(&view);
             Event::Refused {
@@ -519,6 +536,7 @@ impl Reader {
                 self.open(tag, flags, opening);
                 Ok(Vec::new())
             }
+            Notice::Layout { .. } => Ok(Vec::new()),
             Notice::End { .. } | Notice::Exit => Err(Stop),
             Notice::Other => Ok(Vec::new()),
         }

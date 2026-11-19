@@ -1,5 +1,5 @@
 use super::terminal::{
-    NATIVE_OVERFLOW, Reservation, Sink, Terminals, ViewKey, input_request, plain_code,
+    NATIVE_OVERFLOW, Reservation, Session, Sink, Terminals, ViewKey, input_request, plain_code,
 };
 use super::{BridgeError, failure};
 use crazyagent::engine::owner::TerminalSession;
@@ -58,8 +58,8 @@ pub type Wake = Arc<dyn Fn() + Send + Sync>;
 pub type Opening = Pin<Box<dyn Future<Output = Result<TerminalSession, BridgeError>> + Send>>;
 
 /// Opens the engine session of a bound native view. Takes the view's key, its grid and
-/// whether the session is input-only. Returns the opening session.
-pub type Opener = Arc<dyn Fn(ViewKey, (u16, u16), bool) -> Opening + Send + Sync>;
+/// the session kind. Returns the opening session.
+pub type Opener = Arc<dyn Fn(ViewKey, (u16, u16), Session) -> Opening + Send + Sync>;
 
 /// Turns one engine terminal frame into the event a native view's host reads, under the
 /// rules `channel_message` keeps for a page view. Takes the view, its agent and the frame.
@@ -105,7 +105,7 @@ pub fn paste_requests(keys: &[u8]) -> Vec<TerminalRequest> {
 enum Slot {
     Bound {
         place: Reservation,
-        input_only: bool,
+        kind: Session,
     },
     Opening {
         task: tauri::async_runtime::JoinHandle<()>,
@@ -175,19 +175,19 @@ impl EngineFeed {
     }
 
     /// Binds a native view to the place the shared gate took for it, before the host opens
-    /// it. Takes the view, the place and whether its session is input-only. Returns unit, or
+    /// it. Takes the view, the place and its session kind. Returns unit, or
     /// `native_view_taken` for a view already bound, which gives the place back.
     pub fn bind(
         &mut self,
         view: u64,
         place: Reservation,
-        input_only: bool,
+        kind: Session,
     ) -> Result<(), BridgeError> {
         let mut slots = self.slots().map_err(|_| failure("terminal_state_failed"))?;
         if slots.contains_key(&view) {
             return Err(failure("native_view_taken"));
         }
-        slots.insert(view, Slot::Bound { place, input_only });
+        slots.insert(view, Slot::Bound { place, kind });
         Ok(())
     }
 
@@ -203,8 +203,8 @@ impl EngineFeed {
         self.opened += 1;
         let token = self.opened;
         let mut slots = self.slots()?;
-        let (place, input_only) = match slots.remove(&view) {
-            Some(Slot::Bound { place, input_only }) => (place, input_only),
+        let (place, kind) = match slots.remove(&view) {
+            Some(Slot::Bound { place, kind }) => (place, kind),
             Some(other) => {
                 slots.insert(view, other);
                 return Err(refused(io::ErrorKind::AlreadyExists, "native_view_opened"));
@@ -215,7 +215,7 @@ impl EngineFeed {
             let (window, key) = place.place();
             (window.to_owned(), key.clone())
         };
-        let opening = (self.opener)(key.clone(), grid, input_only);
+        let opening = (self.opener)(key.clone(), grid, kind);
         let sink = Sink::Native {
             view,
             token,
