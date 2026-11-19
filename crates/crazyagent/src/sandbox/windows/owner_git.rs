@@ -246,6 +246,18 @@ mod tests {
     }
 
     #[test]
+    fn the_git_the_engine_finds_on_the_path_is_one_owner_git_installs_for() {
+        let git = crate::github::git_program(std::env::var_os("PATH").as_deref())
+            .expect("git on the runner's PATH");
+        let root = install_root(&git);
+        assert!(
+            root.is_some_and(marked),
+            "git {} gives the install folder {root:?}",
+            git.display()
+        );
+    }
+
+    #[test]
     fn git_for_windows_install_folders_are_found_from_its_programs_only() {
         let root = Path::new(r"C:\Programs\Git");
         for program in [
@@ -613,7 +625,13 @@ pub(crate) mod farm {
             &helper,
             &place.join(GRANTS_FOLDER),
         )
-        .unwrap()
+        .unwrap_or_else(|refused| {
+            panic!(
+                "owner git install for {} with {}: {refused:?}",
+                project.display(),
+                git.display()
+            )
+        })
     }
 
     /// Plants `shape` in the repository whose work tree is `project`, pointing git at its
