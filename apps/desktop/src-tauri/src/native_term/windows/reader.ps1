@@ -4,6 +4,7 @@ $ErrorActionPreference = 'Stop'
 try {
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
+    "reader_stage=lookup"
     $element = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Handle)
     "reader_name=" + $element.Current.Name
     $pattern = $null
@@ -13,7 +14,8 @@ try {
     $document = $pattern.DocumentRange
     "reader_text=" + $document.GetText(-1).Replace("`n", "|")
 } catch {
-    "reader_error=" + $_.Exception.GetBaseException().GetType().FullName
+    $base = $_.Exception.GetBaseException()
+    "reader_error=" + $base.GetType().FullName + " " + ('0x{0:X8}' -f $base.HResult)
     exit 0
 }
 if ($Mode -ne 'full') { exit 0 }

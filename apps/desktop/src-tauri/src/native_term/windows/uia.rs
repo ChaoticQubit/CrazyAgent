@@ -658,10 +658,11 @@ impl Root {
     }
 
     /// Raises UI Automation's text and selection events for what a post changed, only when
-    /// a client listens and the provider exists. Input: what changed.
+    /// a client listens and the provider exists; the provider is cloned out first, since UI
+    /// Automation may send WM_GETOBJECT during the raise. Input: what changed.
     pub fn raise(&self, changed: Changed) {
-        let held = self.held.borrow();
-        let Some(provider) = held.as_ref() else {
+        let held = self.held.borrow().clone();
+        let Some(provider) = held else {
             return;
         };
         if !unsafe { UiaClientsAreListening() }.as_bool() {
@@ -673,7 +674,7 @@ impl Root {
         ];
         for (owed, event) in events {
             if owed {
-                let _ = unsafe { UiaRaiseAutomationEvent(provider, event) };
+                let _ = unsafe { UiaRaiseAutomationEvent(&provider, event) };
             }
         }
     }
@@ -726,7 +727,7 @@ mod tests {
 
     fn read(range: &ITextRangeProvider) -> String {
         let read = unsafe { range.GetText(-1) }.expect("the range's text");
-        String::from_utf16(read.as_wide()).expect("UTF-16 text")
+        String::from_utf16(&read).expect("UTF-16 text")
     }
 
     fn code(result: Result<impl Sized>) -> HRESULT {
@@ -770,7 +771,7 @@ mod tests {
                 .as_bool()
         );
         assert_eq!(
-            String::from_utf16(unsafe { line.GetText(1) }.expect("one").as_wide()).unwrap(),
+            String::from_utf16(&unsafe { line.GetText(1) }.expect("one")).unwrap(),
             "c"
         );
         assert_eq!(
@@ -846,7 +847,7 @@ mod tests {
         assert_eq!(read(&document), "😀a\n\n");
         assert_eq!(read(&tail), "");
         let cut = unsafe { document.GetText(1) }.expect("cut");
-        assert_eq!(cut.as_wide().len(), 0);
+        assert_eq!(cut.len(), 0);
         let element: IRawElementProviderSimple = provider(&access).cast().expect("the element");
         let name = unsafe { element.GetPropertyValue(UIA_NamePropertyId) }.expect("the name");
         assert_eq!(name.to_string(), NAME);

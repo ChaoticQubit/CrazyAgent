@@ -902,7 +902,9 @@ fn read_by_a_screen_reader_and_not_by_an_agent(view: &View) {
     );
     assert!(
         sides[0] >= window.left && sides[1] >= window.top,
-        "{rects} inside {window:?}"
+        "{rects} inside the window at {}, {}",
+        window.left,
+        window.top
     );
     assert!(sides[0] + sides[2] <= window.right && sides[1] + sides[3] <= window.bottom);
     assert!(value(&lines, "reader_text_after").is_some_and(|text| text.starts_with("ab|cd|ef|")));
@@ -910,15 +912,29 @@ fn read_by_a_screen_reader_and_not_by_an_agent(view: &View) {
     println!("h3 row: text changed events {events}");
     let contained = read_from_an_agent_container(view.hwnd());
     assert!(
-        value(&contained, "reader_pid").is_some(),
-        "the container reader started: {contained:?}"
+        value(&contained, "reader_stage") == Some("lookup"),
+        "the container reader never reached the UIA lookup: {contained:?}"
     );
-    let read = value(&contained, "reader_text");
-    assert!(
-        read.is_none_or(|text| !text.contains("ab|cd")),
-        "an agent's AppContainer read the view: {contained:?}"
-    );
+    contained_read_nothing(&contained);
     println!("h3 row: agent container read nothing: {contained:?}");
+}
+
+/// Checks a reader in an agent's AppContainer reached none of the view's provider: no name,
+/// no Text pattern and no text. Input: the reader's lines, its lookup stage reached.
+fn contained_read_nothing(contained: &[String]) {
+    let read = "an agent's AppContainer read the view";
+    assert!(
+        value(contained, "reader_name").is_none_or(|name| name != "Terminal"),
+        "{read}: its name, {contained:?}"
+    );
+    assert!(
+        value(contained, "reader_text_pattern").is_none_or(|has| has != "True"),
+        "{read}: its Text pattern, {contained:?}"
+    );
+    assert!(
+        value(contained, "reader_text").is_none(),
+        "{read}: its text, {contained:?}"
+    );
 }
 
 #[test]
