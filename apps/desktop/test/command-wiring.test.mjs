@@ -50,7 +50,7 @@ function specCalls() {
   for (const name of readdirSync(new URL("./native/", import.meta.url))) {
     if (!name.endsWith(".e2e.mjs")) continue;
     const spec = read(`test/native/${name}`);
-    for (const match of spec.matchAll(/\(\s*"(desktop_[a-z_]+)"/g)) calls.add(match[1]);
+    for (const match of spec.matchAll(/\binvoke\(\s*"(desktop_[a-z_]+)"/g)) calls.add(match[1]);
   }
   assert.ok(calls.size > 0, "the native trial specs call commands");
   return calls;
