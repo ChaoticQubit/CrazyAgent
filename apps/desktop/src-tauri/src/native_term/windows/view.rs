@@ -250,17 +250,17 @@ impl View {
         self.hwnd
     }
 
-    /// Places the view over the page's terminal box and shows it, or hides it for none.
-    /// Input: the box in CSS pixels. Output: ok, or `native_terminal_rect_invalid`, which
-    /// leaves the view hidden.
+    /// Places the view over the page's terminal box and shows it, or hides it for none or
+    /// once the render thread faulted it. Input: the box in CSS pixels. Output: ok, or
+    /// `native_terminal_rect_invalid`, which leaves the view hidden.
     pub fn place(&self, page: Option<(f64, f64, f64, f64)>) -> Result<(), &'static str> {
         self.inner.page.set(page);
         self.inner.apply(self.hwnd)
     }
 
     /// Hides the view while a page popover, menu or dialog covers its box, and shows it
-    /// again after; a box that cannot be placed keeps it hidden, as `place` reported.
-    /// Input: whether it is covered.
+    /// again after; a box that cannot be placed, or a fault, keeps it hidden, as `place`
+    /// does. Input: whether it is covered.
     pub fn cover(&self, covered: bool) {
         self.inner.covered.set(covered);
         let _ = self.inner.apply(self.hwnd);
@@ -376,8 +376,8 @@ impl Inner {
     }
 
     /// Moves the view to its page box at its scale, on top of the webview, and shows it,
-    /// or hides it with no box, covered, or a box that cannot be placed. Output: ok, or why
-    /// the box cannot be placed.
+    /// or hides it with no box, covered, faulted, or a box that cannot be placed. Output:
+    /// ok, or why the box cannot be placed.
     fn apply(&self, hwnd: HWND) -> Result<(), &'static str> {
         let placed = self.move_to_box(hwnd);
         if placed != Ok(true) {
