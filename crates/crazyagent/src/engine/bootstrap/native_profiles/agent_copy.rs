@@ -925,10 +925,11 @@ fn claude_copy(record: &[u8]) -> Result<Record, EngineError> {
     })
 }
 
-/// Reads the account's Claude Code credential from the managed home's own keychain, where
-/// the sign-in custodian's Claude Code stored it under the item name Claude Code derives
-/// from that home. The secret comes back only through a bounded pipe, never an argument.
-/// Inputs: the managed home's descriptor and path. Output: the record, or unavailable.
+/// Reads the account's Claude Code credential from the managed home's own keychain, filed
+/// under the item name Claude Code derives from that home, once the keychain is open, so a
+/// locked one never makes macOS ask the owner for its password. The secret comes back only
+/// through a bounded pipe, never an argument. Inputs: the managed home's descriptor and
+/// path. Output: the record, or unavailable.
 #[cfg(target_os = "macos")]
 fn keychain_record(home: &File, path: &Path) -> Result<Vec<u8>, EngineError> {
     use std::process::{Command, Stdio};
@@ -938,7 +939,10 @@ fn keychain_record(home: &File, path: &Path) -> Result<Vec<u8>, EngineError> {
         .ok_or_else(unavailable)?;
     let library = open_folder(home, "Library")?;
     let keychains = open_folder(&library, "Keychains")?;
-    let stat = rustix::fs::statat(&keychains, "login.keychain-db", AtFlags::SYMLINK_NOFOLLOW)
+    let keychain =
+        crate::engine::keychain::open_profile_keychain(path).map_err(|_| unavailable())?;
+    let name = keychain.file_name().ok_or_else(unavailable)?;
+    let stat = rustix::fs::statat(&keychains, name, AtFlags::SYMLINK_NOFOLLOW)
         .map_err(|_| unavailable())?;
     if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile
         || stat.st_nlink != 1
@@ -947,7 +951,6 @@ fn keychain_record(home: &File, path: &Path) -> Result<Vec<u8>, EngineError> {
         return Err(unavailable());
     }
     let service = claude_service(text);
-    let keychain = path.join("Library/Keychains/login.keychain-db");
     let mut child = crate::spawn_gate::spawn(
         Command::new(SECURITY)
             .args(["find-generic-password", "-s", service.as_str(), "-w"])

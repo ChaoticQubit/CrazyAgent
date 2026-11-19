@@ -84,7 +84,7 @@ function standIn(node, bin) {
   }
   return `#!/bin/sh
 marker="$CLAUDE_CONFIG_DIR/.questions-flow-signed-in"
-keychain="$CLAUDE_CONFIG_DIR/Library/Keychains/login.keychain-db"
+keychain="$CLAUDE_CONFIG_DIR/Library/Keychains/profile.keychain-db"
 service="Claude Code-credentials-$(printf %s "$CLAUDE_CONFIG_DIR" | /usr/bin/shasum -a 256 | /usr/bin/cut -c1-8)"
 if [ "$1" != "auth" ]; then
   case " $* " in
