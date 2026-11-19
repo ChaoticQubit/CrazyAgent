@@ -437,7 +437,6 @@ fn check_generation(anchor: &Anchor, value: &Locator) -> Result<(), EngineError>
 
 /// The file in an engine run's own generation that names the owner timeout it serves under.
 /// It lives where no shipped binary reads, so the locator keeps the shape they parse.
-#[cfg(unix)]
 const OWNER_TIMEOUT: &str = "owner-timeout";
 /// The most bytes an owner timeout file holds: its decimal milliseconds, no line end.
 #[cfg(unix)]

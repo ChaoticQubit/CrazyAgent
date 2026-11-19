@@ -123,9 +123,9 @@ impl Drop for Fixture {
 }
 
 /// R10-L1: an input whose typing fails after its checks passed frees the master for the
-/// next one, since its input time is cleared. With the master's pane gone, tmux answers the
-/// bracketed paste question for its current window (IMP-RVDS-PR3), here the other pane, so
-/// the check passes and only the typing fails; the other pane gets nothing.
+/// next one, since its input time is cleared. The master's pane ends after the checks and
+/// the hold, just before the typing, while another pane is tmux's current window: the typing
+/// fails and that other pane gets nothing.
 #[test]
 fn a_failed_typing_frees_the_live_master_for_the_next_input() {
     let mut fixture = Fixture::new();
@@ -170,19 +170,17 @@ fn a_failed_typing_frees_the_live_master_for_the_next_input() {
         selected.success(),
         "the other pane is tmux's current window"
     );
-    host.kill(&master).unwrap();
-    assert!(
-        host.input_live(&master).unwrap(),
-        "tmux answers for another pane of its server"
-    );
 
-    let gone = master_input_at(
+    let gone = master_input_when(
         &fixture.connection,
         host.as_ref(),
         None,
         &project,
         "hello",
-        NOW,
+        || {
+            host.kill(&master).unwrap();
+            Ok(true)
+        },
     );
     assert!(matches!(gone, Err(InputRefused::Failed(_))), "{gone:?}");
     let input_ms: Option<i64> = fixture
