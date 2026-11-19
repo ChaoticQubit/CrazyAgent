@@ -928,10 +928,10 @@ mod tests {
             .unwrap()
     }
 
-    /// Sends one create while the worker is held at its claim, lifts the hold `release`
-    /// after the send, and waits for the engine to close. Inputs: the folder, the settings
-    /// lines and the release delay. Output: the apply's revision or error code, and the
-    /// stored revision after close.
+    /// Sends one create, once storage receives, while the worker is held at its claim, lifts
+    /// the hold `release` after the send, and waits for the engine to close. Inputs: the
+    /// folder, the settings lines and the release delay. Output: the apply's revision or error
+    /// code, and the stored revision after close.
     async fn apply_across_a_held_claim(
         root: &std::path::Path,
         settings: &str,
@@ -941,6 +941,9 @@ mod tests {
         let hold = crate::storage::hold_claims(&path);
         let (engine, opened) = one_slot_engine(root, settings).await;
         assert_eq!(opened, path);
+        tokio::time::timeout(Duration::from_secs(10), engine.storage.started())
+            .await
+            .unwrap();
         let engine = std::sync::Arc::new(engine);
         let raced = tokio::spawn({
             let engine = engine.clone();
@@ -978,21 +981,51 @@ mod tests {
                 let (outcome, stored) =
                     apply_across_a_held_claim(root.path(), "timeout_ms = 100", release).await;
                 let seen = format!("round {round} offset {offset}: {outcome:?}, stored {stored}");
-                match outcome.as_ref() {
-                    Err(code) if code == "storage_busy_not_submitted" => {
-                        assert_eq!(stored, 0, "{seen}")
-                    }
-                    Ok(revision) => {
-                        assert_eq!(*revision, crate::protocol::Cursor::new(1), "{seen}");
-                        assert_eq!(stored, 1, "{seen}");
-                    }
-                    Err(code) if code == "outcome_unknown_retry_same_identity" => {
-                        assert_eq!(stored, 1, "{seen}")
-                    }
-                    Err(_) => panic!("an outcome outside the claim's three: {seen}"),
-                }
+                one_of_the_claims_three(&outcome, stored, &seen);
             }
         }
+    }
+
+    /// Checks that one claim race ended in one of its three outcomes and stored what that
+    /// outcome says: withdrawn with nothing stored, or applied once, answered or unknown.
+    /// Inputs: the outcome, the stored revision and the label a failure names.
+    fn one_of_the_claims_three(
+        outcome: &Result<crate::protocol::Cursor, String>,
+        stored: i64,
+        seen: &str,
+    ) {
+        match outcome.as_ref() {
+            Err(code) if code == "storage_busy_not_submitted" => assert_eq!(stored, 0, "{seen}"),
+            Ok(revision) => {
+                assert_eq!(*revision, crate::protocol::Cursor::new(1), "{seen}");
+                assert_eq!(stored, 1, "{seen}");
+            }
+            Err(code) if code == "outcome_unknown_retry_same_identity" => {
+                assert_eq!(stored, 1, "{seen}")
+            }
+            Err(_) => panic!("an outcome outside the claim's three: {seen}"),
+        }
+    }
+
+    const START_HELD: Duration = Duration::from_secs(1);
+
+    /// A claim race reaches the claim even when storage is still starting as the engine
+    /// opens: the race begins only once storage receives. The start is held 1 s, 900 ms past
+    /// the 100 ms bound, so a race begun at open is refused storage_starting_not_submitted
+    /// instead of racing the claim (the V243 claim race at the bound flake).
+    #[tokio::test]
+    async fn the_claim_race_begins_only_once_storage_receives() {
+        let root = tempfile::tempdir().unwrap();
+        let start = crate::storage::hold_start(&root.path().join("db"));
+        let ((outcome, stored), ()) = tokio::join!(
+            apply_across_a_held_claim(root.path(), "timeout_ms = 100", Duration::from_millis(100)),
+            async move {
+                tokio::time::sleep(START_HELD).await;
+                drop(start);
+            }
+        );
+        let seen = format!("start held {START_HELD:?}: {outcome:?}, stored {stored}");
+        one_of_the_claims_three(&outcome, stored, &seen);
     }
 
     #[tokio::test]
