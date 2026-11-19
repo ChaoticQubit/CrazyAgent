@@ -163,14 +163,14 @@ fn profile_keychain(directory: &Path) -> Result<Option<PathBuf>, EngineError> {
 }
 
 /// Opens a signed-in profile home's keychain before the engine reads it: settles its name,
-/// unlocks it, then makes it that home's default and only search-list keychain again, so a
-/// rename a crash cut short heals. Input: the absolute profile home. Output: the keychain, or
-/// a failure, also for a home with none, after which the caller makes no call that could ask
-/// the owner for a password.
+/// unlocks it, then points the home's default and search list at it again, so a cut-short
+/// rename heals. Input: the canonical profile home, never the owner's own, checked first.
+/// Output: the keychain, or a failure, also for a home with none, after which the caller
+/// makes no call that could ask the owner for a password.
 pub(crate) fn open_profile_keychain(home: &Path) -> Result<PathBuf, EngineError> {
+    profile_home_guard(home)?;
     let directory = home.join("Library/Keychains");
-    if !home.is_absolute() || !present(&home.join("Library"), true)? || !present(&directory, true)?
-    {
+    if !present(&home.join("Library"), true)? || !present(&directory, true)? {
         return Err(failure());
     }
     let keychain = profile_keychain(&directory)?.ok_or_else(failure)?;
@@ -182,11 +182,12 @@ pub(crate) fn open_profile_keychain(home: &Path) -> Result<PathBuf, EngineError>
 
 /// Gives a private Claude profile home its own unlocked macOS keychain, so the official CLI
 /// uses it instead of asking macOS for a login keychain; an earlier `login.keychain-db` is
-/// renamed, and on a `login` sign-in one the empty password cannot open is set aside, never
-/// deleted. Inputs: the absolute private profile home and whether a login follows. Output:
+/// renamed, and on a `login` sign-in one "" cannot open is set aside, never deleted. Inputs:
+/// the canonical profile home, never the owner's own, and whether a login follows. Output:
 /// the keychain, the home's default and only search-list one; the owner's stay untouched.
 pub(crate) fn prepare_profile_keychain(home: &Path, login: bool) -> Result<PathBuf, EngineError> {
-    if !home.is_absolute() || !home.is_dir() {
+    profile_home_guard(home)?;
+    if !home.is_dir() {
         return Err(failure());
     }
     let directory = home.join("Library/Keychains");
@@ -278,8 +279,16 @@ fn owner_home() -> Result<PathBuf, EngineError> {
 }
 
 /// Refuses a profile home the engine may not settle a keychain in, before any rename or
-/// `security` call. Input: the home. Output: done, or a failure.
-fn profile_home_guard(_home: &Path) -> Result<(), EngineError> {
+/// `security` call: it must be absolute and its own canonical path, so no link sits on it,
+/// and never the owner's own home, whose login keychain a rename would take from the login
+/// window. Input: the home. Output: done, or a failure.
+fn profile_home_guard(home: &Path) -> Result<(), EngineError> {
+    if !home.is_absolute()
+        || std::fs::canonicalize(home).map_err(|_| failure())? != home
+        || home == owner_home()?
+    {
+        return Err(failure());
+    }
     Ok(())
 }
 
