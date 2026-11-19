@@ -1083,8 +1083,7 @@ fn wayland_child(
 mod tests {
     use super::*;
     use crate::native_term::linux::rows::{
-        STEP_WAIT, add_css, green_terminal, ms, pump, pump_for, pump_until, row_dir, wait_mapped,
-        white_toplevel,
+        add_css, green_terminal, ms, pump, pump_for, pump_until, row_dir, wait_mapped, white_toplevel,
     };
     use crate::native_term::render::{Shared, Surface};
     use crate::native_term::screen::Frame;
