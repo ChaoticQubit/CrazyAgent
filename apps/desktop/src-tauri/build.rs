@@ -114,6 +114,7 @@ fn main() {
         "desktop_native_terminal_keys",
         "desktop_native_terminal_close",
         "desktop_native_terminal_probe",
+        "desktop_native_terminal_responder",
         "desktop_team_terminals_per_window",
         "desktop_terminals_per_window",
         "desktop_open_terminal_windows",

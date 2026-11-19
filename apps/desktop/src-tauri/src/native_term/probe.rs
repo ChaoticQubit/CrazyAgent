@@ -1,10 +1,13 @@
 use super::host::{self, Look};
 use super::view::TermView;
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyObject, NSObjectProtocol};
 use objc2::{ClassType, MainThreadMarker, msg_send};
-use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSResponder};
+use objc2_app_kit::{
+    NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSResponder, NSView, NSWindow,
+};
 use objc2_foundation::{NSNotFound, NSPoint, NSRange, NSString};
+use std::ffi::c_void;
 
 /// The longest text one trial step types or composes, in bytes.
 pub const TEXT_BYTES_MAX: usize = 4096;
@@ -156,4 +159,45 @@ fn seen(mtm: MainThreadMarker, look: Look) -> Seen {
     assert!(!seen.focused || window.is_some());
     assert!(seen.scale >= 0.0 && seen.scale.is_finite());
     seen
+}
+
+/// What holds a page window's keyboard, as a trial reads it with no view open: `page` (the
+/// page's webview or a view inside it), `terminal` (a native terminal view), `window` (the
+/// window itself), `none` or `other`; and whether the app is active and the window key.
+#[derive(serde::Serialize, Debug, PartialEq)]
+pub struct Responder {
+    pub holder: &'static str,
+    pub active: bool,
+    pub key: bool,
+}
+
+/// Reads what holds the keyboard of the window a page's webview sits in. Inputs: the marker
+/// and the page's WKWebView pointer. Output: the reading, or `native_terminal_probe_failed`
+/// when the webview or its window is missing.
+pub fn responder(mtm: MainThreadMarker, pointer: *mut c_void) -> Result<Responder, &'static str> {
+    let webview = unsafe { Retained::retain(pointer.cast::<NSView>()) }
+        .ok_or("native_terminal_probe_failed")?;
+    let window = webview.window().ok_or("native_terminal_probe_failed")?;
+    let holder = window
+        .firstResponder()
+        .map_or("none", |first| holder(&first, &webview, &window));
+    Ok(Responder {
+        holder,
+        active: NSApplication::sharedApplication(mtm).isActive(),
+        key: window.isKeyWindow(),
+    })
+}
+
+fn holder(first: &NSResponder, webview: &NSView, window: &NSWindow) -> &'static str {
+    let itself: &NSResponder = window;
+    if std::ptr::eq(first, itself) {
+        return "window";
+    }
+    if first.isKindOfClass(TermView::class()) {
+        return "terminal";
+    }
+    match first.downcast_ref::<NSView>() {
+        Some(view) if view.isDescendantOf(webview) => "page",
+        _ => "other",
+    }
 }

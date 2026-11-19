@@ -173,6 +173,34 @@ async function close(view) {
   await invoke("desktop_native_terminal_close", { view });
 }
 
+/** Reads what holds the test window's keyboard with no view needed: page, terminal, window,
+ * none or other, and whether the app is active and its window key. Output: the reading. */
+function responder() {
+  return invoke("desktop_native_terminal_responder", {});
+}
+
+/** Opens a view on the master and gives it the keyboard; the window must then read that
+ * view as its holder. Output: the view and the window's reading then. */
+async function focusedView() {
+  const shown = await open(true);
+  await ready(shown);
+  await invoke("desktop_native_terminal_focus", { view: shown.view });
+  await seenWhen(shown.view, (seen) => seen.focused, UI_MS, "the view never took the keyboard");
+  const held = await responder();
+  assert.equal(held.holder, "terminal", "the window reads the focused view as its keyboard holder");
+  return { shown, held };
+}
+
+/** Checks that the page holds the keyboard once a focused view is gone, and that the app and
+ * its window stayed as they were (N2). Inputs: how the view went and the reading before. */
+async function pageHolds(how, held) {
+  const after = await responder();
+  console.log(`END-FOCUS ${how} ${JSON.stringify({ before: held, after })}`);
+  assert.equal(after.holder, "page", `a focused view that ${how} gave the keyboard back to the page`);
+  assert.equal(after.active, held.active, "the hand-back never brings the app forward");
+  assert.equal(after.key, held.key, "the hand-back never makes the window key");
+}
+
 describe("Native terminal views in the real window", () => {
   before(async () => {
     await prepareWindow();
@@ -203,6 +231,23 @@ describe("Native terminal views in the real window", () => {
     assert.equal(after.active, before.active, "focus never brings the app forward");
     assert.equal(after.key, before.key, "focus never makes the window key");
     await close(shown.view);
+  });
+
+  it("a focused view the engine ends gives the keyboard back to the page", async () => {
+    const { shown, held } = await focusedView();
+    const newer = await open(true);
+    await until(async () => (await events(shown.tag)).some((event) => event.type === "ended"), UI_MS,
+      "the replaced view never ended");
+    assert.equal((await events(shown.tag)).find((event) => event.type === "ended").code, "terminal_view_replaced");
+    opened.delete(shown.view);
+    await pageHolds("ended", held);
+    await close(newer.view);
+  });
+
+  it("a focused view the page closes gives the keyboard back to the page", async () => {
+    const { shown, held } = await focusedView();
+    await close(shown.view);
+    await pageHolds("closed", held);
   });
 
   it("the message box's prompt is typed into a direct view's terminal as one submission (#632)", async () => {

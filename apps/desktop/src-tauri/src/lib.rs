@@ -2087,6 +2087,31 @@ async fn desktop_native_terminal_probe(
     .map_err(engine_failure)
 }
 
+/// Test builds only: reads what holds the keyboard of the calling page's window, so a
+/// native-webdriver trial sees where keys go once a native view has ended. Input: the
+/// calling page. Output: the holder, and whether the app is active and the window key.
+#[cfg(all(target_os = "macos", feature = "native-webdriver"))]
+#[tauri::command]
+async fn desktop_native_terminal_responder(
+    webview: Webview,
+) -> Result<native_term::probe::Responder, BridgeError> {
+    terminal_window(&webview)?;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    webview
+        .with_webview(move |platform| {
+            let read = match objc2::MainThreadMarker::new() {
+                Some(mtm) => native_term::probe::responder(mtm, platform.inner()),
+                None => Err("native_terminal_main_busy"),
+            };
+            let _ = sender.send(read);
+        })
+        .map_err(|_| engine_failure("native_terminal_webview_missing"))?;
+    receiver
+        .await
+        .map_err(|_| engine_failure("native_terminal_main_busy"))?
+        .map_err(engine_failure)
+}
+
 /// Whether this desktop draws terminals natively: true only in a macOS build. Input: the
 /// calling page. Output: the answer.
 #[tauri::command]
@@ -6225,6 +6250,7 @@ native_commands! {
     desktop_terminal_detach,
     ;
     desktop_native_terminal_probe,
+    desktop_native_terminal_responder,
 }
 
 pub fn run() {
