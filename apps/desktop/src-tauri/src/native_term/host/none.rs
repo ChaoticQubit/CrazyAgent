@@ -114,10 +114,7 @@ pub fn drawn(_view: &View, _geometry: Geometry, _term: &Term<VoidListener>) {}
 
 /// Takes a view down. Input: the view. Output: its events channel.
 pub fn dismiss_view(view: View) -> Channel<NativeEvent> {
-    let View {
-        surface, events, ..
-    } = view;
-    drop(surface);
+    let View { events, .. } = view;
     events
 }
 
