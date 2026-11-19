@@ -1182,4 +1182,133 @@ mod tests {
             assert!(!project.join(".git").exists() && !project.join(".crazyagent").exists());
         }
     }
+
+    /// The 8.3 name Windows gives `path`, read through cmd.exe, the long path itself where the
+    /// volume keeps no short names. Input: an existing path. Output: the path cmd.exe prints.
+    fn short_path(path: &Path) -> PathBuf {
+        use std::os::windows::process::CommandExt;
+        let output = Command::new(cmd())
+            .arg("/C")
+            .raw_arg(format!("for %I in (\"{}\") do @echo %~sI", path.display()))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let short = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+        assert!(short.is_absolute(), "{}", short.display());
+        short
+    }
+
+    /// V244-WIN-HIDDEN-BOUNDARY Q1, Q2 (FROM-LEADER-0406): each hidden folder joins the boundary
+    /// as hidden, in a project and a job folder alike, and an absent one is made empty first,
+    /// so a folder made while the agent runs lands under the cover.
+    #[test]
+    fn hidden_folders_join_the_boundary_hidden_and_an_absent_one_is_made_empty() {
+        let helper = std::env::current_exe().unwrap();
+        for job in [false, true] {
+            let folders = folders();
+            let vault = folders.project.join("vault");
+            let later = folders.project.join("later");
+            fs::create_dir(&vault).unwrap();
+            fs::write(vault.join("key.txt"), "key\r\n").unwrap();
+            let plain = policy(&folders, SandboxNetwork::Only(Vec::new()))
+                .hide(&vault)
+                .unwrap()
+                .hide(&later)
+                .unwrap();
+            let sandbox = if job { plain.as_job_folder() } else { plain };
+            let profile = folders.profiles.join("agent.sb");
+            WindowsSandbox::install(sandbox.clone(), &helper, &profile, &folders.grants).unwrap();
+            assert!(
+                later.is_dir() && fs::read_dir(&later).unwrap().next().is_none(),
+                "an absent hidden folder is made empty: job {job}"
+            );
+            assert_eq!(fs::read_to_string(vault.join("key.txt")).unwrap(), "key\r\n");
+            let guarded = boundary_profile(&sandbox, &folders.grants).unwrap().guarded;
+            for folder in [&vault, &later] {
+                let path = folder.to_str().unwrap();
+                assert!(
+                    guarded
+                        .iter()
+                        .any(|item| item.path == path && item.guard == Guard::Hidden),
+                    "{path} is hidden: job {job}"
+                );
+            }
+        }
+    }
+
+    /// V244-WIN-HIDDEN-BOUNDARY Q5: a wrapped agent cannot list, read, write, rename or delete a
+    /// hidden folder by its name, in another letter case, by its 8.3 name or through a junction
+    /// the owner made to it, nor give a hidden file a second name, and still edits the project.
+    #[test]
+    fn a_wrapped_agent_cannot_reach_a_hidden_folder_by_any_name() {
+        let helper = helper();
+        let folders = folders();
+        let project = &folders.project;
+        let vault = project.join("vault-of-keys");
+        fs::create_dir(&vault).unwrap();
+        fs::write(vault.join("key.txt"), "key\r\n").unwrap();
+        let door = project.join("door");
+        let line = format!("mklink /J {} {}", door.display(), vault.display());
+        assert!(Command::new(cmd()).arg("/C").arg(line).status().unwrap().success());
+        let mut names = vec![vault.clone(), project.join("VAULT-OF-KEYS"), door];
+        let short = short_path(&vault);
+        if short != vault {
+            names.push(short);
+        }
+        let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()))
+            .hide(&vault)
+            .unwrap();
+        let profile = folders.profiles.join("agent.sb");
+        let installed = WindowsSandbox::install(sandbox, &helper, &profile, &folders.grants).unwrap();
+        let run = |line: &str| shell(&installed, &folders, line);
+        assert!(run("echo work>work.txt"), "the agent still edits the project");
+        for name in &names {
+            let name = name.display();
+            assert!(!run(&format!("dir {name}")), "listed {name}");
+            assert!(!run(&format!(r"type {name}\key.txt")), "read {name}");
+            assert!(!run(&format!(r"echo x>{name}\new.txt")), "wrote in {name}");
+        }
+        let moved_to = project.join("moved");
+        for name in &names[..2] {
+            let moved = call(&installed, &folders, &[name.as_path(), moved_to.as_path()]);
+            assert!(denied(&moved), "renamed {}: {moved:?}", name.display());
+            let deleted = call(&installed, &folders, &[name.as_path()]);
+            assert!(denied(&deleted), "deleted {}: {deleted:?}", name.display());
+        }
+        let link = format!(r"mklink /H copy.txt {}\key.txt", vault.display());
+        assert!(!run(&link), "a hidden file took a second name");
+        assert!(!project.join("copy.txt").exists() && !moved_to.exists());
+        assert_eq!(fs::read_to_string(vault.join("key.txt")).unwrap(), "key\r\n");
+        assert_eq!(fs::read_dir(&vault).unwrap().count(), 1, "nothing new in the vault");
+    }
+
+    /// V244-WIN-HIDDEN-BOUNDARY probe: a file in a hidden folder whose own list, cut from the
+    /// folder's, grants every app container read stays out of reach; red here means traverse
+    /// bypass opens it by path, which goes to the leader as a question.
+    #[test]
+    fn a_hidden_file_with_its_own_grant_to_every_app_container_stays_out_of_reach() {
+        let helper = helper();
+        let folders = folders();
+        let vault = folders.project.join("vault");
+        fs::create_dir(&vault).unwrap();
+        let open = vault.join("open.txt");
+        fs::write(&open, "open\r\n").unwrap();
+        let granted = Command::new("icacls")
+            .arg(&open)
+            .args(["/inheritance:r", "/grant:r", "*S-1-15-2-1:(R)"])
+            .args(["*S-1-3-4:(F)", "*S-1-5-32-544:(F)"])
+            .output()
+            .unwrap();
+        assert!(granted.status.success(), "{granted:?}");
+        let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()))
+            .hide(&vault)
+            .unwrap();
+        let profile = folders.profiles.join("agent.sb");
+        let installed = WindowsSandbox::install(sandbox, &helper, &profile, &folders.grants).unwrap();
+        assert!(shell(&installed, &folders, "echo work>work.txt"));
+        assert!(
+            !shell(&installed, &folders, r"type vault\open.txt"),
+            "an app container read a hidden file through its own grant"
+        );
+    }
 }

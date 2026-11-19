@@ -3138,6 +3138,25 @@ fn a_hidden_folder_left_unchecked_is_told_the_cause_and_the_way_out() {
     );
 }
 
+/// V244-WIN-HIDDEN-BOUNDARY Q3 (FROM-LEADER-0406, leader 04:09): a Windows save refused for a
+/// file in the folder with another link, a folder too big to walk or an entry the walk could
+/// not read says what to do in fixed words; the desktop app shows the same words.
+#[test]
+fn a_hidden_folder_the_windows_walk_refused_is_told_what_to_do() {
+    assert_eq!(
+        plain_problem("hidden_path_linked_file"),
+        "A file in that folder has another link outside it, so agents could read it by that name. Remove the file's other link, or don't hide this folder."
+    );
+    assert_eq!(
+        plain_problem("hidden_path_too_many_entries"),
+        "That folder holds over 100,000 files and folders, too many to check for files with other links. Hide a smaller folder, or don't hide this one."
+    );
+    assert_eq!(
+        plain_problem("hidden_path_entry_unreadable"),
+        "CrazyAgent couldn't read a file or folder inside that folder to check it for other links. Fix its permissions, or don't hide this folder."
+    );
+}
+
 /// #590 (leader 10:37): where the engine says this system's boundary cannot hold hidden
 /// folders, the Settings tab says so in one plain line and `k` opens no box; a list saved
 /// before still shows with how to clear it and `k` opens the box, and the save's refusal

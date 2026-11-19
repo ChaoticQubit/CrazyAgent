@@ -1826,4 +1826,156 @@ mod tests {
         std::mem::forget(run);
         assert_eq!(runs_seeing(project, &saved), vec![RunKind::Research]);
     }
+
+    /// How many names a walked file has, as this system reads them. Input: the path.
+    /// Output: the count, or the error.
+    fn names(path: &Path) -> std::io::Result<u64> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            Ok(std::fs::symlink_metadata(path)?.nlink())
+        }
+        #[cfg(windows)]
+        {
+            file_links(path)
+        }
+    }
+
+    /// V244-WIN-HIDDEN-BOUNDARY Q3 (FROM-LEADER-0406): the walk names the first file in a hidden
+    /// folder that has another name, however deep, since the agent reads it by that name; a
+    /// file with one name, an absent folder and a link the walk never follows all pass.
+    #[test]
+    fn the_walk_names_a_hidden_file_with_another_name_and_passes_the_rest() {
+        let root = project();
+        let hidden = root.path().join("vault");
+        let deep = hidden.join("a").join("b");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(hidden.join("plain.txt"), "one name\n").unwrap();
+        let folders = [hidden.clone(), root.path().join("absent")];
+        assert_eq!(walk(&folders, WALK_ENTRIES_MAX, names), Ok(()));
+        let outside = root.path().join("outside.txt");
+        std::fs::write(&outside, "two names\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, hidden.join("pointer")).unwrap();
+        assert_eq!(
+            walk(&folders, WALK_ENTRIES_MAX, names),
+            Ok(()),
+            "a link is a name of its own and is never followed"
+        );
+        let linked = deep.join("key.txt");
+        std::fs::hard_link(&outside, &linked).unwrap();
+        assert_eq!(
+            walk(&folders, WALK_ENTRIES_MAX, names),
+            Err(Unheld {
+                code: "hidden_path_linked_file",
+                path: Some(linked.clone()),
+            })
+        );
+        std::fs::remove_file(&outside).unwrap();
+        assert_eq!(
+            walk(&folders, WALK_ENTRIES_MAX, names),
+            Ok(()),
+            "once its other name is gone the file passes"
+        );
+    }
+
+    /// V244-WIN-HIDDEN-BOUNDARY Q3: one bound counts every entry of every hidden folder, so a
+    /// list of big folders cannot stall a launch; past it the list is refused with its own code.
+    #[test]
+    fn the_walk_counts_every_entry_of_every_folder_against_one_bound() {
+        let root = project();
+        let (one, two) = (root.path().join("one"), root.path().join("two"));
+        std::fs::create_dir_all(one.join("inner")).unwrap();
+        std::fs::create_dir(&two).unwrap();
+        std::fs::write(one.join("inner").join("a.txt"), "a\n").unwrap();
+        std::fs::write(two.join("b.txt"), "b\n").unwrap();
+        let folders = [one, two];
+        assert_eq!(walk(&folders, 3, names), Ok(()), "inner, a.txt and b.txt");
+        assert_eq!(
+            walk(&folders, 2, names),
+            Err(Unheld {
+                code: "hidden_path_too_many_entries",
+                path: None,
+            })
+        );
+        assert!((10_000..=1_000_000).contains(&WALK_ENTRIES_MAX));
+    }
+
+    /// V244-WIN-HIDDEN-BOUNDARY Q3: a folder the walk cannot read refuses the whole list, fail
+    /// closed, naming that folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_the_walk_cannot_read_refuses_the_list() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = project();
+        let hidden = root.path().join("vault");
+        let shut = hidden.join("shut");
+        std::fs::create_dir_all(&shut).unwrap();
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let walked = walk(std::slice::from_ref(&hidden), WALK_ENTRIES_MAX, names);
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            walked,
+            Err(Unheld {
+                code: "hidden_path_entry_unreadable",
+                path: Some(shut),
+            })
+        );
+    }
+
+    /// V244-WIN-HIDDEN-BOUNDARY Q3, Q4: Windows walks the hidden folders before a launch or a
+    /// save and only Linux still refuses hidden folders; macOS and Linux leave other links to
+    /// V24x-HIDDEN-MULTILINK-PARITY.
+    #[test]
+    fn only_windows_walks_the_hidden_folders_and_only_linux_still_refuses_them() {
+        let root = project();
+        let hidden = root.path().join("vault");
+        std::fs::create_dir(&hidden).unwrap();
+        let outside = root.path().join("outside.txt");
+        std::fs::write(&outside, "two names\n").unwrap();
+        let linked = hidden.join("key.txt");
+        std::fs::hard_link(&outside, &linked).unwrap();
+        let got = held(root.path(), std::slice::from_ref(&hidden));
+        if cfg!(target_os = "windows") {
+            assert_eq!(
+                got,
+                Err(Unheld {
+                    code: "hidden_path_linked_file",
+                    path: Some(linked),
+                })
+            );
+        } else {
+            assert_eq!(got, Ok(()));
+        }
+        assert_eq!(crate::sandbox::HIDDEN_UNHELD, cfg!(target_os = "linux"));
+    }
+
+    /// V244-WIN-HIDDEN-BOUNDARY Q3 (leader 04:09, option A): each walk refusal has its own fixed
+    /// words saying what to do, and the owner's launch line adds the file the walk named.
+    #[test]
+    fn each_walk_refusal_has_its_own_words_and_the_owner_line_names_the_file() {
+        for (code, words) in [
+            ("hidden_path_linked_file", "remove the file's other link"),
+            ("hidden_path_too_many_entries", "100,000"),
+            ("hidden_path_entry_unreadable", "couldn't be read"),
+        ] {
+            assert!(refusal(code).contains(words), "{code}: {}", refusal(code));
+            assert_ne!(refusal(code), refusal("hidden_path_unchecked"));
+            assert!(!refusal(code).ends_with('.'));
+        }
+        let file = PathBuf::from("/p/vault/key.txt");
+        let linked = Unheld {
+            code: "hidden_path_linked_file",
+            path: Some(file.clone()),
+        };
+        assert_eq!(
+            linked.line(),
+            format!("{}: {}", refusal(linked.code), file.display())
+        );
+        let bound = Unheld {
+            code: "hidden_path_too_many_entries",
+            path: None,
+        };
+        assert_eq!(bound.line(), refusal(bound.code));
+    }
 }

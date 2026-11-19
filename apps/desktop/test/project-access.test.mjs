@@ -304,6 +304,15 @@ test("Hiding a folder takes an absolute path, rejects duplicates and caps at the
   const unchecked = "CrazyAgent couldn't check that folder against git: git gave an error or took over 5 seconds. Run git status in the project, fix what it reports, then try again.";
   assert.equal(api.knownError("hidden_path_unchecked"), unchecked);
   assert.ok(tuiProject.includes(`"${unchecked}"`), "the TUI shows the same unchecked line");
+  for (const [code, words] of [
+    ["hidden_path_linked_file", "A file in that folder has another link outside it, so agents could read it by that name. Remove the file's other link, or don't hide this folder."],
+    ["hidden_path_too_many_entries", "That folder holds over 100,000 files and folders, too many to check for files with other links. Hide a smaller folder, or don't hide this one."],
+    ["hidden_path_entry_unreadable", "CrazyAgent couldn't read a file or folder inside that folder to check it for other links. Fix its permissions, or don't hide this folder."],
+  ]) {
+    assert.ok(api.KNOWN_ERROR_CODES.includes(code), code);
+    assert.equal(api.knownError(code), words);
+    assert.ok(tuiProject.includes(`"${words}"`), `the TUI shows the same ${code} line`);
+  }
   const macosOnly = "Hidden folders work only on macOS for now, so a list with folders can't be saved here. Remove them all and save.";
   assert.equal(api.knownError("hidden_paths_need_macos"), macosOnly);
   assert.ok(tuiProject.includes(`"${macosOnly}"`));
