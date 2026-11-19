@@ -116,6 +116,28 @@ function turns(seen) {
   return seen.rows.filter((row) => /stand-in turn/.test(row)).length;
 }
 
+/** Counts the stand-in turns the master's pane printed, read from the test engine's tmux,
+ * never from a view. Output: the count over the pane's screen and last 200 history rows. */
+function paneTurns() {
+  const rows = tmux("capture-pane", "-p", "-S", "-200", "-t", `${SESSION}:=${master}`).split("\n");
+  return rows.filter((row) => /stand-in turn/.test(row)).length;
+}
+
+/** Waits until a view shows a turn count; on a timeout the failure adds the turns the pane
+ * printed in all and the view's events, so a red tells a prompt never typed from one typed
+ * but never drawn (V243-DIRECT-VIEW-DRAW-MISS). It reads nothing before the wait, so the
+ * caller's timing is unchanged. Inputs: the view, the count, the limit and the label. */
+async function turnsShown({ view, tag }, count, timeout, label) {
+  assert.ok(Number.isInteger(count) && count > 0, `a turn count: ${count}`);
+  assert.ok(timeout > 0 && timeout <= LONG_TURN_MS, `a time limit: ${timeout}`);
+  try {
+    return await seenWhen(view, (seen) => turns(seen) === count, timeout, label);
+  } catch (error) {
+    const told = (await events(tag)).map((event) => (event.end ? "end" : event.type));
+    throw new Error(`${error.message}; the pane printed ${paneTurns()} stand-in turns in all; view events ${JSON.stringify(told)}`);
+  }
+}
+
 /** Reads the width of the master's pane on the test engine's server. Output: the columns. */
 function paneWidth() {
   const width = Number(tmux("list-panes", "-t", `${SESSION}:=${master}`, "-F", "#{pane_width}"));
@@ -168,15 +190,15 @@ describe("Native terminal views in the real window", () => {
     const base = turns(seen);
     const send = (text) => invoke("desktop_terminal_prompt", { agent: master, text, pane: null });
     await send("w5 message box prompt");
-    await seenWhen(shown.view, (seen) => turns(seen) === base + 1, UI_MS, "the message box's prompt never reached the terminal");
+    await turnsShown(shown, base + 1, UI_MS, "the message box's prompt never reached the terminal");
     await pause(SHORT_TURN_MS);
     assert.equal(turns(await probe(shown.view, READ)), base + 1, "the prompt was one submission, one turn");
     await send("w5 message box long prompt");
-    await seenWhen(shown.view, (seen) => turns(seen) === base + 2, UI_MS, "the second prompt never reached the terminal");
+    await turnsShown(shown, base + 2, UI_MS, "the second prompt never reached the terminal");
     await send("w5 message box prompt again");
     await pause(SHORT_TURN_MS);
     assert.equal(turns(await probe(shown.view, READ)), base + 2, "the prompt's text was typed: its long turn holds the next prompt");
-    await seenWhen(shown.view, (seen) => turns(seen) === base + 3, LONG_TURN_MS, "the held prompt never ran after the long turn");
+    await turnsShown(shown, base + 3, LONG_TURN_MS, "the held prompt never ran after the long turn");
     await pause(SHORT_TURN_MS);
     await close(shown.view);
   });
