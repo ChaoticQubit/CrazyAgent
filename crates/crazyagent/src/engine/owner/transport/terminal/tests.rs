@@ -90,7 +90,13 @@ async fn a_detach_the_engine_already_closed_on_is_a_detach() {
         Ok(())
     );
     let mut rest = Vec::new();
-    assert_eq!(engine.read_to_end(&mut rest).await.unwrap(), 0);
+    assert_eq!(
+        tokio::time::timeout(WAIT, engine.read_to_end(&mut rest))
+            .await
+            .map(|read| read.map_err(|error| error.kind())),
+        Ok(Ok(0)),
+        "the engine reads the end of the viewer's half within ten seconds"
+    );
 }
 
 /// A sized attach is only an opening request: sent inside a live session it ends that
