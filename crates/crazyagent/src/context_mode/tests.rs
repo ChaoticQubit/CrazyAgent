@@ -462,6 +462,116 @@ fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_insta
     );
 }
 
+/// V243-CONTEXT-MODE-ENGINE-NODE: context-mode on the engine's own Node, laid out as setup
+/// lays it out (`setup/bin/{node,npm,npx}` links into `setup/node/bin`, a copy of the real
+/// Node tree), in an engine root no other user can change: the Node check reads a supported
+/// version and npm starts under the install profile. A failed start shows its standard error.
+#[test]
+fn the_engine_s_own_node_passes_the_node_check_and_starts_npm_under_the_install_profile() {
+    let real = system_bin();
+    let cli = crate::sandbox::canonical(&real.join("npm")).unwrap();
+    let package = cli.parent().and_then(Path::parent).unwrap().to_path_buf();
+    assert!(package.ends_with("lib/node_modules/npm"), "{cli:?}");
+    let build = std::env::current_exe().unwrap();
+    let outside = tempfile::Builder::new()
+        .prefix("ca-engine-node-")
+        .tempdir_in(build.parent().unwrap())
+        .unwrap();
+    let base = outside.path().canonicalize().unwrap();
+    if let Some(open) = crate::service::changeable_by_others(&base) {
+        panic!("UNAVAILABLE: a build folder no other user can change, not {open:?}");
+    }
+    let root = base.join("engine");
+    let tree = crate::setup::node::folder(&root);
+    let bin = root.join("setup").join("bin");
+    let npm = root.join("setup").join("npm");
+    let modules = tree.join("lib").join("node_modules");
+    for folder in [&npm, &bin, &tree.join("bin"), &modules] {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(folder)
+            .unwrap();
+    }
+    let copied = crate::spawn_gate::status(
+        std::process::Command::new("/bin/cp")
+            .arg("-R")
+            .arg(&package)
+            .arg(&modules),
+    )
+    .unwrap();
+    assert!(copied.success(), "{package:?}");
+    let writable = crate::spawn_gate::status(
+        std::process::Command::new("/bin/chmod")
+            .arg("-R")
+            .arg("u+w")
+            .arg(&modules),
+    )
+    .unwrap();
+    assert!(writable.success(), "{modules:?}");
+    let node = crate::sandbox::canonical(&real.join("node")).unwrap();
+    let own = tree.join("bin").join("node");
+    fs::copy(&node, &own).unwrap();
+    let alone = crate::spawn_gate::collected(std::process::Command::new(&own).arg("--version"))
+        .unwrap()
+        .status
+        .success();
+    if !alone {
+        let quoted = node.to_str().filter(|path| !path.contains('\'')).unwrap();
+        fs::write(&own, format!("#!/bin/sh\nexec '{quoted}' \"$@\"\n")).unwrap();
+        fs::set_permissions(&own, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    for (name, script) in [("npm", "npm-cli.js"), ("npx", "npx-cli.js")] {
+        let target = format!("../lib/node_modules/npm/bin/{script}");
+        std::os::unix::fs::symlink(target, tree.join("bin").join(name)).unwrap();
+    }
+    for name in ["node", "npm", "npx"] {
+        std::os::unix::fs::symlink(tree.join("bin").join(name), bin.join(name)).unwrap();
+    }
+    let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    crate::sandbox_settings::initialize(&connection).unwrap();
+    drop(connection);
+    let checked = node_supported(&root, &bin).unwrap();
+    let check_error = if checked {
+        String::new()
+    } else {
+        let scratch = staging_folder(&npm, NODE_CHECK).unwrap();
+        let canonical = crate::sandbox::canonical(&scratch).unwrap();
+        let mut command = node_command(&root, &scratch, &bin).unwrap();
+        let failed = crate::spawn_gate::collected(&mut command).unwrap();
+        end_check(&scratch, &canonical);
+        format!(
+            "{:?} {}{}",
+            failed.status,
+            String::from_utf8_lossy(&failed.stdout),
+            String::from_utf8_lossy(&failed.stderr)
+        )
+    };
+    let name = format!("context-mode@{VERSION}");
+    let staged = staging_folder(&npm, &name).unwrap();
+    let work = staging_folder(&npm, &format!("{name}-work")).unwrap();
+    let npm_version = || {
+        let mut command = npm_command(&root, &staged, &work, &bin, VERSION).unwrap();
+        command.arg("--version");
+        command
+    };
+    let (started, output) = run_command(npm_version(), Duration::from_secs(60)).unwrap();
+    let npm_error = if started {
+        String::new()
+    } else {
+        let failed = crate::spawn_gate::collected(&mut npm_version()).unwrap();
+        String::from_utf8_lossy(&failed.stderr).into_owned()
+    };
+    assert!(
+        checked && started,
+        "the engine's own Node: node check passed {checked}: {check_error}\nnpm started \
+         {started}: {npm_error}"
+    );
+    let version = String::from_utf8(output).unwrap();
+    let numbers: Vec<&str> = version.trim().split('.').collect();
+    assert_eq!(numbers.len(), 3, "{version}");
+}
+
 /// The shared install's npm starts through the launcher its Node check starts through, so
 /// on Linux it never starts `sandbox-exec`, which Linux does not have (RV-DS241-194): both
 /// build with one program, or both refuse with one code.
