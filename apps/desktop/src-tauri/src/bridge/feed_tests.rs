@@ -481,6 +481,7 @@ fn an_overflowed_view_bound_again_without_close_drops_its_first_opens_events() {
 /// the queue every worker takes from, not in this worker's own slot that no other worker takes.
 /// Takes nothing. Returns once a task spawned from here ran while this thread waited, which
 /// shows the next spawns can run while the open task blocks; panics after 20 tries.
+#[cfg(unix)]
 fn leave_worker() {
     for _ in 0..20 {
         tokio::task::block_in_place(|| std::thread::sleep(Duration::from_millis(20)));
@@ -500,6 +501,7 @@ fn leave_worker() {
 /// On a live engine terminal the test holds the slots lock from the session handover: no event
 /// arrives while it is held, then `Attached` passes `take` and a key is taken. The row is
 /// scheduler-dependent: its opener calls `leave_worker`, so a read task spawned early can run.
+#[cfg(unix)]
 #[test]
 fn the_attached_of_a_live_open_reaches_the_host_only_once_its_view_is_open() {
     use crazyagent::engine::Client;
