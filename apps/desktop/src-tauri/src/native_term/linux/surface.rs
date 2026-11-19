@@ -1074,11 +1074,12 @@ fn wayland_child(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::native_term::linux::rows::{STEP_WAIT, ms, pump, pump_for, pump_until, row_dir};
+    use crate::native_term::linux::rows::{
+        STEP_WAIT, add_css, green_terminal, ms, pump, pump_for, pump_until, row_dir, wait_mapped,
+        white_toplevel,
+    };
     use crate::native_term::render::{Shared, Surface};
     use crate::native_term::screen::Frame;
-    use crate::native_term::style::{Style, Theme, font_for};
-    use alacritty_terminal::vte::ansi::Rgb;
     use serde_json::{Value, json};
 
     /// The 95th percentile one present may take: under the 16.7 ms of a 60 Hz output, so
@@ -1096,9 +1097,6 @@ mod tests {
 
     /// How many presents the display row paces back to back.
     const FRAMES: usize = 60;
-
-    /// The child's colour, which the farm's pixel checks look for.
-    const GREEN: Rgb = Rgb { r: 0, g: 255, b: 0 };
 
     #[test]
     fn a_host_rect_is_finite_bounded_and_at_least_one_pixel() {
@@ -1322,71 +1320,6 @@ mod tests {
         let took = ms(started);
         child.presented();
         took
-    }
-
-    /// A white toplevel holding a page widget that fills it, mapped. Output: both.
-    fn white_toplevel() -> (gtk::Window, gtk::DrawingArea) {
-        gtk::init().expect("a display");
-        let window = gtk::Window::new(gtk::WindowType::Toplevel);
-        window.set_decorated(false);
-        window.set_default_size(640, 480);
-        add_css(&window, b"window { background-color: #ffffff; }");
-        let page = gtk::DrawingArea::new();
-        window.add(&page);
-        window.show_all();
-        wait_mapped(&window);
-        pump_for(Duration::from_millis(500));
-        (window, page)
-    }
-
-    /// Adds a stylesheet for the toplevel's screen. Inputs: the toplevel and the CSS.
-    fn add_css(window: &gtk::Window, css: &[u8]) {
-        let provider = gtk::CssProvider::new();
-        provider.load_from_data(css).expect("page css");
-        let screen = WidgetExt::screen(window).expect("a screen");
-        gtk::StyleContext::add_provider_for_screen(
-            &screen,
-            &provider,
-            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-        );
-    }
-
-    /// Runs GTK's events until the toplevel is viewable. Input: the toplevel.
-    fn wait_mapped(window: &gtk::Window) {
-        let started = Instant::now();
-        while !window.window().is_some_and(|gdk| gdk.is_viewable()) {
-            assert!(started.elapsed() < STEP_WAIT, "the toplevel did not map");
-            pump_for(Duration::from_millis(10));
-        }
-    }
-
-    /// A GPU, a wgpu surface on the child at its size and an empty frame, drawn in a green
-    /// background the farm's screenshots look for. Input: the child. Output: them.
-    fn green_terminal(child: &Child) -> (Shared, Surface, Frame) {
-        let (width, height) = child.size();
-        let (family, source) = font_for("JetBrains Mono").expect("built in");
-        let style = Style {
-            family,
-            source,
-            font_px: 13.0,
-            blink: false,
-            theme: Theme {
-                background: GREEN,
-                ..Theme::default()
-            },
-        };
-        let mut shared = Shared::new(child.scale() as f32, &style).expect("a GPU");
-        let (display, handle) = child.handles();
-        let surface =
-            unsafe { shared.surface_raw(display, handle, width, height) }.expect("a wgpu surface");
-        let frame = Frame {
-            rows: Vec::new(),
-            keys: Vec::new(),
-            fills: Vec::new(),
-            cursor: None,
-            preedit: None,
-        };
-        (shared, surface, frame)
     }
 
     /// A blue toplevel the size of the farm's output under a white one fixed at 640x480, which
