@@ -1013,8 +1013,9 @@ mod tests {
     }
 
     /// V243-INPUT-PIN-TOLD-END-KEY-SCOPE: only a newer view of a view's own key replaces it.
-    /// A newer view of another key in the same window leaves its detached end detached, before
-    /// and after its own key is replaced, so that view's follower may still take its key back.
+    /// A newer view of another key in the same window never makes a view's end final: the first
+    /// key's older view stays detached until its own key is replaced, and the second key's view
+    /// stays detached after that, so its follower may still take its key back.
     #[test]
     fn a_newer_view_of_another_key_in_the_window_replaces_nothing() {
         let terminals = Arc::new(Terminals::default());
