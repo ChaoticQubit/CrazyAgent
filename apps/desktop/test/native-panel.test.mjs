@@ -270,7 +270,7 @@ const BUSY = `{ code: "native_terminal_main_busy", message: "native_terminal_mai
 test("V243-NATIVE-SWITCH-TIME: a cover(true) the desktop refuses after a hide is sent again every 100 ms at most 5 more times, stops once the desktop takes it, and stops when the view shows again", async () => {
   const seen = await page(`
     await F.stage();
-    const covers = (from, covered) => F.calls("desktop_native_terminal_cover").slice(from).filter((entry) => entry.args.view === 1 && entry.args.covered === covered).length;
+    const covers = (from, covered) => F.calls().slice(from).filter((entry) => entry.command === "desktop_native_terminal_cover" && entry.args.view === 1 && entry.args.covered === covered).length;
     const view = await F.live("a", ${MASTER});
     F.fail("cover", ${BUSY});
     let mark = F.calls().length;
@@ -290,6 +290,9 @@ test("V243-NATIVE-SWITCH-TIME: a cover(true) the desktop refuses after a hide is
     const taken = covers(mark, true);
     await pause(400);
     const takenStill = covers(mark, true);
+    mark = F.calls().length;
+    F.mount("a", ${MASTER});
+    const shownBeforeLast = await F.until(() => covers(mark, false) >= 1);
     F.fail("cover", ${BUSY});
     mark = F.calls().length;
     F.unmount("a");
@@ -299,7 +302,7 @@ test("V243-NATIVE-SWITCH-TIME: a cover(true) the desktop refuses after a hide is
     const shownAgain = await F.until(() => covers(mark, false) >= 1);
     const afterShow = F.calls().length;
     await pause(400);
-    return { view, retried, bounded, shown, taken, takenStill, shownAgain, hiddenAfterShow: covers(afterShow, true) };
+    return { view, retried, bounded, shown, taken, takenStill, shownBeforeLast, shownAgain, hiddenAfterShow: covers(afterShow, true) };
   `);
   assert.equal(seen.view, 1);
   assert.equal(seen.retried, true, "a refused cover(true) is sent again");
@@ -307,6 +310,7 @@ test("V243-NATIVE-SWITCH-TIME: a cover(true) the desktop refuses after a hide is
   assert.equal(seen.shown, true);
   assert.ok(seen.taken >= 3, `sent until the desktop took it: ${seen.taken}`);
   assert.equal(seen.takenStill, seen.taken, "nothing more once the desktop took it");
+  assert.equal(seen.shownBeforeLast, true);
   assert.equal(seen.shownAgain, true);
   assert.equal(seen.hiddenAfterShow, 0, "a view shown again stops sending cover(true)");
 });
@@ -314,8 +318,8 @@ test("V243-NATIVE-SWITCH-TIME: a cover(true) the desktop refuses after a hide is
 test("V243-NATIVE-SWITCH-TIME: a place or cover(false) the desktop refuses for the shown view is sent again by the next check until the desktop takes it", async () => {
   const seen = await page(`
     await F.stage();
-    const covers = (from) => F.calls("desktop_native_terminal_cover").slice(from).filter((entry) => entry.args.view === 1 && entry.args.covered === false).length;
-    const places = (from) => F.calls("desktop_native_terminal_place").slice(from).filter((entry) => entry.args.view === 1).length;
+    const covers = (from) => F.calls().slice(from).filter((entry) => entry.command === "desktop_native_terminal_cover" && entry.args.view === 1 && entry.args.covered === false).length;
+    const places = (from) => F.calls().slice(from).filter((entry) => entry.command === "desktop_native_terminal_place" && entry.args.view === 1).length;
     const view = await F.live("a", ${MASTER});
     F.unmount("a");
     await F.until(() => F.calls("desktop_native_terminal_cover").at(-1)?.args.covered === true);
