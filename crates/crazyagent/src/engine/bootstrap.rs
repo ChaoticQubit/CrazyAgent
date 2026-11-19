@@ -118,6 +118,8 @@ struct Locator {
     ordinary_socket: Identity,
     #[serde(default)]
     engine_version: String,
+    #[serde(default)]
+    owner_timeout_ms: u64,
 }
 
 #[cfg(unix)]
@@ -201,6 +203,8 @@ fn parse_locator(bytes: &[u8]) -> Result<Locator, EngineError> {
         || !hex(&locator.generation[1..], 8)
         || socket_name(&locator.ordinary_name).is_err()
         || !engine_version_valid(&locator.engine_version)
+        || (locator.owner_timeout_ms != 0
+            && !crate::config::TIMEOUT_MS_BOUNDS.contains(&locator.owner_timeout_ms))
         || [
             locator.database,
             locator.generation_identity,
@@ -499,11 +503,16 @@ async fn discover_owner(
     let pinned = PinnedLocator::read(&anchor)?.ok_or_else(|| fail("owner_locator_missing"))?;
     let binding = NativeBinding { anchor, pinned };
     binding.verify()?;
+    let engine_timeout = match binding.pinned.value.owner_timeout_ms {
+        0 => None,
+        ms => Some(Duration::from_millis(ms)),
+    };
     let client = OwnerClient::attach(
         &binding.anchor.path.join(&binding.pinned.value.generation),
         kind,
         timeout,
-    )?;
+    )?
+    .serving_under(engine_timeout);
     capabilities(&client).await?;
     binding.verify()?;
     let identity = OwnerConnectionIdentity {
@@ -990,6 +999,8 @@ impl EngineService {
             ordinary_name: ordinary.into(),
             ordinary_socket,
             engine_version: crate::version::VERSION.into(),
+            owner_timeout_ms: u64::try_from(self.timeout.as_millis())
+                .map_err(|_| fail("owner_locator_bounds"))?,
         };
         self.publish(value, previous)?;
         self.sweep_generations();
@@ -1494,6 +1505,40 @@ mod tests {
             ordinary_name: "engine.sock".into(),
             ordinary_socket: id,
             engine_version: crate::version::VERSION.into(),
+            owner_timeout_ms: 1000,
+        }
+    }
+
+    /// The locator names the engine's owner timeout inside the settings bounds; an older
+    /// engine's locator without it reads as 0, so its client keeps its own timeout, and any
+    /// other value outside the bounds refuses the locator (V243-PLUGINS-CLIENT-TIMEOUT-BELOW-ENGINE).
+    #[test]
+    fn locator_carries_a_bounded_owner_timeout_and_tolerates_older_engines() {
+        let parsed = parse_locator(&serde_json::to_vec(&sample()).unwrap()).unwrap();
+        assert_eq!(parsed.owner_timeout_ms, 1000);
+        let mut older = serde_json::to_value(sample()).unwrap();
+        older.as_object_mut().unwrap().remove("owner_timeout_ms");
+        let parsed = parse_locator(&serde_json::to_vec(&older).unwrap()).unwrap();
+        assert_eq!(parsed.owner_timeout_ms, 0);
+        for edge in [10, 30_000] {
+            let mut value = sample();
+            value.owner_timeout_ms = edge;
+            assert_eq!(
+                parse_locator(&serde_json::to_vec(&value).unwrap())
+                    .unwrap()
+                    .owner_timeout_ms,
+                edge
+            );
+        }
+        for bad in [9, 30_001, u64::MAX] {
+            let mut value = sample();
+            value.owner_timeout_ms = bad;
+            assert_eq!(
+                parse_locator(&serde_json::to_vec(&value).unwrap())
+                    .unwrap_err()
+                    .0,
+                "owner_locator_invalid"
+            );
         }
     }
 

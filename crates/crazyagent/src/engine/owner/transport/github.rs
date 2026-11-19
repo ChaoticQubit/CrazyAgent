@@ -91,11 +91,11 @@ impl Action {
         }
     }
 
-    /// The longest a client waits for this request: the larger of its own timeout and the
-    /// bound the engine serves the action under. Input: the client's timeout. Output: the
-    /// wait.
+    /// The longest a client waits for this request: the bound the engine serves the action
+    /// under plus the client's own timeout, which covers the admission and the reply's write.
+    /// Input: the client's timeout. Output: the wait.
     pub(super) fn wait(&self, client: Duration) -> Duration {
-        client.max(self.time())
+        self.time() + client
     }
 }
 
