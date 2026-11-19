@@ -2039,7 +2039,7 @@ fn native_direct(name: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)>
 /// engine-fed. Inputs: the app, the window label, the agent window name and the wall
 /// window's project. Output: the place, or the refusal.
 #[cfg_attr(
-    not(target_os = "macos"),
+    not(any(target_os = "macos", all(windows, test))),
     expect(
         dead_code,
         reason = "the Linux and Windows hosts reopen views engine-fed through it (DEC-203)"
