@@ -1,6 +1,8 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use windows::Win32::Foundation::{E_INVALIDARG, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{
+    E_INVALIDARG, E_OUTOFMEMORY, HWND, LPARAM, SysAllocStringLen, WPARAM,
+};
 use windows::Win32::System::Com::SAFEARRAY;
 use windows::Win32::System::Ole::{SafeArrayCreateVector, SafeArrayDestroy, SafeArrayPutElement};
 use windows::Win32::System::Variant::{VARIANT, VT_R8, VT_UNKNOWN};
@@ -229,13 +231,12 @@ fn range_of(hwnd: isize, access: &Arc<Access>, span: (usize, usize)) -> ITextRan
 /// A one-dimensional SAFEARRAY of ranges, which UI Automation takes ownership of. Input:
 /// the ranges. Output: the array.
 fn ranges_array(ranges: &[ITextRangeProvider]) -> Result<*mut SAFEARRAY> {
-    let count = u32::try_from(ranges.len()).map_err(|_| Error::from(E_INVALIDARG))?;
-    let array = unsafe { SafeArrayCreateVector(VT_UNKNOWN, 0, count) };
+    let count = i32::try_from(ranges.len()).map_err(|_| Error::from(E_INVALIDARG))?;
+    let array = unsafe { SafeArrayCreateVector(VT_UNKNOWN, 0, count.unsigned_abs()) };
     if array.is_null() {
-        return Err(Error::from(windows::Win32::Foundation::E_OUTOFMEMORY));
+        return Err(Error::from(E_OUTOFMEMORY));
     }
-    for (index, range) in ranges.iter().enumerate() {
-        let index = i32::try_from(index).expect("bounded by the count");
+    for (index, range) in (0..count).zip(ranges) {
         if let Err(error) = unsafe { SafeArrayPutElement(array, &index, range.as_raw()) } {
             let _ = unsafe { SafeArrayDestroy(array) };
             return Err(error);
@@ -285,7 +286,8 @@ impl IRawElementProviderSimple_Impl for Terminal_Impl {
         let value = if propertyid == UIA_ControlTypePropertyId {
             VARIANT::from(UIA_DocumentControlTypeId.0)
         } else if propertyid == UIA_NamePropertyId {
-            VARIANT::from(NAME)
+            let name: Vec<u16> = NAME.encode_utf16().collect();
+            VARIANT::from(allocated(&name)?)
         } else if propertyid == UIA_IsKeyboardFocusablePropertyId {
             VARIANT::from(true)
         } else if propertyid == UIA_HasKeyboardFocusPropertyId {
@@ -543,7 +545,7 @@ impl ITextRangeProvider_Impl for TextRange_Impl {
             let cuts_pair = keep > 0 && (0xD800..0xDC00).contains(&wide[keep - 1]);
             wide.truncate(keep - usize::from(cuts_pair));
         }
-        Ok(BSTR::from_wide(&wide))
+        allocated(&wide)
     }
 
     fn Move(&self, unit: TextUnit, count: i32) -> Result<i32> {
@@ -615,17 +617,30 @@ impl ITextRangeProvider_Impl for TextRange_Impl {
     }
 }
 
+/// A string a client reads, always allocated, an empty one too: a null BSTR for no text
+/// crashed the windows-2022 UI Automation client (run 44437021009), and the windows-strings
+/// constructors panic on a failed allocation, which would abort inside a COM call. Input:
+/// the UTF-16 text. Output: the string, or `E_OUTOFMEMORY`.
+fn allocated(wide: &[u16]) -> Result<BSTR> {
+    let raw = unsafe { SysAllocStringLen(Some(wide)) }.into_raw();
+    if raw.is_null() {
+        return Err(Error::from(E_OUTOFMEMORY));
+    }
+    let string = unsafe { BSTR::from_raw(raw) };
+    assert_eq!(string.len(), wide.len());
+    Ok(string)
+}
+
 /// A one-dimensional SAFEARRAY of doubles, four per rectangle (left, top, width, height),
 /// which UI Automation takes ownership of. Input: the doubles. Output: the array.
 fn doubles_array(values: &[f64]) -> Result<*mut SAFEARRAY> {
     assert_eq!(values.len() % 4, 0);
-    let count = u32::try_from(values.len()).map_err(|_| Error::from(E_INVALIDARG))?;
-    let array = unsafe { SafeArrayCreateVector(VT_R8, 0, count) };
+    let count = i32::try_from(values.len()).map_err(|_| Error::from(E_INVALIDARG))?;
+    let array = unsafe { SafeArrayCreateVector(VT_R8, 0, count.unsigned_abs()) };
     if array.is_null() {
-        return Err(Error::from(windows::Win32::Foundation::E_OUTOFMEMORY));
+        return Err(Error::from(E_OUTOFMEMORY));
     }
-    for (index, value) in values.iter().enumerate() {
-        let index = i32::try_from(index).expect("bounded by the count");
+    for (index, value) in (0..count).zip(values) {
         let at = (value as *const f64).cast();
         if let Err(error) = unsafe { SafeArrayPutElement(array, &index, at) } {
             let _ = unsafe { SafeArrayDestroy(array) };
