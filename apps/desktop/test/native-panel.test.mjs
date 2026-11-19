@@ -604,7 +604,10 @@ test("V243-NATIVE-INPUT r2 (fix11 05:22): each native open carries the project i
   assert.deepEqual(panels, [["team-2", "p2"], ["team-3", null]]);
 });
 
-test("V243-NATIVE-SESSION-HEADER: every open and place of a native view carries the page's viewport height, so the desktop frames it below the title bar", async () => {
+const VIEWPORT_ROW = "V243-NATIVE-SESSION-HEADER: every open and place of a native view " +
+  "carries the page's viewport height, so the desktop frames it below the title bar";
+
+test(VIEWPORT_ROW, async () => {
   const seen = await page(`
     await F.stage();
     F.mount("a", ${MASTER});
@@ -613,7 +616,9 @@ test("V243-NATIVE-SESSION-HEADER: every open and place of a native view carries 
     document.getElementById("a").style.height = "400px";
     const placed = await F.until(() => F.calls("desktop_native_terminal_place").length > 0);
     const rect = (command) => F.calls(command).at(-1)?.args.rect ?? null;
-    return { placed, viewport: window.innerHeight, open: rect("desktop_native_terminal_open"), place: rect("desktop_native_terminal_place") };
+    const open = rect("desktop_native_terminal_open");
+    const place = rect("desktop_native_terminal_place");
+    return { placed, viewport: window.innerHeight, open, place };
   `);
   assert.equal(seen.placed, true, "a resized screen places its view");
   assert.equal(seen.viewport, 800);
@@ -621,9 +626,13 @@ test("V243-NATIVE-SESSION-HEADER: every open and place of a native view carries 
   assert.equal(seen.place.viewport, 800, JSON.stringify(seen.place));
 });
 
-test("V243-NATIVE-SESSION-HEADER: a window height change that leaves the screen's rect alone places the view again with the new viewport", async () => {
+const HEIGHT_ROW = "V243-NATIVE-SESSION-HEADER: a window height change that leaves the " +
+  "screen's rect alone places the view again with the new viewport";
+
+test(HEIGHT_ROW, async () => {
   const seen = await withPage(async ({ evaluate, send }) => {
-    const size = (height) => send("Emulation.setDeviceMetricsOverride", { width: 1200, height, deviceScaleFactor: 1, mobile: false });
+    const metrics = { width: 1200, deviceScaleFactor: 1, mobile: false };
+    const size = (height) => send("Emulation.setDeviceMetricsOverride", { ...metrics, height });
     const run = (script) => evaluate(`(async () => { const F = Fixture; ${script} })()`);
     await size(800);
     await evaluate(fixture);
@@ -637,8 +646,10 @@ test("V243-NATIVE-SESSION-HEADER: a window height change that leaves the screen'
     `);
     await size(760);
     const after = await run(`
-      const placed = await F.until(() => F.calls("desktop_native_terminal_place").some((entry) => entry.args.rect.viewport === 760));
-      return { placed, rect: F.screenRect("a"), place: F.calls("desktop_native_terminal_place").at(-1)?.args.rect ?? null };
+      const places = () => F.calls("desktop_native_terminal_place");
+      const told = (entry) => entry.args.rect.viewport === 760;
+      const placed = await F.until(() => places().some(told));
+      return { placed, rect: F.screenRect("a"), place: places().at(-1)?.args.rect ?? null };
     `);
     return { before, after };
   });

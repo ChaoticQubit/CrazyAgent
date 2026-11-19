@@ -223,7 +223,8 @@ export function screenRect(slot) {
   const screen = document.querySelector(`#${slot} .tg-terminal-screen`);
   if (!screen) return null;
   const box = screen.getBoundingClientRect();
-  return { x: box.left, y: box.top, width: box.width, height: box.height, viewport: window.innerHeight };
+  const viewport = window.innerHeight;
+  return { x: box.left, y: box.top, width: box.width, height: box.height, viewport };
 }
 
 /** What a slot's panel shows: its status lines, alerts, buttons and menu items, and whether
