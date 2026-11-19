@@ -234,24 +234,9 @@ pub fn trial_cell(view: &View) -> Option<(f64, f64)> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Command, command};
-    use super::{main, main_on, mark_main, mark_on};
+    use super::{main_on, mark_on};
     use std::sync::OnceLock;
     use std::thread;
-
-    /// The only row that marks the process's main thread; host calls run on it, before any
-    /// view opened, as a page's call on a view that is not there.
-    #[test]
-    fn the_setup_marks_its_thread_and_host_calls_there_answer_for_a_missing_view() {
-        mark_main();
-        mark_main();
-        assert!(main().is_some(), "the marked thread");
-        let elsewhere = thread::spawn(|| main().is_none()).join();
-        assert!(elsewhere.expect("another thread"), "another thread");
-        let focus = command("main", 1, Command::Focus);
-        assert_eq!(focus, Err("native_terminal_view_unknown"));
-        assert_eq!(command("main", 1, Command::Close), Ok(()));
-    }
 
     #[test]
     fn a_mark_holds_its_first_thread_and_takes_that_thread_again() {

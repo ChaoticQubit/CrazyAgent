@@ -49,6 +49,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use super::super::a11y;
 use super::super::event::ViewEvent;
 use super::super::host::windows as platform;
+use super::super::host::{Command, command};
 use super::super::pane::{CONTROL, Input, Named, Pane};
 use super::super::render::{GPU_FAULT, Shared};
 use super::super::screen::{self, Frame};
@@ -2095,19 +2096,29 @@ fn a_view_its_sink_drops_on_the_fault_goes_from_inside_the_fault_message() {
     assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the stand-in goes");
 }
 
-/// The host's Windows calls on a real child window: the parent lookup takes only a
-/// `WRY_WEBVIEW` child, a view opens hidden, places and shows over its box, takes frames
-/// the render thread presents with the host's cell size, and once faulted refuses to fit
-/// and answers `native_terminal_gpu` to a frame, hidden. The row marks its own thread as
-/// the app's main one, as setup does, since the view's events go to the host's sink.
+/// The host's Windows calls on a real child window: host calls answer for a missing view,
+/// the parent lookup takes only a `WRY_WEBVIEW` child, and a view opens hidden, shows over
+/// its box, draws in the host's cell size, and once faulted refuses to fit and to draw. The
+/// only row that marks the process's main thread, as setup does, so one process may run
+/// every row: two marking rows would trip the mark's one-thread assert.
 #[test]
 #[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
 fn the_host_platform_opens_draws_faults_and_dismisses_a_view_over_its_webview() {
+    platform::mark_main();
     platform::mark_main();
     assert!(
         platform::main().is_some(),
         "the row's thread is the app's main one"
     );
+    let elsewhere = thread::spawn(|| platform::main().is_none()).join();
+    assert!(elsewhere.expect("another thread"), "another thread");
+    let focus = command("main", 1, Command::Focus);
+    assert_eq!(
+        focus,
+        Err("native_terminal_view_unknown"),
+        "no view is open"
+    );
+    assert_eq!(command("main", 1, Command::Close), Ok(()));
     let (parent, webview) = stand_ins();
     let missing = Some("native_terminal_webview_missing");
     assert_eq!(
