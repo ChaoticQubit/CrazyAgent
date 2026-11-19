@@ -354,6 +354,26 @@ mod tests {
     }
 
     #[test]
+    fn small_deltas_add_up_to_exactly_the_lines_of_a_notch() {
+        for per in [7, 100] {
+            let mut state = Mouse::default();
+            let mut scrolled = 0.0;
+            for _ in 0..NOTCH_DELTA {
+                if let Some(ViewEvent::Wheel { delta, .. }) =
+                    state.wheel(1, Notch::Lines(per), 24, (1.0, 2.0))
+                {
+                    scrolled += delta;
+                }
+            }
+            let want = f64::from(per);
+            assert_eq!(
+                scrolled, want,
+                "a notch in deltas of 1 at {per} lines a notch"
+            );
+        }
+    }
+
+    #[test]
     fn a_wheel_turned_the_other_way_drops_the_carry_first() {
         let mut state = Mouse::default();
         let at = (1.0, 2.0);

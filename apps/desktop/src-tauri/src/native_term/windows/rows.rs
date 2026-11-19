@@ -43,9 +43,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     PM_NOREMOVE, PM_QS_SENDMESSAGE, PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassExW,
     SM_CXSCREEN, SM_CYSCREEN, SPI_GETWHEELSCROLLLINES, SW_MINIMIZE, SW_RESTORE, SendMessageW,
     SetWindowLongPtrW, ShowWindow, SystemParametersInfoW, TranslateMessage, WM_CHAR,
-    WM_DPICHANGED_AFTERPARENT, WM_IME_CHAR, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION,
-    WM_IME_REQUEST, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN,
-    WS_CLIPSIBLINGS, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    WM_CONTEXTMENU, WM_DPICHANGED_AFTERPARENT, WM_IME_CHAR, WM_IME_COMPOSITION,
+    WM_IME_ENDCOMPOSITION, WM_IME_REQUEST, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_MOUSEWHEEL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_TOPMOST,
+    WS_POPUP, WS_VISIBLE,
 };
 
 use super::super::a11y;
@@ -2390,6 +2391,40 @@ fn keyboard_menus(view: &View) {
     }
 }
 
+/// A drag that a cover or a hide cuts ends with its release first, and a covered or hidden
+/// view that kept focus sends no wheel and no menu, as macOS sends none to a hidden view.
+/// Inputs: the view and its centre on the screen.
+fn covered_and_hidden_views_send_no_mouse(view: &View, centre: POINT) {
+    let hwnd = view.hwnd();
+    let at = view_point(view, centre);
+    let mut client = centre;
+    unsafe { ScreenToClient(hwnd, &mut client) };
+    let packed = |p: POINT| (isize::from(p.y as i16) << 16) | isize::from(p.x as u16);
+    let cut = |what: &str, hide: &dyn Fn()| {
+        take_seen();
+        unsafe { SendMessageW(hwnd, WM_LBUTTONDOWN, 0, packed(client)) };
+        hide();
+        let seen = sent();
+        assert_eq!(
+            seen.len(),
+            2,
+            "a press, then {what} ends the drag: {seen:?}"
+        );
+        let _ = mouse_event(&seen[0], MouseKind::Press, at);
+        let _ = mouse_event(&seen[1], MouseKind::Release, at);
+        unsafe { SendMessageW(hwnd, WM_MOUSEWHEEL, 120 << 16, packed(centre)) };
+        unsafe { SendMessageW(hwnd, WM_CONTEXTMENU, hwnd as usize, -1) };
+        let seen = sent();
+        assert!(seen.is_empty(), "no wheel or menu after {what}: {seen:?}");
+    };
+    cut("the cover", &|| view.cover(true));
+    view.cover(false);
+    cut("the hide", &|| view.place(None).expect("hidden"));
+    view.place(Some(PAGE)).expect("shown again");
+    pump_for(KEY_TAIL);
+    take_seen();
+}
+
 #[test]
 #[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
 fn the_mouse_selects_scrolls_and_opens_the_menu_as_the_panel_does() {
@@ -2402,6 +2437,7 @@ fn the_mouse_selects_scrolls_and_opens_the_menu_as_the_panel_does() {
     a_lost_capture_releases(&view, webview, centre);
     wheel_and_right_click(&view, centre);
     keyboard_menus(&view);
+    covered_and_hidden_views_send_no_mouse(&view, centre);
     drop(view);
     assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the stand-in goes");
 }
