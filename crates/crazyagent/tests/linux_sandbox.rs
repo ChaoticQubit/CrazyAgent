@@ -4205,15 +4205,29 @@ const UMOUNT2: &str = "echo umount2 $(python3 -I -c \"import ctypes, errno, sys;
     print(*[c.umount2(p, f) and errno.errorcode.get(ctypes.get_errno(), ctypes.get_errno()) \
     for f in (0, 2)])\" \"$0\"); ";
 
-/// Nested's refusal of the `mapped` leg: unshare cannot open its uid map in the agent.
+/// Nested's refusal of the `mapped` leg, unshare's own line: the agent may make a user
+/// namespace there, but unshare cannot open its uid map to map the agent to root, so it exits
+/// 1 before its inner shell runs.
 const MAPPED_REFUSAL: &str = "unshare: cannot open /proc/self/uid_map: Permission denied";
 
+/// The `held` leg, one Python process with no exec in it, so it keeps every capability over the
+/// user and mount namespace it makes: it prints `inner held`, its CapEff, then [`UMOUNT2`]'s
+/// line for its own calls, then each name the folder lists. Where unshare fails it prints
+/// `unshare` and the errno name and exits 1. Input (argv): the folder.
+const HELD: &str = "import ctypes, errno, os, sys; c = ctypes.CDLL(None, use_errno=True); \
+    name = lambda r: r and errno.errorcode.get(ctypes.get_errno(), ctypes.get_errno()); \
+    r = c.unshare(0x10000000 | 0x00020000); r and (print(\"unshare\", name(r)), sys.exit(1)); \
+    print(\"inner held\"); print(\"capeff\", [l.split()[1] \
+    for l in open(\"/proc/self/status\") if l.startswith(\"CapEff\")][0]); \
+    p = sys.argv[1].encode(); print(\"umount2\", *[name(c.umount2(p, f)) for f in (0, 2)]); \
+    [print(e) for e in os.listdir(sys.argv[1])]";
+
 /// The shell legs that unmount, list and read a hidden folder from a namespace of the agent's
-/// own, one per [`NAMESPACE_LEGS`] entry. Each inner shell prints `inner <name>` first and
-/// drops its own errors, so an error line can only be unshare's own; the outer shell then
-/// prints `<name> rc=` and unshare's exit. Input: the quoted folder. Output: the legs.
+/// own, one per [`NAMESPACE_LEGS`] entry, then [`HELD`]. Each inner shell prints `inner <name>`
+/// first and drops its own errors, so an error line can only be unshare's own; the outer shell
+/// then prints `<name> rc=` and the exit. Input: the quoted folder. Output: the legs.
 fn namespace_legs(folder: &str) -> String {
-    NAMESPACE_LEGS
+    let legs: String = NAMESPACE_LEGS
         .iter()
         .map(|(name, command, call)| {
             format!(
@@ -4222,13 +4236,15 @@ fn namespace_legs(folder: &str) -> String {
                  2>&1; echo \"{name} rc=$?\"; "
             )
         })
-        .collect()
+        .collect();
+    format!("{legs}python3 -I -c '{HELD}' {folder} 2>&1; echo \"held rc=$?\"; ")
 }
 
-/// The output with each [`namespace_legs`] leg's lines taken out, when each ran (`inner <name>`,
-/// for `unmapped` a [`UMOUNT2`] line of EPERM or EINVAL only, then `<name> rc=0`) or, for
-/// `mapped` on Nested only, [`MAPPED_REFUSAL`] then `mapped rc=1`. Silence never counts.
-/// Inputs: the backend and the output. Output: the rest, or none when a leg shows neither.
+/// The output with each [`namespace_legs`] leg's lines taken out, when each ran (its marker, a
+/// [`UMOUNT2`] line of EPERM or EINVAL only where it calls umount2, for [`HELD`] a CapEff with
+/// CAP_SYS_ADMIN first, then `<name> rc=0`) or, for `mapped` on Nested only, [`MAPPED_REFUSAL`]
+/// then `mapped rc=1`. Silence never counts. Inputs: the backend and the output. Output: the
+/// rest, or none when a leg shows neither.
 fn without_namespace_legs(backend: Hiding, stdout: &str) -> Option<String> {
     let lines: Vec<&str> = stdout.lines().collect();
     let refused_by_the_kernel = |line: &str| {
@@ -4261,11 +4277,28 @@ fn without_namespace_legs(backend: Hiding, stdout: &str) -> Option<String> {
         }
         taken.extend(marker..=at);
     }
+    let exits: Vec<usize> = (0..lines.len())
+        .filter(|index| lines[*index].starts_with("held rc="))
+        .collect();
+    let [at] = exits[..] else { return None };
+    let marker = at.checked_sub(3)?;
+    let sys_admin = lines[marker + 1]
+        .strip_prefix("capeff ")
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+        .is_some_and(|caps| caps & (1 << 21) != 0);
+    if lines[marker] != "inner held"
+        || !sys_admin
+        || !refused_by_the_kernel(lines[at - 1])
+        || lines[at] != "held rc=0"
+    {
+        return None;
+    }
+    taken.extend(marker..=at);
     let legs: usize = NAMESPACE_LEGS
         .iter()
         .map(|(_, _, call)| 2 + usize::from(!call.is_empty()))
         .sum();
-    assert_eq!(taken.len(), legs);
+    assert_eq!(taken.len(), legs + 4);
     let rest: String = (0..lines.len())
         .filter(|index| !taken.contains(index))
         .map(|index| format!("{}\n", lines[index]))
@@ -4374,8 +4407,8 @@ fn a_hidden_folder_gives_the_agent_a_mount_tree_of_its_own_and_no_capability() {
 
 /// V24x-LINUX-NEST-MOUNT-PROPAGATION: the cover over a hidden folder stays on after the cut
 /// on both hiding backends. The agent's plain and lazy unmounts fail, and so do both from the
-/// namespaces of its own that start, with a direct umount2 ([`without_namespace_legs`]), since
-/// the covers are locked there (MNT_LOCKED); the folder lists empty, its file reads nowhere.
+/// namespaces of its own that start, the held one with CAP_SYS_ADMIN over its own tree and a
+/// direct umount2 ([`without_namespace_legs`]); the folder lists empty, its file reads nowhere.
 #[test]
 fn a_hidden_folders_cover_stays_on_whatever_the_agent_unmounts() {
     let mut wrong = Vec::new();
