@@ -46,13 +46,26 @@ async fn closed(output: &mut TerminalOutput) -> String {
     .unwrap_or_else(|_| "no close within ten seconds".into())
 }
 
+/// A connected viewer and engine socket pair made inside the spawn gate, as the engine makes
+/// every socket. Takes nothing. Returns the viewer's end and the engine's end.
+fn socket_pair() -> (UnixStream, UnixStream) {
+    let (viewer, engine) = crate::spawn_gate::unix_pair_std().unwrap();
+    for end in [&viewer, &engine] {
+        end.set_nonblocking(true).unwrap();
+    }
+    (
+        UnixStream::from_std(viewer).unwrap(),
+        UnixStream::from_std(engine).unwrap(),
+    )
+}
+
 /// A detach the engine served and closed the connection on before the viewer shut its half
 /// is still a detach: macOS refuses that shutdown as not connected, Linux takes it. A viewer
 /// whose engine is still there shuts its half, and the engine reads the end of its stream.
 #[tokio::test]
 async fn a_detach_the_engine_already_closed_on_is_a_detach() {
     use tokio::io::AsyncReadExt;
-    let (viewer, mut engine) = UnixStream::pair().unwrap();
+    let (viewer, mut engine) = socket_pair();
     let (_reader, writer) = viewer.into_split();
     let mut control = TerminalControl { writer };
     control.send(&TerminalRequest::Detach).await.unwrap();
@@ -70,7 +83,7 @@ async fn a_detach_the_engine_already_closed_on_is_a_detach() {
         "a detach the engine closed on first is a detach"
     );
 
-    let (viewer, mut engine) = UnixStream::pair().unwrap();
+    let (viewer, mut engine) = socket_pair();
     let (_reader, mut writer) = viewer.into_split();
     assert_eq!(
         close_detached(&mut writer).await.map_err(|error| error.0),
