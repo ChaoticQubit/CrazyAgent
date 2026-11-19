@@ -20,8 +20,8 @@ pub struct Told {
 
 /// One open native view: the window that opened it and the agent window it shows, its pane
 /// mirror, the engine feed view it reads now, whether the direct path draws it, its page
-/// place in CSS pixels, whether a page overlay covers it, what it last told its panel, the
-/// wheel's carried fraction and its platform parts.
+/// place in CSS pixels with the page's viewport height, whether a page overlay covers it,
+/// what it last told its panel, the wheel's carried fraction and its platform parts.
 pub struct Entry<P> {
     pub window: String,
     pub name: String,
@@ -29,6 +29,7 @@ pub struct Entry<P> {
     pub feed: u64,
     pub direct: bool,
     pub rect: [f64; 4],
+    pub viewport: f64,
     pub covered: bool,
     pub told: Told,
     pub carry: f64,
@@ -300,6 +301,7 @@ mod tests {
             feed,
             direct: true,
             rect: [0.0, 0.0, 100.0, 50.0],
+            viewport: 800.0,
             covered: false,
             told: Told::default(),
             carry: 0.0,
