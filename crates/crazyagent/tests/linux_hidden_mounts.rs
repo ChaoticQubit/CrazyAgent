@@ -3,9 +3,11 @@ use crazyagent::sandbox::linux::{
     BWRAP_PATHS, HIDDEN_MOUNTED_AGAIN, LinuxBackend, LinuxSandbox, NEST_ARGS,
 };
 
-use crazyagent::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork};
+use crazyagent::sandbox::{ProjectSandbox, Sandbox, SandboxError, SandboxNetwork};
 
 use std::fs;
+
+use std::io::{BufRead, BufReader, Read, Write};
 
 use std::path::{Path, PathBuf};
 
@@ -182,4 +184,90 @@ fn a_second_mount_inside_the_project_refuses_the_launch_on_both_bubblewrap_backe
             &format!("{backend:?}, alias in the project"),
         );
     }
+}
+
+/// Starts the agent on one backend, with no second mount yet, as a wrapped `/bin/sh -c`
+/// that prints `ready`, waits for a line, then tries to read, list, write and remove the
+/// hidden folder through an alias. Once it is running, the host binds the case root at the
+/// alias, then lets it go on. Inputs: the backend, the case and the alias folder, which
+/// exists and is empty. Output: what the agent printed after `ready`.
+fn through_a_later_mount(backend: Hiding, case: &Case, alias: &Path) -> String {
+    let sandbox = built(backend, case).expect("no second mount before the start");
+    let shown = alias.join(case.private.strip_prefix(&case.root).unwrap());
+    let shown = format!("'{}'", shown.display());
+    let script = format!(
+        "echo ready; read go; cat {shown}/secret.txt 2>/dev/null; ls -A {shown} 2>/dev/null; \
+         (echo agent > {shown}/new.txt) 2>/dev/null; rm -f {shown}/secret.txt 2>/dev/null; \
+         echo done"
+    );
+    let mut harness = Command::new("/bin/sh");
+    harness
+        .args(["-c", &script])
+        .current_dir(case.project.join("worktrees"));
+    let mut child = crazyagent::spawn_gate::spawn(
+        sandbox
+            .wrap(&harness)
+            .unwrap()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    output.read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n", "{backend:?}");
+    let bound = Bound::new(&case.root, alias);
+    child.stdin.take().unwrap().write_all(b"go\n").unwrap();
+    let mut rest = String::new();
+    output.read_to_string(&mut rest).unwrap();
+    assert!(child.wait().unwrap().success(), "{backend:?}");
+    drop(bound);
+    rest
+}
+
+/// What a later mount let through on one backend: the agent's output past `done` and the
+/// host's hidden folder after the run. Inputs: the backend, the case and the agent's
+/// output. Output: none when nothing came through, else the leg's account.
+fn came_through(backend: Hiding, case: &Case, rest: &str) -> Option<String> {
+    let secret = fs::read_to_string(case.private.join("secret.txt")).ok();
+    let planted = case.private.join("new.txt").exists();
+    let kept = secret.as_deref() == Some("hidden secret words\n") && !planted;
+    (rest != "done\n" || !kept).then(|| {
+        format!("{backend:?}: printed {rest:?}, host secret {secret:?}, new.txt {planted}")
+    })
+}
+
+/// V24x-LINUX-NEST-MOUNT-PROPAGATION R1: a second mount of the hidden folder's disk that
+/// the host makes inside the project after the agent started never reaches it on either
+/// hiding backend, so nothing of the folder is read, listed, written or removed through it.
+/// bubblewrap makes the agent's tree a slave of the host's (bubblewrap.c:2959), so at the
+/// base every later mount came in. Each backend runs, and the row reports every leg.
+#[test]
+#[ignore = "needs passwordless sudo for bind mounts; the farm runs it with --ignored"]
+fn a_mount_made_after_the_start_inside_the_project_stays_out_of_both_bubblewrap_backends() {
+    let mut through = Vec::new();
+    for backend in [Hiding::Bubblewrap, Hiding::Nested] {
+        let case = case();
+        let alias = case.project.join("worktrees").join("alias");
+        fs::create_dir(&alias).unwrap();
+        let rest = through_a_later_mount(backend, &case, &alias);
+        through.extend(came_through(backend, &case, &rest));
+    }
+    assert!(through.is_empty(), "{through:#?}");
+}
+
+/// V24x-LINUX-NEST-MOUNT-PROPAGATION R2: a second mount of the case root that the host
+/// makes outside every grant after a Nested agent started never reaches it; run 44410206144
+/// read the hidden folder's files this way. Bubblewrap binds no such folder, so only the
+/// Nested backend runs.
+#[test]
+#[ignore = "needs passwordless sudo for bind mounts; the farm runs it with --ignored"]
+fn a_mount_made_after_the_start_outside_every_grant_stays_out_of_a_nested_agent() {
+    let case = case();
+    let folder = tempfile::tempdir().unwrap();
+    let alias = folder.path().canonicalize().unwrap();
+    let rest = through_a_later_mount(Hiding::Nested, &case, &alias);
+    let through = came_through(Hiding::Nested, &case, &rest);
+    assert!(through.is_none(), "{through:#?}");
 }
