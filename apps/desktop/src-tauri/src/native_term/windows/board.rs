@@ -20,7 +20,9 @@ pub struct Geometry {
 }
 
 impl Geometry {
-    fn check(self) {
+    /// Checks a geometry the view's thread posts and the render thread refits to: a size of
+    /// at least one device pixel each way and a known scale key.
+    pub(super) fn check(self) {
         assert!(self.size.0 >= 1, "a placed width");
         assert!(self.size.1 >= 1, "a placed height");
         assert!(SCALE_KEYS.contains(&self.scale_key), "a scale key");
@@ -285,7 +287,6 @@ impl<T> Board<T> {
         assert!(!slot.fresh, "a view faults only after the hand-over");
         slot.faulted = true;
         slot.changed = false;
-        assert!(!slot.ready());
     }
 
     /// Whether the render thread faulted a view. Input: the view id. Output: true once
@@ -617,6 +618,44 @@ mod tests {
         assert!(round.ready.is_empty(), "{round:?}");
         dropper.join().expect("the dropper");
         assert!(!board.faulted(1), "off the board");
+    }
+
+    #[test]
+    #[should_panic(expected = "a view faults only after the hand-over")]
+    fn faulting_a_view_before_the_hand_over_is_a_bug() {
+        let board: Board<&str> = Board::new();
+        board.add(9, 99, ONE).expect("a view");
+        board.fault(9);
+    }
+
+    #[test]
+    #[should_panic(expected = "a placed width")]
+    fn a_zero_width_is_a_bug() {
+        Geometry {
+            size: (0, 1),
+            ..ONE
+        }
+        .check();
+    }
+
+    #[test]
+    #[should_panic(expected = "a placed height")]
+    fn a_zero_height_is_a_bug() {
+        Geometry {
+            size: (1, 0),
+            ..ONE
+        }
+        .check();
+    }
+
+    #[test]
+    #[should_panic(expected = "a scale key")]
+    fn an_unknown_scale_key_is_a_bug() {
+        Geometry {
+            scale_key: 99,
+            ..ONE
+        }
+        .check();
     }
 
     #[test]

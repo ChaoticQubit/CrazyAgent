@@ -128,20 +128,19 @@ fn after_wait(id: u64, shared: &Shared) {
 fn after_wait(_: u64, _: &Shared) {}
 
 /// Resizes a view's surface; a lost device, or a test row's ask, refuses it. Inputs: the
-/// view id, its shared state, its surface and the size in device pixels. Output: ok, or
+/// view id, its shared state, its surface and the geometry. Output: ok, or
 /// `native_terminal_gpu`.
 fn resized(
     id: u64,
     shared: &Shared,
     surface: &mut Surface,
-    size: (u32, u32),
+    geometry: Geometry,
 ) -> Result<(), &'static str> {
-    assert!(size.0 >= 1, "a placed width");
-    assert!(size.1 >= 1, "a placed height");
+    geometry.check();
     if refused(id) || shared.lost() {
         return Err(GPU_FAULT);
     }
-    shared.resize(surface, size.0, size.1)
+    shared.resize(surface, geometry.size.0, geometry.size.1)
 }
 
 /// The frame a ready view draws: the one posted since the last take, else the last one
@@ -254,7 +253,10 @@ impl Painter {
             surface: made.ok(),
             last: None,
         });
-        assert!(self.views.len() <= VIEWS_MAX);
+        assert!(
+            self.views.len() <= VIEWS_MAX,
+            "views are bounded by the board's"
+        );
         if live {
             self.post_cell(fresh.id, fresh.geometry.scale_key);
         } else {
@@ -325,13 +327,13 @@ impl Painter {
         let same = view.geometry.scale_key == geometry.scale_key;
         view.geometry = geometry;
         if same {
-            let surface = view.surface.as_mut().expect("a live view has a surface");
             let held = self
                 .shared
                 .iter()
                 .find(|(key, _)| *key == geometry.scale_key);
             let (_, shared) = held.expect("a live view's scale has its shared state");
-            return resized(view.id, shared, surface, geometry.size);
+            let surface = view.surface.as_mut().expect("a live view has a surface");
+            return resized(view.id, shared, surface, geometry);
         }
         view.surface = None;
         let handle = view.handle;
@@ -348,7 +350,6 @@ impl Painter {
         let view = &mut self.views[index];
         view.surface = None;
         BOARD.fault(view.id);
-        assert!(BOARD.faulted(view.id), "the board holds the fault");
         self.retire_lost();
     }
 
@@ -424,7 +425,123 @@ impl Painter {
 
 #[cfg(test)]
 mod tests {
+    use super::super::super::style::{Theme, font_for};
     use super::*;
+
+    fn painter(views: Vec<Drawn>) -> Painter {
+        let (family, source) = font_for("JetBrains Mono").expect("the built-in font");
+        let style = Style {
+            family,
+            source,
+            font_px: 13.0,
+            blink: false,
+            theme: Theme::default(),
+        };
+        Painter {
+            style,
+            shared: Vec::new(),
+            views,
+            replaced: Replaced::default(),
+        }
+    }
+
+    fn faulted(id: u64) -> Drawn {
+        Drawn {
+            id,
+            handle: 0,
+            geometry: Geometry {
+                size: (10, 10),
+                scale_key: 100,
+            },
+            surface: None,
+            last: None,
+        }
+    }
+
+    fn with_shared(mut painter: Painter) -> Painter {
+        let shared = Shared::new(1.0, &painter.style).expect("shared state");
+        painter.shared.push((100, shared));
+        painter
+    }
+
+    #[test]
+    #[should_panic(expected = "a ready view has a drawn entry")]
+    fn drawing_a_view_the_render_side_never_made_is_a_bug() {
+        painter(Vec::new()).draw(7);
+    }
+
+    #[test]
+    #[should_panic(expected = "a ready view has not faulted, so it has a surface")]
+    fn drawing_a_faulted_view_is_a_bug() {
+        painter(vec![faulted(7)]).draw(7);
+    }
+
+    #[test]
+    #[should_panic(expected = "a live view's scale has its shared state")]
+    fn refitting_a_view_with_no_shared_state_is_a_bug() {
+        let geometry = Geometry {
+            size: (20, 20),
+            scale_key: 100,
+        };
+        let _ = painter(vec![faulted(7)]).refit(0, geometry);
+    }
+
+    #[test]
+    #[should_panic(expected = "a live view has a surface")]
+    fn refitting_a_faulted_view_is_a_bug() {
+        let geometry = Geometry {
+            size: (20, 20),
+            scale_key: 100,
+        };
+        let _ = with_shared(painter(vec![faulted(7)])).refit(0, geometry);
+    }
+
+    #[test]
+    #[should_panic(expected = "a live view's scale has its shared state")]
+    fn presenting_a_view_with_no_shared_state_is_a_bug() {
+        let _ = painter(vec![faulted(7)]).present(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "a live view has a surface")]
+    fn presenting_a_faulted_view_is_a_bug() {
+        let _ = with_shared(painter(vec![faulted(7)])).present(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "a view made once")]
+    fn making_a_view_twice_is_a_bug() {
+        let fresh = Fresh {
+            id: 7,
+            handle: 0,
+            geometry: faulted(7).geometry,
+        };
+        painter(vec![faulted(7)]).make(fresh);
+    }
+
+    #[test]
+    #[should_panic(expected = "views are bounded by the board's")]
+    fn a_view_past_the_bound_is_a_bug_to_make() {
+        let views = (1..=VIEWS_MAX as u64).map(faulted).collect();
+        let fresh = Fresh {
+            id: 0,
+            handle: 0,
+            geometry: faulted(0).geometry,
+        };
+        painter(views).make(fresh);
+    }
+
+    #[test]
+    #[should_panic(expected = "a made surface has its shared state")]
+    fn posting_the_cell_of_a_scale_with_no_shared_state_is_a_bug() {
+        painter(Vec::new()).post_cell(7, 100);
+    }
+
+    #[test]
+    #[should_panic(expected = "a drawn view stays on the board until the render side drops it")]
+    fn posting_the_cell_of_a_view_off_the_board_is_a_bug() {
+        with_shared(painter(Vec::new())).post_cell(u64::MAX, 100);
+    }
 
     #[test]
     fn a_scale_replaces_a_lost_device_at_most_twice_a_run() {
