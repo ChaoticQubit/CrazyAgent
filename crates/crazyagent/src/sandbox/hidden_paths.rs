@@ -500,7 +500,10 @@ fn scan(listing: impl std::io::Read, folders: &[Vec<String>]) -> Scan {
     let mut openers: std::collections::HashMap<&str, Vec<&[String]>> =
         std::collections::HashMap::with_capacity(folders.len());
     for names in folders {
-        openers.entry(names[0].as_str()).or_default().push(&names[1..]);
+        openers
+            .entry(names[0].as_str())
+            .or_default()
+            .push(&names[1..]);
     }
     assert!(openers.len() <= folders.len());
     let capped = listing.take(CHECK_BYTES_MAX + 1);
@@ -564,7 +567,8 @@ fn folded_folders(root: &Path, folders: &[PathBuf]) -> Result<Vec<Vec<String>>, 
             .collect::<Option<Vec<String>>>()
             .filter(|names| !names.is_empty())
             .ok_or(unchecked)?;
-        assert!(names.iter().all(|name| !name.is_empty() && fold(name) == *name));
+        assert!(names.iter().all(|name| !name.is_empty()));
+        assert!(names.iter().all(|name| fold(name) == *name));
         wanted.push(names);
     }
     assert!(wanted.len() <= folders.len());
@@ -599,7 +603,13 @@ fn listing_answer(
     let polls_max = CHECK_TIME.as_millis() / CHECK_POLL.as_millis() + 1;
     for _ in 0..polls_max {
         match child.try_wait() {
-            Ok(Some(status)) => return if status.success() { Ok(false) } else { Err(unchecked) },
+            Ok(Some(status)) => {
+                return if status.success() {
+                    Ok(false)
+                } else {
+                    Err(unchecked)
+                };
+            }
             Ok(None) if std::time::Instant::now() < deadline => std::thread::sleep(CHECK_POLL),
             Ok(None) | Err(_) => break,
         }
@@ -785,7 +795,11 @@ mod tests {
         ] {
             assert_eq!(fold(one), fold(other), "{one:?} {other:?}");
         }
-        for (one, other) in [("secret", "secrets"), ("secret", "secre"), ("cle", "cl\u{e9}")] {
+        for (one, other) in [
+            ("secret", "secrets"),
+            ("secret", "secre"),
+            ("cle", "cl\u{e9}"),
+        ] {
             assert_ne!(fold(one), fold(other), "{one:?} {other:?}");
         }
         assert_eq!(fold("Conf.D"), "conf.d");
@@ -816,7 +830,10 @@ mod tests {
         let folders = vec![vec![fold("secret")], vec![fold("conf"), fold("keys")]];
         let scanned = |bytes: &[u8]| scan(bytes, &folders);
         assert_eq!(scanned(b""), Scan::End);
-        assert_eq!(scanned(b"secrets/key.txt\0conf/key\0Secrets/x\0conf\0"), Scan::End);
+        assert_eq!(
+            scanned(b"secrets/key.txt\0conf/key\0Secrets/x\0conf\0"),
+            Scan::End
+        );
         for tracked in [
             &b"secret/key.txt\0"[..],
             &b"a\0conf/keys\0"[..],
@@ -831,9 +848,18 @@ mod tests {
             let shown = String::from_utf8_lossy(tracked).into_owned();
             assert_eq!(scanned(tracked), Scan::Tracked, "{shown:?}");
         }
-        let shared = vec![vec![fold("conf"), fold("keys")], vec![fold("CONF"), fold("certs")]];
-        assert_eq!(scan(&b"conf/keys2\0Conf/certs/a\0"[..], &shared), Scan::Tracked);
-        assert_eq!(scan(&b"conf/keys2\0conf/cert\0conf\0"[..], &shared), Scan::End);
+        let shared = vec![
+            vec![fold("conf"), fold("keys")],
+            vec![fold("CONF"), fold("certs")],
+        ];
+        assert_eq!(
+            scan(&b"conf/keys2\0Conf/certs/a\0"[..], &shared),
+            Scan::Tracked
+        );
+        assert_eq!(
+            scan(&b"conf/keys2\0conf/cert\0conf\0"[..], &shared),
+            Scan::End
+        );
         for doubt in [
             &b"secret/key.txt"[..],
             &b"\0"[..],
@@ -1128,7 +1154,12 @@ mod tests {
             .iter()
             .map(|name| format!("100644 {EMPTY_BLOB}\t{name}\n"))
             .collect();
-        child.stdin.take().unwrap().write_all(lines.as_bytes()).unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(lines.as_bytes())
+            .unwrap();
         assert!(child.wait().unwrap().success(), "{} entries", listed.len());
     }
 
@@ -1150,7 +1181,13 @@ mod tests {
             std::fs::create_dir(&folder).unwrap();
             full.push(folder);
         }
-        let tops = ["src", "docs", "Donn\u{e9}es", "\u{30c6}\u{30b9}\u{30c8}", "vendor"];
+        let tops = [
+            "src",
+            "docs",
+            "Donn\u{e9}es",
+            "\u{30c6}\u{30b9}\u{30c8}",
+            "vendor",
+        ];
         let bulk: Vec<String> = (1..100_000)
             .map(|n| format!("{}/d{:03}/file-{n:06}.txt", tops[n % 5], n / 100))
             .collect();
