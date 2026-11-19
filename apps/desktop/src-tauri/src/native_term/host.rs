@@ -121,8 +121,9 @@ pub enum NativeEvent {
     },
 }
 
-#[cfg(target_os = "macos")]
-pub use super::view::LABEL_BYTES_MAX;
+/// The longest label a screen reader says for a view, in bytes; a page's open past it is
+/// refused.
+pub const LABEL_BYTES_MAX: usize = 256;
 
 /// One open checked off the main thread: the calling window, the agent window name, the
 /// screen reader label, the place the shared gate took, the tmux program and engine socket
