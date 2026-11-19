@@ -338,6 +338,48 @@ async fn a_usage_request_slower_than_the_owner_deadline_still_answers() {
     owner.stop().await;
 }
 
+/// A harness catalog Check whose work outlasts both the owner exchange deadline and a
+/// client's default request timeout, here behind the owner egress barrier a real reply
+/// holds, still answers with the catalog, as the master harness picker reads it on a Linux
+/// machine where hashing Codex and Claude Code alone takes longer than that timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_catalog_check_slower_than_the_owner_deadline_and_the_request_timeout_still_answers() {
+    let owner = Owner::start().await;
+    let waited = Duration::from_millis(crate::config::Settings::default().timeout_ms);
+    assert!(waited > Duration::from_millis(OWNER_TIMEOUT_MS));
+    let client = OwnerClient::discover(owner.root.path(), OwnerClientKind::Tui, waited)
+        .await
+        .unwrap()
+        .0;
+    let barrier = owner
+        .service
+        .owner_runtime()
+        .unwrap()
+        .engine
+        .owner_egress
+        .clone()
+        .read_owned()
+        .await;
+    let held = tokio::spawn(async move {
+        tokio::time::sleep(2 * waited).await;
+        drop(barrier);
+    });
+
+    let started = std::time::Instant::now();
+    let entries = client
+        .harness_catalog(true)
+        .await
+        .expect("a Check past the owner deadline and the request timeout must still answer");
+    assert!(
+        started.elapsed() > waited,
+        "the Check must outlast the client's request timeout for this test to show anything"
+    );
+    held.await.unwrap();
+    assert!(entries.iter().any(|entry| entry.id == "codex"));
+    drop(client);
+    owner.stop().await;
+}
+
 /// A skill import queued behind real storage work past the owner exchange deadline still
 /// imports and answers with the skill, rather than the owner hearing the outcome is unknown
 /// while storage adds it later.

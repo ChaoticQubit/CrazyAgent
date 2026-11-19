@@ -657,11 +657,11 @@ mod tests {
     }
 
     #[test]
-    fn list_and_check_keep_their_wire_form_and_stay_on_the_inline_path() {
+    fn list_stays_on_the_inline_path_and_check_is_served_past_the_deadline() {
         assert_eq!(body(&Action::List), br#"{"harness_catalog":"list"}"#);
         assert_eq!(body(&Action::Check), br#"{"harness_catalog":"check"}"#);
         assert!(!slow(br#"{"harness_catalog":"list"}"#));
-        assert!(!slow(br#"{"harness_catalog":"check"}"#));
+        assert!(slow(br#"{"harness_catalog":"check"}"#));
         assert!(!slow(b"not json"));
     }
 
