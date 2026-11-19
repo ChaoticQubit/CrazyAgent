@@ -53,8 +53,8 @@ pub struct ModelAccess {
 
 pub const ACCOUNTS_MAX: usize = 4096;
 pub const CONFIG_BYTES_MAX: usize = 8 << 20;
-/// The owner timeout_ms values the engine accepts: in its settings, and in the locator a
-/// client discovers it through, where 0 marks a locator an older engine wrote.
+/// The owner timeout_ms values the engine accepts: in its settings, and in the owner
+/// timeout file of the generation a client discovers it through.
 /// Values: milliseconds, both ends included.
 pub const TIMEOUT_MS_BOUNDS: std::ops::RangeInclusive<u64> = 10..=30000;
 /// The settings file version this engine reads and writes. A file with a higher

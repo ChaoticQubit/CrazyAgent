@@ -118,8 +118,6 @@ struct Locator {
     ordinary_socket: Identity,
     #[serde(default)]
     engine_version: String,
-    #[serde(default)]
-    owner_timeout_ms: u64,
 }
 
 #[cfg(unix)]
@@ -203,8 +201,6 @@ fn parse_locator(bytes: &[u8]) -> Result<Locator, EngineError> {
         || !hex(&locator.generation[1..], 8)
         || socket_name(&locator.ordinary_name).is_err()
         || !engine_version_valid(&locator.engine_version)
-        || (locator.owner_timeout_ms != 0
-            && !crate::config::TIMEOUT_MS_BOUNDS.contains(&locator.owner_timeout_ms))
         || [
             locator.database,
             locator.generation_identity,
@@ -439,14 +435,73 @@ fn check_generation(anchor: &Anchor, value: &Locator) -> Result<(), EngineError>
     )
 }
 
+/// The file in an engine run's own generation that names the owner timeout it serves under.
+/// It lives where no shipped binary reads, so the locator keeps the shape they parse.
+#[cfg(unix)]
 const OWNER_TIMEOUT: &str = "owner-timeout";
+/// The most bytes an owner timeout file holds: its decimal milliseconds, no line end.
+#[cfg(unix)]
+const OWNER_TIMEOUT_MAX: u64 = 16;
 
-/// The owner timeout the engine wrote into the generation its locator names. Takes the
-/// anchor and the pinned locator. Returns none for an engine that wrote none, or the
-/// refusal of an unsafe or invalid file.
+/// Refuses to read the owner timeout without Unix directory-relative opens.
+/// Takes the anchor and the locator, both unused.
+/// Returns `owner_anchor_unavailable` until Windows has owner-only directory checks.
+#[cfg(not(unix))]
+fn owner_timeout(_anchor: &Anchor, _value: &Locator) -> Result<Option<Duration>, EngineError> {
+    Err(fail("owner_anchor_unavailable"))
+}
+
+/// The owner timeout the engine wrote into the generation its locator pins, read without
+/// following links. Takes the anchor and the pinned locator. Returns none for an engine that
+/// wrote none, `owner_locator_unsafe` for a link or a file not the owner's alone or oversized,
+/// `owner_locator_invalid` for anything but a decimal inside the settings bounds, or the
+/// generation refusal for a folder the locator does not pin.
+#[cfg(unix)]
 fn owner_timeout(anchor: &Anchor, value: &Locator) -> Result<Option<Duration>, EngineError> {
-    let _ = (anchor, value);
-    Ok(None)
+    anchor.verify()?;
+    let replaced = || fail("owner_generation_replaced_or_unsafe");
+    let directory = File::from(
+        rustix::fs::openat(
+            &anchor.directory,
+            value.generation.as_str(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| replaced())?,
+    );
+    let folder = directory.metadata().map_err(io_error)?;
+    if !safe_directory(&folder) || Identity::of(&folder) != value.generation_identity {
+        return Err(replaced());
+    }
+    let file = match rustix::fs::openat(
+        &directory,
+        OWNER_TIMEOUT,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => File::from(fd),
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(_) => return Err(fail("owner_locator_unsafe")),
+    };
+    let metadata = file.metadata().map_err(io_error)?;
+    if !safe_file(&metadata) || metadata.len() > OWNER_TIMEOUT_MAX {
+        return Err(fail("owner_locator_unsafe"));
+    }
+    let mut bytes = Vec::new();
+    (&file)
+        .take(OWNER_TIMEOUT_MAX + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_error)?;
+    if bytes.len() as u64 > OWNER_TIMEOUT_MAX {
+        return Err(fail("owner_locator_unsafe"));
+    }
+    let ms = std::str::from_utf8(&bytes)
+        .ok()
+        .filter(|text| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|text| text.parse::<u64>().ok())
+        .filter(|ms| crate::config::TIMEOUT_MS_BOUNDS.contains(ms))
+        .ok_or_else(|| fail("owner_locator_invalid"))?;
+    Ok(Some(Duration::from_millis(ms)))
 }
 
 async fn capabilities(client: &OwnerClient) -> Result<(), EngineError> {
@@ -513,10 +568,7 @@ async fn discover_owner(
     let pinned = PinnedLocator::read(&anchor)?.ok_or_else(|| fail("owner_locator_missing"))?;
     let binding = NativeBinding { anchor, pinned };
     binding.verify()?;
-    let engine_timeout = match binding.pinned.value.owner_timeout_ms {
-        0 => None,
-        ms => Some(Duration::from_millis(ms)),
-    };
+    let engine_timeout = owner_timeout(&binding.anchor, &binding.pinned.value)?;
     let client = OwnerClient::attach(
         &binding.anchor.path.join(&binding.pinned.value.generation),
         kind,
@@ -1009,8 +1061,6 @@ impl EngineService {
             ordinary_name: ordinary.into(),
             ordinary_socket,
             engine_version: crate::version::VERSION.into(),
-            owner_timeout_ms: u64::try_from(self.timeout.as_millis())
-                .map_err(|_| fail("owner_locator_bounds"))?,
         };
         self.publish(value, previous)?;
         self.sweep_generations();
@@ -1270,6 +1320,23 @@ impl EngineService {
         if Identity::of(&directory.metadata().map_err(io_error)?) != *identity {
             return Err(fail("owner_generation_replaced_or_unsafe"));
         }
+        let timeout = u64::try_from(self.timeout.as_millis())
+            .ok()
+            .filter(|ms| crate::config::TIMEOUT_MS_BOUNDS.contains(ms))
+            .ok_or_else(|| fail("owner_timeout_bounds"))?;
+        let named = File::from(
+            rustix::fs::openat(
+                &directory,
+                OWNER_TIMEOUT,
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::RUSR | Mode::WUSR,
+            )
+            .map_err(io_error)?,
+        );
+        named
+            .write_all_at(timeout.to_string().as_bytes(), 0)
+            .map_err(io_error)?;
+        named.sync_all().map_err(io_error)?;
         let file = File::from(
             rustix::fs::openat(
                 &directory,
@@ -1424,6 +1491,11 @@ impl EngineService {
                     std::fs::remove_file(path).map_err(io_error)?;
                 }
                 let path = self.anchor.path.join(&generation);
+                if let Err(error) = std::fs::remove_file(path.join(OWNER_TIMEOUT))
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    return Err(io_error(error));
+                }
                 for entry in std::fs::read_dir(&path).map_err(io_error)? {
                     let entry = entry.map_err(io_error)?;
                     if entry
@@ -1515,40 +1587,6 @@ mod tests {
             ordinary_name: "engine.sock".into(),
             ordinary_socket: id,
             engine_version: crate::version::VERSION.into(),
-            owner_timeout_ms: 1000,
-        }
-    }
-
-    /// The locator names the engine's owner timeout inside the settings bounds; an older
-    /// engine's locator without it reads as 0, so its client keeps its own timeout, and any
-    /// other value outside the bounds refuses the locator (V243-PLUGINS-CLIENT-TIMEOUT-BELOW-ENGINE).
-    #[test]
-    fn locator_carries_a_bounded_owner_timeout_and_tolerates_older_engines() {
-        let parsed = parse_locator(&serde_json::to_vec(&sample()).unwrap()).unwrap();
-        assert_eq!(parsed.owner_timeout_ms, 1000);
-        let mut older = serde_json::to_value(sample()).unwrap();
-        older.as_object_mut().unwrap().remove("owner_timeout_ms");
-        let parsed = parse_locator(&serde_json::to_vec(&older).unwrap()).unwrap();
-        assert_eq!(parsed.owner_timeout_ms, 0);
-        for edge in [10, 30_000] {
-            let mut value = sample();
-            value.owner_timeout_ms = edge;
-            assert_eq!(
-                parse_locator(&serde_json::to_vec(&value).unwrap())
-                    .unwrap()
-                    .owner_timeout_ms,
-                edge
-            );
-        }
-        for bad in [9, 30_001, u64::MAX] {
-            let mut value = sample();
-            value.owner_timeout_ms = bad;
-            assert_eq!(
-                parse_locator(&serde_json::to_vec(&value).unwrap())
-                    .unwrap_err()
-                    .0,
-                "owner_locator_invalid"
-            );
         }
     }
 

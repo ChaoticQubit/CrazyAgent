@@ -3551,10 +3551,9 @@ impl OwnerClient {
         })
     }
 
-    /// Takes the owner timeout the engine serves its requests under, as named by the locator
-    /// this client discovered the engine through. None, from a locator an older engine wrote,
-    /// keeps the client's own timeout in its place. Input: the engine's timeout. Output: the
-    /// client.
+    /// Takes the owner timeout the engine serves its requests under, as its generation names
+    /// it to the client that discovered it. None, for an older engine that names none, keeps
+    /// the client's own timeout in its place. Input: the engine's timeout. Output: the client.
     pub(crate) fn serving_under(mut self, engine: Option<Duration>) -> Self {
         if let Some(engine) = engine {
             self.engine_timeout = engine;
