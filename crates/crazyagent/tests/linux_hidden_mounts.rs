@@ -59,10 +59,9 @@ enum Hiding {
     Bubblewrap,
 }
 
-/// Builds the sandbox that hides the case's folder on one backend, as an install does.
-/// Inputs: the backend and the case. Output: what the build returned.
-fn built(backend: Hiding, case: &Case) -> Result<LinuxSandbox, SandboxError> {
-    let policy = ProjectSandbox::new(
+/// The closed policy that hides the case's folder. Input: the case. Output: the policy.
+fn hiding_policy(case: &Case) -> ProjectSandbox {
+    ProjectSandbox::new(
         &case.project,
         &case.root.join("agent").join("home"),
         &case.root.join("agent").join("tmp"),
@@ -70,12 +69,23 @@ fn built(backend: Hiding, case: &Case) -> Result<LinuxSandbox, SandboxError> {
     )
     .unwrap()
     .hide(&case.private)
-    .unwrap();
-    let bwrap = BWRAP_PATHS
+    .unwrap()
+}
+
+/// This machine's bubblewrap at its first fixed place. No input. Output: the path.
+fn bwrap() -> &'static Path {
+    BWRAP_PATHS
         .iter()
         .map(Path::new)
         .find(|path| path.is_file())
-        .expect("Linux test machines need bubblewrap installed");
+        .expect("Linux test machines need bubblewrap installed")
+}
+
+/// Builds the sandbox that hides the case's folder on one backend, as an install does.
+/// Inputs: the backend and the case. Output: what the build returned.
+fn built(backend: Hiding, case: &Case) -> Result<LinuxSandbox, SandboxError> {
+    let policy = hiding_policy(case);
+    let bwrap = bwrap();
     match backend {
         Hiding::Nested => {
             let nests = crazyagent::spawn_gate::status(
@@ -304,27 +314,60 @@ fn set_limit(value: &str) -> bool {
     .is_ok_and(|status| status.success())
 }
 
-/// V24x-LINUX-NEST-MOUNT-PROPAGATION Q5 (leader 19:09): where bubblewrap's own user namespace
-/// starts but the helper's cannot, as with `user.max_user_namespaces` at 1, a launch with a
-/// hidden folder refuses with the named line on both backends, never starting an agent
-/// whose mount tree later host mounts reach; at the base both builds held.
+/// V24x-LINUX-NEST-MOUNT-PROPAGATION Q5 (leader 19:09): where no user namespace can be made,
+/// as with `user.max_user_namespaces` at 0, the helper asked for a private tree exits 3 with
+/// the named line before it starts anything, and a build with a hidden folder refuses with
+/// the named line on both backends; at this machine's own limit, before each, both hold.
+/// The limit is 0, not 1: under 1 bubblewrap's own namespace was refused (run 44442220795).
 #[test]
 #[ignore = "needs passwordless sudo for sysctl; the farm runs it with --ignored"]
-fn a_launch_with_hidden_folders_refuses_where_the_helper_cannot_cut_its_mounts() {
+fn the_helper_and_both_builds_fail_closed_where_no_user_namespace_can_be_made() {
     let mut wrong = Vec::new();
+    let helper = |what: &str| {
+        let output = crazyagent::spawn_gate::collected(Command::new(HELPER).args([
+            "--filter-sockets",
+            "--private-mounts",
+            "--",
+            "/bin/true",
+        ]))
+        .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        (what.to_owned(), output.status.code(), stderr)
+    };
+    let build = |backend: Hiding, case: &Case| {
+        let bwrap = bwrap().to_path_buf();
+        let helper = PathBuf::from(HELPER);
+        let backend = match backend {
+            Hiding::Nested => LinuxBackend::Nested { bwrap, helper },
+            Hiding::Bubblewrap => LinuxBackend::Bubblewrap { bwrap, helper },
+        };
+        LinuxSandbox::new(hiding_policy(case), backend)
+    };
+    let (what, code, stderr) = helper("the helper at this machine's limit");
+    if code != Some(0) {
+        wrong.push(format!("{what}: exit {code:?}, {stderr:?}"));
+    }
+    let limit = Limit::new(0);
+    let (what, code, stderr) = helper("the helper with no user namespace");
+    drop(limit);
+    let named = stderr.contains(HIDDEN_MOUNTS_NOT_PRIVATE)
+        && stderr.contains("a user and mount namespace of its own");
+    if code != Some(3) || !named {
+        wrong.push(format!("{what}: exit {code:?}, {stderr:?}"));
+    }
     for backend in [Hiding::Nested, Hiding::Bubblewrap] {
         let case = case();
-        assert!(
-            built(backend, &case).is_ok(),
-            "{backend:?}: the control builds"
-        );
-        let limit = Limit::new(1);
-        match built(backend, &case) {
+        if let Err(error) = build(backend, &case) {
+            wrong.push(format!("{backend:?} at this machine's limit: {error:?}"));
+        }
+        let limit = Limit::new(0);
+        let refused = build(backend, &case);
+        drop(limit);
+        match refused {
             Err(SandboxError::Unavailable(reason)) if reason == HIDDEN_MOUNTS_NOT_PRIVATE => {}
             Err(other) => wrong.push(format!("{backend:?}: refused for {other:?}")),
             Ok(sandbox) => wrong.push(format!("{backend:?}: built on {:?}", sandbox.backend())),
         }
-        drop(limit);
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
 }

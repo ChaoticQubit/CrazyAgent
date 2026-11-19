@@ -4257,10 +4257,10 @@ fn a_hidden_folder_gives_the_agent_a_mount_tree_of_its_own_and_no_capability() {
     for backend in HIDING {
         let case = case();
         let hidden = hidden(&case);
-        let policy = policy(&case, SandboxNetwork::Only(Vec::new()))
+        let hides = policy(&case, SandboxNetwork::Only(Vec::new()))
             .hide(&hidden.folder)
             .unwrap();
-        let Some(sandbox) = hiding(backend, policy) else {
+        let Some(sandbox) = hiding(backend, hides) else {
             continue;
         };
         let output = run(&sandbox, &case, script);
