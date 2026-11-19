@@ -112,8 +112,9 @@ pub use super::view::LABEL_BYTES_MAX;
 
 /// One open checked off the main thread: the calling window, the agent window name, the
 /// screen reader label, the place the shared gate took, the tmux program and engine socket
-/// when the direct path may draw it, the page place, the style, whether it opens covered,
-/// whether its keys go through, the wall window's project and the events channel.
+/// when the direct path may draw it, the page place and the page's viewport height, the
+/// style, whether it opens covered, whether its keys go through, the wall window's project
+/// and the events channel.
 pub struct Open {
     pub window: String,
     pub name: String,
@@ -121,6 +122,7 @@ pub struct Open {
     pub place: Reservation,
     pub direct: Option<(PathBuf, PathBuf)>,
     pub rect: [f64; 4],
+    pub viewport: f64,
     pub style: Style,
     pub covered: bool,
     pub keys: bool,
@@ -130,7 +132,7 @@ pub struct Open {
 
 /// One page call on an open view.
 pub enum Command {
-    Place([f64; 4]),
+    Place([f64; 4], f64),
     Cover(bool),
     Focus,
     Copy(bool),
@@ -409,13 +411,14 @@ pub fn style(style: Style) -> Result<(), &'static str> {
     }
 }
 
-/// What a native-webdriver trial reads of one view: its NSView, its visible rows, whether
-/// the direct path draws it, the private pasteboard's text, whether the view is hidden, its
-/// show stamps, the host's clock at the read, in ms since 1970, and the app-wide counts of
-/// page commands answered busy and of covers told refused.
+/// What a native-webdriver trial reads of one view: its NSView, the webview it is placed
+/// over, its visible rows, whether the direct path draws it, the private pasteboard's text,
+/// whether the view is hidden, its show stamps, the host's clock at the read, in ms since
+/// 1970, and the app-wide counts of page commands answered busy and of covers told refused.
 #[cfg(feature = "native-webdriver")]
 pub struct Look {
     pub view: Retained<TermView>,
+    pub webview: Retained<NSView>,
     pub rows: Vec<String>,
     pub direct: bool,
     pub pasteboard: Option<String>,
@@ -448,6 +451,7 @@ pub fn look(window: &str, page: u64) -> Result<Look, &'static str> {
         assert!(hidden || entry.platform.stamps.uncovered_ms.is_some());
         Ok(Look {
             view: entry.platform.ns.clone(),
+            webview: entry.platform.webview.clone(),
             rows,
             direct: entry.direct,
             pasteboard: clip.read(),
@@ -650,6 +654,7 @@ impl Native {
             feed: page,
             direct,
             rect: open.rect,
+            viewport: open.viewport,
             covered: open.covered,
             told: Told::default(),
             carry: 0.0,
@@ -756,8 +761,9 @@ impl Native {
             Err(code) => return Err(code),
         };
         let action = match call {
-            Command::Place(rect) => {
+            Command::Place(rect, viewport) => {
                 entry.rect = rect;
+                entry.viewport = viewport;
                 Action::Nothing
             }
             Command::Cover(covered) => {
@@ -1195,7 +1201,8 @@ impl Native {
             return;
         }
         let host = unsafe { view.ns.superview() };
-        let css = NSRect::new(NSPoint::new(x, y), NSSize::new(width, height));
+        let webview_height = view.webview.bounds().size.height;
+        let css = page_frame([x, y, width, height], webview_height, entry.viewport);
         view.ns
             .setFrame(view.webview.convertRect_toView(css, host.as_deref()));
         #[cfg(feature = "native-webdriver")]
@@ -1312,5 +1319,44 @@ impl Native {
             self.end(page, code);
             assert!(self.table.get(page).is_none());
         }
+    }
+}
+
+/// The frame a view gets in its webview's own coordinates for its host's page rect: the
+/// rect moved below the part of the webview the page does not reach, under the title bar on
+/// macOS. Inputs: the page rect, the webview's height and the page's viewport height, in
+/// points. Output: the frame.
+fn page_frame(rect: [f64; 4], webview_height: f64, viewport: f64) -> NSRect {
+    let [x, y, width, height] = rect;
+    let top = crate::page_to_view_y(y, webview_height, viewport);
+    assert!(
+        width >= 0.0 && height >= 0.0,
+        "a page rect with no negative side"
+    );
+    NSRect::new(NSPoint::new(x, top), NSSize::new(width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::page_frame;
+
+    /// V243-NATIVE-SESSION-HEADER: the frame a view gets for its host's page rect keeps the
+    /// rect's x and size and sits below the page's inset, so a host under the sessions bar
+    /// at page y 306 in a 900-point webview with an 868-point page is drawn at 338, not 306.
+    #[test]
+    fn a_host_rect_is_framed_below_the_page_inset() {
+        let frame = page_frame([245.0, 306.0, 694.0, 513.0], 900.0, 868.0);
+        assert_eq!((frame.origin.x, frame.origin.y), (245.0, 338.0));
+        assert_eq!((frame.size.width, frame.size.height), (694.0, 513.0));
+        let whole = page_frame([245.0, 306.0, 694.0, 513.0], 868.0, 868.0);
+        assert_eq!(whole.origin.y, 306.0, "native full screen has no inset");
+    }
+
+    /// V243-NATIVE-SESSION-HEADER: a rect with a negative side never reaches AppKit:
+    /// NativeRect::checked refused it, so one here is a caller's bug.
+    #[test]
+    #[should_panic(expected = "a page rect with no negative side")]
+    fn a_host_rect_with_a_negative_side_is_a_bug() {
+        page_frame([245.0, 306.0, -1.0, 513.0], 900.0, 868.0);
     }
 }

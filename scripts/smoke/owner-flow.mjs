@@ -38,7 +38,7 @@ const SILENT_TURN_S = 300;
 const BRIDGE_READY = /^ready (\d+) ([0-9a-f]{64})$/m;
 const STAND_IN = `#!/bin/sh
 marker="$CLAUDE_CONFIG_DIR/.owner-flow-signed-in"
-keychain="$CLAUDE_CONFIG_DIR/Library/Keychains/login.keychain-db"
+keychain="$CLAUDE_CONFIG_DIR/Library/Keychains/profile.keychain-db"
 service="Claude Code-credentials-$(printf %s "$CLAUDE_CONFIG_DIR" | /usr/bin/shasum -a 256 | /usr/bin/cut -c1-8)"
 if [ "$1" != "auth" ]; then
   case " $* " in *" --session-id "*|*" --print "*) [ -f "\${0%/*}/${SILENT_MARK}" ] && exec /bin/sleep ${SILENT_TURN_S} ;; esac

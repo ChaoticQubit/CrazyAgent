@@ -4920,6 +4920,65 @@ fn a_live_claude_master_whose_terminal_ends_resumes_its_conversation_and_logs_ea
     host.close(&[]).unwrap();
 }
 
+/// V243-MASTER-INPUT-ENDED-PANE (leader 04:56): a live master's interrupted run whose note
+/// comes due just as the master's pane ends, before the next tick sees it gone, waits instead
+/// of failing: the master's input reads the ended pane as not reading keys, so the run stays
+/// interrupted with no reason, never failed with the terminal's own code.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_interrupted_master_run_waits_when_its_live_master_s_pane_has_just_ended() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = claude_runtime(&fixture, &host, RESUMING_CLAUDE);
+    let project = fixture.setup.project_id.clone();
+    set_master(&fixture, "claude-code");
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the Claude Code master runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    let deadline = Instant::now() + WAIT;
+    while !(team.workers[&master].live && team.workers[&master].briefed) {
+        assert!(
+            Instant::now() < deadline,
+            "the live master is never briefed"
+        );
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        super::super::master::quiet(&fixture.connection, None, &project, now_ms()),
+        "the briefed master is idle, so its input reaches the pane check"
+    );
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO recovery_runs(agent,project,kind,harness,at_ms,turn,state) VALUES (?1,?2,'master','claude-code',1,1,'interrupted')",
+            params![master, PROJECT],
+        )
+        .unwrap();
+    host.kill(&AgentId::team(master).unwrap()).unwrap();
+
+    team.resume_interrupted(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    let run: (String, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT state,reason FROM recovery_runs WHERE agent=?1",
+            [master],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        run,
+        ("interrupted".to_owned(), None),
+        "a run whose master's pane just ended waits, never failed with the terminal's code"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
 /// A resumed live master whose terminal ends before its app reads keys has its conversation
 /// refused, so the start after it is fresh rather than the same dead resume (DEC-147.4).
 #[cfg(target_os = "macos")]

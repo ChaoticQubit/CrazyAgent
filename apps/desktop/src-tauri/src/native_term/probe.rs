@@ -4,7 +4,9 @@ use super::view::TermView;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{ClassType, MainThreadMarker, msg_send};
-use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSResponder};
+use objc2_app_kit::{
+    NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSResponder, NSView,
+};
 use objc2_foundation::{NSNotFound, NSPoint, NSRange, NSString};
 use std::collections::VecDeque;
 use std::sync::{Mutex, PoisonError};
@@ -59,10 +61,12 @@ pub enum Step {
 /// What a trial reads after its step: the visible rows, whether the direct path draws the
 /// view, whether the view is its window's first responder, whether the app is active and its
 /// window key, the window's backing scale (0 with no window), the marked text, the private
-/// pasteboard's text, whether the view is hidden, its show stamps (`ShowStamps`) and the
-/// host's clock at the read, both in ms since 1970, when its last cover(false) command
-/// started, the draws it skipped since its uncover with the first reason, and the app-wide
-/// counts of page commands answered busy and of covers told refused.
+/// pasteboard's text, the view's frame as x, y, width and height in its webview's own
+/// coordinates and that webview's height, both in points, whether the view is hidden, its
+/// show stamps (`ShowStamps`) and the host's clock at the read, both in ms since 1970, when
+/// its last cover(false) command started, the draws it skipped since its uncover with the
+/// first reason, and the app-wide counts of page commands answered busy and of covers told
+/// refused.
 #[derive(serde::Serialize, Debug, PartialEq)]
 pub struct Seen {
     pub rows: Vec<String>,
@@ -73,6 +77,8 @@ pub struct Seen {
     pub scale: f64,
     pub marked: Option<String>,
     pub pasteboard: Option<String>,
+    pub frame: [f64; 4],
+    pub webview_height: f64,
     pub hidden: bool,
     pub uncovered_ms: Option<f64>,
     pub presented_ms: Option<f64>,
@@ -197,6 +203,8 @@ fn seen(mtm: MainThreadMarker, look: Look, asked_ms: Option<f64>) -> Seen {
             .map_or(0.0, |window| window.backingScaleFactor()),
         marked: look.view.marked_text(),
         pasteboard: look.pasteboard,
+        frame: in_webview(&look.view, &look.webview),
+        webview_height: look.webview.bounds().size.height,
         hidden: look.hidden,
         uncovered_ms: look.stamps.uncovered_ms,
         presented_ms: look.stamps.presented_ms,
@@ -209,9 +217,27 @@ fn seen(mtm: MainThreadMarker, look: Look, asked_ms: Option<f64>) -> Seen {
     };
     assert!(!seen.focused || window.is_some());
     assert!(seen.scale >= 0.0 && seen.scale.is_finite());
+    assert!(seen.webview_height >= 0.0 && seen.webview_height.is_finite());
     assert!(seen.hidden == seen.uncovered_ms.is_none());
     assert!(seen.presented_ms.is_none() || seen.uncovered_ms.is_some());
     assert!(seen.skipped == 0 || seen.uncovered_ms.is_some());
     assert_eq!(seen.skip_first.is_some(), seen.skipped > 0);
     seen
+}
+
+/// Reads where AppKit placed a view, counted in its webview's own coordinates, so a trial
+/// can set it against the page rect it was given. Inputs: the view and its webview.
+/// Output: x, y, width and height in points.
+fn in_webview(view: &TermView, webview: &NSView) -> [f64; 4] {
+    let superview = unsafe { view.superview() };
+    let placed = webview.convertRect_fromView(view.frame(), superview.as_deref());
+    let frame = [
+        placed.origin.x,
+        placed.origin.y,
+        placed.size.width,
+        placed.size.height,
+    ];
+    assert!(frame.iter().all(|side| side.is_finite()));
+    assert!(frame[2] >= 0.0 && frame[3] >= 0.0);
+    frame
 }

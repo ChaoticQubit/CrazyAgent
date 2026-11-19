@@ -87,7 +87,15 @@ function followStyle(): void {
 
 function rectOf(element: Element): NativeRect {
   const box = element.getBoundingClientRect();
-  return { x: box.left, y: box.top, width: box.width, height: box.height };
+  const viewport = window.innerHeight;
+  return { x: box.left, y: box.top, width: box.width, height: box.height, viewport };
+}
+
+/** The key a placed view is compared by: its rect and the page's viewport height, so a window
+ * height change that leaves the rect alone still places it again. Input: the place. Output:
+ * the key. */
+function spotOf(rect: NativeRect): string {
+  return `${rect.x},${rect.y},${rect.width},${rect.height},${rect.viewport}`;
 }
 
 /** Whether a page overlay covers a place: one of `OVERLAYS` with a size, outside and not
@@ -325,12 +333,13 @@ export class NativeView implements Held {
     const covered = screen === null;
     assert(!covered || this.size !== null, "a covered open knows its size");
     if (screen) this.keepSize(screen);
-    const rect = screen ? rectOf(screen) : { x: 0, y: 0, width: this.size?.width ?? 0, height: this.size?.height ?? 0 };
+    const size = { width: this.size?.width ?? 0, height: this.size?.height ?? 0 };
+    const rect = screen ? rectOf(screen) : { x: 0, y: 0, ...size, viewport: window.innerHeight };
     const open: Opened = { id: null, ended: false, closed: false, liveAt: null, keys: this.keys, send: () => false };
     open.send = jobQueue(() => this.stopTyping(open));
     this.open = open;
     this.told = covered;
-    this.placed = `${rect.x},${rect.y},${rect.width},${rect.height}`;
+    this.placed = spotOf(rect);
     const events = new Channel<NativeEvent>((event) => this.heardEvent(open, event));
     const { terminal: name, pane, project } = this.key;
     void openNativeTerminal({ name, pane, label: this.label, rect, style: nativeStyle(), events, covered, keys: this.keys, project }).then((result) => {
@@ -441,7 +450,7 @@ export class NativeView implements Held {
     if (!this.shown || screen === null || id === null) return;
     const rect = rectOf(screen);
     const empty = rect.width < 1 || rect.height < 1;
-    const spot = `${rect.x},${rect.y},${rect.width},${rect.height}`;
+    const spot = spotOf(rect);
     if (!empty && spot !== this.placed) this.tellPlace(id, rect, spot);
     this.keepSize(screen);
     const covered = empty || overlayCovers(rect, screen, document.querySelectorAll(OVERLAYS));

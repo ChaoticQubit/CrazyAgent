@@ -2,8 +2,9 @@ import { Channel } from "@tauri-apps/api/core";
 import { call, type Result } from "../../api";
 
 /** A native view's place: the host element's `getBoundingClientRect()` in CSS pixels of the
- * webview's viewport. */
-export type NativeRect = { x: number; y: number; width: number; height: number };
+ * webview's viewport, and that viewport's height (`innerHeight`), by which the desktop frames
+ * the view below the part of its webview the page does not reach (the macOS title bar). */
+export type NativeRect = { x: number; y: number; width: number; height: number; viewport: number };
 
 /** The colours a native view draws with, each a CSS colour string (`#rgb`, `#rrggbb`,
  * `rgb()` or `rgba()`) read from the same `--terminal-*` tokens as today's panel. */
