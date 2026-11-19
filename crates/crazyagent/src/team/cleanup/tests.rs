@@ -1144,7 +1144,8 @@ fn denies(path: &Path) -> bool {
 /// RV-DS241-181: removing an agent's tree while a process of its keeps swapping folders in
 /// it for links to an owner folder never clears an ACL there or opens up a mode there, since
 /// ACLs and modes change only through entries reached from the tree's own handles. A later
-/// removal with nothing swapping still finishes.
+/// removal with nothing swapping still finishes. Owner folders sit at 0555, a mode neither a
+/// change by path (0500) nor one through a handle (0700) leaves.
 #[cfg(target_os = "macos")]
 #[test]
 fn removing_an_agent_tree_never_changes_an_owner_folder_a_swapped_folder_points_to() {
@@ -1171,7 +1172,7 @@ fn removing_an_agent_tree_never_changes_an_owner_folder_a_swapped_folder_points_
         }
     }
     for folder in &owned {
-        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o500)).unwrap();
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o555)).unwrap();
     }
     let stop = Arc::new(AtomicBool::new(false));
     let swapper = {
@@ -1213,7 +1214,7 @@ fn removing_an_agent_tree_never_changes_an_owner_folder_a_swapped_folder_points_
             .permissions()
             .mode();
         assert!(denies(folder), "{folder:?} lost its ACL");
-        assert_eq!(mode & 0o777, 0o500, "{folder:?} was opened up");
+        assert_eq!(mode & 0o777, 0o555, "{folder:?} was opened up");
     }
 }
 
@@ -1252,7 +1253,7 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
         }
     }
     for folder in &owned {
-        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o500)).unwrap();
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o555)).unwrap();
     }
     let stop = Arc::new(AtomicBool::new(false));
     let planted = Arc::new(AtomicUsize::new(0));
@@ -1308,7 +1309,7 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
             .permissions()
             .mode();
         assert!(denies(folder), "{folder:?} lost its ACL");
-        assert_eq!(mode & 0o777, 0o500, "{folder:?} was opened up");
+        assert_eq!(mode & 0o777, 0o555, "{folder:?} was opened up");
     }
 }
 
@@ -2573,4 +2574,94 @@ fn a_home_removal_caller_keeps_the_walk_code_and_gives_any_other_error_its_own()
 
     assert_eq!(walked, "cleanup_walk_too_long");
     assert_eq!(failed, "agent_home_unwritable");
+}
+
+/// V243-CLEANUP-OPEN-UP-FOLDER-PROOF (#571 sec F1): a folder an agent shut, swapped for a
+/// hard link to the owner's read-only file while Clean up opens it up, never makes that
+/// file writable: swapped before the folder check the file keeps its mode, and swapped just
+/// after it, the worst case, the file gains no write bit. The link is made before the file is
+/// read-only, since a macOS 15 runner refused that link with EACCES; the swap renames it in.
+#[cfg(target_os = "macos")]
+#[test]
+fn opening_up_a_shut_folder_swapped_for_a_link_to_an_owner_file_never_makes_it_writable() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |path: &Path| {
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    };
+    for point in [OpenUpPoint::Start, OpenUpPoint::BeforeMode] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        let owner = root.join("owner");
+        let linked = root.join("linked");
+        write(&owner, b"the owner's\n");
+        std::fs::hard_link(&owner, &linked).unwrap();
+        std::fs::set_permissions(&owner, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let agent = root.join("agent");
+        let shut = agent.join("shut");
+        write(&shut.join("inner"), b"left by a session\n");
+        std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let (moved, aside) = (shut.clone(), agent.join("aside"));
+        let swap: Box<dyn FnOnce()> = Box::new(move || {
+            std::fs::rename(&moved, &aside).unwrap();
+            std::fs::rename(&linked, &moved).unwrap();
+        });
+        OPEN_UP_STEP.with(|slot| *slot.borrow_mut() = Some((point, c"shut".to_owned(), swap)));
+        let _ = remove_agent_tree(&agent);
+        let swapped = OPEN_UP_STEP.with(|slot| slot.borrow_mut().take().is_none());
+        let after = mode(&owner);
+        let _ =
+            std::fs::set_permissions(agent.join("aside"), std::fs::Permissions::from_mode(0o700));
+        let _ = remove_agent_tree(&agent);
+        assert!(swapped, "{point:?}: the swap never ran");
+        assert_eq!(
+            after & 0o222,
+            0,
+            "{point:?}: the owner's file is writable: {after:o}"
+        );
+        if point == OpenUpPoint::Start {
+            assert_eq!(after, 0o400, "the owner's file changed mode: {after:o}");
+        }
+    }
+}
+
+/// #611 code F1: a folder an agent shut at mode 000 under its own ACL that denies this user
+/// reading its attributes or its ACL refuses every look at it by name, so removing the
+/// agent's tree clears that ACL by name, looks again and still removes the folder.
+#[cfg(target_os = "macos")]
+#[test]
+fn removing_an_agent_tree_clears_an_acl_that_refuses_a_look_at_a_shut_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let agent = root.join("agent");
+    let mut shut = Vec::new();
+    for (name, entry) in [
+        ("attributes", "everyone deny readattr"),
+        ("security", "everyone deny readsecurity"),
+    ] {
+        let folder = agent.join(name);
+        write(&folder.join("inner"), b"left by an agent\n");
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o000)).unwrap();
+        add_acl(entry, std::slice::from_ref(&folder));
+        shut.push(folder);
+    }
+    let refused = shut
+        .iter()
+        .all(|folder| std::fs::symlink_metadata(folder).is_err());
+
+    let removed = remove_agent_tree(&agent);
+    let left = agent.exists();
+    for folder in &shut {
+        drop(AclCleared(folder.clone()));
+        let _ = std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700));
+    }
+    let _ = remove_agent_tree(&agent);
+
+    assert!(refused, "a look at a shut folder was not refused");
+    assert_eq!(removed, Ok(()));
+    assert!(!left, "the tree stayed");
 }

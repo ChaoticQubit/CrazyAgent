@@ -31,7 +31,9 @@ pub(crate) use master_session::{
 #[cfg(unix)]
 pub use migrations::backup_failure;
 pub(crate) mod agent_text;
+pub(crate) mod narrowing;
 mod native_auth;
+pub(crate) use native_auth::SIGN_OUT_NOT_RUN;
 #[cfg(all(test, unix))]
 mod native_auth_custody_tests;
 pub(crate) mod plugins;
@@ -129,6 +131,63 @@ fn wait_while_held(path: &Path, stage: Stage) {
     }
 }
 
+/// A point where a row makes the storage worker stop as the worker of an engine that dies
+/// does: at the claim of its next job, or right after an MCP secret attach commits, before
+/// it answers or ends anything that attach supersedes.
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Death {
+    Claim,
+    AttachCommitted,
+}
+
+#[cfg(all(test, unix))]
+static DYING: std::sync::Mutex<Vec<(std::path::PathBuf, Death)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Marks the storage worker of the database at `path` to stop at its next claim, running
+/// neither that job nor any queued after it, as the worker of an engine that dies does.
+/// Input: the path given to `Storage::open`. Output: none; the mark is used up once.
+#[cfg(all(test, unix))]
+pub(crate) fn die_at_claim(path: &Path) {
+    die_at(path, Death::Claim);
+}
+
+/// Marks the storage worker of the database at `path` to stop at `death`, running nothing
+/// after it, as the worker of an engine that dies there does. One mark per database.
+/// Inputs: the path given to `Storage::open` and the point. Output: none; used up once.
+#[cfg(all(test, unix))]
+pub(crate) fn die_at(path: &Path, death: Death) {
+    let mut dying = DYING.lock().unwrap();
+    assert!(!dying.iter().any(|(other, _)| other == path));
+    dying.push((path.to_path_buf(), death));
+}
+
+/// Whether a mark [`die_at`] left for `path` is still unused, so a row waits until the
+/// worker stopped before it opens the same database again. Input: the database path.
+/// Output: true while the mark waits for its point.
+#[cfg(all(test, unix))]
+pub(crate) fn dying(path: &Path) -> bool {
+    DYING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|(other, _)| other == path)
+}
+
+/// Takes the mark [`die_at`] left for `path` at `death`. Inputs: the database path and the
+/// point the worker reached. Output: true once for a worker marked there, which then stops.
+#[cfg(all(test, unix))]
+fn dies(path: &Path, death: Death) -> bool {
+    let mut dying = DYING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let before = dying.len();
+    dying.retain(|other| *other != (path.to_path_buf(), death));
+    assert!(before - dying.len() <= 1);
+    before != dying.len()
+}
+
 #[cfg(all(test, unix))]
 mod model_access_page_tests;
 #[cfg(all(test, unix))]
@@ -150,6 +209,17 @@ const OPERATIONS_PER_CLIENT_MAX: usize = 64;
 
 /// Recent wire operations kept across all clients; the oldest finished rows go first.
 const OPERATIONS_MAX: usize = 1024;
+
+/// Who asks a native-auth job, which decides what it does with the owner's kept sign-outs:
+/// an owner's new sign-in ends those of its profile, a drained sign-out runs only while its
+/// intent is kept, and any other ask, such as the engine's own check, touches none. The
+/// owner waits until `answer_by`, a margin before its exchange is cut.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NativeAuthAsk {
+    Owner { answer_by: tokio::time::Instant },
+    Drained(narrowing::IntentId),
+    Engine,
+}
 
 pub(crate) enum Job {
     Accounts(
@@ -195,6 +265,7 @@ pub(crate) enum Job {
     NativeAuth(
         Admission,
         owner_auth::Command,
+        NativeAuthAsk,
         oneshot::Sender<Result<NativeAuthBegin, EngineError>>,
     ),
     NativeAuthFinish(
@@ -206,6 +277,10 @@ pub(crate) enum Job {
         HostStamp,
         Option<SessionId>,
         oneshot::Sender<Result<Vec<NativeAuthStart>, EngineError>>,
+    ),
+    NativeAuthSignOutsDue(
+        HostStamp,
+        oneshot::Sender<Result<Vec<(NativeAuthLogout, NativeAuthMethod)>, EngineError>>,
     ),
     PrepareNativeProfile(
         HostStamp,
@@ -234,6 +309,7 @@ pub(crate) enum Job {
     OwnerControl(
         HostStamp,
         OwnerControl,
+        Option<narrowing::IntentId>,
         oneshot::Sender<Result<(OwnerControlReply, Registration), EngineError>>,
     ),
     OwnerControlReconcile(
@@ -444,6 +520,7 @@ pub(crate) struct Storage {
     pub(crate) sender: mpsc::Sender<Job>,
     admission: Arc<tokio::sync::Semaphore>,
     receiving: tokio::sync::watch::Receiver<bool>,
+    pub(crate) intents: Option<Arc<narrowing::Intents>>,
 }
 
 const QUEUED: u8 = 0;
@@ -587,14 +664,14 @@ impl Job {
     /// job is never withdrawn. Input: the job. Output: the answer.
     pub(crate) fn narrows_access(&self) -> bool {
         match self {
-            Self::OwnerControl(_, control, _) => control.decision == OwnerDecision::Revoke,
-            Self::NativeAuth(_, command, _) => matches!(
+            Self::OwnerControl(_, control, _, _) => control.decision == OwnerDecision::Revoke,
+            Self::NativeAuth(_, command, _, _) => matches!(
                 command,
                 owner_auth::Command::Logout(_) | owner_auth::Command::Cancel(_)
             ),
             Self::Accounts(_, command, _) => matches!(
                 command,
-                accounts::Command::Remove(_) | accounts::Command::KeyReplaced(..)
+                accounts::Command::Remove(..) | accounts::Command::KeyReplaced(..)
             ),
             Self::Plugins(command, _) => plugin_narrows_access(command),
             Self::OwnerApply(_, request, _) => match &request.operation {
@@ -747,15 +824,31 @@ impl Storage {
                     )
                     .and_then(|()| store_config(&connection, &config))
                 };
-                if let Err(e) = recovered {
-                    drop(connection);
-                    drop(custody.take());
-                    drop(lock);
-                    drop(sources.take());
-                    let _ = ready_send.send(Err(e));
-                    return;
+                let opened = recovered.and_then(|()| {
+                    if readonly {
+                        return Ok(None);
+                    }
+                    let root = path
+                        .parent()
+                        .ok_or_else(|| error("database parent missing"))?;
+                    narrowing::Intents::open(root).map(|intents| intents.map(Arc::new))
+                });
+                let intents = match opened {
+                    Ok(intents) => intents,
+                    Err(e) => {
+                        drop(connection);
+                        drop(custody.take());
+                        drop(lock);
+                        drop(sources.take());
+                        let _ = ready_send.send(Err(e));
+                        return;
+                    }
+                };
+                #[cfg(unix)]
+                if let Some(intents) = &intents {
+                    replay_intents(&mut connection, &mut config, sources.as_ref(), &path, intents);
                 }
-                let _ = ready_send.send(Ok(config.clone()));
+                let _ = ready_send.send(Ok((config.clone(), intents.clone())));
                 let mut owner_runtime = None;
                 let mut ended_custody: Option<NativeAuthFact> = None;
                 let mut ended_failure: Option<String> = None;
@@ -798,6 +891,10 @@ impl Storage {
                         Job::Claimed(job, claim) => {
                             #[cfg(all(test, unix))]
                             wait_while_held(&path, Stage::Claim);
+                            #[cfg(all(test, unix))]
+                            if dies(&path, Death::Claim) {
+                                break;
+                            }
                             if !claim.decide(TAKEN) {
                                 continue;
                             }
@@ -808,11 +905,18 @@ impl Storage {
                     };
                     match job {
                         Job::Accounts(admission, command, reply) => {
+                            let kept = command.kept();
                             let result = if readonly {
                                 Err(error("accounts_readonly"))
                             } else {
                                 accounts::execute(&mut connection, &mut config, sources.as_ref(), &admission, command)
                             };
+                            if let Some(ask) = &kept {
+                                let ends = result
+                                    .as_ref()
+                                    .map_or_else(|refused| refused.0 == "account_not_found", |_| true);
+                                end_intent(intents.as_deref(), ask.id(), ends);
+                            }
                             let _ = reply.send(result);
                         }
                         Job::AccountProfile(admission, command, reply) => {
@@ -902,9 +1006,19 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
-                        Job::NativeAuth(admission, command, reply) => {
+                        Job::NativeAuth(admission, command, ask, reply) => {
+                            let logout = match &command {
+                                owner_auth::Command::Logout(logout) => Some(logout.request_id.clone()),
+                                _ => None,
+                            };
+                            let signs_in = matches!(command, owner_auth::Command::Start(_))
+                                && matches!(ask, NativeAuthAsk::Owner { .. });
                             let result = if readonly {
                                 Err(error("native_auth_readonly"))
+                            } else if let NativeAuthAsk::Drained(id) = &ask
+                                && !still_kept(intents.as_deref(), id)
+                            {
+                                Err(error("native_auth_sign_out_superseded"))
                             } else {
                                 native_auth::execute(
                                     &mut connection,
@@ -917,6 +1031,17 @@ impl Storage {
                                     command,
                                 )
                             };
+                            if let Some(request_id) = &logout
+                                && result.is_ok()
+                            {
+                                end_logout_intent(intents.as_deref(), request_id);
+                            }
+                            if signs_in
+                                && let Ok(begun) = &result
+                                && let Some(work) = &begun.work
+                            {
+                                end_superseded_sign_outs(&connection, intents.as_deref(), work);
+                            }
                             if let Err(Ok(begun)) = reply.send(result)
                                 && let Some(work) = begun.work
                             {
@@ -929,6 +1054,14 @@ impl Storage {
                                     work,
                                 );
                             }
+                        }
+                        Job::NativeAuthSignOutsDue(host, reply) => {
+                            let result = if readonly {
+                                Err(error("native_auth_readonly"))
+                            } else {
+                                native_auth::sign_outs_due(&mut connection, &config, sources.as_ref(), &host)
+                            };
+                            let _ = reply.send(result);
                         }
                         Job::NativeAuthStale(host, session, reply) => {
                             let result = if readonly {
@@ -1044,8 +1177,15 @@ impl Storage {
                             }
                             let _ = reply.send(result);
                         }
-                        Job::OwnerControl(stamp, control, reply) => {
-                            let _ = reply.send(owner_control(&mut connection, &stamp, &control));
+                        Job::OwnerControl(stamp, control, kept, reply) => {
+                            let result = owner_control(&mut connection, &stamp, &control);
+                            if let Some(id) = &kept {
+                                let ends = result
+                                    .as_ref()
+                                    .map_or_else(|refused| refused.0 == "owner_control_stale", |_| true);
+                                end_intent(intents.as_deref(), id, ends);
+                            }
+                            let _ = reply.send(result);
                         }
                         Job::OwnerControlReconcile(stamp, control, reply) => {
                             let _ = reply.send(owner_control_reconcile(
@@ -1514,14 +1654,74 @@ impl Storage {
                             let _ = reply.send(runner_read(&mut connection, &config, &path, &command));
                         }
                         Job::Plugins(command, reply) => {
+                            #[cfg(all(test, unix))]
+                            let attach = matches!(command, plugins::Command::AttachSecret { .. });
+                            let detach = match &command {
+                                plugins::Command::DetachSecret { ask, .. } => Some(ask.clone()),
+                                _ => None,
+                            };
+                            #[cfg(unix)]
+                            let ends = match &command {
+                                plugins::Command::AttachSecret { id, name, .. } => {
+                                    superseded_detaches(intents.as_deref(), id, name)
+                                }
+                                _ => Vec::new(),
+                            };
+                            #[cfg(not(unix))]
+                            let ends = Vec::new();
                             let result = if readonly {
                                 Err(error("plugins_readonly"))
+                            } else if let Some(Some(narrowing::NarrowingAsk::Drained(kept))) = &detach
+                                && detach_superseded(&connection, intents.as_deref(), kept)
+                            {
+                                Err(error("server_secret_detach_superseded"))
                             } else {
                                 match path.parent() {
-                                    Some(root) => plugins::execute(&mut connection, root, command),
+                                    Some(root) => {
+                                        plugins::execute_ending(&mut connection, root, command, &ends)
+                                    }
                                     None => Err(error("plugin_store_unavailable")),
                                 }
                             };
+                            #[cfg(all(test, unix))]
+                            if attach && result.is_ok() && dies(&path, Death::AttachCommitted) {
+                                break;
+                            }
+                            #[cfg(unix)]
+                            if result.is_ok() {
+                                for id in &ends {
+                                    end_ended(&connection, intents.as_deref(), id);
+                                }
+                            }
+                            if let Some(ask) = detach {
+                                #[cfg(unix)]
+                                if let (Ok(plugins::ResultValue::Secret(_, Some(reference))), Some(root)) =
+                                    (&result, path.parent())
+                                {
+                                    plugins::settle_detached(&connection, root, reference);
+                                }
+                                if let Some(ask) = &ask {
+                                    let superseded = result.as_ref().is_err_and(|refused| {
+                                        refused.0 == "server_secret_detach_superseded"
+                                    });
+                                    let ends = result.as_ref().map_or_else(
+                                        |refused| {
+                                            matches!(
+                                                refused.0.as_str(),
+                                                "server_not_found" | "server_secret_not_found"
+                                            )
+                                        },
+                                        |_| true,
+                                    );
+                                    #[cfg(unix)]
+                                    if superseded {
+                                        end_ended(&connection, intents.as_deref(), ask.id());
+                                    }
+                                    #[cfg(not(unix))]
+                                    let _ = superseded;
+                                    end_intent(intents.as_deref(), ask.id(), ends);
+                                }
+                            }
                             let _ = reply.send(result);
                         }
                         Job::Setup(command, reply) => {
@@ -1572,12 +1772,13 @@ impl Storage {
                 }
             })
             .map_err(|e| error(format!("database_worker_spawn_failed: {e}")))?;
-        let config = ready_receive.await.map_err(error)??;
+        let (config, intents) = ready_receive.await.map_err(error)??;
         Ok((
             Self {
                 sender,
                 admission,
                 receiving,
+                intents,
             },
             config,
         ))
@@ -1726,6 +1927,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     plugins::initialize(connection)?;
     accounts::initialize(connection)?;
     trash::initialize(connection)?;
+    narrowing::initialize(connection)?;
     setup::initialize(connection)?;
     crate::assets::initialize(connection)?;
     crate::verification::initialize(connection)?;
@@ -2843,6 +3045,26 @@ fn owner_registration(
     host: &HostStamp,
     kind: OwnerClientKind,
 ) -> Result<Registration, EngineError> {
+    let (id, epoch, active) = owner_identity(tx, kind)?;
+    Ok(Registration {
+        kind,
+        admission: Admission {
+            db_instance: host.db_instance.clone(),
+            engine_epoch: host.engine_epoch.clone(),
+            owner_id: id,
+            owner_epoch: epoch,
+        },
+        active,
+    })
+}
+
+/// Reads one client's stored identity. Inputs: the transaction and the client kind.
+/// Output: its owner id, epoch and whether it is active, or `owner_registration_invalid`
+/// for a row out of bounds.
+fn owner_identity(
+    tx: &Transaction<'_>,
+    kind: OwnerClientKind,
+) -> Result<(String, i64, bool), EngineError> {
     let (id, epoch, status): (String, i64, String) = tx
         .query_row(
             "SELECT owner_id,owner_epoch,status FROM owner_identities WHERE client_kind=?1",
@@ -2853,16 +3075,7 @@ fn owner_registration(
     if !is_hex_id(&id) || epoch < 1 || !matches!(status.as_str(), "active" | "revoked") {
         return Err(error("owner_registration_invalid"));
     }
-    Ok(Registration {
-        kind,
-        admission: Admission {
-            db_instance: host.db_instance.clone(),
-            engine_epoch: host.engine_epoch.clone(),
-            owner_id: id,
-            owner_epoch: epoch,
-        },
-        active: status == "active",
-    })
+    Ok((id, epoch, status == "active"))
 }
 
 fn check_owner_admission(tx: &Transaction<'_>, a: &Admission) -> Result<(), EngineError> {
@@ -3263,31 +3476,42 @@ fn owner_control(
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
     check_owner_host(&tx, host)?;
+    let reply = owner_control_in(&tx, &host.engine_epoch, control)?;
     let registration = owner_registration(&tx, host, control.target)?;
-    let a = &registration.admission;
+    tx.commit().map_err(error)?;
+    Ok((reply, registration))
+}
+
+/// Applies one host control inside the caller's transaction: the stored answer again for a
+/// control already applied, else the client's epoch moved on and its status set, with the
+/// operation recorded. Inputs: the transaction, the engine run named in the record and the
+/// control. Output: the answer, or `owner_control_stale` once the client is past that epoch.
+fn owner_control_in(
+    tx: &Transaction<'_>,
+    engine_epoch: &str,
+    control: &OwnerControl,
+) -> Result<OwnerControlReply, EngineError> {
+    let (owner_id, owner_epoch, _) = owner_identity(tx, control.target)?;
     let bytes = serde_json::to_vec(control).map_err(error)?;
     let hash_text = crate::memory::hash(&bytes);
     if let Some((_, result)) = owner_lookup(
-        &tx,
+        tx,
         "trusted_host",
-        &a.owner_id,
+        &owner_id,
         &control.operation_id,
         Some(&hash_text),
     )? {
-        return Ok((
-            serde_json::from_slice(&result).map_err(error)?,
-            registration,
-        ));
+        return serde_json::from_slice(&result).map_err(error);
     }
-    if control.expected_epoch != a.owner_epoch {
+    if control.expected_epoch != owner_epoch {
         return Err(error("owner_control_stale"));
     }
-    let next = a.owner_epoch.checked_add(1);
+    let next = owner_epoch.checked_add(1);
     if next.is_none() && control.decision == OwnerDecision::Reactivate {
         return Err(error("owner_epoch_exhausted"));
     }
     let reply = OwnerControlReply {
-        owner_id: a.owner_id.clone(),
+        owner_id: owner_id.clone(),
         owner_epoch: next.unwrap_or(i64::MAX),
         active: control.decision == OwnerDecision::Reactivate,
         epoch_exhausted_revoked: next.is_none(),
@@ -3301,28 +3525,359 @@ fn owner_control(
         ],
     )
     .map_err(error)?;
-    let revision = owner_revision(&tx)?;
+    let revision = owner_revision(tx)?;
     let provenance = OwnerProvenance {
         origin: "trusted_host".into(),
-        owner_id: a.owner_id.clone(),
+        owner_id,
         operation_id: control.operation_id.clone(),
         request_hash: hash_text,
-        engine_epoch: host.engine_epoch.clone(),
-        admitted_epoch: a.owner_epoch,
+        engine_epoch: engine_epoch.to_owned(),
+        admitted_epoch: owner_epoch,
         resulting_epoch: reply.owner_epoch,
         revision_before: Cursor::new(revision),
         revision_after: Cursor::new(revision),
         event_cursor: None,
     };
     owner_record(
-        &tx,
+        tx,
         &provenance,
         &Sha256::digest(&bytes),
         &serde_json::to_vec(&reply).map_err(error)?,
     )?;
-    let registration = owner_registration(&tx, host, control.target)?;
-    tx.commit().map_err(error)?;
-    Ok((reply, registration))
+    Ok(reply)
+}
+
+/// What applying a kept narrowing change at open found: it committed now, or it no longer
+/// applies (already applied, past its epoch, or for another database), each of which ends
+/// the intent; the cause is logged.
+#[cfg(unix)]
+pub(crate) enum Replayed {
+    Committed,
+    NotApplicable(&'static str),
+}
+
+/// Applies the narrowing changes kept in the intent folder at open, before the worker takes
+/// any job, so a change a dead or stopped engine never committed takes effect first. An
+/// intent ends once committed or no longer applicable; one that fails stays, retried at each
+/// open, and only the log line `narrowing_intent_kept id= cause=` shows it (a stated limit).
+/// Inputs: the database, config, sources, database path and store. Output: none; all logged.
+#[cfg(unix)]
+fn replay_intents(
+    db: &mut Connection,
+    config: &mut EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    path: &Path,
+    intents: &narrowing::Intents,
+) {
+    let listing = match intents.list() {
+        Ok(listing) => listing,
+        Err(refused) => {
+            eprintln!("narrowing_intents_unread cause={}", refused.0);
+            return;
+        }
+    };
+    if listing.refused > 0 {
+        eprintln!("narrowing_intents_refused count={}", listing.refused);
+    }
+    for (id, intent) in listing.intents {
+        let detach = matches!(intent.change, narrowing::Change::DetachSecret { .. });
+        match detach.then(|| narrowing::ended(db, &id)) {
+            None | Some(Ok(false)) => {}
+            Some(Ok(true)) => {
+                eprintln!("narrowing_intent_not_applicable id={} cause=ended", id.as_str());
+                end_ended(db, Some(intents), &id);
+                continue;
+            }
+            Some(Err(unread)) => {
+                eprintln!("narrowing_intent_kept id={} cause={}", id.as_str(), unread.0);
+                continue;
+            }
+        }
+        let replayed = match &intent.change {
+            narrowing::Change::Revoke {
+                operation_id,
+                target,
+                expected_epoch,
+            } => replay_revoke(
+                db,
+                &intent.db_instance,
+                &OwnerControl {
+                    operation_id: operation_id.clone(),
+                    target: *target,
+                    expected_epoch: *expected_epoch,
+                    decision: OwnerDecision::Revoke,
+                },
+            ),
+            narrowing::Change::Logout(logout) => {
+                native_auth::replay_logout(db, &intent.db_instance, logout)
+            }
+            narrowing::Change::RemoveAccount { id: account } => {
+                replay_kept(db, &intent.db_instance, |db| {
+                    accounts::replay_remove(db, config, sources, &id, account)
+                })
+            }
+            narrowing::Change::KeyReplaced {
+                id: account,
+                credential,
+            } => replay_kept(db, &intent.db_instance, |db| {
+                accounts::replay_key_replaced(db, config, account, credential)
+            }),
+            narrowing::Change::DetachSecret { id: server, name } => {
+                replay_kept(db, &intent.db_instance, |db| {
+                    let root = path
+                        .parent()
+                        .ok_or_else(|| error("plugin_store_unavailable"))?;
+                    plugins::replay_detach(db, root, server, name)
+                })
+            }
+        };
+        match replayed {
+            Ok(outcome) => {
+                if let Replayed::NotApplicable(cause) = outcome {
+                    eprintln!(
+                        "narrowing_intent_not_applicable id={} cause={cause}",
+                        id.as_str()
+                    );
+                }
+                end_intent(Some(intents), &id, true);
+            }
+            Err(kept) => eprintln!("narrowing_intent_kept id={} cause={}", id.as_str(), kept.0),
+        }
+    }
+}
+
+/// Names the kept detaches an attach of the same server and secret name supersedes, so its
+/// commit ends them and no crash point leaves a detach over the new secret. Inputs: the store,
+/// the server id and the secret's name. Output: the intent names; none when the store is
+/// unreadable, which is logged, and those detaches then land as before.
+#[cfg(unix)]
+fn superseded_detaches(
+    intents: Option<&narrowing::Intents>,
+    server: &str,
+    name: &str,
+) -> Vec<narrowing::IntentId> {
+    let Some(intents) = intents else {
+        return Vec::new();
+    };
+    match intents.list() {
+        Ok(listing) => listing
+            .intents
+            .into_iter()
+            .filter(|(_, intent)| {
+                matches!(&intent.change, narrowing::Change::DetachSecret { id, name: kept }
+                    if id == server && kept == name)
+            })
+            .map(|(id, _)| id)
+            .collect(),
+        Err(refused) => {
+            eprintln!("narrowing_intents_unread cause={}", refused.0);
+            Vec::new()
+        }
+    }
+}
+
+/// Whether a drained detach was superseded by a newer attach of the same secret: its intent
+/// is gone, or an attach's commit ended it. A store or table that cannot be read counts as not
+/// superseded, which is logged, so the detach still lands. Inputs: the database, the store
+/// and the intent name. Output: the verdict.
+#[cfg(unix)]
+fn detach_superseded(
+    db: &Connection,
+    intents: Option<&narrowing::Intents>,
+    id: &narrowing::IntentId,
+) -> bool {
+    !still_kept(intents, id)
+        || narrowing::ended(db, id).unwrap_or_else(|unread| {
+            eprintln!("narrowing_ended_unread cause={}", unread.0);
+            false
+        })
+}
+
+/// Whether a drained detach was superseded where no ended table exists: only when its intent
+/// is gone. Inputs: the database, unused, the store and the intent name. Output: the verdict.
+#[cfg(not(unix))]
+fn detach_superseded(
+    _db: &Connection,
+    intents: Option<&narrowing::Intents>,
+    id: &narrowing::IntentId,
+) -> bool {
+    !still_kept(intents, id)
+}
+
+/// Unlinks an intent a committed change ended, then forgets the ended row; a file that
+/// cannot be unlinked keeps its row, so the next open skips it again. Inputs: the database,
+/// the store and the intent name. Output: none; each failure is logged.
+#[cfg(unix)]
+fn end_ended(db: &Connection, intents: Option<&narrowing::Intents>, id: &narrowing::IntentId) {
+    let Some(intents) = intents else {
+        return;
+    };
+    match intents.remove(id) {
+        Ok(()) => {
+            if let Err(left) = narrowing::forget_ended(db, id) {
+                eprintln!("narrowing_ended_unforgotten id={} cause={}", id.as_str(), left.0);
+            }
+        }
+        Err(left) => eprintln!("narrowing_intent_unremoved id={} cause={}", id.as_str(), left.0),
+    }
+}
+
+/// Applies one kept account or secret change at open, only to the database it was kept
+/// for: one kept for another database, or a database with no owner tables, does nothing.
+/// Inputs: the database, the intent's database id and the change. Output: the outcome, or
+/// the storage error, which keeps the intent.
+#[cfg(unix)]
+fn replay_kept(
+    db: &mut Connection,
+    db_instance: &str,
+    apply: impl FnOnce(&mut Connection) -> Result<Replayed, EngineError>,
+) -> Result<Replayed, EngineError> {
+    let ours = {
+        let tx = db.transaction().map_err(error)?;
+        owner_schema(&tx)?
+            && tx
+                .query_row(
+                    "SELECT db_instance FROM owner_meta WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(error)?
+                == db_instance
+    };
+    if !ours {
+        return Ok(Replayed::NotApplicable("other_database"));
+    }
+    apply(db)
+}
+
+/// Applies one kept revocation at open, guarded by its database and epoch: for another
+/// database, a database with no owner tables, or a client already past its epoch it does
+/// nothing. Inputs: the database, the intent's database id and the revocation. Output: the
+/// outcome, or the storage error, which keeps the intent.
+#[cfg(unix)]
+fn replay_revoke(
+    db: &mut Connection,
+    db_instance: &str,
+    control: &OwnerControl,
+) -> Result<Replayed, EngineError> {
+    assert_eq!(control.decision, OwnerDecision::Revoke);
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    if !owner_schema(&tx)? {
+        return Ok(Replayed::NotApplicable("owner_schema_missing"));
+    }
+    let (instance, engine_epoch): (String, String) = tx
+        .query_row(
+            "SELECT db_instance,engine_epoch FROM owner_meta WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(error)?;
+    if instance != db_instance {
+        return Ok(Replayed::NotApplicable("other_database"));
+    }
+    match owner_control_in(&tx, &engine_epoch, control) {
+        Ok(_) => {
+            tx.commit().map_err(error)?;
+            Ok(Replayed::Committed)
+        }
+        Err(stale) if stale.0 == "owner_control_stale" => {
+            Ok(Replayed::NotApplicable("stale_epoch"))
+        }
+        Err(refused) => Err(refused),
+    }
+}
+
+/// Whether a drained sign-out's intent is still kept, so it may run. A store that cannot be
+/// read, or that refused some entries, counts as keeping it, so the sign-out still lands.
+/// Inputs: the store and the intent's name. Output: the verdict.
+fn still_kept(intents: Option<&narrowing::Intents>, id: &narrowing::IntentId) -> bool {
+    let Some(intents) = intents else {
+        return true;
+    };
+    match intents.list() {
+        Ok(listing) => listing.refused > 0 || listing.intents.iter().any(|(kept, _)| kept == id),
+        Err(refused) => {
+            eprintln!("narrowing_intents_unread cause={}", refused.0);
+            true
+        }
+    }
+}
+
+/// Ends the kept sign-outs an owner's new sign-in supersedes, so neither the drainer nor the
+/// next open signs that sign-in out. Inputs: the database, the store and the begun sign-in.
+/// Output: none; a store or table that cannot be read is logged and ends nothing, so those
+/// sign-outs still land.
+fn end_superseded_sign_outs(
+    db: &Connection,
+    intents: Option<&narrowing::Intents>,
+    begun: &NativeAuthWork,
+) {
+    let Some(intents) = intents else {
+        return;
+    };
+    let listing = match intents.list() {
+        Ok(listing) => listing,
+        Err(refused) => {
+            eprintln!("narrowing_intents_unread cause={}", refused.0);
+            return;
+        }
+    };
+    match native_auth::superseded_sign_outs(db, begun, &listing.intents) {
+        Ok(superseded) => {
+            for id in superseded {
+                end_intent(Some(intents), &id, true);
+            }
+        }
+        Err(refused) => eprintln!("narrowing_sign_outs_unchecked cause={}", refused.0),
+    }
+}
+
+/// Ends the kept sign-out with this operation id once storage recorded its begin, so the next
+/// open does not sign out for it again; a refusal the owner hears is ended where it is
+/// answered. Inputs: the store and the sign-out's operation id. Output: none; a store that
+/// cannot be read is logged and its intent replays later.
+fn end_logout_intent(intents: Option<&narrowing::Intents>, request_id: &RequestId) {
+    let Some(intents) = intents else {
+        return;
+    };
+    let listing = match intents.list() {
+        Ok(listing) => listing,
+        Err(refused) => {
+            eprintln!("narrowing_intents_unread cause={}", refused.0);
+            return;
+        }
+    };
+    for (id, intent) in listing.intents {
+        if matches!(&intent.change, narrowing::Change::Logout(logout) if &logout.request_id == request_id)
+        {
+            end_intent(Some(intents), &id, true);
+        }
+    }
+}
+
+/// Ends a kept narrowing change once storage committed it or found it no longer applies, and
+/// keeps it otherwise, for the next open. Inputs: the store, the intent and whether it ends.
+/// Output: none; a removal that fails is logged and replays as a no-op later.
+fn end_intent(intents: Option<&narrowing::Intents>, id: &narrowing::IntentId, ends: bool) {
+    if !ends {
+        return;
+    }
+    let Some(intents) = intents else {
+        eprintln!(
+            "narrowing_intent_unremoved id={} cause=readonly",
+            id.as_str()
+        );
+        return;
+    };
+    if let Err(left) = intents.remove(id) {
+        eprintln!(
+            "narrowing_intent_unremoved id={} cause={}",
+            id.as_str(),
+            left.0
+        );
+    }
 }
 
 fn owner_control_reconcile(
@@ -3947,6 +4502,7 @@ mod owner_actor_tests {
         let secret = plugins::Command::DetachSecret {
             id: "server".into(),
             name: "token".into(),
+            ask: None,
         };
         let removed = plugins::Command::RemoveServer {
             id: "server".into(),
@@ -4104,7 +4660,7 @@ mod owner_actor_tests {
         let (tx, rx) = oneshot::channel();
         storage
             .sender
-            .try_send(Job::OwnerControl(started.host, control, tx))
+            .try_send(Job::OwnerControl(started.host, control, None, tx))
             .unwrap_or_else(|_| panic!("queue"));
         let (read_tx, read_rx) = oneshot::channel();
         storage
@@ -4237,7 +4793,12 @@ mod owner_actor_tests {
         let (tx, rx) = oneshot::channel();
         storage
             .sender
-            .try_send(Job::OwnerControl(started.host.clone(), control.clone(), tx))
+            .try_send(Job::OwnerControl(
+                started.host.clone(),
+                control.clone(),
+                None,
+                tx,
+            ))
             .unwrap_or_else(|_| panic!("queue"));
         let (late_tx, late_rx) = oneshot::channel();
         storage
@@ -4270,7 +4831,7 @@ mod owner_actor_tests {
         let (tx, rx) = oneshot::channel();
         storage
             .sender
-            .try_send(Job::OwnerControl(started.host, reactivate, tx))
+            .try_send(Job::OwnerControl(started.host, reactivate, None, tx))
             .unwrap_or_else(|_| panic!("queue"));
         assert!(rx.await.unwrap().unwrap().0.active);
         let (tx, rx) = oneshot::channel();

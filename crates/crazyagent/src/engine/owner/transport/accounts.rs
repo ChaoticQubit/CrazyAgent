@@ -5,6 +5,7 @@ use crate::engine::owner::AccountSecret;
 use crate::engine::owner::native_auth::NativeAuthPhase;
 use crate::protocol::{CredentialRef, encode_frame};
 use crate::storage::accounts::{Command, Listed, ResultValue};
+use crate::storage::narrowing::NarrowingAsk;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 #[cfg(unix)]
@@ -389,7 +390,26 @@ async fn handle(
             }
         }
         Action::Remove { id } => {
-            let ResultValue::Removed = actor(engine, admission, Command::Remove(id)).await? else {
+            let runtime = OwnerRuntimeHandle {
+                engine: engine.clone(),
+                authority: authority.clone(),
+            };
+            let kept = runtime
+                .keep_narrowing(crate::storage::narrowing::Change::RemoveAccount { id: id.clone() })
+                .await;
+            let pending = kept.clone().map(|intent| super::narrowing::Pending::Account {
+                admission: admission.clone(),
+                change: super::narrowing::AccountChange::Remove(id.clone()),
+                id: intent,
+            });
+            let ask = kept.clone().map(NarrowingAsk::Owner);
+            let answer = actor(engine, admission, Command::Remove(id, ask)).await;
+            if let Some(intent) = &kept
+                && heard(&answer)
+            {
+                runtime.end_kept(intent).await;
+            }
+            let ResultValue::Removed = runtime.pending_unless_taken(answer, pending)? else {
                 return Err(unknown());
             };
             Reply::Removed
@@ -407,11 +427,39 @@ async fn handle(
                 crate::credentials::wipe(&mut key.into_bytes());
                 return Err(failure("account_key_not_allowed"));
             };
+            let runtime = OwnerRuntimeHandle {
+                engine: engine.clone(),
+                authority: authority.clone(),
+            };
+            let kept = runtime
+                .keep_narrowing(crate::storage::narrowing::Change::KeyReplaced {
+                    id: id.clone(),
+                    credential: credential_ref.clone(),
+                })
+                .await;
             replace_key(root, credential_ref, key)?;
-            let listed = match key_replaced(engine, admission, id, credential_ref.clone()).await {
+            let pending = kept.clone().map(|intent| super::narrowing::Pending::Account {
+                admission: admission.clone(),
+                change: super::narrowing::AccountChange::KeyReplaced(
+                    id.clone(),
+                    credential_ref.clone(),
+                ),
+                id: intent,
+            });
+            let ask = kept.clone().map(NarrowingAsk::Owner);
+            let answer = key_replaced(engine, admission, id, credential_ref.clone(), ask).await;
+            if let Some(intent) = &kept
+                && heard(&answer)
+            {
+                runtime.end_kept(intent).await;
+            }
+            let listed = match runtime.pending_unless_taken(answer, pending) {
                 Ok(ResultValue::Account(current)) => current,
                 Err(gone) if gone.0 == "account_not_found" => return Err(gone),
                 Err(problem) if problem.0.starts_with("account_key") => return Err(problem),
+                Err(pending) if pending.0 == crate::storage::ACCESS_CHANGE_PENDING => {
+                    return Err(pending);
+                }
                 _ => return Err(unknown()),
             };
             Reply::Account {
@@ -450,15 +498,28 @@ async fn actor(
 /// Tells storage that a new key replaced an account's key. Storage deletes that key file
 /// itself when the account is gone, even after the owner's wait ended, unless another
 /// connection still names the key, so a key replace racing a Remove leaves no key behind
-/// and takes none a sibling uses. Inputs: the engine, the admission, the account and its
-/// key reference. Output: storage's answer.
+/// and takes none a sibling uses. Inputs: the engine, the admission, the account, its key
+/// reference and the kept intent. Output: storage's answer.
 pub(super) async fn key_replaced(
     engine: &Engine,
     admission: &Admission,
     id: CredentialRef,
     credential: CredentialRef,
+    ask: Option<NarrowingAsk>,
 ) -> Result<ResultValue, EngineError> {
-    actor(engine, admission, Command::KeyReplaced(id, credential)).await
+    actor(engine, admission, Command::KeyReplaced(id, credential, ask)).await
+}
+
+/// Whether the owner hears a refusal of a kept change by its own name, so the change's
+/// intent ends: a code this route sends as it is, neither a storage answer nor an outcome
+/// unknown. Input: the answer. Output: the verdict.
+fn heard<T>(answer: &Result<T, EngineError>) -> bool {
+    answer.as_ref().is_err_and(|refused| {
+        !crate::storage::storage_answer(&refused.0)
+            && *refused != crate::engine::owner::native_auth::outcome_unknown()
+            && *refused != unknown()
+            && public_code(refused.clone()) == refused.0
+    })
 }
 
 async fn authenticate(
@@ -830,16 +891,32 @@ fn view(listed: &Listed, status: AccountStatus) -> AccountView {
         },
         model: (!native).then(|| listed.connection.model.id.clone()),
         status,
-        status_label: if status == AccountStatus::NotSignedIn && listed.rejected {
-            "Sign-in rejected"
-        } else if status == AccountStatus::SigningIn
-            && listed.sign_in == Some(NativeAuthPhase::AuthenticatedObserved)
-        {
-            "Checking sign-in"
-        } else {
-            status.label()
-        }
-        .into(),
+        status_label: match &listed.sign_out_unfinished {
+            Some(code) if status == AccountStatus::NotSignedIn => {
+                format!("Sign-out not finished: {}", sign_out_reason(code))
+            }
+            _ if status == AccountStatus::NotSignedIn && listed.rejected => {
+                "Sign-in rejected".into()
+            }
+            _ if status == AccountStatus::SigningIn
+                && listed.sign_in == Some(NativeAuthPhase::AuthenticatedObserved) =>
+            {
+                "Checking sign-in".into()
+            }
+            _ => status.label().into(),
+        },
+    }
+}
+
+/// Says in plain words why a sign-out did not finish in the harness, for the Accounts page:
+/// the profile is signed out here, but the harness may still hold its credentials.
+/// Input: the stored code. Output: the reason, a fixed sentence for any code it does not
+/// name, so no harness output ever reaches the page.
+fn sign_out_reason(code: &str) -> &'static str {
+    match code {
+        crate::storage::SIGN_OUT_NOT_RUN => "the engine stopped before the harness signed out",
+        "native_auth_host_unavailable" => "the sign-in helper could not run the harness",
+        _ => "the harness sign-out failed",
     }
 }
 

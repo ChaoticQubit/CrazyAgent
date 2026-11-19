@@ -1135,19 +1135,68 @@ impl OwnerRuntimeHandle {
         self.authority.reserve_native_auth(dispatch, false)
     }
 
+    /// Runs one native-auth command. A sign-out is kept on disk first: it ends here when the
+    /// owner hears storage refuse it by name, one storage refuses to take is queued for the
+    /// drainer and answered pending, and any other stays until storage records it or the
+    /// next open replays it. Inputs: the admission, the command and who asks. Output: the
+    /// reply, or the code the asker sees.
     pub(super) async fn native_auth_command(
         &self,
         admission: Admission,
         command: crate::engine::owner::native_auth::Command,
+        ask: crate::storage::NativeAuthAsk,
+    ) -> Result<NativeAuthReply, EngineError> {
+        let logout = match &command {
+            crate::engine::owner::native_auth::Command::Logout(logout) => Some(logout.clone()),
+            _ => None,
+        };
+        let Some(logout) = logout else {
+            return self.native_auth_submit(admission, command, ask).await;
+        };
+        command.validate()?;
+        let owner = matches!(ask, crate::storage::NativeAuthAsk::Owner { .. });
+        let kept = self
+            .keep_narrowing(crate::storage::narrowing::Change::Logout(logout.clone()))
+            .await;
+        let answer = self
+            .native_auth_submit(admission.clone(), command, ask)
+            .await;
+        if owner && let Some(id) = &kept {
+            self.end_refused_sign_out(id, &answer).await;
+        }
+        self.pending_unless_taken(
+            answer,
+            kept.map(|id| super::narrowing::Pending::Logout {
+                admission,
+                logout,
+                id,
+            }),
+        )
+    }
+
+    /// Submits one native-auth command to storage and takes its answer to the next step,
+    /// freezing host registration first for a sign-in or a sign-out. Every wait for the
+    /// owner ends by its answer's due time. Inputs: the admission, the command and who asks.
+    /// Output: the reply, or the storage or validation code.
+    pub(super) async fn native_auth_submit(
+        &self,
+        admission: Admission,
+        command: crate::engine::owner::native_auth::Command,
+        ask: crate::storage::NativeAuthAsk,
     ) -> Result<NativeAuthReply, EngineError> {
         command.validate()?;
+        let answer_by = match &ask {
+            crate::storage::NativeAuthAsk::Owner { answer_by } => Some(*answer_by),
+            _ => None,
+        };
         if matches!(
             &command,
             crate::engine::owner::native_auth::Command::Start(_)
                 | crate::engine::owner::native_auth::Command::Logout(_)
         ) {
+            let released_by = Instant::now() + CLEANUP_BOUND;
             self.authority
-                .native_auth_released(Instant::now() + CLEANUP_BOUND)
+                .native_auth_released(answer_by.map_or(released_by, |by| by.min(released_by)))
                 .await;
             self.authority
                 .native_auth_host
@@ -1165,8 +1214,9 @@ impl OwnerRuntimeHandle {
         let begun = self
             .engine
             .native_auth_settled_job(
-                |reply| Job::NativeAuth(admission.clone(), command, reply),
+                |reply| Job::NativeAuth(admission.clone(), command, ask, reply),
                 late,
+                answer_by,
             )
             .await?;
         self.settle_native_auth(admission, begun).await
@@ -2919,7 +2969,14 @@ fallback_allowed = false
             };
             let begun = host
                 .engine
-                .native_auth_job(|reply| Job::NativeAuth(admission, command, reply))
+                .native_auth_job(|reply| {
+                    Job::NativeAuth(
+                        admission,
+                        command,
+                        crate::storage::NativeAuthAsk::Engine,
+                        reply,
+                    )
+                })
                 .await
                 .unwrap();
             assert_eq!(begun.reply.fact.phase, NativeAuthPhase::Starting);

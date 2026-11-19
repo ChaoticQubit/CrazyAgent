@@ -1,6 +1,7 @@
 use super::*;
 use crate::accounts::AccountDetails;
 use crate::config::{ModelAccessEdit, ModelAuthentication, ModelConnection};
+use super::narrowing::NarrowingAsk;
 use crate::engine::owner::native_auth::NativeAuthPhase;
 use serde::{Deserialize, Serialize};
 
@@ -20,12 +21,24 @@ pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
 pub(crate) enum Command {
     Add(Box<ModelConnection>, AccountDetails),
     Rename(CredentialRef, String),
-    Remove(CredentialRef),
+    Remove(CredentialRef, Option<NarrowingAsk>),
     List(Option<CredentialRef>, usize),
     Get(CredentialRef),
-    /// A new key replaced an account's key: the account and its key reference.
-    KeyReplaced(CredentialRef, CredentialRef),
+    /// A new key replaced an account's key: the account, its key reference, and the intent
+    /// the transport kept the change under.
+    KeyReplaced(CredentialRef, CredentialRef, Option<NarrowingAsk>),
     Held,
+}
+
+impl Command {
+    /// The kept intent a removal or a key replace carries, which storage ends once the change
+    /// commits or no longer applies. Output: the ask, none for every other command.
+    pub(crate) fn kept(&self) -> Option<NarrowingAsk> {
+        match self {
+            Self::Remove(_, ask) | Self::KeyReplaced(_, _, ask) => ask.clone(),
+            _ => None,
+        }
+    }
 }
 
 pub(crate) struct Listed {
@@ -35,6 +48,7 @@ pub(crate) struct Listed {
     pub(crate) launchable: bool,
     pub(crate) rejected: bool,
     pub(crate) rechecking: bool,
+    pub(crate) sign_out_unfinished: Option<String>,
 }
 
 pub(crate) enum ResultValue {
@@ -271,7 +285,7 @@ pub(super) fn execute(
                 &tx, admission, connection, details,
             )?)))
         }
-        Command::KeyReplaced(id, credential) => {
+        Command::KeyReplaced(id, credential, _) => {
             let tx = db
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(error)?;
@@ -361,7 +375,7 @@ pub(super) fn execute(
             tx.commit().map_err(error)?;
             Ok(ResultValue::Account(Box::new(account)))
         }
-        Command::Remove(id) => {
+        Command::Remove(id, _) => {
             let (connection, _) = {
                 let tx = db.transaction().map_err(error)?;
                 check_owner_admission(&tx, admission)?;
@@ -376,36 +390,112 @@ pub(super) fn execute(
                     ModelAccessEdit::RemoveConnectedAccount { id: id.clone() },
                 )?;
             }
-            let tx = db
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .map_err(error)?;
-            check_owner_admission(&tx, admission)?;
-            #[cfg(unix)]
-            let saved = registered(&tx, &id)?.map(|(_, record)| record.connection.auth);
-            tx.execute("DELETE FROM accounts WHERE id=?1", [id.as_str()])
-                .map_err(error)?;
-            crate::usage::forget_limits(&tx, &id)?;
-            #[cfg(not(unix))]
-            if let ModelAuthentication::ApiKey { credential_ref } = &connection.auth {
-                super::trash::put(&tx, super::trash::ACCOUNT_KEY, credential_ref.as_str())?;
-            }
-            #[cfg(unix)]
-            let left: std::collections::BTreeSet<(&str, &str)> = account_files(&connection.auth)
-                .into_iter()
-                .chain(saved.iter().flat_map(account_files))
-                .collect();
-            #[cfg(unix)]
-            for (kind, name) in &left {
-                super::trash::put(&tx, kind, name)?;
-            }
-            tx.commit().map_err(error)?;
-            #[cfg(unix)]
-            for (kind, name) in &left {
-                settle_removed(db, config.settings.model_access.as_ref(), kind, name);
-            }
+            remove_record(db, config, Some(admission), &id, &connection)?;
             Ok(ResultValue::Removed)
         }
     }
+}
+
+/// Deletes a removed account's row and usage limits, then its files once nothing names them,
+/// after its connection left the catalog. An owner's removal checks its admission again in
+/// the delete; the open's replay of a kept removal has no owner to check.
+/// Inputs: the database, catalog, the owner's admission or none for a replay, the account id
+/// and its connection. Output: any failure, which leaves the account for a retry.
+fn remove_record(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    admission: Option<&Admission>,
+    id: &CredentialRef,
+    connection: &ModelConnection,
+) -> Result<(), EngineError> {
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    if let Some(admission) = admission {
+        check_owner_admission(&tx, admission)?;
+    }
+    #[cfg(unix)]
+    let saved = registered(&tx, id)?.map(|(_, record)| record.connection.auth);
+    tx.execute("DELETE FROM accounts WHERE id=?1", [id.as_str()])
+        .map_err(error)?;
+    crate::usage::forget_limits(&tx, id)?;
+    #[cfg(not(unix))]
+    if let ModelAuthentication::ApiKey { credential_ref } = &connection.auth {
+        super::trash::put(&tx, super::trash::ACCOUNT_KEY, credential_ref.as_str())?;
+    }
+    #[cfg(unix)]
+    let left: std::collections::BTreeSet<(&str, &str)> = account_files(&connection.auth)
+        .into_iter()
+        .chain(saved.iter().flat_map(account_files))
+        .collect();
+    #[cfg(unix)]
+    for (kind, name) in &left {
+        super::trash::put(&tx, kind, name)?;
+    }
+    tx.commit().map_err(error)?;
+    #[cfg(unix)]
+    for (kind, name) in &left {
+        settle_removed(db, config.settings.model_access.as_ref(), kind, name);
+    }
+    Ok(())
+}
+
+/// Applies a kept account removal at open, with no owner: a held account first leaves the
+/// catalog through a replay journal ([`settings::replay_remove_connection`]), then its row
+/// and files go as an owner's removal deletes them. An account already gone is applied.
+/// Inputs: the database, config, sources, the intent's name and the account id. Output: the
+/// outcome, or the failure, which keeps the intent for the next open.
+#[cfg(unix)]
+pub(super) fn replay_remove(
+    db: &mut Connection,
+    config: &mut EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    intent: &super::narrowing::IntentId,
+    id: &CredentialRef,
+) -> Result<super::Replayed, EngineError> {
+    initialize(db)?;
+    let found = {
+        let tx = db.transaction().map_err(error)?;
+        find(&tx, config, id)?
+    };
+    let Some((connection, _)) = found else {
+        return Ok(super::Replayed::NotApplicable("account_not_found"));
+    };
+    if held(config, id) {
+        settings::replay_remove_connection(db, config, sources, intent, id)?;
+    }
+    assert!(!held(config, id));
+    remove_record(db, config, None, id, &connection)?;
+    Ok(super::Replayed::Committed)
+}
+
+/// Applies the narrowing half of a kept key replace at open: with the account gone, the key
+/// file the replace wrote is deleted unless another connection names it. An account still
+/// present keeps its key, and its holds lift only when its owner replaces the key.
+/// Inputs: the database, the config, the account id and its key reference. Output: the outcome.
+#[cfg(unix)]
+pub(super) fn replay_key_replaced(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    id: &CredentialRef,
+    credential: &CredentialRef,
+) -> Result<super::Replayed, EngineError> {
+    initialize(db)?;
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    if find(&tx, config, id)?.is_some() {
+        return Ok(super::Replayed::NotApplicable("account_present"));
+    }
+    super::trash::put(&tx, super::trash::ACCOUNT_KEY, credential.as_str())?;
+    tx.commit().map_err(error)?;
+    settle_removed(
+        db,
+        config.settings.model_access.as_ref(),
+        super::trash::ACCOUNT_KEY,
+        credential.as_str(),
+    );
+    Ok(super::Replayed::Committed)
 }
 
 /// Names the files an account's authentication leaves to delete once nothing names it: an
@@ -721,13 +811,11 @@ fn list(
     Ok(ResultValue::Page(items, next))
 }
 
-/// Lists one account with its latest sign-in, whether the provider rejected it, whether it
-/// passes the launch check every master, team and research turn uses on this engine run, so
-/// status never shows an account as signed in when a launch or the master would refuse it,
-/// and whether a sign-in that fails only that check waits for this run's re-check (DEC-108);
-/// a re-check that cannot be read counts as none, so one account never fails the list.
-/// Inputs: the transaction, the admitted owner, the connection and its details.
-/// Output: the listed account.
+/// Lists one account: its latest sign-in, a provider rejection, the launch check every turn
+/// uses on this run (so status never says signed in when a launch would refuse), a pending
+/// re-check (DEC-108; one that cannot be read counts as none), and why its newest sign-out
+/// did not finish in the harness. Inputs: the transaction, the admitted owner, the
+/// connection and its details. Output: the listed account.
 fn listed(
     tx: &Transaction<'_>,
     admission: &Admission,
@@ -752,6 +840,16 @@ fn listed(
         && !rejected
         && crate::storage::sign_in_rechecking(tx, &host, &connection).unwrap_or(false);
     assert!(!(launchable && rechecking));
+    let sign_out_unfinished = match (&connection.auth, sign_in) {
+        (ModelAuthentication::NativeManaged { profile_ref }, Some(_)) => {
+            super::native_auth::unfinished_sign_out(
+                tx,
+                &crate::memory::hash(profile_ref.as_str().as_bytes()),
+            )?
+        }
+        _ => None,
+    };
+    assert!(sign_out_unfinished.is_none() || !launchable);
     Ok(Listed {
         connection,
         details,
@@ -759,6 +857,7 @@ fn listed(
         launchable,
         rejected,
         rechecking,
+        sign_out_unfinished,
     })
 }
 
