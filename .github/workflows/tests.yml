@@ -74,6 +74,7 @@ jobs:
           cache-bin: false
           save-if: false
       - name: Build at the tip
+        if: always()
         timeout-minutes: 100
         run: bash "$RUNNER_TEMP/rows.sh" build "$TIP"
       - name: Green at the tip, the probe on its own, and every lib row naming hidden
@@ -178,6 +179,7 @@ jobs:
           cache-bin: false
           save-if: false
       - name: Build at the tip
+        if: always()
         timeout-minutes: 60
         run: bash "$RUNNER_TEMP/rows.sh" build "$TIP"
       - name: Green at the tip, the probe on its own, and every lib row naming hidden
