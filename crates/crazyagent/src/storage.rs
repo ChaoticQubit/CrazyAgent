@@ -1761,6 +1761,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::learning::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
+    crate::team::cleanup::initialize(connection)?;
     crate::team::log_status_changes(connection)?;
     crate::ide::bridge::memory::initialize(connection)?;
     crate::coord::ensure(connection)?;

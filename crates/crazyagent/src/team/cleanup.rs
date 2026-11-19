@@ -269,7 +269,8 @@ fn profile(team: &Path, id: i64) -> PathBuf {
 /// Creates the table that holds the worktree records of agents the owner confirmed for
 /// removal until their files are gone; the runtime reads only `team_worktrees`, so no
 /// revive or resolve task starts on a record waiting here, while the IDE's git ceiling
-/// counts both. Input: the store.
+/// counts both. The engine start makes it with the other tables, before the owner server
+/// answers; the calls here keep a store opened without that start whole. Input: the store.
 pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS team_retiring (
