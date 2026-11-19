@@ -1277,7 +1277,10 @@ mod tests {
                 later.is_dir() && fs::read_dir(&later).unwrap().next().is_none(),
                 "an absent hidden folder is made empty: job {job}"
             );
-            assert_eq!(fs::read_to_string(vault.join("key.txt")).unwrap(), "key\r\n");
+            assert_eq!(
+                fs::read_to_string(vault.join("key.txt")).unwrap(),
+                "key\r\n"
+            );
             let guarded = boundary_profile(&sandbox, &folders.grants).unwrap().guarded;
             for folder in [&vault, &later] {
                 let path = folder.to_str().unwrap();
@@ -1315,9 +1318,13 @@ mod tests {
             .hide(&vault)
             .unwrap();
         let profile = folders.profiles.join("agent.sb");
-        let installed = WindowsSandbox::install(sandbox, &helper, &profile, &folders.grants).unwrap();
+        let installed =
+            WindowsSandbox::install(sandbox, &helper, &profile, &folders.grants).unwrap();
         let run = |line: &str| shell(&installed, &folders, line);
-        assert!(run("echo work>work.txt"), "the agent still edits the project");
+        assert!(
+            run("echo work>work.txt"),
+            "the agent still edits the project"
+        );
         for name in &names {
             let name = name.display();
             assert!(!run(&format!("dir {name}")), "listed {name}");
@@ -1334,8 +1341,15 @@ mod tests {
         let link = format!(r"mklink /H copy.txt {}\key.txt", vault.display());
         assert!(!run(&link), "a hidden file took a second name");
         assert!(!project.join("copy.txt").exists() && !moved_to.exists());
-        assert_eq!(fs::read_to_string(vault.join("key.txt")).unwrap(), "key\r\n");
-        assert_eq!(fs::read_dir(&vault).unwrap().count(), 1, "nothing new in the vault");
+        assert_eq!(
+            fs::read_to_string(vault.join("key.txt")).unwrap(),
+            "key\r\n"
+        );
+        assert_eq!(
+            fs::read_dir(&vault).unwrap().count(),
+            1,
+            "nothing new in the vault"
+        );
     }
 
     /// V244-WIN-HIDDEN-BOUNDARY probe: a file in a hidden folder whose own list, cut from the
@@ -1361,7 +1375,8 @@ mod tests {
             .hide(&vault)
             .unwrap();
         let profile = folders.profiles.join("agent.sb");
-        let installed = WindowsSandbox::install(sandbox, &helper, &profile, &folders.grants).unwrap();
+        let installed =
+            WindowsSandbox::install(sandbox, &helper, &profile, &folders.grants).unwrap();
         assert!(shell(&installed, &folders, "echo work>work.txt"));
         assert!(
             !shell(&installed, &folders, r"type vault\open.txt"),
@@ -1385,9 +1400,15 @@ mod tests {
         let plain = ProjectSandbox::new(&folders.project, &other, &folders.tmp, network).unwrap();
         let open_profile = folders.profiles.join("open.sb");
         let open = WindowsSandbox::install(plain, &helper, &open_profile, &folders.grants).unwrap();
-        assert_ne!(container_name(&open.sandbox), container_name(&policy(&folders, SandboxNetwork::Open)));
+        assert_ne!(
+            container_name(&open.sandbox),
+            container_name(&policy(&folders, SandboxNetwork::Open))
+        );
         let read = r"type vault\key.txt";
-        assert!(shell(&open, &folders, read), "unhidden, the second agent reads it");
+        assert!(
+            shell(&open, &folders, read),
+            "unhidden, the second agent reads it"
+        );
         let hiding = policy(&folders, SandboxNetwork::Only(Vec::new()))
             .hide(&vault)
             .unwrap();
@@ -1424,6 +1445,9 @@ mod tests {
         running.kill().unwrap();
         running.wait().unwrap();
         drop(stdin);
-        assert!(!second, "the second container read a folder another run hides");
+        assert!(
+            !second,
+            "the second container read a folder another run hides"
+        );
     }
 }

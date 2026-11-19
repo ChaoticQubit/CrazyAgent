@@ -754,7 +754,9 @@ fn walk(
     let mut stack: Vec<PathBuf> = Vec::with_capacity(folders.len());
     for folder in folders {
         match std::fs::symlink_metadata(folder) {
-            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => stack.push(folder.clone()),
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+                stack.push(folder.clone())
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             _ => return Err(unreadable(folder)),
         }
@@ -2089,7 +2091,10 @@ mod tests {
     fn walk_time_per_call() {
         const FOLDERS: usize = 100;
         let root = project();
-        for (label, entries) in [("tenth", WALK_ENTRIES_MAX / 10), ("bound", WALK_ENTRIES_MAX)] {
+        for (label, entries) in [
+            ("tenth", WALK_ENTRIES_MAX / 10),
+            ("bound", WALK_ENTRIES_MAX),
+        ] {
             let hidden = root.path().join(label);
             let files = entries / FOLDERS - 1;
             for folder in 0..FOLDERS {

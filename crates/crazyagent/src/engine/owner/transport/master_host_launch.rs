@@ -990,7 +990,8 @@ fn turn_sandbox(
     }
     let repository = &crate::projects_home::one_spelling(repository.to_path_buf());
     let worktree = &crate::projects_home::one_spelling(worktree.to_path_buf());
-    crate::sandbox::hidden_paths::held(repository, hidden).map_err(|unheld| failure(unheld.code))?;
+    crate::sandbox::hidden_paths::held(repository, hidden)
+        .map_err(|unheld| failure(unheld.code))?;
     let refused = |_: SandboxError| failure("master_sandbox_unavailable");
     let remote = match endpoint {
         ModelEndpoint::Native {} => SandboxRemote::AnyHost(HTTPS_PORT),
