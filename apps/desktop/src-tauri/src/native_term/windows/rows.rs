@@ -814,9 +814,31 @@ fn cell_spot(cell: (usize, usize)) -> place::Spot {
     place::ime_spot(cell, size, 100).expect("a spot")
 }
 
-/// Marked text is the view's own: a composition string marks it with one redraw, the drawn
-/// marked text gives each character's screen cell to IMR_QUERYCHARPOSITION and puts the
-/// candidate list clear of the caret's cell. Input: the focused view.
+/// Counts the pixels down the middle of each of these cells of the view's screen that
+/// differ from the background. Inputs: the view, the row and the columns. Output: the count.
+fn drawn_down_cells(view: &View, row: usize, columns: std::ops::Range<usize>) -> usize {
+    let mut window = RECT::default();
+    assert_ne!(unsafe { GetWindowRect(view.hwnd(), &mut window) }, 0);
+    let mut drawn = 0;
+    for column in columns {
+        let (left, top, right, bottom) = cell_spot((row, column)).cell;
+        assert!(bottom > top);
+        let x = window.left + (left + right) / 2;
+        for y in top..bottom {
+            let at = POINT {
+                x,
+                y: window.top + y,
+            };
+            drawn += usize::from(!near(pixel(at), background()));
+        }
+    }
+    drawn
+}
+
+/// Marked text is the view's own: a composition string marks it with one redraw, its cells
+/// are drawn, the drawn marked text gives each character's screen cell to
+/// IMR_QUERYCHARPOSITION and puts the candidate list clear of the caret's cell. Input: the
+/// focused view.
 fn marks_and_answers_where_its_characters_are(view: &View) {
     let caret = (GCS_CURSORPOS, 1, Vec::new());
     let answers = vec![told(GCS_COMPSTR, "かな"), caret];
@@ -833,6 +855,11 @@ fn marks_and_answers_where_its_characters_are(view: &View) {
     );
     assert!(view.feed(frame));
     await_present("the marked frame", before);
+    let span = drawn.column..drawn.column + drawn.cells;
+    let marked = drawn_down_cells(view, drawn.row, span.clone());
+    assert!(marked > 0, "the marked cells are drawn");
+    let blank = drawn_down_cells(view, drawn.row + 2, span);
+    assert_eq!(blank, 0, "the cells two rows down are background");
     let (answer, asked) = asked_where(view, char_query(36, 1));
     assert_eq!(answer, 1, "the second character's cell is answered");
     let want = cell_spot((drawn.row, drawn.column + 2));
@@ -869,10 +896,8 @@ fn marks_and_answers_where_its_characters_are(view: &View) {
         (CFS_EXCLUDE, at),
         "clear of the caret's cell"
     );
-    println!(
-        "h2b row: marked かな, char 1 at {:?}, candidate {area:?}",
-        written(&asked)
-    );
+    let at = written(&asked);
+    println!("h2b row: marked かな, {marked} pixels drawn, char 1 at {at:?}, candidate {area:?}");
 }
 
 /// Answers the view cannot trust change nothing: a null, short or past-the-end char query
@@ -930,9 +955,9 @@ fn commits_once_as_typed_text(view: &View) {
     println!("h2b row: 日本 and a control commit once each");
 }
 
-/// The end of a composition, a click and a hide each drop the marked text with nothing
-/// sent. Inputs: the view and its centre on screen.
-fn compositions_end_and_cancel_with_nothing_sent(view: &View, centre: POINT) {
+/// The end of a composition, a click, a focus loss and a hide each drop the marked text
+/// with nothing sent. Inputs: the view, the webview and the view's centre on screen.
+fn compositions_end_and_cancel_with_nothing_sent(view: &View, webview: HWND, centre: POINT) {
     let mark = || {
         let seen = composed(view, GCS_COMPSTR, vec![told(GCS_COMPSTR, "か")]);
         assert_eq!(seen, [ViewEvent::Marked]);
@@ -955,6 +980,22 @@ fn compositions_end_and_cancel_with_nothing_sent(view: &View, centre: POINT) {
     );
     assert_eq!(view.marked_text(), None);
     mark();
+    unsafe { SetFocus(webview) };
+    pump_for(KEY_TAIL);
+    assert_eq!(
+        sent(),
+        [ViewEvent::Marked],
+        "a focus loss cancels the marked text"
+    );
+    assert_eq!(view.marked_text(), None);
+    click(centre);
+    pump_until(
+        "focus again",
+        FARM_WAIT,
+        || unsafe { GetFocus() } == view.hwnd(),
+    );
+    take_seen();
+    mark();
     view.place(None).expect("hidden");
     pump_for(KEY_TAIL);
     assert_eq!(
@@ -970,7 +1011,7 @@ fn compositions_end_and_cancel_with_nothing_sent(view: &View, centre: POINT) {
         FARM_WAIT,
         || unsafe { GetFocus() } == view.hwnd(),
     );
-    println!("h2b row: end, click and hide each cancelled once");
+    println!("h2b row: end, click, focus loss and hide each cancelled once");
 }
 
 /// A covered view and a view without focus commit nothing and keep no marked text (the
@@ -1026,7 +1067,7 @@ fn the_ime_marks_inline_commits_once_refuses_bad_answers_and_nothing_while_inact
     marks_and_answers_where_its_characters_are(&view);
     refuses_what_it_cannot_trust(&view);
     commits_once_as_typed_text(&view);
-    compositions_end_and_cancel_with_nothing_sent(&view, centre);
+    compositions_end_and_cancel_with_nothing_sent(&view, webview, centre);
     inactive_views_compose_nothing(&view, webview, centre);
     drop(view);
     assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the stand-in goes");
