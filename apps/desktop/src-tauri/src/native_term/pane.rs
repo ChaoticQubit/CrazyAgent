@@ -16,6 +16,10 @@ pub const GRID_MIN: usize = SIZE_MIN as usize;
 
 const _: () = assert!(GRID_MAX == 1000 && GRID_MIN == 2);
 
+/// The code a copy answers when the pane has nothing to copy: no terminal yet, or no
+/// selection, or only blank cells.
+pub const COPY_EMPTY: &str = "native_terminal_copy_empty";
+
 /// The xterm modifier bits a named key carries: Shift, Alt (Option) and Control.
 pub const SHIFT: u8 = 1;
 pub const ALT: u8 = 2;
@@ -499,7 +503,7 @@ impl Pane {
     /// and screen). Input: whether to take the whole output. Output: the text, or a plain
     /// code when there is nothing to copy or it is over `COPY_BYTES_MAX`.
     pub fn copy(&self, output: bool) -> Result<String, &'static str> {
-        let term = self.term.as_ref().ok_or("native_terminal_copy_empty")?;
+        let term = self.term.as_ref().ok_or(COPY_EMPTY)?;
         let text = if output {
             let top = Point::new(Line(-(term.grid().history_size() as i32)), Column(0));
             let bottom = Point::new(
@@ -513,9 +517,7 @@ impl Pane {
         } else {
             term.selection_to_string()
         };
-        let text = text
-            .filter(|t| !t.trim().is_empty())
-            .ok_or("native_terminal_copy_empty")?;
+        let text = text.filter(|t| !t.trim().is_empty()).ok_or(COPY_EMPTY)?;
         if text.len() > codec::COPY_BYTES_MAX {
             return Err("native_terminal_copy_too_large");
         }

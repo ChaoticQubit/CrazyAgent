@@ -4,6 +4,8 @@ use super::control::{Control, Event};
 use super::ended::ended_final;
 use super::event::{MouseKind, ViewEvent};
 use super::pane::{Action, GRID_MAX, Input};
+#[cfg(windows)]
+use super::pane::{COPY_EMPTY, Pane};
 use super::render::{GPU_FAULT, Shared};
 use super::screen;
 use super::style::Style;
@@ -957,11 +959,20 @@ impl Native {
     }
 }
 
-/// The copy chord of a host without Cmd (Ctrl+C, Ctrl+Shift+C). Inputs: the pane, the
-/// board and the chord's own input. Output: what the pane asks for.
+/// The copy chord of a host without Cmd (Ctrl+C, Ctrl+Shift+C): a selection goes to the
+/// board, and with none the chord's own input (^C) goes to the pane. A selection the board
+/// refuses as too large sends nothing, so a copy never interrupts the agent. Inputs: the
+/// pane, the board and the chord's input. Output: what the pane asks for.
 #[cfg(windows)]
-fn copy_key(pane: &mut super::pane::Pane, _clip: &platform::Clip, input: Input) -> Action {
-    pane.apply(input)
+fn copy_key(pane: &mut Pane, clip: &platform::Clip, input: Input) -> Action {
+    match pane.copy(false) {
+        Ok(text) => {
+            let _ = clip.write(&text);
+            Action::Nothing
+        }
+        Err(code) if code == COPY_EMPTY => pane.apply(input),
+        Err(_) => Action::Nothing,
+    }
 }
 
 fn cell_of(
