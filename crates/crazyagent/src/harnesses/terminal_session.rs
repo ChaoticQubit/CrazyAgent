@@ -569,7 +569,8 @@ impl TerminalSession {
         let host = self.host.as_ref();
         let pin = crate::terminal::request_pin(host, &self.agent).map_err(host_failure)?;
         let typed = |bytes: &[u8]| {
-            crate::terminal::type_piece(host, &self.agent, pin.as_ref(), bytes)
+            let stale = crate::terminal::APP_PANE_UNKNOWN;
+            crate::terminal::type_piece(host, &self.agent, pin.as_ref(), bytes, stale)
                 .map_err(host_failure)
         };
         for part in paste(prompt) {

@@ -488,18 +488,18 @@ pub trait Host: Send + Sync {
 
     /// Marks the pane of an agent's window whose first process is `pid` as the agent's app
     /// pane, the one its prompts go to, for a pane an older engine started without that mark.
-    /// Takes the name and the pid its pane record kept. Returns Ok once marked, or at once on
-    /// a host with no pane ids.
+    /// Takes the name and the pid its pane record kept. Returns Ok once marked, at once on a
+    /// host with no pane ids, or `APP_PANE_UNKNOWN` when no live pane has that pid.
     fn tag_app(&self, _agent: &AgentId, _pid: u32) -> Result<(), HostError> {
         Ok(())
     }
 
     /// The pane an agent's prompts go to: its app's own pane, never a teammate split off its
     /// window, and the serial of the connection that found it. Takes the name. Returns the
-    /// pane, `terminal_agent_unknown` when no pane is known to be the app's, or
-    /// `terminal_unavailable` for a host with no pane ids, whose prompts type by name.
+    /// pane, `APP_PANE_UNKNOWN` when no pane is known to be the app's, or `PINS_UNSUPPORTED`
+    /// for a host with no pane ids, whose prompts type by name.
     fn app_pane_at(&self, _agent: &AgentId) -> Result<PaneAt, HostError> {
-        Err(failure("terminal_unavailable"))
+        Err(failure(PINS_UNSUPPORTED))
     }
 
     /// Pastes keys straight into the pane a view stays on, as `paste` does by name, while the
@@ -708,6 +708,15 @@ pub const TEAMMATES_SERVER_ENDED: &str = "terminal_teammates_server_ended";
 pub fn ended_code(code: &str) -> bool {
     matches!(code, "terminal_agent_unknown" | TEAMMATES_SERVER_ENDED)
 }
+
+/// What a host with no pane ids answers for an agent's app pane, so its prompts type by name.
+/// No tmux host answers it, so a failed connect fails the prompt instead (#686 r1 sec F1).
+pub(crate) const PINS_UNSUPPORTED: &str = "terminal_pins_unsupported";
+
+/// The refusal for a prompt to an agent whose app pane is not known while its window lives: a
+/// split window with no tag, an app pane gone beside a teammate, or a request's pin gone
+/// stale. Not an ended terminal, so a view stays and coord holds the message (#686 r1 F2).
+pub(crate) const APP_PANE_UNKNOWN: &str = "terminal_app_pane_unknown";
 
 /// The refusal for a native lead's teammates' socket answered by a server under another pid
 /// than the one the engine first reached there (PLC c).
@@ -1110,6 +1119,9 @@ pub fn plain_reason(code: &str) -> &'static str {
         "terminal_agent_running" => "This agent already has a terminal.",
         "terminal_agent_invalid" => "That is not an agent terminal.",
         "terminal_pane_unknown" => "That teammate's terminal has already closed.",
+        APP_PANE_UNKNOWN => {
+            "This agent's own pane could not be found, so nothing was typed. It keeps running."
+        }
         "terminal_project_full" => {
             "This project already runs 15 agents, the most one project may run at once."
         }
@@ -1544,21 +1556,34 @@ pub fn paste_keys(text: &str) -> Vec<u8> {
 /// nothing.
 pub fn type_prompt(host: &dyn Host, agent: &AgentId, text: &str) -> Result<bool, HostError> {
     if let Some(at) = request_pin(host, agent)? {
-        return type_prompt_at(host, agent, &at, text);
+        return prompt_pinned(host, agent, &at, text, APP_PANE_UNKNOWN);
     }
     let bracketed = host.input_live(agent)?;
     prompt_into(text, bracketed, |keys| host.input(agent, keys))
 }
 
-/// Types one prompt into a pinned pane, as `type_prompt` does: the same keys and Enter, the
-/// paste mode read from that pane, each straight into it, never by name. Takes the host, the
-/// terminal name, the pane and the text. Returns as `type_prompt`, or `terminal_agent_unknown`
-/// once that pane is no longer one the host can type into.
+/// Types one prompt into a view's pinned pane, as `type_prompt` does, never by name. Takes the
+/// host, the terminal name, the pane and the text. Returns as `type_prompt`, or
+/// `terminal_agent_unknown` once that pane is no longer one the host can type into, which ends
+/// the view so it opens again with a fresh pin, as its other pinned sends do.
 pub(crate) fn type_prompt_at(
     host: &dyn Host,
     agent: &AgentId,
     at: &PaneAt,
     text: &str,
+) -> Result<bool, HostError> {
+    prompt_pinned(host, agent, at, text, "terminal_agent_unknown")
+}
+
+/// Types one prompt's keys and Enter into a pinned pane, the paste mode read from that pane.
+/// Takes the host, the name, the pin, the text and the code a stale pin answers. Returns as
+/// `type_prompt`, or that code once the pin is stale.
+fn prompt_pinned(
+    host: &dyn Host,
+    agent: &AgentId,
+    at: &PaneAt,
+    text: &str,
+    stale: &'static str,
 ) -> Result<bool, HostError> {
     assert!(pane_id_valid(&at.pane), "a pin is a pane id");
     assert!(
@@ -1566,38 +1591,43 @@ pub(crate) fn type_prompt_at(
         "a pin names the control connection that found it"
     );
     let Some(bracketed) = host.input_live_at(agent, at)? else {
-        return Err(failure("terminal_agent_unknown"));
+        return Err(failure(stale));
     };
     prompt_into(text, bracketed, |keys| {
-        type_piece(host, agent, Some(at), keys)
+        type_piece(host, agent, Some(at), keys, stale)
     })
 }
 
 /// The pane one engine prompt goes to, found once so every piece of it lands in one pane
-/// (V243-PASTE-INTERLEAVE-N0): the agent's app pane, or none on a host with no pane ids, which
-/// types by name. Takes the host and the name. Returns the pin, none, or the host's error,
-/// `terminal_agent_unknown` when no pane is known to be the app's.
+/// (V243-PASTE-INTERLEAVE-N0): the agent's app pane, or none only on a host that answers
+/// `PINS_UNSUPPORTED`, which types by name. Takes the host and the name. Returns the pin,
+/// none, or the host's error, such as `APP_PANE_UNKNOWN` or a failed connect.
 pub(crate) fn request_pin(host: &dyn Host, agent: &AgentId) -> Result<Option<PaneAt>, HostError> {
     match host.app_pane_at(agent) {
         Ok(at) => Ok(Some(at)),
-        Err(problem) if problem.0 == "terminal_unavailable" => Ok(None),
+        Err(problem) if problem.0 == PINS_UNSUPPORTED => Ok(None),
         Err(problem) => Err(problem),
     }
 }
 
 /// Types one piece of a request into the pane the request was pinned to, or by name with no
-/// pin. Takes the host, the name, the pin and at most `INPUT_BYTES_MAX` bytes. Returns once
-/// typed, or `terminal_agent_unknown` once the pinned pane is no longer one the host can type
-/// into, never typing by name instead.
+/// pin. Takes the host, the name, the pin, at most `INPUT_BYTES_MAX` bytes and the code a
+/// stale pin answers: `APP_PANE_UNKNOWN` for a request's pin, `terminal_agent_unknown` for a
+/// view's. Returns once typed, or that code, never typing by name instead.
 pub(crate) fn type_piece(
     host: &dyn Host,
     agent: &AgentId,
     pin: Option<&PaneAt>,
     bytes: &[u8],
+    stale: &'static str,
 ) -> Result<(), HostError> {
     assert!(
         bytes.len() <= INPUT_BYTES_MAX,
         "a piece fits one input request"
+    );
+    assert!(
+        matches!(stale, APP_PANE_UNKNOWN | "terminal_agent_unknown"),
+        "a stale pin refuses the request or ends the view"
     );
     let Some(at) = pin else {
         return host.input(agent, bytes);
@@ -1605,7 +1635,7 @@ pub(crate) fn type_piece(
     assert!(pane_id_valid(&at.pane), "a pin is a pane id");
     match host.input_at(agent, at, bytes)? {
         true => Ok(()),
-        false => Err(failure("terminal_agent_unknown")),
+        false => Err(failure(stale)),
     }
 }
 

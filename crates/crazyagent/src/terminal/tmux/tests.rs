@@ -732,11 +732,11 @@ fn a_split_window_with_no_app_tag_takes_no_prompt_until_its_app_pane_is_tagged()
     untag(&server, &app);
     tmux_client(&server, &["select-pane", "-t", &mate]);
     let refused = crate::terminal::type_prompt(&*host, &agent, "hello");
-    let unknown = HostError("terminal_agent_unknown".to_owned());
+    let unknown = HostError(crate::terminal::APP_PANE_UNKNOWN.to_owned());
     assert_eq!(
         refused,
         Err(unknown),
-        "no tag in a split window types into no pane"
+        "no tag in a split window types into no pane, and the live agent is not read as ended"
     );
     let pid = host
         .panes(&agent)
@@ -781,6 +781,45 @@ fn a_one_pane_window_with_no_app_tag_takes_the_prompt_and_is_tagged() {
         agent.as_str(),
         "the one pane now carries the tag"
     );
+    assert_eq!(
+        mark_of(&server, &app),
+        agent.as_str(),
+        "its window is now marked as one whose app the engine tagged"
+    );
+}
+
+/// #686 r1 code F1: once a lead's tagged app pane closes beside the teammate it split off,
+/// the window lists one untagged pane, the teammate's. The window's mark says the engine
+/// tagged its app, so a prompt by name is refused as an unknown app pane of a live window
+/// and the teammate gets nothing, instead of being tagged as the lead's app.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_window_whose_tagged_app_pane_closed_hands_its_teammate_no_prompt() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, server, agent, _own) = raw_cat_pane(home.path(), false);
+    let window = target(&agent);
+    let app = tmux_client(
+        &server,
+        &["display-message", "-p", "-t", &window, "#{pane_id}"],
+    );
+    let (mate, theirs) = split_cat(&server, &agent, home.path(), "teammate", false);
+    tmux_client(&server, &["kill-pane", "-t", &app]);
+    let left = tmux_client(&server, &["list-panes", "-t", &window, "-F", "#{pane_id}"]);
+    assert_eq!(left, mate, "the window lives on with the teammate alone");
+    let refused = crate::terminal::type_prompt(&*host, &agent, "hello");
+    let unknown = HostError(crate::terminal::APP_PANE_UNKNOWN.to_owned());
+    assert_eq!(
+        refused,
+        Err(unknown),
+        "a live window with no app pane takes no prompt"
+    );
+    assert_eq!(
+        tag_of(&server, &mate),
+        "",
+        "the teammate is never tagged as the app"
+    );
+    let typed = marked(&host, &[(&mate, &theirs)]);
+    assert_eq!(typed[0], b"#", "the teammate gets only the mark");
 }
 
 /// Runs one tmux client command on a test's server with an empty environment, as a person
@@ -911,13 +950,24 @@ fn tag_of(server: &Server, pane: &str) -> String {
     )
 }
 
-/// Clears the app tag on one pane, as an engine from before V243-PASTE-INTERLEAVE-N0 left
-/// every pane of its own server. Takes the server and the pane. Returns nothing; checks the
-/// pane carries no tag after.
+/// The app mark the window of one pane carries now. Takes the server and the pane. Returns
+/// the mark, empty when the window carries none.
+#[cfg(target_os = "macos")]
+fn mark_of(server: &Server, pane: &str) -> String {
+    assert!(pane_id_valid(pane));
+    let format = format!("#{{{APP_MARK}}}");
+    tmux_client(server, &["display-message", "-p", "-t", pane, &format])
+}
+
+/// Clears the app tag on one pane and the app mark on its window, as an engine from before
+/// V243-PASTE-INTERLEAVE-N0 left every pane and window of its own server. Takes the server
+/// and the pane. Returns nothing; checks neither is left after.
 #[cfg(target_os = "macos")]
 fn untag(server: &Server, pane: &str) {
     tmux_client(server, &["set-option", "-pu", "-t", pane, AGENT_TAG]);
+    tmux_client(server, &["set-option", "-wu", "-t", pane, APP_MARK]);
     assert_eq!(tag_of(server, pane), "");
+    assert_eq!(mark_of(server, pane), "");
 }
 
 /// V243-PASTE-INTERLEAVE-N0: a request piece longer than one input request is a caller's
@@ -929,7 +979,31 @@ fn a_typed_piece_over_one_input_request_is_a_bug() {
     let host = Tmux::open(None, Path::new("/nonexistent"));
     let agent = AgentId::team(1).unwrap();
     let piece = vec![b'x'; INPUT_BYTES_MAX + 1];
-    let _ = crate::terminal::type_piece(&host, &agent, None, &piece);
+    let stale = crate::terminal::APP_PANE_UNKNOWN;
+    let _ = crate::terminal::type_piece(&host, &agent, None, &piece, stale);
+}
+
+/// #686 r1 F2: a stale pin answers only an unknown app pane, which refuses the request, or
+/// an unknown agent, which ends a view; any other code is a caller's bug, caught before the
+/// host is asked.
+#[test]
+#[should_panic(expected = "a stale pin refuses the request or ends the view")]
+fn a_typed_piece_whose_stale_code_is_neither_refusal_is_a_bug() {
+    let host = Tmux::open(None, Path::new("/nonexistent"));
+    let agent = AgentId::team(1).unwrap();
+    let _ = crate::terminal::type_piece(&host, &agent, None, b"x", "terminal_unavailable");
+}
+
+/// #686 r1 code F1: marking a window target as an agent's app pane is a caller's bug, since
+/// the tag would land on whichever pane is active, which may be a teammate's.
+#[cfg(target_os = "macos")]
+#[test]
+#[should_panic(expected = "only a pane id is tagged")]
+fn marking_a_window_target_as_the_app_pane_is_a_bug() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, _server, agent, _own) = raw_cat_pane(home.path(), false);
+    let control = host.live_control().unwrap();
+    let _ = Tmux::mark_app(&control, &target(&agent), &agent);
 }
 
 /// V243-PASTE-INTERLEAVE-N0: a pinned piece whose pin is a window target, not a pane id, is
@@ -943,7 +1017,9 @@ fn a_typed_piece_pinned_to_no_pane_id_is_a_bug() {
         pane: "crazyagent:=team-1".to_owned(),
         serial: 1,
     };
-    let _ = crate::terminal::type_piece(&host, &AgentId::team(1).unwrap(), Some(&at), b"x");
+    let agent = AgentId::team(1).unwrap();
+    let stale = crate::terminal::APP_PANE_UNKNOWN;
+    let _ = crate::terminal::type_piece(&host, &agent, Some(&at), b"x", stale);
 }
 
 /// V243-PASTE-INTERLEAVE-N0: tagging the app pane by pid 0 or 1, which no pane record keeps

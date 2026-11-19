@@ -112,6 +112,9 @@ const LEAD_SHELL: &str = "/bin/sh";
 /// The pane option naming the agent whose own app a pane of a lead's server runs, set by the
 /// engine at spawn, since the lead's window also holds the panes its teammates split off.
 const AGENT_TAG: &str = "@crazyagent";
+/// The window option marking a window whose app pane the engine tagged, set with the tag, so
+/// a window that lost its app pane never hands its one teammate pane to the app's prompts.
+const APP_MARK: &str = "@crazyagent-app";
 const TERMINAL_TYPE: &str = "xterm-256color";
 const TERMINAL_DEFAULTS: [(&str, &str); 2] = [("TERM", TERMINAL_TYPE), ("COLORTERM", "truecolor")];
 const VERSION_MIN: (u32, u32) = (3, 7);
@@ -709,34 +712,45 @@ impl Tmux {
     }
 
     /// The pane an agent's prompts go to (V243-PASTE-INTERLEAVE-N0): the one tagged with its
-    /// name at spawn or adopt, searched on the engine's server in the agent's window only. A
-    /// window an older engine left untagged gives its one pane, tagged now; a split one gives
-    /// none, never its active pane, which may be a teammate's. Takes the control client and
-    /// the agent. Returns the pane id, or `terminal_agent_unknown`.
+    /// name, searched on the engine's server in the agent's window only. Only a window no
+    /// engine marked (`APP_MARK`) gives its one untagged pane, marked now; any other gives
+    /// none, never a pane that may be a teammate's. Takes the control client and the agent.
+    /// Returns the pane id, `APP_PANE_UNKNOWN`, or `terminal_agent_unknown` with no window.
     fn app_pane(&self, control: &Control, agent: &AgentId) -> Result<String, HostError> {
         if self.confined.is_some() {
             return self.agent_target(control, agent);
         }
         let lines = control.ask(&format!(
-            "list-panes -t {} -F '#{{pane_id}} #{{{AGENT_TAG}}}{FORMAT_END}'",
+            "list-panes -t {} -F '#{{pane_id}} #{{{APP_MARK}}} #{{{AGENT_TAG}}}{FORMAT_END}'",
             target(agent)
         ))?;
-        let panes: Vec<(&str, &str)> = lines
+        let panes: Vec<(&str, &str, &str)> = lines
             .iter()
-            .filter_map(|line| std::str::from_utf8(line).ok()?.split_once(' '))
-            .filter(|(pane, _)| pane_id_valid(pane))
+            .filter_map(|line| {
+                let mut fields = std::str::from_utf8(line).ok()?.splitn(3, ' ');
+                Some((fields.next()?, fields.next()?, fields.next()?))
+            })
+            .filter(|(pane, ..)| pane_id_valid(pane))
             .take(PANES_LISTED_MAX)
             .collect();
-        assert!(panes.len() <= PANES_LISTED_MAX);
-        if let Some((pane, _)) = panes.iter().find(|(_, tag)| *tag == agent.as_str()) {
+        if let Some((pane, ..)) = panes.iter().find(|(.., tag)| *tag == agent.as_str()) {
             return Ok((*pane).to_owned());
         }
-        let [(pane, "")] = panes.as_slice() else {
-            return Err(failure("terminal_agent_unknown"));
+        let [(pane, "", "")] = panes.as_slice() else {
+            return Err(failure(super::APP_PANE_UNKNOWN));
         };
-        assert!(pane_id_valid(pane), "only pane ids were kept");
-        control.run(&format!("set-option -p -t {pane} {AGENT_TAG} {agent}"))?;
+        Self::mark_app(control, pane, agent)?;
         Ok((*pane).to_owned())
+    }
+
+    /// Tags a pane as the agent's app and marks its window as one whose app the engine tagged,
+    /// so the one-pane fallback never takes a pane left beside it. Takes the control client,
+    /// the pane id and the agent. Returns once both options are set, or tmux's error.
+    fn mark_app(control: &Control, pane: &str, agent: &AgentId) -> Result<(), HostError> {
+        assert!(pane_id_valid(pane), "only a pane id is tagged");
+        control.run(&format!("set-option -p -t {pane} {AGENT_TAG} {agent}"))?;
+        control.run(&format!("set-option -w -t {pane} {APP_MARK} {agent}"))?;
+        Ok(())
     }
 
     /// Whether this lead server holds a pane tagged with the agent's name. Takes the agent.
@@ -2364,10 +2378,7 @@ impl Tmux {
             let _ = control.run(&format!("kill-window -t {}", target(agent)));
             return Err(failure("terminal_command_failed"));
         }
-        let tagged = pane_id_valid(pane)
-            && control
-                .run(&format!("set-option -p -t {pane} {AGENT_TAG} {agent}"))
-                .is_ok();
+        let tagged = pane_id_valid(pane) && Self::mark_app(&control, pane, agent).is_ok();
         if !tagged {
             let _ = control.run(&format!("kill-window -t {}", target(agent)));
             return Err(failure("terminal_command_failed"));
@@ -2469,10 +2480,9 @@ impl Host for Tmux {
             .panes(agent)?
             .into_iter()
             .find(|pane| pane.pid == pid && !pane.dead)
-            .ok_or_else(|| failure("terminal_agent_unknown"))?;
+            .ok_or_else(|| failure(super::APP_PANE_UNKNOWN))?;
         assert!(pane_id_valid(&app.id), "tmux lists pane ids");
-        let tag = format!("set-option -p -t {} {AGENT_TAG} {agent}", app.id);
-        control.run(&tag).map(|_| ())
+        Self::mark_app(&control, &app.id, agent)
     }
 
     fn paste_at(&self, _agent: &AgentId, at: &PaneAt, keys: &[u8]) -> Result<bool, HostError> {
