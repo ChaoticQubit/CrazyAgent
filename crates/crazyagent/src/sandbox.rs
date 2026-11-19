@@ -986,6 +986,10 @@ pub const LINUX_HIDDEN_NEEDS_NAMESPACES: &str = "linux_hidden_needs_namespaces";
 /// computer mounts a second time where it shows that folder.
 pub const LINUX_HIDDEN_MOUNTED_AGAIN: &str = "linux_hidden_mounted_again";
 
+/// The engine refusal code of a Linux launch whose project hides folders on a computer
+/// where the sandbox helper cannot cut the agent's mounts off from this computer's.
+pub const LINUX_HIDDEN_MOUNTS_NOT_PRIVATE: &str = "linux_hidden_mounts_not_private";
+
 /// The code a launch refusal has of its own, so a caller shows its plain line: the strict
 /// setting's ([`LINUX_NOT_FULL`]) and, on Linux, the hidden folders' two
 /// ([`LINUX_HIDDEN_NEEDS_NAMESPACES`], [`LINUX_HIDDEN_MOUNTED_AGAIN`]). Input: the
@@ -5644,7 +5648,8 @@ mod linux_sockets_tests {
     }
 
     /// rv-code4 F2 (#622): each Linux refusal of hidden folders, where bubblewrap cannot
-    /// start agents in namespaces of their own and where a second mount shows the folder,
+    /// start agents in namespaces of their own, where a second mount shows the folder and
+    /// where the helper cannot cut the agent's mounts off (V24x-LINUX-NEST-MOUNT-PROPAGATION),
     /// has its own code, so the owner reads what to change instead of the generic line.
     #[cfg(target_os = "linux")]
     #[test]
@@ -5663,6 +5668,11 @@ mod linux_sockets_tests {
                     "remove that mount",
                     "Hidden folders",
                 ],
+            ),
+            (
+                linux::HIDDEN_MOUNTS_NOT_PRIVATE,
+                LINUX_HIDDEN_MOUNTS_NOT_PRIVATE,
+                ["user namespaces", "later mount", "Hidden folders"],
             ),
         ] {
             let refused = SandboxError::Unavailable(reason.into());

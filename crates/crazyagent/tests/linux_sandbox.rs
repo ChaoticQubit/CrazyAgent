@@ -903,6 +903,7 @@ fn the_helper_reads_back_the_policy_the_engine_wrote_without_protected_paths_or_
             limit_network: true,
             open_sockets: false,
             keep_free: false,
+            cut: None,
         })
     );
     assert_eq!(
@@ -911,6 +912,7 @@ fn the_helper_reads_back_the_policy_the_engine_wrote_without_protected_paths_or_
             limit_network: true,
             open_sockets: true,
             keep_free: false,
+            cut: None,
         })
     );
     assert!(parse(&["--probe", "--open-sockets"]).is_err());
@@ -4238,6 +4240,86 @@ fn a_hidden_folder_is_out_of_reach_on_both_bubblewrap_backends() {
             &run(&sandbox, &case, &hiding_script(&hidden)),
         );
     }
+}
+
+/// V24x-LINUX-NEST-MOUNT-PROPAGATION: with a hidden folder, the agent's mount tree on both
+/// hiding backends takes no mount event from this computer, no line of its mount list
+/// carries `shared:` or `master:`, and the agent holds no capability in any of the five
+/// sets; without one, the tree still takes them (Q1, run 44438218667 P6: 27 lines).
+#[test]
+fn a_hidden_folder_gives_the_agent_a_mount_tree_of_its_own_and_no_capability() {
+    let script = "grep -c 'shared:\\|master:' /proc/self/mountinfo; \
+                  grep '^Cap' /proc/self/status; echo done";
+    let bare = "0\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\n\
+                CapEff:\t0000000000000000\nCapBnd:\t0000000000000000\n\
+                CapAmb:\t0000000000000000\ndone\n";
+    let mut wrong = Vec::new();
+    for backend in HIDING {
+        let case = case();
+        let hidden = hidden(&case);
+        let policy = policy(&case, SandboxNetwork::Only(Vec::new()))
+            .hide(&hidden.folder)
+            .unwrap();
+        let Some(sandbox) = hiding(backend, policy) else {
+            continue;
+        };
+        let output = run(&sandbox, &case, script);
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        if stdout != bare {
+            wrong.push(format!("{backend:?}: {stdout:?}"));
+        }
+        let plain = hiding(backend, policy(&case, SandboxNetwork::Only(Vec::new())))
+            .expect("the backend that hid a folder starts a plain agent");
+        let output = run(&plain, &case, script);
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let taking = stdout
+            .lines()
+            .next()
+            .and_then(|count| count.parse::<u32>().ok());
+        if !taking.is_some_and(|count| count > 0) {
+            wrong.push(format!("{backend:?} without a hidden folder: {stdout:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// V24x-LINUX-NEST-MOUNT-PROPAGATION: the cover over a hidden folder stays on after the
+/// cut on both hiding backends: the agent's plain and lazy unmounts fail, and so do both
+/// from a user namespace of its own, since the covers are locked mounts there (MNT_LOCKED),
+/// so the folder still lists empty and its file reads nowhere.
+#[test]
+fn a_hidden_folders_cover_stays_on_whatever_the_agent_unmounts() {
+    let mut wrong = Vec::new();
+    for backend in HIDING {
+        let case = case();
+        let hidden = hidden(&case);
+        let policy = policy(&case, SandboxNetwork::Only(Vec::new()))
+            .hide(&hidden.folder)
+            .unwrap();
+        let Some(sandbox) = hiding(backend, policy) else {
+            continue;
+        };
+        let folder = quoted(&hidden.folder);
+        let script = format!(
+            "umount {folder} 2>/dev/null; umount -l {folder} 2>/dev/null; \
+             unshare -Urm sh -c 'umount -l \"$0\"; umount \"$0\"; ls -A \"$0\"; \
+             cat \"$0\"/secret.txt' {folder} 2>/dev/null; \
+             ls -A {folder} 2>/dev/null; cat {folder}/secret.txt 2>/dev/null; \
+             grep -c ' {path} ' /proc/self/mountinfo; echo done",
+            path = hidden.folder.display(),
+        );
+        let output = run(&sandbox, &case, &script);
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        if stdout != "1\ndone\n" {
+            wrong.push(format!("{backend:?}: {stdout:?}"));
+        }
+        assert_eq!(
+            fs::read_to_string(hidden.folder.join("secret.txt")).unwrap(),
+            SECRET,
+            "{backend:?}"
+        );
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
 /// A link the agent makes inside its own grant to a hidden folder leads to the empty

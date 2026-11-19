@@ -1,6 +1,7 @@
 #![cfg(target_os = "linux")]
 use crazyagent::sandbox::linux::{
-    BWRAP_PATHS, HIDDEN_MOUNTED_AGAIN, LinuxBackend, LinuxSandbox, NEST_ARGS,
+    BWRAP_PATHS, HIDDEN_MOUNTED_AGAIN, HIDDEN_MOUNTS_NOT_PRIVATE, LinuxBackend, LinuxSandbox,
+    NEST_ARGS,
 };
 
 use crazyagent::sandbox::{ProjectSandbox, Sandbox, SandboxError, SandboxNetwork};
@@ -270,4 +271,60 @@ fn a_mount_made_after_the_start_outside_every_grant_stays_out_of_a_nested_agent(
     let rest = through_a_later_mount(Hiding::Nested, &case, &alias);
     let through = came_through(Hiding::Nested, &case, &rest);
     assert!(through.is_none(), "{through:#?}");
+}
+
+/// Sets this computer's `user.max_user_namespaces` with `sudo -n sysctl` and puts back the
+/// value it read first when dropped. Input: the new limit. Output: the guard.
+struct Limit(String);
+
+impl Limit {
+    fn new(limit: u32) -> Self {
+        let was = fs::read_to_string("/proc/sys/user/max_user_namespaces").unwrap();
+        let was = was.trim().to_owned();
+        assert!(was.parse::<u32>().is_ok(), "{was:?}");
+        assert!(set_limit(&limit.to_string()), "sudo -n sysctl {limit}");
+        Self(was)
+    }
+}
+
+impl Drop for Limit {
+    fn drop(&mut self) {
+        let _ = set_limit(&self.0);
+    }
+}
+
+/// Writes `user.max_user_namespaces`. Input: the value. Output: whether sysctl took it.
+fn set_limit(value: &str) -> bool {
+    crazyagent::spawn_gate::status(
+        Command::new("sudo")
+            .args(["-n", "sysctl", "-q", "-w"])
+            .arg(format!("user.max_user_namespaces={value}"))
+            .stdin(Stdio::null()),
+    )
+    .is_ok_and(|status| status.success())
+}
+
+/// V24x-LINUX-NEST-MOUNT-PROPAGATION Q5 (leader 19:09): where bubblewrap's own user namespace
+/// starts but the helper's cannot, as with `user.max_user_namespaces` at 1, a launch with a
+/// hidden folder refuses with the named line on both backends, never starting an agent
+/// whose mount tree later host mounts reach; at the base both builds held.
+#[test]
+#[ignore = "needs passwordless sudo for sysctl; the farm runs it with --ignored"]
+fn a_launch_with_hidden_folders_refuses_where_the_helper_cannot_cut_its_mounts() {
+    let mut wrong = Vec::new();
+    for backend in [Hiding::Nested, Hiding::Bubblewrap] {
+        let case = case();
+        assert!(
+            built(backend, &case).is_ok(),
+            "{backend:?}: the control builds"
+        );
+        let limit = Limit::new(1);
+        match built(backend, &case) {
+            Err(SandboxError::Unavailable(reason)) if reason == HIDDEN_MOUNTS_NOT_PRIVATE => {}
+            Err(other) => wrong.push(format!("{backend:?}: refused for {other:?}")),
+            Ok(sandbox) => wrong.push(format!("{backend:?}: built on {:?}", sandbox.backend())),
+        }
+        drop(limit);
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }

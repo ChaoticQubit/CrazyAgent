@@ -178,6 +178,7 @@ test("each Linux launch refusal reads plainly and names the setting", () => {
   assert.match(knownError("linux_sandbox_not_full"), /'Refuse agents without the full Linux sandbox'[\s\S]*Agent access[\s\S]*Settings/);
   assert.match(knownError("linux_hidden_needs_namespaces"), /hides folders[\s\S]*bubblewrap[\s\S]*namespaces[\s\S]*does not start[\s\S]*Hidden folders/);
   assert.match(knownError("linux_hidden_mounted_again"), /hides[\s\S]*mounted a second time[\s\S]*does not start[\s\S]*remove that mount[\s\S]*Hidden folders/);
+  assert.match(knownError("linux_hidden_mounts_not_private"), /hides folders[\s\S]*later mount[\s\S]*does not start[\s\S]*user namespaces[\s\S]*Hidden folders/);
 });
 
 test("the options are the engine's LinuxSockets names", () => {
