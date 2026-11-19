@@ -4189,13 +4189,21 @@ fn hiding_script(hidden: &Hidden) -> String {
     )
 }
 
-/// The namespaces [`namespace_legs`] makes, by name and command: `mapped` is a user and mount
-/// namespace with the agent as root, `unmapped` one that keeps its unmapped id and the
-/// propagation it had, which starts on both hiding backends.
-const NAMESPACE_LEGS: [(&str, &str); 2] = [
-    ("mapped", "unshare -Urm"),
-    ("unmapped", "unshare -Um --propagation unchanged"),
+/// The namespaces [`namespace_legs`] makes, by name, command and extra call: `mapped` is a user
+/// and mount namespace with the agent as root, `unmapped` one that keeps its unmapped id and
+/// the propagation it had, which starts on both hiding backends and calls [`UMOUNT2`].
+const NAMESPACE_LEGS: [(&str, &str, &str); 2] = [
+    ("mapped", "unshare -Urm", ""),
+    ("unmapped", "unshare -Um --propagation unchanged", UMOUNT2),
 ];
+
+/// A direct umount2 call on the folder, plain then detached, through Python's ctypes, so no
+/// umount tool can refuse before the kernel does. It prints `umount2` and each call's errno
+/// name, or 0 where a call unmounted.
+const UMOUNT2: &str = "echo umount2 $(python3 -I -c \"import ctypes, errno, sys; \
+    c = ctypes.CDLL(None, use_errno=True); p = sys.argv[1].encode(); \
+    print(*[c.umount2(p, f) and errno.errorcode.get(ctypes.get_errno(), ctypes.get_errno()) \
+    for f in (0, 2)])\" \"$0\"); ";
 
 /// Nested's refusal of the `mapped` leg: unshare cannot open its uid map in the agent.
 const MAPPED_REFUSAL: &str = "unshare: cannot open /proc/self/uid_map: Permission denied";
@@ -4207,41 +4215,57 @@ const MAPPED_REFUSAL: &str = "unshare: cannot open /proc/self/uid_map: Permissio
 fn namespace_legs(folder: &str) -> String {
     NAMESPACE_LEGS
         .iter()
-        .map(|(name, command)| {
+        .map(|(name, command, call)| {
             format!(
                 "{command} sh -c 'exec 2>/dev/null; echo inner {name}; umount -l \"$0\"; \
-                 umount \"$0\"; ls -A \"$0\"; cat \"$0\"/secret.txt; exit 0' {folder} 2>&1; \
-                 echo \"{name} rc=$?\"; "
+                 umount \"$0\"; {call}ls -A \"$0\"; cat \"$0\"/secret.txt; exit 0' {folder} \
+                 2>&1; echo \"{name} rc=$?\"; "
             )
         })
         .collect()
 }
 
-/// The output with each [`namespace_legs`] leg's two lines taken out, when each shows it ran
-/// (`inner <name>`, then `<name> rc=0`) or, for `mapped` on Nested only, [`MAPPED_REFUSAL`]
-/// then `mapped rc=1`. Silence never counts. Inputs: the backend and the output. Output: the
-/// rest, or none when a leg shows neither.
+/// The output with each [`namespace_legs`] leg's lines taken out, when each ran (`inner <name>`,
+/// for `unmapped` a [`UMOUNT2`] line of EPERM or EINVAL only, then `<name> rc=0`) or, for
+/// `mapped` on Nested only, [`MAPPED_REFUSAL`] then `mapped rc=1`. Silence never counts.
+/// Inputs: the backend and the output. Output: the rest, or none when a leg shows neither.
 fn without_namespace_legs(backend: Hiding, stdout: &str) -> Option<String> {
     let lines: Vec<&str> = stdout.lines().collect();
+    let refused_by_the_kernel = |line: &str| {
+        let words: Vec<&str> = line.split(' ').collect();
+        words.len() == 3
+            && words[0] == "umount2"
+            && words[1..]
+                .iter()
+                .all(|word| ["EPERM", "EINVAL"].contains(word))
+    };
     let mut taken = Vec::new();
-    for (name, _) in NAMESPACE_LEGS {
+    for (name, _, call) in NAMESPACE_LEGS {
         let exit = format!("{name} rc=");
         let exits: Vec<usize> = (0..lines.len())
             .filter(|index| lines[*index].starts_with(&exit))
             .collect();
         let [at] = exits[..] else { return None };
-        let first = *lines.get(at.checked_sub(1)?)?;
-        let ran = first == format!("inner {name}") && lines[at] == format!("{exit}0");
+        let calls = usize::from(!call.is_empty());
+        let marker = at.checked_sub(1 + calls)?;
+        let ran = lines[marker] == format!("inner {name}")
+            && (calls == 0 || refused_by_the_kernel(lines[at - 1]))
+            && lines[at] == format!("{exit}0");
         let refused = matches!(backend, Hiding::Nested)
             && name == "mapped"
-            && first == MAPPED_REFUSAL
+            && calls == 0
+            && lines[marker] == MAPPED_REFUSAL
             && lines[at] == format!("{exit}1");
         if !ran && !refused {
             return None;
         }
-        taken.extend([at - 1, at]);
+        taken.extend(marker..=at);
     }
-    assert_eq!(taken.len(), 2 * NAMESPACE_LEGS.len());
+    let legs: usize = NAMESPACE_LEGS
+        .iter()
+        .map(|(_, _, call)| 2 + usize::from(!call.is_empty()))
+        .sum();
+    assert_eq!(taken.len(), legs);
     let rest: String = (0..lines.len())
         .filter(|index| !taken.contains(index))
         .map(|index| format!("{}\n", lines[index]))
@@ -4350,8 +4374,8 @@ fn a_hidden_folder_gives_the_agent_a_mount_tree_of_its_own_and_no_capability() {
 
 /// V24x-LINUX-NEST-MOUNT-PROPAGATION: the cover over a hidden folder stays on after the cut
 /// on both hiding backends. The agent's plain and lazy unmounts fail, and so do both from the
-/// namespaces of its own that start ([`without_namespace_legs`]), since the covers are locked
-/// mounts there (MNT_LOCKED); the folder lists empty and its file reads nowhere.
+/// namespaces of its own that start, with a direct umount2 ([`without_namespace_legs`]), since
+/// the covers are locked there (MNT_LOCKED); the folder lists empty, its file reads nowhere.
 #[test]
 fn a_hidden_folders_cover_stays_on_whatever_the_agent_unmounts() {
     let mut wrong = Vec::new();
