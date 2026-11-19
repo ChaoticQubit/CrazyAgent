@@ -1080,22 +1080,96 @@ mod tests {
         home.join("Library/Keychains/profile.keychain-db")
     }
 
-    #[test]
-    fn a_profile_keychain_the_empty_password_cannot_open_is_refused_and_its_settings_stay() {
+    fn aside_path(home: &Path) -> PathBuf {
+        home.join("Library/Keychains/profile-locked.keychain-db")
+    }
+
+    fn profile_folders(home: &Path) {
         use std::os::unix::fs::PermissionsExt;
-        let root = scratch();
-        let home = private_home(root.path(), "home");
         for folder in ["Library", "Library/Keychains", "Library/Preferences"] {
-            std::fs::create_dir(home.join(folder)).unwrap();
+            std::fs::create_dir_all(home.join(folder)).unwrap();
             std::fs::set_permissions(home.join(folder), std::fs::Permissions::from_mode(0o700))
                 .unwrap();
         }
-        let keychain = TestKeychain::adopt(&home, profile_keychain_path(&home));
+    }
+
+    fn locked_with_another_password(home: &Path, path: PathBuf) -> TestKeychain {
+        profile_folders(home);
+        let keychain = TestKeychain::adopt(home, path);
         let text = keychain.path().to_str().unwrap().to_owned();
         keychain.security(&["create-keychain", "-p", "crazyagent-dummy", &text], None);
         keychain.security(&["list-keychains", "-d", "user", "-s", &text], None);
         keychain.security(&["default-keychain", "-d", "user", "-s", &text], None);
         keychain.security(&["lock-keychain", &text], None);
+        keychain
+    }
+
+    fn identity(path: &Path) -> (u64, Vec<u8>) {
+        let metadata = std::fs::symlink_metadata(path).unwrap();
+        assert!(metadata.is_file());
+        (metadata.ino(), std::fs::read(path).unwrap())
+    }
+
+    #[test]
+    fn a_profile_keychain_the_empty_password_cannot_open_is_set_aside_at_sign_in_and_replaced() {
+        let root = scratch();
+        let home = private_home(root.path(), "home");
+        let keychain = locked_with_another_password(&home, profile_keychain_path(&home));
+        let old = identity(keychain.path());
+        assert_eq!(
+            prepare_profile_keychain(&home).unwrap(),
+            profile_keychain_path(&home)
+        );
+        let _aside = TestKeychain::adopt(&home, aside_path(&home));
+        assert_eq!(identity(&aside_path(&home)), old);
+        assert_ne!(identity(keychain.path()).0, old.0);
+        let text = keychain.path().to_str().unwrap().to_owned();
+        keychain.security(&["lock-keychain", &text], None);
+        keychain.security(&["unlock-keychain", "-p", "", &text], None);
+        assert!(keychain.setting("default-keychain").contains(&text));
+        assert!(keychain.setting("list-keychains").contains(&text));
+    }
+
+    #[test]
+    fn a_sign_in_keeps_both_files_when_the_aside_name_is_already_taken() {
+        let root = scratch();
+        let home = private_home(root.path(), "home");
+        let keychain = locked_with_another_password(&home, profile_keychain_path(&home));
+        std::fs::write(aside_path(&home), "taken").unwrap();
+        let state = || {
+            (
+                identity(keychain.path()),
+                identity(&aside_path(&home)),
+                keychain.setting("default-keychain"),
+                keychain.setting("list-keychains"),
+            )
+        };
+        let before = state();
+        assert!(prepare_profile_keychain(&home).is_err());
+        assert_eq!(state(), before);
+    }
+
+    #[test]
+    fn a_sign_in_refuses_a_link_at_the_profile_keychain_and_leaves_its_target_untouched() {
+        let root = scratch();
+        let home = private_home(root.path(), "home");
+        let target = locked_with_another_password(&home, home.join("target.keychain-db"));
+        std::os::unix::fs::symlink(target.path(), profile_keychain_path(&home)).unwrap();
+        let before = identity(target.path());
+        assert!(prepare_profile_keychain(&home).is_err());
+        assert_eq!(identity(target.path()), before);
+        assert_eq!(
+            std::fs::read_link(profile_keychain_path(&home)).unwrap(),
+            target.path()
+        );
+        assert!(std::fs::symlink_metadata(aside_path(&home)).is_err());
+    }
+
+    #[test]
+    fn a_profile_keychain_the_empty_password_cannot_open_is_refused_and_its_settings_stay() {
+        let root = scratch();
+        let home = private_home(root.path(), "home");
+        let keychain = locked_with_another_password(&home, profile_keychain_path(&home));
         let before = [
             keychain.setting("default-keychain"),
             keychain.setting("list-keychains"),
@@ -1194,10 +1268,15 @@ mod tests {
     }
 
     #[test]
-    fn an_agent_keychain_is_refused_in_a_home_holding_a_profile_keychain_under_either_name() {
+    fn an_agent_keychain_is_refused_in_a_home_holding_any_profile_keychain_name() {
         let root = scratch();
         let engine = private_home(root.path(), "engine");
-        for (index, name) in [LOGIN_KEYCHAIN, "profile.keychain-db"].iter().enumerate() {
+        let names = [
+            LOGIN_KEYCHAIN,
+            "profile.keychain-db",
+            "profile-locked.keychain-db",
+        ];
+        for (index, name) in names.iter().enumerate() {
             let home = private_home(&engine, &format!("agents/agent-{index}/home"));
             let profile = TestKeychain::create_named(&home, name);
             let before = profile.setting("default-keychain");
