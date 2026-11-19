@@ -94,8 +94,8 @@ fn after_wait(id: u64, shared: &Shared) {
 #[cfg(not(test))]
 fn after_wait(_: u64, _: &Shared) {}
 
-/// Resizes a view's surface, refused when a test row asked. Inputs: the view id, its
-/// shared state, its surface and the size in device pixels. Output: ok, or
+/// Resizes a view's surface; a lost device, or a test row's ask, refuses it. Inputs: the
+/// view id, its shared state, its surface and the size in device pixels. Output: ok, or
 /// `native_terminal_gpu`.
 fn resized(
     id: u64,
@@ -105,19 +105,20 @@ fn resized(
 ) -> Result<(), &'static str> {
     assert!(size.0 >= 1, "a placed width");
     assert!(size.1 >= 1, "a placed height");
-    if refused(id) {
+    if refused(id) || shared.lost() {
         return Err(GPU_FAULT);
     }
     shared.resize(surface, size.0, size.1)
 }
 
 /// The frame a ready view draws: the one posted since the last take, else the last one
-/// drawn. Inputs: the last frame and the one taken. Output: the frame.
-fn newest<T: Default>(last: &mut Option<T>, taken: Option<T>) -> &T {
+/// drawn. A ready view always has one: it is ready only once a frame was posted, and only
+/// the draw takes it. Inputs: the last frame and the one taken. Output: the frame.
+fn newest<T>(last: &mut Option<T>, taken: Option<T>) -> &T {
     if let Some(frame) = taken {
         *last = Some(frame);
     }
-    last.get_or_insert_with(T::default)
+    last.as_ref().expect("a ready view has a frame")
 }
 
 struct Drawn {
@@ -161,35 +162,41 @@ fn failed() {
 }
 
 impl Painter {
+    /// Makes a fresh view's surface; one that cannot be made faults the view, as macOS
+    /// ends a view with no surface. Input: the view the board handed over.
     fn make(&mut self, fresh: Fresh) {
-        match self.surface(fresh.handle, fresh.geometry) {
-            Ok(surface) => {
-                assert!(
-                    self.views.iter().all(|view| view.id != fresh.id),
-                    "a view made once"
-                );
-                self.views.push(Drawn {
-                    id: fresh.id,
-                    handle: fresh.handle,
-                    geometry: fresh.geometry,
-                    surface: Some(surface),
-                    last: None,
-                });
-                self.post_cell(fresh.id, fresh.geometry.scale_key);
-            }
-            Err(_) => {
-                failed();
-                BOARD.dropped(fresh.id);
-            }
+        assert!(
+            self.views.iter().all(|view| view.id != fresh.id),
+            "a view made once"
+        );
+        let made = self.surface(fresh.handle, fresh.geometry);
+        let live = made.is_ok();
+        self.views.push(Drawn {
+            id: fresh.id,
+            handle: fresh.handle,
+            geometry: fresh.geometry,
+            surface: made.ok(),
+            last: None,
+        });
+        assert!(self.views.len() <= VIEWS_MAX);
+        if live {
+            self.post_cell(fresh.id, fresh.geometry.scale_key);
+        } else {
+            failed();
+            BOARD.fault(fresh.id);
         }
     }
 
-    /// Makes a view's surface on the shared state for its scale, dropping shared state no
-    /// view uses first, so there is never more of it than views plus one.
+    /// Makes a view's surface on the shared state for its scale, dropping first the shared
+    /// state no surface uses, so there is never more of it than views plus one and a lost
+    /// device goes once its surfaces have. A lost device makes nothing.
     fn surface(&mut self, handle: isize, geometry: Geometry) -> Result<Surface, String> {
         let views = &self.views;
-        self.shared
-            .retain(|(key, _)| views.iter().any(|view| view.geometry.scale_key == *key));
+        self.shared.retain(|(key, _)| {
+            views
+                .iter()
+                .any(|view| view.surface.is_some() && view.geometry.scale_key == *key)
+        });
         let key = geometry.scale_key;
         let index = match self.shared.iter().position(|(held, _)| *held == key) {
             Some(index) => index,
@@ -204,42 +211,45 @@ impl Painter {
         let display = RawDisplayHandle::Windows(WindowsDisplayHandle::new());
         let (width, height) = geometry.size;
         let shared = &mut self.shared[index].1;
+        if shared.lost() {
+            return Err(GPU_FAULT.to_owned());
+        }
         unsafe { shared.surface_raw(display, RawWindowHandle::Win32(window), width, height) }
     }
 
     /// Gives a view its new geometry before the swap-chain wait: a resize on the same
     /// scale, or a new surface on the new scale's shared state, the old one dropped first
-    /// since a window has one swap chain. A resize wgpu refused counts a failure and makes
-    /// the surface again at the new geometry, within the board's bounded retry.
-    fn refit(&mut self, index: usize, geometry: Geometry) {
-        assert!(
-            geometry.size.0 >= 1 && geometry.size.1 >= 1,
-            "a placed size"
-        );
+    /// since a window has one swap chain. Inputs: the view's index and geometry. Output: ok,
+    /// or `native_terminal_gpu` when the resize or the new surface was refused.
+    fn refit(&mut self, index: usize, geometry: Geometry) -> Result<(), &'static str> {
         let view = &mut self.views[index];
         let same = view.geometry.scale_key == geometry.scale_key;
         view.geometry = geometry;
-        let key = geometry.scale_key;
-        let held = self
-            .shared
-            .iter()
-            .find(|(shared_key, _)| *shared_key == key);
-        if let (true, Some(surface), Some((_, shared))) = (same, view.surface.as_mut(), held) {
-            if resized(view.id, shared, surface, geometry.size).is_ok() {
-                return;
-            }
-            failed();
+        if same {
+            let surface = view.surface.as_mut().expect("a live view has a surface");
+            let held = self
+                .shared
+                .iter()
+                .find(|(key, _)| *key == geometry.scale_key);
+            let (_, shared) = held.expect("a live view's scale has its shared state");
+            return resized(view.id, shared, surface, geometry.size);
         }
         view.surface = None;
         let handle = view.handle;
-        let made = self.surface(handle, geometry);
-        match made {
-            Ok(surface) => {
-                self.views[index].surface = Some(surface);
-                self.post_cell(self.views[index].id, key);
-            }
-            Err(_) => failed(),
-        }
+        let surface = self.surface(handle, geometry).map_err(|_| GPU_FAULT)?;
+        self.views[index].surface = Some(surface);
+        self.post_cell(self.views[index].id, geometry.scale_key);
+        Ok(())
+    }
+
+    /// Gives up on a view's GPU work for good: its surface goes and the board never hands
+    /// it out as ready again, so its host ends it as macOS does on `native_terminal_gpu`.
+    /// Input: the view's index.
+    fn fault(&mut self, index: usize) {
+        let view = &mut self.views[index];
+        view.surface = None;
+        BOARD.fault(view.id);
+        assert!(BOARD.faulted(view.id), "the board holds the fault");
     }
 
     /// Tells the board a view's cell size on its scale's shared state, which the view's
@@ -258,46 +268,56 @@ impl Painter {
     }
 
     /// Draws one ready view, frame-ready first: geometry, then the swap-chain wait, then
-    /// the newest frame, so a frame posted during the wait is the one drawn. A view with no
-    /// surface or a failed wait keeps its change for the board's bounded retry; a texture
-    /// with no frame to draw is given back.
+    /// the newest frame, so a frame posted during the wait is the one drawn. A refused
+    /// geometry or frame faults the view. Input: the view id.
     fn draw(&mut self, id: u64) {
         let index = self.views.iter().position(|view| view.id == id);
         let index = index.expect("a ready view has a drawn entry");
-        let geometry = BOARD.geometry(id);
-        let missing = self.views[index].surface.is_none();
-        if let Some(geometry) = geometry.or(missing.then_some(self.views[index].geometry)) {
-            self.refit(index, geometry);
-        }
-        let view = &mut self.views[index];
-        let key = view.geometry.scale_key;
-        let held = self
-            .shared
-            .iter_mut()
-            .find(|(shared_key, _)| *shared_key == key);
-        let (Some(surface), Some((_, shared))) = (view.surface.as_mut(), held) else {
-            BOARD.missed(id);
-            return;
+        assert!(
+            self.views[index].surface.is_some(),
+            "a ready view has not faulted, so it has a surface"
+        );
+        let fitted = match BOARD.geometry(id) {
+            Some(geometry) => self.refit(index, geometry),
+            None => Ok(()),
         };
-        let Ok(output) = shared.acquire(surface) else {
+        if fitted.and_then(|()| self.present(index)).is_err() {
             failed();
-            BOARD.missed(id);
-            return;
-        };
-        after_wait(id, shared);
-        if let Some(frame) = BOARD.take(id) {
-            view.last = Some(frame);
+            self.fault(index);
         }
-        let Some(frame) = view.last.as_ref() else {
-            if shared.give_back(output).is_err() {
-                failed();
+    }
+
+    /// Waits for a view's next texture and draws its newest frame into it. Input: the
+    /// view's index. Output: ok, with a failed wait on a live device left to the board's
+    /// bounded retry, or `native_terminal_gpu`.
+    fn present(&mut self, index: usize) -> Result<(), &'static str> {
+        let Painter { shared, views, .. } = self;
+        let view = &mut views[index];
+        let key = view.geometry.scale_key;
+        let held = shared.iter_mut().find(|(held, _)| *held == key);
+        let (_, shared) = held.expect("a live view's scale has its shared state");
+        let surface = view.surface.as_mut().expect("a live view has a surface");
+        let Ok(output) = shared.acquire(surface) else {
+            if shared.lost() {
+                return Err(GPU_FAULT);
             }
-            return;
+            failed();
+            BOARD.missed(view.id);
+            return Ok(());
         };
+        after_wait(view.id, shared);
+        let frame = newest(&mut view.last, BOARD.take(view.id));
         match shared.draw_acquired(surface, frame, output) {
-            Ok(()) => PRESENTS.fetch_add(1, Ordering::SeqCst),
-            Err(_) => FAILURES.fetch_add(1, Ordering::SeqCst),
-        };
+            Ok(()) => {
+                PRESENTS.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            Err(code) if code == GPU_FAULT => Err(GPU_FAULT),
+            Err(_) => {
+                failed();
+                Ok(())
+            }
+        }
     }
 }
 

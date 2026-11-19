@@ -64,11 +64,12 @@ struct Slot<T> {
     cell: Option<(f64, f64)>,
     fresh: bool,
     removing: bool,
+    faulted: bool,
 }
 
 impl<T> Slot<T> {
     fn ready(&self) -> bool {
-        self.shown && self.changed && self.framed && !self.fresh && !self.removing
+        self.shown && self.changed && self.framed && !self.fresh && !self.removing && !self.faulted
     }
 }
 
@@ -118,6 +119,7 @@ impl<T> Board<T> {
             cell: None,
             fresh: true,
             removing: false,
+            faulted: false,
         });
         assert!(slots.len() <= VIEWS_MAX);
         drop(slots);
@@ -277,14 +279,21 @@ impl<T> Board<T> {
     /// drawn or remade again, and its removal still drops it. Input: the view id, which the
     /// board handed over and the render side has not dropped.
     pub fn fault(&self, id: u64) {
-        let _ = id;
+        let mut slots = self.lock();
+        let slot = slots.iter_mut().find(|slot| slot.id == id);
+        let slot = slot.expect("a faulted view is on the board");
+        assert!(!slot.fresh, "a view faults only after the hand-over");
+        slot.faulted = true;
+        slot.changed = false;
+        assert!(!slot.ready());
     }
 
     /// Whether the render thread faulted a view. Input: the view id. Output: true once
     /// faulted, false for a live view or one off the board.
     pub fn faulted(&self, id: u64) -> bool {
-        let _ = id;
-        false
+        let slots = self.lock();
+        let slot = slots.iter().find(|slot| slot.id == id);
+        slot.is_some_and(|slot| slot.faulted)
     }
 
     /// A view's newest frame, taken after the swap-chain wait, so a frame posted during

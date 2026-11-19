@@ -835,6 +835,13 @@ impl Shared {
         painted
     }
 
+    /// Whether wgpu reported the device lost; false before the first surface makes one.
+    /// Output: the answer, which never clears.
+    #[cfg(windows)]
+    pub fn lost(&self) -> bool {
+        self.device.as_ref().is_some_and(Device::is_lost)
+    }
+
     /// Test builds only: destroys the device, as a GPU reset would, and waits until wgpu
     /// reports it lost; the render thread's next GPU call then meets the loss.
     #[cfg(all(windows, test))]
