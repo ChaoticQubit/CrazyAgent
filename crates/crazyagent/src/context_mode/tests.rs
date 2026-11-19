@@ -1018,13 +1018,51 @@ fn on_a_node_older_than_22_5_no_install_starts_and_an_agent_launch_drops_the_ser
     assert!(!case.npm().join(FAILED).exists(), "no failure is recorded");
     assert!(!case.npm().join(PROFILE).exists(), "npm never started");
     assert!(case.staged().is_empty());
-    fs::remove_file(case.bin.join("node")).unwrap();
-    std::os::unix::fs::symlink("/usr/bin/true", case.bin.join("node")).unwrap();
+    node_reports(&case.bin, "node-unknown");
     assert_eq!(
         for_launch(&case.root, npx_in(&case, VERSION)),
         Err(ContextModeOff::NodeTooOld),
-        "a node that names no version counts as too old"
+        "a node that ran and names no version counts as too old"
     );
+}
+
+/// V243-CONTEXT-MODE-ENGINE-NODE: a node check that did not run to an answer, as when the
+/// boundary refuses the start, node exits with a failure or prints nothing, answers its own
+/// code, so the owner is not told to update a Node that never answered; no install starts
+/// and no failure is recorded. Input: none. Output: none; panics on a too-old answer.
+#[test]
+fn a_node_check_that_did_not_run_answers_its_own_code_not_too_old() {
+    for program in ["/usr/bin/false", "/usr/bin/true"] {
+        let case = case("/usr/bin/false");
+        case.store();
+        fs::remove_file(case.bin.join("node")).unwrap();
+        std::os::unix::fs::symlink(program, case.bin.join("node")).unwrap();
+        assert_eq!(
+            case.install().unwrap_err().0,
+            "context_mode_node_check_failed",
+            "{program}"
+        );
+        assert_eq!(
+            for_check(&case.root, npx_in(&case, VERSION)),
+            ForCheck::Refused("context_mode_node_check_failed"),
+            "{program}"
+        );
+        assert_eq!(
+            for_launch(&case.root, npx_in(&case, VERSION)),
+            Err(ContextModeOff::Failed),
+            "{program}"
+        );
+        assert!(!registered(&case.folder()), "{program}");
+        assert!(
+            !case.npm().join(FAILED).exists(),
+            "{program}: no failure is recorded"
+        );
+        assert!(
+            !case.npm().join(PROFILE).exists(),
+            "{program}: npm never started"
+        );
+        assert!(case.staged().is_empty(), "{program}");
+    }
 }
 
 #[cfg(target_os = "macos")]
