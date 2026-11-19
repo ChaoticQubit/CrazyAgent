@@ -1305,6 +1305,7 @@ mod tests {
         let vault = project.join("vault-of-keys");
         fs::create_dir(&vault).unwrap();
         fs::write(vault.join("key.txt"), "key\r\n").unwrap();
+        fs::create_dir(project.join("src")).unwrap();
         let door = project.join("door");
         let line = format!("mklink /J {} {}", door.display(), vault.display());
         let made = crate::spawn_gate::collected(Command::new(cmd()).arg("/C").arg(line)).unwrap();
@@ -1322,7 +1323,7 @@ mod tests {
             WindowsSandbox::install(sandbox, &helper, &profile, &folders.grants).unwrap();
         let run = |line: &str| shell(&installed, &folders, line);
         assert!(
-            run("echo work>work.txt"),
+            run(r"echo work>src\work.txt"),
             "the agent still edits the project"
         );
         for name in &names {
@@ -1363,6 +1364,7 @@ mod tests {
         fs::create_dir(&vault).unwrap();
         let open = vault.join("open.txt");
         fs::write(&open, "open\r\n").unwrap();
+        fs::create_dir(folders.project.join("src")).unwrap();
         let granted = crate::spawn_gate::collected(
             Command::new("icacls")
                 .arg(&open)
@@ -1377,7 +1379,7 @@ mod tests {
         let profile = folders.profiles.join("agent.sb");
         let installed =
             WindowsSandbox::install(sandbox, &helper, &profile, &folders.grants).unwrap();
-        assert!(shell(&installed, &folders, "echo work>work.txt"));
+        assert!(shell(&installed, &folders, r"echo work>src\work.txt"));
         assert!(
             !shell(&installed, &folders, r"type vault\open.txt"),
             "an app container read a hidden file through its own grant"
