@@ -366,21 +366,23 @@ fn focus_follows_clicks(view: &View, webview: HWND, centre: POINT) {
     );
     unsafe { SetFocus(webview) };
     pump_for(Duration::from_millis(100));
-    click(centre);
-    pump_until(
-        "the click's focus",
-        FARM_WAIT,
-        || unsafe { GetFocus() } == view.hwnd(),
-    );
+    clicked_into(view, centre);
     let seen = take_seen();
+    assert!(seen.iter().all(|(id, _)| *id == 1), "{seen:?}");
+    let (focus, clicked): (Vec<ViewEvent>, Vec<ViewEvent>) = seen
+        .into_iter()
+        .map(|(_, event)| event)
+        .partition(|event| matches!(event, ViewEvent::Focus(_)));
     let want = [
         ViewEvent::Focus(true),
         ViewEvent::Focus(false),
         ViewEvent::Focus(true),
     ];
-    let events: Vec<&ViewEvent> = seen.iter().map(|(_, event)| event).collect();
-    assert_eq!(events, want.iter().collect::<Vec<_>>(), "{seen:?}");
-    assert!(seen.iter().all(|(id, _)| *id == 1));
+    assert_eq!(
+        focus, want,
+        "focus(), the webview's focus, then the click's"
+    );
+    one_click(&clicked, view_point(view, centre));
 }
 
 /// A move to a 150 percent display: the view takes the new device rectangle and the render
@@ -878,12 +880,7 @@ fn inactive_views_type_nothing(view: &View, webview: HWND, centre: POINT) {
     pump_for(KEY_TAIL);
     assert_eq!(typing(), 0, "a covered view types nothing");
     view.cover(false);
-    click(centre);
-    pump_until(
-        "focus again",
-        FARM_WAIT,
-        || unsafe { GetFocus() } == view.hwnd(),
-    );
+    clicked_into(view, centre);
     unsafe { SetFocus(webview) };
     pump_for(KEY_TAIL);
     take_seen();
@@ -900,12 +897,7 @@ fn each_key_reaches_the_sink_once_as_the_panel_sends_it_and_nothing_while_inacti
     let (parent, webview) = stand_ins();
     let view = View::new(parent, webview, 3, sink, &style()).expect("a view");
     let centre = placed_shown_and_drawn(parent, &view);
-    click(centre);
-    pump_until(
-        "the click's focus",
-        FARM_WAIT,
-        || unsafe { GetFocus() } == view.hwnd(),
-    );
+    clicked_into(&view, centre);
     keys_send_once();
     layouts_type_their_characters();
     unicode_and_ime_text_types_once(&view);
@@ -936,15 +928,37 @@ unsafe extern "system" fn page_proc(
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
-/// Clicks into a drawn view and waits until it holds focus. Inputs: the view and its
-/// centre on the screen.
+/// Clicks into a drawn view and waits until it holds focus and the click's release has
+/// reached the sink, so no late release lands in a later step's events. Inputs: the view
+/// and its centre on the screen.
 fn clicked_into(view: &View, centre: POINT) {
+    let releases = || {
+        let seen = SEEN.lock().expect("the seen events");
+        let release = |event: &ViewEvent| {
+            matches!(
+                event,
+                ViewEvent::Mouse {
+                    kind: MouseKind::Release,
+                    ..
+                }
+            )
+        };
+        seen.iter().filter(|(_, event)| release(event)).count()
+    };
+    let before = releases();
     click(centre);
-    pump_until(
-        "the click's focus",
-        FARM_WAIT,
-        || unsafe { GetFocus() } == view.hwnd(),
-    );
+    pump_until("the click's focus and release", FARM_WAIT, || {
+        let focused = unsafe { GetFocus() } == view.hwnd();
+        focused && releases() > before
+    });
+}
+
+/// Checks that events are one left click at a point: a single press, then its release.
+/// Inputs: the events and the point.
+fn one_click(events: &[ViewEvent], at: (f64, f64)) {
+    assert_eq!(events.len(), 2, "one press and its release: {events:?}");
+    assert_eq!(mouse_event(&events[0], MouseKind::Press, at), (false, 1));
+    assert!(!mouse_event(&events[1], MouseKind::Release, at).0);
 }
 
 /// Faults a focused view by a refused resize and waits for the board's fault while this
@@ -1320,13 +1334,16 @@ fn compositions_end_and_cancel_with_nothing_sent(view: &View, webview: HWND, cen
     );
     assert_eq!(view.marked_text(), None);
     mark();
-    click(centre);
+    clicked_into(view, centre);
     pump_for(KEY_TAIL);
+    let clicked = sent();
+    let (cancel, pressed) = clicked.split_first().expect("the click sent the cancel");
     assert_eq!(
-        sent(),
-        [ViewEvent::Marked],
+        *cancel,
+        ViewEvent::Marked,
         "a click cancels the marked text"
     );
+    one_click(pressed, view_point(view, centre));
     assert_eq!(view.marked_text(), None);
     mark();
     unsafe { SetFocus(webview) };
@@ -1337,12 +1354,7 @@ fn compositions_end_and_cancel_with_nothing_sent(view: &View, webview: HWND, cen
         "a focus loss cancels the marked text"
     );
     assert_eq!(view.marked_text(), None);
-    click(centre);
-    pump_until(
-        "focus again",
-        FARM_WAIT,
-        || unsafe { GetFocus() } == view.hwnd(),
-    );
+    clicked_into(view, centre);
     take_seen();
     mark();
     view.place(None).expect("hidden");
@@ -1354,12 +1366,7 @@ fn compositions_end_and_cancel_with_nothing_sent(view: &View, webview: HWND, cen
     );
     assert_eq!(view.marked_text(), None);
     view.place(Some(PAGE)).expect("shown again");
-    click(centre);
-    pump_until(
-        "focus again",
-        FARM_WAIT,
-        || unsafe { GetFocus() } == view.hwnd(),
-    );
+    clicked_into(view, centre);
     println!("h2b row: end, click, focus loss and hide each cancelled once");
 }
 
@@ -1392,12 +1399,7 @@ fn inactive_views_compose_nothing(view: &View, webview: HWND, centre: POINT) {
         None,
         "a view without focus keeps no marked text"
     );
-    click(centre);
-    pump_until(
-        "focus again",
-        FARM_WAIT,
-        || unsafe { GetFocus() } == view.hwnd(),
-    );
+    clicked_into(view, centre);
     println!("h2b row: covered and unfocused views composed nothing");
 }
 
@@ -1407,12 +1409,7 @@ fn the_ime_marks_inline_commits_once_refuses_bad_answers_and_nothing_while_inact
     let (parent, webview) = stand_ins();
     let view = View::new(parent, webview, IME_VIEW, sink, &style()).expect("a view");
     let centre = placed_shown_and_drawn(parent, &view);
-    click(centre);
-    pump_until(
-        "the click's focus",
-        FARM_WAIT,
-        || unsafe { GetFocus() } == view.hwnd(),
-    );
+    clicked_into(&view, centre);
     marks_and_answers_where_its_characters_are(&view);
     refuses_what_it_cannot_trust(&view);
     commits_once_as_typed_text(&view);
@@ -2399,12 +2396,7 @@ fn the_mouse_selects_scrolls_and_opens_the_menu_as_the_panel_does() {
     let (parent, webview) = stand_ins();
     let view = View::new(parent, webview, MOUSE_VIEW, sink, &style()).expect("a view");
     let centre = placed_shown_and_drawn(parent, &view);
-    click(centre);
-    pump_until(
-        "the click's focus",
-        FARM_WAIT,
-        || unsafe { GetFocus() } == view.hwnd(),
-    );
+    clicked_into(&view, centre);
     presses_count_clicks(&view, centre);
     shift_drag_selects(&view, centre);
     a_lost_capture_releases(&view, webview, centre);
