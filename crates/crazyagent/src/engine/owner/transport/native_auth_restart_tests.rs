@@ -1481,7 +1481,7 @@ async fn an_existing_claude_sign_in_whose_token_lapsed_and_cannot_be_renewed_is_
         let home = &homes[0];
         let keychain = crate::credentials::test_keychain::TestKeychain::adopt(
             home,
-            home.join("Library/Keychains/login.keychain-db"),
+            home.join("Library/Keychains/profile.keychain-db"),
         );
         let service = format!(
             "Claude Code-credentials-{}",
@@ -1876,7 +1876,7 @@ async fn live_master_says_it_waits_while_another_process_holds_its_profile() {
         let home = &homes[0];
         let keychain = crate::credentials::test_keychain::TestKeychain::adopt(
             home,
-            home.join("Library/Keychains/login.keychain-db"),
+            home.join("Library/Keychains/profile.keychain-db"),
         );
         keychain.add(
             "unknown",

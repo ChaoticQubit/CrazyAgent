@@ -34,11 +34,12 @@ impl TestKeychain {
         keychain
     }
 
-    /// Creates an unlocked keychain at `<home>/Library/Keychains/login.keychain-db` and
-    /// makes it the home's default and only search-list keychain, which `security` keeps
-    /// per home. Input: an absolute temporary home. Output: the keychain.
+    /// Creates an unlocked keychain at `<home>/Library/Keychains/profile.keychain-db`, the
+    /// name the engine gives a profile home's keychain, and makes it the home's default and
+    /// only search-list keychain, which `security` keeps per home. Input: an absolute
+    /// temporary home. Output: the keychain.
     pub(crate) fn create(home: &Path) -> Self {
-        Self::create_named(home, "login.keychain-db")
+        Self::create_named(home, "profile.keychain-db")
     }
 
     /// Creates an unlocked keychain under `name` in `<home>/Library/Keychains`, such as the
