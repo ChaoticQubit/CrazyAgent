@@ -118,8 +118,8 @@ fn profile_keychain(directory: &Path) -> Result<Option<PathBuf>, EngineError> {
 }
 
 /// Opens a signed-in profile home's keychain before the engine reads it: settles its name,
-/// makes it that home's default and only search-list keychain again, so a rename a crash cut
-/// short heals, then unlocks it. Input: the absolute profile home. Output: the keychain, or
+/// unlocks it, then makes it that home's default and only search-list keychain again, so a
+/// rename a crash cut short heals. Input: the absolute profile home. Output: the keychain, or
 /// a failure, also for a home with none, after which the caller makes no call that could ask
 /// the owner for a password.
 pub(crate) fn open_profile_keychain(home: &Path) -> Result<PathBuf, EngineError> {
@@ -130,8 +130,8 @@ pub(crate) fn open_profile_keychain(home: &Path) -> Result<PathBuf, EngineError>
     }
     let keychain = profile_keychain(&directory)?.ok_or_else(failure)?;
     settings_folders(home)?;
-    point_at(home, &keychain)?;
     unlock(home, &keychain)?;
+    point_at(home, &keychain)?;
     Ok(keychain)
 }
 
@@ -179,8 +179,8 @@ pub(crate) fn prepare_profile_keychain(home: &Path) -> Result<PathBuf, EngineErr
             keychain
         }
     };
-    point_at(home, &keychain)?;
     unlock(home, &keychain)?;
+    point_at(home, &keychain)?;
     for private in [home.join("Library"), directory.clone()] {
         std::fs::set_permissions(
             &private,
@@ -1078,6 +1078,35 @@ mod tests {
 
     fn profile_keychain_path(home: &Path) -> PathBuf {
         home.join("Library/Keychains/profile.keychain-db")
+    }
+
+    #[test]
+    fn a_profile_keychain_the_empty_password_cannot_open_is_refused_and_its_settings_stay() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch();
+        let home = private_home(root.path(), "home");
+        for folder in ["Library", "Library/Keychains"] {
+            std::fs::create_dir(home.join(folder)).unwrap();
+            std::fs::set_permissions(home.join(folder), std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+        }
+        let keychain = TestKeychain::adopt(&home, profile_keychain_path(&home));
+        let text = keychain.path().to_str().unwrap().to_owned();
+        keychain.security(&["create-keychain", "-p", "crazyagent-dummy", &text], None);
+        keychain.security(&["list-keychains", "-d", "user", "-s", &text], None);
+        keychain.security(&["default-keychain", "-d", "user", "-s", &text], None);
+        keychain.security(&["lock-keychain", &text], None);
+        let before = [
+            keychain.setting("default-keychain"),
+            keychain.setting("list-keychains"),
+        ];
+        assert!(open_profile_keychain(&home).is_err());
+        let after = [
+            keychain.setting("default-keychain"),
+            keychain.setting("list-keychains"),
+        ];
+        assert_eq!(after, before);
+        assert!(present(keychain.path(), false).unwrap());
     }
 
     #[test]

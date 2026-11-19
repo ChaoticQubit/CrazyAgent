@@ -719,6 +719,31 @@ fn an_agent_gets_a_claude_copy_from_a_locked_profile_keychain_without_a_prompt()
 
 #[cfg(target_os = "macos")]
 #[test]
+fn a_locked_profile_keychain_the_empty_password_cannot_open_gives_no_copy_and_no_prompt() {
+    let mut case = UseCase::with_harness("claude-code");
+    let home = case.home();
+    let expires = (now() + 8 * 3600) * 1000;
+    let path = home.join("Library/Keychains/profile.keychain-db");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let keychain = TestKeychain::adopt(&home, path.clone());
+    let text = path.to_str().unwrap().to_owned();
+    keychain.security(&["create-keychain", "-p", "crazyagent-dummy", &text], None);
+    keychain.security(&["list-keychains", "-d", "user", "-s", &text], None);
+    keychain.security(&["default-keychain", "-d", "user", "-s", &text], None);
+    let (keychain, _service) = claude_keychain_from(keychain, &home, &claude_record(expires));
+    keychain.security(&["lock-keychain", &text], None);
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    assert_eq!(
+        refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
+        "native_profile_credential_unavailable"
+    );
+    assert!(entries(&agent).is_empty());
+    assert!(path.is_file());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn a_claude_profile_keychain_an_earlier_engine_named_login_is_renamed_on_the_first_read() {
     let mut case = UseCase::with_harness("claude-code");
     let home = case.home();
