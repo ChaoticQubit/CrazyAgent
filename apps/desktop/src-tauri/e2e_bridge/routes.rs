@@ -58,7 +58,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };
-            let result: Result<_, BridgeError> = async { read(state) .await? .harness_catalog(check.unwrap_or(false)) .await }.await;
+            let result: Result<_, BridgeError> = async { state.harness_catalog(check.unwrap_or(false)).await }.await;
             routed(result)
         }
         "desktop_harness_versions" => {

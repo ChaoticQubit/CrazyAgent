@@ -349,3 +349,18 @@ async fn a_versions_read_never_repins_an_entry_relinked_to_a_file_engine_start_r
         "the reads never run the owner's first file once the entry leads elsewhere"
     );
 }
+
+/// rv-code2 #691 F1 (leader 10:23): a Check's client wait is sized to a read, 30 s as an
+/// overview's, not the 75 s an update action may run, so a slow Check frees the TUI's owner
+/// worker and the desktop's listing place sooner than an update would; a List keeps the
+/// client's request timeout.
+#[test]
+fn a_check_waits_thirty_seconds_and_a_list_its_request_timeout() {
+    let timeout = Duration::from_secs(1);
+    assert_eq!(catalog_wait(timeout, true), Duration::from_secs(30));
+    assert_eq!(
+        catalog_wait(Duration::from_secs(30), true),
+        Duration::from_secs(30)
+    );
+    assert_eq!(catalog_wait(timeout, false), timeout);
+}

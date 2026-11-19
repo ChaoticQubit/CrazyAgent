@@ -1,4 +1,4 @@
-use super::{BridgeError, NativeBridge};
+use super::{BridgeError, NativeBridge, Unlocked};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -75,6 +75,17 @@ impl BridgeQueue {
             .map_err(|_| super::failure("busy"))
     }
 
+    /// Runs an engine call that `start` prepares from the shared bridge, with the same
+    /// bounds as `read`. Input: the step that prepares the call from the bridge. Output:
+    /// the call's result, or `busy`.
+    pub(super) async fn unlocked<T>(
+        &self,
+        start: impl FnOnce(&NativeBridge) -> Result<Unlocked<T>, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        let bridge = self.read().await?;
+        start(&*bridge)?.await
+    }
+
     async fn queued<G>(&self, lock: impl Future<Output = G>) -> Result<G, BridgeError> {
         let _turn = Turn::take(&self.waiting)?;
         tokio::time::timeout(BRIDGE_WAIT, lock)
@@ -110,6 +121,49 @@ mod tests {
     use std::time::Instant;
 
     const HOLD: Duration = Duration::from_millis(50);
+
+    /// rv-code2 #691 F1 (leader 10:23): a call that lets the bridge go once started, as a
+    /// desktop harness Check now does, holds a listing place while it runs but not the bridge,
+    /// so a change asked meanwhile gets the bridge at once rather than `busy` after the
+    /// queue's wait, and the next listing waits for the place.
+    #[tokio::test]
+    async fn a_call_that_lets_the_bridge_go_leaves_changes_free_while_it_runs() {
+        let queue = Arc::new(BridgeQueue::new(NativeBridge::new(None)));
+        let (finish, finished) = tokio::sync::oneshot::channel::<()>();
+        let running = tokio::spawn({
+            let queue = Arc::clone(&queue);
+            async move {
+                queue
+                    .unlocked(|_| {
+                        Ok(Box::pin(async move {
+                            finished.await.map_err(|_| super::super::failure("busy"))
+                        }) as Unlocked<()>)
+                    })
+                    .await
+                    .map_err(|e| e.code)
+            }
+        });
+        tokio::time::sleep(HOLD).await;
+        assert!(!running.is_finished(), "the call is still running");
+        let asked = Instant::now();
+        assert_eq!(queue.enter().await.map(drop).map_err(|e| e.code), Ok(()));
+        assert!(
+            asked.elapsed() < HOLD,
+            "a change never waits on a running call"
+        );
+        let listing = tokio::spawn({
+            let queue = Arc::clone(&queue);
+            async move { queue.listing().await.map(drop).map_err(|e| e.code) }
+        });
+        tokio::time::sleep(HOLD).await;
+        assert!(
+            !listing.is_finished(),
+            "the running call holds its listing place"
+        );
+        finish.send(()).unwrap();
+        assert_eq!(running.await.unwrap(), Ok(()));
+        assert_eq!(listing.await.unwrap(), Ok(()));
+    }
 
     #[tokio::test]
     async fn a_call_waits_its_turn_while_another_call_holds_the_bridge() {

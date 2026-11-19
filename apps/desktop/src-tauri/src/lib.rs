@@ -414,10 +414,7 @@ async fn desktop_harness_catalog(
     check: Option<bool>,
 ) -> Result<Vec<HarnessEntry>, BridgeError> {
     main_window(&webview)?;
-    read(&state)
-        .await?
-        .harness_catalog(check.unwrap_or(false))
-        .await
+    state.0.harness_catalog(check.unwrap_or(false)).await
 }
 
 #[tauri::command]

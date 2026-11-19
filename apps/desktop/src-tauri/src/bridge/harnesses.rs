@@ -1,4 +1,7 @@
-use super::{BridgeError, ENGINE_VERSION_MISMATCH, NativeBridge, bounded, caused, failure};
+use super::{
+    BridgeError, BridgeQueue, ENGINE_VERSION_MISMATCH, NativeBridge, Unlocked, bounded, caused,
+    failure,
+};
 use crazyagent::harnesses::HarnessEntry;
 use crazyagent::harnesses::finding::{self, Found};
 use crazyagent::harnesses::update::{HarnessVersions, INSTALL_LIST_INVALID, UpdateSettings};
@@ -114,18 +117,48 @@ impl NativeBridge {
     /// whether to probe now. Output: catalog entries in owner order, each with a
     /// plain status such as "Ready", "Not installed" or "Limited control: <reason>".
     pub async fn harness_catalog(&self, check: bool) -> Result<Vec<HarnessEntry>, BridgeError> {
+        self.harness_call(check)?.await
+    }
+
+    /// Prepares the harness catalog read of [`Self::harness_catalog`] on a copy of the
+    /// controller, so awaiting it holds no bridge state and leaves the bridge controller's
+    /// view as it was. Input: whether to probe now. Output: the prepared read, or
+    /// `not_connected`.
+    fn harness_call(&self, check: bool) -> Result<Unlocked<Vec<HarnessEntry>>, BridgeError> {
         if !self.status().connected {
             return Err(failure("not_connected"));
         }
-        let entries = self
-            .reader()?
-            .harness_catalog(check)
-            .await
-            .map_err(|error| caused("owner_read_failed", &error.0))?;
-        assert!(!entries.is_empty());
-        bounded(entries)
+        let controller = self
+            .controller
+            .as_ref()
+            .ok_or_else(|| failure("not_connected"))?
+            .reader()
+            .map_err(|_| failure("not_connected"))?;
+        Ok(Box::pin(async move {
+            let entries = controller
+                .harness_catalog(check)
+                .await
+                .map_err(|error| caused("owner_read_failed", &error.0))?;
+            assert!(!entries.is_empty());
+            bounded(entries)
+        }))
     }
+}
 
+impl BridgeQueue {
+    /// Lists the harness catalog through the window's bridge queue. A List shares the bridge
+    /// for its call. A Check, which may hash every harness it finds, runs through
+    /// `unlocked`, so a change asked while it runs does not wait for it. Input: whether to
+    /// probe now. Output: the catalog entries, or `busy`.
+    pub async fn harness_catalog(&self, check: bool) -> Result<Vec<HarnessEntry>, BridgeError> {
+        if check {
+            return self.unlocked(|bridge| bridge.harness_call(true)).await;
+        }
+        self.read().await?.harness_catalog(false).await
+    }
+}
+
+impl NativeBridge {
     /// Reads one harness's installed version, how it was installed and the exact update line,
     /// and has the engine look for a newer version when `look` is set. Inputs: the catalog id
     /// and whether to look now. Output: the versions, or a harness code.
