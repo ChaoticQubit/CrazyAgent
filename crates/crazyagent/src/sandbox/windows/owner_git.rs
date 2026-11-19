@@ -216,7 +216,7 @@ mod tests {
     }
 
     /// A project, an owner-git folder, a grants folder and a stand-in for Git for Windows'
-    /// `cmd\git.exe` beside its `mingw64` folder, all in one temp folder. Output: the folders.
+    /// `cmd\git.exe` beside its `mingw64\bin\git.exe`, all in one temp folder. Output: the folders.
     fn made() -> Made {
         let temp = tempfile::tempdir().unwrap();
         let root = canonical(temp.path()).unwrap();
@@ -225,11 +225,17 @@ mod tests {
             root.join("Git").join("cmd").join("git.exe"),
             root.join(GRANTS_FOLDER),
         );
-        let platform = root.join("Git").join("mingw64");
-        for made in [&project, git.parent().unwrap(), &grants, &platform] {
+        let platform = root.join("Git").join("mingw64").join("bin").join("git.exe");
+        for made in [
+            &project,
+            git.parent().unwrap(),
+            &grants,
+            platform.parent().unwrap(),
+        ] {
             fs::create_dir_all(made).unwrap();
         }
         fs::write(&git, "").unwrap();
+        fs::write(&platform, "").unwrap();
         Made {
             _temp: temp,
             root,
@@ -266,6 +272,8 @@ mod tests {
             r"C:\Programs\Git\CMD\git.exe",
             r"C:\Programs\Git\mingw64\bin\git.exe",
             r"C:\Programs\Git\clangarm64\bin\git.exe",
+            r"C:\Programs\Git\ucrt64\bin\git.exe",
+            r"C:\Programs\Git\clang64\bin\git.exe",
         ] {
             assert_eq!(install_root(Path::new(program)), Some(root), "{program}");
         }
@@ -398,28 +406,18 @@ mod tests {
     #[test]
     fn owner_git_reads_only_a_folder_that_holds_git_for_windows_markers() {
         let made = made();
-        for (name, files, folders) in [
-            ("UserBin", &["bin/git.exe"][..], &[][..]),
-            ("UserCmd", &["cmd/git.exe"][..], &[][..]),
-            ("NoCmd", &["bin/git.exe"][..], &["mingw64"][..]),
-            (
-                "NoPlatform",
-                &["cmd/git.exe", "bin/git.exe"][..],
-                &["usr/bin"][..],
-            ),
-        ] {
-            let git = laid_out(&made.root.join(name), files, folders);
-            refused_install(&made, &made.folder, &made.project, &git, "Git for Windows");
-        }
         for (name, platform) in [
+            ("Ucrt", "ucrt64"),
+            ("Clang", "clang64"),
             ("Full", "mingw64"),
             ("Arm", "clangarm64"),
             ("Old", "mingw32"),
         ] {
+            let platform_git = format!("{platform}/bin/git.exe");
             let git = laid_out(
                 &made.root.join(name),
-                &["cmd/git.exe", "bin/git.exe"],
-                &[platform],
+                &["cmd/git.exe", "bin/git.exe", platform_git.as_str()],
+                &[],
             );
             let project = made.root.join(format!("project-{name}"));
             fs::create_dir_all(&project).unwrap();
@@ -432,6 +430,33 @@ mod tests {
                 "{name}"
             );
         }
+        for (name, files, folders) in [
+            ("UserBin", &["bin/git.exe"][..], &[][..]),
+            ("UserCmd", &["cmd/git.exe"][..], &[][..]),
+            (
+                "NoCmd",
+                &["bin/git.exe", "mingw64/bin/git.exe"][..],
+                &[][..],
+            ),
+            (
+                "NoPlatform",
+                &["cmd/git.exe", "bin/git.exe"][..],
+                &["usr/bin"][..],
+            ),
+            (
+                "BareMingw",
+                &["cmd/git.exe", "bin/git.exe"][..],
+                &["mingw64/bin"][..],
+            ),
+            (
+                "BareUcrt",
+                &["cmd/git.exe", "bin/git.exe"][..],
+                &["ucrt64/bin"][..],
+            ),
+        ] {
+            let git = laid_out(&made.root.join(name), files, folders);
+            refused_install(&made, &made.folder, &made.project, &git, "Git for Windows");
+        }
     }
 
     #[test]
@@ -440,11 +465,11 @@ mod tests {
         let work = made.root.join("work");
         let project = work.join("project");
         fs::create_dir_all(&project).unwrap();
-        let git = laid_out(&work, &["cmd/git.exe"], &["mingw64"]);
+        let git = laid_out(&work, &["cmd/git.exe", "mingw64/bin/git.exe"], &[]);
         refused_install(&made, &made.folder, &project, &git, "holds");
         let engine = made.root.join("engine");
         let folder = engine.join(OWNER_GIT_FOLDER);
-        let git = laid_out(&engine, &["cmd/git.exe"], &["mingw64"]);
+        let git = laid_out(&engine, &["cmd/git.exe", "mingw64/bin/git.exe"], &[]);
         refused_install(&made, &folder, &made.project, &git, "holds");
     }
 
