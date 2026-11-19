@@ -277,6 +277,24 @@ async fn one_engine_owns_database_and_config_identity_is_checked() {
     first.close().await.unwrap();
 }
 
+const RECEIVING_TRIES: usize = 30;
+
+/// Applies one project once the storage worker receives, trying again while it still starts,
+/// so a row that then holds the database's write lock never races the worker's own start
+/// settles, which would push its receiving past every apply's deadline. Input: the engine.
+/// Output: the revision that apply made. Panics after `RECEIVING_TRIES` refused tries.
+async fn first_apply_once_receiving(engine: &Engine) -> Cursor {
+    for attempt in 0..RECEIVING_TRIES {
+        let warm_up = request(&format!("warm-up-{attempt}"), 0, create("warm-up"));
+        match engine.apply(warm_up).await {
+            Ok(reply) => return reply.revision,
+            Err(error) if error.0 == "storage_starting_not_submitted" => {}
+            Err(error) => panic!("the warm-up apply failed: {error:?}"),
+        }
+    }
+    panic!("the storage worker never received in {RECEIVING_TRIES} tries");
+}
+
 #[tokio::test]
 async fn real_sqlite_contention_and_queue_saturation_are_bounded() {
     let root = private_root();
@@ -285,6 +303,7 @@ async fn real_sqlite_contention_and_queue_saturation_are_bounded() {
     let cfg = resolve_config(&g, &root.path().join("p")).unwrap();
     let path = root.path().join("db");
     let engine = std::sync::Arc::new(Engine::open(&path, cfg).await.unwrap());
+    assert_eq!(first_apply_once_receiving(&engine).await, Cursor::new(1));
     let blocker = rusqlite::Connection::open(&path).unwrap();
     blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
     let mut jobs = tokio::task::JoinSet::new();
@@ -294,7 +313,7 @@ async fn real_sqlite_contention_and_queue_saturation_are_bounded() {
             engine
                 .apply(request(
                     &format!("saturation-{i}"),
-                    0,
+                    1,
                     create(&format!("p-{i}")),
                 ))
                 .await
@@ -310,10 +329,10 @@ async fn real_sqlite_contention_and_queue_saturation_are_bounded() {
     assert!(full > 0);
     blocker.execute_batch("ROLLBACK").unwrap();
     let reply = engine
-        .apply(request("after-contention", 0, create("real")))
+        .apply(request("after-contention", 1, create("real")))
         .await
         .unwrap();
-    assert_eq!(reply.revision, Cursor::new(1));
+    assert_eq!(reply.revision, Cursor::new(2));
     engine.close().await.unwrap();
 }
 
