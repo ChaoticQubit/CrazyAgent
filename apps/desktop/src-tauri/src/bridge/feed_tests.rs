@@ -477,11 +477,29 @@ fn an_overflowed_view_bound_again_without_close_drops_its_first_opens_events() {
     );
 }
 
+/// Moves the open task that calls it off its tokio worker, so the tasks it spawns next wait in
+/// the queue every worker takes from, not in this worker's own slot that no other worker takes.
+/// Takes nothing. Returns once a task spawned from here ran while this thread waited, which
+/// shows the next spawns can run while the open task blocks; panics after 20 tries.
+fn leave_worker() {
+    for _ in 0..20 {
+        tokio::task::block_in_place(|| std::thread::sleep(Duration::from_millis(20)));
+        let (ran, probe) = std::sync::mpsc::channel::<()>();
+        tauri::async_runtime::spawn(async move {
+            let _ = ran.send(());
+        });
+        if probe.recv_timeout(Duration::from_millis(200)).is_ok() {
+            return;
+        }
+    }
+    panic!("the open task never left its worker");
+}
+
 /// NOTE-0155 section 5 (rv-code2 #488 r2 N1, V243-NATIVE-FEED-FIXES): `Attached` reaches the
-/// host only once its view is open, so the first key sent on it is never refused with
-/// `terminal_not_attached`. Against a live engine terminal, the test holds the slots lock
-/// from the moment the engine hands over the session: no event of the view arrives while it
-/// is held, and once it is let go the `Attached` arrives, passes `take`, and a key is taken.
+/// host only once its view is open, so its first key is never refused `terminal_not_attached`.
+/// On a live engine terminal the test holds the slots lock from the session handover: no event
+/// arrives while it is held, then `Attached` passes `take` and a key is taken. The row is
+/// scheduler-dependent: its opener calls `leave_worker`, so a read task spawned early can run.
 #[test]
 fn the_attached_of_a_live_open_reaches_the_host_only_once_its_view_is_open() {
     use crazyagent::engine::Client;
@@ -566,6 +584,7 @@ fn the_attached_of_a_live_open_reaches_the_host_only_once_its_view_is_open() {
                 .terminal_attach(key.agent)
                 .await
                 .map_err(|_| failure("terminal_outcome_unknown"))?;
+            leave_worker();
             handed.send(()).expect("the test waits for the session");
             Ok(session)
         })
