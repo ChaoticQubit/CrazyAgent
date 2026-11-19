@@ -277,7 +277,6 @@ impl Painter {
     /// scale's replacement budget. Inputs: the view's window and geometry.
     fn surface(&mut self, handle: isize, geometry: Geometry) -> Result<Surface, String> {
         self.retire_lost();
-        let window = Win32WindowHandle::new(NonZeroIsize::new(handle).ok_or("no window")?);
         let key = geometry.scale_key;
         let index = match self.shared.iter().position(|(held, _)| *held == key) {
             Some(index) => index,
@@ -288,6 +287,7 @@ impl Painter {
                 self.shared.len() - 1
             }
         };
+        let window = Win32WindowHandle::new(NonZeroIsize::new(handle).ok_or("no window")?);
         let shared = &mut self.shared[index].1;
         if !shared.has_device() && !self.replaced.attempt(key) {
             return Err(GPU_FAULT.to_owned());
@@ -479,6 +479,10 @@ mod tests {
         assert!(
             painter.shared.iter().any(|(key, _)| *key == 100),
             "shared state no view uses is kept, never dropped"
+        );
+        assert!(
+            painter.shared.iter().any(|(key, _)| *key == 150),
+            "the make reached the shared state for its own scale"
         );
     }
 
