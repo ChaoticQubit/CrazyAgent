@@ -278,6 +278,21 @@ fn owner_home() -> Result<PathBuf, EngineError> {
     std::fs::canonicalize(&user.dir).map_err(|_| failure())
 }
 
+/// Tells whether a folder is the owner's own home by its device and inode, so every name
+/// macOS gives that folder, the data volume's `/System/Volumes/Data` spelling included,
+/// counts. Input: an absolute folder. Output: whether it is the owner's home, or a failure
+/// when either folder cannot be read.
+fn is_owner_home(home: &Path) -> Result<bool, EngineError> {
+    use std::os::unix::fs::MetadataExt;
+    assert!(
+        home.is_absolute(),
+        "the owner home check takes an absolute path"
+    );
+    let owner = std::fs::metadata(owner_home()?).map_err(|_| failure())?;
+    let entry = std::fs::metadata(home).map_err(|_| failure())?;
+    Ok((entry.dev(), entry.ino()) == (owner.dev(), owner.ino()))
+}
+
 /// Refuses a profile home the engine may not settle a keychain in, before any rename or
 /// `security` call: it must be absolute and its own canonical path, so no link sits on it,
 /// and never the owner's own home, whose login keychain a rename would take from the login
@@ -285,7 +300,7 @@ fn owner_home() -> Result<PathBuf, EngineError> {
 fn profile_home_guard(home: &Path) -> Result<(), EngineError> {
     if !home.is_absolute()
         || std::fs::canonicalize(home).map_err(|_| failure())? != home
-        || home == owner_home()?
+        || is_owner_home(home)?
     {
         return Err(failure());
     }
@@ -305,7 +320,7 @@ fn agent_home_guard(root: &Path, home: &Path) -> Result<(), EngineError> {
     if std::fs::canonicalize(home).map_err(|_| failure())? != home
         || !home.starts_with(&root)
         || home == root
-        || home == owner_home()?
+        || is_owner_home(home)?
     {
         return Err(failure());
     }
@@ -1044,6 +1059,8 @@ mod tests {
     fn the_owners_home_and_any_login_keychain_name_are_refused_before_any_security_call() {
         let owner = owner_home().unwrap();
         assert!(agent_home_guard(Path::new("/"), &owner).is_err());
+        let long = crate::projects_home::data_twin(&owner).expect("a data volume name");
+        assert!(agent_home_guard(Path::new("/System/Volumes/Data"), &long).is_err());
         assert!(!agent_keychain_name(LOGIN_KEYCHAIN));
         assert!(!agent_keychain_name(PROFILE_KEYCHAIN));
         assert!(agent_keychain_name("agent-0123456789abcdef.keychain-db"));
@@ -1066,6 +1083,12 @@ mod tests {
     fn the_owners_own_home_is_refused_as_a_profile_home_before_any_rename() {
         let owner = owner_home().unwrap();
         assert_eq!(profile_home_guard(&owner), Err(failure()));
+        let long = crate::projects_home::data_twin(&owner).expect("a data volume name");
+        assert_eq!(
+            profile_home_guard(&long),
+            Err(failure()),
+            "the owner's home in its data volume spelling passed as a profile home"
+        );
         let root = scratch();
         let home = private_home(root.path(), "home");
         assert_eq!(profile_home_guard(&home), Ok(()));
@@ -1073,6 +1096,12 @@ mod tests {
         std::os::unix::fs::symlink(&home, &link).unwrap();
         assert_eq!(profile_home_guard(&link), Err(failure()));
         assert_eq!(profile_home_guard(Path::new("home")), Err(failure()));
+    }
+
+    #[test]
+    #[should_panic(expected = "the owner home check takes an absolute path")]
+    fn the_owner_home_check_trips_on_a_relative_path() {
+        let _ = is_owner_home(Path::new("home"));
     }
 
     #[test]
