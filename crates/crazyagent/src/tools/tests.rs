@@ -881,6 +881,43 @@ fn a_shim_named_by_path_under_an_npm_prefix_never_asks_its_own_node() {
     assert_eq!(launched.interpreter().unwrap().program, real);
 }
 
+/// V243-OWN-PREFIX-NODE-REFUSE trip row: [`own_node_refused`] holds only a tool whose real
+/// file is absolute, as every tool [`entry_at`] gives is.
+#[test]
+#[should_panic(expected = "assertion failed: tool.program.is_absolute()")]
+fn the_own_prefix_node_check_trips_on_a_tool_whose_file_is_relative() {
+    let (_folder, home) = scratch();
+    let tool = Resolved {
+        entry: PathBuf::from("codex"),
+        program: PathBuf::from("codex"),
+        kind: Kind::Native,
+    };
+    let _ = own_node_refused(&tool, &home_only(&home));
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE trip row: [`own_node`] judges only a script named by its
+/// absolute real file.
+#[test]
+#[should_panic(expected = "assertion failed: script.is_absolute()")]
+fn the_own_prefix_node_trips_on_a_relative_script() {
+    let (_folder, home) = scratch();
+    let _ = own_node(
+        Path::new("lib/node_modules/pkg/cli.js"),
+        &home_only(&home),
+        1,
+    );
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE trip row: [`own_node`] never judges a `node` past
+/// [`INTERPRETER_DEPTH_MAX`].
+#[test]
+#[should_panic(expected = "assertion failed: depth <= INTERPRETER_DEPTH_MAX")]
+fn the_own_prefix_node_trips_past_the_interpreter_depth() {
+    let (_folder, home) = scratch();
+    let script = home.join("nvm-like/lib/node_modules/pkg/cli.js");
+    let _ = own_node(&script, &home_only(&home), INTERPRETER_DEPTH_MAX + 1);
+}
+
 /// R-L2: a folder other users of the group can write, such as a 0775 staff folder made under
 /// umask 002, is passed over; on macOS an admin-group folder, like Intel Homebrew's, is not.
 /// On Linux a folder of this user's private group is not passed over either, by design

@@ -1216,7 +1216,6 @@ pub(crate) fn own_node_refused(tool: &Resolved, places: &Places) -> Option<Missi
         return None;
     }
     let passed = own_node(&tool.program, places, 1)?.1.err()?;
-    assert_ne!(passed.reason, Reason::NotFound);
     let name = tool
         .entry
         .file_name()
@@ -1233,9 +1232,9 @@ const OWN_NODE_LOGGED_MAX: usize = 64;
 
 /// Writes one engine log line for an npm prefix's own `node` the resolver found and passed
 /// over, with its reason, once per file per process and for at most [`OWN_NODE_LOGGED_MAX`]
-/// files, so the fallback to the places' `node` is never silent (G1 P7; refusing the
-/// harness instead is backlog V243-OWN-PREFIX-NODE-REFUSE). Inputs: the file and why it was
-/// passed over. Output: whether this call wrote the line.
+/// files, so the fallback to the places' `node` is never silent (G1 P7); a harness launch
+/// refuses instead ([`own_node_refused`]). Inputs: the file and why it was passed over.
+/// Output: whether this call wrote the line.
 fn log_own_node_passed_over(node: &Path, passed: &Missing) -> bool {
     static LOGGED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
     assert_ne!(passed.reason, Reason::NotFound);
