@@ -991,9 +991,10 @@ pub const LINUX_HIDDEN_MOUNTED_AGAIN: &str = "linux_hidden_mounted_again";
 pub const LINUX_HIDDEN_MOUNTS_NOT_PRIVATE: &str = "linux_hidden_mounts_not_private";
 
 /// The code a launch refusal has of its own, so a caller shows its plain line: the strict
-/// setting's ([`LINUX_NOT_FULL`]) and, on Linux, the hidden folders' two
-/// ([`LINUX_HIDDEN_NEEDS_NAMESPACES`], [`LINUX_HIDDEN_MOUNTED_AGAIN`]). Input: the
-/// refusal. Output: the code, or none for a refusal with no code of its own.
+/// setting's ([`LINUX_NOT_FULL`]) and, on Linux, the hidden folders' three
+/// ([`LINUX_HIDDEN_NEEDS_NAMESPACES`], [`LINUX_HIDDEN_MOUNTED_AGAIN`],
+/// [`LINUX_HIDDEN_MOUNTS_NOT_PRIVATE`]). Input: the refusal. Output: the code, or none
+/// for a refusal with no code of its own.
 pub fn refusal_code(error: &SandboxError) -> Option<&'static str> {
     let SandboxError::Unavailable(reason) = error else {
         return None;
@@ -1004,6 +1005,8 @@ pub fn refusal_code(error: &SandboxError) -> Option<&'static str> {
         linux::HIDDEN_NEEDS_NAMESPACES => Some(LINUX_HIDDEN_NEEDS_NAMESPACES),
         #[cfg(target_os = "linux")]
         linux::HIDDEN_MOUNTED_AGAIN => Some(LINUX_HIDDEN_MOUNTED_AGAIN),
+        #[cfg(target_os = "linux")]
+        linux::HIDDEN_MOUNTS_NOT_PRIVATE => Some(LINUX_HIDDEN_MOUNTS_NOT_PRIVATE),
         _ => None,
     }
 }

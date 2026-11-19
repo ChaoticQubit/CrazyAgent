@@ -421,6 +421,7 @@ impl LandlockPolicy {
         if self.nested {
             args.push(NESTED.into());
         }
+        args.extend(cut_args(self.cut.as_deref()));
         args.extend(self.guard.args());
         args
     }
@@ -581,11 +582,14 @@ impl HelperRequest {
                 Some(DIE_WITH) if policy.die_with.is_none() => {
                     policy.die_with = Some(parent(rest.next())?);
                 }
+                Some(PRIVATE_MOUNTS) if policy.cut.is_none() => policy.cut = Some(Vec::new()),
+                Some(COVER) => cover(policy.cut.as_mut(), rest.next())?,
                 Some("--") if nest => {
                     let alone = !probe && !filter && policy == LandlockPolicy::default();
                     return nest_request(alone, rest);
                 }
                 Some("--") if !probe && filter => {
+                    let cut = policy.cut.take();
                     if policy != LandlockPolicy::default() {
                         return Err(format!("{FILTER_SOCKETS} takes no policy"));
                     }
@@ -593,7 +597,7 @@ impl HelperRequest {
                     return Ok(Self::Filter {
                         program,
                         args: rest.collect(),
-                        cut: None,
+                        cut,
                     });
                 }
                 Some("--") if !probe => return run_request(policy, rest),
@@ -614,11 +618,49 @@ impl HelperRequest {
                 limit_network: policy.limit_network,
                 open_sockets: policy.open_sockets,
                 keep_free: !policy.keep_free.is_empty(),
-                cut: None,
+                cut: policy.cut,
             });
         }
         Err("missing the harness command after --".into())
     }
+}
+
+/// The helper words that ask for a private mount tree with these covers, or none.
+/// Input: the covers, when the tree is asked for. Output: [`PRIVATE_MOUNTS`], then
+/// [`COVER`] and the path for each cover.
+fn cut_args(covers: Option<&[PathBuf]>) -> Vec<OsString> {
+    let Some(covers) = covers else {
+        return Vec::new();
+    };
+    let mut args = vec![OsString::from(PRIVATE_MOUNTS)];
+    for cover in covers {
+        args.push(COVER.into());
+        args.push(cover.into());
+    }
+    assert_eq!(args.len(), 1 + 2 * covers.len());
+    args
+}
+
+/// Adds one [`COVER`] to a private tree: after [`PRIVATE_MOUNTS`], a clean absolute path
+/// below the root, each once, at most [`crate::sandbox::HIDDEN_MAX`]. Inputs: the covers
+/// so far, when the tree was asked for, and the next word. Output: Ok, or the reason.
+fn cover(covers: Option<&mut Vec<PathBuf>>, value: Option<OsString>) -> Result<(), String> {
+    let covers = covers.ok_or_else(|| format!("{COVER} follows {PRIVATE_MOUNTS}"))?;
+    let path = absolute(value)?;
+    if !clean_absolute(&path) || path.parent().is_none() {
+        return Err(format!(
+            "{COVER} takes a clean folder below /: {}",
+            path.display()
+        ));
+    }
+    if covers.contains(&path) || covers.len() >= crate::sandbox::HIDDEN_MAX {
+        return Err(format!(
+            "{COVER} names each folder once, at most {}",
+            crate::sandbox::HIDDEN_MAX
+        ));
+    }
+    covers.push(path);
+    Ok(())
 }
 
 /// Reads what follows a policy's `--`: the harness and its arguments, once the policy
@@ -633,6 +675,9 @@ fn run_request(
     guard_fits(&policy)?;
     if policy.nested && policy.die_with.is_some() {
         return Err(format!("{NESTED} takes no {DIE_WITH}"));
+    }
+    if policy.cut.is_some() && !policy.nested {
+        return Err(format!("{PRIVATE_MOUNTS} needs {NESTED}"));
     }
     let program = absolute(rest.next())?;
     if policy.read.len() + policy.write.len() + policy.git_write.len() > HELPER_PATHS_MAX {
@@ -1653,7 +1698,9 @@ impl LinuxSandbox {
     /// which keeps no port free ([`LINUX_OPEN_NETWORK_NEEDS_LANDLOCK`]), for a policy confined to one
     /// worktree, whose git denies neither backend can hold, for a limited network the
     /// sockets setting starts no agent on, or on Landlock for a kept port Linux could hand
-    /// out by itself ([`kept_outside_picked`]) or a hidden folder ([`HIDDEN_NEEDS_NAMESPACES`]).
+    /// out by itself ([`kept_outside_picked`]) or a hidden folder ([`HIDDEN_NEEDS_NAMESPACES`]),
+    /// and with hidden folders where the helper gets no mount tree of its own on the
+    /// backend ([`cuts`], [`HIDDEN_MOUNTS_NOT_PRIVATE`]).
     /// Bubblewrap starts only a closed agent, in a network of its own with no host port.
     pub fn new(sandbox: ProjectSandbox, backend: LinuxBackend) -> Result<Self, SandboxError> {
         admitted(&sandbox)?;
@@ -1698,6 +1745,9 @@ impl LinuxSandbox {
         } else {
             kept_outside_picked(&kept_free(&sandbox), read_picked_ports().as_ref())
                 .map_err(SandboxError::Unavailable)?;
+        }
+        if !sandbox.hidden.is_empty() && !cuts(&backend) {
+            return Err(SandboxError::Unavailable(HIDDEN_MOUNTS_NOT_PRIVATE.into()));
         }
         Ok(Self {
             sandbox,
@@ -2108,6 +2158,32 @@ fn trusted_file(bwrap: &Path) -> Option<fs::File> {
     (plain && [0, own].contains(&held.uid())).then_some(file)
 }
 
+/// Tells whether the helper gets a mount tree of its own where this backend starts it, by
+/// starting it there with a private tree and no cover but `/proc` ([`cut`]): the nested
+/// probe ([`nests`]), or bubblewrap's closed box with the socket filter before `/bin/true`.
+/// Input: the backend. Output: true only when that start exits 0; never on plain Landlock.
+fn cuts(backend: &LinuxBackend) -> bool {
+    match backend {
+        LinuxBackend::Landlock { .. } => false,
+        LinuxBackend::Nested { bwrap, helper } => {
+            nests(bwrap, helper, &[PROBE.into(), PRIVATE_MOUNTS.into()])
+        }
+        LinuxBackend::Bubblewrap { bwrap, helper } => {
+            let bare = Grants {
+                read: Vec::new(),
+                write: Vec::new(),
+                git_write: Vec::new(),
+                guarded: Held::default(),
+                hidden: Vec::new(),
+            };
+            let closed = SandboxNetwork::Only(Vec::new());
+            let mut probe = bwrap_command(bwrap, helper, &bare, Path::new("/"), &closed);
+            probe.args([PRIVATE_MOUNTS, "--", "/bin/true"]);
+            passes(&mut probe)
+        }
+    }
+}
+
 /// Tells whether a bubblewrap is one the helper may nest an agent under ([`trusted_file`]).
 /// A host whose bubblewrap fails this stays on plain Landlock with its gap lines. Input:
 /// its path. Output: true when it may.
@@ -2483,6 +2559,7 @@ impl Sandbox for LinuxSandbox {
                 let policy = self.with_guard(
                     LandlockPolicy {
                         nested: true,
+                        cut: private_tree(&grants.hidden).map(<[PathBuf]>::to_vec),
                         ..landlock_policy(&grants, &self.sandbox)
                     },
                     &grants.guarded,
@@ -2692,9 +2769,10 @@ impl Grants {
 
 /// Refuses a launch whose hidden folders a second mount of their disk shows
 /// ([`mounted_again`]), reading this computer's mount list only when the policy hides a
-/// folder, at install and again at wrap. A stated limit: a mount made after the start
-/// still reaches the running agent (run 44410206144). Input: the policy. Output: Ok, or
-/// the refusal.
+/// folder, at install and again at wrap. A mount made after the start stays out, since the
+/// helper cuts the agent's tree off first ([`cut`]); a stated limit (leader 19:09 Q6): one
+/// made between this read and that cut still reaches the agent. Input: the policy.
+/// Output: Ok, or the refusal.
 fn mounts_hold(sandbox: &ProjectSandbox) -> Result<(), SandboxError> {
     if sandbox.hidden.is_empty() {
         return Ok(());
@@ -2794,44 +2872,103 @@ fn unescaped(field: &str) -> Option<PathBuf> {
 }
 
 /// Gives the helper a mount tree of its own that no later mount on this computer reaches,
-/// before Landlock, and proves it: no mount takes another's events, each cover is a locked
-/// mount, and no capability is left. Input: the covers. Output: Ok, or the reason.
+/// before Landlock, and proves it (V24x-LINUX-NEST-MOUNT-PROPAGATION): one thread, a user
+/// and a mount namespace of its own mapped to the same ids, every mount private, each cover
+/// and `/proc` a mount that `umount2` refuses as locked, then no capability, bounding set
+/// included. Input: the covers. Output: Ok, or the reason.
 fn cut(covers: &[PathBuf]) -> Result<(), String> {
     let read = |path: &str| fs::read_to_string(path).map_err(|error| format!("{path}: {error}"));
+    let write = |path: &str, text: String| {
+        fs::write(path, text).map_err(|error| format!("{path}: {error}"))
+    };
+    if !alone(&read("/proc/self/status")?) {
+        return Err("the helper runs more than one thread".into());
+    }
+    let uid = rustix::process::getuid().as_raw();
+    let gid = rustix::process::getgid().as_raw();
+    nix::sched::unshare(
+        nix::sched::CloneFlags::CLONE_NEWUSER | nix::sched::CloneFlags::CLONE_NEWNS,
+    )
+    .map_err(|error| format!("a user and mount namespace of its own: {error}"))?;
+    write("/proc/self/setgroups", "deny".into())?;
+    write("/proc/self/uid_map", format!("{uid} {uid} 1\n"))?;
+    write("/proc/self/gid_map", format!("{gid} {gid} 1\n"))?;
+    let private = nix::mount::MsFlags::MS_REC | nix::mount::MsFlags::MS_PRIVATE;
+    nix::mount::mount(None::<&str>, "/", None::<&str>, private, None::<&str>)
+        .map_err(|error| format!("private mounts: {error}"))?;
     let mountinfo = read("/proc/self/mountinfo")?;
-    let status = read("/proc/self/status")?;
-    let held = alone(&status)
-        && propagation_free(&mountinfo)
-        && covers.iter().all(|cover| covered(&mountinfo, cover))
-        && capabilities_bare(&status);
-    held.then_some(())
-        .ok_or_else(|| "the mount tree is not its own".into())
+    if !propagation_free(&mountinfo) {
+        return Err("a mount still takes mount events".into());
+    }
+    for cover in covers
+        .iter()
+        .map(PathBuf::as_path)
+        .chain([Path::new("/proc")])
+    {
+        if !covered(&mountinfo, cover) {
+            return Err(format!("{} is not a mount", cover.display()));
+        }
+        match nix::mount::umount2(cover, nix::mount::MntFlags::empty()) {
+            Err(nix::errno::Errno::EINVAL) => {}
+            Ok(()) => return Err(format!("{} came off", cover.display())),
+            Err(error) => return Err(format!("{}: {error}", cover.display())),
+        }
+    }
+    for capability in rustix::thread::CapabilitySet::all().iter() {
+        match rustix::thread::remove_capability_from_bounding_set(capability) {
+            Ok(()) | Err(rustix::io::Errno::INVAL) => {}
+            Err(error) => return Err(format!("bounding set: {error}")),
+        }
+    }
+    egress::drop_capabilities()?;
+    if !capabilities_bare(&read("/proc/self/status")?) {
+        return Err("a capability is left".into());
+    }
+    Ok(())
 }
 
 /// Tells whether a process status text names one thread. Input: `/proc/self/status`.
 /// Output: true only for `Threads: 1`.
-fn alone(_status: &str) -> bool {
-    true
+fn alone(status: &str) -> bool {
+    status.lines().any(|line| {
+        line.strip_prefix("Threads:")
+            .is_some_and(|count| count.trim() == "1")
+    })
 }
 
 /// Tells whether no mount in a mount list takes or gives mount events: no line carries a
 /// `shared:` or `master:` field. Input: the mount list text. Output: true only then, and
 /// never for a list with no line or a line that does not read plainly.
-fn propagation_free(_mountinfo: &str) -> bool {
-    true
+fn propagation_free(mountinfo: &str) -> bool {
+    !mountinfo.is_empty()
+        && mounts(mountinfo).is_some()
+        && mountinfo.lines().all(|line| {
+            line.split_once(" - ").is_some_and(|(head, _)| {
+                head.split(' ')
+                    .skip(6)
+                    .all(|field| !field.starts_with("shared:") && !field.starts_with("master:"))
+            })
+        })
 }
 
 /// Tells whether a mount list holds a mount at exactly this folder. Inputs: the mount list
 /// text and the folder. Output: true only then.
-fn covered(_mountinfo: &str, _folder: &Path) -> bool {
-    true
+fn covered(mountinfo: &str, folder: &Path) -> bool {
+    mounts(mountinfo).is_some_and(|mounts| mounts.iter().any(|mount| mount.point == folder))
 }
 
 /// Tells whether a process status text shows every capability set empty: inheritable,
 /// permitted, effective, bounding and ambient. Input: `/proc/self/status`. Output: true
-/// only when all five read zero.
-fn capabilities_bare(_status: &str) -> bool {
-    true
+/// only when each of the five shows once and reads zero.
+fn capabilities_bare(status: &str) -> bool {
+    ["CapInh:", "CapPrm:", "CapEff:", "CapBnd:", "CapAmb:"]
+        .iter()
+        .all(|name| {
+            let mut values = status.lines().filter_map(|line| line.strip_prefix(name));
+            let value = values.next();
+            values.next().is_none()
+                && value.is_some_and(|value| u64::from_str_radix(value.trim(), 16) == Ok(0))
+        })
 }
 
 /// Splits every write grant that covers the hidden folder `folder` so that none does: the
@@ -3126,7 +3263,8 @@ fn nest_command(
 /// The bubblewrap command for a closed agent up to its harness: its own namespaces, the
 /// system folders read-only but the name resolver's ([`RESOLVER_ROOT`]), the grants, an
 /// empty read-only folder over each existing hidden folder, then the helper bound
-/// read-only and started to install the TCP-only socket filter ([`FILTER_SOCKETS`]).
+/// read-only and started to install the TCP-only socket filter ([`FILTER_SOCKETS`]), with
+/// a private mount tree first when it hides folders ([`cut`]).
 /// Inputs: bwrap, the helper, the grants, the working folder and the network. Output: the
 /// command, which the harness follows after `--`.
 fn bwrap_command(
@@ -3183,7 +3321,15 @@ fn bwrap_command(
     command.arg("--ro-bind").arg(helper).arg(helper);
     command.arg("--chdir").arg(cwd);
     command.arg("--").arg(helper).arg(FILTER_SOCKETS);
+    command.args(cut_args(private_tree(&grants.hidden)));
     command
+}
+
+/// The covers a launch asks the helper's private mount tree for: its hidden folders, or no
+/// private tree when it hides none (leader 19:09 Q1). Input: the hidden folders. Output:
+/// the covers, or none.
+fn private_tree(hidden: &[PathBuf]) -> Option<&[PathBuf]> {
+    (!hidden.is_empty()).then_some(hidden)
 }
 
 #[cfg(test)]

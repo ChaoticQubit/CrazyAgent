@@ -854,6 +854,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "linux_hidden_needs_namespaces" => Some(
             "This project hides folders, and on Linux an agent with hidden folders starts only when bubblewrap can give it namespaces of its own, which this computer does not allow, so the agent does not start. Install bubblewrap and allow unprivileged user namespaces, then start it again, or take the folders off Hidden folders in the project's settings.",
         ),
+        "linux_hidden_mounts_not_private" => Some(
+            "This project hides folders, and on Linux an agent with hidden folders starts only when its mounts can be cut off from this computer's, so that no later mount on this computer reaches the folders. This computer does not let the sandbox helper make user namespaces of its own inside bubblewrap, so the agent does not start. Allow user namespaces for the programs bubblewrap starts, then start it again, or take the folders off Hidden folders in the project's settings.",
+        ),
         "linux_hidden_mounted_again" => Some(
             "A folder this project hides sits on a disk that is mounted a second time where it shows that folder, so an agent could reach the folder there and the agent does not start. To start it, remove that mount or take the folder off Hidden folders in the project's settings.",
         ),

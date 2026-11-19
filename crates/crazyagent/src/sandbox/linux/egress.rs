@@ -726,7 +726,7 @@ fn ambient_held() -> Option<CapabilitySet> {
 
 /// Drops every capability: the ambient set, then the effective, permitted and inheritable
 /// sets. No input. Output: Ok once all four are empty, or the reason.
-fn drop_capabilities() -> Result<(), String> {
+pub(super) fn drop_capabilities() -> Result<(), String> {
     let failed = |error: rustix::io::Errno| format!("network capabilities: {error}");
     rustix::thread::clear_ambient_capability_set().map_err(failed)?;
     let none = CapabilitySets {
