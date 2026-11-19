@@ -370,14 +370,18 @@ impl Painter {
 
     /// Draws one ready view, frame-ready first: geometry, then the swap-chain wait, then
     /// the newest frame, so a frame posted during the wait is the one drawn. A refused
-    /// geometry or frame faults the view. Input: the view id.
+    /// geometry or frame faults the view; one a lost device retired earlier in the round is
+    /// not drawn. Input: the view id.
     fn draw(&mut self, id: u64) {
         let index = self.views.iter().position(|view| view.id == id);
         let index = index.expect("a ready view has a drawn entry");
-        assert!(
-            self.views[index].surface.is_some(),
-            "a ready view has not faulted, so it has a surface"
-        );
+        if self.views[index].surface.is_none() {
+            assert!(
+                BOARD.faulted(id),
+                "a ready view with no surface was retired"
+            );
+            return;
+        }
         let fitted = match BOARD.geometry(id) {
             Some(geometry) => self.refit(index, geometry),
             None => Ok(()),
@@ -486,8 +490,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "a ready view has not faulted, so it has a surface")]
-    fn drawing_a_faulted_view_is_a_bug() {
+    #[should_panic(expected = "a ready view with no surface was retired")]
+    fn drawing_a_view_with_no_surface_the_board_never_faulted_is_a_bug() {
         painter(vec![faulted(7)]).draw(7);
     }
 
