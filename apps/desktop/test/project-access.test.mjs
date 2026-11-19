@@ -295,6 +295,9 @@ test("Hiding a folder takes an absolute path, rejects duplicates and caps at the
   const tracked = "A path git tracks matches this folder when letter case is ignored. Only folders git doesn't track can be hidden.";
   assert.equal(api.knownError("hidden_path_tracked"), tracked);
   assert.ok(tuiProject.includes(`"${tracked}"`), "the TUI shows the same tracked line");
+  const nested = "That folder is inside another git repository in this project, whose history agents can read. Only folders outside a nested repository can be hidden.";
+  assert.equal(api.knownError("hidden_path_in_nested_repository"), nested);
+  assert.ok(tuiProject.includes(`"${nested}"`), "the TUI shows the same nested repository line");
   const macosOnly = "Hidden folders work only on macOS for now, so a list with folders can't be saved here. Remove them all and save.";
   assert.equal(api.knownError("hidden_paths_need_macos"), macosOnly);
   assert.ok(tuiProject.includes(`"${macosOnly}"`));

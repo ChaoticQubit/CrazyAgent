@@ -3112,6 +3112,17 @@ fn a_hidden_folder_refused_as_tracked_is_told_a_path_matches_when_case_is_ignore
     );
 }
 
+/// V244-HIDDEN-GIT-NONASCII-CASE r2 (rv-sec3 F1): a hidden folder refused because it sits in
+/// another git repository inside the project is told so, and that trying again does not help;
+/// the desktop app shows the same words.
+#[test]
+fn a_hidden_folder_inside_a_nested_repository_is_told_why() {
+    assert_eq!(
+        plain_problem("hidden_path_in_nested_repository"),
+        "That folder is inside another git repository in this project, whose history agents can read. Only folders outside a nested repository can be hidden."
+    );
+}
+
 /// #590 (leader 10:37): where the engine says this system's boundary cannot hold hidden
 /// folders, the Settings tab says so in one plain line and `k` opens no box; a list saved
 /// before still shows with how to clear it and `k` opens the box, and the save's refusal

@@ -1101,6 +1101,57 @@ mod tests {
         assert_eq!(none_tracked(&path, &[hidden]), Err("hidden_path_tracked"));
     }
 
+    /// V244-HIDDEN-GIT-NONASCII-CASE r2 (rv-sec3 F1): git lists a registered submodule as one
+    /// gitlink entry and never the files inside it, so a folder inside the submodule is found
+    /// tracked by that entry, which ends before the folder's own names.
+    #[test]
+    fn a_folder_inside_a_submodule_the_index_names_is_found_tracked() {
+        let root = project();
+        let path = canonical(root.path()).unwrap();
+        git_in(&path, &["init", "-q"]);
+        let entry = format!("160000,{EMPTY_BLOB},sub");
+        git_in(&path, &["update-index", "--add", "--cacheinfo", &entry]);
+        let folder = path.join("sub").join("secret");
+        std::fs::create_dir_all(&folder).unwrap();
+        assert_eq!(none_tracked(&path, &[folder]), Err("hidden_path_tracked"));
+    }
+
+    /// V244-HIDDEN-GIT-NONASCII-CASE r2 (rv-sec3 F1): a folder inside another repository of
+    /// the project keeps its history in that repository's `.git`, which the project's index
+    /// never lists, so it is refused whatever that repository tracks, and so is a folder that
+    /// is itself a repository; with or without a repository at the project's root.
+    #[test]
+    fn a_folder_inside_a_nested_repository_is_refused() {
+        for root_repository in [true, false] {
+            let root = project();
+            let path = canonical(root.path()).unwrap();
+            if root_repository {
+                git_in(&path, &["init", "-q"]);
+            }
+            let nested = path.join("nested");
+            let folder = nested.join("secret");
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::create_dir(nested.join(".git")).unwrap();
+            let refused = Err("hidden_path_in_nested_repository");
+            assert_eq!(none_tracked(&path, &[folder]), refused, "{root_repository}");
+            assert_eq!(none_tracked(&path, &[nested]), refused, "{root_repository}");
+        }
+    }
+
+    /// V244-HIDDEN-GIT-NONASCII-CASE r2 (rv-sec3 N2): a listed path that is not UTF-8 is read
+    /// with each bad run of bytes as U+FFFD. Elsewhere in the listing it leaves the folders
+    /// untracked, below a folder it is found tracked, and a bad first name never matches a
+    /// folder's name, which is UTF-8; a `/` after a cut sequence still ends a name.
+    #[test]
+    fn a_listed_path_that_is_not_utf8_is_read_with_replacement_characters() {
+        let folders = vec![vec![fold("secret")], vec![fold("conf"), fold("keys")]];
+        assert_eq!(scan(&b"caf\xe9/x\0other\0"[..], &folders), Scan::End);
+        assert_eq!(scan(&b"secret/\xff.txt\0"[..], &folders), Scan::Tracked);
+        assert_eq!(scan(&b"conf/keys/\xc3\0"[..], &folders), Scan::Tracked);
+        assert_eq!(scan(&b"\xffsecret/x\0secret\xc3/y\0"[..], &folders), Scan::End);
+        assert_eq!(scan(&b"conf\xc3/keys/x\0"[..], &folders), Scan::End);
+    }
+
     /// The object id of the empty file, which the rows write with `hash-object -w` before an
     /// index entry names it.
     const EMPTY_BLOB: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
