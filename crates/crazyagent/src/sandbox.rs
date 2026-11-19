@@ -117,6 +117,11 @@ pub fn settings_owner_ports(global: &Path, project: &Path) -> Result<Vec<u16>, &
 /// grant whole roots and cannot keep a folder inside one out of reach.
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
 
+/// Whether this system's boundary cannot hold a hidden folder, so a sandbox with one does not
+/// start ([`HIDDEN_NEEDS_SEATBELT`]), a save that hides a folder is refused and neither app
+/// offers the setting (#590): true on Linux and Windows.
+pub const HIDDEN_UNHELD: bool = cfg!(any(target_os = "linux", target_os = "windows"));
+
 /// Why a native-mode lead's own tmux server does not start off macOS: only Seatbelt holds
 /// its one-socket grant, and DEC-094 keeps team agents macOS-only in V1.
 pub const TMUX_SERVER_NEEDS_SEATBELT: &str = "native teammates need the macOS sandbox";
@@ -3976,9 +3981,11 @@ impl InstalledSandbox {
     ) -> Result<Self, SandboxError> {
         #[cfg(not(target_os = "linux"))]
         let _ = strict;
+        if HIDDEN_UNHELD && !sandbox.hidden.is_empty() {
+            return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
+        }
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() || sandbox.open_tops.is_some()
-        {
+        if !sandbox.kept_out.is_empty() || sandbox.open_tops.is_some() {
             return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
         }
         #[cfg(any(target_os = "linux", target_os = "windows"))]

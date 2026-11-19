@@ -161,6 +161,8 @@ const COPY: Record<string, string> = {
   hidden_path_not_plain: "A hidden folder path can't hold quotes, backslashes or control characters.",
   hidden_path_tracked: "Git tracks files in that folder. Hidden folders cover only files git doesn't track; pick a folder git ignores.",
   hidden_path_unchecked: "CrazyAgent couldn't check that folder against git. Try again.",
+  hidden_path_name_unchecked: "A folder path with non-English letters or symbols can't be checked against git on this system yet. Rename the folder or pick another.",
+  hidden_paths_need_macos: "Hidden folders work only on macOS for now, so a list with folders can't be saved here. Remove them all and save.",
   agent_access_unavailable: "That agent access level can't run on this computer. Pick another level.",
   agent_policy_invalid: "That agent access choice isn't valid. Open Agent access and save again.",
   agent_policy_unreadable: "CrazyAgent couldn't read this project's agent access. Try again.",
