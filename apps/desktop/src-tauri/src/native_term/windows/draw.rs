@@ -39,6 +39,8 @@ static REFUSE_RESIZE: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static LOSE_AFTER_WAIT: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
+static SHARED_MADE: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
 static FAIL_WAITS: AtomicU64 = AtomicU64::new(0);
 
 /// Starts the one render thread, once, drawing in the first style it is given. Input: the
@@ -126,6 +128,21 @@ fn after_wait(id: u64, shared: &Shared) {
 
 #[cfg(not(test))]
 fn after_wait(_: u64, _: &Shared) {}
+
+/// Test builds only: how many shared states the render thread has made, so a row can tell a
+/// new device in kept shared state from new shared state. Output: the count.
+#[cfg(test)]
+pub fn trial_shared_made() -> u64 {
+    SHARED_MADE.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+fn made_shared() {
+    SHARED_MADE.fetch_add(1, Ordering::SeqCst);
+}
+
+#[cfg(not(test))]
+fn made_shared() {}
 
 /// Resizes a view's surface; a lost device, or a test row's ask, refuses it. Inputs: the
 /// view id, its shared state, its surface and the geometry. Output: ok, or
@@ -284,6 +301,7 @@ impl Painter {
                     return Err(GPU_FAULT.to_owned());
                 }
                 let made = Shared::new(key as f32 / 100.0, &self.style)?;
+                made_shared();
                 self.shared.push((key, made));
                 self.shared.len() - 1
             }
@@ -466,6 +484,39 @@ mod tests {
         let shared = Shared::new(1.0, &painter.style).expect("shared state");
         painter.shared.push((100, shared));
         painter
+    }
+
+    #[test]
+    fn an_unused_scale_keeps_its_shared_state() {
+        let mut painter = with_shared(painter(Vec::new()));
+        let other = Geometry {
+            size: (10, 10),
+            scale_key: 150,
+        };
+        assert!(
+            painter.surface(0, other).is_err(),
+            "no window to make a surface on"
+        );
+        assert!(
+            painter.shared.iter().any(|(key, _)| *key == 100),
+            "shared state no view uses is kept, never dropped"
+        );
+    }
+
+    #[test]
+    fn a_surface_that_fails_before_its_device_request_spends_no_attempt() {
+        let mut painter = painter(Vec::new());
+        painter.replaced.lost(100);
+        let geometry = faulted(0).geometry;
+        for _ in 0..=DEVICE_REPLACE_MAX {
+            let made = painter.surface(0, geometry).err();
+            assert_eq!(
+                made.as_deref(),
+                Some("no window"),
+                "no device was requested"
+            );
+        }
+        assert!(painter.replaced.attempt(100), "the budget is untouched");
     }
 
     #[test]
