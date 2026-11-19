@@ -13,6 +13,8 @@ const AGENT_PREFIX: &str = "agent-";
 const NONCE_HEX: usize = 16;
 const LOGIN_KEYCHAIN: &str = "login.keychain-db";
 const PROFILE_KEYCHAIN: &str = "profile.keychain-db";
+const ASIDE_KEYCHAIN: &str = "profile-locked.keychain-db";
+const AUTH_FAILED: i32 = 51;
 const FOLDER_ENTRIES_MAX: usize = 64;
 
 fn failure() -> EngineError {
@@ -69,24 +71,69 @@ fn present(path: &Path, folder: bool) -> Result<bool, EngineError> {
     }
 }
 
-/// Unlocks one keychain with the empty password the engine gives every keychain it makes,
-/// then keeps it from locking itself on a timeout or on sleep. `security` refuses a password
-/// unlock of any file named `login.keychain-db`, so no keychain this module opens has that
-/// name. Inputs: the home and the keychain file. Output: done, or a failure, after which the
-/// caller makes no call that could ask the owner for a password.
-fn unlock(home: &Path, keychain: &Path) -> Result<(), EngineError> {
+/// Tries the empty password the engine gives every keychain it makes on one keychain.
+/// `security` refuses a password unlock of any file named `login.keychain-db`, so no keychain
+/// this module opens has that name. Inputs: the home and the keychain file. Output: true when
+/// it opened, false when `security` refused that password, or a failure for any other answer.
+fn opens(home: &Path, keychain: &Path) -> Result<bool, EngineError> {
     assert!(keychain.is_absolute());
     assert_ne!(
         keychain.file_name(),
         Some(std::ffi::OsStr::new(LOGIN_KEYCHAIN))
     );
-    let path = keychain.as_os_str();
     let empty = std::ffi::OsStr::new("");
+    let args = [
+        "unlock-keychain".as_ref(),
+        "-p".as_ref(),
+        empty,
+        keychain.as_os_str(),
+    ];
+    match exit_code(home, &args)? {
+        0 => Ok(true),
+        AUTH_FAILED => Ok(false),
+        _ => Err(failure()),
+    }
+}
+
+/// Unlocks one keychain with the empty password, then keeps it from locking itself on a
+/// timeout or on sleep. Inputs: the home and the keychain file. Output: done, or a failure,
+/// after which the caller makes no call that could ask the owner for a password.
+fn unlock(home: &Path, keychain: &Path) -> Result<(), EngineError> {
+    if !opens(home, keychain)? {
+        return Err(failure());
+    }
     security(
         home,
-        &["unlock-keychain".as_ref(), "-p".as_ref(), empty, path],
-    )?;
-    security(home, &["set-keychain-settings".as_ref(), path])
+        &["set-keychain-settings".as_ref(), keychain.as_os_str()],
+    )
+}
+
+/// Moves a profile keychain the empty password cannot open aside at sign-in, never deleting
+/// it, so the owner keeps any password they set on it: a regular file with one link owned by
+/// this uid is renamed in its folder, following no link, to the one aside name, which must be
+/// free. Input: the home's checked keychain folder. Output: done, or a failure, nothing moved.
+fn set_aside(directory: &Path) -> Result<(), EngineError> {
+    assert!(directory.is_absolute());
+    let keychain = directory.join(PROFILE_KEYCHAIN);
+    let aside = directory.join(ASIDE_KEYCHAIN);
+    let metadata = std::fs::symlink_metadata(&keychain).map_err(|_| failure())?;
+    if !metadata.is_file()
+        || metadata.nlink() != 1
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || present(&aside, false)?
+    {
+        return Err(failure());
+    }
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        &keychain,
+        rustix::fs::CWD,
+        &aside,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )
+    .map_err(|_| failure())?;
+    eprintln!("native_profile_keychain_set_aside file={ASIDE_KEYCHAIN}");
+    Ok(())
 }
 
 /// The keychain a profile home holds, under its current name: a `login.keychain-db` an
@@ -136,10 +183,10 @@ pub(crate) fn open_profile_keychain(home: &Path) -> Result<PathBuf, EngineError>
 }
 
 /// Gives a private Claude profile home its own unlocked macOS keychain, so the official CLI
-/// stores and reads its token there instead of asking macOS to create the absent login
-/// keychain; one an earlier engine named `login.keychain-db` is kept under the new name.
-/// Input: the absolute private profile home. Output: the keychain path, set as that home's
-/// default and only search-list keychain; the owner's real keychain settings are untouched.
+/// uses it instead of asking macOS for a login keychain; an earlier `login.keychain-db` is
+/// renamed, and one the empty password cannot open is set aside, never deleted. Input: the
+/// absolute private profile home. Output: the keychain path, set as that home's default and
+/// only search-list keychain; the owner's real keychain settings are untouched.
 pub(crate) fn prepare_profile_keychain(home: &Path) -> Result<PathBuf, EngineError> {
     if !home.is_absolute() || !home.is_dir() {
         return Err(failure());
@@ -164,21 +211,12 @@ pub(crate) fn prepare_profile_keychain(home: &Path) -> Result<PathBuf, EngineErr
     }
     let keychain = match existing {
         Some(keychain) => keychain,
-        None => {
-            let keychain = directory.join(PROFILE_KEYCHAIN);
-            let empty = std::ffi::OsStr::new("");
-            security(
-                home,
-                &[
-                    "create-keychain".as_ref(),
-                    "-p".as_ref(),
-                    empty,
-                    keychain.as_os_str(),
-                ],
-            )?;
-            keychain
-        }
+        None => create_keychain(home, &directory)?,
     };
+    if !opens(home, &keychain)? {
+        set_aside(&directory)?;
+        create_keychain(home, &directory)?;
+    }
     unlock(home, &keychain)?;
     point_at(home, &keychain)?;
     for private in [home.join("Library"), directory.clone()] {
@@ -194,6 +232,24 @@ pub(crate) fn prepare_profile_keychain(home: &Path) -> Result<PathBuf, EngineErr
     )
     .map_err(|_| failure())?;
     assert!(keychain.is_file());
+    Ok(keychain)
+}
+
+/// Makes a new empty-password profile keychain in a home's checked keychain folder, where no
+/// keychain of that name is left. Inputs: the home and its keychain folder. Output: the new
+/// keychain, or a failure.
+fn create_keychain(home: &Path, directory: &Path) -> Result<PathBuf, EngineError> {
+    let keychain = directory.join(PROFILE_KEYCHAIN);
+    let empty = std::ffi::OsStr::new("");
+    security(
+        home,
+        &[
+            "create-keychain".as_ref(),
+            "-p".as_ref(),
+            empty,
+            keychain.as_os_str(),
+        ],
+    )?;
     Ok(keychain)
 }
 
@@ -222,9 +278,9 @@ fn owner_home() -> Result<PathBuf, EngineError> {
 
 /// Refuses a home the engine may not give an agent keychain, before any `security` call: it
 /// must be its own canonical path, so no link sits anywhere on it, lie strictly below the
-/// canonical engine-owned `root`, not be the owner's own home, and hold neither keychain
-/// name a profile home or a real login home has. Inputs: the root the engine keeps agent
-/// homes under and the home. Output: done, or a failure.
+/// canonical engine-owned `root`, not be the owner's own home, and hold no keychain name a
+/// profile home or a real login home has. Inputs: the root the engine keeps agent homes
+/// under and the home. Output: done, or a failure.
 fn agent_home_guard(root: &Path, home: &Path) -> Result<(), EngineError> {
     if !root.is_absolute() || !home.is_absolute() {
         return Err(failure());
@@ -237,7 +293,7 @@ fn agent_home_guard(root: &Path, home: &Path) -> Result<(), EngineError> {
     {
         return Err(failure());
     }
-    for name in [LOGIN_KEYCHAIN, PROFILE_KEYCHAIN] {
+    for name in [LOGIN_KEYCHAIN, PROFILE_KEYCHAIN, ASIDE_KEYCHAIN] {
         match std::fs::symlink_metadata(home.join("Library/Keychains").join(name)) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             _ => return Err(failure()),
@@ -1181,6 +1237,12 @@ mod tests {
         ];
         assert_eq!(after, before);
         assert!(present(keychain.path(), false).unwrap());
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed: directory.is_absolute()")]
+    fn setting_aside_trips_on_a_relative_folder() {
+        let _ = set_aside(Path::new("Library/Keychains"));
     }
 
     #[test]
