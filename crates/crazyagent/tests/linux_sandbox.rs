@@ -903,6 +903,7 @@ fn the_helper_reads_back_the_policy_the_engine_wrote_without_protected_paths_or_
             limit_network: true,
             open_sockets: false,
             keep_free: false,
+            cut: None,
         })
     );
     assert_eq!(
@@ -911,6 +912,7 @@ fn the_helper_reads_back_the_policy_the_engine_wrote_without_protected_paths_or_
             limit_network: true,
             open_sockets: true,
             keep_free: false,
+            cut: None,
         })
     );
     assert!(parse(&["--probe", "--open-sockets"]).is_err());
@@ -4166,11 +4168,11 @@ fn hiding(backend: Hiding, sandbox: ProjectSandbox) -> Option<LinuxSandbox> {
     }
 }
 
-/// The agent's tries on a hidden folder, after it reads and writes the plain file beside
-/// it: read, list, link to, hard link from and unmount it, then write in, move and remove
-/// it and move the folder above it. Each try runs on its own with its errors dropped, so
-/// only what reached the agent prints. Input: the hidden folder. Output: the script, which
-/// prints `done` last.
+/// The agent's tries on a hidden folder, after it reads and writes the plain file beside it:
+/// read, list, link to, hard link from and unmount it ([`namespace_legs`]), then write in,
+/// move and remove it and move the folder above it. Each try drops its errors, so only what
+/// reached the agent prints, beside the namespace legs' own lines. Input: the hidden folder.
+/// Output: the script, which prints `done` last.
 fn hiding_script(hidden: &Hidden) -> String {
     let folder = quoted(&hidden.folder);
     let above = quoted(&hidden.above);
@@ -4179,19 +4181,141 @@ fn hiding_script(hidden: &Hidden) -> String {
         "cat {plain}; echo agent >> {plain}; \
          cat {folder}/secret.txt 2>/dev/null; ls -A {folder} 2>/dev/null; \
          ln {folder}/secret.txt hard 2>/dev/null; cat hard 2>/dev/null; \
-         unshare -Urm sh -c 'umount \"$0\"; cat \"$0\"/secret.txt; ls -A \"$0\"' {folder} 2>/dev/null; \
-         (echo made > {folder}/made) 2>/dev/null; \
+         {legs}(echo made > {folder}/made) 2>/dev/null; \
          mv {folder} {folder}.moved 2>/dev/null; rm -rf {folder} 2>/dev/null; \
          mv {above} {moved} 2>/dev/null; echo done",
         plain = quoted(&hidden.plain),
+        legs = namespace_legs(&folder),
     )
 }
 
-/// Asserts that a run of [`hiding_script`] read and wrote the plain file and reached
-/// nothing of the hidden folder, which is unchanged on the host with the folder above it.
-/// Inputs: the backend, the hidden folder and the run's output.
+/// The namespaces [`namespace_legs`] makes, by name, command and extra call: `mapped` is a user
+/// and mount namespace with the agent as root, `unmapped` one that keeps its unmapped id and
+/// the propagation it had, which starts on both hiding backends and calls [`UMOUNT2`].
+const NAMESPACE_LEGS: [(&str, &str, &str); 2] = [
+    ("mapped", "unshare -Urm", ""),
+    ("unmapped", "unshare -Um --propagation unchanged", UMOUNT2),
+];
+
+/// A direct umount2 call on the folder, plain then detached, through Python's ctypes, so no
+/// umount tool can refuse before the kernel does. It prints `umount2` and each call's errno
+/// name, or 0 where a call unmounted.
+const UMOUNT2: &str = "echo umount2 $(python3 -I -c \"import ctypes, errno, sys; \
+    c = ctypes.CDLL(None, use_errno=True); p = sys.argv[1].encode(); \
+    print(*[c.umount2(p, f) and errno.errorcode.get(ctypes.get_errno(), ctypes.get_errno()) \
+    for f in (0, 2)])\" \"$0\"); ";
+
+/// Nested's refusal of the `mapped` leg, unshare's own line: the agent may make a user
+/// namespace there, but unshare cannot open its uid map to map the agent to root, so it exits
+/// 1 before its inner shell runs.
+const MAPPED_REFUSAL: &str = "unshare: cannot open /proc/self/uid_map: Permission denied";
+
+/// The `held` leg, one Python process with no exec in it, so it keeps every capability over the
+/// user and mount namespace it makes: it prints `inner held`, its CapEff, then [`UMOUNT2`]'s
+/// line for its own calls, then each name the folder lists. Where unshare fails it prints
+/// `unshare` and the errno name and exits 1. Input (argv): the folder.
+const HELD: &str = "import ctypes, errno, os, sys; c = ctypes.CDLL(None, use_errno=True); \
+    name = lambda r: r and errno.errorcode.get(ctypes.get_errno(), ctypes.get_errno()); \
+    r = c.unshare(0x10000000 | 0x00020000); r and (print(\"unshare\", name(r)), sys.exit(1)); \
+    print(\"inner held\"); print(\"capeff\", [l.split()[1] \
+    for l in open(\"/proc/self/status\") if l.startswith(\"CapEff\")][0]); \
+    p = sys.argv[1].encode(); print(\"umount2\", *[name(c.umount2(p, f)) for f in (0, 2)]); \
+    [print(e) for e in os.listdir(sys.argv[1])]";
+
+/// The shell legs that unmount, list and read a hidden folder from a namespace of the agent's
+/// own, one per [`NAMESPACE_LEGS`] entry, then [`HELD`]. Each inner shell prints `inner <name>`
+/// first and drops its own errors, so an error line can only be unshare's own; the outer shell
+/// then prints `<name> rc=` and the exit. Input: the quoted folder. Output: the legs.
+fn namespace_legs(folder: &str) -> String {
+    let legs: String = NAMESPACE_LEGS
+        .iter()
+        .map(|(name, command, call)| {
+            format!(
+                "{command} sh -c 'exec 2>/dev/null; echo inner {name}; umount -l \"$0\"; \
+                 umount \"$0\"; {call}ls -A \"$0\"; cat \"$0\"/secret.txt; exit 0' {folder} \
+                 2>&1; echo \"{name} rc=$?\"; "
+            )
+        })
+        .collect();
+    format!("{legs}python3 -I -c '{HELD}' {folder} 2>&1; echo \"held rc=$?\"; ")
+}
+
+/// The output with each [`namespace_legs`] leg's lines taken out, when each ran (its marker, a
+/// [`UMOUNT2`] line of EPERM or EINVAL only where it calls umount2, for [`HELD`] a CapEff with
+/// CAP_SYS_ADMIN first, then `<name> rc=0`) or, for `mapped` on Nested only, [`MAPPED_REFUSAL`]
+/// then `mapped rc=1`. Silence never counts. Inputs: the backend and the output. Output: the
+/// rest, or none when a leg shows neither.
+fn without_namespace_legs(backend: Hiding, stdout: &str) -> Option<String> {
+    let lines: Vec<&str> = stdout.lines().collect();
+    let refused_by_the_kernel = |line: &str| {
+        let words: Vec<&str> = line.split(' ').collect();
+        words.len() == 3
+            && words[0] == "umount2"
+            && words[1..]
+                .iter()
+                .all(|word| ["EPERM", "EINVAL"].contains(word))
+    };
+    let mut taken = Vec::new();
+    for (name, _, call) in NAMESPACE_LEGS {
+        let exit = format!("{name} rc=");
+        let exits: Vec<usize> = (0..lines.len())
+            .filter(|index| lines[*index].starts_with(&exit))
+            .collect();
+        let [at] = exits[..] else { return None };
+        let calls = usize::from(!call.is_empty());
+        let marker = at.checked_sub(1 + calls)?;
+        let ran = lines[marker] == format!("inner {name}")
+            && (calls == 0 || refused_by_the_kernel(lines[at - 1]))
+            && lines[at] == format!("{exit}0");
+        let refused = matches!(backend, Hiding::Nested)
+            && name == "mapped"
+            && calls == 0
+            && lines[marker] == MAPPED_REFUSAL
+            && lines[at] == format!("{exit}1");
+        if !ran && !refused {
+            return None;
+        }
+        taken.extend(marker..=at);
+    }
+    let exits: Vec<usize> = (0..lines.len())
+        .filter(|index| lines[*index].starts_with("held rc="))
+        .collect();
+    let [at] = exits[..] else { return None };
+    let marker = at.checked_sub(3)?;
+    let sys_admin = lines[marker + 1]
+        .strip_prefix("capeff ")
+        .and_then(|hex| u64::from_str_radix(hex, 16).ok())
+        .is_some_and(|caps| caps & (1 << 21) != 0);
+    if lines[marker] != "inner held"
+        || !sys_admin
+        || !refused_by_the_kernel(lines[at - 1])
+        || lines[at] != "held rc=0"
+    {
+        return None;
+    }
+    taken.extend(marker..=at);
+    let legs: usize = NAMESPACE_LEGS
+        .iter()
+        .map(|(_, _, call)| 2 + usize::from(!call.is_empty()))
+        .sum();
+    assert_eq!(taken.len(), legs + 4);
+    let rest: String = (0..lines.len())
+        .filter(|index| !taken.contains(index))
+        .map(|index| format!("{}\n", lines[index]))
+        .collect();
+    assert!(rest.len() < stdout.len());
+    Some(rest)
+}
+
+/// Asserts that a run of [`hiding_script`] read and wrote the plain file, showed its namespace
+/// legs ([`without_namespace_legs`]) and reached nothing of the hidden folder, which is
+/// unchanged on the host with the folder above it. Inputs: the backend, folder and output.
 fn assert_hidden(backend: Hiding, hidden: &Hidden, output: &Output) {
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        without_namespace_legs(backend, &stdout).is_some(),
+        "{backend:?}: a namespace leg neither ran nor was refused aloud: {stdout}"
+    );
     assert!(stdout.starts_with("plain\n"), "{backend:?}: {stdout}");
     assert!(stdout.ends_with("done\n"), "{backend:?}: {stdout}");
     assert!(!stdout.contains("secret"), "{backend:?}: {stdout}");
@@ -4238,6 +4362,85 @@ fn a_hidden_folder_is_out_of_reach_on_both_bubblewrap_backends() {
             &run(&sandbox, &case, &hiding_script(&hidden)),
         );
     }
+}
+
+/// V24x-LINUX-NEST-MOUNT-PROPAGATION: with a hidden folder, the agent's mount tree on both
+/// hiding backends takes no mount event from this computer, no line of its mount list
+/// carries `shared:` or `master:`, and the agent holds no capability in any of the five
+/// sets; without one, the tree still takes them (Q1, run 44438218667 P6: 27 lines).
+#[test]
+fn a_hidden_folder_gives_the_agent_a_mount_tree_of_its_own_and_no_capability() {
+    let script = "grep -c 'shared:\\|master:' /proc/self/mountinfo; \
+                  grep '^Cap' /proc/self/status; echo done";
+    let bare = "0\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\n\
+                CapEff:\t0000000000000000\nCapBnd:\t0000000000000000\n\
+                CapAmb:\t0000000000000000\ndone\n";
+    let mut wrong = Vec::new();
+    for backend in HIDING {
+        let case = case();
+        let hidden = hidden(&case);
+        let hides = policy(&case, SandboxNetwork::Only(Vec::new()))
+            .hide(&hidden.folder)
+            .unwrap();
+        let Some(sandbox) = hiding(backend, hides) else {
+            continue;
+        };
+        let output = run(&sandbox, &case, script);
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        if stdout != bare {
+            wrong.push(format!("{backend:?}: {stdout:?}"));
+        }
+        let plain = hiding(backend, policy(&case, SandboxNetwork::Only(Vec::new())))
+            .expect("the backend that hid a folder starts a plain agent");
+        let output = run(&plain, &case, script);
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let taking = stdout
+            .lines()
+            .next()
+            .and_then(|count| count.parse::<u32>().ok());
+        if !taking.is_some_and(|count| count > 0) {
+            wrong.push(format!("{backend:?} without a hidden folder: {stdout:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// V24x-LINUX-NEST-MOUNT-PROPAGATION: the cover over a hidden folder stays on after the cut
+/// on both hiding backends. The agent's plain and lazy unmounts fail, and so do both from the
+/// namespaces of its own that start, the held one with CAP_SYS_ADMIN over its own tree and a
+/// direct umount2 ([`without_namespace_legs`]); the folder lists empty, its file reads nowhere.
+#[test]
+fn a_hidden_folders_cover_stays_on_whatever_the_agent_unmounts() {
+    let mut wrong = Vec::new();
+    for backend in HIDING {
+        let case = case();
+        let hidden = hidden(&case);
+        let policy = policy(&case, SandboxNetwork::Only(Vec::new()))
+            .hide(&hidden.folder)
+            .unwrap();
+        let Some(sandbox) = hiding(backend, policy) else {
+            continue;
+        };
+        let folder = quoted(&hidden.folder);
+        let script = format!(
+            "umount {folder} 2>/dev/null; umount -l {folder} 2>/dev/null; {legs}\
+             ls -A {folder} 2>/dev/null; cat {folder}/secret.txt 2>/dev/null; \
+             grep -c ' {path} ' /proc/self/mountinfo; echo done",
+            legs = namespace_legs(&folder),
+            path = hidden.folder.display(),
+        );
+        let output = run(&sandbox, &case, &script);
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        if without_namespace_legs(backend, &stdout).as_deref() != Some("1\ndone\n") {
+            wrong.push(format!("{backend:?}: {stdout:?}"));
+        }
+        assert_eq!(
+            fs::read_to_string(hidden.folder.join("secret.txt")).unwrap(),
+            SECRET,
+            "{backend:?}"
+        );
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
 /// A link the agent makes inside its own grant to a hidden folder leads to the empty
