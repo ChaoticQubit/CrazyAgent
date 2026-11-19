@@ -378,7 +378,7 @@ impl NativeBridge {
         let session = match (size, input_only, pane) {
             (Some((cols, rows)), true, pane) => {
                 controller
-                    .terminal_attach_input(agent.clone(), pane, cols, rows)
+                    .terminal_attach_input(agent.clone(), pane, (cols, rows), false)
                     .await
             }
             (None, true, _) => return Err(failure("terminal_size_bounds")),

@@ -1415,12 +1415,16 @@ pub enum TerminalRequest {
         rows: u16,
     },
     /// Opens a view of the agent's terminal, or one pane of its window, sized to `cols` by
-    /// `rows` and sending no output, for a viewer that draws the pane from elsewhere.
+    /// `rows` and sending no output, for a viewer that draws the pane from elsewhere. With
+    /// `follows`, it sizes the window only while no view without it is open; the key is
+    /// left out when false, so the request reads as before to an engine without it.
     AttachInput {
         agent_id: AgentId,
         pane: Option<String>,
         cols: u16,
         rows: u16,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        follows: bool,
     },
     Input {
         bytes: Vec<u8>,

@@ -188,24 +188,25 @@ impl OwnerClient {
         self.attach_with(agent, &request).await
     }
 
-    /// Opens an input-only view of the agent's terminal, or of one pane with `pane`, after the
-    /// engine sizes the window to the viewer: the engine checks the grant and records the
-    /// owner's keys as for any view but sends no output, for a viewer that draws the pane
-    /// from elsewhere. Takes the terminal name, the pane if any, and the size within
-    /// `SIZE_MIN..=SIZE_MAX`. Returns the session, whose output gives only the final `Closed`.
+    /// Opens an input-only view of the agent's terminal, or of one pane with `pane`, sized to
+    /// the viewer (a follower only while no other view sizes it), that records the owner's keys
+    /// but sends no output, for a viewer that draws the pane from elsewhere. Takes the name,
+    /// the pane if any, the size within `SIZE_MIN..=SIZE_MAX` and whether it follows. Returns
+    /// the session, whose output gives only the final `Closed`.
     #[cfg(unix)]
     pub async fn terminal_attach_input(
         &self,
         agent: AgentId,
         pane: Option<String>,
-        cols: u16,
-        rows: u16,
+        (cols, rows): (u16, u16),
+        follows: bool,
     ) -> Result<TerminalSession, EngineError> {
         let request = TerminalRequest::AttachInput {
             agent_id: agent.clone(),
             pane,
             cols,
             rows,
+            follows,
         };
         self.attach_with(agent, &request).await
     }
@@ -716,6 +717,7 @@ async fn open(
             pane,
             cols,
             rows,
+            follows: _,
         } => {
             let size = crate::terminal::SIZE_MIN..=crate::terminal::SIZE_MAX;
             if !size.contains(&cols) || !size.contains(&rows) {
@@ -885,14 +887,14 @@ impl OwnerClient {
         Err(failure("terminal_owner_unavailable"))
     }
 
-    /// Refuses an input-only view for the same reason. Takes the terminal name, pane and
-    /// size, unused. Returns `terminal_owner_unavailable`.
+    /// Refuses an input-only view for the same reason. Takes the terminal name, pane, size
+    /// and whether it follows, unused. Returns `terminal_owner_unavailable`.
     pub async fn terminal_attach_input(
         &self,
         _agent: AgentId,
         _pane: Option<String>,
-        _cols: u16,
-        _rows: u16,
+        _size: (u16, u16),
+        _follows: bool,
     ) -> Result<TerminalSession, EngineError> {
         Err(failure("terminal_owner_unavailable"))
     }
