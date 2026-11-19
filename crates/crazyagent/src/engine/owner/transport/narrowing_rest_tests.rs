@@ -299,9 +299,9 @@ async fn a_secret_detach_pending_when_the_engine_dies_lands_at_the_next_open() {
     restarted.stop().await;
 }
 
-/// Adds an account to the model-access catalog through an owner apply, so agents may use it
-/// and storage counts it as held. Inputs: the engine and the account id. Output: none; the
-/// settings file names the account afterwards.
+/// Puts an account in a pool through an owner apply, so agents may use it and its connection
+/// joins the model-access catalog, which storage counts as held. Inputs: the engine and the
+/// account id. Output: none; the settings files hold the account's connection afterwards.
 async fn into_catalog(owner: &Usage, id: &CredentialRef) {
     let applied = catalog_apply(owner, id).await;
     let OwnerResponse::Applied { operation } = applied else {
@@ -309,10 +309,11 @@ async fn into_catalog(owner: &Usage, id: &CredentialRef) {
     };
     assert_eq!(operation.result, OwnerResult::Applied);
     assert!(in_settings(owner.root.path(), id));
+    assert!(held_in_catalog(owner.root.path(), id));
 }
 
-/// Asks the engine, as the owner, to add an account to the model-access catalog.
-/// Inputs: the engine and the account id. Output: the engine's answer.
+/// Asks the engine, as the owner, to put an account in a new pool, which adds its connection
+/// to the model-access catalog. Inputs: the engine and the account id. Output: the answer.
 async fn catalog_apply(owner: &Usage, id: &CredentialRef) -> OwnerResponse {
     let read = owner
         .client
@@ -346,8 +347,16 @@ async fn catalog_apply(owner: &Usage, id: &CredentialRef) -> OwnerResponse {
                 mutation: OwnerMutation::ModelAccess {
                     expected_config_id: state.config_id,
                     expected_source_hash: source_hash,
-                    edit: crate::config::ModelAccessEdit::AddAccount {
-                        account_ref: id.clone(),
+                    edit: crate::config::ModelAccessEdit::CreatePool {
+                        pool: crate::config::AccountPool {
+                            id: CredentialRef::new("rest-held-pool").unwrap(),
+                            name: None,
+                            members: vec![id.clone()],
+                            projects: vec![],
+                            roles: vec![],
+                            fallback_allowed: false,
+                            provider_quota_policy: Default::default(),
+                        },
                     },
                 },
             },
@@ -363,6 +372,22 @@ fn in_settings(root: &Path, id: &CredentialRef) -> bool {
     std::fs::read_to_string(root.join("global.toml"))
         .unwrap()
         .contains(id.as_str())
+}
+
+/// Whether the settings files give an account a connection in the model-access catalog,
+/// the one test storage uses to count it as held. A missing project file reads as empty.
+/// Inputs: the test root and the account id. Output: the verdict.
+fn held_in_catalog(root: &Path, id: &CredentialRef) -> bool {
+    let read = |name: &str| match std::fs::read_to_string(root.join(name)) {
+        Ok(text) => text,
+        Err(missing) if missing.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(unread) => panic!("the settings file {name} reads: {unread}"),
+    };
+    crate::config::resolve_config_bytes(&read("global.toml"), &read("project.toml"))
+        .unwrap()
+        .settings
+        .model_access
+        .is_some_and(|catalog| catalog.connections.iter().any(|c| c.id == *id))
 }
 
 /// The owner admission of the TUI client, as the transport builds it from its packet.
