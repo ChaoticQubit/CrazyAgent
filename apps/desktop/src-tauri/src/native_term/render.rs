@@ -842,6 +842,15 @@ impl Shared {
         self.device.as_ref().is_some_and(Device::is_lost)
     }
 
+    /// Test builds only: records a wgpu error on the device, as the error handler does for
+    /// a reconfigure wgpu refused; the next render call that takes errors meets it.
+    #[cfg(all(windows, test))]
+    pub fn trial_error(&self) {
+        let set = self.device.as_ref().expect("a device to record on");
+        set.faulted.store(true, Ordering::Release);
+        assert!(set.faulted.load(Ordering::Acquire), "the error is recorded");
+    }
+
     /// Test builds only: destroys the device, as a GPU reset would, and waits until wgpu
     /// reports it lost; the render thread's next GPU call then meets the loss.
     #[cfg(all(windows, test))]

@@ -551,14 +551,23 @@ fn dropped_within_the_bound(view: View, what: &str) {
     );
 }
 
-/// A device lost between a view's swap-chain wait and its draw faults that view, and a
-/// view opened after the loss draws on a new device. Inputs: the parent and the webview.
+/// A device lost between a view's swap-chain wait and its draw faults that view and, at
+/// once, a hidden view still on that device, and a view opened after the loss draws on a
+/// new device. Inputs: the parent and the webview.
 fn faults_on_a_loss_after_the_wait_and_a_new_view_draws(parent: HWND, webview: HWND) {
     let lost = View::new(parent, webview, 2, sink, &style()).expect("a second view");
     let before = presents();
     assert!(lost.feed(fed_frame(&Theme::default(), b"before the loss\r\n")));
     lost.place(Some(PAGE)).expect("a box");
     await_present("the present before the loss", before);
+    let hidden = View::new(parent, webview, 4, sink, &style()).expect("a view to hide");
+    let shown = presents();
+    assert!(hidden.feed(fed_frame(&Theme::default(), b"hidden after\r\n")));
+    hidden
+        .place(Some((420.0, 160.0, 100.0, 60.0)))
+        .expect("a fourth box");
+    await_present("the fourth view's present", shown);
+    hidden.place(None).expect("no box hides it");
     draw::trial_lose_after_wait(2);
     assert!(lost.feed(fed_frame(&Theme::default(), b"after the loss\r\n")));
     pump_until("the loss faults the view", FARM_WAIT, || lost.faulted());
@@ -571,10 +580,15 @@ fn faults_on_a_loss_after_the_wait_and_a_new_view_draws(parent: HWND, webview: H
     await_present("a view after the loss draws on a new device", fresh);
     assert!(!after.faulted(), "the view after the loss has not faulted");
     assert!(lost.faulted(), "the lost view stays faulted");
+    assert!(
+        hidden.faulted(),
+        "the hidden view on the lost device faulted with it"
+    );
+    dropped_within_the_bound(hidden, "the hidden view");
     dropped_within_the_bound(lost, "the lost view");
     dropped_within_the_bound(after, "the view after the loss");
     println!(
-        "h5a row: a loss after the wait faulted view 2, view 3 drew on a new device, presents {}",
+        "h5a row: a loss faulted views 2 and 4, view 3 drew on a new device, presents {}",
         presents()
     );
 }
@@ -589,6 +603,48 @@ fn a_gpu_refusal_or_loss_faults_a_view_for_good_and_a_minimized_parent_does_not(
     faults_on_a_refused_resize_with_no_remake(&view);
     dropped_within_the_bound(view, "the faulted view");
     faults_on_a_loss_after_the_wait_and_a_new_view_draws(parent, webview);
+    assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the parent goes last");
+}
+
+#[test]
+#[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
+fn a_failed_wait_faults_its_own_view_never_another_at_its_scale() {
+    let (parent, webview) = stand_ins();
+    let failing = View::new(parent, webview, 1, sink, &style()).expect("a view");
+    let other = View::new(parent, webview, 2, sink, &style()).expect("a second view");
+    let before = presents();
+    assert!(failing.feed(fed_frame(&Theme::default(), b"one\r\n")));
+    failing
+        .place(Some((50.0, 40.0, 200.0, 100.0)))
+        .expect("a box");
+    assert!(other.feed(fed_frame(&Theme::default(), b"two\r\n")));
+    other
+        .place(Some((300.0, 40.0, 200.0, 100.0)))
+        .expect("a second box");
+    pump_until("both views present", FARM_WAIT, || presents() >= before + 2);
+    draw::trial_fail_waits(Some(1));
+    assert!(failing.feed(fed_frame(&Theme::default(), b"a failed wait\r\n")));
+    pump_for(Duration::from_millis(500));
+    draw::trial_fail_waits(None);
+    let drawn = presents();
+    assert!(other.feed(fed_frame(&Theme::default(), b"after it\r\n")));
+    pump_until("the other view draws or faults", FARM_WAIT, || {
+        presents() > drawn || other.faulted()
+    });
+    assert!(
+        !other.faulted(),
+        "another view's failed wait never faults this one"
+    );
+    assert!(
+        failing.faulted(),
+        "a failed wait whose reconfigure recorded an error faults its own view"
+    );
+    println!(
+        "h5a row: view 1's failed wait faulted view 1, view 2 drew, presents {}",
+        presents()
+    );
+    dropped_within_the_bound(failing, "the failed view");
+    dropped_within_the_bound(other, "the other view");
     assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the parent goes last");
 }
 

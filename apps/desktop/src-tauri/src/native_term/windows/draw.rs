@@ -4,6 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use wgpu::SurfaceTexture;
+
 use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, Win32WindowHandle, WindowsDisplayHandle,
 };
@@ -30,6 +32,8 @@ static FAILURES: AtomicU64 = AtomicU64::new(0);
 static REFUSE_RESIZE: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static LOSE_AFTER_WAIT: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static FAIL_WAITS: AtomicU64 = AtomicU64::new(0);
 
 /// Starts the one render thread, once, drawing in the first style it is given. Input: the
 /// style. Output: ok, or `native_terminal_render_unavailable`.
@@ -70,6 +74,29 @@ pub fn trial_lose_after_wait(id: u64) {
     assert!(id > 0, "a view id");
     LOSE_AFTER_WAIT.store(id, Ordering::SeqCst);
     assert_eq!(LOSE_AFTER_WAIT.load(Ordering::SeqCst), id);
+}
+
+/// Test builds only: fails every swap-chain wait of one view, or none, each recording a
+/// wgpu error as a refused reconfigure does. Input: the view id, above 0, or none.
+#[cfg(test)]
+pub fn trial_fail_waits(id: Option<u64>) {
+    let id = id.unwrap_or(0);
+    FAIL_WAITS.store(id, Ordering::SeqCst);
+    assert_eq!(FAIL_WAITS.load(Ordering::SeqCst), id);
+}
+
+#[cfg(test)]
+fn waited(id: u64, shared: &Shared, surface: &mut Surface) -> Result<SurfaceTexture, String> {
+    if id == FAIL_WAITS.load(Ordering::SeqCst) {
+        shared.trial_error();
+        return Err("a trial wait".to_owned());
+    }
+    shared.acquire(surface)
+}
+
+#[cfg(not(test))]
+fn waited(_: u64, shared: &Shared, surface: &mut Surface) -> Result<SurfaceTexture, String> {
+    shared.acquire(surface)
 }
 
 #[cfg(test)]
@@ -297,7 +324,7 @@ impl Painter {
         let held = shared.iter_mut().find(|(held, _)| *held == key);
         let (_, shared) = held.expect("a live view's scale has its shared state");
         let surface = view.surface.as_mut().expect("a live view has a surface");
-        let Ok(output) = shared.acquire(surface) else {
+        let Ok(output) = waited(view.id, shared, surface) else {
             if shared.lost() {
                 return Err(GPU_FAULT);
             }
