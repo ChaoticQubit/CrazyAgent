@@ -287,7 +287,7 @@ impl OwnerClient {
     }
 
     async fn overview_exchange(&self, action: Action) -> Result<Reply, EngineError> {
-        tokio::time::timeout(self.timeout.max(OVERVIEW_TIMEOUT), async {
+        tokio::time::timeout(deferred_wait(self.timeout, OVERVIEW_TIMEOUT), async {
             let read = read_kind(&action);
             let frame = encode_frame(&Envelope { overview: action })
                 .map_err(|_| failure("overview_request_bounds"))?;

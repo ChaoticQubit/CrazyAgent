@@ -257,9 +257,9 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
 }
 
 /// Serves one accounts owner request after the owner exchange deadline: the action runs
-/// under its own budget, which covers its network probes, and the reply write under the
-/// owner wait. Inputs: the stream, engine, authority, owner packet, admission and request
-/// bytes. Output: the reply written, a rejection code included.
+/// under its own budget, which covers its network probes and decides each storage job just
+/// before that budget cuts it, and the reply write under the owner wait. Inputs: the stream,
+/// engine, authority, owner packet, admission and request bytes. Output: the reply written.
 pub(super) async fn serve(
     stream: &mut Stream,
     engine: &Arc<Engine>,
@@ -276,12 +276,11 @@ pub(super) async fn serve(
         None
     };
     let time = envelope.accounts.time(engine.timeout);
-    let outcome = tokio::time::timeout(
-        time,
-        handle(engine, authority, packet, admission, envelope.accounts, key),
-    )
-    .await
-    .unwrap_or_else(|_| Err(unknown()));
+    let cut = tokio::time::Instant::now() + time;
+    let work = handle(engine, authority, packet, admission, envelope.accounts, key);
+    let outcome = tokio::time::timeout_at(cut, crate::storage::before_cut(cut, time, work))
+        .await
+        .unwrap_or_else(|_| Err(unknown()));
     let reply = match outcome {
         Ok(reply) => reply,
         Err(error) => Reply::Rejected {
@@ -854,9 +853,7 @@ fn view(listed: &Listed, status: AccountStatus) -> AccountView {
 fn sign_out_reason(code: &str) -> &'static str {
     match code {
         crate::storage::SIGN_OUT_NOT_RUN => "the engine stopped before the harness signed out",
-        "native_auth_host_unavailable" | "native_auth_host_unregistered" => {
-            "the sign-in helper could not run the harness"
-        }
+        "native_auth_host_unavailable" => "the sign-in helper could not run the harness",
         _ => "the harness sign-out failed",
     }
 }

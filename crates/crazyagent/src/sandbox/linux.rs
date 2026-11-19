@@ -86,6 +86,8 @@ const FILTER_SOCKETS: &str = "--filter-sockets";
 const DIE_WITH: &str = "--die-with";
 const NEST: &str = "--nest";
 const NESTED: &str = "--nested";
+const PRIVATE_MOUNTS: &str = "--private-mounts";
+const COVER: &str = "--cover";
 const SCOPED: &str = "--scoped";
 const GUARD_LOOPBACK: &str = "--guard-loopback";
 const GUARD_GIT: &str = "--guard-git";
@@ -239,6 +241,34 @@ const CONFINED_NEEDS_LANDLOCK: &str = "an agent confined to its own worktree or 
      Landlock file rules on Linux (Linux 6.2 or newer), and this Linux runs agents under \
      bubblewrap alone, which cannot give the git folders their own rights";
 
+/// Why an agent whose project hides a folder does not start under Landlock alone: a right
+/// to list a folder covers every folder below it, so the hidden folder's names would stay
+/// in view. It names what makes hidden folders work on this computer (leader 12:25).
+pub const HIDDEN_NEEDS_NAMESPACES: &str = "hidden folders on Linux need bubblewrap to start \
+     agents in namespaces of their own, and this computer does not let it: install \
+     bubblewrap and allow unprivileged user namespaces, then start the agent again";
+
+/// Why an agent whose project hides a folder does not start while this computer mounts that
+/// folder's disk a second time where it shows the folder: the empty cover lies on one path,
+/// and the second one leads past it (rv-code4 F1, #622, farm run 44410206144).
+pub const HIDDEN_MOUNTED_AGAIN: &str = "a hidden folder's disk is mounted a second time where \
+     it shows that folder, and an agent could reach the folder there: remove that mount or \
+     stop hiding the folder, then start the agent again";
+
+/// Why an agent whose project hides a folder does not start when this computer's mount list
+/// cannot be read plainly: no second mount of the folder's disk can then be ruled out.
+const HIDDEN_MOUNTS_UNREAD: &str = "hidden folders on Linux need this computer's mount list, \
+     and it could not be read";
+
+/// Why an agent whose project hides a folder does not start where the sandbox helper cannot
+/// give it a mount tree of its own that no later mount on this computer reaches: a second
+/// mount of the folder's disk made during the turn would lead past the cover
+/// (V24x-LINUX-NEST-MOUNT-PROPAGATION, leader 19:09 Q5).
+pub const HIDDEN_MOUNTS_NOT_PRIVATE: &str = "hidden folders on Linux need an agent's mounts \
+     cut off from this computer's, and this computer does not let the sandbox helper do it: \
+     allow user namespaces for the programs bubblewrap starts, or stop hiding the folders, \
+     then start the agent again";
+
 const LANDLOCK_DEVICES: &[&str] = &[
     "/dev/null",
     "/dev/zero",
@@ -273,6 +303,9 @@ pub struct LandlockPolicy {
     pub die_with: Option<u32>,
     pub nested: bool,
     pub guard: Guard,
+    /// With `nested` or a probe: asks the helper for a mount tree of its own that no later mount
+    /// on this computer reaches, and names the covers it proves locked there first ([`cut`]).
+    pub cut: Option<Vec<PathBuf>>,
 }
 
 /// What the helper's call supervisor holds for an agent on a host with no namespaces to
@@ -388,6 +421,7 @@ impl LandlockPolicy {
         if self.nested {
             args.push(NESTED.into());
         }
+        args.extend(cut_args(self.cut.as_deref()));
         args.extend(self.guard.args());
         args
     }
@@ -452,6 +486,7 @@ pub enum HelperRequest {
         limit_network: bool,
         open_sockets: bool,
         keep_free: bool,
+        cut: Option<Vec<PathBuf>>,
     },
     Run {
         policy: Box<LandlockPolicy>,
@@ -461,6 +496,7 @@ pub enum HelperRequest {
     Filter {
         program: PathBuf,
         args: Vec<OsString>,
+        cut: Option<Vec<PathBuf>>,
     },
     Nest {
         bwrap: PathBuf,
@@ -546,11 +582,14 @@ impl HelperRequest {
                 Some(DIE_WITH) if policy.die_with.is_none() => {
                     policy.die_with = Some(parent(rest.next())?);
                 }
+                Some(PRIVATE_MOUNTS) if policy.cut.is_none() => policy.cut = Some(Vec::new()),
+                Some(COVER) => cover(policy.cut.as_mut(), rest.next())?,
                 Some("--") if nest => {
                     let alone = !probe && !filter && policy == LandlockPolicy::default();
                     return nest_request(alone, rest);
                 }
                 Some("--") if !probe && filter => {
+                    let cut = policy.cut.take();
                     if policy != LandlockPolicy::default() {
                         return Err(format!("{FILTER_SOCKETS} takes no policy"));
                     }
@@ -558,6 +597,7 @@ impl HelperRequest {
                     return Ok(Self::Filter {
                         program,
                         args: rest.collect(),
+                        cut,
                     });
                 }
                 Some("--") if !probe => return run_request(policy, rest),
@@ -578,10 +618,49 @@ impl HelperRequest {
                 limit_network: policy.limit_network,
                 open_sockets: policy.open_sockets,
                 keep_free: !policy.keep_free.is_empty(),
+                cut: policy.cut,
             });
         }
         Err("missing the harness command after --".into())
     }
+}
+
+/// The helper words that ask for a private mount tree with these covers, or none.
+/// Input: the covers, when the tree is asked for. Output: [`PRIVATE_MOUNTS`], then
+/// [`COVER`] and the path for each cover.
+fn cut_args(covers: Option<&[PathBuf]>) -> Vec<OsString> {
+    let Some(covers) = covers else {
+        return Vec::new();
+    };
+    let mut args = vec![OsString::from(PRIVATE_MOUNTS)];
+    for cover in covers {
+        args.push(COVER.into());
+        args.push(cover.into());
+    }
+    assert_eq!(args.len(), 1 + 2 * covers.len());
+    args
+}
+
+/// Adds one [`COVER`] to a private tree: after [`PRIVATE_MOUNTS`], a clean absolute path
+/// below the root, each once, at most [`crate::sandbox::HIDDEN_MAX`]. Inputs: the covers
+/// so far, when the tree was asked for, and the next word. Output: Ok, or the reason.
+fn cover(covers: Option<&mut Vec<PathBuf>>, value: Option<OsString>) -> Result<(), String> {
+    let covers = covers.ok_or_else(|| format!("{COVER} follows {PRIVATE_MOUNTS}"))?;
+    let path = absolute(value)?;
+    if !clean_absolute(&path) || path.parent().is_none() {
+        return Err(format!(
+            "{COVER} takes a clean folder below /: {}",
+            path.display()
+        ));
+    }
+    if covers.contains(&path) || covers.len() >= crate::sandbox::HIDDEN_MAX {
+        return Err(format!(
+            "{COVER} names each folder once, at most {}",
+            crate::sandbox::HIDDEN_MAX
+        ));
+    }
+    covers.push(path);
+    Ok(())
 }
 
 /// Reads what follows a policy's `--`: the harness and its arguments, once the policy
@@ -596,6 +675,9 @@ fn run_request(
     guard_fits(&policy)?;
     if policy.nested && policy.die_with.is_some() {
         return Err(format!("{NESTED} takes no {DIE_WITH}"));
+    }
+    if policy.cut.is_some() && !policy.nested {
+        return Err(format!("{PRIVATE_MOUNTS} needs {NESTED}"));
     }
     let program = absolute(rest.next())?;
     if policy.read.len() + policy.write.len() + policy.git_write.len() > HELPER_PATHS_MAX {
@@ -707,15 +789,33 @@ fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
 }
 
 /// Tells whether what follows [`NEST_ARGS`] is what the engine's own nests write: an
-/// optional `--unshare-net`, an optional `--chdir` with a clean absolute folder, then `--`
-/// and the command, so no caller adds a capability, filter, namespace, bind or descriptor
-/// option to the agent's bubblewrap (rv-sa241 SBX-2-R2 N2, rv-code2 N5). Input: the words
-/// after the fixed arguments. Output: true when they are.
+/// optional `--unshare-net`, at most [`crate::sandbox::HIDDEN_MAX`] `--tmpfs P --remount-ro P`
+/// covers (P clean, absolute, below the root), an optional clean absolute `--chdir`, then `--`
+/// and the command, so no caller adds another bubblewrap option (rv-sa241 SBX-2-R2 N2,
+/// rv-code2 N5). Input: the words after the fixed arguments. Output: true when they are.
 fn own_options(words: &[OsString]) -> bool {
-    let words = match words {
+    let mut words = match words {
         [unshare, rest @ ..] if unshare == bridge::UNSHARE_NET => rest,
         _ => words,
     };
+    let mut covers = 0;
+    while let [tmpfs, path, remount, again, rest @ ..] = words
+        && tmpfs == "--tmpfs"
+    {
+        let folder = Path::new(path);
+        if remount != "--remount-ro"
+            || again != path
+            || !clean_absolute(folder)
+            || folder.parent().is_none()
+        {
+            return false;
+        }
+        covers += 1;
+        words = rest;
+    }
+    if covers > crate::sandbox::HIDDEN_MAX {
+        return false;
+    }
     let words = match words {
         [chdir, folder, rest @ ..] if chdir == "--chdir" => {
             if !clean_absolute(Path::new(folder)) {
@@ -758,7 +858,8 @@ fn nest_request(
     }
     if !own_options(&args[NEST_ARGS.len()..]) {
         return Err(format!(
-            "{NEST} takes only --unshare-net and an absolute --chdir before `--` and a command"
+            "{NEST} takes only --unshare-net, hidden folder covers and an absolute --chdir \
+             before `--` and a command"
         ));
     }
     Ok(HelperRequest::Nest { bwrap, args })
@@ -1113,7 +1214,9 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
         return ExitCode::from(3);
     }
     let (policy, launch) = match request {
-        HelperRequest::Filter { program, args } => return filtered(&program, args),
+        HelperRequest::Filter { program, args, cut } => {
+            return filtered(&program, args, cut.as_deref());
+        }
         HelperRequest::Nest { bwrap, args } => {
             return nest(&bwrap, &args, bridge.as_ref(), &routes);
         }
@@ -1127,11 +1230,13 @@ pub fn helper_main(args: Vec<OsString>) -> ExitCode {
             limit_network,
             open_sockets,
             keep_free,
+            cut,
         } => (
             LandlockPolicy {
                 limit_network,
                 open_sockets,
                 keep_free: OWNER_PORTS[..usize::from(keep_free)].to_vec(),
+                cut,
                 ..LandlockPolicy::default()
             },
             None,
@@ -1216,13 +1321,11 @@ fn close_inherited(named: &[RawFd]) -> Result<(), String> {
     Ok(())
 }
 
-/// Holds a policy on this process, then becomes the harness, or with a guard stays as its
-/// parent ([`supervise`]); for a probe it only tells whether this kernel held it. In a
-/// routed nest it first waits for the go byte and refuses without it
-/// ([`egress::started`]). Under a bridge it then hands the bridged listeners to the broker,
-/// before any rule; the ports it would keep free are then ports of a network of its own, so
-/// the picked range is not asked. Inputs: the policy, the harness if any, the bridge and
-/// the go descriptor. Output: the exit code as [`helper_main`] gives it.
+/// Holds a policy on this process, then becomes the harness, or with a guard stays as its parent
+/// ([`supervise`]); a probe only tells whether this kernel held it. In order: in a routed nest the
+/// go byte ([`egress::started`]), under a bridge the bridged listeners to the broker (so kept ports
+/// are a private network's), the private mount tree when it hides folders ([`cut`]), the rules.
+/// Inputs: the policy, the harness if any, the bridge and the go descriptor. Output: the exit code.
 fn hold(
     policy: &LandlockPolicy,
     launch: Option<(PathBuf, Vec<OsString>)>,
@@ -1248,6 +1351,12 @@ fn hold(
     };
     if let Err(reason) = readied {
         eprintln!("crazyagent-landlock: {reason}");
+        return ExitCode::from(3);
+    }
+    if let Some(covers) = &policy.cut
+        && let Err(reason) = cut(covers)
+    {
+        eprintln!("crazyagent-landlock: {HIDDEN_MOUNTS_NOT_PRIVATE}: {reason}");
         return ExitCode::from(3);
     }
     match enforce(policy, launch.is_some()) {
@@ -1515,15 +1624,18 @@ fn placed(nested: bool) -> Result<(), String> {
         .map_err(|error| format!("signal mask: {error}"))
 }
 
-/// Starts a harness bubblewrap launched, behind the socket filter alone, the one a Landlock
-/// agent with a network limit gets ([`refuse_sockets`] with `tcp_only`): no Unix-domain
-/// socket, so a closed agent reaches no socket in the folders bound for it, no io_uring
-/// ring, and no socket but TCP over IPv4 or IPv6 and routing netlink, so no AF_VSOCK or
-/// other family that `--unshare-net` does not isolate reaches outside the closed network
-/// (RV-DS241-84 r2). Bubblewrap already holds the files, the network namespace and the
-/// session. Input: the harness. Output: 3 when the filter cannot be installed, 126 when the
-/// harness cannot start.
-fn filtered(program: &Path, args: Vec<OsString>) -> ExitCode {
+/// Starts a harness bubblewrap launched, after a private mount tree if it hides folders ([`cut`]),
+/// behind the socket filter a Landlock agent with a network limit gets ([`refuse_sockets`] with
+/// `tcp_only`): no Unix-domain socket, no io_uring ring, no family but TCP and routing netlink, so
+/// no AF_VSOCK leaves the closed network (RV-DS241-84 r2). Inputs: the harness and the covers.
+/// Output: 3 when the cut or the filter fails, 126 when the harness cannot start.
+fn filtered(program: &Path, args: Vec<OsString>, covers: Option<&[PathBuf]>) -> ExitCode {
+    if let Some(covers) = covers
+        && let Err(reason) = cut(covers)
+    {
+        eprintln!("crazyagent-landlock: {HIDDEN_MOUNTS_NOT_PRIVATE}: {reason}");
+        return ExitCode::from(3);
+    }
     if let Err(reason) = refuse_sockets(true, false) {
         eprintln!("crazyagent-landlock: {reason}");
         return ExitCode::from(3);
@@ -1575,16 +1687,17 @@ struct Supervision {
 }
 
 impl LinuxSandbox {
-    /// Binds the policy to one backend. Input: the project policy and the helper, or bwrap
-    /// and the helper, each an absolute file. Output: the sandbox, `Invalid` for a bad
-    /// executable, or `Unavailable` for a network limit or an open network on bubblewrap,
-    /// which keeps no port free ([`LINUX_OPEN_NETWORK_NEEDS_LANDLOCK`]), for a policy confined to one
-    /// worktree, whose git denies neither backend can hold, for a limited network the
-    /// sockets setting starts no agent on, or on Landlock for a kept port Linux could hand
-    /// out by itself ([`kept_outside_picked`]). Bubblewrap starts only a closed agent, in a
-    /// network of its own, where no port it takes is a host port.
+    /// Binds the policy to one backend. Input: the policy and the backend's absolute files. Output:
+    /// the sandbox, `Invalid` for a bad executable, or `Unavailable` on bubblewrap for any network
+    /// but a closed one with no host port, for a one-worktree policy, a limited network the sockets
+    /// setting refuses, off bubblewrap a kept port Linux could hand out ([`kept_outside_picked`]),
+    /// on Landlock a hidden folder, or hidden folders with no private mount tree ([`cuts`]).
     pub fn new(sandbox: ProjectSandbox, backend: LinuxBackend) -> Result<Self, SandboxError> {
         admitted(&sandbox)?;
+        if matches!(backend, LinuxBackend::Landlock { .. }) && !sandbox.hidden.is_empty() {
+            return Err(SandboxError::Unavailable(HIDDEN_NEEDS_NAMESPACES.into()));
+        }
+        mounts_hold(&sandbox)?;
         let (launcher, inside) = match &backend {
             LinuxBackend::Landlock { helper } => (helper, None),
             LinuxBackend::Nested { bwrap, helper } => (helper, Some(bwrap)),
@@ -1622,6 +1735,9 @@ impl LinuxSandbox {
         } else {
             kept_outside_picked(&kept_free(&sandbox), read_picked_ports().as_ref())
                 .map_err(SandboxError::Unavailable)?;
+        }
+        if !sandbox.hidden.is_empty() && !cuts(&backend) {
+            return Err(SandboxError::Unavailable(HIDDEN_MOUNTS_NOT_PRIVATE.into()));
         }
         Ok(Self {
             sandbox,
@@ -2032,6 +2148,32 @@ fn trusted_file(bwrap: &Path) -> Option<fs::File> {
     (plain && [0, own].contains(&held.uid())).then_some(file)
 }
 
+/// Tells whether the helper gets a mount tree of its own where this backend starts it, by
+/// starting it there with a private tree and no cover but `/proc` ([`cut`]): the nested
+/// probe ([`nests`]), or bubblewrap's closed box with the socket filter before `/bin/true`.
+/// Input: the backend. Output: true only when that start exits 0; never on plain Landlock.
+fn cuts(backend: &LinuxBackend) -> bool {
+    match backend {
+        LinuxBackend::Landlock { .. } => false,
+        LinuxBackend::Nested { bwrap, helper } => {
+            nests(bwrap, helper, &[PROBE.into(), PRIVATE_MOUNTS.into()])
+        }
+        LinuxBackend::Bubblewrap { bwrap, helper } => {
+            let bare = Grants {
+                read: Vec::new(),
+                write: Vec::new(),
+                git_write: Vec::new(),
+                guarded: Held::default(),
+                hidden: Vec::new(),
+            };
+            let closed = SandboxNetwork::Only(Vec::new());
+            let mut probe = bwrap_command(bwrap, helper, &bare, Path::new("/"), &closed);
+            probe.args([PRIVATE_MOUNTS, "--", "/bin/true"]);
+            passes(&mut probe)
+        }
+    }
+}
+
 /// Tells whether a bubblewrap is one the helper may nest an agent under ([`trusted_file`]).
 /// A host whose bubblewrap fails this stays on plain Landlock with its gap lines. Input:
 /// its path. Output: true when it may.
@@ -2407,6 +2549,7 @@ impl Sandbox for LinuxSandbox {
                 let policy = self.with_guard(
                     LandlockPolicy {
                         nested: true,
+                        cut: private_tree(&grants.hidden).map(<[PathBuf]>::to_vec),
                         ..landlock_policy(&grants, &self.sandbox)
                     },
                     &grants.guarded,
@@ -2416,7 +2559,15 @@ impl Sandbox for LinuxSandbox {
                     Some(routed) => (routed.bridged.clone(), routed.any.clone()),
                     None => (self.sandbox.bridged_ports().unwrap_or_default(), Vec::new()),
                 };
-                nest_command(bwrap, helper, &policy, cwd, &bridged, &routes)
+                nest_command(
+                    bwrap,
+                    helper,
+                    &policy,
+                    &grants.hidden,
+                    cwd,
+                    &bridged,
+                    &routes,
+                )
             }
             LinuxBackend::Bubblewrap { bwrap, helper } => {
                 bwrap_command(bwrap, helper, &grants, cwd, self.sandbox.network())
@@ -2457,10 +2608,15 @@ struct Grants {
     write: Vec<PathBuf>,
     git_write: Vec<PathBuf>,
     guarded: Held,
+    /// The hidden folders, each made empty first when absent so a folder made during the
+    /// run lands under the cover (rv-sec2 F2), each covered by bubblewrap with an empty
+    /// read-only folder; no write grant covers any hidden folder ([`split_above`]).
+    hidden: Vec<PathBuf>,
 }
 
 impl Grants {
     fn of(sandbox: &ProjectSandbox) -> Result<Self, SandboxError> {
+        mounts_hold(sandbox)?;
         let project = sandbox.project_root();
         let git = project.join(".git");
         let state = project.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
@@ -2501,6 +2657,35 @@ impl Grants {
                 writable_children(&state, &[], &protected, &mut write)?;
             }
         }
+        for hidden in &sandbox.hidden {
+            split_above(hidden, &protected, &mut write)?;
+        }
+        if git_write
+            .iter()
+            .any(|root| sandbox.hidden.iter().any(|hidden| hidden.starts_with(root)))
+        {
+            return Err(invalid("a git folder grant holds a hidden folder"));
+        }
+        let mut hidden = Vec::new();
+        for path in &sandbox.hidden {
+            match fs::create_dir(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+            if !fs::symlink_metadata(path)?.is_dir() {
+                return Err(invalid("a hidden folder is no longer a plain folder"));
+            }
+            hidden.push(path.clone());
+        }
+        assert_eq!(hidden.len(), sandbox.hidden.len());
+        assert!(hidden.len() <= crate::sandbox::HIDDEN_MAX);
+        assert!(write.iter().all(|path| {
+            sandbox
+                .hidden
+                .iter()
+                .all(|hidden| !hidden.starts_with(path))
+        }));
         assert!(
             write
                 .iter()
@@ -2567,8 +2752,245 @@ impl Grants {
             write,
             git_write,
             guarded,
+            hidden,
         })
     }
+}
+
+/// Refuses a launch whose hidden folders a second mount of their disk shows ([`mounted_again`]),
+/// reading this computer's mount list only when the policy hides a folder, at install and at
+/// wrap. A later mount stays out, since the helper cuts the agent's tree first ([`cut`]); stated
+/// limit (leader 19:09 Q6): one made between this read and that cut still reaches the agent.
+/// Input: the policy. Output: Ok, or the refusal.
+fn mounts_hold(sandbox: &ProjectSandbox) -> Result<(), SandboxError> {
+    if sandbox.hidden.is_empty() {
+        return Ok(());
+    }
+    let text = fs::read_to_string("/proc/self/mountinfo")
+        .map_err(|_| SandboxError::Unavailable(HIDDEN_MOUNTS_UNREAD.into()))?;
+    mounted_again(&sandbox.hidden, &text)
+}
+
+/// Refuses hidden folders whose disk the mount list shows mounted a second time at the
+/// folder, above it or inside it, wherever that mount sits: a folder's own mount is the
+/// deepest one holding its path. Inputs: the hidden folders and the mount list text.
+/// Output: Ok, or the refusal; a list that does not read plainly refuses too.
+fn mounted_again(hidden: &[PathBuf], text: &str) -> Result<(), SandboxError> {
+    let unread = || SandboxError::Unavailable(HIDDEN_MOUNTS_UNREAD.into());
+    let mounts = mounts(text).ok_or_else(unread)?;
+    for folder in hidden {
+        assert!(folder.is_absolute());
+        let own = mounts
+            .iter()
+            .filter(|mount| folder.starts_with(&mount.point))
+            .max_by_key(|mount| mount.point.components().count())
+            .filter(|mount| mount.root.is_absolute())
+            .ok_or_else(unread)?;
+        let below = folder
+            .strip_prefix(&own.point)
+            .expect("a folder's own mount holds its path");
+        let inside = own.root.join(below);
+        let shows = |root: &Path| root.starts_with(&inside) || inside.starts_with(root);
+        if mounts
+            .iter()
+            .any(|mount| mount.id != own.id && mount.device == own.device && shows(&mount.root))
+        {
+            return Err(SandboxError::Unavailable(HIDDEN_MOUNTED_AGAIN.into()));
+        }
+    }
+    Ok(())
+}
+
+/// One line of the mount list: the mount's id, its disk's device number, the folder of
+/// that disk it shows and the folder it is mounted on.
+struct Mount {
+    id: u64,
+    device: String,
+    root: PathBuf,
+    point: PathBuf,
+}
+
+/// Reads the mount list text, one mount per line as `/proc/self/mountinfo` writes it.
+/// Input: the text. Output: the mounts, or none when a line does not read plainly.
+fn mounts(text: &str) -> Option<Vec<Mount>> {
+    text.lines()
+        .map(|line| {
+            let mut fields = line.split(' ');
+            let id = fields.next()?.parse().ok()?;
+            fields.next()?;
+            let device = fields.next()?;
+            let (major, minor) = device.split_once(':')?;
+            major.parse::<u32>().ok()?;
+            minor.parse::<u32>().ok()?;
+            let root = unescaped(fields.next()?)?;
+            let point = unescaped(fields.next()?)?;
+            point.is_absolute().then(|| Mount {
+                id,
+                device: device.to_owned(),
+                root,
+                point,
+            })
+        })
+        .collect()
+}
+
+/// Undoes the mount list's octal escapes, such as `\040` for a space. Input: one field.
+/// Output: the path, or none for an escape that is not three octal digits.
+fn unescaped(field: &str) -> Option<PathBuf> {
+    let bytes = field.as_bytes();
+    let mut path = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] != b'\\' {
+            path.push(bytes[at]);
+            at += 1;
+            continue;
+        }
+        let digits = bytes.get(at + 1..at + 4)?;
+        if !digits.iter().all(|digit| (b'0'..=b'7').contains(digit)) {
+            return None;
+        }
+        let value = digits
+            .iter()
+            .fold(0u32, |value, digit| value * 8 + u32::from(digit - b'0'));
+        path.push(u8::try_from(value).ok()?);
+        at += 4;
+    }
+    assert_eq!(at, bytes.len());
+    Some(PathBuf::from(OsStr::from_bytes(&path)))
+}
+
+/// Gives the helper a mount tree of its own that no later mount on this computer reaches,
+/// before Landlock, and proves it (V24x-LINUX-NEST-MOUNT-PROPAGATION): one thread, a user
+/// and a mount namespace of its own mapped to the same ids, every mount private, each cover
+/// and `/proc` a mount that `umount2` refuses as locked, then no capability, bounding set
+/// included. Input: the covers. Output: Ok, or the reason.
+fn cut(covers: &[PathBuf]) -> Result<(), String> {
+    let read = |path: &str| fs::read_to_string(path).map_err(|error| format!("{path}: {error}"));
+    let write = |path: &str, text: String| {
+        fs::write(path, text).map_err(|error| format!("{path}: {error}"))
+    };
+    if !alone(&read("/proc/self/status")?) {
+        return Err("the helper runs more than one thread".into());
+    }
+    let uid = rustix::process::getuid().as_raw();
+    let gid = rustix::process::getgid().as_raw();
+    nix::sched::unshare(
+        nix::sched::CloneFlags::CLONE_NEWUSER | nix::sched::CloneFlags::CLONE_NEWNS,
+    )
+    .map_err(|error| format!("a user and mount namespace of its own: {error}"))?;
+    write("/proc/self/setgroups", "deny".into())?;
+    write("/proc/self/uid_map", format!("{uid} {uid} 1\n"))?;
+    write("/proc/self/gid_map", format!("{gid} {gid} 1\n"))?;
+    let private = nix::mount::MsFlags::MS_REC | nix::mount::MsFlags::MS_PRIVATE;
+    nix::mount::mount(None::<&str>, "/", None::<&str>, private, None::<&str>)
+        .map_err(|error| format!("private mounts: {error}"))?;
+    let mountinfo = read("/proc/self/mountinfo")?;
+    if !propagation_free(&mountinfo) {
+        return Err("a mount still takes mount events".into());
+    }
+    for cover in covers
+        .iter()
+        .map(PathBuf::as_path)
+        .chain([Path::new("/proc")])
+    {
+        if !covered(&mountinfo, cover) {
+            return Err(format!("{} is not a mount", cover.display()));
+        }
+        match nix::mount::umount2(cover, nix::mount::MntFlags::empty()) {
+            Err(nix::errno::Errno::EINVAL) => {}
+            Ok(()) => return Err(format!("{} came off", cover.display())),
+            Err(error) => return Err(format!("{}: {error}", cover.display())),
+        }
+    }
+    for capability in rustix::thread::CapabilitySet::all().iter() {
+        match rustix::thread::remove_capability_from_bounding_set(capability) {
+            Ok(()) | Err(rustix::io::Errno::INVAL) => {}
+            Err(error) => return Err(format!("bounding set: {error}")),
+        }
+    }
+    egress::drop_capabilities()?;
+    if !capabilities_bare(&read("/proc/self/status")?) {
+        return Err("a capability is left".into());
+    }
+    Ok(())
+}
+
+/// Tells whether a process status text names one thread. Input: `/proc/self/status`.
+/// Output: true only for `Threads: 1`.
+fn alone(status: &str) -> bool {
+    status.lines().any(|line| {
+        line.strip_prefix("Threads:")
+            .is_some_and(|count| count.trim() == "1")
+    })
+}
+
+/// Tells whether no mount in a mount list takes or gives mount events: no line carries a
+/// `shared:` or `master:` field. Input: the mount list text. Output: true only then, and
+/// never for a list with no line or a line that does not read plainly.
+fn propagation_free(mountinfo: &str) -> bool {
+    !mountinfo.is_empty()
+        && mounts(mountinfo).is_some()
+        && mountinfo.lines().all(|line| {
+            line.split_once(" - ").is_some_and(|(head, _)| {
+                head.split(' ')
+                    .skip(6)
+                    .all(|field| !field.starts_with("shared:") && !field.starts_with("master:"))
+            })
+        })
+}
+
+/// Tells whether a mount list holds a mount at exactly this folder. Inputs: the mount list
+/// text and the folder. Output: true only then.
+fn covered(mountinfo: &str, folder: &Path) -> bool {
+    mounts(mountinfo).is_some_and(|mounts| mounts.iter().any(|mount| mount.point == folder))
+}
+
+/// Tells whether a process status text shows every capability set empty: inheritable,
+/// permitted, effective, bounding and ambient. Input: `/proc/self/status`. Output: true
+/// only when each of the five shows once and reads zero.
+fn capabilities_bare(status: &str) -> bool {
+    ["CapInh:", "CapPrm:", "CapEff:", "CapBnd:", "CapAmb:"]
+        .iter()
+        .all(|name| {
+            let mut values = status.lines().filter_map(|line| line.strip_prefix(name));
+            let value = values.next();
+            values.next().is_none()
+                && value.is_some_and(|value| u64::from_str_radix(value.trim(), 16) == Ok(0))
+        })
+}
+
+/// Splits every write grant that covers the hidden folder `folder` so that none does: the
+/// grant goes, each folder from it down to `folder`'s parent keeps only what the read grants
+/// give, its other existing entries are granted as [`writable_children`] grants them, and
+/// `folder` gets nothing, so it cannot be written, made, moved or carried off by a move
+/// above it. Inputs: the folder, the protected paths and the grants. Output: Ok, or why not.
+fn split_above(
+    folder: &Path,
+    protected: &[PathBuf],
+    write: &mut Vec<PathBuf>,
+) -> Result<(), SandboxError> {
+    let covering: Vec<PathBuf> = write
+        .iter()
+        .filter(|grant| folder.starts_with(grant))
+        .cloned()
+        .collect();
+    write.retain(|grant| !folder.starts_with(grant));
+    for grant in covering {
+        let mut above = grant;
+        while above != folder {
+            let step = folder
+                .strip_prefix(&above)
+                .ok()
+                .and_then(|rest| rest.components().next())
+                .ok_or_else(|| invalid("a hidden folder lies outside its grant"))?;
+            let next = above.join(step);
+            writable_children(&above, &[&next], protected, write)?;
+            above = next;
+        }
+    }
+    assert!(write.iter().all(|grant| !folder.starts_with(grant)));
+    Ok(())
 }
 
 fn writable_children(
@@ -2745,6 +3167,7 @@ fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy 
         die_with: None,
         nested: false,
         guard: Guard::default(),
+        cut: None,
     }
 }
 
@@ -2781,14 +3204,15 @@ fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {
 
 /// The command for a nested agent up to its harness: the helper asked to start bubblewrap
 /// ([`NEST`]) with [`NEST_ARGS`] in the working folder, and inside it the helper again with
-/// the policy. With route or bridged ports the route flags lead, then the bridge flags,
-/// and bubblewrap gives the agent a network of its own. Inputs: bubblewrap, the helper,
-/// the policy, marked nested, the working folder, the bridged ports and the route ports.
-/// Output: the command, which the harness follows after `--`.
+/// the policy. With route or bridged ports the route flags lead, then the bridge flags, and
+/// bubblewrap gives the agent a network of its own; an empty read-only folder covers each
+/// existing hidden folder. Inputs: bubblewrap, the helper, the nested policy, the hidden
+/// folders, the working folder, the bridged and route ports. Output: the command up to `--`.
 fn nest_command(
     bwrap: &Path,
     helper: &Path,
     policy: &LandlockPolicy,
+    hidden: &[PathBuf],
     cwd: &Path,
     bridged: &[u16],
     routes: &[u16],
@@ -2796,6 +3220,7 @@ fn nest_command(
     assert!(policy.nested);
     assert!(policy.die_with.is_none());
     assert!(routes.len() <= REMOTES_MAX);
+    assert!(hidden.len() <= crate::sandbox::HIDDEN_MAX);
     let mut command = Command::new(helper);
     for port in routes {
         command.arg(egress::ROUTE).arg(port.to_string());
@@ -2807,6 +3232,13 @@ fn nest_command(
     if !bridged.is_empty() || !routes.is_empty() {
         command.arg(bridge::UNSHARE_NET);
     }
+    for folder in hidden {
+        command
+            .arg("--tmpfs")
+            .arg(folder)
+            .arg("--remount-ro")
+            .arg(folder);
+    }
     command
         .arg("--chdir")
         .arg(cwd)
@@ -2817,12 +3249,11 @@ fn nest_command(
     command
 }
 
-/// The bubblewrap command for a closed agent up to its harness: its own namespaces, the
-/// system folders read-only but the name resolver's ([`RESOLVER_ROOT`]), the grants, then
-/// the helper bound read-only and started to install the TCP-only socket filter
-/// ([`FILTER_SOCKETS`]).
-/// Inputs: bwrap, the helper, the grants, the working folder and the network. Output: the
-/// command, which the harness follows after `--`.
+/// The bubblewrap command for a closed agent up to its harness: its own namespaces, the system
+/// folders read-only but the name resolver's ([`RESOLVER_ROOT`]), the grants, an empty read-only
+/// folder over each existing hidden folder, then the helper read-only for the socket filter
+/// ([`FILTER_SOCKETS`]), with a private mount tree first when it hides folders ([`cut`]). Inputs:
+/// bwrap, the helper, the grants, the working folder and the network. Output: the command.
 fn bwrap_command(
     bwrap: &Path,
     helper: &Path,
@@ -2867,10 +3298,25 @@ fn bwrap_command(
     for root in &grants.write {
         command.arg("--bind").arg(root).arg(root);
     }
+    for folder in &grants.hidden {
+        command
+            .arg("--tmpfs")
+            .arg(folder)
+            .arg("--remount-ro")
+            .arg(folder);
+    }
     command.arg("--ro-bind").arg(helper).arg(helper);
     command.arg("--chdir").arg(cwd);
     command.arg("--").arg(helper).arg(FILTER_SOCKETS);
+    command.args(cut_args(private_tree(&grants.hidden)));
     command
+}
+
+/// The covers a launch asks the helper's private mount tree for: its hidden folders, or no
+/// private tree when it hides none (leader 19:09 Q1). Input: the hidden folders. Output:
+/// the covers, or none.
+fn private_tree(hidden: &[PathBuf]) -> Option<&[PathBuf]> {
+    (!hidden.is_empty()).then_some(hidden)
 }
 
 #[cfg(test)]
@@ -2897,6 +3343,7 @@ mod tests {
             write: Vec::new(),
             git_write: Vec::new(),
             guarded: Held::default(),
+            hidden: Vec::new(),
         };
         let command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
@@ -2915,6 +3362,7 @@ mod tests {
             write: Vec::new(),
             git_write: Vec::new(),
             guarded: Held::default(),
+            hidden: Vec::new(),
         };
         let unshares = |network: SandboxNetwork| {
             bwrap_command(
@@ -3351,6 +3799,7 @@ mod tests {
             write: Vec::new(),
             git_write: vec![PathBuf::from("/p/.git/worktrees/agent-1")],
             guarded: Held::default(),
+            hidden: Vec::new(),
         };
         let _command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
@@ -3385,6 +3834,7 @@ mod tests {
             write: Vec::new(),
             git_write: Vec::new(),
             guarded: Held::default(),
+            hidden: Vec::new(),
         };
         let policy = landlock_policy(&grants, &sandbox);
         assert!(!policy.limit_network);
@@ -3496,6 +3946,7 @@ mod tests {
             write: Vec::new(),
             git_write: Vec::new(),
             guarded: Held::default(),
+            hidden: Vec::new(),
         };
         let policy = landlock_policy(&grants, &sandbox);
         assert!(policy.limit_network);
@@ -3528,6 +3979,7 @@ mod tests {
                 limit_network: false,
                 open_sockets: false,
                 keep_free: true,
+                cut: None,
             })
         );
         assert_eq!(
@@ -3536,6 +3988,7 @@ mod tests {
                 limit_network: false,
                 open_sockets: false,
                 keep_free: false,
+                cut: None,
             })
         );
         assert_eq!(
@@ -3544,6 +3997,7 @@ mod tests {
                 limit_network: true,
                 open_sockets: false,
                 keep_free: true,
+                cut: None,
             })
         );
         assert_eq!(
@@ -3797,6 +4251,7 @@ mod tests {
             write: Vec::new(),
             git_write: Vec::new(),
             guarded: Held::default(),
+            hidden: Vec::new(),
         };
         let command = bwrap_command(
             Path::new(BWRAP_PATHS[0]),
@@ -3835,6 +4290,7 @@ mod tests {
             Ok(HelperRequest::Filter {
                 program: PathBuf::from("/bin/true"),
                 args: vec![OsString::from("-x")],
+                cut: None,
             })
         );
         assert!(parse(&[FILTER_SOCKETS, READ, "/usr", "--", "/bin/true"]).is_err());
@@ -4009,7 +4465,7 @@ mod tests {
         let bwrap = Path::new(BWRAP_PATHS[0]);
         let helper = helper();
         let words = |bridged: &[u16], routes: &[u16]| -> Vec<OsString> {
-            nest_command(bwrap, &helper, &policy, &cwd, bridged, routes)
+            nest_command(bwrap, &helper, &policy, &[], &cwd, bridged, routes)
                 .get_args()
                 .map(OsStr::to_os_string)
                 .collect()
@@ -4814,6 +5270,414 @@ mod tests {
         ] {
             assert!(nest(refused).is_err(), "{refused:?}");
         }
+    }
+
+    /// A nest also takes the empty read-only folders a hidden folder gets, each as the exact
+    /// pair `--tmpfs P --remount-ro P` on one clean absolute path below the root, after the
+    /// network and before the working folder, at most [`crate::sandbox::HIDDEN_MAX`] of
+    /// them; any other shape, a lone half, two paths or one more pair is refused.
+    #[test]
+    fn a_nest_takes_exact_read_only_empty_folder_pairs_before_its_working_folder() {
+        use bridge::UNSHARE_NET;
+        let nest = |options: &[&str]| {
+            let mut words = vec![NEST, "--", BWRAP_PATHS[0]];
+            words.extend(NEST_ARGS);
+            words.extend(options);
+            HelperRequest::parse(words.iter().map(OsString::from).collect())
+        };
+        let helper = "/opt/helper";
+        let (hidden, other) = ("/work/private", "/work/notes/inner");
+        for kept in [
+            &["--tmpfs", hidden, "--remount-ro", hidden, "--", helper][..],
+            &[
+                UNSHARE_NET,
+                "--tmpfs",
+                hidden,
+                "--remount-ro",
+                hidden,
+                "--tmpfs",
+                other,
+                "--remount-ro",
+                other,
+                "--chdir",
+                "/work",
+                "--",
+                helper,
+                NESTED,
+            ],
+        ] {
+            assert!(nest(kept).is_ok(), "{kept:?}");
+        }
+        for refused in [
+            &["--tmpfs", hidden, "--", helper][..],
+            &["--remount-ro", hidden, "--", helper],
+            &["--tmpfs", hidden, "--remount-ro", other, "--", helper],
+            &[
+                "--tmpfs",
+                "work/private",
+                "--remount-ro",
+                "work/private",
+                "--",
+                helper,
+            ],
+            &[
+                "--tmpfs",
+                "/work/../etc",
+                "--remount-ro",
+                "/work/../etc",
+                "--",
+                helper,
+            ],
+            &["--tmpfs", "/", "--remount-ro", "/", "--", helper],
+            &["--remount-ro", hidden, "--tmpfs", hidden, "--", helper],
+            &[
+                "--chdir",
+                "/work",
+                "--tmpfs",
+                hidden,
+                "--remount-ro",
+                hidden,
+                "--",
+                helper,
+            ],
+            &[
+                "--tmpfs",
+                hidden,
+                "--remount-ro",
+                hidden,
+                UNSHARE_NET,
+                "--",
+                helper,
+            ],
+            &["--ro-bind", hidden, hidden, "--", helper],
+        ] {
+            assert!(nest(refused).is_err(), "{refused:?}");
+        }
+        let paths: Vec<String> = (0..=crate::sandbox::HIDDEN_MAX)
+            .map(|number| format!("/work/hidden-{number}"))
+            .collect();
+        let pairs = |count: usize| {
+            let mut words: Vec<&str> = Vec::new();
+            for path in &paths[..count] {
+                words.extend(["--tmpfs", path.as_str(), "--remount-ro", path.as_str()]);
+            }
+            words.extend(["--", helper]);
+            nest(&words)
+        };
+        assert!(pairs(crate::sandbox::HIDDEN_MAX).is_ok());
+        assert!(pairs(crate::sandbox::HIDDEN_MAX + 1).is_err());
+    }
+
+    /// rv-code4 F1 (#622): a second mount of a hidden folder's disk that shows the folder, a
+    /// folder above it or one inside it refuses the launch wherever it is mounted (farm run
+    /// 44410206144 read the folder through one); another disk, a folder beside it and the
+    /// folder's own mount do not, and a mount list that does not read plainly refuses too.
+    #[test]
+    fn a_second_mount_of_a_hidden_folders_disk_refuses_the_launch() {
+        let line = |id: u32, device: &str, root: &str, point: &str| {
+            format!("{id} 1 {device} {root} {point} rw,relatime shared:1 - ext4 /dev/sda1 rw\n")
+        };
+        let base = line(21, "8:1", "/", "/") + &line(22, "8:2", "/", "/boot");
+        let reason = |hidden: &str, text: &str| match mounted_again(&[PathBuf::from(hidden)], text)
+        {
+            Ok(()) => None,
+            Err(SandboxError::Unavailable(reason)) => Some(reason),
+            Err(other) => panic!("{other:?}"),
+        };
+        let folder = "/home/u/work/notes/private";
+        let again = Some(HIDDEN_MOUNTED_AGAIN.to_owned());
+        let unread = Some(HIDDEN_MOUNTS_UNREAD.to_owned());
+        assert_eq!(reason(folder, &base), None);
+        let seconds = [
+            (line(23, "8:1", "/home/u", "/mnt/alias"), &again),
+            (line(23, "8:1", "/", "/srv/root"), &again),
+            (line(23, "8:1", folder, "/srv/view"), &again),
+            (
+                line(23, "8:1", "/home/u/work/notes/private/sub", "/srv/part"),
+                &again,
+            ),
+            (
+                line(23, "8:1", "/home/u", "/home/u/work/worktrees/alias"),
+                &again,
+            ),
+            (line(23, "8:1", "/home/u", "/mnt/my\\040alias"), &again),
+            (
+                line(23, "8:1", "/home/u/work/context", "/srv/context"),
+                &None,
+            ),
+            (
+                line(23, "8:1", "/home/u/work/my\\040notes", "/srv/notes"),
+                &None,
+            ),
+            (line(23, "8:9", "/home/u", "/mnt/other"), &None),
+            (line(23, "0:4", "net:[4026532]", "/run/netns/one"), &None),
+        ];
+        for (second, expected) in seconds {
+            assert_eq!(
+                reason(folder, &(base.clone() + &second)),
+                *expected,
+                "{second}"
+            );
+        }
+        let spaced = base.clone() + &line(23, "8:1", "/home/u/my\\040work", "/srv/spaced");
+        assert_eq!(reason("/home/u/my work/private", &spaced), again);
+        let own = line(21, "8:1", "/", "/") + &line(24, "8:3", "/u", "/home");
+        assert_eq!(reason(folder, &own), None);
+        assert_eq!(
+            reason(folder, &(own + &line(25, "8:3", "/", "/mnt/home"))),
+            again
+        );
+        for broken in [
+            String::new(),
+            base.clone() + "garbage\n",
+            base.clone() + &line(23, "8:1", "/a\\0", "/b"),
+            base.clone() + &line(23, "8:1", "/a\\08x", "/b"),
+            base.clone() + &line(23, "eight", "/a", "/b"),
+            base.clone() + &line(23, "8:1", "/a", "relative"),
+        ] {
+            assert_eq!(reason(folder, &broken), unread, "{broken}");
+        }
+    }
+
+    /// V24x-LINUX-NEST-MOUNT-PROPAGATION: the cut's proofs read the helper's own status and
+    /// mount list plainly: one thread, no `shared:` or `master:` field on any mount, a mount
+    /// at each cover, and all five capability sets zero; anything else does not hold.
+    #[test]
+    fn the_cut_reads_threads_propagation_covers_and_capabilities_plainly() {
+        let zero = "0000000000000000";
+        let status = |threads: &str, caps: [&str; 5]| {
+            format!(
+                "Name:\tcrazyagent-land\nThreads:\t{threads}\nCapInh:\t{}\nCapPrm:\t{}\n\
+                 CapEff:\t{}\nCapBnd:\t{}\nCapAmb:\t{}\nNoNewPrivs:\t1\n",
+                caps[0], caps[1], caps[2], caps[3], caps[4]
+            )
+        };
+        let bare = status("1", [zero; 5]);
+        assert!(alone(&bare));
+        assert!(!alone(&status("2", [zero; 5])));
+        assert!(!alone("Name:\tcrazyagent-land\n"));
+        assert!(capabilities_bare(&bare));
+        for set in 0..5 {
+            let mut caps = [zero; 5];
+            caps[set] = "0000000000200000";
+            assert!(!capabilities_bare(&status("1", caps)), "set {set}");
+        }
+        assert!(!capabilities_bare(&status(
+            "1",
+            [zero, zero, "x", zero, zero]
+        )));
+        assert!(!capabilities_bare(
+            "Threads:\t1\nCapInh:\t0000000000000000\n"
+        ));
+        let private = "21 1 8:1 / / rw,relatime - ext4 /dev/sda1 rw\n\
+                       40 21 0:50 / /home/u/work/private ro,nosuid - tmpfs tmpfs ro\n";
+        assert!(propagation_free(private));
+        assert!(propagation_free(
+            "21 1 8:1 / / rw unbindable - ext4 /dev/sda1 rw\n"
+        ));
+        for taking in [
+            "shared:1",
+            "master:1",
+            "master:1 propagate_from:2",
+            "shared:3 master:1",
+        ] {
+            let line = format!("21 1 8:1 / / rw,relatime {taking} - ext4 /dev/sda1 rw\n");
+            assert!(!propagation_free(&line), "{taking}");
+        }
+        assert!(!propagation_free(""));
+        assert!(!propagation_free(
+            "21 1 8:1 / / rw,relatime ext4 /dev/sda1 rw\n"
+        ));
+        assert!(covered(private, Path::new("/home/u/work/private")));
+        assert!(!covered(private, Path::new("/home/u/work")));
+        assert!(!covered(private, Path::new("/home/u/work/private/inner")));
+        let spaced = "41 21 0:51 / /home/u/my\\040work ro - tmpfs tmpfs ro\n";
+        assert!(covered(spaced, Path::new("/home/u/my work")));
+        assert!(!covered("garbage\n", Path::new("/")));
+    }
+
+    /// V24x-LINUX-NEST-MOUNT-PROPAGATION: only a nested run, a probe or the socket filter
+    /// asks for a private tree, with at most [`crate::sandbox::HIDDEN_MAX`] distinct clean
+    /// absolute covers below the root; a cover alone, a flag twice or a nest is refused.
+    #[test]
+    fn a_private_tree_comes_with_a_nested_run_a_probe_or_the_filter_and_absolute_covers() {
+        let parse =
+            |words: &[&str]| HelperRequest::parse(words.iter().map(OsString::from).collect());
+        let covers = Some(vec![PathBuf::from("/w/h")]);
+        let run = parse(&[
+            READ,
+            "/usr",
+            NESTED,
+            PRIVATE_MOUNTS,
+            COVER,
+            "/w/h",
+            "--",
+            "/bin/true",
+        ]);
+        let Ok(HelperRequest::Run { policy, .. }) = run else {
+            panic!("a nested run takes a private tree: {run:?}");
+        };
+        assert_eq!(policy.cut, covers);
+        let probe = |cut: Option<Vec<PathBuf>>| HelperRequest::Probe {
+            limit_network: false,
+            open_sockets: false,
+            keep_free: false,
+            cut,
+        };
+        assert_eq!(
+            parse(&[PROBE, PRIVATE_MOUNTS, COVER, "/proc"]),
+            Ok(probe(Some(vec![PathBuf::from("/proc")])))
+        );
+        assert_eq!(parse(&[PROBE, PRIVATE_MOUNTS]), Ok(probe(Some(Vec::new()))));
+        assert_eq!(parse(&[PROBE]), Ok(probe(None)));
+        assert_eq!(
+            parse(&[
+                FILTER_SOCKETS,
+                PRIVATE_MOUNTS,
+                COVER,
+                "/w/h",
+                "--",
+                "/bin/true"
+            ]),
+            Ok(HelperRequest::Filter {
+                program: PathBuf::from("/bin/true"),
+                args: Vec::new(),
+                cut: covers,
+            })
+        );
+        for refused in [
+            &[READ, "/usr", PRIVATE_MOUNTS, "--", "/bin/true"][..],
+            &[READ, "/usr", NESTED, COVER, "/w/h", "--", "/bin/true"],
+            &[PROBE, COVER, "/proc"],
+            &[FILTER_SOCKETS, COVER, "/w/h", "--", "/bin/true"],
+            &[
+                READ,
+                "/usr",
+                NESTED,
+                PRIVATE_MOUNTS,
+                COVER,
+                "w/h",
+                "--",
+                "/bin/true",
+            ],
+            &[
+                READ,
+                "/usr",
+                NESTED,
+                PRIVATE_MOUNTS,
+                COVER,
+                "/",
+                "--",
+                "/bin/true",
+            ],
+            &[
+                READ,
+                "/usr",
+                NESTED,
+                PRIVATE_MOUNTS,
+                COVER,
+                "/w/../h",
+                "--",
+                "/bin/true",
+            ],
+            &[
+                READ,
+                "/usr",
+                NESTED,
+                PRIVATE_MOUNTS,
+                PRIVATE_MOUNTS,
+                "--",
+                "/bin/true",
+            ],
+            &[
+                READ,
+                "/usr",
+                NESTED,
+                PRIVATE_MOUNTS,
+                COVER,
+                "/w/h",
+                COVER,
+                "/w/h",
+                "--",
+                "/bin/true",
+            ],
+            &[NEST, PRIVATE_MOUNTS, "--", BWRAP_PATHS[0]],
+        ] {
+            assert!(parse(refused).is_err(), "{refused:?}");
+        }
+        let many: Vec<String> = (0..=crate::sandbox::HIDDEN_MAX)
+            .map(|at| format!("/w/h{at}"))
+            .collect();
+        let mut words = vec![READ, "/usr", NESTED, PRIVATE_MOUNTS];
+        for cover in &many {
+            words.extend([COVER, cover.as_str()]);
+        }
+        words.extend(["--", "/bin/true"]);
+        assert!(parse(&words).is_err(), "more covers than hidden folders");
+    }
+
+    /// V24x-LINUX-NEST-MOUNT-PROPAGATION: a launch with hidden folders asks the helper for a
+    /// private tree with each folder as a cover on both hiding backends, the nested policy
+    /// reading back from its own words, and a launch without them asks for none.
+    #[test]
+    fn a_launch_with_hidden_folders_asks_the_helper_for_a_private_tree_on_both_backends() {
+        let folder = PathBuf::from("/w/project/private");
+        let policy = LandlockPolicy {
+            read: vec![PathBuf::from("/usr")],
+            nested: true,
+            cut: Some(vec![folder.clone()]),
+            ..LandlockPolicy::default()
+        };
+        let args = policy.args();
+        let at = args
+            .iter()
+            .position(|arg| arg == PRIVATE_MOUNTS)
+            .expect("the nested run asks for a private tree");
+        assert_eq!(
+            args[at + 1..at + 3],
+            [OsString::from(COVER), folder.clone().into_os_string()]
+        );
+        let mut words = args.clone();
+        words.extend([OsString::from("--"), OsString::from("/bin/true")]);
+        match HelperRequest::parse(words) {
+            Ok(HelperRequest::Run { policy: back, .. }) => assert_eq!(*back, policy),
+            other => panic!("the nested policy reads back: {other:?}"),
+        }
+        let plain = LandlockPolicy {
+            cut: None,
+            ..policy.clone()
+        };
+        assert!(!plain.args().iter().any(|arg| arg == PRIVATE_MOUNTS));
+        let grants = |hidden: Vec<PathBuf>| Grants {
+            read: Vec::new(),
+            write: Vec::new(),
+            git_write: Vec::new(),
+            guarded: Held::default(),
+            hidden,
+        };
+        let tail = |grants: &Grants| -> Vec<OsString> {
+            bwrap_command(
+                Path::new(BWRAP_PATHS[0]),
+                &helper(),
+                grants,
+                Path::new("/tmp"),
+                &SandboxNetwork::Open,
+            )
+            .get_args()
+            .skip_while(|arg| *arg != FILTER_SOCKETS)
+            .map(OsStr::to_os_string)
+            .collect()
+        };
+        assert_eq!(
+            tail(&grants(vec![folder.clone()])),
+            [
+                OsString::from(FILTER_SOCKETS),
+                OsString::from(PRIVATE_MOUNTS),
+                OsString::from(COVER),
+                folder.into_os_string(),
+            ]
+        );
+        assert_eq!(tail(&grants(Vec::new())), [OsString::from(FILTER_SOCKETS)]);
     }
 
     #[test]

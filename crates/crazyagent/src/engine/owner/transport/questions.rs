@@ -192,7 +192,7 @@ impl OwnerClient {
     }
 
     async fn questions_exchange(&self, action: Action) -> Result<Reply, EngineError> {
-        tokio::time::timeout(self.timeout.max(QUESTIONS_TIMEOUT), async {
+        tokio::time::timeout(deferred_wait(self.timeout, QUESTIONS_TIMEOUT), async {
             let read = read_kind(&action);
             let frame = encode_frame(&Envelope { questions: action })
                 .map_err(|_| failure("questions_request_bounds"))?;

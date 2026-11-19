@@ -952,6 +952,29 @@ impl Host for Servers {
         self.on_panes(agent, |server| server.input_at(agent, at, bytes))
     }
 
+    fn own_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        self.on(agent, |server| server.own_pane_at(agent))
+    }
+
+    fn paste_at(&self, agent: &AgentId, at: &PaneAt, keys: &[u8]) -> Result<bool, HostError> {
+        self.on(agent, |server| server.paste_at(agent, at, keys))
+    }
+
+    /// Sizes a pinned view's window on the server that found its pane and, for a lead whose
+    /// teammates' server this engine reaches, that server too, as `resize` does by name.
+    /// Takes the agent, the pane and the size. Returns whether the pinned window was sized.
+    fn resize_at(&self, agent: &AgentId, at: &PaneAt, size: (u16, u16)) -> Result<bool, HostError> {
+        if !self.on(agent, |server| server.resize_at(agent, at, size))? {
+            return Ok(false);
+        }
+        if self.own(agent)?.is_some()
+            && let Some(mates) = self.mates(agent)?
+        {
+            mates.resize(agent, size.0, size.1)?;
+        }
+        Ok(true)
+    }
+
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         self.on(agent, |server| server.input_live(agent))
     }
@@ -1083,6 +1106,14 @@ impl Host for Servers {
 
     fn input_live_pane(&self, agent: &AgentId, pane: &str) -> Result<bool, HostError> {
         self.on_panes(agent, |server| server.input_live_pane(agent, pane))
+    }
+
+    fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
+        self.on(agent, |server| server.paste(agent, keys))
+    }
+
+    fn paste_pane(&self, agent: &AgentId, pane: &str, keys: &[u8]) -> Result<(), HostError> {
+        self.on_panes(agent, |server| server.paste_pane(agent, pane, keys))
     }
 
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {

@@ -23,11 +23,37 @@ function called() {
   return commands;
 }
 
+/**
+ * Reads the commands of lib.rs's `native_commands!` call in its three groups: every build's,
+ * the webview terminal's (off macOS only) and the trials of a macOS native-webdriver build.
+ * Output: lib.rs, every name, the names the window calls and the trial names.
+ */
 function registered() {
   const lib = read("src-tauri/src/lib.rs");
   const handler = lib.slice(lib.indexOf("native_commands! {"));
-  const list = [...handler.slice(0, handler.indexOf("\n}")).matchAll(/\b(desktop_[a-z_]+)\b/g)].map((match) => match[1]);
-  return { lib, list };
+  const groups = handler.slice(0, handler.indexOf("\n}")).split(/\n\s*;\s*\n/)
+    .map((group) => [...group.matchAll(/\b(desktop_[a-z_]+)\b/g)].map((match) => match[1]));
+  assert.equal(groups.length, 3, "native_commands! has its three groups");
+  const [each, webview, trial] = groups;
+  assert.ok(each.length > 100, "native_commands! names every build's commands first");
+  assert.ok(webview.length > 0, "native_commands! names the webview terminal's commands");
+  assert.ok(trial.length > 0, "native_commands! names the trial commands last");
+  return { lib, list: groups.flat(), window: [...each, ...webview], trial };
+}
+
+/**
+ * Reads which commands the native trial specs (test/native/*.e2e.mjs) call through invoke.
+ * Output: the set of command names.
+ */
+function specCalls() {
+  const calls = new Set();
+  for (const name of readdirSync(new URL("./native/", import.meta.url))) {
+    if (!name.endsWith(".e2e.mjs")) continue;
+    const spec = read(`test/native/${name}`);
+    for (const match of spec.matchAll(/\binvoke\(\s*"(desktop_[a-z_]+)"/g)) calls.add(match[1]);
+  }
+  assert.ok(calls.size > 0, "the native trial specs call commands");
+  return calls;
 }
 
 test("every command any window file calls, through invoke or call, is registered in all four native places", () => {
@@ -43,15 +69,27 @@ test("every command any window file calls, through invoke or call, is registered
   }
 });
 
-test("every registered command is called by the window and registered once", () => {
-  const { list } = registered();
+test("every window command is called by the window and every command is registered once", () => {
+  const { list, window } = registered();
   const commands = called();
   assert.equal(new Set(list).size, list.length, "a command is listed twice in invoke_handler");
-  for (const command of list) assert.ok(commands.has(command), `${command} is registered but never called`);
+  for (const command of window) {
+    assert.ok(commands.has(command), `${command} is registered but never called`);
+  }
   const build = [...read("src-tauri/build.rs").matchAll(/"(desktop_[a-z_]+)"/g)].map((match) => match[1]);
   assert.equal(new Set(build).size, build.length, "a command is listed twice in build.rs");
   const allowed = JSON.parse(read("src-tauri/capabilities/main-window.json")).permissions.filter((item) => typeof item === "string");
   assert.equal(new Set(allowed).size, allowed.length, "a permission is listed twice in main-window.json");
+});
+
+test("a native-webdriver trial command is called by a native spec, never by the window", () => {
+  const { trial } = registered();
+  const commands = called();
+  const specs = specCalls();
+  for (const command of trial) {
+    assert.ok(specs.has(command), `${command} is a trial command no native spec calls`);
+    assert.ok(!commands.has(command), `${command} is a trial command the window calls`);
+  }
 });
 
 test("the intake, GitHub and setup commands send the argument names their Rust commands take", () => {

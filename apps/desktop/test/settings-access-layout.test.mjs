@@ -489,6 +489,14 @@ test("#358 r2: choosing Standard saves it under the Terminal renderer key alone 
   assert.deepEqual(seen, { saved: [["crazyagent.terminal-renderer", "standard"]], chosen: ["Standard"] });
 });
 
+test("V243-NATIVE-ONLY: a build that draws every terminal natively has no Terminal renderer line in Profile's Appearance or Settings > Terminal", async () => {
+  const profile = await onProfile({ native: true }, read);
+  assert.deepEqual(profile[1].rows.map((row) => row.label), ["Theme", "Terminal input", "Questions show"]);
+  const terminal = await onTerminal({ native: true }, async (page) => ({ top: await top(page), sections: await read(page) }));
+  assert.equal(terminal.top?.purpose, "Where you type to agents.", JSON.stringify(terminal));
+  assert.deepEqual(terminal.sections.map((section) => section.rows.map((row) => row.label)), [["Terminal input"]]);
+});
+
 test("V243-TERMINAL-SETTINGS-PLACE: Settings lists Terminal under App, and its section holds Terminal input and Terminal renderer as Profile's Appearance does", async () => {
   const seen = await onTerminal({}, async (page) => ({
     top: await top(page),

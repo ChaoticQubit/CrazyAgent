@@ -3002,9 +3002,10 @@ fn every_team_agent_is_in_the_agent_register_with_the_owners_stop_and_restart() 
 }
 
 /// DEC-200 (V243-TEAM-THREAD-WAKE): the owner's stop of a team sub-agent from the agent
-/// register acts on the wake, not at the team's next tick. A stop that waits for the tick
-/// takes a whole tick or more (8 s here, under the register's 10 s `HOST_WAIT`), so a stop
-/// under one tick acted on the wake. macOS only, as every team agent (DEC-094).
+/// register acts on the wake. Without it, a stop asked after the tick's last `owner_controls`
+/// waits for the next tick, a whole tick or more (8 s, under the 10 s `HOST_WAIT`); one asked
+/// before that call is read in the same tick, and the row passes either way. macOS only, as
+/// every team agent (DEC-094).
 #[cfg(target_os = "macos")]
 #[test]
 fn the_owners_register_stop_of_a_team_agent_acts_without_waiting_for_the_next_tick() {

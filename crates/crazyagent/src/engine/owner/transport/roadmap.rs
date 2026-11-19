@@ -166,7 +166,7 @@ impl OwnerClient {
     }
 
     async fn roadmap_exchange(&self, action: Action) -> Result<Reply, EngineError> {
-        tokio::time::timeout(self.timeout.max(ROADMAP_TIMEOUT), async {
+        tokio::time::timeout(deferred_wait(self.timeout, ROADMAP_TIMEOUT), async {
             let read = read_kind(&action);
             let frame = encode_frame(&Envelope { roadmap: action })
                 .map_err(|_| failure("roadmap_status_request_bounds"))?;

@@ -423,7 +423,7 @@ impl OwnerClient {
 
     async fn changes_exchange(&self, action: Action) -> Result<Reply, EngineError> {
         action.validate()?;
-        tokio::time::timeout(self.timeout.max(CHANGES_TIMEOUT), async {
+        tokio::time::timeout(deferred_wait(self.timeout, CHANGES_TIMEOUT), async {
             let read = read_kind(&action);
             let frame = encode_frame(&Envelope { changes: action })
                 .map_err(|_| failure("changes_request_bounds"))?;

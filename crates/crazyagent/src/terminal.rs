@@ -46,6 +46,10 @@ pub const INPUT_BYTES_MAX: usize = 4096;
 /// no split of them cuts it (RV-DS241-69).
 pub(crate) const PASTE_CLOSE: &[u8] = b"\x1b[201~";
 pub const PROMPT_BYTES_MAX: usize = 4096;
+/// The most bytes one owner paste may hold once the engine gathered its `Paste` chunks, the
+/// most a native view copies.
+pub const PASTE_BYTES_MAX: usize = 1 << 20;
+const _: () = assert!(PASTE_BYTES_MAX.is_multiple_of(INPUT_BYTES_MAX));
 pub const CHUNK_BYTES_MAX: usize = 8192;
 pub const SIZE_MIN: u16 = 2;
 pub const SIZE_MAX: u16 = 1000;
@@ -474,6 +478,33 @@ pub trait Host: Send + Sync {
         Ok(false)
     }
 
+    /// The pane an input-only view of an agent stays on: the agent's own pane now, the one
+    /// `attach` would view, and the serial of the connection that found it. Takes the name.
+    /// Returns the pane, `terminal_agent_unknown` once the terminal is gone, or
+    /// `terminal_unavailable` for a host with no pane ids, whose views type by name.
+    fn own_pane_at(&self, _agent: &AgentId) -> Result<PaneAt, HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
+    /// Pastes keys straight into the pane a view stays on, as `paste` does by name, while the
+    /// connection that found that pane still serves it. Takes the name, the pane and 1 to
+    /// `PASTE_BYTES_MAX` keys. Returns true once pasted, false when this host cannot use it.
+    fn paste_at(&self, _agent: &AgentId, _at: &PaneAt, _keys: &[u8]) -> Result<bool, HostError> {
+        Ok(false)
+    }
+
+    /// Sizes the window of the pane a view stays on, as `resize` does by name, while the
+    /// connection that found that pane still serves it. Takes the name, the pane and the
+    /// size. Returns true once sized, false when this host cannot use that pane.
+    fn resize_at(
+        &self,
+        _agent: &AgentId,
+        _at: &PaneAt,
+        _size: (u16, u16),
+    ) -> Result<bool, HostError> {
+        Ok(false)
+    }
+
     /// Tells whether the app in an agent terminal reads keys itself yet: interactive apps
     /// turn on bracketed paste once their own input is live, and keys typed before that
     /// go through the terminal's line editing, which turns Enter into a newline.
@@ -537,6 +568,20 @@ pub trait Host: Send + Sync {
     /// agent's own pane. Takes the name and the pane id. Returns the answer.
     fn input_live_pane(&self, _agent: &AgentId, _pane: &str) -> Result<bool, HostError> {
         Err(failure("terminal_unavailable"))
+    }
+
+    /// Pastes the owner's keys into the agent's own pane as one paste, bracketed only when
+    /// its app turned bracketed paste on. Takes the name and keys from `paste_keys`, 1 to
+    /// `PASTE_BYTES_MAX` bytes. Returns once the host took them all, or
+    /// `terminal_paste_unsupported` from a host that cannot paste.
+    fn paste(&self, _agent: &AgentId, _keys: &[u8]) -> Result<(), HostError> {
+        Err(failure("terminal_paste_unsupported"))
+    }
+
+    /// Pastes the owner's keys into one pane as `paste` does into the agent's own pane.
+    /// Takes the name, the pane id and the keys. Returns as `paste`.
+    fn paste_pane(&self, _agent: &AgentId, _pane: &str, _keys: &[u8]) -> Result<(), HostError> {
+        Err(failure("terminal_paste_unsupported"))
     }
 
     /// Gives a native teammate's pane its own name (DEC-104 K5a), so later calls by that
@@ -685,6 +730,18 @@ impl Host for OwnServer {
         self.0.input_at(agent, at, bytes)
     }
 
+    fn own_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        self.0.own_pane_at(agent)
+    }
+
+    fn paste_at(&self, agent: &AgentId, at: &PaneAt, keys: &[u8]) -> Result<bool, HostError> {
+        self.0.paste_at(agent, at, keys)
+    }
+
+    fn resize_at(&self, agent: &AgentId, at: &PaneAt, size: (u16, u16)) -> Result<bool, HostError> {
+        self.0.resize_at(agent, at, size)
+    }
+
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         self.0.input_live(agent)
     }
@@ -744,6 +801,14 @@ impl Host for OwnServer {
 
     fn input_live_pane(&self, agent: &AgentId, pane: &str) -> Result<bool, HostError> {
         self.0.input_live_pane(agent, pane)
+    }
+
+    fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
+        self.0.paste(agent, keys)
+    }
+
+    fn paste_pane(&self, agent: &AgentId, pane: &str, keys: &[u8]) -> Result<(), HostError> {
+        self.0.paste_pane(agent, pane, keys)
     }
 
     fn adopt_pane(&self, agent: &AgentId, lead: &AgentId, pane: &str) -> Result<(), HostError> {
@@ -818,6 +883,10 @@ impl Host for PaneView {
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         self.host.input_live_pane(agent, &self.pane)
+    }
+
+    fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
+        self.host.paste_pane(agent, &self.pane, keys)
     }
 
     fn quiet(&self, agent: &AgentId) -> Result<Option<Duration>, HostError> {
@@ -1345,8 +1414,22 @@ pub enum TerminalRequest {
         cols: u16,
         rows: u16,
     },
+    /// Opens a view of the agent's terminal, or one pane of its window, sized to `cols` by
+    /// `rows` and sending no output, for a viewer that draws the pane from elsewhere.
+    AttachInput {
+        agent_id: AgentId,
+        pane: Option<String>,
+        cols: u16,
+        rows: u16,
+    },
     Input {
         bytes: Vec<u8>,
+    },
+    /// One chunk of 1 to `INPUT_BYTES_MAX` bytes of an owner paste of at most
+    /// `PASTE_BYTES_MAX`, the last one marked; the engine filters the whole and pastes it once.
+    Paste {
+        bytes: Vec<u8>,
+        last: bool,
     },
     Scroll {
         bytes: Vec<u8>,
@@ -1395,21 +1478,74 @@ pub fn prompt_keys(text: &str, bracketed: bool) -> Option<Vec<u8>> {
     Some(keys.into_bytes())
 }
 
+/// The keys one owner paste types, filtered here at the trust boundary as the desktop's
+/// `pasteText` filters it: every control character (C0, DEL and C1) is dropped except tab,
+/// line feed and carriage return, then CR LF and LF become CR, as a terminal sends Enter, so
+/// a paste can never press Escape, end a bracketed paste or send a Ctrl key. Takes the
+/// pasted text. Returns the keys, empty when nothing is left.
+pub fn paste_keys(text: &str) -> Vec<u8> {
+    let kept: String = text
+        .chars()
+        .filter(|character| matches!(character, '\t' | '\n' | '\r') || !character.is_control())
+        .collect();
+    let keys = kept.replace("\r\n", "\r").replace('\n', "\r");
+    assert!(!keys.contains('\x1b') && !keys.contains('\n') && !keys.contains('\0'));
+    assert!(keys.len() <= text.len());
+    keys.into_bytes()
+}
+
 /// Types one prompt into an agent's app as one submission: a paste when the app turned
 /// bracketed paste on, then Enter once the paste settled. Takes the host, the terminal name and
 /// the text. Returns whether it was typed; blank or oversized text types nothing.
 pub fn type_prompt(host: &dyn Host, agent: &AgentId, text: &str) -> Result<bool, HostError> {
     let bracketed = host.input_live(agent)?;
+    prompt_into(text, bracketed, |keys| host.input(agent, keys))
+}
+
+/// Types one prompt into the pane a pinned view stays on, as `type_prompt` does by name: the
+/// same keys and Enter, each straight into that pane, never by name. Takes the host, the
+/// terminal name, the pane and the text. Returns as `type_prompt`, or `terminal_agent_unknown`
+/// once that pane is no longer one the host can type into.
+#[cfg(unix)]
+pub(crate) fn type_prompt_at(
+    host: &dyn Host,
+    agent: &AgentId,
+    at: &PaneAt,
+    text: &str,
+) -> Result<bool, HostError> {
+    assert!(pane_id_valid(&at.pane), "a pin is a pane id");
+    assert!(
+        at.serial > 0,
+        "a pin names the control connection that found it"
+    );
+    let bracketed = host.input_live(agent)?;
+    prompt_into(text, bracketed, |keys| {
+        match host.input_at(agent, at, keys)? {
+            true => Ok(()),
+            false => Err(failure("terminal_agent_unknown")),
+        }
+    })
+}
+
+/// Types one prompt's keys as one submission through the given typing: the keys in chunks of
+/// at most `INPUT_BYTES_MAX`, a settle when they went as a paste, then Enter. Takes the text,
+/// whether the app turned bracketed paste on and the typing. Returns whether it was typed;
+/// blank or oversized text types nothing.
+fn prompt_into(
+    text: &str,
+    bracketed: bool,
+    mut typing: impl FnMut(&[u8]) -> Result<(), HostError>,
+) -> Result<bool, HostError> {
     let Some(keys) = prompt_keys(text, bracketed) else {
         return Ok(false);
     };
     for chunk in keys.chunks(INPUT_BYTES_MAX) {
-        host.input(agent, chunk)?;
+        typing(chunk)?;
     }
     if bracketed {
         std::thread::sleep(PASTE_SETTLE);
     }
-    host.input(agent, b"\r")?;
+    typing(b"\r")?;
     Ok(true)
 }
 

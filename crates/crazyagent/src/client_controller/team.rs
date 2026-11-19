@@ -87,6 +87,40 @@ impl OwnerController {
             .await
     }
 
+    /// Opens a live view of an agent's terminal, or one pane of its window, sized by the
+    /// engine to the viewer first. Takes the terminal name, the pane if any, and the columns
+    /// and rows. Returns the session, or a plain code such as `terminal_size_bounds`.
+    pub async fn terminal_attach_sized(
+        &mut self,
+        agent: AgentId,
+        pane: Option<String>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<TerminalSession, EngineError> {
+        self.client
+            .as_deref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))?
+            .terminal_attach_sized(agent, pane, cols, rows)
+            .await
+    }
+
+    /// Opens an input-only view of an agent's terminal, or one pane of its window, for a
+    /// viewer that draws the pane from elsewhere. Takes the terminal name, the pane if any,
+    /// and the columns and rows. Returns the session, whose output gives only its end.
+    pub async fn terminal_attach_input(
+        &mut self,
+        agent: AgentId,
+        pane: Option<String>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<TerminalSession, EngineError> {
+        self.client
+            .as_deref()
+            .ok_or_else(|| EngineError("controller_disconnected".into()))?
+            .terminal_attach_input(agent, pane, cols, rows)
+            .await
+    }
+
     /// Sends one owner team action: a message to the master, a task handed straight
     /// to a sub-agent, a cancel or the keep-warm switch.
     /// Takes the action and the client generation.

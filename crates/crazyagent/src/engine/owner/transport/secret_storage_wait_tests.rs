@@ -414,11 +414,7 @@ async fn an_account_removed_while_storage_is_busy_leaves_no_key_on_disk() {
 
     let (swept, sweep) = busy.occupy_storage();
     let removed = busy.client.remove_account(added.id.clone()).await;
-    let code = removed.err().map(|error| error.0).unwrap_or_default();
-    assert!(
-        code.contains("outcome_unknown"),
-        "the request must outlast the owner wait behind the real sweep: {code}"
-    );
+    outlasted_the_owner_wait(removed, "access_change_pending");
     settled(&swept, sweep).await;
 
     assert!(
