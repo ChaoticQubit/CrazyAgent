@@ -3,9 +3,9 @@ use super::codec;
 use super::control::{Control, Event};
 use super::ended::ended_final;
 use super::event::{MouseKind, ViewEvent};
-use super::pane::{Action, GRID_MAX, Input};
 #[cfg(windows)]
-use super::pane::{COPY_EMPTY, Pane};
+use super::pane::Pane;
+use super::pane::{Action, GRID_MAX, Input};
 use super::render::{GPU_FAULT, Shared};
 use super::screen;
 use super::style::Style;
@@ -980,17 +980,16 @@ impl Native {
 }
 
 /// The copy chord of a host without Cmd (Ctrl+C, Ctrl+Shift+C), as the panel off a Mac: a
-/// selection goes to the board and is dropped, so the next chord interrupts; with none the
-/// chord's own input (^C) goes to the pane. A selection too large for the board is dropped
-/// and sends nothing. Inputs: the pane, the board and the chord's input. Output: what the
-/// pane asks for.
+/// selection, blank cells included, goes to the board and is dropped, so the next chord
+/// interrupts; with none the chord's own input (^C) goes to the pane. Blank text or text
+/// too large for the board is not put on it, and the chord still sends nothing. Inputs: the
+/// pane, the board and the chord's input. Output: what the pane asks for.
 #[cfg(windows)]
 fn copy_key(pane: &mut Pane, clip: &platform::Clip, input: Input) -> Action {
-    let copied = match pane.copy(false) {
-        Err(code) if code == COPY_EMPTY => return pane.apply(input),
-        copied => copied,
-    };
-    if let Ok(text) = copied {
+    if !pane.has_selection() {
+        return pane.apply(input);
+    }
+    if let Ok(text) = pane.copy(false) {
         let _ = clip.write(&text);
     }
     pane.clear_selection();

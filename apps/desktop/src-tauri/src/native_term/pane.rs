@@ -246,6 +246,14 @@ impl Pane {
             .is_some_and(|t| t.grid().display_offset() > 0)
     }
 
+    /// Whether the pane holds a selection of at least one cell, blank or not; the empty one a
+    /// plain click leaves is none, as xterm's `hasSelection` reads. Output: the answer.
+    #[cfg(windows)]
+    pub fn has_selection(&self) -> bool {
+        let selection = self.term.as_ref().and_then(|term| term.selection.as_ref());
+        selection.is_some_and(|selection| !selection.is_empty())
+    }
+
     /// Drops the local selection, as the copy chord off a Mac does once it copied, and marks
     /// the pane for a redraw when there was one.
     #[cfg(windows)]
