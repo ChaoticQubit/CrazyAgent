@@ -1,7 +1,7 @@
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    VK_A, VK_BACK, VK_C, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F4, VK_F12, VK_HOME,
-    VK_INSERT, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP, VK_V,
-    VK_Z,
+    VK_A, VK_BACK, VK_C, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F4, VK_F10, VK_F12,
+    VK_HOME, VK_INSERT, VK_LEFT, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB, VK_UP,
+    VK_V, VK_Z,
 };
 
 use super::super::event::ViewEvent;
@@ -139,10 +139,10 @@ fn printable(unit: u16) -> bool {
 }
 
 /// What a key-down makes, by keymap's xterm rules with Alt as Meta: Win chords send
-/// nothing; Alt+F4, Alt+Space, AltGr text and keys without Ctrl or Alt pass; the rest sends
-/// through `chord`, `named`, `edit` or the key's `own` character. Inputs: the VK, the
-/// modifiers, the queued character message and the key's Shift-only character. Output:
-/// the event and whether the queued character message is dropped.
+/// nothing; Alt+F4, Alt+Space, Shift+F10 (the menu), AltGr text and keys without Ctrl or
+/// Alt pass; the rest sends through `chord`, `named`, `edit` or the key's `own` character.
+/// Inputs: the VK, the modifiers, the queued character message and the key's Shift-only
+/// character. Output: the event and whether the queued character message is dropped.
 pub fn down(vk: u16, mods: Mods, next: Next, bare: Option<char>) -> Down {
     let queued = matches!(next, Next::Char(_));
     let handled = |event: Option<ViewEvent>| Down {
@@ -157,6 +157,9 @@ pub fn down(vk: u16, mods: Mods, next: Next, bare: Option<char>) -> Down {
         return handled(None);
     }
     if mods.alt && !mods.control && matches!(vk, VK_F4 | VK_SPACE) {
+        return pass;
+    }
+    if vk == VK_F10 && mods.shift && !mods.control && !mods.alt {
         return pass;
     }
     if let Some(event) = chord(vk, mods) {

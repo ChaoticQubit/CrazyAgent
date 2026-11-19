@@ -62,34 +62,47 @@ impl Mouse {
         option: bool,
         limits: Limits,
     ) -> ViewEvent {
-        let _ = (time_ms, px, limits);
+        let near = self.last.is_some_and(|(time, at)| {
+            let soon = time_ms.wrapping_sub(time) <= limits.time_ms;
+            let across = (px.0 - at.0).abs() <= limits.box_px.0 / 2;
+            soon && across && (px.1 - at.1).abs() <= limits.box_px.1 / 2
+        });
+        self.clicks = if near {
+            self.clicks.saturating_add(1).min(CLICKS_MAX)
+        } else {
+            1
+        };
+        self.last = Some((time_ms, px));
+        self.drag = Some(Drag { option, point });
         self.event(MouseKind::Press, point, option)
     }
 
     /// A move: under a drag, to a point it has not sent yet, the drag; else nothing. Inputs:
     /// the point and whether Shift is held. Output: the event, if any.
     pub fn moved(&mut self, point: (f64, f64), option: bool) -> Option<ViewEvent> {
-        let _ = (point, option, self.drag);
-        None
+        let drag = self.drag.as_mut().filter(|drag| drag.point != point)?;
+        drag.point = point;
+        Some(self.event(MouseKind::Drag, point, option))
     }
 
     /// The left button going up: under a drag, ends it with the release; else nothing, as
     /// for a press another window took. Inputs: the point and whether Shift is held.
     /// Output: the event, if any.
     pub fn release(&mut self, point: (f64, f64), option: bool) -> Option<ViewEvent> {
-        let _ = (point, option);
-        None
+        self.drag.take()?;
+        Some(self.event(MouseKind::Release, point, option))
     }
 
     /// The capture lost to another window: ends a drag with its release at the last point
     /// it sent, with its press's Shift. Output: the event, or none with no drag.
     pub fn lost(&mut self) -> Option<ViewEvent> {
-        None
+        let drag = self.drag.take()?;
+        Some(self.event(MouseKind::Release, drag.point, drag.option))
     }
 
     /// A right press, which ends a run of left clicks, as the system's double click does.
     pub fn right(&mut self) {
-        let _ = (self.last, self.carry);
+        self.last = None;
     }
 
     /// One wheel message: adds its delta to the carry, dropped first when the wheel turned
@@ -103,8 +116,26 @@ impl Mouse {
         page_lines: usize,
         point: (f64, f64),
     ) -> Option<ViewEvent> {
-        let _ = (delta, notch, page_lines, point);
-        None
+        let per = match notch {
+            Notch::Lines(lines) => i64::from(lines),
+            Notch::Page => i64::try_from(page_lines).unwrap_or(NOTCH_LINES_MAX),
+        };
+        let per = per.min(NOTCH_LINES_MAX);
+        let turned = (self.carry > 0 && delta < 0) || (self.carry < 0 && delta > 0);
+        let carry = if turned { 0 } else { i64::from(self.carry) } + i64::from(delta);
+        if per == 0 {
+            self.carry = 0;
+            return None;
+        }
+        let lines = carry * per / NOTCH_DELTA;
+        let rest = carry - lines * NOTCH_DELTA / per;
+        self.carry = rest.clamp(i64::from(i16::MIN), i64::from(i16::MAX)) as i32;
+        let lines = lines.clamp(-NOTCH_LINES_MAX, NOTCH_LINES_MAX);
+        (lines != 0).then_some(ViewEvent::Wheel {
+            point,
+            delta: lines as f64,
+            precise: false,
+        })
     }
 
     /// One mouse event of this view's run of clicks. Inputs: the kind, the point and
@@ -123,50 +154,53 @@ impl Mouse {
 /// GET_Y_LPARAM read them, so a point left of or above the view stays negative. Input: the
 /// lParam. Output: x and y.
 pub fn client_px(lparam: isize) -> (i32, i32) {
-    let _ = lparam;
-    (0, 0)
+    let x = lparam as u16 as i16;
+    let y = (lparam >> 16) as u16 as i16;
+    (i32::from(x), i32::from(y))
 }
 
 /// Where a pixel sits in the view's own points, as the host reads every view's events:
 /// pixels over the scale. Inputs: x and y in pixels and the scale key. Output: the point.
 pub fn point(px: (i32, i32), key: u32) -> (f64, f64) {
-    let _ = (px, key, SCALE_KEYS);
-    (0.0, 0.0)
+    assert!(
+        SCALE_KEYS.contains(&key),
+        "a scale key of 100 to 400, got {key}"
+    );
+    let scale = f64::from(key) / 100.0;
+    (f64::from(px.0) / scale, f64::from(px.1) / scale)
 }
 
 /// The signed delta in a WM_MOUSEWHEEL wParam's high word (GET_WHEEL_DELTA_WPARAM); its
 /// low word is the key state. Input: the wParam. Output: the delta, positive away from the
 /// user, which scrolls up into the history.
 pub fn wheel_delta(wparam: usize) -> i16 {
-    let _ = wparam;
-    0
+    (wparam >> 16) as u16 as i16
 }
 
 /// How far a lines-per-notch setting scrolls. Input: the setting. Output: the notch.
 pub fn notch(setting: u32) -> Notch {
-    let _ = (
-        setting,
-        WHEEL_PAGESCROLL,
-        NOTCH_DELTA,
-        NOTCH_LINES_MAX,
-        CLICKS_MAX,
-    );
-    Notch::Lines(0)
+    if setting == WHEEL_PAGESCROLL {
+        Notch::Page
+    } else {
+        Notch::Lines(setting)
+    }
 }
 
 /// Whether a WM_CONTEXTMENU lParam comes from the keyboard (Shift+F10 or the menu key),
 /// which sends -1 in place of a screen point. Input: the lParam. Output: the answer.
 pub fn keyboard_menu(lparam: isize) -> bool {
-    let _ = lparam;
-    false
+    lparam == -1
 }
 
 /// Where a keyboard menu opens: under the cursor cell, at its left edge, in the view's
 /// points; at the view's corner with no cursor or no usable cell size. Inputs: the cursor's
 /// row and column and the cell size in points. Output: the point.
 pub fn cursor_point(cursor: Option<(usize, usize)>, cell: Option<(f64, f64)>) -> (f64, f64) {
-    let _ = (cursor, cell);
-    (0.0, 0.0)
+    let sized = cell.filter(|(w, h)| w.is_finite() && h.is_finite() && *w > 0.0 && *h > 0.0);
+    let (Some((row, column)), Some((width, height))) = (cursor, sized) else {
+        return (0.0, 0.0);
+    };
+    (column as f64 * width, row.saturating_add(1) as f64 * height)
 }
 
 #[cfg(test)]
