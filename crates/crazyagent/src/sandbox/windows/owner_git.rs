@@ -1,6 +1,7 @@
 use super::{WindowsSandbox, container_for};
 use crate::sandbox::{
-    AGENT_HOME_ENV, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, canonical, invalid,
+    AGENT_HOME_ENV, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, canonical,
+    clean_absolute, invalid,
 };
 use std::ffi::OsStr;
 use std::fs;
@@ -106,6 +107,29 @@ fn marked(root: &Path) -> bool {
             .any(|platform| root.join(platform).join("bin").join("git.exe").is_file())
 }
 
+/// Git's program in the plain drive form the boundary starts, such as the engine's lookup
+/// gives as `\\?\C:\...`: kept only when the plain path opens the same file as the program
+/// (volume serial and file index), since a plain path drops a trailing dot or space and keeps
+/// the length limit. Input: git's program. Output: the plain program, or `Invalid` for another
+/// file or a form that is no plain drive path.
+fn plain_program(git: &Path) -> Result<PathBuf, SandboxError> {
+    let plain = canonical(git)?;
+    let opened =
+        |path: &Path| fs::File::open(path).and_then(|file| crazyagent_win_sandbox::file_id(&file));
+    match (opened(git), opened(&plain)) {
+        (Ok(program), Ok(named)) if program == named => {}
+        _ => {
+            return Err(invalid(
+                "git's plain path opens another file than its program",
+            ));
+        }
+    }
+    if !clean_absolute(&plain) {
+        return Err(invalid("git's program is not a plain drive path"));
+    }
+    Ok(plain)
+}
+
 /// The owner's git for one project, run inside an AppContainer of its own with no capability
 /// (owner option 1, V244-WIN-GIT-UNC-SIBLINGS), so a `.git` that points git at a share or a
 /// folder outside the project reaches nothing. Every command reuses the profile written once.
@@ -118,9 +142,10 @@ pub struct OwnerGit {
 
 impl OwnerGit {
     /// Makes the project's places under `folder` and writes its boundary profile there for
-    /// `git`, bound to `helper` and recording grants in `grants`. Inputs: the owner-git folder,
-    /// the project, git's absolute program, the helper and the grants folder. Output: owner
-    /// git, or the refusal: a project or git no boundary can hold, or a missing helper.
+    /// `git` in its plain form ([`plain_program`]), bound to `helper` and recording grants in
+    /// `grants`. Inputs: the owner-git folder, the project, git's absolute program, the helper
+    /// and the grants folder. Output: owner git, or the refusal: a project or git no boundary
+    /// can hold, or a missing helper.
     pub fn install(
         folder: &Path,
         project: &Path,
@@ -134,12 +159,13 @@ impl OwnerGit {
         let places = places(&folder, &project);
         fs::create_dir_all(&places.home)?;
         fs::create_dir_all(&places.tmp)?;
-        let policy = policy(&project, git, &places)?;
+        let git = plain_program(git)?;
+        let policy = policy(&project, &git, &places)?;
         let boundary = WindowsSandbox::install(policy, helper, &places.profile, grants)?;
         assert_eq!(boundary.profile(), places.profile);
         Ok(Self {
             boundary,
-            git: git.to_path_buf(),
+            git,
             tmp: places.tmp,
         })
     }
