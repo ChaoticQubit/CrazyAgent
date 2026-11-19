@@ -401,11 +401,13 @@ async fn handle(
             let kept = runtime
                 .keep_narrowing(crate::storage::narrowing::Change::RemoveAccount { id: id.clone() })
                 .await;
-            let pending = kept.clone().map(|intent| super::narrowing::Pending::Account {
-                admission: admission.clone(),
-                change: super::narrowing::AccountChange::Remove(id.clone()),
-                id: intent,
-            });
+            let pending = kept
+                .clone()
+                .map(|intent| super::narrowing::Pending::Account {
+                    admission: admission.clone(),
+                    change: super::narrowing::AccountChange::Remove(id.clone()),
+                    id: intent,
+                });
             let ask = kept.clone().map(NarrowingAsk::Owner);
             let answer = actor(engine, admission, Command::Remove(id, ask)).await;
             if let Some(intent) = &kept
@@ -442,14 +444,16 @@ async fn handle(
                 })
                 .await;
             replace_key(root, credential_ref, key)?;
-            let pending = kept.clone().map(|intent| super::narrowing::Pending::Account {
-                admission: admission.clone(),
-                change: super::narrowing::AccountChange::KeyReplaced(
-                    id.clone(),
-                    credential_ref.clone(),
-                ),
-                id: intent,
-            });
+            let pending = kept
+                .clone()
+                .map(|intent| super::narrowing::Pending::Account {
+                    admission: admission.clone(),
+                    change: super::narrowing::AccountChange::KeyReplaced(
+                        id.clone(),
+                        credential_ref.clone(),
+                    ),
+                    id: intent,
+                });
             let ask = kept.clone().map(NarrowingAsk::Owner);
             let answer = key_replaced(engine, admission, id, credential_ref.clone(), ask).await;
             if let Some(intent) = &kept

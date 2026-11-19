@@ -100,7 +100,10 @@ pub(crate) fn ended(connection: &rusqlite::Connection, id: &IntentId) -> Result<
 /// Forgets one ended intent once its file is gone. Inputs: the connection and the intent
 /// name. Output: any SQLite failure; a row left behind only makes a later open skip it again.
 #[cfg(unix)]
-pub(crate) fn forget_ended(connection: &rusqlite::Connection, id: &IntentId) -> Result<(), EngineError> {
+pub(crate) fn forget_ended(
+    connection: &rusqlite::Connection,
+    id: &IntentId,
+) -> Result<(), EngineError> {
     connection
         .execute("DELETE FROM narrowing_ended WHERE id=?1", [id.as_str()])
         .map_err(super::error)?;

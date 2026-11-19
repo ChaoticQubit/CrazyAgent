@@ -75,7 +75,10 @@ async fn secret_server(owner: &Usage, name: &str) -> (String, String) {
         )
         .await
         .unwrap();
-    assert_eq!(holders(&engine_root(owner.root.path()), value.as_bytes()), 1);
+    assert_eq!(
+        holders(&engine_root(owner.root.path()), value.as_bytes()),
+        1
+    );
     assert_eq!(
         stored_secret_names(&database(owner), &server.id),
         [SECRET_NAME]
@@ -94,8 +97,7 @@ fn engine_root(root: &Path) -> PathBuf {
 /// committed without going through the engine.
 /// Input: the database path. Output: the connection.
 fn stored(path: &Path) -> rusqlite::Connection {
-    rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .unwrap()
+    rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap()
 }
 
 /// Counts the stored account rows with this id, which is 0 once storage committed its
@@ -417,7 +419,10 @@ async fn key_replaced_lost(
         intent.map(crate::storage::narrowing::NarrowingAsk::Owner),
     )
     .await;
-    assert!(lost.is_err(), "a job the dying worker never ran is not committed");
+    assert!(
+        lost.is_err(),
+        "a job the dying worker never ran is not committed"
+    );
     assert!(
         worker_died(&path).await,
         "the storage worker dies at its claim"
@@ -474,7 +479,9 @@ fn stop_publications(path: &Path) {
 fn disguise_as_replay(path: &Path) {
     let db = rusqlite::Connection::open(path).unwrap();
     let body: Vec<u8> = db
-        .query_row("SELECT body FROM settings_publication", [], |row| row.get(0))
+        .query_row("SELECT body FROM settings_publication", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     let mut journal: serde_json::Value = serde_json::from_slice(&body).unwrap();
     journal["origin"] = serde_json::json!("narrowing_replay");
@@ -528,7 +535,10 @@ async fn an_account_removal_drained_with_a_stale_admission_keeps_its_intent_for_
         none_hold(&root, key.as_bytes()).await,
         "the removed account's key leaves the disk"
     );
-    assert!(kept(restarted.root.path()).is_empty(), "the applied intent ends");
+    assert!(
+        kept(restarted.root.path()).is_empty(),
+        "the applied intent ends"
+    );
     restarted.stop().await;
 }
 
@@ -566,7 +576,10 @@ async fn a_key_replaced_after_its_account_was_removed_and_lost_with_the_engine_l
         none_hold(&root, second.as_bytes()).await,
         "the next open deletes the key a lost key replace left for a removed account"
     );
-    assert!(kept(restarted.root.path()).is_empty(), "the applied intent ends");
+    assert!(
+        kept(restarted.root.path()).is_empty(),
+        "the applied intent ends"
+    );
     restarted.stop().await;
 }
 
@@ -591,7 +604,11 @@ async fn a_key_replace_lost_after_its_key_rename_leaves_no_orphan_key() {
         none_hold(&root, first.as_bytes()).await,
         "the rename replaced the old key in place, so no old key is left"
     );
-    assert_eq!(holders(&root, second.as_bytes()), 1, "the new key stays once");
+    assert_eq!(
+        holders(&root, second.as_bytes()),
+        1,
+        "the new key stays once"
+    );
     restarted.stop().await;
 }
 
@@ -659,7 +676,10 @@ async fn an_attach_after_a_refused_detach_keeps_the_new_secret_through_the_drain
         "the next open leaves the secret attached after the detach"
     );
     assert_eq!(holders(&root, second.as_bytes()), 1);
-    assert!(kept(restarted.root.path()).is_empty(), "the superseded intent ends");
+    assert!(
+        kept(restarted.root.path()).is_empty(),
+        "the superseded intent ends"
+    );
     restarted.stop().await;
 }
 
@@ -705,7 +725,10 @@ async fn a_death_between_an_attach_commit_and_its_intent_unlink_keeps_the_new_se
         "the next open leaves the secret the attach committed: {answer:?}"
     );
     assert_eq!(holders(&root, second.as_bytes()), 1);
-    assert!(kept(restarted.root.path()).is_empty(), "the superseded intent ends");
+    assert!(
+        kept(restarted.root.path()).is_empty(),
+        "the superseded intent ends"
+    );
     restarted.stop().await;
 }
 
@@ -734,7 +757,10 @@ async fn a_held_account_removal_pending_when_the_engine_dies_leaves_the_catalog_
         none_hold(&root, key.as_bytes()).await,
         "the removed account's key leaves the disk"
     );
-    assert!(kept(restarted.root.path()).is_empty(), "the applied intent ends");
+    assert!(
+        kept(restarted.root.path()).is_empty(),
+        "the applied intent ends"
+    );
     restarted.stop().await;
 }
 
@@ -773,7 +799,10 @@ async fn a_replayed_removal_stopped_after_its_settings_journal_finishes_at_the_n
         none_hold(&root, key.as_bytes()).await,
         "the removed account's key leaves the disk"
     );
-    assert!(kept(restarted.root.path()).is_empty(), "the applied intent ends");
+    assert!(
+        kept(restarted.root.path()).is_empty(),
+        "the applied intent ends"
+    );
     restarted.stop().await;
 }
 

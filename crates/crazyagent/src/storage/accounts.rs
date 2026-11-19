@@ -1,7 +1,7 @@
+use super::narrowing::NarrowingAsk;
 use super::*;
 use crate::accounts::AccountDetails;
 use crate::config::{ModelAccessEdit, ModelAuthentication, ModelConnection};
-use super::narrowing::NarrowingAsk;
 use crate::engine::owner::native_auth::NativeAuthPhase;
 use serde::{Deserialize, Serialize};
 

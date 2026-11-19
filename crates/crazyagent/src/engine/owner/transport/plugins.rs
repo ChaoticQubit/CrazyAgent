@@ -1333,11 +1333,13 @@ async fn handle(
                     name: name.clone(),
                 })
                 .await;
-            let pending = kept.clone().map(|intent| super::narrowing::Pending::Secret {
-                server: id.clone(),
-                name: name.clone(),
-                id: intent,
-            });
+            let pending = kept
+                .clone()
+                .map(|intent| super::narrowing::Pending::Secret {
+                    server: id.clone(),
+                    name: name.clone(),
+                    id: intent,
+                });
             let ask = kept
                 .clone()
                 .map(crate::storage::narrowing::NarrowingAsk::Owner);
@@ -1352,7 +1354,8 @@ async fn handle(
             {
                 runtime.end_kept(intent).await;
             }
-            let ResultValue::Secret(view, _) = runtime.pending_unless_taken(answer, pending)? else {
+            let ResultValue::Secret(view, _) = runtime.pending_unless_taken(answer, pending)?
+            else {
                 return Err(unknown());
             };
             Reply::Server { server: *view }

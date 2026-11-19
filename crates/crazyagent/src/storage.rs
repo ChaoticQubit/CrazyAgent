@@ -3514,12 +3514,19 @@ fn replay_intents(
         match detach.then(|| narrowing::ended(db, &id)) {
             None | Some(Ok(false)) => {}
             Some(Ok(true)) => {
-                eprintln!("narrowing_intent_not_applicable id={} cause=ended", id.as_str());
+                eprintln!(
+                    "narrowing_intent_not_applicable id={} cause=ended",
+                    id.as_str()
+                );
                 end_ended(db, Some(intents), &id);
                 continue;
             }
             Some(Err(unread)) => {
-                eprintln!("narrowing_intent_kept id={} cause={}", id.as_str(), unread.0);
+                eprintln!(
+                    "narrowing_intent_kept id={} cause={}",
+                    id.as_str(),
+                    unread.0
+                );
                 continue;
             }
         }
@@ -3645,10 +3652,18 @@ fn end_ended(db: &Connection, intents: Option<&narrowing::Intents>, id: &narrowi
     match intents.remove(id) {
         Ok(()) => {
             if let Err(left) = narrowing::forget_ended(db, id) {
-                eprintln!("narrowing_ended_unforgotten id={} cause={}", id.as_str(), left.0);
+                eprintln!(
+                    "narrowing_ended_unforgotten id={} cause={}",
+                    id.as_str(),
+                    left.0
+                );
             }
         }
-        Err(left) => eprintln!("narrowing_intent_unremoved id={} cause={}", id.as_str(), left.0),
+        Err(left) => eprintln!(
+            "narrowing_intent_unremoved id={} cause={}",
+            id.as_str(),
+            left.0
+        ),
     }
 }
 
