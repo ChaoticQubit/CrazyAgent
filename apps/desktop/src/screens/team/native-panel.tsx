@@ -19,6 +19,12 @@ import {
 /** How often a shown view checks its place, beside the resize, scroll and page change triggers. */
 const PLACE_CHECK_MS = 500;
 
+/** How long a hidden view waits to send again a cover the desktop refused, in ms. */
+const COVER_RETRY_MS = 100;
+
+/** How many times a hidden view sends again a cover the desktop refused, after the first. */
+const COVER_TRIES = 5;
+
 /** Page elements that draw over a terminal, the app's toast among them: the native view draws
  * above the page, so it is covered while one of them overlaps it. */
 const OVERLAYS = '[role="dialog"],[role="menu"],[role="listbox"],[role="tooltip"],dialog[open],[popover],.toast';
@@ -115,13 +121,14 @@ export class NativeView implements Held {
   private size: { width: number; height: number } | null;
   private open: Opened | null = null;
   private started = false;
-  private told = true;
+  private told: boolean | null = true;
   private wantsFocus = false;
   private keys = inputMode(readTerminalInput()).keys;
   private placed = "";
   private tries = 0;
   private dropped = false;
   private againTimer = 0;
+  private coverTimer = 0;
   private frame = 0;
   private unwatch = () => {};
 
@@ -174,6 +181,7 @@ export class NativeView implements Held {
     if (this.state.view.kind === "ended") this.reopen();
     else if (!this.started) this.connect();
     else {
+      window.clearTimeout(this.coverTimer);
       this.watch();
       this.focus();
     }
@@ -192,10 +200,7 @@ export class NativeView implements Held {
     this.unwatch();
     this.screen = null;
     const id = this.open?.id ?? null;
-    if (id !== null && !this.told) {
-      this.told = true;
-      void coverNativeTerminal(id, true);
-    }
+    if (id !== null && this.told !== true) this.tellCover(id, true, 0);
     this.set({ menu: null });
   }
 
@@ -213,8 +218,8 @@ export class NativeView implements Held {
   focus(): void {
     const id = this.open?.id ?? null;
     if (!this.shown || id === null || this.state.view.kind !== "live") return;
-    this.wantsFocus = this.told;
-    if (!this.told) void focusNativeTerminal(id);
+    this.wantsFocus = this.told !== false;
+    if (this.told === false) void focusNativeTerminal(id);
   }
 
   /** Lets the owner's typed keys through to the view or not, per the Terminal input choice;
@@ -290,6 +295,7 @@ export class NativeView implements Held {
     this.dropped = true;
     this.shown = false;
     window.clearTimeout(this.againTimer);
+    window.clearTimeout(this.coverTimer);
     this.unwatch();
     this.release();
     this.screen = null;
@@ -337,10 +343,7 @@ export class NativeView implements Held {
         if (open.ended) return;
         this.tellKeys();
         if (this.shown) this.watch();
-        else if (!this.told) {
-          this.told = true;
-          void coverNativeTerminal(result.value, true);
-        }
+        else if (this.told !== true) this.tellCover(result.value, true, 0);
         if (open.liveAt !== null) this.goLive();
       } else if (open.ended || open !== this.open) {
         return;
@@ -373,6 +376,7 @@ export class NativeView implements Held {
     if (open.ended || open !== this.open) return;
     open.ended = true;
     this.unwatch();
+    window.clearTimeout(this.coverTimer);
     this.open = null;
     const next = this.follow && !final ? followTry(this.tries, open.liveAt, performance.now()) : null;
     if (next === null) {
@@ -438,20 +442,45 @@ export class NativeView implements Held {
     const rect = rectOf(screen);
     const empty = rect.width < 1 || rect.height < 1;
     const spot = `${rect.x},${rect.y},${rect.width},${rect.height}`;
-    if (!empty && spot !== this.placed) {
-      this.placed = spot;
-      void placeNativeTerminal(id, rect);
-    }
+    if (!empty && spot !== this.placed) this.tellPlace(id, rect, spot);
     this.keepSize(screen);
     const covered = empty || overlayCovers(rect, screen, document.querySelectorAll(OVERLAYS));
-    if (covered !== this.told) {
-      this.told = covered;
-      void coverNativeTerminal(id, covered);
-    }
+    if (covered !== this.told) this.tellCover(id, covered, 0);
     if (!covered && this.wantsFocus) {
       this.wantsFocus = false;
       if (this.state.view.kind === "live") void focusNativeTerminal(id);
     }
+  }
+
+  /** Places the open view and forgets the place when the desktop refuses it, so the next
+   * check sends it again. Inputs: the view id, the place and its key. Output: none. */
+  private tellPlace(id: number, rect: NativeRect, spot: string): void {
+    assert(spot.length > 0 && rect.width >= 1 && rect.height >= 1, "only a place with an area is sent");
+    this.placed = spot;
+    void placeNativeTerminal(id, rect).then((result) => {
+      if (result.kind === "ok" || this.open?.id !== id || this.placed !== spot) return;
+      this.placed = "";
+    });
+  }
+
+  /** Covers or uncovers the open view and forgets what it told when the desktop refuses it:
+   * a shown view sends it again from its next check, a hidden one sends cover(true) again
+   * every `COVER_RETRY_MS` up to `COVER_TRIES` times, until it is shown, ends or is let go.
+   * Inputs: the view id, whether it is covered and how many times it was sent again. */
+  private tellCover(id: number, covered: boolean, again: number): void {
+    assert(Number.isInteger(again) && again >= 0 && again <= COVER_TRIES, "a refused cover is sent again a bounded number of times");
+    assert(!covered || again === 0 || !this.shown, "only a hidden view sends cover(true) again on its own");
+    this.told = covered;
+    window.clearTimeout(this.coverTimer);
+    void coverNativeTerminal(id, covered).then((result) => {
+      if (result.kind === "ok" || this.dropped || this.open?.id !== id || this.told !== covered) return;
+      this.told = null;
+      if (!covered || this.shown || again >= COVER_TRIES) return;
+      this.coverTimer = window.setTimeout(() => {
+        if (this.dropped || this.shown || this.open?.id !== id || this.told !== null) return;
+        this.tellCover(id, true, again + 1);
+      }, COVER_RETRY_MS);
+    });
   }
 }
 
