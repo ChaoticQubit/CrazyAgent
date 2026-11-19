@@ -199,6 +199,24 @@ fn backing(view: &NSView) -> f64 {
     scale
 }
 
+/// Hands the keyboard back to the page when the view leaving holds it, as the webview panel
+/// does when its terminal closes, so keys go on to the page instead of the window. Inputs:
+/// the view and its page's webview. A window that refuses the webview keeps the keyboard
+/// itself.
+fn give_back(ns: &TermView, webview: &NSView) {
+    let Some(window) = ns.window() else {
+        return;
+    };
+    let me: &NSResponder = ns;
+    let held = window
+        .firstResponder()
+        .is_some_and(|first| std::ptr::eq(&*first, me));
+    let page: &NSResponder = webview;
+    if held && !window.makeFirstResponder(Some(page)) {
+        let _ = window.makeFirstResponder(None);
+    }
+}
+
 fn io_code(error: &std::io::Error) -> &'static str {
     let text = error.to_string();
     let code = OPEN_CODES
@@ -890,8 +908,8 @@ impl Native {
     }
 
     /// Takes a view out in the order nothing can reach it after: its feed and direct path
-    /// closed, marked text dropped, its surface before its NSView. Input: the page id.
-    /// Output: its events channel, if it was open.
+    /// closed, marked text dropped, its surface before its NSView, and a keyboard it held
+    /// back to the page. Input: the page id. Output: its events channel, if it was open.
     fn dismiss(&mut self, page: u64) -> Option<Channel<NativeEvent>> {
         let entry = self.table.remove(page)?;
         self.feed.close(entry.feed);
@@ -900,12 +918,14 @@ impl Native {
         }
         let View {
             ns,
+            webview,
             surface,
             events,
             ..
         } = entry.platform;
         ns.cancel_marked();
         drop(surface);
+        give_back(&ns, &webview);
         ns.removeFromSuperview();
         if self.table.is_empty() {
             self.drop_control();
