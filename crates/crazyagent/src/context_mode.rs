@@ -732,6 +732,11 @@ fn npm_profile(parent: &Path, version: &str) -> PathBuf {
     parent.join(format!("{PACKAGE}@{version}.sb"))
 }
 
+/// Builds npm's command under the install profile: it reads npm's folder and, on Unix, the
+/// npm package `bin/npm` links into and the `node` beside it ([`ProjectSandbox::allow_node_for`]),
+/// read only, so an npm laid out as setup-node lays it out starts outside every system root.
+/// Inputs: the engine root, staging and work folders, npm's folder and the version. Output:
+/// the command, or the refusal.
 fn npm_command(
     root: &Path,
     staged: &Path,
@@ -761,6 +766,10 @@ fn npm_command(
     .and_then(|sandbox| sandbox.allow_tools(&Toolchains::grant(&homes, &[Toolchain::Node])))
     .map_err(refused)?;
     let sandbox = sandbox.allow_read(&canonical(bin)?).map_err(refused)?;
+    #[cfg(unix)]
+    let sandbox = sandbox
+        .allow_node_for(&canonical(&bin.join("npm"))?)
+        .map_err(refused)?;
     let profile = npm_profile(parent, version);
     os::npm_wrap(sandbox, root, &profile, bin, &canonical(staged)?)
 }
