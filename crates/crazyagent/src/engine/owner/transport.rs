@@ -1758,6 +1758,7 @@ impl OwnerServer {
                 .map(|_| ())
         }
         .await;
+        eprintln!("diag owner_server_stop stopped={stopped:?}");
         let cleaned = self.authority.cleanup();
         stopped.and(cleaned).and(result)
     }

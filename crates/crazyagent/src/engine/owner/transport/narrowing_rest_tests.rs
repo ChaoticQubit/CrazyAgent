@@ -194,6 +194,10 @@ async fn an_account_removal_the_full_queue_refuses_is_pending_and_lands_while_th
         Err(failure(crate::storage::ACCESS_CHANGE_PENDING)),
         "a kept removal is pending, never 'nothing changed'"
     );
+    eprintln!(
+        "diag full_queue_removal drain_idle={}",
+        owner.runtime().narrowing_drain_idle()
+    );
     owner.stop().await;
 }
 

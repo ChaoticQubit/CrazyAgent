@@ -424,9 +424,14 @@ async fn a_revocation_waits_for_a_plugin_change_in_flight_and_refuses_the_next()
     );
     let control = revocation(runtime, OwnerClientKind::Tui, "revoke-during-plugin-change");
     let mut revoke = Box::pin(runtime.control(control.clone()));
+    let early = tokio::time::timeout(IN_FLIGHT, &mut revoke).await;
     assert!(
-        tokio::time::timeout(IN_FLIGHT, &mut revoke).await.is_err(),
-        "a revocation waits for the change already in flight"
+        early.is_err(),
+        "a revocation waits for the change already in flight: diag answer={:?} egress_free={}",
+        early
+            .as_ref()
+            .map(|answer| answer.as_ref().map(|reply| reply.active)),
+        runtime.engine.owner_egress.try_write().is_ok()
     );
     let answered = tokio::time::timeout(SWEEP_TIME_MAX, added).await.unwrap();
     let revoked = tokio::time::timeout(SWEEP_TIME_MAX, revoke).await.unwrap();
