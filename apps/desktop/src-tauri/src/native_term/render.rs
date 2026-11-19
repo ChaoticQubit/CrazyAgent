@@ -835,6 +835,17 @@ impl Shared {
         painted
     }
 
+    /// Test builds only: destroys the device, as a GPU reset would, and waits until wgpu
+    /// reports it lost; the render thread's next GPU call then meets the loss.
+    #[cfg(all(windows, test))]
+    pub fn trial_lose(&self) {
+        let set = self.device.as_ref().expect("a device to lose");
+        set.device.destroy();
+        let polled = set.device.poll(wgpu::PollType::Wait).is_ok();
+        eprintln!("trial loss: poll ok {polled}");
+        assert!(set.is_lost(), "wgpu reported the loss");
+    }
+
     /// Gives back a texture acquired for a frame that is not drawn: dropped, which discards
     /// it, or forgotten on a lost device, where the drop panics in wgpu 25, so one frame
     /// leaks as in `hand_back`. Input: the texture. Output: ok, or `native_terminal_gpu` on

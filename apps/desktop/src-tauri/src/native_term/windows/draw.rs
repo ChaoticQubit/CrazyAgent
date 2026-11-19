@@ -8,7 +8,7 @@ use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, Win32WindowHandle, WindowsDisplayHandle,
 };
 
-use super::super::render::{Shared, Surface};
+use super::super::render::{GPU_FAULT, Shared, Surface};
 use super::super::screen::Frame;
 use super::super::style::Style;
 use super::board::{Board, Fresh, Geometry, VIEWS_MAX};
@@ -26,6 +26,10 @@ const UNAVAILABLE: &str = "native_terminal_render_unavailable";
 static STARTED: OnceLock<bool> = OnceLock::new();
 static PRESENTS: AtomicU64 = AtomicU64::new(0);
 static FAILURES: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static REFUSE_RESIZE: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static LOSE_AFTER_WAIT: AtomicU64 = AtomicU64::new(0);
 
 /// Starts the one render thread, once, drawing in the first style it is given. Input: the
 /// style. Output: ok, or `native_terminal_render_unavailable`.
@@ -48,6 +52,72 @@ pub fn counts() -> (u64, u64) {
         PRESENTS.load(Ordering::SeqCst),
         FAILURES.load(Ordering::SeqCst),
     )
+}
+
+/// Test builds only: refuses one view's next resize as wgpu would, with
+/// `native_terminal_gpu`. Input: the view id, above 0.
+#[cfg(test)]
+pub fn trial_refuse_resize(id: u64) {
+    assert!(id > 0, "a view id");
+    REFUSE_RESIZE.store(id, Ordering::SeqCst);
+    assert_eq!(REFUSE_RESIZE.load(Ordering::SeqCst), id);
+}
+
+/// Test builds only: loses the device right after one view's next swap-chain wait, as a
+/// GPU reset between the wait and the draw would. Input: the view id, above 0.
+#[cfg(test)]
+pub fn trial_lose_after_wait(id: u64) {
+    assert!(id > 0, "a view id");
+    LOSE_AFTER_WAIT.store(id, Ordering::SeqCst);
+    assert_eq!(LOSE_AFTER_WAIT.load(Ordering::SeqCst), id);
+}
+
+#[cfg(test)]
+fn refused(id: u64) -> bool {
+    let asked = REFUSE_RESIZE.compare_exchange(id, 0, Ordering::SeqCst, Ordering::SeqCst);
+    asked.is_ok()
+}
+
+#[cfg(not(test))]
+fn refused(_: u64) -> bool {
+    false
+}
+
+#[cfg(test)]
+fn after_wait(id: u64, shared: &Shared) {
+    let asked = LOSE_AFTER_WAIT.compare_exchange(id, 0, Ordering::SeqCst, Ordering::SeqCst);
+    if asked.is_ok() {
+        shared.trial_lose();
+    }
+}
+
+#[cfg(not(test))]
+fn after_wait(_: u64, _: &Shared) {}
+
+/// Resizes a view's surface, refused when a test row asked. Inputs: the view id, its
+/// shared state, its surface and the size in device pixels. Output: ok, or
+/// `native_terminal_gpu`.
+fn resized(
+    id: u64,
+    shared: &Shared,
+    surface: &mut Surface,
+    size: (u32, u32),
+) -> Result<(), &'static str> {
+    assert!(size.0 >= 1, "a placed width");
+    assert!(size.1 >= 1, "a placed height");
+    if refused(id) {
+        return Err(GPU_FAULT);
+    }
+    shared.resize(surface, size.0, size.1)
+}
+
+/// The frame a ready view draws: the one posted since the last take, else the last one
+/// drawn. Inputs: the last frame and the one taken. Output: the frame.
+fn newest<T: Default>(last: &mut Option<T>, taken: Option<T>) -> &T {
+    if let Some(frame) = taken {
+        *last = Some(frame);
+    }
+    last.get_or_insert_with(T::default)
 }
 
 struct Drawn {
@@ -155,10 +225,7 @@ impl Painter {
             .iter()
             .find(|(shared_key, _)| *shared_key == key);
         if let (true, Some(surface), Some((_, shared))) = (same, view.surface.as_mut(), held) {
-            if shared
-                .resize(surface, geometry.size.0, geometry.size.1)
-                .is_ok()
-            {
+            if resized(view.id, shared, surface, geometry.size).is_ok() {
                 return;
             }
             failed();
@@ -217,6 +284,7 @@ impl Painter {
             BOARD.missed(id);
             return;
         };
+        after_wait(id, shared);
         if let Some(frame) = BOARD.take(id) {
             view.last = Some(frame);
         }
@@ -230,5 +298,30 @@ impl Painter {
             Ok(()) => PRESENTS.fetch_add(1, Ordering::SeqCst),
             Err(_) => FAILURES.fetch_add(1, Ordering::SeqCst),
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_newest_frame_is_drawn_and_kept_for_a_redraw() {
+        let mut last = None;
+        assert_eq!(*newest(&mut last, Some(1_u8)), 1);
+        assert_eq!(
+            *newest(&mut last, None),
+            1,
+            "a geometry alone redraws the last"
+        );
+        assert_eq!(*newest(&mut last, Some(2)), 2);
+        assert_eq!(last, Some(2));
+    }
+
+    #[test]
+    #[should_panic(expected = "a ready view has a frame")]
+    fn a_ready_view_with_no_frame_is_a_bug() {
+        let mut last: Option<u8> = None;
+        let _ = newest(&mut last, None);
     }
 }

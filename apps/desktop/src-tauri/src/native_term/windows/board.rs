@@ -273,6 +273,20 @@ impl<T> Board<T> {
         owed
     }
 
+    /// The render thread's word that a view's GPU work failed for good: the view is never
+    /// drawn or remade again, and its removal still drops it. Input: the view id, which the
+    /// board handed over and the render side has not dropped.
+    pub fn fault(&self, id: u64) {
+        let _ = id;
+    }
+
+    /// Whether the render thread faulted a view. Input: the view id. Output: true once
+    /// faulted, false for a live view or one off the board.
+    pub fn faulted(&self, id: u64) -> bool {
+        let _ = id;
+        false
+    }
+
     /// A view's newest frame, taken after the swap-chain wait, so a frame posted during
     /// the wait is drawn in it; clears the view's change unless a geometry came in during
     /// the wait. Input: the view id. Output: the frame posted since the last take, or none.
@@ -557,5 +571,49 @@ mod tests {
         assert_eq!(board.cell(1), Some((7.0, 17.0)));
         assert!(!board.post_cell(2, (7.0, 17.0)));
         assert_eq!(board.cell(2), None);
+    }
+
+    #[test]
+    fn a_faulted_view_is_never_drawn_again_and_its_removal_still_drops_it() {
+        let board = shown_board();
+        assert!(board.post_frame(1, "a"));
+        assert_eq!(board.wait().ready, vec![1]);
+        assert!(!board.faulted(1), "a drawn view has not faulted");
+        board.fault(1);
+        assert!(board.faulted(1), "the render side faulted it");
+        assert!(board.post_frame(1, "b"), "a faulted view still takes posts");
+        assert!(board.post_geometry(
+            1,
+            Geometry {
+                size: (10, 10),
+                ..ONE
+            }
+        ));
+        assert!(board.post_shown(1, true));
+        let (send, receive) = mpsc::channel();
+        let render = Arc::clone(&board);
+        let dropper = thread::spawn(move || {
+            let round = render.wait();
+            let gone = round.gone.contains(&1);
+            send.send(round).expect("the round");
+            if gone {
+                render.dropped(1);
+            }
+        });
+        let idle = receive.recv_timeout(Duration::from_millis(300));
+        assert!(idle.is_err(), "a faulted view is never drawn: {idle:?}");
+        assert!(board.remove(1, WAIT), "the render side dropped it");
+        let round = receive.recv_timeout(WAIT).expect("the removal's round");
+        assert_eq!(round.gone, vec![1]);
+        assert!(round.ready.is_empty(), "{round:?}");
+        dropper.join().expect("the dropper");
+        assert!(!board.faulted(1), "off the board");
+    }
+
+    #[test]
+    #[should_panic(expected = "a faulted view is on the board")]
+    fn faulting_a_view_off_the_board_is_a_bug() {
+        let board: Board<&str> = Board::new();
+        board.fault(9);
     }
 }

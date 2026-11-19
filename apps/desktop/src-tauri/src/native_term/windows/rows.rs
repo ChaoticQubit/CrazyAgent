@@ -39,10 +39,11 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, ES_MULTILINE, GW_CHILD,
     GetSystemMetrics, GetWindow, GetWindowRect, IsWindow, IsWindowVisible, MSG, PM_REMOVE,
-    PeekMessageW, PostMessageW, RegisterClassExW, SM_CXSCREEN, SM_CYSCREEN, SendMessageW,
-    TranslateMessage, WM_CHAR, WM_DPICHANGED_AFTERPARENT, WM_IME_CHAR, WM_IME_COMPOSITION,
-    WM_IME_ENDCOMPOSITION, WM_IME_REQUEST, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WNDCLASSEXW,
-    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    PeekMessageW, PostMessageW, RegisterClassExW, SM_CXSCREEN, SM_CYSCREEN, SW_MINIMIZE,
+    SW_RESTORE, SendMessageW, ShowWindow, TranslateMessage, WM_CHAR, WM_DPICHANGED_AFTERPARENT,
+    WM_IME_CHAR, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_REQUEST,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use super::super::a11y;
@@ -481,6 +482,116 @@ fn a_view_sits_over_the_webview_draws_a_fed_screen_hides_and_drops_its_surface_f
 }
 
 /// The layouts the key rows load, by their KLID.
+/// A minimized parent and an empty page box hide a view without ending it: restored and
+/// in its box again, it draws and has not faulted. Inputs: the parent and the view.
+fn survives_a_minimized_parent_and_an_empty_box(parent: HWND, view: &View) {
+    unsafe { ShowWindow(parent, SW_MINIMIZE) };
+    assert!(view.feed(fed_frame(&Theme::default(), b"minimized\r\n")));
+    pump_for(Duration::from_millis(500));
+    let before = presents();
+    unsafe { ShowWindow(parent, SW_RESTORE) };
+    assert!(view.feed(fed_frame(&Theme::default(), b"restored\r\n")));
+    await_present("the present after the restore", before);
+    assert!(!view.faulted(), "a minimized parent does not end the view");
+    let empty = view.place(Some((50.0, 40.0, 0.0, 0.0)));
+    assert_eq!(
+        empty,
+        Err(place::RECT_INVALID),
+        "an empty box cannot be placed"
+    );
+    assert_eq!(
+        unsafe { IsWindowVisible(view.hwnd()) },
+        0,
+        "an empty box hides the view"
+    );
+    pump_for(Duration::from_millis(300));
+    let hidden = presents();
+    view.place(Some(PAGE)).expect("the box again");
+    await_present("the present in the box again", hidden);
+    assert!(!view.faulted(), "an empty box does not end the view");
+    println!(
+        "h5a row: minimized, restored and an empty box, then presents {}",
+        presents()
+    );
+}
+
+/// A refused resize faults the view, as macOS ends one, and nothing draws or remakes it
+/// after. Input: the view, id 1.
+fn faults_on_a_refused_resize_with_no_remake(view: &View) {
+    assert!(!view.faulted(), "a drawn view has not faulted");
+    draw::trial_refuse_resize(1);
+    view.place(Some((50.0, 40.0, 420.0, 300.0)))
+        .expect("a wider box");
+    pump_until("the refused resize faults the view", FARM_WAIT, || {
+        view.faulted()
+    });
+    pump_for(Duration::from_millis(300));
+    let faulted = presents();
+    let later = fed_frame(&Theme::default(), b"after the fault\r\n");
+    assert!(view.feed(later), "a faulted view still takes posts");
+    view.place(Some(PAGE)).expect("the box again");
+    pump_for(Duration::from_millis(500));
+    assert_eq!(
+        presents(),
+        faulted,
+        "a faulted view is never drawn or remade"
+    );
+    println!("h5a row: a refused resize faulted the view, presents stay {faulted}");
+}
+
+/// Drops a view and checks its surface went within the bound. Inputs: the view and what
+/// it is.
+fn dropped_within_the_bound(view: View, what: &str) {
+    let started = Instant::now();
+    drop(view);
+    let took = started.elapsed();
+    assert!(
+        took < TEARDOWN_MAX,
+        "{what}: the surface went within {took:?}"
+    );
+}
+
+/// A device lost between a view's swap-chain wait and its draw faults that view, and a
+/// view opened after the loss draws on a new device. Inputs: the parent and the webview.
+fn faults_on_a_loss_after_the_wait_and_a_new_view_draws(parent: HWND, webview: HWND) {
+    let lost = View::new(parent, webview, 2, sink, &style()).expect("a second view");
+    let before = presents();
+    assert!(lost.feed(fed_frame(&Theme::default(), b"before the loss\r\n")));
+    lost.place(Some(PAGE)).expect("a box");
+    await_present("the present before the loss", before);
+    draw::trial_lose_after_wait(2);
+    assert!(lost.feed(fed_frame(&Theme::default(), b"after the loss\r\n")));
+    pump_until("the loss faults the view", FARM_WAIT, || lost.faulted());
+    let after = View::new(parent, webview, 3, sink, &style()).expect("a view after the loss");
+    let fresh = presents();
+    assert!(after.feed(fed_frame(&Theme::default(), b"a new device\r\n")));
+    after
+        .place(Some((420.0, 40.0, 200.0, 100.0)))
+        .expect("a third box");
+    await_present("a view after the loss draws on a new device", fresh);
+    assert!(!after.faulted(), "the view after the loss has not faulted");
+    assert!(lost.faulted(), "the lost view stays faulted");
+    dropped_within_the_bound(lost, "the lost view");
+    dropped_within_the_bound(after, "the view after the loss");
+    println!(
+        "h5a row: a loss after the wait faulted view 2, view 3 drew on a new device, presents {}",
+        presents()
+    );
+}
+
+#[test]
+#[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
+fn a_gpu_refusal_or_loss_faults_a_view_for_good_and_a_minimized_parent_does_not() {
+    let (parent, webview) = stand_ins();
+    let view = View::new(parent, webview, 1, sink, &style()).expect("a view");
+    placed_shown_and_drawn(parent, &view);
+    survives_a_minimized_parent_and_an_empty_box(parent, &view);
+    faults_on_a_refused_resize_with_no_remake(&view);
+    dropped_within_the_bound(view, "the faulted view");
+    faults_on_a_loss_after_the_wait_and_a_new_view_draws(parent, webview);
+    assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the parent goes last");
+}
+
 const GERMAN: &str = "00000407";
 const US_INTERNATIONAL: &str = "00020409";
 

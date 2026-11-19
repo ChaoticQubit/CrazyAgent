@@ -275,6 +275,13 @@ impl View {
         BOARD.post_frame(self.inner.id, frame)
     }
 
+    /// Whether the render thread gave up on the view's GPU work for good, so the host ends
+    /// it with `native_terminal_gpu`, as macOS ends a view whose frame the GPU refused.
+    /// Output: the answer.
+    pub fn faulted(&self) -> bool {
+        BOARD.faulted(self.inner.id)
+    }
+
     /// The marked text the next frame draws, for the host's `screen::frame`, as the macOS
     /// view's. Output: the text, or none when not composing.
     pub fn marked_text(&self) -> Option<String> {
