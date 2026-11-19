@@ -35,6 +35,18 @@ pub struct Main(PhantomData<*const ()>);
 /// wry's `WRY_WEBVIEW` container, as a handle value.
 pub type Webview = isize;
 
+/// Records the calling thread as the one that makes the app's windows, from the app's
+/// setup, which runs on it; a mark from another thread later is a bug.
+pub fn mark_main() {
+    mark_on(&MAIN, thread::current().id());
+}
+
+/// Records a thread in a mark once; the marked thread may mark again. Inputs: the mark and
+/// the calling thread.
+fn mark_on(mark: &OnceLock<ThreadId>, current: ThreadId) {
+    let _ = mark.set(current);
+}
+
 /// The main thread's marker, or none on another thread or before the app's setup recorded
 /// its thread. Output: the marker, if any.
 pub fn main() -> Option<Main> {
@@ -218,8 +230,45 @@ pub fn trial_cell(view: &View) -> Option<(f64, f64)> {
 
 #[cfg(test)]
 mod tests {
-    use super::main_on;
+    use super::super::{Command, command};
+    use super::{main, main_on, mark_main, mark_on};
+    use std::sync::OnceLock;
     use std::thread;
+
+    /// The only row that marks the process's main thread; host calls run on it, before any
+    /// view opened, as a page's call on a view that is not there.
+    #[test]
+    fn the_setup_marks_its_thread_and_host_calls_there_answer_for_a_missing_view() {
+        mark_main();
+        mark_main();
+        assert!(main().is_some(), "the marked thread");
+        let elsewhere = thread::spawn(|| main().is_none()).join();
+        assert!(elsewhere.expect("another thread"), "another thread");
+        let focus = command("main", 1, Command::Focus);
+        assert_eq!(focus, Err("native_terminal_view_unknown"));
+        assert_eq!(command("main", 1, Command::Close), Ok(()));
+    }
+
+    #[test]
+    fn a_mark_holds_its_first_thread_and_takes_that_thread_again() {
+        let mark = OnceLock::new();
+        let here = thread::current().id();
+        mark_on(&mark, here);
+        mark_on(&mark, here);
+        assert_eq!(mark.get(), Some(&here));
+        assert!(main_on(mark.get().copied(), here).is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "marked once")]
+    fn a_mark_from_a_second_thread_is_a_bug() {
+        let mark = OnceLock::new();
+        let there = thread::spawn(|| thread::current().id())
+            .join()
+            .expect("another thread");
+        mark_on(&mark, there);
+        mark_on(&mark, thread::current().id());
+    }
 
     #[test]
     fn main_answers_only_on_the_recorded_thread() {

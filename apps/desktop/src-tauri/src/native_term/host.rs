@@ -36,6 +36,8 @@ use mac as platform;
 pub(super) mod windows;
 #[cfg(windows)]
 use self::windows as platform;
+#[cfg(windows)]
+pub use self::windows::{main, mark_main};
 /// The stand-in on a system whose host has not landed yet: no native view opens there.
 #[cfg(not(any(target_os = "macos", windows)))]
 mod none;

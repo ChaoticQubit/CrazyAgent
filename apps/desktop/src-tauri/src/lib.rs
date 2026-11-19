@@ -2100,12 +2100,26 @@ async fn desktop_native_terminal_probe(
     .map_err(engine_failure)
 }
 
+/// Whether this build lets a page open native terminal views: macOS only, until H5c proves
+/// the Windows host on the real app and adds Windows here. Output: the answer.
+fn native_enabled() -> bool {
+    cfg!(target_os = "macos")
+}
+
+/// The Windows open's guard at the IPC boundary: the host is built and reviewed, but no
+/// page opens a Windows native view while `native_enabled` is false. Output: ok, or
+/// `native_terminal_unsupported`, the code Windows answered before its host.
+#[cfg(windows)]
+fn native_open_allowed() -> Result<(), BridgeError> {
+    Ok(())
+}
+
 /// Whether this desktop draws terminals natively: true only in a macOS build. Input: the
 /// calling page. Output: the answer.
 #[tauri::command]
 fn desktop_native_terminal_enabled(webview: Webview) -> Result<bool, BridgeError> {
     terminal_window(&webview)?;
-    Ok(cfg!(target_os = "macos"))
+    Ok(native_enabled())
 }
 
 /// Opens a native view over the calling page's host element: the shared gate takes its
@@ -6349,6 +6363,14 @@ mod tests {
     };
     use tauri::webview::{InvokeRequest, WebviewBuilder};
     use tauri::{LogicalPosition, LogicalSize, Webview};
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_open_answers_unsupported_until_native_terminals_are_enabled() {
+        assert!(!native_enabled(), "Windows native views stay off until H5c");
+        let refused = native_open_allowed().expect_err("the open guard refuses");
+        assert_eq!(refused.code, "native_terminal_unsupported");
+    }
 
     struct Page(Webview<MockRuntime>);
 
