@@ -14,6 +14,8 @@ use std::ffi::c_void;
 #[cfg(target_os = "macos")]
 use std::ptr::NonNull;
 use std::sync::Arc;
+#[cfg(all(windows, test))]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The code a view ends with when the GPU refused its work: a wgpu error the device's
@@ -904,6 +906,15 @@ impl Shared {
         assert!(set.is_lost(), "wgpu reported the loss");
     }
 
+    /// Test builds only: removes the D3D12 device right before this state's next present,
+    /// as a driver reset that `Present` itself finds would, with wgpu not told first.
+    #[cfg(all(windows, test))]
+    pub fn trial_remove_at_present(&self) {
+        assert!(self.device.is_some(), "a device to remove");
+        let armed = REMOVE_AT_PRESENT.swap(true, Ordering::SeqCst);
+        assert!(!armed, "one removal armed at a time");
+    }
+
     /// Gives back a texture acquired for a frame that is not drawn: dropped, which discards
     /// it, or forgotten on a lost device, where the drop panics in wgpu 25, so one frame
     /// leaks as in `hand_back`. Input: the texture. Output: ok, or `native_terminal_gpu` on
@@ -1027,8 +1038,57 @@ fn hand_back(
         return Err(GPU_FAULT.to_owned());
     }
     encoded?;
+    at_present(set);
     output.present();
     Ok(())
+}
+
+#[cfg(all(windows, test))]
+static REMOVE_AT_PRESENT: AtomicBool = AtomicBool::new(false);
+#[cfg(all(windows, test))]
+static REMOVALS: AtomicU64 = AtomicU64::new(0);
+
+/// Test builds only: how many D3D12 devices the present seam removed. Output: the count.
+#[cfg(all(windows, test))]
+pub fn trial_removals() -> u64 {
+    REMOVALS.load(Ordering::SeqCst)
+}
+
+#[cfg(all(windows, test))]
+fn at_present(set: &Device) {
+    if REMOVE_AT_PRESENT.swap(false, Ordering::SeqCst) {
+        remove_device(set);
+    }
+}
+
+#[cfg(not(all(windows, test)))]
+fn at_present(_: &Device) {}
+
+/// Test builds only: puts the D3D12 device in the removed state through
+/// `ID3D12Device5::RemoveDevice`, Microsoft's call for testing removal, and prints what
+/// the device then reports. wgpu-hal's device is a windows 0.58 type, one COM pointer, so
+/// the pointer is borrowed as windows 0.62's. Input: the device.
+#[cfg(all(windows, test))]
+fn remove_device(set: &Device) {
+    use windows::Win32::Graphics::Direct3D12::{ID3D12Device, ID3D12Device5};
+    use windows::core::Interface;
+    let reason = unsafe {
+        set.device.as_hal::<wgpu::hal::api::Dx12, _, _>(|hal| {
+            let raw = hal.expect("a DX12 device").raw_device();
+            let pointer_size = size_of::<*mut std::ffi::c_void>();
+            assert_eq!(size_of_val(raw), pointer_size, "one COM pointer");
+            let pointer: *mut std::ffi::c_void = std::mem::transmute_copy(raw);
+            assert!(!pointer.is_null(), "a live device");
+            let device = ID3D12Device::from_raw_borrowed(&pointer).expect("a device");
+            let five = device.cast::<ID3D12Device5>();
+            println!("trial removal: ID3D12Device5 cast ok {}", five.is_ok());
+            five.expect("ID3D12Device5").RemoveDevice();
+            device.GetDeviceRemovedReason()
+        })
+    };
+    println!("trial removal: removed reason {reason:?}");
+    assert!(reason.is_err(), "the device reads removed");
+    REMOVALS.fetch_add(1, Ordering::SeqCst);
 }
 
 fn encode(
