@@ -21,14 +21,14 @@ fn unknown() -> EngineError {
     failure("harness_update_outcome_unknown")
 }
 
-/// Tells whether a harness catalog request is one of the update actions, which may run a
-/// harness or a package tool and are served past the owner exchange deadline within
-/// `UPDATES_TIMEOUT`. Input: the request body. Output: true for those; false for List,
-/// Check and an unreadable or oversized request, which the inline path answers.
+/// Tells whether a harness catalog request is a Check, which hashes every found harness whole,
+/// or one of the update actions, which may run a harness or a package tool: those are served
+/// past the owner exchange deadline within `UPDATES_TIMEOUT`. Input: the request body.
+/// Output: true for those; false for List and an unreadable or oversized request.
 pub(in crate::engine::owner::transport) fn slow(bytes: &[u8]) -> bool {
     bytes.len() <= REQUEST_BYTES_MAX
         && serde_json::from_slice::<Envelope>(bytes)
-            .is_ok_and(|envelope| !matches!(envelope.harness_catalog, Action::List | Action::Check))
+            .is_ok_and(|envelope| !matches!(envelope.harness_catalog, Action::List))
 }
 
 fn settings_reply(settings: UpdateSettings) -> WireReply {

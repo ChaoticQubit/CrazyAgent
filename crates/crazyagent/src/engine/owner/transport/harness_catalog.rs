@@ -83,11 +83,17 @@ enum WireReply {
 
 impl OwnerClient {
     /// Lists every harness the engine knows with its status on this machine, from the
-    /// engine's last probe unless `check` asks it to look again now. Input: whether to probe now,
-    /// beyond the attached owner capability. Output: catalog entries in owner priority order, or
-    /// the engine's plain refusal code.
+    /// engine's last probe unless `check` asks it to look again now, which the engine serves
+    /// past the owner deadline and this waits on up to `UPDATES_TIMEOUT`. Input: whether to
+    /// probe now, beyond the attached owner capability. Output: catalog entries in owner
+    /// priority order, or the engine's plain refusal code.
     pub async fn harness_catalog(&self, check: bool) -> Result<Vec<HarnessEntry>, EngineError> {
-        tokio::time::timeout(self.timeout, async {
+        let waited = if check {
+            self.timeout.max(UPDATES_TIMEOUT)
+        } else {
+            self.timeout
+        };
+        tokio::time::timeout(waited, async {
             let frame = encode_frame(&Envelope {
                 harness_catalog: if check { Action::Check } else { Action::List },
             })
