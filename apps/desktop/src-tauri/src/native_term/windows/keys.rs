@@ -220,7 +220,7 @@ mod tests {
     use super::*;
     use crate::native_term::pane::{ALT, CONTROL, SHIFT};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        VK_APPS, VK_F5, VK_F10, VK_OEM_1, VK_OEM_4, VK_OEM_MINUS, VK_Q, VK_SHIFT, VK_X,
+        VK_APPS, VK_F5, VK_OEM_1, VK_OEM_4, VK_OEM_MINUS, VK_Q, VK_SHIFT, VK_X,
     };
 
     const NONE: Mods = Mods {
