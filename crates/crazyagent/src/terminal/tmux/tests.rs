@@ -994,6 +994,22 @@ fn a_typed_piece_whose_stale_code_is_neither_refusal_is_a_bug() {
     let _ = crate::terminal::type_piece(&host, &agent, None, b"x", "terminal_unavailable");
 }
 
+/// #687 NOTE-0944 item 2: a pin under serial 0 is a bug, since control serials count from 1
+/// and `control_at` matches a pin to its connection by serial alone.
+#[test]
+#[should_panic(expected = "control serials start at 1")]
+fn a_pin_under_control_serial_zero_is_a_bug() {
+    let _ = pin_at("%1".to_owned(), 0);
+}
+
+/// #687 NOTE-0944 item 2: a pin that names a window target is a bug, since every pinned read
+/// and send would then land on whichever pane is active.
+#[test]
+#[should_panic(expected = "a pin names a pane id, never a window target")]
+fn a_pin_naming_a_window_target_is_a_bug() {
+    let _ = pin_at("crazyagent:=team-1".to_owned(), 1);
+}
+
 /// #686 r1 code F1: marking a window target as an agent's app pane is a caller's bug, since
 /// the tag would land on whichever pane is active, which may be a teammate's.
 #[cfg(target_os = "macos")]

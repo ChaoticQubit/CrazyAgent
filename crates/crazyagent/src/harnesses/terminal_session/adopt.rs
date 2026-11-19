@@ -334,6 +334,20 @@ fn still_recorded(
         && host.pane_pid(agent).ok().flatten() == Some(record.pid))
 }
 
+/// Tags a kept pane as its agent's app pane, best effort (#687 rv-code2 F2): the tag only
+/// steers later prompts, so a failed tag is logged and the live agent is still adopted,
+/// never ended with its context files removed. Untagged, a split window refuses prompts and
+/// an unmarked one-pane window is tagged at its first prompt. Inputs: host, agent and pid.
+fn tag_kept(host: &dyn Host, agent: &AgentId, pid: u32) {
+    if let Err(problem) = host.tag_app(agent, pid) {
+        eprintln!(
+            "launch_adopt_untagged agent={} code={}",
+            agent.as_str(),
+            problem.0
+        );
+    }
+}
+
 impl TerminalSession {
     /// Takes over a sub-agent's pane; see `adopt_as`, whose rule for a pane that is no live
     /// master applies. Takes the host, the pane name, the stored record and the limits.
@@ -402,7 +416,7 @@ impl TerminalSession {
         if !still_recorded(host.as_ref(), &agent, record)? {
             return Err(failure("launch_closed"));
         }
-        host.tag_app(&agent, record.pid).map_err(host_failure)?;
+        tag_kept(host.as_ref(), &agent, record.pid);
         let budget = if live {
             REPLAY_WAIT
         } else {

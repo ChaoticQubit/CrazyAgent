@@ -1120,7 +1120,7 @@ pub fn plain_reason(code: &str) -> &'static str {
         "terminal_agent_invalid" => "That is not an agent terminal.",
         "terminal_pane_unknown" => "That teammate's terminal has already closed.",
         APP_PANE_UNKNOWN => {
-            "This agent's own pane could not be found, so nothing was typed. It keeps running."
+            "This agent's own pane could not be found, so the message was not sent."
         }
         "terminal_project_full" => {
             "This project already runs 15 agents, the most one project may run at once."
@@ -1566,6 +1566,7 @@ pub fn type_prompt(host: &dyn Host, agent: &AgentId, text: &str) -> Result<bool,
 /// host, the terminal name, the pane and the text. Returns as `type_prompt`, or
 /// `terminal_agent_unknown` once that pane is no longer one the host can type into, which ends
 /// the view so it opens again with a fresh pin, as its other pinned sends do.
+#[cfg(unix)]
 pub(crate) fn type_prompt_at(
     host: &dyn Host,
     agent: &AgentId,

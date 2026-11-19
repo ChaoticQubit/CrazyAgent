@@ -1032,6 +1032,18 @@ fn variable_names(lines: &[Vec<u8>]) -> Vec<String> {
         .collect()
 }
 
+/// The pin a lookup hands out: a pane id the caller already checked, and the serial of the
+/// control connection that found it, which counts from 1. Inputs: the pane id and the
+/// serial. Output: the `PaneAt` that later pinned reads and sends must match.
+fn pin_at(pane: String, serial: u64) -> PaneAt {
+    assert!(serial > 0, "control serials start at 1");
+    assert!(
+        pane_id_valid(&pane),
+        "a pin names a pane id, never a window target"
+    );
+    PaneAt { pane, serial }
+}
+
 /// Pins a teammates' server to the pid it first answered with (PLC c): a server under
 /// another pid at the same socket, such as one a process bound there after the teammates'
 /// server ended, is refused, so no listing or input of its is taken for the lead's team.
@@ -2442,11 +2454,7 @@ impl Host for Tmux {
         if !pane_id_valid(&pane) {
             return Err(failure("terminal_command_failed"));
         }
-        assert!(control.serial > 0, "control serials start at 1");
-        Ok(PaneAt {
-            pane,
-            serial: control.serial,
-        })
+        Ok(pin_at(pane, control.serial))
     }
 
     fn app_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
@@ -2455,21 +2463,13 @@ impl Host for Tmux {
         if !pane_id_valid(&pane) {
             return Err(failure("terminal_command_failed"));
         }
-        assert!(control.serial > 0, "control serials start at 1");
-        Ok(PaneAt {
-            pane,
-            serial: control.serial,
-        })
+        Ok(pin_at(pane, control.serial))
     }
 
     fn input_live_at(&self, _agent: &AgentId, at: &PaneAt) -> Result<Option<bool>, HostError> {
         let Some(control) = self.control_at(at)? else {
             return Ok(None);
         };
-        assert_eq!(
-            control.serial, at.serial,
-            "a pinned read uses the connection that found it"
-        );
         Self::paste_on(&control, &at.pane).map(Some)
     }
 
@@ -2481,7 +2481,6 @@ impl Host for Tmux {
             .into_iter()
             .find(|pane| pane.pid == pid && !pane.dead)
             .ok_or_else(|| failure(super::APP_PANE_UNKNOWN))?;
-        assert!(pane_id_valid(&app.id), "tmux lists pane ids");
         Self::mark_app(&control, &app.id, agent)
     }
 
