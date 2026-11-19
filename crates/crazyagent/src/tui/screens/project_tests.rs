@@ -3100,6 +3100,18 @@ fn a_hidden_folder_refused_as_not_plain_is_told_in_this_systems_path_form() {
     assert_eq!(plain_problem("hidden_path_not_plain"), wanted);
 }
 
+/// V244-HIDDEN-GIT-NONASCII-CASE (leader FROM-LEADER-2006): a hidden folder refused as
+/// tracked is told a tracked path matches it when case is ignored, since on Linux the
+/// tracked path may sit in another folder whose name differs only in case; the desktop app
+/// shows the same words.
+#[test]
+fn a_hidden_folder_refused_as_tracked_is_told_a_path_matches_when_case_is_ignored() {
+    assert_eq!(
+        plain_problem("hidden_path_tracked"),
+        "A path git tracks matches this folder when letter case is ignored. Only folders git doesn't track can be hidden."
+    );
+}
+
 /// #590 (leader 10:34): a hidden folder refused because its path holds non-English letters
 /// is told that cause in plain words, the same words the desktop app shows.
 #[test]

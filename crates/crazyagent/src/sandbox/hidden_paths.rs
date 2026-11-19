@@ -776,31 +776,103 @@ mod tests {
         assert_eq!(none_tracked(&path, &[renamed]), Err("hidden_path_tracked"));
     }
 
-    /// #590 (leader 10:34): git's `icase` folds ASCII letters only, while Windows and macOS
-    /// folder names also fold other letters, so there a folder path with any non-ASCII
-    /// character in a git project is refused as unchecked by name; with no repository, and on
-    /// Linux, where names match byte for byte, it is checked as before.
+    /// V244-HIDDEN-GIT-NONASCII-CASE: a folder with a non-ASCII name that git does not track
+    /// is checked like any other folder, with or without a repository, on every system.
     #[test]
-    fn a_non_ascii_folder_name_in_a_git_project_is_unchecked_where_names_fold_case() {
+    fn an_untracked_non_ascii_folder_is_not_tracked() {
         let plain = project();
         let plain_path = canonical(plain.path()).unwrap();
-        let loose = plain_path.join("clé");
+        let loose = plain_path.join("cl\u{e9}");
         std::fs::create_dir(&loose).unwrap();
         assert_eq!(git_tracks(&plain_path, &loose), Ok(false));
         let root = project();
         let path = canonical(root.path()).unwrap();
         let _ = tracked_and_untracked(&path);
-        let folder = path.join("clé");
+        let folder = path.join("cl\u{e9}");
         std::fs::create_dir(&folder).unwrap();
         std::fs::write(folder.join("tmp.txt"), "t\n").unwrap();
-        let wanted = if cfg!(any(windows, target_os = "macos")) {
-            Err("hidden_path_name_unchecked")
-        } else {
-            Ok(false)
-        };
-        assert_eq!(git_tracks(&path, &folder), wanted);
-        assert_eq!(none_tracked(&path, &[folder]), wanted.map(|_| ()));
+        assert_eq!(git_tracks(&path, &folder), Ok(false));
+        assert_eq!(none_tracked(&path, &[folder]), Ok(()));
     }
+
+    /// V244-HIDDEN-GIT-NONASCII-CASE: a folder git added as `Écrits` and renamed on disk to
+    /// `écrits` without git still has its files in the index under the old name, so it is
+    /// found tracked; on Linux too, where the fold is the same on purpose.
+    #[test]
+    fn a_folder_the_index_names_with_another_non_ascii_case_is_found_tracked() {
+        let root = project();
+        let path = canonical(root.path()).unwrap();
+        git_in(&path, &["init", "-q"]);
+        let indexed = path.join("\u{c9}crits");
+        std::fs::create_dir(&indexed).unwrap();
+        std::fs::write(indexed.join("a.txt"), "a\n").unwrap();
+        git_in(&path, &["add", "--", "\u{c9}crits/a.txt"]);
+        let renamed = path.join("\u{e9}crits");
+        std::fs::rename(&indexed, &renamed).unwrap();
+        assert_eq!(git_tracks(&path, &renamed), Ok(true));
+        assert_eq!(none_tracked(&path, &[renamed]), Err("hidden_path_tracked"));
+    }
+
+    /// V244-HIDDEN-GIT-NONASCII-CASE: the index holds `clé` composed, as git on macOS
+    /// stores it, while the folder on disk is spelled decomposed (`e` and a combining
+    /// accent); the two are one name to macOS, so the folder is found tracked everywhere.
+    #[test]
+    fn a_folder_made_nfd_on_disk_is_found_under_its_nfc_index_name() {
+        let root = project();
+        let path = canonical(root.path()).unwrap();
+        git_in(&path, &["init", "-q"]);
+        std::fs::write(path.join("empty.txt"), "").unwrap();
+        git_in(&path, &["hash-object", "-w", "--", "empty.txt"]);
+        let entry = format!("100644,{EMPTY_BLOB},cl\u{e9}/k.txt");
+        git_in(&path, &["update-index", "--add", "--cacheinfo", &entry]);
+        let folder = path.join("cle\u{301}");
+        std::fs::create_dir(&folder).unwrap();
+        assert_eq!(git_tracks(&path, &folder), Ok(true));
+        assert_eq!(none_tracked(&path, &[folder]), Err("hidden_path_tracked"));
+    }
+
+    /// V244-HIDDEN-GIT-NONASCII-CASE: an index entry under `ſecret` (long s), which macOS and
+    /// Windows read as the folder `secret`, makes the plain ASCII folder `secret` tracked,
+    /// though git's own `icase` folds ASCII letters only.
+    #[test]
+    fn an_ascii_folder_whose_index_name_is_a_twin_spelling_is_found_tracked() {
+        let root = project();
+        let path = canonical(root.path()).unwrap();
+        git_in(&path, &["init", "-q"]);
+        std::fs::write(path.join("empty.txt"), "").unwrap();
+        git_in(&path, &["hash-object", "-w", "--", "empty.txt"]);
+        let entry = format!("100644,{EMPTY_BLOB},\u{17f}ecret/key.txt");
+        git_in(&path, &["update-index", "--add", "--cacheinfo", &entry]);
+        let folder = path.join("secret");
+        std::fs::create_dir(&folder).unwrap();
+        assert_eq!(git_tracks(&path, &folder), Ok(true));
+        assert_eq!(none_tracked(&path, &[folder]), Err("hidden_path_tracked"));
+    }
+
+    /// V244-HIDDEN-GIT-NONASCII-CASE (leader FROM-LEADER-2006): on Linux, where `Écrits` and
+    /// `écrits` are two folders, a hidden `écrits` beside a tracked `Écrits` is refused as
+    /// tracked on purpose; the owner is told a tracked path matches it when case is ignored.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_folder_beside_a_tracked_one_of_another_case_is_refused_on_linux() {
+        let root = project();
+        let path = canonical(root.path()).unwrap();
+        git_in(&path, &["init", "-q"]);
+        let tracked = path.join("\u{c9}crits");
+        std::fs::create_dir(&tracked).unwrap();
+        std::fs::write(tracked.join("a.txt"), "a\n").unwrap();
+        git_in(&path, &["add", "--", "\u{c9}crits/a.txt"]);
+        let hidden = path.join("\u{e9}crits");
+        std::fs::create_dir(&hidden).unwrap();
+        std::fs::write(hidden.join("b.txt"), "b\n").unwrap();
+        assert_eq!(git_tracks(&path, &tracked), Ok(true));
+        assert_eq!(git_tracks(&path, &hidden), Ok(true));
+        assert_eq!(none_tracked(&path, &[hidden]), Err("hidden_path_tracked"));
+    }
+
+    /// The object id of the empty file, which the rows write with `hash-object -w` before an
+    /// index entry names it.
+    const EMPTY_BLOB: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
 
     /// V243-WIN-HIDDEN-GIT (leader 09:21): a saved list of several folders costs one git run,
     /// wherever the tracked folder stands in it, and an empty list runs no git at all.
