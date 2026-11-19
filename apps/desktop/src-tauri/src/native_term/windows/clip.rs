@@ -84,7 +84,12 @@ impl Clip {
 
     /// The board `new` picked, checked against the build's choice. Inputs: the Clip and
     /// whether the build wants the in-process board. Output: the Clip; a mismatch is a bug.
-    fn checked(clip: Clip, _private: bool) -> Clip {
+    fn checked(clip: Clip, private: bool) -> Clip {
+        assert_eq!(
+            clip.is_private(),
+            private,
+            "the board new picked is not the build's"
+        );
         clip
     }
 
