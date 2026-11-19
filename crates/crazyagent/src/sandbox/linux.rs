@@ -1687,11 +1687,11 @@ struct Supervision {
 }
 
 impl LinuxSandbox {
-    /// Binds the policy to one backend; Bubblewrap starts only a closed agent, with no host port.
-    /// Input: the policy and the backend's absolute files. Output: the sandbox, `Invalid` for a
-    /// bad executable, or `Unavailable` for a network limit or open network on bubblewrap, a
-    /// one-worktree policy, a limited network the sockets setting refuses, on Landlock a kept port
-    /// or hidden folder, or hidden folders with no private mount tree on the backend ([`cuts`]).
+    /// Binds the policy to one backend. Input: the policy and the backend's absolute files. Output:
+    /// the sandbox, `Invalid` for a bad executable, or `Unavailable` on bubblewrap for any network
+    /// but a closed one with no host port, for a one-worktree policy, a limited network the sockets
+    /// setting refuses, off bubblewrap a kept port Linux could hand out ([`kept_outside_picked`]),
+    /// on Landlock a hidden folder, or hidden folders with no private mount tree ([`cuts`]).
     pub fn new(sandbox: ProjectSandbox, backend: LinuxBackend) -> Result<Self, SandboxError> {
         admitted(&sandbox)?;
         if matches!(backend, LinuxBackend::Landlock { .. }) && !sandbox.hidden.is_empty() {
