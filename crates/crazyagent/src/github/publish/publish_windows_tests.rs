@@ -665,3 +665,46 @@ fn a_contained_windows_publish_refuses_a_project_git_replaced_by_a_gitfile_or_li
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
+
+#[test]
+fn a_relative_git_dir_holds_only_where_its_work_tree_names_the_start() {
+    let project = Path::new("C:\\p");
+    let held = |dir: &str, start: Option<&Path>| {
+        let mut command = Command::new("git");
+        command.env("GIT_DIR", dir).env("GIT_WORK_TREE", project);
+        if let Some(start) = start {
+            command.current_dir(start);
+        }
+        starts_at_its_work_tree(&command)
+    };
+    assert!(held(".git", Some(project)));
+    assert!(!held(".git", Some(&project.join("sub"))));
+    assert!(!held(".git", None));
+    assert!(held("C:\\p\\.git", Some(&project.join("sub"))));
+    assert!(starts_at_its_work_tree(&Command::new("git")));
+}
+
+#[test]
+#[ignore = "needs unc-share-setup.ps1's device entries on an elevated runner (test farm)"]
+#[should_panic(expected = "a contained git with a relative GIT_DIR starts in its work tree")]
+fn a_contained_windows_git_started_below_the_project_trips_the_start_assertion() {
+    let made = project();
+    let folder = contained_folder(&made);
+    std::fs::create_dir(folder.join("inner")).unwrap();
+    let git = routed(&made, &folder);
+    let mut command = project_git(&git, made.home.path(), &folder);
+    assert_eq!(
+        command.get_envs().find(|(name, _)| *name == "GIT_DIR"),
+        Some((
+            std::ffi::OsStr::new("GIT_DIR"),
+            Some(std::ffi::OsStr::new(".git"))
+        )),
+        "a contained command names its git folder from its start"
+    );
+    let _ = run(
+        git.container(),
+        command
+            .current_dir(folder.join("inner"))
+            .args(["rev-parse", "HEAD"]),
+    );
+}

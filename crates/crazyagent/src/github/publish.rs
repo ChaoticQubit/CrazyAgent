@@ -311,16 +311,20 @@ pub(super) fn git() -> Result<PublishGit, EngineError> {
 }
 
 /// Starts a git command in the project's own repository with the engine's safe options and the
-/// empty home, so no hook folder, pager, fsmonitor, owner config outside the repository or
-/// outside file its config names ([`OUTSIDE_FILES_OFF`]) runs or is read, and git never looks
-/// above the project. [`refuse_hooks`] first refuses a config hook these options do not stop.
-/// Inputs: git, its empty home and the project. Output: the command, without arguments.
+/// empty home, so no hook, pager, fsmonitor or outside file its config names runs or is read
+/// ([`OUTSIDE_FILES_OFF`], [`refuse_hooks`]). A contained one names `.git` from its start in the
+/// project, so a ref write walks no folder above it ([`starts_at_its_work_tree`]). Inputs: git,
+/// its empty home and the project. Output: the command, without arguments.
 fn project_git(git: &PublishGit, home: &Path, project: &Path) -> Command {
+    let git_dir = match git.container() {
+        Some(_) => PathBuf::from(".git"),
+        None => project.join(".git"),
+    };
     let mut command = clone::git_command(git.program(), home);
     command
         .current_dir(project)
         .args(OUTSIDE_FILES_OFF)
-        .env("GIT_DIR", project.join(".git"))
+        .env("GIT_DIR", git_dir)
         .env("GIT_WORK_TREE", project)
         .args(git_safe())
         .stdin(Stdio::null())
@@ -407,6 +411,24 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Whether `command` starts where its relative `GIT_DIR` is meant to resolve: in the folder
+/// `GIT_WORK_TREE` names itself, never below it, where an agent could plant a `.git`. A command
+/// with no relative `GIT_DIR` holds. Input: the command. Output: the answer.
+fn starts_at_its_work_tree(command: &Command) -> bool {
+    let named = |wanted: &str| {
+        command
+            .get_envs()
+            .find(|(name, _)| *name == wanted)
+            .and_then(|(_, value)| value)
+    };
+    match named("GIT_DIR") {
+        Some(dir) if Path::new(dir).is_relative() => command
+            .get_current_dir()
+            .is_some_and(|start| named("GIT_WORK_TREE") == Some(start.as_os_str())),
+        _ => true,
+    }
+}
+
 /// Starts `command` and its watcher, output piped and input piped when it takes input. Every
 /// publish git starts here, a project command inside owner git's container when there is one;
 /// the wrapped command keeps no stdio, so it is set again, with no error output. Inputs: the
@@ -426,6 +448,10 @@ fn started(
     let command = match contained {
         None => command,
         Some(owner) => {
+            assert!(
+                starts_at_its_work_tree(command),
+                "a contained git with a relative GIT_DIR starts in its work tree"
+            );
             wrapped = owner
                 .wrap(command)
                 .map_err(|_| failure("github_publish_failed"))?;
