@@ -2695,8 +2695,9 @@ fn set_read_paths(
 /// Saves a project's hidden folders once each passes [`crate::sandbox::hidden_paths::checked`]
 /// against the project's folder and the screen showed the current ones. Takes the transaction,
 /// project, the version shown and the typed paths. Returns Applied, or a plain rejection for an
-/// unknown project, a refused path, any folder where [`crate::sandbox::HIDDEN_UNHELD`], or
-/// `stale_revision` when the folders changed since, so a stale screen never un-hides a folder.
+/// unknown project, a refused path, any folder where [`crate::sandbox::HIDDEN_UNHELD`], a list
+/// [`crate::sandbox::hidden_paths::held`] refuses, or `stale_revision` when the folders changed
+/// since, so a stale screen never un-hides a folder.
 fn set_hidden_paths(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2714,8 +2715,8 @@ fn set_hidden_paths(
         Ok(checked) => checked,
         Err(code) => return Ok(rejected(code)),
     };
-    if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&folder, &checked) {
-        return Ok(rejected(code));
+    if let Err(unheld) = crate::sandbox::hidden_paths::held(&folder, &checked) {
+        return Ok(rejected(unheld.code));
     }
     let item = crate::storage::versioned::hidden_paths_item(project_id);
     if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {

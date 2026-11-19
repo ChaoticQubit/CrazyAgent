@@ -990,7 +990,7 @@ fn turn_sandbox(
     }
     let repository = &crate::projects_home::one_spelling(repository.to_path_buf());
     let worktree = &crate::projects_home::one_spelling(worktree.to_path_buf());
-    crate::sandbox::hidden_paths::none_tracked(repository, hidden).map_err(failure)?;
+    crate::sandbox::hidden_paths::held(repository, hidden).map_err(|unheld| failure(unheld.code))?;
     let refused = |_: SandboxError| failure("master_sandbox_unavailable");
     let remote = match endpoint {
         ModelEndpoint::Native {} => SandboxRemote::AnyHost(HTTPS_PORT),
@@ -2682,7 +2682,7 @@ mod tests {
         );
     }
 
-    /// A master launch refuses a hidden folder git now tracks: the same none_tracked gate the
+    /// A master launch refuses a hidden folder git now tracks: the same held gate the
     /// team and research launches use, here on the master turn sandbox, fails the launch with
     /// the plain code rather than install a profile that promises to hide a file in history.
     #[test]

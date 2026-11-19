@@ -695,7 +695,7 @@ fn any_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<bool, &'stati
 /// project root and the checked folders. Output: ok, `hidden_path_tracked`,
 /// `hidden_path_in_nested_repository`, `hidden_path_index_unreadable` or
 /// `hidden_path_unchecked`.
-pub fn none_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<(), &'static str> {
+fn none_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<(), &'static str> {
     if any_tracked(project_root, folders)? {
         Err("hidden_path_tracked")
     } else {
@@ -703,12 +703,126 @@ pub fn none_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<(), &'st
     }
 }
 
-/// The owner's words for a launch that [`none_tracked`] refused, naming the cause and the way
-/// out (rv-code2 F1), for the runs that store a line rather than show a code. Input: the
-/// refusal code. Output: one sentence with no final stop.
+/// Most files and folders the Windows walk reads across all of a list's hidden folders before
+/// it refuses the list (`hidden_path_too_many_entries`), so no launch or save stalls on a huge
+/// folder (V244-WIN-HIDDEN-BOUNDARY Q3).
+pub const WALK_ENTRIES_MAX: usize = 100_000;
+
+/// Why a list of hidden folders cannot be held for a launch or a save: the plain refusal code,
+/// and the file or folder it names, if any, which only the engine log carries, since a name
+/// inside a hidden folder is part of what the folder hides.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unheld {
+    pub code: &'static str,
+    pub path: Option<PathBuf>,
+}
+
+/// Refuses hidden folders the boundary cannot hold, for every launch and the save: git tracking
+/// a file in one ([`none_tracked`]), and on Windows a file in one that has another name, which
+/// the agent's container reads by that name ([`walk`]); the engine log names the code and the
+/// path. Inputs: the project root and the checked folders. Output: ok, or the refusal.
+pub fn held(project_root: &Path, folders: &[PathBuf]) -> Result<(), Unheld> {
+    let checked = none_tracked(project_root, folders).map_err(|code| Unheld { code, path: None });
+    #[cfg(target_os = "windows")]
+    let checked = checked.and_then(|()| walk(folders, WALK_ENTRIES_MAX, file_links));
+    if let Err(unheld) = &checked {
+        assert!(unheld.code.starts_with("hidden_path_"));
+        eprintln!(
+            "hidden_paths_unheld code={} path={:?}",
+            unheld.code, unheld.path
+        );
+    }
+    checked
+}
+
+/// Walks every entry below the hidden folders, without following a link or junction, and
+/// refuses the list at the first file with another name, at more than `entries_max` entries in
+/// all, or at an entry it cannot read; an absent folder passes, since install makes it empty.
+/// Inputs: the folders, the bound and how a file's names are counted. Output: ok, or the refusal.
+#[cfg(any(test, target_os = "windows"))]
+fn walk(
+    folders: &[PathBuf],
+    entries_max: usize,
+    links: impl Fn(&Path) -> std::io::Result<u64>,
+) -> Result<(), Unheld> {
+    assert!(folders.len() <= HIDDEN_PATHS_MAX);
+    assert!(entries_max > 0);
+    let unreadable = |path: &Path| Unheld {
+        code: "hidden_path_entry_unreadable",
+        path: Some(path.to_path_buf()),
+    };
+    let mut stack: Vec<PathBuf> = Vec::with_capacity(folders.len());
+    for folder in folders {
+        match std::fs::symlink_metadata(folder) {
+            Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => stack.push(folder.clone()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(unreadable(folder)),
+        }
+    }
+    let mut seen: usize = 0;
+    while let Some(folder) = stack.pop() {
+        for entry in std::fs::read_dir(&folder).map_err(|_| unreadable(&folder))? {
+            let entry = entry.map_err(|_| unreadable(&folder))?;
+            seen += 1;
+            if seen > entries_max {
+                return Err(Unheld {
+                    code: "hidden_path_too_many_entries",
+                    path: None,
+                });
+            }
+            let path = entry.path();
+            let kind = entry.file_type().map_err(|_| unreadable(&path))?;
+            if kind.is_dir() && !kind.is_symlink() {
+                stack.push(path);
+            } else if !kind.is_symlink() && links(&path).map_err(|_| unreadable(&path))? > 1 {
+                return Err(Unheld {
+                    code: "hidden_path_linked_file",
+                    path: Some(path),
+                });
+            }
+        }
+    }
+    assert!(seen <= entries_max);
+    assert!(stack.is_empty());
+    Ok(())
+}
+
+/// How many names a file has on Windows, read from a handle opened for its attributes and
+/// access list only, never through a link at its path, sharing everything so no owner program
+/// is blocked. Input: the path. Output: the count, or the error.
+#[cfg(target_os = "windows")]
+fn file_links(path: &Path) -> std::io::Result<u64> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const READ_CONTROL: u32 = 0x0002_0000;
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    const FILE_SHARE_ALL: u32 = 0x0007;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    let file = std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_ALL)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let facts = crazyagent_win_sandbox::private::facts(&file)?;
+    assert!(facts.links >= 1, "an open file has a name");
+    Ok(u64::from(facts.links))
+}
+
+/// The owner's words for a launch that [`held`] refused, naming the cause and the way out
+/// (rv-code2 F1), for the runs that store a line rather than show a code; the same fixed words
+/// on every system, never the path. Input: the refusal code. Output: one sentence with no
+/// final stop.
 pub fn refusal(code: &str) -> &'static str {
     assert!(code.starts_with("hidden_path_"));
     match code {
+        "hidden_path_linked_file" => {
+            "A file in a hidden folder has another link outside it, so agents could read it by that name; remove the file's other link or stop hiding that folder"
+        }
+        "hidden_path_too_many_entries" => {
+            "A hidden folder holds over 100,000 files and folders, too many to check for files with other links; hide a smaller folder or stop hiding that folder"
+        }
+        "hidden_path_entry_unreadable" => {
+            "A file or folder inside a hidden folder couldn't be read to check it for other links; fix its permissions or stop hiding that folder"
+        }
         "hidden_path_tracked" => {
             "Git tracks a file in a hidden folder, or in one whose name differs only in letter case; untrack it or stop hiding that folder"
         }
@@ -1950,10 +2064,11 @@ mod tests {
         assert_eq!(crate::sandbox::HIDDEN_UNHELD, cfg!(target_os = "linux"));
     }
 
-    /// V244-WIN-HIDDEN-BOUNDARY Q3 (leader 04:09, option A): each walk refusal has its own fixed
-    /// words saying what to do, and the owner's launch line adds the file the walk named.
+    /// V244-WIN-HIDDEN-BOUNDARY Q3 (leader 04:09, 04:31): each walk refusal has its own fixed
+    /// words saying what to do, and no launch line names the file, which only the engine log
+    /// carries, since a name inside a hidden folder is part of what the folder hides.
     #[test]
-    fn each_walk_refusal_has_its_own_words_and_the_owner_line_names_the_file() {
+    fn each_walk_refusal_has_its_own_fixed_words() {
         for (code, words) in [
             ("hidden_path_linked_file", "remove the file's other link"),
             ("hidden_path_too_many_entries", "100,000"),
@@ -1962,20 +2077,43 @@ mod tests {
             assert!(refusal(code).contains(words), "{code}: {}", refusal(code));
             assert_ne!(refusal(code), refusal("hidden_path_unchecked"));
             assert!(!refusal(code).ends_with('.'));
+            assert!(!refusal(code).contains(std::path::MAIN_SEPARATOR));
         }
-        let file = PathBuf::from("/p/vault/key.txt");
-        let linked = Unheld {
-            code: "hidden_path_linked_file",
-            path: Some(file.clone()),
-        };
-        assert_eq!(
-            linked.line(),
-            format!("{}: {}", refusal(linked.code), file.display())
-        );
-        let bound = Unheld {
-            code: "hidden_path_too_many_entries",
-            path: None,
-        };
-        assert_eq!(bound.line(), refusal(bound.code));
+    }
+
+    /// V244-WIN-HIDDEN-BOUNDARY Q3 timing: what the Windows walk adds to a launch or a save at a
+    /// tenth of its bound and at the bound, three calls each; the farm runs it quiet and loaded.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "timing row the farm runs"]
+    fn walk_time_per_call() {
+        const FOLDERS: usize = 100;
+        let root = project();
+        for (label, entries) in [("tenth", WALK_ENTRIES_MAX / 10), ("bound", WALK_ENTRIES_MAX)] {
+            let hidden = root.path().join(label);
+            let files = entries / FOLDERS - 1;
+            for folder in 0..FOLDERS {
+                let sub = hidden.join(format!("f{folder}"));
+                std::fs::create_dir_all(&sub).unwrap();
+                for file in 0..files {
+                    std::fs::write(sub.join(format!("{file}.txt")), b"x").unwrap();
+                }
+            }
+            let walked = FOLDERS * (files + 1);
+            assert!(walked <= WALK_ENTRIES_MAX);
+            let mut ms: Vec<f64> = (0..3)
+                .map(|_| {
+                    let start = std::time::Instant::now();
+                    let got = walk(std::slice::from_ref(&hidden), WALK_ENTRIES_MAX, file_links);
+                    assert_eq!(got, Ok(()));
+                    start.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect();
+            ms.sort_by(f64::total_cmp);
+            println!(
+                "TIMING walk {label} entries={walked} p50_ms={:.0} max_ms={:.0}",
+                ms[1], ms[2]
+            );
+        }
     }
 }

@@ -61,8 +61,8 @@ const PINNED_VARIABLES: &[&str] = &[
 
 /// The Windows boundary for one project agent. The helper runs the agent in an AppContainer
 /// of its own with read and execute on its read roots, modify on its writable roots, read and
-/// execute only on the protected paths and nothing on secret paths inside a granted root,
-/// inside a job that kills the agent's whole tree when the helper ends (DEC-193).
+/// execute only on the protected paths and nothing on secret paths or hidden folders inside a
+/// granted root, inside a job that kills the agent's whole tree when the helper ends (DEC-193).
 #[derive(Debug)]
 pub struct WindowsSandbox {
     sandbox: ProjectSandbox,
@@ -71,11 +71,12 @@ pub struct WindowsSandbox {
 }
 
 impl WindowsSandbox {
-    /// Makes each missing guarded folder ([`make_guarded_folders`]), then writes the boundary
-    /// profile for `sandbox` at `profile`, a `.sb` file replaced atomically, bound to `helper`;
-    /// the profile and the helper's `grants` folder lie outside every writable root, so no
-    /// agent rewrites what its next launch uses. Inputs: the policy, the helper, the profile
-    /// path and the grants folder. Output: the sandbox, or the [`SandboxError`] saying why not.
+    /// Makes each missing guarded folder ([`make_guarded_folders`]) and hidden folder
+    /// ([`make_hidden_folders`]), then writes the boundary profile for `sandbox` at `profile`, a
+    /// `.sb` file replaced atomically, bound to `helper`; the profile and the helper's `grants`
+    /// folder lie outside every writable root, so no agent rewrites what its next launch uses.
+    /// Inputs: the policy, the helper, the profile path and the grants folder. Output: the
+    /// sandbox, or the [`SandboxError`] saying why not.
     pub fn install(
         sandbox: ProjectSandbox,
         helper: &Path,
@@ -86,6 +87,7 @@ impl WindowsSandbox {
             .filter(|grants| clean_absolute(grants) && grants.is_dir())
             .ok_or_else(|| invalid("grants folder must exist"))?;
         make_guarded_folders(&sandbox)?;
+        make_hidden_folders(&sandbox)?;
         let boundary = boundary_profile(&sandbox, &canonical(grants)?)?;
         if let Some(root) = crazyagent_win_sandbox::unreadable_read_root(&boundary) {
             eprintln!("sandbox_read_root_refused cause=unreadable folder={root}");
@@ -295,7 +297,8 @@ pub(crate) fn container_for(project_root: &Path, agent_home: &Path) -> String {
 /// `context` while `.crazyagent` is a real folder, since the state folder then holds the
 /// context the engine reads ([`crate::projects_home::state_folder`]) and a missing root
 /// `context` would keep the project root from taking new entries; none for a job folder
-/// ([`ProjectSandbox::as_job_folder`]); plain drive secret paths hidden, and the grants folder.
+/// ([`ProjectSandbox::as_job_folder`]); plain drive secret paths hidden, every hidden folder
+/// hidden, a folder that is not a plain drive path refusing the profile, and the grants folder.
 /// The helper's plan check runs here too, so a policy it would refuse, such as a grants folder
 /// in a writable root, is refused at install. Inputs: the policy and the grants folder.
 /// Output: the profile, or the refusal.
@@ -339,6 +342,14 @@ pub fn boundary_profile(
             guard: Guard::Hidden,
         })
     }));
+    let shown = guarded.len();
+    for folder in &sandbox.hidden {
+        guarded.push(Guarded {
+            path: drive_path(folder)?,
+            guard: Guard::Hidden,
+        });
+    }
+    assert_eq!(guarded.len(), shown + sandbox.hidden.len());
     let profile = BoundaryProfile {
         container: container_name(sandbox),
         capabilities,
@@ -392,6 +403,29 @@ fn make_guarded_folders(sandbox: &ProjectSandbox) -> Result<usize, SandboxError>
         }
     }
     assert!(made <= wanted.len());
+    Ok(made)
+}
+
+/// Makes each absent hidden folder empty before the helper runs, in a job folder too, so the
+/// helper covers a folder the agent could otherwise make and fill, and refuses one that is now
+/// a link, a junction or a file, as the Linux boundary does. [`ProjectSandbox::hide`] already
+/// checked each parent is a real folder. Input: the policy. Output: how many were made, or the
+/// refusal.
+fn make_hidden_folders(sandbox: &ProjectSandbox) -> Result<usize, SandboxError> {
+    let mut made = 0;
+    for folder in &sandbox.hidden {
+        match fs::create_dir(folder) {
+            Ok(()) => made += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        let plain = fs::symlink_metadata(folder)
+            .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink());
+        if !plain {
+            return Err(invalid("a hidden folder must be a plain folder"));
+        }
+    }
+    assert!(made <= sandbox.hidden.len());
     Ok(made)
 }
 

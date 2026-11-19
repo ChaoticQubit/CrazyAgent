@@ -113,14 +113,15 @@ pub fn settings_owner_ports(global: &Path, project: &Path) -> Result<Vec<u16>, &
         .map_or_else(Vec::new, |access| owner_ports(&access)))
 }
 
-/// Why a sandbox with hidden folders does not start on Linux or Windows: their boundaries
-/// grant whole roots and cannot keep a folder inside one out of reach.
+/// Why a sandbox with hidden folders does not start on Linux, nor one with kept-out paths or
+/// open tops on Linux or Windows: those boundaries grant whole roots and cannot keep a path
+/// inside one out of reach. Windows holds hidden folders as hidden guards of its helper.
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
 
 /// Whether this system's boundary cannot hold a hidden folder, so a sandbox with one does not
 /// start ([`HIDDEN_NEEDS_SEATBELT`]), a save that hides a folder is refused and neither app
-/// offers the setting (#590): true on Linux and Windows.
-pub const HIDDEN_UNHELD: bool = cfg!(any(target_os = "linux", target_os = "windows"));
+/// offers the setting (#590): true on Linux only (V244-WIN-HIDDEN-BOUNDARY Q4).
+pub const HIDDEN_UNHELD: bool = cfg!(target_os = "linux");
 
 /// Why a native-mode lead's own tmux server does not start off macOS: only Seatbelt holds
 /// its one-socket grant, and DEC-094 keeps team agents macOS-only in V1.
@@ -2374,8 +2375,9 @@ impl ProjectSandbox {
     /// Keeps one folder inside a granted root out of the agent's reach, read and write, as
     /// the secret paths are; the graph step hides the project's `.crazyagent/` from graphify.
     /// Input: a clean absolute path below a root, in a real parent folder, absent or a real
-    /// folder. Output: the narrowed sandbox, or `Invalid`. Only Seatbelt holds it, so the
-    /// Linux and Windows boundaries refuse a sandbox with hidden folders.
+    /// folder, its parent in [`canonical`] form, which on Windows has no verbatim prefix.
+    /// Output: the narrowed sandbox, or `Invalid`. Seatbelt and the Windows helper hold it;
+    /// the Linux boundary refuses a sandbox with hidden folders ([`HIDDEN_UNHELD`]).
     pub fn hide(mut self, folder: &Path) -> Result<Self, SandboxError> {
         if self.hidden.len() >= HIDDEN_MAX {
             return Err(invalid("too many hidden folders"));
@@ -2384,11 +2386,9 @@ impl ProjectSandbox {
             .writable_roots()
             .chain(self.read_roots.iter())
             .any(|root| folder.starts_with(root) && folder != root.as_path());
-        let parent = folder.parent().filter(|parent| {
-            parent
-                .canonicalize()
-                .is_ok_and(|real| real.as_path() == *parent)
-        });
+        let parent = folder
+            .parent()
+            .filter(|parent| canonical(parent).is_ok_and(|real| real.as_path() == *parent));
         let plain = fs::symlink_metadata(folder).map_or_else(
             |error| error.kind() == io::ErrorKind::NotFound,
             |metadata| metadata.is_dir() && !metadata.file_type().is_symlink(),
