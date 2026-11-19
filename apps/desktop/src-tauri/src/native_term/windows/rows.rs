@@ -2076,6 +2076,12 @@ fn a_view_its_sink_drops_on_the_fault_goes_from_inside_the_fault_message() {
     let view =
         View::new(parent, webview, DROPPED_ON_FAULT, dropping_sink, &style()).expect("a view");
     let _ = placed_shown_and_drawn(parent, &view);
+    view.focus();
+    pump_until(
+        "the view's focus",
+        FARM_WAIT,
+        || unsafe { GetFocus() } == view.hwnd(),
+    );
     faulted_unheard(&view, DROPPED_ON_FAULT);
     let hwnd = view.hwnd();
     HELD.with(|held| *held.borrow_mut() = Some(view));
@@ -2095,10 +2101,16 @@ fn a_view_its_sink_drops_on_the_fault_goes_from_inside_the_fault_message() {
 /// The host's Windows calls on a real child window: the parent lookup takes only a
 /// `WRY_WEBVIEW` child, a view opens hidden, places and shows over its box, takes frames
 /// the render thread presents with the host's cell size, and once faulted refuses to fit
-/// and answers `native_terminal_gpu` to a frame, hidden.
+/// and answers `native_terminal_gpu` to a frame, hidden. The row marks its own thread as
+/// the app's main one, as setup does, since the view's events go to the host's sink.
 #[test]
 #[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
 fn the_host_platform_opens_draws_faults_and_dismisses_a_view_over_its_webview() {
+    platform::mark_main();
+    assert!(
+        platform::main().is_some(),
+        "the row's thread is the app's main one"
+    );
     let (parent, webview) = stand_ins();
     let missing = Some("native_terminal_webview_missing");
     assert_eq!(
