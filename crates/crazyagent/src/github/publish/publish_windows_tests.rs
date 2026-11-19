@@ -506,83 +506,104 @@ fn a_contained_windows_publish_reads_no_git_folder_or_gitfile_planted_below_the_
         email: "ada@example.invalid".into(),
     };
     let mut wrong = Vec::new();
-    for step in CONTAINED_STEPS {
-        let made = if step == "commit" {
-            unborn()
-        } else {
-            project()
-        };
-        let folder = contained_folder(&made);
-        let home = made.home.path();
-        let inner = folder.join("inner");
-        std::fs::create_dir(&inner).unwrap();
-        owner_git(&inner, &["init", "-q", "--template=", "-b", "other"]);
-        owner_git(&inner, &["config", "user.name", "Inner"]);
-        owner_git(&inner, &["config", "user.email", "inner@example.invalid"]);
-        std::fs::write(inner.join("y.txt"), "y").unwrap();
-        owner_git(&inner, &["add", "y.txt"]);
-        owner_git(&inner, &["commit", "-q", "--no-gpg-sign", "-m", "inner"]);
-        let started_inside = crate::spawn_gate::collected(
-            Command::new(git().unwrap().program())
-                .args(["rev-parse", "--abbrev-ref", "HEAD"])
-                .current_dir(&inner)
-                .env("GIT_DIR", ".git")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE),
-        )
-        .unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&started_inside.stdout).trim(),
-            "other",
-            "a relative GIT_DIR started in inner reads the planted repository"
-        );
-        farm::plant(&folder, "nested");
-        let git = routed(&made, &folder);
-        let head = if step == "workflows" {
-            made.head()
-        } else {
-            String::new()
-        };
-        let kept = snapshot(&inner.join(".git"));
-        let said = made.place.path().join("contained-stderr.txt");
-        CONTAINED_STDERR
-            .with(|file| *file.borrow_mut() = Some(std::fs::File::create(&said).unwrap()));
-        farm::reset_sessions();
-        let answer = match step {
-            "inspect" => match inspect(&git, home, &folder, HOST) {
-                Ok(local) if local.branch.as_deref() == Some("main") => None,
-                other => Some(format!("{other:?}")),
-            },
-            "commit" => match commit(&git, home, &folder, &[], &ada) {
-                Ok(made_commit)
-                    if made_commit.branch == "main" && made_commit.commit == made.head() =>
-                {
+    for shape in ["folder", "gitfile"] {
+        for step in CONTAINED_STEPS {
+            let made = if step == "commit" {
+                unborn()
+            } else {
+                project()
+            };
+            let folder = contained_folder(&made);
+            let home = made.home.path();
+            let inner = folder.join("inner");
+            if shape == "folder" {
+                std::fs::create_dir(&inner).unwrap();
+                owner_git(&inner, &["init", "-q", "--template=", "-b", "other"]);
+                owner_git(&inner, &["config", "user.name", "Inner"]);
+                owner_git(&inner, &["config", "user.email", "inner@example.invalid"]);
+                std::fs::write(inner.join("y.txt"), "y").unwrap();
+                owner_git(&inner, &["add", "y.txt"]);
+                owner_git(&inner, &["commit", "-q", "--no-gpg-sign", "-m", "inner"]);
+                let started_inside = crate::spawn_gate::collected(
+                    Command::new(git().unwrap().program())
+                        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                        .current_dir(&inner)
+                        .env("GIT_DIR", ".git")
+                        .env("GIT_CONFIG_NOSYSTEM", "1")
+                        .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE),
+                )
+                .unwrap();
+                assert_eq!(
+                    String::from_utf8_lossy(&started_inside.stdout).trim(),
+                    "other",
+                    "a relative GIT_DIR started in inner reads the planted repository"
+                );
+            } else {
+                farm::plant(&folder, "nested");
+            }
+            let git = routed(&made, &folder);
+            let head = if step == "workflows" {
+                made.head()
+            } else {
+                String::new()
+            };
+            let kept = (shape == "folder").then(|| snapshot(&inner.join(".git")));
+            let said = made.place.path().join("contained-stderr.txt");
+            CONTAINED_STDERR
+                .with(|file| *file.borrow_mut() = Some(std::fs::File::create(&said).unwrap()));
+            farm::reset_sessions();
+            let answer = match step {
+                "inspect" => match inspect(&git, home, &folder, HOST) {
+                    Ok(local) if local.branch.as_deref() == Some("main") => None,
+                    other => Some(format!("{other:?}")),
+                },
+                "commit" => match (shape, commit(&git, home, &folder, &[], &ada)) {
+                    ("folder", Ok(made_commit))
+                        if made_commit.branch == "main" && made_commit.commit == made.head() =>
+                    {
+                        None
+                    }
+                    ("gitfile", Err(EngineError(code)))
+                        if code == "github_publish_failed"
+                            && !folder
+                                .join(".git")
+                                .join("refs")
+                                .join("heads")
+                                .join("main")
+                                .exists()
+                            && std::fs::read_to_string(&said)
+                                .unwrap_or_default()
+                                .contains("'sub/' does not have a commit checked out") =>
+                    {
+                        None
+                    }
+                    other => Some(format!("{other:?}")),
+                },
+                "author" => match configured_author(&git, made.owner_home.path(), home, &folder) {
+                    Some(author) if author.name == "Owner" => None,
+                    other => Some(format!("{other:?}")),
+                },
+                _ => {
+                    let local = inspect(&git, home, &folder, HOST).unwrap();
+                    ran_step(step, &git, &made, &folder, &local, &head);
                     None
                 }
-                other => Some(format!("{other:?}")),
-            },
-            "author" => match configured_author(&git, made.owner_home.path(), home, &folder) {
-                Some(author) if author.name == "Owner" => None,
-                other => Some(format!("{other:?}")),
-            },
-            _ => {
-                let local = inspect(&git, home, &folder, HOST).unwrap();
-                ran_step(step, &git, &made, &folder, &local, &head);
-                None
+            };
+            CONTAINED_STDERR.with(|file| *file.borrow_mut() = None);
+            if let Some(got) = answer {
+                wrong.push(format!(
+                    "{shape} {step}: {got}, contained git said: {}",
+                    std::fs::read_to_string(&said).unwrap_or_default()
+                ));
             }
-        };
-        CONTAINED_STDERR.with(|file| *file.borrow_mut() = None);
-        if let Some(got) = answer {
-            wrong.push(format!(
-                "{step}: {got}, contained git said: {}",
-                std::fs::read_to_string(&said).unwrap_or_default()
-            ));
-        }
-        if farm::server_session() {
-            wrong.push(format!("{step}: a server session"));
-        }
-        if snapshot(&inner.join(".git")) != kept {
-            wrong.push(format!("{step}: the planted inner .git changed"));
+            if farm::server_session() {
+                wrong.push(format!("{shape} {step}: a server session"));
+            }
+            if let Some(kept) = kept
+                && snapshot(&inner.join(".git")) != kept
+            {
+                wrong.push(format!("{shape} {step}: the planted inner .git changed"));
+            }
         }
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
