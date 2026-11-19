@@ -4301,10 +4301,12 @@ fn a_hidden_folders_cover_stays_on_whatever_the_agent_unmounts() {
         };
         let folder = quoted(&hidden.folder);
         let script = format!(
-            "umount {folder} 2>/dev/null; umount -l {folder} 2>/dev/null; \
-             unshare -Urm sh -c 'echo inner; umount -l \"$0\"; umount \"$0\"; ls -A \"$0\"; \
-             cat \"$0\"/secret.txt' {folder} 2>/dev/null; \
-             ls -A {folder} 2>/dev/null; cat {folder}/secret.txt 2>/dev/null; \
+            "grep -E '^(Seccomp|NoNewPrivs|CapEff)' /proc/self/status; \
+             umount {folder} 2>&1; echo \"plain rc=$?\"; \
+             for v in 'unshare -Urm' 'unshare -Urm --propagation unchanged' 'unshare -Ur' \
+             'unshare -Um --propagation unchanged' 'unshare -U'; do echo \"== $v\"; \
+             $v sh -c 'echo inner; id -u; umount -l \"$0\" 2>&1; echo \"lazy rc=$?\"; \
+             umount \"$0\" 2>&1; echo \"umount rc=$?\"' {folder} 2>&1; echo \"rc=$?\"; done; \
              grep -c ' {path} ' /proc/self/mountinfo; echo done",
             path = hidden.folder.display(),
         );
