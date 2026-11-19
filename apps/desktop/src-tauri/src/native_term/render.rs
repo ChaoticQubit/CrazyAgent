@@ -835,11 +835,45 @@ impl Shared {
         painted
     }
 
-    /// Whether wgpu reported the device lost; false before the first surface makes one.
-    /// Output: the answer, which never clears.
+    /// Whether wgpu reported the device lost; false while no device is held, before the
+    /// first surface makes one or after `retire_lost`. Output: the answer.
     #[cfg(windows)]
     pub fn lost(&self) -> bool {
         self.device.as_ref().is_some_and(Device::is_lost)
+    }
+
+    /// Waits for the device's work to finish so wgpu frees what a dropped surface left: a
+    /// window takes one swap chain at a time, so its next surface, on another scale's
+    /// device, needs the old one gone. A lost device is left to `retire_lost`. Output: ok,
+    /// or `native_terminal_gpu` when the wait failed.
+    #[cfg(windows)]
+    pub fn settle(&self) -> Result<(), &'static str> {
+        let Some(set) = self.device.as_ref().filter(|set| !set.is_lost()) else {
+            return Ok(());
+        };
+        set.device
+            .poll(wgpu::PollType::Wait)
+            .map(|_| ())
+            .map_err(|_| GPU_FAULT)
+    }
+
+    /// Whether a device is held, so a surface made now requests none. Output: the answer.
+    #[cfg(windows)]
+    pub fn has_device(&self) -> bool {
+        self.device.is_some()
+    }
+
+    /// Forgets a device wgpu reported lost, never dropping it: core `Queue::drop` can wait
+    /// and panic, and on Windows it would run on the one render thread. Only the device goes
+    /// (its adapter, queue, pipeline and glyph cache); the instance and fonts stay, and the
+    /// next surface requests a new device. Output: whether a lost device was forgotten.
+    #[cfg(windows)]
+    pub fn retire_lost(&mut self) -> bool {
+        let Some(lost) = self.device.take_if(|device| device.is_lost()) else {
+            return false;
+        };
+        std::mem::forget(lost);
+        true
     }
 
     /// Takes the wgpu error the device recorded since the last render call took it, as

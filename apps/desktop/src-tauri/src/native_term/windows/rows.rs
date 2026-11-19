@@ -571,6 +571,7 @@ fn faults_on_a_loss_after_the_wait_and_a_new_view_draws(parent: HWND, webview: H
     draw::trial_lose_after_wait(2);
     assert!(lost.feed(fed_frame(&Theme::default(), b"after the loss\r\n")));
     pump_until("the loss faults the view", FARM_WAIT, || lost.faulted());
+    let made = draw::trial_shared_made();
     let after = View::new(parent, webview, 3, sink, &style()).expect("a view after the loss");
     let fresh = presents();
     assert!(after.feed(fed_frame(&Theme::default(), b"a new device\r\n")));
@@ -578,6 +579,11 @@ fn faults_on_a_loss_after_the_wait_and_a_new_view_draws(parent: HWND, webview: H
         .place(Some((420.0, 40.0, 200.0, 100.0)))
         .expect("a third box");
     await_present("a view after the loss draws on a new device", fresh);
+    assert_eq!(
+        draw::trial_shared_made(),
+        made,
+        "the new device came into the kept shared state, not new shared state"
+    );
     assert!(!after.faulted(), "the view after the loss has not faulted");
     assert!(lost.faulted(), "the lost view stays faulted");
     assert!(

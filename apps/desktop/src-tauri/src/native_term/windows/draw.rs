@@ -26,9 +26,10 @@ pub const DROP_WAIT: Duration = Duration::from_secs(2);
 /// The plain code for a render thread that could not start.
 const UNAVAILABLE: &str = "native_terminal_render_unavailable";
 
-/// Device attempts a scale may make while a lost device of its is not yet replaced, for the
-/// run, as device-replace allows on macOS. Each lost device is forgotten, never dropped, so
-/// the render thread leaks at most `DEVICE_REPLACE_MAX` + 1 devices per scale per run.
+/// Device requests a scale may make after its first lost device, for the run, as
+/// device-replace allows on macOS: one is counted where a surface is made on shared state
+/// holding no device, failed ones too. Each lost device (adapter, device, queue, pipeline,
+/// glyph cache) is forgotten, never dropped: at most `DEVICE_REPLACE_MAX` + 1 per scale.
 const DEVICE_REPLACE_MAX: u32 = 2;
 
 static STARTED: OnceLock<bool> = OnceLock::new();
@@ -38,6 +39,8 @@ static FAILURES: AtomicU64 = AtomicU64::new(0);
 static REFUSE_RESIZE: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static LOSE_AFTER_WAIT: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static SHARED_MADE: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static FAIL_WAITS: AtomicU64 = AtomicU64::new(0);
 
@@ -127,6 +130,21 @@ fn after_wait(id: u64, shared: &Shared) {
 #[cfg(not(test))]
 fn after_wait(_: u64, _: &Shared) {}
 
+/// Test builds only: how many shared states the render thread has made, so a row can tell a
+/// new device in kept shared state from new shared state. Output: the count.
+#[cfg(test)]
+pub fn trial_shared_made() -> u64 {
+    SHARED_MADE.load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+fn made_shared() {
+    SHARED_MADE.fetch_add(1, Ordering::SeqCst);
+}
+
+#[cfg(not(test))]
+fn made_shared() {}
+
 /// Resizes a view's surface; a lost device, or a test row's ask, refuses it. Inputs: the
 /// view id, its shared state, its surface and the geometry. Output: ok, or
 /// `native_terminal_gpu`.
@@ -161,44 +179,32 @@ struct Drawn {
     last: Option<Frame>,
 }
 
-/// Per scale key that lost a device: whether that loss is still to be replaced, and the
-/// device attempts made while one was.
+/// Per scale key that lost a device: the device requests made there since its first loss.
 #[derive(Default)]
 struct Replaced {
-    keys: Vec<(u32, bool, u32)>,
+    keys: Vec<(u32, u32)>,
 }
 
 impl Replaced {
-    /// Counts a lost device on a scale; a new device there is now a counted replacement.
+    /// Counts a lost device on a scale; every device request there is counted from now.
     /// Input: the scale key.
     fn lost(&mut self, key: u32) {
         assert!(SCALE_KEYS.contains(&key), "a scale key");
-        match self.keys.iter_mut().find(|(held, _, _)| *held == key) {
-            Some((_, owed, _)) => *owed = true,
-            None => self.keys.push((key, true, 0)),
+        if self.keys.iter().all(|(held, _)| *held != key) {
+            self.keys.push((key, 0));
         }
     }
 
-    /// Takes one device attempt on a scale: free while no loss there is owed, else counted,
-    /// failed attempts too, and refused past `DEVICE_REPLACE_MAX`. Input: the scale key.
-    /// Output: whether a device may be made.
+    /// Takes one device request on a scale: free before its first loss, else counted and
+    /// refused past `DEVICE_REPLACE_MAX`. Input: the scale key. Output: whether a device
+    /// may be requested.
     fn attempt(&mut self, key: u32) -> bool {
-        let Some((_, owed, made)) = self.keys.iter_mut().find(|(held, _, _)| *held == key) else {
+        let Some((_, made)) = self.keys.iter_mut().find(|(held, _)| *held == key) else {
             return true;
         };
-        if !*owed {
-            return true;
-        }
         let allowed = *made < DEVICE_REPLACE_MAX;
         *made += u32::from(allowed);
         allowed
-    }
-
-    /// Marks a scale's loss replaced once a surface was made there. Input: the scale key.
-    fn replaced(&mut self, key: u32) {
-        if let Some((_, owed, _)) = self.keys.iter_mut().find(|(held, _, _)| *held == key) {
-            *owed = false;
-        }
     }
 }
 
@@ -266,65 +272,57 @@ impl Painter {
     }
 
     /// Makes a view's surface on the shared state for its scale, after retiring any lost
-    /// device and dropping the live shared state no surface uses, so there is never more of
-    /// it than views plus one. A scale past its replacement budget makes nothing.
+    /// device. Shared state is kept for the run, one per scale key as macOS keeps it, so
+    /// none is ever dropped; a device is requested only where none is held, within the
+    /// scale's replacement budget. Inputs: the view's window and geometry.
     fn surface(&mut self, handle: isize, geometry: Geometry) -> Result<Surface, String> {
         self.retire_lost();
-        let views = &self.views;
-        self.shared.retain(|(key, _)| {
-            views
-                .iter()
-                .any(|view| view.surface.is_some() && view.geometry.scale_key == *key)
-        });
         let key = geometry.scale_key;
         let index = match self.shared.iter().position(|(held, _)| *held == key) {
             Some(index) => index,
             None => {
-                if !self.replaced.attempt(key) {
-                    return Err(GPU_FAULT.to_owned());
-                }
                 let made = Shared::new(key as f32 / 100.0, &self.style)?;
+                made_shared();
                 self.shared.push((key, made));
                 self.shared.len() - 1
             }
         };
-        assert!(self.shared.len() <= self.views.len() + 1);
         let window = Win32WindowHandle::new(NonZeroIsize::new(handle).ok_or("no window")?);
+        let shared = &mut self.shared[index].1;
+        if !shared.has_device() && !self.replaced.attempt(key) {
+            return Err(GPU_FAULT.to_owned());
+        }
         let display = RawDisplayHandle::Windows(WindowsDisplayHandle::new());
         let (width, height) = geometry.size;
-        let shared = &mut self.shared[index].1;
-        let made =
-            unsafe { shared.surface_raw(display, RawWindowHandle::Win32(window), width, height) };
-        if made.is_ok() {
-            self.replaced.replaced(key);
-        }
-        made
+        unsafe { shared.surface_raw(display, RawWindowHandle::Win32(window), width, height) }
     }
 
-    /// Retires every shared state whose device wgpu reported lost: each view with a surface
-    /// on it faults at once, and the state is forgotten, never dropped, since dropping a lost
-    /// device's queue can wait seconds and panic on the one render thread all views share.
+    /// Retires every device wgpu reported lost: each view with a surface on it faults at
+    /// once, and its shared state forgets the device and keeps the rest, so the next view
+    /// at that scale requests a new one within the scale's budget.
     fn retire_lost(&mut self) {
-        while let Some(index) = self.shared.iter().position(|(_, shared)| shared.lost()) {
-            let (key, lost) = self.shared.swap_remove(index);
+        for (key, shared) in &mut self.shared {
+            if !shared.retire_lost() {
+                continue;
+            }
             for view in &mut self.views {
-                if view.geometry.scale_key == key && view.surface.is_some() {
+                if view.geometry.scale_key == *key && view.surface.is_some() {
                     view.surface = None;
                     BOARD.fault(view.id);
                 }
             }
-            std::mem::forget(lost);
-            self.replaced.lost(key);
+            self.replaced.lost(*key);
         }
     }
 
     /// Gives a view its new geometry before the swap-chain wait: a resize on the same
-    /// scale, or a new surface on the new scale's shared state, the old one dropped first
-    /// since a window has one swap chain. Inputs: the view's index and geometry. Output: ok,
-    /// or `native_terminal_gpu` when the resize or the new surface was refused.
+    /// scale, or a new surface on the new scale's shared state, the old one dropped and its
+    /// device settled first since a window has one swap chain. Inputs: the view's index and
+    /// geometry. Output: ok, or `native_terminal_gpu` when a step was refused.
     fn refit(&mut self, index: usize, geometry: Geometry) -> Result<(), &'static str> {
         let view = &mut self.views[index];
-        let same = view.geometry.scale_key == geometry.scale_key;
+        let old = view.geometry.scale_key;
+        let same = old == geometry.scale_key;
         view.geometry = geometry;
         if same {
             let held = self
@@ -337,6 +335,9 @@ impl Painter {
         }
         view.surface = None;
         let handle = view.handle;
+        let held = self.shared.iter().find(|(key, _)| *key == old);
+        let (_, left) = held.expect("a live view's scale has its shared state");
+        left.settle()?;
         let surface = self.surface(handle, geometry).map_err(|_| GPU_FAULT)?;
         self.views[index].surface = Some(surface);
         self.post_cell(self.views[index].id, geometry.scale_key);
@@ -469,6 +470,43 @@ mod tests {
     }
 
     #[test]
+    fn an_unused_scale_keeps_its_shared_state() {
+        let mut painter = with_shared(painter(Vec::new()));
+        let other = Geometry {
+            size: (10, 10),
+            scale_key: 150,
+        };
+        assert!(
+            painter.surface(0, other).is_err(),
+            "no window to make a surface on"
+        );
+        assert!(
+            painter.shared.iter().any(|(key, _)| *key == 100),
+            "shared state no view uses is kept, never dropped"
+        );
+        assert!(
+            painter.shared.iter().any(|(key, _)| *key == 150),
+            "the make reached the shared state for its own scale"
+        );
+    }
+
+    #[test]
+    fn a_surface_that_fails_before_its_device_request_spends_no_attempt() {
+        let mut painter = painter(Vec::new());
+        painter.replaced.lost(100);
+        let geometry = faulted(0).geometry;
+        for _ in 0..=DEVICE_REPLACE_MAX {
+            let made = painter.surface(0, geometry).err();
+            assert_eq!(
+                made.as_deref(),
+                Some("no window"),
+                "no device was requested"
+            );
+        }
+        assert!(painter.replaced.attempt(100), "the budget is untouched");
+    }
+
+    #[test]
     fn a_view_retired_earlier_in_its_round_is_not_drawn() {
         let id = u64::MAX - 1;
         let geometry = faulted(id).geometry;
@@ -501,6 +539,16 @@ mod tests {
         let geometry = Geometry {
             size: (20, 20),
             scale_key: 100,
+        };
+        let _ = painter(vec![faulted(7)]).refit(0, geometry);
+    }
+
+    #[test]
+    #[should_panic(expected = "a live view's scale has its shared state")]
+    fn refitting_a_view_to_a_new_scale_with_no_shared_state_is_a_bug() {
+        let geometry = Geometry {
+            size: (20, 20),
+            scale_key: 150,
         };
         let _ = painter(vec![faulted(7)]).refit(0, geometry);
     }
@@ -574,17 +622,12 @@ mod tests {
         assert!(!replaced.attempt(100), "past the budget");
         assert!(replaced.attempt(150), "another scale keeps its own");
         replaced.lost(125);
-        assert!(replaced.attempt(125));
-        replaced.replaced(125);
-        for _ in 0..5 {
-            assert!(replaced.attempt(125), "free once the loss is replaced");
-        }
+        assert!(replaced.attempt(125), "one replacement");
         replaced.lost(125);
         assert!(
             replaced.attempt(125),
             "a second loss, the second replacement"
         );
-        replaced.replaced(125);
         replaced.lost(125);
         assert!(
             !replaced.attempt(125),
