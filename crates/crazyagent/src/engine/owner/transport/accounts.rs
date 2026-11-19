@@ -47,15 +47,19 @@ enum Action {
 }
 
 impl Action {
-    /// The longest the engine spends on an action once it has read it: one owner wait
-    /// for the account records, plus the network probes the action makes.
-    /// Input: the owner wait. Output: the action's budget.
+    /// The longest the engine spends on an action once it has read it: one owner wait for
+    /// the account records, plus the network probes the action makes. A removal makes no
+    /// probe; its margin lets storage's own bound answer before this one ends, so a removal
+    /// storage did not take is kept and drained, never cut. Input: the owner wait. Output:
+    /// the action's budget.
     fn time(&self, owner: Duration) -> Duration {
         match self {
             Self::Check { .. } | Self::LocalModels { .. } => owner + CHECK_PROBE,
-            Self::List { .. } | Self::Add { .. } | Self::Rename { .. } => owner + LIST_PROBE,
+            Self::List { .. } | Self::Add { .. } | Self::Rename { .. } | Self::Remove { .. } => {
+                owner + LIST_PROBE
+            }
             Self::ReplaceKey { .. } => owner * 2 + LIST_PROBE,
-            Self::Catalog | Self::Remove { .. } => owner,
+            Self::Catalog => owner,
         }
     }
 }
