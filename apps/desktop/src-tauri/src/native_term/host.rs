@@ -3,6 +3,7 @@ use super::clip::Clip;
 use super::codec;
 use super::control::{Control, Event};
 use super::ended::ended_final;
+use super::misses::{self, Draw, Next, Refusals, Skips, skip_reason};
 use super::pane::{Action, GRID_MAX, Input};
 use super::render::{GPU_FAULT, Shared, Surface};
 use super::screen;
@@ -69,6 +70,7 @@ thread_local! {
     static OUTBOX: RefCell<Outbox<ViewEvent>> = RefCell::new(Outbox::default());
     static PENDING: Cell<bool> = const { Cell::new(false) };
     static PARKED: RefCell<VecDeque<Parked>> = const { RefCell::new(VecDeque::new()) };
+    static REFUSALS: RefCell<Refusals> = const { RefCell::new(Refusals::new()) };
 }
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
@@ -142,7 +144,8 @@ enum Held {
 
 /// A view's AppKit and drawing parts: its NSView above the webview, the webview its place
 /// is measured in, its surface and the backing scale key it was made at, its events channel,
-/// the wall window's project a reopen needs and, in a native-webdriver build, its show stamps.
+/// the wall window's project a reopen needs, the draws it skipped since its last frame and,
+/// in a native-webdriver build, its show stamps.
 pub struct View {
     ns: Retained<TermView>,
     webview: Retained<NSView>,
@@ -150,6 +153,7 @@ pub struct View {
     scale: u32,
     events: Channel<NativeEvent>,
     project: Option<String>,
+    skips: Skips,
     #[cfg(feature = "native-webdriver")]
     stamps: ShowStamps,
 }
@@ -346,16 +350,30 @@ pub fn open(
 }
 
 /// Applies one page call to a view the calling window opened; on the main thread. A
-/// close of a view that is gone is fine. Inputs: the window label, the view id and the
-/// call. Output: ok, or a plain code.
+/// close of a view that is gone is fine. A cover(true) refused while the state is held is
+/// told once per view per hide on stderr, so a terminal left over another page is seen.
+/// Inputs: the window label, the view id and the call. Output: ok, or a plain code.
 pub fn command(window: &str, page: u64, call: Command) -> Result<(), &'static str> {
     let closing = matches!(call, Command::Close);
-    match with_native(|native| native.command(window, page, call)) {
+    let hiding = matches!(call, Command::Cover(true));
+    if closing || matches!(call, Command::Cover(false)) {
+        REFUSALS.with(|refusals| refusals.borrow_mut().cleared(page));
+    }
+    let answer = match with_native(|native| native.command(window, page, call)) {
         Ok(result) => result,
         Err((Held::Missing, _)) if closing => Ok(()),
         Err((Held::Missing, _)) => Err("native_terminal_view_unknown"),
-        Err((Held::Busy, _)) => Err("native_terminal_main_busy"),
+        Err((Held::Busy, _)) => {
+            if hiding && page > 0 && REFUSALS.with(|refusals| refusals.borrow_mut().refused(page)) {
+                eprintln!("native_terminal_cover_refused view={page}");
+            }
+            Err("native_terminal_main_busy")
+        }
+    };
+    if hiding && answer.is_ok() {
+        REFUSALS.with(|refusals| refusals.borrow_mut().cleared(page));
     }
+    answer
 }
 
 /// Takes out every view a window opened, telling no page, as that window's page reloads
@@ -606,6 +624,7 @@ impl Native {
             scale: key,
             events: open.events,
             project: open.project,
+            skips: Skips::default(),
             #[cfg(feature = "native-webdriver")]
             stamps: ShowStamps::default(),
         };
@@ -1094,18 +1113,21 @@ fn wheel(
 }
 
 /// Draws one view's frame and hands VoiceOver and the input method what it showed. Inputs:
-/// the view, its shared renderer, the style and the blink phase. Output: whether the frame
-/// was drawn, a skipped frame leaving the view dirty for the next pass, or
+/// the view, its shared renderer, the style and the blink phase. Output: the frame drawn,
+/// or skipped for a fixed reason leaving the view dirty for the next pass, or
 /// `native_terminal_gpu` when the GPU refused the frame and the view must end.
 fn draw_view(
     entry: &mut Entry<View>,
     shared: &mut Shared,
     style: &Style,
     shown: bool,
-) -> Result<bool, &'static str> {
+) -> Result<Draw, &'static str> {
     let view = &mut entry.platform;
-    let (Some(surface), Some(term)) = (view.surface.as_mut(), entry.pane.term()) else {
-        return Ok(false);
+    let Some(surface) = view.surface.as_mut() else {
+        return Ok(Draw::Skipped(misses::NO_SURFACE));
+    };
+    let Some(term) = entry.pane.term() else {
+        return Ok(Draw::Skipped(misses::NO_SCREEN));
     };
     let marked = view.ns.marked_text();
     let frame = screen::frame(term, &style.theme, shown, marked.as_deref());
@@ -1113,7 +1135,7 @@ fn draw_view(
     match shared.draw(surface, &frame) {
         Ok(()) => {}
         Err(code) if code == GPU_FAULT => return Err(GPU_FAULT),
-        Err(_) => return Ok(false),
+        Err(code) => return Ok(Draw::Skipped(skip_reason(&code))),
     }
     let scale = f64::from(view.scale) / 100.0;
     let (width, height) = shared.cell_points();
@@ -1125,7 +1147,7 @@ fn draw_view(
     };
     view.ns
         .drawn(geometry, a11y::marks(term), a11y::text_key(term));
-    Ok(true)
+    Ok(Draw::Drawn)
 }
 
 impl Native {
@@ -1152,6 +1174,7 @@ impl Native {
                 view.ns.cancel_marked();
             }
             view.ns.setHidden(true);
+            view.skips.reset();
             #[cfg(feature = "native-webdriver")]
             view.stamps.hidden();
             return;
@@ -1203,7 +1226,8 @@ impl Native {
     }
 
     /// Draws every shown view whose screen changed, refits one whose backing scale changed,
-    /// and hands VoiceOver and the input method what the frame showed.
+    /// and hands VoiceOver and the input method what the frame showed. A view whose draw was
+    /// skipped asks for one more pass up to `SKIPS_MAX` skips in a row, the last told once.
     fn draw_dirty(&mut self) {
         let moved: Vec<u64> = self
             .table
@@ -1230,26 +1254,41 @@ impl Native {
             return;
         };
         let mut drawn = 0;
+        let mut again = false;
+        let mut bounded = Vec::new();
         let mut refused = Vec::new();
         for (page, entry) in table.entries_mut() {
             if !entry.pane.dirty || entry.platform.ns.isHidden() {
                 continue;
             }
-            let Some(shared) = shared.get_mut(&entry.platform.scale) else {
-                continue;
+            let drew = match shared.get_mut(&entry.platform.scale) {
+                Some(shared) => draw_view(entry, shared, style, *shown),
+                None => Ok(Draw::Skipped(misses::NO_RENDERER)),
             };
-            match draw_view(entry, shared, style, *shown) {
-                Ok(true) => {
+            match drew {
+                Ok(Draw::Drawn) => {
                     entry.pane.dirty = false;
+                    entry.platform.skips.reset();
                     #[cfg(feature = "native-webdriver")]
                     entry.platform.stamps.presented(stamps::now_ms());
                     drawn += 1;
                 }
-                Ok(false) => {}
+                Ok(Draw::Skipped(reason)) => match entry.platform.skips.skipped(reason) {
+                    Next::Again => again = true,
+                    Next::Bound => bounded.push((*page, entry.platform.skips.first())),
+                    Next::Wait => {}
+                },
                 Err(code) => refused.push((*page, code)),
             }
         }
-        assert!(drawn + refused.len() <= self.table.pages().len());
+        assert!(drawn + bounded.len() + refused.len() <= self.table.pages().len());
+        for (page, first) in bounded {
+            let reason = first.expect("a skipped draw names its first reason");
+            eprintln!("native_terminal_draw_skipped view={page} reason={reason}");
+        }
+        if again {
+            schedule();
+        }
         for (page, code) in refused {
             self.end(page, code);
             assert!(self.table.get(page).is_none());

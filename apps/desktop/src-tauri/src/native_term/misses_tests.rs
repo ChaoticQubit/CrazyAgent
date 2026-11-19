@@ -50,7 +50,10 @@ fn a_refused_cover_is_told_once_per_view_per_hide() {
     assert!(refusals.refused(1));
     assert!(!refusals.refused(2));
     refusals.cleared(9);
-    assert!(!refusals.refused(2), "clearing a view never told leaves the others");
+    assert!(
+        !refusals.refused(2),
+        "clearing a view never told leaves the others"
+    );
 }
 
 #[test]

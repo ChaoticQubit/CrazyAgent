@@ -6,6 +6,9 @@ mod ended;
 pub(crate) mod host;
 mod ime;
 mod keymap;
+mod misses;
+#[cfg(test)]
+mod misses_tests;
 mod pane;
 #[cfg(feature = "native-webdriver")]
 pub(crate) mod probe;
@@ -13,8 +16,6 @@ mod render;
 mod screen;
 #[cfg(any(test, feature = "native-webdriver"))]
 mod stamps;
-#[cfg(test)]
-mod misses_tests;
 #[cfg(test)]
 mod stamps_tests;
 pub(crate) mod style;

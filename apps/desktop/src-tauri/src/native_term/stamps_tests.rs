@@ -55,7 +55,7 @@ fn the_host_clock_counts_ms_since_1970() {
 }
 
 #[test]
-fn skipped_draws_since_the_uncover_count_with_the_first_reason_and_a_hide_or_a_new_show_clears_them() {
+fn skipped_draws_since_the_uncover_keep_the_first_reason_and_a_hide_clears_them() {
     let mut stamps = ShowStamps::default();
     stamps.shown(true, 1000.0);
     stamps.skipped("frame_timeout");
@@ -64,7 +64,10 @@ fn skipped_draws_since_the_uncover_count_with_the_first_reason_and_a_hide_or_a_n
     assert_eq!(stamps.skip_first, Some("frame_timeout"));
     stamps.presented(1040.0);
     stamps.shown(false, 1050.0);
-    assert_eq!(stamps.skipped, 2, "a frame or a place while shown keeps the count");
+    assert_eq!(
+        stamps.skipped, 2,
+        "a frame or a place while shown keeps the count"
+    );
     stamps.hidden();
     assert_eq!(stamps, ShowStamps::default());
     stamps.shown(true, 2000.0);

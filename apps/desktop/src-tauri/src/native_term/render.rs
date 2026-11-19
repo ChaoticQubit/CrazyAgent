@@ -1,3 +1,4 @@
+use super::misses;
 use super::screen::{Cursor, Frame, Preedit, Span};
 use super::style::{FaceEm, FontSource, Style, Theme, cell_px};
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
@@ -848,12 +849,12 @@ impl Shared {
                 areas,
                 &mut self.swash,
             )
-            .map_err(|e| e.to_string())?;
+            .map_err(|_| misses::FRAME_PREPARE.to_owned())?;
         let output = match surface.surface.get_current_texture() {
             Ok(output) => output,
             Err(error) => {
                 surface.surface.configure(&set.device, &surface.config);
-                return Err(error.to_string());
+                return Err(texture_skip(&error).to_owned());
             }
         };
         let clear = linear_rgba(self.theme.background, 1.0);
@@ -863,6 +864,20 @@ impl Shared {
         assert_eq!(surface.generation, self.generation);
         Ok(())
     }
+}
+
+/// The fixed reason a surface gave no frame: it timed out, it changed and was configured
+/// again, or another refusal. Input: the error. Output: the reason.
+fn texture_skip(error: &wgpu::SurfaceError) -> &'static str {
+    let reason = if matches!(error, wgpu::SurfaceError::Timeout) {
+        misses::FRAME_TIMEOUT
+    } else if matches!(error, wgpu::SurfaceError::Outdated) {
+        misses::FRAME_OUTDATED
+    } else {
+        misses::FRAME_TEXTURE
+    };
+    assert!(misses::SKIP_REASONS.contains(&reason));
+    reason
 }
 
 /// Hands an acquired frame back to wgpu: presents it once encoded, or lets it drop, which
