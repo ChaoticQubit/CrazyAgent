@@ -739,6 +739,185 @@ fn a_passed_over_own_node_falls_back_and_is_logged_once_per_file() {
     assert!(!log_own_node_passed_over(&other, &passed));
 }
 
+/// V243-OWN-PREFIX-NODE-REFUSE: a harness launch never starts an npm script under a `node`
+/// other than its own prefix's. When the resolver passes that `node` over, here one every
+/// user can write, the launch is refused with the line naming that file, while
+/// [`resolve_entry`], which npm uses, still falls back to the places' `node` (G1 P7).
+#[test]
+fn a_launch_is_refused_when_its_own_prefix_node_is_passed_over() {
+    let (_folder, home) = scratch();
+    let places_node = program(&home.join(".local/bin/node"), NODE);
+    let prefix = home.join("nvm-like");
+    npm_codex(&prefix);
+    let own = program(&prefix.join("bin/node"), NODE);
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let places = home_only(&home);
+    let entry = prefix.join("bin/codex");
+    let fallback = resolve_entry(&entry, &places).unwrap();
+    assert_eq!(fallback.interpreter().unwrap().program, places_node);
+    let passed = entry_at(&own, &places, 1).unwrap_err();
+    assert_eq!(passed.reason, Reason::Refused);
+    let crate::harnesses::launch::LaunchError(line, secret) =
+        crate::harnesses::interactive::launch_tool(&entry, &places).unwrap_err();
+    assert!(secret.is_none());
+    let named = Missing {
+        tool: "codex".to_owned(),
+        ..passed
+    };
+    assert_eq!(line, named.line());
+    assert!(line.starts_with("codex can't start: "), "{line}");
+    assert!(line.contains(&own.display().to_string()), "{line}");
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE: the harness list reads a harness as a launch reads it, so a
+/// Codex npm script whose own prefix `node` the resolver passes over shows as unable to run,
+/// with the launch's own line and no program to install, never as ready.
+#[test]
+fn the_harness_list_reads_a_passed_over_own_prefix_node_as_a_launch_does() {
+    let (_folder, home) = scratch();
+    program(&home.join(".local/bin/node"), NODE);
+    let prefix = home.join("nvm-like");
+    npm_codex(&prefix);
+    let own = program(&prefix.join("bin/node"), NODE);
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let places = home_only(&home);
+    let entry = prefix.join("bin/codex");
+    assert!(resolve_entry(&entry, &places).is_ok());
+    let needs = crate::harnesses::update::needs(&entry, &places).expect("a harness that can't run");
+    let crate::harnesses::launch::LaunchError(line, _) =
+        crate::harnesses::interactive::launch_tool(&entry, &places).unwrap_err();
+    assert_eq!(needs.line, line);
+    assert_eq!(needs.program, None);
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE: [`own_node_refused`] answers only for a script that asks
+/// `env` for `node` and whose own prefix holds a `node` the resolver passes over. A prefix
+/// with no `node` or with a usable one, and a script asking for another program, give none,
+/// and the first still launches under the places' `node`.
+#[test]
+fn only_a_passed_over_own_prefix_node_refuses_a_launch() {
+    let (_folder, home) = scratch();
+    let places_node = program(&home.join(".local/bin/node"), NODE);
+    program(&home.join(".local/bin/deno"), NODE);
+    let places = home_only(&home);
+    let bare = home.join("bare");
+    npm_codex(&bare);
+    let tool = resolve_entry(&bare.join("bin/codex"), &places).unwrap();
+    assert_eq!(tool.interpreter().unwrap().program, places_node);
+    assert_eq!(own_node_refused(&tool, &places), None);
+    let usable = home.join("usable");
+    npm_codex(&usable);
+    let own = program(&usable.join("bin/node"), NODE);
+    let tool = resolve_entry(&usable.join("bin/codex"), &places).unwrap();
+    assert_eq!(tool.interpreter().unwrap().program, own);
+    assert_eq!(own_node_refused(&tool, &places), None);
+    let other = home.join("other");
+    let script = program(
+        &other.join("lib/node_modules/pkg/cli.js"),
+        "#!/usr/bin/env deno\n",
+    );
+    let refused = program(&other.join("bin/node"), NODE);
+    std::fs::set_permissions(&refused, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let tool = resolve_entry(&script, &places).unwrap();
+    assert_eq!(
+        tool.interpreter().unwrap().program,
+        home.join(".local/bin/deno")
+    );
+    assert_eq!(own_node_refused(&tool, &places), None);
+    let launched =
+        crate::harnesses::interactive::launch_tool(&bare.join("bin/codex"), &places).unwrap();
+    assert_eq!(launched.interpreter().unwrap().program, places_node);
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE: with no `node` in the places, a Codex npm script whose own
+/// prefix `node` the resolver passes over is refused naming that file, never reported as
+/// needing a `node` installed, since one in the places would not start it either. The
+/// launch and the harness list give that same line.
+#[test]
+fn a_passed_over_own_prefix_node_with_none_in_the_places_is_named_not_missing() {
+    let (_folder, home) = scratch();
+    let prefix = home.join("nvm-like");
+    npm_codex(&prefix);
+    let own = program(&prefix.join("bin/node"), NODE);
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let places = home_only(&home);
+    let entry = prefix.join("bin/codex");
+    let missing = resolve_entry(&entry, &places).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused);
+    assert_eq!(missing.tool, "codex");
+    assert_eq!(
+        missing.refused.as_ref().map(|refused| &refused.file),
+        Some(&own)
+    );
+    let crate::harnesses::launch::LaunchError(line, _) =
+        crate::harnesses::interactive::launch_tool(&entry, &places).unwrap_err();
+    assert_eq!(line, missing.line());
+    let needs = crate::harnesses::update::needs(&entry, &places).expect("a harness that can't run");
+    assert_eq!(needs.line, line);
+    assert_eq!(needs.program, None);
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE: only a first line that asks `env` for `node` asks the own
+/// prefix, as [`named_interpreter`] does. A script under an npm prefix whose first line names
+/// a version-manager shim's `node` by path runs the shim's real install and launches, even
+/// beside a prefix `node` the resolver passes over.
+#[test]
+fn a_shim_named_by_path_under_an_npm_prefix_never_asks_its_own_node() {
+    let (_folder, home) = scratch();
+    let shim = program(&home.join(".volta/bin/node"), NODE);
+    let real = program(&home.join(".volta/tools/image/node/22.11.0/bin/node"), NODE);
+    let prefix = home.join("nvm-like");
+    let script = program(
+        &prefix.join("lib/node_modules/pkg/cli.js"),
+        &format!("#!{}\n", shim.display()),
+    );
+    let refused = program(&prefix.join("bin/node"), NODE);
+    std::fs::set_permissions(&refused, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let places = home_only(&home);
+    let tool = resolve_entry(&script, &places).unwrap();
+    assert_eq!(tool.interpreter().unwrap().program, real);
+    assert_eq!(own_node_refused(&tool, &places), None);
+    let launched = crate::harnesses::interactive::launch_tool(&script, &places).unwrap();
+    assert_eq!(launched.interpreter().unwrap().program, real);
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE trip row: [`own_node_refused`] holds only a tool whose real
+/// file is absolute, as every tool [`entry_at`] gives is.
+#[test]
+#[should_panic(expected = "assertion failed: tool.program.is_absolute()")]
+fn the_own_prefix_node_check_trips_on_a_tool_whose_file_is_relative() {
+    let (_folder, home) = scratch();
+    let tool = Resolved {
+        entry: PathBuf::from("codex"),
+        program: PathBuf::from("codex"),
+        kind: Kind::Native,
+    };
+    let _ = own_node_refused(&tool, &home_only(&home));
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE trip row: [`own_node`] judges only a script named by its
+/// absolute real file.
+#[test]
+#[should_panic(expected = "assertion failed: script.is_absolute()")]
+fn the_own_prefix_node_trips_on_a_relative_script() {
+    let (_folder, home) = scratch();
+    let _ = own_node(
+        Path::new("lib/node_modules/pkg/cli.js"),
+        &home_only(&home),
+        1,
+    );
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE trip row: [`own_node`] never judges a `node` past
+/// [`INTERPRETER_DEPTH_MAX`].
+#[test]
+#[should_panic(expected = "assertion failed: depth <= INTERPRETER_DEPTH_MAX")]
+fn the_own_prefix_node_trips_past_the_interpreter_depth() {
+    let (_folder, home) = scratch();
+    let script = home.join("nvm-like/lib/node_modules/pkg/cli.js");
+    let _ = own_node(&script, &home_only(&home), INTERPRETER_DEPTH_MAX + 1);
+}
+
 /// R-L2: a folder other users of the group can write, such as a 0775 staff folder made under
 /// umask 002, is passed over; on macOS an admin-group folder, like Intel Homebrew's, is not.
 /// On Linux a folder of this user's private group is not passed over either, by design

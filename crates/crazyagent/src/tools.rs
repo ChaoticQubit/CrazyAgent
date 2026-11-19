@@ -1144,8 +1144,9 @@ fn between_program_and_check(entry: &Path) -> Option<Step> {
 
 /// Finds the interpreter a script's first line asks `env` for by name: for `node`, first the
 /// one in its own npm prefix ([`crate::harnesses::npm_prefix`]) when the resolver's checks
-/// pass it, else the places in order, as `<name>.exe` on Windows. Inputs: the name, the
-/// script's real file, the places and the depth. Output: the interpreter, or why.
+/// pass it, else the places in order, as `<name>.exe` on Windows; with none there, why that
+/// own `node` was passed over, so the owner is told the file to fix, not to install a node.
+/// Inputs: the name, the script's real file, the places and the depth. Output: it, or why.
 fn named_interpreter(
     name: &str,
     script: &Path,
@@ -1153,22 +1154,77 @@ fn named_interpreter(
     depth: usize,
 ) -> Result<Resolved, Missing> {
     assert!(depth <= INTERPRETER_DEPTH_MAX);
-    let own = (name == "node")
-        .then(|| crate::harnesses::npm_prefix(script))
-        .flatten()
-        .map(|prefix| prefix.join("bin").join(name));
-    if let Some(node) = own {
-        match entry_at(&node, places, depth) {
+    let mut passed = None;
+    if name == "node"
+        && let Some((node, judged)) = own_node(script, places, depth)
+    {
+        match judged {
             Ok(found) => return Ok(found),
-            Err(passed) if passed.reason != Reason::NotFound => {
-                log_own_node_passed_over(&node, &passed);
+            Err(missing) => {
+                log_own_node_passed_over(&node, &missing);
+                passed = Some(missing);
             }
-            Err(_) => {}
         }
     }
     #[cfg(windows)]
     let name = &format!("{name}.exe");
-    resolve_at(name, places, depth)
+    match (resolve_at(name, places, depth), passed) {
+        (Err(none), Some(passed)) if none.reason == Reason::NotFound => Err(passed),
+        (found, _) => found,
+    }
+}
+
+/// The `node` file in a script's own npm prefix ([`crate::harnesses::npm_prefix`]) and how
+/// the resolver's checks judge it at the depth given: none when the script has no prefix or
+/// the prefix has no `node`, else that `node` or why it is passed over. Inputs: the script's
+/// real file, the places and the depth. Output: the file and its judgement, or none.
+fn own_node(
+    script: &Path,
+    places: &Places,
+    depth: usize,
+) -> Option<(PathBuf, Result<Resolved, Missing>)> {
+    assert!(depth <= INTERPRETER_DEPTH_MAX);
+    assert!(script.is_absolute());
+    let node = crate::harnesses::npm_prefix(script)?
+        .join("bin")
+        .join("node");
+    let judged = entry_at(&node, places, depth);
+    if judged
+        .as_ref()
+        .is_err_and(|missing| missing.reason == Reason::NotFound)
+    {
+        return None;
+    }
+    Some((node, judged))
+}
+
+/// Why a resolved script whose first line asks `env` for `node` would start under a `node`
+/// other than its own npm prefix's: why the resolver passes that one over, named for the
+/// tool, so a harness launch refuses where npm falls back (V243-OWN-PREFIX-NODE-REFUSE). The
+/// tool is resolved at depth 0, so its `node` is judged at depth 1, as [`named_interpreter`]
+/// judges it. Inputs: the tool and the places. Output: why, or none.
+pub(crate) fn own_node_refused(tool: &Resolved, places: &Places) -> Option<Missing> {
+    assert!(tool.program.is_absolute());
+    if !matches!(tool.kind, Kind::Script { by_name: true, .. }) {
+        return None;
+    }
+    let asks_node = shebang(&tool.program)
+        .ok()
+        .flatten()
+        .is_some_and(|first| first.by_name.as_deref() == Some("node"));
+    if !asks_node {
+        return None;
+    }
+    let passed = own_node(&tool.program, places, 1)?.1.err()?;
+    let name = tool
+        .entry
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("the program");
+    Some(Missing {
+        tool: name.to_owned(),
+        ..passed
+    })
 }
 
 /// The most own-prefix `node` files the engine log names, each once per process.
@@ -1176,9 +1232,9 @@ const OWN_NODE_LOGGED_MAX: usize = 64;
 
 /// Writes one engine log line for an npm prefix's own `node` the resolver found and passed
 /// over, with its reason, once per file per process and for at most [`OWN_NODE_LOGGED_MAX`]
-/// files, so the fallback to the places' `node` is never silent (G1 P7; refusing the
-/// harness instead is backlog V243-OWN-PREFIX-NODE-REFUSE). Inputs: the file and why it was
-/// passed over. Output: whether this call wrote the line.
+/// files, so the fallback to the places' `node` is never silent (G1 P7); a harness launch
+/// refuses instead ([`own_node_refused`]). Inputs: the file and why it was passed over.
+/// Output: whether this call wrote the line.
 fn log_own_node_passed_over(node: &Path, passed: &Missing) -> bool {
     static LOGGED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
     assert_ne!(passed.reason, Reason::NotFound);
