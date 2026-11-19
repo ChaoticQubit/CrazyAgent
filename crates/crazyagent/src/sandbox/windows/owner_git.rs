@@ -12,7 +12,7 @@ use std::process::Command;
 pub const OWNER_GIT_FOLDER: &str = "owner-git";
 
 const PROGRAM_FOLDERS: [&str; 2] = ["cmd", "bin"];
-const PLATFORM_FOLDERS: [&str; 3] = ["mingw64", "clangarm64", "mingw32"];
+const PLATFORM_FOLDERS: [&str; 5] = ["ucrt64", "mingw64", "clang64", "clangarm64", "mingw32"];
 const GLOBAL_CONFIG: &str = "GIT_CONFIG_GLOBAL";
 
 /// Where owner git keeps its files for one project: its home and temp folder, the only
@@ -42,9 +42,9 @@ pub fn places(folder: &Path, project: &Path) -> OwnerGitPlaces {
 }
 
 /// Git for Windows' install folder for its program: the folder above `cmd` or `bin`, or above
-/// a platform folder's `bin` such as `mingw64\bin`, so the program the launcher starts and its
-/// libraries are readable too. Input: git's absolute program. Output: the folder, or none for a
-/// program outside those layouts.
+/// a platform folder's `bin` such as `ucrt64\bin` or `mingw64\bin`, so the program the launcher
+/// starts and its libraries are readable too. Input: git's absolute program. Output: the
+/// folder, or none for a program outside those layouts.
 pub fn install_root(git: &Path) -> Option<&Path> {
     let named = |path: &Path, names: &[&str]| {
         path.file_name()
@@ -96,14 +96,14 @@ pub fn policy(
 }
 
 /// True when a folder holds Git for Windows' markers, as every installer and MinGit lay them
-/// out: `cmd\git.exe` and a platform folder such as `mingw64`, so a `git.exe` that sits in any
-/// folder's `cmd` or `bin` never makes that whole folder readable (rv-sec3 #628 F1). Input:
-/// the folder above the program. Output: the answer.
+/// out: `cmd\git.exe` and a platform's `bin\git.exe` such as `ucrt64\bin\git.exe`, so a
+/// `git.exe` in any folder's `cmd` or `bin`, or a bare platform folder, never makes that whole
+/// folder readable (rv-sec3 #628 F1). Input: the folder above the program. Output: the answer.
 fn marked(root: &Path) -> bool {
     root.join("cmd").join("git.exe").is_file()
         && PLATFORM_FOLDERS
             .iter()
-            .any(|platform| root.join(platform).is_dir())
+            .any(|platform| root.join(platform).join("bin").join("git.exe").is_file())
 }
 
 /// The owner's git for one project, run inside an AppContainer of its own with no capability
