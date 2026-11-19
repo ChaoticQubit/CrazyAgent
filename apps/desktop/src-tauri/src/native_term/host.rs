@@ -895,6 +895,8 @@ impl Native {
                 }
                 Action::Nothing
             }
+            #[cfg(windows)]
+            ViewEvent::CopyKey(input) => copy_key(&mut entry.pane, clip, input),
             ViewEvent::Paste => match clip.read() {
                 Some(text) => entry.pane.apply(Input::Paste { text }),
                 None => Action::Nothing,
@@ -953,6 +955,13 @@ impl Native {
         entry.told = now;
         assert_eq!(entry.told, now);
     }
+}
+
+/// The copy chord of a host without Cmd (Ctrl+C, Ctrl+Shift+C). Inputs: the pane, the
+/// board and the chord's own input. Output: what the pane asks for.
+#[cfg(windows)]
+fn copy_key(pane: &mut super::pane::Pane, _clip: &platform::Clip, input: Input) -> Action {
+    pane.apply(input)
 }
 
 fn cell_of(
@@ -1130,5 +1139,51 @@ impl Native {
             self.end(page, code);
             assert!(self.table.get(page).is_none());
         }
+    }
+}
+
+#[cfg(all(windows, test))]
+mod tests {
+    use super::super::pane::{Action, Input, Pane};
+    use super::{copy_key, platform};
+
+    fn selected(output: &[u8], last: usize) -> Pane {
+        let mut pane = Pane::new(true);
+        assert!(pane.on_attached(20, 4));
+        assert!(pane.on_output(output));
+        let press = Input::Press {
+            cell: (0, 0),
+            option: false,
+            clicks: 1,
+        };
+        assert_eq!(pane.apply(press), Action::Local);
+        let drag = Input::Drag {
+            cell: (last, 0),
+            option: false,
+        };
+        assert_eq!(pane.apply(drag), Action::Local);
+        pane
+    }
+
+    #[test]
+    fn the_copy_chord_with_a_selection_copies_and_sends_no_interrupt() {
+        let mut pane = selected(b"hello world", 4);
+        let clip = platform::Clip::new();
+        let chord = Input::Text(vec![0x03]);
+        assert_eq!(copy_key(&mut pane, &clip, chord), Action::Nothing);
+    }
+
+    #[test]
+    fn the_copy_chord_with_no_selection_sends_the_interrupt() {
+        let mut pane = Pane::new(true);
+        assert!(pane.on_attached(20, 4));
+        assert!(pane.on_output(b"hello world"));
+        let clip = platform::Clip::new();
+        let sent = copy_key(&mut pane, &clip, Input::Text(vec![0x03]));
+        let interrupt = Action::Input {
+            bytes: vec![0x03],
+            wheel: false,
+        };
+        assert_eq!(sent, interrupt);
     }
 }
