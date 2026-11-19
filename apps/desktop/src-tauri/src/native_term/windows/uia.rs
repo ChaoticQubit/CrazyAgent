@@ -520,11 +520,10 @@ impl ITextRangeProvider_Impl for TextRange_Impl {
         let read = text.string_for_range((span.0, span.1 - span.0));
         let string = read.map(|(string, _)| string).unwrap_or_default();
         let mut wide: Vec<u16> = string.encode_utf16().collect();
-        if let Ok(keep) = usize::try_from(maxlength) {
-            if keep < wide.len() {
-                let cuts_pair = keep > 0 && (0xD800..0xDC00).contains(&wide[keep - 1]);
-                wide.truncate(keep - usize::from(cuts_pair));
-            }
+        let keep = usize::try_from(maxlength).map_or(wide.len(), |keep| keep.min(wide.len()));
+        if keep < wide.len() {
+            let cuts_pair = keep > 0 && (0xD800..0xDC00).contains(&wide[keep - 1]);
+            wide.truncate(keep - usize::from(cuts_pair));
         }
         Ok(BSTR::from_wide(&wide))
     }
