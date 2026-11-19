@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { LIMIT_MS, clockSkew, nativeSample, nativeShown } from "./switch-time-kit.mjs";
+import { LIMIT_MS, clockSkew, nativeCounts, nativeLook, nativeSample, nativeShown } from "./switch-time-kit.mjs";
 import { NATIVE_FIRST_READ_MS, VIEW_IDS_MAX, inPageNativeRead } from "./switch-time.mjs";
 
 const TEXT = "stand-in ready";
 const CLICK = 1_800_000_000_000;
 const ROWS = ["", "Codex stand-in ready", ""];
-const seen = (fields) => ({ hidden: false, rows: ROWS, uncovered_ms: CLICK + 9, presented_ms: CLICK + 21, now_ms: CLICK + 80, direct: true, ...fields });
+const seen = (fields) => ({ hidden: false, rows: ROWS, uncovered_ms: CLICK + 9, presented_ms: CLICK + 21, now_ms: CLICK + 80, direct: true,
+  asked_ms: CLICK + 4, skipped: 0, skip_first: null, busy_answers: 3, cover_refused: 0, ...fields });
 
 test("a native view is on screen once it is not hidden, presented a frame since its uncover and its rows hold the marker", () => {
   assert.equal(nativeShown(seen({}), TEXT), true);
@@ -17,8 +18,11 @@ test("a native view is on screen once it is not hidden, presented a frame since 
   assert.throws(() => nativeShown(seen({ hidden: true }), TEXT), /hidden view keeps no stamps/);
 });
 
-test("a native switch runs from the click to the first frame the view presented after it, and keeps the uncover's share", () => {
-  assert.deepEqual(nativeSample(CLICK, seen({}), TEXT), { ms: 21, uncovered_ms: 9 });
+test("a native switch runs from the click to the first frame the view presented after it, and keeps the uncover's share, the cover's entry and the draws skipped since the uncover", () => {
+  assert.deepEqual(nativeSample(CLICK, seen({}), TEXT), { ms: 21, uncovered_ms: 9, asked_ms: 4, skipped: 0, skip_first: null });
+  assert.deepEqual(nativeSample(CLICK, seen({ skipped: 2, skip_first: "frame_timeout" }), TEXT), { ms: 21, uncovered_ms: 9, asked_ms: 4, skipped: 2, skip_first: "frame_timeout" });
+  assert.equal(nativeSample(CLICK, seen({ asked_ms: CLICK - 300 }), TEXT).asked_ms, null, "a cover entry before the click is another switch's");
+  assert.equal(nativeSample(CLICK, seen({ asked_ms: null }), TEXT).asked_ms, null);
   assert.equal(nativeSample(CLICK, seen({ hidden: true, uncovered_ms: null, presented_ms: null }), TEXT), null, "still covered: not yet");
   assert.equal(nativeSample(CLICK, seen({ presented_ms: null }), TEXT), null, "uncovered, not yet presented");
   assert.equal(nativeSample(CLICK, seen({ rows: [""] }), TEXT), null, "presented without the marker");
@@ -26,6 +30,23 @@ test("a native switch runs from the click to the first frame the view presented 
     "a view already shown before the click is never this switch's sample");
   assert.throws(() => nativeSample(0, seen({}), TEXT), /click stamp/);
   assert.throws(() => nativeSample(CLICK, seen({ presented_ms: CLICK + 1 }), TEXT), /presents only after/);
+});
+
+test("the last read of a switch the view never showed in keeps whether it was hidden, its stamps and the cover's entry from the click, its skipped draws and whether the marker was there", () => {
+  assert.deepEqual(nativeLook(CLICK, seen({ presented_ms: null, skipped: 3, skip_first: "frame_timeout" }), TEXT),
+    { hidden: false, uncovered_ms: 9, presented_ms: null, asked_ms: 4, marker: true, skipped: 3, skip_first: "frame_timeout" });
+  assert.deepEqual(nativeLook(CLICK, seen({ hidden: true, uncovered_ms: null, presented_ms: null, asked_ms: CLICK - 300 }), TEXT),
+    { hidden: true, uncovered_ms: null, presented_ms: null, asked_ms: null, marker: true, skipped: 0, skip_first: null }, "still covered and no cover asked since the click");
+  assert.equal(nativeLook(CLICK, seen({ rows: ["", "$ ", ""] }), TEXT).marker, false, "presented without the marker");
+  assert.throws(() => nativeLook(CLICK, seen({ skipped: -1 }), TEXT), /skipped/);
+  assert.throws(() => nativeLook(CLICK, seen({ skip_first: "frame_timeout" }), TEXT), /first skip/);
+});
+
+test("the busy answers and refused covers of one switch are the host's counts between the read before the click and the last read", () => {
+  assert.deepEqual(nativeCounts(seen({ busy_answers: 3, cover_refused: 1 }), seen({ busy_answers: 5, cover_refused: 1 })), { busy: 2, refused: 0 });
+  assert.deepEqual(nativeCounts(seen({}), seen({ cover_refused: 2 })), { busy: 0, refused: 2 });
+  assert.throws(() => nativeCounts(seen({ busy_answers: 5 }), seen({ busy_answers: 3 })), /never fall/);
+  assert.throws(() => nativeCounts(seen({ busy_answers: undefined }), seen({})), /count/);
 });
 
 test("the clock skew is how far the host's stamp falls outside the page stamps around its read", () => {

@@ -14,6 +14,8 @@ mod screen;
 #[cfg(any(test, feature = "native-webdriver"))]
 mod stamps;
 #[cfg(test)]
+mod misses_tests;
+#[cfg(test)]
 mod stamps_tests;
 pub(crate) mod style;
 mod table;
