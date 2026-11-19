@@ -11,6 +11,8 @@ mod pane;
 pub(crate) mod probe;
 mod render;
 mod screen;
+#[cfg(any(test, feature = "native-webdriver"))]
+mod stamps;
 #[cfg(test)]
 mod stamps_tests;
 pub(crate) mod style;

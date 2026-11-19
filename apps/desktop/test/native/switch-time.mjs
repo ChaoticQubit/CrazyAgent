@@ -3,7 +3,7 @@ import { writeFileSync } from "node:fs";
 import { loadavg } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
-import { LIMIT_MS, SWITCHES, TARGET_MS, line, report } from "./switch-time-kit.mjs";
+import { LIMIT_MS, SWITCHES, TARGET_MS, clockSkew, line, nativeSample, nativeShown, report } from "./switch-time-kit.mjs";
 
 /** How long one switch may take to show its target before it counts as never shown, in ms.
  * It is far under the WebDriver request limit, so a stuck switch is a sample, not a lost run. */
@@ -16,6 +16,19 @@ export const AWAY_MS = 1000;
 /** How long leaving may take until the target is off the screen, in ms. */
 const GONE_MS_MAX = 10000;
 const LOOK_MS = 50;
+
+/** How long after a click the first read of a native view waits, in ms: the limit itself,
+ * so a switch that passes has no probe read on the main thread inside it. */
+export const NATIVE_FIRST_READ_MS = LIMIT_MS;
+
+/** The view ids a scan for a shown native view reads: page and feed ids count up from 1 on
+ * one counter (native_term/table.rs) and a run opens few views. */
+export const VIEW_IDS_MAX = 64;
+
+/** How often a native read the main thread was too busy for is taken again, and the pause
+ * between tries, in ms. */
+const BUSY_TRIES_MAX = 20;
+const BUSY_MS = 10;
 
 /** How many frame gaps a row times in its idle window before it switches. */
 export const PERIOD_FRAMES = 30;
@@ -119,6 +132,90 @@ export function inPageSwitch(request, done) {
   requestAnimationFrame(look);
 }
 
+/** Runs inside the app page and uses nothing outside itself but the app's bridge: one probe
+ * read of a native view (`desktop_native_terminal_probe`, native-webdriver builds only),
+ * stamped by the page's clock just before and after it. Inputs: `{ view }` and the callback.
+ * Output, to the callback: `{ seen, before, after }`, or `{ failed }`, the refusal as text. */
+export function inPageNativeRead(request, done) {
+  const stamp = () => performance.timeOrigin + performance.now();
+  const before = stamp();
+  window.__TAURI_INTERNALS__.invoke("desktop_native_terminal_probe", { view: request.view, step: { kind: "read" } }).then(
+    (seen) => done({ seen, before, after: stamp() }),
+    (failure) => done({ failed: typeof failure === "string" ? failure : JSON.stringify(failure) }),
+  );
+}
+
+function checkedNative(target) {
+  assert.ok(Number.isInteger(target.view) && target.view > 0 && target.view <= VIEW_IDS_MAX, `a native target names a view id up to ${VIEW_IDS_MAX}`);
+  assert.match(target.text ?? "", /\S/, "a native target names its text");
+  return target;
+}
+
+/** One probe read of a native view in the real window, taken again while the main thread is
+ * busy. Input: the view id. Output: `{ seen, skew_ms }`, or null for an id no view of this
+ * window holds; throws on any other refusal, or a main thread busy for every try. */
+async function probeNative(view) {
+  for (let tries = 0; tries < BUSY_TRIES_MAX; tries += 1) {
+    const answer = await browser.executeAsync(inPageNativeRead, { view });
+    if (answer?.failed === undefined) {
+      assert.ok(answer?.seen && Number.isFinite(answer.before) && Number.isFinite(answer.after), `the page answered a native read: ${JSON.stringify(answer)}`);
+      return { seen: answer.seen, skew_ms: clockSkew(answer.before, answer.seen.now_ms, answer.after) };
+    }
+    if (answer.failed.includes("native_terminal_view_unknown")) return null;
+    assert.ok(answer.failed.includes("native_terminal_main_busy"), `the probe of native view ${view} failed: ${answer.failed}`);
+    await pause(BUSY_MS);
+  }
+  throw new Error(`the main thread was busy for ${BUSY_TRIES_MAX} reads of native view ${view}`);
+}
+
+/** Finds the one native view of the window on screen with `text` on it, by one scan of ids 1
+ * to `VIEW_IDS_MAX`. Input: the text. Output: `{ view, direct, skew_ms }`, or null while
+ * none shows it; throws when two do. */
+export async function nativeViewShowing(text) {
+  const found = [];
+  for (let view = 1; view <= VIEW_IDS_MAX; view += 1) {
+    const read = await probeNative(view);
+    if (read !== null && nativeShown(read.seen, text)) found.push({ view, direct: read.seen.direct, skew_ms: read.skew_ms });
+  }
+  assert.ok(found.length <= 1, `one native view shows ${text}, not ${found.length}: ${JSON.stringify(found)}`);
+  return found[0] ?? null;
+}
+
+/** Times one switch back to a native view in the real window (DEC-203) by the host's show
+ * stamps: stamps the click in the page, reads the view `NATIVE_FIRST_READ_MS` after it, then
+ * every `LOOK_MS` until it is on screen or `SHOW_MS_MAX` passed. Inputs: `{ click, target }`.
+ * Output: `{ ms, uncovered_ms, reads, skew_ms, load1 }`, ms null for a view never shown;
+ * throws for no link, a view on screen before the click, or one gone. */
+async function timeNativeSwitch({ click, target }) {
+  const load1 = loadavg()[0];
+  const gone = `native view ${target.view} is gone: it ended or opened again, so the switch is not timed`;
+  const first = await probeNative(target.view);
+  assert.ok(first !== null, gone);
+  assert.ok(!nativeShown(first.seen, target.text), `the target is on screen before the click on ${click}`);
+  const clickAt = await browser.execute((selector) => {
+    const link = document.querySelector(selector);
+    if (!link) return null;
+    const at = performance.timeOrigin + performance.now();
+    link.click();
+    return at;
+  }, click);
+  assert.ok(Number.isFinite(clickAt), `nothing matches ${click}`);
+  await pause(NATIVE_FIRST_READ_MS);
+  const deadline = Date.now() + SHOW_MS_MAX - NATIVE_FIRST_READ_MS;
+  const readsMax = Math.ceil(SHOW_MS_MAX / LOOK_MS) + 1;
+  let skew = null;
+  for (let reads = 1; reads <= readsMax; reads += 1) {
+    const read = await probeNative(target.view);
+    assert.ok(read !== null, gone);
+    skew = read.skew_ms;
+    const sample = nativeSample(clickAt, read.seen, target.text);
+    if (sample !== null) return { ...sample, reads, skew_ms: skew, load1 };
+    if (Date.now() >= deadline) return { ms: null, uncovered_ms: null, reads, skew_ms: skew, load1 };
+    await pause(LOOK_MS);
+  }
+  return { ms: null, uncovered_ms: null, reads: readsMax, skew_ms: skew, load1 };
+}
+
 function checked(request) {
   assert.ok(request.click === null || /\S/.test(request.click), "a switch clicks a link, or null only asks what is shown");
   for (const part of ["scope", "rows", "text"]) assert.match(request.target?.[part] ?? "", /\S/, `a target names its ${part}`);
@@ -132,9 +229,14 @@ export function switchExpression(request) {
   return `new Promise((done) => (${inPageSwitch.toString()})(${JSON.stringify(checked(request))}, done))`;
 }
 
-/** Whether a target is on screen now, in the real window. Input: the target. Output: the
- * answer. */
+/** Whether a target is on screen now, in the real window: a page target by `inPageSwitch`,
+ * a native one (`{ view, text }`) by one probe read. Input: the target. Output: the answer. */
 export async function onScreen(target) {
+  if (target?.view !== undefined) {
+    const read = await probeNative(checkedNative(target).view);
+    assert.ok(read !== null, `native view ${target.view} is gone: it ended or opened again`);
+    return nativeShown(read.seen, target.text);
+  }
   const answer = await browser.executeAsync(inPageSwitch, checked({ click: null, target, limit_ms: SHOW_MS_MAX }));
   assert.equal(typeof answer?.shown, "boolean", `the page answered what is shown: ${JSON.stringify(answer)}`);
   return answer.shown;
@@ -153,9 +255,11 @@ export async function framePeriod() {
 /** Times one switch in the real window. Inputs: `{ click, target }`, the link's selector and
  * the target. Output: the sample `{ ms, frame_ms, frames, load1 }`, with ms null for a
  * target that never showed; throws when the switch could not be timed at all: no link, the
- * target already on screen, or a window that drew no frame. */
+ * target already on screen, or a window that drew no frame. A native target (`{ view, text }`)
+ * is timed by its host's stamps instead (`timeNativeSwitch`). */
 export async function timeSwitch({ click, target }) {
   assert.match(click ?? "", /\S/, "a timed switch clicks a link");
+  if (target?.view !== undefined) return timeNativeSwitch({ click, target: checkedNative(target) });
   const load1 = loadavg()[0];
   const answer = await browser.executeAsync(inPageSwitch, checked({ click, target, limit_ms: SHOW_MS_MAX }));
   assert.ok(answer && answer.error === undefined, `the switch on ${click} could not be timed: ${answer?.error}`);
@@ -164,6 +268,18 @@ export async function timeSwitch({ click, target }) {
   assert.ok(answer.ms === null || (Number.isFinite(answer.ms) && Number.isFinite(answer.frame_ms) && answer.frame_ms >= 0 && answer.ms >= answer.frame_ms),
     `a shown target has both its times: ${JSON.stringify(answer)}`);
   return { ms: answer.ms, frame_ms: answer.frame_ms, frames: answer.frames, load1 };
+}
+
+/** The native share of a row's switches as a line: the median and worst time to the uncover,
+ * the page and bridge share, the worst clock skew and the most reads one switch took. Input:
+ * the timed native samples. Output: the line. */
+function nativeLine(samples) {
+  assert.ok(samples.length > 0 && samples.every((sample) => Number.isInteger(sample.reads)), "native samples count their reads");
+  const uncovered = samples.map((sample) => sample.uncovered_ms).filter((ms) => ms !== null).sort((left, right) => left - right);
+  const skews = samples.map((sample) => sample.skew_ms).filter((ms) => ms !== null);
+  const ms = (value) => (value === undefined ? "none" : `${value.toFixed(1)} ms`);
+  return `uncover p50 ${ms(uncovered[Math.floor(uncovered.length / 2)])}, max ${ms(uncovered.at(-1))}; `
+    + `clock skew max ${ms(skews.length === 0 ? undefined : Math.max(...skews))}; reads max ${Math.max(...samples.map((sample) => sample.reads))}`;
 }
 
 /** Runs one row (DEC-187): a warm-up switch, then `SWITCHES` timed ones. Each leaves with
@@ -193,6 +309,7 @@ export async function measureRow({ name, away, back, target, evidence }) {
   result.line = line(name, result);
   writeFileSync(join(evidence, `switch-time-${name}.json`), JSON.stringify({ name, back, target, away_ms: AWAY_MS, frame_period: frames, warm_up: warmUp, samples: timed, report: result }, null, 1), { mode: 0o600 });
   console.log(`SWITCH-TIME ${result.line}`);
+  if (target.view !== undefined) console.log(`SWITCH-TIME ${name} native: ${nativeLine(timed)}`);
   console.log(`SWITCH-TIME ${name} frames: idle period ${frames.period_ms === null ? "not timed" : `${frames.period_ms.toFixed(1)} ms, shortest ${frames.min_ms.toFixed(1)} ms`} over ${frames.frames} frames`);
   return result;
 }

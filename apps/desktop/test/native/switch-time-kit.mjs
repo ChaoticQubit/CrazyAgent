@@ -44,6 +44,45 @@ export function stampSample(clickAt, shows) {
   return { ms };
 }
 
+/** Whether a native view is on screen by one probe read (DEC-203): not hidden, a frame
+ * presented since its uncover, and its rows hold `text`. Inputs: the read (`hidden`, `rows`,
+ * `uncovered_ms`, `presented_ms`) and the text. Output: the answer. */
+export function nativeShown(seen, text) {
+  assert.equal(typeof seen?.hidden, "boolean", `a native read says whether the view is hidden: ${JSON.stringify(seen)}`);
+  assert.ok(Array.isArray(seen.rows), "a native read has the view's rows");
+  assert.match(text ?? "", /\S/, "a native target names its text");
+  assert.ok(!seen.hidden || (seen.uncovered_ms === null && seen.presented_ms === null), "a hidden view keeps no stamps");
+  if (seen.hidden || seen.presented_ms === null) return false;
+  assert.ok(Number.isFinite(seen.uncovered_ms) && Number.isFinite(seen.presented_ms), "a presented view has both its stamps");
+  assert.ok(seen.presented_ms >= seen.uncovered_ms, "a view presents only after its uncover");
+  return seen.rows.join("\n").includes(text);
+}
+
+/** One native switch from the click's stamp and one probe read, both in ms since 1970 on the
+ * Mac's one clock: once the view is on screen (`nativeShown`), `ms` runs from the click to
+ * the first frame it presented and `uncovered_ms` to its uncover, the page and bridge share.
+ * Inputs: the click's stamp, the read and the text. Output: `{ ms, uncovered_ms }`, or null
+ * while it is not on screen; throws for a view shown before the click. */
+export function nativeSample(clickAt, seen, text) {
+  assert.ok(Number.isFinite(clickAt) && clickAt > 0, `a click stamp is a time: ${clickAt}`);
+  if (!nativeShown(seen, text)) return null;
+  assert.ok(seen.uncovered_ms >= clickAt, `the view was shown before the click: uncovered ${clickAt - seen.uncovered_ms} ms before it`);
+  const { ms } = stampSample(clickAt, [seen.presented_ms]);
+  assert.ok(ms !== null && ms >= seen.uncovered_ms - clickAt);
+  return { ms, uncovered_ms: seen.uncovered_ms - clickAt };
+}
+
+/** How far the host's clock at a read falls outside the page's stamps just before and after
+ * it, in ms: 0 when the two clocks agree within the read's round trip. Inputs: the page's
+ * stamp before, the host's and the page's after. Output: the skew. */
+export function clockSkew(before, host, after) {
+  assert.ok(Number.isFinite(before) && Number.isFinite(after) && before <= after, `the page stamps in order: ${before}, ${after}`);
+  assert.ok(Number.isFinite(host), `a host stamp is a time: ${host}`);
+  const skew = Math.max(0, before - host, host - after);
+  assert.ok(skew >= 0);
+  return skew;
+}
+
 /** Judges one row's switches (DEC-187). Input: 1 to `SAMPLES_MAX` samples `{ ms }`, the time
  * from the click to the target on screen, null for a switch that never showed it, which
  * counts as past every limit. Output: the count, p50, p95 and max by nearest rank (null

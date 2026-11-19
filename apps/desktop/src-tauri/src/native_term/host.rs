@@ -6,6 +6,8 @@ use super::ended::ended_final;
 use super::pane::{Action, GRID_MAX, Input};
 use super::render::{GPU_FAULT, Shared, Surface};
 use super::screen;
+#[cfg(feature = "native-webdriver")]
+use super::stamps::{self, ShowStamps};
 use super::style::Style;
 use super::table::{Direct, Entry, Outbox, Table, Told, VIEWS_MAX, changes};
 use super::view::{MouseKind, TermView, ViewEvent};
@@ -139,8 +141,8 @@ enum Held {
 }
 
 /// A view's AppKit and drawing parts: its NSView above the webview, the webview its place
-/// is measured in, its surface and the backing scale key it was made at, its events channel
-/// and the wall window's project a reopen needs.
+/// is measured in, its surface and the backing scale key it was made at, its events channel,
+/// the wall window's project a reopen needs and, in a native-webdriver build, its show stamps.
 pub struct View {
     ns: Retained<TermView>,
     webview: Retained<NSView>,
@@ -148,6 +150,8 @@ pub struct View {
     scale: u32,
     events: Channel<NativeEvent>,
     project: Option<String>,
+    #[cfg(feature = "native-webdriver")]
+    stamps: ShowStamps,
 }
 
 /// Everything the native terminals hold on the main thread.
@@ -378,13 +382,17 @@ pub fn style(style: Style) -> Result<(), &'static str> {
 }
 
 /// What a native-webdriver trial reads of one view: its NSView, its visible rows, whether
-/// the direct path draws it and the private pasteboard's text.
+/// the direct path draws it, the private pasteboard's text, whether the view is hidden, its
+/// show stamps and the host's clock at the read, in ms since 1970.
 #[cfg(feature = "native-webdriver")]
 pub struct Look {
     pub view: Retained<TermView>,
     pub rows: Vec<String>,
     pub direct: bool,
     pub pasteboard: Option<String>,
+    pub hidden: bool,
+    pub stamps: ShowStamps,
+    pub now_ms: f64,
 }
 
 /// Reads one view a window opened for a native-webdriver trial; on the main thread. Inputs:
@@ -404,11 +412,17 @@ pub fn look(window: &str, page: u64) -> Result<Look, &'static str> {
             grid.rows.iter().map(text).collect()
         });
         assert!(rows.len() <= GRID_MAX);
+        let hidden = entry.platform.ns.isHidden();
+        assert!(!hidden || entry.platform.stamps == ShowStamps::default());
+        assert!(hidden || entry.platform.stamps.uncovered_ms.is_some());
         Ok(Look {
             view: entry.platform.ns.clone(),
             rows,
             direct: entry.direct,
             pasteboard: clip.read(),
+            hidden,
+            stamps: entry.platform.stamps,
+            now_ms: stamps::now_ms(),
         })
     });
     match looked {
@@ -592,6 +606,8 @@ impl Native {
             scale: key,
             events: open.events,
             project: open.project,
+            #[cfg(feature = "native-webdriver")]
+            stamps: ShowStamps::default(),
         };
         let entry = Entry {
             window: open.window,
@@ -1136,13 +1152,19 @@ impl Native {
                 view.ns.cancel_marked();
             }
             view.ns.setHidden(true);
+            #[cfg(feature = "native-webdriver")]
+            view.stamps.hidden();
             return;
         }
         let host = unsafe { view.ns.superview() };
         let css = NSRect::new(NSPoint::new(x, y), NSSize::new(width, height));
         view.ns
             .setFrame(view.webview.convertRect_toView(css, host.as_deref()));
+        #[cfg(feature = "native-webdriver")]
+        let was_hidden = view.ns.isHidden();
         view.ns.setHidden(false);
+        #[cfg(feature = "native-webdriver")]
+        view.stamps.shown(was_hidden, stamps::now_ms());
         let scale = backing(&view.ns);
         let key = scale_key(scale);
         if view.scale != key {
@@ -1219,6 +1241,8 @@ impl Native {
             match draw_view(entry, shared, style, *shown) {
                 Ok(true) => {
                     entry.pane.dirty = false;
+                    #[cfg(feature = "native-webdriver")]
+                    entry.platform.stamps.presented(stamps::now_ms());
                     drawn += 1;
                 }
                 Ok(false) => {}

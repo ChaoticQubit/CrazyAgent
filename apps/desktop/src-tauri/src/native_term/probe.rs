@@ -25,8 +25,9 @@ pub enum Step {
 
 /// What a trial reads after its step: the visible rows, whether the direct path draws the
 /// view, whether the view is its window's first responder, whether the app is active and its
-/// window key, the window's backing scale (0 with no window), the marked text and the
-/// private pasteboard's text.
+/// window key, the window's backing scale (0 with no window), the marked text, the private
+/// pasteboard's text, whether the view is hidden, its show stamps (`ShowStamps`) and the
+/// host's clock at the read, both in ms since 1970.
 #[derive(serde::Serialize, Debug, PartialEq)]
 pub struct Seen {
     pub rows: Vec<String>,
@@ -37,6 +38,10 @@ pub struct Seen {
     pub scale: f64,
     pub marked: Option<String>,
     pub pasteboard: Option<String>,
+    pub hidden: bool,
+    pub uncovered_ms: Option<f64>,
+    pub presented_ms: Option<f64>,
+    pub now_ms: f64,
 }
 
 /// Takes one trial step on a view the calling window opened, then reads it. Inputs: the
@@ -152,8 +157,14 @@ fn seen(mtm: MainThreadMarker, look: Look) -> Seen {
             .map_or(0.0, |window| window.backingScaleFactor()),
         marked: look.view.marked_text(),
         pasteboard: look.pasteboard,
+        hidden: look.hidden,
+        uncovered_ms: look.stamps.uncovered_ms,
+        presented_ms: look.stamps.presented_ms,
+        now_ms: look.now_ms,
     };
     assert!(!seen.focused || window.is_some());
     assert!(seen.scale >= 0.0 && seen.scale.is_finite());
+    assert!(seen.hidden == seen.uncovered_ms.is_none());
+    assert!(seen.presented_ms.is_none() || seen.uncovered_ms.is_some());
     seen
 }
