@@ -2111,7 +2111,10 @@ fn native_enabled() -> bool {
 /// `native_terminal_unsupported`, the code Windows answered before its host.
 #[cfg(windows)]
 fn native_open_allowed() -> Result<(), BridgeError> {
-    Ok(())
+    if native_enabled() {
+        return Ok(());
+    }
+    native_unsupported()
 }
 
 /// Whether this desktop draws terminals natively: true only in a macOS build. Input: the

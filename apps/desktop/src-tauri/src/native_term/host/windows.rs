@@ -44,7 +44,11 @@ pub fn mark_main() {
 /// Records a thread in a mark once; the marked thread may mark again. Inputs: the mark and
 /// the calling thread.
 fn mark_on(mark: &OnceLock<ThreadId>, current: ThreadId) {
-    let _ = mark.set(current);
+    let marked = *mark.get_or_init(|| current);
+    assert_eq!(
+        marked, current,
+        "the app's windows are marked once, from one thread"
+    );
 }
 
 /// The main thread's marker, or none on another thread or before the app's setup recorded
