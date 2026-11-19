@@ -835,11 +835,30 @@ impl Shared {
         painted
     }
 
-    /// Whether wgpu reported the device lost; false before the first surface makes one.
-    /// Output: the answer, which never clears.
+    /// Whether wgpu reported the device lost; false while no device is held, before the
+    /// first surface makes one or after `retire_lost`. Output: the answer.
     #[cfg(windows)]
     pub fn lost(&self) -> bool {
         self.device.as_ref().is_some_and(Device::is_lost)
+    }
+
+    /// Whether a device is held, so a surface made now requests none. Output: the answer.
+    #[cfg(windows)]
+    pub fn has_device(&self) -> bool {
+        self.device.is_some()
+    }
+
+    /// Forgets a device wgpu reported lost, never dropping it: core `Queue::drop` can wait
+    /// and panic, and on Windows it would run on the one render thread. Only the device goes
+    /// (its adapter, queue, pipeline and glyph cache); the instance and fonts stay, and the
+    /// next surface requests a new device. Output: whether a lost device was forgotten.
+    #[cfg(windows)]
+    pub fn retire_lost(&mut self) -> bool {
+        let Some(lost) = self.device.take_if(|device| device.is_lost()) else {
+            return false;
+        };
+        std::mem::forget(lost);
+        true
     }
 
     /// Takes the wgpu error the device recorded since the last render call took it, as
