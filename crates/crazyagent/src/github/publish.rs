@@ -401,6 +401,10 @@ thread_local! {
     /// agent that changes `.git` after publish checked it. None runs nothing.
     static BEFORE_SPAWN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    /// The file the rows name for a contained publish git's error output, so a contained
+    /// step that fails says why. None sends it nowhere, as outside the rows.
+    static CONTAINED_STDERR: std::cell::RefCell<Option<std::fs::File>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Starts `command` and its watcher, output piped and input piped when it takes input. Every
@@ -425,7 +429,16 @@ fn started(
             wrapped = owner
                 .wrap(command)
                 .map_err(|_| failure("github_publish_failed"))?;
-            wrapped.stdin(Stdio::null()).stderr(Stdio::null())
+            let stderr = Stdio::null();
+            #[cfg(test)]
+            let stderr = CONTAINED_STDERR
+                .with(|file| {
+                    file.borrow()
+                        .as_ref()
+                        .and_then(|file| file.try_clone().ok())
+                })
+                .map_or(stderr, Stdio::from);
+            wrapped.stdin(Stdio::null()).stderr(stderr)
         }
     };
     if input {

@@ -439,7 +439,15 @@ fn a_contained_windows_publish_commits_a_new_file_with_the_project_author_first(
         },
         "the project's own identity wins over the owner's global one"
     );
-    let committed = commit(&git, home, &folder, &[], &author).unwrap();
+    let said = made.place.path().join("contained-stderr.txt");
+    CONTAINED_STDERR.with(|file| *file.borrow_mut() = Some(std::fs::File::create(&said).unwrap()));
+    let committed = commit(&git, home, &folder, &[], &author).unwrap_or_else(|failed| {
+        panic!(
+            "{failed:?}, contained git said: {}",
+            std::fs::read_to_string(&said).unwrap_or_default()
+        )
+    });
+    CONTAINED_STDERR.with(|file| *file.borrow_mut() = None);
     assert_eq!(
         made.head(),
         committed.commit,
