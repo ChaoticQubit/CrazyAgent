@@ -3123,6 +3123,21 @@ fn a_hidden_folder_inside_a_nested_repository_is_told_why() {
     );
 }
 
+/// V244-HIDDEN-GIT-NONASCII-CASE r2 (rv-code2 F1): a check that git's index cannot answer
+/// for as long as one path stays in it names that path's kind and the way out, and a check
+/// that git itself failed names git and how to see why; the desktop app shows the same words.
+#[test]
+fn a_hidden_folder_left_unchecked_is_told_the_cause_and_the_way_out() {
+    assert_eq!(
+        plain_problem("hidden_path_index_unreadable"),
+        "CrazyAgent can't check hidden folders in this project: its git index has a path that isn't UTF-8 or is over 32 KiB, or over 64 MiB of paths in all. Rename or untrack those paths, or hide no folders here."
+    );
+    assert_eq!(
+        plain_problem("hidden_path_unchecked"),
+        "CrazyAgent couldn't check that folder against git: git gave an error or took over 5 seconds. Run git status in the project, fix what it reports, then try again."
+    );
+}
+
 /// #590 (leader 10:37): where the engine says this system's boundary cannot hold hidden
 /// folders, the Settings tab says so in one plain line and `k` opens no box; a list saved
 /// before still shows with how to clear it and `k` opens the box, and the save's refusal

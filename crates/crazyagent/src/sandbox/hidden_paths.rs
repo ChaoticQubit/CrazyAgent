@@ -1190,6 +1190,28 @@ mod tests {
         assert_eq!(scan(&b"conf\xc3/keys/x\0"[..], &folders), Scan::End);
     }
 
+    /// V244-HIDDEN-GIT-NONASCII-CASE r2 (rv-sec3 N2, rv-code2 F1): Git for Windows writes an
+    /// index name that is not UTF-8 with bytes 0xa0 to 0xff as U+00A0 to U+00FF, so `caf\xe9`
+    /// lands on disk as `café`, which no decode of the listing can know. Such a path refuses the
+    /// check as unreadable, and so does a path past the line cap: both last until the owner
+    /// renames or untracks the path.
+    #[test]
+    fn a_listed_path_not_utf8_or_past_the_line_cap_refuses_the_check_as_unreadable() {
+        let long = vec!["a".repeat(200); CHECK_LINE_BYTES_MAX / 200 + 1].join("/");
+        assert!(long.len() > CHECK_LINE_BYTES_MAX);
+        for listed in [b"caf\xe9/x".to_vec(), format!("{long}/f").into_bytes()] {
+            let root = project();
+            let path = canonical(root.path()).unwrap();
+            git_in(&path, &["init", "-q"]);
+            add_bytes_to_index(&path, std::slice::from_ref(&listed));
+            let folder = path.join("caf\u{e9}");
+            std::fs::create_dir(&folder).unwrap();
+            let answer = none_tracked(&path, &[folder]);
+            let unreadable = Err("hidden_path_index_unreadable");
+            assert_eq!(answer, unreadable, "{}", listed.len());
+        }
+    }
+
     /// The object id of the empty file, which the rows write with `hash-object -w` before an
     /// index entry names it.
     const EMPTY_BLOB: &str = "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391";
@@ -1226,7 +1248,16 @@ mod tests {
     /// `update-index --index-info` run of the test's own git after it writes that file's
     /// object. Inputs: the repository and the paths.
     fn add_to_index(path: &Path, listed: &[String]) {
+        let bytes: Vec<Vec<u8>> = listed.iter().map(|name| name.as_bytes().to_vec()).collect();
+        assert_eq!(bytes.len(), listed.len());
+        add_bytes_to_index(path, &bytes);
+    }
+
+    /// [`add_to_index`] for paths given as bytes, so a row can name a path that is not UTF-8.
+    /// Inputs: the repository and the paths.
+    fn add_bytes_to_index(path: &Path, listed: &[Vec<u8>]) {
         use std::io::Write;
+        assert!(listed.iter().all(|name| !name.contains(&b'\n')));
         git_in(path, &["hash-object", "-w", "--stdin"]);
         let program = if cfg!(unix) { "/usr/bin/git" } else { "git" };
         let mut command = std::process::Command::new(program);
@@ -1239,16 +1270,12 @@ mod tests {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
         let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
-        let lines: String = listed
+        let entry = format!("100644 {EMPTY_BLOB}\t").into_bytes();
+        let lines: Vec<u8> = listed
             .iter()
-            .map(|name| format!("100644 {EMPTY_BLOB}\t{name}\n"))
+            .flat_map(|name| [&entry[..], &name[..], &b"\n"[..]].concat())
             .collect();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(lines.as_bytes())
-            .unwrap();
+        child.stdin.take().unwrap().write_all(&lines).unwrap();
         assert!(child.wait().unwrap().success(), "{} entries", listed.len());
     }
 

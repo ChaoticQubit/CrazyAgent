@@ -286,7 +286,7 @@ test("Hiding a folder takes an absolute path, rejects duplicates and caps at the
   assert.ok("error" in settings.addHiddenPath(full, "/one-more"));
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
   assert.match(page, /<HiddenSection data=\{data\} \/>/);
-  for (const code of ["hidden_paths_too_many", "hidden_paths_invalid", "hidden_path_not_absolute", "hidden_path_not_plain", "hidden_path_missing", "hidden_path_not_folder", "hidden_path_outside_project", "hidden_path_tracked", "hidden_path_unchecked"]) {
+  for (const code of ["hidden_paths_too_many", "hidden_paths_invalid", "hidden_path_not_absolute", "hidden_path_not_plain", "hidden_path_missing", "hidden_path_not_folder", "hidden_path_outside_project", "hidden_path_tracked", "hidden_path_in_nested_repository", "hidden_path_index_unreadable", "hidden_path_unchecked"]) {
     assert.ok(api.KNOWN_ERROR_CODES.includes(code), code);
   }
   const tuiProject = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project.rs", import.meta.url), "utf8");
@@ -298,6 +298,12 @@ test("Hiding a folder takes an absolute path, rejects duplicates and caps at the
   const nested = "That folder is inside another git repository in this project, whose history agents can read. Only folders outside a nested repository can be hidden.";
   assert.equal(api.knownError("hidden_path_in_nested_repository"), nested);
   assert.ok(tuiProject.includes(`"${nested}"`), "the TUI shows the same nested repository line");
+  const unreadable = "CrazyAgent can't check hidden folders in this project: its git index has a path that isn't UTF-8 or is over 32 KiB, or over 64 MiB of paths in all. Rename or untrack those paths, or hide no folders here.";
+  assert.equal(api.knownError("hidden_path_index_unreadable"), unreadable);
+  assert.ok(tuiProject.includes(`"${unreadable}"`), "the TUI shows the same unreadable index line");
+  const unchecked = "CrazyAgent couldn't check that folder against git: git gave an error or took over 5 seconds. Run git status in the project, fix what it reports, then try again.";
+  assert.equal(api.knownError("hidden_path_unchecked"), unchecked);
+  assert.ok(tuiProject.includes(`"${unchecked}"`), "the TUI shows the same unchecked line");
   const macosOnly = "Hidden folders work only on macOS for now, so a list with folders can't be saved here. Remove them all and save.";
   assert.equal(api.knownError("hidden_paths_need_macos"), macosOnly);
   assert.ok(tuiProject.includes(`"${macosOnly}"`));
