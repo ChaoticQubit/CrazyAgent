@@ -4168,11 +4168,11 @@ fn hiding(backend: Hiding, sandbox: ProjectSandbox) -> Option<LinuxSandbox> {
     }
 }
 
-/// The agent's tries on a hidden folder, after it reads and writes the plain file beside
-/// it: read, list, link to, hard link from and unmount it, then write in, move and remove
-/// it and move the folder above it. Each try runs on its own with its errors dropped, so
-/// only what reached the agent prints. Input: the hidden folder. Output: the script, which
-/// prints `done` last.
+/// The agent's tries on a hidden folder, after it reads and writes the plain file beside it:
+/// read, list, link to, hard link from and unmount it ([`namespace_legs`]), then write in,
+/// move and remove it and move the folder above it. Each try drops its errors, so only what
+/// reached the agent prints, beside the namespace legs' own lines. Input: the hidden folder.
+/// Output: the script, which prints `done` last.
 fn hiding_script(hidden: &Hidden) -> String {
     let folder = quoted(&hidden.folder);
     let above = quoted(&hidden.above);
@@ -4181,19 +4181,84 @@ fn hiding_script(hidden: &Hidden) -> String {
         "cat {plain}; echo agent >> {plain}; \
          cat {folder}/secret.txt 2>/dev/null; ls -A {folder} 2>/dev/null; \
          ln {folder}/secret.txt hard 2>/dev/null; cat hard 2>/dev/null; \
-         unshare -Urm sh -c 'umount \"$0\"; cat \"$0\"/secret.txt; ls -A \"$0\"' {folder} 2>/dev/null; \
-         (echo made > {folder}/made) 2>/dev/null; \
+         {legs}(echo made > {folder}/made) 2>/dev/null; \
          mv {folder} {folder}.moved 2>/dev/null; rm -rf {folder} 2>/dev/null; \
          mv {above} {moved} 2>/dev/null; echo done",
         plain = quoted(&hidden.plain),
+        legs = namespace_legs(&folder),
     )
 }
 
-/// Asserts that a run of [`hiding_script`] read and wrote the plain file and reached
-/// nothing of the hidden folder, which is unchanged on the host with the folder above it.
-/// Inputs: the backend, the hidden folder and the run's output.
+/// The namespaces [`namespace_legs`] makes, by name and command: `mapped` is a user and mount
+/// namespace with the agent as root, `unmapped` one that keeps its unmapped id and the
+/// propagation it had, which starts on both hiding backends.
+const NAMESPACE_LEGS: [(&str, &str); 2] = [
+    ("mapped", "unshare -Urm"),
+    ("unmapped", "unshare -Um --propagation unchanged"),
+];
+
+/// Nested's refusal of the `mapped` leg: unshare cannot open its uid map in the agent.
+const MAPPED_REFUSAL: &str = "unshare: cannot open /proc/self/uid_map: Permission denied";
+
+/// The shell legs that unmount, list and read a hidden folder from a namespace of the agent's
+/// own, one per [`NAMESPACE_LEGS`] entry. Each inner shell prints `inner <name>` first and
+/// drops its own errors, so an error line can only be unshare's own; the outer shell then
+/// prints `<name> rc=` and unshare's exit. Input: the quoted folder. Output: the legs.
+fn namespace_legs(folder: &str) -> String {
+    NAMESPACE_LEGS
+        .iter()
+        .map(|(name, command)| {
+            format!(
+                "{command} sh -c 'exec 2>/dev/null; echo inner {name}; umount -l \"$0\"; \
+                 umount \"$0\"; ls -A \"$0\"; cat \"$0\"/secret.txt; exit 0' {folder} 2>&1; \
+                 echo \"{name} rc=$?\"; "
+            )
+        })
+        .collect()
+}
+
+/// The output with each [`namespace_legs`] leg's two lines taken out, when each shows it ran
+/// (`inner <name>`, then `<name> rc=0`) or, for `mapped` on Nested only, [`MAPPED_REFUSAL`]
+/// then `mapped rc=1`. Silence never counts. Inputs: the backend and the output. Output: the
+/// rest, or none when a leg shows neither.
+fn without_namespace_legs(backend: Hiding, stdout: &str) -> Option<String> {
+    let lines: Vec<&str> = stdout.lines().collect();
+    let mut taken = Vec::new();
+    for (name, _) in NAMESPACE_LEGS {
+        let exit = format!("{name} rc=");
+        let exits: Vec<usize> = (0..lines.len())
+            .filter(|index| lines[*index].starts_with(&exit))
+            .collect();
+        let [at] = exits[..] else { return None };
+        let first = *lines.get(at.checked_sub(1)?)?;
+        let ran = first == format!("inner {name}") && lines[at] == format!("{exit}0");
+        let refused = matches!(backend, Hiding::Nested)
+            && name == "mapped"
+            && first == MAPPED_REFUSAL
+            && lines[at] == format!("{exit}1");
+        if !ran && !refused {
+            return None;
+        }
+        taken.extend([at - 1, at]);
+    }
+    assert_eq!(taken.len(), 2 * NAMESPACE_LEGS.len());
+    let rest: String = (0..lines.len())
+        .filter(|index| !taken.contains(index))
+        .map(|index| format!("{}\n", lines[index]))
+        .collect();
+    assert!(rest.len() < stdout.len());
+    Some(rest)
+}
+
+/// Asserts that a run of [`hiding_script`] read and wrote the plain file, showed its namespace
+/// legs ([`without_namespace_legs`]) and reached nothing of the hidden folder, which is
+/// unchanged on the host with the folder above it. Inputs: the backend, folder and output.
 fn assert_hidden(backend: Hiding, hidden: &Hidden, output: &Output) {
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        without_namespace_legs(backend, &stdout).is_some(),
+        "{backend:?}: a namespace leg neither ran nor was refused aloud: {stdout}"
+    );
     assert!(stdout.starts_with("plain\n"), "{backend:?}: {stdout}");
     assert!(stdout.ends_with("done\n"), "{backend:?}: {stdout}");
     assert!(!stdout.contains("secret"), "{backend:?}: {stdout}");
@@ -4283,10 +4348,10 @@ fn a_hidden_folder_gives_the_agent_a_mount_tree_of_its_own_and_no_capability() {
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
-/// V24x-LINUX-NEST-MOUNT-PROPAGATION: the cover over a hidden folder stays on after the
-/// cut on both hiding backends: the agent's plain and lazy unmounts fail, and so do both
-/// from a user namespace of its own, which must start (its shell prints `inner`), since the
-/// covers are locked mounts there (MNT_LOCKED); the folder lists empty, its file reads nowhere.
+/// V24x-LINUX-NEST-MOUNT-PROPAGATION: the cover over a hidden folder stays on after the cut
+/// on both hiding backends. The agent's plain and lazy unmounts fail, and so do both from the
+/// namespaces of its own that start ([`without_namespace_legs`]), since the covers are locked
+/// mounts there (MNT_LOCKED); the folder lists empty and its file reads nowhere.
 #[test]
 fn a_hidden_folders_cover_stays_on_whatever_the_agent_unmounts() {
     let mut wrong = Vec::new();
@@ -4301,16 +4366,15 @@ fn a_hidden_folders_cover_stays_on_whatever_the_agent_unmounts() {
         };
         let folder = quoted(&hidden.folder);
         let script = format!(
-            "umount {folder} 2>/dev/null; umount -l {folder} 2>/dev/null; \
-             unshare -Urm sh -c 'echo inner; umount -l \"$0\"; umount \"$0\"; ls -A \"$0\"; \
-             cat \"$0\"/secret.txt' {folder} 2>/dev/null; \
+            "umount {folder} 2>/dev/null; umount -l {folder} 2>/dev/null; {legs}\
              ls -A {folder} 2>/dev/null; cat {folder}/secret.txt 2>/dev/null; \
              grep -c ' {path} ' /proc/self/mountinfo; echo done",
+            legs = namespace_legs(&folder),
             path = hidden.folder.display(),
         );
         let output = run(&sandbox, &case, &script);
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        if stdout != "inner\n1\ndone\n" {
+        if without_namespace_legs(backend, &stdout).as_deref() != Some("1\ndone\n") {
             wrong.push(format!("{backend:?}: {stdout:?}"));
         }
         assert_eq!(
