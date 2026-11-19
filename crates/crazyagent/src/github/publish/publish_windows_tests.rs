@@ -41,9 +41,9 @@ struct Project {
 }
 
 /// Makes the project with git from the runner's PATH: a repository on `main` whose own
-/// config names the author, and one commit of `README.md`.
-/// Output: the project.
-fn project() -> Project {
+/// config names the author, with `README.md` and no commit yet, so a publish commit builds
+/// its whole tree. Output: the project.
+fn unborn() -> Project {
     let made = Project {
         place: tempfile::tempdir().unwrap(),
         home: tempfile::tempdir().unwrap(),
@@ -55,6 +55,14 @@ fn project() -> Project {
     owner_git(&folder, &["config", "user.name", "Owner"]);
     owner_git(&folder, &["config", "user.email", "owner@example.invalid"]);
     std::fs::write(folder.join("README.md"), "readme").unwrap();
+    made
+}
+
+/// Makes the project as [`unborn`] does, with one commit of `README.md`.
+/// Output: the project.
+fn project() -> Project {
+    let made = unborn();
+    let folder = made.path();
     owner_git(&folder, &["add", "README.md"]);
     owner_git(&folder, &["commit", "-q", "--no-gpg-sign", "-m", "start"]);
     made
@@ -367,11 +375,19 @@ fn a_contained_windows_publish_step_opens_no_share_a_git_folder_names_after_the_
     let mut reached = Vec::new();
     for (shape, _) in farm::SHAPES {
         for step in CONTAINED_STEPS {
-            let made = project();
+            let made = if step == "commit" {
+                unborn()
+            } else {
+                project()
+            };
             let folder = contained_folder(&made);
             let git = routed(&made, &folder);
             let local = inspect(&git, made.home.path(), &folder, HOST).unwrap();
-            let head = made.head();
+            let head = if step == "workflows" {
+                made.head()
+            } else {
+                String::new()
+            };
             farm::reset_sessions();
             if shape == "nested" {
                 farm::plant(&folder, shape);
@@ -398,7 +414,7 @@ fn a_contained_windows_publish_step_opens_no_share_a_git_folder_names_after_the_
 #[test]
 #[ignore = "needs unc-share-setup.ps1's device entries on an elevated runner (test farm)"]
 fn a_contained_windows_publish_commits_a_new_file_with_the_project_author_first() {
-    let made = project();
+    let made = unborn();
     let folder = contained_folder(&made);
     let home = made.home.path();
     std::fs::write(folder.join("notes.txt"), "new").unwrap();
@@ -413,7 +429,6 @@ fn a_contained_windows_publish_commits_a_new_file_with_the_project_author_first(
     )
     .unwrap();
     let git = routed(&made, &folder);
-    let before = made.head();
     inspect(&git, home, &folder, HOST).unwrap();
     let author = configured_author(&git, made.owner_home.path(), home, &folder).unwrap();
     assert_eq!(
@@ -425,14 +440,16 @@ fn a_contained_windows_publish_commits_a_new_file_with_the_project_author_first(
         "the project's own identity wins over the owner's global one"
     );
     let committed = commit(&git, home, &folder, &[], &author).unwrap();
-    assert_ne!(
-        committed.commit, before,
-        "the contained commit moved the branch"
+    assert_eq!(
+        made.head(),
+        committed.commit,
+        "the contained commit is the branch's first"
     );
     let tree = owner_git(&folder, &["ls-tree", "-r", "--name-only", "HEAD"]);
-    assert!(
-        tree.lines().any(|path| path == "notes.txt"),
-        "tree {tree:?}"
+    assert_eq!(
+        tree.lines().collect::<Vec<_>>(),
+        ["README.md", "notes.txt"],
+        "the contained add staged every file on the private index"
     );
     owner_git(&folder, &["config", "--unset", "user.name"]);
     owner_git(&folder, &["config", "--unset", "user.email"]);
