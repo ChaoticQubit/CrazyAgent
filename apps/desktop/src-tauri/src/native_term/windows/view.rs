@@ -15,19 +15,19 @@ use windows_sys::Win32::UI::Input::Ime::{
     ImmSetCandidateWindow, ImmSetCompositionWindow, NI_COMPOSITIONSTR,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, GetKeyboardLayout, SetFocus, ToUnicodeEx, VK_CONTROL, VK_LWIN, VK_MENU,
+    GetFocus, GetKeyState, GetKeyboardLayout, SetFocus, ToUnicodeEx, VK_CONTROL, VK_LWIN, VK_MENU,
     VK_PROCESSKEY, VK_RWIN, VK_SHIFT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW,
     GetWindowRect, HWND_TOP, IDC_IBEAM, ISMEX_REPLIED, ISMEX_SEND, InSendMessageEx, LoadCursorW,
-    MA_ACTIVATE, MSG, PM_NOREMOVE, PeekMessageW, RegisterClassExW, SW_HIDE, SWP_NOACTIVATE,
-    SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CHAR, WM_DEADCHAR, WM_DESTROY,
-    WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND, WM_GETOBJECT, WM_IME_COMPOSITION,
-    WM_IME_ENDCOMPOSITION, WM_IME_REQUEST, WM_IME_SETCONTEXT, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
-    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_NCDESTROY, WM_PAINT, WM_SETFOCUS,
-    WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WNDCLASSEXW, WS_CHILD, WS_CLIPSIBLINGS,
-    WS_EX_NOPARENTNOTIFY,
+    MA_ACTIVATE, MSG, PM_NOREMOVE, PeekMessageW, PostMessageW, RegisterClassExW, SW_HIDE,
+    SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_APP, WM_CHAR,
+    WM_DEADCHAR, WM_DESTROY, WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND, WM_GETOBJECT,
+    WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_REQUEST, WM_IME_SETCONTEXT,
+    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEACTIVATE,
+    WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WNDCLASSEXW,
+    WS_CHILD, WS_CLIPSIBLINGS, WS_EX_NOPARENTNOTIFY,
 };
 
 use super::super::a11y::Grid;
@@ -53,6 +53,16 @@ const KEY_DEFAULT: u32 = *SCALE_KEYS.start();
 const KEEP_KEYBOARD_STATE: u32 = 0x4;
 
 static CLASS: OnceLock<Option<Vec<u16>>> = OnceLock::new();
+
+/// The render thread's private message to a view's window: the view faulted.
+const FAULTED: u32 = WM_APP + 1;
+
+/// Tells a view's window that the render thread faulted it, so its window thread hides it
+/// and hands a held focus to the page before the host ends it. Input: the window handle.
+/// A refused post (a full queue) still leaves `active`'s fault check and the host's end.
+pub(super) fn post_faulted(handle: isize) {
+    let _ = unsafe { PostMessageW(handle as HWND, FAULTED, 0, 0) };
+}
 
 /// A composition trial's answers: per string kind, the count IMM32 reports and the units the
 /// IME holds.
@@ -240,17 +250,17 @@ impl View {
         self.hwnd
     }
 
-    /// Places the view over the page's terminal box and shows it, or hides it for none.
-    /// Input: the box in CSS pixels. Output: ok, or `native_terminal_rect_invalid`, which
-    /// leaves the view hidden.
+    /// Places the view over the page's terminal box and shows it, or hides it for none or
+    /// once the render thread faulted it. Input: the box in CSS pixels. Output: ok, or
+    /// `native_terminal_rect_invalid`, which leaves the view hidden.
     pub fn place(&self, page: Option<(f64, f64, f64, f64)>) -> Result<(), &'static str> {
         self.inner.page.set(page);
         self.inner.apply(self.hwnd)
     }
 
     /// Hides the view while a page popover, menu or dialog covers its box, and shows it
-    /// again after; a box that cannot be placed keeps it hidden, as `place` reported.
-    /// Input: whether it is covered.
+    /// again after; a box that cannot be placed, or a fault, keeps it hidden, as `place`
+    /// does. Input: whether it is covered.
     pub fn cover(&self, covered: bool) {
         self.inner.covered.set(covered);
         let _ = self.inner.apply(self.hwnd);
@@ -312,10 +322,37 @@ impl Inner {
         }
     }
 
-    /// Whether keys and text reach the sink: the view is live, shown, uncovered and holds
-    /// keyboard focus.
+    /// Whether keys and text reach the sink: the view is live, not faulted, shown, uncovered
+    /// and holds keyboard focus. The fault is read here too, since a key can come before
+    /// the render thread's `FAULTED` message.
     fn active(&self) -> bool {
-        self.alive.get() && self.shown.get() && !self.covered.get() && self.focused.get()
+        let open = self.alive.get() && !BOARD.faulted(self.id);
+        open && self.shown.get() && !self.covered.get() && self.focused.get()
+    }
+
+    /// A faulted view fails closed before the host ends it: a held focus goes to the page
+    /// and the child hides, which `move_to_box` keeps from now on, so the owner neither types
+    /// into a dead pane nor reads its last frame as live.
+    fn fail_closed(&self, hwnd: HWND) {
+        self.give_focus_back(hwnd);
+        let _ = self.apply(hwnd);
+    }
+
+    /// Hands keyboard focus to the page when this view holds it: its webview window, or the
+    /// parent with none. When Windows refuses that, focus goes to no window, so keys are
+    /// dropped rather than sent to a pane that is gone. Input: the view's window.
+    fn give_focus_back(&self, hwnd: HWND) {
+        if unsafe { GetFocus() } != hwnd {
+            return;
+        }
+        let page = if self.webview.is_null() {
+            self.parent
+        } else {
+            self.webview
+        };
+        if unsafe { SetFocus(page) }.is_null() {
+            unsafe { SetFocus(ptr::null_mut()) };
+        }
     }
 
     /// The webview's origin in the parent's client area, in device pixels: zero with no
@@ -339,8 +376,8 @@ impl Inner {
     }
 
     /// Moves the view to its page box at its scale, on top of the webview, and shows it,
-    /// or hides it with no box, covered, or a box that cannot be placed. Output: ok, or why
-    /// the box cannot be placed.
+    /// or hides it with no box, covered, faulted, or a box that cannot be placed. Output:
+    /// ok, or why the box cannot be placed.
     fn apply(&self, hwnd: HWND) -> Result<(), &'static str> {
         let placed = self.move_to_box(hwnd);
         if placed != Ok(true) {
@@ -361,7 +398,7 @@ impl Inner {
         let rect = place::rect(page, key, offset)?;
         let width = i32::try_from(rect.w).expect("a bounded width");
         let height = i32::try_from(rect.h).expect("a bounded height");
-        let shown = !self.covered.get();
+        let shown = !self.covered.get() && !BOARD.faulted(self.id);
         let flags = SWP_NOACTIVATE | if shown { SWP_SHOWWINDOW } else { 0 };
         unsafe { SetWindowPos(hwnd, HWND_TOP, rect.x, rect.y, width, height, flags) };
         let geometry = Geometry {
@@ -787,6 +824,10 @@ unsafe extern "system" fn window_proc(
             inner.rescale(hwnd);
             0
         }
+        FAULTED => {
+            inner.fail_closed(hwnd);
+            0
+        }
         WM_GETOBJECT => inner
             .root
             .answer(hwnd as isize, wparam, lparam)
@@ -807,11 +848,13 @@ unsafe extern "system" fn window_proc(
 }
 
 impl Drop for View {
-    /// Takes the view from the render thread, waiting bounded for its surface to drop, then
-    /// destroys its window. A surface still held past the bound keeps the window, hidden and
-    /// cut off from this view, since the surface must not outlive it.
+    /// Hands a held focus to the page, takes the view from the render thread, waiting bounded
+    /// for its surface to drop, then destroys its window. A surface still held past the bound
+    /// keeps the window, hidden and cut off from this view, since the surface must not
+    /// outlive it.
     fn drop(&mut self) {
         if self.inner.alive.get() {
+            self.inner.give_focus_back(self.hwnd);
             self.inner.root.end(self.hwnd as isize, in_send());
         }
         let gone = BOARD.remove(self.inner.id, DROP_WAIT);

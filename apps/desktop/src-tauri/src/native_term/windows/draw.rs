@@ -15,6 +15,7 @@ use super::super::screen::Frame;
 use super::super::style::Style;
 use super::board::{Board, Fresh, Geometry, VIEWS_MAX};
 use super::place::SCALE_KEYS;
+use super::view;
 
 /// The hand-off every native view on Windows posts to; the one render thread reads it.
 pub static BOARD: Board<Frame> = Board::new();
@@ -179,6 +180,16 @@ struct Drawn {
     last: Option<Frame>,
 }
 
+/// Faults one drawn view for good: its surface goes, the board marks it, and its window
+/// hears, so the view hides and hands a held focus to the page before the host ends it.
+/// Input: the view, which has a window.
+fn fault_drawn(drawn: &mut Drawn) {
+    assert_ne!(drawn.handle, 0, "a faulted view has a window");
+    drawn.surface = None;
+    BOARD.fault(drawn.id);
+    view::post_faulted(drawn.handle);
+}
+
 /// Per scale key that lost a device: the device requests made there since its first loss.
 #[derive(Default)]
 struct Replaced {
@@ -305,10 +316,9 @@ impl Painter {
             if !shared.retire_lost() {
                 continue;
             }
-            for view in &mut self.views {
-                if view.geometry.scale_key == *key && view.surface.is_some() {
-                    view.surface = None;
-                    BOARD.fault(view.id);
+            for drawn in &mut self.views {
+                if drawn.geometry.scale_key == *key && drawn.surface.is_some() {
+                    fault_drawn(drawn);
                 }
             }
             self.replaced.lost(*key);
@@ -348,9 +358,7 @@ impl Painter {
     /// it out as ready again, for H5b's host, which ends it with `native_terminal_gpu`; a
     /// lost device then retires every view on it. Input: the view's index.
     fn fault(&mut self, index: usize) {
-        let view = &mut self.views[index];
-        view.surface = None;
-        BOARD.fault(view.id);
+        fault_drawn(&mut self.views[index]);
         self.retire_lost();
     }
 
@@ -551,6 +559,12 @@ mod tests {
             scale_key: 150,
         };
         let _ = painter(vec![faulted(7)]).refit(0, geometry);
+    }
+
+    #[test]
+    #[should_panic(expected = "a faulted view has a window")]
+    fn faulting_a_view_with_no_window_is_a_bug() {
+        painter(vec![faulted(7)]).fault(0);
     }
 
     #[test]
