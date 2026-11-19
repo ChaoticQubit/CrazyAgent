@@ -1183,6 +1183,26 @@ mod tests {
         }
     }
 
+    /// V244-WIN-HIDDEN-BOUNDARY (leader 04:31, point 5): a folder in a canonical parent can be
+    /// hidden on Windows, present or absent, though std's canonical form of that parent carries
+    /// the verbatim prefix its plain drive path lacks.
+    #[test]
+    fn a_folder_in_a_canonical_parent_can_be_hidden() {
+        let folders = folders();
+        let vault = folders.project.join("vault");
+        fs::create_dir(&vault).unwrap();
+        let verbatim = folders.project.canonicalize().unwrap();
+        assert!(verbatim.to_str().unwrap().starts_with(r"\\?\"));
+        assert_eq!(canonical(&folders.project).unwrap(), folders.project);
+        let later = folders.project.join("later");
+        let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()))
+            .hide(&vault)
+            .unwrap()
+            .hide(&later)
+            .unwrap();
+        assert_eq!(sandbox.hidden, vec![vault, later]);
+    }
+
     /// The 8.3 name Windows gives `path`, read through cmd.exe, the long path itself where the
     /// volume keeps no short names. Input: an existing path. Output: the path cmd.exe prints.
     fn short_path(path: &Path) -> PathBuf {
