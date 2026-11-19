@@ -692,6 +692,18 @@ impl Job {
 }
 
 impl Storage {
+    /// Waits until the storage worker has run its start steps and receives jobs, so a test
+    /// can begin a timed race only once the start can no longer refuse it. Output: none; it
+    /// panics when the worker ended before receiving.
+    #[cfg(all(test, unix))]
+    pub(crate) async fn started(&self) {
+        let mut receiving = self.receiving.clone();
+        assert!(
+            receiving.wait_for(|on| *on).await.is_ok(),
+            "the storage worker ended before it received"
+        );
+    }
+
     /// Queues one timed job and waits until the worker takes it, a non-narrowing job first
     /// waiting for the worker to receive. Inputs: the job, the deadline for both waits (earlier
     /// inside a `before_cut` request), the refusal for a full queue. Output: `Taken`; else a

@@ -928,10 +928,10 @@ mod tests {
             .unwrap()
     }
 
-    /// Sends one create while the worker is held at its claim, lifts the hold `release`
-    /// after the send, and waits for the engine to close. Inputs: the folder, the settings
-    /// lines and the release delay. Output: the apply's revision or error code, and the
-    /// stored revision after close.
+    /// Sends one create, once storage receives, while the worker is held at its claim, lifts
+    /// the hold `release` after the send, and waits for the engine to close. Inputs: the
+    /// folder, the settings lines and the release delay. Output: the apply's revision or error
+    /// code, and the stored revision after close.
     async fn apply_across_a_held_claim(
         root: &std::path::Path,
         settings: &str,
@@ -941,6 +941,9 @@ mod tests {
         let hold = crate::storage::hold_claims(&path);
         let (engine, opened) = one_slot_engine(root, settings).await;
         assert_eq!(opened, path);
+        tokio::time::timeout(Duration::from_secs(10), engine.storage.started())
+            .await
+            .unwrap();
         let engine = std::sync::Arc::new(engine);
         let raced = tokio::spawn({
             let engine = engine.clone();
