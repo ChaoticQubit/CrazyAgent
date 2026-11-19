@@ -244,6 +244,7 @@ impl View {
     }
 
     /// The view's own window, for the host's focus and hit tests.
+    #[cfg(test)]
     pub fn hwnd(&self) -> HWND {
         self.hwnd
     }

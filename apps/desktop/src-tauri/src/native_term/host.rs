@@ -277,6 +277,7 @@ fn sink(page: u64, event: ViewEvent) {
 }
 
 /// The visible grid VoiceOver reads, or none while the state is in use.
+#[cfg(target_os = "macos")]
 fn screen(page: u64) -> Option<a11y::Grid> {
     NATIVE.with(|cell| {
         let held = cell.try_borrow().ok()?;
@@ -749,12 +750,14 @@ impl Native {
     /// engine-fed, so no view waits for output from a client that is gone. Input: the event.
     fn on_direct(&mut self, event: Event) {
         match event {
+            #[cfg(unix)]
             Event::Restored { view, bytes } => {
                 if let Some(entry) = self.table.get_mut(view).filter(|e| e.direct) {
                     entry.pane.on_output(&bytes);
                 }
                 self.tell(view);
             }
+            #[cfg(unix)]
             Event::Output { views, bytes } => {
                 for page in views {
                     if let Some(entry) = self.table.get_mut(page).filter(|e| e.direct) {
@@ -763,6 +766,7 @@ impl Native {
                     self.tell(page);
                 }
             }
+            #[cfg(unix)]
             Event::Refused { view, .. } => self.reopen(view),
             Event::Closed => {
                 self.drop_control();
@@ -909,6 +913,7 @@ impl Native {
                 let _ = entry.platform.events.send(NativeEvent::Menu { x, y });
                 Action::Nothing
             }
+            #[cfg(target_os = "macos")]
             ViewEvent::Copy => {
                 if let Ok(text) = entry.pane.copy(false) {
                     let _ = clip.write(&text);
@@ -926,6 +931,7 @@ impl Native {
                 Some(text) => entry.pane.apply(Input::Paste { text }),
                 None => Action::Nothing,
             },
+            #[cfg(target_os = "macos")]
             ViewEvent::SelectAll => {
                 entry.pane.select_all();
                 Action::Local

@@ -248,6 +248,7 @@ impl Pane {
 
     /// Selects the whole output the view holds, as Cmd-A does. Output: whether there was a
     /// terminal to select in.
+    #[cfg(any(target_os = "macos", test))]
     pub fn select_all(&mut self) -> bool {
         let Some(term) = self.term.as_mut() else {
             return false;
