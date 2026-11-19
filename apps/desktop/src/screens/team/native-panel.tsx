@@ -537,6 +537,7 @@ export function NativeTerminalPanel({ node, harness = (id) => id, onClose, onSto
     const element = screen.current;
     if (!key || !element) return;
     const shown = tile ? new NativeView(key, node.label) : keptNativeView(key, node.label);
+    shown.tile = tile;
     shown.follow = following.current;
     shown.setKeys(keys.current);
     shown.show(element);

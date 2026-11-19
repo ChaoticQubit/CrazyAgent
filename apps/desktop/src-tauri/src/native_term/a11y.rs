@@ -335,12 +335,15 @@ pub fn cell_rect(
     width: usize,
 ) -> (f64, f64, f64, f64) {
     let Geometry {
-        cell, pad, scale, ..
+        cell,
+        pad,
+        scale,
+        top,
     } = geometry;
     assert!((1.0..=4.0).contains(&scale));
     assert!(cell.0 > 0.0 && cell.1 > 0.0 && pad >= 0.0 && width >= 1);
     let x = (pad + column as f64 * cell.0) / scale;
-    let y = (pad + row as f64 * cell.1) / scale;
+    let y = (pad + (row as f64 - top as f64) * cell.1) / scale;
     let rect = (x, y, width as f64 * cell.0 / scale, cell.1 / scale);
     assert!(rect.2 > 0.0 && rect.3 > 0.0);
     rect

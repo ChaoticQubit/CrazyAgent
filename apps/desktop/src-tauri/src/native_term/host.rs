@@ -3,7 +3,7 @@ use super::clip::Clip;
 use super::codec;
 use super::control::{Control, Event};
 use super::ended::ended_final;
-use super::pane::{Action, GRID_MAX, Input};
+use super::pane::{Action, GRID_MAX, GRID_MIN, Input};
 use super::render::{GPU_FAULT, Shared, Surface};
 use super::screen;
 use super::style::Style;
@@ -12,7 +12,9 @@ use super::view::{MouseKind, TermView, ViewEvent};
 use crate::bridge::BridgeError;
 use crate::bridge::feed::{EngineFeed, Fed, FeedEvent, Opener, Opening, Wake};
 use crate::bridge::terminal::{NATIVE_OVERFLOW, Reservation, Session, ViewKey};
+use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::term::Term;
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::{NSResponder, NSView, NSWindowOrderingMode};
@@ -579,9 +581,10 @@ impl Native {
             None => false,
         };
         let page = self.table.fresh();
-        let kind = match direct {
-            true => Session::Input,
-            false => Session::Full,
+        let kind = match (direct, open.tile) {
+            (true, true) => Session::Follow,
+            (true, false) => Session::Input,
+            (false, _) => Session::Full,
         };
         self.feed
             .bind(page, open.place, kind)
@@ -814,17 +817,36 @@ impl Native {
 
     /// Applies one direct-path event. A refused view reopens engine-fed, and a closed
     /// client, including one that bound a view after it closed, reopens every direct view
-    /// engine-fed, so no view waits for output from a client that is gone. Input: the event.
+    /// engine-fed, so no view waits for output from a client that is gone. A pane's new size
+    /// reaches only the views that follow it; one no mirror holds reopens them engine-fed.
+    /// Input: the event.
     fn on_direct(&mut self, event: Event) {
         match event {
             Event::Restored { view, bytes, grid } => {
                 if let Some(entry) = self.table.get_mut(view).filter(|e| e.direct) {
-                    let _ = grid;
+                    if entry.follows() {
+                        entry.pane.resize(grid);
+                    }
                     entry.pane.on_output(&bytes);
                 }
                 self.tell(view);
             }
-            Event::Sized { .. } => {}
+            Event::Sized { views, grid } => {
+                let fits = [grid.0, grid.1]
+                    .iter()
+                    .all(|side| (GRID_MIN..=GRID_MAX).contains(side));
+                for page in views {
+                    let Some(entry) = self.table.get_mut(page).filter(|e| e.follows()) else {
+                        continue;
+                    };
+                    if !fits {
+                        self.reopen(page);
+                        continue;
+                    }
+                    entry.pane.resize(grid);
+                    self.tell(page);
+                }
+            }
             Event::Output { views, bytes } => {
                 for page in views {
                     if let Some(entry) = self.table.get_mut(page).filter(|e| e.direct) {
@@ -1062,9 +1084,25 @@ fn cell_of(
         return (0, 0);
     };
     let (columns, lines) = (term.columns(), term.screen_lines());
-    let cell = codec::cell_at(point.0, point.1, shared.cell_points(), columns, lines);
+    let (top, rows) = view_rows(entry.rect, term, shared.cell_points());
+    let cell = codec::cell_at(point.0, point.1, shared.cell_points(), columns, rows);
+    let cell = (cell.0, cell.1 + top);
     assert!(cell.0 < columns && cell.1 < lines);
     cell
+}
+
+/// The rows of its mirror a view draws, the first and how many: every row when the view
+/// fits its pane, else as many as fit, ending at the cursor's row, as for a wall tile whose
+/// window a sizer holds taller. Inputs: the view's page rect, its mirror and the cell size.
+/// Output: the first row and the count.
+fn view_rows(rect: [f64; 4], term: &Term<VoidListener>, cell: (f64, f64)) -> (usize, usize) {
+    let lines = term.screen_lines();
+    let fit = codec::grid_for(rect[2], rect[3], cell, GRID_MAX)
+        .1
+        .min(lines);
+    let top = screen::top_row(term, fit);
+    assert!(fit >= 1 && top + fit <= lines);
+    (top, fit)
 }
 
 fn wheel(
@@ -1110,7 +1148,11 @@ fn draw_view(
     let marked = view.ns.marked_text();
     let frame = screen::frame(term, &style.theme, shown, marked.as_deref());
     assert_eq!(frame.rows.len(), term.screen_lines());
-    let _ = rect;
+    let (top, rows) = view_rows(rect, term, shared.cell_points());
+    let frame = match rows < term.screen_lines() {
+        true => screen::clipped(frame, top, rows),
+        false => frame,
+    };
     match shared.draw(surface, &frame) {
         Ok(()) => {}
         Err(code) if code == GPU_FAULT => return Err(GPU_FAULT),
@@ -1123,7 +1165,7 @@ fn draw_view(
         cell: (width * scale, height * scale),
         pad: 0.0,
         scale,
-        top: 0,
+        top,
     };
     view.ns
         .drawn(geometry, a11y::marks(term), a11y::text_key(term));
@@ -1185,7 +1227,15 @@ impl Native {
             }
         };
         let grid = codec::grid_for(width, height, shared.cell_points(), GRID_MAX);
-        if let Some(size) = entry.pane.resize(grid) {
+        if entry.follows() {
+            let size = (
+                u16::try_from(grid.0).unwrap_or(u16::MAX),
+                u16::try_from(grid.1).unwrap_or(u16::MAX),
+            );
+            if size != entry.asked && feed.resize(entry.feed, size).is_ok() {
+                entry.asked = size;
+            }
+        } else if let Some(size) = entry.pane.resize(grid) {
             entry.asked = size;
             let _ = feed.resize(entry.feed, size);
         }

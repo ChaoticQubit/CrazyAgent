@@ -131,10 +131,38 @@ pub fn parse(line: &[u8]) -> Notice<'_> {
             tag: rest,
         };
     }
+    if let Some(rest) = line.strip_prefix(b"%layout-change ") {
+        return layout(rest).unwrap_or(Notice::Other);
+    }
     if line == b"%exit" || line.starts_with(b"%exit ") {
         return Notice::Exit;
     }
     Notice::Other
+}
+
+/// Reads a `%layout-change` line's window layout when the window holds one pane, the only
+/// kind a view binds: `checksum,WxH,X,Y,ID`; a split layout's brackets read as nothing.
+/// Input: the line after its name. Output: the pane's `%ID`, columns and lines, or none.
+fn layout(rest: &[u8]) -> Option<Notice<'static>> {
+    let text = std::str::from_utf8(rest).ok()?;
+    let mut words = text.split(' ');
+    let (_window, layout) = (words.next()?, words.next()?);
+    let fields: Vec<&str> = layout.split(',').collect();
+    let [_, size, _, _, id] = fields[..] else {
+        return None;
+    };
+    let (columns, lines) = size.split_once('x')?;
+    let digits =
+        |word: &str| (1..=9).contains(&word.len()) && word.bytes().all(|b| b.is_ascii_digit());
+    if !(digits(columns) && digits(lines) && digits(id)) {
+        return None;
+    }
+    let pane = format!("%{id}");
+    assert!(codec::pane_id_valid(&pane));
+    Some(Notice::Layout {
+        pane,
+        grid: (columns.parse().ok()?, lines.parse().ok()?),
+    })
 }
 
 /// The pane facts from a bind's `display-message`.
@@ -452,6 +480,28 @@ impl Binds {
         })
     }
 
+    /// Takes a pane's new size: the views bound to it get it as it is, for the host to apply
+    /// or refuse per view, and a view waiting on its capture keeps a size inside the grid
+    /// bounds in its facts, its cursor kept on the screen. Inputs: the pane and its columns
+    /// and lines. Output: the event for the bound views, if any.
+    fn sized(&mut self, pane: &str, grid: (usize, usize)) -> Option<Event> {
+        let fits = [grid.0, grid.1]
+            .iter()
+            .all(|side| (GRID_MIN..=GRID_MAX).contains(side));
+        let waiting = self.views.values_mut().filter_map(|slot| match slot {
+            Slot::Facts(state) if fits && state.pane == pane => Some(state),
+            _ => None,
+        });
+        for state in waiting {
+            (state.columns, state.lines) = grid;
+            state.cursor_x = state.cursor_x.min(grid.0);
+            state.cursor_y = state.cursor_y.min(grid.1 - 1);
+            assert!(state.cursor_x <= state.columns && state.cursor_y < state.lines);
+        }
+        let views = self.readers(pane);
+        (!views.is_empty()).then_some(Event::Sized { views, grid })
+    }
+
     /// Ends the direct path of each view reading a pane whose `%output` line a drain dropped,
     /// since output meant for it may be gone. Input: the pane. Output: the refusals.
     fn lose(&mut self, pane: &str) -> Vec<Event> {
@@ -536,7 +586,9 @@ impl Reader {
                 self.open(tag, flags, opening);
                 Ok(Vec::new())
             }
-            Notice::Layout { .. } => Ok(Vec::new()),
+            Notice::Layout { pane, grid } => {
+                Ok(locked(binds).sized(&pane, grid).into_iter().collect())
+            }
             Notice::End { .. } | Notice::Exit => Err(Stop),
             Notice::Other => Ok(Vec::new()),
         }
@@ -598,7 +650,8 @@ impl Reader {
 
     /// One line of a drain: dropped until the marker shows, then only the marker block's
     /// `%end` ends the drain. A dropped `%output` line ends the direct path of the views
-    /// reading its pane. Inputs: the line and the binds. Output: events, or Stop.
+    /// reading its pane; a `%layout-change` line still sizes them, since it holds the whole
+    /// size. Inputs: the line and the binds. Output: events, or Stop.
     fn drain_line(&mut self, line: &[u8], binds: &Mutex<Binds>) -> Result<Vec<Event>, Stop> {
         let drain = self.drain.as_mut().expect("a drain is open");
         if drain.found {
@@ -624,6 +677,9 @@ impl Reader {
                 Ok(Vec::new())
             }
             Notice::Output { pane, .. } => Ok(locked(binds).lose(pane)),
+            Notice::Layout { pane, grid } => {
+                Ok(locked(binds).sized(&pane, grid).into_iter().collect())
+            }
             _ => Ok(Vec::new()),
         }
     }

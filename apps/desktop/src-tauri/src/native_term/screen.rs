@@ -376,8 +376,17 @@ pub fn frame(
 /// scrolled out of view counts as the last row. Inputs: the screen and how many rows the
 /// view fits. Output: the row.
 pub fn top_row(term: &Term<VoidListener>, shown: usize) -> usize {
-    let _ = (term, shown);
-    0
+    assert!(shown >= 1);
+    let lines = term.screen_lines();
+    if shown >= lines {
+        return 0;
+    }
+    let offset = i32::try_from(term.grid().display_offset()).unwrap_or(i32::MAX);
+    let line = term.grid().cursor.point.line.0.saturating_add(offset);
+    let row = usize::try_from(line).unwrap_or(0).min(lines - 1);
+    let top = (row + 1).saturating_sub(shown).min(lines - shown);
+    assert!(top + shown <= lines && (top..top + shown).contains(&row));
+    top
 }
 
 /// Keeps `shown` rows of a frame from row `top` on, for a view whose pane holds more rows
@@ -385,8 +394,40 @@ pub fn top_row(term: &Term<VoidListener>, shown: usize) -> usize {
 /// what lies outside is dropped. Inputs: the frame, the first row kept and how many.
 /// Output: the frame of those rows.
 pub fn clipped(frame: Frame, top: usize, shown: usize) -> Frame {
-    let _ = (top, shown);
-    frame
+    assert!(shown >= 1 && top + shown <= frame.rows.len());
+    let kept = top..top + shown;
+    let fills = frame
+        .fills
+        .into_iter()
+        .filter(|fill| kept.contains(&fill.row))
+        .map(|fill| Fill {
+            row: fill.row - top,
+            ..fill
+        })
+        .collect();
+    let cursor = frame
+        .cursor
+        .filter(|cursor| kept.contains(&cursor.row))
+        .map(|cursor| Cursor {
+            row: cursor.row - top,
+            ..cursor
+        });
+    let preedit = frame
+        .preedit
+        .filter(|cells| kept.contains(&cells.row))
+        .map(|cells| Preedit {
+            row: cells.row - top,
+            ..cells
+        });
+    let clipped = Frame {
+        keys: frame.keys[kept.clone()].to_vec(),
+        rows: frame.rows.into_iter().skip(top).take(shown).collect(),
+        fills,
+        cursor,
+        preedit,
+    };
+    assert!(clipped.rows.len() == shown && clipped.keys.len() == shown);
+    clipped
 }
 
 /// The plain text of each row, for the rows that check a frame. Input: the frame. Output:

@@ -48,6 +48,15 @@ pub struct Table<P> {
     next: u64,
 }
 
+impl<P> Entry<P> {
+    /// Whether the view follows its window's size instead of setting it: a wall tile on the
+    /// direct path, whose mirror takes the pane's real size from the control client
+    /// (V243-PANE-SIZE-ACROSS-WINDOWS). Output: the answer.
+    pub fn follows(&self) -> bool {
+        self.direct && self.tile
+    }
+}
+
 impl<P> Default for Table<P> {
     fn default() -> Self {
         Table {
