@@ -1,14 +1,17 @@
 param([Int64]$Handle, [string]$Mode)
 $ErrorActionPreference = 'Stop'
 "reader_pid=$PID"
+"reader_language=" + $ExecutionContext.SessionState.LanguageMode
+$wpf = 'Version=4.0.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35'
 try {
-    Add-Type -AssemblyName UIAutomationClient
-    Add-Type -AssemblyName UIAutomationTypes
+    $null = [System.Reflection.Assembly]::Load("UIAutomationClient, $wpf")
+    $null = [System.Reflection.Assembly]::Load("UIAutomationTypes, $wpf")
     "reader_stage=lookup"
     $element = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Handle)
     "reader_name=" + $element.Current.Name
     $pattern = $null
-    $has = $element.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$pattern)
+    $textPattern = [System.Windows.Automation.TextPattern]::Pattern
+    $has = $element.TryGetCurrentPattern($textPattern, [ref]$pattern)
     "reader_text_pattern=$has"
     if (-not $has) { exit 0 }
     $document = $pattern.DocumentRange
@@ -16,6 +19,7 @@ try {
 } catch {
     $base = $_.Exception.GetBaseException()
     "reader_error=" + $base.GetType().FullName + " " + ('0x{0:X8}' -f $base.HResult)
+    "reader_error_message=" + ($base.Message -replace '\s+', ' ')
     exit 0
 }
 if ($Mode -ne 'full') { exit 0 }
@@ -24,8 +28,13 @@ $line = $document.Clone()
 $line.ExpandToEnclosingUnit($unit::Line)
 "reader_line_moved=" + $line.Move($unit::Line, 1)
 "reader_line=" + $line.GetText(-1).Replace("`n", "|")
+"reader_step=selection"
 $selection = $pattern.GetSelection()
-"reader_selection=" + $selection.Length + ":" + $selection[0].GetText(-1).Length
+"reader_step=selection_text " + $selection.Length
+$selected = $selection[0].GetText(-1)
+"reader_step=selection_read"
+$length = if ($null -eq $selected) { 0 } else { $selected.Length }
+"reader_selection=" + $selection.Length + ":" + $length
 $rects = $line.GetBoundingRectangles() | ForEach-Object {
     "{0},{1},{2},{3}" -f [int]$_.X, [int]$_.Y, [int]$_.Width, [int]$_.Height
 }
@@ -50,7 +59,8 @@ $kind = [System.Windows.Automation.AutomationEventHandler]
 $handler = [System.Delegate]::CreateDelegate($kind, [Seen].GetMethod('Handler'))
 $changed = [System.Windows.Automation.TextPattern]::TextChangedEvent
 $scope = [System.Windows.Automation.TreeScope]::Element
-[System.Windows.Automation.Automation]::AddAutomationEventHandler($changed, $element, $scope, $handler)
+$automation = [System.Windows.Automation.Automation]
+$automation::AddAutomationEventHandler($changed, $element, $scope, $handler)
 "reader_listening"
 $deadline = (Get-Date).AddSeconds(15)
 while ([Seen]::Count -lt 1 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100 }

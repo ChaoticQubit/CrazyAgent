@@ -758,8 +758,7 @@ fn read_view(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let mut child = command
-        .spawn()
+    let mut child = crazyagent::spawn_gate::spawn(&mut command)
         .unwrap_or_else(|error| panic!("{what} starts: {error}"));
     let stdout = child.stdout.take().expect("piped");
     let (send, lines) = std::sync::mpsc::channel();

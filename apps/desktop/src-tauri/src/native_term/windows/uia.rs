@@ -244,16 +244,26 @@ fn ranges_array(ranges: &[ITextRangeProvider]) -> Result<*mut SAFEARRAY> {
     Ok(array)
 }
 
-/// The unit a UIA text unit moves by: Format and Word by Line, Paragraph and Page by
-/// Document. Input: the client's unit. Output: the unit, or `E_INVALIDARG` for a value UIA
-/// does not define.
+/// Every text unit UIA defines with the unit it moves by: Format and Word by Line,
+/// Paragraph and Page by Document.
+const UNITS: [(TextUnit, Unit); 7] = [
+    (TextUnit_Character, Unit::Character),
+    (TextUnit_Format, Unit::Line),
+    (TextUnit_Word, Unit::Line),
+    (TextUnit_Line, Unit::Line),
+    (TextUnit_Paragraph, Unit::Document),
+    (TextUnit_Page, Unit::Document),
+    (TextUnit_Document, Unit::Document),
+];
+
+/// The unit a UIA text unit moves by. Input: the client's unit. Output: the unit, or
+/// `E_INVALIDARG` for a value UIA does not define.
 fn unit_of(unit: TextUnit) -> Result<Unit> {
-    match unit {
-        TextUnit_Character => Ok(Unit::Character),
-        TextUnit_Format | TextUnit_Word | TextUnit_Line => Ok(Unit::Line),
-        TextUnit_Paragraph | TextUnit_Page | TextUnit_Document => Ok(Unit::Document),
-        _ => Err(Error::from(E_INVALIDARG)),
-    }
+    UNITS
+        .iter()
+        .find(|(defined, _)| *defined == unit)
+        .map(|(_, moves)| *moves)
+        .ok_or_else(|| Error::from(E_INVALIDARG))
 }
 
 impl IRawElementProviderSimple_Impl for Terminal_Impl {
@@ -272,12 +282,16 @@ impl IRawElementProviderSimple_Impl for Terminal_Impl {
 
     fn GetPropertyValue(&self, propertyid: UIA_PROPERTY_ID) -> Result<VARIANT> {
         let (_, _, focused, _) = self.access.shape()?;
-        let value = match propertyid {
-            UIA_ControlTypePropertyId => VARIANT::from(UIA_DocumentControlTypeId.0),
-            UIA_NamePropertyId => VARIANT::from(NAME),
-            UIA_IsKeyboardFocusablePropertyId => VARIANT::from(true),
-            UIA_HasKeyboardFocusPropertyId => VARIANT::from(focused),
-            _ => VARIANT::default(),
+        let value = if propertyid == UIA_ControlTypePropertyId {
+            VARIANT::from(UIA_DocumentControlTypeId.0)
+        } else if propertyid == UIA_NamePropertyId {
+            VARIANT::from(NAME)
+        } else if propertyid == UIA_IsKeyboardFocusablePropertyId {
+            VARIANT::from(true)
+        } else if propertyid == UIA_HasKeyboardFocusPropertyId {
+            VARIANT::from(focused)
+        } else {
+            VARIANT::default()
         };
         Ok(value)
     }
@@ -412,10 +426,12 @@ impl TextRange {
 /// One endpoint of a span. Inputs: the span and the endpoint. Output: the index, or
 /// `E_INVALIDARG` for a value UIA does not define.
 fn endpoint(span: (usize, usize), which: TextPatternRangeEndpoint) -> Result<usize> {
-    match which {
-        TextPatternRangeEndpoint_Start => Ok(span.0),
-        TextPatternRangeEndpoint_End => Ok(span.1),
-        _ => Err(Error::from(E_INVALIDARG)),
+    if which == TextPatternRangeEndpoint_Start {
+        Ok(span.0)
+    } else if which == TextPatternRangeEndpoint_End {
+        Ok(span.1)
+    } else {
+        Err(Error::from(E_INVALIDARG))
     }
 }
 
@@ -426,10 +442,12 @@ fn with_endpoint(
     which: TextPatternRangeEndpoint,
     at: usize,
 ) -> Result<(usize, usize)> {
-    let moved = match which {
-        TextPatternRangeEndpoint_Start => (at, span.1.max(at)),
-        TextPatternRangeEndpoint_End => (span.0.min(at), at),
-        _ => return Err(Error::from(E_INVALIDARG)),
+    let moved = if which == TextPatternRangeEndpoint_Start {
+        (at, span.1.max(at))
+    } else if which == TextPatternRangeEndpoint_End {
+        (span.0.min(at), at)
+    } else {
+        return Err(Error::from(E_INVALIDARG));
     };
     assert!(moved.0 <= moved.1);
     Ok(moved)
