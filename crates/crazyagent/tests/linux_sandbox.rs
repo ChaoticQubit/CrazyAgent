@@ -4285,8 +4285,8 @@ fn a_hidden_folder_gives_the_agent_a_mount_tree_of_its_own_and_no_capability() {
 
 /// V24x-LINUX-NEST-MOUNT-PROPAGATION: the cover over a hidden folder stays on after the
 /// cut on both hiding backends: the agent's plain and lazy unmounts fail, and so do both
-/// from a user namespace of its own, since the covers are locked mounts there (MNT_LOCKED),
-/// so the folder still lists empty and its file reads nowhere.
+/// from a user namespace of its own, which must start (its shell prints `inner`), since the
+/// covers are locked mounts there (MNT_LOCKED); the folder lists empty, its file reads nowhere.
 #[test]
 fn a_hidden_folders_cover_stays_on_whatever_the_agent_unmounts() {
     let mut wrong = Vec::new();
@@ -4302,7 +4302,7 @@ fn a_hidden_folders_cover_stays_on_whatever_the_agent_unmounts() {
         let folder = quoted(&hidden.folder);
         let script = format!(
             "umount {folder} 2>/dev/null; umount -l {folder} 2>/dev/null; \
-             unshare -Urm sh -c 'umount -l \"$0\"; umount \"$0\"; ls -A \"$0\"; \
+             unshare -Urm sh -c 'echo inner; umount -l \"$0\"; umount \"$0\"; ls -A \"$0\"; \
              cat \"$0\"/secret.txt' {folder} 2>/dev/null; \
              ls -A {folder} 2>/dev/null; cat {folder}/secret.txt 2>/dev/null; \
              grep -c ' {path} ' /proc/self/mountinfo; echo done",
@@ -4310,7 +4310,7 @@ fn a_hidden_folders_cover_stays_on_whatever_the_agent_unmounts() {
         );
         let output = run(&sandbox, &case, &script);
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        if stdout != "1\ndone\n" {
+        if stdout != "inner\n1\ndone\n" {
             wrong.push(format!("{backend:?}: {stdout:?}"));
         }
         assert_eq!(
