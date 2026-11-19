@@ -27,7 +27,7 @@ defaults:
 
 jobs:
   linux:
-    name: V244 Linux L5c term rows again, red e953d4f16 then green ffc221894 (unused import dropped; red check reads the result line), on X11, weston and sway, quiet and loaded
+    name: V244 Linux L5c term rows, third run at ffc221894, with the display's exit status and dmesg on a compositor death and two more weston-loaded cells
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:

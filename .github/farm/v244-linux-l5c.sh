@@ -151,6 +151,21 @@ start_sway() {
   return 1
 }
 
+display_died=()
+display_alive() {
+  local after=$1 status
+  [ -n "$display_pid" ] || return 1
+  kill -0 "$display_pid" 2> /dev/null && return 0
+  wait "$display_pid" 2> /dev/null
+  status=$?
+  log "::error::$cell: the display (pid $display_pid) is gone after $after, exit status $status"
+  display_died+=("$cell after $after, exit $status")
+  free -m | tee -a "$out"
+  sudo dmesg -T 2> /dev/null | tail -n 30 | tee -a "$out"
+  display_pid=""
+  return 1
+}
+
 stop_display() {
   [ -n "$display_pid" ] && kill "$display_pid" 2> /dev/null
   wait "$display_pid" 2> /dev/null
@@ -256,6 +271,7 @@ run_term() {
   done
   wait "$pid"
   term_rc=$?
+  display_alive "${row##*::}"
   tail -n 12 "$dir/row.txt" >> "$out"
   log "$cell ${row##*::}: row exit $term_rc, steps $term_shots of ${#steps[@]}, pixel steps passed $term_passed of ${#steps[@]}"
 }
@@ -343,6 +359,7 @@ run_clip() {
   done
   wait "$pid"
   clip_rc=$?
+  display_alive "the clip row"
   tail -n 25 "$dir/row.txt" >> "$out"
   log "$cell clip ($mode): row exit $clip_rc, steps $clip_reached of ${#steps[@]}, pixel steps passed $clip_passed of ${#steps[@]}"
 }
@@ -390,11 +407,13 @@ run_cell() {
   done
   wait "$pid"
   local rc=$?
+  display_alive "the display row"
   local clip_steps=(cropped reclipped none back larger_old larger smaller_old smaller)
   [ "$kind" = x11 ] || clip_steps+=(rescaled_old rescaled)
   run_clip "$kind" "$dir/clip" green "${clip_steps[@]}"
   NO_AT_BRIDGE=1 timeout 120 cargo test "${pkg[@]}" --lib -- --ignored --exact "$timeout_row" --test-threads=1 > "$dir/timeout.txt" 2>&1
   local timeout_rc=$?
+  display_alive "the timeout row"
   tail -n 8 "$dir/timeout.txt" >> "$out"
   run_term "$kind" "$dir/cover" "$cover_row" shown covered uncovered
   local cover_rc=$term_rc cover_passed=$term_passed
@@ -488,6 +507,8 @@ if [ "$rows_built" = 0 ]; then
   run_cell x11-loaded x11 loaded
   run_cell weston-loaded weston loaded
   run_cell sway-loaded sway loaded
+  run_cell weston-loaded-2 weston loaded
+  run_cell weston-loaded-3 weston loaded
 else
   row_ok=1
 fi
@@ -508,6 +529,7 @@ clipt=${PIPESTATUS[0]}
   printf '| native_term rows | %s, %s passed |\n' "$rows_rc" "$passed"
   printf '| named rows ok, none failed (0 = yes) | %s |\n' "$want"
   printf '| display row cells all pass (0 = yes) | %s %s |\n' "$row_ok" "${cells[*]:-}"
+  printf '| displays that died under a row (none = 0) | %s %s |\n' "${#display_died[@]}" "${display_died[*]:-}"
   printf '| clippy --lib -D warnings | %s |\n| clippy --tests -D warnings | %s |\n' "$clip" "$clipt"
   printf '\n| cell | row exit | pixel steps | present ms p50 / p95 / max | wait for ready ms p50 / p95 / max | clip row exit | clip pixel steps | timeout row exit | cover row exit | cover pixel steps | rescale row exit | rescale pixel steps | focus row exit (na on weston) |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n'
   printf '%s\n' "${cell_rows[@]}"
