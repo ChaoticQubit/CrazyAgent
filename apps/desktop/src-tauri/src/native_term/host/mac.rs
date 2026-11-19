@@ -1,11 +1,12 @@
 use super::NativeEvent;
 #[cfg(feature = "native-webdriver")]
-use super::{Held, Native, with_native};
+use super::{Held, Native, SKIPPED, with_native};
 use super::{screen, sink};
 use crate::native_term::a11y::{self, Geometry};
 #[cfg(feature = "native-webdriver")]
 use crate::native_term::pane::GRID_MAX;
-use crate::native_term::render::{Shared, Surface};
+use crate::native_term::render::{GPU_FAULT, Shared, Surface};
+use crate::native_term::screen::Frame;
 use crate::native_term::view::TermView;
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::term::Term;
@@ -37,7 +38,7 @@ pub fn main() -> Option<Main> {
 pub struct View {
     ns: Retained<TermView>,
     webview: Retained<NSView>,
-    pub(super) surface: Option<Surface>,
+    surface: Option<Surface>,
     pub(super) scale: u32,
     pub(super) events: Channel<NativeEvent>,
     pub(super) project: Option<String>,
@@ -123,10 +124,50 @@ pub fn place_view(view: &mut View, rect: [f64; 4], shown: bool) -> Option<f64> {
 
 /// Makes the view's surface on its NSView. Inputs: the view, the renderer at its scale and
 /// the size in device pixels. Output: the surface, or none when it cannot be made.
-pub fn surface(view: &View, shared: &mut Shared, pixels: (u32, u32)) -> Option<Surface> {
+fn surface(view: &View, shared: &mut Shared, pixels: (u32, u32)) -> Option<Surface> {
     let pointer = Retained::as_ptr(&view.ns) as *mut c_void;
     let made = unsafe { shared.surface(pointer, pixels.0, pixels.1) };
     made.ok()
+}
+
+/// Gives the view a new scale key: its surface, made on the old scale's renderer, goes,
+/// and `fit` makes the next one. Inputs: the view and the key.
+pub fn rescale(view: &mut View, key: u32) {
+    view.surface = None;
+    view.scale = key;
+}
+
+/// Sizes the view's surface to the pixels, making it on the renderer when the view has
+/// none. Inputs: the view, the renderer at its scale and the size in device pixels.
+/// Output: whether the view has a surface of that size.
+pub fn fit(view: &mut View, shared: &mut Shared, pixels: (u32, u32)) -> bool {
+    match view.surface.as_mut() {
+        Some(surface) => shared.resize(surface, pixels.0, pixels.1).is_ok(),
+        None => {
+            view.surface = surface(view, shared, pixels);
+            view.surface.is_some()
+        }
+    }
+}
+
+/// Draws a frame into the view's surface on the main thread. Inputs: the view, the
+/// renderer at its scale and the frame. Output: ok, `native_terminal_gpu` when the GPU
+/// refused the frame, or the skipped code when there is no surface or the draw skipped.
+pub fn paint(view: &mut View, shared: &mut Shared, frame: &Frame) -> Result<(), &'static str> {
+    let Some(surface) = view.surface.as_mut() else {
+        return Err(SKIPPED);
+    };
+    match shared.draw(surface, frame) {
+        Ok(()) => Ok(()),
+        Err(code) if code == GPU_FAULT => Err(GPU_FAULT),
+        Err(_) => Err(SKIPPED),
+    }
+}
+
+/// Whether the view can present a frame now: always on macOS, where the draw is on the
+/// main thread. Input: the view. Output: true.
+pub fn ready(_view: &mut View) -> bool {
+    true
 }
 
 /// Whether the view shows. Input: the view. Output: the answer.

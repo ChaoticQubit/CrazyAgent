@@ -68,6 +68,10 @@ const OPEN_CODES: [&str; 4] = [
 
 const _: () = assert!(SETTLE_ROUNDS > 0 && DRAIN_MAX > 0 && DRAIN_MAX < INBOX_MAX);
 
+/// The code a host's `paint` gives for a frame it did not draw and that leaves the view
+/// dirty for the next pass: no surface yet, or a draw the GPU skipped without a fault.
+const SKIPPED: &str = "native_terminal_frame_skipped";
+
 /// Host work parked until the call holding the state settles.
 type Parked = Box<dyn FnOnce(&mut Native)>;
 
@@ -1002,12 +1006,12 @@ fn draw_view(
 ) -> Result<bool, &'static str> {
     let view = &mut entry.platform;
     let marked = platform::marked(view);
-    let (Some(surface), Some(term)) = (view.surface.as_mut(), entry.pane.term()) else {
+    let Some(term) = entry.pane.term() else {
         return Ok(false);
     };
     let frame = screen::frame(term, &style.theme, shown, marked.as_deref());
     assert_eq!(frame.rows.len(), term.screen_lines());
-    match shared.draw(surface, &frame) {
+    match platform::paint(view, shared, &frame) {
         Ok(()) => {}
         Err(code) if code == GPU_FAULT => return Err(GPU_FAULT),
         Err(_) => return Ok(false),
@@ -1048,8 +1052,7 @@ impl Native {
         };
         let key = scale_key(scale);
         if view.scale != key {
-            view.surface = None;
-            view.scale = key;
+            platform::rescale(view, key);
         }
         let pixels = (
             (width * scale).round() as u32,
@@ -1058,13 +1061,7 @@ impl Native {
         let Ok(shared) = shared_at(shared, key, style) else {
             return;
         };
-        let made = match view.surface.as_mut() {
-            Some(surface) => shared.resize(surface, pixels.0, pixels.1).is_ok(),
-            None => {
-                view.surface = platform::surface(view, shared, pixels);
-                view.surface.is_some()
-            }
-        };
+        let made = platform::fit(view, shared, pixels);
         let grid = codec::grid_for(width, height, shared.cell_points(), GRID_MAX);
         if let Some(size) = entry.pane.resize(grid) {
             let _ = feed.resize(entry.feed, size);
@@ -1110,7 +1107,10 @@ impl Native {
         let mut drawn = 0;
         let mut refused = Vec::new();
         for (page, entry) in table.entries_mut() {
-            if !entry.pane.dirty || !platform::shown(&entry.platform) {
+            if !entry.pane.dirty
+                || !platform::shown(&entry.platform)
+                || !platform::ready(&mut entry.platform)
+            {
                 continue;
             }
             let Some(shared) = shared.get_mut(&entry.platform.scale) else {
