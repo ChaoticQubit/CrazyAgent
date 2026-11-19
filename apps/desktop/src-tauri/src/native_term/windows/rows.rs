@@ -1,13 +1,27 @@
 use std::ptr;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use windows::Win32::System::Com::{
+    CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+};
+use windows::Win32::System::Ole::{
+    SafeArrayDestroy, SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound,
+};
+use windows::Win32::UI::Accessibility::{
+    CUIAutomation, IUIAutomation, IUIAutomationCacheRequest, IUIAutomationElement,
+    IUIAutomationEventHandler, IUIAutomationEventHandler_Impl, IUIAutomationTextPattern,
+    IUIAutomationTextRange, TextPatternRangeEndpoint_End, TextPatternRangeEndpoint_Start,
+    TextUnit_Line, TreeScope_Element, UIA_EVENT_ID, UIA_Text_TextChangedEventId, UIA_TextPatternId,
+};
+use windows_core::{Ref, implement};
 use windows_sys::Win32::Foundation::{COLORREF, HWND, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
     CLR_INVALID, ClientToScreen, CreateSolidBrush, GetDC, GetPixel, ReleaseDC, ScreenToClient,
 };
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, LoadLibraryW};
 use windows_sys::Win32::UI::Input::Ime::{
     CFS_POINT, COMPOSITIONFORM, ImmGetCompositionWindow, ImmGetContext, ImmReleaseContext,
 };
@@ -21,10 +35,10 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_SHIFT, VK_TAB, VK_UP, VK_V,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GW_CHILD, GetSystemMetrics,
-    GetWindow, GetWindowRect, IsWindow, IsWindowVisible, MSG, PM_REMOVE, PeekMessageW,
-    PostMessageW, RegisterClassExW, SM_CXSCREEN, SM_CYSCREEN, SendMessageW, TranslateMessage,
-    WM_CHAR, WM_DPICHANGED_AFTERPARENT, WM_IME_CHAR, WM_IME_ENDCOMPOSITION,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, ES_MULTILINE, GW_CHILD,
+    GetSystemMetrics, GetWindow, GetWindowRect, IsWindow, IsWindowVisible, MSG, PM_REMOVE,
+    PeekMessageW, PostMessageW, RegisterClassExW, SM_CXSCREEN, SM_CYSCREEN, SendMessageW,
+    TranslateMessage, WM_CHAR, WM_DPICHANGED_AFTERPARENT, WM_IME_CHAR, WM_IME_ENDCOMPOSITION,
     WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
     WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
@@ -714,8 +728,8 @@ fn each_key_reaches_the_sink_once_as_the_panel_sends_it_and_nothing_while_inacti
     assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the stand-in goes");
 }
 
-/// The UIA reader: Windows PowerShell's managed UI Automation client, as a screen reader
-/// reads the view; `full` reads lines, selection, bounds and the text-changed event too.
+/// The PowerShell reader: Windows PowerShell's managed UI Automation client. `text` reads
+/// the element and its text; the `probe_` modes read one kind of range each.
 const READER: &str = include_str!("reader.ps1");
 
 /// How long a reader may run: Windows PowerShell's start and its assembly loads take a few
@@ -827,11 +841,20 @@ fn plain_canonical(path: &std::path::Path) -> std::path::PathBuf {
     std::path::PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(text))
 }
 
-/// Runs the text reader inside an agent's AppContainer, through the product's own Windows
-/// agent launch: a project sandbox with an open network, the widest capabilities an agent
-/// gets, installed with the boundary helper beside this test binary, then its wrapped
-/// command. Input: the view's window. Output: the reader's lines.
-fn read_from_an_agent_container(hwnd: HWND) -> Vec<String> {
+/// A UI Automation client a row starts: Windows PowerShell's managed client, or this test
+/// binary's compiled IUIAutomation reader, the COM client API screen readers use.
+#[derive(Clone, Copy, Debug)]
+enum Client {
+    PowerShell,
+    Compiled,
+}
+
+/// Runs a client's text read inside an agent's AppContainer, through the product's own
+/// Windows agent launch: a project sandbox with an open network, the widest capabilities
+/// an agent gets, installed with the boundary helper beside this test binary, then its
+/// wrapped command, the reader copied into the project. Inputs: the view's window and the
+/// client. Output: the reader's lines.
+fn read_from_an_agent_container(hwnd: HWND, client: Client) -> Vec<String> {
     use crazyagent::sandbox::{
         InstalledSandbox, LinuxStrict, LinuxSupervisor, ProjectSandbox, SandboxNetwork,
     };
@@ -846,22 +869,33 @@ fn read_from_an_agent_container(hwnd: HWND) -> Vec<String> {
     for folder in [&project, &home, &tmp, &profiles] {
         std::fs::create_dir_all(folder).expect("a sandbox folder");
     }
-    let script = project.join("reader.ps1");
-    std::fs::write(&script, READER).expect("the reader script");
+    let mut harness = match client {
+        Client::PowerShell => {
+            let script = project.join("reader.ps1");
+            std::fs::write(&script, READER).expect("the reader script");
+            reader_command(&script, hwnd, "text")
+        }
+        Client::Compiled => {
+            let binary = project.join("compiled-reader.exe");
+            let this = std::env::current_exe().expect("this test binary");
+            std::fs::copy(this, &binary).expect("this test binary copied into the project");
+            compiled_command(&binary, hwnd, "text")
+        }
+    };
     let sandbox =
         ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Open).expect("a policy");
     let profile = profiles.join("agent.sb");
     let installed =
         InstalledSandbox::install(sandbox, &profile, LinuxSupervisor::On, LinuxStrict::Off);
     let installed = installed.expect("the boundary helper beside the test binary");
-    let mut harness = reader_command(&script, hwnd, "text");
     harness.current_dir(&project);
     let command = installed.wrap(&harness).expect("an agent command");
-    read_view("h3 row: agent container reader", command, |_| {})
+    let what = format!("h3 row: agent container reader {client:?}");
+    read_view(&what, command, |_| {})
 }
 
-/// The wall: a screen reader outside any container reads the view's text, and a reader
-/// started in an agent's AppContainer must reach the view's own window in this process and
+/// The wall: a screen reader outside any container reads the view's text, and each client,
+/// started in an agent's AppContainer, must reach the view's own window in this process and
 /// read nothing of it. Inputs: the view, showing "ab" and "cd", and the reader script.
 fn the_wall(view: &View, script: &std::path::Path) {
     let shown = read_view(
@@ -874,14 +908,16 @@ fn the_wall(view: &View, script: &std::path::Path) {
     assert_eq!(value(&shown, "reader_name"), Some("Terminal"));
     assert_eq!(value(&shown, "reader_text_pattern"), Some("True"));
     assert!(value(&shown, "reader_text").is_some_and(|text| text.starts_with("ab|cd|")));
-    let contained = read_from_an_agent_container(view.hwnd());
-    assert!(
-        value(&contained, "reader_stage") == Some("lookup"),
-        "the container reader never reached the UIA lookup: {contained:?}"
-    );
-    found_the_view(&contained, view.hwnd());
-    contained_read_nothing(&contained);
-    println!("h3 row: agent container read nothing: {contained:?}");
+    for client in [Client::PowerShell, Client::Compiled] {
+        let contained = read_from_an_agent_container(view.hwnd(), client);
+        assert!(
+            value(&contained, "reader_stage") == Some("lookup"),
+            "the {client:?} container reader never reached the UIA lookup: {contained:?}"
+        );
+        found_the_view(&contained, view.hwnd());
+        contained_read_nothing(&contained);
+        println!("h3 row: agent container read nothing {client:?}: {contained:?}");
+    }
 }
 
 /// A view placed, drawn and showing "ab" and "cd", with the reader script written beside
@@ -897,14 +933,16 @@ fn shown_for_readers(parent: HWND, webview: HWND) -> (View, tempfile::TempDir) {
     (view, temp)
 }
 
-/// A screen reader reads the view's second line, the empty selection at the cursor, the
-/// line's bounds inside the window, a refused Select and the text after a new screen, and
-/// counts text-changed events. Inputs: the view, showing "ab" and "cd", and the reader.
-fn read_in_full(view: &View, script: &std::path::Path) {
+/// A screen reader, the compiled IUIAutomation client, reads the view's second line, the
+/// empty selection at the cursor, the line's bounds inside the window, a refused Select and
+/// the text after a new screen, and counts text-changed events. Input: the view, showing
+/// "ab" and "cd".
+fn read_in_full(view: &View) {
     let mut posted = false;
+    let this = std::env::current_exe().expect("this test binary");
     let lines = read_view(
         "h3 row: screen reader",
-        reader_command(script, view.hwnd(), "full"),
+        compiled_command(&this, view.hwnd(), "full"),
         |line| {
             if line == "reader_listening" && !posted {
                 posted = true;
@@ -913,6 +951,10 @@ fn read_in_full(view: &View, script: &std::path::Path) {
         },
     );
     found_the_view(&lines, view.hwnd());
+    assert_eq!(value(&lines, "reader_control"), Some(DOCUMENT));
+    assert_eq!(value(&lines, "reader_name"), Some("Terminal"));
+    assert_eq!(value(&lines, "reader_text_pattern"), Some("True"));
+    assert!(value(&lines, "reader_text").is_some_and(|text| text.starts_with("ab|cd|")));
     assert_eq!(value(&lines, "reader_line_moved"), Some("1"));
     assert_eq!(value(&lines, "reader_line"), Some("cd|"));
     assert_eq!(value(&lines, "reader_selection"), Some("1:0"));
@@ -1003,8 +1045,8 @@ fn an_agent_container_reaches_the_view_and_reads_nothing_of_it() {
 #[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
 fn a_screen_reader_reads_lines_the_selection_bounds_and_events() {
     let (parent, webview) = stand_ins();
-    let (view, temp) = shown_for_readers(parent, webview);
-    read_in_full(&view, &temp.path().join("reader.ps1"));
+    let (view, _temp) = shown_for_readers(parent, webview);
+    read_in_full(&view);
     drop(view);
     assert_eq!(
         draw::counts().1,
@@ -1028,11 +1070,72 @@ fn each_kind_of_range_is_read_by_its_own_reader_and_recorded() {
             "{what} reached its lookup: {lines:?}"
         );
     }
+    let this = std::env::current_exe().expect("this test binary");
+    let command = compiled_command(&this, view.hwnd(), "probe");
+    let lines = read_view("h3 row: compiled reader", command, |_| {});
+    assert_eq!(
+        value(&lines, "reader_stage"),
+        Some("lookup"),
+        "the compiled reader reached its lookup: {lines:?}"
+    );
+    let control = rich_edit();
+    let command = reader_command(&script, control, "probe_visible");
+    let lines = read_view("h3 row: rich edit control probe_visible", command, |_| {});
+    assert_eq!(
+        value(&lines, "reader_stage"),
+        Some("lookup"),
+        "the rich edit control probe reached its lookup: {lines:?}"
+    );
+    assert_ne!(unsafe { DestroyWindow(control) }, 0);
+    drop(view);
+}
+
+/// A system rich edit window showing "ab" and "cd": the control the windows-2022 client
+/// probe reads the same way as the view, through a provider that is not ours. Output: its
+/// window, which the caller destroys.
+fn rich_edit() -> HWND {
+    let library: Vec<u16> = "Msftedit.dll\0".encode_utf16().collect();
+    let loaded = unsafe { LoadLibraryW(library.as_ptr()) };
+    assert!(!loaded.is_null(), "the rich edit library");
+    let class: Vec<u16> = "RICHEDIT50W\0".encode_utf16().collect();
+    let text: Vec<u16> = "ab\r\ncd\0".encode_utf16().collect();
+    let style = WS_POPUP | WS_VISIBLE | ES_MULTILINE.unsigned_abs();
+    let window = unsafe {
+        CreateWindowExW(
+            0,
+            class.as_ptr(),
+            text.as_ptr(),
+            style,
+            40,
+            40,
+            300,
+            120,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            GetModuleHandleW(ptr::null()),
+            ptr::null(),
+        )
+    };
+    assert!(!window.is_null(), "a rich edit window");
+    pump_for(Duration::from_millis(200));
+    window
+}
+
+/// The variable naming the window a compiled reader child reads, set only by a row that
+/// starts this test binary as a UI Automation client.
+const READ_WINDOW: &str = "H3_UIA_READ_WINDOW";
+
+/// The variable naming what a compiled reader child reads: `text`, `probe` or `full`.
+const READ_MODE: &str = "H3_UIA_READ_MODE";
+
+/// The compiled reader command: this test binary, or a copy of it, running only its reader
+/// row on a window. Inputs: the binary, the window and the mode. Output: the command.
+fn compiled_command(binary: &std::path::Path, hwnd: HWND, mode: &str) -> std::process::Command {
     let path = module_path!()
         .split_once("::")
         .map_or(module_path!(), |(_, rest)| rest);
     let row = format!("{path}::the_compiled_reader_reads_the_window_its_parent_names");
-    let mut command = std::process::Command::new(std::env::current_exe().expect("this binary"));
+    let mut command = std::process::Command::new(binary);
     command
         .args([
             row.as_str(),
@@ -1041,24 +1144,16 @@ fn each_kind_of_range_is_read_by_its_own_reader_and_recorded() {
             "--nocapture",
             "--test-threads=1",
         ])
-        .env(READ_WINDOW, (view.hwnd() as isize).to_string());
-    let lines = read_view("h3 row: compiled reader", command, |_| {});
-    assert_eq!(
-        value(&lines, "reader_stage"),
-        Some("lookup"),
-        "the compiled reader reached its lookup: {lines:?}"
-    );
-    drop(view);
+        .env(READ_WINDOW, (hwnd as isize).to_string())
+        .env(READ_MODE, mode);
+    command
 }
 
-/// The variable naming the window a compiled reader child reads, set only by the probe row
-/// when it starts this test binary as a UI Automation client.
-const READ_WINDOW: &str = "H3_UIA_READ_WINDOW";
-
-/// The probe row's child: without its variable it does nothing; with it, it reads that
-/// window through IUIAutomation, the COM client screen readers use (`compiled_read`).
+/// The H3 rows' child: without its variables it does nothing; with them, it reads that
+/// window through IUIAutomation, the COM client screen readers use. Its first line ends
+/// the test harness's own line, so every reader line stands alone.
 #[test]
-#[ignore = "a child of the probe row: the compiled UI Automation reader"]
+#[ignore = "a child of the H3 rows: the compiled UI Automation reader"]
 fn the_compiled_reader_reads_the_window_its_parent_names() {
     let Some(handle) = std::env::var_os(READ_WINDOW) else {
         return;
@@ -1066,29 +1161,40 @@ fn the_compiled_reader_reads_the_window_its_parent_names() {
     let handle = handle.to_str().and_then(|text| text.parse::<isize>().ok());
     let handle = handle.expect("a window handle in the variable");
     assert_ne!(handle, 0);
-    compiled_read(handle);
+    let mode = std::env::var(READ_MODE).expect("a mode in the variable");
+    println!();
+    let Some(read) = compiled_text(handle) else {
+        return;
+    };
+    match mode.as_str() {
+        "text" => {}
+        "probe" => compiled_probe(&read),
+        "full" => compiled_full(&read),
+        other => panic!("no compiled reader mode {other}"),
+    }
 }
 
-/// Reads the view through IUIAutomation as the PowerShell probes do, the same ranges in the
-/// same order, printing a step before each call so a crash names its call. Input: the
-/// view's window handle.
-fn compiled_read(handle: isize) {
-    use windows::Win32::System::Com::{
-        CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
-    };
-    use windows::Win32::UI::Accessibility::{
-        CUIAutomation, IUIAutomation, IUIAutomationTextPattern, TextPatternRangeEndpoint_End,
-        TextPatternRangeEndpoint_Start, UIA_TextPatternId,
-    };
-    unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
-        .ok()
-        .expect("COM on this thread");
+/// What the compiled reader holds once the window's element has a Text pattern: the
+/// client, the element, its pattern and its document range.
+struct Read {
+    automation: IUIAutomation,
+    element: IUIAutomationElement,
+    pattern: IUIAutomationTextPattern,
+    document: IUIAutomationTextRange,
+}
+
+/// Starts the COM client and reads the window's element as the PowerShell text mode does:
+/// its window, process, type, name, Text pattern and text. Input: the window. Output: what
+/// a later read needs, or none when the element has no Text pattern.
+fn compiled_text(handle: isize) -> Option<Read> {
+    let started = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    started.ok().expect("COM on this thread");
     let automation: IUIAutomation =
         unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
             .expect("the UI Automation client");
     println!("reader_stage=lookup");
     let window = windows::Win32::Foundation::HWND(handle as *mut core::ffi::c_void);
-    let element = unsafe { automation.ElementFromHandle(window) }.expect("the view");
+    let element = unsafe { automation.ElementFromHandle(window) }.expect("the window's element");
     let found = unsafe { element.CurrentNativeWindowHandle() }.expect("its window");
     println!("reader_hwnd={}", found.0 as isize as i32);
     println!(
@@ -1103,22 +1209,38 @@ fn compiled_read(handle: isize) {
         "reader_name={}",
         unsafe { element.CurrentName() }.expect("its name")
     );
-    let pattern: IUIAutomationTextPattern =
-        unsafe { element.GetCurrentPatternAs(UIA_TextPatternId) }.expect("its Text pattern");
-    println!("reader_text_pattern=True");
+    let pattern =
+        unsafe { element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId) };
+    println!(
+        "reader_text_pattern={}",
+        if pattern.is_ok() { "True" } else { "False" }
+    );
+    let pattern = pattern.ok()?;
     let document = unsafe { pattern.DocumentRange() }.expect("the document");
     let text = unsafe { document.GetText(-1) }
         .expect("its text")
         .to_string();
     println!("reader_text={}", text.replace('\n', "|"));
+    Some(Read {
+        automation,
+        element,
+        pattern,
+        document,
+    })
+}
+
+/// Reads the view through IUIAutomation as the PowerShell probes do, the same ranges in the
+/// same order, printing a step before each call so a crash names its call. Input: what the
+/// text read found.
+fn compiled_probe(read: &Read) {
     println!("reader_step=visible_array");
-    let visible = unsafe { pattern.GetVisibleRanges() }.expect("the visible ranges");
+    let visible = unsafe { read.pattern.GetVisibleRanges() }.expect("the visible ranges");
     let first = unsafe { visible.GetElement(0) }.expect("the first visible range");
     println!(
         "reader_step=visible_read {}",
         unsafe { first.GetText(-1) }.expect("text").len()
     );
-    let empty = unsafe { document.Clone() }.expect("a clone");
+    let empty = unsafe { read.document.Clone() }.expect("a clone");
     let start = TextPatternRangeEndpoint_Start;
     unsafe { empty.MoveEndpointByRange(TextPatternRangeEndpoint_End, &empty, start) }
         .expect("collapsed to its start");
@@ -1127,7 +1249,7 @@ fn compiled_read(handle: isize) {
         "reader_step=empty_read {}",
         unsafe { empty.GetText(-1) }.expect("text").len()
     );
-    let selection = unsafe { pattern.GetSelection() }.expect("the selection");
+    let selection = unsafe { read.pattern.GetSelection() }.expect("the selection");
     println!(
         "reader_step=selection_array {}",
         unsafe { selection.Length() }.expect("count")
@@ -1136,6 +1258,97 @@ fn compiled_read(handle: isize) {
     println!("reader_step=selection_indexed");
     let _copy = unsafe { selected.Clone() }.expect("a clone of it");
     println!("reader_step=selection_cloned");
-    let read = unsafe { selected.GetText(-1) }.expect("its text");
-    println!("reader_step=selection_read {}", read.len());
+    let text = unsafe { selected.GetText(-1) }.expect("its text");
+    println!("reader_step=selection_read {}", text.len());
+}
+
+/// Reads as the full row asks: the second line by a line move, the selection's count and
+/// length, the line's bounds and a Select the view refuses, then the text-changed events.
+/// Input: what the text read found.
+fn compiled_full(read: &Read) {
+    let line = unsafe { read.document.Clone() }.expect("a clone");
+    unsafe { line.ExpandToEnclosingUnit(TextUnit_Line) }.expect("a line");
+    let moved = unsafe { line.Move(TextUnit_Line, 1) }.expect("a line move");
+    println!("reader_line_moved={moved}");
+    let text = unsafe { line.GetText(-1) }.expect("its text").to_string();
+    println!("reader_line={}", text.replace('\n', "|"));
+    let selection = unsafe { read.pattern.GetSelection() }.expect("the selection");
+    let count = unsafe { selection.Length() }.expect("its count");
+    let selected = unsafe { selection.GetElement(0) }.expect("the selected range");
+    let length = unsafe { selected.GetText(-1) }.expect("its text").len();
+    println!("reader_selection={count}:{length}");
+    println!("reader_rects={}", rects_of(&line));
+    match unsafe { read.document.Select() } {
+        Ok(()) => println!("reader_select=accepted"),
+        Err(error) => println!("reader_select=refused {:#010X}", error.code().0),
+    }
+    compiled_events(read);
+}
+
+/// A range's bounds as the reader prints them: each rectangle's left, top, width and height
+/// in whole pixels, rectangles joined by semicolons. Input: the range. Output: the text.
+fn rects_of(range: &IUIAutomationTextRange) -> String {
+    let array = unsafe { range.GetBoundingRectangles() }.expect("the bounds");
+    assert!(!array.is_null());
+    let lower = unsafe { SafeArrayGetLBound(array, 1) }.expect("its lower bound");
+    let upper = unsafe { SafeArrayGetUBound(array, 1) }.expect("its upper bound");
+    let mut sides = Vec::new();
+    for index in lower..=upper {
+        let mut side = 0f64;
+        let at = (&raw mut side).cast();
+        unsafe { SafeArrayGetElement(array, &index, at) }.expect("a side");
+        sides.push(side.round() as i32);
+    }
+    unsafe { SafeArrayDestroy(array) }.expect("the bounds freed");
+    assert_eq!(sides.len() % 4, 0, "whole rectangles: {sides:?}");
+    let rects: Vec<String> = sides
+        .chunks(4)
+        .map(|side| format!("{},{},{},{}", side[0], side[1], side[2], side[3]))
+        .collect();
+    rects.join(";")
+}
+
+/// Counts the view's text-changed events: listens on the element, says so, waits up to 15
+/// seconds for one while the parent posts a new screen, then reads the text after. Input:
+/// what the text read found.
+fn compiled_events(read: &Read) {
+    let seen = Arc::new(AtomicUsize::new(0));
+    let handler: IUIAutomationEventHandler = Seen(Arc::clone(&seen)).into();
+    let changed = UIA_Text_TextChangedEventId;
+    let none = None::<&IUIAutomationCacheRequest>;
+    let scope = TreeScope_Element;
+    unsafe {
+        read.automation
+            .AddAutomationEventHandler(changed, &read.element, scope, none, &handler)
+    }
+    .expect("a text-changed handler");
+    println!("reader_listening");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while seen.load(Ordering::SeqCst) < 1 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(100));
+    }
+    println!("reader_text_changed={}", seen.load(Ordering::SeqCst));
+    let text = unsafe { read.document.GetText(-1) }
+        .expect("its text")
+        .to_string();
+    println!("reader_text_after={}", text.replace('\n', "|"));
+    unsafe { read.automation.RemoveAllEventHandlers() }.expect("the handler removed");
+}
+
+/// The compiled reader's event handler: counts each text-changed event UI Automation hands
+/// it, on whichever thread it calls.
+#[implement(IUIAutomationEventHandler)]
+struct Seen(Arc<AtomicUsize>);
+
+impl IUIAutomationEventHandler_Impl for Seen_Impl {
+    fn HandleAutomationEvent(
+        &self,
+        _sender: Ref<IUIAutomationElement>,
+        event: UIA_EVENT_ID,
+    ) -> windows_core::Result<()> {
+        if event == UIA_Text_TextChangedEventId {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
 }
