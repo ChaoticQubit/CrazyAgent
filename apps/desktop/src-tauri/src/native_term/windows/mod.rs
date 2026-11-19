@@ -5,4 +5,5 @@ mod keys;
 mod place;
 #[cfg(test)]
 mod rows;
+mod uia;
 mod view;

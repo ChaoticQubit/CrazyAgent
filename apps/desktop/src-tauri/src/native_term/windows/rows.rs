@@ -29,6 +29,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
+use super::super::a11y;
 use super::super::event::ViewEvent;
 use super::super::pane::{CONTROL, Input, Named, Pane};
 use super::super::screen::{self, Frame};
@@ -711,4 +712,226 @@ fn each_key_reaches_the_sink_once_as_the_panel_sends_it_and_nothing_while_inacti
     inactive_views_type_nothing(&view, webview, centre);
     drop(view);
     assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the stand-in goes");
+}
+
+/// The UIA reader: Windows PowerShell's managed UI Automation client, as a screen reader
+/// reads the view; `full` reads lines, selection, bounds and the text-changed event too.
+const READER: &str = include_str!("reader.ps1");
+
+/// How long a reader may run: Windows PowerShell's start and its assembly loads take a few
+/// seconds on a hosted runner, and a hung reader must not hold the run.
+const READER_WAIT: Duration = Duration::from_secs(60);
+
+/// Windows PowerShell, by its absolute path, as an agent's wrapped command needs it.
+fn powershell() -> std::path::PathBuf {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| r"C:\Windows".into());
+    std::path::PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe")
+}
+
+/// The reader command for a view. Inputs: the script, the view's window and the mode.
+fn reader_command(script: &std::path::Path, hwnd: HWND, mode: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(powershell());
+    command
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
+        .arg(script)
+        .arg((hwnd as isize).to_string())
+        .arg(mode);
+    command
+}
+
+/// Runs a reader to its end while this thread pumps the view's messages, handing each line
+/// to `on_line` as it arrives. Inputs: what reads, the command and the line callback.
+/// Output: every line the reader printed.
+fn read_view(
+    what: &str,
+    mut command: std::process::Command,
+    mut on_line: impl FnMut(&str),
+) -> Vec<String> {
+    use std::io::BufRead;
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command
+        .spawn()
+        .unwrap_or_else(|error| panic!("{what} starts: {error}"));
+    let stdout = child.stdout.take().expect("piped");
+    let (send, lines) = std::sync::mpsc::channel();
+    let reading = thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if send.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut seen = Vec::new();
+    let started = Instant::now();
+    loop {
+        while let Ok(line) = lines.try_recv() {
+            on_line(&line);
+            seen.push(line);
+        }
+        if reading.is_finished() && child.try_wait().ok().flatten().is_some() {
+            break;
+        }
+        if started.elapsed() > READER_WAIT {
+            let _ = child.kill();
+            panic!("{what} ended within {READER_WAIT:?}: {seen:?}");
+        }
+        pump_for(Duration::from_millis(20));
+    }
+    seen.extend(lines.try_iter());
+    let output = child.wait_with_output().expect("the reader's end");
+    let errors = String::from_utf8_lossy(&output.stderr);
+    println!(
+        "{what}: {seen:?} rc {:?} stderr {}",
+        output.status.code(),
+        errors.trim()
+    );
+    seen
+}
+
+/// The value of the reader line with this key. Inputs: the lines and the key. Output: the
+/// value, or none.
+fn value<'a>(lines: &'a [String], key: &str) -> Option<&'a str> {
+    let key = format!("{key}=");
+    lines
+        .iter()
+        .find_map(|line| line.strip_prefix(key.as_str()))
+}
+
+/// Feeds a view one screen, drawn and posted to UI Automation as the host does after each
+/// frame. Inputs: the view and the bytes the terminal took.
+fn fed_and_posted(view: &View, text: &[u8]) {
+    let mut pane = Pane::new(true);
+    assert!(pane.on_attached(40, 12));
+    assert!(pane.on_output(text));
+    let term = pane.term().expect("an attached pane");
+    assert!(view.feed(screen::frame(term, &Theme::default(), true, None)));
+    view.access(a11y::visible(term), a11y::text_key(term));
+}
+
+/// A plain canonical folder: the verbatim prefix Windows' canonical form adds dropped, as
+/// the boundary takes paths. Input: the folder. Output: its plain form.
+fn plain_canonical(path: &std::path::Path) -> std::path::PathBuf {
+    let full = std::fs::canonicalize(path).expect("a canonical folder");
+    let text = full.to_str().expect("a UTF-8 folder");
+    std::path::PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(text))
+}
+
+/// Runs the text reader inside an agent's AppContainer, through the product's own Windows
+/// agent launch: a project sandbox with an open network, the widest capabilities an agent
+/// gets, installed with the boundary helper beside this test binary, then its wrapped
+/// command. Input: the view's window. Output: the reader's lines.
+fn read_from_an_agent_container(hwnd: HWND) -> Vec<String> {
+    use crazyagent::sandbox::{
+        InstalledSandbox, LinuxStrict, LinuxSupervisor, ProjectSandbox, SandboxNetwork,
+    };
+    let temp = tempfile::tempdir().expect("a temporary folder");
+    let root = plain_canonical(temp.path());
+    let (project, home, tmp, profiles) = (
+        root.join("project"),
+        root.join("agent").join("home"),
+        root.join("agent").join("tmp"),
+        root.join("profiles"),
+    );
+    for folder in [&project, &home, &tmp, &profiles] {
+        std::fs::create_dir_all(folder).expect("a sandbox folder");
+    }
+    let script = project.join("reader.ps1");
+    std::fs::write(&script, READER).expect("the reader script");
+    let sandbox =
+        ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Open).expect("a policy");
+    let profile = profiles.join("agent.sb");
+    let installed =
+        InstalledSandbox::install(sandbox, &profile, LinuxSupervisor::On, LinuxStrict::Off);
+    let installed = installed.expect("the boundary helper beside the test binary");
+    let mut harness = reader_command(&script, hwnd, "text");
+    harness.current_dir(&project);
+    let command = installed.wrap(&harness).expect("an agent command");
+    read_view("h3 row: agent container reader", command, |_| {})
+}
+
+/// A screen reader outside any container reads the view's text, its second line, the empty
+/// selection at the cursor, bounds inside the view, a refused Select and a text-changed
+/// event after a new screen; then a reader started in an agent's AppContainer must start
+/// and read nothing. Input: the view, placed and drawn.
+fn read_by_a_screen_reader_and_not_by_an_agent(view: &View) {
+    fed_and_posted(view, b"ab\r\ncd");
+    let temp = tempfile::tempdir().expect("a temporary folder");
+    let script = temp.path().join("reader.ps1");
+    std::fs::write(&script, READER).expect("the reader script");
+    let mut posted = false;
+    let lines = read_view(
+        "h3 row: screen reader",
+        reader_command(&script, view.hwnd(), "full"),
+        |line| {
+            if line == "reader_listening" && !posted {
+                posted = true;
+                fed_and_posted(view, b"ab\r\ncd\r\nef");
+            }
+        },
+    );
+    assert_eq!(value(&lines, "reader_name"), Some("Terminal"));
+    assert_eq!(value(&lines, "reader_text_pattern"), Some("True"));
+    assert!(value(&lines, "reader_text").is_some_and(|text| text.starts_with("ab|cd|")));
+    assert_eq!(value(&lines, "reader_line_moved"), Some("1"));
+    assert_eq!(value(&lines, "reader_line"), Some("cd|"));
+    assert_eq!(value(&lines, "reader_selection"), Some("1:0"));
+    assert!(value(&lines, "reader_select").is_some_and(|said| said.starts_with("refused")));
+    let mut window = RECT::default();
+    assert_ne!(unsafe { GetWindowRect(view.hwnd(), &mut window) }, 0);
+    let rects = value(&lines, "reader_rects").expect("the line's bounds");
+    let sides: Vec<i32> = rects
+        .split([',', ';'])
+        .filter_map(|side| side.parse().ok())
+        .collect();
+    assert_eq!(
+        sides.len(),
+        4,
+        "one rectangle for the line's two cells: {rects}"
+    );
+    assert!(
+        sides[0] >= window.left && sides[1] >= window.top,
+        "{rects} inside {window:?}"
+    );
+    assert!(sides[0] + sides[2] <= window.right && sides[1] + sides[3] <= window.bottom);
+    assert!(value(&lines, "reader_text_after").is_some_and(|text| text.starts_with("ab|cd|ef|")));
+    let events = value(&lines, "reader_text_changed").unwrap_or("none");
+    println!("h3 row: text changed events {events}");
+    let contained = read_from_an_agent_container(view.hwnd());
+    assert!(
+        value(&contained, "reader_pid").is_some(),
+        "the container reader started: {contained:?}"
+    );
+    let read = value(&contained, "reader_text");
+    assert!(
+        read.is_none_or(|text| !text.contains("ab|cd")),
+        "an agent's AppContainer read the view: {contained:?}"
+    );
+    println!("h3 row: agent container read nothing: {contained:?}");
+}
+
+#[test]
+#[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
+fn a_screen_reader_reads_the_view_and_an_agent_container_reads_nothing() {
+    let (parent, webview) = stand_ins();
+    let view = View::new(parent, webview, 1, sink, &style()).expect("a view");
+    placed_shown_and_drawn(parent, &view);
+    read_by_a_screen_reader_and_not_by_an_agent(&view);
+    drop(view);
+    assert_eq!(
+        draw::counts().1,
+        0,
+        "no surface setup, swap-chain wait or draw failed"
+    );
 }

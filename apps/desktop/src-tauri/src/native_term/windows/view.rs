@@ -17,14 +17,16 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW,
-    GetWindowRect, HWND_TOP, IDC_IBEAM, LoadCursorW, MA_ACTIVATE, MSG, PM_NOREMOVE, PeekMessageW,
-    RegisterClassExW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, WM_CHAR, WM_DEADCHAR, WM_DESTROY, WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND,
-    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEACTIVATE,
-    WM_NCDESTROY, WM_PAINT, WM_SETFOCUS, WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WNDCLASSEXW,
-    WS_CHILD, WS_CLIPSIBLINGS, WS_EX_NOPARENTNOTIFY,
+    GetWindowRect, HWND_TOP, IDC_IBEAM, ISMEX_REPLIED, ISMEX_SEND, InSendMessageEx, LoadCursorW,
+    MA_ACTIVATE, MSG, PM_NOREMOVE, PeekMessageW, RegisterClassExW, SW_HIDE, SWP_NOACTIVATE,
+    SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_CHAR, WM_DEADCHAR, WM_DESTROY,
+    WM_DPICHANGED_AFTERPARENT, WM_ERASEBKGND, WM_GETOBJECT, WM_IME_STARTCOMPOSITION, WM_KEYDOWN,
+    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEACTIVATE, WM_NCDESTROY, WM_PAINT, WM_SETFOCUS,
+    WM_SYSCHAR, WM_SYSDEADCHAR, WM_SYSKEYDOWN, WNDCLASSEXW, WS_CHILD, WS_CLIPSIBLINGS,
+    WS_EX_NOPARENTNOTIFY,
 };
 
+use super::super::a11y::Grid;
 use super::super::event::{Sink, ViewEvent};
 use super::super::screen::Frame;
 use super::super::style::Style;
@@ -32,6 +34,7 @@ use super::board::Geometry;
 use super::draw::{self, BOARD, DROP_WAIT};
 use super::keys::{self, Mods, Next, Typed};
 use super::place::{self, SCALE_KEYS};
+use super::uia::{Access, Root};
 
 /// The plain code for a parent window no child view can be made in.
 const UNAVAILABLE: &str = "native_terminal_surface_unavailable";
@@ -108,6 +111,7 @@ struct Inner {
     held: Cell<Option<u16>>,
     cursor: Cell<Option<(usize, usize)>>,
     alive: Cell<bool>,
+    root: Root,
 }
 
 /// One terminal view's native child window over the webview on Windows. Its window thread
@@ -167,6 +171,7 @@ impl View {
             held: Cell::new(None),
             cursor: Cell::new(None),
             alive: Cell::new(true),
+            root: Root::new(Access::new(id, key)),
         });
         let geometry = Geometry {
             size: (1, 1),
@@ -215,6 +220,14 @@ impl View {
             .map(|cursor| (cursor.row, cursor.column));
         self.inner.cursor.set(cursor);
         BOARD.post_frame(self.inner.id, frame)
+    }
+
+    /// Hands UI Automation the screen a frame drew and raises its text and selection events
+    /// for what changed, as the macOS view's `drawn` posts VoiceOver's. Inputs: the visible
+    /// grid (`a11y::visible`) and `a11y::text_key` of the same terminal.
+    pub fn access(&self, grid: Grid, text_key: u64) {
+        let changed = self.inner.root.access().post(grid, text_key);
+        self.inner.root.raise(changed);
     }
 }
 
@@ -297,6 +310,7 @@ impl Inner {
     fn rescale(&self, hwnd: HWND) {
         self.key.set(read_key(hwnd).unwrap_or(self.key.get()));
         assert!(SCALE_KEYS.contains(&self.key.get()), "a view's scale key");
+        self.root.access().rescale(self.key.get());
         let _ = self.apply(hwnd);
     }
 }
@@ -399,6 +413,7 @@ impl Inner {
     /// Focus leaves the view: keys stop, any composition is cancelled and the host hears.
     fn lose_focus(&self, hwnd: HWND) {
         self.focused.set(false);
+        self.root.access().focus(false);
         self.swallow.set(false);
         self.held.set(None);
         cancel_composition(hwnd);
@@ -469,6 +484,13 @@ fn cancel_composition(hwnd: HWND) {
     unsafe { ImmReleaseContext(hwnd, context) };
 }
 
+/// Whether this thread is handling a message another thread sent and still waits on, where
+/// UI Automation refuses to disconnect a provider. Output: true inside such a send.
+fn in_send() -> bool {
+    let flags = unsafe { InSendMessageEx(ptr::null()) };
+    flags & ISMEX_SEND != 0 && flags & ISMEX_REPLIED == 0
+}
+
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     message: u32,
@@ -487,6 +509,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_SETFOCUS => {
             inner.focused.set(true);
+            inner.root.access().focus(true);
             (inner.sink)(inner.id, ViewEvent::Focus(true));
             0
         }
@@ -511,7 +534,12 @@ unsafe extern "system" fn window_proc(
             inner.rescale(hwnd);
             0
         }
+        WM_GETOBJECT => inner
+            .root
+            .answer(hwnd as isize, wparam, lparam)
+            .unwrap_or_else(|| unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }),
         WM_DESTROY => {
+            inner.root.end(hwnd as isize, in_send());
             BOARD.remove(inner.id, DROP_WAIT);
             0
         }
@@ -529,6 +557,9 @@ impl Drop for View {
     /// destroys its window. A surface still held past the bound keeps the window, hidden and
     /// cut off from this view, since the surface must not outlive it.
     fn drop(&mut self) {
+        if self.inner.alive.get() {
+            self.inner.root.end(self.hwnd as isize, in_send());
+        }
         let gone = BOARD.remove(self.inner.id, DROP_WAIT);
         if !self.inner.alive.get() {
             return;
