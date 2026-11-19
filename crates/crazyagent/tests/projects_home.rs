@@ -877,9 +877,16 @@ fn a_home_move_covers_every_folder_or_refuses_before_anything_moves() {
 }
 
 #[cfg(target_os = "macos")]
+mod image_support;
+
+/// A scratch disk image mounted for one test, holding the shared disk image lock from
+/// before its attach until after its detach, so no other test process renumbers a volume
+/// meanwhile. One test makes at most one at a time.
+#[cfg(target_os = "macos")]
 struct Volume {
     mount: PathBuf,
     _image: tempfile::TempDir,
+    _images: std::fs::File,
 }
 
 #[cfg(target_os = "macos")]
@@ -892,6 +899,7 @@ impl Volume {
     /// detached when dropped. Input: the `hdiutil create -fs` name. Output: the volume.
     fn attach_as(format: &str) -> Self {
         use std::os::unix::fs::MetadataExt;
+        let images = image_support::lock();
         let image = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
         let disk = image.path().join("second.dmg");
         let mount = image.path().join("mount");
@@ -925,6 +933,7 @@ impl Volume {
         let volume = Self {
             mount: mount.canonicalize().unwrap(),
             _image: image,
+            _images: images,
         };
         assert_ne!(
             fs::metadata(&volume.mount).unwrap().dev(),

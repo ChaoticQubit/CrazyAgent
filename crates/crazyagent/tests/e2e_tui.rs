@@ -3083,18 +3083,24 @@ fn a_removed_project_comes_back_only_from_its_own_folder_in_the_tui() {
     engine.stop();
 }
 
+#[cfg(target_os = "macos")]
+mod image_support;
+
 /// A fresh APFS disk image mounted for one test, detached when dropped, so a Delete everything
-/// moves its folders to the image's own Trash and never to the owner's.
+/// moves its folders to the image's own Trash and never to the owner's. It holds the shared
+/// disk image lock from before its attach until after its detach.
 #[cfg(target_os = "macos")]
 struct Volume {
     mount: PathBuf,
     _image: tempfile::TempDir,
+    _images: std::fs::File,
 }
 
 #[cfg(target_os = "macos")]
 impl Volume {
     /// Creates and mounts a 64 MB APFS image. Input: none. Output: the mounted volume.
     fn attach() -> Self {
+        let images = image_support::lock();
         let image = scratch("ca-e2e-volume-");
         let disk = image.path().join("projects.dmg");
         let mount = image.path().join("mount");
@@ -3129,6 +3135,7 @@ impl Volume {
         Self {
             mount: mount.canonicalize().unwrap(),
             _image: image,
+            _images: images,
         }
     }
 }
