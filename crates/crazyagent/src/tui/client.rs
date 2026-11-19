@@ -231,6 +231,7 @@ pub(super) struct Connection {
     receiver: Option<Receiver<Result<WireReply, ClientError>>>,
     owner_receiver: Option<Receiver<OwnerReply>>,
     owner_busy: bool,
+    owner_reconnecting: bool,
     stopped: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     pending: Option<Pending>,
@@ -1022,6 +1023,7 @@ impl Connection {
             receiver: Some(receiver),
             owner_receiver: Some(owner_receiver),
             owner_busy: false,
+            owner_reconnecting: false,
             stopped,
             worker: Some(worker),
             pending: None,
@@ -1033,6 +1035,13 @@ impl Connection {
 
     pub fn busy(&self) -> bool {
         self.pending.is_some() || self.owner_busy
+    }
+
+    /// Tells whether the owner job in flight is a reconnect, from Ctrl-R or an engine start.
+    /// Input: none. Output: true from the reconnect's send until its finished reply is
+    /// polled, so a later press neither stacks a second reconnect nor waits behind it.
+    pub(super) fn reconnecting(&self) -> bool {
+        self.owner_reconnecting
     }
 
     pub fn uncertain(&self) -> bool {
@@ -1125,6 +1134,7 @@ impl Connection {
         if reply.finished {
             assert!(self.owner_busy);
             self.owner_busy = false;
+            self.owner_reconnecting = false;
         }
         Ok(Some(reply.event))
     }
@@ -1198,12 +1208,14 @@ impl Connection {
         if self.busy() {
             return Err("A native request is still pending".into());
         }
+        let reconnecting = matches!(job, Job::Reconnect(_));
         self.sender
             .as_ref()
             .ok_or("Client stopped")?
             .try_send(job)
             .map_err(|e| e.to_string())?;
         self.owner_busy = true;
+        self.owner_reconnecting = reconnecting;
         Ok(())
     }
 }

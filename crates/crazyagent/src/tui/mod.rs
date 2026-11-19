@@ -228,9 +228,10 @@ fn bounded_area(width: u16, height: u16) -> Rect {
 }
 
 /// Answers Ctrl-R: retries an uncertain request, queues the original owner recovery while
-/// a conversation, master, model access or creation is unresolved, else reconnects now.
+/// a conversation, master, model access or creation is unresolved, does nothing while a
+/// reconnect runs, queues one reconnect while another job runs, else reconnects now.
 /// Inputs: the app, the connection and the loop's queued recovery flag.
-/// Output: none; a refusal becomes the app's notice.
+/// Output: none; a refusal or a queued press becomes the app's notice.
 fn reconnect_key(app: &mut App, connection: &mut Connection, queued: &mut bool) {
     let result = if connection.uncertain() {
         connection.retry()
@@ -242,6 +243,13 @@ fn reconnect_key(app: &mut App, connection: &mut Connection, queued: &mut bool) 
     {
         *queued = true;
         app.notice("Original owner recovery queued until the native worker is idle");
+        Ok(())
+    } else if connection.reconnecting() {
+        app.notice("A reconnect is already running");
+        Ok(())
+    } else if connection.busy() {
+        *queued = true;
+        app.notice("Reconnect queued until the native worker is idle");
         Ok(())
     } else {
         connection.reconnect().and_then(|()| app.reconnect_owner())
