@@ -851,6 +851,38 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_range_reads_an_allocated_empty_string_never_a_null_one() {
+        let access = Access::new(1, 100);
+        posted(&access, b"ab");
+        let document = unsafe { provider(&access).DocumentRange() }.expect("the document");
+        let empty = unsafe { document.Clone() }.expect("a clone");
+        let collapsed = unsafe {
+            empty.MoveEndpointByRange(
+                TextPatternRangeEndpoint_End,
+                &empty,
+                TextPatternRangeEndpoint_Start,
+            )
+        };
+        collapsed.expect("collapsed to its start");
+        let text = unsafe { empty.GetText(-1) }.expect("the empty range's text");
+        assert_eq!(text.len(), 0);
+        let raw = text.into_raw();
+        assert!(
+            !raw.is_null(),
+            "an allocated empty string, never a null one"
+        );
+        drop(unsafe { BSTR::from_raw(raw) });
+        let cut = unsafe { document.GetText(0) }.expect("a cut to nothing");
+        assert_eq!(cut.len(), 0);
+        let raw = cut.into_raw();
+        assert!(
+            !raw.is_null(),
+            "a cut to nothing is an allocated empty string too"
+        );
+        drop(unsafe { BSTR::from_raw(raw) });
+    }
+
+    #[test]
     fn endpoints_snap_into_a_shorter_text_and_a_cut_keeps_surrogate_pairs_whole() {
         let access = Access::new(1, 100);
         posted(&access, b"abcdef\r\nghij");

@@ -880,6 +880,8 @@ fn read_by_a_screen_reader_and_not_by_an_agent(view: &View) {
             }
         },
     );
+    found_the_view(&lines, view.hwnd());
+    assert_eq!(value(&lines, "reader_control"), Some(DOCUMENT));
     assert_eq!(value(&lines, "reader_name"), Some("Terminal"));
     assert_eq!(value(&lines, "reader_text_pattern"), Some("True"));
     assert!(value(&lines, "reader_text").is_some_and(|text| text.starts_with("ab|cd|")));
@@ -914,14 +916,41 @@ fn read_by_a_screen_reader_and_not_by_an_agent(view: &View) {
         value(&contained, "reader_stage") == Some("lookup"),
         "the container reader never reached the UIA lookup: {contained:?}"
     );
+    found_the_view(&contained, view.hwnd());
     contained_read_nothing(&contained);
     println!("h3 row: agent container read nothing: {contained:?}");
 }
 
-/// Checks a reader in an agent's AppContainer reached none of the view's provider: no name,
-/// no Text pattern and no text. Input: the reader's lines, its lookup stage reached.
+/// The UIA control type id of a Document, the type the view's provider answers; the system's
+/// own proxy for a bare window answers Pane.
+const DOCUMENT: &str = "50030";
+
+/// Checks a reader's element is the view itself: its window handle, as UI Automation gives
+/// it (32 bits), and this process. Inputs: the reader's lines and the view's window.
+fn found_the_view(lines: &[String], hwnd: HWND) {
+    let handle = (hwnd as isize as i32).to_string();
+    assert_eq!(
+        value(lines, "reader_hwnd"),
+        Some(handle.as_str()),
+        "the reader found the view's window: {lines:?}"
+    );
+    let process = std::process::id().to_string();
+    assert_eq!(
+        value(lines, "reader_process"),
+        Some(process.as_str()),
+        "the reader found this process's window: {lines:?}"
+    );
+}
+
+/// Checks a reader in an agent's AppContainer reached none of the view's provider: not its
+/// Document type, its name, its Text pattern or its text, only the system's window proxy.
+/// Input: the reader's lines, its lookup stage reached on the view's own window.
 fn contained_read_nothing(contained: &[String]) {
     let read = "an agent's AppContainer read the view";
+    assert!(
+        value(contained, "reader_control").is_none_or(|control| control != DOCUMENT),
+        "{read}: its Document type, {contained:?}"
+    );
     assert!(
         value(contained, "reader_name").is_none_or(|name| name != "Terminal"),
         "{read}: its name, {contained:?}"

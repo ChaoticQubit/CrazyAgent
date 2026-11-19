@@ -8,7 +8,18 @@ try {
     $null = [System.Reflection.Assembly]::Load("UIAutomationTypes, $wpf")
     "reader_stage=lookup"
     $element = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]$Handle)
-    "reader_name=" + $element.Current.Name
+    $current = $element.Current
+    "reader_hwnd=" + $current.NativeWindowHandle
+    "reader_process=" + $current.ProcessId
+    "reader_control=" + $current.ControlType.Id
+    "reader_name=" + $current.Name
+    try {
+        $described = [System.Windows.Automation.AutomationProperty]::LookupById(30107)
+        $provider = [string]$element.GetCurrentPropertyValue($described)
+        "reader_provider=" + ($provider -replace '\s+', ' ')
+    } catch {
+        "reader_provider_error=" + $_.Exception.GetBaseException().GetType().FullName
+    }
     $pattern = $null
     $textPattern = [System.Windows.Automation.TextPattern]::Pattern
     $has = $element.TryGetCurrentPattern($textPattern, [ref]$pattern)
