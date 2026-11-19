@@ -920,6 +920,41 @@ fn untag(server: &Server, pane: &str) {
     assert_eq!(tag_of(server, pane), "");
 }
 
+/// V243-PASTE-INTERLEAVE-N0: a request piece longer than one input request is a caller's
+/// bug, caught before the host is asked, so no prompt is ever cut across two requests to
+/// two panes.
+#[test]
+#[should_panic(expected = "a piece fits one input request")]
+fn a_typed_piece_over_one_input_request_is_a_bug() {
+    let host = Tmux::open(None, Path::new("/nonexistent"));
+    let agent = AgentId::team(1).unwrap();
+    let piece = vec![b'x'; INPUT_BYTES_MAX + 1];
+    let _ = crate::terminal::type_piece(&host, &agent, None, &piece);
+}
+
+/// V243-PASTE-INTERLEAVE-N0: a pinned piece whose pin is a window target, not a pane id, is
+/// a caller's bug, since a window target names whichever pane is active and would undo the
+/// pin.
+#[test]
+#[should_panic(expected = "a pin is a pane id")]
+fn a_typed_piece_pinned_to_no_pane_id_is_a_bug() {
+    let host = Tmux::open(None, Path::new("/nonexistent"));
+    let at = PaneAt {
+        pane: "crazyagent:=team-1".to_owned(),
+        serial: 1,
+    };
+    let _ = crate::terminal::type_piece(&host, &AgentId::team(1).unwrap(), Some(&at), b"x");
+}
+
+/// V243-PASTE-INTERLEAVE-N0: tagging the app pane by pid 0 or 1, which no pane record keeps
+/// for a pane tmux started, is a caller's bug, caught before the server is asked.
+#[test]
+#[should_panic(expected = "a pane record keeps a real pid")]
+fn tagging_an_app_pane_by_pid_one_is_a_bug() {
+    let host = Tmux::open(None, Path::new("/nonexistent"));
+    let _ = host.tag_app(&AgentId::team(1).unwrap(), 1);
+}
+
 #[test]
 fn quoted_arguments_keep_every_character_inside_one_tmux_word() {
     assert_eq!(

@@ -494,6 +494,14 @@ pub trait Host: Send + Sync {
         Ok(())
     }
 
+    /// The pane an agent's prompts go to: its app's own pane, never a teammate split off its
+    /// window, and the serial of the connection that found it. Takes the name. Returns the
+    /// pane, `terminal_agent_unknown` when no pane is known to be the app's, or
+    /// `terminal_unavailable` for a host with no pane ids, whose prompts type by name.
+    fn app_pane_at(&self, _agent: &AgentId) -> Result<PaneAt, HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
     /// Pastes keys straight into the pane a view stays on, as `paste` does by name, while the
     /// connection that found that pane still serves it. Takes the name, the pane and 1 to
     /// `PASTE_BYTES_MAX` keys. Returns true once pasted, false when this host cannot use it.
@@ -519,6 +527,14 @@ pub trait Host: Send + Sync {
     /// Takes the name. Returns true once it is on, and always for a host that cannot tell.
     fn input_live(&self, _agent: &AgentId) -> Result<bool, HostError> {
         Ok(true)
+    }
+
+    /// Tells whether bracketed paste is on in the pane a view or a prompt stays on, as
+    /// `input_live` tells it by name, while the connection that found that pane still serves
+    /// it. Takes the name and the pane. Returns the answer, none when this host cannot use
+    /// that pane, or the answer by name on a host with no pane ids.
+    fn input_live_at(&self, agent: &AgentId, _at: &PaneAt) -> Result<Option<bool>, HostError> {
+        self.input_live(agent).map(Some)
     }
 
     /// Reads how long an agent terminal's app has drawn nothing: a working harness redraws
@@ -742,6 +758,14 @@ impl Host for OwnServer {
         self.0.own_pane_at(agent)
     }
 
+    fn tag_app(&self, agent: &AgentId, pid: u32) -> Result<(), HostError> {
+        self.0.tag_app(agent, pid)
+    }
+
+    fn app_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        self.0.app_pane_at(agent)
+    }
+
     fn paste_at(&self, agent: &AgentId, at: &PaneAt, keys: &[u8]) -> Result<bool, HostError> {
         self.0.paste_at(agent, at, keys)
     }
@@ -752,6 +776,10 @@ impl Host for OwnServer {
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         self.0.input_live(agent)
+    }
+
+    fn input_live_at(&self, agent: &AgentId, at: &PaneAt) -> Result<Option<bool>, HostError> {
+        self.0.input_live_at(agent, at)
     }
 
     fn quiet(&self, agent: &AgentId) -> Result<Option<Duration>, HostError> {
@@ -891,6 +919,13 @@ impl Host for PaneView {
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         self.host.input_live_pane(agent, &self.pane)
+    }
+
+    fn input_live_at(&self, agent: &AgentId, at: &PaneAt) -> Result<Option<bool>, HostError> {
+        if at.pane != self.pane {
+            return Ok(None);
+        }
+        self.host.input_live_at(agent, at)
     }
 
     fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
@@ -1503,18 +1538,22 @@ pub fn paste_keys(text: &str) -> Vec<u8> {
 }
 
 /// Types one prompt into an agent's app as one submission: a paste when the app turned
-/// bracketed paste on, then Enter once the paste settled. Takes the host, the terminal name and
-/// the text. Returns whether it was typed; blank or oversized text types nothing.
+/// bracketed paste on, then Enter once the paste settled, all into the app's own pane, found
+/// once (V243-PASTE-INTERLEAVE-N0), or by name on a host with no pane ids. Takes the host, the
+/// terminal name and the text. Returns whether it was typed; blank or oversized text types
+/// nothing.
 pub fn type_prompt(host: &dyn Host, agent: &AgentId, text: &str) -> Result<bool, HostError> {
+    if let Some(at) = request_pin(host, agent)? {
+        return type_prompt_at(host, agent, &at, text);
+    }
     let bracketed = host.input_live(agent)?;
     prompt_into(text, bracketed, |keys| host.input(agent, keys))
 }
 
-/// Types one prompt into the pane a pinned view stays on, as `type_prompt` does by name: the
-/// same keys and Enter, each straight into that pane, never by name. Takes the host, the
+/// Types one prompt into a pinned pane, as `type_prompt` does: the same keys and Enter, the
+/// paste mode read from that pane, each straight into it, never by name. Takes the host, the
 /// terminal name, the pane and the text. Returns as `type_prompt`, or `terminal_agent_unknown`
 /// once that pane is no longer one the host can type into.
-#[cfg(unix)]
 pub(crate) fn type_prompt_at(
     host: &dyn Host,
     agent: &AgentId,
@@ -1526,13 +1565,48 @@ pub(crate) fn type_prompt_at(
         at.serial > 0,
         "a pin names the control connection that found it"
     );
-    let bracketed = host.input_live(agent)?;
+    let Some(bracketed) = host.input_live_at(agent, at)? else {
+        return Err(failure("terminal_agent_unknown"));
+    };
     prompt_into(text, bracketed, |keys| {
-        match host.input_at(agent, at, keys)? {
-            true => Ok(()),
-            false => Err(failure("terminal_agent_unknown")),
-        }
+        type_piece(host, agent, Some(at), keys)
     })
+}
+
+/// The pane one engine prompt goes to, found once so every piece of it lands in one pane
+/// (V243-PASTE-INTERLEAVE-N0): the agent's app pane, or none on a host with no pane ids, which
+/// types by name. Takes the host and the name. Returns the pin, none, or the host's error,
+/// `terminal_agent_unknown` when no pane is known to be the app's.
+pub(crate) fn request_pin(host: &dyn Host, agent: &AgentId) -> Result<Option<PaneAt>, HostError> {
+    match host.app_pane_at(agent) {
+        Ok(at) => Ok(Some(at)),
+        Err(problem) if problem.0 == "terminal_unavailable" => Ok(None),
+        Err(problem) => Err(problem),
+    }
+}
+
+/// Types one piece of a request into the pane the request was pinned to, or by name with no
+/// pin. Takes the host, the name, the pin and at most `INPUT_BYTES_MAX` bytes. Returns once
+/// typed, or `terminal_agent_unknown` once the pinned pane is no longer one the host can type
+/// into, never typing by name instead.
+pub(crate) fn type_piece(
+    host: &dyn Host,
+    agent: &AgentId,
+    pin: Option<&PaneAt>,
+    bytes: &[u8],
+) -> Result<(), HostError> {
+    assert!(
+        bytes.len() <= INPUT_BYTES_MAX,
+        "a piece fits one input request"
+    );
+    let Some(at) = pin else {
+        return host.input(agent, bytes);
+    };
+    assert!(pane_id_valid(&at.pane), "a pin is a pane id");
+    match host.input_at(agent, at, bytes)? {
+        true => Ok(()),
+        false => Err(failure("terminal_agent_unknown")),
+    }
 }
 
 /// Types one prompt's keys as one submission through the given typing: the keys in chunks of

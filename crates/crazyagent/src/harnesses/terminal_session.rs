@@ -542,10 +542,11 @@ impl TerminalSession {
         assert!(!self.held && !self.own_held);
     }
 
-    /// Types one prompt into the app as a bracketed paste, then Enter. The first prompt
-    /// waits, at most `READY_WAIT`, until the app has drawn its screen, gone quiet and
-    /// reads keys itself (see [`Host::input_live`]), so its Enter is not lost.
-    /// Input: prompt text. Output: Ok, `launch_busy` while a turn runs, or a refusal code.
+    /// Types one prompt into the app's own pane as a bracketed paste, then Enter, never into a
+    /// teammate split off its window. The first prompt waits, at most `READY_WAIT`, until the
+    /// app has drawn its screen, gone quiet and reads keys itself (see [`Host::input_live`]),
+    /// so its Enter is not lost. Input: prompt text. Output: Ok, `launch_busy` while a turn
+    /// runs, or a refusal code.
     pub fn send(&mut self, prompt: &str) -> Result<(), LaunchError> {
         self.send_or_cancel(prompt, &AtomicBool::new(false))
     }
@@ -565,11 +566,17 @@ impl TerminalSession {
         if !self.ready {
             self.wait_ready(cancel)?;
         }
+        let host = self.host.as_ref();
+        let pin = crate::terminal::request_pin(host, &self.agent).map_err(host_failure)?;
+        let typed = |bytes: &[u8]| {
+            crate::terminal::type_piece(host, &self.agent, pin.as_ref(), bytes)
+                .map_err(host_failure)
+        };
         for part in paste(prompt) {
-            self.type_bytes(part.as_bytes())?;
+            typed(part.as_bytes())?;
         }
         std::thread::sleep(PASTE_SETTLE);
-        self.type_bytes(ENTER)?;
+        typed(ENTER)?;
         self.turn = true;
         Ok(())
     }

@@ -402,6 +402,7 @@ impl TerminalSession {
         if !still_recorded(host.as_ref(), &agent, record)? {
             return Err(failure("launch_closed"));
         }
+        host.tag_app(&agent, record.pid).map_err(host_failure)?;
         let budget = if live {
             REPLAY_WAIT
         } else {

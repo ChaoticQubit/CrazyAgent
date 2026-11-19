@@ -708,6 +708,37 @@ impl Tmux {
             .ok_or_else(|| failure("terminal_agent_unknown"))
     }
 
+    /// The pane an agent's prompts go to (V243-PASTE-INTERLEAVE-N0): the one tagged with its
+    /// name at spawn or adopt, searched on the engine's server in the agent's window only. A
+    /// window an older engine left untagged gives its one pane, tagged now; a split one gives
+    /// none, never its active pane, which may be a teammate's. Takes the control client and
+    /// the agent. Returns the pane id, or `terminal_agent_unknown`.
+    fn app_pane(&self, control: &Control, agent: &AgentId) -> Result<String, HostError> {
+        if self.confined.is_some() {
+            return self.agent_target(control, agent);
+        }
+        let lines = control.ask(&format!(
+            "list-panes -t {} -F '#{{pane_id}} #{{{AGENT_TAG}}}{FORMAT_END}'",
+            target(agent)
+        ))?;
+        let panes: Vec<(&str, &str)> = lines
+            .iter()
+            .filter_map(|line| std::str::from_utf8(line).ok()?.split_once(' '))
+            .filter(|(pane, _)| pane_id_valid(pane))
+            .take(PANES_LISTED_MAX)
+            .collect();
+        assert!(panes.len() <= PANES_LISTED_MAX);
+        if let Some((pane, _)) = panes.iter().find(|(_, tag)| *tag == agent.as_str()) {
+            return Ok((*pane).to_owned());
+        }
+        let [(pane, "")] = panes.as_slice() else {
+            return Err(failure("terminal_agent_unknown"));
+        };
+        assert!(pane_id_valid(pane), "only pane ids were kept");
+        control.run(&format!("set-option -p -t {pane} {AGENT_TAG} {agent}"))?;
+        Ok((*pane).to_owned())
+    }
+
     /// Whether this lead server holds a pane tagged with the agent's name. Takes the agent.
     /// Returns false on the engine's server or when the server cannot answer.
     pub(super) fn holds(&self, agent: &AgentId) -> bool {
@@ -830,8 +861,9 @@ impl Tmux {
 
     /// Hands bytes to one tmux target: a request `pastes` takes goes through a named tmux
     /// buffer in one paste, any other is typed as hex keys, one command after another, in
-    /// order. Takes the control client, the target and the bytes. Returns once tmux took them
-    /// all, or `terminal_input_bounds`.
+    /// order, all into the pane a window target names at the start when there are several
+    /// (V243-PASTE-INTERLEAVE-N0). Takes the control client, the target and the bytes.
+    /// Returns once tmux took them all, `terminal_input_bounds`, or the lookup's code.
     fn send_bytes(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
         if bytes.len() > INPUT_BYTES_MAX {
             return Err(failure("terminal_input_bounds"));
@@ -839,7 +871,15 @@ impl Tmux {
         if pastes(bytes) {
             return Self::send_pasted(control, target, bytes);
         }
-        for line in send_keys_lines(target, bytes) {
+        let mut lines = send_keys_lines(target, bytes);
+        if lines.len() > 1 && !pane_id_valid(target) {
+            let pane = Self::displayed(control, target, "#{pane_id}")?;
+            if !pane_id_valid(&pane) {
+                return Err(failure("terminal_command_failed"));
+            }
+            lines = send_keys_lines(&pane, bytes);
+        }
+        for line in lines {
             control.run(&line)?;
         }
         Ok(())
@@ -2324,15 +2364,13 @@ impl Tmux {
             let _ = control.run(&format!("kill-window -t {}", target(agent)));
             return Err(failure("terminal_command_failed"));
         }
-        if self.confined.is_some() {
-            let tagged = pane_id_valid(pane)
-                && control
-                    .run(&format!("set-option -p -t {pane} {AGENT_TAG} {agent}"))
-                    .is_ok();
-            if !tagged {
-                let _ = control.run(&format!("kill-window -t {}", target(agent)));
-                return Err(failure("terminal_command_failed"));
-            }
+        let tagged = pane_id_valid(pane)
+            && control
+                .run(&format!("set-option -p -t {pane} {AGENT_TAG} {agent}"))
+                .is_ok();
+        if !tagged {
+            let _ = control.run(&format!("kill-window -t {}", target(agent)));
+            return Err(failure("terminal_command_failed"));
         }
         Ok(PaneRef {
             agent: agent.clone(),
@@ -2398,6 +2436,43 @@ impl Host for Tmux {
             pane,
             serial: control.serial,
         })
+    }
+
+    fn app_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        let control = self.live_control()?;
+        let pane = self.app_pane(&control, agent)?;
+        if !pane_id_valid(&pane) {
+            return Err(failure("terminal_command_failed"));
+        }
+        assert!(control.serial > 0, "control serials start at 1");
+        Ok(PaneAt {
+            pane,
+            serial: control.serial,
+        })
+    }
+
+    fn input_live_at(&self, _agent: &AgentId, at: &PaneAt) -> Result<Option<bool>, HostError> {
+        let Some(control) = self.control_at(at)? else {
+            return Ok(None);
+        };
+        assert_eq!(
+            control.serial, at.serial,
+            "a pinned read uses the connection that found it"
+        );
+        Self::paste_on(&control, &at.pane).map(Some)
+    }
+
+    fn tag_app(&self, agent: &AgentId, pid: u32) -> Result<(), HostError> {
+        assert!(pid > 1, "a pane record keeps a real pid");
+        let control = self.live_control()?;
+        let app = self
+            .panes(agent)?
+            .into_iter()
+            .find(|pane| pane.pid == pid && !pane.dead)
+            .ok_or_else(|| failure("terminal_agent_unknown"))?;
+        assert!(pane_id_valid(&app.id), "tmux lists pane ids");
+        let tag = format!("set-option -p -t {} {AGENT_TAG} {agent}", app.id);
+        control.run(&tag).map(|_| ())
     }
 
     fn paste_at(&self, _agent: &AgentId, at: &PaneAt, keys: &[u8]) -> Result<bool, HostError> {
