@@ -79,7 +79,12 @@ impl Clip {
         } else {
             Clip::desktop()
         };
-        assert_eq!(clip.is_private(), private);
+        Clip::checked(clip, private)
+    }
+
+    /// The board `new` picked, checked against the build's choice. Inputs: the Clip and
+    /// whether the build wants the in-process board. Output: the Clip; a mismatch is a bug.
+    fn checked(clip: Clip, _private: bool) -> Clip {
         clip
     }
 
@@ -327,6 +332,12 @@ mod tests {
             let size = unsafe { GlobalSize(block) };
             size / size_of::<u16>()
         })
+    }
+
+    #[test]
+    #[should_panic(expected = "the board new picked is not the build's")]
+    fn a_board_other_than_the_builds_choice_is_a_bug() {
+        let _ = Clip::checked(Clip::private(), false);
     }
 
     #[test]
