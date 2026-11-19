@@ -1680,7 +1680,7 @@ fn open_up<P: rustix::path::Arg>(
 
 /// Gives this user read and search, never write, on `name` under `parent` once a look that
 /// never follows a link shows a folder, after [`clear_refused_acl`] clears an ACL that refused
-/// that look; a look after that clear that shows no folder prints `cleanup_open_up_swapped`.
+/// that look; a look after that clear that shows no folder prints the trace `open_up_swapped`.
 /// Inputs: the parent handle and the name, or the current folder and a walk top's path.
 /// Output: Ok, `ENOTDIR`, or the error.
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -1698,7 +1698,7 @@ fn open_up<P: rustix::path::Arg + Copy>(
             clear_refused_acl(parent.as_fd(), name)?;
             let found = rustix::fs::statat(&parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
             if FileType::from_raw_mode(found.st_mode) != FileType::Directory {
-                eprintln!("cleanup_open_up_swapped");
+                eprintln!("open_up_swapped");
                 #[cfg(all(test, target_os = "macos"))]
                 OPEN_UP_SWAPPED.set(OPEN_UP_SWAPPED.get() + 1);
             }
@@ -1816,7 +1816,7 @@ thread_local! {
 
     /// How many looks [`open_up`] took on this thread after clearing the ACL of an entry
     /// whose look a deny entry refused that showed no folder, each reported as
-    /// `cleanup_open_up_swapped`, so a row can see the report.
+    /// the trace `open_up_swapped`, so a row can see the report.
     pub(super) static OPEN_UP_SWAPPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
