@@ -356,7 +356,7 @@ fn digest_of(name: &str) -> String {
 struct Slot {
     folder: PathBuf,
     home: PathBuf,
-    files: [PathBuf; 3],
+    files: [PathBuf; 4],
 }
 
 /// A synthetic managed profile slot under `root` holding dummy sign-in files, a manifest and
@@ -371,6 +371,7 @@ fn slot(root: &Path, name: &str) -> Slot {
         home.join("auth.json"),
         home.join(".credentials.json"),
         home.join("Library/Keychains/login.keychain-db"),
+        home.join("Library/Keychains/profile.keychain-db"),
     ];
     for file in &files {
         private_file(file);

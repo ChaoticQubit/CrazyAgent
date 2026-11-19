@@ -621,7 +621,18 @@ const CLAUDE_ACCOUNT: &str = "unknown";
 
 #[cfg(target_os = "macos")]
 fn claude_keychain(home: &Path, record: &Value) -> (TestKeychain, String) {
-    let keychain = TestKeychain::create(home);
+    claude_keychain_from(TestKeychain::create(home), home, record)
+}
+
+/// Files a Claude Code sign-in in a profile home's keychain, as the sign-in custodian's
+/// Claude Code does. Inputs: the new keychain, the home and the record. Output: the
+/// keychain and the service the record sits under.
+#[cfg(target_os = "macos")]
+fn claude_keychain_from(
+    keychain: TestKeychain,
+    home: &Path,
+    record: &Value,
+) -> (TestKeychain, String) {
     let service = format!(
         "Claude Code-credentials-{}",
         &digest(home.to_str().unwrap().as_bytes())[..8]
@@ -677,6 +688,56 @@ fn an_agent_gets_a_claude_copy_from_the_accounts_keychain_without_its_refresh_to
         "native_profile_renewal_failed"
     );
     assert!(entries(&agent).is_empty());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_gets_a_claude_copy_from_a_locked_profile_keychain_without_a_prompt() {
+    let mut case = UseCase::with_harness("claude-code");
+    let home = case.home();
+    let expires = (now() + 8 * 3600) * 1000;
+    let (keychain, service) = claude_keychain(&home, &claude_record(expires));
+    let text = keychain.path().to_str().unwrap().to_owned();
+    keychain.security(&["lock-keychain", &text], None);
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    assert!(
+        std::fs::symlink_metadata(agent.join(".credentials.json"))
+            .unwrap()
+            .is_file()
+    );
+    assert_eq!(
+        serde_json::from_str::<Value>(&keychain.find(&service)).unwrap(),
+        claude_record(expires)
+    );
+    drop(copy);
+    drop(guard);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_claude_profile_keychain_an_earlier_engine_named_login_is_renamed_on_the_first_read() {
+    let mut case = UseCase::with_harness("claude-code");
+    let home = case.home();
+    let expires = (now() + 8 * 3600) * 1000;
+    let legacy = TestKeychain::create_named(&home, "login.keychain-db");
+    let (legacy, service) = claude_keychain_from(legacy, &home, &claude_record(expires));
+    let agent = agent_home(&case);
+    let guard = execution(&mut case);
+    let copy = guard
+        .hand_to_agent(&agent, TURN, &no_harness(&case))
+        .unwrap();
+    assert!(!legacy.path().exists());
+    let current = TestKeychain::adopt(&home, home.join("Library/Keychains/profile.keychain-db"));
+    assert_eq!(
+        serde_json::from_str::<Value>(&current.find(&service)).unwrap(),
+        claude_record(expires)
+    );
+    drop(copy);
+    drop(guard);
 }
 
 /// The keychain service Claude Code files an agent's sign-in under in that agent's home,

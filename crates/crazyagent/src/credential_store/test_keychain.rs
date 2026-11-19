@@ -38,12 +38,22 @@ impl TestKeychain {
     /// makes it the home's default and only search-list keychain, which `security` keeps
     /// per home. Input: an absolute temporary home. Output: the keychain.
     pub(crate) fn create(home: &Path) -> Self {
+        Self::create_named(home, "login.keychain-db")
+    }
+
+    /// Creates an unlocked keychain under `name` in `<home>/Library/Keychains`, such as the
+    /// `login.keychain-db` an earlier engine gave a profile home, and makes it the home's
+    /// default and only search-list keychain. Inputs: an absolute temporary home and the
+    /// file name. Output: the keychain.
+    pub(crate) fn create_named(home: &Path, name: &str) -> Self {
+        assert!(name.ends_with(".keychain-db"));
+        assert!(!name.contains('/'));
         let folder = home.join("Library/Keychains");
         std::fs::create_dir_all(&folder).unwrap();
         for private in [home.join("Library"), folder.clone()] {
             std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
         }
-        let keychain = Self::adopt(home, folder.join("login.keychain-db"));
+        let keychain = Self::adopt(home, folder.join(name));
         let path = keychain.text().to_owned();
         keychain.security(&["create-keychain", "-p", "", &path], None);
         keychain.security(&["list-keychains", "-d", "user", "-s", &path], None);

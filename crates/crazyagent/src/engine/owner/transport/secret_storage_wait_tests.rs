@@ -1097,6 +1097,7 @@ async fn a_native_connection_that_leaves_the_settings_loses_its_sign_in_files() 
         home.join("auth.json"),
         home.join(".credentials.json"),
         home.join("Library/Keychains/login.keychain-db"),
+        home.join("Library/Keychains/profile.keychain-db"),
     ];
     for (file, bytes) in kept
         .iter()
@@ -1106,7 +1107,7 @@ async fn a_native_connection_that_leaves_the_settings_loses_its_sign_in_files() 
         std::fs::write(file, bytes).unwrap();
         std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
-    assert_eq!(holders(&busy.engine_root(), secret.as_bytes()), 3);
+    assert_eq!(holders(&busy.engine_root(), secret.as_bytes()), 4);
 
     remove_connection(&busy, "lab-native").await;
     assert!(

@@ -1006,4 +1006,92 @@ mod tests {
             "the sharing home got a keychain of its own"
         );
     }
+
+    fn profile_keychain_path(home: &Path) -> PathBuf {
+        home.join("Library/Keychains/profile.keychain-db")
+    }
+
+    #[test]
+    fn a_locked_profile_keychain_opens_with_the_empty_password_without_a_prompt() {
+        let root = scratch();
+        let home = private_home(root.path(), "home");
+        let keychain = TestKeychain::adopt(&home, prepare_profile_keychain(&home).unwrap());
+        let text = keychain.path().to_str().unwrap().to_owned();
+        keychain.add("probe", "crazyagent-locked-test", "signed in");
+        keychain.security(&["lock-keychain", &text], None);
+        keychain.security(&["unlock-keychain", "-p", "", &text], None);
+        keychain.security(&["lock-keychain", &text], None);
+        assert_eq!(prepare_profile_keychain(&home).unwrap(), keychain.path());
+        assert_eq!(keychain.find("crazyagent-locked-test"), "signed in");
+    }
+
+    #[test]
+    fn an_earlier_engines_login_keychain_is_renamed_and_found_through_the_search_list() {
+        let root = scratch();
+        let home = private_home(root.path(), "home");
+        let legacy = TestKeychain::create_named(&home, LOGIN_KEYCHAIN);
+        legacy.add("probe", "crazyagent-rename-test", "signed in");
+        let keychain = prepare_profile_keychain(&home).unwrap();
+        assert_eq!(keychain, profile_keychain_path(&home));
+        assert!(!legacy.path().exists());
+        let keychain = TestKeychain::adopt(&home, keychain);
+        let text = keychain.path().to_str().unwrap().to_owned();
+        for which in ["default-keychain", "list-keychains"] {
+            assert!(keychain.setting(which).contains(&text), "{which}");
+        }
+        assert_eq!(keychain.find("crazyagent-rename-test"), "signed in");
+        let found = read(
+            &home,
+            &[
+                "find-generic-password",
+                "-s",
+                "crazyagent-rename-test",
+                "-w",
+            ],
+        );
+        assert_eq!(found.trim_end(), "signed in");
+    }
+
+    #[test]
+    fn a_locked_login_keychain_an_earlier_engine_made_is_renamed_opened_and_read() {
+        let root = scratch();
+        let home = private_home(root.path(), "home");
+        let legacy = TestKeychain::create_named(&home, LOGIN_KEYCHAIN);
+        legacy.add("probe", "crazyagent-locked-rename-test", "signed in");
+        let text = legacy.path().to_str().unwrap().to_owned();
+        legacy.security(&["lock-keychain", &text], None);
+        let keychain = TestKeychain::adopt(&home, prepare_profile_keychain(&home).unwrap());
+        assert_eq!(keychain.path(), profile_keychain_path(&home));
+        assert!(!legacy.path().exists());
+        assert_eq!(keychain.find("crazyagent-locked-rename-test"), "signed in");
+    }
+
+    #[test]
+    fn a_profile_home_holding_both_keychain_names_is_refused_and_both_stay() {
+        let root = scratch();
+        let home = private_home(root.path(), "home");
+        let legacy = TestKeychain::create_named(&home, LOGIN_KEYCHAIN);
+        legacy.add("probe", "crazyagent-both-test", "old");
+        let current = TestKeychain::create_named(&home, "profile.keychain-db");
+        current.add("probe", "crazyagent-both-test", "new");
+        assert!(prepare_profile_keychain(&home).is_err());
+        assert_eq!(legacy.find("crazyagent-both-test"), "old");
+        assert_eq!(current.find("crazyagent-both-test"), "new");
+    }
+
+    #[test]
+    fn an_agent_keychain_is_refused_in_a_home_holding_a_profile_keychain_under_either_name() {
+        let root = scratch();
+        let engine = private_home(root.path(), "engine");
+        for (index, name) in [LOGIN_KEYCHAIN, "profile.keychain-db"].iter().enumerate() {
+            let home = private_home(&engine, &format!("agents/agent-{index}/home"));
+            let profile = TestKeychain::create_named(&home, name);
+            let before = profile.setting("default-keychain");
+            assert!(
+                fresh_profile_keychain(&engine, &home, &[]).is_err(),
+                "{name}"
+            );
+            assert_eq!(profile.setting("default-keychain"), before, "{name}");
+        }
+    }
 }
