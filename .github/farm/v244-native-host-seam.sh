@@ -82,6 +82,17 @@ log "== clippy --tests"
 cargo clippy "${pkg[@]}" --tests -- -D warnings 2>&1 | tee -a "$out"
 clipt=${PIPESTATUS[0]}
 
+wd=na
+wdt=na
+if [ "$os" = macos ]; then
+  log "== clippy --lib --features native-webdriver"
+  cargo clippy "${pkg[@]}" --lib --features native-webdriver -- -D warnings 2>&1 | tee -a "$out"
+  wd=${PIPESTATUS[0]}
+  log "== clippy --tests --features native-webdriver"
+  cargo clippy "${pkg[@]}" --tests --features native-webdriver -- -D warnings 2>&1 | tee -a "$out"
+  wdt=${PIPESTATUS[0]}
+fi
+
 scan_ok=na
 if [ "$os" != macos ] && [ "$rows_built" = 0 ]; then
   scan_ok=1
@@ -109,9 +120,11 @@ fi
   printf '| native_term rows | %s, %s passed |\n' "$rows_rc" "$passed"
   printf '| named rows ok, none failed (0 = yes) | %s |\n' "$want"
   printf '| clippy --lib -D warnings | %s |\n| clippy --tests -D warnings | %s |\n' "$clip" "$clipt"
+  printf '| clippy --lib --features native-webdriver -D warnings (macOS only) | %s |\n' "$wd"
+  printf '| clippy --tests --features native-webdriver -D warnings (macOS only) | %s |\n' "$wdt"
   printf '| red: the host/ scan fails on mac.rs as at %s (0 = yes; Linux and Windows) | %s |\n' "$SCAN_OLD_SHA" "$scan_ok"
 } | tee -a "$out" >> "$GITHUB_STEP_SUMMARY"
 
 [ "$anc" = 0 ] && [ "$lib_built" = 0 ] && [ "$rows_built" = 0 ] && [ "$want" = 0 ] \
   && [ "$rows_rc" = 0 ] && [ "$clip" = 0 ] && [ "$clipt" = 0 ] \
-  && { [ "$scan_ok" = 0 ] || [ "$os" = macos ]; }
+  && { { [ "$wd" = 0 ] && [ "$wdt" = 0 ]; } || [ "$os" != macos ]; } && { [ "$scan_ok" = 0 ] || [ "$os" = macos ]; }
