@@ -4,9 +4,11 @@ mod clip;
 mod codec;
 #[cfg(unix)]
 mod control;
+#[cfg(not(unix))]
+#[path = "control_none.rs"]
+mod control;
 mod ended;
 mod event;
-#[cfg(target_os = "macos")]
 pub(crate) mod host;
 mod ime;
 mod keymap;

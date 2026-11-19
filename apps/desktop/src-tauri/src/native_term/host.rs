@@ -28,6 +28,11 @@ use tokio::sync::mpsc;
 mod mac;
 #[cfg(target_os = "macos")]
 use mac as platform;
+/// The stand-in on a system whose host has not landed yet: no native view opens there.
+#[cfg(not(target_os = "macos"))]
+mod none;
+#[cfg(not(target_os = "macos"))]
+use none as platform;
 
 use platform::View;
 #[cfg(all(target_os = "macos", feature = "native-webdriver"))]
@@ -102,6 +107,7 @@ pub enum NativeEvent {
     },
 }
 
+#[cfg(target_os = "macos")]
 pub use super::view::LABEL_BYTES_MAX;
 
 /// One open checked off the main thread: the calling window, the agent window name, the
