@@ -75,9 +75,6 @@ const CONNECT_TIME: Duration = Duration::from_millis(500);
 const WATCH_POLL: Duration = Duration::from_secs(1);
 const STOP_POLL: Duration = Duration::from_millis(20);
 const KILL_WAIT: Duration = Duration::from_secs(2);
-/// The longest one `lsof` listing of a port's listeners may take before it is stopped.
-#[cfg(target_os = "macos")]
-const LISTENERS_TIME: Duration = Duration::from_secs(5);
 
 /// Where one project's running IDE is reached: the workbench URL on the engine proxy at
 /// 127.0.0.1, the proxy's port, which also serves the webview hosts, the server's own port
@@ -1272,15 +1269,16 @@ fn retire(tmp: &Path) -> Option<PathBuf> {
     Some(gone)
 }
 
-/// Removes one folder [`retire`] moved aside, with all it holds and never following a link,
-/// on a thread of its own; one that is no longer such a folder is left, and one that cannot
-/// be removed is logged and left for the next engine-start sweep ([`sweep_retired`]).
-/// Input: the folder.
+/// Removes one folder [`retire`] moved aside on a thread of its own, never following a link,
+/// as [`crate::team::cleanup::remove_agent_tree`] removes an agent's tree: a folder its
+/// session shut, or an immutable file that opens and has one link, does not keep it. One no
+/// longer such a folder is left; one that still cannot go is logged and left for the next
+/// engine-start sweep ([`sweep_retired`]). Input: the folder.
 fn remove_in_background(gone: PathBuf) {
     let spawned = std::thread::Builder::new()
         .name("ide-tmp-gone".into())
         .spawn(move || {
-            if retired(&gone) && fs::remove_dir_all(&gone).is_err() {
+            if retired(&gone) && crate::team::cleanup::remove_agent_tree(&gone).is_err() {
                 eprintln!("ide_server_tmp_left");
             }
         });
@@ -1316,9 +1314,9 @@ fn retired(path: &Path) -> bool {
         && crate::sandbox::toolchains::private_folder_pin(path).is_some()
 }
 
-/// Removes, on a thread of its own, the folders [`retire`] moved aside that an earlier
-/// engine left when it stopped before their removal ended, looking at no more than `limit`
-/// entries of the system temp folder. The owner server starts it once at engine start
+/// Removes, on a thread of its own and as [`remove_in_background`] does, the folders
+/// [`retire`] moved aside that an earlier engine left unremoved, looking at no more than
+/// `limit` entries of the system temp folder. The owner server starts it once at engine start
 /// ([`Servers::sweep_left`]). Input: the limit. Output: the sweep's thread, whose result
 /// is how many it removed, or none when no thread could start.
 fn sweep_retired(limit: usize) -> Option<std::thread::JoinHandle<usize>> {
@@ -1334,7 +1332,7 @@ fn sweep_retired(limit: usize) -> Option<std::thread::JoinHandle<usize>> {
                 if !retired(&path) {
                     continue;
                 }
-                match fs::remove_dir_all(&path) {
+                match crate::team::cleanup::remove_agent_tree(&path) {
                     Ok(()) => removed += 1,
                     Err(_) => eprintln!("ide_server_tmp_left"),
                 }
@@ -1502,7 +1500,7 @@ fn recorded_group(path: &Path) -> Option<(Pid, Option<String>)> {
     Some((group, (!started.is_empty()).then(|| started.to_owned())))
 }
 
-/// Checks through `lsof` that the server's process group listens on its port at 127.0.0.1
+/// Checks through [`listeners`] that the server's process group listens on its port at 127.0.0.1
 /// only and that no other process listens there at 127.0.0.1 ([`judged`]). Inputs: the port
 /// and the group. Output: the group's listening processes, which the proxy holds every later
 /// connection to ([`served_by`]), or `ide_server_port_taken` or `ide_server_not_loopback`.
@@ -1596,45 +1594,29 @@ pub(super) async fn served_by(_port: u16, _served: &[i32]) -> Result<(), EngineE
     Err(failure("ide_platform_unqualified"))
 }
 
-/// Lists every process listening on a TCP port and the address each binds, through `lsof`
-/// run within [`LISTENERS_TIME`], its process group stopped after, so a listing that hangs
-/// holds no open and no proxied request. Every process holding a listening socket there is
-/// named, one sharing another's socket included. Input: the port. Output: process ids with
-/// addresses, empty when none listens, or `ide_server_check_failed`.
+/// Lists every process listening on a TCP port and the address each binds, read from the
+/// kernel with no process spawned ([`crazyagent_macos_fs::tcp_listeners`], IDE-LIBPROC), in
+/// lsof's text: `*:P` for an unspecified address, `a.b.c.d:P`, `[v6]:P`. Every process holding
+/// a listening socket there is named, one sharing another's socket included. Input: the port.
+/// Output: process ids with addresses, empty when none listens, or `ide_server_check_failed`.
 #[cfg(target_os = "macos")]
 pub(crate) fn listeners(port: u16) -> Result<Vec<(i32, String)>, EngineError> {
     assert_ne!(port, 0);
-    let mut command = Command::new("/usr/sbin/lsof");
-    command
-        .env_clear()
-        .env("LC_ALL", "C")
-        .arg("-nP")
-        .arg(format!("-iTCP:{port}"))
-        .args(["-sTCP:LISTEN", "-Fpn"]);
-    let (succeeded, stdout) = crate::setup::process::run_command(command, LISTENERS_TIME)
-        .map_err(|_| failure("ide_server_check_failed"))?;
-    if stdout.len() >= crate::setup::process::OUTPUT_BYTES_MAX {
-        return Err(failure("ide_server_check_failed"));
-    }
-    let text = std::str::from_utf8(&stdout).map_err(|_| failure("ide_server_check_failed"))?;
-    if !succeeded && !text.is_empty() {
-        return Err(failure("ide_server_check_failed"));
-    }
-    let mut pid = None;
-    let mut found = Vec::new();
-    for line in text.lines() {
-        if let Some(number) = line.strip_prefix('p') {
-            pid = Some(
-                number
-                    .parse::<i32>()
-                    .map_err(|_| failure("ide_server_check_failed"))?,
-            );
-        } else if let Some(address) = line.strip_prefix('n') {
-            let pid = pid.ok_or_else(|| failure("ide_server_check_failed"))?;
-            found.push((pid, address.to_owned()));
-        }
-    }
-    Ok(found)
+    let found =
+        crazyagent_macos_fs::tcp_listeners(port).map_err(|_| failure("ide_server_check_failed"))?;
+    let named: Vec<(i32, String)> = found
+        .into_iter()
+        .map(|(pid, address)| {
+            let shown = if address.is_unspecified() {
+                format!("*:{port}")
+            } else {
+                std::net::SocketAddr::new(address, port).to_string()
+            };
+            (pid, shown)
+        })
+        .collect();
+    assert!(named.iter().all(|(pid, _)| *pid > 0));
+    Ok(named)
 }
 
 #[cfg(all(test, target_os = "macos"))]

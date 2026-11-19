@@ -372,7 +372,7 @@ fn a_record_rewritten_in_place_with_another_start_starts_over() {
             .input,
         5
     );
-    let identity = file_identity(&std::fs::metadata(&record).unwrap());
+    let identity = file_identity(&record, &std::fs::metadata(&record).unwrap()).unwrap();
     let rewritten = [
         claude_assistant("b1", 8, 1, 0, 0, "end_turn"),
         claude_assistant("b2", 2, 1, 0, 0, "end_turn"),
@@ -380,7 +380,7 @@ fn a_record_rewritten_in_place_with_another_start_starts_over() {
     .concat();
     std::fs::write(&record, rewritten).unwrap();
     assert_eq!(
-        file_identity(&std::fs::metadata(&record).unwrap()),
+        file_identity(&record, &std::fs::metadata(&record).unwrap()).unwrap(),
         identity,
         "the rewrite keeps the inode, as a file made right after a removal does on Linux"
     );
@@ -452,7 +452,7 @@ fn a_recount_stops_at_a_record_rewritten_in_place_since_its_last_chunk() {
     let home = tempfile::tempdir().unwrap();
     let record = home.path().join("projects/-work-alpha/s5.jsonl");
     append(&record, &claude_assistant("a1", 5, 5, 0, 0, "end_turn"));
-    let listed = file_identity(&std::fs::metadata(&record).unwrap());
+    let listed = file_identity(&record, &std::fs::metadata(&record).unwrap()).unwrap();
     let first = recount_read(&db, &record, Format::Claude, "", listed, NOW);
     assert_eq!(first.usages.len(), 1);
     let rewritten = [
@@ -1846,7 +1846,7 @@ fn a_tool_filed_before_a_rewind_is_not_collected_again() {
     let filed = std::fs::metadata(&record).unwrap().len();
     append(&record, &line("Read"));
     let mut progress = Progress {
-        identity: file_identity(&std::fs::metadata(&record).unwrap()),
+        identity: file_identity(&record, &std::fs::metadata(&record).unwrap()).unwrap(),
         filed_to: filed,
         ..Progress::default()
     };

@@ -168,7 +168,8 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         "home_add_interrupted" => {
             "Adding the folder stopped part way. Check your projects folder before trying again."
         }
-        "job_busy" => "Another job is running. Wait for it to finish on Home.",
+        "job_busy" => "Several folders are already waiting. Wait for one to finish on Home.",
+        "job_same_folder" => "This folder is already being moved or added. See it on Home.",
         "intake_failed" => {
             "Adding the folder failed. Check your projects folder before trying again."
         }

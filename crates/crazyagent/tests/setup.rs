@@ -296,19 +296,90 @@ fn graphify(status: &SetupStatus) -> DependencyState {
         .clone()
 }
 
-/// Wiring test: a fake graphify that sleeps and prints an invented version stands in for
-/// the real tool, so this checks the status read deadline only. No test reads the real
-/// installed graphify version: setup_status_lists_the_dependencies_and_the_shipped_pack
-/// accepts Found or Missing.
+const CLEAN_ENV_CHILD: &str = "CRAZYAGENT_SETUP_ROW_CLEAN_ENV";
+const CLEAN_ENV_WAIT: Duration = Duration::from_secs(120);
+const CLEAN_ENV_POLL: Duration = Duration::from_millis(50);
+const CLEAN_ENV_KEPT: [&str; 4] = [
+    "TMPDIR",
+    "USER",
+    "LOGNAME",
+    "CRAZYAGENT_TEST_NATIVE_AUTH_HOST",
+];
+
+/// Runs the named row again in a child process with a private HOME and only the system
+/// PATH, as the engine finds the PATH's and HOME's tools ahead of its own setup folder, so a
+/// graphify the owner or the farm installed never answers for a fixture. Input: the row's
+/// name. Output: true in the child; false in the parent once the child passed exactly one
+/// test. Panics with the child's output when it fails, outlives `CLEAN_ENV_WAIT` or runs none.
+fn in_clean_env(row: &str) -> bool {
+    if std::env::var_os(CLEAN_ENV_CHILD).is_some() {
+        return true;
+    }
+    let home = tempfile::Builder::new()
+        .prefix("ca-setup-home-")
+        .tempdir_in(fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    fs::set_permissions(home.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let log = home.path().join("child.log");
+    let out = fs::File::create(&log).unwrap();
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([row, "--exact", "--nocapture", "--test-threads=1"])
+        .env_clear()
+        .env(CLEAN_ENV_CHILD, "1")
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+        .stdin(std::process::Stdio::null())
+        .stdout(out.try_clone().unwrap())
+        .stderr(out);
+    for name in CLEAN_ENV_KEPT {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    let mut child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
+    let deadline = Instant::now() + CLEAN_ENV_WAIT;
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(CLEAN_ENV_POLL);
+    };
+    let output = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        status.is_some_and(|status| status.success()),
+        "{row} in a clean HOME and PATH: {status:?}\n{output}"
+    );
+    assert!(
+        output.contains("test result: ok. 1 passed;"),
+        "{row} in a clean HOME and PATH ran no test or more than one:\n{output}"
+    );
+    false
+}
+
+/// Wiring test: a fake graphify that sleeps and prints a version no real install has stands
+/// in for the real tool, found in the engine's setup folder by a child with no other
+/// graphify on its HOME or PATH ([`in_clean_env`]), so this checks the status read deadline
+/// only. setup_status_lists_the_dependencies_and_the_shipped_pack accepts Found or Missing.
 #[tokio::test]
 async fn wiring_a_version_check_slower_than_the_reply_deadline_does_not_fail_the_status_read() {
+    if !in_clean_env(
+        "wiring_a_version_check_slower_than_the_reply_deadline_does_not_fail_the_status_read",
+    ) {
+        return;
+    }
     let case = Case::new().await;
     let setup = case.root.path().join("setup");
     let bin = setup.join("bin");
     fs::create_dir_all(&bin).unwrap();
     fs::set_permissions(&setup, fs::Permissions::from_mode(0o700)).unwrap();
     let program = bin.join("graphify");
-    fs::write(&program, "#!/bin/sh\n/bin/sleep 4\necho graphify 0.9.9\n").unwrap();
+    fs::write(&program, "#!/bin/sh\n/bin/sleep 4\necho graphify 9.8.7\n").unwrap();
     fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
     let mut owner = case.controller().await;
 
@@ -324,7 +395,7 @@ async fn wiring_a_version_check_slower_than_the_reply_deadline_does_not_fail_the
     assert_eq!(
         graphify(&checked),
         DependencyState::Found {
-            version: Version::parse("0.9.9").unwrap()
+            version: Version::parse("9.8.7").unwrap()
         }
     );
 

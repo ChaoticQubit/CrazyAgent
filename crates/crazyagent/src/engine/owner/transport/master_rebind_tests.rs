@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::{AccountPool, ModelAccessEdit};
+use crate::config::{AccountPool, ModelAccessEdit, ModelConnection};
 use crate::engine::bootstrap::EngineService;
 use crate::master_session::{
     MasterBackend, MasterOwnerAction, MasterReason, MasterSelection, MasterSessionView,
@@ -517,23 +517,33 @@ async fn a_send_after_an_account_outside_the_master_pool_is_removed_continues_th
     assert_eq!(turns.len(), 3);
 }
 
+/// Builds the master pool with the given members, serving project p as POOL does.
+/// Input: the member connection ids. Output: the pool.
+fn master_pool(members: &[&str]) -> AccountPool {
+    AccountPool {
+        id: reference("master-pool"),
+        name: None,
+        members: members.iter().copied().map(reference).collect(),
+        projects: vec![reference("p")],
+        roles: vec![reference("project_leader")],
+        fallback_allowed: false,
+        provider_quota_policy: Default::default(),
+    }
+}
+
+/// An owner who removes another account from the master's pool keeps the conversation:
+/// the master still runs on its own connection, so the next send continues the same
+/// session under the new settings instead of asking for a new conversation.
 #[tokio::test]
-async fn a_send_after_a_master_pool_member_is_removed_asks_for_a_new_conversation() {
+async fn a_send_after_another_master_pool_member_is_removed_continues_the_same_conversation() {
     let mut case = RebindCase::start().await;
     let session = case.open("pool-open").await;
+    let (before, _) = case.basis().await;
     let narrowed = case
         .edit(
             "pool-narrow",
             ModelAccessEdit::ReplacePool {
-                pool: AccountPool {
-                    id: reference("master-pool"),
-                    name: None,
-                    members: vec![reference("claude-connection")],
-                    projects: vec![reference("p")],
-                    roles: vec![reference("project_leader")],
-                    fallback_allowed: false,
-                    provider_quota_policy: Default::default(),
-                },
+                pool: master_pool(&["claude-connection"]),
             },
         )
         .await;
@@ -545,18 +555,152 @@ async fn a_send_after_a_master_pool_member_is_removed_asks_for_a_new_conversatio
             },
         )
         .await;
-    let refused = case.submit(&session, "pool-stale-send").await;
-    let ended = case.close(&session, "pool-close").await;
-    let fresh = case.open("pool-reopen").await;
-    let sent = case.submit(&fresh, "pool-fresh-send").await;
+    let (after, _) = case.basis().await;
+    let sent = case.submit(&session, "pool-send").await;
+    let turn = case.settled(&session, "pool-send").await;
+    let current = case.session().await;
     case.stop().await.unwrap();
     assert_eq!(narrowed, OwnerResult::Applied);
     assert_eq!(removed, OwnerResult::Applied);
-    assert_eq!(refused, conflict());
-    assert_eq!(ended, OwnerResult::Applied);
-    assert_ne!(fresh.session_id, session.session_id);
-    assert!(fresh.rebound.is_empty());
+    assert_ne!(
+        before, after,
+        "removing the pool member changes the settings"
+    );
+    assert_eq!(
+        sent,
+        OwnerResult::Applied,
+        "another account leaving the master's pool does not end the conversation"
+    );
+    assert_eq!(
+        turn.and_then(|turn| turn.reason),
+        Some(MasterReason::ReadinessUnknown),
+        "the turn reaches the sign-in check under the new settings, not a source conflict"
+    );
+    assert_eq!(current.session_id, session.session_id);
+    assert_eq!(current.binding().0, &after);
+}
+
+/// An owner who signs another account in to the master's pool keeps the conversation:
+/// the new member is one more account the pool may use, and the master's own connection
+/// and account are unchanged, so the next send continues the same session.
+#[tokio::test]
+async fn a_send_after_an_account_joins_the_master_pool_continues_the_same_conversation() {
+    let mut case = RebindCase::start().await;
+    let session = case.open("join-open").await;
+    let (before, _) = case.basis().await;
+    let joined = case
+        .edit(
+            "join-spare",
+            ModelAccessEdit::ReplacePool {
+                pool: master_pool(&["claude-connection", "second-connection", "spare-connection"]),
+            },
+        )
+        .await;
+    let (after, _) = case.basis().await;
+    let sent = case.submit(&session, "join-send").await;
+    let turn = case.settled(&session, "join-send").await;
+    let current = case.session().await;
+    case.stop().await.unwrap();
+    assert_eq!(joined, OwnerResult::Applied);
+    assert_ne!(before, after, "the joined account changes the settings");
+    assert_eq!(
+        sent,
+        OwnerResult::Applied,
+        "an account joining the master's pool does not end the conversation"
+    );
+    assert_eq!(
+        turn.and_then(|turn| turn.reason),
+        Some(MasterReason::ReadinessUnknown)
+    );
+    assert_eq!(current.session_id, session.session_id);
+    assert_eq!(current.binding().0, &after);
+}
+
+/// The owner's report (V243-SESSION-RESUME-CONFLICT) through the engine service: the
+/// owner parks a used session behind a new one, signs another account in to the master's
+/// pool and switches back, and the parked session resumes instead of asking for a new one.
+#[tokio::test]
+async fn a_resume_after_an_account_joins_the_master_pool_continues_the_parked_session() {
+    let mut case = RebindCase::start().await;
+    let first = case.open("resume-open").await;
+    let sent = case.submit(&first, "resume-first").await;
+    let settled = case.settled(&first, "resume-first").await;
+    let (config, source) = case.basis().await;
+    let renewed = case
+        .master(
+            "resume-renew",
+            MasterOwnerAction::NewSession {
+                project_id: first.project_id.clone(),
+                expected_config_id: config,
+                expected_source_hash: source,
+                selection: Box::new(first.selection.clone()),
+                cancel_running: true,
+            },
+        )
+        .await;
+    let fresh = case.session().await;
+    let joined = case
+        .edit(
+            "resume-join",
+            ModelAccessEdit::ReplacePool {
+                pool: master_pool(&["claude-connection", "second-connection", "spare-connection"]),
+            },
+        )
+        .await;
+    let resumed = case
+        .master(
+            "resume-first-again",
+            MasterOwnerAction::Resume {
+                project_id: first.project_id.clone(),
+                session_id: first.session_id.clone(),
+                cancel_running: true,
+            },
+        )
+        .await;
+    let current = case.session().await;
+    case.stop().await.unwrap();
     assert_eq!(sent, OwnerResult::Applied);
+    assert!(settled.is_some(), "the first session holds a settled turn");
+    assert_eq!(renewed, OwnerResult::Applied);
+    assert_ne!(fresh.session_id, first.session_id);
+    assert_eq!(joined, OwnerResult::Applied);
+    assert_eq!(
+        resumed,
+        OwnerResult::Applied,
+        "an account joining the master's pool does not stop the owner switching back"
+    );
+    assert_eq!(current.session_id, first.session_id);
+}
+
+/// An owner who replaces the master's own connection, here with another model, changes
+/// what the conversation runs on, so the next send still asks for a new conversation.
+#[tokio::test]
+async fn a_send_after_the_master_s_own_connection_is_replaced_asks_for_a_new_conversation() {
+    let mut case = RebindCase::start().await;
+    let session = case.open("own-open").await;
+    let mut connection: ModelConnection = toml::from_str(
+        r#"id = "claude-connection"
+provider = "anthropic"
+harness = "claude-code"
+protocol = "native"
+account_ref = "claude-account"
+endpoint = { kind = "native" }
+model = { id = "configured-claude-model", author = "anthropic" }
+auth = { method = "native_managed", profile_ref = "claude-profile" }
+"#,
+    )
+    .unwrap();
+    connection.model.id = "replaced-claude-model".into();
+    let replaced = case
+        .edit(
+            "own-replace",
+            ModelAccessEdit::ReplaceConnection { connection },
+        )
+        .await;
+    let refused = case.submit(&session, "own-send").await;
+    case.stop().await.unwrap();
+    assert_eq!(replaced, OwnerResult::Applied);
+    assert_eq!(refused, conflict());
 }
 
 #[tokio::test]

@@ -83,7 +83,7 @@ fn private_directory(path: &Path) {
 }
 
 /// Stores a Claude Code sign-in record where Claude Code keeps it: the managed home's
-/// own login keychain, a temporary one, under the service named after that home.
+/// own profile keychain, a temporary one, under the service named after that home.
 /// Inputs: the managed home and the record. Output: the keychain, deleted on drop.
 fn claude_keychain(home: &Path, record: &Value) -> TestKeychain {
     let keychain = TestKeychain::create(home);

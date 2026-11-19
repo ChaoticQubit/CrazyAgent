@@ -75,13 +75,15 @@ fn report_serializes_unavailable_capabilities_and_admit_names_them() {
     fs::write(&path, output.stdout).unwrap();
     let denied = admit(&path, &root, "revision-a", "profile-a");
     assert_eq!(denied.status.code(), Some(1));
-    assert!(
-        String::from_utf8(denied.stderr)
-            .unwrap()
-            .contains("live_recovery")
-    );
+    let named = if cfg!(unix) {
+        "live_recovery"
+    } else {
+        "qualification_evidence_unavailable"
+    };
+    assert!(String::from_utf8(denied.stderr).unwrap().contains(named));
 }
 
+#[cfg(unix)]
 #[test]
 fn binary_accepts_intact_evidence_and_rejects_changed_bytes() {
     let root = TempDir::new().unwrap();
@@ -103,10 +105,28 @@ fn binary_accepts_intact_evidence_and_rejects_changed_bytes() {
     );
 }
 
+/// Windows has no no-follow open for the report, so admission refuses every report there,
+/// an intact one included, with a plain reason and exit code 1.
+#[cfg(windows)]
+#[test]
+fn binary_refuses_every_report_where_it_cannot_open_one_without_following_links() {
+    let root = TempDir::new().unwrap();
+    let path = complete(&root);
+    let denied = admit(&path, &root, "revision-a", "profile-a");
+    assert_eq!(denied.status.code(), Some(1));
+    assert!(
+        String::from_utf8(denied.stderr)
+            .unwrap()
+            .contains("qualification_evidence_unavailable")
+    );
+    assert!(denied.stdout.is_empty());
+}
+
 #[test]
 fn binary_requires_trusted_source_profile_and_nonempty_requirements() {
     let root = TempDir::new().unwrap();
     let path = complete(&root);
+    #[cfg(unix)]
     for (source, profile, message) in [
         ("revision-other", "profile-a", "source revision"),
         ("revision-a", "profile-other", "profile"),

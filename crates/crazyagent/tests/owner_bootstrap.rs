@@ -63,7 +63,14 @@ impl Process {
         let err_reader = std::thread::spawn(move || {
             let mut bytes = Vec::new();
             err.take(65536).read_to_end(&mut bytes).unwrap();
-            appended(&captured, &bytes);
+            let untraced: Vec<u8> = bytes
+                .split_inclusive(|byte| *byte == b'\n')
+                .filter(|line| !line.starts_with(b"owner_trace "))
+                .flatten()
+                .copied()
+                .collect();
+            assert!(untraced.len() <= bytes.len());
+            appended(&captured, &untraced);
         });
         Self {
             child,
@@ -757,6 +764,19 @@ fn an_engine_start_with_nothing_cut_short_writes_no_cut_short_line() {
     process.stop("TERM");
     let stderr = String::from_utf8_lossy(&process.stderr.lock().unwrap()).into_owned();
     assert!(!stderr.contains("project_delete_cut_short"), "{stderr}");
+}
+
+/// The first start of a new database holds no removed project, so it writes no backfill line
+/// and the stderr of a start keeps only what went wrong; the line is written only when the
+/// backfill held an id.
+#[test]
+fn the_first_start_of_a_new_database_writes_no_backfill_line() {
+    let root = private_root();
+    let mut process = Process::launch(root.path(), "e.sock");
+    process.ready();
+    process.stop("TERM");
+    let stderr = String::from_utf8_lossy(&process.stderr.lock().unwrap()).into_owned();
+    assert!(!stderr.contains("projects_removed_backfill"), "{stderr}");
 }
 
 #[test]

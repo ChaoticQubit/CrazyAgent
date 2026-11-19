@@ -24,26 +24,23 @@ test("every DEC-078 intake, GitHub and setup name has a client function", () => 
     ["setPackEntry", "desktop_set_pack_entry"], ["removePackEntry", "desktop_remove_pack_entry"],
   ]) assert.match(client, new RegExp(`export function ${name}\\([^)]*\\)[^{]*\\{\\s*return invoke<[A-Za-z\\[\\]]+>\\("${command}"`), name);
   assert.match(client, /invoke<CloneReceipt>\("desktop_clone_repo", \{ fullName \}\)/);
-  for (const name of ["downloadFromIcloud", "loadIcloudProgress", "cancelIcloudDownload"]) assert.equal(typeof api[name], "function", name);
-  assert.match(client, /export function icloudDownload\(path: string\): Promise<number> \{\s*return invoke<number>\("desktop_icloud_download", \{ path \}\)/);
-  assert.match(client, /return invoke<IcloudProgress \| null>\("desktop_icloud_progress"\)/);
-  assert.match(client, /return invoke<boolean>\("desktop_icloud_cancel"\)/);
+  for (const name of ["downloadFromIcloud", "loadIcloudProgress", "cancelIcloudDownload"]) assert.equal(api[name], undefined, `${name} left with the standalone download`);
   assert.match(client, /invoke<SetupStatus>\("desktop_run_setup", \{ pack, generation \}\)/);
   assert.match(client, /invoke<SetupStatus>\("desktop_set_pack_entry", \{ id, on, version, generation \}\)/);
 });
 
 test("the intake job has a client call for each command and its own sentences", async () => {
-  for (const name of ["startIntake", "loadIntakeJob", "stopIntake", "dismissIntake"]) assert.equal(typeof api[name], "function", name);
+  for (const name of ["startIntake", "loadIntakeJobs", "stopIntake", "dismissIntake"]) assert.equal(typeof api[name], "function", name);
   const client = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");
   assert.match(client, /return invoke<IntakeJob>\("desktop_intake_start", \{ path, mode, overrides \}\)/);
-  assert.match(client, /return invoke<IntakeJob \| null>\("desktop_intake_status"\)/);
+  assert.match(client, /return invoke<IntakeJob\[\]>\("desktop_intake_status"\)/);
   assert.match(client, /return invoke<boolean>\("desktop_intake_stop", \{ id \}\)/);
   assert.match(client, /return invoke<boolean>\("desktop_intake_dismiss", \{ id \}\)/);
-  assert.equal(api.intakeCopy("job_busy"), "Another job is running. Wait for it to finish on Home.");
+  assert.equal(api.intakeCopy("job_busy"), "Several folders are already waiting. Wait for one to finish on Home.");
   assert.equal(api.intakeCopy("home_add_in_progress"), "A folder is being added to your projects folder. Try again when it finishes.");
   assert.equal(api.intakeCopy("home_add_cancelled"), "Adding the folder stopped. Nothing was moved or copied.");
   assert.equal(api.intakeCopy("intake_failed"), "Adding the folder failed. Check your projects folder before trying again.");
-  assert.deepEqual(await api.loadIntakeJob(), failed("engine_unreachable", "CrazyAgent's engine isn't running."));
+  assert.deepEqual(await api.loadIntakeJobs(), failed("engine_unreachable", "CrazyAgent's engine isn't running."));
   assert.deepEqual(await api.startIntake("relative/site", "move", []), failed("engine_unreachable", "CrazyAgent's engine isn't running."), "the native bridge checks the path, not the window");
 });
 
@@ -162,9 +159,19 @@ test("each Move anyway and Copy anyway warning reads exactly as the owner asked"
   assert.equal(api.measuredLine(42 * 1024 ** 3), "It is about 42 GB.");
 });
 
+test("V243-ICLOUD slice 4: the standalone iCloud download is gone from the window, the bridge and the e2e routes; jobs download their own", () => {
+  const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+  for (const [path, text] of [["../src/engine-client.ts", read("../src/engine-client.ts")], ["../src-tauri/src/lib.rs", read("../src-tauri/src/lib.rs")],
+    ["../src-tauri/build.rs", read("../src-tauri/build.rs")], ["../src-tauri/e2e_bridge/routes.rs", read("../src-tauri/e2e_bridge/routes.rs")],
+    ["../src-tauri/src/bridge/intake.rs", read("../src-tauri/src/bridge/intake.rs")]]) {
+    assert.doesNotMatch(text, /desktop_icloud_(download|progress|cancel)|fn icloud_(download|progress|cancel)\b/, path);
+  }
+  assert.equal(api.intakeCopy("icloud_download_busy"), "Too many iCloud downloads are running at once. Wait for one to finish.");
+});
+
 test("an add anyway sends the overrides with the add and a bad override reads as a plain sentence", () => {
   const client = readFileSync(new URL("../src/engine-client.ts", import.meta.url), "utf8");
-  assert.match(client, /export type AddOverride = "worktrees" \| "linked_checkout" \| "too_large";/);
+  assert.match(client, /export type AddOverride = "worktrees" \| "linked_checkout" \| "too_large" \| "download_everything";/);
   assert.match(client, /invoke<IntentReceipt>\("desktop_add_existing_folder", \{ source, mode, overrides, generation \}\)/);
   assert.equal(api.intakeCopy("home_override_invalid"), "CrazyAgent couldn't match what you agreed to with this folder. Choose the folder again.");
 });
@@ -172,7 +179,6 @@ test("an add anyway sends the overrides with the add and a bad override reads as
 test("an iCloud refusal reads as a plain sentence that keeps the folder safe", () => {
   assert.equal(api.intakeCopy("home_icloud_not_downloaded"), "Some files are still only in iCloud, so the folder wasn't added. Nothing was removed. Download them and try again.");
   assert.match(api.intakeCopy("home_permission_denied"), /System Settings > Privacy & Security > Files and Folders/);
-  assert.equal(api.intakeCopy("icloud_download_busy"), "Another iCloud download is running. Wait for it to finish.");
 });
 
 test("a started onboarding's kept change guesses no project from the folder name, so only the engine's id names it (rv-secreview S2 F1)", () => {

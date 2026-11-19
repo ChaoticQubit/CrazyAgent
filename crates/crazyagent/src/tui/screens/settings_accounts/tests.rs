@@ -1,6 +1,6 @@
 use super::super::settings_add_account::{
-    AddAccount, UpdateOffer, choices, code_left_line, key_problem, provider_tiles, sign_in_problem,
-    too_old_line, update_offer,
+    AddAccount, UpdateOffer, choices, code_left_line, follow_polls, key_problem, provider_tiles,
+    sign_in_problem, too_old_line, update_offer, update_running_line,
 };
 use super::*;
 use crate::accounts::{AccountStatus, AccountView, Provider, SignInMethod, catalog};
@@ -1516,7 +1516,7 @@ fn a_recorded_sign_in_failure_reads_the_app_s_sentence_for_the_harness_it_used()
     ] {
         assert_eq!(
             sign_in_problem(native, &failed(code, device_code)),
-            sentence,
+            sentence.replace("this Mac", super::super::THIS_COMPUTER),
             "{code}"
         );
     }
@@ -1545,6 +1545,7 @@ fn too_old_versions(installed: Option<&str>) -> crate::harnesses::update::Harnes
         last: None,
         needs: None,
         sign_in_min: Some("2.1.268".into()),
+        waiting: None,
     }
 }
 
@@ -1635,6 +1636,35 @@ fn the_too_old_panel_offers_update_only_where_settings_harnesses_would() {
     assert_eq!(update_offer(Some(&row), None), UpdateOffer::Nothing);
 }
 
+/// V243-HARNESS-UPDATE-PARALLEL r1 F1: an update the too-old panel started that waits behind
+/// another harness's job says so, named from the catalog, as Settings, Harnesses does, and its
+/// reads start over once it stops waiting or waits behind another job, so a wait never uses up
+/// the reads of its own run.
+#[test]
+fn the_too_old_panel_says_whose_job_its_update_waits_for_and_follows_the_wait_afresh() {
+    let running = crate::harnesses::update::HarnessVersions {
+        running: true,
+        ..too_old_versions(Some("2.1.200"))
+    };
+    let held = crate::harnesses::update::HarnessVersions {
+        waiting: Some("pi".into()),
+        ..running.clone()
+    };
+    assert_eq!(
+        update_running_line("Claude Code", Some(&running)),
+        "Updating Claude Code..."
+    );
+    assert_eq!(
+        update_running_line("Claude Code", Some(&held)),
+        "Waiting for Pi to finish..."
+    );
+    assert_eq!(follow_polls(200, Some(&running), &running), 200);
+    assert_eq!(follow_polls(200, Some(&running), &held), 0);
+    assert_eq!(follow_polls(7, Some(&held), &held), 7);
+    assert_eq!(follow_polls(7, Some(&held), &running), 0);
+    assert_eq!(follow_polls(7, None, &running), 7);
+}
+
 /// A finished view for one phase and, when the engine recorded one, its code. Inputs: the
 /// phase and the code. Output: the view the engine reply gives the TUI.
 fn finished(phase: NativeAuthPhase, code: Option<&str>) -> SignInView {
@@ -1687,7 +1717,7 @@ fn a_recorded_code_wins_over_the_phase_line_and_an_unconfirmed_sign_in_says_how_
     ] {
         assert_eq!(
             sign_in_problem(native, &finished(phase, code)),
-            sentence,
+            sentence.replace("this Mac", super::super::THIS_COMPUTER),
             "{phase:?} {code:?}"
         );
     }

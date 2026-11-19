@@ -124,7 +124,7 @@ test("the page letting go after the pool assign starts still saves the agent acc
   assert.ok(!/&& mounted\.current\)/.test(wizard), "no follow-up step waits on the page staying open");
   assert.ok(wizard.includes("carryFollowUps(following, follow.project)"), "the page's Done runs the shared follow-ups");
   const state = read("src/state.ts");
-  assert.match(state, /carryFollowUps\(result\.value\.id, result\.value\.project_id\)/, "Home's poll runs them for a page closed");
+  assert.match(state, /carryFollowUps\(job\.id, job\.project_id\)/, "Home's poll runs them for a page closed");
 });
 
 test("the follow-ups apply only to the project the kept job makes: a caller naming another project is refused before any call (rv-secreview S3 r1)", () => {

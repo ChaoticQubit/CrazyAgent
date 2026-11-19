@@ -29,6 +29,33 @@ fn job(id: i64, kind: ResearchKind, status: ResearchStatus, error: Option<&str>)
         started_ms: Some(1_793_000_001_000),
         heartbeat_ms: None,
         finished_ms: Some(1_793_000_002_000),
+        retryable: matches!(status, ResearchStatus::Failed | ResearchStatus::Cancelled),
+    }
+}
+
+/// A failed or stopped planning job the engine cannot run again, as on a system where it runs
+/// no research, shows no Retry; `r` still asks, so the engine's refusal is what the owner sees.
+#[test]
+fn a_planning_job_the_engine_cannot_run_again_shows_no_retry() {
+    let project = ProjectId::new("notes-cli").unwrap();
+    for (status, shown) in [
+        (
+            ResearchStatus::Failed,
+            "! Failed: planning stopped with an error",
+        ),
+        (ResearchStatus::Cancelled, "Stopped"),
+    ] {
+        let mut stuck = job(5, ResearchKind::RoadmapPlanning, status, None);
+        stuck.retryable = false;
+        let state = planning(&[stuck]);
+        assert_eq!(planning_value(&state, &Look::plain()).text(), shown);
+        assert_eq!(
+            planning_key(&state, &project, KeyCode::Char('r')),
+            Some(Ok(SetupAction::RetryResearch {
+                project_id: project.clone(),
+                job: 5,
+            }))
+        );
     }
 }
 
@@ -52,6 +79,7 @@ fn planning_line_shows_failed_with_retry() {
             job: 3,
             cancelled: false,
             reason: Some("the harness stopped before it wrote the roadmap".into()),
+            retryable: true,
         },
         "the newest planning job decides"
     );

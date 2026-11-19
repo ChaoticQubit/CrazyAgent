@@ -600,10 +600,16 @@ impl NativeProfileCustody {
         )?;
         step()?;
         let profile = match profile {
-            Some(profile) => {
-                staged.replace_into(&root.file, MANIFEST, &profile.file)?;
-                profile
-            }
+            Some(profile) => match staged.replace_into(&root.file, MANIFEST, &profile.file) {
+                Ok(()) => profile,
+                Err(staging::Unreplaced::Changed(refused)) => return Err(refused),
+                Err(staging::Unreplaced::Stopped(stopped)) => {
+                    if written.verify(&profile.file).is_ok() {
+                        remember_profile(&mut self.profiles, key, digest(&written.bytes));
+                    }
+                    return Err(stopped);
+                }
+            },
             None => staged.commit(&root.file, &key)?,
         };
         drop(manifest_lock);

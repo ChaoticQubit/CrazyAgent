@@ -30,6 +30,10 @@ mod native_auth_host;
 #[path = "engine/native_auth_host_unavailable.rs"]
 mod native_auth_host;
 pub mod owner;
+/// The `owner-trace` feature's one stderr line per owner exchange: request id, operation
+/// kind, claim, end and reply, never a payload, path or name. Off by default; only the test
+/// farm's build turns it on, and no release build may ([`owner_trace::connection`]).
+pub(crate) mod owner_trace;
 
 #[cfg(unix)]
 pub use native_auth_host::{
@@ -479,6 +483,9 @@ type TerminalHost = (
     u64,
 );
 
+/// The refusal for an apply or settings change sent while the storage queue is full.
+const QUEUE_FULL: &str = "queue unavailable: no available capacity";
+
 pub struct Engine {
     storage: Storage,
     input: Mutex<InputState>,
@@ -506,43 +513,98 @@ impl Engine {
         self.storage_job_within(self.timeout, build).await
     }
 
-    /// Runs one storage job and waits at most `wait` for its answer, for owner work whose
-    /// client waits longer than the owner deadline. Inputs: the wait and the job.
-    /// Output: the job's result, or the outcome-unknown error while storage has not
-    /// answered in time or went away without answering.
+    /// Runs one native-auth job whose answer carries work only its caller runs, such as the
+    /// dispatch that signs out. When an access-narrowing job answers after the owner stopped
+    /// waiting, `late` gets that answer, so the work still runs. Inputs: the job, the late
+    /// step and when the owner's answer is due, else each wait takes the engine's bound.
+    /// Output: the job's result, or the error the owner sees.
+    async fn native_auth_settled_job<T, F>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
+        late: impl FnOnce(T) -> F + Send + 'static,
+        answer_by: Option<tokio::time::Instant>,
+    ) -> Result<T, EngineError>
+    where
+        T: Send + 'static,
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let (send, mut receive) = oneshot::channel();
+        let bound = || answer_by.unwrap_or_else(|| tokio::time::Instant::now() + self.timeout);
+        let submitted = self
+            .storage
+            .submit(build(send), bound(), "owner_queue_not_submitted")
+            .await;
+        let lost = match submitted {
+            Ok(taken) => match tokio::time::timeout_at(bound(), &mut receive).await {
+                Ok(answer) => return answer.map_err(|_| owner::native_auth::outcome_unknown())?,
+                Err(_) => taken.lost(owner::native_auth::outcome_unknown()),
+            },
+            Err(refused) => refused,
+        };
+        if lost.0 == crate::storage::ACCESS_CHANGE_PENDING {
+            tokio::spawn(async move {
+                if let Ok(Ok(answer)) = receive.await {
+                    late(answer).await;
+                }
+            });
+        }
+        Err(lost)
+    }
+
+    /// Runs one storage job, waiting at most `wait` for the worker to take it and at most
+    /// `wait` after the take for its answer, for owner work whose client waits longer than
+    /// the owner deadline. Inputs: the wait and the job. Output: the job's result; a
+    /// not-submitted code when the worker never took it; access_change_pending for a narrowing
+    /// one; else outcome-unknown when a taken job is late or storage went away unanswered.
     async fn storage_job_within<T>(
         &self,
         wait: Duration,
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
     ) -> Result<T, EngineError> {
         let (send, receive) = oneshot::channel();
-        self.storage
-            .sender
-            .try_send(build(send))
-            .map_err(|_| EngineError("owner_queue_not_submitted".into()))?;
+        let submit_by = tokio::time::Instant::now() + wait;
+        let taken = self
+            .storage
+            .submit(build(send), submit_by, "owner_queue_not_submitted")
+            .await?;
         tokio::time::timeout(wait, receive)
             .await
-            .map_err(|_| owner::native_auth::outcome_unknown())?
+            .map_err(|_| taken.lost(owner::native_auth::outcome_unknown()))?
             .map_err(|_| owner::native_auth::outcome_unknown())?
     }
 
     /// Runs one storage job for a record that refers to files written before it, and hands
-    /// storage's real answer to `settle` even when the owner stops waiting first, so a late
-    /// commit never loses a file its record refers to. Inputs: the job and the settle step.
-    /// Output: the settle step's error when it fails, else the job's result, or the
-    /// outcome-unknown error while storage has not answered in time or went away without
-    /// answering.
+    /// storage's answer to `settle` even after the owner stops waiting, so a late commit never
+    /// loses a file its record refers to. Inputs: the job and the settle step. Output: the settle
+    /// error, else the job's result; a not-submitted code, settled at once; access_change_pending
+    /// for a narrowing job; or outcome-unknown when a taken job is late or storage went away.
     async fn settled_job<T: Send + 'static>(
         &self,
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
         settle: impl FnOnce(&Result<T, EngineError>) -> Result<(), EngineError> + Send + 'static,
     ) -> Result<T, EngineError> {
         let (send, receive) = oneshot::channel();
-        if self.storage.sender.try_send(build(send)).is_err() {
-            let refused = Err(EngineError("owner_queue_not_submitted".into()));
-            settle(&refused)?;
-            return refused;
-        }
+        let submit_by = tokio::time::Instant::now() + self.timeout;
+        let submitted = self
+            .storage
+            .submit(build(send), submit_by, "owner_queue_not_submitted")
+            .await;
+        let taken = match submitted {
+            Ok(taken) => taken,
+            Err(pending) if pending.0 == crate::storage::ACCESS_CHANGE_PENDING => {
+                tokio::spawn(async move {
+                    if let Ok(result) = receive.await {
+                        let _ = settle(&result);
+                    }
+                });
+                return Err(pending);
+            }
+            Err(refused) => {
+                let refused = Err(refused);
+                settle(&refused)?;
+                return refused;
+            }
+        };
         let answered = tokio::spawn(async move {
             let result = receive
                 .await
@@ -551,7 +613,7 @@ impl Engine {
         });
         tokio::time::timeout(self.timeout, answered)
             .await
-            .map_err(|_| owner::native_auth::outcome_unknown())?
+            .map_err(|_| taken.lost(owner::native_auth::outcome_unknown()))?
             .map_err(|_| owner::native_auth::outcome_unknown())?
     }
 
@@ -652,34 +714,36 @@ impl Engine {
     }
 
     pub async fn apply(&self, request: WireRequest) -> Result<WireReply, EngineError> {
-        let _delivery = tokio::time::timeout(self.timeout, self.owner_egress.read())
+        let submit_by = tokio::time::Instant::now() + self.timeout;
+        let _delivery = tokio::time::timeout_at(submit_by, self.owner_egress.read())
             .await
             .map_err(|_| EngineError("delivery_barrier_timeout_not_submitted".into()))?;
         request.validate().map_err(|e| EngineError(e.to_string()))?;
         let (send, receive) = oneshot::channel();
-        self.storage
-            .sender
-            .try_send(Job::Apply(request, send))
-            .map_err(|e| EngineError(format!("queue unavailable: {e}")))?;
+        let taken = self
+            .storage
+            .submit(Job::Apply(request, send), submit_by, QUEUE_FULL)
+            .await?;
         tokio::time::timeout(self.timeout, receive)
             .await
-            .map_err(|_| EngineError("outcome_unknown_retry_same_identity".into()))?
+            .map_err(|_| taken.lost(EngineError("outcome_unknown_retry_same_identity".into())))?
             .map_err(|_| EngineError("database worker stopped".into()))?
     }
 
     pub async fn update_config(&self, config: EffectiveConfig) -> Result<(), EngineError> {
-        let _delivery = tokio::time::timeout(self.timeout, self.owner_egress.write())
+        let submit_by = tokio::time::Instant::now() + self.timeout;
+        let _delivery = tokio::time::timeout_at(submit_by, self.owner_egress.write())
             .await
             .map_err(|_| EngineError("delivery_barrier_timeout_not_submitted".into()))?;
         config.validate().map_err(|e| EngineError(e.to_string()))?;
         let (send, receive) = oneshot::channel();
-        self.storage
-            .sender
-            .try_send(Job::Config(config, send))
-            .map_err(|e| EngineError(format!("queue unavailable: {e}")))?;
+        let taken = self
+            .storage
+            .submit(Job::Config(config, send), submit_by, QUEUE_FULL)
+            .await?;
         tokio::time::timeout(self.timeout, receive)
             .await
-            .map_err(|_| EngineError("configuration_update_outcome_unknown".into()))?
+            .map_err(|_| taken.lost(EngineError("configuration_update_outcome_unknown".into())))?
             .map_err(|_| EngineError("database worker stopped".into()))?
     }
 
@@ -818,6 +882,362 @@ impl Engine {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// One project create as a desktop client sends it. Input: the request and project id.
+    /// Output: the request.
+    fn create_request(id: &str) -> WireRequest {
+        WireRequest {
+            protocol_version: crate::protocol::PROTOCOL_VERSION,
+            client_id: ClientId::new("desktop").unwrap(),
+            request_id: crate::protocol::RequestId::new(id).unwrap(),
+            expected_revision: crate::protocol::Cursor::new(0),
+            command: crate::protocol::Command::CreateProject {
+                project_id: crate::protocol::ProjectId::new(id).unwrap(),
+                spec: crate::protocol::ProjectSpec {
+                    name: "Inventory".into(),
+                    repositories: vec!["/tmp/inventory".into()],
+                },
+            },
+        }
+    }
+
+    /// Opens an engine whose storage queue holds one job, in a private folder.
+    /// Inputs: the folder and any further settings lines. Output: the engine and its
+    /// database path.
+    async fn one_slot_engine(
+        root: &std::path::Path,
+        settings: &str,
+    ) -> (Engine, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.join("g");
+        std::fs::write(&global, format!("queue_capacity = 1\n{settings}")).unwrap();
+        let cfg = crate::config::resolve_config(&global, &root.join("p")).unwrap();
+        let path = root.join("db");
+        (Engine::open(&path, cfg).await.unwrap(), path)
+    }
+
+    /// Reads how many changes the closed engine's database holds.
+    /// Input: the database path. Output: the stored revision.
+    fn stored_revision(path: &std::path::Path) -> i64 {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    /// Sends one create, once storage receives, while the worker is held at its claim, lifts
+    /// the hold `release` after the send, and waits for the engine to close. Inputs: the
+    /// folder, the settings lines and the release delay. Output: the apply's revision or error
+    /// code, and the stored revision after close.
+    async fn apply_across_a_held_claim(
+        root: &std::path::Path,
+        settings: &str,
+        release: Duration,
+    ) -> (Result<crate::protocol::Cursor, String>, i64) {
+        let path = root.join("db");
+        let hold = crate::storage::hold_claims(&path);
+        let (engine, opened) = one_slot_engine(root, settings).await;
+        assert_eq!(opened, path);
+        tokio::time::timeout(Duration::from_secs(10), engine.storage.started())
+            .await
+            .unwrap();
+        let engine = std::sync::Arc::new(engine);
+        let raced = tokio::spawn({
+            let engine = engine.clone();
+            async move { engine.apply(create_request("raced")).await }
+        });
+        tokio::time::sleep(release).await;
+        drop(hold);
+        let outcome = raced
+            .await
+            .unwrap()
+            .map(|reply| reply.revision)
+            .map_err(|error| error.0);
+        engine.close().await.unwrap();
+        (outcome, stored_revision(&path))
+    }
+
+    #[tokio::test]
+    async fn a_job_whose_bound_runs_out_at_the_claim_is_withdrawn_and_the_worker_skips_it() {
+        let root = tempfile::tempdir().unwrap();
+        let (outcome, stored) =
+            apply_across_a_held_claim(root.path(), "", Duration::from_millis(1500)).await;
+        assert_eq!(outcome, Err("storage_busy_not_submitted".to_owned()));
+        assert_eq!(
+            stored, 0,
+            "the worker lost the claim and never ran the withdrawn job"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_claim_race_at_the_bound_has_one_outcome_and_applies_at_most_once() {
+        for round in 0..3 {
+            for offset in [-20i64, -10, -5, -2, 0, 2, 5, 10, 20] {
+                let root = tempfile::tempdir().unwrap();
+                let release = Duration::from_millis(u64::try_from(100 + offset).unwrap());
+                let (outcome, stored) =
+                    apply_across_a_held_claim(root.path(), "timeout_ms = 100", release).await;
+                let seen = format!("round {round} offset {offset}: {outcome:?}, stored {stored}");
+                one_of_the_claims_three(&outcome, stored, &seen);
+            }
+        }
+    }
+
+    /// Checks that one claim race ended in one of its three outcomes and stored what that
+    /// outcome says: withdrawn with nothing stored, or applied once, answered or unknown.
+    /// Inputs: the outcome, the stored revision and the label a failure names.
+    fn one_of_the_claims_three(
+        outcome: &Result<crate::protocol::Cursor, String>,
+        stored: i64,
+        seen: &str,
+    ) {
+        match outcome.as_ref() {
+            Err(code) if code == "storage_busy_not_submitted" => assert_eq!(stored, 0, "{seen}"),
+            Ok(revision) => {
+                assert_eq!(*revision, crate::protocol::Cursor::new(1), "{seen}");
+                assert_eq!(stored, 1, "{seen}");
+            }
+            Err(code) if code == "outcome_unknown_retry_same_identity" => {
+                assert_eq!(stored, 1, "{seen}")
+            }
+            Err(_) => panic!("an outcome outside the claim's three: {seen}"),
+        }
+    }
+
+    const START_HELD: Duration = Duration::from_secs(1);
+
+    /// A claim race reaches the claim even when storage is still starting as the engine
+    /// opens: the race begins only once storage receives. The start is held 1 s, 900 ms past
+    /// the 100 ms bound, so a race begun at open is refused storage_starting_not_submitted
+    /// instead of racing the claim (the V243 claim race at the bound flake).
+    #[tokio::test]
+    async fn the_claim_race_begins_only_once_storage_receives() {
+        let root = tempfile::tempdir().unwrap();
+        let start = crate::storage::hold_start(&root.path().join("db"));
+        let ((outcome, stored), ()) = tokio::join!(
+            apply_across_a_held_claim(root.path(), "timeout_ms = 100", Duration::from_millis(100)),
+            async move {
+                tokio::time::sleep(START_HELD).await;
+                drop(start);
+            }
+        );
+        let seen = format!("start held {START_HELD:?}: {outcome:?}, stored {stored}");
+        one_of_the_claims_three(&outcome, stored, &seen);
+    }
+
+    #[tokio::test]
+    async fn an_apply_the_busy_worker_does_not_take_in_time_is_withdrawn_and_never_lands() {
+        let root = tempfile::tempdir().unwrap();
+        let (engine, _) = one_slot_engine(root.path(), "").await;
+        let engine = std::sync::Arc::new(engine);
+        let (release, held) = oneshot::channel();
+        engine.storage.sender.try_send(Job::Hold(held)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let queued = engine.apply(create_request("queued")).await;
+        let next = tokio::spawn({
+            let engine = engine.clone();
+            async move { engine.apply(create_request("next")).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(release);
+        let next = next.await.unwrap();
+        assert_eq!(
+            queued.map(|reply| reply.revision).map_err(|error| error.0),
+            Err("storage_busy_not_submitted".to_owned()),
+            "an apply still queued when its bound ran out is withdrawn and answered unsent"
+        );
+        assert_eq!(
+            next.map(|reply| reply.revision).map_err(|error| error.0),
+            Ok(crate::protocol::Cursor::new(1)),
+            "the withdrawn create never landed, and its queue slot was free for the next apply"
+        );
+    }
+
+    /// An apply whose caller stops waiting while its job still waits in the queue, as an
+    /// owner request the transport cuts at its deadline does, is withdrawn: the worker skips
+    /// it, it never lands, and its queue slot is free for the next apply
+    /// (V243-STORAGE-BUSY-ROWS).
+    #[tokio::test]
+    async fn an_apply_its_caller_drops_while_queued_is_withdrawn_and_never_lands() {
+        let root = tempfile::tempdir().unwrap();
+        let (engine, _) = one_slot_engine(root.path(), "").await;
+        let engine = std::sync::Arc::new(engine);
+        let (release, held) = oneshot::channel();
+        engine.storage.sender.try_send(Job::Hold(held)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let cut =
+            tokio::time::timeout(engine.timeout / 4, engine.apply(create_request("cut"))).await;
+        assert!(
+            cut.is_err(),
+            "the caller stopped waiting while its job was queued"
+        );
+        drop(release);
+        let next = engine.apply(create_request("next")).await;
+        assert_eq!(
+            next.map(|reply| reply.revision).map_err(|error| error.0),
+            Ok(crate::protocol::Cursor::new(1)),
+            "the dropped create never landed, and its queue slot was free for the next apply"
+        );
+    }
+
+    /// A settings change whose caller stops waiting while it waits in the queue still lands,
+    /// since storage never withdraws an access-narrowing job (V243-STORAGE-BUSY-ROWS).
+    #[tokio::test]
+    async fn a_narrowing_job_its_caller_drops_while_queued_still_lands() {
+        let root = tempfile::tempdir().unwrap();
+        let (engine, path) = one_slot_engine(root.path(), "").await;
+        let changed = root.path().join("g2");
+        std::fs::write(&changed, "queue_capacity = 1\ntimeout_ms = 4321\n").unwrap();
+        let config = crate::config::resolve_config(&changed, &root.path().join("p")).unwrap();
+        let id = config.id.as_str().to_owned();
+        let (release, held) = oneshot::channel();
+        engine.storage.sender.try_send(Job::Hold(held)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let cut = tokio::time::timeout(engine.timeout / 4, engine.update_config(config)).await;
+        assert!(
+            cut.is_err(),
+            "the caller stopped waiting while its job was queued"
+        );
+        drop(release);
+        engine.close().await.unwrap();
+        assert_eq!(
+            stored_configs(&path, &id),
+            1,
+            "the dropped narrowing change still landed"
+        );
+    }
+
+    /// Counts the stored settings with one id in a closed engine's database.
+    /// Inputs: the database path and the settings id. Output: the count.
+    fn stored_configs(path: &std::path::Path, id: &str) -> i64 {
+        rusqlite::Connection::open(path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM configs WHERE id=?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    /// An apply inside a bounded owner request behind busy storage is decided before the
+    /// request's cut, so the request itself answers storage_busy_not_submitted instead of
+    /// being cut with its job still queued (V243-STORAGE-BUSY-ROWS).
+    #[tokio::test]
+    async fn an_apply_behind_busy_storage_is_refused_before_its_requests_cut() {
+        let root = tempfile::tempdir().unwrap();
+        let (engine, _) = one_slot_engine(root.path(), "").await;
+        let (release, held) = oneshot::channel();
+        engine.storage.sender.try_send(Job::Hold(held)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let bound = engine.timeout / 4;
+        let cut = tokio::time::Instant::now() + bound;
+        let request = crate::storage::before_cut(cut, bound, engine.apply(create_request("cut")));
+        let answered = tokio::time::timeout_at(cut, request)
+            .await
+            .map(|reply| reply.map(|reply| reply.revision).map_err(|error| error.0))
+            .map_err(|_| "cut");
+        drop(release);
+        assert_eq!(
+            answered,
+            Ok(Err("storage_busy_not_submitted".to_owned())),
+            "the request answered the refusal itself before its cut"
+        );
+    }
+
+    /// A narrowing job inside a bounded owner request behind busy storage is answered
+    /// access_change_pending before the request's cut and still lands once storage frees
+    /// up (V243-STORAGE-BUSY-ROWS).
+    #[tokio::test]
+    async fn a_narrowing_job_behind_busy_storage_is_pending_before_its_requests_cut_and_lands() {
+        let root = tempfile::tempdir().unwrap();
+        let (engine, path) = one_slot_engine(root.path(), "").await;
+        let changed = root.path().join("g2");
+        std::fs::write(&changed, "queue_capacity = 1\ntimeout_ms = 4322\n").unwrap();
+        let config = crate::config::resolve_config(&changed, &root.path().join("p")).unwrap();
+        let id = config.id.as_str().to_owned();
+        let (release, held) = oneshot::channel();
+        engine.storage.sender.try_send(Job::Hold(held)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let bound = engine.timeout / 4;
+        let cut = tokio::time::Instant::now() + bound;
+        let request = crate::storage::before_cut(cut, bound, engine.update_config(config));
+        let answered = tokio::time::timeout_at(cut, request)
+            .await
+            .map(|changed| changed.map_err(|error| error.0))
+            .map_err(|_| "cut");
+        drop(release);
+        engine.close().await.unwrap();
+        assert_eq!(
+            answered,
+            Ok(Err("access_change_pending".to_owned())),
+            "the request answered the pending change itself before its cut"
+        );
+        assert_eq!(
+            stored_configs(&path, &id),
+            1,
+            "the pending narrowing change landed"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_apply_waits_for_a_storage_worker_that_starts_receiving_within_its_bound() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("db");
+        let hold = crate::storage::hold_start(&path);
+        let (engine, opened) = one_slot_engine(root.path(), "").await;
+        assert_eq!(opened, path);
+        let engine = std::sync::Arc::new(engine);
+        let first = tokio::spawn({
+            let engine = engine.clone();
+            async move { engine.apply(create_request("first")).await }
+        });
+        tokio::time::sleep(engine.timeout / 2).await;
+        drop(hold);
+        assert_eq!(
+            first
+                .await
+                .unwrap()
+                .map(|reply| reply.revision)
+                .map_err(|error| error.0),
+            Ok(crate::protocol::Cursor::new(1)),
+            "an apply sent while the worker starts is answered once the worker receives"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_apply_before_the_storage_worker_receives_is_refused_unsent() {
+        let root = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("g");
+        std::fs::write(&global, "queue_capacity = 1").unwrap();
+        let cfg = crate::config::resolve_config(&global, &root.path().join("p")).unwrap();
+        let path = root.path().join("db");
+        let hold = crate::storage::hold_start(&path);
+        let engine = Engine::open(&path, cfg).await.unwrap();
+        let started = std::time::Instant::now();
+        let first = engine.apply(create_request("first")).await;
+        let waited = started.elapsed();
+        drop(hold);
+        let after = engine.apply(create_request("after")).await;
+        assert_eq!(
+            first.map(|reply| reply.revision).map_err(|error| error.0),
+            Err("storage_starting_not_submitted".to_owned()),
+            "an apply the worker cannot yet receive is refused, nothing queued, after {waited:?}"
+        );
+        assert!(
+            waited >= engine.timeout,
+            "it waited its own bound: {waited:?}"
+        );
+        assert_eq!(
+            after.map(|reply| reply.revision).map_err(|error| error.0),
+            Ok(crate::protocol::Cursor::new(1)),
+            "the refused create never committed, so the next apply is the first revision"
+        );
+        engine.close().await.unwrap();
+    }
 
     #[cfg(target_os = "macos")]
     #[tokio::test]

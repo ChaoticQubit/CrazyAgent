@@ -1,7 +1,13 @@
+#[cfg(any(windows, test))]
+mod batch;
+#[cfg(windows)]
+pub(crate) use batch::{batch_file, cmd_shim_real, fixed_program, npx_real, program_file};
 pub mod permission_fix;
 pub mod probe;
 #[cfg(all(test, unix))]
 mod tests;
+#[cfg(all(test, windows))]
+mod windows_tests;
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -51,7 +57,7 @@ const TEMP_FOLDERS: [&str; 7] = [
     "/dev/shm",
 ];
 const HOMEBREW_FOLDERS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
-const SYSTEM_FOLDERS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+pub(crate) const SYSTEM_FOLDERS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
 /// The file name of the tmux the app ships beside the engine (DEC-157), which the name
 /// `tmux` finds before every folder ([`Places::bundled`]).
 pub const BUNDLED_TMUX: &str = "crazyagent-tmux";
@@ -467,17 +473,22 @@ impl Places {
         (self.temp_refused && hops.iter().any(leads)).then_some(Refusal::InTemp)
     }
 
-    /// Whether agents can write a folder or file, read as written and with its links
-    /// resolved: inside a `.crazyagent` folder, inside a project ([`in_project`]), inside a
-    /// folder the engine names for agents ([`Places::in_set_up_project`]), inside the engine's
-    /// data folder outside its `setup` folder, or inside an agent's short temp folder
-    /// ([`crate::sandbox::toolchains::in_agent_tmp`]). Input: the path. Output: the answer.
+    /// Whether agents can write a path, read as written, resolved and in its one spelling
+    /// ([`crate::sandbox::canonical`]): in a `.crazyagent` folder, a project ([`in_project`]),
+    /// a folder the engine names for agents, the engine's data folder outside `setup`, or an
+    /// agent's short temp folder. HOME's names are read once per call. Input: the path.
+    /// Output: the answer.
     pub(crate) fn agent_writable(&self, path: &Path) -> bool {
         let real = path.canonicalize().ok();
-        std::iter::once(path).chain(real.as_deref()).any(|path| {
+        let plain = crate::sandbox::canonical(path).ok();
+        let homes = home_names(self.home());
+        let mut forms = std::iter::once(path)
+            .chain(real.as_deref())
+            .chain(plain.as_deref());
+        forms.any(|path| {
             crate::harnesses::in_crazyagent_folder(path)
-                || in_project(self.home(), path)
-                || self.in_set_up_project(path)
+                || in_project(&homes, path)
+                || self.in_set_up_project(&homes, path)
                 || in_engine_data(&self.engine_roots, path)
                 || crate::sandbox::toolchains::in_agent_tmp(path)
         })
@@ -485,30 +496,47 @@ impl Places {
 
     /// Whether a path lies in a folder the engine names for agents ([`registered_projects`]),
     /// which they can write whole. When those could not be read it fails closed: every path
-    /// under HOME outside the engine's data folder counts. Input: the path. Output: the
-    /// answer.
-    fn in_set_up_project(&self, path: &Path) -> bool {
+    /// under HOME outside the engine's data folder counts. Inputs: HOME's names
+    /// ([`home_names`]) and the path. Output: the answer.
+    fn in_set_up_project(&self, homes: &[PathBuf], path: &Path) -> bool {
+        assert!(homes.len() <= 4);
         match &self.projects {
             Some(roots) => roots.iter().any(|root| path.starts_with(root)),
             None => {
-                let home = self.home.as_deref();
-                let real_home = home.and_then(|home| home.canonicalize().ok());
-                home.into_iter()
-                    .chain(real_home.as_deref())
-                    .any(|home| path.starts_with(home))
+                homes.iter().any(|home| path.starts_with(home))
                     && !self.engine_roots.iter().any(|root| path.starts_with(root))
             }
         }
     }
 }
 
-/// Every folder agents can write whole that `engine.db` names, as recorded and real: set-up
-/// project folders, declared repositories, team and leased worktrees with their repositories,
-/// read read-only through engine start's own reader
-/// ([`crate::harnesses::finding::named_folders`]). No database or table names none; a failed
-/// read or a table past [`crate::harnesses::finding::AGENT_ROWS_MAX`] rows gives none; a row
-/// it cannot read is skipped alone and counted in the log. Input: the data folder. Output:
-/// the folders.
+/// HOME's names: as given, with its links resolved, in its one spelling and, on macOS, that
+/// spelling's data volume name, so a path in either spelling meets HOME in its own. Input:
+/// HOME, or none. Output: the names, each once.
+fn home_names(home: Option<&Path>) -> Vec<PathBuf> {
+    let Some(home) = home else {
+        return Vec::new();
+    };
+    let plain = crate::sandbox::canonical(home).ok();
+    let twin = plain.as_deref().and_then(crate::projects_home::data_twin);
+    let mut names = vec![home.to_path_buf()];
+    for name in [home.canonicalize().ok(), plain, twin]
+        .into_iter()
+        .flatten()
+    {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    assert!(names.len() <= 4);
+    names
+}
+
+/// Every folder `engine.db` names that agents write whole (set-up projects, declared
+/// repositories, team and leased worktrees with their repositories), as recorded, real and in
+/// one spelling, read through [`crate::harnesses::finding::named_folders`]. No database names
+/// none; a failed read or too many rows gives none; an unreadable row is skipped and counted.
+/// Input: the data folder. Output: the folders.
 fn registered_projects(data_root: &Path) -> Option<Vec<PathBuf>> {
     use crate::harnesses::finding::{BadRow, NAMED_FOLDERS_MAX, named_folders};
     let database = data_root.join("engine.db");
@@ -531,7 +559,8 @@ fn registered_projects(data_root: &Path) -> Option<Vec<PathBuf>> {
     let mut seen = std::collections::HashSet::new();
     for folder in named.into_iter().filter(|folder| folder.is_absolute()) {
         let real = folder.canonicalize().ok();
-        for root in std::iter::once(folder).chain(real) {
+        let plain = crate::sandbox::canonical(&folder).ok();
+        for root in std::iter::once(folder).chain(real).chain(plain) {
             if seen.insert(root.clone()) {
                 roots.push(root);
             }
@@ -540,7 +569,7 @@ fn registered_projects(data_root: &Path) -> Option<Vec<PathBuf>> {
     if skipped > 0 {
         eprintln!("engine_places_setup_rows_skipped count={skipped}");
     }
-    assert!(roots.len() <= 2 * NAMED_FOLDERS_MAX);
+    assert!(roots.len() <= 3 * NAMED_FOLDERS_MAX);
     assert!(roots.iter().all(|root| root.is_absolute()));
     Some(roots)
 }
@@ -565,33 +594,38 @@ fn engine_folders(root: &Path) -> [PathBuf; 2] {
     ]
 }
 
-/// The engine data folder as given and with its links resolved. Input: the folder, or
-/// none. Output: the folders.
+/// The engine data folder as given, with its links resolved and in its one spelling
+/// ([`crate::sandbox::canonical`]), so a path in the short spelling meets a data folder given
+/// through the data volume. Input: the folder, or none. Output: the folders, each once.
 pub(crate) fn engine_roots(root: Option<&Path>) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = root.map(Path::to_path_buf).into_iter().collect();
-    if let Some(real) = root.and_then(|root| root.canonicalize().ok())
-        && !roots.contains(&real)
-    {
-        roots.push(real);
+    let resolved = root.into_iter().flat_map(|root| {
+        [
+            root.canonicalize().ok(),
+            crate::sandbox::canonical(root).ok(),
+        ]
+    });
+    for real in resolved.flatten() {
+        if !roots.contains(&real) {
+            roots.push(real);
+        }
     }
-    assert!(roots.len() <= 2);
+    assert!(roots.len() <= 3);
     roots
 }
 
 /// Whether a path is inside a CrazyAgent project: it or a folder above it, other than HOME
-/// and `/`, holds a `.crazyagent` entry, which the sandbox never lets an agent remove. A
-/// path deeper than [`ANCESTORS_MAX`] counts as inside. Inputs: HOME and the path.
-/// Output: the answer.
-fn in_project(home: Option<&Path>, path: &Path) -> bool {
+/// under any of its names ([`home_names`]) and `/`, holds a `.crazyagent` entry, which the
+/// sandbox never lets an agent remove. A path deeper than [`ANCESTORS_MAX`] counts as
+/// inside. Inputs: HOME's names and the path. Output: the answer.
+fn in_project(homes: &[PathBuf], path: &Path) -> bool {
+    assert!(homes.len() <= 4);
     if path.components().count() > ANCESTORS_MAX {
         return true;
     }
-    let real_home = home.and_then(|home| home.canonicalize().ok());
     path.ancestors()
         .filter(|folder| {
-            folder.parent().is_some()
-                && Some(*folder) != home
-                && Some(*folder) != real_home.as_deref()
+            folder.parent().is_some() && !homes.iter().any(|home| home.as_path() == *folder)
         })
         .any(|folder| {
             std::fs::symlink_metadata(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY))
@@ -605,23 +639,34 @@ fn in_project(home: Option<&Path>, path: &Path) -> bool {
 /// an engine root, a mounted app) does not. Inputs: the file as written, its real path and
 /// the temp folders. Output: the answer.
 pub(crate) fn leads_into_temp(written: &Path, real: &Path, temps: &[PathBuf]) -> bool {
-    let inside = |path: &Path| temps.iter().any(|temp| path.starts_with(temp));
-    !inside(written) && inside(real)
+    !under_temp(written, temps) && under_temp(real, temps)
 }
 
-/// The temp folders: the shared ones and this user's own, as given and with its links
-/// resolved, so a path matches however it is written; an owner temp folder of `/` is
-/// dropped. Output: the absolute folders.
+/// Whether a path lies under one of the temp folders given, as written or in its one spelling,
+/// so a macOS path named through the data volume still matches its short-named temp folder.
+/// Inputs: the path and the temp folders. Output: the answer.
+fn under_temp(path: &Path, temps: &[PathBuf]) -> bool {
+    let short = crate::projects_home::one_spelling(path.to_path_buf());
+    temps
+        .iter()
+        .any(|temp| path.starts_with(temp) || short.starts_with(temp))
+}
+
+/// The temp folders: the shared ones and this user's own, as given, with its links resolved
+/// and in the plain form [`crate::sandbox::canonical`] gives (a Windows drive path without
+/// `\\?\`), so a path matches however it is written; an owner temp folder of `/` is
+/// dropped. Output: the absolute folders, each once.
 pub(crate) fn temp_roots() -> Vec<PathBuf> {
     let owner = std::env::temp_dir();
     let real = owner.canonicalize().ok();
+    let plain = crate::sandbox::canonical(&owner).ok();
     let mut roots: Vec<PathBuf> = TEMP_FOLDERS.iter().map(PathBuf::from).collect();
-    roots.extend(
-        std::iter::once(owner)
-            .chain(real)
-            .filter(|root| root.is_absolute() && root.parent().is_some()),
-    );
-    assert!(roots.len() <= TEMP_FOLDERS.len() + 2);
+    for root in std::iter::once(owner).chain(real).chain(plain) {
+        if root.is_absolute() && root.parent().is_some() && !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    assert!(roots.len() <= TEMP_FOLDERS.len() + 3);
     roots
 }
 
@@ -633,8 +678,8 @@ fn in_temp(folder: &Path) -> bool {
 }
 
 /// Whether a folder is in one of the temp folders given, as written and with its links
-/// resolved; none given refuses nothing. Inputs: the folder and the temp folders. Output:
-/// the answer.
+/// resolved, in either macOS spelling; none given refuses nothing. Inputs: the folder and the
+/// temp folders. Output: the answer.
 pub(crate) fn in_temp_of(folder: &Path, temps: &[PathBuf]) -> bool {
     if temps.is_empty() {
         return false;
@@ -642,7 +687,7 @@ pub(crate) fn in_temp_of(folder: &Path, temps: &[PathBuf]) -> bool {
     let real = folder.canonicalize().ok();
     std::iter::once(folder)
         .chain(real.as_deref())
-        .any(|folder| temps.iter().any(|temp| folder.starts_with(temp)))
+        .any(|folder| under_temp(folder, temps))
 }
 
 /// How a resolved program runs: as the program itself, or as a script its interpreter reads,
@@ -672,7 +717,8 @@ impl Resolved {
     /// runs itself for a program or a script whose first line names a program by path;
     /// otherwise the interpreter's own words, the first line's arguments, then the script's
     /// real file, for a script that asks `env` by name, names a shim, or names an interpreter
-    /// that is itself a script, which macOS does not run. Output: the absolute words.
+    /// that is itself a script, which macOS does not run, and every script on Windows, which
+    /// runs no first line. Output: the absolute words.
     pub fn argv(&self) -> Vec<OsString> {
         let words: Vec<OsString> = match &self.kind {
             Kind::Native => vec![self.program.clone().into_os_string()],
@@ -680,7 +726,7 @@ impl Resolved {
                 interpreter,
                 by_name: false,
                 ..
-            } if interpreter.kind == Kind::Native => {
+            } if cfg!(unix) && interpreter.kind == Kind::Native => {
                 vec![self.program.clone().into_os_string()]
             }
             Kind::Script {
@@ -744,8 +790,9 @@ impl Reason {
 /// named so the owner knows what to fix, a file agents can write, a version-manager shim
 /// with no real install found behind it, or a file in a temp folder the engine's places
 /// refuse or reached through a link into one, which agents with the owner's temp folder
-/// grant or other users write, or a script whose first line the resolver cannot read the
-/// way the system and `/usr/bin/env` run it.
+/// grant or other users write, a script whose first line the resolver cannot read the
+/// way the system and `/usr/bin/env` run it, or a Windows batch file that is neither an npm
+/// cmd-shim nor npm's own `npx.cmd`, which std would start through cmd.exe.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     OthersCanChange(PathBuf),
@@ -753,6 +800,7 @@ pub enum Refusal {
     Shim,
     InTemp,
     FirstLine,
+    Batch,
 }
 
 /// A file the resolver found and passed over, and why.
@@ -762,14 +810,16 @@ pub struct Refused {
     pub why: Refusal,
 }
 
-/// A tool that cannot run: which one, why, the interpreter it needs when that is what is
-/// missing, the folders looked in and the first file passed over when no usable one was
-/// found, boxed so the error stays small, kept apart from the owner line so it is fixed.
+/// A tool that cannot run: which one, why, what it needs (the missing interpreter, or the
+/// version needed when the one found is too old), the version found when that is too old,
+/// the folders looked in and the first file passed over when no usable one was found,
+/// boxed so the error stays small, kept apart from the owner line so it is fixed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Missing {
     pub tool: String,
     pub reason: Reason,
     pub needs: Option<String>,
+    pub found: Option<String>,
     pub looked: Vec<PathBuf>,
     pub refused: Option<Box<Refused>>,
 }
@@ -791,9 +841,12 @@ impl Missing {
                     install_hint(needs)
                 )
             }
-            (Reason::WrongVersion, tool, _) => {
-                format!("{tool} is too old for CrazyAgent. Update it, then try again.")
-            }
+            (Reason::WrongVersion, tool, needs) => match (self.found.as_deref(), needs) {
+                (Some(found), Some(needs)) => format!(
+                    "{tool} {found} is too old for CrazyAgent; it needs {needs} or newer. Update it, then try again."
+                ),
+                _ => format!("{tool} is too old for CrazyAgent. Update it, then try again."),
+            },
             (Reason::Refused, tool, _) => match &self.refused {
                 Some(refused) => refused_line(tool, refused),
                 None => format!(
@@ -889,6 +942,7 @@ fn resolve_at(name: &str, places: &Places, depth: usize) -> Result<Resolved, Mis
         tool: name.to_owned(),
         reason: Reason::NotFound,
         needs: None,
+        found: None,
         looked: places.folders.clone(),
         refused: None,
     };
@@ -958,6 +1012,7 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         tool: tool.clone(),
         reason: Reason::NotFound,
         needs: None,
+        found: None,
         looked: entry.parent().map(Path::to_path_buf).into_iter().collect(),
         refused: None,
     };
@@ -992,6 +1047,10 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         return Err(refused(program.as_path(), Refusal::InTemp));
     }
     assert!(program.is_absolute());
+    #[cfg(windows)]
+    if let Some(mapped) = batch::entry(entry, &program, places, depth, refused) {
+        return mapped;
+    }
     let shebang = match shebang(&program) {
         Ok(Some(shebang)) => shebang,
         Ok(None) => {
@@ -1007,6 +1066,7 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         tool: tool.clone(),
         reason: Reason::NeedsInterpreter,
         needs: Some(name.to_owned()),
+        found: None,
         looked: places.folders.clone(),
         refused: None,
     };
@@ -1083,9 +1143,10 @@ fn between_program_and_check(entry: &Path) -> Option<Step> {
 }
 
 /// Finds the interpreter a script's first line asks `env` for by name: for `node`, first the
-/// one in the script's own npm prefix ([`crate::harnesses::node_prefix`]), so a harness
-/// installed under one Node starts under that Node, then the places in order. Inputs: the
-/// name, the script's real file, the places and the depth. Output: the interpreter, or why.
+/// one in its own npm prefix ([`crate::harnesses::npm_prefix`]) when the resolver's checks
+/// pass it, else the places in order, as `<name>.exe` on Windows; with none there, why that
+/// own `node` was passed over, so the owner is told the file to fix, not to install a node.
+/// Inputs: the name, the script's real file, the places and the depth. Output: it, or why.
 fn named_interpreter(
     name: &str,
     script: &Path,
@@ -1093,14 +1154,106 @@ fn named_interpreter(
     depth: usize,
 ) -> Result<Resolved, Missing> {
     assert!(depth <= INTERPRETER_DEPTH_MAX);
-    let own = (name == "node")
-        .then(|| crate::harnesses::node_prefix(script))
-        .flatten()
-        .and_then(|prefix| entry_at(&prefix.join("bin").join(name), places, depth).ok());
-    match own {
-        Some(node) => Ok(node),
-        None => resolve_at(name, places, depth),
+    let mut passed = None;
+    if name == "node"
+        && let Some((node, judged)) = own_node(script, places, depth)
+    {
+        match judged {
+            Ok(found) => return Ok(found),
+            Err(missing) => {
+                log_own_node_passed_over(&node, &missing);
+                passed = Some(missing);
+            }
+        }
     }
+    #[cfg(windows)]
+    let name = &format!("{name}.exe");
+    match (resolve_at(name, places, depth), passed) {
+        (Err(none), Some(passed)) if none.reason == Reason::NotFound => Err(passed),
+        (found, _) => found,
+    }
+}
+
+/// The `node` file in a script's own npm prefix ([`crate::harnesses::npm_prefix`]) and how
+/// the resolver's checks judge it at the depth given: none when the script has no prefix or
+/// the prefix has no `node`, else that `node` or why it is passed over. Inputs: the script's
+/// real file, the places and the depth. Output: the file and its judgement, or none.
+fn own_node(
+    script: &Path,
+    places: &Places,
+    depth: usize,
+) -> Option<(PathBuf, Result<Resolved, Missing>)> {
+    assert!(depth <= INTERPRETER_DEPTH_MAX);
+    assert!(script.is_absolute());
+    let node = crate::harnesses::npm_prefix(script)?
+        .join("bin")
+        .join("node");
+    let judged = entry_at(&node, places, depth);
+    if judged
+        .as_ref()
+        .is_err_and(|missing| missing.reason == Reason::NotFound)
+    {
+        return None;
+    }
+    Some((node, judged))
+}
+
+/// Why a resolved script whose first line asks `env` for `node` would start under a `node`
+/// other than its own npm prefix's: why the resolver passes that one over, named for the
+/// tool, so a harness launch refuses where npm falls back (V243-OWN-PREFIX-NODE-REFUSE). The
+/// tool is resolved at depth 0, so its `node` is judged at depth 1, as [`named_interpreter`]
+/// judges it. Inputs: the tool and the places. Output: why, or none.
+pub(crate) fn own_node_refused(tool: &Resolved, places: &Places) -> Option<Missing> {
+    assert!(tool.program.is_absolute());
+    if !matches!(tool.kind, Kind::Script { by_name: true, .. }) {
+        return None;
+    }
+    let asks_node = shebang(&tool.program)
+        .ok()
+        .flatten()
+        .is_some_and(|first| first.by_name.as_deref() == Some("node"));
+    if !asks_node {
+        return None;
+    }
+    let passed = own_node(&tool.program, places, 1)?.1.err()?;
+    let name = tool
+        .entry
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("the program");
+    Some(Missing {
+        tool: name.to_owned(),
+        ..passed
+    })
+}
+
+/// The most own-prefix `node` files the engine log names, each once per process.
+const OWN_NODE_LOGGED_MAX: usize = 64;
+
+/// Writes one engine log line for an npm prefix's own `node` the resolver found and passed
+/// over, with its reason, once per file per process and for at most [`OWN_NODE_LOGGED_MAX`]
+/// files, so the fallback to the places' `node` is never silent (G1 P7); a harness launch
+/// refuses instead ([`own_node_refused`]). Inputs: the file and why it was passed over.
+/// Output: whether this call wrote the line.
+fn log_own_node_passed_over(node: &Path, passed: &Missing) -> bool {
+    static LOGGED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+    assert_ne!(passed.reason, Reason::NotFound);
+    assert!(node.is_absolute());
+    let mut logged = LOGGED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if logged.len() == OWN_NODE_LOGGED_MAX || logged.iter().any(|seen| seen == node) {
+        return false;
+    }
+    logged.push(node.to_path_buf());
+    assert!(logged.len() <= OWN_NODE_LOGGED_MAX);
+    eprintln!(
+        "tools_own_node_passed_over file={} reason={} refused={:?}",
+        node.display(),
+        passed.reason.code(),
+        passed.refused.as_deref().map(|refused| &refused.why)
+    );
+    true
 }
 
 /// Whether a name is one of a launcher that starts the program it is given looked up by name
@@ -1108,8 +1261,14 @@ fn named_interpreter(
 /// starts a copy the resolver never judged (rv-sec2 B11 r2 F2). [`entry_at`] asks it of the
 /// interpreter's real file name and of the name the line runs it as, its program word for
 /// `env` or the file name as written, since a multi-call binary such as coreutils or busybox
-/// picks its tool by that name (rv-code4 B18 F1). Input: the name. Output: the answer.
+/// picks its tool by that name (rv-code4 B18 F1). On Windows the name is read as Windows
+/// finds a program, ASCII case ignored and a trailing `.exe` dropped (#333 r1 sec F1).
+/// Input: the name. Output: the answer.
 fn launches_by_name(name: &str) -> bool {
+    #[cfg(windows)]
+    let lower = name.to_ascii_lowercase();
+    #[cfg(windows)]
+    let name = lower.strip_suffix(".exe").unwrap_or(&lower);
     NAME_LAUNCHERS.contains(&name)
 }
 
@@ -1182,18 +1341,15 @@ fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     }
     let (first, rest) = words.split_first().ok_or(Unreadable)?;
     let interpreter = PathBuf::from(first);
-    if !usable(&interpreter) {
-        return Err(Unreadable);
-    }
-    if interpreter.file_name() != Some(OsStr::new("env")) {
+    if interpreter != Path::new(ENV) {
+        if !usable(&interpreter) || interpreter.file_name() == Some(OsStr::new("env")) {
+            return Err(Unreadable);
+        }
         return Ok(Some(Shebang {
             interpreter,
             by_name: None,
             arguments: rest.iter().map(|word| (*word).to_owned()).collect(),
         }));
-    }
-    if interpreter != Path::new(ENV) {
-        return Err(Unreadable);
     }
     let split = rest.first() == Some(&"-S");
     let rest = if split { &rest[1..] } else { rest };
@@ -1345,6 +1501,9 @@ fn refused_line(tool: &str, refused: &Refused) -> String {
         ),
         Refusal::FirstLine => format!(
             "{tool} can't start: {file} is not used because its first line could run a program CrazyAgent can't check (a relative interpreter, env with a setting or a flag other than -S, a launcher such as nice or nohup that looks a program up by name, a # in the line, a line that is too long, or a file CrazyAgent can't read). Name the interpreter by its full path, or as /usr/bin/env and a program name, then try again."
+        ),
+        Refusal::Batch => format!(
+            "{tool} can't start: {file} is not used because it is a Windows batch file, which runs through cmd.exe. CrazyAgent reads only a .cmd that npm made for a Node.js program, or npm's own npx.cmd beside node.exe. Use the program's .exe, or install it again with npm, then try again."
         ),
     }
 }

@@ -1840,7 +1840,8 @@ pub(super) fn undo(
 }
 
 /// Records a finished undo: sets accepted with no commit of their own whose work the revert
-/// removed, as [`reverted_work`] says, are marked undone with it, the set keeps the commit
+/// removed, as [`reverted_work`] says, are marked undone with it (where it cannot tell, a set
+/// closed at the undone commit itself counts as reverted), the set keeps the commit
 /// and drops its intent, its merge rows show Undone and one Undone row names those sets. The
 /// reads every set shares run first, so a failed one stops the step for a retry. Inputs: the
 /// store, the undone set, the reverting commit and who undid it. Output: Ok once saved.
@@ -1860,14 +1861,17 @@ fn undone(db: &Connection, record: &mut Record, commit: &str, by: &str) -> Resul
         let Some(at) = other.landed.clone().filter(|at| above.contains(at)) else {
             continue;
         };
-        let reverted =
-            reverted_work(&owner, [&before, commit], &changed, &other).unwrap_or_else(|error| {
+        let reverted = match reverted_work(&owner, [&before, commit], &changed, &other) {
+            Ok(Some(reverted)) => reverted,
+            Ok(None) => at == landed,
+            Err(error) => {
                 eprintln!(
                     "landing_undo_closed_set_unread cause={}",
                     crate::protocol::plain_code(&error.0)
                 );
                 at == landed
-            });
+            }
+        };
         if !reverted {
             continue;
         }
@@ -1899,21 +1903,25 @@ fn commits_from(owner: &Repo, landed: &str, commit: &str) -> Result<BTreeSet<Str
 /// Tells whether a revert removed a set's work: the reverted commit changed one of the set's
 /// files, the branch held the set's work just before the revert and does not at the
 /// reverting commit. Inputs: the owner repository, the commits before and after the revert,
-/// the paths it changed and the set. Output: the answer, or a read failure of this set.
+/// the paths it changed and the set. Output: the answer, None on a git older than 2.40,
+/// which cannot merge again to tell, or a read failure of this set.
 fn reverted_work(
     owner: &Repo,
     [before, after]: [&str; 2],
     changed: &[String],
     set: &Record,
-) -> Result<bool, EngineError> {
+) -> Result<Option<bool>, EngineError> {
     let own = diff::changed_paths(owner, &set.base, &set.head)?;
     if !own.iter().any(|path| changed.contains(path)) {
-        return Ok(false);
+        return Ok(Some(false));
     }
-    Ok(
+    if owner.old_git() {
+        return Ok(None);
+    }
+    Ok(Some(
         super::merges::holds_set_work(owner, before, &set.base, &set.head)?
             && !super::merges::holds_set_work(owner, after, &set.base, &set.head)?,
-    )
+    ))
 }
 
 /// Moves an owner ref an Accept or an undo left in flight: by compare and swap when the
@@ -2054,7 +2062,8 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
 /// The paths a change set's work conflicts on with the tip it lands on (OS-8): git's own
 /// three-way merge of its head onto that tip from where the work is measured, with no
 /// merge driver, run in the owner repository only. None while the tip cannot be read or
-/// already lies in the head's history. A path it changes that carries an owner-configured
+/// already lies in the head's history, and none on a git older than 2.40, which cannot merge
+/// again, so the set waits for the owner. A path it changes that carries an owner-configured
 /// filter or merge driver, which that merge would run, is refused before it runs, as
 /// `update` refuses it. Inputs: the store and the change set. Output: the conflicting
 /// paths, empty for a clean merge, `changes_git_unsupported`, or the plain git code.
@@ -2063,6 +2072,9 @@ pub(super) fn conflicts_with_tip(
     record: &Record,
 ) -> Result<Vec<String>, EngineError> {
     let owner = Repo::open(&record.repository, &record.repository.join(".git"), None)?;
+    if owner.old_git() {
+        return Ok(Vec::new());
+    }
     let Some(tip) = landing_tip(
         db,
         &owner,
@@ -2504,9 +2516,9 @@ fn copy_gone(db: &Connection, record: &Record) -> Result<bool, EngineError> {
 /// holds its head or merging its work onto the tip changes nothing, else the remainder a
 /// clean merge adds. A set whose work starts at the tip, so that merge is a fast-forward,
 /// shows its whole change without a merge, the same range a stored change shows. An empty
-/// change, a conflicting merge or a configured filter or merge driver leaves the whole
-/// change shown, measured as [`measured_from`] says (DEC-107). Inputs: the store, the
-/// owner repository, the change set and the tip. Output: the judgement.
+/// change, a conflicting merge, a git older than 2.40 or a configured filter or merge driver
+/// leaves the whole change shown, measured as [`measured_from`] says (DEC-107). Inputs: the
+/// store, the owner repository, the change set and the tip. Output: the judgement.
 fn judge(db: &Connection, owner: &Repo, record: &Record, tip: &str) -> Result<Judged, EngineError> {
     let whole = |from: &str| -> Result<Shown, EngineError> {
         let stats = diff::stats(owner, from, &record.head)?;
@@ -2529,7 +2541,7 @@ fn judge(db: &Connection, owner: &Repo, record: &Record, tip: &str) -> Result<Ju
         return whole(&from).map(Judged::Open);
     }
     let paths = merge_paths(owner, &from, tip, &record.head)?;
-    if uses_configured_commands(owner, &paths, &[&from, tip, &record.head])? {
+    if owner.old_git() || uses_configured_commands(owner, &paths, &[&from, tip, &record.head])? {
         return whole(&from).map(Judged::Open);
     }
     let (tree, conflicts) = merge(owner, &from, tip, &record.head)?;

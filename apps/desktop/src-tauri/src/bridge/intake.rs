@@ -11,8 +11,8 @@ use crazyagent::github::{
 use crazyagent::github::{GitHubRepoRules, GitHubRule};
 use crazyagent::onboarding::OnboardingView;
 use crazyagent::project_setup::ProjectSetup;
-use crazyagent::projects_home::icloud::Progress;
 use crazyagent::projects_home::job::{JobKind, JobState, JobSubject, JobView};
+use crazyagent::projects_home::reinstall::Offer;
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec, RequestId};
 use crazyagent::setup::{Dependency, RefusedTool, SetupStatus};
@@ -28,7 +28,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 118] = [
+pub const INTAKE_CODES: [&str; 120] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
@@ -73,6 +73,7 @@ pub const INTAKE_CODES: [&str; 118] = [
     "home_add_cancelled",
     "home_add_in_progress",
     "job_busy",
+    "job_same_folder",
     "intake_failed",
     "home_record_invalid",
     "home_icloud_not_downloaded",
@@ -113,6 +114,7 @@ pub const INTAKE_CODES: [&str; 118] = [
     "move_project_folder_link",
     "move_project_in_progress",
     "move_project_master_session",
+    "move_project_two_spellings",
     "move_project_record_invalid",
     "move_project_unavailable",
     "move_project_interrupted",
@@ -278,14 +280,19 @@ const SETUP_CODES: [&str; 48] = [
 /// of its files are only in iCloud (0 when unmeasured), the
 /// GitHub owner/name of its `origin` remote on github.com, its linked git worktrees and their
 /// folders, whether a Move keeps its git links and which link it breaks, whether a Copy keeps
-/// its own git data, whether it has git at all, and whether it is on the projects folder's
-/// disk (None when that is unknown).
+/// its own git data, whether it has git at all, whether it is on the projects folder's
+/// disk (None when that is unknown), and the rebuildable folders an add leaves in iCloud, the
+/// first ones named and the rest counted.
 #[derive(Debug, Serialize)]
 pub struct FolderSize {
     pub bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size_problem: Option<&'static str>,
     pub placeholders: u64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skipped: Vec<crazyagent::projects_home::icloud::Skipped>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_more: Option<crazyagent::projects_home::icloud::SkippedMore>,
     pub github: Option<String>,
     pub worktrees: usize,
     pub worktree_paths: Vec<String>,
@@ -353,6 +360,12 @@ pub fn shown(mut view: JobView) -> JobView {
 
 fn intake_id(id: &str) -> Result<RequestId, BridgeError> {
     RequestId::new(id).map_err(|_| failure("intake_failed"))
+}
+
+/// Reads a project id the window sent for a reinstall offer. Input: the text. Output: the
+/// id, else `invalid_project`.
+fn reinstall_project(id: &str) -> Result<ProjectId, BridgeError> {
+    ProjectId::new(id).map_err(|_| failure("invalid_project"))
 }
 
 /// Names a GitHub failure from its allowlist only, never with the engine code behind it:
@@ -553,18 +566,20 @@ impl NativeBridge {
             _ => return Err(failure("owner_read_failed")),
         };
         let read = self.owner_read(OwnerRead::FolderSize { path }).await;
-        let (bytes, placeholders, size_problem) = match read {
+        let (bytes, placeholders, skipped, skipped_more, size_problem) = match read {
             Ok(OwnerData::FolderSize {
                 bytes,
                 placeholders,
-            }) => (Some(bytes), placeholders, None),
+                skipped,
+                skipped_more,
+            }) => (Some(bytes), placeholders, skipped, skipped_more, None),
             Ok(_) => return Err(failure("owner_read_failed")),
             Err(error) => match SIZE_PROBLEMS
                 .iter()
                 .copied()
                 .find(|code| *code == error.code)
             {
-                Some(code) => (None, 0, Some(code)),
+                Some(code) => (None, 0, Vec::new(), None, Some(code)),
                 None => return Err(error),
             },
         };
@@ -574,6 +589,8 @@ impl NativeBridge {
             bytes,
             size_problem,
             placeholders,
+            skipped,
+            skipped_more,
             github,
             worktrees,
             worktree_paths,
@@ -643,36 +660,6 @@ impl NativeBridge {
             return Err(failure("not_connected"));
         }
         self.controller()?.shared_client().map_err(intake_failure)
-    }
-
-    /// Downloads every file of a folder that is only in iCloud and waits until all are on
-    /// this Mac; the folder itself is not moved or changed. Runs without the bridge lock, so
-    /// progress and cancel answer while it waits. Input: the absolute folder. Output: how many
-    /// files it downloaded, or `home_icloud_not_downloaded` after a cancel, stall or time limit.
-    pub fn icloud_download(&mut self, path: String) -> Result<Unlocked<u64>, BridgeError> {
-        crazyagent::projects_home::path_text(&path, "icloud_path_invalid")
-            .map_err(intake_failure)?;
-        let client = self.icloud_client()?;
-        Ok(Box::pin(async move {
-            bounded(client.icloud_download(path).await.map_err(intake_failure)?)
-        }))
-    }
-
-    /// Reads how far the running iCloud download has come. Output: the counts, or None when
-    /// no download runs.
-    pub fn icloud_progress(&mut self) -> Result<Unlocked<Option<Progress>>, BridgeError> {
-        let client = self.icloud_client()?;
-        Ok(Box::pin(async move {
-            bounded(client.icloud_progress().await.map_err(intake_failure)?)
-        }))
-    }
-
-    /// Stops the running iCloud download at its next check. Output: whether one was running.
-    pub fn icloud_cancel(&mut self) -> Result<Unlocked<bool>, BridgeError> {
-        let client = self.icloud_client()?;
-        Ok(Box::pin(async move {
-            bounded(client.icloud_cancel().await.map_err(intake_failure)?)
-        }))
     }
 
     /// Starts the engine's intake job for a folder: it downloads what is only in iCloud, then
@@ -774,12 +761,13 @@ impl NativeBridge {
         }))
     }
 
-    /// Reads the engine's intake job, running or last ended. Output: its view, or None.
-    pub fn intake_status(&mut self) -> Result<Unlocked<Option<JobView>>, BridgeError> {
+    /// Reads every job the engine holds, running, waiting its turn or ended since the last
+    /// start (DEC-197). Output: their views in start order.
+    pub fn intake_status(&mut self) -> Result<Unlocked<Vec<JobView>>, BridgeError> {
         let client = self.icloud_client()?;
         Ok(Box::pin(async move {
-            let view = client.job_status().await.map_err(intake_failure)?;
-            bounded(view.map(shown))
+            let jobs = client.job_status().await.map_err(intake_failure)?;
+            bounded(jobs.into_iter().map(shown).collect::<Vec<_>>())
         }))
     }
 
@@ -802,6 +790,40 @@ impl NativeBridge {
             bounded(
                 client
                     .job_dismiss(request_id)
+                    .await
+                    .map_err(intake_failure)?,
+            )
+        }))
+    }
+
+    /// Reads the reinstall offer the engine keeps for a project's folder: the folders a job
+    /// left in iCloud as rebuildable and the message the master gets on Ask. Input: the
+    /// project id. Output: the offer, or None when there is none.
+    pub fn reinstall_offer(
+        &mut self,
+        project_id: String,
+    ) -> Result<Unlocked<Option<Offer>>, BridgeError> {
+        let project = reinstall_project(&project_id)?;
+        let client = self.icloud_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .reinstall_offer(project)
+                    .await
+                    .map_err(intake_failure)?,
+            )
+        }))
+    }
+
+    /// Dismisses a project's reinstall offer, so neither client shows it again. Input: the
+    /// project id. Output: whether an offer was dismissed.
+    pub fn reinstall_dismiss(&mut self, project_id: String) -> Result<Unlocked<bool>, BridgeError> {
+        let project = reinstall_project(&project_id)?;
+        let client = self.icloud_client()?;
+        Ok(Box::pin(async move {
+            bounded(
+                client
+                    .reinstall_dismiss(project)
                     .await
                     .map_err(intake_failure)?,
             )
@@ -1406,6 +1428,46 @@ mod tests {
         );
     }
 
+    /// V243-MOVE-SIZE-PROBLEM-DESKTOP: a folder read the engine could not finish reaches the
+    /// window as an ok read with no bytes, its size problem, no placeholders and no skipped
+    /// list, the shape the move question's rows in move-home.test.mjs are written against.
+    #[test]
+    fn a_size_problem_reaches_the_window_as_a_read_with_no_bytes_and_no_left_folders() {
+        for code in SIZE_PROBLEMS {
+            let read = FolderSize {
+                bytes: None,
+                size_problem: Some(code),
+                placeholders: 0,
+                skipped: Vec::new(),
+                skipped_more: None,
+                github: None,
+                worktrees: 0,
+                worktree_paths: Vec::new(),
+                movable: true,
+                git_link: crazyagent::projects_home::GitLink::None,
+                copyable: true,
+                git: true,
+                same_volume: Some(true),
+            };
+            assert_eq!(
+                serde_json::to_value(&read).unwrap(),
+                serde_json::json!({
+                    "bytes": null,
+                    "size_problem": code,
+                    "placeholders": 0,
+                    "github": null,
+                    "worktrees": 0,
+                    "worktree_paths": [],
+                    "movable": true,
+                    "git_link": "none",
+                    "copyable": true,
+                    "git": true,
+                    "same_volume": true
+                })
+            );
+        }
+    }
+
     #[test]
     fn engine_codes_map_to_known_plain_codes_only() {
         assert_eq!(
@@ -1496,6 +1558,8 @@ mod tests {
     #[test]
     fn an_intake_job_reaches_the_window_with_listed_codes_only() {
         let view = |state| JobView {
+            left: Vec::new(),
+            left_more: None,
             id: RequestId::new("add-1").unwrap(),
             kind: crazyagent::projects_home::job::JobKind::Add,
             project_id: None,
@@ -1561,6 +1625,8 @@ mod tests {
             );
         }
         let view = JobView {
+            left: Vec::new(),
+            left_more: None,
             id: RequestId::new("delete-1").unwrap(),
             kind: crazyagent::projects_home::job::JobKind::Delete,
             project_id: Some(crazyagent::protocol::ProjectId::new("notes").unwrap()),
@@ -1615,6 +1681,8 @@ mod tests {
             );
         }
         let view = |state| JobView {
+            left: Vec::new(),
+            left_more: None,
             id: RequestId::new("setup-1").unwrap(),
             kind: crazyagent::projects_home::job::JobKind::Setup,
             project_id: Some(crazyagent::protocol::ProjectId::new("notes").unwrap()),

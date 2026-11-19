@@ -6,9 +6,9 @@ import type { EngineState } from "./ui/shell";
 import type { Route } from "./ui/router";
 import { watchUnconfirmed, leavesProfileUnconfirmed } from "./engine-client";
 import type { ActionReceipt, FoundProject, IntakeJob, IntentReceipt, PendingIntent, ProjectPage } from "./engine-client";
-import { loadFoundProjects, loadIntakeJob } from "./api-intake";
+import { loadFoundProjects, loadIntakeJobs } from "./api-intake";
 import { notifyIntake } from "./notify";
-import { foundPollMs, intakePollMs, jobEndLine } from "./screens/intake/intake";
+import { foundPollMs, intakePollMs, jobEnds, jobLine } from "./screens/intake/intake";
 import { carryFollowUps } from "./screens/new-project/carry";
 import { INPUT_DEFAULT, inputChoice } from "./screens/team/terminal-io";
 import type { InputChoice } from "./screens/team/terminal-io";
@@ -96,13 +96,51 @@ export function readTerminalInput(): InputChoice {
   }
 }
 
-/** Remembers where the owner types to every agent's terminal. Input: the choice. Output: none. */
+/** The listeners of one choice kept in this app: a save in this window tells them at once,
+ * and the storage event tells them of a save in another window. Input: the stored key.
+ * Output: `tell`, called after a save, and `listen`, which returns the call that stops it. */
+function choiceListeners(key: string): { tell: () => void; listen: (listener: () => void) => () => void } {
+  const heard = new Set<() => void>();
+  let watched = false;
+  const tell = () => {
+    for (const listener of [...heard]) listener();
+  };
+  return {
+    tell,
+    listen: (listener) => {
+      if (!watched) {
+        watched = true;
+        window.addEventListener("storage", (event) => {
+          if (event.key === key) tell();
+        });
+      }
+      heard.add(listener);
+      return () => {
+        heard.delete(listener);
+      };
+    },
+  };
+}
+
+const inputHeard = choiceListeners(TERMINAL_INPUT_KEY);
+
+/** Remembers where the owner types to every agent's terminal and tells this window's
+ * listeners at once; other windows hear it through the storage event. Input: the choice.
+ * Output: none. */
 export function saveTerminalInput(choice: InputChoice): void {
   try {
     window.localStorage.setItem(TERMINAL_INPUT_KEY, choice);
   } catch {
     return;
   }
+  inputHeard.tell();
+}
+
+/** Calls `listener` after each Terminal input choice, made in this window or in another
+ * window of the app, so every copy of the setting shows the stored choice (#406 F1). Input:
+ * the listener. Output: the call that stops it. */
+export function onTerminalInput(listener: () => void): () => void {
+  return inputHeard.listen(listener);
 }
 
 /** Reads how every terminal draws, as kept in this app (not in the engine). Output: the
@@ -115,8 +153,7 @@ export function readTerminalRenderer(): RendererChoice {
   }
 }
 
-const rendererHeard = new Set<() => void>();
-let rendererWatched = false;
+const rendererHeard = choiceListeners(TERMINAL_RENDERER_KEY);
 
 /** Remembers how every terminal draws and tells this window's listeners at once; other
  * windows hear it through the storage event. Input: the choice. Output: none. */
@@ -126,23 +163,13 @@ export function saveTerminalRenderer(choice: RendererChoice): void {
   } catch {
     return;
   }
-  for (const listener of [...rendererHeard]) listener();
+  rendererHeard.tell();
 }
 
 /** Calls `listener` after each Terminal renderer choice, made in this window or in another
  * window of the app. Input: the listener. Output: the call that stops it. */
 export function onTerminalRenderer(listener: () => void): () => void {
-  if (!rendererWatched) {
-    rendererWatched = true;
-    window.addEventListener("storage", (event) => {
-      if (event.key !== TERMINAL_RENDERER_KEY) return;
-      for (const heard of [...rendererHeard]) heard();
-    });
-  }
-  rendererHeard.add(listener);
-  return () => {
-    rendererHeard.delete(listener);
-  };
+  return rendererHeard.listen(listener);
 }
 
 /** Reads the owner's appearance choice kept in this app (not in the engine profile).
@@ -231,7 +258,8 @@ export interface Session {
   toast: string;
   toastOpen: Route | null;
   revision: number;
-  intake: IntakeJob | null;
+  /** Every job the engine holds, in start order (DEC-197). */
+  intake: IntakeJob[];
   found: Loaded<FoundProject[]>;
   retry: () => void;
   refreshIntake: (started?: IntakeJob) => void;
@@ -272,8 +300,8 @@ export function useSession(home: boolean): Session {
   const [toastOpen, setToastOpen] = useState<Route | null>(null);
   const [revision, setRevision] = useState(0);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
-  const [intake, setIntake] = useState<IntakeJob | null>(null);
-  const intakeSeen = useRef<IntakeJob | null>(null);
+  const [intake, setIntake] = useState<IntakeJob[]>([]);
+  const intakeSeen = useRef<IntakeJob[]>([]);
   const followed = useRef<string | null>(null);
   const [intakeTick, setIntakeTick] = useState(0);
   const [found, setFound] = useState<Loaded<FoundProject[]>>({ kind: "loading" });
@@ -405,26 +433,26 @@ export function useSession(home: boolean): Session {
     let live = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const read = async () => {
-      const result = await loadIntakeJob();
+      const result = await loadIntakeJobs();
       if (!live) return;
       if (result.kind === "ok") {
-        const line = jobEndLine(intakeSeen.current, result.value);
+        const ended = jobEnds(intakeSeen.current, result.value);
         intakeSeen.current = result.value;
-        const job = result.value;
-        setIntake((shown) => keptRead(shown, job));
-        if (line && result.value) {
-          const carried = result.value.kind === "setup" && result.value.state.state === "done" && result.value.project_id !== null
-            ? carryFollowUps(result.value.id, result.value.project_id)
+        const jobs = result.value;
+        setIntake((shown) => keptRead(shown, jobs));
+        for (const job of ended) {
+          const carried = job.kind === "setup" && job.state.state === "done" && job.project_id !== null
+            ? carryFollowUps(job.id, job.project_id)
             : null;
-          if (result.value.id !== followed.current) {
+          if (job.id !== followed.current) {
             if (carried) void carried.outcome.then((message) => { showToast(message, { name: "home" }); void refreshProjects(); });
-            else showToast(line, { name: "home" });
+            else showToast(jobLine(job), { name: "home" });
           }
-          setFoundTick((value) => value + 1);
-          void notifyIntake(result.value.id);
-          if (result.value.kind === "move_project" || result.value.kind === "delete" || result.value.kind === "setup") void refreshProjects();
-          if (result.value.kind === "delete" && result.value.state.state === "done" && result.value.project_id) void api.closeProjectWalls(result.value.project_id);
+          void notifyIntake(job.id);
+          if (job.kind === "move_project" || job.kind === "delete" || job.kind === "setup") void refreshProjects();
+          if (job.kind === "delete" && job.state.state === "done" && job.project_id) void api.closeProjectWalls(job.project_id);
         }
+        if (ended.length > 0) setFoundTick((value) => value + 1);
       }
       if (result.kind !== "not_ready") timer = setTimeout(() => void read(), intakePollMs(intakeSeen.current));
     };
@@ -463,8 +491,9 @@ export function useSession(home: boolean): Session {
     retry: () => { void start(); },
     refreshIntake: (started?: IntakeJob) => {
       if (started) {
-        intakeSeen.current = started;
-        setIntake(started);
+        const jobs = [...intakeSeen.current.filter((job) => job.id !== started.id), started];
+        intakeSeen.current = jobs;
+        setIntake(jobs);
       }
       setIntakeTick((value) => value + 1);
     },

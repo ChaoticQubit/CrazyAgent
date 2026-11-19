@@ -11,7 +11,7 @@ const api = await import("../src/api-projects.ts");
 const job = (status, extra = {}) => ({
   id: 1, project_id: "p", kind: "market_research", kind_label: "Market research", status, status_label: "", report_path: "context/research/market_research.md",
   harness: "codex", tools: true, attempts: 0, claimer: null, error: null, cancel_requested: false, output_bytes: 0,
-  created_ms: 1_000, started_ms: null, heartbeat_ms: null, finished_ms: null, ...extra,
+  created_ms: 1_000, started_ms: null, heartbeat_ms: null, finished_ms: null, retryable: status === "failed" || status === "cancelled", ...extra,
 });
 
 test("elapsed time reads in seconds, minutes and hours", () => {
@@ -110,6 +110,14 @@ test("master status words follow the design's fixed set", () => {
   assert.equal(research.turnLine({ ...turn("blocked", "repository_config_refused"), detail: refused }), `The master couldn't start: ${refused} (repository_config_refused)`);
   assert.equal(research.turnLine(turn("failed", "repository_config_refused")), "The master couldn't start: a Git setting in this project's repository runs commands or redirects Git. Remove it, then send again. (repository_config_refused)");
   assert.equal(research.turnLine(turn("queued")), "Waiting to start");
+});
+
+test("a master on a Git older than 2.39 says it couldn't start and which Git to update (V243-WORKTREE-GIT-FLOOR)", () => {
+  const turn = { id: "t", ordinal: 1, phase: "failed", reason: "git_too_old", reply: null, cause: "worktree_git_old" };
+  assert.equal(research.turnLine(turn, false),
+    "The master couldn't start: agents need Git 2.39 or newer, and the Git on this computer is older. Update Git, then send again. (worktree_git_old)");
+  assert.equal(research.turnLine(turn, true),
+    "The master couldn't start: agents need Git 2.39 or newer, and the Git of Xcode or its Command Line Tools on this Mac is older; CrazyAgent doesn't use Homebrew's Git. Update them in Software Update, or in Terminal with softwareupdate --install --all or xcode-select --install, then send again. (worktree_git_old)");
 });
 
 test("a stopped master turn shows a plain sentence and the cause the engine stored", () => {

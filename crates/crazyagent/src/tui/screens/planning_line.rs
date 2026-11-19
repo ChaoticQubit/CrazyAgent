@@ -8,7 +8,8 @@ use crossterm::event::KeyCode;
 
 /// Where a project's roadmap planning stands: not planned, waiting for research, planning,
 /// done, or failed or stopped, with the planning job it reads from and, for one parked on a
-/// rate limit, when that limit ends and why.
+/// rate limit, when that limit ends and why; a failed or stopped one says whether the engine
+/// can run it again.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::tui) enum Planning {
     Idle,
@@ -26,6 +27,7 @@ pub(in crate::tui) enum Planning {
         job: i64,
         cancelled: bool,
         reason: Option<String>,
+        retryable: bool,
     },
 }
 
@@ -81,15 +83,18 @@ pub(in crate::tui) fn planning(jobs: &[ResearchJob]) -> Planning {
                 .map(str::trim)
                 .filter(|reason| !reason.is_empty())
                 .map(str::to_owned),
+            retryable: job.retryable,
         },
     }
 }
 
 /// Draws the planning state as one value: the status word, what the job reports, and the key
-/// of the one action; a job parked on a rate limit reads when it ends in local time and why
-/// (RV-DS241-133). Takes the state and the look. Returns the row, without a label.
+/// of the one action, with no Retry for a job the engine cannot run again; a job parked on a
+/// rate limit reads when it ends in local time and why (RV-DS241-133). Takes the state and the
+/// look. Returns the row, without a label.
 pub(in crate::tui) fn planning_value(state: &Planning, look: &Look) -> Row {
     let plan = format!("   p {PLAN_NOW}");
+    let retry = |retryable: bool| if retryable { "   r Retry" } else { "" };
     match state {
         Planning::Idle => Row::of("Not planned", look.fg).push(plan, look.muted),
         Planning::Waiting => Row::of("Waiting for research", look.muted),
@@ -118,9 +123,13 @@ pub(in crate::tui) fn planning_value(state: &Planning, look: &Look) -> Row {
         ),
         Planning::Done { .. } => Row::of("Done, in Context", look.success).push(plan, look.muted),
         Planning::Failed {
-            cancelled: true, ..
-        } => Row::of("Stopped", look.muted).push("   r Retry", look.muted),
-        Planning::Failed { reason, .. } => Row::of(
+            cancelled: true,
+            retryable,
+            ..
+        } => Row::of("Stopped", look.muted).push(retry(*retryable), look.muted),
+        Planning::Failed {
+            reason, retryable, ..
+        } => Row::of(
             format!(
                 "! Failed: {}",
                 reason
@@ -129,7 +138,7 @@ pub(in crate::tui) fn planning_value(state: &Planning, look: &Look) -> Row {
             ),
             look.warning,
         )
-        .push("   r Retry", look.muted),
+        .push(retry(*retryable), look.muted),
     }
 }
 

@@ -17,6 +17,7 @@ const APP_ICON = fileURLToPath(new URL("../../src-tauri/icons/icon.icns", import
 const CSP = JSON.parse(readFileSync(join(APP, "src-tauri", "tauri.conf.json"), "utf8")).app.security.csp;
 const LOAD_TRIES = 100;
 const LOAD_POLL_MS = 50;
+const PLUTIL_MAC_ONLY = { skip: process.platform !== "darwin" && "dockIcon reads Info.plist with /usr/bin/plutil, which only macOS ships" };
 
 /** A brand file as a route the loopback site serves. Inputs: the file and its media type.
  * Output: [type, bytes]. */
@@ -181,7 +182,7 @@ test("under the app's own CSP a favicon that draws another image or does not loa
   assert.match(png, /^the window could not draw its PNG favicon \/src\/assets\/brand\/favicon-32\.png: \w+/u);
 });
 
-test("dockIcon reads the icon the bundle's Info.plist names, as the Dock does", () => {
+test("dockIcon reads the icon the bundle's Info.plist names, as the Dock does", PLUTIL_MAC_ONLY, () => {
   const plain = bundle("icon", { "icon.icns": APP_ICON });
   const other = bundle("other.icns", { "other.icns": join(BRAND, "favicon-32.png") });
   try {
@@ -193,7 +194,7 @@ test("dockIcon reads the icon the bundle's Info.plist names, as the Dock does", 
   }
 });
 
-test("dockIcon fails plainly for a bare binary, a missing icon file or a name outside Resources", () => {
+test("dockIcon fails plainly for a bare binary, a missing icon file or a name outside Resources", PLUTIL_MAC_ONLY, () => {
   const missing = bundle("gone", {});
   const outside = bundle("../../Info", {});
   try {

@@ -91,10 +91,10 @@ pub(super) fn refuse_outside_merges(
 /// Tells whether a master's set holds nothing but fixes of real conflicts with the other
 /// open sets its head holds, so it may land with no Accept (MASTER-LAND-SPLIT). Every own
 /// commit must be such a fix, and every one of those sets must come in through one. Any
-/// doubt is false and the set waits for the owner. The caller holds the repository hold
-/// and has verified the objects. Inputs: the owner repository, the master's set, the sets
-/// its head holds, the Land on tip and the commit its squash measures from. Output: the
-/// answer.
+/// doubt is false and the set waits for the owner, as on a git older than 2.40, which
+/// cannot merge again ([`holds_changes_since`]). The caller holds the repository hold and
+/// has verified the objects. Inputs: the owner repository, the master's set, the sets its
+/// head holds, the Land on tip and the commit its squash measures from. Output: the answer.
 pub(super) fn only_conflict_fixes(
     owner: &Repo,
     master: &Record,
@@ -104,6 +104,9 @@ pub(super) fn only_conflict_fixes(
 ) -> Result<bool, EngineError> {
     assert!(!covered.is_empty());
     assert!(is_object_id(&master.head) && is_object_id(from) && is_object_id(tip));
+    if owner.old_git() {
+        return Ok(false);
+    }
     let Some(merges) = own_merges(owner, master, covered, tip, from)? else {
         return Ok(false);
     };
@@ -194,14 +197,18 @@ fn fixes_conflict(
 /// Tells whether a landed commit holds a change set's work: merging the set's head into it
 /// again would change nothing but conflicted paths, and at each of those the landed tree
 /// shows the set's work ([`holds_work_at`]). Doubt stays open: a reworded resolution waits
-/// for the owner. Inputs: the owner repository, the commit the land left the branch at and
-/// the set's base and head. Output: the answer.
+/// for the owner, and so does every set on a git older than 2.40, which cannot merge again,
+/// as in [`holds_changes_since`]. Inputs: the owner repository, the commit the land left the
+/// branch at and the set's base and head. Output: the answer.
 pub(super) fn holds_set_work(
     owner: &Repo,
     landed: &str,
     base: &str,
     head: &str,
 ) -> Result<bool, EngineError> {
+    if owner.old_git() {
+        return Ok(false);
+    }
     let Some(conflicts) = kept_clean_changes(owner, landed, landed, head)? else {
         return Ok(false);
     };
@@ -390,7 +397,8 @@ fn sets_marker_size(
 /// the set's base and head. A path the merge has and the commit lacks still counts as held
 /// when the commit holds that file whole under another name than the head does, so a lead
 /// that moved a worker's file holds it; a file moved and changed does not, and that set
-/// waits for the owner. Output: the answer.
+/// waits for the owner. A git older than 2.40 cannot merge again, so the answer is no and
+/// the set waits for the owner as well (#274). Output: the answer.
 pub(super) fn holds_changes_since(
     owner: &Repo,
     commit: &str,
@@ -399,6 +407,9 @@ pub(super) fn holds_changes_since(
 ) -> Result<bool, EngineError> {
     assert!(is_object_id(base));
     assert!(is_object_id(head));
+    if owner.old_git() {
+        return Ok(false);
+    }
     let Some(Remerged {
         conflicts,
         differences,

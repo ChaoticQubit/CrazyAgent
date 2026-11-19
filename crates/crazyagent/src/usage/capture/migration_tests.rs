@@ -146,7 +146,7 @@ fn a_seeded_message_adds_only_its_growth_on_its_next_line() {
     };
     let first = line(10);
     std::fs::write(&file, &first).unwrap();
-    let (device, inode) = file_identity(&std::fs::metadata(&file).unwrap());
+    let (device, inode) = file_identity(&file, &std::fs::metadata(&file).unwrap()).unwrap();
     let progress = serde_json::json!({
         "identity": [device, inode], "offset": first.len(), "skipping": false, "message": "msg_a",
         "counted": {"input": 100, "output": 10, "cache_read": 0, "cache_write": 0},
@@ -293,4 +293,88 @@ fn insert_new(db: &Connection) {
         [],
     )
     .unwrap();
+}
+
+/// W10b: progress an older Windows build stored names no file, (0, 0). While the record's
+/// first bytes still match, it keeps its place and takes the live identity, so the first
+/// scan after the upgrade reads only the lines appended since and counts none twice.
+#[test]
+fn progress_stored_without_a_file_identity_keeps_its_place_while_the_head_matches() {
+    let home = tempfile::tempdir().unwrap();
+    let file = home.path().join("s7.jsonl");
+    let line = |id: &str, input: u64| {
+        format!(
+            "{}\n",
+            serde_json::json!({"type": "assistant", "message": {"id": id,
+                "usage": {"input_tokens": input, "output_tokens": 1}}})
+        )
+    };
+    std::fs::write(&file, line("msg_a", 6)).unwrap();
+    let mut progress = Progress::default();
+    read_record(&file, Format::Claude, &mut progress, 1_795_000_000_000);
+    let (live, read_to) = (progress.identity, progress.offset);
+    assert_ne!(read_to, 0);
+    progress.identity = (0, 0);
+    let mut more = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&file)
+        .unwrap();
+    std::io::Write::write_all(&mut more, line("msg_b", 3).as_bytes()).unwrap();
+    drop(more);
+    let usages = read_record(&file, Format::Claude, &mut progress, 1_795_000_000_001).0;
+    let input: u64 = usages.iter().map(|usage| usage.tokens.input).sum();
+    assert_eq!(input, 3);
+    assert_eq!(progress.identity, live);
+    assert_eq!(progress.offset, std::fs::metadata(&file).unwrap().len());
+}
+
+/// W10b: a record the walk leaves out whose progress an older Windows build stored as
+/// (0, 0) and read to its end holds nothing uncounted, so its home does not read as partial
+/// after the upgrade. Windows only: unix never stored that identity for a record.
+#[cfg(windows)]
+#[test]
+fn a_left_out_record_read_to_its_end_without_a_file_identity_is_not_uncounted() {
+    let (_root, db) = store_new();
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("projects").join("x");
+    std::fs::create_dir_all(&folder).unwrap();
+    let line = |id: &str| {
+        format!(
+            "{}\n",
+            serde_json::json!({"type": "assistant", "message": {"id": id,
+                "usage": {"input_tokens": 1, "output_tokens": 1}}})
+        )
+    };
+    let oldest = folder.join("s000.jsonl");
+    std::fs::write(&oldest, line("m0")).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&oldest)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+        .unwrap();
+    for index in 1..=FILES_PER_SCAN_MAX {
+        std::fs::write(
+            folder.join(format!("s{index:03}.jsonl")),
+            line(&format!("m{index}")),
+        )
+        .unwrap();
+    }
+    let mut progress = Progress::default();
+    read_record(&oldest, Format::Claude, &mut progress, 1_795_000_000_000);
+    assert_eq!(progress.offset, std::fs::metadata(&oldest).unwrap().len());
+    progress.identity = (0, 0);
+    db.execute(
+        "INSERT INTO usage_files (path,progress) VALUES (?1,?2)",
+        params![
+            oldest.to_string_lossy(),
+            serde_json::to_string(&progress).unwrap()
+        ],
+    )
+    .unwrap();
+    let (_, left, _) = records(home.path(), Format::Claude);
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].path, oldest);
+    let mut budget = READ_BYTES_MAX as u64;
+    assert!(!uncounted(&db, &left[0], &mut budget).unwrap());
 }

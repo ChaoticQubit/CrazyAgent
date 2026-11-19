@@ -124,6 +124,18 @@ mod tests {
                 Err("batch files are refused; start cmd.exe with /C instead")
             );
         }
+        for spelled in [
+            r"C:\bin\run.cmd.",
+            r"C:\bin\run.cmd ",
+            r"C:\bin\run.bat. .",
+            r"C:\bin\tool.exe:x.cmd",
+            r"C:\bin\tool.exe:stream",
+        ] {
+            assert!(
+                parse(args(&["--profile", profile, "--", spelled])).is_err(),
+                "{spelled}: Windows drops trailing dots and spaces and reads a colon as a stream"
+            );
+        }
         let mut many = args(&["--profile", profile, "--", program]);
         many.extend((0..=ARGS_MAX).map(|n| OsString::from(n.to_string())));
         assert_eq!(parse(many), Err("the agent has more than 1024 arguments"));

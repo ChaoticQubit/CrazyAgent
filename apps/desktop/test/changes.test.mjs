@@ -120,6 +120,11 @@ test("every refusal reads as a plain sentence, and a conflict names its files", 
   assert.equal(client.changesRefusal({ code: "changes_branch_moved" }), "Your branch moved while these changes were landing, so nothing changed. Review and accept again.");
   assert.equal(client.changesRefusal({ code: "changes_git_include" }), "Your project's Git config includes a file inside your project folder, where accepted changes can rewrite it. Move that file outside the project folder and include it by its full path, then try again.");
   assert.equal(client.changesRefusal({ code: "changes_git_unsupported" }), "The Git on this computer can't land changes. Update Git, then try again.");
+  assert.equal(client.changesRefusal({ code: "changes_git_unsupported" }, true), "The Git on this computer can't land changes. Update Git, then try again.", "the catch-all keeps its words on a Mac");
+  assert.equal(client.changesRefusal({ code: "changes_git_old" }, false), "Landing changes needs Git 2.40 or newer, and the Git on this computer is older. Update Git, then try again.");
+  const oldOnMac = client.changesRefusal({ code: "changes_git_old" }, true);
+  assert.match(oldOnMac, /^Landing changes needs Git 2\.40 or newer, and the Git of Xcode or its Command Line Tools on this Mac is older; .*softwareupdate --install --all or xcode-select --install, then try again\.$/u);
+  assert.doesNotMatch(oldOnMac, /brew (install|upgrade)/u);
   assert.equal(client.changesRefusal({ code: "changes_merge_unsafe" }), "These changes can't land as a merge commit: an agent commit isn't safe to keep in your history (too many commits, hidden characters, another author's name, or files Git treats specially). Switch Landing to Squash, then accept again.");
   assert.equal(client.changesRefusal({ code: "changes_restore_expired" }), "These changes can no longer be restored. Discarded changes are kept for 7 days.");
   assert.equal(client.changesRefusal({ code: "changes_agent_has_pending" }), "This agent has newer changes waiting. Accept or discard those first.");

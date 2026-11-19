@@ -99,11 +99,10 @@ pub struct Status {
     pub pid: Option<u32>,
 }
 
-/// Builds the PATH the service gives the engine for its harness lookup: the absolute
-/// entries of the installing shell's PATH, then `~/.local/bin` and the usual system
-/// folders, each once. Folders inside the running AppImage's mount folder `appdir` and
-/// folders [`changeable_by_others`] names are left out, since the service outlives the
-/// mount and must not look harnesses up where another user can plant one.
+/// Builds the PATH the service gives the engine for its harness lookup: the absolute entries
+/// of the installing shell's PATH, then `~/.local/bin` and the usual system folders, each
+/// once, leaving out folders in the AppImage mount `appdir`, ones [`changeable_by_others`]
+/// names and, on Windows, missing ones, where a drive added later could plant a harness.
 /// Inputs: the current PATH, home folder and mount folder. Output: the joined PATH.
 pub fn service_path(
     current: Option<&OsStr>,
@@ -127,6 +126,7 @@ pub fn service_path(
             && !appdir
                 .as_ref()
                 .is_some_and(|appdir| canonical(&folder).starts_with(appdir))
+            && (!cfg!(windows) || folder.is_dir())
             && changeable_by_others(&folder).is_none()
         {
             folders.push(folder);
@@ -1067,18 +1067,22 @@ pub(crate) fn first_changeable_part(parts: &[Part], me: u32, open_stores: bool) 
     None
 }
 
-/// Reports no changeable entry where Unix owners and modes do not exist; the Windows task
-/// runs from the folder the installer chose. Input unused. Output: none.
-#[cfg(not(unix))]
-pub fn changeable_by_others(_path: &Path) -> Option<PathBuf> {
-    None
+/// The first entry on a path that an account other than SYSTEM, the administrators,
+/// TrustedInstaller and this user can change, read as written and with its links resolved
+/// ([`crazyagent_win_sandbox::changeable_part`]); an unreadable entry counts. Input: the
+/// absolute path. Output: the entry, or none.
+#[cfg(windows)]
+pub fn changeable_by_others(path: &Path) -> Option<PathBuf> {
+    crazyagent_win_sandbox::changeable_part(path)
+        .or_else(|| crazyagent_win_sandbox::changeable_part(&canonical(path)))
 }
 
-/// Reports no changeable entry where Unix owners and modes do not exist. Input unused.
-/// Output: none.
-#[cfg(not(unix))]
-pub(crate) fn changeable_past_sticky(_path: &Path) -> Option<PathBuf> {
-    None
+/// [`changeable_by_others`] for the tools the resolver runs. Windows has no sticky folder,
+/// and a folder further up already passes when others may only add to it. Input: the
+/// absolute path. Output: the entry, or none.
+#[cfg(windows)]
+pub(crate) fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
+    changeable_by_others(path)
 }
 
 /// Whether a path lies on a disk image or another disk (`/Volumes/...`) or in a Gatekeeper
@@ -1448,7 +1452,7 @@ const ACCOUNTS_BYTES_MAX: u64 = 4 * 1024 * 1024;
 /// a failed lookup or read counts as not private, so its folders fall to the stricter rule.
 /// Output: the answer.
 #[cfg(all(unix, not(target_os = "macos")))]
-fn own_group_private() -> bool {
+pub(crate) fn own_group_private() -> bool {
     static PRIVATE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *PRIVATE.get_or_init(|| {
         let gid = nix::unistd::getegid();
@@ -2012,15 +2016,30 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
 }
 
 /// Adds the folder holding `crazyagent.exe` to the user's PATH on Windows through
-/// PowerShell, keeping every existing entry. Inputs: the executable and an unused bin
-/// folder. Output: the folder added.
+/// PowerShell, keeping every existing entry. A folder whose path holds ';' is refused with
+/// the user's PATH untouched, since PATH splits its entries there. Inputs: the executable
+/// and an unused bin folder. Output: the folder added, or the refusal.
 #[cfg(not(unix))]
 pub fn link_cli(executable: &Path, _bin: &Path) -> Result<PathBuf, ServiceError> {
+    link_cli_under(executable, USER_ENVIRONMENT_KEY)
+}
+
+/// [`link_cli`] on the PATH value stored under one registry key: the user's environment key
+/// in the product, a key of its own in each test row, so no row writes the PATH of the
+/// machine running it. Inputs: the executable and the key. Output: the folder, or the refusal.
+#[cfg(not(unix))]
+fn link_cli_under(executable: &Path, key: &str) -> Result<PathBuf, ServiceError> {
     let folder = executable
         .parent()
         .ok_or_else(|| failure("the executable has no folder"))?
         .to_path_buf();
-    run_process(&mut windows_path_command(&folder))?;
+    if folder.to_string_lossy().contains(';') {
+        return Err(failure(format!(
+            "{} holds a ';', where the Windows PATH splits its entries; the user PATH is unchanged",
+            folder.display()
+        )));
+    }
+    run_process(&mut windows_path_command_under(&folder, key))?;
     Ok(folder)
 }
 
@@ -2029,31 +2048,48 @@ pub fn link_cli(executable: &Path, _bin: &Path) -> Result<PathBuf, ServiceError>
 /// on the command line.
 pub const WINDOWS_PATH_FOLDER_VARIABLE: &str = "CRAZYAGENT_PATH_FOLDER";
 
-/// The PowerShell command that appends a folder to the user's PATH once. It reads the
-/// stored value as written, %VAR% references unexpanded, and stores it back with the
-/// registry kind it had (REG_EXPAND_SZ for a new value), so references keep following their
-/// variables. Deleting a CrazyAgent-only user variable through .NET then announces the
-/// change to running programs the way a PATH set through .NET would. Input: the folder,
-/// handed over in [`WINDOWS_PATH_FOLDER_VARIABLE`] so it is read as data, never as script.
-/// Output: the command; it fails when that variable arrives empty.
+/// The environment variable that hands the registry key holding the PATH value to the
+/// Windows PATH command, read as data like the folder.
+const WINDOWS_PATH_KEY_VARIABLE: &str = "CRAZYAGENT_PATH_KEY";
+
+/// The registry key of the user's stored environment, where the user's PATH value lives.
+const USER_ENVIRONMENT_KEY: &str = r"HKCU:\Environment";
+
+/// The PowerShell command that appends a folder to the user's PATH once
+/// ([`windows_path_command_under`] on [`USER_ENVIRONMENT_KEY`]). Input: the folder.
+/// Output: the command.
 pub fn windows_path_command(folder: &Path) -> std::process::Command {
+    windows_path_command_under(folder, USER_ENVIRONMENT_KEY)
+}
+
+/// Appends a folder once to the PATH value under a key, read as written (%VAR% unexpanded)
+/// and stored back with its registry kind (REG_EXPAND_SZ when new); deleting a CrazyAgent-only
+/// user variable through .NET then announces the change. Inputs: the folder and an HKCU key,
+/// both handed over in the environment so they are read as data, never as script. Output:
+/// the command; it fails when either arrives empty.
+fn windows_path_command_under(folder: &Path, key: &str) -> std::process::Command {
+    assert!(key.starts_with(r"HKCU:\"), "{key}");
+    assert!(key.len() > r"HKCU:\".len(), "{key}");
     let script = format!(
         "$ErrorActionPreference='Stop'; \
 $f=$env:{WINDOWS_PATH_FOLDER_VARIABLE}; if ([string]::IsNullOrEmpty($f)) {{ exit 2 }}; \
-$k=Get-Item -LiteralPath 'HKCU:\\Environment'; \
+$r=$env:{WINDOWS_PATH_KEY_VARIABLE}; if ([string]::IsNullOrEmpty($r)) {{ exit 2 }}; \
+$k=Get-Item -LiteralPath $r; \
 $p=''; $t=[Microsoft.Win32.RegistryValueKind]::ExpandString; \
 if ($k.GetValueNames() -contains 'Path') {{ \
 $p=[string]$k.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); \
 $t=$k.GetValueKind('Path') }}; \
 if (-not ((($p -split ';') | ForEach-Object {{ [Environment]::ExpandEnvironmentVariables($_) }}) -contains $f)) {{ \
 $v=(($p.TrimEnd(';'), $f) -join ';').TrimStart(';'); \
-Set-ItemProperty -LiteralPath 'HKCU:\\Environment' -Name 'Path' -Value $v -Type $t; \
+Set-ItemProperty -LiteralPath $r -Name 'Path' -Value $v -Type $t; \
 [Environment]::SetEnvironmentVariable('CRAZYAGENT_PATH_REFRESH', $null, 'User') }}"
     );
+    assert!(!script.contains("HKCU:"));
     let mut command = std::process::Command::new("powershell.exe");
     command
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .env(WINDOWS_PATH_FOLDER_VARIABLE, folder);
+        .env(WINDOWS_PATH_FOLDER_VARIABLE, folder)
+        .env(WINDOWS_PATH_KEY_VARIABLE, key);
     command
 }
 

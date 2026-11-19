@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { knownError, listAccounts, nextGeneration, oneSelection, plainError, removeAccount, signInRecord, type AccountView, type Result } from "../../api";
+import { harnessCatalog, knownError, listAccounts, nextGeneration, oneSelection, plainError, removeAccount, signInRecord, type AccountView, type HarnessEntry, type Result } from "../../api";
 import { cancelNativeAuth, logoutNativeAuth, readNativeAuth, startNativeAuth, submitClaudeAuthCode, withCode } from "../../engine-client";
 import {
   CHECK_SIGN_IN, nativeAuthAllowed, nativeAuthFailureCode, nativeAuthRunningAccount, nativeAuthText, nativeClaudeInputAllowed, reduceNativeAuth,
   signInMethodFor, signInWay, signInWayUnavailable, validateClaudeAuthCode,
   type NativeAuthCommand, type NativeAuthMethod, type NativeAuthState, type NativeAuthView, type SignInWay,
 } from "../../native-auth";
-import { harnessVersions, loadHarnessUpdateSettings, pollWhileRunning, readForConfirm, updateHarness, type HarnessVersions, type UpdateMode } from "../../api-harness-updates";
+import { harnessVersions, loadHarnessUpdateSettings, pollWhileRunning, readForConfirm, runningLine, updateHarness, type HarnessVersions, type UpdateMode } from "../../api-harness-updates";
 import { useAppSession } from "../../state";
-import { Button, Icon, Notice, SecretField } from "../../ui";
+import { Button, Icon, Notice, SecretField, thisComputer } from "../../ui";
 import { HarnessFile, lastLine, refusalLine, UpdateConfirm } from "./harnesses";
 
 type Challenge = NonNullable<NativeAuthView["challenge"]>;
@@ -55,7 +55,7 @@ const SIGN_IN_TEXT: Record<string, string> = {
   native_auth_claude_output_invalid: "Claude Code didn't finish because of a problem CrazyAgent couldn't handle. Try again, and update Claude Code if it keeps happening.",
   native_auth_claude_subscription_unsupported: "This account isn't signed in with a Claude subscription. Sign in with a Claude Pro or Max account, or use an API key instead.",
   native_auth_claude_profile_mismatch: "Claude Code's settings folder for this account didn't match the one CrazyAgent set up. Try again, and update Claude Code if it keeps happening.",
-  native_auth_claude_launch_failed: "Claude Code couldn't start. Check that Claude Code is installed and opens on this Mac, then try again.",
+  native_auth_claude_launch_failed: "Claude Code couldn't start. Check that Claude Code is installed and opens on {computer}, then try again.",
   native_auth_claude_keychain_unavailable: "CrazyAgent couldn't set up this account's own keychain for Claude Code. Try again. If it keeps failing, delete the account, then add it again.",
   native_auth_claude_destination_unsupported: "Claude Code gave a sign-in page address CrazyAgent doesn't recognize. Update CrazyAgent and Claude Code, then try again.",
   native_auth_claude_credential_expiring: "Claude Code couldn't renew this account's sign-in before it expires. Try again.",
@@ -63,7 +63,7 @@ const SIGN_IN_TEXT: Record<string, string> = {
   native_auth_codex_deadline: "Codex didn't answer in time. Try again.",
   native_auth_codex_protocol_invalid: "Codex gave an answer CrazyAgent couldn't use. Update Codex, then try again.",
   native_auth_codex_io_failed: "CrazyAgent lost contact with Codex. Try again.",
-  native_profile_custody_unsafe: "CrazyAgent couldn't safely use this account's sign-in folder on this Mac, so it stopped. Delete the account, then add it again.",
+  native_profile_custody_unsafe: "CrazyAgent couldn't safely use this account's sign-in folder on {computer}, so it stopped. Delete the account, then add it again.",
   native_profile_identity_changed: "This account's sign-in folder no longer matches what CrazyAgent recorded, so CrazyAgent stopped. Delete the account, then add it again.",
 };
 export const POLL_MS = 2000;
@@ -98,9 +98,10 @@ export function tooOldLine(harness: string, versions?: HarnessVersions | null): 
 
 /** Turns a sign-in failure code into one plain sentence and the action that fits it.
  * Inputs: the code, the provider, for a sign-in refused because another still runs that
- * account's name when known, and for a harness too old to sign in its versions row.
- * Output: the copy and its hint. */
-export function signInFailure(code: string, provider: SubscriptionProvider, running?: string, versions?: HarnessVersions | null): { text: string; hint: FailureHint } {
+ * account's name when known, for a harness too old to sign in its versions row, and the words
+ * for this computer, by default the window's. Output: the copy and its hint. */
+export function signInFailure(code: string, provider: SubscriptionProvider, running?: string, versions?: HarnessVersions | null,
+  computer: string = thisComputer()): { text: string; hint: FailureHint } {
   const [harness, name] = provider === "chatgpt" ? ["Codex", "ChatGPT"] : ["Claude Code", "Claude"];
   if (code === TOO_OLD) return { text: tooOldLine(harness, versions), hint: "too_old" };
   if (code === "native_auth_sign_in_running") {
@@ -108,12 +109,12 @@ export function signInFailure(code: string, provider: SubscriptionProvider, runn
       : plainError(code), hint: "retry" };
   }
   if (code === "native_auth_host_unavailable") {
-    return { text: `CrazyAgent didn't find a ${harness} it can run on this Mac, so ${name} sign-in isn't available. Install ${harness}, then choose Check again, or choose its file.`, hint: "missing" };
+    return { text: `CrazyAgent didn't find a ${harness} it can run on ${computer}, so ${name} sign-in isn't available. Install ${harness}, then choose Check again, or choose its file.`, hint: "missing" };
   }
   if (code === "native_auth_host_executable_unsafe") {
-    return { text: `${harness} on this Mac isn't safe to start, so CrazyAgent didn't start it. Reinstall ${harness}, then try again.`, hint: "retry" };
+    return { text: `${harness} on ${computer} isn't safe to start, so CrazyAgent didn't start it. Reinstall ${harness}, then try again.`, hint: "retry" };
   }
-  if (code === "native_auth_host_executable_changed") return { text: `${harness} changed on this Mac after CrazyAgent checked it, perhaps from an update. Try again.`, hint: "retry" };
+  if (code === "native_auth_host_executable_changed") return { text: `${harness} changed on ${computer} after CrazyAgent checked it, perhaps from an update. Try again.`, hint: "retry" };
   if (EXPIRED.includes(code)) return { text: "This code expired.", hint: "expired" };
   if (code === "native_auth_sign_in_page_timed_out") {
     return { text: "CrazyAgent stopped waiting for the sign-in page. Start the sign-in again.", hint: "retry" };
@@ -125,7 +126,7 @@ export function signInFailure(code: string, provider: SubscriptionProvider, runn
   if (code === "native_auth_cancelled") return { text: "Sign-in cancelled.", hint: "retry" };
   if (code === "native_auth_authentication_failed") return { text: "Sign-in didn't finish.", hint: "retry" };
   if (UNFINISHED.includes(code)) return { text: "Sign-in didn't finish. Try again.", hint: "retry" };
-  const text = Object.hasOwn(SIGN_IN_TEXT, code) ? SIGN_IN_TEXT[code] : undefined;
+  const text = Object.hasOwn(SIGN_IN_TEXT, code) ? SIGN_IN_TEXT[code]?.replaceAll("{computer}", computer) : undefined;
   return { text: text ?? knownError(code) ?? withCode("Sign-in didn't finish. Try again.", code), hint: "retry" };
 }
 
@@ -453,17 +454,19 @@ export function updateOffer(versions: HarnessVersions | null, mode: UpdateMode |
 }
 
 /** The panel for a sign-in refused because the harness is too old: the line, Update with that
- * harness's own update where the settings allow it, else how to update it, and Check again.
- * Pure on its props. Inputs: the harness name, the line, the versions row and update mode (null
- * until read), whether the update is starting, and the two actions. Output: the panel. */
-export function TooOldView({ name, line, versions, mode, pending, onUpdate, onCheck, after }: {
+ * harness's own update where the settings allow it, else how to update it, and Check again. A
+ * running update held behind another harness's job names that harness. Pure on its props.
+ * Inputs: the harness name, the line, the versions row and update mode (null until read),
+ * whether the update is starting, the catalog's names and the two actions. Output: the panel. */
+export function TooOldView({ name, line, versions, mode, pending, onUpdate, onCheck, after, nameOf = (id) => id }: {
   name: string; line: string; versions: HarnessVersions | null; mode: UpdateMode | null; pending: boolean;
-  onUpdate: () => void; onCheck: () => void; after?: string | null;
+  onUpdate: () => void; onCheck: () => void; after?: string | null; nameOf?: (id: string) => string;
 }) {
   const offer = updateOffer(versions, mode);
   return <div className="stack-small">
     <Notice tone="danger" alert>{line}</Notice>
-    {offer.kind === "running" && <p className="live" role="status"><Icon name="loader-circle" spin />{`Updating ${name}...`}</p>}
+    {offer.kind === "running" && <p className="live" role="status"><Icon name="loader-circle" spin />
+      {versions?.waiting ? runningLine(versions, false, nameOf) : `Updating ${name}...`}</p>}
     {offer.kind === "command" && <>
       <p>{`To update ${name}, run this in Terminal:`}</p>
       <pre className="mono">{offer.command}</pre>
@@ -493,6 +496,7 @@ export function TooOldPanel({ provider, onCheck }: { provider: SubscriptionProvi
   const [pending, setPending] = useState(false);
   const [updated, setUpdated] = useState(false);
   const [problem, setProblem] = useState<string>();
+  const [names, setNames] = useState<readonly HarnessEntry[]>([]);
   const alive = useRef(true);
   const take = useCallback((read: Result<HarnessVersions>) => {
     if (alive.current && read.kind === "ok") setVersions(read.value);
@@ -502,6 +506,7 @@ export function TooOldPanel({ provider, onCheck }: { provider: SubscriptionProvi
     alive.current = true;
     void harnessVersions(id, false).then(take);
     void loadHarnessUpdateSettings().then((read) => { if (alive.current && read.kind === "ok") setMode(read.value.mode); });
+    void harnessCatalog().then((read) => { if (alive.current && read.kind === "ok") setNames(read.value); });
     return () => { alive.current = false; };
   }, [id, take]);
   const ask = async () => {
@@ -522,7 +527,8 @@ export function TooOldPanel({ provider, onCheck }: { provider: SubscriptionProvi
   };
   return <>
     <TooOldView name={name} line={signInFailure(TOO_OLD, provider, undefined, versions).text} versions={versions} mode={mode} pending={pending}
-      after={updated && versions ? lastLine(versions, name) : null} onUpdate={() => void ask()} onCheck={onCheck} />
+      after={updated && versions ? lastLine(versions, name) : null} onUpdate={() => void ask()} onCheck={onCheck}
+      nameOf={(other) => names.find((entry) => entry.id === other)?.name ?? other} />
     {problem && <Notice tone="danger" alert>{problem}</Notice>}
     {versions?.command && <UpdateConfirm versions={versions} name={name} open={asking} pending={pending}
       onConfirm={() => void start()} onCancel={() => setAsking(false)} />}

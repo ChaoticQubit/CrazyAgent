@@ -1144,12 +1144,24 @@ fn validate_config(repository: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Refuses a git older than the 2.39 floor before any other git of an agent worktree runs,
+/// so the owner reads which Git to update (V243-WORKTREE-GIT-FLOOR). Input: the
+/// repository. Output: Ok, else `worktree_git_old`, or `changes_git_unsupported` for a
+/// version line that names no version.
+#[cfg(unix)]
+fn refuse_old_git(repository: &Path) -> Result<(), EngineError> {
+    let found = crate::landing::version_numbers(git(repository, &["version"])?);
+    crate::landing::refuse_older(&found, crate::landing::OPEN_VERSION_MIN, GIT_OLD)
+}
+
 fn inspect(repository: &str) -> Result<Admission, EngineError> {
     let path = Path::new(repository);
     canonical(path)?;
     let root = identity(path, true)?;
     let metadata = identity(&path.join(".git"), true)?;
     validate_metadata(path)?;
+    #[cfg(unix)]
+    refuse_old_git(path)?;
     validate_config(path)?;
     let actual = git(path, &["rev-parse", "--show-toplevel"])?;
     if actual.strip_suffix(b"\n") != Some(repository.as_bytes()) {
@@ -1543,6 +1555,10 @@ const VERIFY_RETRY_WAIT: Duration = Duration::from_millis(50);
 /// The code of an engine Git command killed at its deadline. It says the machine was
 /// slow, not that the repository broke a rule.
 const GIT_DEADLINE: &str = "git_deadline";
+/// The code of a lease check refused for a git older than the 2.39 floor. It says the
+/// computer's Git needs updating, not that the lease broke a rule (V243-WORKTREE-GIT-FLOOR).
+#[cfg(unix)]
+const GIT_OLD: &str = "worktree_git_old";
 /// The codes of a Git command that failed at once, which is no rule of the engine's about
 /// the repository. `git_deadline` is not among them: a Git command that ran out of time
 /// has already held its caller for its whole deadline.
@@ -2674,31 +2690,83 @@ fn verify_record(record: &LeaseRecord) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Tells whether an Uncertain lease may have been left Uncertain only by a volume renumber
-/// that an older engine refused: its worktree identities were pinned and the live
-/// repository folder now has another device. Such a lease is verified again and can only
-/// become RecoveryRequired. Input: the stored record. Output: true to verify it again.
+/// Checks that an Uncertain lease's worktree is whole: no cut-off Git writer left its index
+/// lock, its index exists, and no tracked file differs from that index; staged changes are
+/// its agent's or a turn end's. Read only: `status` honours `--no-optional-locks`, unlike
+/// `diff`, which refreshes the index. Input: the record. Output: success, or the refusal.
 #[cfg(unix)]
-fn renumbered(record: &LeaseRecord) -> bool {
-    record.directory.is_some()
-        && record.metadata.is_some()
-        && identity(Path::new(&record.lease.repository), true)
-            .is_ok_and(|live| live.device != record.admission.root.device)
+fn worktree_matches_index(record: &LeaseRecord) -> Result<(), EngineError> {
+    let metadata = worktree_metadata(record)?;
+    match std::fs::symlink_metadata(metadata.join("index.lock")) {
+        Ok(_) => return Err(error("worktree_index_locked")),
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {}
+        Err(problem) => return Err(error(problem)),
+    }
+    if !std::fs::symlink_metadata(metadata.join("index"))
+        .map_err(error)?
+        .is_file()
+    {
+        return Err(error("worktree_index_missing"));
+    }
+    let gitdir = metadata.to_str().ok_or_else(|| error("non_utf8_gitdir"))?;
+    let entries = git(
+        Path::new(&record.lease.repository),
+        &[
+            "-c",
+            "core.protectHFS=true",
+            "-c",
+            "core.protectNTFS=true",
+            "--git-dir",
+            gitdir,
+            "--work-tree",
+            &record.lease.path,
+            "-C",
+            &record.lease.path,
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--no-branch",
+            "--no-renames",
+            "--untracked-files=no",
+            "--ignore-submodules=all",
+        ],
+    )?;
+    let unstaged = entries
+        .split(|byte| *byte == 0)
+        .any(|entry| !entry.is_empty() && entry.get(1) != Some(&b' '));
+    if unstaged {
+        return Err(error("worktree_content_differs_from_index"));
+    }
+    Ok(())
+}
+
+/// Checks a stored lease at an engine start: [`verify_record`], and for an Uncertain lease
+/// also [`worktree_matches_index`], so a checkout that failed after its folder was pinned
+/// is never requalified on its pins alone. Input: the stored record. Output: success, or
+/// the refusal code.
+#[cfg(unix)]
+fn verify_at_start(record: &LeaseRecord) -> Result<(), EngineError> {
+    verify_record(record)?;
+    if record.lease.state == LeaseState::Uncertain {
+        worktree_matches_index(record)?;
+    }
+    Ok(())
 }
 
 /// Settles every stored lease when the engine starts, checking each through
-/// [`verify_record`]. Input: the connection, outside any transaction. Output: success, or
-/// `lease_capacity` or the storage failure.
+/// [`verify_at_start`]. Input: the connection, outside any transaction. Output: success,
+/// or `lease_capacity` or the storage failure.
 #[cfg(unix)]
 pub(crate) fn reconcile(connection: &Connection) -> Result<(), EngineError> {
-    reconcile_with(connection, verify_record)
+    reconcile_with(connection, verify_at_start)
 }
 
-/// Settles every stored lease at an engine start. A Ready or RecoveryRequired lease that
-/// verifies, or whose check ran out of time on a slow start, becomes RecoveryRequired and
-/// is checked again before any use; a Reserved lease, or one whose check failed otherwise,
-/// becomes Uncertain. Each failed check is logged. Inputs: the connection, outside any
-/// transaction, and the lease check. Output: success, `lease_capacity` or the storage error.
+/// Settles every stored lease at an engine start. A lease that verifies, Ready,
+/// RecoveryRequired or pinned Uncertain, or a Ready or RecoveryRequired one whose check ran
+/// out of time or met a git older than the floor, becomes RecoveryRequired, checked again
+/// before any use; any other lease is Uncertain. Each failed check is logged. Inputs: the
+/// connection, outside any transaction, and the lease check. Output: success,
+/// `lease_capacity` or the storage error.
 #[cfg(unix)]
 fn reconcile_with(
     connection: &Connection,
@@ -2720,12 +2788,13 @@ fn reconcile_with(
             record.lease.state,
             LeaseState::Ready | LeaseState::RecoveryRequired
         );
-        let due = held || (record.lease.state == LeaseState::Uncertain && renumbered(&record));
+        let pinned = record.directory.is_some() && record.metadata.is_some();
+        let due = held || (record.lease.state == LeaseState::Uncertain && pinned);
         record.lease.state = match due.then(|| checked(|| verify(&record))) {
             Some(Ok(())) => LeaseState::RecoveryRequired,
             Some(Err((problem, retried))) => {
                 log_failed_check(&record, &problem, retried);
-                if held && problem.0 == GIT_DEADLINE {
+                if held && (problem.0 == GIT_DEADLINE || problem.0 == GIT_OLD) {
                     LeaseState::RecoveryRequired
                 } else {
                     LeaseState::Uncertain
@@ -2738,6 +2807,9 @@ fn reconcile_with(
     assert!(connection.is_autocommit());
     Ok(())
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests;
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -3774,6 +3846,32 @@ mod tests {
         );
     }
 
+    /// V243-WORKTREE-GIT-FLOOR: on a git older than the 2.39 floor an agent worktree is
+    /// refused with its own code at admission and at every later check, before the
+    /// repository's config is read; the floor itself goes on to the config check.
+    #[cfg(unix)]
+    #[test]
+    fn an_agent_worktree_on_a_git_older_than_the_floor_is_refused_before_its_config_is_read() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let repository = committed_repository(&root);
+        let path = repository.to_str().unwrap();
+        let admission = inspect(path).unwrap();
+        crate::landing::shape_git(Some("git version 2.34.1"));
+        assert_eq!(verify(&admission).unwrap_err().0, "worktree_git_old");
+        let config = repository.join(".git/config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str("[core]\n\tfsmonitor = /bin/true\n");
+        std::fs::write(&config, text).unwrap();
+        assert_eq!(inspect(path).unwrap_err().0, "worktree_git_old");
+        crate::landing::shape_git(Some("git version 2.39.0"));
+        assert_eq!(
+            inspect(path).unwrap_err().0,
+            "repository_config_refused:core_fsmonitor"
+        );
+        crate::landing::shape_git(None);
+    }
+
     /// The engine's worktree git, asked outright for the signature of an owner commit in any
     /// armor, runs none of the repository's signature programs (RV-DS241-39).
     #[test]
@@ -3790,29 +3888,88 @@ mod tests {
         }
     }
 
-    /// Runs [`restarted_at`] for a lease of `/repository`, a folder that does not exist, so
-    /// its volume never reads as renumbered. Inputs: the state and the answers. Output: the
-    /// state stored after the start and how many checks ran.
-    fn restarted(state: LeaseState, answers: &[Result<(), &str>]) -> (LeaseState, usize) {
-        restarted_at("/repository", state, answers)
+    /// The engine's worktree git, asked outright 40 times for an ssh signature while three
+    /// busy threads per processor hold up its signature program, reads the subject every
+    /// time: the program it pins never starts, so none can exit before git writes it the
+    /// payload and kill git with SIGPIPE (V243-WORKTREES-GIT-FLAKE). Linux only, where the
+    /// farm saw that race.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "load row: run alone, its busy threads slow timing rows beside it (V243-WORKTREES-GIT-FLAKE)"]
+    fn engine_worktree_git_reads_an_ssh_signed_commit_under_load_every_time() {
+        use crate::landing::signature_tests::{Armor, SUBJECT, signed};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        /// Clears the busy flag when dropped, so the busy threads stop and the scope ends
+        /// even when a read panics. Input: the flag. Output: none.
+        struct Stop<'a>(&'a AtomicBool);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Relaxed);
+            }
+        }
+
+        const RUNS: usize = 40;
+        let signed = signed(Armor::Ssh);
+        let busy = AtomicBool::new(true);
+        let threads = 3 * std::thread::available_parallelism().map_or(1, usize::from);
+        let reads: Vec<Result<Vec<u8>, EngineError>> = std::thread::scope(|scope| {
+            let _stop = Stop(&busy);
+            for _ in 0..threads {
+                scope.spawn(|| {
+                    while busy.load(Ordering::Relaxed) {
+                        std::hint::spin_loop();
+                    }
+                });
+            }
+            (0..RUNS)
+                .map(|_| {
+                    git_until(
+                        &signed.root,
+                        &["log", "--show-signature", "-1", "--format=%s"],
+                        OUTPUT_BYTES_MAX,
+                        Instant::now() + Duration::from_secs(60),
+                    )
+                })
+                .collect()
+        });
+        assert_eq!(reads.len(), RUNS);
+        let subject = format!("{SUBJECT}\n");
+        let failed: Vec<(usize, String)> = reads
+            .iter()
+            .enumerate()
+            .filter_map(|(run, read)| match read {
+                Ok(bytes) if bytes.ends_with(subject.as_bytes()) => None,
+                Ok(bytes) => Some((run, format!("read {:?}", String::from_utf8_lossy(bytes)))),
+                Err(EngineError(code)) => Some((run, code.clone())),
+            })
+            .collect();
+        assert!(
+            failed.is_empty(),
+            "Ssh: {} of {RUNS} runs failed under {threads} busy threads, (run, code): {failed:?}",
+            failed.len()
+        );
+        assert_eq!(signed.ran(), Vec::<String>::new(), "Ssh");
     }
 
-    /// Stores one lease of `repository` at `state` with both worktree identities pinned in a
-    /// fresh lease table, then runs one engine start's reconcile with a lease check that
-    /// gives `answers` in turn, the last one again once they run out. Inputs: the
-    /// repository, the state and the answers. Output: the state stored and the check count.
-    fn restarted_at(
-        repository: &str,
-        state: LeaseState,
+    /// Runs [`restarted_with`] for a pinned lease stored at `state`. Inputs: the state and
+    /// the answers. Output: the state stored after the start and how many checks ran.
+    fn restarted(state: LeaseState, answers: &[Result<(), &str>]) -> (LeaseState, usize) {
+        restarted_with(|record| record.lease.state = state, answers)
+    }
+
+    /// Stores one lease, with both worktree identities pinned and then changed by `change`,
+    /// in a fresh lease table, then runs one engine start's reconcile with a lease check that
+    /// gives `answers` in turn, the last one again once they run out. Inputs: the change and
+    /// the answers. Output: the state stored after the start and how many checks ran.
+    fn restarted_with(
+        change: impl FnOnce(&mut LeaseRecord),
         answers: &[Result<(), &str>],
     ) -> (LeaseState, usize) {
         assert!(!answers.is_empty());
         let connection = Connection::open_in_memory().unwrap();
         initialize(&connection).unwrap();
         let mut record = reserved_record();
-        record.lease.repository = repository.into();
-        record.admission.repository = repository.into();
-        record.lease.state = state;
         record.directory = Some(Identity {
             device: 1,
             inode: 4,
@@ -3821,6 +3978,7 @@ mod tests {
             device: 1,
             inode: 5,
         });
+        change(&mut record);
         let inserted = connection
             .execute(
                 "INSERT INTO worktree_leases VALUES (?1, ?2, ?3, ?4)",
@@ -3861,6 +4019,20 @@ mod tests {
         }
     }
 
+    /// V243-WORKTREE-GIT-FLOOR: a lease check at start refused for a git older than the floor
+    /// says nothing about the lease, so a Ready or RecoveryRequired lease waits for recovery,
+    /// checked again once Git is updated, instead of turning Uncertain.
+    #[test]
+    fn a_lease_check_refused_for_an_old_git_at_start_keeps_the_lease_for_recovery() {
+        for state in [LeaseState::Ready, LeaseState::RecoveryRequired] {
+            assert_eq!(
+                restarted(state.clone(), &[Err("worktree_git_old")]),
+                (LeaseState::RecoveryRequired, 1),
+                "{state:?}"
+            );
+        }
+    }
+
     /// ENGINE-START-LEASE-DEMOTE: a lease check at start that failed on a read is tried once
     /// more, as a lease read's check is; a second failed read leaves the lease Uncertain.
     #[test]
@@ -3877,8 +4049,8 @@ mod tests {
     }
 
     /// ENGINE-START-LEASE-DEMOTE guard: a lease that verifies at start waits for recovery; one
-    /// that broke a rule is Uncertain after one check; a Reserved lease and an Uncertain one
-    /// on an unrenumbered volume are Uncertain without a check.
+    /// that broke a rule is Uncertain after one check; a Reserved lease is Uncertain without
+    /// a check.
     #[test]
     fn a_lease_at_start_is_uncertain_on_a_rule_and_waits_for_recovery_when_it_verifies() {
         assert_eq!(
@@ -3896,27 +4068,39 @@ mod tests {
                 "{rule}"
             );
         }
-        let volume = tempfile::tempdir().unwrap();
-        let moved = std::fs::canonicalize(volume.path()).unwrap();
-        assert_ne!(
-            identity(&moved, true).unwrap().device,
-            reserved_record().admission.root.device
-        );
         assert_eq!(
-            restarted_at(
-                moved.to_str().unwrap(),
-                LeaseState::Uncertain,
-                &[Err("git_deadline")]
-            ),
-            (LeaseState::Uncertain, 1),
-            "an Uncertain lease checked after a renumber stays Uncertain when its check times out"
+            restarted(LeaseState::Reserved, &[Ok(())]),
+            (LeaseState::Uncertain, 0)
         );
-        for state in [LeaseState::Reserved, LeaseState::Uncertain] {
+    }
+
+    /// LEASE-LEGACY-UNCERTAIN: every Uncertain lease with both worktree identities pinned is
+    /// checked again at each engine start, renumbered volume or not, and waits for recovery
+    /// once its check passes; a check that times out leaves it Uncertain, and a lease whose
+    /// checkout never pinned its folder is not checked at all.
+    #[test]
+    fn a_pinned_uncertain_lease_is_checked_again_at_each_start() {
+        assert_eq!(
+            restarted(LeaseState::Uncertain, &[Ok(())]),
+            (LeaseState::RecoveryRequired, 1)
+        );
+        for failure in ["git_deadline", "worktree_content_differs_from_index"] {
             assert_eq!(
-                restarted(state.clone(), &[Err("git_deadline")]),
-                (LeaseState::Uncertain, 0),
-                "{state:?}"
+                restarted(LeaseState::Uncertain, &[Err(failure)]),
+                (LeaseState::Uncertain, 1),
+                "{failure}"
             );
         }
+        assert_eq!(
+            restarted_with(
+                |record| {
+                    record.lease.state = LeaseState::Uncertain;
+                    record.directory = None;
+                    record.metadata = None;
+                },
+                &[Ok(())]
+            ),
+            (LeaseState::Uncertain, 0)
+        );
     }
 }

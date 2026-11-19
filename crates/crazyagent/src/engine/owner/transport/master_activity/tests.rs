@@ -3,11 +3,23 @@ use crate::master_session::{MasterTurnPage, MasterTurnPhase, MasterTurnView};
 use crate::protocol::{ConfigId, Cursor, ProjectId};
 use serde_json::json;
 
+/// A path as this system spells it: as written on Unix; on Windows a leading `/` becomes the
+/// `C:\` drive and every `/` a `\`. Input: a path spelled with `/`. Output: the native text.
+fn native(path: &str) -> String {
+    if cfg!(unix) {
+        path.to_owned()
+    } else if let Some(rest) = path.strip_prefix('/') {
+        format!(r"C:\{}", rest.replace('/', r"\"))
+    } else {
+        path.replace('/', r"\")
+    }
+}
+
 fn screen() -> Screen {
     Screen::new(
-        Path::new("/w/tree"),
-        Path::new("/p/repo"),
-        &[PathBuf::from("/p/repo/client-x")],
+        Path::new(&native("/w/tree")),
+        Path::new(&native("/p/repo")),
+        &[PathBuf::from(native("/p/repo/client-x"))],
     )
 }
 
@@ -54,20 +66,22 @@ fn a_file_read_or_edit_names_its_path_below_the_worktree() {
     let screen = screen();
     let label = |name: &str, input: Value| screen.label(&tool_use(name, input));
     assert_eq!(
-        label("Read", json!({"file_path": "/w/tree/src/app/page.tsx"})).as_deref(),
-        Some("Reading src/app/page.tsx")
+        label(
+            "Read",
+            json!({"file_path": native("/w/tree/src/app/page.tsx")})
+        ),
+        Some(format!("Reading {}", native("src/app/page.tsx")))
     );
     assert_eq!(
-        label("Edit", json!({"file_path": "docs/plan.md"})).as_deref(),
-        Some("Editing docs/plan.md")
+        label("Edit", json!({"file_path": native("docs/plan.md")})),
+        Some(format!("Editing {}", native("docs/plan.md")))
     );
     assert_eq!(
         label(
             "NotebookEdit",
-            json!({"notebook_path": "/w/tree/nb/run.ipynb"})
-        )
-        .as_deref(),
-        Some("Editing nb/run.ipynb")
+            json!({"notebook_path": native("/w/tree/nb/run.ipynb")})
+        ),
+        Some(format!("Editing {}", native("nb/run.ipynb")))
     );
     let longest = format!("{}.md", "a".repeat(PATH_BYTES_MAX - 3));
     assert_eq!(
@@ -80,30 +94,30 @@ fn a_file_read_or_edit_names_its_path_below_the_worktree() {
 fn a_path_that_could_tell_a_secret_or_leave_the_worktree_is_never_named() {
     let screen = screen();
     let refused = [
-        json!({"file_path": "/w/tree/.env"}),
-        json!({"file_path": "/w/tree/config/credentials.json"}),
-        json!({"file_path": "/w/tree/keys/id_rsa_token.txt"}),
-        json!({"file_path": "/Users/someone/Library/Application Support/CrazyAgent/x.md"}),
-        json!({"file_path": "/w/treehouse/x.md"}),
-        json!({"file_path": "/w/tree"}),
-        json!({"file_path": "../outside.md"}),
-        json!({"file_path": "docs/../../outside.md"}),
-        json!({"file_path": "docs//x.md"}),
-        json!({"file_path": "docs/./x.md"}),
-        json!({"file_path": "/w/tree/.git/config"}),
-        json!({"file_path": "/w/tree/sub/.GIT/HEAD"}),
-        json!({"file_path": "/w/tree/.CrazyAgent/context/brief.md"}),
-        json!({"file_path": "/w/tree/client-x/contract.md"}),
-        json!({"file_path": "/w/tree/Client-X/notes/a.md"}),
-        json!({"file_path": "/w/tree/docs/bell\u{7}.md"}),
-        json!({"file_path": "/w/tree/docs/invoice\u{202e}dm.exe"}),
-        json!({"file_path": "/w/tree/docs/a\u{200b}b.md"}),
-        json!({"file_path": "/w/tree/.ssh/config"}),
-        json!({"file_path": "/w/tree/.AWS/config"}),
-        json!({"file_path": "/w/tree/deploy/.kube/config"}),
-        json!({"file_path": "/w/tree/.docker/config.json"}),
-        json!({"file_path": "/w/tree/.azure/profile.json"}),
-        json!({"file_path": "/w/tree/.gcloud/settings.json"}),
+        json!({"file_path": native("/w/tree/.env")}),
+        json!({"file_path": native("/w/tree/config/credentials.json")}),
+        json!({"file_path": native("/w/tree/keys/id_rsa_token.txt")}),
+        json!({"file_path": native("/Users/someone/Library/Application Support/CrazyAgent/x.md")}),
+        json!({"file_path": native("/w/treehouse/x.md")}),
+        json!({"file_path": native("/w/tree")}),
+        json!({"file_path": native("../outside.md")}),
+        json!({"file_path": native("docs/../../outside.md")}),
+        json!({"file_path": native("docs//x.md")}),
+        json!({"file_path": native("docs/./x.md")}),
+        json!({"file_path": native("/w/tree/.git/config")}),
+        json!({"file_path": native("/w/tree/sub/.GIT/HEAD")}),
+        json!({"file_path": native("/w/tree/.CrazyAgent/context/brief.md")}),
+        json!({"file_path": native("/w/tree/client-x/contract.md")}),
+        json!({"file_path": native("/w/tree/Client-X/notes/a.md")}),
+        json!({"file_path": native("/w/tree/docs/bell\u{7}.md")}),
+        json!({"file_path": native("/w/tree/docs/invoice\u{202e}dm.exe")}),
+        json!({"file_path": native("/w/tree/docs/a\u{200b}b.md")}),
+        json!({"file_path": native("/w/tree/.ssh/config")}),
+        json!({"file_path": native("/w/tree/.AWS/config")}),
+        json!({"file_path": native("/w/tree/deploy/.kube/config")}),
+        json!({"file_path": native("/w/tree/.docker/config.json")}),
+        json!({"file_path": native("/w/tree/.azure/profile.json")}),
+        json!({"file_path": native("/w/tree/.gcloud/settings.json")}),
         json!({"file_path": format!("{}.md", "a".repeat(PATH_BYTES_MAX - 2))}),
         json!({"file_path": 7}),
         json!({"omitted_bytes": 90000}),
@@ -120,46 +134,90 @@ fn a_path_that_could_tell_a_secret_or_leave_the_worktree_is_never_named() {
         screen
             .label(&tool_use(
                 "Edit",
-                json!({"file_path": "/w/tree/.env.local"})
+                json!({"file_path": native("/w/tree/.env.local")})
             ))
             .as_deref(),
         Some("Editing a file")
     );
     let accented = Screen::new(
-        Path::new("/w/tree"),
-        Path::new("/p/repo"),
-        &[PathBuf::from("/p/repo/Caf\u{e9}")],
+        Path::new(&native("/w/tree")),
+        Path::new(&native("/p/repo")),
+        &[PathBuf::from(native("/p/repo/Caf\u{e9}"))],
     );
     let read = |path: &str| {
         accented
             .label(&tool_use("Read", json!({ "file_path": path })))
             .unwrap()
     };
-    assert_eq!(read("/w/tree/Cafe\u{301}/menu.md"), "Reading a file");
-    assert_eq!(read("/w/tree/CAF\u{c9}/menu.md"), "Reading a file");
-    assert_eq!(read("/w/tree/docs/menu.md"), "Reading docs/menu.md");
+    assert_eq!(
+        read(&native("/w/tree/Cafe\u{301}/menu.md")),
+        "Reading a file"
+    );
+    assert_eq!(read(&native("/w/tree/CAF\u{c9}/menu.md")), "Reading a file");
+    assert_eq!(
+        read(&native("/w/tree/docs/menu.md")),
+        format!("Reading {}", native("docs/menu.md"))
+    );
     let outside = Screen::new(
-        Path::new("/w/tree"),
-        Path::new("/p/repo"),
-        &[PathBuf::from("/elsewhere/folder")],
+        Path::new(&native("/w/tree")),
+        Path::new(&native("/p/repo")),
+        &[PathBuf::from(native("/elsewhere/folder"))],
     );
     assert_eq!(
         outside
-            .label(&tool_use("Read", json!({"file_path": "/w/tree/src/x.ts"})))
+            .label(&tool_use(
+                "Read",
+                json!({"file_path": native("/w/tree/src/x.ts")})
+            ))
             .as_deref(),
         Some("Reading a file")
     );
     let whole = Screen::new(
-        Path::new("/w/tree"),
-        Path::new("/p/repo"),
-        &[PathBuf::from("/p/repo")],
+        Path::new(&native("/w/tree")),
+        Path::new(&native("/p/repo")),
+        &[PathBuf::from(native("/p/repo"))],
     );
     assert_eq!(
         whole
-            .label(&tool_use("Read", json!({"file_path": "/w/tree/src/x.ts"})))
+            .label(&tool_use(
+                "Read",
+                json!({"file_path": native("/w/tree/src/x.ts")})
+            ))
             .as_deref(),
         Some("Reading a file")
     );
+}
+
+/// A path whose parts are joined by backslashes, as on Windows, is screened part by part on
+/// every system: a part that is empty, `.` or `..`, a `.git`, `.crazyagent` or credential
+/// folder, or a hidden folder is never named, nor is a rooted or drive-relative path on
+/// Windows, while a plain one still is, as written.
+#[test]
+fn a_path_joined_by_backslashes_is_screened_part_by_part() {
+    let screen = screen();
+    let read = |path: &str| {
+        screen
+            .label(&tool_use("Read", json!({ "file_path": path })))
+            .unwrap()
+    };
+    for path in [
+        r"..\outside.md",
+        r"docs\..\..\outside.md",
+        r"docs\\x.md",
+        r"docs\.\x.md",
+        r"\outside.md",
+        r"config\.git\x",
+        r".CrazyAgent\context\brief.md",
+        r"client-x\plan.md",
+        r"Client-X\notes\a.md",
+        r"deploy\.kube\config",
+        r".ssh\config",
+    ] {
+        assert_eq!(read(path), "Reading a file", "{path}");
+    }
+    #[cfg(not(unix))]
+    assert_eq!(read("C:outside.md"), "Reading a file");
+    assert_eq!(read(r"src\app\page.tsx"), r"Reading src\app\page.tsx");
 }
 
 #[test]

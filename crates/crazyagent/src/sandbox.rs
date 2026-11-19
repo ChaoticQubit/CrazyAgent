@@ -43,6 +43,20 @@ const TOOL_CACHE_ENV: [&str; 2] = ["UV_CACHE_DIR", "pnpm_config_store_dir"];
 /// The macOS Seatbelt launcher every project agent process runs under.
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
+/// Whether `program` is the boundary program [`agent_command`] starts a confined agent from
+/// on this system: [`SANDBOX_EXEC`] on Unix, the boundary helper beside the engine's
+/// executable on Windows. Input: a command's program. Output: true for that program.
+pub fn starts_at_boundary(program: &OsStr) -> bool {
+    #[cfg(unix)]
+    {
+        program == SANDBOX_EXEC
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::helper_beside_engine().is_ok_and(|helper| program == helper.as_os_str())
+    }
+}
+
 /// The fixed ports the owner's tools listen on, which no tools-on agent may bind or listen
 /// on at any address: the Codex sign-in callback and Ollama's local model server. Seatbelt
 /// matches a local address by port only (`localhost` there matches every local address), so
@@ -99,8 +113,11 @@ pub fn settings_owner_ports(global: &Path, project: &Path) -> Result<Vec<u16>, &
         .map_or_else(Vec::new, |access| owner_ports(&access)))
 }
 
-/// Why a sandbox with hidden folders does not start on Linux or Windows: their boundaries
-/// grant whole roots and cannot keep a folder inside one out of reach.
+/// Why a sandbox with hidden folders does not start on Windows, nor one with kept-out paths
+/// or open tops on Linux or Windows: those boundaries cannot keep a path inside a granted
+/// root out of reach as Seatbelt does. Linux holds hidden folders on its bubblewrap
+/// backends and names its own refusals otherwise (`linux::HIDDEN_NEEDS_NAMESPACES`,
+/// `linux::HIDDEN_MOUNTED_AGAIN`).
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
 
 /// Why a native-mode lead's own tmux server does not start off macOS: only Seatbelt holds
@@ -339,6 +356,9 @@ const ENGINE_SECRET_FOLDERS: &[&str] = &[
     crate::ide::FOLDER,
     crate::engine::bootstrap::NATIVE_PROFILES_FOLDER,
     crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER,
+    "plugin-keys",
+    #[cfg(unix)]
+    crate::storage::migrations::BACKUPS,
 ];
 
 const RUNTIME_ENTRIES_MAX: usize = 1024;
@@ -958,11 +978,37 @@ pub fn linux_holds_fully(
     })
 }
 
-/// Tells whether a launch refusal is the strict setting's ([`LINUX_NOT_FULL_LINE`]), so a
-/// caller can give it its own code ([`LINUX_NOT_FULL`]). Input: the refusal. Output: the
-/// answer.
-pub fn linux_not_full(error: &SandboxError) -> bool {
-    matches!(error, SandboxError::Unavailable(reason) if reason == LINUX_NOT_FULL_LINE)
+/// The engine refusal code of a Linux launch whose project hides folders on a computer
+/// where bubblewrap cannot start agents in namespaces of their own.
+pub const LINUX_HIDDEN_NEEDS_NAMESPACES: &str = "linux_hidden_needs_namespaces";
+
+/// The engine refusal code of a Linux launch whose project hides a folder that this
+/// computer mounts a second time where it shows that folder.
+pub const LINUX_HIDDEN_MOUNTED_AGAIN: &str = "linux_hidden_mounted_again";
+
+/// The engine refusal code of a Linux launch whose project hides folders on a computer
+/// where the sandbox helper cannot cut the agent's mounts off from this computer's.
+pub const LINUX_HIDDEN_MOUNTS_NOT_PRIVATE: &str = "linux_hidden_mounts_not_private";
+
+/// The code a launch refusal has of its own, so a caller shows its plain line: the strict
+/// setting's ([`LINUX_NOT_FULL`]) and, on Linux, the hidden folders' three
+/// ([`LINUX_HIDDEN_NEEDS_NAMESPACES`], [`LINUX_HIDDEN_MOUNTED_AGAIN`],
+/// [`LINUX_HIDDEN_MOUNTS_NOT_PRIVATE`]). Input: the refusal. Output: the code, or none
+/// for a refusal with no code of its own.
+pub fn refusal_code(error: &SandboxError) -> Option<&'static str> {
+    let SandboxError::Unavailable(reason) = error else {
+        return None;
+    };
+    match reason.as_str() {
+        LINUX_NOT_FULL_LINE => Some(LINUX_NOT_FULL),
+        #[cfg(target_os = "linux")]
+        linux::HIDDEN_NEEDS_NAMESPACES => Some(LINUX_HIDDEN_NEEDS_NAMESPACES),
+        #[cfg(target_os = "linux")]
+        linux::HIDDEN_MOUNTED_AGAIN => Some(LINUX_HIDDEN_MOUNTED_AGAIN),
+        #[cfg(target_os = "linux")]
+        linux::HIDDEN_MOUNTS_NOT_PRIVATE => Some(LINUX_HIDDEN_MOUNTS_NOT_PRIVATE),
+        _ => None,
+    }
 }
 
 /// The launch refusal when the Linux sockets setting starts no limited-network agent.
@@ -1256,8 +1302,8 @@ impl LinuxHost {
     }
 }
 
-/// What this computer holds as [`LinuxHost`] says, read through the sandbox helper beside
-/// this executable, again once what is kept is a minute old. No input. Output: none on
+/// What this computer holds as [`LinuxHost`] says, read through the sandbox helper its
+/// launches take, again once what is kept is a minute old. No input. Output: none on
 /// another system; on Linux the facts, each false when it cannot be read, so its gap line
 /// is shown.
 pub fn linux_host() -> Option<LinuxHost> {
@@ -1377,6 +1423,7 @@ pub struct ProjectSandbox {
     open_tops: Option<Vec<String>>,
     node_bin: Option<PathBuf>,
     owner_config: bool,
+    job_folder: bool,
     #[cfg(unix)]
     engine_home: Option<bool>,
 }
@@ -1467,6 +1514,7 @@ impl ProjectSandbox {
             open_tops: None,
             node_bin: None,
             owner_config: false,
+            job_folder: false,
             #[cfg(unix)]
             engine_home: None,
         })
@@ -1674,12 +1722,10 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Names the engine runtime folder whose secrets this agent must never read or write:
-    /// the engine database, the owner socket, the GitHub sign-in and settings files, the
-    /// saved account keys, the native sign-in profiles, the configured SDK homes with their
-    /// keys, the terminal and IDE server folders and every engine socket and socket folder
-    /// found in it now. The agent's own home and
-    /// temp dirs may sit inside it, but no granted root may hold or sit inside a secret.
+    /// Names the engine runtime folder whose secrets no granted root may hold or sit inside:
+    /// engine.db, the owner socket, the GitHub files, the account and plugin keys, the upgrade
+    /// backups, the native profiles, the configured SDK homes, the terminal and IDE folders and
+    /// every engine socket and socket folder in it now; the agent's home and temp may sit in it.
     /// Input: the existing runtime folder. Output: the guarded sandbox, or a refusal.
     pub fn guard_engine(mut self, runtime: &Path) -> Result<Self, SandboxError> {
         let runtime = canonical(runtime)?;
@@ -2320,8 +2366,8 @@ impl ProjectSandbox {
     /// Keeps one folder inside a granted root out of the agent's reach, read and write, as
     /// the secret paths are; the graph step hides the project's `.crazyagent/` from graphify.
     /// Input: a clean absolute path below a root, in a real parent folder, absent or a real
-    /// folder. Output: the narrowed sandbox, or `Invalid`. Only Seatbelt holds it, so the
-    /// Linux and Windows boundaries refuse a sandbox with hidden folders.
+    /// folder. Output: the narrowed sandbox, or `Invalid`. Seatbelt holds it, the Linux
+    /// bubblewrap backends too where no second mount shows it; plain Landlock and Windows refuse.
     pub fn hide(mut self, folder: &Path) -> Result<Self, SandboxError> {
         if self.hidden.len() >= HIDDEN_MAX {
             return Err(invalid("too many hidden folders"));
@@ -2511,7 +2557,7 @@ impl ProjectSandbox {
             .collect();
         let prefix = format!("^{}/(.*/)?", seatbelt_pattern(root));
         let mut text = String::new();
-        for body in regex_bodies(&prefix, &names, "(/.*)?$") {
+        for body in regex_bodies(&prefix, &names, "(/|$)") {
             text.push_str(&format!(
                 "{KEPT_OUT_DENY}\n  (require-all\n    (regex #\"{body}\")\n    (require-not (subpath \"{}/.git\")){own}))\n",
                 root.display()
@@ -2844,6 +2890,23 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Marks the project folder as one the engine made for one job of its own, a plugin
+    /// server's check or a context-mode install, not a project: on Windows it holds no project
+    /// guards, so the boundary leaves it writable at its top (DEC-193); Seatbelt and Landlock
+    /// are unchanged. Input: a sandbox confined to no worktree, clone or setup. Output: it, marked.
+    pub fn as_job_folder(mut self) -> Self {
+        assert_eq!(self.confinements(), 0);
+        assert!(!self.job_folder);
+        self.job_folder = true;
+        self
+    }
+
+    /// Whether the project folder holds the project guards of [`Self::protected_paths`]:
+    /// true but for a folder marked by [`Self::as_job_folder`]. Output: the answer.
+    pub fn holds_project_guards(&self) -> bool {
+        !self.job_folder
+    }
+
     /// The project folder this sandbox confines writes to.
     pub fn project_root(&self) -> &Path {
         &self.project_root
@@ -3160,8 +3223,8 @@ impl ProjectSandbox {
             .join("|");
         for root in &self.tool_roots {
             text.push_str(&format!(
-                "\n  (regex #\"^{}/(.*/)?({credentials})(/.*)?$\")",
-                seatbelt_pattern(root)
+                "\n  {}",
+                at_or_below(&format!("{}/(.*/)?({credentials})", seatbelt_pattern(root)))
             ));
         }
         text.push_str(")\n(deny mach-lookup");
@@ -3435,7 +3498,10 @@ impl ProjectSandbox {
         entries.extend(GIT_STATE_FILES.map(|name| format!("{git}/{}", any_case(name))));
         let mut text = String::from("(deny file-write* file-link");
         for path in &below {
-            text.push_str(&format!("\n  (regex #\"^{project}/{path}(/.*)?$\")"));
+            text.push_str(&format!(
+                "\n  {}",
+                at_or_below(&format!("{project}/{path}"))
+            ));
         }
         for path in &entries {
             text.push_str(&format!("\n  (regex #\"^{project}/{path}$\")"));
@@ -3519,7 +3585,10 @@ impl ProjectSandbox {
         let worktrees = any_case("worktrees");
         let modules = any_case("modules");
         let text = format!(
-            "(deny file-write*\n  (regex #\"^{pattern}/{dot_git}(/{worktrees}/[^/]+)?/{modules}(/.*)?$\"))\n"
+            "(deny file-write*\n  {})\n",
+            at_or_below(&format!(
+                "{pattern}/{dot_git}(/{worktrees}/[^/]+)?/{modules}"
+            ))
         );
         assert_eq!(text.matches("(regex #\"^/").count(), 1);
         text
@@ -3550,8 +3619,8 @@ impl ProjectSandbox {
         let mut nested = String::new();
         for root in &working {
             nested.push_str(&format!(
-                "\n      (regex #\"^{}/.+/{dot_git}(/.*)?$\")",
-                seatbelt_pattern(root)
+                "\n      {}",
+                at_or_below(&format!("{}/.+/{dot_git}", seatbelt_pattern(root)))
             ));
         }
         for root in &other {
@@ -3619,25 +3688,20 @@ impl ProjectSandbox {
         if let Some(checkout) = &self.checkout {
             stores.push(seatbelt_pattern(&checkout.objects));
         }
+        let info = any_case("info");
         let mut text = format!(
-            "(deny file-write*\n  (regex #\"^{git}/({}(/.*)?|{})$\")",
-            any_case("info"),
+            "(deny file-write*\n  (regex #\"^{git}/({info}|{})$\")\n  (regex #\"^{git}/{info}/\")",
             any_case("shallow")
         );
         let [alternates, http_alternates] = STORE_ALTERNATES.map(any_case);
-        let held = format!(
-            "{}{}?(/.*)?|{alternates}|{http_alternates}",
-            any_case("commit-graph"),
-            any_case("s")
-        );
+        let graph = format!("{}{}?", any_case("commit-graph"), any_case("s"));
         for store in &stores {
             text.push_str(&format!(
-                "\n  (regex #\"^{store}/{}/({held})$\")",
-                any_case("info")
+                "\n  (regex #\"^{store}/{info}/({graph}|{alternates}|{http_alternates})$\")\n  (regex #\"^{store}/{info}/{graph}/\")"
             ));
         }
         text.push_str(")\n");
-        assert_eq!(text.matches("(regex #\"^/").count(), stores.len() + 1);
+        assert_eq!(text.matches("(regex #\"^/").count(), 2 * stores.len() + 2);
         text
     }
 
@@ -3804,7 +3868,7 @@ impl ProjectSandbox {
         let base = self.base_env(true);
         let mut command = agent_command(profile, program, &borrowed(&base), harness.get_envs())?;
         command.args(harness.get_args()).current_dir(cwd);
-        assert_eq!(command.get_program(), SANDBOX_EXEC);
+        assert!(starts_at_boundary(command.get_program()));
         Ok(command)
     }
 
@@ -3909,7 +3973,9 @@ impl InstalledSandbox {
         #[cfg(not(target_os = "linux"))]
         let _ = strict;
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() || sandbox.open_tops.is_some()
+        if (cfg!(target_os = "windows") && !sandbox.hidden.is_empty())
+            || !sandbox.kept_out.is_empty()
+            || sandbox.open_tops.is_some()
         {
             return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
         }
@@ -3928,9 +3994,7 @@ impl InstalledSandbox {
         }
         #[cfg(target_os = "windows")]
         {
-            let helper = windows::existing_helper(
-                &std::env::current_exe()?.with_file_name(windows::HELPER_NAME),
-            )?;
+            let helper = windows::existing_helper(&windows::helper_beside_engine()?)?;
             let grants = windows::grants_folder()?;
             let windows =
                 windows::WindowsSandbox::install(sandbox.clone(), &helper, profile, &grants)?;
@@ -3949,7 +4013,7 @@ impl InstalledSandbox {
             assert!(profile.is_file());
             #[cfg(target_os = "linux")]
             let linux = {
-                let helper = std::env::current_exe()?.with_file_name(linux::HELPER_NAME);
+                let helper = linux::helper_beside_engine()?;
                 let data = crate::tools::engine_root();
                 linux::LinuxSandbox::detect(sandbox.clone(), &helper)?.supervise(calls, data)
             };
@@ -4089,9 +4153,13 @@ impl Checkout {
         const HEX: &str = "[0-9a-fA-F]";
         let objects = self.objects.display();
         let pattern = seatbelt_pattern(&self.objects);
-        let held = format!("({}|{})", any_case("info"), any_case("pack"));
+        let held = at_or_below(&format!(
+            "{pattern}/({}|{})",
+            any_case("info"),
+            any_case("pack")
+        ));
         let text = format!(
-            "(deny file-write*\n  (regex #\"^{pattern}/{held}(/.*)?$\"))\n(deny file-write-unlink\n  (literal \"{objects}\")\n  (regex #\"^{pattern}/{HEX}{HEX}$\"))\n(deny file-write-unlink file-write-data file-link\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (regex #\"^{pattern}/{HEX}{HEX}$\")\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (require-all (subpath \"{objects}\") (vnode-type SYMLINK)))\n(deny file-write-mode file-write-flags file-write-acl\n  (subpath \"{objects}\"))\n"
+            "(deny file-write*\n  {held})\n(deny file-write-unlink\n  (literal \"{objects}\")\n  (regex #\"^{pattern}/{HEX}{HEX}$\"))\n(deny file-write-unlink file-write-data file-link\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (regex #\"^{pattern}/{HEX}{HEX}$\")\n  (regex #\"^{pattern}/{HEX}{HEX}/{HEX}+$\"))\n(deny file-write-create\n  (require-all (subpath \"{objects}\") (vnode-type SYMLINK)))\n(deny file-write-mode file-write-flags file-write-acl\n  (subpath \"{objects}\"))\n"
         );
         assert!(text.matches("(regex #\"^/").count() == 5);
         assert!(text.contains("(vnode-type SYMLINK)"));
@@ -4204,8 +4272,9 @@ fn clone_store_denies(clone: &Path) -> String {
     let index = format!("{pack}/{}", any_case(MULTI_PACK_INDEX));
     let [alternates, http_alternates] = STORE_ALTERNATES.map(any_case);
     let [commondir, _] = ADMIN_LINKS.map(any_case);
+    let below = at_or_below(&fallback);
     let text = format!(
-        "(deny file-write*\n  (regex #\"^{git}$\")\n  (regex #\"^{fallback}(/.*)?$\")\n  (regex #\"^{pack}$\")\n  (regex #\"^{objects}/[0-9a-fA-F][0-9a-fA-F]$\")\n  (regex #\"^{index}\")\n  (regex #\"^{info}/({alternates}|{http_alternates})$\")\n  (regex #\"^{git}/{commondir}$\"))\n(deny file-write-unlink\n  (regex #\"^{objects}$\")\n  (regex #\"^{info}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{objects}/\") (vnode-type SYMLINK)))\n"
+        "(deny file-write*\n  (regex #\"^{git}$\")\n  {below}\n  (regex #\"^{pack}$\")\n  (regex #\"^{objects}/[0-9a-fA-F][0-9a-fA-F]$\")\n  (regex #\"^{index}\")\n  (regex #\"^{info}/({alternates}|{http_alternates})$\")\n  (regex #\"^{git}/{commondir}$\"))\n(deny file-write-unlink\n  (regex #\"^{objects}$\")\n  (regex #\"^{info}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{objects}/\") (vnode-type SYMLINK)))\n"
     );
     assert_eq!(text.matches("(regex #\"^/").count(), 10);
     assert!(text.contains("(vnode-type SYMLINK)"));
@@ -4635,10 +4704,7 @@ pub(crate) fn ensure_store(path: &Path) -> io::Result<()> {
 #[cfg(target_os = "windows")]
 fn owner_home() -> Result<PathBuf, SandboxError> {
     let home = std::env::home_dir().ok_or_else(|| invalid("owner account is unknown"))?;
-    if !clean_absolute(&home) {
-        return Err(invalid("owner home must be absolute"));
-    }
-    Ok(canonical(&home).unwrap_or(home))
+    settled_home(home)
 }
 
 #[cfg(unix)]
@@ -4646,11 +4712,18 @@ fn owner_home() -> Result<PathBuf, SandboxError> {
     let user = nix::unistd::User::from_uid(nix::unistd::getuid())
         .map_err(|error| SandboxError::Io(io::Error::from(error)))?
         .ok_or_else(|| invalid("owner account is unknown"))?;
-    let home = user.dir;
+    settled_home(user.dir)
+}
+
+/// The owner's home as the sandbox compares it: refused unless absolute and clean, then
+/// [`canonical`] when it resolves, so a home named through the macOS data volume has the
+/// short spelling every sandbox root has. Input: the home the account names. Output: the
+/// folder, or `Invalid` for a relative or unclean one.
+fn settled_home(home: PathBuf) -> Result<PathBuf, SandboxError> {
     if !clean_absolute(&home) {
         return Err(invalid("owner home must be absolute"));
     }
-    Ok(home.canonicalize().unwrap_or(home))
+    Ok(canonical(&home).unwrap_or(home))
 }
 
 /// Names the credential files and folders the sandbox guards as they appear in a path: the
@@ -4809,8 +4882,8 @@ fn launch_denies(home: &Path) -> String {
     let mut text = String::from("(deny file-write*\n");
     for folder in folders {
         text.push_str(&format!(
-            "  (regex #\"^{home}/{}(/.*)?$\")\n",
-            any_case(folder)
+            "  {}\n",
+            at_or_below(&format!("{home}/{}", any_case(folder)))
         ));
     }
     for file in files {
@@ -4926,24 +4999,32 @@ fn agent_config_denies(home: &Path) -> String {
         assert!(CONFIG_PARENTS.contains(&parent));
     }
     let home = seatbelt_pattern(home);
-    let spelled = |names: &[&str], tail: &str| {
+    let spelled = |names: &[&str], below: bool| {
         names
             .iter()
-            .map(|name| format!("\n  (regex #\"^{home}/{}{tail}\")", any_case(name)))
+            .map(|name| {
+                let pattern = format!("{home}/{}", any_case(name));
+                if below {
+                    format!("\n  {}", at_or_below(&pattern))
+                } else {
+                    format!("\n  (regex #\"^{pattern}$\")")
+                }
+            })
             .collect::<String>()
     };
     let kept = crate::agent_home::kept_entries();
     let kept: Vec<&str> = kept.iter().map(String::as_str).collect();
     let text = format!(
         "(deny file-write*{})\n(deny file-write-create{})\n(deny file-write-flags file-write-acl{})\n",
-        spelled(&AGENT_CONFIG, "(/.*)?$"),
-        spelled(&CONFIG_PARENTS, "$"),
-        spelled(&kept, "(/.*)?$")
+        spelled(&AGENT_CONFIG, true),
+        spelled(&CONFIG_PARENTS, false),
+        spelled(&kept, true)
     );
     assert_eq!(
         text.matches("(regex #\"^/").count(),
         AGENT_CONFIG.len() + CONFIG_PARENTS.len() + kept.len()
     );
+    assert!(!text.contains("(/.*)"));
     text
 }
 
@@ -5008,15 +5089,26 @@ fn root_pin(root: &Path) -> String {
     format!("(deny {FIXED_WRITES} (literal \"{}\"))\n", root.display())
 }
 
-/// The Seatbelt filter for a `.git` at any depth below `root`, top level included, in every
+/// The Seatbelt filter for a path and everything below it: one `^X(/|$)` in place of
+/// `^X(/.*)?$`, whose `(/.*)` tail libsandbox fails to compile again in lower case after a
+/// fold group with no bracket class or wildcard before it, as `^/x/(s|S)(/.*)?$`
+/// (V241-SANDBOX-REGEX, V243-FARM2-PRODUCT-SMALL). One regex keeps the profile under its cap
+/// for long roots, where an `X$` and `X/` pair did not (V243-PROFILE-CAP-ROW, DEC-195 Q6).
+/// Input: the pattern after `^`, an absolute path first. Output: the filter.
+pub(crate) fn at_or_below(pattern: &str) -> String {
+    assert!(pattern.starts_with('/'));
+    format!("(regex #\"^{pattern}(/|$)\")")
+}
+
+/// The Seatbelt filters for a `.git` at any depth below `root`, top level included, in every
 /// spelling a case-insensitive volume finds ([`any_case`]): the part of [`ProjectSandbox::nested_git_denies`] for a root that is not a
-/// working tree (SM1-R). Input: the root. Output: the regex filter.
+/// working tree (SM1-R), as [`at_or_below`] spells it. Input: the root. Output: the filters.
 fn any_depth_git(root: &Path) -> String {
-    format!(
-        "(regex #\"^{}/(.+/)?{}(/.*)?$\")",
+    at_or_below(&format!(
+        "{}/(.+/)?{}",
         seatbelt_pattern(root),
         any_case(".git")
-    )
+    ))
 }
 
 /// The base write denies a profile gives again after it grants writes once more to the agent
@@ -5032,8 +5124,8 @@ fn any_depth_git(root: &Path) -> String {
 pub(crate) fn regranted_denies(home: &Path, folders: &[&Path]) -> String {
     let mut text = launch_denies(home);
     text.push_str(&format!(
-        "(deny file-write-flags file-write-acl (regex #\"^{}(/.*)?$\"))\n",
-        seatbelt_pattern(home)
+        "(deny file-write-flags file-write-acl {})\n",
+        at_or_below(&seatbelt_pattern(home))
     ));
     let mut nested = String::new();
     for root in std::iter::once(home).chain(folders.iter().copied()) {
@@ -5170,10 +5262,6 @@ pub(crate) fn windows_clean_text(text: &str) -> bool {
     })
 }
 
-/// The canonical form of an existing path. On Windows the verbatim `\\?\` prefix that
-/// `canonicalize` adds to a drive path is removed, so the result equals the plain drive path;
-/// any other verbatim form stays as it is and fails [`clean_absolute`]. Input: the path.
-/// Output: the canonical path, or the I/O error.
 /// The npm package folder a Node script harness sits in: `<prefix>/lib/node_modules/<name>`,
 /// or `<prefix>/lib/node_modules/@scope/<name>` for a scoped package, which holds the
 /// harness's own dependencies. Inputs: the prefix and the program under it. Output: the
@@ -5190,6 +5278,11 @@ fn node_package(prefix: &Path, program: &Path) -> Option<PathBuf> {
     (program != package.as_path() && program.starts_with(&package)).then_some(package)
 }
 
+/// The canonical form of an existing path. On macOS a path named through the data volume
+/// comes back under its short name, so a root given in the long name is not canonical. On
+/// Windows the verbatim `\\?\` prefix `canonicalize` adds to a drive path is removed; any other
+/// verbatim form stays and fails [`clean_absolute`]. Input: the path. Output: the canonical
+/// path, or the I/O error.
 pub(crate) fn canonical(path: &Path) -> io::Result<PathBuf> {
     let resolved = path.canonicalize()?;
     #[cfg(target_os = "windows")]
@@ -5200,7 +5293,26 @@ pub(crate) fn canonical(path: &Path) -> io::Result<PathBuf> {
     {
         return Ok(PathBuf::from(plain));
     }
-    Ok(resolved)
+    Ok(crate::projects_home::one_spelling(resolved))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod owner_home_tests {
+    use super::settled_home;
+    use std::path::PathBuf;
+
+    /// V243-FIRMLINK-SWEEP D1: an owner home the account names through /System/Volumes/Data
+    /// settles to its short name, the spelling every sandbox root has, so the owner home and
+    /// secret denies built from it still match.
+    #[test]
+    fn a_home_named_through_the_data_volume_settles_to_its_short_name() {
+        let base = tempfile::tempdir().unwrap();
+        let short = base.path().canonicalize().unwrap();
+        let long = PathBuf::from(format!("/System/Volumes/Data{}", short.display()));
+        assert!(long.is_dir());
+        assert_eq!(settled_home(long).unwrap(), short);
+        assert_eq!(settled_home(short.clone()).unwrap(), short);
+    }
 }
 
 #[cfg(test)]
@@ -5266,7 +5378,7 @@ mod windows_path_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod linux_sockets_tests {
     use super::*;
     use crate::sandbox::elf::tests::executable;
@@ -5514,13 +5626,18 @@ mod linux_sockets_tests {
 
     #[test]
     fn the_strict_refusal_has_its_own_code_and_reads_plainly() {
-        assert!(linux_not_full(&SandboxError::Unavailable(
-            LINUX_NOT_FULL_LINE.into()
-        )));
-        assert!(!linux_not_full(&SandboxError::Unavailable("other".into())));
-        assert!(!linux_not_full(&SandboxError::Invalid(
-            LINUX_NOT_FULL_LINE.into()
-        )));
+        assert_eq!(
+            refusal_code(&SandboxError::Unavailable(LINUX_NOT_FULL_LINE.into())),
+            Some(LINUX_NOT_FULL)
+        );
+        assert_eq!(
+            refusal_code(&SandboxError::Unavailable("other".into())),
+            None
+        );
+        assert_eq!(
+            refusal_code(&SandboxError::Invalid(LINUX_NOT_FULL_LINE.into())),
+            None
+        );
         let line = crate::config::plain_problem(LINUX_NOT_FULL);
         assert!(line.is_some(), "the strict refusal has a plain sentence");
         let line = line.unwrap();
@@ -5530,6 +5647,45 @@ mod linux_sockets_tests {
             "Settings",
         ] {
             assert!(line.contains(part), "{line}");
+        }
+    }
+
+    /// rv-code4 F2 (#622): each Linux refusal of hidden folders, where bubblewrap cannot
+    /// start agents in namespaces of their own, where a second mount shows the folder and
+    /// where the helper cannot cut the agent's mounts off (V24x-LINUX-NEST-MOUNT-PROPAGATION),
+    /// has its own code, so the owner reads what to change instead of the generic line.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_hidden_folder_refusals_have_their_own_codes_and_read_plainly() {
+        for (reason, code, parts) in [
+            (
+                linux::HIDDEN_NEEDS_NAMESPACES,
+                LINUX_HIDDEN_NEEDS_NAMESPACES,
+                ["bubblewrap", "namespaces", "Hidden folders"],
+            ),
+            (
+                linux::HIDDEN_MOUNTED_AGAIN,
+                LINUX_HIDDEN_MOUNTED_AGAIN,
+                [
+                    "mounted a second time",
+                    "remove that mount",
+                    "Hidden folders",
+                ],
+            ),
+            (
+                linux::HIDDEN_MOUNTS_NOT_PRIVATE,
+                LINUX_HIDDEN_MOUNTS_NOT_PRIVATE,
+                ["user namespaces", "later mount", "Hidden folders"],
+            ),
+        ] {
+            let refused = SandboxError::Unavailable(reason.into());
+            assert_eq!(refusal_code(&refused), Some(code));
+            let line = crate::config::plain_problem(code);
+            assert!(line.is_some(), "{code} has a plain sentence");
+            let line = line.unwrap();
+            for part in parts {
+                assert!(line.contains(part), "{line}");
+            }
         }
     }
 
@@ -5897,7 +6053,7 @@ mod profile_string_tests {
         let open: Vec<String> = (0..64)
             .map(|at| format!("{at:02}{}", "n".repeat(40)))
             .collect();
-        let wide = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+        let wide = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Open)
             .unwrap()
             .keep_project_secrets(&project, &[])
             .unwrap()
@@ -5950,5 +6106,110 @@ mod profile_string_tests {
             other => panic!("{other:?}"),
         }
         assert!(!target.exists());
+    }
+
+    /// V243-FARM2-PRODUCT-SMALL: the agent home's config and kept-entry denies and the
+    /// regranted flag and `.git` denies match a path and everything below it as one `X(/|$)`
+    /// regex, never with a `(/.*)` tail, which libsandbox fails to compile again in lower case
+    /// after a fold group with no bracket class before it (V243-PROFILE-CAP-ROW).
+    #[test]
+    fn home_denies_match_at_or_below_without_an_optional_tail() {
+        let home = Path::new("/private/tmp/.tmpA1b2C3/agent/home");
+        let data = Path::new("/private/tmp/.tmpA1b2C3/data");
+        let config = agent_config_denies(home);
+        assert!(!config.contains("(/.*)"), "{config}");
+        let regranted = regranted_denies(home, &[data]);
+        assert!(!regranted.contains("(/.*)"), "{regranted}");
+        let flagged = seatbelt_pattern(home);
+        assert!(
+            regranted.contains(&format!(
+                "(deny file-write-flags file-write-acl (regex #\"^{flagged}(/|$)\"))"
+            )),
+            "{regranted}"
+        );
+        let git = any_case(".git");
+        for root in [home, data] {
+            let below = format!("{}/(.+/)?{git}", seatbelt_pattern(root));
+            assert!(
+                regranted.contains(&format!("(regex #\"^{below}(/|$)\")")),
+                "{regranted}"
+            );
+        }
+    }
+
+    /// V243-FARM2-PRODUCT-SMALL: no regex of a closed-tops agent's profile, a clone's store
+    /// denies or a home's config denies holds a `(/.*)` tail. libsandbox fails its second,
+    /// lower-case compile of one after a fold group with no bracket class or wildcard before
+    /// it, as `^/x/(s|S)(/.*)?$` (probed 11-17), so each is one `X(/|$)` regex instead
+    /// (V243-PROFILE-CAP-ROW). The HFS rule alone keeps a tail, after its leading `(.*/)?`,
+    /// which compiles.
+    #[test]
+    fn no_profile_regex_has_a_slash_tail() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let (home, tmp, project) = (base.join("home"), base.join("tmp"), base.join("project"));
+        for folder in [&home, &tmp, &project] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+            .unwrap()
+            .keep_project_secrets(&project, &[])
+            .unwrap()
+            .open_only_tops(&["notes".to_string()])
+            .unwrap();
+        let text = [
+            sandbox.profile(),
+            clone_store_denies(&base.join("clone")),
+            agent_config_denies(&home),
+        ]
+        .concat();
+        let hfs = hfs_ignored_deny();
+        assert_eq!(text.matches(hfs.as_str()).count(), 1);
+        let text = text.replace(hfs.as_str(), "");
+        let bodies: Vec<&str> = text
+            .split("#\"")
+            .skip(1)
+            .filter_map(|rest| rest.split_once('"').map(|(body, _)| body))
+            .collect();
+        assert!(bodies.len() > 20, "{text}");
+        let tailed: Vec<&&str> = bodies
+            .iter()
+            .filter(|body| body.contains("(/.*)"))
+            .collect();
+        assert!(tailed.is_empty(), "{tailed:#?}");
+        let below = bodies.iter().filter(|body| body.ends_with("(/|$)")).count();
+        assert!(below >= 20, "{below}");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod firmlink_tests {
+    use super::*;
+
+    /// V243-FIRMLINK-SANDBOX-ROOT (sweep #3): a root named through /System/Volumes/Data is
+    /// refused, since Seatbelt matches only the short name and every rule written in the long
+    /// one would never match; an extra read path typed that way is checked under its short
+    /// name, so one holding the engine's data is refused.
+    #[test]
+    fn a_root_named_through_the_data_volume_is_refused_and_a_read_path_is_checked_short() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for folder in ["project", "home", "tmp", "engine"] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        let long = |path: &Path| PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+        assert!(long(&root.join("project")).is_dir());
+        let network = || SandboxNetwork::Only(Vec::new());
+        let (home, tmp) = (root.join("home"), root.join("tmp"));
+        let refused = ProjectSandbox::new(&long(&root.join("project")), &home, &tmp, network());
+        assert!(
+            matches!(&refused, Err(SandboxError::Invalid(reason)) if reason.contains("canonical")),
+            "{refused:?}"
+        );
+        assert!(ProjectSandbox::new(&root.join("project"), &home, &tmp, network()).is_ok());
+        assert_eq!(
+            extra_paths::checked(long(&root).to_str().unwrap(), &root.join("engine")),
+            Err("read_path_engine_data")
+        );
     }
 }

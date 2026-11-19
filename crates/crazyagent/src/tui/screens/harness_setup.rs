@@ -4,7 +4,7 @@ use super::settings_harnesses::plain_update;
 use super::{Flow, Place, Screen, open};
 use crate::harnesses::HarnessEntry;
 use crate::harnesses::update::HarnessVersions;
-use crate::setup::{Dependency, DependencyState};
+use crate::setup::{Dependency, DependencyState, SetupStatus};
 use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::Ctx;
@@ -178,6 +178,23 @@ pub(super) fn node_offer(needed: bool, node: Option<&DependencyState>, busy: boo
     }
 }
 
+/// Setup's Node row as the Node.js offer reads it: installing while a job on Node runs, the
+/// setup run's step or a lone install, else its own state. Input: the setup status. Output:
+/// the state, none without a Node row.
+pub(super) fn node_row(status: &SetupStatus) -> Option<DependencyState> {
+    status
+        .dependencies
+        .iter()
+        .find(|tool| tool.name == Dependency::Node)
+        .map(|tool| {
+            if tool.busy {
+                DependencyState::Installing
+            } else {
+                tool.state.clone()
+            }
+        })
+}
+
 /// Tells whether the step reads again for Node while a harness needs it: setup's Node row is
 /// still being checked, or it reads found or installed while the harness read still needs
 /// Node, as when it was read just before Node was linked. Inputs: the need and the Node row's
@@ -214,10 +231,11 @@ pub(super) fn node_needed(versions: &HarnessVersions) -> bool {
 }
 
 /// Where an offered harness stands, in the desktop step's order: RCLI comes with the app; a
-/// running or queued install wins; a found harness the resolver can't run says what it needs;
-/// a failed install of a missing harness or a fresh install shows its result; else installed,
-/// the install line, or why it can't install. Inputs: the id, its catalog row, its versions
-/// (none while unread) and the queued ids.
+/// running install wins, and one held behind another harness's job or queued waits; a found
+/// harness the resolver can't run says what it needs; a failed install of a missing harness
+/// or a fresh install shows its result; else installed, the install line, or why it can't
+/// install. Inputs: the id, its catalog row, its versions (none while unread) and the queued
+/// ids.
 fn harness_row(
     id: &str,
     entry: Option<&HarnessEntry>,
@@ -230,10 +248,10 @@ fn harness_row(
     let Some(versions) = versions else {
         return Row::Reading;
     };
-    if versions.running {
+    if versions.running && versions.waiting.is_none() {
         return Row::Installing;
     }
-    if queued.iter().any(|waiting| waiting == id) {
+    if versions.running || queued.iter().any(|waiting| waiting == id) {
         return Row::Waiting;
     }
     let present = entry.is_some_and(|entry| entry.executable.is_some());
@@ -538,13 +556,7 @@ impl HarnessSetup {
                     return;
                 }
                 self.setup_busy = result.as_ref().is_ok_and(|status| status.running);
-                self.node = result.as_ref().ok().and_then(|status| {
-                    status
-                        .dependencies
-                        .iter()
-                        .find(|tool| tool.name == Dependency::Node)
-                        .map(|tool| tool.state.clone())
-                });
+                self.node = result.as_ref().ok().and_then(node_row);
             }
             SettingsEvent::AppSetup(AppSetupEvent::Installed(result)) => {
                 if !self.sending_node {

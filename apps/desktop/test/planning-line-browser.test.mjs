@@ -13,7 +13,7 @@ const APP_CSS = [
   readFileSync(new URL("../src/style.css", import.meta.url), "utf8").replace(/@import[^;]*;/g, ""),
   readFileSync(new URL("../src/screens/project/projects.css", import.meta.url), "utf8"),
 ].join("\n");
-const job = (status, report_path = null) => ({ id: "plan-1", kind: "planning", status, report_path, error: null });
+const job = (status, report_path = null) => ({ id: "plan-1", kind: "planning", status, report_path, error: null, retryable: status === "failed" || status === "cancelled" });
 const VIEWS = [
   ["not planned", planning.planningView({ kind: "idle" })],
   ["done", planning.planningView({ kind: "done", job: job("done", "docs/roadmap.md") })],

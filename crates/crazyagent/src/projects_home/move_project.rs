@@ -1,6 +1,6 @@
 use super::{
     AddMode, AddOverride, AddPlan, GitLink, LINKED_WORKTREES_MAX, Placed, Registered, Tally,
-    git_link, in_use, linked_worktree_paths, linked_worktrees, plan_add, refused,
+    git_link, in_use, linked_worktree_paths, linked_worktrees, one_spelling, plan_add, refused,
 };
 use crate::engine::EngineError;
 use crate::landing::RepositoryHolds;
@@ -17,6 +17,7 @@ pub const MOVE_STOP_WAIT: Duration = super::DELETE_STOP_WAIT;
 const MOVE_POLL: Duration = Duration::from_millis(100);
 const LANDING_REPOSITORIES_MAX: usize = 16;
 const COPIES_MAX: i64 = 4096;
+const KEPT_LOGGED_MAX: i64 = 64;
 
 /// Every stored column that holds an absolute path inside a project's folder and must
 /// follow the folder when it moves: the onboarding records keyed by the folder, each agent
@@ -69,11 +70,123 @@ fn under(column: &str) -> String {
     format!("({column}=?1 OR substr({column},1,length(?1)+1)=?1||'/')")
 }
 
-/// Says where a path inside the old project folder is after the move. Inputs: the path and
-/// both folders. Output: the same place inside the new folder, or None for a path outside
-/// the old one.
+/// The short name of a folder stored under the macOS data volume: the same path without the
+/// `/System/Volumes/Data` prefix, which [`checked`] made sure names the same folder before
+/// the move was planned. Input: the stored folder. Output: the short name, none otherwise.
+#[cfg(target_os = "macos")]
+fn short_name(origin: &Path) -> Option<PathBuf> {
+    let rest = origin.strip_prefix(super::DATA_VOLUME).ok()?;
+    Some(Path::new("/").join(rest))
+}
+
+/// Off macOS a folder has one name. Input: the stored folder. Output: none.
+#[cfg(not(target_os = "macos"))]
+fn short_name(_origin: &Path) -> Option<PathBuf> {
+    None
+}
+
+/// The names the old project folder's rows may use: as stored, and its short name when it
+/// is stored under the data volume. Input: the stored folder. Output: one or two names.
+fn origin_names(origin: &Path) -> Vec<PathBuf> {
+    let mut names = vec![origin.to_path_buf()];
+    names.extend(short_name(origin));
+    assert!(!names.is_empty() && names.len() <= 2);
+    names
+}
+
+/// Names each table where the old folder's two names hold one key: a row under the stored
+/// name and a row under its short name that the move would write to one key of a unique
+/// index, so one would replace the other. The short name's rows are written to the stored
+/// name inside a savepoint that is always rolled back, and each table's rows are counted.
+/// Inputs: the caller's write and the stored folder. Output: the tables, none for one name.
+fn held_twice(tx: &Connection, origin: &Path) -> Result<Vec<&'static str>, EngineError> {
+    let names = origin_names(origin);
+    let [long, short] = names.as_slice() else {
+        return Ok(Vec::new());
+    };
+    let (long, short) = (text(long)?, text(short)?);
+    tx.execute_batch("SAVEPOINT move_held_twice").map_err(sql)?;
+    let found = collapsed(tx, short, long);
+    let undone = tx
+        .execute_batch("ROLLBACK TO move_held_twice; RELEASE move_held_twice")
+        .map_err(sql);
+    let found = found?;
+    undone?;
+    Ok(found)
+}
+
+/// The tables of [`PATH_COLUMNS`] whose row count drops when every path under `from` is
+/// written under `to` the way the move's rewrite writes it, replacing a row that already
+/// holds the key. Inputs: a write inside a savepoint and both names. Output: the tables.
+fn collapsed(tx: &Connection, from: &str, to: &str) -> Result<Vec<&'static str>, EngineError> {
+    let rows = |table: &str| -> Result<i64, EngineError> {
+        tx.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .map_err(sql)
+    };
+    let mut tables: Vec<&'static str> = PATH_COLUMNS.iter().map(|(table, _)| *table).collect();
+    tables.dedup();
+    let mut found = Vec::new();
+    for table in tables {
+        if !present(tx, table).map_err(sql)? {
+            continue;
+        }
+        let before = rows(table)?;
+        for (_, column) in PATH_COLUMNS.iter().filter(|(named, _)| *named == table) {
+            tx.execute(
+                &format!(
+                    "UPDATE OR REPLACE {table} SET {column}=?2||substr({column},length(?1)+1)
+                     WHERE {}",
+                    under(column)
+                ),
+                params![from, to],
+            )
+            .map_err(sql)?;
+        }
+        let after = rows(table)?;
+        assert!(after >= 0 && after <= before);
+        if after < before {
+            found.push(table);
+        }
+    }
+    assert!(found.len() <= PATH_COLUMNS.len());
+    Ok(found)
+}
+
+/// Logs each key of `column` that a finished move kept on the old folder's stored name
+/// because the short name held the same key, which went live in the new folder: the table,
+/// the column and the key's place inside the folder, at most [`KEPT_LOGGED_MAX`] keys.
+/// Inputs: the write, the table, the column and the stored folder. Output: Ok.
+fn log_kept(tx: &Connection, table: &str, column: &str, origin: &Path) -> Result<(), EngineError> {
+    let mut statement = tx
+        .prepare(&format!(
+            "SELECT {column} FROM {table} WHERE {} LIMIT ?2",
+            under(column)
+        ))
+        .map_err(sql)?;
+    let rows = statement
+        .query_map(params![text(origin)?, KEPT_LOGGED_MAX], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(sql)?;
+    for row in rows {
+        let key = PathBuf::from(row.map_err(sql)?);
+        let inside = key.strip_prefix(origin).unwrap_or(Path::new(""));
+        eprintln!(
+            "move_project_rows_kept table={table} column={column} key={} long=kept_on_old_folder short=live_in_new_folder",
+            inside.display()
+        );
+    }
+    Ok(())
+}
+
+/// Says where a path inside the old project folder, under either of its names, is after
+/// the move. Inputs: the path and both folders. Output: the same place inside the new
+/// folder, or None for a path outside the old one.
 fn moved(path: &Path, origin: &Path, target: &Path) -> Option<PathBuf> {
-    let rest = path.strip_prefix(origin).ok()?;
+    let names = origin_names(origin);
+    let rest = names.iter().find_map(|name| path.strip_prefix(name).ok())?;
     Some(if rest.as_os_str().is_empty() {
         target.to_path_buf()
     } else {
@@ -99,12 +212,14 @@ pub(crate) struct Asked<'a> {
 }
 
 /// A checked move of one registered project into the projects home, recorded as pending
-/// before any disk work: the engine database, the project and the folder plan. Built only
-/// by [`plan`].
+/// before any disk work: the engine database, the project, its folder in the spelling it is
+/// stored under, which the engine's records name, and the folder plan. Built only by
+/// [`plan`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectMove {
     database: PathBuf,
     project: ProjectId,
+    origin: PathBuf,
     add: AddPlan,
 }
 
@@ -183,7 +298,7 @@ impl ProjectMove {
     /// blank or other text, a folder that cannot be read or no engine data folder.
     fn written_text(&self) -> Option<String> {
         let data = self.database.parent()?;
-        let source = self.add.source();
+        let source = self.origin.as_path();
         let text = crate::agent_home::read_project(source).ok()?;
         let owners = !text.trim().is_empty() && !crate::agent_home::outside(data, source, &text);
         owners.then_some(text)
@@ -217,7 +332,7 @@ impl ProjectMove {
                 Ok(0) | Err(_) => tally.waited(),
                 Ok(left) => tally.wait_for(left),
             }
-            if active == 0 && !crate::onboarding::service::refreshing_in(self.add.source()) {
+            if active == 0 && !crate::onboarding::service::refreshing_in(&self.origin) {
                 break;
             }
             if Instant::now() >= deadline {
@@ -227,13 +342,12 @@ impl ProjectMove {
         }
         assert!(!tally.waiting());
         let origin = self
-            .add
-            .source()
+            .origin
             .to_str()
             .ok_or_else(|| refused("move_project_unavailable"))?;
-        assert!(self.add.source().is_absolute());
+        assert!(self.origin.is_absolute());
         let landing = crate::landing::hold_repositories(
-            &landing_repositories(&db, &self.project, self.add.source())?,
+            &landing_repositories(&db, &self.project, &self.origin)?,
             deadline.saturating_duration_since(Instant::now()),
         )
         .ok_or_else(|| refused("move_project_busy"))?;
@@ -322,17 +436,18 @@ pub(crate) fn pending(connection: &Connection) -> Result<Option<Pending>, Engine
     .transpose()
 }
 
-/// The owner repositories landing work of the project runs in: the project's folder, and
-/// each repository one of its change sets names that is that folder or inside it, under
-/// the spelling the change set stores, since landing work takes its hold by that. Inputs:
-/// an engine connection, the project and its real folder. Output: the roots, or
-/// `move_project_unavailable` (also for more than [`LANDING_REPOSITORIES_MAX`]).
-fn landing_repositories(
+/// The owner repositories landing work of the project runs in, in each spelling landing
+/// work takes its hold by: the project's folder under both names of a data-volume folder,
+/// and each repository a change set names, as stored, that is that folder or inside it
+/// under either name. Inputs: an engine connection, the project and its stored folder.
+/// Output: the roots, or `move_project_unavailable` (also past the max).
+pub(super) fn landing_repositories(
     db: &Connection,
     project: &ProjectId,
     origin: &Path,
 ) -> Result<BTreeSet<PathBuf>, EngineError> {
-    let mut roots = BTreeSet::from([origin.to_path_buf()]);
+    let short = one_spelling(origin.to_path_buf());
+    let mut roots = BTreeSet::from([origin.to_path_buf(), short.clone()]);
     if !present(db, "landing_change_sets").map_err(sql)? {
         return Ok(roots);
     }
@@ -345,10 +460,12 @@ fn landing_repositories(
             |row| row.get::<_, String>(0),
         )
         .map_err(sql)?;
+    let under_origin = |path: &Path| path.starts_with(origin) || path.starts_with(&short);
     for repository in stored {
         let repository = PathBuf::from(repository.map_err(sql)?);
-        let inside = repository.starts_with(origin)
-            || std::fs::canonicalize(&repository).is_ok_and(|real| real.starts_with(origin));
+        let inside = under_origin(&repository)
+            || std::fs::canonicalize(&repository)
+                .is_ok_and(|real| under_origin(&one_spelling(real)));
         if inside {
             roots.insert(repository);
         }
@@ -375,9 +492,10 @@ pub(crate) fn holds(connection: &Connection, folder: &Path) -> rusqlite::Result<
         )
         .optional()?;
     Ok(origin.is_some_and(|origin| {
-        let origin = Path::new(&origin);
-        folder.starts_with(origin)
-            || std::fs::canonicalize(folder).is_ok_and(|real| real.starts_with(origin))
+        let origin = one_spelling(PathBuf::from(origin));
+        folder.starts_with(&origin)
+            || std::fs::canonicalize(folder)
+                .is_ok_and(|real| one_spelling(real).starts_with(&origin))
     }))
 }
 
@@ -399,9 +517,10 @@ pub(crate) fn lands(connection: &Connection, folder: &Path) -> rusqlite::Result<
         )
         .optional()?;
     Ok(target.is_some_and(|target| {
-        let target = Path::new(&target);
-        folder.starts_with(target)
-            || std::fs::canonicalize(folder).is_ok_and(|real| real.starts_with(target))
+        let target = one_spelling(PathBuf::from(target));
+        folder.starts_with(&target)
+            || std::fs::canonicalize(folder)
+                .is_ok_and(|real| one_spelling(real).starts_with(&target))
     }))
 }
 
@@ -512,32 +631,47 @@ fn linked_agent_copies(tx: &Transaction<'_>, origin: &Path) -> Result<bool, Engi
 }
 
 /// What the checks of a project move that read nothing inside its folder found: the projects
-/// home, the project's real folder and every other registered project.
+/// home and the project's real folder, both in their stored spelling, which the records of
+/// the move and of the project's work compare as text, and every other registered project.
 struct Checked {
     home: PathBuf,
     real: PathBuf,
     others: Vec<Registered>,
 }
 
+/// What a project move job's start check found, writing nothing: the project's real folder
+/// as text, whether an add runs and whether another project move is pending. The engine lets
+/// the move wait its turn behind its own add and move jobs and refuses it for any other
+/// (DEC-197).
+#[derive(Debug)]
+pub(crate) struct MoveCheck {
+    pub(crate) source: String,
+    pub(crate) adding: bool,
+    pub(crate) moving: bool,
+}
+
 /// Checks a project move as far as it can without reading inside the folder, so a job that
-/// would be refused is refused before it starts: another project move pending
-/// (`move_project_in_progress`), no projects home, an unknown project, a project without
-/// setup, a folder gone (`home_source_missing`), already in the home
+/// would be refused is refused before it starts: no projects home, an unknown project, a
+/// project without setup, a folder gone (`home_source_missing`), already in the home
 /// (`move_project_already_home`) or reached through a link (`move_project_folder_link`),
-/// another project using the folder (`home_move_project`), what [`busy`] names, and a Copy
-/// while an agent works in a linked worktree (`move_project_copy_worktrees`). Nothing is
-/// written. Inputs: the transaction, the guarded projects, the project and the mode.
-/// Output: the project's real folder, or the refusal code.
+/// another project using the folder (`home_move_project`), what [`busy`] names, a key the
+/// folder's two names both hold (`move_project_two_spellings`), and a Copy while an agent
+/// works in a linked worktree (`move_project_copy_worktrees`). Another project move pending
+/// is reported, not refused, so the engine lets the move wait behind its own move job
+/// (DEC-197); [`plan`] still refuses it. Nothing is written. Inputs: the transaction, the
+/// guarded projects, the project and the mode. Output: the project's real folder and whether
+/// another project move is pending, or the refusal code.
 pub(crate) fn check(
     tx: &Transaction<'_>,
     registered: &[Registered],
     project: &ProjectId,
     mode: AddMode,
-) -> Result<PathBuf, EngineError> {
+) -> Result<(PathBuf, bool), EngineError> {
+    let moving = pending(tx)?.is_some();
     let found = checked(tx, registered, project, mode)?;
     assert!(found.real.is_absolute());
     assert!(!found.real.starts_with(&found.home));
-    Ok(found.real)
+    Ok((found.real, moving))
 }
 
 /// The checks [`check`] names, keeping what they found for [`plan`]. Inputs: as
@@ -548,9 +682,6 @@ fn checked(
     project: &ProjectId,
     mode: AddMode,
 ) -> Result<Checked, EngineError> {
-    if pending(tx)?.is_some() {
-        return Err(refused("move_project_in_progress"));
-    }
     let home = super::load(tx)?.ok_or_else(|| refused("projects_home_unset"))?;
     let found = registered
         .iter()
@@ -566,10 +697,10 @@ fn checked(
         return Err(refused("project_setup_missing"));
     }
     let real = std::fs::canonicalize(&found.folder).map_err(|_| refused("home_source_missing"))?;
-    if real.starts_with(&home) {
+    if one_spelling(real.clone()).starts_with(one_spelling(home.clone())) {
         return Err(refused("move_project_already_home"));
     }
-    if real != found.folder {
+    if real != found.folder || (short_name(&real).is_some() && one_spelling(real.clone()) == real) {
         return Err(refused("move_project_folder_link"));
     }
     let source = text(&real)?;
@@ -584,6 +715,10 @@ fn checked(
     if let Some(code) = busy(tx, project, source)? {
         return Err(refused(code));
     }
+    if let Some(table) = held_twice(tx, &real)?.first() {
+        eprintln!("move_project_two_spellings table={table}");
+        return Err(refused("move_project_two_spellings"));
+    }
     if mode == AddMode::Copy && linked_agent_copies(tx, &real)? {
         return Err(refused("move_project_copy_worktrees"));
     }
@@ -595,10 +730,12 @@ fn checked(
 /// the hold: no agent or research run starts in the folder until the move is finished or
 /// forgotten ([`holds`]). Refusals, with nothing written: another project move pending
 /// (`move_project_in_progress`), no projects home, a project without setup, a folder
-/// already in the home (`move_project_already_home`), a folder reached through a link
-/// (`move_project_folder_link`), another project using the folder (`home_move_project`),
-/// what [`busy`] names, a Copy while an agent works in a linked worktree
-/// (`move_project_copy_worktrees`), a Move that breaks git worktrees kept outside the
+/// already in the home (`move_project_already_home`), a folder reached through a link or
+/// stored under the data volume with no short name (`move_project_folder_link`), another
+/// project using the folder (`home_move_project`), what [`busy`] names, a key the
+/// folder's two names both hold (`move_project_two_spellings`), a Copy while an agent
+/// works in a linked worktree (`move_project_copy_worktrees`), a Move that breaks git
+/// worktrees kept outside the
 /// folder unless the owner went past it (`home_move_worktrees`), every refusal of
 /// [`plan_add`], and a destination another project's folder or repository still names,
 /// even one gone from disk (`home_destination_exists`), whose stored rows the move would
@@ -612,6 +749,9 @@ pub(crate) fn plan(
     asked: &Asked<'_>,
 ) -> Result<ProjectMove, EngineError> {
     assert!(asked.exchange > 0);
+    if pending(tx)?.is_some() {
+        return Err(refused("move_project_in_progress"));
+    }
     let Checked { home, real, others } = checked(tx, registered, asked.project, asked.mode)?;
     let source = text(&real)?;
     let mut overrides = asked.overrides.to_vec();
@@ -631,7 +771,7 @@ pub(crate) fn plan(
         overrides.push(AddOverride::Worktrees);
     }
     let add = plan_add(&home, engine_root, source, asked.mode, &overrides, &others)?;
-    assert_eq!(add.source(), real);
+    assert_eq!(add.source(), one_spelling(real.clone()));
     assert!(add.destination().starts_with(&home));
     if others
         .iter()
@@ -657,6 +797,7 @@ pub(crate) fn plan(
     Ok(ProjectMove {
         database: database.to_path_buf(),
         project: asked.project.clone(),
+        origin: real,
         add,
     })
 }
@@ -731,7 +872,7 @@ pub(crate) fn finish(
 /// git then refuses it instead of reading another store. Inputs: the transaction and both
 /// folders. Output: how many copies were rewritten.
 fn repoint(tx: &Transaction<'_>, origin: &Path, target: &Path) -> Result<usize, EngineError> {
-    let from = text(origin)?;
+    let names = origin_names(origin);
     let mut copies: Vec<(String, String, String)> = Vec::new();
     for table in COPY_TABLES {
         if !present(tx, table).map_err(sql)? {
@@ -742,15 +883,17 @@ fn repoint(tx: &Transaction<'_>, origin: &Path, target: &Path) -> Result<usize, 
             under("git_dir")
         );
         let mut statement = tx.prepare(&query).map_err(sql)?;
-        let rows = statement
-            .query_map(params![from, COPIES_MAX], |row| {
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-            })
-            .map_err(sql)?;
-        for row in rows {
-            let copy = row.map_err(sql)?;
-            if !copies.contains(&copy) {
-                copies.push(copy);
+        for name in &names {
+            let rows = statement
+                .query_map(params![text(name)?, COPIES_MAX], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .map_err(sql)?;
+            for row in rows {
+                let copy = row.map_err(sql)?;
+                if !copies.contains(&copy) {
+                    copies.push(copy);
+                }
             }
         }
     }
@@ -797,7 +940,11 @@ fn repoint(tx: &Transaction<'_>, origin: &Path, target: &Path) -> Result<usize, 
 /// new folder. A stale row already at the new path gives way to
 /// the moved one; [`plan`] refused a destination any other project still names, so such a
 /// row belongs to no project, and a plain UPDATE that failed here would leave a folder
-/// already moved unrecorded. Records of what was said or done (prompts, messages, events)
+/// already moved unrecorded. Where the old folder's two names hold one key, the short
+/// name's row goes live in the new folder and the stored name's row stays on the old path,
+/// logged by [`log_kept`]: rows are now written in the short name, so it is the newer one.
+/// [`plan`] refuses such a move, so only rows written after the plan get here; none is
+/// deleted. Records of what was said or done (prompts, messages, events)
 /// and of the master's identity-pinned working copies keep the old path. Inputs: the
 /// transaction, the project and both folders. Output: Ok, or the bound a moved path breaks.
 fn rewrite(
@@ -806,7 +953,7 @@ fn rewrite(
     origin: &Path,
     target: &Path,
 ) -> Result<(), EngineError> {
-    let (from, to) = (text(origin)?, text(target)?);
+    let to = text(target)?;
     let json = |e: serde_json::Error| EngineError(e.to_string());
     let body: Option<String> = tx
         .query_row(
@@ -867,19 +1014,39 @@ fn rewrite(
             .map_err(sql)?;
         }
     }
+    let names = origin_names(origin);
+    let kept = held_twice(tx, origin)?;
     for (table, column) in PATH_COLUMNS {
         if !present(tx, table).map_err(sql)? {
             continue;
         }
-        tx.execute(
-            &format!(
-                "UPDATE OR REPLACE {table} SET {column}=?2||substr({column},length(?1)+1)
-                 WHERE {}",
-                under(column)
-            ),
-            params![from, to],
-        )
-        .map_err(sql)?;
+        let held = kept.contains(&table);
+        let passes: Vec<(&Path, &str)> = if held {
+            assert_eq!(names.len(), 2);
+            vec![
+                (names[1].as_path(), "REPLACE"),
+                (names[0].as_path(), "IGNORE"),
+            ]
+        } else {
+            names
+                .iter()
+                .map(|name| (name.as_path(), "REPLACE"))
+                .collect()
+        };
+        for (name, conflict) in passes {
+            tx.execute(
+                &format!(
+                    "UPDATE OR {conflict} {table} SET {column}=?2||substr({column},length(?1)+1)
+                     WHERE {}",
+                    under(column)
+                ),
+                params![text(name)?, to],
+            )
+            .map_err(sql)?;
+        }
+        if held {
+            log_kept(tx, table, column, origin)?;
+        }
     }
     Ok(())
 }

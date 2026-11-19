@@ -17,7 +17,7 @@ mod master_rebind_tests;
 mod master_resolve;
 mod master_runtime;
 use crate::coordination::{Role, WorkerBinding};
-use crate::engine::{Engine, io_error, read_frame, verify_peer};
+use crate::engine::{Engine, io_error, owner_trace as trace, read_frame, verify_peer};
 use crate::model_gateway::{ConnectionState, Observation};
 use crate::platform::FileExt;
 use crate::platform::unix_socket::{UnixListener, UnixStream};
@@ -52,6 +52,7 @@ pub(crate) mod ide;
 pub(crate) mod ide_extensions;
 pub(crate) mod ide_tab;
 mod intake;
+mod narrowing;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod overview;
@@ -66,6 +67,8 @@ pub(crate) mod terminal;
 pub(crate) mod usage;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
 use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
+#[cfg(all(test, unix))]
+mod intake_parallel_tests;
 #[cfg(all(test, unix))]
 mod native_auth_channel_tests;
 #[cfg(all(test, unix))]
@@ -92,6 +95,7 @@ const SOCKET: &str = "owner.sock";
 const REPLY_LOG: &str = "owner-reply.log";
 const CLIENTS_MAX: usize = crate::protocol::OWNER_CLIENTS_MAX;
 const DEFERRED_MAX: usize = 4;
+const _: () = assert!(2 * crate::instruction_cleanup::CLEANUPS_MAX <= DEFERRED_MAX);
 const HANDSHAKES_MAX: usize = crate::protocol::OWNER_CLIENTS_MAX;
 const REFUSALS_MAX: usize = 4;
 const KEYS: [&str; 2] = ["owner-tui.cap", "owner-desktop.cap"];
@@ -516,6 +520,7 @@ struct Authority {
     reproof_left: Mutex<Option<std::collections::BTreeSet<CredentialRef>>>,
     icloud: crate::projects_home::icloud::Downloads,
     intake: intake::Intake,
+    drain: Mutex<narrowing::Drain>,
 }
 
 /// Removes what an earlier engine left at a runner folder's place beside the engine's root
@@ -1141,6 +1146,24 @@ impl OwnerRuntimeHandle {
         self.authority.host.clone()
     }
 
+    /// The owner client kinds this engine run holds active, the ones an owner can sign in
+    /// as; a revoked kind stays refused. Output: the kinds, in registration order, or
+    /// `owner_authority_unavailable`.
+    #[cfg(unix)]
+    pub(crate) fn active_kinds(&self) -> Result<Vec<OwnerClientKind>, EngineError> {
+        let slots = self
+            .authority
+            .slots
+            .lock()
+            .map_err(|_| failure("owner_authority_unavailable"))?;
+        assert!(slots.len() <= KEYS.len());
+        Ok(slots
+            .iter()
+            .filter(|slot| slot.registration.active)
+            .map(|slot| slot.registration.kind)
+            .collect())
+    }
+
     pub fn epoch(&self, kind: OwnerClientKind) -> Result<i64, EngineError> {
         let slots = self
             .authority
@@ -1159,9 +1182,25 @@ impl OwnerRuntimeHandle {
     /// Orders a trusted host grant change with actor work and response delivery.
     /// Takes an exact control identity, client kind and expected grant epoch. Returns
     /// committed status; prior delivered data cannot be recalled. A revocation that fails in
-    /// any way refuses the client at once; what storage commits late still takes effect.
+    /// any way refuses the client at once; it is kept on disk first, so one storage never
+    /// took lands later or at the next open, and that one is answered pending.
     pub async fn control(&self, control: OwnerControl) -> Result<OwnerControlReply, EngineError> {
         let (target, decision) = (control.target, control.decision);
+        let kept = match decision {
+            OwnerDecision::Revoke => {
+                self.keep_narrowing(crate::storage::narrowing::Change::Revoke {
+                    operation_id: control.operation_id.clone(),
+                    target,
+                    expected_epoch: control.expected_epoch,
+                })
+                .await
+            }
+            OwnerDecision::Reactivate => None,
+        };
+        let pending = kept.clone().map(|id| narrowing::Pending::Revoke {
+            control: control.clone(),
+            id,
+        });
         let barrier =
             tokio::time::timeout(self.engine.timeout, self.engine.owner_egress.write()).await;
         let submitted = self.authority.next_control();
@@ -1171,7 +1210,7 @@ impl OwnerRuntimeHandle {
             let authority = self.authority.clone();
             self.engine
                 .settled_owner_job(
-                    |reply| Job::OwnerControl(self.authority.host.clone(), control, reply),
+                    |reply| Job::OwnerControl(self.authority.host.clone(), control, kept, reply),
                     move |stored| {
                         let (result, registration) = stored?;
                         authority.publish(registration, submitted).map_err(|_| {
@@ -1187,7 +1226,7 @@ impl OwnerRuntimeHandle {
             _ => Ok(()),
         };
         drop(barrier);
-        closed.and(committed)
+        closed.and(self.pending_unless_taken(committed, pending))
     }
 
     /// Looks up an exact host control through the current storage actor.
@@ -1380,6 +1419,7 @@ impl OwnerServer {
                 reproof_left: Mutex::new(None),
                 icloud: crate::projects_home::icloud::Downloads::default(),
                 intake: intake::Intake::default(),
+                drain: Mutex::new(narrowing::Drain::default()),
             });
             Ok::<_, EngineError>((listener, authority))
         })();
@@ -1514,9 +1554,9 @@ impl OwnerServer {
             }
             let engine = self.engine.clone();
             let authority = self.authority.clone();
-            tasks.clients.spawn(async move {
+            tasks.clients.spawn(trace::connection(async move {
                 serve_authenticated_owner(stream, auth, engine, authority, deadline).await;
-            });
+            }));
         }
     }
 
@@ -1787,20 +1827,22 @@ impl Engine {
         let (send, receive) = oneshot::channel();
         let job = build(send);
         let deadline = job.reply_deadline(self.timeout);
-        self.storage
-            .sender
-            .try_send(job)
-            .map_err(|_| failure("owner_queue_not_submitted"))?;
+        let submit_by = tokio::time::Instant::now() + self.timeout;
+        let taken = self
+            .storage
+            .submit(job, submit_by, "owner_queue_not_submitted")
+            .await?;
         tokio::time::timeout(deadline, receive)
             .await
-            .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
+            .map_err(|_| taken.lost(failure("owner_outcome_unknown_reconcile_same_identity")))?
             .map_err(|_| failure("owner_actor_stopped_outcome_unknown"))?
     }
 
     /// Runs one owner storage job and hands storage's answer to `settle` even when the owner
     /// stops waiting first, so what storage commits late still takes effect in memory.
-    /// Inputs: the job and the settle step. Output: the settle step's answer, or the owner
-    /// outcome-unknown error while storage has not answered in time or went away.
+    /// Inputs: the job and the settle step. Output: the settle step's answer; a not-submitted
+    /// code, with nothing to settle; access_change_pending for a narrowing job; else the owner
+    /// outcome-unknown error when a taken job does not answer in time or storage went away.
     async fn settled_owner_job<T: Send + 'static, U: Send + 'static>(
         &self,
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
@@ -1809,10 +1851,23 @@ impl Engine {
         let (send, receive) = oneshot::channel();
         let job = build(send);
         let deadline = job.reply_deadline(self.timeout);
-        self.storage
-            .sender
-            .try_send(job)
-            .map_err(|_| failure("owner_queue_not_submitted"))?;
+        let submit_by = tokio::time::Instant::now() + self.timeout;
+        let submitted = self
+            .storage
+            .submit(job, submit_by, "owner_queue_not_submitted")
+            .await;
+        let taken = match submitted {
+            Ok(taken) => taken,
+            Err(pending) if pending.0 == crate::storage::ACCESS_CHANGE_PENDING => {
+                tokio::spawn(async move {
+                    if let Ok(stored) = receive.await {
+                        let _ = settle(stored);
+                    }
+                });
+                return Err(pending);
+            }
+            Err(refused) => return Err(refused),
+        };
         let settled = tokio::spawn(async move {
             match receive.await {
                 Ok(stored) => settle(stored),
@@ -1821,7 +1876,7 @@ impl Engine {
         });
         tokio::time::timeout(deadline, settled)
             .await
-            .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
+            .map_err(|_| taken.lost(failure("owner_outcome_unknown_reconcile_same_identity")))?
             .map_err(|_| failure("owner_actor_stopped_outcome_unknown"))?
     }
 
@@ -2309,7 +2364,7 @@ async fn serve_admitted(
     deadline: Instant,
 ) {
     let body = &frame[4..];
-    let exchange = async {
+    let exchange = trace::ended(async {
         let Some(a) = admission else {
             let request: RunnerRequest =
                 serde_json::from_slice(body).map_err(|_| failure("runner_request_invalid"))?;
@@ -2364,7 +2419,7 @@ async fn serve_admitted(
             Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
             Protocol::Roadmap => return Ok(Some(Deferred::Roadmap(a))),
             Protocol::NativeAuth => {
-                return native_auth::serve(stream, engine, authority, auth, &a, body)
+                return native_auth::serve(stream, engine, authority, auth, &a, body, deadline)
                     .await
                     .map(|()| None);
             }
@@ -2383,7 +2438,6 @@ async fn serve_admitted(
                     .map(|()| None);
             }
             Protocol::IdeTab => return Ok(Some(Deferred::IdeTab(a))),
-            Protocol::Icloud if icloud::deferred(body) => return Ok(Some(Deferred::Icloud(a))),
             Protocol::Icloud => {
                 return icloud::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2395,7 +2449,7 @@ async fn serve_admitted(
         }
         let request: OwnerRequest =
             serde_json::from_slice(body).map_err(|_| failure("owner_request_invalid"))?;
-        request.validate()?;
+        trace::request(&request).validate()?;
         if projects_home::handles(&request) {
             return Ok(Some(Deferred::ProjectsHome(a, Box::new(request))));
         }
@@ -2471,7 +2525,7 @@ async fn serve_admitted(
                 .map(|()| None);
         }
         if let OwnerOperation::Reconcile { operation_id, .. } = &request.operation
-            && projects_home::running(authority, &a, operation_id)
+            && trace::held(projects_home::running(authority, &a, operation_id))
         {
             let reply = projects_home::still_running(engine, authority, auth, &a, operation_id)
                 .await
@@ -2513,7 +2567,8 @@ async fn serve_admitted(
         write_owner_reply(stream, result, id, mutation)
             .await
             .map(|()| None)
-    };
+    });
+    let exchange = crate::storage::before_cut(deadline, engine.timeout, exchange);
     let Ok(Ok(Some(deferred))) = tokio::time::timeout_at(deadline, exchange).await else {
         return;
     };
@@ -2536,65 +2591,77 @@ async fn serve_admitted(
         }
         Deferred::Agents(a) => {
             let served = agents::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(agents::CONTROL_TIMEOUT, served).await;
+            within(agents::CONTROL_TIMEOUT, served).await;
         }
         Deferred::Changes(a) => {
             let served = changes::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(changes::CHANGES_TIMEOUT, served).await;
+            within(changes::CHANGES_TIMEOUT, served).await;
         }
         Deferred::IdeExtensions(a) => {
             let served = ide_extensions::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(ide_extensions::IDE_EXTENSIONS_TIMEOUT, served).await;
+            within(ide_extensions::IDE_EXTENSIONS_TIMEOUT, served).await;
         }
         Deferred::Recovery(a) => {
             let served = recovery::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(recovery::RECOVERY_TIMEOUT, served).await;
+            within(recovery::RECOVERY_TIMEOUT, served).await;
         }
         Deferred::Ide(a) => {
             let served = ide::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(ide::IDE_TIMEOUT, served).await;
+            within(ide::IDE_TIMEOUT, served).await;
         }
         Deferred::Process(a) => {
             let served = process::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(process::PROPOSE_TIMEOUT, served).await;
+            within(process::PROPOSE_TIMEOUT, served).await;
         }
         Deferred::IdeTab(a) => {
             let served = ide_tab::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(ide_tab::IDE_TAB_TIMEOUT, served).await;
+            within(ide_tab::IDE_TAB_TIMEOUT, served).await;
         }
         Deferred::Questions(a) => {
             let served = questions::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(questions::QUESTIONS_TIMEOUT, served).await;
+            within(questions::QUESTIONS_TIMEOUT, served).await;
         }
         Deferred::Roadmap(a) => {
             let served = roadmap::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(roadmap::ROADMAP_TIMEOUT, served).await;
+            within(roadmap::ROADMAP_TIMEOUT, served).await;
         }
         Deferred::Cleanup(a) => {
             let served = cleanup::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served).await;
+            within(cleanup::CLEANUP_TIMEOUT, served).await;
         }
         Deferred::Overview(a) => {
             let served = overview::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(overview::OVERVIEW_TIMEOUT, served).await;
+            within(overview::OVERVIEW_TIMEOUT, served).await;
         }
         Deferred::SkillImport(a) => {
             let served = plugins::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(plugins::IMPORT_TIMEOUT, served).await;
+            within(plugins::IMPORT_TIMEOUT, served).await;
         }
         Deferred::Usage(a) => {
             let served = usage::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(usage::USAGE_TIMEOUT, served).await;
+            within(usage::USAGE_TIMEOUT, served).await;
         }
         Deferred::HarnessUpdates(a) => {
             let served = harness_catalog::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(harness_catalog::UPDATES_TIMEOUT, served).await;
-        }
-        Deferred::Icloud(a) => {
-            let served = icloud::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(icloud::ICLOUD_TIMEOUT, served).await;
+            within(harness_catalog::UPDATES_TIMEOUT, served).await;
         }
     }
+}
+
+/// Runs one deferred owner request under its own bound, each timed storage job it submits
+/// decided before the bound cuts it, so the request answers that decision itself.
+/// Inputs: the bound and the request. Output: none; the request writes its own reply.
+async fn within<F: std::future::Future>(bound: Duration, served: F) {
+    let cut = Instant::now() + bound;
+    let _ = tokio::time::timeout_at(cut, crate::storage::before_cut(cut, bound, served)).await;
+}
+
+/// The longest an owner client waits for a request the engine serves under `bound` once it
+/// admits it: the client's own timeout, which covers the admission and the reply's write,
+/// plus the bound, so the engine's answer, a refusal included, arrives before the client gives
+/// up. Inputs: the client timeout and the engine's bound. Output: the wait.
+fn deferred_wait(timeout: Duration, bound: Duration) -> Duration {
+    timeout + bound
 }
 
 /// One owner request served past its exchange. While it runs it is counted apart from
@@ -2647,8 +2714,7 @@ struct Tasks {
 /// copy skill folders, Roadmap requests, which read and write the roadmap status store,
 /// Usage requests, which read and write the usage store, harness version, update and
 /// install requests, which wait for a harness, Homebrew, npm or a vendor's release
-/// pointer, iCloud downloads, which wait for macOS to bring a folder's files to this Mac,
-/// and Process proposals, which wait for an Edit with AI model run. Each carries the
+/// pointer, and Process proposals, which wait for an Edit with AI model run. Each carries the
 /// admission, and the projects home its validated request; the others read the request
 /// frame.
 enum Deferred {
@@ -2669,7 +2735,6 @@ enum Deferred {
     SkillImport(Admission),
     Usage(Admission),
     HarnessUpdates(Admission),
-    Icloud(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
@@ -2685,7 +2750,7 @@ async fn refuse(
     let Some(reply) = refusal(&auth[..4] == b"CAR1", &frame[4..], code)? else {
         return Ok(());
     };
-    stream.write_all(&reply).await.map_err(io_error)
+    trace::refused(stream, &reply).await.map_err(io_error)
 }
 
 /// Encodes the refusal of one request in the reply shape of its protocol.
@@ -2736,7 +2801,7 @@ async fn write_owner_reply(
     mutation: bool,
 ) -> Result<(), EngineError> {
     let frame = owner_reply_frame(result, id, mutation)?;
-    write_reply(stream, &frame).await
+    trace::reply(write_reply(stream, &frame), "written").await
 }
 
 /// The longest a reply written under the owner barrier waits for its client to read it.
@@ -2764,19 +2829,19 @@ fn owner_reply_frame(
     mutation: bool,
 ) -> Result<Vec<u8>, EngineError> {
     let reply = result.unwrap_or_else(|e| {
-        let known = matches!(
-            e.0.as_str(),
-            "owner_busy"
-                | "owner_grant_stale_or_revoked"
-                | "owner_runtime_stale"
-                | "owner_queue_not_submitted"
-                | "operation_identity_conflict"
-                | "master_transaction_rolled_back"
-                | "master_dispatch_stopped"
-                | "master_dispatch_capacity"
-                | "move_project_old_folder_left"
-                | "job_busy"
-        );
+        let known = crate::storage::storage_answer(&e.0)
+            || matches!(
+                e.0.as_str(),
+                "owner_busy"
+                    | "owner_grant_stale_or_revoked"
+                    | "owner_runtime_stale"
+                    | "operation_identity_conflict"
+                    | "master_transaction_rolled_back"
+                    | "master_dispatch_stopped"
+                    | "master_dispatch_capacity"
+                    | "move_project_old_folder_left"
+                    | "job_busy"
+            );
         let response = if mutation && !known {
             OwnerResponse::OutcomeUnknown {
                 operation_id: id.clone(),
@@ -3449,6 +3514,7 @@ pub struct OwnerClient {
     token: [u8; 32],
     socket: Identity,
     timeout: Duration,
+    engine_timeout: Duration,
 }
 
 impl OwnerClient {
@@ -3481,7 +3547,18 @@ impl OwnerClient {
             token,
             socket,
             timeout,
+            engine_timeout: timeout,
         })
+    }
+
+    /// Takes the owner timeout the engine serves its requests under, as its generation names
+    /// it to the client that discovered it. None, for an older engine that names none, keeps
+    /// the client's own timeout in its place. Input: the engine's timeout. Output: the client.
+    pub(crate) fn serving_under(mut self, engine: Option<Duration>) -> Self {
+        if let Some(engine) = engine {
+            self.engine_timeout = engine;
+        }
+        self
     }
 
     /// Says what a reply that would not parse means. For a read it is an engine writing what

@@ -43,11 +43,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// The `/usr/bin/git` xcrun shim, the git every resolver here falls back to.
 pub(crate) const GIT: &str = "/usr/bin/git";
 /// The settings every engine git runs with, whatever the repository configures: no hooks,
-/// fsmonitor or pager, no submodule recursion, no transport and no signature program, so a
-/// log or show that meets a signed commit in any armor runs `/usr/bin/false`, never a
-/// program the repository names (RV-DS241-39), and no signature check on a log or show at
-/// all, so a repository that turns `log.showSignature` on gets no check output mixed into
-/// what the engine reads (RV-DS241-39 r2 F2).
+/// fsmonitor, pager, submodule recursion or transport, no signature check on a log or show
+/// (RV-DS241-39 r2 F2), and no signature program the repository names (RV-DS241-39). On
+/// Unix each program is `/dev/null`, which git cannot start and goes on without; a started
+/// `/usr/bin/false` could exit before git wrote it an ssh payload and kill git with SIGPIPE
+/// (V243-WORKTREES-GIT-FLAKE). Windows keeps `/usr/bin/false` (V244-WIN-GIT-SAFE-PROGRAM-PATH).
 pub(crate) const GIT_SAFE: [&str; 18] = [
     "-c",
     "core.hooksPath=/dev/null",
@@ -60,11 +60,23 @@ pub(crate) const GIT_SAFE: [&str; 18] = [
     "-c",
     "protocol.allow=never",
     "-c",
-    "gpg.program=/usr/bin/false",
+    if cfg!(unix) {
+        "gpg.program=/dev/null"
+    } else {
+        "gpg.program=/usr/bin/false"
+    },
     "-c",
-    "gpg.x509.program=/usr/bin/false",
+    if cfg!(unix) {
+        "gpg.x509.program=/dev/null"
+    } else {
+        "gpg.x509.program=/usr/bin/false"
+    },
     "-c",
-    "gpg.ssh.program=/usr/bin/false",
+    if cfg!(unix) {
+        "gpg.ssh.program=/dev/null"
+    } else {
+        "gpg.ssh.program=/usr/bin/false"
+    },
     "-c",
     "log.showSignature=false",
 ];
@@ -477,8 +489,8 @@ fn requeued_reason(cause: Narrowing) -> &'static str {
 
 impl ResearchRunner {
     /// `database` is the job store, `state` an engine-owned directory outside
-    /// every project for sandbox profiles and agent homes, `codex` the
-    /// absolute Codex executable.
+    /// every project, in its one spelling, for sandbox profiles and agent homes,
+    /// `codex` the absolute Codex executable.
     pub fn new(
         database: &Path,
         state: &Path,
@@ -511,7 +523,10 @@ impl ResearchRunner {
         codex: Option<&Path>,
         limits: ResearchLimits,
     ) -> Result<Self, RunError> {
-        if !state.is_absolute() || !state.is_dir() || state.canonicalize()? != state {
+        if !state.is_absolute()
+            || !state.is_dir()
+            || crate::projects_home::one_spelling(state.canonicalize()?) != state
+        {
             return Err(RunError::Invalid(
                 "state directory must be canonical".into(),
             ));
@@ -958,8 +973,11 @@ impl ResearchRunner {
             return Err(RunError::Invalid("unsafe research kind".into()));
         }
         still_held(jobs, job)?;
-        let root = project.root.canonicalize()?;
-        if root != project.root || !root.is_dir() || root.starts_with(&self.state) {
+        let root = crate::projects_home::one_spelling(project.root.canonicalize()?);
+        if root != crate::projects_home::one_spelling(project.root.to_path_buf())
+            || !root.is_dir()
+            || root.starts_with(&self.state)
+        {
             return Err(RunError::Invalid("project folder must be canonical".into()));
         }
         let id = ProjectId::new(project.id).map_err(|_| RunError::Invalid("project id".into()))?;
@@ -1770,8 +1788,11 @@ impl ResearchRunner {
         }
         let (behind, relay) = relayed(self.engine_folder()?, run.account)?;
         let account = &behind;
-        let folder = run.folder.canonicalize()?;
-        if folder != run.folder || !folder.is_dir() || folder.starts_with(&self.state) {
+        let folder = crate::projects_home::one_spelling(run.folder.canonicalize()?);
+        if folder != crate::projects_home::one_spelling(run.folder.to_path_buf())
+            || !folder.is_dir()
+            || folder.starts_with(&self.state)
+        {
             return Err(RunError::Invalid(
                 "read-only folder must be canonical".into(),
             ));
@@ -3132,8 +3153,8 @@ pub(crate) struct AgentGit {
 
 /// Runs one git command in a folder an agent owns with that agent's own rights (DEC-104
 /// K5b): under its installed profile, as the worktree setup steps run, with the
-/// [`GIT_SAFE`] settings and the caller's extra variables, within the setup time limit.
-/// Its output is read while it runs, so a long listing never stalls it. Takes the
+/// [`GIT_SAFE`] settings, the editor `:` git never starts (no path lookup) and the caller's
+/// extra variables, within the setup time limit. Output is read while it runs. Takes the
 /// agent's sandbox, its installed profile, the folder, the arguments, the variables and
 /// the most output bytes kept. Returns how it ended, or the spawn failure.
 #[cfg(unix)]
@@ -3147,7 +3168,7 @@ pub(crate) fn agent_git(
 ) -> Result<AgentGit, RunError> {
     let mut command = worktree_git(sandbox, profile);
     command
-        .env("GIT_EDITOR", "true")
+        .env("GIT_EDITOR", ":")
         .envs(variables.iter().copied())
         .arg("-C")
         .arg(folder)
@@ -4668,6 +4689,25 @@ mod tests {
             .unwrap();
     }
 
+    /// V243-FIRMLINK-STATE (#448 r2 LOW): a research state named through
+    /// /System/Volumes/Data is refused, since the folder gates compare it with one-spelled
+    /// roots and its sandbox rules would never match, so a folder inside it would see other
+    /// agents' homes and tmp. The short name of the same folder opens.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_research_state_named_through_the_data_volume_is_refused() {
+        let root = engine_root();
+        let long = PathBuf::from(format!("/System/Volumes/Data{}", root.state.display()));
+        assert!(matches!(
+            ResearchRunner::without_codex(&root.database, &long, ResearchLimits::default()),
+            Err(RunError::Invalid(reason)) if reason == "state directory must be canonical"
+        ));
+        assert!(
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .is_ok()
+        );
+    }
+
     /// A run that waits for its repository's setup lock longer than the stale limit keeps
     /// its claim: the wait is heartbeated, so stale recovery neither takes the job back nor
     /// leaves the run setting up a worktree for a job it lost (finding_40456ca5a72c5454).
@@ -5401,6 +5441,49 @@ mod tests {
             "a plain bind took the port the row named for a down provider"
         );
         assert!(ProviderReach::system().refused_everywhere(&[address]));
+    }
+
+    /// V243-FIRMLINK-LAUNCH-ROOT (rv-sec2 19:24): a read-only run's folder named through the
+    /// data volume passes the canonical-folder gate under its short name, and a folder reached
+    /// through a link is still refused there.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_read_only_run_takes_the_long_name_of_its_folder_but_refuses_a_link() {
+        let root = engine_root();
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        let linked = root.base.join("linked");
+        std::os::unix::fs::symlink(&folder, &linked).unwrap();
+        let long = std::path::PathBuf::from(format!("/System/Volumes/Data{}", folder.display()));
+        assert!(long.is_dir());
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let project = ProjectId::new("alpha").unwrap();
+        let gated = |name: &str, folder: &std::path::Path| {
+            let run = ReadOnlyRun {
+                name,
+                agent: "onboarding",
+                kind: Some(crate::sandbox::hidden_paths::RunKind::Onboarding),
+                project: Some(&project),
+                folder,
+                prompt: "Map this repository.",
+                account: &account,
+                wall_time: Duration::from_secs(5),
+                output_tokens: None,
+            };
+            matches!(
+                runner.run_read_only(&run, &|| false),
+                Err(RunError::Invalid(ref text)) if text == "read-only folder must be canonical"
+            )
+        };
+        assert!(!gated("onboard-m-alpha-1", &long));
+        assert!(gated("onboard-m-alpha-2", &linked));
     }
 
     #[test]
@@ -7898,7 +7981,7 @@ mod windows_tests {
     use super::*;
 
     #[test]
-    fn a_read_only_run_on_windows_stops_with_the_plain_unavailable_line() {
+    fn a_research_runner_on_windows_does_not_start_and_says_why() {
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
         let engine = base.join("engine");
@@ -7909,25 +7992,15 @@ mod windows_tests {
         sqlite.close().map_err(|(_, error)| error).unwrap();
         let state = engine.join("research");
         fs::create_dir(&state).unwrap();
-        let runner =
-            ResearchRunner::without_codex(&database, &state, ResearchLimits::default()).unwrap();
-        let account = ResearchAccount::Endpoint {
-            base_url: "http://127.0.0.1:9/v1".into(),
-            model: "windows-model".into(),
-            key: None,
-        };
-        let run = ReadOnlyRun {
-            name: "onboard-m-windows",
-            account: &account,
-            wall_time: Duration::from_secs(5),
-        };
-        assert_eq!(
-            runner.run_read_only(&run, &|| false).unwrap(),
-            ReadOnlyEnding::Failed(
-                "Team agents and research are not available on Windows in this version.".into()
-            )
-        );
-        assert!(fs::read_dir(state.join("agents")).unwrap().next().is_none());
+        match ResearchRunner::without_codex(&database, &state, ResearchLimits::default()) {
+            Err(RunError::Io(error)) => {
+                assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+                assert_eq!(error.to_string(), "research_runner_unavailable");
+            }
+            Err(other) => panic!("expected the unavailable refusal, got {other}"),
+            Ok(_) => panic!("a research runner started on Windows"),
+        }
+        assert!(!state.join("agents").exists());
     }
 }
 

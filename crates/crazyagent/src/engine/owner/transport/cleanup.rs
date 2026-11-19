@@ -16,6 +16,7 @@ pub const CLEANUP_CODES: &[&str] = &[
     "changes_git_failed",
     "changes_git_hooks",
     "changes_git_include",
+    "changes_git_old",
     "changes_git_unsupported",
     "changes_unavailable",
     "cleanup_agent_has_task",
@@ -149,7 +150,7 @@ impl OwnerClient {
     }
 
     async fn cleanup_exchange(&self, action: Action) -> Result<Reply, EngineError> {
-        tokio::time::timeout(self.timeout.max(CLEANUP_TIMEOUT), async {
+        tokio::time::timeout(deferred_wait(self.timeout, CLEANUP_TIMEOUT), async {
             let read = read_kind(&action);
             let frame = encode_frame(&Envelope { cleanup: action })
                 .map_err(|_| failure("cleanup_request_bounds"))?;

@@ -243,7 +243,14 @@ impl ChannelCase {
     async fn begin(&self, command: Command) -> NativeAuthBegin {
         self.host
             .engine
-            .native_auth_job(|reply| Job::NativeAuth(self.admission(), command, reply))
+            .native_auth_job(|reply| {
+                Job::NativeAuth(
+                    self.admission(),
+                    command,
+                    crate::storage::NativeAuthAsk::Engine,
+                    reply,
+                )
+            })
             .await
             .unwrap()
     }

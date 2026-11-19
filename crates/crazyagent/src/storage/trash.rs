@@ -4,7 +4,6 @@ use crate::config::ModelAccess;
 use crate::config::ModelAuthentication;
 use crate::engine::EngineError;
 use rusqlite::{Connection, params};
-#[cfg(unix)]
 use std::path::Path;
 
 pub(crate) const ACCOUNT_KEY: &str = "account_key";
@@ -75,21 +74,27 @@ pub(crate) fn sweep_at_start(
     connection: &Connection,
     catalog: Option<&ModelAccess>,
 ) -> Result<(), EngineError> {
-    let root = connection
-        .path()
-        .and_then(|path| Path::new(path).parent())
-        .ok_or_else(|| error("file_trash_root_unknown"))?;
-    sweep(connection, root, catalog).map(|_| ())
+    sweep(connection, engine_root(connection)?, catalog).map(|_| ())
 }
 
-/// Leaves the trash alone where engine storage does not open.
-/// Inputs: the engine connection and the catalog, both unused. Output: always done.
+/// Leaves the trash notes alone where engine storage does not open, and releases the check
+/// containers a crash left with no stored server ([`super::plugins::sweep_check_containers`]).
+/// Inputs: the engine connection and the catalog, unused. Output: any failure.
 #[cfg(not(unix))]
 pub(crate) fn sweep_at_start(
-    _connection: &Connection,
+    connection: &Connection,
     _catalog: Option<&ModelAccess>,
 ) -> Result<(), EngineError> {
-    Ok(())
+    super::plugins::sweep_check_containers(connection, engine_root(connection)?)
+}
+
+/// Names the engine root, the folder that holds the engine database.
+/// Input: the engine connection. Output: the root, or `file_trash_root_unknown`.
+fn engine_root(connection: &Connection) -> Result<&Path, EngineError> {
+    connection
+        .path()
+        .and_then(|path| Path::new(path).parent())
+        .ok_or_else(|| error("file_trash_root_unknown"))
 }
 
 /// Deletes every file the trash names under the engine root, at most `SWEEP_MAX` a start,

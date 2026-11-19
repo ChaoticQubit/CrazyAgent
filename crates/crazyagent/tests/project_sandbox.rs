@@ -104,8 +104,9 @@ fn command_env(sandbox: &ProjectSandbox, profile: &Path) -> BTreeMap<String, Str
 }
 
 /// T8 row 1 and C1: the tool cache is one more writable root, listed as a non-working-tree
-/// root in the SM1-R rule, whose other lines stay as they were. The rule's closing
-/// parentheses ride on its last line, so the lines are compared without them.
+/// root in the SM1-R rule as one line of an `X(/|$)` regex, whose other lines stay
+/// as they were. The rule's closing parentheses ride on its last line, so the lines are
+/// compared without them.
 #[test]
 fn a_tool_cache_is_one_more_root_under_the_nested_git_rule() {
     let case = case();
@@ -117,7 +118,7 @@ fn a_tool_cache_is_one_more_root_under_the_nested_git_rule() {
         .unwrap();
     let rule = |text: &str| -> Vec<String> {
         text.lines()
-            .filter(|line| line.contains("[gG](i|I|\u{131})[tT](/.*)?$"))
+            .filter(|line| line.contains("[gG](i|I|\u{131})[tT](/|$)\""))
             .map(|line| line.trim_end_matches(')').to_owned())
             .collect()
     };
@@ -1622,7 +1623,7 @@ fn installed_sandbox_wraps_through_the_platform_seam_and_reports_its_policy() {
     let any_i = "(i|I|\u{131})";
     let dot_git = format!("\\.[gG]{any_i}[tT]");
     let state = "\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]";
-    let context = "[cC][oO][nN][tT][eE][xX][tT](/.*)?";
+    let context = "[cC][oO][nN][tT][eE][xX][tT]";
     let any_k = "(k|K|\u{212a})";
     let any_s = "(s|S|\u{17f})";
     let st = format!("({any_s}[tT]|\u{fb05}|\u{fb06})");
@@ -1630,13 +1631,18 @@ fn installed_sandbox_wraps_through_the_platform_seam_and_reports_its_policy() {
     for path in [
         context.to_owned(),
         format!("{state}/{context}"),
+        format!("{dot_git}/[hH][oO][oO]{any_k}{any_s}"),
+        format!(
+            "{dot_git}(/[wW][oO][rR]{any_k}[tT][rR][eE][eE]{any_s}/[^/]+)?/[mM][oO][dD][uU][lL][eE]{any_s}"
+        ),
+    ] {
+        let rule = format!("(regex #\"^{pattern}/{path}(/|$)\")");
+        assert!(text.contains(&rule), "{rule}\n{text}");
+    }
+    for path in [
         format!("{state}/{any_i}[nN]{st}[rR][uU][cC][tT]{any_i}[oO][nN]{any_s}\\.[mM][dD]"),
-        format!("{dot_git}/[hH][oO][oO]{any_k}{any_s}(/.*)?"),
         format!("{dot_git}/[cC][oO][nN]{fi}[gG]"),
         format!("{dot_git}/[cC][oO][nN]{fi}[gG]\\.[lL][oO][cC]{any_k}"),
-        format!(
-            "{dot_git}(/[wW][oO][rR]{any_k}[tT][rR][eE][eE]{any_s}/[^/]+)?/[mM][oO][dD][uU][lL][eE]{any_s}(/.*)?"
-        ),
     ] {
         let rule = format!("(regex #\"^{pattern}/{path}$\")");
         assert!(text.contains(&rule), "{rule}\n{text}");

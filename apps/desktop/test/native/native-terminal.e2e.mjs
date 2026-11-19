@@ -1,0 +1,340 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { isAbsolute, join } from "node:path";
+import { setTimeout as pause } from "node:timers/promises";
+import { invoke, newProject, prepareWindow } from "./master-settings-window.mjs";
+import { go, paste, pick, reopen, run, tab, until, waitFor } from "./trial-kit.mjs";
+import { startIfPaused, teamNodes } from "./trial4/n-d8-master-reply.mjs";
+
+const ROOT = process.env.MS_ROOT;
+const SOCKET = join(ROOT, "engine", "terminal", "tmux.sock");
+const SESSION = "crazyagent";
+const UI_MS = 30000;
+const MASTER_MS = 180000;
+const END_MS = 20000;
+const QUIET_MS = 4000;
+const SHORT_TURN_MS = 6000;
+/** How long a stand-in turn for a line with "long" in it may hold the next line: its
+ * TURN_S of 90 seconds in master-switch.wdio.conf.mjs, with room for a loaded machine. */
+const LONG_TURN_MS = 120000;
+/** The pause before a following page view opens again, FOLLOW_MS in terminal-panel.tsx. */
+const FOLLOW_MS = 1000;
+const RUNNING = ["starting", "idle", "working"];
+const READ = { kind: "read" };
+const RETURN = { kind: "key", characters: "\r", code: 36 };
+const RECT = { x: 40, y: 120, width: 640, height: 400 };
+const THEME = {
+  background: "#101010", foreground: "#e0e0e0", cursor: "#e0e0e0", cursorAccent: "#101010",
+  selectionBackground: "#335588", black: "#000000", red: "#cc0000", green: "#00cc00",
+  yellow: "#cccc00", blue: "#0000cc", magenta: "#cc00cc", cyan: "#00cccc", white: "#cccccc",
+  brightBlack: "#555555", brightRed: "#ff5555", brightGreen: "#55ff55", brightYellow: "#ffff55",
+  brightBlue: "#5555ff", brightMagenta: "#ff55ff", brightCyan: "#55ffff", brightWhite: "#ffffff",
+};
+const STYLE = { fontFamily: "Menlo", fontSize: 13, cursorBlink: false, theme: THEME };
+const kit = { go, tab, pick, paste, reopen, until, waitFor, project: () => run.project };
+const opened = new Set();
+let master = null;
+
+/** Runs one tmux command on the test engine's own server, never another. Inputs: the
+ * arguments after the socket. Output: the trimmed standard output; throws on a failure. */
+function tmux(...args) {
+  assert(isAbsolute(SOCKET) && SOCKET.startsWith(ROOT) && !SOCKET.includes("/tmux-"));
+  const result = spawnSync("tmux", ["-S", SOCKET, ...args], { env: { PATH: process.env.PATH }, encoding: "utf8" });
+  assert.equal(result.status, 0, `tmux ${args.join(" ")}: ${result.stderr}`);
+  return result.stdout.trim();
+}
+
+/** Starts the project's team and waits until the master runs in a terminal and the page's
+ * own master panel is live, then leaves the Conversation tab. The page keeps that view
+ * hidden with its terminal live (DEC-187), so every row opens over a hidden following view
+ * of the same key, as the app does, never by a race (#632). Output: the terminal name. */
+async function liveMaster() {
+  await tab("conversation");
+  await startIfPaused(kit, run.project);
+  let node = null;
+  await waitFor(async () => {
+    node = (await teamNodes(run.project)).find((each) => each.kind === "master") ?? null;
+    return { done: Boolean(node?.terminal) && RUNNING.includes(node.status), seen: JSON.stringify(node).slice(0, 300) };
+  }, MASTER_MS, "the master never ran in a terminal");
+  await until(async () => (await masterPanel()).live, UI_MS, "the page's master panel never went live");
+  await tab("overview");
+  await pause(1500);
+  assert.ok(node.terminal);
+  return node.terminal;
+}
+
+/** Opens one native view on the master through the app's own open command, with a channel
+ * whose events the window keeps. Input: whether typed keys reach the terminal. Output: the
+ * view id and the channel's callback id. */
+async function open(keys) {
+  const tag = await browser.execute(() => {
+    const kept = (window.__w5 ??= {});
+    const id = window.__TAURI_INTERNALS__.transformCallback((raw) => (kept[id] ??= []).push(raw));
+    return id;
+  });
+  const viewport = await browser.execute(() => window.innerHeight);
+  const view = await invoke("desktop_native_terminal_open", {
+    name: master, pane: null, label: "Native terminal trial", rect: { ...RECT, viewport },
+    style: STYLE, covered: false, keys, project: run.project, events: `__CHANNEL__:${tag}`,
+  });
+  assert.ok(Number.isInteger(view) && view > 0, `the open answered a view id: ${view}`);
+  opened.add(view);
+  return { view, tag };
+}
+
+/** Reads the events a view's channel delivered, in the order they were sent. Input: the
+ * channel's callback id. Output: the event bodies, an end marker as { end: true }. */
+function events(tag) {
+  return browser.execute((tag) => (window.__w5?.[tag] ?? []).slice().sort((a, b) => a.index - b.index)
+    .map((raw) => ("end" in raw ? { end: true } : raw.message)), tag);
+}
+
+/** Names a view's events in order: each type with its code, and "end" for the end marker.
+ * Input: the events. Output: the names. */
+function named(list) {
+  return list.map((event) => (event.end ? "end" : `${event.type}${event.code ? `:${event.code}` : ""}`));
+}
+
+/** Reads the page's own embedded master panel on the Conversation tab. Output: whether its
+ * view is live, and the text of its ended alert, or null while it has none. */
+function masterPanel() {
+  return browser.execute(() => {
+    const panel = document.querySelector("section.tg-terminal.embedded");
+    const alert = panel?.querySelector('.tg-terminal-state[role="alert"] span');
+    return { live: Boolean(panel?.querySelector(".tg-terminal-note")), ended: alert?.textContent ?? null };
+  });
+}
+
+/** Takes one probe step on a view. Inputs: the view and the step. Output: what the view
+ * shows after it: rows, direct, focused, active, key, marked and pasteboard. */
+function probe(view, step) {
+  return invoke("desktop_native_terminal_probe", { view, step });
+}
+
+/** Reads a view until its state passes a check. Inputs: the view, the check, the time limit
+ * and the failure label. Output: the state that passed. */
+async function seenWhen(view, check, timeout, label) {
+  let seen = null;
+  await waitFor(async () => {
+    seen = await probe(view, READ);
+    return { done: check(seen), seen: JSON.stringify({ ...seen, rows: seen.rows.filter(Boolean).slice(-6) }) };
+  }, timeout, label);
+  return seen;
+}
+
+/** Waits for a view's ready event and the master's stand-in ready line on its rows, and
+ * checks the test window sits on a 1x display, never the owner's built-in Retina. Input:
+ * the opened view. Output: the view's state then. */
+async function ready({ view, tag }) {
+  await until(async () => (await events(tag)).some((event) => event.type === "ready"), UI_MS, `view ${view} never said ready`);
+  const seen = await seenWhen(view, (seen) => seen.rows.some((row) => /stand-in ready/.test(row)), UI_MS, `view ${view} never showed the stand-in`);
+  assert.equal(seen.scale, 1, "the test window is on a 1x display");
+  return seen;
+}
+
+/** Counts the stand-in turns a view's rows show. Input: the view's state. Output: the count. */
+function turns(seen) {
+  return seen.rows.filter((row) => /stand-in turn/.test(row)).length;
+}
+
+/** Counts the stand-in turns the master's pane printed, read from the test engine's tmux,
+ * never from a view. Output: the count over the pane's screen and last 200 history rows. */
+function paneTurns() {
+  const rows = tmux("capture-pane", "-p", "-S", "-200", "-t", `${SESSION}:=${master}`).split("\n");
+  return rows.filter((row) => /stand-in turn/.test(row)).length;
+}
+
+/** Waits until a view shows a turn count; on a timeout the failure adds the turns the pane
+ * printed in all, the view's events with their codes and the server's clients with their
+ * start times, so a red tells a prompt never typed from one typed but never drawn
+ * (V243-DIRECT-VIEW-DRAW-MISS). It reads nothing before the wait, so the caller's timing
+ * is unchanged. Inputs: the view, the count, the limit and the label. Output: the state. */
+async function turnsShown({ view, tag }, count, timeout, label) {
+  assert.ok(Number.isInteger(count) && count > 0, `a turn count: ${count}`);
+  assert.ok(timeout > 0 && timeout <= LONG_TURN_MS, `a time limit: ${timeout}`);
+  try {
+    return await seenWhen(view, (seen) => turns(seen) === count, timeout, label);
+  } catch (error) {
+    const told = named(await events(tag));
+    const clients = tmux("list-clients", "-F", "#{client_pid} #{client_flags} created=#{client_created}").split("\n");
+    throw new Error(`${error.message}; the pane printed ${paneTurns()} stand-in turns in all; view events ${JSON.stringify(told)}; clients ${JSON.stringify(clients)}; now ${Math.floor(Date.now() / 1000)}`);
+  }
+}
+
+/** Reads the width of the master's pane on the test engine's server. Output: the columns. */
+function paneWidth() {
+  const width = Number(tmux("list-panes", "-t", `${SESSION}:=${master}`, "-F", "#{pane_width}"));
+  assert.ok(Number.isInteger(width) && width > 0, `the pane width: ${width}`);
+  return width;
+}
+
+/** Closes a view the spec opened. Input: the view. Output: none. */
+async function close(view) {
+  opened.delete(view);
+  await invoke("desktop_native_terminal_close", { view });
+}
+
+describe("Native terminal views in the real window", () => {
+  before(async () => {
+    await prepareWindow();
+    assert.notEqual(await browser.execute(() => document.title), "test", "the app embeds the real page, not a placeholder");
+    await newProject("native-terminal-shop");
+    master = await liveMaster();
+  });
+
+  afterEach(async () => {
+    for (const view of [...opened]) await close(view).catch(() => {});
+  });
+
+  it("opens on the master and draws its screen through the direct path", async () => {
+    const shown = await open(true);
+    const seen = await ready(shown);
+    assert.equal(seen.direct, true, "a plain master window is drawn by the direct path");
+    await close(shown.view);
+  });
+
+  it("places the view on the page rect it was given, not one title bar higher", async () => {
+    const shown = await open(false);
+    const seen = await ready(shown);
+    const page = await browser.execute(() => window.innerHeight);
+    const inset = seen.webview_height - page;
+    const told = { webview: seen.webview_height, page, frame: seen.frame, rect: RECT };
+    console.log(`placement ${JSON.stringify(told)}`);
+    assert.ok(inset >= 0 && inset < 80, `the page starts inside its webview: ${inset}`);
+    const want = [RECT.x, RECT.y + inset, RECT.width, RECT.height];
+    assert.deepEqual(seen.frame, want, "the view's frame is its page rect below the page's inset");
+    await close(shown.view);
+  });
+
+  it("focus gives the view the keyboard and leaves the app and its window as they were (N2)", async () => {
+    const shown = await open(true);
+    await ready(shown);
+    const before = await probe(shown.view, READ);
+    assert.equal(before.focused, false, "a fresh view does not hold the keyboard before focus");
+    console.log(`N2 before ${JSON.stringify({ active: before.active, key: before.key })}`);
+    await invoke("desktop_native_terminal_focus", { view: shown.view });
+    const after = await seenWhen(shown.view, (seen) => seen.focused, UI_MS, "the view never took the keyboard");
+    assert.equal(after.active, before.active, "focus never brings the app forward");
+    assert.equal(after.key, before.key, "focus never makes the window key");
+    await close(shown.view);
+  });
+
+  it("the message box's prompt is typed into a direct view's terminal as one submission (#632)", async () => {
+    const shown = await open(false);
+    const seen = await ready(shown);
+    assert.equal(seen.direct, true, "the prompt goes through a direct view");
+    const base = turns(seen);
+    const send = (text) => invoke("desktop_terminal_prompt", { agent: master, text, pane: null });
+    await send("w5 message box prompt");
+    await turnsShown(shown, base + 1, UI_MS, "the message box's prompt never reached the terminal");
+    await pause(SHORT_TURN_MS);
+    assert.equal(turns(await probe(shown.view, READ)), base + 1, "the prompt was one submission, one turn");
+    await send("w5 message box long prompt");
+    await turnsShown(shown, base + 2, UI_MS, "the second prompt never reached the terminal");
+    await send("w5 message box prompt again");
+    await pause(SHORT_TURN_MS);
+    assert.equal(turns(await probe(shown.view, READ)), base + 2, "the prompt's text was typed: its long turn holds the next prompt");
+    await turnsShown(shown, base + 3, LONG_TURN_MS, "the held prompt never ran after the long turn");
+    await pause(SHORT_TURN_MS);
+    await close(shown.view);
+  });
+
+  it("an input method commit and Return with keys off never reach the terminal (#517)", async () => {
+    const shown = await open(false);
+    const base = turns(await ready(shown));
+    await invoke("desktop_native_terminal_focus", { view: shown.view });
+    await probe(shown.view, { kind: "compose", text: "lo" });
+    await probe(shown.view, { kind: "commit", text: "long" });
+    await probe(shown.view, RETURN);
+    await pause(QUIET_MS);
+    assert.equal(turns(await probe(shown.view, READ)), base, "nothing typed with keys off started a turn");
+    await invoke("desktop_native_terminal_keys", { view: shown.view, on: true });
+    await probe(shown.view, RETURN);
+    await seenWhen(shown.view, (seen) => turns(seen) === base + 1, UI_MS, "Return with keys on never started a turn");
+    await probe(shown.view, RETURN);
+    await seenWhen(shown.view, (seen) => turns(seen) === base + 2, SHORT_TURN_MS,
+      "the first turn was not the short one: text typed with keys off reached the terminal");
+    await probe(shown.view, { kind: "compose", text: "lo" });
+    await probe(shown.view, { kind: "commit", text: "long" });
+    await probe(shown.view, RETURN);
+    await seenWhen(shown.view, (seen) => turns(seen) === base + 3, UI_MS, "the commit and Return with keys on never started a turn");
+    await probe(shown.view, RETURN);
+    await pause(SHORT_TURN_MS);
+    assert.equal(turns(await probe(shown.view, READ)), base + 3, "with keys on the commit reached the terminal: its long turn holds the next Return");
+    await close(shown.view);
+  });
+
+  it("a window the direct path refuses reopens fed by the engine and still draws", async () => {
+    const target = `${SESSION}:=${master}`;
+    const extra = tmux("split-window", "-d", "-P", "-F", "#{pane_id}", "-t", target, "/bin/sleep 600");
+    assert.match(extra, /^%\d+$/);
+    try {
+      const shown = await open(true);
+      const seen = await seenWhen(shown.view, (seen) => !seen.direct && seen.rows.some((row) => /stand-in/.test(row)),
+        UI_MS, "the refused view never reopened fed by the engine");
+      assert.equal(seen.direct, false);
+      await close(shown.view);
+    } finally {
+      tmux("kill-pane", "-t", extra);
+    }
+  });
+
+  it("a 2x backing scale refits the grid and the pane width follows, then 1x again", async () => {
+    const shown = await open(true);
+    await ready(shown);
+    const width = paneWidth();
+    try {
+      await probe(shown.view, { kind: "scale", factor: 2 });
+      await until(async () => (await probe(shown.view, READ)) && paneWidth() < width, UI_MS,
+        `the pane stayed ${width} columns at a 2x backing scale`);
+    } finally {
+      await probe(shown.view, { kind: "scale", factor: 0 });
+    }
+    await until(async () => (await probe(shown.view, READ)) && paneWidth() === width, UI_MS,
+      `the pane never came back to ${width} columns at the window's own scale`);
+    await close(shown.view);
+  });
+
+  it("a hidden page view a newer view replaced opens nothing on its own and takes the master back once its panel shows (#632)", async () => {
+    await tab("conversation");
+    await until(async () => (await masterPanel()).live, UI_MS, "the page's master panel never went live");
+    await tab("overview");
+    await pause(1500);
+    const shown = await open(false);
+    await ready(shown);
+    await pause(2 * FOLLOW_MS + 500);
+    assert.deepEqual(named(await events(shown.tag)), ["ready"], "nothing took the master from the newer view");
+    await assert.rejects(probe(shown.view + 1, READ), /native_terminal_view_unknown/, "no view opened after the newer one");
+    await tab("conversation");
+    await until(async () => (await events(shown.tag)).some((event) => event.type === "ended"), UI_MS, "the shown panel never took the master back");
+    assert.equal((await events(shown.tag)).find((event) => event.type === "ended").code, "terminal_view_replaced");
+    opened.delete(shown.view);
+    await until(async () => (await masterPanel()).live, UI_MS, "the shown panel never went live");
+  });
+
+  it("an on-screen following panel a newer view replaces says so and opens nothing more (#632)", async () => {
+    await tab("conversation");
+    await until(async () => (await masterPanel()).live, UI_MS, "the page's master panel is not live on screen");
+    const shown = await open(false);
+    await ready(shown);
+    await until(async () => /newer view/.test((await masterPanel()).ended ?? ""), UI_MS, "the replaced panel never said a newer view took the terminal");
+    await pause(5000);
+    assert.deepEqual(named(await events(shown.tag)), ["ready"], "the replaced panel never took the master back");
+    await assert.rejects(probe(shown.view + 1, READ), /native_terminal_view_unknown/, "no view opened after the newer one");
+    assert.match((await masterPanel()).ended ?? "", /newer view/, "the panel still says why it closed");
+    await close(shown.view);
+    await tab("overview");
+    await pause(1500);
+  });
+
+  it("an ended terminal closes the direct view", async () => {
+    const shown = await open(true);
+    assert.equal((await ready(shown)).direct, true);
+    tmux("kill-window", "-t", `${SESSION}:=${master}`);
+    await until(async () => (await events(shown.tag)).some((event) => event.type === "ended"), END_MS, "the view never ended");
+    const ended = (await events(shown.tag)).find((event) => event.type === "ended");
+    assert.equal(ended.code, "terminal_ended");
+    opened.delete(shown.view);
+    await assert.rejects(probe(shown.view, READ), /native_terminal_view_unknown/);
+  });
+});

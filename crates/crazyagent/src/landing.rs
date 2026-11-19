@@ -18,6 +18,8 @@ mod flow;
 mod git;
 #[cfg(unix)]
 pub(crate) use git::owner_excludes_setting;
+#[cfg(unix)]
+pub(crate) use git::{OPEN_VERSION_MIN, refuse_older, version_numbers};
 mod hold;
 #[cfg(unix)]
 pub(crate) mod ide;
@@ -519,6 +521,14 @@ fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
 }
 
+/// Shapes what engine git on this thread reports as its version for the rest of a row, so a
+/// row in landing or outside it can cross the git floor (W-GIT-FLOOR). Input: the line
+/// `git version` prints, or None for the real git's own.
+#[cfg(all(test, unix))]
+pub(crate) fn shape_git(printed: Option<&str>) {
+    git::VERSION_PRINTED.with(|shaped| *shaped.borrow_mut() = printed.map(str::to_owned));
+}
+
 /// Records one action on a change set in its project's activity at the time the set last
 /// changed, with its sub-agent for the goal; a failure is logged by its plain code, so the
 /// action itself never fails on it. A Discarded set closed outside the app says so, and
@@ -673,6 +683,14 @@ fn noted(db: &Connection, id: &ChangeSetId, kind: crate::activity::ActivityKind,
             crate::protocol::plain_code(&error.0)
         ),
     }
+}
+
+/// Creates the landing store's tables and columns in an engine database, for the engine
+/// start, so no landing call made later adds a table while the engine already answers.
+/// Input: the engine connection. Output: Ok once the store has every table and column.
+#[cfg(unix)]
+pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
+    store::initialize(db)
 }
 
 /// Opens the change set store in the engine database, adding its table when missing.
@@ -1593,6 +1611,21 @@ pub fn accept_into_as(
             target_branch,
             by,
         );
+        Err(unavailable())
+    }
+}
+
+/// Whether engine git can merge again in an owner repository, as every Accept must: false on
+/// a git older than 2.40 (W-GIT-FLOOR), whose Accept refuses `changes_git_old`, so a land the
+/// owner did not ask for leaves the set for the owner without trying. Input: the repository.
+/// Output: the answer, or the code of a git that cannot open it.
+pub(crate) fn can_merge_again(repository: &Path) -> Result<bool, EngineError> {
+    #[cfg(unix)]
+    return git::Repo::open(repository, &repository.join(".git"), None)
+        .map(|owner| !owner.old_git());
+    #[cfg(not(unix))]
+    {
+        let _ = repository;
         Err(unavailable())
     }
 }

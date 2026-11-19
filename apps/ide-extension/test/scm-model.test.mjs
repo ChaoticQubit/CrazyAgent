@@ -143,8 +143,12 @@ test("an Accept, Discard or Restore answer reads as the desktop's own sentence",
   const sentences = Object.fromEntries([...desktop.matchAll(/^ {2}(changes_[a-z_]+): "([^"]+)",$/gm)].map((match) => [match[1], match[2]]));
   assert.ok(Object.keys(sentences).length >= 20, "the desktop sentences were read");
   for (const code of model.REFUSAL_CODES) {
-    assert.equal(model.refusal(code), sentences[code], code);
+    assert.equal(model.refusal(code, false), sentences[code], code);
   }
+  const mac = desktop.match(/^const GIT_OLD_MAC = "([^"]+)";$/mu);
+  assert.ok(mac, "the desktop's Mac words for an old Git were read");
+  assert.equal(model.refusal("changes_git_old", true), mac[1]);
+  assert.equal(model.refusal("changes_git_unsupported", true), sentences.changes_git_unsupported);
   for (const code of ["changes_stale", "changes_owner_dirty", "changes_restore_expired", "changes_owner_identity_missing", "changes_not_found"]) {
     assert.ok(model.REFUSAL_CODES.includes(code), code);
   }

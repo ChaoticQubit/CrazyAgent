@@ -1,6 +1,7 @@
 import { call } from "./api";
 import type { Result } from "./api";
 import { failureCopy } from "./api-projects";
+import { isMac } from "./ui/keys";
 
 export type ChangeState = "pending" | "conflict" | "updating" | "accepted" | "discarded";
 export type TurnOutcome = "succeeded" | "failed" | "cancelled";
@@ -69,6 +70,7 @@ const REFUSALS: Record<string, string> = {
   changes_branch_not_above_base: "The agent's branch no longer holds the commit these changes start from. Ask the agent to update, or discard.",
   changes_git_hooks: "Your project's Git config sets a hook command, which CrazyAgent never runs. Remove the hook settings from your project's Git config, then try again.",
   changes_git_include: "Your project's Git config includes a file inside your project folder, where accepted changes can rewrite it. Move that file outside the project folder and include it by its full path, then try again.",
+  changes_git_old: "Landing changes needs Git 2.40 or newer, and the Git on this computer is older. Update Git, then try again.",
   changes_git_unsupported: "The Git on this computer can't land changes. Update Git, then try again.",
   changes_merge_unsafe: "These changes can't land as a merge commit: an agent commit isn't safe to keep in your history (too many commits, hidden characters, another author's name, or files Git treats specially). Switch Landing to Squash, then accept again.",
   changes_ignored_files: "These changes add files your project's ignore rules leave out. Ask the agent to remove them.",
@@ -98,19 +100,25 @@ const REFUSALS: Record<string, string> = {
   changes_master_not_started: "Your branch is merged into the master's copy, but the master couldn't start resolving it yet. It starts after the master's next turn ends.",
 };
 
+/** The words for `changes_git_old` on a Mac, where the engine runs the Git of Xcode or its
+ * Command Line Tools, never Homebrew's, so only updating those helps. */
+const GIT_OLD_MAC = "Landing changes needs Git 2.40 or newer, and the Git of Xcode or its Command Line Tools on this Mac is older; CrazyAgent doesn't use Homebrew's Git. Update them in Software Update, or in Terminal with softwareupdate --install --all or xcode-select --install, then try again.";
+
 /** The refusal codes of the changes protocol that have their own sentence. */
 export const CHANGES_REFUSALS = Object.keys(REFUSALS);
 
 /** One plain sentence for a refused Changes action; a conflict names up to five of its
- * files. Input: the refusal code, its engine cause and conflicting files. Output: the
- * sentence, or the plain fallback naming the code. */
-export function changesRefusal(refusal: ChangesRefusal): string {
+ * files, and a Git too old to land names the Mac's Xcode or Command Line Tools. Input: the
+ * refusal code, its engine cause and conflicting files, and whether this is a Mac. Output:
+ * the sentence, or the plain fallback naming the code. */
+export function changesRefusal(refusal: ChangesRefusal, mac: boolean = isMac()): string {
   const files = refusal.files ?? [];
   if (refusal.code === "changes_conflict" && files.length > 0) {
     const shown = files.slice(0, CONFLICT_SHOWN).join(", ");
     const more = files.length > CONFLICT_SHOWN ? ` and ${files.length - CONFLICT_SHOWN} more` : "";
     return `These files also changed on your branch: ${shown}${more}. Ask the agent to update, or discard.`;
   }
+  if (refusal.code === "changes_git_old" && mac) return GIT_OLD_MAC;
   return Object.hasOwn(REFUSALS, refusal.code) ? REFUSALS[refusal.code] : failureCopy(refusal);
 }
 

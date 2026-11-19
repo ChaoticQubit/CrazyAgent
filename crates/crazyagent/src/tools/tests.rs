@@ -80,9 +80,11 @@ fn an_npm_codex_with_an_env_node_line_starts_with_no_search_path() {
             script.clone().into_os_string()
         ]
     );
+    let sh = std::fs::canonicalize("/bin/sh").unwrap();
     assert_eq!(
         codex.grants(),
-        vec![script.clone(), node, PathBuf::from("/bin/sh")]
+        vec![script.clone(), node, sh],
+        "grants are real files, so /bin/sh is granted where it really sits"
     );
 
     let by_name = crate::spawn_gate::output(
@@ -280,10 +282,8 @@ fn shebang_flags_and_absolute_interpreters_are_kept() {
         ],
         "macOS runs no interpreter that is itself a script, so it is split out (N3)"
     );
-    assert_eq!(
-        resolved.grants(),
-        vec![absolute, node, PathBuf::from("/bin/sh")]
-    );
+    let sh = std::fs::canonicalize("/bin/sh").unwrap();
+    assert_eq!(resolved.grants(), vec![absolute, node, sh]);
     let native = program(&home.join(".local/bin/native"), "#!/bin/sh --native\n");
     let resolved = resolve("native", &home_only(&home)).unwrap();
     assert_eq!(
@@ -695,8 +695,234 @@ fn an_npm_script_starts_with_the_node_of_its_own_prefix() {
     assert_eq!(codex.argv()[0], own.into_os_string());
 }
 
+/// G1 P7: the `node` beside an npm prefix is judged by the resolver's own checks, so a
+/// prefix in this user's folder under a sticky shared folder, as under /tmp on Linux,
+/// starts its harness under that `node`, never another one found later in the places.
+#[test]
+fn an_npm_prefix_under_a_sticky_shared_folder_starts_with_its_own_node() {
+    let (_folder, home) = scratch();
+    program(&home.join(".local/bin/node"), NODE);
+    let shared = home.join("shared");
+    let mine = shared.join("mine");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    std::fs::set_permissions(&mine, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let prefix = mine.join("nvm-like");
+    npm_codex(&prefix);
+    let own = program(&prefix.join("bin/node"), NODE);
+    let codex = resolve_entry(&prefix.join("bin/codex"), &home_only(&home)).unwrap();
+    assert_eq!(codex.interpreter().unwrap().program, own);
+}
+
+/// G1 P7: an npm prefix's own `node` the resolver passes over, here one every user can
+/// write, still falls back to the places' `node`, but never silently: the resolver writes
+/// its engine log line, once per file.
+#[test]
+fn a_passed_over_own_node_falls_back_and_is_logged_once_per_file() {
+    let (_folder, home) = scratch();
+    let places_node = program(&home.join(".local/bin/node"), NODE);
+    let prefix = home.join("nvm-like");
+    npm_codex(&prefix);
+    let own = program(&prefix.join("bin/node"), NODE);
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let places = home_only(&home);
+    let codex = resolve_entry(&prefix.join("bin/codex"), &places).unwrap();
+    assert_eq!(codex.interpreter().unwrap().program, places_node);
+    let passed = entry_at(&own, &places, 0).unwrap_err();
+    assert_eq!(passed.reason, Reason::Refused);
+    assert!(
+        !log_own_node_passed_over(&own, &passed),
+        "the resolver already logged it"
+    );
+    let other = home.join("other/bin/node");
+    assert!(log_own_node_passed_over(&other, &passed));
+    assert!(!log_own_node_passed_over(&other, &passed));
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE: a harness launch never starts an npm script under a `node`
+/// other than its own prefix's. When the resolver passes that `node` over, here one every
+/// user can write, the launch is refused with the line naming that file, while
+/// [`resolve_entry`], which npm uses, still falls back to the places' `node` (G1 P7).
+#[test]
+fn a_launch_is_refused_when_its_own_prefix_node_is_passed_over() {
+    let (_folder, home) = scratch();
+    let places_node = program(&home.join(".local/bin/node"), NODE);
+    let prefix = home.join("nvm-like");
+    npm_codex(&prefix);
+    let own = program(&prefix.join("bin/node"), NODE);
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let places = home_only(&home);
+    let entry = prefix.join("bin/codex");
+    let fallback = resolve_entry(&entry, &places).unwrap();
+    assert_eq!(fallback.interpreter().unwrap().program, places_node);
+    let passed = entry_at(&own, &places, 1).unwrap_err();
+    assert_eq!(passed.reason, Reason::Refused);
+    let crate::harnesses::launch::LaunchError(line, secret) =
+        crate::harnesses::interactive::launch_tool(&entry, &places).unwrap_err();
+    assert!(secret.is_none());
+    let named = Missing {
+        tool: "codex".to_owned(),
+        ..passed
+    };
+    assert_eq!(line, named.line());
+    assert!(line.starts_with("codex can't start: "), "{line}");
+    assert!(line.contains(&own.display().to_string()), "{line}");
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE: the harness list reads a harness as a launch reads it, so a
+/// Codex npm script whose own prefix `node` the resolver passes over shows as unable to run,
+/// with the launch's own line and no program to install, never as ready.
+#[test]
+fn the_harness_list_reads_a_passed_over_own_prefix_node_as_a_launch_does() {
+    let (_folder, home) = scratch();
+    program(&home.join(".local/bin/node"), NODE);
+    let prefix = home.join("nvm-like");
+    npm_codex(&prefix);
+    let own = program(&prefix.join("bin/node"), NODE);
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let places = home_only(&home);
+    let entry = prefix.join("bin/codex");
+    assert!(resolve_entry(&entry, &places).is_ok());
+    let needs = crate::harnesses::update::needs(&entry, &places).expect("a harness that can't run");
+    let crate::harnesses::launch::LaunchError(line, _) =
+        crate::harnesses::interactive::launch_tool(&entry, &places).unwrap_err();
+    assert_eq!(needs.line, line);
+    assert_eq!(needs.program, None);
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE: [`own_node_refused`] answers only for a script that asks
+/// `env` for `node` and whose own prefix holds a `node` the resolver passes over. A prefix
+/// with no `node` or with a usable one, and a script asking for another program, give none,
+/// and the first still launches under the places' `node`.
+#[test]
+fn only_a_passed_over_own_prefix_node_refuses_a_launch() {
+    let (_folder, home) = scratch();
+    let places_node = program(&home.join(".local/bin/node"), NODE);
+    program(&home.join(".local/bin/deno"), NODE);
+    let places = home_only(&home);
+    let bare = home.join("bare");
+    npm_codex(&bare);
+    let tool = resolve_entry(&bare.join("bin/codex"), &places).unwrap();
+    assert_eq!(tool.interpreter().unwrap().program, places_node);
+    assert_eq!(own_node_refused(&tool, &places), None);
+    let usable = home.join("usable");
+    npm_codex(&usable);
+    let own = program(&usable.join("bin/node"), NODE);
+    let tool = resolve_entry(&usable.join("bin/codex"), &places).unwrap();
+    assert_eq!(tool.interpreter().unwrap().program, own);
+    assert_eq!(own_node_refused(&tool, &places), None);
+    let other = home.join("other");
+    let script = program(
+        &other.join("lib/node_modules/pkg/cli.js"),
+        "#!/usr/bin/env deno\n",
+    );
+    let refused = program(&other.join("bin/node"), NODE);
+    std::fs::set_permissions(&refused, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let tool = resolve_entry(&script, &places).unwrap();
+    assert_eq!(
+        tool.interpreter().unwrap().program,
+        home.join(".local/bin/deno")
+    );
+    assert_eq!(own_node_refused(&tool, &places), None);
+    let launched =
+        crate::harnesses::interactive::launch_tool(&bare.join("bin/codex"), &places).unwrap();
+    assert_eq!(launched.interpreter().unwrap().program, places_node);
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE: with no `node` in the places, a Codex npm script whose own
+/// prefix `node` the resolver passes over is refused naming that file, never reported as
+/// needing a `node` installed, since one in the places would not start it either. The
+/// launch and the harness list give that same line.
+#[test]
+fn a_passed_over_own_prefix_node_with_none_in_the_places_is_named_not_missing() {
+    let (_folder, home) = scratch();
+    let prefix = home.join("nvm-like");
+    npm_codex(&prefix);
+    let own = program(&prefix.join("bin/node"), NODE);
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let places = home_only(&home);
+    let entry = prefix.join("bin/codex");
+    let missing = resolve_entry(&entry, &places).unwrap_err();
+    assert_eq!(missing.reason, Reason::Refused);
+    assert_eq!(missing.tool, "codex");
+    assert_eq!(
+        missing.refused.as_ref().map(|refused| &refused.file),
+        Some(&own)
+    );
+    let crate::harnesses::launch::LaunchError(line, _) =
+        crate::harnesses::interactive::launch_tool(&entry, &places).unwrap_err();
+    assert_eq!(line, missing.line());
+    let needs = crate::harnesses::update::needs(&entry, &places).expect("a harness that can't run");
+    assert_eq!(needs.line, line);
+    assert_eq!(needs.program, None);
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE: only a first line that asks `env` for `node` asks the own
+/// prefix, as [`named_interpreter`] does. A script under an npm prefix whose first line names
+/// a version-manager shim's `node` by path runs the shim's real install and launches, even
+/// beside a prefix `node` the resolver passes over.
+#[test]
+fn a_shim_named_by_path_under_an_npm_prefix_never_asks_its_own_node() {
+    let (_folder, home) = scratch();
+    let shim = program(&home.join(".volta/bin/node"), NODE);
+    let real = program(&home.join(".volta/tools/image/node/22.11.0/bin/node"), NODE);
+    let prefix = home.join("nvm-like");
+    let script = program(
+        &prefix.join("lib/node_modules/pkg/cli.js"),
+        &format!("#!{}\n", shim.display()),
+    );
+    let refused = program(&prefix.join("bin/node"), NODE);
+    std::fs::set_permissions(&refused, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let places = home_only(&home);
+    let tool = resolve_entry(&script, &places).unwrap();
+    assert_eq!(tool.interpreter().unwrap().program, real);
+    assert_eq!(own_node_refused(&tool, &places), None);
+    let launched = crate::harnesses::interactive::launch_tool(&script, &places).unwrap();
+    assert_eq!(launched.interpreter().unwrap().program, real);
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE trip row: [`own_node_refused`] holds only a tool whose real
+/// file is absolute, as every tool [`entry_at`] gives is.
+#[test]
+#[should_panic(expected = "assertion failed: tool.program.is_absolute()")]
+fn the_own_prefix_node_check_trips_on_a_tool_whose_file_is_relative() {
+    let (_folder, home) = scratch();
+    let tool = Resolved {
+        entry: PathBuf::from("codex"),
+        program: PathBuf::from("codex"),
+        kind: Kind::Native,
+    };
+    let _ = own_node_refused(&tool, &home_only(&home));
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE trip row: [`own_node`] judges only a script named by its
+/// absolute real file.
+#[test]
+#[should_panic(expected = "assertion failed: script.is_absolute()")]
+fn the_own_prefix_node_trips_on_a_relative_script() {
+    let (_folder, home) = scratch();
+    let _ = own_node(
+        Path::new("lib/node_modules/pkg/cli.js"),
+        &home_only(&home),
+        1,
+    );
+}
+
+/// V243-OWN-PREFIX-NODE-REFUSE trip row: [`own_node`] never judges a `node` past
+/// [`INTERPRETER_DEPTH_MAX`].
+#[test]
+#[should_panic(expected = "assertion failed: depth <= INTERPRETER_DEPTH_MAX")]
+fn the_own_prefix_node_trips_past_the_interpreter_depth() {
+    let (_folder, home) = scratch();
+    let script = home.join("nvm-like/lib/node_modules/pkg/cli.js");
+    let _ = own_node(&script, &home_only(&home), INTERPRETER_DEPTH_MAX + 1);
+}
+
 /// R-L2: a folder other users of the group can write, such as a 0775 staff folder made under
 /// umask 002, is passed over; on macOS an admin-group folder, like Intel Homebrew's, is not.
+/// On Linux a folder of this user's private group is not passed over either, by design
+/// (`service::private_group`), while one of a group the user shares, as a supplementary
+/// group, is (G1).
 #[test]
 fn a_group_writable_folder_is_passed_over_unless_its_group_is_admin() {
     let (_folder, home) = scratch();
@@ -708,16 +934,38 @@ fn a_group_writable_folder_is_passed_over_unless_its_group_is_admin() {
         group != 0 && group != 80,
         "the scratch folder has the user's group"
     );
-    assert_eq!(
-        resolve("node", &home_only(&home)).unwrap_err().reason,
-        Reason::Refused
-    );
     #[cfg(target_os = "macos")]
-    if std::os::unix::fs::chown(&bin, None, Some(80)).is_ok() {
-        assert!(
-            resolve("node", &home_only(&home)).is_ok(),
-            "admin's group is trusted"
+    {
+        assert_eq!(
+            resolve("node", &home_only(&home)).unwrap_err().reason,
+            Reason::Refused
         );
+        if std::os::unix::fs::chown(&bin, None, Some(80)).is_ok() {
+            assert!(
+                resolve("node", &home_only(&home)).is_ok(),
+                "admin's group is trusted"
+            );
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        assert_eq!(
+            resolve("node", &home_only(&home)).is_ok(),
+            crate::service::own_group_private(),
+            "only this user's private group is trusted"
+        );
+        let shared = nix::unistd::getgroups()
+            .unwrap()
+            .into_iter()
+            .map(|gid| gid.as_raw())
+            .find(|gid| *gid != 0 && *gid != group);
+        if let Some(shared) = shared {
+            std::os::unix::fs::chown(&bin, None, Some(shared)).unwrap();
+            assert_eq!(
+                resolve("node", &home_only(&home)).unwrap_err().reason,
+                Reason::Refused
+            );
+        }
     }
 }
 
@@ -1616,6 +1864,121 @@ fn unread_projects_make_every_place_under_home_but_the_engine_agent_writable() {
         ..places.clone()
     };
     assert!(!read.agent_writable(&home.join(".local/bin")));
+}
+
+/// The data volume's name for an existing path. Input: an absolute path. Output: the long
+/// name.
+#[cfg(target_os = "macos")]
+fn data_volume_name(path: &Path) -> PathBuf {
+    let long = PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+    assert!(long.exists(), "no data volume name for {}", path.display());
+    long
+}
+
+/// V243-FIRMLINK-AGENT-WRITABLE: the engine's data folder and a set-up project are
+/// agent-writable whichever name, short or through the data volume, the path and the engine
+/// folder are given in.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_engine_data_and_a_set_up_project_are_agent_writable_under_either_data_volume_name() {
+    let (_folder, home) = scratch();
+    let root = home.join("engine");
+    let project = home.join("work/older");
+    let agent = root.join("team/agents/agent-7/home/bin");
+    std::fs::create_dir_all(project.join("bin")).unwrap();
+    std::fs::create_dir_all(&agent).unwrap();
+    engine_with_projects(&root, &[&project]);
+    let short = Places::at_roots(Some(&root), None);
+    let long = Places::at_roots(Some(&data_volume_name(&root)), None);
+    for places in [&short, &long] {
+        for path in [agent.clone(), project.join("bin")] {
+            assert!(places.agent_writable(&path), "{}", path.display());
+            let named = data_volume_name(&path);
+            assert!(places.agent_writable(&named), "{}", named.display());
+        }
+    }
+}
+
+/// V243-FIRMLINK-AGENT-WRITABLE guard: the engine's `setup` folder stays out of the
+/// agent-writable places under either name of the path and of the engine folder.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_engine_setup_folder_stays_out_of_agent_writable_under_either_data_volume_name() {
+    let (_folder, home) = scratch();
+    let root = home.join("engine");
+    let setup = root.join("setup/bin");
+    std::fs::create_dir_all(&setup).unwrap();
+    engine_with_projects(&root, &[]);
+    for places in [
+        Places::at_roots(Some(&root), None),
+        Places::at_roots(Some(&data_volume_name(&root)), None),
+    ] {
+        assert!(!places.agent_writable(&setup));
+        assert!(!places.agent_writable(&data_volume_name(&setup)));
+    }
+}
+
+/// V243-FIRMLINK-AGENT-WRITABLE: HOME is never a project, even when it holds a
+/// `.crazyagent` folder, so an owner tool under it stays out of the agent-writable places
+/// whichever name HOME and the tool are given in.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tool_under_a_home_holding_a_crazyagent_folder_stays_out_under_either_data_volume_name() {
+    let (_folder, home) = scratch();
+    std::fs::create_dir_all(home.join(".crazyagent")).unwrap();
+    let tool = program(&home.join(".local/bin/tool"), "#!/bin/sh\nexit 0\n");
+    for named_home in [home.clone(), data_volume_name(&home)] {
+        let places = Places::new(Vec::new(), Some(named_home.clone()));
+        for path in [tool.clone(), data_volume_name(&tool)] {
+            assert!(
+                !places.agent_writable(&path),
+                "HOME {} tool {}",
+                named_home.display(),
+                path.display()
+            );
+        }
+    }
+}
+
+/// V243-FIRMLINK-AGENT-WRITABLE: when the set-up projects cannot be read, every place under
+/// HOME counts as agent-writable whichever name HOME and the place are given in.
+#[cfg(target_os = "macos")]
+#[test]
+fn unread_projects_count_every_place_under_home_under_either_data_volume_name() {
+    let (_folder, home) = scratch();
+    let work = home.join("work/app/bin");
+    std::fs::create_dir_all(&work).unwrap();
+    for named_home in [home.clone(), data_volume_name(&home)] {
+        let places = Places {
+            projects: None,
+            ..Places::new(Vec::new(), Some(named_home.clone()))
+        };
+        for path in [work.clone(), data_volume_name(&work)] {
+            assert!(
+                places.agent_writable(&path),
+                "HOME {} place {}",
+                named_home.display(),
+                path.display()
+            );
+        }
+    }
+}
+
+/// V243-FIRMLINK-AGENT-WRITABLE r2: a set-up project the engine recorded through the data
+/// volume is agent-writable under either name of the place, the short one included.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_set_up_project_recorded_through_the_data_volume_is_agent_writable_under_either_name() {
+    let (_folder, home) = scratch();
+    let root = home.join("engine");
+    let project = home.join("work/older");
+    let bin = project.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    engine_with_projects(&root, &[&data_volume_name(&project)]);
+    let places = Places::at_roots(Some(&root), None);
+    for path in [bin.clone(), data_volume_name(&bin)] {
+        assert!(places.agent_writable(&path), "{}", path.display());
+    }
 }
 
 /// rv-code2 r1 F1, vid 1's race in the shared resolver: `entry_at` reads the entry's real file

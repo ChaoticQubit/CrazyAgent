@@ -348,18 +348,22 @@ fn marker(bucket: &OwnedFd) -> Result<(), &'static str> {
     }
 }
 
-/// The identity of a uv binary a priming record holds: its device, inode, size and
-/// modification time, so a replaced or upgraded uv primes again (C4). Input: the canonical binary.
-/// Output: the identity line, or `tool_cache_uv_unread`.
+/// The identity of a uv binary a priming record holds: its device, inode, size,
+/// modification time and change time, so a replaced or upgraded uv primes again (C4), even
+/// one rewritten in place or given a freed inode with its old size and modification time
+/// (V243-INODE-STAMPS). Input: the canonical binary. Output: the identity line, or
+/// `tool_cache_uv_unread`.
 fn identity(uv: &Path) -> Result<String, &'static str> {
     let metadata = std::fs::metadata(uv).map_err(|_| "tool_cache_uv_unread")?;
     Ok(format!(
-        "{} {} {} {}.{}",
+        "{} {} {} {}.{} {}.{}",
         metadata.dev(),
         metadata.ino(),
         metadata.len(),
         metadata.mtime(),
-        metadata.mtime_nsec()
+        metadata.mtime_nsec(),
+        metadata.ctime(),
+        metadata.ctime_nsec()
     ))
 }
 

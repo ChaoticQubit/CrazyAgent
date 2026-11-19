@@ -1,9 +1,9 @@
 use super::buffer::{Feed, buffer};
 pub use super::harness_socket;
 use super::{
-    AgentId, Host, HostError, INPUT_BYTES_MAX, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneAt,
-    PaneInfo, PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN, TEAMMATES_SERVER_REPLACED,
-    TerminalStream, VIEWERS_MAX, end_except, failure, pane_id_valid,
+    AgentId, Host, HostError, INPUT_BYTES_MAX, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX,
+    PASTE_BYTES_MAX, PaneAt, PaneInfo, PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN,
+    TEAMMATES_SERVER_REPLACED, TerminalStream, VIEWERS_MAX, end_except, failure, pane_id_valid,
 };
 use crate::harnesses::interactive::InteractiveCommand;
 use crate::harnesses::launch::Ending;
@@ -114,10 +114,8 @@ const LEAD_SHELL: &str = "/bin/sh";
 const AGENT_TAG: &str = "@crazyagent";
 const TERMINAL_TYPE: &str = "xterm-256color";
 const TERMINAL_DEFAULTS: [(&str, &str); 2] = [("TERM", TERMINAL_TYPE), ("COLORTERM", "truecolor")];
-const VERSION_MIN: (u32, u32) = (3, 2);
-const CAPTURE_WRITTEN_MIN: (u32, u32) = (3, 4);
+const VERSION_MIN: (u32, u32) = (3, 7);
 const CAPTURE_WRITTEN: &str = "-p -e -N -T";
-const CAPTURE_TRIMMED: &str = "-p -e";
 /// The most bytes one `send-keys -H` command types. tmux parses a command's arguments in time
 /// that grows faster than their count and answers nothing else meanwhile: 4096 hex keys held
 /// the server about 74 ms, 256 under 1 ms (fix11 NOTE-1032).
@@ -185,7 +183,6 @@ struct Control {
     child: Mutex<Option<Child>>,
     input: Mutex<Option<ChildStdin>>,
     state: Arc<Mutex<State>>,
-    capture: &'static str,
     serial: u64,
     #[cfg(test)]
     listed: std::sync::atomic::AtomicUsize,
@@ -259,9 +256,10 @@ const RAN_MAX: usize = 4;
 static RAN: Mutex<Vec<RanFile>> = Mutex::new(Vec::new());
 
 /// Whether a tmux runs: `-V` reports a version within the bound and that version is one the
-/// terminal supports (3.2 or later). A read that runs out of time counts as running, since a
-/// new file can wait behind the system's first-run checks; the version read setup does next
-/// reports it. Takes the tmux. Returns the answer.
+/// terminal supports (3.7 or later, the first with the bracketed-paste flag the attach
+/// reads). A read that runs out of time counts as running, since a new file can wait behind
+/// the system's first-run checks; the version read setup does next reports it. Takes the
+/// tmux. Returns the answer.
 pub fn runs(tmux: &crate::tools::Resolved) -> bool {
     runs_within(tmux, VERSION_READ_TIME)
 }
@@ -647,11 +645,10 @@ impl Tmux {
             ..State::default()
         }));
         let reader = state.clone();
-        let mut control = Control {
+        let control = Control {
             child: Mutex::new(Some(child)),
             input: Mutex::new(Some(input)),
             state,
-            capture: CAPTURE_TRIMMED,
             serial: CONTROL_SERIALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             #[cfg(test)]
             listed: std::sync::atomic::AtomicUsize::new(0),
@@ -667,32 +664,20 @@ impl Tmux {
         let version = control
             .ask(&format!("display-message -p '#{{version}}{FORMAT_END}'"))
             .map_err(|_| failure("terminal_unavailable"))?;
-        let Some(capture) = version
+        if version
             .first()
-            .and_then(|line| capture_flags(&String::from_utf8_lossy(line)))
-        else {
+            .and_then(|line| supported(&String::from_utf8_lossy(line)))
+            != Some(true)
+        {
             return Err(failure("terminal_tmux_unsupported"));
-        };
-        control.capture = capture;
+        }
         if let Some(pin) = &self.pin
             && let Err(refused) = pinned(&control, pin)
         {
             control.stop();
             return Err(refused);
         }
-        for option in [
-            format!("set-option -g default-terminal {TERMINAL_TYPE}"),
-            "set-option -gw allow-rename off".into(),
-            "set-option -gw automatic-rename off".into(),
-            "set-option -gw remain-on-exit off".into(),
-            format!("set-option -g history-limit {SCROLLBACK_LINES}"),
-        ]
-        .into_iter()
-        .chain(
-            self.confined
-                .is_some()
-                .then(|| format!("set-option -g default-shell {LEAD_SHELL}")),
-        ) {
+        for option in server_options(self.confined.is_some()) {
             control
                 .run(&option)
                 .map_err(|_| failure("terminal_unavailable"))?;
@@ -843,12 +828,16 @@ impl Tmux {
         Ok(())
     }
 
-    /// Types bytes into one tmux target as hex keys, one command after another, in order.
-    /// Takes the control client, the target and the bytes. Returns once tmux took them all,
-    /// or `terminal_input_bounds`.
+    /// Hands bytes to one tmux target: a request `pastes` takes goes through a named tmux
+    /// buffer in one paste, any other is typed as hex keys, one command after another, in
+    /// order. Takes the control client, the target and the bytes. Returns once tmux took them
+    /// all, or `terminal_input_bounds`.
     fn send_bytes(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
         if bytes.len() > INPUT_BYTES_MAX {
             return Err(failure("terminal_input_bounds"));
+        }
+        if pastes(bytes) {
+            return Self::send_pasted(control, target, bytes);
         }
         for line in send_keys_lines(target, bytes) {
             control.run(&line)?;
@@ -856,13 +845,88 @@ impl Tmux {
         Ok(())
     }
 
+    /// Pastes bytes into one tmux target through a buffer no other paste uses: `set-buffer`
+    /// then `paste-buffer -d -r -S`, written back to back, so the pane gets the bytes
+    /// unchanged in one write and the buffer is deleted; on a failure a best-effort
+    /// `delete-buffer` follows, so the text does not stay on the server. Takes the control
+    /// client, the target and bytes `pastes` takes. Returns once tmux took them all.
+    fn send_pasted(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
+        assert!(pastes(bytes));
+        let buffer = paste_buffer_name();
+        let lines = paste_buffer_lines(target, &buffer, bytes);
+        assert_eq!(lines.len(), COMMANDS_SENT_MAX);
+        let pasted = control.run_all(&lines);
+        if pasted.is_err() {
+            let _ = control.run(&format!("delete-buffer -b {buffer}"));
+        }
+        pasted
+    }
+
+    /// Pastes one owner paste into one tmux target through `owner_paste_lines` (T7), which
+    /// brackets it only when the pane asked, with a best-effort `delete-buffer` on a failure.
+    /// Takes the control client, the target and 1 to `PASTE_BYTES_MAX` keys from
+    /// `paste_keys`, without a NUL. Returns once tmux took them all, `terminal_paste_bounds`,
+    /// or tmux's refusal.
+    fn send_paste(control: &Control, target: &str, keys: &[u8]) -> Result<(), HostError> {
+        if keys.is_empty() || keys.len() > PASTE_BYTES_MAX || keys.contains(&0) {
+            return Err(failure("terminal_paste_bounds"));
+        }
+        let buffer = paste_buffer_name();
+        let lines = owner_paste_lines(target, &buffer, keys);
+        assert_eq!(lines.len(), keys.len().div_ceil(INPUT_BYTES_MAX) + 1);
+        let pasted = lines
+            .iter()
+            .try_for_each(|line| control.run(line).map(|_| ()));
+        if pasted.is_err() {
+            let _ = control.run(&format!("delete-buffer -b {buffer}"));
+        }
+        pasted
+    }
+
     /// Reads whether bracketed paste is on in one tmux target. Takes the control client and
-    /// the target. Returns the answer.
+    /// the target. Returns the answer, or `terminal_agent_unknown` once the target is gone.
     fn paste_on(control: &Control, target: &str) -> Result<bool, HostError> {
+        Ok(Self::displayed(control, target, "#{bracket_paste_flag}")? == "1")
+    }
+
+    /// Reads one format of one tmux target. `display-message` answers for the current pane,
+    /// with success, when its target is gone (tmux 3.8), so the answer also names its pane
+    /// and window, and one of them must be the target. Takes the control client, a `%N` pane
+    /// or `session:=window` target, and a format whose text holds no space; the names come
+    /// last and may. Returns the format's text, or `terminal_agent_unknown` once the target
+    /// is gone.
+    fn displayed(control: &Control, target: &str, format: &str) -> Result<String, HostError> {
+        let named = "#{session_name}:=#{window_name}";
         let lines = control.ask(&format!(
-            "display-message -p -t {target} '#{{bracket_paste_flag}}{FORMAT_END}'"
+            "display-message -p -t {target} '#{{pane_id}} {format} {named}{FORMAT_END}'"
         ))?;
-        Ok(lines.first().is_some_and(|line| line.as_slice() == b"1"))
+        let unread = || failure("terminal_command_failed");
+        let line = lines
+            .first()
+            .and_then(|line| std::str::from_utf8(line).ok())
+            .ok_or_else(unread)?;
+        let (pane, rest) = line.split_once(' ').ok_or_else(unread)?;
+        let (text, window) = rest.split_once(' ').ok_or_else(unread)?;
+        if pane != target && window != target {
+            return Err(failure("terminal_agent_unknown"));
+        }
+        Ok(text.to_owned())
+    }
+
+    /// The held control client while it is the one that found a view's pane and still reads,
+    /// so a command aimed at that pane id never reaches a pane of a newer server, which can
+    /// reuse the id. Takes the view's pane. Returns the client, or none for a malformed id or
+    /// another or closed client.
+    fn control_at(&self, at: &PaneAt) -> Result<Option<Arc<Control>>, HostError> {
+        if !pane_id_valid(&at.pane) {
+            return Ok(None);
+        }
+        let held = self
+            .control
+            .lock()
+            .map_err(|_| failure("terminal_unavailable"))?
+            .clone();
+        Ok(held.filter(|control| control.serial == at.serial && !control.closed()))
     }
 }
 
@@ -964,21 +1028,37 @@ impl Control {
     }
 
     fn send(&self, line: &str, pending: Pending) -> Result<(), HostError> {
-        assert!(!line.contains('\n') && !line.contains('\r'));
+        self.send_all(vec![(line, pending)])
+    }
+
+    /// Queues each command's pending reply in order and writes all the commands in one write
+    /// under one hold of the client's input, so no other caller's command lands between them.
+    /// Takes the commands with their pendings, at most `COMMANDS_SENT_MAX`. Returns once they
+    /// are written, or the closed client's error.
+    fn send_all(&self, commands: Vec<(&str, Pending)>) -> Result<(), HostError> {
+        assert!(!commands.is_empty());
+        assert!(commands.len() <= COMMANDS_SENT_MAX);
+        assert!(
+            commands
+                .iter()
+                .all(|(line, _)| !line.contains('\n') && !line.contains('\r'))
+        );
         let mut input = self.input.lock().map_err(|_| closed())?;
         let Some(writer) = input.as_mut() else {
             return Err(closed());
         };
+        let mut bytes = Vec::with_capacity(commands.iter().map(|(line, _)| line.len() + 1).sum());
         {
             let mut state = self.state.lock().map_err(|_| closed())?;
             if state.closed {
                 return Err(closed());
             }
-            state.pending.push_back(pending);
+            for (line, pending) in commands {
+                state.pending.push_back(pending);
+                bytes.extend_from_slice(line.as_bytes());
+                bytes.push(b'\n');
+            }
         }
-        let mut bytes = Vec::with_capacity(line.len() + 1);
-        bytes.extend_from_slice(line.as_bytes());
-        bytes.push(b'\n');
         if writer
             .write_all(&bytes)
             .and_then(|()| writer.flush())
@@ -1001,6 +1081,27 @@ impl Control {
             }
             Err(RecvTimeoutError::Disconnected) => Err(closed()),
         }
+    }
+
+    /// Runs commands back to back: sends them all at once through `send_all`, then waits for
+    /// each answer in order. Takes the commands. Returns once all succeeded, or the first error.
+    fn run_all(&self, lines: &[String]) -> Result<(), HostError> {
+        assert!(!lines.is_empty());
+        let mut answers = Vec::with_capacity(lines.len());
+        let commands = lines
+            .iter()
+            .map(|line| {
+                let (reply, answer) = sync_channel(1);
+                answers.push(answer);
+                (line.as_str(), Pending::Reply(reply))
+            })
+            .collect();
+        self.send_all(commands)?;
+        assert_eq!(answers.len(), lines.len());
+        for answer in &answers {
+            self.wait(answer)?;
+        }
+        Ok(())
     }
 
     fn run(&self, line: &str) -> Answer {
@@ -1100,23 +1201,17 @@ fn release(version: &str) -> Option<(u32, u32)> {
     Some((major.parse::<u32>().ok()?, digits.parse::<u32>().ok()?))
 }
 
-fn supported(version: &str) -> Option<bool> {
+/// Whether agent terminals support a tmux version, the second word of `tmux -V`: 3.7 or
+/// later ([`VERSION_MIN`]). Input: the version. Output: the answer, or none when it is not
+/// a release number.
+pub(crate) fn supported(version: &str) -> Option<bool> {
     release(version).map(|found| found >= VERSION_MIN)
 }
 
-/// Picks the `capture-pane` flags for the screen sent on attach. From tmux 3.4 the screen
-/// keeps every cell the program wrote, trailing spaces included, and no unused cell; older
-/// tmux trims trailing spaces and the cursor position still shows where the program is.
-/// Takes the tmux version report. Returns the flags, or none for an unsupported tmux.
-fn capture_flags(version: &str) -> Option<&'static str> {
-    if !supported(version)? {
-        return None;
-    }
-    Some(if release(version)? >= CAPTURE_WRITTEN_MIN {
-        CAPTURE_WRITTEN
-    } else {
-        CAPTURE_TRIMMED
-    })
+/// The oldest tmux version agent terminals support, as setup names it. Output: the
+/// version, such as "3.7".
+pub(crate) fn version_needed() -> String {
+    format!("{}.{}", VERSION_MIN.0, VERSION_MIN.1)
 }
 
 fn quote(text: &str) -> String {
@@ -2128,8 +2223,7 @@ impl Tmux {
             format!("-{history}")
         };
         let asked = format!(
-            "list-panes -t {target} -f '{filter}' -F '#{{pane_height}} #{{history_size}} #{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}} #{{alternate_on}} #{{mouse_standard_flag}} #{{mouse_button_flag}} #{{mouse_all_flag}} #{{mouse_sgr_flag}} #{{mouse_utf8_flag}}{FORMAT_END}' ; capture-pane {} -S {start} -t {target}",
-            control.capture
+            "list-panes -t {target} -f '{filter}' -F '#{{pane_height}} #{{history_size}} #{{pane_id}} #{{window_id}} #{{cursor_x}} #{{cursor_y}} #{{pane_width}} #{{bracket_paste_flag}} #{{keypad_cursor_flag}} #{{alternate_on}} #{{mouse_standard_flag}} #{{mouse_button_flag}} #{{mouse_all_flag}} #{{mouse_sgr_flag}} #{{mouse_utf8_flag}}{FORMAT_END}' ; capture-pane {CAPTURE_WRITTEN} -S {start} -t {target}"
         );
         let until = Instant::now() + REPLY_TIME;
         loop {
@@ -2280,19 +2374,67 @@ impl Host for Tmux {
     }
 
     fn input_at(&self, _agent: &AgentId, at: &PaneAt, bytes: &[u8]) -> Result<bool, HostError> {
-        if !pane_id_valid(&at.pane) {
-            return Ok(false);
-        }
-        let held = self
-            .control
-            .lock()
-            .map_err(|_| failure("terminal_unavailable"))?
-            .clone();
-        let Some(control) = held.filter(|control| control.serial == at.serial && !control.closed())
-        else {
+        let Some(control) = self.control_at(at)? else {
             return Ok(false);
         };
+        assert_eq!(
+            control.serial, at.serial,
+            "a pinned send uses the connection that found it"
+        );
         Self::send_bytes(&control, &at.pane, bytes).map(|()| true)
+    }
+
+    fn own_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        let control = self.live_control()?;
+        let pane = if self.confined.is_some() {
+            self.agent_target(&control, agent)?
+        } else {
+            Self::displayed(&control, &target(agent), "#{pane_id}")?
+        };
+        if !pane_id_valid(&pane) {
+            return Err(failure("terminal_command_failed"));
+        }
+        assert!(control.serial > 0, "control serials start at 1");
+        Ok(PaneAt {
+            pane,
+            serial: control.serial,
+        })
+    }
+
+    fn paste_at(&self, _agent: &AgentId, at: &PaneAt, keys: &[u8]) -> Result<bool, HostError> {
+        if keys.is_empty() || keys.len() > PASTE_BYTES_MAX {
+            return Err(failure("terminal_paste_bounds"));
+        }
+        let Some(control) = self.control_at(at)? else {
+            return Ok(false);
+        };
+        assert_eq!(
+            control.serial, at.serial,
+            "a pinned send uses the connection that found it"
+        );
+        Self::send_paste(&control, &at.pane, keys).map(|()| true)
+    }
+
+    fn resize_at(
+        &self,
+        _agent: &AgentId,
+        at: &PaneAt,
+        size: (u16, u16),
+    ) -> Result<bool, HostError> {
+        let (cols, rows) = size;
+        let bounds = SIZE_MIN..=SIZE_MAX;
+        if !bounds.contains(&cols) || !bounds.contains(&rows) {
+            return Err(failure("terminal_size_bounds"));
+        }
+        let Some(control) = self.control_at(at)? else {
+            return Ok(false);
+        };
+        assert_eq!(
+            control.serial, at.serial,
+            "a pinned send uses the connection that found it"
+        );
+        let line = format!("resize-window -t {} -x {cols} -y {rows}", at.pane);
+        control.run(&line).map(|_| true)
     }
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
@@ -2329,6 +2471,23 @@ impl Host for Tmux {
         Self::paste_on(&*self.live_control()?, &pane)
     }
 
+    fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
+        if keys.is_empty() || keys.len() > PASTE_BYTES_MAX {
+            return Err(failure("terminal_paste_bounds"));
+        }
+        let control = self.live_control()?;
+        let target = self.agent_target(&control, agent)?;
+        Self::send_paste(&control, &target, keys)
+    }
+
+    fn paste_pane(&self, agent: &AgentId, pane: &str, keys: &[u8]) -> Result<(), HostError> {
+        if keys.is_empty() || keys.len() > PASTE_BYTES_MAX {
+            return Err(failure("terminal_paste_bounds"));
+        }
+        let pane = self.member_pane(agent, pane)?;
+        Self::send_paste(&*self.live_control()?, &pane, keys)
+    }
+
     fn adopt_pane(&self, agent: &AgentId, lead: &AgentId, pane: &str) -> Result<(), HostError> {
         if self.confined.is_none() {
             return Err(failure(OWN_SERVER_UNAVAILABLE));
@@ -2349,14 +2508,10 @@ impl Host for Tmux {
     fn quiet(&self, agent: &AgentId) -> Result<Option<Duration>, HostError> {
         let control = self.live_control()?;
         let target = self.agent_target(&control, agent)?;
-        let lines = control.ask(&format!(
-            "display-message -p -t {target} '#{{window_activity}}{FORMAT_END}'"
-        ))?;
-        let activity = lines
-            .first()
-            .and_then(|line| std::str::from_utf8(line).ok())
-            .and_then(|text| text.trim().parse::<u64>().ok())
-            .ok_or_else(|| failure("terminal_command_failed"))?;
+        let activity = Self::displayed(&control, &target, "#{window_activity}")?
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| failure("terminal_command_failed"))?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| failure("terminal_command_failed"))?
@@ -2478,6 +2633,114 @@ impl Host for Tmux {
 
 const _: () = assert!(SEND_KEYS_BYTES_MAX > super::RUN_CUT_BACK_BYTES_MAX);
 const _: () = assert!(SEND_KEYS_BYTES_MAX <= INPUT_BYTES_MAX);
+
+/// Whether `send_bytes` pastes a request through a tmux buffer: when it is longer than one
+/// `send-keys` run and holds no NUL, which would end the buffer. Takes at most
+/// `INPUT_BYTES_MAX` bytes. Returns the choice.
+fn pastes(bytes: &[u8]) -> bool {
+    assert!(bytes.len() <= INPUT_BYTES_MAX);
+    bytes.len() > SEND_KEYS_BYTES_MAX && !bytes.contains(&0)
+}
+
+/// The `set-option` commands the engine runs on each server it controls, in order: the
+/// terminal type, window names and exits, scrollback, the lead shell on a confined host,
+/// then `set-clipboard external` and `get-clipboard off`, so no pane's OSC 52 query reads a
+/// tmux buffer. Takes whether the host is confined. Returns the commands.
+fn server_options(confined: bool) -> Vec<String> {
+    let mut options = vec![
+        format!("set-option -g default-terminal {TERMINAL_TYPE}"),
+        "set-option -gw allow-rename off".into(),
+        "set-option -gw automatic-rename off".into(),
+        "set-option -gw remain-on-exit off".into(),
+        format!("set-option -g history-limit {SCROLLBACK_LINES}"),
+    ];
+    if confined {
+        options.push(format!("set-option -g default-shell {LEAD_SHELL}"));
+    }
+    options.push("set-option -sq set-clipboard external".into());
+    options.push("set-option -sq get-clipboard off".into());
+    assert!(options.len() >= 7);
+    assert!(
+        options
+            .iter()
+            .all(|option| option.starts_with("set-option -"))
+    );
+    options
+}
+
+/// The most commands one `Control::send_all` writes: a paste's `set-buffer` and
+/// `paste-buffer`.
+const COMMANDS_SENT_MAX: usize = 2;
+
+/// The two commands that paste bytes into one target through a named tmux buffer:
+/// `set-buffer` with every byte other than an ASCII letter or digit written as a `\ooo`
+/// octal escape inside double quotes, so tmux's parser decodes each exactly and expands no
+/// `$`, `~` or `#`, then `paste-buffer -d -r -S`, which writes the bytes unchanged, control
+/// bytes and line ends included, and deletes the buffer. No `-p`: the pasted bytes carry
+/// their own bracket marks. Takes the target, the buffer name and bytes without a NUL.
+/// Returns the commands.
+fn paste_buffer_lines(target: &str, buffer: &str, bytes: &[u8]) -> Vec<String> {
+    assert!(!bytes.contains(&0));
+    assert!(bytes.len() <= INPUT_BYTES_MAX);
+    vec![
+        set_buffer_line(buffer, bytes, false),
+        format!("paste-buffer -d -r -S -b {buffer} -t {target}"),
+    ]
+}
+
+/// One `set-buffer` command that writes bytes into a named buffer, appended with `append`,
+/// every byte other than an ASCII letter or digit written as a `\ooo` octal escape inside
+/// double quotes, so tmux's parser decodes each exactly and expands nothing. Takes the
+/// buffer name, at most `INPUT_BYTES_MAX` bytes without a NUL and whether to append.
+/// Returns the command.
+fn set_buffer_line(buffer: &str, bytes: &[u8], append: bool) -> String {
+    assert!(!bytes.contains(&0));
+    assert!(bytes.len() <= INPUT_BYTES_MAX);
+    let flag = if append { "-a " } else { "" };
+    let mut set = String::with_capacity(28 + buffer.len() + bytes.len() * 4);
+    let _ = write!(set, "set-buffer {flag}-b {buffer} -- \"");
+    for &byte in bytes {
+        if byte.is_ascii_alphanumeric() {
+            set.push(char::from(byte));
+        } else {
+            let _ = write!(set, "\\{byte:03o}");
+        }
+    }
+    set.push('"');
+    assert!(set.len() <= "set-buffer -a -b  -- \"\"".len() + buffer.len() + bytes.len() * 4);
+    set
+}
+
+/// The commands that paste one owner paste into one target through a named buffer (T7):
+/// one `set-buffer` per piece of at most `INPUT_BYTES_MAX` bytes, each piece after the first
+/// appended, then `paste-buffer -d -p -r -S`, which brackets the whole only when the pane's
+/// app asked, writes the bytes unchanged otherwise and deletes the buffer. Takes the target,
+/// the buffer name and 1 to `PASTE_BYTES_MAX` keys without a NUL. Returns the commands.
+fn owner_paste_lines(target: &str, buffer: &str, keys: &[u8]) -> Vec<String> {
+    assert!(!keys.is_empty() && keys.len() <= PASTE_BYTES_MAX);
+    let mut lines: Vec<String> = keys
+        .chunks(INPUT_BYTES_MAX)
+        .enumerate()
+        .map(|(at, piece)| set_buffer_line(buffer, piece, at > 0))
+        .collect();
+    lines.push(format!("paste-buffer -d -p -r -S -b {buffer} -t {target}"));
+    assert_eq!(lines.len(), keys.len().div_ceil(INPUT_BYTES_MAX) + 1);
+    lines
+}
+
+/// A tmux buffer name no other paste of this engine uses, `crazyagent-paste-<pid>-<n>`,
+/// plain enough to sit unquoted in a command. Takes nothing. Returns the name.
+fn paste_buffer_name() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    assert!(next < u64::MAX);
+    let name = format!("crazyagent-paste-{}-{next}", std::process::id());
+    assert!(
+        name.bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    );
+    name
+}
 
 /// The `send-keys -H` commands that type bytes into one target, in order. Takes the target
 /// and the bytes. Returns one command per `input_runs` run of at most `SEND_KEYS_BYTES_MAX`

@@ -49,6 +49,18 @@ fn server(name: &str, spec: ServerSpec, status: ServerStatus) -> ServerView {
     }
 }
 
+/// A uvx path the server check accepts on this system: a drive path on Windows.
+#[cfg(unix)]
+const UVX: &str = "/opt/homebrew/bin/uvx";
+#[cfg(not(unix))]
+const UVX: &str = r"C:\Users\owner\.local\bin\uvx.exe";
+
+/// An npx path the server check accepts on this system: a drive path on Windows.
+#[cfg(unix)]
+const NPX: &str = "/opt/homebrew/bin/npx";
+#[cfg(not(unix))]
+const NPX: &str = r"C:\Program Files\nodejs\npx.cmd";
+
 fn stdio(command: &str, args: &[&str]) -> ServerSpec {
     ServerSpec::Stdio {
         command: command.into(),
@@ -433,11 +445,8 @@ fn the_server_form_checks_locally_and_hides_secret_values() {
 #[test]
 fn local_checks_and_short_lines() {
     assert_eq!(
-        command_spec("/opt/homebrew/bin/uvx mcp-server-postgres --read-only"),
-        Ok(stdio(
-            "/opt/homebrew/bin/uvx",
-            &["mcp-server-postgres", "--read-only"]
-        ))
+        command_spec(&format!("{UVX} mcp-server-postgres --read-only")),
+        Ok(stdio(UVX, &["mcp-server-postgres", "--read-only"]))
     );
     assert_eq!(command_spec("uvx mcp"), Err(COMMAND_HINT));
     assert_eq!(
@@ -752,32 +761,68 @@ fn a_bad_secret_name_is_refused_before_the_engine_sees_it() {
 
 #[test]
 fn a_command_line_reads_back_as_the_same_command() {
-    let spec = stdio(
-        "/opt/homebrew/bin/uvx",
-        &["mcp-server-postgres", "--name", "it's here", ""],
-    );
+    let spec = stdio(UVX, &["mcp-server-postgres", "--name", "it's here", ""]);
     assert_eq!(command_spec(&spec.runs()), Ok(spec));
-    assert_eq!(
-        words(r"a 'b c'd e\ f"),
-        Ok(vec!["a".to_owned(), "b cd".to_owned(), "e f".to_owned()])
-    );
+    #[cfg(not(windows))]
+    {
+        assert_eq!(
+            words(r"a 'b c'd e\ f"),
+            Ok(vec!["a".to_owned(), "b cd".to_owned(), "e f".to_owned()])
+        );
+        assert_eq!(words("a \\"), Err("A backslash ends the line."));
+    }
+    #[cfg(windows)]
+    {
+        assert_eq!(
+            words(r"a 'b c'd e\ f"),
+            Ok(vec![
+                "a".to_owned(),
+                "b cd".to_owned(),
+                r"e\".to_owned(),
+                "f".to_owned()
+            ])
+        );
+        assert_eq!(words(r"a \"), Ok(vec!["a".to_owned(), r"\".to_owned()]));
+        assert_eq!(
+            words(r"it\'s C:\x"),
+            Ok(vec!["it's".to_owned(), r"C:\x".to_owned()])
+        );
+    }
     assert_eq!(words("a 'b"), Err("A quote is not closed."));
-    assert_eq!(words("a \\"), Err("A backslash ends the line."));
     assert_eq!(words("  "), Ok(Vec::new()));
+}
+
+/// On Windows a backslash separates folders, so the command hint's own example, typed
+/// without quotes, reads as that command; a backslash keeps the next character only before
+/// a quote, as a saved line writes one.
+#[cfg(windows)]
+#[test]
+fn the_windows_hint_example_typed_without_quotes_reads_as_written() {
+    let example = r"C:\Users\you\.local\bin\uvx.exe";
+    assert!(COMMAND_HINT.contains(example), "{COMMAND_HINT}");
+    assert_eq!(
+        command_spec(&format!("{example} mcp-x")),
+        Ok(stdio(example, &["mcp-x"]))
+    );
 }
 
 #[test]
 fn an_unchanged_server_line_writes_nothing_and_an_added_word_keeps_the_rest_exact() {
+    #[cfg(unix)]
+    const SPACED: &str = "/opt/My Tools/uvx";
+    #[cfg(not(unix))]
+    const SPACED: &str = r"C:\My Tools\uvx.exe";
+    #[cfg(unix)]
+    const GREP: &str = "/usr/bin/grep";
+    #[cfg(not(unix))]
+    const GREP: &str = r"C:\Windows\System32\findstr.exe";
     let specs = [
-        stdio("/opt/My Tools/uvx", &["mcp-server-x"]),
+        stdio(SPACED, &["mcp-server-x"]),
         stdio(
-            "/usr/bin/grep",
+            GREP,
             &[r"--pattern=\d+", "it's", "a b", "", r"C:\path", "'", r"\"],
         ),
-        stdio(
-            "/opt/homebrew/bin/npx",
-            &["@modelcontextprotocol/server-github"],
-        ),
+        stdio(NPX, &["@modelcontextprotocol/server-github"]),
     ];
     for spec in specs {
         let line = spec.runs();
@@ -811,8 +856,14 @@ fn an_unchanged_server_line_writes_nothing_and_an_added_word_keeps_the_rest_exac
 
 #[test]
 fn changing_what_a_server_runs_sends_the_new_command_and_asks_for_approval() {
+    let github = || {
+        let mut github = github_with_token();
+        github.spec = stdio(NPX, &["@modelcontextprotocol/server-github"]);
+        github.runs = github.spec.runs();
+        github
+    };
     let mut ctx = plugin_ctx(80, 24);
-    let mut screen = EditServer::new(github_with_token());
+    let mut screen = EditServer::new(github());
     assert!(screen.typing(), "the page opens on the command");
     screen.key(&Key::Enter, &mut ctx);
     assert_eq!(ctx.queued(), 0);
@@ -822,10 +873,7 @@ fn changing_what_a_server_runs_sends_the_new_command_and_asks_for_approval() {
         screen.key(&Key::Char(character), &mut ctx);
     }
     screen.key(&Key::Enter, &mut ctx);
-    let wanted = stdio(
-        "/opt/homebrew/bin/npx",
-        &["@modelcontextprotocol/server-github", "--read-only"],
-    );
+    let wanted = stdio(NPX, &["@modelcontextprotocol/server-github", "--read-only"]);
     match ctx.next_request() {
         Some(Request::Settings(job)) => match *job {
             SettingsJob::Plugin(PluginChange::Update { id, spec, version }) => {
@@ -838,7 +886,7 @@ fn changing_what_a_server_runs_sends_the_new_command_and_asks_for_approval() {
         other => panic!("settings request expected, got {other:?}"),
     }
     assert!(screen.busy(&ctx));
-    let mut updated = github_with_token();
+    let mut updated = github();
     updated.runs = wanted.runs();
     updated.spec = wanted;
     updated.status = ServerStatus::WaitingForApproval;
@@ -923,7 +971,7 @@ fn a_project_form_adds_for_that_project_and_returns_to_its_settings() {
     }
     form.key(&Key::Tab, &mut ctx);
     form.key(&Key::Tab, &mut ctx);
-    for character in "/opt/homebrew/bin/uvx mcp-server-postgres".chars() {
+    for character in format!("{UVX} mcp-server-postgres").chars() {
         form.key(&Key::Char(character), &mut ctx);
     }
     form.key(&Key::Enter, &mut ctx);

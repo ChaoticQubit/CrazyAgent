@@ -155,6 +155,7 @@ fn merge_in_clone(answering: &Answering<'_>, lead: i64, id: i64, label: &str) ->
         .project_folder()
         .canonicalize()
         .ok()
+        .map(crate::projects_home::one_spelling)
         .and_then(|root| {
             ProjectSandbox::new(&root, &home, &tmp, SandboxNetwork::Only(Vec::new())).ok()
         });

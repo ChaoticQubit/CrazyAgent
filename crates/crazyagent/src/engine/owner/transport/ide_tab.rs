@@ -189,7 +189,7 @@ impl OwnerClient {
     }
 
     async fn ide_tab_exchange(&self, action: Action) -> Result<Reply, EngineError> {
-        tokio::time::timeout(self.timeout.max(IDE_TAB_TIMEOUT), async {
+        tokio::time::timeout(deferred_wait(self.timeout, IDE_TAB_TIMEOUT), async {
             let read = read_kind(&action);
             let frame = encode_frame(&Envelope { ide_tab: action })
                 .map_err(|_| failure("ide_tab_request_bounds"))?;
@@ -255,7 +255,7 @@ pub(super) async fn serve(
 }
 
 fn public_code(error: EngineError) -> String {
-    if IDE_TAB_CODES.contains(&error.0.as_str()) {
+    if IDE_TAB_CODES.contains(&error.0.as_str()) || crate::storage::storage_answer(&error.0) {
         error.0
     } else {
         "ide_tab_outcome_unknown".into()

@@ -227,6 +227,14 @@ struct SubAgent {
 
 impl SubAgent {
     async fn start() -> Self {
+        Self::start_in(None).await
+    }
+
+    /// Starts the sub-agent as [`SubAgent::start`] does. With a projects home it first sets
+    /// up project `alpha` there, since the product writes a team row only for a set-up
+    /// project and a row whose project is not recorded marks a removed one. Input: the
+    /// projects home, if any. Output: the started sub-agent.
+    async fn start_in(home: Option<&Path>) -> Self {
         let root = tempfile::Builder::new()
             .prefix("ca-term-sub-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -251,6 +259,9 @@ impl SubAgent {
         )
         .await
         .unwrap();
+        if let Some(home) = home {
+            set_up_alpha(root.path(), home).await;
+        }
         let member: i64 = {
             let connection = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
             connection.busy_timeout(Duration::from_secs(5)).unwrap();
@@ -481,6 +492,44 @@ async fn a_revoked_viewer_cannot_type_one_more_key_into_the_terminal() {
     control.detach().await.unwrap();
     assert_eq!(closed(&mut output).await, "terminal_detached");
     drop(tui);
+    sub.stop().await;
+}
+
+/// The input-only session a native view types through (DEC-203) sends no output, so nothing
+/// but the timed grant check ends it while its owner types nothing. Revoked while it idles,
+/// it closes with the revoke reason within one 5 s check, short of a second check at 10 s.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_input_only_session_closes_within_one_grant_check_of_a_revoke() {
+    use crazyagent::engine::owner::{OwnerControl, OwnerDecision};
+    use crazyagent::protocol::RequestId;
+    let mut sub = SubAgent::start().await;
+    let TerminalSession {
+        mut output,
+        control,
+        ..
+    } = sub
+        .controller
+        .terminal_attach_input(sub.agent.clone(), None, 80, 24)
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let host = sub.service.owner_runtime().unwrap();
+    host.control(OwnerControl {
+        operation_id: RequestId::new("revoke-input-only-view").unwrap(),
+        target: OwnerClientKind::Desktop,
+        expected_epoch: host.epoch(OwnerClientKind::Desktop).unwrap(),
+        decision: OwnerDecision::Revoke,
+    })
+    .await
+    .unwrap();
+    let revoked = std::time::Instant::now();
+    assert_eq!(closed(&mut output).await, "owner_grant_stale_or_revoked");
+    let waited = revoked.elapsed();
+    assert!(
+        waited < Duration::from_secs(9),
+        "the idle input-only session closed {waited:?} after the revoke"
+    );
+    drop(control);
     sub.stop().await;
 }
 
@@ -754,6 +803,43 @@ fn applied(response: OwnerResponse) {
     }
 }
 
+/// Sets up project `alpha` in a projects home through an owner controller of its own, which
+/// ends before the sub-agent's controller attaches. Inputs: the engine root and the home.
+async fn set_up_alpha(root: &Path, home: &Path) {
+    let mut controller =
+        OwnerController::attach(root, OwnerClientKind::Desktop, Duration::from_secs(5))
+            .await
+            .unwrap();
+    applied(
+        controller
+            .set_projects_home(home.to_str().unwrap().into(), 1)
+            .await
+            .unwrap(),
+    );
+    applied(
+        controller
+            .setup_project(
+                ProjectId::new("alpha").unwrap(),
+                ProjectSpec {
+                    name: "Alpha".into(),
+                    repositories: vec![],
+                },
+                ProjectSetup {
+                    about: "Watches sensor buoys and raises alerts.".into(),
+                    tech_stack: vec!["rust".into()],
+                    platforms: vec![Platform::Website],
+                    research: vec![ResearchKind::MarketResearch],
+                    pool: None,
+                    team: None,
+                    documents: vec![],
+                },
+                2,
+            )
+            .await
+            .unwrap(),
+    );
+}
+
 /// Waits up to ten seconds for an agent terminal's screen to show some text. Inputs: the
 /// host, the agent and the text. Output: whether it showed.
 fn shows(host: &dyn Host, agent: &AgentId, wanted: &[u8]) -> bool {
@@ -775,8 +861,6 @@ fn shows(host: &dyn Host, agent: &AgentId, wanted: &[u8]) -> bool {
 /// ended, so no key reaches the ended agent; one that never ran here names none (N-D21).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_finished_sub_agent_opens_its_kept_last_screen_read_only() {
-    let mut sub = SubAgent::start().await;
-    let project = ProjectId::new("alpha").unwrap();
     let disk = tempfile::Builder::new()
         .prefix("ca-term-home-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -784,34 +868,8 @@ async fn a_finished_sub_agent_opens_its_kept_last_screen_read_only() {
     std::fs::set_permissions(disk.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let home = disk.path().join("Projects");
     std::fs::create_dir(&home).unwrap();
-    applied(
-        sub.controller
-            .set_projects_home(home.to_str().unwrap().into(), 1)
-            .await
-            .unwrap(),
-    );
-    applied(
-        sub.controller
-            .setup_project(
-                project.clone(),
-                ProjectSpec {
-                    name: "Alpha".into(),
-                    repositories: vec![],
-                },
-                ProjectSetup {
-                    about: "Watches sensor buoys and raises alerts.".into(),
-                    tech_stack: vec!["rust".into()],
-                    platforms: vec![Platform::Website],
-                    research: vec![ResearchKind::MarketResearch],
-                    pool: None,
-                    team: None,
-                    documents: vec![],
-                },
-                2,
-            )
-            .await
-            .unwrap(),
-    );
+    let mut sub = SubAgent::start_in(Some(&home)).await;
+    let project = ProjectId::new("alpha").unwrap();
     let lead = sub.agent.team_agent().unwrap();
     let (finished, never) = {
         let connection = rusqlite::Connection::open(sub.root.path().join("engine.db")).unwrap();

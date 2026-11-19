@@ -137,6 +137,57 @@ fn a_chosen_file_inside_the_engine_folder_or_an_agent_temp_folder_is_refused() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn a_chosen_file_inside_the_engine_folder_named_through_the_data_volume_is_refused() {
+    let case = Case::new();
+    let agent = case.file("engine/team/agents/agent-7/home/codex", 0o755);
+    let long = PathBuf::from(format!("/System/Volumes/Data{}", agent.display()));
+    assert!(long.is_file());
+    assert_eq!(case.check("codex", &agent), Err(PATH_AGENT_SPACE.into()));
+    assert_eq!(case.check("codex", &long), Err(PATH_AGENT_SPACE.into()));
+}
+
+/// The data volume's name for a path. Input: an absolute path. Output: the long name.
+#[cfg(target_os = "macos")]
+fn data_volume_name(path: &Path) -> PathBuf {
+    let long = PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+    assert!(long.exists(), "no data volume name for {}", path.display());
+    long
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_link_outside_a_long_named_engine_folder_to_its_agent_file_spelled_long_is_refused() {
+    let case = Case::new();
+    let agent = case.file("engine/team/agents/agent-7/home/codex", 0o755);
+    let link = case.root.join("tools/codex");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(data_volume_name(&agent), &link).unwrap();
+    let space = finding::AgentSpace::open(&data_volume_name(&case.engine)).unwrap();
+    let checked = finding::check("codex", &link, &space, Some(&case.home));
+    assert_eq!(
+        checked.map_err(|error| error.0),
+        Err(PATH_AGENT_SPACE.into())
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_file_under_a_folder_link_spelled_long_into_a_long_named_engine_folder_is_refused() {
+    let case = Case::new();
+    let agent = case.file("engine/team/agents/agent-7/home/codex", 0o755);
+    let folder = case.root.join("tools");
+    std::os::unix::fs::symlink(data_volume_name(agent.parent().unwrap()), &folder).unwrap();
+    let path = folder.join("codex");
+    let space = finding::AgentSpace::open(&data_volume_name(&case.engine)).unwrap();
+    let checked = finding::check("codex", &path, &space, Some(&case.home));
+    assert_eq!(
+        checked.map_err(|error| error.0),
+        Err(PATH_AGENT_SPACE.into())
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn a_chosen_file_in_a_folder_other_users_can_change_is_refused() {
     let case = Case::new();
     let shared = case.root.join("shared");
@@ -875,4 +926,28 @@ fn one_reader_names_the_agent_folders_and_its_caller_says_what_a_bad_row_does() 
         read(finding::BadRow::Fail),
         Err(finding::PATH_UNREADABLE.to_owned())
     );
+}
+
+/// V243-FIRMLINK-SWEEP D3: a PATH folder named through /System/Volumes/Data inside a temp
+/// folder is set aside, and a kept file linked into a temp folder by its data volume name
+/// leads into temp all the same, so the engine search finds neither harness.
+#[cfg(target_os = "macos")]
+#[test]
+fn temp_folders_named_through_the_data_volume_are_still_temp() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap();
+    let long = |path: &Path| PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+    let temps = vec![root.join("tmp")];
+    let set_aside = root.join("tmp/bin");
+    let kept = root.join("kept/bin");
+    runnable(&set_aside.join("codex"));
+    let real = runnable(&root.join("tmp/real/claude"));
+    std::fs::create_dir_all(&kept).unwrap();
+    std::os::unix::fs::symlink(long(&real), kept.join("claude")).unwrap();
+    assert!(long(&set_aside).is_dir());
+    let path = std::env::join_paths([long(&set_aside), kept.clone()]).unwrap();
+    let search = Search::engine_in(Some(&path), &[], None, &temps);
+    assert_eq!(search.find("codex"), None);
+    assert_eq!(search.find("claude-code"), None);
+    assert!(crate::tools::in_temp_of(&long(&set_aside), &temps));
 }

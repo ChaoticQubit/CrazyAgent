@@ -882,3 +882,23 @@ fn upstream_config_bytes_stay_the_same() {
         "model_relay_request_invalid"
     );
 }
+
+#[test]
+fn an_idle_relay_waits_for_harness_connections_without_waking_every_poll() {
+    let relay = Relay::start("http://127.0.0.1:9/v1", key()).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let before = relay.shared.accept_passes.load(Ordering::SeqCst);
+    std::thread::sleep(Duration::from_secs(1));
+    let passes = relay.shared.accept_passes.load(Ordering::SeqCst) - before;
+    assert!(passes <= 10, "{passes} accept passes in an idle second");
+}
+
+#[test]
+fn dropping_an_idle_relay_stops_its_accept_thread_at_once() {
+    let relay = Relay::start("http://127.0.0.1:9/v1", key()).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let started = Instant::now();
+    drop(relay);
+    let took = started.elapsed();
+    assert!(took < Duration::from_millis(50), "dropping took {took:?}");
+}

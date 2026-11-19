@@ -382,5 +382,5 @@ fn a_poisoned_capture_still_reads_back_for_the_failure_message() {
     let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         captured_text(&stdout, &stderr)
     }));
-    assert_eq!(text.ok().as_deref(), Some("stdout: ready\nstderr: "));
+    assert_eq!(text.ok().as_deref(), Some("stdout: ready\n\nstderr: "));
 }

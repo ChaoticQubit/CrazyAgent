@@ -3,15 +3,17 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod parallel;
+
 struct Machine {
     root: tempfile::TempDir,
 }
 
 impl Machine {
     fn new() -> Self {
+        let root = crate::harnesses::finding::private_root();
         Self {
-            root: tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap())
-                .unwrap(),
+            root: tempfile::tempdir_in(root).unwrap(),
         }
     }
     fn roots(&self) -> Roots {

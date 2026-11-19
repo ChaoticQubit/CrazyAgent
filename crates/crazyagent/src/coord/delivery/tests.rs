@@ -435,6 +435,76 @@ fn recipients_are_live_agents_waiting_longest_first_and_capped_per_tick() {
     );
 }
 
+/// How many old messages the idle-cost row puts in front of the tick's waiting reads.
+const HISTORY_MESSAGES: i64 = 600;
+/// The most SQLite steps the waiting reads may add over that history: far below one step
+/// per old message, so any read that walks the history fails.
+const HISTORY_STEPS_SLACK: i32 = 32;
+
+/// Idle cost (V243-ENGINE-IDLE-CPU): each tick reads which messages wait, for every stepped
+/// project. Over a history of read messages and of messages left Sent to a stopped agent,
+/// both reads take as many SQLite steps as over none, so an idle tick does not grow with it.
+#[test]
+fn waiting_message_reads_do_not_grow_with_message_history() {
+    let fixture = Fixture::new();
+    let live = fixture.agent("sub", "codex", "idle", None);
+    let stopped = fixture.agent("sub", "codex", "stopped", None);
+    let before = waiting_read_steps(&fixture.db);
+    for n in 0..HISTORY_MESSAGES {
+        let (to, receipt) = match n % 3 {
+            0 => (stopped, "sent"),
+            1 => (stopped, "read"),
+            _ => (live, "read"),
+        };
+        fixture
+            .db
+            .execute(
+                "INSERT INTO coord_messages(project,from_kind,to_kind,to_agent,kind,body,receipt,created,receipt_at)
+                 VALUES (?1,'owner','agent',?2,'prompt','Old',?3,1,1)",
+                params![PROJECT, to, receipt],
+            )
+            .unwrap();
+    }
+    let after = waiting_read_steps(&fixture.db);
+    assert!(
+        after.0 <= before.0 + HISTORY_STEPS_SLACK,
+        "requeue steps grew from {} to {}",
+        before.0,
+        after.0
+    );
+    assert!(
+        after.1 <= before.1 + HISTORY_STEPS_SLACK,
+        "recipients steps grew from {} to {}",
+        before.1,
+        after.1
+    );
+    assert!(recipients(&fixture.db, &project()).unwrap().is_empty());
+}
+
+/// Counts the SQLite steps of the tick's two waiting reads, each run to its end.
+/// Input: the database. Output: the steps of the requeue read and of the recipients read.
+fn waiting_read_steps(db: &Connection) -> (i32, i32) {
+    let limit = i64::try_from(RECIPIENTS_PER_TICK_MAX).unwrap();
+    let requeue = statement_steps(db, REQUEUE_SQL, params![PROJECT, limit]);
+    let recipients = statement_steps(
+        db,
+        &recipients_sql(),
+        params![PROJECT, RESULTS_KEY, EVENTS_KEY, limit],
+    );
+    assert!(requeue > 0 && recipients > 0);
+    (requeue, recipients)
+}
+
+/// Runs one read to its end and counts its SQLite virtual machine steps.
+/// Inputs: the database, the SQL and its parameters. Output: the step count.
+fn statement_steps(db: &Connection, sql: &str, args: impl rusqlite::Params) -> i32 {
+    let mut statement = db.prepare(sql).unwrap();
+    let mut rows = statement.query(args).unwrap();
+    while rows.next().unwrap().is_some() {}
+    drop(rows);
+    statement.get_status(rusqlite::StatementStatus::VmStep)
+}
+
 /// K2b: Native only leaves a Claude Code or Rcli agent's messages Sent with no retry, for
 /// the relay or the next engine-started turn; Auto leaves Claude Code messages younger
 /// than `NATIVE_GRACE_MS` alone and retries older ones while no terminal host is known.

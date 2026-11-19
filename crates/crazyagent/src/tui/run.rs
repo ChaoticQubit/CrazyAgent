@@ -695,6 +695,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn the_keyboard_protocol_is_turned_on_only_under_auto_on_a_terminal_that_has_it() {
         let pushed = AtomicBool::new(false);
@@ -720,6 +721,7 @@ mod tests {
         assert!(out.is_empty() && !pushed.load(Ordering::SeqCst));
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn every_restore_turns_a_pushed_keyboard_protocol_off_before_the_screen_is_left() {
         let pushed = AtomicBool::new(true);
@@ -754,6 +756,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(windows))]
     #[test]
     fn a_saved_shift_enter_choice_switches_the_keyboard_protocol_at_once() {
         let pushed = AtomicBool::new(true);
@@ -788,5 +791,29 @@ mod tests {
         switch_keyboard(&mut out, ShiftEnter::Auto, || Ok(true), &pushed).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "\x1b[>1u");
         assert!(pushed.load(Ordering::SeqCst));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn on_windows_auto_starts_switches_and_restores_without_the_keyboard_protocol() {
+        let pushed = AtomicBool::new(false);
+        let mut out = Vec::new();
+        let supported = crossterm::terminal::supports_keyboard_enhancement;
+        push_keyboard(&mut out, ShiftEnter::Auto, supported, &pushed).unwrap();
+        switch_keyboard(&mut out, ShiftEnter::Auto, supported, &pushed).unwrap();
+        switch_keyboard(
+            &mut out,
+            ShiftEnter::Off,
+            || panic!("Off never asks the terminal"),
+            &pushed,
+        )
+        .unwrap();
+        restore_with(&mut out, &pushed).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            !text.contains("\x1b[>") && !text.contains("\x1b[<"),
+            "{text:?}"
+        );
+        assert!(!pushed.load(Ordering::SeqCst));
     }
 }

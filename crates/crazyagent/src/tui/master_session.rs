@@ -3283,6 +3283,10 @@ fn reason_text(reason: &MasterReason) -> &'static str {
         MasterReason::RepositoryConfigRefused => {
             "A Git setting in this project's repository runs commands or redirects Git"
         }
+        MasterReason::GitTooOld if cfg!(target_os = "macos") => {
+            "Agents need Git 2.39 or newer: update Xcode or its Command Line Tools, then send again"
+        }
+        MasterReason::GitTooOld => "Agents need Git 2.39 or newer: update Git, then send again",
         MasterReason::InstructionsTooLarge => {
             "App and project instructions are too long for a Claude master: shorten them on the Process page"
         }
@@ -3450,6 +3454,15 @@ mod turn_line_tests {
                 MasterReason::SandboxStopped,
                 "sandbox_held_not_put_back",
                 "Turn 1: Blocked | The sandbox stopped this run: a protected name could not be put back (sandbox_held_not_put_back)",
+            ),
+            (
+                MasterReason::GitTooOld,
+                "worktree_git_old",
+                if cfg!(target_os = "macos") {
+                    "Turn 1: Blocked | Agents need Git 2.39 or newer: update Xcode or its Command Line Tools, then send again (worktree_git_old)"
+                } else {
+                    "Turn 1: Blocked | Agents need Git 2.39 or newer: update Git, then send again (worktree_git_old)"
+                },
             ),
         ] {
             let mut lines = Vec::new();

@@ -154,6 +154,10 @@ fn channels_name_their_release_manifests() {
 
 #[test]
 fn the_data_root_follows_the_release_contract() {
+    #[cfg(unix)]
+    const CUSTOM: &str = "/srv/crazy";
+    #[cfg(not(unix))]
+    const CUSTOM: &str = r"C:\srv\crazy";
     let vars = |pairs: &'static [(&'static str, &'static str)]| {
         move |name: &str| {
             pairs
@@ -164,10 +168,10 @@ fn the_data_root_follows_the_release_contract() {
     };
     assert_eq!(
         data_root_from(vars(&[
-            ("CRAZYAGENT_HOME", "/srv/crazy"),
+            ("CRAZYAGENT_HOME", CUSTOM),
             ("HOME", "/Users/mira")
         ])),
-        Some(PathBuf::from("/srv/crazy"))
+        Some(PathBuf::from(CUSTOM))
     );
     #[cfg(target_os = "macos")]
     {

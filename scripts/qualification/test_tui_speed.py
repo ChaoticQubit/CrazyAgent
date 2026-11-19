@@ -93,15 +93,6 @@ def test_metrics_refuse_a_missing_or_negative_time():
         raise AssertionError("a negative time was accepted")
 
 
-if __name__ == "__main__":
-    if not __debug__:
-        raise SystemExit("TUI speed checks require Python assertions enabled")
-    checks = [value for name, value in sorted(globals().items()) if name.startswith("test_")]
-    for check in checks:
-        check()
-    print("tui_speed_checks=%d" % len(checks))
-
-
 def test_a_frame_cut_mid_write_is_not_ready_until_it_ends():
     home = ("\x1b[1;1H [◆▪◆▪] CrazyAgent  /  Home\x1b[3;1H  Projects  1"
             "\x1b[4;1H  ▌ Speed Project\x1b[0m\x1b[?25l").encode()
@@ -120,3 +111,12 @@ def test_a_frame_cut_mid_write_is_not_ready_until_it_ends():
     assert not ready(done[:-3], screen_text(done[:-3], 100, 24), path, PROJECT)
     cursor = done + b"\x1b[?25h\x1b[6;5H"
     assert ready(cursor, screen_text(cursor, 100, 24), path, PROJECT)
+
+
+if __name__ == "__main__":
+    if not __debug__:
+        raise SystemExit("TUI speed checks require Python assertions enabled")
+    checks = [value for name, value in sorted(globals().items()) if name.startswith("test_")]
+    for check in checks:
+        check()
+    print("tui_speed_checks=%d" % len(checks))

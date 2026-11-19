@@ -1,3 +1,4 @@
+use crate::platform::fd_wait::{self, Wake};
 use crate::spawn_gate;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -156,6 +157,7 @@ pub struct ModelProxy {
     port: u16,
     shared: Arc<Shared>,
     listener: Option<JoinHandle<()>>,
+    wake: Wake,
 }
 
 /// What one proxy's threads share: the agent its log lines name, its hosts, the stop flag,
@@ -171,6 +173,8 @@ struct Shared {
     totaled: AtomicU64,
     started: Instant,
     any_address: bool,
+    #[cfg(test)]
+    serve_passes: AtomicU64,
 }
 
 impl Shared {
@@ -262,6 +266,12 @@ impl ModelProxy {
         self.shared.refusals.load(Ordering::SeqCst)
     }
 
+    /// How many passes the accept thread has made over its listeners. Output: the count.
+    #[cfg(all(test, unix))]
+    pub(crate) fn serve_passes(&self) -> u64 {
+        self.shared.serve_passes.load(Ordering::SeqCst)
+    }
+
     /// Starts the proxy [`ModelProxy::bind`] describes. Inputs: the agent, its hosts, the
     /// port, the owner's model ports, and whether its tunnels may dial addresses on this
     /// machine. Output: the running proxy, or the bind error.
@@ -292,15 +302,19 @@ impl ModelProxy {
             totaled: AtomicU64::new(0),
             started: Instant::now(),
             any_address,
+            #[cfg(test)]
+            serve_passes: AtomicU64::new(0),
         });
         let serving = shared.clone();
+        let (wake, woken) = fd_wait::wake_pair()?;
         let thread = std::thread::Builder::new()
             .name(format!("model-proxy-{agent}"))
-            .spawn(move || serve(&listeners, &serving))?;
+            .spawn(move || serve(&listeners, &serving, &woken))?;
         Ok(Self {
             port: bound,
             shared,
             listener: Some(thread),
+            wake,
         })
     }
 
@@ -373,11 +387,13 @@ fn free_pair(ports: &[u16], kept: &[u16], start: usize) -> io::Result<[TcpListen
 }
 
 impl Drop for ModelProxy {
-    /// Stops the listeners, which the serving thread sees within one accept poll, waits a
-    /// short bound for the open tunnels to notice the stop, and logs the refusal total when
-    /// the proxy logged only some of its refusal lines. Takes the proxy.
+    /// Stops the listeners, waking the serving thread through its wake pair so it sees the
+    /// stop at once, waits a short bound for the open tunnels to notice the stop, and logs
+    /// the refusal total when the proxy logged only some of its refusal lines. Takes the
+    /// proxy.
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::SeqCst);
+        self.wake.rouse();
         if let Some(thread) = self.listener.take() {
             let _ = thread.join();
         }
@@ -406,19 +422,30 @@ impl Drop for Held {
 }
 
 /// Accepts the agent's connections on both non-blocking listeners until the proxy stops,
-/// polling every `ACCEPT_POLL` while neither has one waiting. Inputs: the listeners and
-/// what the proxy's threads share. Output: none.
-fn serve(listeners: &[TcpListener; 2], shared: &Arc<Shared>) {
+/// waiting for a client or the wake while neither has one waiting. After a failed accept it
+/// waits `ACCEPT_POLL` instead, since a listener whose client cannot be accepted, as when
+/// the process is out of descriptors, stays ready and would turn the wait into a busy loop.
+/// Inputs: the listeners, what the proxy's threads share and the wake end. Output: none.
+fn serve(listeners: &[TcpListener; 2], shared: &Arc<Shared>, woken: &Wake) {
     while !shared.stop.load(Ordering::SeqCst) {
+        #[cfg(test)]
+        shared.serve_passes.fetch_add(1, Ordering::SeqCst);
         let mut waiting = false;
+        let mut failed = false;
         for listener in listeners {
-            if let Ok((client, _)) = spawn_gate::accept_tcp_std(listener) {
-                waiting = true;
-                admit(client, shared);
+            match spawn_gate::accept_tcp_std(listener) {
+                Ok((client, _)) => {
+                    waiting = true;
+                    admit(client, shared);
+                }
+                Err(error) => failed |= error.kind() != io::ErrorKind::WouldBlock,
             }
         }
-        if !waiting {
+        if failed && !waiting {
             std::thread::sleep(ACCEPT_POLL);
+        } else if !waiting {
+            let until = Instant::now() + POLL;
+            fd_wait::wait_for_clients(&[&listeners[0], &listeners[1]], woken, until, ACCEPT_POLL);
         }
     }
 }

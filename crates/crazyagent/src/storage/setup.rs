@@ -701,20 +701,20 @@ pub(crate) fn apply_owner(
             set(tx, root, &mut record, *on)?;
             Ok(Outcome::Applied)
         }
-        SetupAction::Install { .. } => {
-            if progress::snapshot(root).running {
+        SetupAction::Install { name } => {
+            if progress::snapshot(root).jobs.contains(name) {
                 return Ok(rejected("setup_busy"));
             }
             Ok(Outcome::Applied)
         }
-        SetupAction::FixPermissions { tree, .. } => {
+        SetupAction::FixPermissions { name, tree, .. } => {
             if !fix_tree_shape(tree) {
                 return Ok(rejected(permission_fix::TOOL_FIX_CHANGED));
             }
             if refused_tool(tx)? == RefusedTool::CommandOnly {
                 return Ok(rejected(permission_fix::TOOL_FIX_OFF));
             }
-            if progress::snapshot(root).running {
+            if progress::snapshot(root).jobs.contains(name) {
                 return Ok(rejected("setup_busy"));
             }
             Ok(Outcome::Applied)

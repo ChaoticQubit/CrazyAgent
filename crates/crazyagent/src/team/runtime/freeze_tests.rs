@@ -41,7 +41,8 @@ fn free_proxy_port() -> u16 {
 
 /// When a stand-in harness kills the warden its pane shim forked beside it, as an agent
 /// that ends its own warden would: never, as soon as it starts, or on its first dial after
-/// the row writes `kill.warden`. A stand-in that killed it writes `warden.killed`.
+/// the row writes `kill.warden`. A stand-in that killed it writes `warden.killed` whole,
+/// through a rename as its other pid files, so a row never reads it half written.
 #[derive(Clone, Copy)]
 enum WardenKill {
     Never,
@@ -94,7 +95,9 @@ impl Proxied {
         std::fs::write(&profile, CONFINED_SIGNALS).unwrap();
         let dir = folder.display();
         let warden = format!(
-            "for p in $(/usr/bin/pgrep -P $$ perl); do kill -9 $p && echo $p > '{dir}/warden.killed'; done"
+            "for p in $(/usr/bin/pgrep -P $$ perl); do kill -9 $p \
+             && echo $p > '{dir}/warden.killed.new' \
+             && mv '{dir}/warden.killed.new' '{dir}/warden.killed'; done"
         );
         let (started, dialing) = match kill {
             WardenKill::Never => (String::new(), String::new()),

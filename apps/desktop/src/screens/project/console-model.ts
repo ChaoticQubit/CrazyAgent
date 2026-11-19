@@ -245,3 +245,26 @@ export function tagSegments(text: string, known: ReadonlySet<string>): { text: s
 export function promptRows(text: string): number {
   return Math.min(PROMPT_ROWS_MAX, Math.max(1, text.split("\n").length));
 }
+
+/** The master's input once a drafted message is handed to it: the draft alone in an empty
+ * input, else after the owner's own text and a blank line, so nothing typed is lost. Inputs:
+ * the input's text and the draft. Output: the new text. */
+export function seededText(text: string, draft: string): string {
+  return text.trim() === "" ? draft : `${text}\n\n${draft}`;
+}
+
+/** A drafted message handed to the master's input: its id, its text, and `used`, which the
+ * input that takes it calls, so no input made later takes it again. */
+export interface Seed {
+  id: number;
+  text: string;
+  used: () => void;
+}
+
+/** One Ask's seed. Inputs: its id, from a count that only grows, the draft and the setter of
+ * the master area's seed. Output: the seed; its `used` clears the area's seed unless a newer
+ * Ask replaced it. */
+export function seedOf(id: number, text: string, set: (update: (now: Seed | null) => Seed | null) => void): Seed {
+  if (!Number.isSafeInteger(id) || id < 1) throw new Error("a seed's id is a whole number from 1");
+  return { id, text, used: () => set((now) => (now?.id === id ? null : now)) };
+}

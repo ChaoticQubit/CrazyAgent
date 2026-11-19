@@ -143,9 +143,9 @@ fn what_needs_a_checkout_or_a_tool_is_not_set_up_without_one() {
     );
 }
 
-/// WIN-PACK-SEED: on Windows context-mode is set up as the pinned launch through the
-/// engine's own `npx.cmd`, the exact spec the context-mode launch check reads and runs
-/// through its shared install.
+/// WIN-PACK-SEED: on Windows, with no npx of the owner's on PATH, context-mode is set up as
+/// the pinned launch through the engine's own `npx.cmd`, the exact spec the context-mode
+/// launch check reads and runs through its shared install.
 #[cfg(windows)]
 #[test]
 fn context_mode_is_set_up_on_windows_as_the_pinned_launch_the_engine_runs() {
@@ -153,7 +153,15 @@ fn context_mode_is_set_up_on_windows_as_the_pinned_launch_the_engine_runs() {
     let root = case.base.join("engine");
     let bin = root.join("setup").join("bin");
     program(&bin.join("npx.cmd"));
-    let places = crate::tools::Places::from_environment(Some(&root));
+    program(&bin.join("node.exe"));
+    program(
+        &bin.join("node_modules")
+            .join("npm")
+            .join("bin")
+            .join("npx-cli.js"),
+    );
+    let places =
+        crate::tools::Places::engine(Some(&root), None, None, Some(std::ffi::OsStr::new("")));
     let installer = WindowsInstaller::new(
         &root.join("setup"),
         Some(&case.base.join("local")),

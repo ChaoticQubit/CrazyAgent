@@ -4,9 +4,11 @@ use crazyagent::model_gateway::relay::Relay;
 use crazyagent::usage::extras::Adapter;
 use crazyagent::usage::poll::poll_balance;
 use std::alloc::{GlobalAlloc, Layout, System};
+#[cfg(unix)]
 use std::io::{Read, Write};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(unix)]
 use std::time::Duration;
 
 const GITHUB_KEY: &[u8] = b"sk-or-format-copy-fixture-5521";
@@ -75,6 +77,7 @@ fn a_curl_request_frees_no_copy_of_its_token() {
 /// SECRET-FORMAT-COPIES: a request the model key relay forwards frees no block that still
 /// holds the real key while the relay builds curl's config. The closed upstream makes the
 /// relay answer 502 only after it has built that config and started curl.
+#[cfg(unix)]
 #[test]
 fn a_relayed_request_frees_no_copy_of_the_key() {
     let _serial = SERIAL
@@ -102,6 +105,19 @@ fn a_relayed_request_frees_no_copy_of_the_key() {
         String::from_utf8_lossy(&reply)
     );
     assert_eq!(freed, 0, "freed blocks still holding the key");
+}
+
+/// SECRET-FORMAT-COPIES on Windows: curl cannot inherit the pipe that carries a request
+/// body there, so the relay refuses to start and never holds or relays a key.
+#[cfg(windows)]
+#[test]
+fn a_relay_refuses_to_start_where_curl_cannot_take_the_body_pipe() {
+    let key = SecretString::new(RELAY_KEY.to_vec()).unwrap();
+    let refused = Relay::start(&format!("http://{CLOSED}/v1"), key).err();
+    assert_eq!(
+        refused.map(|error| error.0),
+        Some("model_relay_unavailable".to_owned())
+    );
 }
 
 /// SECRET-FORMAT-COPIES: `credentials::sized` writes each piece as the formatting it

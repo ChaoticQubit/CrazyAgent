@@ -111,8 +111,9 @@ impl PinnedInstaller {
     /// Finds a dependency wherever the tool resolver looks ([`crate::tools::resolve`]), the
     /// file a launch that needs it runs, and reads its version through the same words; tmux
     /// is the one the terminal uses ([`crate::tools::resolve_tmux`]), with why the bundled
-    /// copy is not, if it is not. Input: the dependency. Output: its entry, version and note,
-    /// why it cannot run, or the version check's code.
+    /// copy is not, if it is not, and too old when agent terminals do not support its version.
+    /// Input: the dependency. Output: its entry, version and note, why it cannot run, or the
+    /// version check's code.
     fn resolved(
         &self,
         dep: Dependency,
@@ -131,6 +132,23 @@ impl PinnedInstaller {
         };
         let version = self.version(dep, &found.argv())?;
         assert!(found.entry.is_absolute());
+        if dep == Dependency::Tmux
+            && crate::terminal::tmux::supported(version.as_str()) != Some(true)
+        {
+            return Ok(Err(crate::tools::Missing {
+                tool: dep.program().to_owned(),
+                reason: crate::tools::Reason::WrongVersion,
+                needs: Some(crate::terminal::tmux::version_needed()),
+                found: Some(version.as_str().to_owned()),
+                looked: found
+                    .entry
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .into_iter()
+                    .collect(),
+                refused: None,
+            }));
+        }
         Ok(Ok((found.entry, version, note)))
     }
 

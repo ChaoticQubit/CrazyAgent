@@ -122,6 +122,14 @@ jobs:
             lost=$(unresolved)
             [ -z "$lost" ] || { echo "::error::public DNS does not resolve ${lost}either"; exit 1; }
           fi
+          if [ "$RUNNER_ENVIRONMENT" = github-hosted ]; then
+            for source in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+              if [ -f "$source" ] && grep -q 'packages\.microsoft\.com' "$source"; then
+                sudo rm -f "$source"
+                echo "::notice::removed the apt source $source, which names packages.microsoft.com; no package this job installs comes from it"
+              fi
+            done
+          fi
           if ! sudo apt-get "${apt_options[@]}" update --error-on=any; then
             if [ "$RUNNER_ENVIRONMENT" != github-hosted ]; then
               echo "::error::apt-get update failed and CI rewrites no mirror list on a self-hosted runner; fix the runner's package sources"
@@ -137,6 +145,7 @@ jobs:
         with:
           prefix-key: ci-linux
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Keep the Rust build cache under 20 GiB
         if: runner.environment != 'github-hosted'
         run: |
@@ -387,6 +396,7 @@ jobs:
         with:
           prefix-key: ci-macos
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Install desktop dependencies
         working-directory: apps/desktop
         run: npm ci --ignore-scripts --no-audit --no-fund
@@ -456,6 +466,7 @@ jobs:
         with:
           prefix-key: ci-windows
           cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - name: Install SQLite for Windows
         run: |
           set -euo pipefail

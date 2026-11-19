@@ -1950,6 +1950,7 @@ fn an_empty_file_a_failed_run_and_an_unusable_reply_change_nothing() {
         (Err(cleanup::FAILED), "instructions_cleanup_failed"),
         (Err(cleanup::TIMED_OUT), "instructions_cleanup_timed_out"),
         (Err(cleanup::BUSY), "instructions_cleanup_busy"),
+        (Err(cleanup::FULL), "instructions_cleanup_full"),
         (Err(cleanup::NO_ACCOUNT), "instructions_cleanup_no_account"),
         (Err(cleanup::PAUSED), "instructions_cleanup_paused"),
         (
@@ -2375,7 +2376,7 @@ fn process_import_never_labels_the_project_text() {
             "carried",
         ][..],
     ] {
-        let done = crate::spawn_gate::output(
+        let done = crate::spawn_gate::collected(
             std::process::Command::new("git")
                 .arg("-C")
                 .arg(&folder)
@@ -2450,4 +2451,15 @@ fn process_says_when_the_project_text_changed_outside_until_a_save_lands() {
     assert_eq!(current.text, "Pulled rule.\n");
     save(&root, Some(project.clone()), "Pulled rule.\n", 0).unwrap();
     assert!(!read(&root, Some(project)).unwrap().outside);
+}
+
+#[test]
+fn a_storage_answer_reaches_the_process_wire_by_name() {
+    for code in crate::storage::STORAGE_ANSWERS {
+        assert_eq!(public_code(EngineError((*code).into())), *code);
+    }
+    assert_eq!(
+        public_code(EngineError("Not A Code".into())),
+        "process_outcome_unknown"
+    );
 }

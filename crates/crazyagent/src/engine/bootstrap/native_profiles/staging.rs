@@ -9,17 +9,24 @@ const TREE_ENTRIES_MAX: usize = 8;
 #[cfg(test)]
 thread_local! {
     pub(super) static INTERRUPT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static AT_STEP: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-/// Stops a staged change at this point when a test chose it, the way a crash would.
-/// No input. Output: `native_profile_interrupted` on the step a test selected through
-/// `INTERRUPT` (counted from 1); Ok on every other step and always outside tests.
+/// Stops a staged change at this point when a test chose it, the way a crash would, or runs
+/// the action the test put in `AT_STEP` there and goes on. No input. Output:
+/// `native_profile_interrupted` on the step a test selected through `INTERRUPT` (counted
+/// from 1) and set no action for; Ok on every other step and always outside tests.
 pub(super) fn step() -> Result<(), EngineError> {
     #[cfg(test)]
     {
         let left = INTERRUPT.get();
         if left == 1 {
             INTERRUPT.set(0);
+            if let Some(action) = AT_STEP.take() {
+                action();
+                return Ok(());
+            }
             return Err(failure("native_profile_interrupted"));
         }
         INTERRUPT.set(left.saturating_sub(1));
@@ -43,6 +50,25 @@ pub(super) struct Staging {
     name: String,
     pub(super) directory: Directory,
     _held: HeldLock,
+}
+
+/// Where [`Staging::replace_into`] failed: at its check that the staging directory is still
+/// the one the engine made, a tamper check that a directory put in its place fails
+/// (`Changed`), or at any other step, an I/O failure or a test's stop (`Stopped`). Each holds
+/// the error the caller returns.
+pub(super) enum Unreplaced {
+    Stopped(EngineError),
+    Changed(EngineError),
+}
+
+/// Gives the error an [`Unreplaced`] holds, for a caller that treats every failure alike.
+/// Input: the failure. Output: its error.
+impl From<Unreplaced> for EngineError {
+    fn from(unreplaced: Unreplaced) -> Self {
+        match unreplaced {
+            Unreplaced::Stopped(error) | Unreplaced::Changed(error) => error,
+        }
+    }
 }
 
 impl Staging {
@@ -100,23 +126,34 @@ impl Staging {
     /// Moves one finished file out of this staging directory over a file of the same
     /// name in another directory, then removes the emptied staging directory.
     /// Inputs: the staging parent, the file name and its destination directory.
-    /// Output: Ok once the destination names the staged file and the parent is synced.
+    /// Output: Ok once the destination names the staged file and the parent is synced,
+    /// or the failure, told apart by [`Unreplaced`].
     pub(super) fn replace_into(
         self,
         parent: &File,
         name: &str,
         destination: &File,
-    ) -> Result<(), EngineError> {
+    ) -> Result<(), Unreplaced> {
+        self.move_into(name, destination)
+            .map_err(Unreplaced::Stopped)?;
+        self.verify_in(parent).map_err(Unreplaced::Changed)?;
+        rustix::fs::unlinkat(parent, self.name.as_str(), AtFlags::REMOVEDIR)
+            .map_err(|error| Unreplaced::Stopped(unsafe_custody(error)))?;
+        parent
+            .sync_all()
+            .map_err(|error| Unreplaced::Stopped(unsafe_custody(error)))
+    }
+
+    /// Moves one finished file out of this staging directory over a file of the same name
+    /// in another directory and syncs that directory. Inputs: the file name and the
+    /// destination directory. Output: Ok once the destination names the staged file.
+    fn move_into(&self, name: &str, destination: &File) -> Result<(), EngineError> {
         self.directory.file.sync_all().map_err(unsafe_custody)?;
         step()?;
         rustix::fs::renameat(&self.directory.file, name, destination, name)
             .map_err(unsafe_custody)?;
         destination.sync_all().map_err(unsafe_custody)?;
-        step()?;
-        self.directory.verify(parent, OsStr::new(&self.name))?;
-        rustix::fs::unlinkat(parent, self.name.as_str(), AtFlags::REMOVEDIR)
-            .map_err(unsafe_custody)?;
-        parent.sync_all().map_err(unsafe_custody)
+        step()
     }
 
     /// Swaps one finished file in this staging directory with the file of the same name in

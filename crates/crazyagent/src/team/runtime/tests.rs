@@ -212,6 +212,27 @@ impl Fixture {
         }
     }
 
+    /// Starts a pane whose process ignores terminate and waits until its shell has set that
+    /// trap, so a terminate sent at once cannot end it before the trap holds (S4B-B1 rows).
+    /// Inputs: the host and the agent. Output: the pane's record.
+    #[cfg(target_os = "macos")]
+    fn pane_ignoring_terminate(&self, host: &Arc<dyn Host>, id: i64) -> PaneRecord {
+        let ready = self.base.join(format!("terminate-ignored-{id}"));
+        let shown = ready.display().to_string();
+        assert!(!shown.contains('\''), "{shown}");
+        let script = format!("trap '' TERM; : > '{shown}'; exec cat");
+        let record = self.pane_running(host, id, &["/bin/sh", "-c", &script]);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the pane never set its trap: {shown}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        record
+    }
+
     fn keep(&self, id: i64, record: &PaneRecord) {
         self.connection
             .execute(
@@ -1813,6 +1834,45 @@ fn work_of_a_removed_project_ends_without_an_error_or_new_rows() {
     }
 }
 
+/// V243-FIRMLINK-STATE (#448 r2 LOW): a team state named through /System/Volumes/Data is
+/// refused, since the launch gates compare it with one-spelled roots and its sandbox rules
+/// would never match, so a project inside it would see other agents' homes and tmp. The
+/// short name of the same folder opens.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_team_state_named_through_the_data_volume_is_refused() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-team-state-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let database = base.join("engine.db");
+    let connection = Connection::open(&database).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let owner = connection.unchecked_transaction().unwrap();
+    crate::conversation::initialize(&owner).unwrap();
+    owner.commit().unwrap();
+    drop(connection);
+    let state = base.join("team");
+    let long = PathBuf::from(format!("/System/Volumes/Data{}", state.display()));
+    let open = |state: &Path| {
+        TeamRuntime::open(
+            &database,
+            state,
+            BTreeMap::new(),
+            Box::new(|| None),
+            TeamLimits::default(),
+        )
+        .map(drop)
+    };
+    assert_eq!(
+        open(&long),
+        Err(EngineError("team_state_not_canonical".into()))
+    );
+    assert_eq!(open(&state), Ok(()));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_worker_writes_only_its_own_worktree_home_and_tmp() {
@@ -2254,6 +2314,136 @@ fn the_master_framing_names_the_harnesses_an_empty_plan_can_use() {
     assert!(!typed.contains("record_answer"));
 }
 
+/// The master diagnoses and plans before it hands out work: its live role text and its
+/// opening frame, with or without team tools, tell it to find out what is wrong itself,
+/// reproduce or probe it, and give each sub-agent its part with an acceptance check, and
+/// no longer leave all hands-on work to sub-agents (V243-MASTER-ANALYZE-FIRST).
+#[test]
+fn the_master_diagnoses_and_plans_before_it_hands_out_work() {
+    let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let folder = root.path().canonicalize().unwrap().join("project");
+    std::fs::create_dir_all(folder.join("context")).unwrap();
+    std::fs::write(folder.join("context").join("brief.md"), "# Any\n").unwrap();
+    let setup = StoredSetup {
+        project_id: ProjectId::new(PROJECT).unwrap(),
+        name: "Any".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: TeamPlan {
+            master: "claude-code".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: crate::project_setup::TEAM_AGENTS_MAX,
+        },
+        documents: vec![],
+        folder: folder.to_str().unwrap().into(),
+        created_ms: 1,
+        revision: 1,
+    };
+    for team_tool in [true, false] {
+        for text in [
+            framing(&setup, team_tool, &[], &[]),
+            live_instructions(&setup, team_tool),
+        ] {
+            assert!(!text.contains("Sub-agents do the hands-on work"), "{text}");
+            for rule in [
+                "## Your own task first",
+                "reproduce the failure or probe it",
+                "never a sub-agent's",
+                "Then plan:",
+                "the acceptance check",
+                "Name a cause you could not confirm as unconfirmed.",
+            ] {
+                assert!(text.contains(rule), "{rule}: {text}");
+            }
+        }
+    }
+}
+
+/// The phrases a master's hand-off text holds on every path without team tools, as the
+/// tools' task fields do: the finding, the agent's part and its acceptance check, a costly
+/// probe asked of the owner once, else an UNCONFIRMED cause with the owner's refusal and a
+/// first step that reproduces it without what was declined (#388 F1, V243-MASTER-*).
+const HAND_OFF_PHRASES: [&str; 7] = [
+    "what you found",
+    "this agent's part of your plan",
+    "its acceptance check",
+    "ask the owner once for a small probe",
+    "UNCONFIRMED",
+    "say what the owner declined",
+    "reproducing it without those resources the agent's first step",
+];
+
+/// A master without team tools hands out work in task blocks, so the block text asks for
+/// the same finding, part of the plan and acceptance check as the tools' task fields, and
+/// for a costly probe asked of the owner once, else an UNCONFIRMED cause (#388 F1).
+#[test]
+fn a_task_block_carries_the_finding_and_the_acceptance_check() {
+    let text = block_text();
+    for part in HAND_OFF_PHRASES {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+}
+
+/// A master without team tools wakes a finished sub-agent mid-session with the wake block
+/// alone, so that block carries the same hand-off text as a new task
+/// (V243-MASTER-WAKE-TEXT-HANDOFF).
+#[test]
+fn a_tools_off_wake_block_carries_the_finding_and_the_acceptance_check() {
+    let text = wake_text(&["- Ada (@docs), finished".into()], false, false);
+    for part in HAND_OFF_PHRASES {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+}
+
+/// A fresh frame without team tools that lists a finished sub-agent says what a task holds
+/// once, in its task block, and its wake block points there, while a wake block sent alone
+/// mid-session still carries the whole text (V243-HANDOFF-TEXT-TWICE, #411 rv-code4 F1).
+#[test]
+fn a_fresh_tools_off_frame_with_a_finished_sub_agent_says_what_a_task_holds_once() {
+    let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let folder = root.path().canonicalize().unwrap().join("project");
+    std::fs::create_dir_all(folder.join("context")).unwrap();
+    std::fs::write(folder.join("context").join("brief.md"), "# Any\n").unwrap();
+    let setup = StoredSetup {
+        project_id: ProjectId::new(PROJECT).unwrap(),
+        name: "Any".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: None,
+        team: TeamPlan {
+            master: "claude-code".into(),
+            master_tools: false,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: crate::project_setup::TEAM_AGENTS_MAX,
+        },
+        documents: vec![],
+        folder: folder.to_str().unwrap().into(),
+        created_ms: 1,
+        revision: 1,
+    };
+    let finished = ["- Ada (@docs), finished".to_owned()];
+    let framed = framing(&setup, false, &[], &finished);
+    assert_eq!(framed.matches(tool::HAND_OFF_TASK).count(), 1, "{framed}");
+    assert!(framed.contains(&finished[0]), "{framed}");
+    assert!(
+        framed.contains(
+            "\"task\": \"<the text>\"}\n```\nEach task holds what a task block holds, as above."
+        ),
+        "{framed}"
+    );
+    for part in HAND_OFF_PHRASES {
+        assert!(framed.contains(part), "{part}: {framed}");
+    }
+}
+
 #[test]
 fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
@@ -2295,11 +2485,16 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     };
     let mut wrong = Vec::new();
 
-    std::fs::write(&brief, "# Panes\n\nPlan the page.\n").unwrap();
+    const NOTE_BYTES_MAX: usize = 128;
+    let normal = "# Panes\n\nPlan the page.\n";
+    std::fs::write(&brief, normal).unwrap();
     let framed = frame();
+    let around_bytes = framed
+        .as_deref()
+        .map_or(0, |text| text.len().saturating_sub(normal.len()));
     if !framed
         .as_deref()
-        .is_some_and(|text| text.contains("Project brief:\n# Panes\n\nPlan the page.\n"))
+        .is_some_and(|text| text.contains(&format!("Project brief:\n{normal}")))
     {
         wrong.push(("normal", framed));
     }
@@ -2342,7 +2537,7 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     if !framed.as_deref().is_some_and(|text| {
         text.contains("Project brief:\n# Panes\n\naaaa")
             && text.contains(&format!("The brief is {huge} bytes"))
-            && text.len() < BRIEF_BYTES_MAX + 2048
+            && text.len() <= around_bytes + BRIEF_BYTES_MAX + NOTE_BYTES_MAX
     }) {
         wrong.push(("oversized", framed.map(|text| bound_text(&text, 200))));
     }
@@ -4720,6 +4915,65 @@ fn a_live_claude_master_whose_terminal_ends_resumes_its_conversation_and_logs_ea
         terminal_ended_notes(&fixture),
         1,
         "an owner stop adds no restart note"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// V243-MASTER-INPUT-ENDED-PANE (leader 04:56): a live master's interrupted run whose note
+/// comes due just as the master's pane ends, before the next tick sees it gone, waits instead
+/// of failing: the master's input reads the ended pane as not reading keys, so the run stays
+/// interrupted with no reason, never failed with the terminal's own code.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_interrupted_master_run_waits_when_its_live_master_s_pane_has_just_ended() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = claude_runtime(&fixture, &host, RESUMING_CLAUDE);
+    let project = fixture.setup.project_id.clone();
+    set_master(&fixture, "claude-code");
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the Claude Code master runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    let deadline = Instant::now() + WAIT;
+    while !(team.workers[&master].live && team.workers[&master].briefed) {
+        assert!(
+            Instant::now() < deadline,
+            "the live master is never briefed"
+        );
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        super::super::master::quiet(&fixture.connection, None, &project, now_ms()),
+        "the briefed master is idle, so its input reaches the pane check"
+    );
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO recovery_runs(agent,project,kind,harness,at_ms,turn,state) VALUES (?1,?2,'master','claude-code',1,1,'interrupted')",
+            params![master, PROJECT],
+        )
+        .unwrap();
+    host.kill(&AgentId::team(master).unwrap()).unwrap();
+
+    team.resume_interrupted(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    let run: (String, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT state,reason FROM recovery_runs WHERE agent=?1",
+            [master],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        run,
+        ("interrupted".to_owned(), None),
+        "a run whose master's pane just ended waits, never failed with the terminal's code"
     );
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
@@ -12736,6 +12990,93 @@ fn own_turn_outliving(
         finished,
         alive,
     }
+}
+
+/// DEC-200 (V243-AGENT-ORDERS-RECV): while a kept native lead's own turn runs, a stop order
+/// reaches `next_lead_turn` as it is sent, not after an `ORDER_WAIT` sleep. The order goes a
+/// fixed 15 ms after the worker starts, so a sleep step would hold it about 85 ms.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stop_order_reaches_a_lead_whose_own_turn_runs_without_the_order_sleep() {
+    let fixture = Fixture::new(1);
+    let base = fixture.base.join("own-order-wait");
+    let (home, work, bin) = (base.join("home"), base.join("work"), base.join("bin"));
+    for path in [&home, &work, &bin] {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let executable = bin.join("claude");
+    std::fs::write(
+        &executable,
+        OWN_BACKGROUND_CLAUDE.replace("/bin/sleep SECS\n", "/bin/sleep 1\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let profile = base.join("agent.sb");
+    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let request = LaunchRequest {
+        harness: "claude-code".into(),
+        executable,
+        working_dir: work.canonicalize().unwrap(),
+        account: AccountBinding::Url {
+            home: home.clone(),
+            base_url: "http://127.0.0.1:9/v1".into(),
+            key: None,
+        },
+        model: None,
+        tools: true,
+        sandbox_profile: Some(profile),
+        unconfined: false,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    };
+    let host = fixture.host();
+    let mut session = AgentSession::Terminal(Box::new(
+        TerminalSession::start(
+            host.clone(),
+            AgentId::new("own-order-wait").unwrap(),
+            request,
+            None,
+        )
+        .unwrap(),
+    ));
+    assert!(matches!(
+        session.next_event(Duration::from_secs(5)).unwrap(),
+        Some(LaunchEvent::Ready { .. })
+    ));
+    session.follow_own_turns();
+    let (order, orders) = channel();
+    let (reports, _reported) = channel();
+    let (started, start) = channel();
+    let cancel = AtomicBool::new(false);
+    let mut own = OwnTurn {
+        running: true,
+        ..OwnTurn::default()
+    };
+    let mut rules = TurnRules {
+        limit: None,
+        background: crate::team::BackgroundAtEnd::Wait,
+    };
+    let (lead, cancel_flag, own_state, rules) = (&mut session, &cancel, &mut own, &mut rules);
+    let (next, took) = std::thread::scope(|scope| {
+        let worker = scope.spawn(move || {
+            started.send(()).unwrap();
+            next_lead_turn(&orders, cancel_flag, lead, &reports, own_state, rules)
+        });
+        start.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(15));
+        let sent = Instant::now();
+        order.send(Order::Stop).unwrap();
+        let next = worker.join().unwrap();
+        (next, sent.elapsed())
+    });
+    assert!(matches!(next, Next::Stop));
+    assert!(
+        took < ORDER_WAIT * 9 / 20,
+        "the stop order waited {took:?}, about the rest of an {ORDER_WAIT:?} sleep"
+    );
+    session.stop().unwrap();
+    host.close(&[]).unwrap();
 }
 
 /// N-E9 (OP-26): under Wait, a turn a kept native lead's app takes by itself that ends while
@@ -21234,6 +21575,68 @@ fn an_idle_linked_lead_gets_each_resting_teammate_s_work_on_its_task_branch() {
     );
 }
 
+/// V243-GIT-FLOOR-SWEEP door 5: on git 2.39 an idle linked lead's pass does not try to land a
+/// resting teammate's work, which an Accept on that git refuses `changes_git_old`: the set
+/// waits for the owner as it was, where each pass kept that refusal as its landing result and
+/// logged `teammate_landing_failed`. On 2.40 the same pass lands it.
+#[cfg(target_os = "macos")]
+#[test]
+fn on_git_2_39_an_idle_lead_leaves_a_resting_teammate_s_work_for_the_owner() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let linked = LinkedTeam::new(&fixture, &mut team);
+    let start = linked.tip(&linked.branch);
+    std::fs::write(linked.teammate("greet").join("hello.txt"), "Hello.\n").unwrap();
+    linked.mark(&fixture, linked.id(&fixture, "greet"), "idle");
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+    linked.mark(&fixture, linked.lead, "idle");
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,?2,?3)",
+            params![
+                PROJECT,
+                crate::team::DEPTH_DEFAULT,
+                crate::team::ChildLanding::Lead.name()
+            ],
+        )
+        .unwrap();
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let waiting = crate::landing::open_change_set(&db, &linked.teammate("greet"))
+        .unwrap()
+        .expect("greet's turn waits as its change set");
+    let kept = || {
+        let (_, set) = crate::landing::change_set(&db, &waiting.id)
+            .unwrap()
+            .expect("greet's change set is kept");
+        (set.state, set.landing_result)
+    };
+
+    crate::landing::shape_git(Some("git version 2.39.5 (Apple Git-154)"));
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+    assert_eq!(
+        linked.tip(&linked.branch),
+        start,
+        "nothing lands on git 2.39"
+    );
+    assert_eq!(
+        kept(),
+        (waiting.state, waiting.landing_result),
+        "the set waits for the owner as it was, with no refusal kept"
+    );
+
+    crate::landing::shape_git(Some("git version 2.40.0"));
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+    assert_ne!(
+        linked.tip(&linked.branch),
+        start,
+        "greet's work lands on 2.40"
+    );
+    assert_eq!(kept().0, crate::landing::ChangeState::Accepted);
+    crate::landing::shape_git(None);
+}
+
 /// OP9B-C5: when the lead's change set cannot be recorded after its teammates' work landed
 /// on its task branch, the lead is not told to finish over work the owner cannot see yet, and
 /// the engine records it again at a later pass while the lead stays idle, instead of leaving
@@ -24558,7 +24961,7 @@ fn a_taken_over_lead_not_proven_gone_reports_an_uncertain_cleanup() {
         ),
     ] {
         let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
-        let record = fixture.pane_running(&host, id, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
+        let record = fixture.pane_ignoring_terminate(&host, id);
         let agent = AgentId::team(id).unwrap();
         let adoption = Adoption {
             host: host.clone(),
@@ -28035,6 +28438,59 @@ fn a_panicking_teammate_end_leaves_no_id_behind_and_reads_as_uncertain() {
     team.shutdown().unwrap();
 }
 
+/// #393 F1 (DEC-200): a native teammate's end that fails with a host error other than an
+/// unknown agent leaves its row to a later tick, so its end thread does not wake the team
+/// loop; a wake there would run the loop back to back for as long as the error lasts. The
+/// host here has no tmux and is set as the terminal as is, since attaching one asks it for
+/// its panes first, so every end the owner's stop pass starts fails the same way.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_failed_teammate_end_leaves_the_team_loop_to_its_tick() {
+    const PASSES: u64 = 40;
+    let fixture = Fixture::new(1);
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(None, &fixture.base.join(FOLDER)));
+    let mut team = fixture.runtime();
+    team.terminal = Some(host);
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?2 WHERE id=?1",
+            params![mate, lead],
+        )
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_owner_stops(agent,project,stopped_ms,stopped_by) VALUES (?1,?2,1,'owner')",
+            params![mate, PROJECT],
+        )
+        .unwrap();
+
+    let before = wakes_seen();
+    for _ in 0..PASSES {
+        assert_eq!(team.stop_unmanaged().unwrap(), Vec::new());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    let woken = wakes_seen().wrapping_sub(before);
+    assert!(
+        woken < PASSES / 2,
+        "{woken} wakes in {PASSES} stop passes over an end that keeps failing"
+    );
+    let status: String = fixture
+        .connection
+        .query_row(
+            "SELECT status FROM team_agents WHERE id=?1",
+            [mate],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "working");
+    team.shutdown().unwrap();
+}
+
 /// S4B-B1-L1 r1: a teammate's row stopped elsewhere while its end ran, as by its lead's
 /// end, keeps that first mark, and the finished end reports no stop for it.
 #[cfg(target_os = "macos")]
@@ -28173,7 +28629,7 @@ fn a_stopped_teammate_not_proven_gone_is_marked_uncertain() {
             params![mate, lead],
         )
         .unwrap();
-    let _record = fixture.pane_running(&host, mate, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
+    let _record = fixture.pane_ignoring_terminate(&host, mate);
     fixture
         .connection
         .execute(
@@ -34359,4 +34815,311 @@ fn a_native_leads_teammates_home_is_reset_at_each_launch() {
         );
     }
     assert!(mates.join(".claude.json").is_file());
+}
+
+/// SECRET-PARSE-COPIES R2, leader 16:05: a Codex agent whose launch left no readable hook key
+/// list, as one an earlier CrazyAgent started, fails closed. The engine never asks Codex about
+/// keys it could not read nor counts them as trusted; it keeps asking until `HOOK_TRUST_WAIT`
+/// and then keeps a notice that says why in plain words. The other answers keep their texts.
+#[test]
+fn a_codex_agent_with_no_readable_hook_key_list_is_never_taken_as_trusted_and_is_told_why() {
+    use crate::coord::settings::{
+        CODEX_HOOKS_LIST_UNREADABLE, CODEX_HOOKS_UNCHECKED, CODEX_HOOKS_UNLISTED,
+        CODEX_HOOKS_UNTRUSTED,
+    };
+    use crate::launch_context::HookKeysUnread::{Absent, Unreadable};
+    let unasked = |_: &[String]| -> Result<bool, &'static str> {
+        panic!("Codex was asked about hook keys the engine could not read")
+    };
+    for unread in [Absent, Unreadable] {
+        assert_eq!(hook_trust(Err(unread), unasked, false), HookTrust::Later);
+    }
+    assert_eq!(
+        hook_trust(Err(Absent), unasked, true),
+        HookTrust::Notice(CODEX_HOOKS_UNLISTED),
+        "a missing key list says why once the wait is over"
+    );
+    assert_eq!(
+        hook_trust(Err(Unreadable), unasked, true),
+        HookTrust::Notice(CODEX_HOOKS_LIST_UNREADABLE),
+        "a key list that is there but unreadable is not blamed on an earlier CrazyAgent (#166 N0)"
+    );
+    assert!(
+        !CODEX_HOOKS_LIST_UNREADABLE.contains("before this update")
+            && CODEX_HOOKS_LIST_UNREADABLE.contains("replaced or damaged")
+            && CODEX_HOOKS_LIST_UNREADABLE.contains("until the agent restarts")
+            && !CODEX_HOOKS_LIST_UNREADABLE.contains('_'),
+        "{CODEX_HOOKS_LIST_UNREADABLE}"
+    );
+    assert!(
+        CODEX_HOOKS_UNLISTED.contains("started before this update")
+            && CODEX_HOOKS_UNLISTED.contains("until the agent restarts")
+            && !CODEX_HOOKS_UNLISTED.contains('_'),
+        "the notice names the cause and the way out in plain words: {CODEX_HOOKS_UNLISTED}"
+    );
+    assert_eq!(
+        hook_trust(Ok(Vec::new()), unasked, true),
+        HookTrust::Settled
+    );
+    let keys = vec!["/h/config.toml:pre_tool_use:0:0".to_owned()];
+    let expected = keys.clone();
+    let asked = |answer: Result<bool, &'static str>| {
+        let expected = expected.clone();
+        move |given: &[String]| {
+            assert_eq!(given, expected.as_slice());
+            answer
+        }
+    };
+    assert_eq!(
+        hook_trust(Ok(keys.clone()), asked(Ok(true)), false),
+        HookTrust::Settled
+    );
+    assert_eq!(
+        hook_trust(Ok(keys.clone()), asked(Ok(false)), false),
+        HookTrust::Notice(CODEX_HOOKS_UNTRUSTED)
+    );
+    assert_eq!(
+        hook_trust(
+            Ok(keys.clone()),
+            asked(Err("codex_bridge_peer_unknown")),
+            false
+        ),
+        HookTrust::Later
+    );
+    assert_eq!(
+        hook_trust(Ok(keys), asked(Err("codex_bridge_peer_unknown")), true),
+        HookTrust::Notice(CODEX_HOOKS_UNCHECKED)
+    );
+}
+
+/// A project stored under the data volume's long name of its folder, with a hidden folder
+/// saved in that name too, still launches an agent: its sandbox is built on the short name,
+/// the only one Seatbelt matches, so the project stays readable, the worktree writable and
+/// the hidden folder closed under either name (V243-FIRMLINK-LAUNCH-ROOT).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_project_stored_under_the_long_name_launches_an_agent_on_the_short_one() {
+    let mut fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let long = |path: &Path| PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+    let project = fixture.base.join("project");
+    assert!(long(&project).is_dir());
+    std::fs::write(project.join("owner.txt"), "owner\n").unwrap();
+    let drafts = project.join("drafts");
+    std::fs::create_dir(&drafts).unwrap();
+    std::fs::write(drafts.join("plan.txt"), "plan\n").unwrap();
+    fixture.setup.folder = long(&project).to_str().unwrap().into();
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
+        )
+        .unwrap();
+    crate::sandbox::hidden_paths::save(&fixture.connection, PROJECT, &[long(&drafts)]).unwrap();
+    let access = fixture.access.clone();
+    let runtime = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap();
+    let account = TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+            key: None,
+        },
+    };
+    assert_eq!(
+        fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting),
+        1
+    );
+    let plan = runtime
+        .prepare(
+            &fixture.setup,
+            1,
+            AgentRole::Sub,
+            "codex",
+            true,
+            &account,
+            false,
+            crate::agent_git::Layout::Linked,
+            false,
+        )
+        .unwrap_or_else(|cause| panic!("a long-stored project must launch an agent: {cause}"))
+        .1;
+    assert!(plan.working_dir.starts_with(&project));
+    let quoted = |path: &Path| format!("'{}'", path.display());
+    let script = format!(
+        "(cat {owner} >/dev/null) 2>/dev/null && echo owner=read || echo owner=refused\n\
+         (cat {plan} >/dev/null) 2>/dev/null && echo plan=read || echo plan=refused\n\
+         (cat {long_plan} >/dev/null) 2>/dev/null && echo long_plan=read || echo long_plan=refused\n\
+         (echo mine > mine.txt) 2>/dev/null && echo wrote || echo write=refused\n",
+        owner = quoted(&project.join("owner.txt")),
+        plan = quoted(&drafts.join("plan.txt")),
+        long_plan = quoted(&long(&drafts).join("plan.txt")),
+    );
+    let output = crate::spawn_gate::output(
+        Command::new("/usr/bin/sandbox-exec")
+            .arg("-f")
+            .arg(&plan.sandbox_profile)
+            .args(["/bin/sh", "-c", &script])
+            .current_dir(&plan.working_dir)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", runtime.agent_folder(1).join("home"))
+            .env("TMPDIR", runtime.agent_folder(1).join("tmp"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "owner=read\nplan=refused\nlong_plan=refused\nwrote\n",
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(plan.working_dir.join("mine.txt")).unwrap(),
+        "mine\n"
+    );
+}
+
+/// How many ended tasks, answered owner messages and stopped agents the idle-cost row puts
+/// in front of the tick's active project read.
+const HISTORY_ROWS: i64 = 300;
+/// The most SQLite steps that read may add over that history: far below one step per old
+/// row, so any arm that walks the history fails.
+const HISTORY_STEPS_SLACK: i32 = 32;
+
+/// Idle cost (V243-ENGINE-IDLE-CPU): every tick reads which projects to step. Over a
+/// history of delivered ended tasks, answered owner messages and stopped agents the read
+/// takes as many SQLite steps as over none, so an idle tick does not grow with history.
+#[test]
+fn the_active_projects_read_does_not_grow_with_team_history() {
+    let fixture = Fixture::new(1);
+    let before = active_projects_steps(&fixture.connection);
+    for _ in 0..HISTORY_ROWS {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,delivered,created_ms)
+                 VALUES (?1,'master','codex',0,'Old','done',1,1)",
+                [PROJECT],
+            )
+            .unwrap();
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_messages(project,author,text,state,created_ms)
+                 VALUES (?1,'owner','Old','answered',1)",
+                [PROJECT],
+            )
+            .unwrap();
+        fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
+    }
+    let after = active_projects_steps(&fixture.connection);
+    assert!(
+        after <= before + HISTORY_STEPS_SLACK,
+        "active project steps grew from {before} to {after}"
+    );
+}
+
+/// Runs the tick's active project read to its end and counts its SQLite virtual machine
+/// steps. Input: the engine database. Output: the step count.
+fn active_projects_steps(connection: &Connection) -> i32 {
+    let mut statement = connection.prepare(ACTIVE_PROJECTS_SQL).unwrap();
+    let mut rows = statement.query([]).unwrap();
+    while rows.next().unwrap().is_some() {}
+    drop(rows);
+    let steps = statement.get_status(rusqlite::StatementStatus::VmStep);
+    assert!(steps > 0);
+    steps
+}
+
+/// Idle cost (V243-ENGINE-IDLE-CPU): the tick follows the IDE workspaces only when the
+/// database changed since it last did, so an idle tick runs none of their reads, while a
+/// write by another connection or by the runtime makes the next tick follow them again.
+#[test]
+fn ide_workspaces_are_followed_only_after_the_database_changes() {
+    let fixture = Fixture::new(1);
+    let mut runtime = fixture.runtime();
+    let write = "INSERT INTO team_messages(project,author,text,state,created_ms)
+                 VALUES (?1,'owner','Seen','answered',1)";
+    assert!(runtime.follow_due().unwrap(), "the first tick follows");
+    runtime.tick().unwrap();
+    runtime.tick().unwrap();
+    assert!(
+        !runtime.follow_due().unwrap(),
+        "an idle tick leaves nothing to follow"
+    );
+    fixture.connection.execute(write, [PROJECT]).unwrap();
+    assert!(runtime.follow_due().unwrap(), "another connection wrote");
+    runtime.tick().unwrap();
+    assert!(
+        !runtime.follow_due().unwrap(),
+        "the tick followed that write"
+    );
+    runtime.connection.execute(write, [PROJECT]).unwrap();
+    assert!(runtime.follow_due().unwrap(), "the runtime wrote");
+    runtime.shutdown().unwrap();
+}
+
+/// Idle cost (V243-ENGINE-IDLE-CPU, rv-code2 F1): another connection's commit that lands
+/// while the tick follows the IDE workspaces, after the follow read its rows, keeps the
+/// next tick due, and that tick's follow leaves nothing due again.
+#[test]
+fn a_commit_during_the_workspace_follow_is_followed_on_the_next_tick() {
+    let fixture = Fixture::new(1);
+    let mut runtime = fixture.runtime();
+    let write = "INSERT INTO team_messages(project,author,text,state,created_ms)
+                 VALUES (?1,'owner','Seen','answered',1)";
+    runtime.tick().unwrap();
+    runtime.tick().unwrap();
+    assert!(
+        !runtime.follow_due().unwrap(),
+        "an idle tick leaves nothing to follow"
+    );
+    fixture.connection.execute(write, [PROJECT]).unwrap();
+    runtime
+        .follow_workspaces(|db, root| {
+            crate::ide::workspace::follow(db, root)?;
+            fixture.connection.execute(write, [PROJECT]).unwrap();
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        runtime.follow_due().unwrap(),
+        "a commit during the follow stays due"
+    );
+    runtime
+        .follow_workspaces(crate::ide::workspace::follow)
+        .unwrap();
+    assert!(!runtime.follow_due().unwrap(), "the next follow caught it");
+    runtime.shutdown().unwrap();
+}
+
+/// Idle cost (V243-ENGINE-IDLE-CPU): with no queued task, dispatch reads none of the
+/// settings only its per-task loop uses (caps, open recovery runs, Reuse idle, Keep warm)
+/// on each tick. A caps table that cannot be read shows it: an idle dispatch succeeds.
+#[test]
+fn dispatch_with_nothing_queued_reads_no_per_task_settings() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    fixture
+        .connection
+        .execute_batch("DROP TABLE team_caps")
+        .unwrap();
+    let idle = team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new());
+    assert!(idle.is_ok(), "an idle dispatch read the caps: {idle:?}");
+    team.shutdown().unwrap();
 }

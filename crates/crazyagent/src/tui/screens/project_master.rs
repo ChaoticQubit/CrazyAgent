@@ -406,6 +406,12 @@ fn notice(turn: &MasterTurnView, harness: &str, latest: bool) -> Option<String> 
         Some(MasterReason::RepositoryConfigRefused) => {
             "a Git setting in this project's repository runs commands or redirects Git."
         }
+        Some(MasterReason::GitTooOld) if cfg!(target_os = "macos") => {
+            "agents need Git 2.39 or newer, and the Git of Xcode or its Command Line Tools on this Mac is older; CrazyAgent doesn't use Homebrew's Git. Update them in Software Update, or in Terminal with softwareupdate --install --all or xcode-select --install, then send again."
+        }
+        Some(MasterReason::GitTooOld) => {
+            "agents need Git 2.39 or newer, and the Git on this computer is older. Update Git, then send again."
+        }
         Some(MasterReason::InstructionsTooLarge) => {
             "the app and project instructions are too long for a Claude master. Shorten them on the Process page."
         }
@@ -1042,6 +1048,14 @@ mod tests {
                 MasterReason::SandboxStopped,
                 "Codex stopped: the sandbox ended it because a protected name could not be put back. (sandbox_stopped) Press r to try again.",
             ),
+            (
+                MasterReason::GitTooOld,
+                if cfg!(target_os = "macos") {
+                    "Codex stopped: agents need Git 2.39 or newer, and the Git of Xcode or its Command Line Tools on this Mac is older; CrazyAgent doesn't use Homebrew's Git. Update them in Software Update, or in Terminal with softwareupdate --install --all or xcode-select --install, then send again. (git_too_old) Press r to try again."
+                } else {
+                    "Codex stopped: agents need Git 2.39 or newer, and the Git on this computer is older. Update Git, then send again. (git_too_old) Press r to try again."
+                },
+            ),
         ] {
             let transcript = build(
                 configured,
@@ -1088,6 +1102,7 @@ mod tests {
             (MasterReason::ProtocolFault, "protocol_fault"),
             (MasterReason::FrameLimit, "frame_limit"),
             (MasterReason::WorktreeUncertain, "worktree_uncertain"),
+            (MasterReason::GitTooOld, "git_too_old"),
             (MasterReason::SandboxStopped, "sandbox_stopped"),
             (MasterReason::Cancelled, "cancelled"),
         ];

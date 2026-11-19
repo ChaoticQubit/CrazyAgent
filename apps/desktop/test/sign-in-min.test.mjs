@@ -62,6 +62,10 @@ test("DEC-166: with updates on Check only, or no update command, the panel shows
 test("DEC-166: while its update runs the panel says so and offers no second Update", () => {
   const html = tooOld({ versions: { ...claude, running: true } });
   assert.match(html, /Updating Claude Code\.\.\./);
+  const held = tooOld({ versions: { ...claude, running: true, waiting: "pi" }, nameOf: (id) => (id === "pi" ? "Pi" : id) });
+  assert.match(held, /Waiting for Pi to finish\.\.\./);
+  assert.doesNotMatch(held, /Updating Claude Code/);
+  assert.doesNotMatch(held, /role="alert"[^>]*>[^<]*Pi/);
   assert.match(html, /<button[^>]*disabled=""[^>]*>Update Claude Code<\/button>/);
 });
 

@@ -2,7 +2,8 @@ use crate::engine::EngineError;
 use crate::sandbox::policy::AgentFilesRule;
 use crate::sandbox::toolchains::{ToolHomes, Toolchains};
 use crate::sandbox::{
-    ProjectSandbox, SANDBOX_EXEC, SandboxNetwork, any_case, sbpl_overlong, seatbelt_pattern,
+    ProjectSandbox, SANDBOX_EXEC, SandboxNetwork, any_case, at_or_below, sbpl_overlong,
+    seatbelt_pattern,
 };
 use std::fs;
 use std::io::Write;
@@ -251,7 +252,7 @@ fn locks(held: &[(&Path, &Path)]) -> String {
     let mut writes = String::from("(deny file-write*");
     let mut moves = String::from("(deny file-write-unlink");
     for (folder, within) in held {
-        writes.push_str(&format!("\n  (regex #\"^{}(/.*)?$\")", caseless(folder)));
+        writes.push_str(&format!("\n  {}", at_or_below(&caseless(folder))));
         for above in folder.ancestors().skip(1) {
             moves.push_str(&format!("\n  (regex #\"^{}$\")", caseless(above)));
             if above == *within {
@@ -275,7 +276,7 @@ fn locks(held: &[(&Path, &Path)]) -> String {
 /// only settings source for agent folders. Input: the project folder. Output: the rule text.
 fn agent_config(root: &Path) -> String {
     let agents = format!(
-        "^{}({})?/{}/[^/]+/",
+        "{}({})?/{}/[^/]+/",
         caseless(root),
         any_case("/.crazyagent"),
         any_case("worktrees")
@@ -284,7 +285,9 @@ fn agent_config(root: &Path) -> String {
     let workspace = any_case(".code-workspace");
     let git = any_case(".git");
     format!(
-        "(deny file-read*\n  (regex #\"{agents}(.*/)?{folder}(/.*)?$\")\n  (regex #\"{agents}(.*/)?[^/]*{workspace}$\")\n  (regex #\"{agents}{git}(/.*)?$\"))\n"
+        "(deny file-read*\n  {}\n  (regex #\"^{agents}(.*/)?[^/]*{workspace}$\")\n  {})\n",
+        at_or_below(&format!("{agents}(.*/)?{folder}")),
+        at_or_below(&format!("{agents}{git}"))
     )
 }
 
@@ -295,13 +298,13 @@ fn agent_config(root: &Path) -> String {
 /// folder. Under an own clone's `.git` the base profile's nested `.git` rule already
 /// refuses every write. Input: the project folder. Output: the rule text.
 fn agent_admin(root: &Path) -> String {
-    let admins = format!(
-        "^{}/{}/{}(/.*)?$",
+    let admins = at_or_below(&format!(
+        "{}/{}/{}",
         caseless(root),
         any_case(".git"),
         any_case("worktrees")
-    );
-    format!("(deny file-write*\n  (regex #\"{admins}\"))\n")
+    ));
+    format!("(deny file-write*\n  {admins})\n")
 }
 
 /// A Seatbelt regex matching `path` in any letter case, as APFS matches names, the Kelvin

@@ -24,11 +24,13 @@ export function appBundle(app) {
   return bundle;
 }
 
-/** The process that listens on a local TCP port, the app's WebDriver server in a trial.
+/** The process that listens on a local TCP port, the app's WebDriver server in a trial; lsof
+ * is found on PATH, since macOS keeps it in /usr/sbin and Ubuntu in /usr/bin.
  * Input: the port. Output: its pid, or null when nothing listens; throws when two do. */
 export function listener(port) {
   assert(Number.isInteger(port) && port > 0 && port < 65536, `a TCP port, got ${port}`);
-  const result = spawnSync("/usr/sbin/lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], { encoding: "utf8", timeout: TOOL_MS, killSignal: "SIGKILL" });
+  const result = spawnSync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], { encoding: "utf8", timeout: TOOL_MS, killSignal: "SIGKILL" });
+  assert.equal(result.error, undefined, "lsof runs from PATH");
   const pids = [...new Set(result.stdout.split("\n").filter(Boolean).map(Number))];
   assert(pids.length <= 1, `more than one process listens on port ${port}: ${pids.join(", ")}`);
   return pids[0] ?? null;

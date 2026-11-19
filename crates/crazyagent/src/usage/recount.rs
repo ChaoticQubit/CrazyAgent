@@ -219,7 +219,10 @@ fn list_home(db: &Connection, home: &str, format: Format, now_ms: i64) -> Result
     let cut = walked_short || paths.len() > room;
     for path in paths.into_iter().take(room) {
         let metadata = std::fs::symlink_metadata(&path).ok();
-        let (dev, ino) = metadata.as_ref().map_or((0, 0), capture::file_identity);
+        let (dev, ino) = metadata
+            .as_ref()
+            .and_then(|metadata| capture::file_identity(&path, metadata))
+            .unwrap_or((0, 0));
         let fallback = metadata
             .and_then(|metadata| metadata.modified().ok())
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())

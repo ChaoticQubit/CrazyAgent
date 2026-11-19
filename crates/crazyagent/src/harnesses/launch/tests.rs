@@ -510,14 +510,15 @@ fn codex_driver_in_a_turn() -> Driver {
 }
 
 fn codex_driver_in_a_turn_keeping(native_threads: bool) -> Driver {
-    let working_dir = std::env::temp_dir();
+    let working_dir: PathBuf = std::env::temp_dir().components().collect();
     let cwd = working_dir.to_str().unwrap().to_owned();
+    let home = working_dir.join("launch-test-home");
     let request = LaunchRequest {
         harness: "codex".into(),
         executable: PathBuf::from("/usr/bin/true"),
         working_dir,
         account: AccountBinding::Url {
-            home: std::env::temp_dir().join("launch-test-home"),
+            home: home.clone(),
             base_url: "http://127.0.0.1:11434".into(),
             key: None,
         },
@@ -541,7 +542,7 @@ fn codex_driver_in_a_turn_keeping(native_threads: bool) -> Driver {
     assert!(driver.send("Reply with OK.").unwrap().is_none());
     let (_, writes) = driver
         .receive(&line(json!({"id":1,"result":{
-            "userAgent":"unit-agent", "codexHome":"/unit/codex",
+            "userAgent":"unit-agent", "codexHome":home.to_str().unwrap(),
             "platformFamily":"unix", "platformOs":"macos"
         }})))
         .unwrap();
@@ -1454,5 +1455,31 @@ fn a_piped_claude_agent_runs_with_auto_memory_off() {
 
         assert_eq!(settings["autoMemoryEnabled"], json!(false), "tools {tools}");
         assert_eq!(memory, [Some(std::ffi::OsStr::new("1"))], "tools {tools}");
+    }
+}
+
+/// V243-FIRMLINK-SWEEP D2: an account home that is the owner's `~/.codex` is refused whichever
+/// of the two macOS names each side uses, so a home or HOME given through /System/Volumes/Data
+/// still meets the forbidden folders.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_folder_named_through_the_data_volume_is_no_account_home() {
+    use std::os::unix::fs::PermissionsExt;
+    let base = tempfile::tempdir().unwrap();
+    let owner = base.path().canonicalize().unwrap().join("owner");
+    let codex = owner.join(".codex");
+    std::fs::create_dir_all(&codex).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let long =
+        |path: &std::path::Path| PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+    assert!(long(&codex).is_dir());
+    let forbidden = Err("launch_account_home_forbidden".to_owned());
+    for (home, given) in [
+        (codex.clone(), owner.clone()),
+        (long(&codex), owner.clone()),
+        (codex.clone(), long(&owner)),
+    ] {
+        let checked = super::validate_home_for(&home, Some(&given)).map_err(|error| error.0);
+        assert_eq!(checked, forbidden, "home {home:?}, HOME {given:?}");
     }
 }

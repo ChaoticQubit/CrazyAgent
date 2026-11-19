@@ -317,12 +317,30 @@ test("pools are summarised by provider and the biggest pool is preselected", () 
   const members = [member("a", "codex", managed), member("b", "codex", managed), member("c", "claude", managed),
     member("d", "codex", { method: "api_key", credential_ref: "k" }, "https://api.openai.com/v1"), member("e", "codex", { method: "none" }, "http://127.0.0.1:11434/v1")];
   assert.equal(wizard.poolSummary(members), "2 ChatGPT, 1 Claude, 1 API key, 1 local model");
+  const more = [member("f", "codex", { method: "none" }, "http://localhost:8080/v1"), member("g", "codex", { method: "api_key", credential_ref: "k2" }, "https://api.openai.com/v1"),
+    member("h", "codex", { method: "none" }, "https://models.example.invalid/v1"), member("i", "codex", { method: "none" }, "https://other.example.invalid/v1")];
+  assert.equal(wizard.poolSummary([...members, ...more]), "2 ChatGPT, 1 Claude, 2 API keys, 2 local models, 2 URLs", "V243-POOL-SUMMARY-PLURAL");
   assert.equal(wizard.poolSummary([]), "No accounts");
   const pools = [{ pool: { id: "small", members: ["a"] }, members: [] }, { pool: { id: "big", members: ["a", "b"] }, members: [] }];
   assert.equal(wizard.preselectPool(pools), "big");
   assert.equal(wizard.preselectPool([]), null);
   assert.equal(wizard.poolFits(catalog[0], members), true);
   assert.equal(wizard.poolFits(harness("opencode", "OpenCode", ready, undefined, ["api_key"]), [member("a", "codex", managed)]), false);
+});
+
+test("an account holding a key fits Codex and Claude Code only where the engine lists API keys for them", () => {
+  const keyed = (id, stored, url) => ({ id, provider: "p", harness: stored, protocol: "openai-chat", account_ref: id, endpoint: { kind: "http", url },
+    model: { id: "m", author: "a" }, auth: { method: "api_key", credential_ref: id } });
+  const pool = [keyed("k1", "rcli", "https://api.openai.com/v1"), keyed("k2", "codex", "https://gateway.example.invalid/v1")];
+  const local = [{ ...keyed("l1", "rcli", "http://127.0.0.1:11434/v1"), auth: { method: "none" } }];
+  const codexHere = harness("codex", "Codex", ready, undefined, ["subscription", "api_key", "open_ai_compatible_url", "local"]);
+  const codexWindows = harness("codex", "Codex", ready, undefined, ["subscription", "open_ai_compatible_url", "local"]);
+  const claudeWindows = harness("claude-code", "Claude Code", ready, undefined, ["subscription"], available, ["claude"]);
+  assert.equal(wizard.poolFits(codexHere, pool), true);
+  assert.equal(wizard.poolFits(codexWindows, pool), false);
+  assert.equal(wizard.poolFits(claudeWindows, pool), false);
+  assert.equal(wizard.poolFits(codexWindows, local), true);
+  assert.equal(wizard.poolFits(harness("rcli", "RCLI", ready, undefined, ["api_key", "open_ai_compatible_url", "local"]), pool), true);
 });
 
 test("Claude subscriptions fit Claude Code under the catalog id and aliases the engine serves", () => {

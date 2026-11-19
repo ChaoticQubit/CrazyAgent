@@ -992,10 +992,15 @@ async fn resume_refuses_a_session_the_current_settings_or_engine_run_no_longer_a
     case.close().await;
 }
 
-/// Has the owner replace the native pool with one serving the given projects, its
-/// members, roles, fallback and quota policy as in CONFIG. Inputs: the case, the edit id
-/// and the projects. Output: the owner's result.
-async fn replace_native_pool(case: &Case, id: &str, projects: &[&str]) -> OwnerResult {
+/// Has the owner replace the native pool with one serving the given projects through the
+/// given members, its roles, fallback and quota policy as in CONFIG. Inputs: the case,
+/// the edit id, the projects and the member connection ids. Output: the owner's result.
+async fn replace_native_pool_members(
+    case: &Case,
+    id: &str,
+    projects: &[&str],
+    members: &[&str],
+) -> OwnerResult {
     let (expected_config_id, expected_source_hash, _) = case.basis().await;
     case.apply(
         id,
@@ -1006,7 +1011,7 @@ async fn replace_native_pool(case: &Case, id: &str, projects: &[&str]) -> OwnerR
                 pool: AccountPool {
                     id: reference("native-pool"),
                     name: None,
-                    members: vec![reference("native-connection")],
+                    members: members.iter().copied().map(reference).collect(),
                     projects: projects.iter().copied().map(reference).collect(),
                     roles: vec![reference("project_leader")],
                     fallback_allowed: false,
@@ -1025,6 +1030,25 @@ async fn replace_native_pool(case: &Case, id: &str, projects: &[&str]) -> OwnerR
 /// destinations into the settings (config.rs:912-975), which CONFIG lacks for the native
 /// connection. Inputs: the case and the projects. Output: the parked session.
 async fn parked_native_after_pool_edit(case: &Case, projects: &[&str]) -> SessionId {
+    parked_native_after_member_edit(
+        case,
+        &["native-connection"],
+        projects,
+        &["native-connection"],
+    )
+    .await
+}
+
+/// Parks a used native session as `parked_native_after_pool_edit` does, with the native
+/// pool settled on `settled` members before any session opens and then replaced with one
+/// serving `projects` through `members`. Inputs: the case, the settled members, the
+/// projects and the members. Output: the parked session.
+async fn parked_native_after_member_edit(
+    case: &Case,
+    settled: &[&str],
+    projects: &[&str],
+    members: &[&str],
+) -> SessionId {
     let repository = case.root.path().join("joined-repository");
     std::fs::create_dir(&repository).unwrap();
     std::fs::write(repository.join("README.md"), "Joined repository\n").unwrap();
@@ -1043,7 +1067,8 @@ async fn parked_native_after_pool_edit(case: &Case, projects: &[&str]) -> Sessio
         OwnerResult::Applied
     );
     assert_eq!(
-        replace_native_pool(case, "settle-native-pool", &["session-project"]).await,
+        replace_native_pool_members(case, "settle-native-pool", &["session-project"], settled)
+            .await,
         OwnerResult::Applied
     );
     assert_eq!(case.open("open-rcli").await, OwnerResult::Applied);
@@ -1060,7 +1085,7 @@ async fn parked_native_after_pool_edit(case: &Case, projects: &[&str]) -> Sessio
     let (bound, _, _) = case.basis().await;
     assert_eq!(native.config_id, bound);
     assert_eq!(
-        replace_native_pool(case, "replace-native-pool", projects).await,
+        replace_native_pool_members(case, "replace-native-pool", projects, members).await,
         OwnerResult::Applied
     );
     let (after, _, _) = case.basis().await;
@@ -1078,6 +1103,74 @@ async fn resume_continues_a_session_after_another_project_joins_its_pool() {
         "another project joining the session's pool leaves what the session runs on as it was"
     );
     assert_eq!(case.shown().await.session_id, native);
+    case.close().await;
+}
+
+/// The owner's report (V243-SESSION-RESUME-CONFLICT): another account signed in to the
+/// session's pool leaves the connection and account the session runs on as they were, so
+/// Resume continues it instead of asking for a new session.
+#[tokio::test]
+async fn resume_continues_a_session_after_an_account_joins_its_pool() {
+    let case = Case::new().await;
+    let native = parked_native_after_member_edit(
+        &case,
+        &["native-connection"],
+        &["session-project"],
+        &["native-connection", "session-connection"],
+    )
+    .await;
+    assert_eq!(
+        case.resume("resume-after-join", &native, false).await,
+        OwnerResult::Applied,
+        "an account joining the session's pool leaves what the session runs on as it was"
+    );
+    assert_eq!(case.shown().await.session_id, native);
+    case.close().await;
+}
+
+/// Another account leaving the session's pool leaves the session's own connection and
+/// account in place, so Resume continues it.
+#[tokio::test]
+async fn resume_continues_a_session_after_another_account_leaves_its_pool() {
+    let case = Case::new().await;
+    let native = parked_native_after_member_edit(
+        &case,
+        &["native-connection", "session-connection"],
+        &["session-project"],
+        &["native-connection"],
+    )
+    .await;
+    assert_eq!(
+        case.resume("resume-after-leave", &native, false).await,
+        OwnerResult::Applied,
+        "another account leaving the session's pool leaves what the session runs on as it was"
+    );
+    assert_eq!(case.shown().await.session_id, native);
+    case.close().await;
+}
+
+/// The refusal kept by the fix, as 9 of the owner's 27 older parked sessions had it: the
+/// session's own connection left its pool and another took its place, so the session no
+/// longer runs on what it started with and Resume still asks for a new session.
+#[tokio::test]
+async fn resume_refuses_a_session_whose_own_connection_was_replaced_in_its_pool() {
+    let case = Case::new().await;
+    let native = parked_native_after_member_edit(
+        &case,
+        &["native-connection", "session-connection"],
+        &["session-project"],
+        &["session-connection"],
+    )
+    .await;
+    let before = snapshot(&case);
+    assert_eq!(
+        case.resume("resume-after-replace", &native, false).await,
+        OwnerResult::Rejected {
+            code: "master_source_conflict".into()
+        },
+        "the session's own connection left its pool, so it no longer runs under the current settings"
+    );
+    assert_eq!(snapshot(&case), before, "a refused Resume changes nothing");
     case.close().await;
 }
 

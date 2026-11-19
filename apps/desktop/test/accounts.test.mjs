@@ -6,6 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 const auth = await import("../src/native-auth.ts");
 const { SignInPanel, signInStage, signInFailure, signedInLine, signInRunning } = await import("../src/screens/settings/sign-in.tsx");
+const { thisComputer } = await import("../src/ui/keys.ts");
 const { methodOptions, providerTiles, defaultAccountName, urlError, nameError, addedLine, TILE_LINES, ProviderTiles, MethodMenu, KeyOrUrlForm } =
   await import("../src/screens/settings/add-account.tsx");
 const { SessionContext, useSession } = await import("../src/state.ts");
@@ -185,8 +186,8 @@ test("sign-in stages come from real reducer states, never from a reply the reduc
   assert.deepEqual(signInStage(mismatched, "chatgpt"), { kind: "failed", text: "We couldn't confirm the sign-in. Check again.", hint: "check" });
   const missing = auth.reduceNativeAuth(begun(), { kind: "failure", navigation: 7, request: 1, code: "native_auth_host_unavailable" });
   assert.equal(signInStage(missing, "chatgpt").hint, "missing");
-  assert.match(signInStage(missing, "chatgpt").text, /^CrazyAgent didn't find a Codex it can run on this Mac, so ChatGPT sign-in isn't available\./);
-  assert.match(signInStage(missing, "claude").text, /^CrazyAgent didn't find a Claude Code it can run on this Mac/);
+  assert.ok(signInStage(missing, "chatgpt").text.startsWith(`CrazyAgent didn't find a Codex it can run on ${thisComputer()}, so ChatGPT sign-in isn't available.`));
+  assert.ok(signInStage(missing, "claude").text.startsWith(`CrazyAgent didn't find a Claude Code it can run on ${thisComputer()},`));
   const expired = answered({ phase: "unauthenticated_observed", challenge: null, code: "native_auth_sign_in_expired" });
   assert.deepEqual(signInStage(expired, "chatgpt"), { kind: "failed", text: "This code expired.", hint: "expired" });
   assert.deepEqual(signInStage(answered({ phase: "unavailable", challenge: null, code: null }), "claude").hint, "missing");
@@ -307,7 +308,7 @@ test("failure panels name the fix: a new code, a key instead of a missing harnes
   assert.match(expired, />Get a new code<\/button>/);
   const missingState = auth.reduceNativeAuth(begun(), { kind: "failure", navigation: 7, request: 1, code: "native_auth_host_unavailable" });
   const missing = panel(missingState, { onUseKey: forbidden });
-  assert.match(missing, /CrazyAgent didn&#x27;t find a Codex it can run on this Mac, so ChatGPT sign-in isn&#x27;t available\./);
+  assert.ok(missing.includes(`CrazyAgent didn&#x27;t find a Codex it can run on ${thisComputer()}, so ChatGPT sign-in isn&#x27;t available.`), missing);
   assert.match(missing, />Use an API key instead<\/button>/);
   assert.match(missing, /aria-label="Check again for Codex"/);
   assert.match(missing, />Choose the codex file<\/button>/);

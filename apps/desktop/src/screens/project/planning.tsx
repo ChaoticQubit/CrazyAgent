@@ -64,9 +64,12 @@ export function planningView(state: PlanningState): PlanningView {
       return { word: "Planning", tone: "info", line, action: null, report: null };
     }
     case "done": return { word: "Done", tone: "ok", line: "The roadmap and release process are in Context.", action: "plan", report: state.job.report_path };
-    case "failed": return state.job.status === "cancelled"
-      ? { word: "Stopped", tone: "neutral", line: "Planning stopped before it finished.", action: "retry", report: null }
-      : { word: "Failed", tone: "danger", line: state.job.error?.trim() || "Planning stopped with an error.", action: "retry", report: null };
+    case "failed": {
+      const action = state.job.retryable ? "retry" : null;
+      return state.job.status === "cancelled"
+        ? { word: "Stopped", tone: "neutral", line: "Planning stopped before it finished.", action, report: null }
+        : { word: "Failed", tone: "danger", line: state.job.error?.trim() || "Planning stopped with an error.", action, report: null };
+    }
   }
 }
 

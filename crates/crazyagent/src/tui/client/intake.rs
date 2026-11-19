@@ -8,6 +8,7 @@ use crate::github::{
 use crate::github::{GitHubRepoRules, GitHubRule};
 use crate::onboarding::OnboardingView;
 use crate::projects_home::job::{JobSubject, JobView};
+use crate::projects_home::reinstall::Offer;
 use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crate::protocol::{CredentialRef, RequestId};
 use std::collections::BTreeSet;
@@ -106,6 +107,12 @@ pub(in crate::tui) enum IntakeQuery {
         rule: GitHubRule,
         on: bool,
     },
+    ReinstallOffer {
+        project: ProjectId,
+    },
+    ReinstallDismiss {
+        project: ProjectId,
+    },
 }
 
 /// A fresh id for one start of the engine's intake job, which the job that start makes
@@ -148,8 +155,11 @@ pub(in crate::tui) enum IntakeView {
     Cloned(CloneReceipt),
     Changed(OwnerResult),
     Job(Option<JobView>),
+    Jobs(Vec<JobView>),
     JobStopped(bool),
     JobDismissed(bool),
+    Reinstall(Option<Offer>),
+    ReinstallDismissed(bool),
     RuleChanging,
     RuleDefaults(BTreeSet<GitHubRule>),
     Rules(Box<GitHubRepoRules>),
@@ -445,7 +455,8 @@ impl NativeOwner {
                     .map_err(problem)?,
             )),
             IntakeQuery::JobStatus => {
-                IntakeView::Job(controller.job_status().await.map_err(problem)?)
+                let jobs = controller.job_status().await.map_err(problem)?;
+                IntakeView::Jobs(jobs)
             }
             IntakeQuery::JobStop { id } => {
                 IntakeView::JobStopped(controller.job_stop(id).await.map_err(problem)?)
@@ -453,6 +464,15 @@ impl NativeOwner {
             IntakeQuery::JobDismiss { id } => {
                 IntakeView::JobDismissed(controller.job_dismiss(id).await.map_err(problem)?)
             }
+            IntakeQuery::ReinstallOffer { project } => {
+                IntakeView::Reinstall(controller.reinstall_offer(project).await.map_err(problem)?)
+            }
+            IntakeQuery::ReinstallDismiss { project } => IntakeView::ReinstallDismissed(
+                controller
+                    .reinstall_dismiss(project)
+                    .await
+                    .map_err(problem)?,
+            ),
             IntakeQuery::GitHubRuleDefaults => {
                 IntakeView::RuleDefaults(controller.github_rule_defaults().await.map_err(problem)?)
             }

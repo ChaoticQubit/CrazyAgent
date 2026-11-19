@@ -1,9 +1,12 @@
+mod path_support;
+
 use crazyagent::adapters::LINE_BYTES_MAX;
 use crazyagent::adapters::codex::{
     ApprovalKind, CodexProtocol, DEVELOPER_INSTRUCTIONS_BYTES_MAX, Event, FRAME_BYTES_MAX,
     ProtocolError, State, TurnStatus, WireId,
 };
 use crazyagent::master_frame_limit::{BYTES_MAX, FrameSize};
+use path_support::unit_path;
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -36,7 +39,7 @@ fn initialized_from(mut protocol: CodexProtocol) -> CodexProtocol {
             &mut protocol,
             1,
             json!({
-                "userAgent":"unit-wire-data", "codexHome":"/unit/codex",
+                "userAgent":"unit-wire-data", "codexHome":unit_path("/unit/codex"),
                 "platformFamily":"unix", "platformOs":"macos"
             })
         ),
@@ -54,7 +57,7 @@ fn initialized_from(mut protocol: CodexProtocol) -> CodexProtocol {
 fn thread() -> Value {
     json!({
         "id":"thread-unit", "cliVersion":"0.163.0", "createdAt":1,
-        "updatedAt":1, "cwd":"/unit/worktree", "ephemeral":false,
+        "updatedAt":1, "cwd":unit_path("/unit/worktree"), "ephemeral":false,
         "modelProvider":"unit-provider-data", "preview":"", "projectId":null,
         "sessionId":"session-unit", "source":"appServer", "status":{"type":"idle"},
         "turns":[]
@@ -63,7 +66,7 @@ fn thread() -> Value {
 
 fn thread_result() -> Value {
     json!({
-        "thread":thread(), "cwd":"/unit/worktree", "model":"unit-model-data",
+        "thread":thread(), "cwd":unit_path("/unit/worktree"), "model":"unit-model-data",
         "modelProvider":"unit-provider-data", "approvalPolicy":"on-request",
         "approvalsReviewer":"user", "sandbox":{"type":"readOnly","networkAccess":false}
     })
@@ -74,7 +77,11 @@ fn idle() -> CodexProtocol {
 }
 
 fn idle_from(mut protocol: CodexProtocol) -> CodexProtocol {
-    let outgoing = request(&protocol.start_thread(Path::new("/unit/worktree")).unwrap());
+    let outgoing = request(
+        &protocol
+            .start_thread(Path::new(&unit_path("/unit/worktree")))
+            .unwrap(),
+    );
     assert_eq!(outgoing["id"], 2);
     assert_eq!(
         reply(&mut protocol, 2, thread_result()),
@@ -120,7 +127,7 @@ fn approval(id: Value, method: &str) -> Vec<u8> {
         "startedAtMs":1
     });
     if method == "item/permissions/requestApproval" {
-        params["cwd"] = json!("/unit/worktree");
+        params["cwd"] = json!(unit_path("/unit/worktree"));
         params["permissions"] = json!({"network":{"enabled":true}});
     }
     wire(json!({"id":id,"method":method,"params":params}))
@@ -146,7 +153,7 @@ fn initialization_requires_a_correlated_complete_reply_before_thread_dispatch() 
     let mut protocol = CodexProtocol::new();
     protocol.initialize().unwrap();
     assert_eq!(
-        protocol.start_thread(Path::new("/unit/worktree")),
+        protocol.start_thread(Path::new(&unit_path("/unit/worktree"))),
         Err(ProtocolError::InvalidState)
     );
     assert_eq!(
@@ -322,14 +329,18 @@ fn thread_request_has_explicit_restrictive_policy_and_validated_cwd() {
         Err(ProtocolError::InvalidInput)
     );
     assert_eq!(
-        protocol.start_thread(Path::new("/unit/../escape")),
+        protocol.start_thread(Path::new(&unit_path("/unit/../escape"))),
         Err(ProtocolError::InvalidInput)
     );
-    let value = request(&protocol.start_thread(Path::new("/unit/worktree")).unwrap());
+    let value = request(
+        &protocol
+            .start_thread(Path::new(&unit_path("/unit/worktree")))
+            .unwrap(),
+    );
     assert_eq!(
         value,
         json!({"id":2,"method":"thread/start","params":{
-            "cwd":"/unit/worktree","approvalPolicy":"on-request","approvalsReviewer":"user","sandbox":"read-only"
+            "cwd":unit_path("/unit/worktree"),"approvalPolicy":"on-request","approvalsReviewer":"user","sandbox":"read-only"
         }})
     );
     assert_eq!(protocol.state(), State::ThreadStarting);
@@ -345,7 +356,9 @@ fn effective_thread_policy_must_match_the_restrictive_request() {
         ("cwd", json!("/different")),
     ] {
         let mut protocol = initialized();
-        protocol.start_thread(Path::new("/unit/worktree")).unwrap();
+        protocol
+            .start_thread(Path::new(&unit_path("/unit/worktree")))
+            .unwrap();
         let mut result = thread_result();
         result[key] = value;
         assert_eq!(
@@ -359,7 +372,9 @@ fn effective_thread_policy_must_match_the_restrictive_request() {
 #[test]
 fn thread_notification_before_reply_is_correlated_without_finishing_the_request() {
     let mut protocol = initialized();
-    protocol.start_thread(Path::new("/unit/worktree")).unwrap();
+    protocol
+        .start_thread(Path::new(&unit_path("/unit/worktree")))
+        .unwrap();
     assert_eq!(
         protocol
             .receive(&wire(
@@ -1107,7 +1122,8 @@ fn a_master_frame_limit_lets_each_option_carry_a_turn_up_to_its_bytes() {
 #[test]
 fn a_master_frame_limit_past_the_wire_size_starts_a_thread_whose_instructions_escape_past_it() {
     let instructions = "\"".repeat(DEVELOPER_INSTRUCTIONS_BYTES_MAX);
-    let cwd = Path::new("/unit/worktree");
+    let cwd = unit_path("/unit/worktree");
+    let cwd = Path::new(&cwd);
     let mut protocol = initialized();
     assert_eq!(
         protocol.start_instructed_thread(cwd, &instructions),

@@ -33,6 +33,7 @@ fn words(command: &[&str]) -> Vec<String> {
     command.iter().map(|word| (*word).to_owned()).collect()
 }
 
+#[cfg(unix)]
 #[test]
 fn launchd_plist_runs_the_recorded_executable_with_logs_and_restart() {
     let expected = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
@@ -77,6 +78,7 @@ fn launchd_plist_runs_the_recorded_executable_with_logs_and_restart() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn launchd_plist_escapes_markup_in_paths() {
     let mut odd = service(Platform::MacOs);
@@ -86,6 +88,7 @@ fn launchd_plist_escapes_markup_in_paths() {
     assert!(!text.contains("o&<"));
 }
 
+#[cfg(unix)]
 #[test]
 fn systemd_unit_quotes_paths_and_escapes_specifiers() {
     let mut linux = service(Platform::Linux);
@@ -118,6 +121,7 @@ WantedBy=default.target
 
 /// systemd.exec: Environment= expands no variables, so a `$` in a PATH folder is written as
 /// is, while `%` (a specifier), backslash and double quote are still escaped.
+#[cfg(unix)]
 #[test]
 fn systemd_environment_keeps_a_dollar_in_a_path_folder_as_written() {
     let mut linux = service(Platform::Linux);
@@ -317,6 +321,7 @@ fn status_output_is_read_per_manager() {
 /// The service PATH keeps the shell's absolute folders in order, then adds the user's and the
 /// system folders once each, and leaves out any folder another user can change on this host
 /// (on a CI runner `/usr/local/bin` can be one).
+#[cfg(unix)]
 #[test]
 fn service_path_keeps_the_shell_path_then_adds_user_and_system_folders_once() {
     let kept = |folders: &[&str]| {
@@ -371,16 +376,28 @@ fn windows_path_command_hands_the_folder_over_in_its_environment_only() {
         .collect();
     assert_eq!(args[..3], ["-NoProfile", "-NonInteractive", "-Command"]);
     assert!(args[3].contains(&format!("$f=$env:{WINDOWS_PATH_FOLDER_VARIABLE};")));
+    assert!(args[3].contains("$r=$env:CRAZYAGENT_PATH_KEY;"));
+    assert!(
+        !args[3].contains("HKCU:"),
+        "the key is handed over as data too"
+    );
     assert!(!args[3].contains("$args"));
     assert!(!args[3].contains("Cra'zy"));
     assert_eq!(args.len(), 4);
-    let envs: Vec<_> = command.get_envs().collect();
+    let mut envs: Vec<_> = command.get_envs().collect();
+    envs.sort();
     assert_eq!(
         envs,
-        [(
-            OsStr::new(WINDOWS_PATH_FOLDER_VARIABLE),
-            Some(folder.as_os_str())
-        )]
+        [
+            (
+                OsStr::new(WINDOWS_PATH_FOLDER_VARIABLE),
+                Some(folder.as_os_str())
+            ),
+            (
+                OsStr::new("CRAZYAGENT_PATH_KEY"),
+                Some(OsStr::new(r"HKCU:\Environment"))
+            )
+        ]
     );
 }
 
@@ -414,109 +431,153 @@ fn windows_path_command_keeps_the_user_path_kind_and_its_unexpanded_text() {
     );
 }
 
-/// Serializes the tests that change the user's stored PATH, so one never restores over
-/// another's change.
+/// Builds one PowerShell command for a script and its environment, with no input and both
+/// outputs collected. Inputs: the script and the variables. Output: the command.
 #[cfg(windows)]
-static USER_PATH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn powershell_command(script: &str, env: &[(&str, &str)]) -> std::process::Command {
+    assert!(!script.is_empty());
+    let mut command = std::process::Command::new("powershell.exe");
+    command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    for (name, value) in env {
+        assert!(!name.is_empty());
+        command.env(name, value);
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    command
+}
 
 /// Runs one PowerShell script with the given environment. Takes the script and the
 /// variables. Returns its standard output; panics when PowerShell fails.
 #[cfg(windows)]
 fn powershell(script: &str, env: &[(&str, &str)]) -> String {
-    let mut command = std::process::Command::new("powershell.exe");
-    command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
-    for (name, value) in env {
-        command.env(name, value);
-    }
-    let output = crate::spawn_gate::output(
-        command
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    )
-    .unwrap();
+    let output = crate::spawn_gate::output(&mut powershell_command(script, env)).unwrap();
     assert!(output.status.success(), "{output:?}");
     String::from_utf8(output.stdout).unwrap()
 }
 
-/// Reads the user's stored PATH as written, %VAR% references unexpanded, with its registry
-/// kind. Takes nothing. Returns the kind name and the value, both empty when it is unset.
+/// A registry key of one row's own that stands in for the user's environment key, so no row
+/// writes the PATH of the machine running it or reads another row's (V244-WIN-LINK-CLI-NEXTEST):
+/// `HKCU:\Software\CrazyAgent-test-<tag>-<pid>`, removed with its values when dropped.
 #[cfg(windows)]
-fn raw_user_path() -> (String, String) {
-    let shown = powershell(
-        "$k=Get-Item -LiteralPath 'HKCU:\\Environment'; \
-if ($k.GetValueNames() -contains 'Path') { [Console]::Out.Write($k.GetValueKind('Path').ToString() + \"`n\" + \
+struct ScratchKey {
+    name: String,
+}
+
+#[cfg(windows)]
+impl ScratchKey {
+    /// Creates the key, holding a Path value of the given registry kind and text when one is
+    /// given. Inputs: the row's tag, lowercase letters, and the value, none for no Path.
+    /// Output: the key.
+    fn new(tag: &str, path: Option<(&str, &str)>) -> Self {
+        assert!(!tag.is_empty(), "a row names its key");
+        assert!(tag.bytes().all(|byte| byte.is_ascii_lowercase()), "{tag}");
+        let name = format!(
+            r"HKCU:\Software\CrazyAgent-test-{tag}-{}",
+            std::process::id()
+        );
+        powershell(
+            "$ErrorActionPreference='Stop'; \
+New-Item -Path $env:CRAZYAGENT_TEST_KEY -Force | Out-Null",
+            &[("CRAZYAGENT_TEST_KEY", &name)],
+        );
+        let key = Self { name };
+        if let Some((kind, value)) = path {
+            powershell(
+                "$ErrorActionPreference='Stop'; \
+Set-ItemProperty -LiteralPath $env:CRAZYAGENT_TEST_KEY -Name 'Path' \
+-Value $env:CRAZYAGENT_TEST_PATH -Type $env:CRAZYAGENT_TEST_KIND",
+                &[
+                    ("CRAZYAGENT_TEST_KEY", &key.name),
+                    ("CRAZYAGENT_TEST_PATH", value),
+                    ("CRAZYAGENT_TEST_KIND", kind),
+                ],
+            );
+        }
+        let (kind, value) = path.unwrap_or_default();
+        assert_eq!(key.path(), (kind.to_owned(), value.to_owned()));
+        key
+    }
+
+    /// Reads the key's Path value as written, %VAR% references unexpanded, with its registry
+    /// kind. Output: the kind name and the value, both empty when there is no Path value.
+    fn path(&self) -> (String, String) {
+        let shown = powershell(
+            "$ErrorActionPreference='Stop'; $k=Get-Item -LiteralPath $env:CRAZYAGENT_TEST_KEY; \
+if ($k.GetValueNames() -contains 'Path') { [Console]::Out.Write( \
+$k.GetValueKind('Path').ToString() + \"`n\" + \
 $k.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)) }",
-        &[],
-    );
-    match shown.split_once('\n') {
-        Some((kind, value)) => (kind.to_owned(), value.to_owned()),
-        None => (String::new(), String::new()),
+            &[("CRAZYAGENT_TEST_KEY", &self.name)],
+        );
+        let (kind, value) = shown.split_once('\n').unwrap_or_default();
+        assert!(["", "String", "ExpandString"].contains(&kind), "{shown}");
+        (kind.to_owned(), value.to_owned())
     }
 }
 
-/// Stores the user's PATH back as it was: the same text with the same registry kind, or no
-/// value when the kind is empty. Takes the kind name and the value. Returns nothing.
 #[cfg(windows)]
-fn restore_raw_user_path(kind: &str, value: &str) {
-    powershell(
-        "if ([string]::IsNullOrEmpty($env:CRAZYAGENT_TEST_KIND)) { \
-Remove-ItemProperty -LiteralPath 'HKCU:\\Environment' -Name 'Path' -ErrorAction SilentlyContinue } else { \
-Set-ItemProperty -LiteralPath 'HKCU:\\Environment' -Name 'Path' -Value $env:CRAZYAGENT_TEST_PATH -Type $env:CRAZYAGENT_TEST_KIND }",
-        &[
-            ("CRAZYAGENT_TEST_KIND", kind),
-            ("CRAZYAGENT_TEST_PATH", value),
-        ],
-    );
+impl Drop for ScratchKey {
+    /// Removes the key and its values. A removal that fails fails the row, unless the row is
+    /// already failing, where a second panic would abort the whole run.
+    fn drop(&mut self) {
+        let removed = crate::spawn_gate::output(&mut powershell_command(
+            "$ErrorActionPreference='Stop'; \
+Remove-Item -LiteralPath $env:CRAZYAGENT_TEST_KEY -Recurse",
+            &[("CRAZYAGENT_TEST_KEY", &self.name)],
+        ));
+        let done = removed.is_ok_and(|output| output.status.success());
+        assert!(done || std::thread::panicking(), "{} is left", self.name);
+    }
 }
 
 #[cfg(windows)]
 #[test]
 fn link_cli_adds_a_folder_named_like_powershell_code_to_the_user_path_once() {
-    let _held = USER_PATH
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (kind, before) = raw_user_path();
+    let key = ScratchKey::new("once", None);
     let root = tempfile::tempdir().unwrap();
-    let folder = root.path().join("cra'zy;$(exit 7)");
+    let folder = root.path().join("cra'zy$(exit 7)");
     std::fs::create_dir(&folder).unwrap();
     let executable = folder.join("crazyagent.exe");
-    let first = link_cli(&executable, root.path());
-    let second = link_cli(&executable, root.path());
-    let (_, after) = raw_user_path();
-    restore_raw_user_path(&kind, &before);
-    assert_eq!(first.unwrap(), folder);
-    assert_eq!(second.unwrap(), folder);
+    assert_eq!(link_cli_under(&executable, &key.name).unwrap(), folder);
+    assert_eq!(link_cli_under(&executable, &key.name).unwrap(), folder);
     let shown = folder.to_str().unwrap();
-    assert_eq!(after.split(';').filter(|entry| *entry == shown).count(), 1);
-    assert_eq!(raw_user_path(), (kind, before));
+    assert_eq!(key.path(), ("ExpandString".to_owned(), shown.to_owned()));
+}
+
+#[cfg(windows)]
+#[test]
+fn link_cli_refuses_a_folder_holding_a_semicolon_and_leaves_the_user_path() {
+    let before = ("String", r"C:\Windows");
+    let key = ScratchKey::new("semicolon", Some(before));
+    let root = tempfile::tempdir().unwrap();
+    let folder = root.path().join("cra;zy");
+    std::fs::create_dir(&folder).unwrap();
+    let linked = link_cli_under(&folder.join("crazyagent.exe"), &key.name);
+    let refusal = linked.unwrap_err().to_string();
+    assert!(
+        refusal.contains("cra;zy") && refusal.contains("PATH is unchanged"),
+        "{refusal}"
+    );
+    assert_eq!(key.path(), (before.0.to_owned(), before.1.to_owned()));
 }
 
 #[cfg(windows)]
 #[test]
 fn link_cli_keeps_the_user_path_kind_and_its_unexpanded_references() {
-    let _held = USER_PATH
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (kind, before) = raw_user_path();
-    let reference = r"%USERPROFILE%\crazyagent-kind-check";
-    restore_raw_user_path("ExpandString", &format!("{reference};{before}"));
+    let before = r"%USERPROFILE%\crazyagent-kind-check;C:\Windows";
     let root = tempfile::tempdir().unwrap();
     let folder = root.path().join("bin");
     std::fs::create_dir(&folder).unwrap();
-    let linked = link_cli(&folder.join("crazyagent.exe"), root.path());
-    let after = raw_user_path();
-    restore_raw_user_path(&kind, &before);
-    assert_eq!(linked.unwrap(), folder);
-    assert_eq!(after.0, "ExpandString", "{after:?}");
-    assert!(after.1.starts_with(&format!("{reference};")), "{after:?}");
     let shown = folder.to_str().unwrap();
-    assert_eq!(
-        after.1.split(';').filter(|entry| *entry == shown).count(),
-        1,
-        "{after:?}"
-    );
-    assert_eq!(raw_user_path(), (kind, before));
+    for kind in ["ExpandString", "String"] {
+        let key = ScratchKey::new(&kind.to_ascii_lowercase(), Some((kind, before)));
+        let linked = link_cli_under(&folder.join("crazyagent.exe"), &key.name);
+        assert_eq!(linked.unwrap(), folder, "{kind}");
+        let after = (kind.to_owned(), format!("{before};{shown}"));
+        assert_eq!(key.path(), after, "{kind}");
+    }
 }
 
 #[cfg(unix)]
@@ -778,6 +839,100 @@ fn changeable_by_others_names_a_world_writable_folder_on_the_path_or_behind_a_li
     }
     let gone = temp.path().join("private").join("gone").join("crazyagent");
     assert_eq!(changeable_by_others(&gone), None);
+}
+
+/// Changes who may write `path` with icacls. Inputs: the path and the icacls arguments.
+#[cfg(windows)]
+fn icacls(path: &Path, change: &[&str]) {
+    let changed =
+        crate::spawn_gate::collected(std::process::Command::new("icacls").arg(path).args(change))
+            .unwrap();
+    assert!(
+        changed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&changed.stderr)
+    );
+}
+
+/// V243-WIN-CHANGEABLE-BY-OTHERS: on Windows both checks read owners and access lists, as
+/// the owner-only program check does. A file Users may write, the folder of a file where
+/// Users may add one, and the first folder above a missing part where Users may add a
+/// folder are named. A fresh file, its folders and System32 are not, nor is a folder whose
+/// parent only lets Users add a folder, as Authenticated Users may at a drive's root.
+#[cfg(windows)]
+#[test]
+fn changeable_by_others_reads_windows_owners_and_access_lists() {
+    let users = "*S-1-5-32-545";
+    let directory = tempfile::tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
+    let above = directory.path().join("above");
+    let own = above.join("own");
+    std::fs::create_dir_all(&own).unwrap();
+    let program = own.join("tool.exe");
+    std::fs::write(&program, "").unwrap();
+    let system32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    for clean in [&program, &own, &above, &system32, &own.join("gone.exe")] {
+        assert_eq!(changeable_by_others(clean), None, "{}", clean.display());
+        assert_eq!(changeable_past_sticky(clean), None, "{}", clean.display());
+    }
+
+    icacls(&above, &["/grant", &format!("{users}:(AD)")]);
+    assert_eq!(changeable_by_others(&own), None);
+    assert_eq!(changeable_by_others(&program), None);
+    assert_eq!(
+        changeable_by_others(&above.join("gone").join("tool.exe")),
+        Some(above.clone())
+    );
+    icacls(&above, &["/remove:g", users]);
+
+    icacls(&program, &["/grant", &format!("{users}:(W)")]);
+    assert_eq!(changeable_by_others(&program), Some(program.clone()));
+    assert_eq!(changeable_past_sticky(&program), Some(program.clone()));
+    icacls(&program, &["/remove:g", users]);
+
+    icacls(&own, &["/grant", &format!("{users}:(WD)")]);
+    for named in [&program, &own, &own.join("gone.exe")] {
+        assert_eq!(
+            changeable_by_others(named),
+            Some(own.clone()),
+            "{}",
+            named.display()
+        );
+        assert_eq!(
+            changeable_past_sticky(named),
+            Some(own.clone()),
+            "{}",
+            named.display()
+        );
+    }
+    icacls(&own, &["/remove:g", users]);
+    assert_eq!(changeable_by_others(&program), None);
+}
+
+/// #331 sec F1: on Windows the service PATH keeps a folder that exists and drops one that
+/// does not, under a clean folder or on a drive letter no volume holds, since a drive or
+/// folder added there later would put whatever it holds on the engine's harness lookup.
+#[cfg(windows)]
+#[test]
+fn service_path_on_windows_drops_a_folder_that_does_not_exist() {
+    let directory = tempfile::tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
+    let kept = directory.path().join("bin");
+    std::fs::create_dir(&kept).unwrap();
+    let missing = directory.path().join("gone").join("bin");
+    let absent = ('D'..='Z')
+        .map(|letter| PathBuf::from(format!("{letter}:\\")))
+        .find(|root| !root.exists())
+        .map(|root| root.join("crazyagent-gone").join("bin"));
+    let current = std::env::join_paths(
+        [kept.clone(), missing.clone()]
+            .into_iter()
+            .chain(absent.clone()),
+    )
+    .unwrap();
+    let folders: Vec<PathBuf> =
+        std::env::split_paths(&service_path(Some(&current), None, None)).collect();
+    assert_eq!(folders.first(), Some(&kept));
+    assert!(!folders.contains(&missing));
+    assert!(absent.is_none_or(|absent| !folders.contains(&absent)));
 }
 
 #[cfg(unix)]

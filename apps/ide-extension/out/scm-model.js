@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.COMMENT_BYTES_MAX = exports.REFUSAL_CODES = exports.LIVE_FILE = exports.HEAD_SCHEME = exports.IDE_CONFIG = exports.CONFIG_SCHEME = exports.BASE_SCHEME = void 0;
+exports.COMMENT_BYTES_MAX = exports.GIT_OLD_MAC = exports.REFUSAL_CODES = exports.LIVE_FILE = exports.HEAD_SCHEME = exports.IDE_CONFIG = exports.CONFIG_SCHEME = exports.BASE_SCHEME = void 0;
 exports.unconfirmed = unconfirmed;
 exports.plainLine = plainLine;
 exports.refusal = refusal;
@@ -53,6 +53,7 @@ const REFUSALS = {
     changes_conflict: "These changes conflict with your branch. Ask the agent to update, or discard.",
     changes_stale: "These changes moved on since you opened them. Review them again, then accept.",
     changes_branch_moved: "Your branch moved while these changes were landing, so nothing changed. Review and accept again.",
+    changes_git_old: "Landing changes needs Git 2.40 or newer, and the Git on this computer is older. Update Git, then try again.",
     changes_git_unsupported: "The Git on this computer can't land changes. Update Git, then try again.",
     changes_ignored_files: "These changes add files your project's ignore rules leave out. Ask the agent to remove them.",
     changes_message_invalid: "The commit message is empty, too long or has characters Git can't keep. Edit it, then accept again.",
@@ -85,7 +86,10 @@ function unconfirmed(code) {
 function plainLine(text) {
     return text.replace(UNSAFE, "\ufffd");
 }
-function refusal(code) {
+exports.GIT_OLD_MAC = "Landing changes needs Git 2.40 or newer, and the Git of Xcode or its Command Line Tools on this Mac is older; CrazyAgent doesn't use Homebrew's Git. Update them in Software Update, or in Terminal with softwareupdate --install --all or xcode-select --install, then try again.";
+function refusal(code, mac = process.platform === "darwin") {
+    if (code === "changes_git_old" && mac)
+        return exports.GIT_OLD_MAC;
     return Object.hasOwn(REFUSALS, code) ? REFUSALS[code] : `Something went wrong. Try again. (${plainLine(code)})`;
 }
 function acceptedNote(outcome) {

@@ -99,6 +99,7 @@ fn versions(id: &str, install: Option<&str>, refusal: Option<&str>) -> HarnessVe
         last: None,
         needs: None,
         sign_in_min: None,
+        waiting: None,
     }
 }
 
@@ -123,6 +124,8 @@ fn setup(state: DependencyState, running: bool) -> Arrival {
                 name: Dependency::Node,
                 label: "Node.js".into(),
                 state,
+                busy: false,
+                waiting: None,
             }],
             pack: Vec::new(),
             running,
@@ -305,6 +308,15 @@ fn each_row_says_what_installing_runs_or_why_it_cannot_in_the_desktop_words() {
     assert_eq!(
         harness_row("codex", Some(entry(&none, "codex")), Some(&running), &[]),
         Row::Installing
+    );
+    let held = HarnessVersions {
+        waiting: Some("claude-code".into()),
+        ..running.clone()
+    };
+    assert_eq!(
+        harness_row("codex", Some(entry(&none, "codex")), Some(&held), &[]),
+        Row::Waiting,
+        "an install held behind another harness's job waits, it is not installing yet"
     );
     let failed = HarnessVersions {
         last: Some(ended(false, Some("harness_install_failed"), None)),
@@ -1108,4 +1120,74 @@ fn a_node_setup_cannot_install_on_this_system_is_never_offered_or_read_again_for
             "busy {busy}"
         );
     }
+}
+
+/// V243-SETUP-PARALLEL (DEC-199): setup's Node row read while a job on Node runs, the setup
+/// run's step or a lone install, reads installing whatever its earlier state; with no job on
+/// Node the row's own state shows.
+#[test]
+fn a_node_row_with_a_job_on_it_reads_installing_whatever_its_earlier_state() {
+    let status = |state: DependencyState, busy: bool| SetupStatus {
+        dependencies: vec![DependencyStatus {
+            name: Dependency::Node,
+            label: "Node.js".into(),
+            state,
+            busy,
+            waiting: None,
+        }],
+        pack: Vec::new(),
+        running: false,
+        notes: Vec::new(),
+        version: 1,
+        refused_tool: Default::default(),
+    };
+    let failed = DependencyState::Failed {
+        reason: NODE_FAILED.into(),
+    };
+    assert_eq!(
+        node_row(&status(failed.clone(), true)),
+        Some(DependencyState::Installing)
+    );
+    assert_eq!(node_row(&status(failed.clone(), false)), Some(failed));
+    let missing = DependencyState::Missing {
+        line: String::new(),
+    };
+    assert_eq!(
+        node_row(&status(missing, true)),
+        Some(DependencyState::Installing)
+    );
+}
+
+/// V243-SETUP-PARALLEL (DEC-199): while the setup run's step on Node runs, the step reads
+/// Node as installing though setup's row still holds an earlier failure, so it neither shows
+/// that failure nor offers n.
+#[test]
+fn the_step_reads_node_installing_while_a_job_on_node_runs_over_an_old_failure() {
+    let mut shell = step(120, 36);
+    sent(&mut shell);
+    let found = entries(&["codex"]);
+    let claude = versions("claude-code", None, Some(NEEDS_NODE));
+    let busy = arrival(SettingsEvent::AppSetup(AppSetupEvent::Status(Ok(
+        SetupStatus {
+            dependencies: vec![DependencyStatus {
+                name: Dependency::Node,
+                label: "Node.js".into(),
+                state: DependencyState::Failed {
+                    reason: NODE_FAILED.into(),
+                },
+                busy: true,
+                waiting: Some("setup".into()),
+            }],
+            pack: Vec::new(),
+            running: true,
+            notes: Vec::new(),
+            version: 1,
+            refused_tool: Default::default(),
+        },
+    ))));
+    answer_setup(&mut shell, &found, needs_node("codex"), claude, &[], busy);
+    let rows = render(&mut shell, 120, 36);
+    assert!(shows(&rows, INSTALLING_NODE), "{rows:#?}");
+    assert!(!shows(&rows, NODE_FAILED), "{rows:#?}");
+    assert!(!bar(&rows).contains(INSTALL_NODE), "{rows:#?}");
 }
