@@ -349,3 +349,78 @@ fn an_explicit_setup_run_asks_the_probes_to_look_again_at_once() {
     assert!(second > first);
     crate::setup::progress::with(root.path(), |state| state.running = false);
 }
+
+/// The schema rows of an engine database, one line each, sorted. Input: the connection.
+/// Output: type, name, table and SQL of every table, index, trigger and view.
+#[cfg(unix)]
+fn schema_rows(db: &rusqlite::Connection) -> Vec<String> {
+    let rows: Vec<String> = db
+        .prepare(
+            "SELECT type || ' ' || name || ' ' || tbl_name || ' ' || coalesce(sql, '') \
+             FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(!rows.is_empty() && rows.len() <= 4096);
+    rows
+}
+
+/// V243-NATIVE-PROFILE-TEAM-RETIRING-FLAKE: one pass of each task the owner server starts
+/// beside its requests (the finished-agents sweep, the landing upkeep and the hooks
+/// backfill, with an installed entry so it writes) leaves the engine database with the
+/// schema the engine start made, so no table appears while the server already answers.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_owner_server_s_start_tasks_add_nothing_to_the_schema_the_engine_start_made() {
+    let made = tempfile::tempdir().unwrap();
+    let fresh = rusqlite::Connection::open(made.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&fresh).unwrap();
+    let started = schema_rows(&fresh);
+    let owner = Usage::start().await;
+    let work = tempfile::tempdir().unwrap();
+    let source = work.path().join("caveman");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: caveman\ndescription: The caveman skill.\n---\n",
+    )
+    .unwrap();
+    let sender = owner.runtime().engine.storage.sender.clone();
+    let (send, installed) = oneshot::channel();
+    sender
+        .send(crate::storage::Job::Setup(
+            crate::storage::setup::Command::Install {
+                id: "caveman".into(),
+                source: "https://example.invalid/caveman@1".into(),
+                skills: vec![source],
+                server: None,
+            },
+            send,
+        ))
+        .await
+        .unwrap();
+    installed.await.unwrap().unwrap();
+    pack_checkout(&owner.engine_root.join("setup"), "caveman");
+    let authority = Arc::downgrade(&owner.runtime().authority);
+    let (stop, stopped) = oneshot::channel();
+    stop.send(()).unwrap();
+    cleanup::sweep(authority.clone(), stopped).await;
+    let (stop, stopped) = oneshot::channel();
+    stop.send(()).unwrap();
+    changes::upkeep(authority, stopped).await;
+    setup::backfill_hooks(sender, owner.engine_root.clone()).await;
+    assert_eq!(stored_hooks(&owner.engine_root), ["caveman/SessionStart/1"]);
+    let engine = rusqlite::Connection::open(owner.engine_root.join("engine.db")).unwrap();
+    let after = schema_rows(&engine);
+    let added: Vec<&String> = after.iter().filter(|row| !started.contains(row)).collect();
+    let gone: Vec<&String> = started.iter().filter(|row| !after.contains(row)).collect();
+    assert!(
+        added.is_empty() && gone.is_empty(),
+        "added {added:#?}, gone {gone:#?}"
+    );
+    drop(engine);
+    owner.stop().await;
+}
