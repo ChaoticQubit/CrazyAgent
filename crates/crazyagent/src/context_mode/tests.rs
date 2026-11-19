@@ -385,10 +385,10 @@ fn npm_starts_under_the_install_sandbox_profile() {
 }
 
 /// V243-CONTEXT-MODE-NPM-LINK-GRANT: npm in a setup-node layout, `bin/npm` a link into
-/// `../lib/node_modules/npm` in a prefix under no granted root, starts under the install
-/// profile: the grant follows `bin/npm` to npm's package and the `node` beside it, read only.
-/// The prefix sits in the build folder, as another user can change a shared `/tmp`; the engine
-/// root holds the settings store Linux reads. A failed start shows npm's standard error.
+/// `../lib/node_modules/npm` and `bin/node` a copy of the real node, in a prefix under no
+/// granted root, starts under the install profile: the grant follows `bin/npm` to npm's
+/// package, read only. The prefix sits in the build folder, which no other user can change;
+/// the root holds the settings store Linux reads. A failed start shows npm's standard error.
 #[test]
 fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_install_profile() {
     let real = system_bin();
@@ -425,7 +425,7 @@ fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_insta
     .unwrap();
     assert!(writable.success(), "{modules:?}");
     let node = crate::sandbox::canonical(&real.join("node")).unwrap();
-    std::os::unix::fs::symlink(&node, bin.join("node")).unwrap();
+    fs::copy(&node, bin.join("node")).unwrap();
     std::os::unix::fs::symlink("../lib/node_modules/npm/bin/npm-cli.js", bin.join("npm")).unwrap();
     let program = crate::sandbox::canonical(&bin.join("npm")).unwrap();
     assert_eq!(
