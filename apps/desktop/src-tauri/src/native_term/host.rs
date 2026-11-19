@@ -1181,21 +1181,39 @@ mod tests {
     use super::{copy_key, platform};
 
     fn selected(output: &[u8], last: usize) -> Pane {
+        dragged(output, (0, 0), Some((last, 0)))
+    }
+
+    fn dragged(output: &[u8], from: (usize, usize), to: Option<(usize, usize)>) -> Pane {
         let mut pane = Pane::new(true);
         assert!(pane.on_attached(20, 4));
         assert!(pane.on_output(output));
         let press = Input::Press {
-            cell: (0, 0),
+            cell: from,
             option: false,
             clicks: 1,
         };
         assert_eq!(pane.apply(press), Action::Local);
-        let drag = Input::Drag {
-            cell: (last, 0),
+        if let Some(cell) = to {
+            let drag = Input::Drag {
+                cell,
+                option: false,
+            };
+            assert_eq!(pane.apply(drag), Action::Local);
+        }
+        let release = Input::Release {
+            cell: to.unwrap_or(from),
             option: false,
         };
-        assert_eq!(pane.apply(drag), Action::Local);
+        assert_eq!(pane.apply(release), Action::Local);
         pane
+    }
+
+    fn interrupt() -> Action {
+        Action::Input {
+            bytes: vec![0x03],
+            wheel: false,
+        }
     }
 
     #[test]
@@ -1219,6 +1237,27 @@ mod tests {
             wheel: false,
         };
         assert_eq!(sent, interrupt);
+    }
+
+    #[test]
+    fn the_copy_chord_over_blank_cells_uses_the_selection_up_and_sends_no_interrupt() {
+        let mut pane = dragged(b"hello world", (0, 1), Some((5, 1)));
+        let clip = platform::Clip::new();
+        let chord = Input::Text(vec![0x03]);
+        let sent = copy_key(&mut pane, &clip, chord);
+        assert_eq!(sent, Action::Local, "a blank selection is a selection");
+        assert_eq!(clip.read(), None, "blank text does not go to the board");
+        let again = copy_key(&mut pane, &clip, Input::Text(vec![0x03]));
+        assert_eq!(again, interrupt(), "the chord used the blank selection up");
+    }
+
+    #[test]
+    fn the_copy_chord_after_a_plain_click_sends_the_interrupt() {
+        let mut pane = dragged(b"hello world", (2, 0), None);
+        let clip = platform::Clip::new();
+        let sent = copy_key(&mut pane, &clip, Input::Text(vec![0x03]));
+        assert_eq!(sent, interrupt(), "a click selects nothing");
+        assert_eq!(clip.read(), None);
     }
 
     #[test]
