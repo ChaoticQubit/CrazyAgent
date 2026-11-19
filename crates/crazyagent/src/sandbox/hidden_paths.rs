@@ -442,16 +442,18 @@ fn same_name(listed: &str, folded: &str) -> bool {
     }
 }
 
-/// Whether a path from git's listing is a folder given as its folded names, or lies below it,
-/// compared name by name with [`same_name`]. Inputs: the listed path and the folder's names.
-/// Output: whether the path falls in the folder.
+/// Whether a path from git's listing is a folder given as its folded names, lies below it, or
+/// ends before the folder's names do, compared name by name with [`same_name`]. A listed path
+/// that ends first is a gitlink, a submodule whose files git never lists, or a file entry the
+/// index still holds where a folder now is, so it counts too (rv-sec3 F1). Inputs: the listed
+/// path and the folder's names. Output: whether the path falls in the folder.
 fn within(listed: &str, names: &[String]) -> bool {
     assert!(!names.is_empty());
     assert!(!listed.is_empty());
     let mut parts = listed.split('/');
     names
         .iter()
-        .all(|name| parts.next().is_some_and(|part| same_name(part, name)))
+        .all(|name| parts.next().is_none_or(|part| same_name(part, name)))
 }
 
 /// A listed path's first name as the hidden folders' first names are kept: its ASCII lowercase
@@ -469,30 +471,33 @@ fn first_key(head: &str) -> String {
 }
 
 /// Whether the rest of a listed path, after a first name that matched a folder's first name,
-/// lies in that folder: always when the folder has no more names, never when the path ends
-/// before them. Inputs: the rest of the path and the folder's remaining names. Output: whether
-/// it falls in.
+/// falls in that folder as [`within`] counts it: always when the folder has no more names or
+/// the path has no more names. Inputs: the rest of the path and the folder's remaining names.
+/// Output: whether it falls in.
 fn below(rest: &str, names: &[String]) -> bool {
-    names.is_empty() || (!rest.is_empty() && within(rest, names))
+    names.is_empty() || rest.is_empty() || within(rest, names)
 }
 
 /// What [`scan`] found in git's NUL-separated index listing.
 #[derive(Debug, PartialEq, Eq)]
 enum Scan {
-    /// A listed path lies in one of the folders.
+    /// A listed path falls in one of the folders, as [`within`] counts it.
     Tracked,
-    /// The whole listing was read, each path ended by a NUL, and none lies in the folders.
+    /// The whole listing was read, each path ended by a NUL, and none falls in the folders.
     End,
-    /// A path was empty, not UTF-8, cut short or past [`CHECK_LINE_BYTES_MAX`], the listing
-    /// passed [`CHECK_BYTES_MAX`], or it could not be read.
+    /// A path was empty, cut short or past [`CHECK_LINE_BYTES_MAX`], the listing passed
+    /// [`CHECK_BYTES_MAX`], or it could not be read.
     Doubt,
 }
 
 /// Reads git's `ls-files -z` listing path by path and stops at the first path in one of the
-/// folders, each given as its folded names, so the rest is never read. A path's first name is
-/// folded once and looked up among the folders' first names, and reused while the sorted
-/// listing stays under it, so one pass costs the same for any number of folders. Inputs: the
-/// listing and the folders. Output: what it found.
+/// folders, each given as its folded names, so the rest is never read. A path that is not
+/// UTF-8 is read with each bad run of bytes as U+FFFD (rv-sec3 N2): the folders' names are
+/// UTF-8, so a bad name can match none of them on any file system, while the names around it
+/// read as they are and `/` still splits them. A path's first name is folded once and looked
+/// up among the folders' first names, and reused while the sorted listing stays under it, so
+/// one pass costs the same for any number of folders. Inputs: the listing and the folders.
+/// Output: what it found.
 fn scan(listing: impl std::io::Read, folders: &[Vec<String>]) -> Scan {
     use std::io::{BufRead, Read};
     assert!(!folders.is_empty());
@@ -527,11 +532,14 @@ fn scan(listing: impl std::io::Read, folders: &[Vec<String>]) -> Scan {
         if total > CHECK_BYTES_MAX || line.pop() != Some(0) {
             return Scan::Doubt;
         }
-        let Ok(path) = std::str::from_utf8(&line) else {
-            return Scan::Doubt;
-        };
+        let decoded = String::from_utf8_lossy(&line);
+        let path: &str = &decoded;
         if path.is_empty() {
             return Scan::Doubt;
+        }
+        if matches!(decoded, std::borrow::Cow::Owned(_)) {
+            let slashes = line.iter().filter(|byte| **byte == b'/').count();
+            assert_eq!(path.matches('/').count(), slashes);
         }
         let (head, rest) = path.split_once('/').unwrap_or((path, ""));
         if head_seen.as_deref() != Some(head) {
@@ -546,9 +554,32 @@ fn scan(listing: impl std::io::Read, folders: &[Vec<String>]) -> Scan {
     unreachable!("each path read is at least one byte, so the listing cap ends the loop")
 }
 
+/// Whether a folder sits in another git repository of the project, whose history the
+/// project's index never lists (rv-sec3 F1): a `.git` entry of any kind, read without following
+/// a link, in any folder from the first one below the root down to the folder itself. The
+/// root's own `.git` is the project's repository, which [`scan`] reads. Inputs: the canonical
+/// root and the folder's path below it. Output: the answer, or unchecked when an entry cannot
+/// be read.
+fn in_nested_repository(root: &Path, relative: &Path) -> Result<bool, &'static str> {
+    assert!(relative.is_relative());
+    let mut folder = root.to_path_buf();
+    for part in relative.components() {
+        folder.push(part);
+        match std::fs::symlink_metadata(folder.join(".git")) {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("hidden_path_unchecked"),
+        }
+    }
+    assert_eq!(folder, root.join(relative));
+    Ok(false)
+}
+
 /// Each folder inside the root as its names below the root, folded. Inputs: the canonical
-/// root and the folders. Output: the folded names of each folder inside the root, or
-/// unchecked when a folder cannot be resolved or a name is not plain UTF-8.
+/// root and the folders. Output: the folded names of each folder inside the root;
+/// `hidden_path_in_nested_repository` for one in another repository of the project
+/// ([`in_nested_repository`]); or unchecked when a folder cannot be resolved or a name is not
+/// plain UTF-8.
 fn folded_folders(root: &Path, folders: &[PathBuf]) -> Result<Vec<Vec<String>>, &'static str> {
     use std::path::Component;
     let unchecked = "hidden_path_unchecked";
@@ -569,6 +600,9 @@ fn folded_folders(root: &Path, folders: &[PathBuf]) -> Result<Vec<Vec<String>>, 
             .ok_or(unchecked)?;
         assert!(names.iter().all(|name| !name.is_empty()));
         assert!(names.iter().all(|name| fold(name) == *name));
+        if in_nested_repository(root, relative)? {
+            return Err("hidden_path_in_nested_repository");
+        }
         wanted.push(names);
     }
     assert!(wanted.len() <= folders.len());
@@ -621,8 +655,10 @@ fn listing_answer(
 /// Whether git tracks any file inside any of these folders: one `ls-files -z` run of the whole
 /// index through [`crate::project_files::owner_git`], read as it streams by [`scan`], names
 /// compared after [`fold`], git killed once the answer is known or after 5 s; a tracked file
-/// lives in every agent's worktree and in history. Inputs: the project root and the folders.
-/// Output: `Ok(false)` with no folder inside the root or no `.git`, else [`listing_answer`]'s.
+/// lives in every agent's worktree and in history. A folder in a nested repository is refused
+/// first ([`folded_folders`]), with or without a `.git` at the root. Inputs: the project root
+/// and the folders. Output: `Ok(false)` with no folder inside the root or no `.git`, a
+/// [`folded_folders`] refusal, else [`listing_answer`]'s.
 fn any_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<bool, &'static str> {
     use crate::project_files::NoOwnerGit;
     let unchecked = "hidden_path_unchecked";
@@ -656,8 +692,8 @@ fn any_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<bool, &'stati
 
 /// Refuses a list that holds a folder git tracks, and refuses the whole list when the check
 /// cannot answer for it, with one git run for the whole list (`any_tracked`). Inputs: the
-/// project root and the checked folders. Output: ok, `hidden_path_tracked` or
-/// `hidden_path_unchecked`.
+/// project root and the checked folders. Output: ok, `hidden_path_tracked`,
+/// `hidden_path_in_nested_repository` or `hidden_path_unchecked`.
 pub fn none_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<(), &'static str> {
     if any_tracked(project_root, folders)? {
         Err("hidden_path_tracked")
@@ -821,9 +857,10 @@ mod tests {
     }
 
     /// V244-HIDDEN-GIT-NONASCII-CASE: a listing is tracked by a whole path in a folder, at any
-    /// depth and in any fold-equal spelling, and only then; a sibling sharing a name's start
-    /// is not. An empty path, a path cut short, one not UTF-8 or one past the line cap is
-    /// doubt, and so is a listing past the total cap; the scan stops at a tracked path.
+    /// depth and in any fold-equal spelling, or by a path that ends before the folder's names
+    /// (r2, rv-sec3 F1), and only then; a sibling sharing a name's start is not. An empty path,
+    /// a path cut short or one past the line cap is doubt, and so is a listing past the total
+    /// cap; the scan stops at a tracked path.
     #[test]
     fn a_listing_is_tracked_only_by_a_whole_path_in_a_folder_and_doubt_on_a_broken_one() {
         use std::io::Read;
@@ -831,7 +868,7 @@ mod tests {
         let scanned = |bytes: &[u8]| scan(bytes, &folders);
         assert_eq!(scanned(b""), Scan::End);
         assert_eq!(
-            scanned(b"secrets/key.txt\0conf/key\0Secrets/x\0conf\0"),
+            scanned(b"secrets/key.txt\0conf/key\0Secrets/x\0confs\0\xff/x\0"),
             Scan::End
         );
         for tracked in [
@@ -840,6 +877,8 @@ mod tests {
             &b"Secret/x\0"[..],
             &b"CONF/Keys/y/z\0"[..],
             &b"secret\0"[..],
+            &b"conf\0"[..],
+            &b"Conf\0"[..],
             &b"conf/key\0conf/keys/x\0"[..],
             &b"secrets/a\0secret/b\0"[..],
             "\u{17f}ecret/k\0".as_bytes(),
@@ -857,15 +896,11 @@ mod tests {
             Scan::Tracked
         );
         assert_eq!(
-            scan(&b"conf/keys2\0conf/cert\0conf\0"[..], &shared),
+            scan(&b"conf/keys2\0conf/cert\0confs\0"[..], &shared),
             Scan::End
         );
-        for doubt in [
-            &b"secret/key.txt"[..],
-            &b"\0"[..],
-            &b"a\0\0secret/x\0"[..],
-            &b"\xff/x\0"[..],
-        ] {
+        assert_eq!(scan(&b"conf/keys2\0conf\0"[..], &shared), Scan::Tracked);
+        for doubt in [&b"secret/key.txt"[..], &b"\0"[..], &b"a\0\0secret/x\0"[..]] {
             let shown = String::from_utf8_lossy(doubt).into_owned();
             assert_eq!(scanned(doubt), Scan::Doubt, "{shown:?}");
         }
@@ -1148,7 +1183,10 @@ mod tests {
         assert_eq!(scan(&b"caf\xe9/x\0other\0"[..], &folders), Scan::End);
         assert_eq!(scan(&b"secret/\xff.txt\0"[..], &folders), Scan::Tracked);
         assert_eq!(scan(&b"conf/keys/\xc3\0"[..], &folders), Scan::Tracked);
-        assert_eq!(scan(&b"\xffsecret/x\0secret\xc3/y\0"[..], &folders), Scan::End);
+        assert_eq!(
+            scan(&b"\xffsecret/x\0secret\xc3/y\0"[..], &folders),
+            Scan::End
+        );
         assert_eq!(scan(&b"conf\xc3/keys/x\0"[..], &folders), Scan::End);
     }
 

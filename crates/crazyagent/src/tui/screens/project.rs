@@ -3340,6 +3340,9 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "hidden_path_tracked" => {
             "A path git tracks matches this folder when letter case is ignored. Only folders git doesn't track can be hidden."
         }
+        "hidden_path_in_nested_repository" => {
+            "That folder is inside another git repository in this project, whose history agents can read. Only folders outside a nested repository can be hidden."
+        }
         "hidden_path_unchecked" => "CrazyAgent couldn't check that folder against git. Try again.",
         "hidden_paths_need_macos" => {
             "Hidden folders work only on macOS for now, so a list with folders can't be saved here. Remove them all and save."
