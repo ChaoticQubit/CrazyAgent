@@ -633,8 +633,9 @@ pub(crate) mod farm {
     }
 
     /// Installs owner git for `project` with the helper beside the test binary's folder and
-    /// owner git's and the grants' folders in `place`. Inputs: the temp folder, the project
-    /// and git's program. Output: owner git; a refusal fails the row.
+    /// owner git's and the grants' folders in `place`, making the grants folder as the engine's
+    /// data root holds it. Inputs: the temp folder, the project and git's program. Output:
+    /// owner git; a refusal fails the row.
     pub(crate) fn installed(place: &Path, project: &Path, git: &Path) -> OwnerGit {
         let tests = std::env::current_exe().unwrap();
         let helper: PathBuf = tests.parent().unwrap().with_file_name(HELPER_NAME);
@@ -643,12 +644,14 @@ pub(crate) mod farm {
             "build crazyagent-win-boundary first: {}",
             helper.display()
         );
+        let grants = place.join(GRANTS_FOLDER);
+        std::fs::create_dir_all(&grants).unwrap();
         OwnerGit::install(
             &place.join(OWNER_GIT_FOLDER),
             project,
             git,
             &helper,
-            &place.join(GRANTS_FOLDER),
+            &grants,
         )
         .unwrap_or_else(|refused| {
             panic!(
