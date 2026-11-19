@@ -516,6 +516,7 @@ impl Native {
             Some((tmux, socket)) => self.ensure_control(tmux, socket),
             None => false,
         };
+        let style = self.style.as_ref().ok_or("native_terminal_style_invalid")?;
         let page = self.table.fresh();
         self.feed
             .bind(page, open.place, direct)
@@ -524,7 +525,6 @@ impl Native {
             self.feed.close(page);
             return Err(io_code(&error));
         }
-        let style = self.style.as_ref().ok_or("native_terminal_style_invalid")?;
         let opened = platform::open_view(
             mtm,
             parent,
