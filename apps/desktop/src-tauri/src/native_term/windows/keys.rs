@@ -217,7 +217,7 @@ mod tests {
     use super::*;
     use crate::native_term::pane::{ALT, CONTROL, SHIFT};
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        VK_F5, VK_OEM_1, VK_OEM_4, VK_OEM_MINUS, VK_Q, VK_SHIFT, VK_X,
+        VK_APPS, VK_F5, VK_F10, VK_OEM_1, VK_OEM_4, VK_OEM_MINUS, VK_Q, VK_SHIFT, VK_X,
     };
 
     const NONE: Mods = Mods {
@@ -281,6 +281,27 @@ mod tests {
                 swallow: false
             }
         );
+    }
+
+    #[test]
+    fn shift_f10_and_the_menu_key_go_to_the_default_procedure_for_the_menu() {
+        let pass = Down {
+            event: None,
+            swallow: false,
+        };
+        let shift_f10 = down(VK_F10, SHIFTED, Next::Nothing, None);
+        assert_eq!(
+            shift_f10, pass,
+            "Shift+F10 opens the menu, not the pane's F10"
+        );
+        assert_eq!(
+            down(VK_APPS, NONE, Next::Nothing, None),
+            pass,
+            "the menu key"
+        );
+        assert_eq!(sent(VK_F10, NONE, Next::Nothing), key(Named::F(10), 0));
+        let ctrl_shift = sent(VK_F10, CTRL_SHIFT, Next::Nothing);
+        assert_eq!(ctrl_shift, key(Named::F(10), CONTROL | SHIFT));
     }
 
     #[test]
