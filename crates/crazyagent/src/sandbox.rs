@@ -122,8 +122,9 @@ pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
 
 /// Whether this system's boundary cannot hold a hidden folder, so a sandbox with one does not
 /// start ([`HIDDEN_NEEDS_SEATBELT`]), a save that hides a folder is refused and neither app
-/// offers the setting (#590): true on Linux and Windows.
-pub const HIDDEN_UNHELD: bool = cfg!(any(target_os = "linux", target_os = "windows"));
+/// offers the setting (#590): true on Windows only. Linux holds them, and each launch there
+/// refuses with its own code where the host cannot (V244-FWD-V243-4).
+pub const HIDDEN_UNHELD: bool = cfg!(target_os = "windows");
 
 /// Why a native-mode lead's own tmux server does not start off macOS: only Seatbelt holds
 /// its one-socket grant, and DEC-094 keeps team agents macOS-only in V1.
