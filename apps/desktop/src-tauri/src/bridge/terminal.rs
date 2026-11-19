@@ -428,7 +428,6 @@ struct Views {
 }
 
 impl Views {
-    #[cfg(test)]
     fn serial(&self, window: &str, key: &ViewKey) -> Option<u64> {
         let viewer = self.windows.get(window)?.viewers.get(key)?;
         Some(viewer.serial)
