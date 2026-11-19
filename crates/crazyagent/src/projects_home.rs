@@ -1138,15 +1138,11 @@ fn folder_inode(folder: &Path) -> Option<i64> {
     i64::try_from(number).ok()
 }
 
-/// Removes the engine files a delete recorded: an agent's state folder, sandbox profiles
-/// and teammates' records, a research run's folder, a roadmap status run's folder and
-/// Seatbelt profile, or a project's tool caches. An agent writes in each of those folders
-/// and may have closed or pinned something there, so each goes as an agent's tree
-/// ([`crate::team::cleanup::remove_agent_tree`], #616 r2). Only the folder the record was
-/// written for goes: under any other identity it stays, logged as
-/// `project_files_kept`, and the record is finished. A name that is no engine file removes
-/// nothing. A file left behind is logged as `project_files_left` and keeps its record.
-/// Inputs: the engine database path and the records. Output: the names that are finished.
+/// Removes the engine files a delete recorded, each folder as an agent's tree: an agent's
+/// state folder, sandbox profiles and teammates' records, a research or roadmap status run's
+/// folder and Seatbelt profile, or a project's tool caches. A non-engine name, or a folder now
+/// under another identity (`project_files_kept`), is finished; a file left keeps its record
+/// (`project_files_left`). Inputs: the database path and the records. Output: finished names.
 pub fn remove_engine_files(database: &Path, files: &[RecordedFile]) -> Vec<String> {
     let Some(root) = database.parent() else {
         return Vec::new();

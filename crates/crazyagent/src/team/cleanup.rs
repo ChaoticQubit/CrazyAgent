@@ -972,15 +972,10 @@ fn gone(result: std::io::Result<()>) -> Result<(), EngineError> {
     }
 }
 
-/// Deletes a folder an agent wrote and everything in it without following a link. When a
-/// plain delete stops, the folder is walked clearing the immutable and append-only flags of
-/// this user's entries and the ACLs of folders that will not open or list, so a delete a mode
-/// change lets through starts no child (RV-DS241-182); when it still stays, it is walked once
-/// more clearing every ACL in it too ([`writable`]). So an agent's `chflags uchg`, `chmod
-/// 0500` or deny entry in its own home, temp folder, tool cache, run folder or worktree keeps
-/// neither Clean up nor a project's delete from removing it (T8 r1 L3, T8-R2-N4, RV-DS241-137
-/// sec r1 F2, #616 r2). ACLs go only through entries the walk reached from the tree's own
-/// handles, but those of the tree's own folder, by its path as its open is (RV-DS241-181).
+/// Deletes a folder an agent wrote and everything in it, never following a link. When a plain
+/// delete stops, [`writable`] clears this user's immutable and append-only flags and the ACLs
+/// of folders that will not open or list, then, if the folder still stays, every ACL in it,
+/// so an agent's `chflags uchg`, `chmod 0500` or deny entry never keeps it.
 /// Input: the folder. Output: Ok once nothing has its name.
 pub(crate) fn remove_agent_tree(folder: &Path) -> Result<(), EngineError> {
     if std::fs::remove_dir_all(folder).is_err() {
@@ -1683,14 +1678,11 @@ fn open_up<P: rustix::path::Arg>(
     )
 }
 
-/// Gives this user read and search, never write, on `name` under `parent` once a look through
-/// the parent's handle that never follows a link shows a folder, first clearing an ACL of
-/// the entry that refuses that look ([`clear_refused_acl`]). A hard link to an owner file
-/// swapped in after the look gains no write (#571 sec F1); the caller adds write through a
-/// folder handle. One swapped in between a refused look and its clear loses its ACL, which
-/// no handle can stop, so a look after that clear that shows no folder is reported as
-/// `cleanup_open_up_swapped` (#616 r2 sec N1). Inputs: the parent handle and the name, or
-/// the current folder and a walk top's path. Output: Ok, `ENOTDIR`, or the error.
+/// Gives this user read and search, never write, on `name` under `parent` once a look that
+/// never follows a link shows a folder, after [`clear_refused_acl`] clears an ACL that refused
+/// that look; a look after that clear that shows no folder prints `cleanup_open_up_swapped`.
+/// Inputs: the parent handle and the name, or the current folder and a walk top's path.
+/// Output: Ok, `ENOTDIR`, or the error.
 #[cfg(all(unix, not(target_os = "linux")))]
 fn open_up<P: rustix::path::Arg + Copy>(
     parent: impl std::os::fd::AsFd,
@@ -1728,11 +1720,10 @@ fn open_up<P: rustix::path::Arg + Copy>(
 }
 
 /// Clears the whole ACL of the entry `name` under `parent` by that name, never following a
-/// link in its last part, for a look there that a deny entry an agent set refused (#611 code
-/// F1): a plain name in a folder a walk holds open, or a walk top's path from the current
-/// folder, as the top's open and [`AclClears`] name it ([`writable`], #616 r2 code F1). A
-/// swap of that entry after the look is reported by [`open_up`]. Inputs: the parent and the
-/// name. Output: Ok, `EACCES` for any other name of more than one part, or the system's error.
+/// link in its last part, after a deny entry refused a look there: a plain name in a folder a
+/// walk holds open, or a walk top's path from the current folder ([`writable`]).
+/// Inputs: the parent and the name. Output: Ok, `EACCES` for any other name of more than one
+/// part, or the system's error.
 #[cfg(target_os = "macos")]
 fn clear_refused_acl<P: rustix::path::Arg>(
     parent: std::os::fd::BorrowedFd<'_>,
