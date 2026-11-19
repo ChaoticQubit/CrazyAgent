@@ -698,6 +698,19 @@ mod windows_tests {
         for (shape, _) in farm::SHAPES {
             let place = tempfile::tempdir().unwrap();
             let (repo, owner) = contained_repository(place.path());
+            let before = list(
+                &repo,
+                "",
+                FILES_MAX,
+                Instant::now() + LISTING_TIME,
+                Some(&owner),
+            );
+            assert!(
+                before
+                    .as_ref()
+                    .is_ok_and(|listed| listed.iter().any(|path| path == "README.md")),
+                "{shape}: a contained list before the plant: {before:?}"
+            );
             farm::reset_sessions();
             if shape == "nested" {
                 farm::plant(&repo, shape);

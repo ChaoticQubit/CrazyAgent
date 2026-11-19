@@ -346,6 +346,26 @@ mod tests {
     }
 
     #[test]
+    fn owner_git_installed_from_a_verbatim_program_wraps_its_plain_form() {
+        let made = made();
+        let verbatim = PathBuf::from(format!(r"\\?\{}", made.git.display()));
+        let helper = std::env::current_exe().unwrap();
+        let owner = OwnerGit::install(
+            &made.folder,
+            &made.project,
+            &verbatim,
+            &helper,
+            &made.grants,
+        )
+        .unwrap();
+        assert_eq!(owner.git(), made.git);
+        let mut git = Command::new(owner.git());
+        git.current_dir(&made.project).arg("--version");
+        let wrapped = owner.wrap(&git).unwrap();
+        assert_eq!(wrapped.get_args().nth(3), Some(made.git.as_os_str()));
+    }
+
+    #[test]
     fn owner_git_refuses_a_git_outside_a_git_for_windows_install_before_any_profile() {
         let made = made();
         let loose = made.root.join("tools").join("git.exe");
@@ -634,8 +654,9 @@ pub(crate) mod farm {
 
     /// Installs owner git for `project` with the helper beside the test binary's folder and
     /// owner git's and the grants' folders in `place`, making the grants folder as the engine's
-    /// data root holds it. Inputs: the temp folder, the project and git's program. Output:
-    /// owner git; a refusal fails the row.
+    /// data root holds it, then runs one wrapped `git --version` to exit 0, as a prepare would
+    /// before any timed step. Inputs: the temp folder, the project and git's program. Output:
+    /// owner git; a refusal, or a contained git that fails, fails the row with its stderr.
     pub(crate) fn installed(place: &Path, project: &Path, git: &Path) -> OwnerGit {
         let tests = std::env::current_exe().unwrap();
         let helper: PathBuf = tests.parent().unwrap().with_file_name(HELPER_NAME);
@@ -646,7 +667,7 @@ pub(crate) mod farm {
         );
         let grants = place.join(GRANTS_FOLDER);
         std::fs::create_dir_all(&grants).unwrap();
-        OwnerGit::install(
+        let owner = OwnerGit::install(
             &place.join(OWNER_GIT_FOLDER),
             project,
             git,
@@ -659,7 +680,27 @@ pub(crate) mod farm {
                 project.display(),
                 git.display()
             )
-        })
+        });
+        let mut version = Command::new(owner.git());
+        version
+            .arg("--version")
+            .current_dir(crate::sandbox::canonical(project).unwrap())
+            .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE);
+        let mut wrapped = owner.wrap(&version).unwrap_or_else(|refused| {
+            panic!(
+                "owner git wrap for {} with {}: {refused:?}",
+                project.display(),
+                owner.git().display()
+            )
+        });
+        let ran = wrapped.stdin(Stdio::null()).output().unwrap();
+        assert!(
+            ran.status.success(),
+            "owner git --version in its container: {:?}, stderr: {}",
+            ran.status,
+            String::from_utf8_lossy(&ran.stderr)
+        );
+        owner
     }
 
     /// Plants `shape` in the repository whose work tree is `project`, pointing git at its
