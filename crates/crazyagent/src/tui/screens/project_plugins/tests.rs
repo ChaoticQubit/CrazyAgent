@@ -1507,6 +1507,10 @@ async fn keys_typed_into_the_read_only_folders_box_never_reach_the_plugins_list(
     assert_eq!(postgres.status, ServerStatus::WaitingForApproval);
 }
 
+/// Keys typed into the hidden folders box stay in the box. The box opens only where the
+/// boundary holds hidden folders (#590), so the row runs on macOS; it comes back on Linux once
+/// the Linux boundary holds them (V243-LINUX-HIDDEN-BOUNDARY).
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn keys_typed_into_the_hidden_folders_box_never_reach_the_plugins_list() {
     let engine = engine().await;
@@ -1580,6 +1584,10 @@ async fn keys_typed_into_the_hidden_folders_box_never_reach_the_plugins_list() {
     );
 }
 
+/// Quitting with the hidden folders box open warns that they are unsaved. The box opens only
+/// where the boundary holds hidden folders (#590), so the row runs on macOS; it comes back on
+/// Linux once the Linux boundary holds them (V243-LINUX-HIDDEN-BOUNDARY).
+#[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn quitting_with_the_hidden_box_open_warns_the_hidden_folders_are_unsaved() {
     let engine = engine().await;

@@ -2853,25 +2853,25 @@ impl ProjectScreen {
             .map(|entry| entry.strategy)
     }
 
-    /// Whether the Settings tab offers hidden folders: until the engine's read says this
-    /// system has none (DEC-194), so the row shows while it loads. Takes the screen.
+    /// Whether the Settings tab offers to edit hidden folders: unless the engine's read says
+    /// this system's boundary cannot hold them and nothing is saved (#590), so a list saved
+    /// before can still be cleared and the box opens while the read loads. Takes the screen.
     /// Returns the answer.
     pub fn hidden_offered(&self) -> bool {
         !self
             .hidden_paths
             .as_ref()
-            .is_some_and(|saved| saved.unavailable)
+            .is_some_and(|saved| saved.unavailable && saved.paths.is_empty())
     }
 
     /// The running agents the team graph names as able to open a folder hidden after they
     /// started (SA-VID14-A), while the project hides any folder. Takes the screen. Returns
     /// their labels in graph order, none while nothing is hidden or the graph loads.
     pub fn hidden_seers(&self) -> Vec<&str> {
-        let hides = self.hidden_offered()
-            && self
-                .hidden_paths
-                .as_ref()
-                .is_some_and(|saved| !saved.paths.is_empty());
+        let hides = self
+            .hidden_paths
+            .as_ref()
+            .is_some_and(|saved| !saved.paths.is_empty());
         match self.team.ready() {
             Some(graph) if hides => graph
                 .nodes
@@ -3341,6 +3341,12 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
             "git tracks a file in that folder. Only folders git does not track can be hidden."
         }
         "hidden_path_unchecked" => "CrazyAgent couldn't check that folder against git. Try again.",
+        "hidden_path_name_unchecked" => {
+            "A folder path with non-English letters or symbols can't be checked against git on this system yet. Rename the folder or pick another."
+        }
+        "hidden_paths_need_macos" => {
+            "Hidden folders work only on macOS for now, so a list with folders can't be saved here. Remove them all and save."
+        }
         "context_item_missing" => "That file is already gone.",
         "project_folder_missing" => "The project folder is missing. Check it in Finder.",
         "project_folder_unwritable" => {
