@@ -17,7 +17,7 @@ use windows::Win32::UI::Accessibility::{
     TextUnit_Line, TreeScope_Element, UIA_EVENT_ID, UIA_Text_TextChangedEventId, UIA_TextPatternId,
 };
 use windows_core::{Ref, implement};
-use windows_sys::Win32::Foundation::{COLORREF, HWND, POINT, RECT};
+use windows_sys::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     CLR_INVALID, ClientToScreen, CreateSolidBrush, GetDC, GetPixel, ReleaseDC, ScreenToClient,
 };
@@ -38,12 +38,12 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, ES_MULTILINE, GW_CHILD,
-    GetSystemMetrics, GetWindow, GetWindowRect, IsWindow, IsWindowVisible, MSG, PM_REMOVE,
-    PeekMessageW, PostMessageW, RegisterClassExW, SM_CXSCREEN, SM_CYSCREEN, SW_MINIMIZE,
-    SW_RESTORE, SendMessageW, ShowWindow, TranslateMessage, WM_CHAR, WM_DPICHANGED_AFTERPARENT,
-    WM_IME_CHAR, WM_IME_COMPOSITION, WM_IME_ENDCOMPOSITION, WM_IME_REQUEST,
-    WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
-    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    GWLP_WNDPROC, GetSystemMetrics, GetWindow, GetWindowRect, IsWindow, IsWindowVisible, MSG,
+    PM_NOREMOVE, PM_QS_SENDMESSAGE, PM_REMOVE, PeekMessageW, PostMessageW, RegisterClassExW,
+    SM_CXSCREEN, SM_CYSCREEN, SW_MINIMIZE, SW_RESTORE, SendMessageW, SetWindowLongPtrW, ShowWindow,
+    TranslateMessage, WM_CHAR, WM_DPICHANGED_AFTERPARENT, WM_IME_CHAR, WM_IME_COMPOSITION,
+    WM_IME_ENDCOMPOSITION, WM_IME_REQUEST, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WNDCLASSEXW,
+    WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use super::super::a11y;
@@ -900,6 +900,150 @@ fn each_key_reaches_the_sink_once_as_the_panel_sends_it_and_nothing_while_inacti
     ime_window_at_the_cursor_cell(&view);
     inactive_views_type_nothing(&view, webview, centre);
     drop(view);
+    assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the stand-in goes");
+}
+
+/// The view ids of the rv-sec3 N1 rows: a faulted focused view, then a focused view ended.
+const FAULTED_FOCUSED: u64 = 6;
+const ENDED_FOCUSED: u64 = 7;
+
+/// The stand-in page's key-downs, counted once a row hands it `page_proc`.
+static PAGE_KEYS: AtomicUsize = AtomicUsize::new(0);
+
+/// The stand-in webview's window procedure in the N1 rows: it counts key-downs, so a row
+/// sees a key land in the page. Output: the default procedure's answer.
+unsafe extern "system" fn page_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if message == WM_KEYDOWN {
+        PAGE_KEYS.fetch_add(1, Ordering::SeqCst);
+    }
+    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+}
+
+/// Clicks into a drawn view and waits until it holds focus. Inputs: the view and its
+/// centre on the screen.
+fn clicked_into(view: &View, centre: POINT) {
+    click(centre);
+    pump_until(
+        "the click's focus",
+        FARM_WAIT,
+        || unsafe { GetFocus() } == view.hwnd(),
+    );
+}
+
+/// Faults a focused view by a refused resize and waits for the board's fault while this
+/// thread runs only sent messages, so any posted word of the fault stays queued. Inputs:
+/// the view and its id.
+fn faulted_unheard(view: &View, id: u64) {
+    draw::trial_refuse_resize(id);
+    view.place(Some((50.0, 40.0, 420.0, 300.0)))
+        .expect("a wider box");
+    let started = Instant::now();
+    while !view.faulted() {
+        assert!(
+            started.elapsed() < FARM_WAIT,
+            "the refused resize faults the view within {FARM_WAIT:?}"
+        );
+        let mut message = MSG::default();
+        let flags = PM_NOREMOVE | PM_QS_SENDMESSAGE;
+        unsafe { PeekMessageW(&mut message, ptr::null_mut(), 0, 0, flags) };
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        unsafe { GetFocus() },
+        view.hwnd(),
+        "the faulted view still holds focus"
+    );
+}
+
+/// What the sink heard besides focus changes, taken. Output: the count.
+fn typed() -> usize {
+    take_seen()
+        .into_iter()
+        .filter(|(_, event)| !matches!(event, ViewEvent::Focus(_)))
+        .count()
+}
+
+/// The page takes the next real key and the pane hears nothing. Input: the webview, which
+/// holds focus.
+fn page_takes_the_next_key(webview: HWND) {
+    let proc = page_proc as unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT;
+    unsafe { SetWindowLongPtrW(webview, GWLP_WNDPROC, proc as usize as isize) };
+    PAGE_KEYS.store(0, Ordering::SeqCst);
+    take_seen();
+    send(&chord(&[], VK_A));
+    pump_until("a key in the page", FARM_WAIT, || {
+        PAGE_KEYS.load(Ordering::SeqCst) > 0
+    });
+    pump_for(KEY_TAIL);
+    assert_eq!(typed(), 0, "the key went to the page, not the pane");
+}
+
+/// rv-sec3 N1: a focused view the render thread faults types nothing at once, before its
+/// window hears, then hides and hands focus to the page, where the next key lands; placing
+/// it again keeps it hidden, and its end leaves focus in the page.
+#[test]
+#[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
+fn a_faulted_focused_view_types_nothing_hides_and_the_page_takes_the_next_key() {
+    let (parent, webview) = stand_ins();
+    let view = View::new(parent, webview, FAULTED_FOCUSED, sink, &style()).expect("a view");
+    let centre = placed_shown_and_drawn(parent, &view);
+    clicked_into(&view, centre);
+    faulted_unheard(&view, FAULTED_FOCUSED);
+    take_seen();
+    unsafe { SendMessageW(view.hwnd(), WM_KEYDOWN, usize::from(VK_UP), 0) };
+    unsafe { SendMessageW(view.hwnd(), WM_CHAR, usize::from(b'a'), 0) };
+    assert_eq!(
+        typed(),
+        0,
+        "a faulted view types nothing before its window hears"
+    );
+    pump_until("the faulted view hides", FARM_WAIT, || unsafe {
+        IsWindowVisible(view.hwnd()) == 0
+    });
+    assert_eq!(
+        unsafe { GetFocus() },
+        webview,
+        "the page holds focus after the fault"
+    );
+    page_takes_the_next_key(webview);
+    view.place(Some(PAGE)).expect("the box again");
+    assert_eq!(
+        unsafe { IsWindowVisible(view.hwnd()) },
+        0,
+        "a faulted view placed again stays hidden"
+    );
+    dropped_within_the_bound(view, "the faulted view");
+    assert_eq!(
+        unsafe { GetFocus() },
+        webview,
+        "the page keeps focus after the end"
+    );
+    println!("n1 row: a faulted focused view typed nothing, hid, and the page took the key");
+    assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the stand-in goes");
+}
+
+/// rv-sec3 N1: ending a focused live view hands focus to the page first, so the next key
+/// goes to the page, not to a window that is gone or to the parent.
+#[test]
+#[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
+fn ending_a_focused_view_hands_focus_to_the_page() {
+    let (parent, webview) = stand_ins();
+    let view = View::new(parent, webview, ENDED_FOCUSED, sink, &style()).expect("a view");
+    let centre = placed_shown_and_drawn(parent, &view);
+    clicked_into(&view, centre);
+    dropped_within_the_bound(view, "the focused view");
+    assert_eq!(
+        unsafe { GetFocus() },
+        webview,
+        "the page holds focus after the end"
+    );
+    page_takes_the_next_key(webview);
+    println!("n1 row: an ended focused view left focus in the page, which took the key");
     assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the stand-in goes");
 }
 

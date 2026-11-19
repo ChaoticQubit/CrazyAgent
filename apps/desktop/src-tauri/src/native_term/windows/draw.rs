@@ -554,6 +554,12 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "a faulted view has a window")]
+    fn faulting_a_view_with_no_window_is_a_bug() {
+        painter(vec![faulted(7)]).fault(0);
+    }
+
+    #[test]
     #[should_panic(expected = "a live view has a surface")]
     fn refitting_a_faulted_view_is_a_bug() {
         let geometry = Geometry {
