@@ -1591,17 +1591,38 @@ impl Storage {
                                 plugins::Command::DetachSecret { ask, .. } => Some(ask.clone()),
                                 _ => None,
                             };
+                            #[cfg(unix)]
+                            let ends = match &command {
+                                plugins::Command::AttachSecret { id, name, .. } => {
+                                    superseded_detaches(intents.as_deref(), id, name)
+                                }
+                                _ => Vec::new(),
+                            };
+                            #[cfg(not(unix))]
+                            let ends = Vec::new();
                             let result = if readonly {
                                 Err(error("plugins_readonly"))
+                            } else if let Some(Some(narrowing::NarrowingAsk::Drained(kept))) = &detach
+                                && detach_superseded(&connection, intents.as_deref(), kept)
+                            {
+                                Err(error("server_secret_detach_superseded"))
                             } else {
                                 match path.parent() {
-                                    Some(root) => plugins::execute(&mut connection, root, command),
+                                    Some(root) => {
+                                        plugins::execute_ending(&mut connection, root, command, &ends)
+                                    }
                                     None => Err(error("plugin_store_unavailable")),
                                 }
                             };
                             #[cfg(all(test, unix))]
                             if attach && result.is_ok() && dies(&path, Death::AttachCommitted) {
                                 break;
+                            }
+                            #[cfg(unix)]
+                            if result.is_ok() {
+                                for id in &ends {
+                                    end_ended(&connection, intents.as_deref(), id);
+                                }
                             }
                             if let Some(ask) = detach {
                                 #[cfg(unix)]
@@ -1611,6 +1632,9 @@ impl Storage {
                                     plugins::settle_detached(&connection, root, reference);
                                 }
                                 if let Some(ask) = &ask {
+                                    let superseded = result.as_ref().is_err_and(|refused| {
+                                        refused.0 == "server_secret_detach_superseded"
+                                    });
                                     let ends = result.as_ref().map_or_else(
                                         |refused| {
                                             matches!(
@@ -1620,6 +1644,12 @@ impl Storage {
                                         },
                                         |_| true,
                                     );
+                                    #[cfg(unix)]
+                                    if superseded {
+                                        end_ended(&connection, intents.as_deref(), ask.id());
+                                    }
+                                    #[cfg(not(unix))]
+                                    let _ = superseded;
                                     end_intent(intents.as_deref(), ask.id(), ends);
                                 }
                             }
@@ -1828,6 +1858,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     plugins::initialize(connection)?;
     accounts::initialize(connection)?;
     trash::initialize(connection)?;
+    narrowing::initialize(connection)?;
     setup::initialize(connection)?;
     crate::assets::initialize(connection)?;
     crate::verification::initialize(connection)?;
@@ -3480,6 +3511,19 @@ fn replay_intents(
         eprintln!("narrowing_intents_refused count={}", listing.refused);
     }
     for (id, intent) in listing.intents {
+        let detach = matches!(intent.change, narrowing::Change::DetachSecret { .. });
+        match detach.then(|| narrowing::ended(db, &id)) {
+            None | Some(Ok(false)) => {}
+            Some(Ok(true)) => {
+                eprintln!("narrowing_intent_not_applicable id={} cause=ended", id.as_str());
+                end_ended(db, Some(intents), &id);
+                continue;
+            }
+            Some(Err(unread)) => {
+                eprintln!("narrowing_intent_kept id={} cause={}", id.as_str(), unread.0);
+                continue;
+            }
+        }
         let replayed = match &intent.change {
             narrowing::Change::Revoke {
                 operation_id,
@@ -3530,6 +3574,82 @@ fn replay_intents(
             }
             Err(kept) => eprintln!("narrowing_intent_kept id={} cause={}", id.as_str(), kept.0),
         }
+    }
+}
+
+/// Names the kept detaches an attach of the same server and secret name supersedes, so its
+/// commit ends them and no crash point leaves a detach over the new secret. Inputs: the store,
+/// the server id and the secret's name. Output: the intent names; none when the store is
+/// unreadable, which is logged, and those detaches then land as before.
+#[cfg(unix)]
+fn superseded_detaches(
+    intents: Option<&narrowing::Intents>,
+    server: &str,
+    name: &str,
+) -> Vec<narrowing::IntentId> {
+    let Some(intents) = intents else {
+        return Vec::new();
+    };
+    match intents.list() {
+        Ok(listing) => listing
+            .intents
+            .into_iter()
+            .filter(|(_, intent)| {
+                matches!(&intent.change, narrowing::Change::DetachSecret { id, name: kept }
+                    if id == server && kept == name)
+            })
+            .map(|(id, _)| id)
+            .collect(),
+        Err(refused) => {
+            eprintln!("narrowing_intents_unread cause={}", refused.0);
+            Vec::new()
+        }
+    }
+}
+
+/// Whether a drained detach was superseded by a newer attach of the same secret: its intent
+/// is gone, or an attach's commit ended it. A store or table that cannot be read counts as not
+/// superseded, which is logged, so the detach still lands. Inputs: the database, the store
+/// and the intent name. Output: the verdict.
+#[cfg(unix)]
+fn detach_superseded(
+    db: &Connection,
+    intents: Option<&narrowing::Intents>,
+    id: &narrowing::IntentId,
+) -> bool {
+    !still_kept(intents, id)
+        || narrowing::ended(db, id).unwrap_or_else(|unread| {
+            eprintln!("narrowing_ended_unread cause={}", unread.0);
+            false
+        })
+}
+
+/// Whether a drained detach was superseded where no ended table exists: only when its intent
+/// is gone. Inputs: the database, unused, the store and the intent name. Output: the verdict.
+#[cfg(not(unix))]
+fn detach_superseded(
+    _db: &Connection,
+    intents: Option<&narrowing::Intents>,
+    id: &narrowing::IntentId,
+) -> bool {
+    !still_kept(intents, id)
+}
+
+/// Unlinks an intent a committed change ended, then forgets the ended row; a file that
+/// cannot be unlinked keeps its row, so the next open skips it again. Inputs: the database,
+/// the store and the intent name. Output: none; each failure is logged.
+#[cfg(unix)]
+fn end_ended(db: &Connection, intents: Option<&narrowing::Intents>, id: &narrowing::IntentId) {
+    let Some(intents) = intents else {
+        return;
+    };
+    match intents.remove(id) {
+        Ok(()) => {
+            if let Err(left) = narrowing::forget_ended(db, id) {
+                eprintln!("narrowing_ended_unforgotten id={} cause={}", id.as_str(), left.0);
+            }
+        }
+        Err(left) => eprintln!("narrowing_intent_unremoved id={} cause={}", id.as_str(), left.0),
     }
 }
 

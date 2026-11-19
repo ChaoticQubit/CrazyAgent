@@ -1802,6 +1802,20 @@ pub(crate) fn execute(
     root: &Path,
     command: Command,
 ) -> Result<ResultValue, EngineError> {
+    execute_ending(connection, root, command, &[])
+}
+
+/// Runs one plugin change as [`execute`] does, and records in the same transaction the kept
+/// intents it ends, so a crash after its commit never replays them: an attach ends the kept
+/// detaches of the secret it replaces. Inputs: the connection, root, change and the intents
+/// it ends. Output: the change's result.
+pub(crate) fn execute_ending(
+    connection: &mut Connection,
+    root: &Path,
+    command: Command,
+    ends: &[super::narrowing::IntentId],
+) -> Result<ResultValue, EngineError> {
+    assert!(ends.is_empty() || matches!(command, Command::AttachSecret { .. }));
     let tx = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
@@ -1818,6 +1832,8 @@ pub(crate) fn execute(
         super::setup::plugin_changed(&tx, id, removed)?;
     }
     let value = run(&tx, root, command)?;
+    #[cfg(unix)]
+    super::narrowing::note_ended(&tx, ends)?;
     let committed = tx.commit().map_err(error);
     match (&value, committed) {
         (ResultValue::Skill(skill) | ResultValue::Imported(skill, ..), Err(problem))

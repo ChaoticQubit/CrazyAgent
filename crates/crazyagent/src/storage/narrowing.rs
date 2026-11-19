@@ -56,6 +56,57 @@ pub(crate) enum Change {
     },
 }
 
+#[cfg(unix)]
+const ENDED: &str = "CREATE TABLE IF NOT EXISTS narrowing_ended (
+    id TEXT PRIMARY KEY CHECK(length(id) = 16)
+) WITHOUT ROWID";
+
+/// Creates the table of kept intents a committed change ended before their files were
+/// unlinked, so a crash between that commit and the unlink never replays them.
+/// Input: the engine connection. Output: any SQLite failure.
+#[cfg(unix)]
+pub(crate) fn initialize(connection: &rusqlite::Connection) -> Result<(), EngineError> {
+    connection.execute_batch(ENDED).map_err(super::error)
+}
+
+/// Records, inside the transaction of the change that ends them, the kept intents that change
+/// supersedes, such as the detaches of a secret an attach replaces. Inputs: the transaction
+/// and the intent names. Output: any SQLite failure, which rolls the change back.
+#[cfg(unix)]
+pub(crate) fn note_ended(tx: &rusqlite::Connection, ids: &[IntentId]) -> Result<(), EngineError> {
+    for id in ids {
+        tx.execute(
+            "INSERT OR IGNORE INTO narrowing_ended(id) VALUES (?1)",
+            [id.as_str()],
+        )
+        .map_err(super::error)?;
+    }
+    Ok(())
+}
+
+/// Whether a committed change ended this kept intent, so neither the drainer nor the next
+/// open applies it. Inputs: the connection and the intent name. Output: the verdict.
+#[cfg(unix)]
+pub(crate) fn ended(connection: &rusqlite::Connection, id: &IntentId) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM narrowing_ended WHERE id=?1)",
+            [id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(super::error)
+}
+
+/// Forgets one ended intent once its file is gone. Inputs: the connection and the intent
+/// name. Output: any SQLite failure; a row left behind only makes a later open skip it again.
+#[cfg(unix)]
+pub(crate) fn forget_ended(connection: &rusqlite::Connection, id: &IntentId) -> Result<(), EngineError> {
+    connection
+        .execute("DELETE FROM narrowing_ended WHERE id=?1", [id.as_str()])
+        .map_err(super::error)?;
+    Ok(())
+}
+
 /// Who submits a kept account or secret narrowing, by the name of the intent it was kept
 /// under: the owner, who wrote the intent just before the submit, or the drainer, whose
 /// detach runs only while that intent is still kept. Storage ends the intent once the change
