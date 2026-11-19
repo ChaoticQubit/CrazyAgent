@@ -377,11 +377,12 @@ pub fn style(style: Style) -> Result<(), &'static str> {
     }
 }
 
-/// What a native-webdriver trial reads of one view: its NSView, its visible rows, whether
-/// the direct path draws it and the private pasteboard's text.
+/// What a native-webdriver trial reads of one view: its NSView, the webview it is placed
+/// over, its visible rows, whether the direct path draws it and the private pasteboard's text.
 #[cfg(feature = "native-webdriver")]
 pub struct Look {
     pub view: Retained<TermView>,
+    pub webview: Retained<NSView>,
     pub rows: Vec<String>,
     pub direct: bool,
     pub pasteboard: Option<String>,
@@ -406,6 +407,7 @@ pub fn look(window: &str, page: u64) -> Result<Look, &'static str> {
         assert!(rows.len() <= GRID_MAX);
         Ok(Look {
             view: entry.platform.ns.clone(),
+            webview: entry.platform.webview.clone(),
             rows,
             direct: entry.direct,
             pasteboard: clip.read(),

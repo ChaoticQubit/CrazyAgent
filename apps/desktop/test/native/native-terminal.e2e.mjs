@@ -192,6 +192,19 @@ describe("Native terminal views in the real window", () => {
     await close(shown.view);
   });
 
+  it("places the view on the page rect it was given, not one title bar higher", async () => {
+    const shown = await open(false);
+    const seen = await ready(shown);
+    const page = await browser.execute(() => window.innerHeight);
+    const inset = seen.webview_height - page;
+    const told = { webview: seen.webview_height, page, frame: seen.frame, rect: RECT };
+    console.log(`placement ${JSON.stringify(told)}`);
+    assert.ok(inset >= 0 && inset < 80, `the page starts inside its webview: ${inset}`);
+    const want = [RECT.x, RECT.y + inset, RECT.width, RECT.height];
+    assert.deepEqual(seen.frame, want, "the view's frame is its page rect below the page's inset");
+    await close(shown.view);
+  });
+
   it("focus gives the view the keyboard and leaves the app and its window as they were (N2)", async () => {
     const shown = await open(true);
     await ready(shown);
