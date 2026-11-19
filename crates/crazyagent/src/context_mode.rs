@@ -357,17 +357,11 @@ fn fixture_program(_: Option<&str>) -> bool {
     false
 }
 
-/// Whether the `node` beside npx runs the shared install: its `--version`, read inside a
-/// boundary in a scratch folder ([`node_command`]), names 22.5 or newer, which has the
-/// built-in SQLite context-mode uses without building a dependency. After the run the
-/// boundary's container is released ([`os::release`]), named from the scratch folder read
-/// before the run, and the scratch folder is removed, after a refused release too, which is
-/// logged, so a lasting refusal adds no folder per probe. Every probe holds the check lock
-/// shared while it runs; one that finds it free first ends what crashed probes left
-/// ([`end_left_checks`]). Inputs: the engine root and npx's folder. Output: false when it
-/// names an older version or no version, `context_mode_node_check_failed` when it did not run
-/// to an answer (a refused start, a failed exit, no output or past its bound), so a refusal
-/// never reads as too old, or `context_mode_sandbox_unavailable` when no boundary holds it.
+/// Whether npx's `node` runs the shared install: its `--version`, read in a boundary in a
+/// scratch folder ([`node_command`]) under the shared check lock, names 22.5 or newer; the
+/// folder and its container ([`os::release`]) go after the run. Inputs: the engine root and
+/// npx's folder. Output: false for an older or no version, `context_mode_node_check_failed`
+/// when it did not run to an answer, `context_mode_sandbox_unavailable` with no boundary.
 fn node_supported(root: &Path, bin: &Path) -> Result<bool, InstallError> {
     let parent = root.join("setup").join("npm");
     private_folder(&parent)?;
@@ -426,12 +420,11 @@ fn end_left_checks(parent: &Path) {
     }
 }
 
-/// The `node --version` command of npx's folder inside the boundary npm installs in, with no
-/// network: the scratch folder's own project, home and temp folders, the engine's secrets
-/// denied, Node's tool folders and npx's folder read, on Unix with npm's grant
-/// ([`ProjectSandbox::allow_node_for`]) so the engine's own `setup/node` runs, a cleared
-/// environment (RV-DS241-150) and, on Linux, the owner's call supervisor choice. Inputs: the
-/// engine root, the scratch folder and npx's folder. Output: the command, or the refusal.
+/// The `node --version` command of npx's folder in npm's install boundary, no network: the
+/// scratch folder's project, home and temp, engine secrets denied, Node's tools, npx's folder
+/// and on Unix npm's grant ([`ProjectSandbox::allow_node_for`]) read, a cleared environment
+/// (RV-DS241-150), on Linux the owner's call supervisor. Inputs: the engine root, the scratch
+/// folder and npx's folder. Output: the command, or the refusal.
 fn node_command(
     root: &Path,
     scratch: &Path,

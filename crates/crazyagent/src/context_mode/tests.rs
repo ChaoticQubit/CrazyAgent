@@ -415,12 +415,11 @@ fn npm_starts_under_the_install_sandbox_profile() {
     assert!(profile.contains("(remote ip \"*:443\")"));
 }
 
-/// V243-CONTEXT-MODE-NPM-LINK-GRANT: npm in a setup-node layout, `bin/npm` a link into
-/// `../lib/node_modules/npm` and `bin/node` a copy of the real node ([`copy_node`]), in a
-/// prefix under no granted root, starts under the install profile: the grant follows
-/// `bin/npm` to npm's package, read only. The prefix sits in the build folder, which no other
-/// user can change; the root holds the settings store Linux reads. A failed start shows npm's
-/// standard error.
+/// V243-CONTEXT-MODE-NPM-LINK-GRANT: npm in a setup-node layout (`bin/npm` a link into
+/// `../lib/node_modules/npm`, `bin/node` a [`copy_node`]) in a prefix under no granted root
+/// starts under the install profile, the grant following `bin/npm` to npm's package, read only.
+/// The prefix is in the build folder; the root holds Linux's settings store. Input: none.
+/// Output: none; panics with npm's standard error on a failed start.
 #[test]
 fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_install_profile() {
     let real = system_bin();
@@ -1050,11 +1049,10 @@ fn on_a_node_older_than_22_5_no_install_starts_and_an_agent_launch_drops_the_ser
 }
 
 /// V243-CONTEXT-MODE-ENGINE-NODE: a node check that did not run to an answer answers its own
-/// code, so the owner is not told to update a Node that never answered; no install starts and
-/// no failure is recorded. The cases: a `node` script that exits 1 or exits 0 printing nothing,
-/// whatever its arguments, and a node in an app bundle outside every granted root, which both
-/// boundaries refuse to start though run alone it names a supported version. Input: none.
-/// Output: none; panics on another answer.
+/// code, not too old; no install starts and no failure is recorded. The cases: a `node` script
+/// that exits 1, one that exits 0 printing nothing, and a node in an app bundle outside every
+/// granted root, which both boundaries refuse though run alone it names a supported version.
+/// Input: none. Output: none; panics on another answer.
 #[test]
 fn a_node_check_that_did_not_run_answers_its_own_code_not_too_old() {
     for why in ["a failed exit", "no output", "a refused start"] {
