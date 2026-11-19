@@ -111,25 +111,52 @@ impl Project {
                 let target = self.place.path().join("outside-refs");
                 std::fs::create_dir(&target).unwrap();
                 std::fs::remove_dir_all(git_dir.join("refs")).unwrap();
-                let made = crate::spawn_gate::output(
-                    Command::new("cmd")
-                        .args(["/C", "mklink", "/J"])
-                        .arg(git_dir.join("refs"))
-                        .arg(&target)
-                        .stdin(Stdio::null()),
-                )
-                .unwrap();
-                assert!(
-                    made.status.success(),
-                    "{}",
-                    String::from_utf8_lossy(&made.stderr)
-                );
+                junction(&git_dir.join("refs"), &target);
                 Ok(())
             }
             _ => panic!("unknown shape {shape}"),
         };
         planted.unwrap();
     }
+}
+
+/// Makes `link` a junction to the folder `target`, as an agent could. Inputs: the link,
+/// which must not exist, and the target. Output: none; a failed `mklink` fails the row.
+fn junction(link: &Path, target: &Path) {
+    let made = crate::spawn_gate::output(
+        Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdin(Stdio::null()),
+    )
+    .unwrap();
+    assert!(
+        made.status.success(),
+        "{}",
+        String::from_utf8_lossy(&made.stderr)
+    );
+}
+
+/// Every file below `folder` with its bytes, sorted, so a row can tell that no step wrote
+/// there. Input: the folder. Output: each file's path below the folder and its contents.
+fn snapshot(folder: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut files = Vec::new();
+    let mut folders = vec![folder.to_path_buf()];
+    while let Some(next) = folders.pop() {
+        for entry in std::fs::read_dir(&next).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                folders.push(path);
+            } else {
+                let bytes = std::fs::read(&path).unwrap();
+                files.push((path.strip_prefix(folder).unwrap().to_path_buf(), bytes));
+            }
+        }
+    }
+    files.sort();
+    assert!(!files.is_empty(), "{} holds no file", folder.display());
+    files
 }
 
 /// Tells how `answer` differs from the refusal `code`, whatever the step returns on success.
@@ -468,4 +495,173 @@ fn a_contained_windows_publish_commits_a_new_file_with_the_project_author_first(
         "Global",
         "with no project identity the owner's global config gives it, through its include"
     );
+}
+
+#[test]
+#[ignore = "needs unc-share-setup.ps1's shares and device entries on an elevated runner (test farm)"]
+fn a_contained_windows_publish_reads_no_git_folder_or_gitfile_planted_below_the_project() {
+    use crate::sandbox::windows::owner_git::farm;
+    let ada = Author {
+        name: "Ada".into(),
+        email: "ada@example.invalid".into(),
+    };
+    let mut wrong = Vec::new();
+    for step in CONTAINED_STEPS {
+        let made = if step == "commit" {
+            unborn()
+        } else {
+            project()
+        };
+        let folder = contained_folder(&made);
+        let home = made.home.path();
+        let inner = folder.join("inner");
+        std::fs::create_dir(&inner).unwrap();
+        owner_git(&inner, &["init", "-q", "--template=", "-b", "other"]);
+        owner_git(&inner, &["config", "user.name", "Inner"]);
+        owner_git(&inner, &["config", "user.email", "inner@example.invalid"]);
+        std::fs::write(inner.join("y.txt"), "y").unwrap();
+        owner_git(&inner, &["add", "y.txt"]);
+        owner_git(&inner, &["commit", "-q", "--no-gpg-sign", "-m", "inner"]);
+        let started_inside = crate::spawn_gate::collected(
+            Command::new(git().unwrap().program())
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .current_dir(&inner)
+                .env("GIT_DIR", ".git")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE),
+        )
+        .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&started_inside.stdout).trim(),
+            "other",
+            "a relative GIT_DIR started in inner reads the planted repository"
+        );
+        farm::plant(&folder, "nested");
+        let git = routed(&made, &folder);
+        let head = if step == "workflows" {
+            made.head()
+        } else {
+            String::new()
+        };
+        let kept = snapshot(&inner.join(".git"));
+        let said = made.place.path().join("contained-stderr.txt");
+        CONTAINED_STDERR
+            .with(|file| *file.borrow_mut() = Some(std::fs::File::create(&said).unwrap()));
+        farm::reset_sessions();
+        let answer = match step {
+            "inspect" => match inspect(&git, home, &folder, HOST) {
+                Ok(local) if local.branch.as_deref() == Some("main") => None,
+                other => Some(format!("{other:?}")),
+            },
+            "commit" => match commit(&git, home, &folder, &[], &ada) {
+                Ok(made_commit)
+                    if made_commit.branch == "main" && made_commit.commit == made.head() =>
+                {
+                    None
+                }
+                other => Some(format!("{other:?}")),
+            },
+            "author" => match configured_author(&git, made.owner_home.path(), home, &folder) {
+                Some(author) if author.name == "Owner" => None,
+                other => Some(format!("{other:?}")),
+            },
+            _ => {
+                let local = inspect(&git, home, &folder, HOST).unwrap();
+                ran_step(step, &git, &made, &folder, &local, &head);
+                None
+            }
+        };
+        CONTAINED_STDERR.with(|file| *file.borrow_mut() = None);
+        if let Some(got) = answer {
+            wrong.push(format!(
+                "{step}: {got}, contained git said: {}",
+                std::fs::read_to_string(&said).unwrap_or_default()
+            ));
+        }
+        if farm::server_session() {
+            wrong.push(format!("{step}: a server session"));
+        }
+        if snapshot(&inner.join(".git")) != kept {
+            wrong.push(format!("{step}: the planted inner .git changed"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+#[test]
+#[ignore = "needs unc-share-setup.ps1's device entries on an elevated runner (test farm)"]
+fn a_contained_windows_publish_refuses_a_project_git_replaced_by_a_gitfile_or_link_as_owner_git_does()
+ {
+    let refusal = "github_publish_not_plain_repo";
+    let ada = Author {
+        name: "Ada".into(),
+        email: "ada@example.invalid".into(),
+    };
+    let choices = GitHubPrepare {
+        private: true,
+        docs: false,
+        approved: Vec::new(),
+        rules: GitHubRule::defaults(),
+    };
+    let mut wrong = Vec::new();
+    for shape in ["gitfile", "junction"] {
+        let made = project();
+        let folder = contained_folder(&made);
+        let home = made.home.path();
+        let outside = made.place.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        owner_git(&outside, &["init", "-q", "--template=", "-b", "main"]);
+        let outside_git = outside.join(".git");
+        let contained = routed(&made, &folder);
+        let local = inspect(&contained, home, &folder, HOST).unwrap();
+        let head = made.head();
+        let kept = snapshot(&outside_git);
+        let project_git_dir = folder.join(".git");
+        std::fs::remove_dir_all(&project_git_dir).unwrap();
+        match shape {
+            "gitfile" => std::fs::write(
+                &project_git_dir,
+                format!("gitdir: {}\n", outside_git.display()),
+            )
+            .unwrap(),
+            _ => junction(&project_git_dir, &outside_git),
+        }
+        for (side, git) in [("owner", git().unwrap()), ("contained", contained.clone())] {
+            let tried = |what: &str| format!("{shape} {side} {what}");
+            wrong.extend(mismatch(
+                inspect(&git, home, &folder, HOST),
+                refusal,
+                &tried("inspect"),
+            ));
+            wrong.extend(mismatch(
+                prepare(&git, home, &folder, &local, &choices),
+                refusal,
+                &tried("prepare"),
+            ));
+            for history in [GitHubHistory::Empty, GitHubHistory::Owner] {
+                wrong.extend(mismatch(
+                    secret_findings(&git, home, &folder, history),
+                    refusal,
+                    &tried(&format!("secrets {history:?}")),
+                ));
+            }
+            wrong.extend(mismatch(
+                commit(&git, home, &folder, &[], &ada),
+                refusal,
+                &tried("commit"),
+            ));
+            wrong.extend(mismatch(
+                has_workflows(&git, home, &folder, &head),
+                refusal,
+                &tried("workflows"),
+            ));
+            if configured_author(&git, made.owner_home.path(), home, &folder).is_some() {
+                wrong.push(tried("author: still read"));
+            }
+        }
+        if snapshot(&outside_git) != kept {
+            wrong.push(format!("{shape}: the outside repository changed"));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
