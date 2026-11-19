@@ -316,12 +316,13 @@ impl Painter {
     }
 
     /// Gives a view its new geometry before the swap-chain wait: a resize on the same
-    /// scale, or a new surface on the new scale's shared state, the old one dropped first
-    /// since a window has one swap chain. Inputs: the view's index and geometry. Output: ok,
-    /// or `native_terminal_gpu` when the resize or the new surface was refused.
+    /// scale, or a new surface on the new scale's shared state, the old one dropped and its
+    /// device settled first since a window has one swap chain. Inputs: the view's index and
+    /// geometry. Output: ok, or `native_terminal_gpu` when a step was refused.
     fn refit(&mut self, index: usize, geometry: Geometry) -> Result<(), &'static str> {
         let view = &mut self.views[index];
-        let same = view.geometry.scale_key == geometry.scale_key;
+        let old = view.geometry.scale_key;
+        let same = old == geometry.scale_key;
         view.geometry = geometry;
         if same {
             let held = self
@@ -334,6 +335,9 @@ impl Painter {
         }
         view.surface = None;
         let handle = view.handle;
+        let held = self.shared.iter().find(|(key, _)| *key == old);
+        let (_, left) = held.expect("a live view's scale has its shared state");
+        left.settle()?;
         let surface = self.surface(handle, geometry).map_err(|_| GPU_FAULT)?;
         self.views[index].surface = Some(surface);
         self.post_cell(self.views[index].id, geometry.scale_key);
@@ -535,6 +539,16 @@ mod tests {
         let geometry = Geometry {
             size: (20, 20),
             scale_key: 100,
+        };
+        let _ = painter(vec![faulted(7)]).refit(0, geometry);
+    }
+
+    #[test]
+    #[should_panic(expected = "a live view's scale has its shared state")]
+    fn refitting_a_view_to_a_new_scale_with_no_shared_state_is_a_bug() {
+        let geometry = Geometry {
+            size: (20, 20),
+            scale_key: 150,
         };
         let _ = painter(vec![faulted(7)]).refit(0, geometry);
     }
