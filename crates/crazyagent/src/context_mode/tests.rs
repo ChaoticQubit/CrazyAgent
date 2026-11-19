@@ -349,7 +349,6 @@ fn whatever_is_left_incomplete_at_the_install_path_is_removed_under_the_lock() {
 
 /// Finds the folder holding the real `npm` and `node` on PATH. Output: the folder; a run
 /// without npm on PATH is reported unavailable.
-#[cfg(target_os = "macos")]
 fn system_bin() -> PathBuf {
     let Some(npm) = std::env::var_os("PATH").and_then(|path| {
         std::env::split_paths(&path)
@@ -383,6 +382,84 @@ fn npm_starts_under_the_install_sandbox_profile() {
     );
     let profile = fs::read_to_string(case.npm().join(PROFILE)).unwrap();
     assert!(profile.contains("(remote ip \"*:443\")"));
+}
+
+/// V243-CONTEXT-MODE-NPM-LINK-GRANT: npm in a setup-node layout, `bin/npm` a link into
+/// `../lib/node_modules/npm` and `bin/node` a copy of the real node, in a prefix under no
+/// granted root, starts under the install profile: the grant follows `bin/npm` to npm's
+/// package, read only. The prefix sits in the build folder, which no other user can change;
+/// the root holds the settings store Linux reads. A failed start shows npm's standard error.
+#[test]
+fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_install_profile() {
+    let real = system_bin();
+    let cli = crate::sandbox::canonical(&real.join("npm")).unwrap();
+    let package = cli.parent().and_then(Path::parent).unwrap().to_path_buf();
+    assert!(package.ends_with("lib/node_modules/npm"), "{cli:?}");
+    let build = std::env::current_exe().unwrap();
+    let outside = tempfile::Builder::new()
+        .prefix("ca-npm-prefix-")
+        .tempdir_in(build.parent().unwrap())
+        .unwrap();
+    let prefix = outside.path().canonicalize().unwrap();
+    if let Some(open) = crate::service::changeable_by_others(&prefix) {
+        panic!("UNAVAILABLE: a build folder no other user can change, not {open:?}");
+    }
+    let bin = prefix.join("bin");
+    let modules = prefix.join("lib").join("node_modules");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&modules).unwrap();
+    let copied = crate::spawn_gate::status(
+        std::process::Command::new("/bin/cp")
+            .arg("-R")
+            .arg(&package)
+            .arg(&modules),
+    )
+    .unwrap();
+    assert!(copied.success(), "{package:?}");
+    let writable = crate::spawn_gate::status(
+        std::process::Command::new("/bin/chmod")
+            .arg("-R")
+            .arg("u+w")
+            .arg(&modules),
+    )
+    .unwrap();
+    assert!(writable.success(), "{modules:?}");
+    let node = crate::sandbox::canonical(&real.join("node")).unwrap();
+    fs::copy(&node, bin.join("node")).unwrap();
+    std::os::unix::fs::symlink("../lib/node_modules/npm/bin/npm-cli.js", bin.join("npm")).unwrap();
+    let program = crate::sandbox::canonical(&bin.join("npm")).unwrap();
+    assert_eq!(
+        crate::harnesses::node_prefix(&program).as_deref(),
+        Some(prefix.as_path()),
+        "the grant takes this prefix as npm's; changeable: {:?}",
+        crate::service::changeable_by_others(&bin.join("node"))
+    );
+    let case = case("/usr/bin/false");
+    case.store();
+    let name = format!("context-mode@{VERSION}");
+    let staged = staging_folder(&case.npm(), &name).unwrap();
+    let work = staging_folder(&case.npm(), &format!("{name}-work")).unwrap();
+    let npm = || {
+        let mut command = npm_command(&case.root, &staged, &work, &bin, VERSION).unwrap();
+        command.arg("--version");
+        command
+    };
+    let (ok, output) = run_command(npm(), Duration::from_secs(60)).unwrap();
+    let version = String::from_utf8(output).unwrap();
+    if !ok {
+        let failed = crate::spawn_gate::collected(&mut npm()).unwrap();
+        panic!(
+            "npm linked into its package did not start under the install profile: {}",
+            String::from_utf8_lossy(&failed.stderr)
+        );
+    }
+    let numbers: Vec<&str> = version.trim().split('.').collect();
+    assert_eq!(numbers.len(), 3, "{version}");
+    assert!(
+        numbers
+            .iter()
+            .all(|number| number.bytes().all(|b| b.is_ascii_digit()))
+    );
 }
 
 /// The shared install's npm starts through the launcher its Node check starts through, so
