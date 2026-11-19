@@ -1526,3 +1526,93 @@ async fn a_prompt_through_a_pinned_view_lands_in_its_pane_and_is_heard() {
         "the master is told the prompt was heard"
     );
 }
+
+/// V243-NATIVE-INPUT-PIN r3 (#632 W5 row 7): on a real tmux server, a prompt the native
+/// panel's message box sends through an input-only view lands in the agent's pane as one
+/// submission: the pasted text between the bracket marks the pane asked for, then Enter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_prompt_through_an_input_only_view_lands_in_a_real_tmux_pane() {
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-term-prompt-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root = tmp.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let global = root.join("g.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 2000\n").unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let script = root.join("stand-in.sh");
+    std::fs::write(
+        &script,
+        "/bin/stty -echo 2>/dev/null\nprintf '\\033[?2004hstand-in ready\\n'\n\
+         while IFS= read -r line; do\n\
+         printf 'turn %s\\n' \"$(printf '%s' \"$line\" | /usr/bin/tr -d '\\033')\"\ndone\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(root).expect("tmux must be installed on this machine");
+    let folder = root.join(FOLDER);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: folder.join(SOCKET),
+    };
+    let agent = AgentId::team(1).unwrap();
+    let stand_in = InteractiveCommand {
+        argv: vec!["/bin/sh".into(), script.to_str().unwrap().into()],
+        cwd: root.to_path_buf(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    let launcher = {
+        let (agent, folder) = (agent.clone(), folder.clone());
+        tokio::task::spawn_blocking(move || {
+            let launcher = Tmux::open(Some(tmux), &folder);
+            launcher.spawn(&agent, &stand_in).unwrap();
+            Arc::new(launcher)
+        })
+        .await
+        .unwrap()
+    };
+    let ready = screen_when(&launcher, &agent, |s| s.contains("stand-in ready"), WAIT).await;
+    assert!(
+        ready.contains("stand-in ready"),
+        "the stand-in runs: {ready}"
+    );
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root,
+        "e.sock",
+        &global,
+        &root.join("p.toml"),
+        &stopped,
+    )
+    .await
+    .unwrap();
+    let (_, owner, _) = Client::new(root.join("e.sock"), WAIT)
+        .unwrap()
+        .with_owner(OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let TerminalSession { mut control, .. } = owner
+        .terminal_attach_input(agent.clone(), None, 100, 30)
+        .await
+        .unwrap();
+    control.prompt("pinned prompt".into()).await.unwrap();
+    let landed = screen_when(&launcher, &agent, |s| s.contains("turn"), WAIT).await;
+    assert!(
+        landed.contains("turn [200~pinned prompt[201~"),
+        "the prompt landed as one bracketed submission: {landed}"
+    );
+    assert_eq!(
+        landed.matches("turn").count(),
+        1,
+        "one submission: {landed}"
+    );
+
+    drop(control);
+    drop(owner);
+    tokio::time::timeout(WAIT, service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+}
