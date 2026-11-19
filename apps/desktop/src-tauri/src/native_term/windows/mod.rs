@@ -7,3 +7,7 @@ mod place;
 mod rows;
 mod uia;
 mod view;
+
+pub use clip::Clip;
+pub use place::scale_key;
+pub use view::View;

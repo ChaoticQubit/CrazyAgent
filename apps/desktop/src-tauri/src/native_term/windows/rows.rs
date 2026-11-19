@@ -48,13 +48,16 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use super::super::a11y;
 use super::super::event::ViewEvent;
+use super::super::host::windows as platform;
 use super::super::pane::{CONTROL, Input, Named, Pane};
+use super::super::render::{GPU_FAULT, Shared};
 use super::super::screen::{self, Frame};
 use super::super::style::{Style, Theme, font_for};
 use super::draw;
 use super::place;
 use super::view::{self, View};
 use std::cell::RefCell;
+use tauri::ipc::Channel;
 
 /// The longest a farm step waits for the render thread, on a loaded software adapter.
 const FARM_WAIT: Duration = Duration::from_secs(60);
@@ -125,7 +128,7 @@ fn stand_in_class(name: &'static str, color: COLORREF) -> Vec<u16> {
 /// WRY_WEBVIEW sit. Output: the parent and the webview.
 fn stand_ins() -> (HWND, HWND) {
     let parent_class = stand_in_class("NativeRowsParent", RED);
-    let webview_class = stand_in_class("NativeRowsWebview", GREEN);
+    let webview_class = stand_in_class("WRY_WEBVIEW", GREEN);
     let module = unsafe { GetModuleHandleW(ptr::null()) };
     let window = |extended, class: &[u16], style, at: (i32, i32), size: (i32, i32), up| unsafe {
         let (x, y, w, h) = (at.0, at.1, size.0, size.1);
@@ -2042,8 +2045,9 @@ impl IUIAutomationEventHandler_Impl for Seen_Impl {
     }
 }
 
-/// The view whose sink drops it on its fault.
+/// The view whose sink drops it on its fault, and the host platform layer's view.
 const DROPPED_ON_FAULT: u64 = 8;
+const HOST_VIEW: u64 = 9;
 
 thread_local! {
     static HELD: RefCell<Option<View>> = const { RefCell::new(None) };
@@ -2083,4 +2087,92 @@ fn a_view_its_sink_drops_on_the_fault_goes_from_inside_the_fault_message() {
     pump_for(Duration::from_millis(300));
     println!("h5 row: the sink dropped the view inside its fault message, its window went");
     assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the stand-in goes");
+}
+
+/// The host's Windows calls on a real child window: the parent lookup takes only a
+/// `WRY_WEBVIEW` child, a view opens hidden, places and shows over its box, takes frames
+/// the render thread presents with the host's cell size, and once faulted refuses to fit
+/// and answers `native_terminal_gpu` to a frame, hidden.
+#[test]
+#[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
+fn the_host_platform_opens_draws_faults_and_dismisses_a_view_over_its_webview() {
+    let (parent, webview) = stand_ins();
+    let missing = Some("native_terminal_webview_missing");
+    assert_eq!(
+        platform::parent(parent as isize).err(),
+        missing,
+        "the Tauri window"
+    );
+    assert_eq!(platform::parent(0).err(), missing, "no window");
+    let host = platform::parent(webview as isize).expect("the webview's window");
+    assert!(platform::parent_scale(&host) >= 1.0);
+    let style = style();
+    let events = Channel::new(|_| Ok(()));
+    let opened = platform::open_view(
+        platform::trial_main(),
+        host,
+        HOST_VIEW,
+        100,
+        "rows",
+        &style,
+        events,
+        None,
+    );
+    let mut view = opened.expect("a view");
+    assert!(!platform::shown(&view), "a view opens hidden");
+    let rect = [PAGE.0, PAGE.1, PAGE.2, PAGE.3];
+    let scale = platform::place_view(&mut view, rect, true).expect("a shown view's scale");
+    assert!(platform::shown(&view), "a placed view shows");
+    assert_eq!(platform::scale(&view), scale);
+    let mut shared = Shared::new(scale as f32, &style).expect("the host's renderer");
+    assert!(platform::fit(&mut view, &mut shared, (400, 300)));
+    assert!(platform::ready(&mut view));
+    assert_eq!(platform::marked(&view), None);
+    let before = presents();
+    let frame = fed_frame(&Theme::default(), b"host platform\r\n");
+    platform::paint(&mut view, &mut shared, frame).expect("a posted frame");
+    await_present("the host's first present", before);
+    host_cell_and_access(&view, &shared);
+    host_fault(&mut view, &mut shared);
+    let _events = platform::dismiss_view(view);
+    println!("h5 row: the host platform opened, drew, faulted and dismissed a view");
+    assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the stand-in goes");
+}
+
+/// The render thread's posted cell is the one the host sizes grids with, and a drawn
+/// terminal reaches UI Automation without a fault. Inputs: the view and the host renderer.
+fn host_cell_and_access(view: &platform::View, shared: &Shared) {
+    pump_until("the render thread's cell", FARM_WAIT, || {
+        platform::trial_cell(view).is_some()
+    });
+    assert_eq!(
+        platform::trial_cell(view),
+        Some(shared.cell_points()),
+        "the host sizes grids with the cell the render thread draws"
+    );
+    let mut pane = Pane::new(true);
+    assert!(pane.on_attached(40, 12));
+    assert!(pane.on_output(b"read me\r\n"));
+    let term = pane.term().expect("an attached pane");
+    let geometry = a11y::Geometry {
+        cell: shared.cell_points(),
+        pad: 0.0,
+        scale: 1.0,
+    };
+    platform::drawn(view, geometry, term);
+}
+
+/// A refused resize faults the view: it hides, refuses to fit and answers the GPU code to
+/// a frame. Inputs: the view and the host renderer.
+fn host_fault(view: &mut platform::View, shared: &mut Shared) {
+    draw::trial_refuse_resize(HOST_VIEW);
+    let wider = [50.0, 40.0, 420.0, 300.0];
+    let _ = platform::place_view(view, wider, true);
+    pump_until("the refused resize faults the view", FARM_WAIT, || {
+        !platform::fit(view, shared, (420, 300))
+    });
+    let late = fed_frame(&Theme::default(), b"after the fault\r\n");
+    assert_eq!(platform::paint(view, shared, late), Err(GPU_FAULT));
+    pump_for(Duration::from_millis(300));
+    assert!(!platform::shown(view), "a faulted view hides");
 }

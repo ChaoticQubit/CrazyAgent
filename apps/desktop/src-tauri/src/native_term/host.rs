@@ -30,10 +30,16 @@ use tokio::sync::mpsc;
 mod mac;
 #[cfg(target_os = "macos")]
 use mac as platform;
+/// The Windows halves of the host: the child window over the webview, its place, focus
+/// and the frames it posts its render thread.
+#[cfg(windows)]
+pub(super) mod windows;
+#[cfg(windows)]
+use self::windows as platform;
 /// The stand-in on a system whose host has not landed yet: no native view opens there.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 mod none;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 use none as platform;
 
 use platform::View;
@@ -514,15 +520,24 @@ impl Native {
             self.feed.close(page);
             return Err(io_code(&error));
         }
-        let platform = platform::open_view(
+        let style = self.style.as_ref().ok_or("native_terminal_style_invalid")?;
+        let opened = platform::open_view(
             mtm,
             parent,
             page,
             key,
             &open.label,
+            style,
             open.events,
             open.project,
         );
+        let platform = match opened {
+            Ok(view) => view,
+            Err(code) => {
+                self.feed.close(page);
+                return Err(code);
+            }
+        };
         let entry = Entry {
             window: open.window,
             name: open.name,
@@ -1036,7 +1051,7 @@ fn draw_view(
     };
     let frame = screen::frame(term, &style.theme, shown, marked.as_deref());
     assert_eq!(frame.rows.len(), term.screen_lines());
-    match platform::paint(view, shared, &frame) {
+    match platform::paint(view, shared, frame) {
         Ok(()) => {}
         Err(code) if code == GPU_FAULT => return Err(GPU_FAULT),
         Err(_) => return Ok(false),
@@ -1187,6 +1202,7 @@ mod tests {
         let clip = platform::Clip::new();
         let chord = Input::Text(vec![0x03]);
         assert_eq!(copy_key(&mut pane, &clip, chord), Action::Nothing);
+        assert_eq!(clip.read().as_deref(), Some("hello"), "the board holds it");
     }
 
     #[test]

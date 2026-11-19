@@ -69,6 +69,20 @@ pub struct Clip {
 }
 
 impl Clip {
+    /// The views' board: one in process memory for rows and driven builds, so a driven copy
+    /// or paste never touches the owner's clipboard, else the desktop clipboard. Output: the
+    /// Clip.
+    pub fn new() -> Clip {
+        let private = cfg!(any(test, feature = "native-webdriver"));
+        let clip = if private {
+            Clip::private()
+        } else {
+            Clip::desktop()
+        };
+        assert_eq!(clip.is_private(), private);
+        clip
+    }
+
     /// The desktop clipboard, through a message-only window owned here. Output: the Clip;
     /// its calls refuse when Windows made no window.
     pub fn desktop() -> Clip {

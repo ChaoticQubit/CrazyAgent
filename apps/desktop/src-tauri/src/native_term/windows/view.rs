@@ -274,6 +274,23 @@ impl View {
         }
     }
 
+    /// Whether the view shows over its box. Output: the answer.
+    pub fn shown(&self) -> bool {
+        self.inner.shown.get()
+    }
+
+    /// The backing scale of the view's window, from its scale key. Output: 1 to 4.
+    pub fn scale(&self) -> f64 {
+        f64::from(self.inner.key.get()) / 100.0
+    }
+
+    /// Test builds only: the cell size the render thread posted for the view, in points.
+    /// Output: the cell, or none before the render thread made the view.
+    #[cfg(test)]
+    pub fn cell(&self) -> Option<(f64, f64)> {
+        BOARD.cell(self.inner.id)
+    }
+
     /// Hands the render thread the view's newest screen, keeping its cursor cell and its
     /// drawn marked text's cells for the IME. Input: the frame. Output: whether a live view
     /// took it.

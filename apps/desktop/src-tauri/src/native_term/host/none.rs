@@ -2,6 +2,7 @@ use super::{NativeEvent, SKIPPED};
 use crate::native_term::a11y::Geometry;
 use crate::native_term::render::Shared;
 use crate::native_term::screen::Frame;
+use crate::native_term::style::Style;
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::term::Term;
 use tauri::ipc::Channel;
@@ -44,20 +45,22 @@ pub fn parent_scale(_parent: &Parent) -> f64 {
 
 /// Makes a view with no drawing parts; never reached, as `parent` refuses first. Inputs:
 /// as the macOS host takes them. Output: the view.
+#[allow(clippy::too_many_arguments)]
 pub fn open_view(
     _mtm: Main,
     _parent: Parent,
     _page: u64,
     key: u32,
     _label: &str,
+    _style: &Style,
     events: Channel<NativeEvent>,
     project: Option<String>,
-) -> View {
-    View {
+) -> Result<View, &'static str> {
+    Ok(View {
         scale: key,
         events,
         project,
-    }
+    })
 }
 
 /// Gives a view focus; no view exists to focus. Input: the view.
@@ -83,7 +86,7 @@ pub fn fit(_view: &mut View, _shared: &mut Shared, _pixels: (u32, u32)) -> bool 
 
 /// Draws a frame; nothing draws here. Inputs: the view, the renderer and the frame.
 /// Output: the skipped code.
-pub fn paint(_view: &mut View, _shared: &mut Shared, _frame: &Frame) -> Result<(), &'static str> {
+pub fn paint(_view: &mut View, _shared: &mut Shared, _frame: Frame) -> Result<(), &'static str> {
     Err(SKIPPED)
 }
 
