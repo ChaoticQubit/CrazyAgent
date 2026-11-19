@@ -164,6 +164,7 @@ impl Restart {
 
     /// The one profile home the case's engine made under its root. Output: the home, or a
     /// panic when there is none or more than one.
+    #[cfg(target_os = "macos")]
     fn profile_home(&self) -> PathBuf {
         let profiles = self.root.path().join("native-profiles");
         let homes: Vec<PathBuf> = std::fs::read_dir(&profiles)
