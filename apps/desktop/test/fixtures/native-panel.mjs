@@ -216,13 +216,15 @@ export function calls(command = null) {
   return desk.calls.filter((entry) => command === null || entry.command === command);
 }
 
-/** The screen element's place in a slot, as the native view must be placed. Input: the slot.
- * Output: `{ x, y, width, height }`, or null with no screen. */
+/** The screen element's place in a slot, as the native view must be placed, with the page's
+ * viewport height the desktop frames it by. Input: the slot. Output: `{ x, y, width, height,
+ * viewport }`, or null with no screen. */
 export function screenRect(slot) {
   const screen = document.querySelector(`#${slot} .tg-terminal-screen`);
   if (!screen) return null;
   const box = screen.getBoundingClientRect();
-  return { x: box.left, y: box.top, width: box.width, height: box.height };
+  const viewport = window.innerHeight;
+  return { x: box.left, y: box.top, width: box.width, height: box.height, viewport };
 }
 
 /** What a slot's panel shows: its status lines, alerts, buttons and menu items, and whether

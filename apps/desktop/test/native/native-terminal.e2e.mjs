@@ -72,9 +72,10 @@ async function open(keys) {
     const id = window.__TAURI_INTERNALS__.transformCallback((raw) => (kept[id] ??= []).push(raw));
     return id;
   });
+  const viewport = await browser.execute(() => window.innerHeight);
   const view = await invoke("desktop_native_terminal_open", {
-    name: master, pane: null, label: "Native terminal trial", rect: RECT, style: STYLE,
-    covered: false, keys, project: run.project, events: `__CHANNEL__:${tag}`,
+    name: master, pane: null, label: "Native terminal trial", rect: { ...RECT, viewport },
+    style: STYLE, covered: false, keys, project: run.project, events: `__CHANNEL__:${tag}`,
   });
   assert.ok(Number.isInteger(view) && view > 0, `the open answered a view id: ${view}`);
   opened.add(view);
@@ -189,6 +190,19 @@ describe("Native terminal views in the real window", () => {
     const shown = await open(true);
     const seen = await ready(shown);
     assert.equal(seen.direct, true, "a plain master window is drawn by the direct path");
+    await close(shown.view);
+  });
+
+  it("places the view on the page rect it was given, not one title bar higher", async () => {
+    const shown = await open(false);
+    const seen = await ready(shown);
+    const page = await browser.execute(() => window.innerHeight);
+    const inset = seen.webview_height - page;
+    const told = { webview: seen.webview_height, page, frame: seen.frame, rect: RECT };
+    console.log(`placement ${JSON.stringify(told)}`);
+    assert.ok(inset >= 0 && inset < 80, `the page starts inside its webview: ${inset}`);
+    const want = [RECT.x, RECT.y + inset, RECT.width, RECT.height];
+    assert.deepEqual(seen.frame, want, "the view's frame is its page rect below the page's inset");
     await close(shown.view);
   });
 
