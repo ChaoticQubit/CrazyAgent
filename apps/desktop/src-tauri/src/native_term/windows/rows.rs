@@ -860,18 +860,13 @@ fn read_from_an_agent_container(hwnd: HWND) -> Vec<String> {
     read_view("h3 row: agent container reader", command, |_| {})
 }
 
-/// A screen reader outside any container reads the view's text, and a reader started in an
-/// agent's AppContainer must reach the view's own window and read nothing of it (the wall);
-/// then a screen reader reads lines, the selection, bounds, a refused Select and a
-/// text-changed event after a new screen. Input: the view, placed and drawn.
-fn read_by_a_screen_reader_and_not_by_an_agent(view: &View) {
-    fed_and_posted(view, b"ab\r\ncd");
-    let temp = tempfile::tempdir().expect("a temporary folder");
-    let script = temp.path().join("reader.ps1");
-    std::fs::write(&script, READER).expect("the reader script");
+/// The wall: a screen reader outside any container reads the view's text, and a reader
+/// started in an agent's AppContainer must reach the view's own window in this process and
+/// read nothing of it. Inputs: the view, showing "ab" and "cd", and the reader script.
+fn the_wall(view: &View, script: &std::path::Path) {
     let shown = read_view(
         "h3 row: screen reader text",
-        reader_command(&script, view.hwnd(), "text"),
+        reader_command(script, view.hwnd(), "text"),
         |_| {},
     );
     found_the_view(&shown, view.hwnd());
@@ -887,7 +882,19 @@ fn read_by_a_screen_reader_and_not_by_an_agent(view: &View) {
     found_the_view(&contained, view.hwnd());
     contained_read_nothing(&contained);
     println!("h3 row: agent container read nothing: {contained:?}");
-    read_in_full(view, &script);
+}
+
+/// A view placed, drawn and showing "ab" and "cd", with the reader script written beside
+/// it. Inputs: the parent and the webview stand-in. Output: the view and the folder holding
+/// the script.
+fn shown_for_readers(parent: HWND, webview: HWND) -> (View, tempfile::TempDir) {
+    let view = View::new(parent, webview, 1, sink, &style()).expect("a view");
+    placed_shown_and_drawn(parent, &view);
+    fed_and_posted(&view, b"ab\r\ncd");
+    let temp = tempfile::tempdir().expect("a temporary folder");
+    std::fs::write(temp.path().join("reader.ps1"), READER).expect("the reader script");
+    assert!(!view.hwnd().is_null());
+    (view, temp)
 }
 
 /// A screen reader reads the view's second line, the empty selection at the cursor, the
@@ -980,11 +987,24 @@ fn contained_read_nothing(contained: &[String]) {
 
 #[test]
 #[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
-fn a_screen_reader_reads_the_view_and_an_agent_container_reads_nothing() {
+fn an_agent_container_reaches_the_view_and_reads_nothing_of_it() {
     let (parent, webview) = stand_ins();
-    let view = View::new(parent, webview, 1, sink, &style()).expect("a view");
-    placed_shown_and_drawn(parent, &view);
-    read_by_a_screen_reader_and_not_by_an_agent(&view);
+    let (view, temp) = shown_for_readers(parent, webview);
+    the_wall(&view, &temp.path().join("reader.ps1"));
+    drop(view);
+    assert_eq!(
+        draw::counts().1,
+        0,
+        "no surface setup, swap-chain wait or draw failed"
+    );
+}
+
+#[test]
+#[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
+fn a_screen_reader_reads_lines_the_selection_bounds_and_events() {
+    let (parent, webview) = stand_ins();
+    let (view, temp) = shown_for_readers(parent, webview);
+    read_in_full(&view, &temp.path().join("reader.ps1"));
     drop(view);
     assert_eq!(
         draw::counts().1,
@@ -997,12 +1017,8 @@ fn a_screen_reader_reads_the_view_and_an_agent_container_reads_nothing() {
 #[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
 fn each_kind_of_range_is_read_by_its_own_reader_and_recorded() {
     let (parent, webview) = stand_ins();
-    let view = View::new(parent, webview, 1, sink, &style()).expect("a view");
-    placed_shown_and_drawn(parent, &view);
-    fed_and_posted(&view, b"ab\r\ncd");
-    let temp = tempfile::tempdir().expect("a temporary folder");
+    let (view, temp) = shown_for_readers(parent, webview);
     let script = temp.path().join("reader.ps1");
-    std::fs::write(&script, READER).expect("the reader script");
     for probe in ["probe_visible", "probe_empty", "probe_selection"] {
         let what = format!("h3 row: {probe}");
         let lines = read_view(&what, reader_command(&script, view.hwnd(), probe), |_| {});
@@ -1012,5 +1028,114 @@ fn each_kind_of_range_is_read_by_its_own_reader_and_recorded() {
             "{what} reached its lookup: {lines:?}"
         );
     }
+    let path = module_path!()
+        .split_once("::")
+        .map_or(module_path!(), |(_, rest)| rest);
+    let row = format!("{path}::the_compiled_reader_reads_the_window_its_parent_names");
+    let mut command = std::process::Command::new(std::env::current_exe().expect("this binary"));
+    command
+        .args([
+            row.as_str(),
+            "--exact",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(READ_WINDOW, (view.hwnd() as isize).to_string());
+    let lines = read_view("h3 row: compiled reader", command, |_| {});
+    assert_eq!(
+        value(&lines, "reader_stage"),
+        Some("lookup"),
+        "the compiled reader reached its lookup: {lines:?}"
+    );
     drop(view);
+}
+
+/// The variable naming the window a compiled reader child reads, set only by the probe row
+/// when it starts this test binary as a UI Automation client.
+const READ_WINDOW: &str = "H3_UIA_READ_WINDOW";
+
+/// The probe row's child: without its variable it does nothing; with it, it reads that
+/// window through IUIAutomation, the COM client screen readers use (`compiled_read`).
+#[test]
+#[ignore = "a child of the probe row: the compiled UI Automation reader"]
+fn the_compiled_reader_reads_the_window_its_parent_names() {
+    let Some(handle) = std::env::var_os(READ_WINDOW) else {
+        return;
+    };
+    let handle = handle.to_str().and_then(|text| text.parse::<isize>().ok());
+    let handle = handle.expect("a window handle in the variable");
+    assert_ne!(handle, 0);
+    compiled_read(handle);
+}
+
+/// Reads the view through IUIAutomation as the PowerShell probes do, the same ranges in the
+/// same order, printing a step before each call so a crash names its call. Input: the
+/// view's window handle.
+fn compiled_read(handle: isize) {
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+    };
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, IUIAutomationTextPattern, TextPatternRangeEndpoint_End,
+        TextPatternRangeEndpoint_Start, UIA_TextPatternId,
+    };
+    unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
+        .ok()
+        .expect("COM on this thread");
+    let automation: IUIAutomation =
+        unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
+            .expect("the UI Automation client");
+    println!("reader_stage=lookup");
+    let window = windows::Win32::Foundation::HWND(handle as *mut core::ffi::c_void);
+    let element = unsafe { automation.ElementFromHandle(window) }.expect("the view");
+    let found = unsafe { element.CurrentNativeWindowHandle() }.expect("its window");
+    println!("reader_hwnd={}", found.0 as isize as i32);
+    println!(
+        "reader_process={}",
+        unsafe { element.CurrentProcessId() }.expect("its pid")
+    );
+    println!(
+        "reader_control={}",
+        unsafe { element.CurrentControlType() }.expect("type").0
+    );
+    println!(
+        "reader_name={}",
+        unsafe { element.CurrentName() }.expect("its name")
+    );
+    let pattern: IUIAutomationTextPattern =
+        unsafe { element.GetCurrentPatternAs(UIA_TextPatternId) }.expect("its Text pattern");
+    println!("reader_text_pattern=True");
+    let document = unsafe { pattern.DocumentRange() }.expect("the document");
+    let text = unsafe { document.GetText(-1) }
+        .expect("its text")
+        .to_string();
+    println!("reader_text={}", text.replace('\n', "|"));
+    println!("reader_step=visible_array");
+    let visible = unsafe { pattern.GetVisibleRanges() }.expect("the visible ranges");
+    let first = unsafe { visible.GetElement(0) }.expect("the first visible range");
+    println!(
+        "reader_step=visible_read {}",
+        unsafe { first.GetText(-1) }.expect("text").len()
+    );
+    let empty = unsafe { document.Clone() }.expect("a clone");
+    let start = TextPatternRangeEndpoint_Start;
+    unsafe { empty.MoveEndpointByRange(TextPatternRangeEndpoint_End, &empty, start) }
+        .expect("collapsed to its start");
+    println!("reader_step=empty_collapsed");
+    println!(
+        "reader_step=empty_read {}",
+        unsafe { empty.GetText(-1) }.expect("text").len()
+    );
+    let selection = unsafe { pattern.GetSelection() }.expect("the selection");
+    println!(
+        "reader_step=selection_array {}",
+        unsafe { selection.Length() }.expect("count")
+    );
+    let selected = unsafe { selection.GetElement(0) }.expect("the selected range");
+    println!("reader_step=selection_indexed");
+    let _copy = unsafe { selected.Clone() }.expect("a clone of it");
+    println!("reader_step=selection_cloned");
+    let read = unsafe { selected.GetText(-1) }.expect("its text");
+    println!("reader_step=selection_read {}", read.len());
 }
