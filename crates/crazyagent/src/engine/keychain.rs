@@ -1066,6 +1066,12 @@ mod tests {
     fn the_owners_own_home_is_refused_as_a_profile_home_before_any_rename() {
         let owner = owner_home().unwrap();
         assert_eq!(profile_home_guard(&owner), Err(failure()));
+        let long = crate::projects_home::data_twin(&owner).expect("a data volume name");
+        assert_eq!(
+            profile_home_guard(&long),
+            Err(failure()),
+            "the owner's home in its data volume spelling passed as a profile home"
+        );
         let root = scratch();
         let home = private_home(root.path(), "home");
         assert_eq!(profile_home_guard(&home), Ok(()));
