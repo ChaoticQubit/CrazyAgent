@@ -66,6 +66,25 @@ pub(crate) fn owner_answering(path: &Path) -> bool {
     endpoint(path).is_ok_and(|(root, purpose)| windows::answering(root, purpose))
 }
 
+/// The endpoint the pipes file at the owner-class `path` publishes now, read through W1's
+/// private read-only open: its random part and the pin of the engine serving it, the
+/// identity a client compares before and after it connects (V244-WIN-ENGINE-WIRING W3-3).
+/// Input: the endpoint path. Output: the endpoint, or why the file is refused.
+#[cfg(windows)]
+pub(crate) fn owner_endpoint(path: &Path) -> io::Result<Published> {
+    let (root, purpose) = endpoint(path)?;
+    windows::read(root, purpose)
+}
+
+/// The endpoint a Windows listener published at `path`, read from the pipes file it holds
+/// rather than by path (V244-WIN-ENGINE-WIRING W3-3, rv-sec2 #719 C2). Inputs: the listener
+/// and its endpoint path. Output: the published random part and pin.
+#[cfg(windows)]
+pub(crate) fn owner_listened(listener: &Listener, path: &Path) -> io::Result<Published> {
+    let (_, purpose) = endpoint(path)?;
+    listener.published(purpose)
+}
+
 /// Closes a Windows listener and deletes its pipes file, reporting a delete that failed
 /// (V244-WIN-ENGINE-WIRING WIRE-2). Input: the listener. Output: Ok, or the delete's error.
 #[cfg(windows)]
@@ -460,6 +479,31 @@ mod pipes_tests {
         created: 133_000_000_000_000_000,
     };
     const SHAPE: &str = "the pipes file is not in the engine's shape";
+
+    /// W3-3 D2: two endpoints are the same only when the random part, the process ID and
+    /// the creation time all match, so a client's compare sees a change in any one.
+    #[test]
+    fn an_endpoint_equals_another_only_on_random_pid_and_created() {
+        let mut random = PUBLISHED;
+        random.random[15] ^= 1;
+        let pid = Published {
+            pid: PUBLISHED.pid + 1,
+            ..PUBLISHED
+        };
+        let created = Published {
+            created: PUBLISHED.created + 1,
+            ..PUBLISHED
+        };
+        for other in [random, pid, created] {
+            assert_ne!(other, PUBLISHED);
+        }
+        let same = Published {
+            random: PUBLISHED.random,
+            pid: PUBLISHED.pid,
+            created: PUBLISHED.created,
+        };
+        assert_eq!(same, PUBLISHED);
+    }
 
     /// DESIGN-0256 D7 pipes file (leader 07:46): one line with the version, the endpoint's
     /// purpose, the per-start random part and the engine's pin, read back the same.
