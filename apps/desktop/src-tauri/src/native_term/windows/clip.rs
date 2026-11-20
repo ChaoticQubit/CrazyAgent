@@ -132,6 +132,13 @@ impl Clip {
         }
     }
 
+    /// Puts plain text on the board for the page's own Copy command, which comes over IPC;
+    /// Windows needs no user event for a board write, so it is the same write. Input: the
+    /// text. Output: whether the board took it.
+    pub fn write_command(&self, text: &str) -> bool {
+        self.write(text)
+    }
+
     /// Reads the board's plain text, kept only at 1 to `COPY_BYTES_MAX` bytes. Output: the
     /// text, or none when the board holds none, holds too much or stays held by another app.
     pub fn read(&self) -> Option<String> {

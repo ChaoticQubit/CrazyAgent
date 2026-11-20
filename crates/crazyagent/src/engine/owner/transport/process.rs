@@ -759,7 +759,7 @@ impl OwnerClient {
         pool: Option<CredentialRef>,
     ) -> Result<Proposal, EngineError> {
         cleanup::cleanup_pool(project.as_ref(), pool.as_ref()).map_err(failure)?;
-        let limit = self.timeout.max(PROPOSE_TIMEOUT);
+        let limit = deferred_wait(self.timeout, PROPOSE_TIMEOUT);
         match self
             .process_exchange_within(Action::Propose { project, pool }, None, limit)
             .await?
@@ -860,7 +860,7 @@ impl OwnerClient {
         text: Option<String>,
         limit: Duration,
     ) -> Result<(Reply, Option<String>), EngineError> {
-        assert!(limit >= self.timeout && limit <= self.timeout.max(PROPOSE_TIMEOUT));
+        assert!(limit >= self.timeout && limit <= deferred_wait(self.timeout, PROPOSE_TIMEOUT));
         tokio::time::timeout(limit, async {
             let read = read_kind(&action);
             let envelope = Envelope {
@@ -873,10 +873,10 @@ impl OwnerClient {
                 return Err(failure("owner_socket_replaced"));
             }
             let unavailable = |_| failure("process_owner_unavailable");
-            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
                 .await
                 .map_err(unavailable)?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             let mut packet = [0; 37];
             packet[..4].copy_from_slice(b"CAO1");
             packet[4] = match self.kind {
@@ -1035,7 +1035,7 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
 }
 
 pub(super) async fn serve(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
@@ -1151,7 +1151,7 @@ pub(super) async fn serve(
 }
 
 fn public_code(error: EngineError) -> String {
-    if PROCESS_CODES.contains(&error.0.as_str()) {
+    if PROCESS_CODES.contains(&error.0.as_str()) || crate::storage::storage_answer(&error.0) {
         error.0
     } else {
         "process_outcome_unknown".into()
@@ -1159,7 +1159,7 @@ fn public_code(error: EngineError) -> String {
 }
 
 async fn handle(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],

@@ -2205,6 +2205,7 @@ fn the_host_platform_opens_draws_faults_and_dismisses_a_view_over_its_webview() 
         host,
         HOST_VIEW,
         100,
+        [PAGE.0, PAGE.1, PAGE.2, PAGE.3],
         "rows",
         &style,
         events,
@@ -2213,7 +2214,7 @@ fn the_host_platform_opens_draws_faults_and_dismisses_a_view_over_its_webview() 
     let mut view = opened.expect("a view");
     assert!(!platform::shown(&view), "a view opens hidden");
     let rect = [PAGE.0, PAGE.1, PAGE.2, PAGE.3];
-    let scale = platform::place_view(&mut view, rect, true).expect("a shown view's scale");
+    let scale = platform::place_view(&mut view, rect, PAGE.3, true).expect("a shown view's scale");
     assert!(platform::shown(&view), "a placed view shows");
     assert_eq!(platform::scale(&view), scale);
     let mut shared = Shared::new(scale as f32, &style).expect("the host's renderer");
@@ -2259,7 +2260,7 @@ fn host_cell_and_access(view: &platform::View, shared: &Shared) {
 fn host_fault(view: &mut platform::View, shared: &mut Shared) {
     draw::trial_refuse_resize(HOST_VIEW);
     let wider = [50.0, 40.0, 420.0, 300.0];
-    let _ = platform::place_view(view, wider, true);
+    let _ = platform::place_view(view, wider, wider[3], true);
     pump_until("the refused resize faults the view", FARM_WAIT, || {
         !platform::fit(view, shared, (420, 300))
     });

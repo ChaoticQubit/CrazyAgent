@@ -246,7 +246,7 @@ fn landlock_helper() -> Option<PathBuf> {
 }
 
 /// The settings every engine git call carries on top of the research runner's
-/// `GIT_SAFE`: no attributes file from outside the repository, no automatic upkeep, the
+/// `git_safe`: no attributes file from outside the repository, no automatic upkeep, the
 /// case-folding path checks on, no signing, no untracked or split index caches, no
 /// reflog created for a ref update and no commit-graph file, which a confined process could
 /// write to make git answer ancestry wrongly (land-19 r1 M1), and no advice about the grafts
@@ -905,7 +905,7 @@ impl Repo {
             .envs(env.iter().copied())
             .envs(self.index.iter().map(|index| ("GIT_INDEX_FILE", index)))
             .arg("--no-optional-locks")
-            .args(crate::research::runner::GIT_SAFE)
+            .args(crate::research::runner::git_safe())
             .args(ENGINE_SETTINGS)
             .args(&self.overrides);
         if let Some(excludes) = &self.excludes {

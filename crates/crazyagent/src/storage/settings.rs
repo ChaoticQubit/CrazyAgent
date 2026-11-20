@@ -1,10 +1,11 @@
 use super::*;
 use crate::config::{edit_model_access, resolve_config_bytes};
+#[cfg(windows)]
+use crazyagent_win_sandbox::private;
 #[cfg(unix)]
 use rustix::fs::{AtFlags, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
-#[cfg(unix)]
 use std::io::{Read, Write};
 use std::path::PathBuf;
 
@@ -73,7 +74,6 @@ fn source_id(
 }
 
 struct SourceFile {
-    #[cfg(unix)]
     parent: std::fs::File,
     path: PathBuf,
     identity: (u64, u64),
@@ -100,16 +100,19 @@ fn identity(metadata: &std::fs::Metadata) -> (u64, u64) {
     (metadata.dev(), metadata.ino())
 }
 
-impl SourceFile {
-    /// Refuses to open a settings source without Unix owner, mode and inode checks.
-    /// Takes the source path, unused.
-    /// Returns `settings_unavailable` until Windows has its own owner-only file checks.
-    #[cfg(not(unix))]
-    fn open(_path: &Path) -> Result<Self, EngineError> {
-        Err(error("settings_unavailable"))
+/// Maps a refusal from W1's private check to the settings code Unix gives for a source that
+/// is not private, and any other failure to its own text. Input: the I/O error. Output: the
+/// engine error.
+#[cfg(windows)]
+fn refused(cause: std::io::Error) -> EngineError {
+    if cause.kind() == std::io::ErrorKind::PermissionDenied {
+        error("settings_metadata_invalid")
+    } else {
+        error(cause)
     }
+}
 
-    #[cfg(unix)]
+impl SourceFile {
     fn open(path: &Path) -> Result<Self, EngineError> {
         let name = path
             .file_name()
@@ -121,22 +124,100 @@ impl SourceFile {
                 .ok_or_else(|| error("settings_path_invalid"))?,
         )
         .map_err(error)?;
-        let parent = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-            .open(&path)
-            .map_err(error)?;
-        let metadata = parent.metadata().map_err(error)?;
-        private(&metadata, true)?;
+        #[cfg(unix)]
+        let (parent, identity) = {
+            let parent = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+                .open(&path)
+                .map_err(error)?;
+            let metadata = parent.metadata().map_err(error)?;
+            private(&metadata, true)?;
+            (parent, identity(&metadata))
+        };
+        #[cfg(windows)]
+        let (parent, identity) = {
+            let parent = private::dir(&path).map_err(refused)?;
+            let identity = private::identity(&parent).map_err(refused)?;
+            (parent, identity)
+        };
         let source = Self {
             parent,
             path,
-            identity: identity(&metadata),
+            identity,
             name,
         };
         source.verify()?;
         source.read()?;
         Ok(source)
+    }
+
+    /// Writes the source folder's entries to disk after a create, rename or delete in it.
+    /// Output: Ok, or the failure.
+    fn sync_parent(&self) -> Result<(), EngineError> {
+        #[cfg(unix)]
+        return self.parent.sync_all().map_err(error);
+        #[cfg(windows)]
+        return private::sync_folder(&self.path).map_err(error);
+    }
+
+    /// Refuses a source folder that is no longer the held one at its path, the Windows twin of
+    /// the Unix identity check; the hold denies delete sharing, so a swap should be impossible.
+    /// Output: Ok, `settings_parent_replaced` or the check's refusal.
+    #[cfg(windows)]
+    fn verify(&self) -> Result<(), EngineError> {
+        let named = private::dir(&self.path).map_err(refused)?;
+        if !private::same(&named, &self.parent).map_err(error)? {
+            return Err(error("settings_parent_replaced"));
+        }
+        Ok(())
+    }
+
+    /// Reads a private file beside a settings source on Windows: missing reads as empty, a
+    /// file that is not private, too large, changed during the read or replaced at its name is
+    /// refused, as on Unix. Input: the file name. Output: the file's identity and text.
+    #[cfg(windows)]
+    fn read_name(&self, name: &std::ffi::OsStr) -> Result<FileState, EngineError> {
+        self.verify()?;
+        let path = self.path.join(name);
+        let mut file = match private::read_only(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(FileState {
+                    identity: None,
+                    bytes: String::new(),
+                });
+            }
+            Err(e) => return Err(refused(e)),
+        };
+        let identity = private::identity(&file).map_err(refused)?;
+        let metadata = file.metadata().map_err(error)?;
+        if metadata.len() > crate::config::CONFIG_BYTES_MAX as u64 {
+            return Err(error("settings_file_bounds"));
+        }
+        let mut bytes = String::new();
+        (&mut file)
+            .take(crate::config::CONFIG_BYTES_MAX as u64 + 1)
+            .read_to_string(&mut bytes)
+            .map_err(error)?;
+        if bytes.len() > crate::config::CONFIG_BYTES_MAX {
+            return Err(error("settings_file_bounds"));
+        }
+        let after = file.metadata().map_err(error)?;
+        if metadata.len() != after.len()
+            || metadata.modified().map_err(error)? != after.modified().map_err(error)?
+        {
+            return Err(error("settings_source_changed"));
+        }
+        let named = private::read_only(&path).map_err(refused)?;
+        if private::identity(&named).map_err(refused)? != identity {
+            return Err(error("settings_source_replaced"));
+        }
+        assert!(bytes.len() <= crate::config::CONFIG_BYTES_MAX);
+        Ok(FileState {
+            identity: Some(identity),
+            bytes,
+        })
     }
 
     #[cfg(unix)]
@@ -147,14 +228,6 @@ impl SourceFile {
             return Err(error("settings_parent_replaced"));
         }
         Ok(())
-    }
-
-    /// Refuses to read a file beside a settings source without directory-relative opens.
-    /// Takes the file name, unused.
-    /// Returns `settings_unavailable` until Windows has its own owner-only file checks.
-    #[cfg(not(unix))]
-    fn read_name(&self, _name: &std::ffi::OsStr) -> Result<FileState, EngineError> {
-        Err(error("settings_unavailable"))
     }
 
     #[cfg(unix)]
@@ -225,34 +298,24 @@ impl SourceFile {
 pub(crate) struct SettingsSources {
     global: SourceFile,
     project: SourceFile,
-    #[cfg(unix)]
     lease: std::fs::File,
-    #[cfg(unix)]
     lease_name: OsString,
-    #[cfg(unix)]
     source_id: String,
 }
 
-#[cfg(unix)]
 impl Drop for SettingsSources {
     /// Ends the settings writer lease on its open file description when the sources are
     /// dropped, so a child that another thread is starting, and that briefly shares the
     /// description, cannot keep the next writer out. Input: the sources. Output: none.
     fn drop(&mut self) {
+        #[cfg(unix)]
         let _ = rustix::fs::flock(&self.lease, rustix::fs::FlockOperation::Unlock);
+        #[cfg(windows)]
+        let _ = private::unlock(&self.lease);
     }
 }
 
 impl SettingsSources {
-    /// Refuses to hold the writable settings sources without a Unix file lease.
-    /// Takes the global and project paths, unused.
-    /// Returns `settings_unavailable` until Windows has its own owner-only file checks.
-    #[cfg(not(unix))]
-    pub(super) fn open(_global: &Path, _project: &Path) -> Result<Self, EngineError> {
-        Err(error("settings_unavailable"))
-    }
-
-    #[cfg(unix)]
     pub(super) fn open(global: &Path, project: &Path) -> Result<Self, EngineError> {
         let global = SourceFile::open(global)?;
         let project = SourceFile::open(project)?;
@@ -264,17 +327,38 @@ impl SettingsSources {
             ".crazyagent-settings-{}.lock",
             crate::memory::hash(global.name.as_encoded_bytes())
         ));
-        let fd = rustix::fs::openat(
-            &global.parent,
-            &lease_name,
-            OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::from_raw_mode(0o600),
-        )
-        .map_err(error)?;
-        let lease = std::fs::File::from(fd);
-        private(&lease.metadata().map_err(error)?, false)?;
-        rustix::fs::flock(&lease, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-            .map_err(|_| error("settings_writer_busy"))?;
+        #[cfg(unix)]
+        let lease = {
+            let fd = rustix::fs::openat(
+                &global.parent,
+                &lease_name,
+                OFlags::RDWR
+                    | OFlags::CREATE
+                    | OFlags::NOFOLLOW
+                    | OFlags::NONBLOCK
+                    | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o600),
+            )
+            .map_err(error)?;
+            let lease = std::fs::File::from(fd);
+            private(&lease.metadata().map_err(error)?, false)?;
+            rustix::fs::flock(&lease, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+                .map_err(|_| error("settings_writer_busy"))?;
+            lease
+        };
+        #[cfg(windows)]
+        let lease = {
+            let path = global.path.join(&lease_name);
+            let lease = match private::file(&path, true) {
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    private::file(&path, false)
+                }
+                opened => opened,
+            }
+            .map_err(refused)?;
+            private::lock(&lease).map_err(|_| error("settings_writer_busy"))?;
+            lease
+        };
         let sources = Self {
             global,
             project,
@@ -289,7 +373,6 @@ impl SettingsSources {
     /// Reads the held global and project settings for an upgrade backup.
     /// Output: the backup file name and text of each settings file that exists;
     /// a file that does not exist yet is left out.
-    #[cfg(unix)]
     pub(super) fn backup_texts(&self) -> Result<Vec<(&'static str, String)>, EngineError> {
         let state = self.snapshot()?;
         Ok([
@@ -309,18 +392,23 @@ impl SettingsSources {
         )
     }
 
-    /// Refuses to read the held settings sources without a Unix file lease.
-    /// Takes the held sources.
-    /// Returns `settings_unavailable` until Windows has its own owner-only file checks.
-    #[cfg(not(unix))]
     fn snapshot(&self) -> Result<SourceState, EngineError> {
-        Err(error("settings_unavailable"))
-    }
-
-    #[cfg(unix)]
-    fn snapshot(&self) -> Result<SourceState, EngineError> {
-        let named = self.global.read_name(&self.lease_name)?;
-        if named.identity != Some(identity(&self.lease.metadata().map_err(error)?)) {
+        #[cfg(unix)]
+        let (named, held) = (
+            self.global.read_name(&self.lease_name)?.identity,
+            identity(&self.lease.metadata().map_err(error)?),
+        );
+        #[cfg(windows)]
+        let (named, held) = {
+            self.global.verify()?;
+            let named =
+                private::read_only(&self.global.path.join(&self.lease_name)).map_err(refused)?;
+            (
+                Some(private::identity(&named).map_err(refused)?),
+                private::identity(&self.lease).map_err(refused)?,
+            )
+        };
+        if named != Some(held) {
             return Err(error("settings_lease_replaced"));
         }
         Ok(SourceState {
@@ -377,19 +465,10 @@ impl SettingsSources {
         }))
     }
 
-    /// Refuses to publish a settings change without directory-relative renames.
-    /// Takes the database and pending change, both unused.
-    /// Returns `settings_unavailable` until Windows has its own owner-only file checks.
-    #[cfg(not(unix))]
-    fn publish(&self, _db: &Connection, _pending: &mut Pending) -> Result<bool, EngineError> {
-        Err(error("settings_unavailable"))
-    }
-
     /// Publishes a journaled change into the global settings file.
     /// Inputs: the database and the pending change. Output: true once the file holds the
     /// change, or false when another edit changed the sources before the rename, which
     /// proves the change never took effect and leaves that edit on disk.
-    #[cfg(unix)]
     fn publish(&self, db: &Connection, pending: &mut Pending) -> Result<bool, EngineError> {
         match self.replace(db, pending) {
             Err(e) if e.0 == "settings_source_conflict" && self.unpublished(pending)? => Ok(false),
@@ -400,7 +479,6 @@ impl SettingsSources {
     /// Tells whether the global file provably never received a pending change: the journal
     /// names these sources, and its staged file was either never bound or still sits at the
     /// temporary name that the rename would have moved. Input: the pending change.
-    #[cfg(unix)]
     fn unpublished(&self, pending: &Pending) -> Result<bool, EngineError> {
         if pending.live_old().source_id != self.source_id {
             return Ok(false);
@@ -409,53 +487,62 @@ impl SettingsSources {
             return Ok(true);
         };
         self.global.verify()?;
-        match rustix::fs::statat(
+        #[cfg(unix)]
+        let named = match rustix::fs::statat(
             &self.global.parent,
             pending.temporary.as_str(),
             AtFlags::SYMLINK_NOFOLLOW,
         ) {
             #[allow(clippy::unnecessary_cast)]
-            Ok(named) => {
-                Ok(Some((named.st_dev as u64, named.st_ino)) == pending.live(Some(staged)))
-            }
-            Err(rustix::io::Errno::NOENT) => Ok(false),
-            Err(e) => Err(error(e)),
-        }
-    }
-
-    /// Refuses to remove a staged settings file without directory-relative unlinks.
-    /// Takes the file name, unused.
-    /// Returns `settings_unavailable` until Windows has its own owner-only file checks.
-    #[cfg(not(unix))]
-    fn remove_temporary(&self, _name: &str) -> Result<(), EngineError> {
-        Err(error("settings_unavailable"))
+            Ok(named) => Some((named.st_dev as u64, named.st_ino)),
+            Err(rustix::io::Errno::NOENT) => None,
+            Err(e) => return Err(error(e)),
+        };
+        #[cfg(windows)]
+        let named = match private::read_only(&self.global.path.join(&pending.temporary)) {
+            Ok(file) => Some(private::identity(&file).map_err(refused)?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(refused(e)),
+        };
+        Ok(named.is_some() && named == pending.live(Some(staged)))
     }
 
     /// Removes a staged publication file this writer left, so an interrupted write is staged
     /// again and an abandoned change leaves nothing behind. Input: the temporary file name.
     /// Output: unit once nothing has that name; anything but a private regular file is refused.
-    #[cfg(unix)]
     fn remove_temporary(&self, name: &str) -> Result<(), EngineError> {
         self.global.verify()?;
-        let fd = match rustix::fs::openat(
-            &self.global.parent,
-            name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::empty(),
-        ) {
-            Ok(fd) => fd,
-            Err(rustix::io::Errno::NOENT) => return Ok(()),
-            Err(e) => return Err(error(e)),
-        };
-        private(&std::fs::File::from(fd).metadata().map_err(error)?, false)?;
-        rustix::fs::unlinkat(&self.global.parent, name, AtFlags::empty()).map_err(error)?;
-        self.global.parent.sync_all().map_err(error)
+        #[cfg(unix)]
+        {
+            let fd = match rustix::fs::openat(
+                &self.global.parent,
+                name,
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                Mode::empty(),
+            ) {
+                Ok(fd) => fd,
+                Err(rustix::io::Errno::NOENT) => return Ok(()),
+                Err(e) => return Err(error(e)),
+            };
+            private(&std::fs::File::from(fd).metadata().map_err(error)?, false)?;
+            rustix::fs::unlinkat(&self.global.parent, name, AtFlags::empty()).map_err(error)?;
+        }
+        #[cfg(windows)]
+        {
+            let path = self.global.path.join(name);
+            match private::read_only(&path) {
+                Ok(file) => drop(file),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) => return Err(refused(e)),
+            }
+            std::fs::remove_file(&path).map_err(error)?;
+        }
+        self.global.sync_parent()
     }
 
     /// Stages the pending change in its temporary file and renames it over the global file.
     /// Inputs: the database and the pending change. Output: unit once the global file holds
     /// the change, or the error that stopped it.
-    #[cfg(unix)]
     fn replace(&self, db: &Connection, pending: &mut Pending) -> Result<(), EngineError> {
         let current = self.snapshot()?;
         let old = pending.live_old();
@@ -466,7 +553,7 @@ impl SettingsSources {
             && current.global.identity == pending.live(pending.new_identity)
             && pending.new_identity.is_some()
         {
-            self.global.parent.sync_all().map_err(error)?;
+            self.global.sync_parent()?;
             return Ok(());
         }
         if current.global != old.global {
@@ -475,34 +562,46 @@ impl SettingsSources {
         let name = OsString::from(&pending.temporary);
         if pending.new_identity.is_none() {
             self.remove_temporary(&pending.temporary)?;
-            let fd = rustix::fs::openat(
-                &self.global.parent,
-                &name,
-                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::from_raw_mode(0o600),
-            )
-            .map_err(error)?;
-            let mut file = std::fs::File::from(fd);
+            #[cfg(unix)]
+            let mut file = std::fs::File::from(
+                rustix::fs::openat(
+                    &self.global.parent,
+                    &name,
+                    OFlags::WRONLY
+                        | OFlags::CREATE
+                        | OFlags::EXCL
+                        | OFlags::NOFOLLOW
+                        | OFlags::CLOEXEC,
+                    Mode::from_raw_mode(0o600),
+                )
+                .map_err(error)?,
+            );
+            #[cfg(windows)]
+            let mut file = private::file(&self.global.path.join(&name), true).map_err(refused)?;
             file.write_all(pending.new_global.as_bytes())
                 .map_err(error)?;
             file.sync_all().map_err(error)?;
+            drop(file);
             let temporary = self.global.read_name(&name)?;
             if temporary.identity.is_none() || temporary.bytes != pending.new_global {
                 return Err(error("settings_temporary_conflict"));
             }
-            let fd = rustix::fs::openat(
-                &self.global.parent,
-                &name,
-                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(error)?;
-            let file = std::fs::File::from(fd);
-            if Some(identity(&file.metadata().map_err(error)?)) != temporary.identity {
-                return Err(error("settings_temporary_conflict"));
+            #[cfg(unix)]
+            {
+                let fd = rustix::fs::openat(
+                    &self.global.parent,
+                    &name,
+                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(error)?;
+                let file = std::fs::File::from(fd);
+                if Some(identity(&file.metadata().map_err(error)?)) != temporary.identity {
+                    return Err(error("settings_temporary_conflict"));
+                }
+                file.sync_all().map_err(error)?;
             }
-            file.sync_all().map_err(error)?;
-            self.global.parent.sync_all().map_err(error)?;
+            self.global.sync_parent()?;
             pending.new_identity = pending.pinned(temporary.identity)?;
             save_pending(db, pending)?;
         }
@@ -515,6 +614,7 @@ impl SettingsSources {
         if self.snapshot()? != old {
             return Err(error("settings_source_conflict"));
         }
+        #[cfg(unix)]
         rustix::fs::renameat(
             &self.global.parent,
             &name,
@@ -522,7 +622,13 @@ impl SettingsSources {
             &self.global.name,
         )
         .map_err(error)?;
-        self.global.parent.sync_all().map_err(error)?;
+        #[cfg(windows)]
+        std::fs::rename(
+            self.global.path.join(&name),
+            self.global.path.join(&self.global.name),
+        )
+        .map_err(error)?;
+        self.global.sync_parent()?;
         let published = self.snapshot()?;
         if published.global.identity != pending.live(pending.new_identity)
             || published.global.bytes != pending.new_global
@@ -609,7 +715,24 @@ impl Pending {
     }
 }
 
-#[cfg(unix)]
+/// The journal pins as the live files number them on Windows, where nothing renumbers a
+/// volume at mount: a volume keeps its serial number, so every pin and the journal's old
+/// sources are live as written.
+#[cfg(windows)]
+impl Pending {
+    fn live(&self, pin: Option<(u64, u64)>) -> Option<(u64, u64)> {
+        pin
+    }
+
+    fn pinned(&self, pin: Option<(u64, u64)>) -> Result<Option<(u64, u64)>, EngineError> {
+        Ok(pin)
+    }
+
+    fn live_old(&self) -> SourceState {
+        self.old.clone()
+    }
+}
+
 fn save_pending(db: &Connection, pending: &Pending) -> Result<(), EngineError> {
     let body = serde_json::to_vec(pending).map_err(error)?;
     if body.len() > SETTINGS_JOURNAL_MAX {

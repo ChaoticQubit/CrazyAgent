@@ -17,10 +17,12 @@ mod master_rebind_tests;
 mod master_resolve;
 mod master_runtime;
 use crate::coordination::{Role, WorkerBinding};
-use crate::engine::{Engine, io_error, owner_trace as trace, read_frame, verify_peer};
+use crate::engine::{
+    Engine, io_error, owner_trace as trace, read_frame, verify_client, verify_server,
+};
+use crate::ipc::{Listener, Stream};
 use crate::model_gateway::{ConnectionState, Observation};
 use crate::platform::FileExt;
-use crate::platform::unix_socket::{UnixListener, UnixStream};
 use crate::storage::Job;
 use crate::storage::worker_dispatch::{
     DispatchJob, DispatchRecord, DispatchResult, DispatchSnapshot,
@@ -52,6 +54,7 @@ pub(crate) mod ide;
 pub(crate) mod ide_extensions;
 pub(crate) mod ide_tab;
 mod intake;
+mod narrowing;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod overview;
@@ -519,6 +522,7 @@ struct Authority {
     reproof_left: Mutex<Option<std::collections::BTreeSet<CredentialRef>>>,
     icloud: crate::projects_home::icloud::Downloads,
     intake: intake::Intake,
+    drain: Mutex<narrowing::Drain>,
 }
 
 /// Removes what an earlier engine left at a runner folder's place beside the engine's root
@@ -1144,6 +1148,24 @@ impl OwnerRuntimeHandle {
         self.authority.host.clone()
     }
 
+    /// The owner client kinds this engine run holds active, the ones an owner can sign in
+    /// as; a revoked kind stays refused. Output: the kinds, in registration order, or
+    /// `owner_authority_unavailable`.
+    #[cfg(unix)]
+    pub(crate) fn active_kinds(&self) -> Result<Vec<OwnerClientKind>, EngineError> {
+        let slots = self
+            .authority
+            .slots
+            .lock()
+            .map_err(|_| failure("owner_authority_unavailable"))?;
+        assert!(slots.len() <= KEYS.len());
+        Ok(slots
+            .iter()
+            .filter(|slot| slot.registration.active)
+            .map(|slot| slot.registration.kind)
+            .collect())
+    }
+
     pub fn epoch(&self, kind: OwnerClientKind) -> Result<i64, EngineError> {
         let slots = self
             .authority
@@ -1162,9 +1184,25 @@ impl OwnerRuntimeHandle {
     /// Orders a trusted host grant change with actor work and response delivery.
     /// Takes an exact control identity, client kind and expected grant epoch. Returns
     /// committed status; prior delivered data cannot be recalled. A revocation that fails in
-    /// any way refuses the client at once; what storage commits late still takes effect.
+    /// any way refuses the client at once; it is kept on disk first, so one storage never
+    /// took lands later or at the next open, and that one is answered pending.
     pub async fn control(&self, control: OwnerControl) -> Result<OwnerControlReply, EngineError> {
         let (target, decision) = (control.target, control.decision);
+        let kept = match decision {
+            OwnerDecision::Revoke => {
+                self.keep_narrowing(crate::storage::narrowing::Change::Revoke {
+                    operation_id: control.operation_id.clone(),
+                    target,
+                    expected_epoch: control.expected_epoch,
+                })
+                .await
+            }
+            OwnerDecision::Reactivate => None,
+        };
+        let pending = kept.clone().map(|id| narrowing::Pending::Revoke {
+            control: control.clone(),
+            id,
+        });
         let barrier =
             tokio::time::timeout(self.engine.timeout, self.engine.owner_egress.write()).await;
         let submitted = self.authority.next_control();
@@ -1174,7 +1212,7 @@ impl OwnerRuntimeHandle {
             let authority = self.authority.clone();
             self.engine
                 .settled_owner_job(
-                    |reply| Job::OwnerControl(self.authority.host.clone(), control, reply),
+                    |reply| Job::OwnerControl(self.authority.host.clone(), control, kept, reply),
                     move |stored| {
                         let (result, registration) = stored?;
                         authority.publish(registration, submitted).map_err(|_| {
@@ -1190,7 +1228,7 @@ impl OwnerRuntimeHandle {
             _ => Ok(()),
         };
         drop(barrier);
-        closed.and(committed)
+        closed.and(self.pending_unless_taken(committed, pending))
     }
 
     /// Looks up an exact host control through the current storage actor.
@@ -1260,7 +1298,7 @@ impl OwnerRuntimeHandle {
 }
 
 pub struct OwnerServer {
-    listener: UnixListener,
+    listener: Listener,
     engine: Arc<Engine>,
     authority: Arc<Authority>,
     timeout: Duration,
@@ -1328,8 +1366,11 @@ impl OwnerServer {
                 });
             }
             root.verify()?;
-            let listener =
-                crate::spawn_gate::bind_unix(root.path.join(SOCKET)).map_err(io_error)?;
+            let listener = crate::ipc::owner_listener(
+                root.path.join(SOCKET),
+                crate::protocol::OWNER_CLIENTS_MAX + HANDSHAKES_MAX,
+            )
+            .map_err(io_error)?;
             let created = std::fs::symlink_metadata(root.path.join(SOCKET)).map_err(io_error)?;
             created_socket = Some(Identity::of(&created));
             if !created.file_type().is_socket()
@@ -1383,6 +1424,7 @@ impl OwnerServer {
                 reproof_left: Mutex::new(None),
                 icloud: crate::projects_home::icloud::Downloads::default(),
                 intake: intake::Intake::default(),
+                drain: Mutex::new(narrowing::Drain::default()),
             });
             Ok::<_, EngineError>((listener, authority))
         })();
@@ -1451,7 +1493,7 @@ impl OwnerServer {
 
     fn accept_owner_handshake(
         &self,
-        stream: UnixStream,
+        stream: Stream,
         auth: [u8; 37],
         deadline: Instant,
         tasks: &mut Tasks,
@@ -1529,7 +1571,7 @@ impl OwnerServer {
     /// deadline when already read, and the refusal tasks. Output: none.
     fn refuse_busy(
         &self,
-        stream: UnixStream,
+        stream: Stream,
         handshake: Option<([u8; 37], Instant)>,
         refusals: &mut tokio::task::JoinSet<()>,
     ) {
@@ -1566,7 +1608,7 @@ impl OwnerServer {
     /// deadline, and the refusal tasks. Output: none.
     fn refuse_terminal(
         &self,
-        stream: UnixStream,
+        stream: Stream,
         auth: [u8; 37],
         deadline: Instant,
         refusals: &mut tokio::task::JoinSet<()>,
@@ -1654,8 +1696,8 @@ impl OwnerServer {
                         None => {}
                     }
                 }
-                accepted=crate::spawn_gate::accept_unix(&self.listener) => {
-                    let (stream,_)=match accepted {Ok(v)=>v,Err(e)=>break Err(io_error(e))};
+                accepted=crate::ipc::owner_accept(&self.listener) => {
+                    let stream=match accepted {Ok(v)=>v,Err(e)=>break Err(io_error(e))};
                     if handshakes.len()>=HANDSHAKES_MAX {self.refuse_busy(stream, None, &mut tasks.refusals);continue;}
                     let timeout=self.timeout;
                     handshakes.spawn(read_owner_handshake(stream,timeout));
@@ -1790,20 +1832,22 @@ impl Engine {
         let (send, receive) = oneshot::channel();
         let job = build(send);
         let deadline = job.reply_deadline(self.timeout);
-        self.storage
-            .sender
-            .try_send(job)
-            .map_err(|_| failure("owner_queue_not_submitted"))?;
+        let submit_by = tokio::time::Instant::now() + self.timeout;
+        let taken = self
+            .storage
+            .submit(job, submit_by, "owner_queue_not_submitted")
+            .await?;
         tokio::time::timeout(deadline, receive)
             .await
-            .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
+            .map_err(|_| taken.lost(failure("owner_outcome_unknown_reconcile_same_identity")))?
             .map_err(|_| failure("owner_actor_stopped_outcome_unknown"))?
     }
 
     /// Runs one owner storage job and hands storage's answer to `settle` even when the owner
     /// stops waiting first, so what storage commits late still takes effect in memory.
-    /// Inputs: the job and the settle step. Output: the settle step's answer, or the owner
-    /// outcome-unknown error while storage has not answered in time or went away.
+    /// Inputs: the job and the settle step. Output: the settle step's answer; a not-submitted
+    /// code, with nothing to settle; access_change_pending for a narrowing job; else the owner
+    /// outcome-unknown error when a taken job does not answer in time or storage went away.
     async fn settled_owner_job<T: Send + 'static, U: Send + 'static>(
         &self,
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
@@ -1812,10 +1856,23 @@ impl Engine {
         let (send, receive) = oneshot::channel();
         let job = build(send);
         let deadline = job.reply_deadline(self.timeout);
-        self.storage
-            .sender
-            .try_send(job)
-            .map_err(|_| failure("owner_queue_not_submitted"))?;
+        let submit_by = tokio::time::Instant::now() + self.timeout;
+        let submitted = self
+            .storage
+            .submit(job, submit_by, "owner_queue_not_submitted")
+            .await;
+        let taken = match submitted {
+            Ok(taken) => taken,
+            Err(pending) if pending.0 == crate::storage::ACCESS_CHANGE_PENDING => {
+                tokio::spawn(async move {
+                    if let Ok(stored) = receive.await {
+                        let _ = settle(stored);
+                    }
+                });
+                return Err(pending);
+            }
+            Err(refused) => return Err(refused),
+        };
         let settled = tokio::spawn(async move {
             match receive.await {
                 Ok(stored) => settle(stored),
@@ -1824,7 +1881,7 @@ impl Engine {
         });
         tokio::time::timeout(deadline, settled)
             .await
-            .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
+            .map_err(|_| taken.lost(failure("owner_outcome_unknown_reconcile_same_identity")))?
             .map_err(|_| failure("owner_actor_stopped_outcome_unknown"))?
     }
 
@@ -2129,12 +2186,12 @@ impl Engine {
 }
 
 async fn read_owner_handshake(
-    mut stream: UnixStream,
+    mut stream: Stream,
     timeout: Duration,
-) -> Option<(UnixStream, [u8; 37], Instant)> {
+) -> Option<(Stream, [u8; 37], Instant)> {
     let deadline = Instant::now() + timeout;
     let exchange = async {
-        verify_peer(&stream)?;
+        verify_client(&stream)?;
         let mut auth = [0; 37];
         stream.read_exact(&mut auth).await.map_err(io_error)?;
         Ok::<_, EngineError>(auth)
@@ -2147,7 +2204,7 @@ async fn read_owner_handshake(
 
 #[cfg(all(test, target_os = "macos"))]
 async fn serve_owner(
-    stream: UnixStream,
+    stream: Stream,
     engine: Arc<Engine>,
     authority: Arc<Authority>,
     timeout: Duration,
@@ -2164,7 +2221,7 @@ async fn serve_owner(
 /// handshake packet, engine, authority and deadline. Output: none; the reply is written to
 /// the stream and the stream is closed.
 async fn serve_authenticated_owner(
-    mut stream: UnixStream,
+    mut stream: Stream,
     auth: [u8; 37],
     engine: Arc<Engine>,
     authority: Arc<Authority>,
@@ -2221,11 +2278,11 @@ fn log_panic<T>(result: &Result<T, tokio::task::JoinError>, code: &str) {
 /// Inputs: the stream, the handshake packet and the authority. Output: the owner
 /// admission (none for a runner) and the whole frame, or the error that ends it.
 async fn admit(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     auth: &[u8; 37],
     authority: &Authority,
 ) -> Result<(Option<Admission>, Vec<u8>), EngineError> {
-    verify_peer(stream)?;
+    verify_client(stream)?;
     let admission = if &auth[..4] == b"CAR1" {
         authority.authenticate_runner(auth)?;
         None
@@ -2303,7 +2360,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
 }
 
 async fn serve_admitted(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     auth: &[u8; 37],
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
@@ -2367,7 +2424,7 @@ async fn serve_admitted(
             Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
             Protocol::Roadmap => return Ok(Some(Deferred::Roadmap(a))),
             Protocol::NativeAuth => {
-                return native_auth::serve(stream, engine, authority, auth, &a, body)
+                return native_auth::serve(stream, engine, authority, auth, &a, body, deadline)
                     .await
                     .map(|()| None);
             }
@@ -2516,6 +2573,7 @@ async fn serve_admitted(
             .await
             .map(|()| None)
     });
+    let exchange = crate::storage::before_cut(deadline, engine.timeout, exchange);
     let Ok(Ok(Some(deferred))) = tokio::time::timeout_at(deadline, exchange).await else {
         return;
     };
@@ -2538,61 +2596,77 @@ async fn serve_admitted(
         }
         Deferred::Agents(a) => {
             let served = agents::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(agents::CONTROL_TIMEOUT, served).await;
+            within(agents::CONTROL_TIMEOUT, served).await;
         }
         Deferred::Changes(a) => {
             let served = changes::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(changes::CHANGES_TIMEOUT, served).await;
+            within(changes::CHANGES_TIMEOUT, served).await;
         }
         Deferred::IdeExtensions(a) => {
             let served = ide_extensions::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(ide_extensions::IDE_EXTENSIONS_TIMEOUT, served).await;
+            within(ide_extensions::IDE_EXTENSIONS_TIMEOUT, served).await;
         }
         Deferred::Recovery(a) => {
             let served = recovery::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(recovery::RECOVERY_TIMEOUT, served).await;
+            within(recovery::RECOVERY_TIMEOUT, served).await;
         }
         Deferred::Ide(a) => {
             let served = ide::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(ide::IDE_TIMEOUT, served).await;
+            within(ide::IDE_TIMEOUT, served).await;
         }
         Deferred::Process(a) => {
             let served = process::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(process::PROPOSE_TIMEOUT, served).await;
+            within(process::PROPOSE_TIMEOUT, served).await;
         }
         Deferred::IdeTab(a) => {
             let served = ide_tab::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(ide_tab::IDE_TAB_TIMEOUT, served).await;
+            within(ide_tab::IDE_TAB_TIMEOUT, served).await;
         }
         Deferred::Questions(a) => {
             let served = questions::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(questions::QUESTIONS_TIMEOUT, served).await;
+            within(questions::QUESTIONS_TIMEOUT, served).await;
         }
         Deferred::Roadmap(a) => {
             let served = roadmap::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(roadmap::ROADMAP_TIMEOUT, served).await;
+            within(roadmap::ROADMAP_TIMEOUT, served).await;
         }
         Deferred::Cleanup(a) => {
             let served = cleanup::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served).await;
+            within(cleanup::CLEANUP_TIMEOUT, served).await;
         }
         Deferred::Overview(a) => {
             let served = overview::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(overview::OVERVIEW_TIMEOUT, served).await;
+            within(overview::OVERVIEW_TIMEOUT, served).await;
         }
         Deferred::SkillImport(a) => {
             let served = plugins::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(plugins::IMPORT_TIMEOUT, served).await;
+            within(plugins::IMPORT_TIMEOUT, served).await;
         }
         Deferred::Usage(a) => {
             let served = usage::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(usage::USAGE_TIMEOUT, served).await;
+            within(usage::USAGE_TIMEOUT, served).await;
         }
         Deferred::HarnessUpdates(a) => {
             let served = harness_catalog::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(harness_catalog::UPDATES_TIMEOUT, served).await;
+            within(harness_catalog::UPDATES_TIMEOUT, served).await;
         }
     }
+}
+
+/// Runs one deferred owner request under its own bound, each timed storage job it submits
+/// decided before the bound cuts it, so the request answers that decision itself.
+/// Inputs: the bound and the request. Output: none; the request writes its own reply.
+async fn within<F: std::future::Future>(bound: Duration, served: F) {
+    let cut = Instant::now() + bound;
+    let _ = tokio::time::timeout_at(cut, crate::storage::before_cut(cut, bound, served)).await;
+}
+
+/// The longest an owner client waits for a request the engine serves under `bound` once it
+/// admits it: the client's own timeout, which covers the admission and the reply's write,
+/// plus the bound, so the engine's answer, a refusal included, arrives before the client gives
+/// up. Inputs: the client timeout and the engine's bound. Output: the wait.
+fn deferred_wait(timeout: Duration, bound: Duration) -> Duration {
+    timeout + bound
 }
 
 /// One owner request served past its exchange. While it runs it is counted apart from
@@ -2673,7 +2747,7 @@ enum Deferred {
 /// Inputs: the stream, the handshake packet, the whole request frame and the code.
 /// Output: Ok once written; Ok without a reply for the Claude code input, which has none.
 async fn refuse(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     auth: &[u8; 37],
     frame: &[u8],
     code: &str,
@@ -2726,7 +2800,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
 }
 
 async fn write_owner_reply(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     result: Result<OwnerReply, EngineError>,
     id: RequestId,
     mutation: bool,
@@ -2742,7 +2816,7 @@ const REPLY_WRITE_TIME: Duration = Duration::from_secs(2);
 /// `REPLY_WRITE_TIME` so a client that stops reading never holds the barrier for others;
 /// the connection is then dropped. Inputs: the connection and the frame.
 /// Output: done once written, or `owner_reply_stalled` and the write error.
-async fn write_reply(stream: &mut UnixStream, frame: &[u8]) -> Result<(), EngineError> {
+async fn write_reply(stream: &mut Stream, frame: &[u8]) -> Result<(), EngineError> {
     tokio::time::timeout(REPLY_WRITE_TIME, stream.write_all(frame))
         .await
         .map_err(|_| failure("owner_reply_stalled"))?
@@ -2760,19 +2834,19 @@ fn owner_reply_frame(
     mutation: bool,
 ) -> Result<Vec<u8>, EngineError> {
     let reply = result.unwrap_or_else(|e| {
-        let known = matches!(
-            e.0.as_str(),
-            "owner_busy"
-                | "owner_grant_stale_or_revoked"
-                | "owner_runtime_stale"
-                | "owner_queue_not_submitted"
-                | "operation_identity_conflict"
-                | "master_transaction_rolled_back"
-                | "master_dispatch_stopped"
-                | "master_dispatch_capacity"
-                | "move_project_old_folder_left"
-                | "job_busy"
-        );
+        let known = crate::storage::storage_answer(&e.0)
+            || matches!(
+                e.0.as_str(),
+                "owner_busy"
+                    | "owner_grant_stale_or_revoked"
+                    | "owner_runtime_stale"
+                    | "operation_identity_conflict"
+                    | "master_transaction_rolled_back"
+                    | "master_dispatch_stopped"
+                    | "master_dispatch_capacity"
+                    | "move_project_old_folder_left"
+                    | "job_busy"
+            );
         let response = if mutation && !known {
             OwnerResponse::OutcomeUnknown {
                 operation_id: id.clone(),
@@ -2861,10 +2935,10 @@ async fn runner_control(
         if root.socket_identity_at("control.sock")? != endpoint {
             return Err(failure("runner_control_socket_replaced"));
         }
-        let mut stream = crate::spawn_gate::connect_unix(root.path.join("control.sock"))
+        let mut stream = crate::ipc::owner_connect(root.path.join("control.sock"))
             .await
             .map_err(io_error)?;
-        verify_peer(&stream)?;
+        verify_server(&stream)?;
         if root.socket_identity_at("control.sock")? != endpoint {
             return Err(failure("runner_control_socket_replaced"));
         }
@@ -3277,10 +3351,10 @@ impl RunnerClient {
             let mut token = [0; 32];
             file.read_exact_at(&mut token, 0).map_err(io_error)?;
             let socket = generation.socket_identity()?;
-            let mut stream = crate::spawn_gate::connect_unix(generation.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(generation.path.join(SOCKET))
                 .await
                 .map_err(io_error)?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             if generation.socket_identity()? != socket {
                 return Err(failure("owner_socket_replaced"));
             }
@@ -3445,6 +3519,7 @@ pub struct OwnerClient {
     token: [u8; 32],
     socket: Identity,
     timeout: Duration,
+    engine_timeout: Duration,
 }
 
 impl OwnerClient {
@@ -3477,7 +3552,18 @@ impl OwnerClient {
             token,
             socket,
             timeout,
+            engine_timeout: timeout,
         })
+    }
+
+    /// Takes the owner timeout the engine serves its requests under, as its generation names
+    /// it to the client that discovered it. None, for an older engine that names none, keeps
+    /// the client's own timeout in its place. Input: the engine's timeout. Output: the client.
+    pub(crate) fn serving_under(mut self, engine: Option<Duration>) -> Self {
+        if let Some(engine) = engine {
+            self.engine_timeout = engine;
+        }
+        self
     }
 
     /// Says what a reply that would not parse means. For a read it is an engine writing what
@@ -3524,10 +3610,10 @@ impl OwnerClient {
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
-            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
                 .await
                 .map_err(io_error)?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
@@ -4132,12 +4218,10 @@ fallback_allowed = false
         let (server, host) = OwnerServer::bind(root.path(), engine.clone(), &config)
             .await
             .unwrap();
-        let mut client = crate::spawn_gate::connect_unix(root.path().join(SOCKET))
+        let mut client = crate::ipc::owner_connect(root.path().join(SOCKET))
             .await
             .unwrap();
-        let (stream, _) = crate::spawn_gate::accept_unix(&server.listener)
-            .await
-            .unwrap();
+        let stream = crate::ipc::owner_accept(&server.listener).await.unwrap();
         nix::sys::socket::setsockopt(&stream, nix::sys::socket::sockopt::SndBuf, &1024usize)
             .unwrap();
         nix::sys::socket::setsockopt(&client, nix::sys::socket::sockopt::RcvBuf, &1024usize)

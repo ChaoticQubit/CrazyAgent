@@ -47,6 +47,13 @@ impl Clip {
         }
     }
 
+    /// Puts plain text on the pasteboard for the page's own Copy command, which comes over
+    /// IPC; on macOS that is the same write. Input: 1 to `COPY_BYTES_MAX` bytes of text.
+    /// Output: whether the pasteboard took it.
+    pub fn write_command(&self, text: &str) -> bool {
+        self.write(text)
+    }
+
     /// Reads the pasteboard's plain text. Output: the text, or none when it holds none.
     pub fn read(&self) -> Option<String> {
         let text = unsafe { self.board.stringForType(NSPasteboardTypeString) }?;

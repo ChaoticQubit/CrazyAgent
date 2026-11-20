@@ -1,8 +1,8 @@
 use crate::engine::EngineError;
 use crate::engine::owner::transport::changes::CHANGES_TIMEOUT;
 use crate::engine::owner::{OwnerRuntimeHandle, failure};
+use crate::ipc::Stream;
 use crate::landing::ChangeSetId;
-use crate::platform::unix_socket::UnixStream;
 use crate::protocol::{ProjectId, RequestId, encode_frame, plain_code};
 use crate::sandbox::policy::AgentAccess;
 use crate::terminal::{AgentId, SIZE_MAX, SIZE_MIN};
@@ -927,7 +927,7 @@ fn register_extension(extensions: &Path, folder: &Path) -> Result<(), EngineErro
 /// its `outcome_unknown` code.
 /// Inputs: the stream, handshake packet, owner runtime and deadline.
 pub(crate) async fn serve(
-    stream: UnixStream,
+    stream: Stream,
     packet: [u8; 37],
     runtime: OwnerRuntimeHandle,
     deadline: Instant,
@@ -939,7 +939,7 @@ pub(crate) async fn serve(
 /// may take before its outcome is unknown, which [`serve`] sets to `IDE_WRITE_TIME`.
 /// Inputs: the stream, handshake packet, owner runtime, deadline and that time.
 async fn serve_within(
-    mut stream: UnixStream,
+    mut stream: Stream,
     packet: [u8; 37],
     runtime: OwnerRuntimeHandle,
     deadline: Instant,
@@ -1060,7 +1060,7 @@ fn bound(call: &IdeCall, deadline: Instant, write_time: Duration) -> Instant {
 /// `ide_capability_refused`, `ide_request_invalid`, `ide_project_refused`,
 /// `ide_session_required` or `ide_session_taken`.
 async fn open(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     packet: &[u8; 37],
     runtime: &OwnerRuntimeHandle,
 ) -> Result<(ProjectId, IdeCall), EngineError> {
@@ -1247,7 +1247,7 @@ async fn workspace(
 /// per event, until the client sends anything or closes, the capability is revoked
 /// (`ide_capability_revoked`) or the client falls behind (`ide_events_lagged`).
 /// Inputs: the stream, handshake packet and owner runtime. Output: none.
-async fn events(stream: &mut UnixStream, packet: &[u8; 37], runtime: &OwnerRuntimeHandle) {
+async fn events(stream: &mut Stream, packet: &[u8; 37], runtime: &OwnerRuntimeHandle) {
     let mut events = match runtime.ide_grants().subscribe(packet) {
         Ok(events) => events,
         Err(error) => {

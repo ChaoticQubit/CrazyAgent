@@ -51,6 +51,7 @@ pub fn open_view(
     _parent: Parent,
     _page: u64,
     key: u32,
+    _rect: [f64; 4],
     _label: &str,
     _style: &Style,
     events: Channel<NativeEvent>,
@@ -66,9 +67,9 @@ pub fn open_view(
 /// Gives a view focus; no view exists to focus. Input: the view.
 pub fn focus_view(_view: &View) {}
 
-/// Places a view; no view shows here. Inputs: the view, the place and whether it shows.
-/// Output: none, as for a hidden view.
-pub fn place_view(_view: &mut View, _rect: [f64; 4], _shown: bool) -> Option<f64> {
+/// Places a view; no view shows here. Inputs: the view, the place, the page's viewport
+/// height and whether it shows. Output: none, as for a hidden view.
+pub fn place_view(_view: &mut View, _rect: [f64; 4], _viewport: f64, _shown: bool) -> Option<f64> {
     None
 }
 
@@ -132,6 +133,11 @@ impl Clip {
 
     /// Refuses a copy. Input: the text. Output: false.
     pub fn write(&self, _text: &str) -> bool {
+        false
+    }
+
+    /// Refuses the page's Copy command. Input: the text. Output: false.
+    pub fn write_command(&self, _text: &str) -> bool {
         false
     }
 

@@ -28,6 +28,9 @@ pub(crate) mod test_server;
 mod tests;
 
 pub use api::Endpoints;
+pub(crate) use clone::NULL_DEVICE;
+#[cfg(not(unix))]
+pub(crate) use clone::git_program;
 pub use job::{
     GitHubDraft, GitHubIgnoreDraft, GitHubPublishJob, GitHubPublishLeft, GitHubPublishPlan,
     GitHubPublishStep,
@@ -691,7 +694,8 @@ impl GitHub {
     /// Finds the lines a publish would push that hold a secret, by file and line, at
     /// most 20 a file and 1000 in all, saying when the list was cut there.
     /// Inputs: the project folder and its history. Output: the scan, or
-    /// `github_publish_not_plain_repo`, `github_publish_too_large` or `github_publish_failed`.
+    /// `github_publish_not_plain_repo`, `github_publish_too_large`, `github_publish_failed`, or on
+    /// Windows `github_publish_nested_repository` or `github_publish_tree_too_large`.
     pub fn publish_secrets(
         &self,
         project: &Path,

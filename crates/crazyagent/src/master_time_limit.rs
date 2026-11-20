@@ -16,7 +16,6 @@ pub const RUN_TIME_MAX: Duration = Duration::from_secs(60 * 60);
 /// the start only, never the turn: a turn the owner cannot stop yet must not wait for ever.
 pub const START_TIME_MAX: Duration = Duration::from_secs(10 * 60);
 
-#[cfg(any(unix, test))]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS configured_master_time (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     time_limit TEXT NOT NULL CHECK(time_limit IN ('no_limit', 'minutes10', 'minutes30', 'minutes60'))
@@ -104,7 +103,6 @@ fn invalid() -> EngineError {
 
 /// Creates the settings table when it is missing. Input: the engine database. Output: Ok,
 /// or the database error.
-#[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(error)
 }

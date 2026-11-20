@@ -2819,9 +2819,17 @@ fn run_words(kind: crate::sandbox::hidden_paths::RunKind) -> &'static str {
     }
 }
 
-/// The Settings line for a project's hidden folders: how many, or loading.
-/// Takes the screen and look. Returns the row with its edit key.
+/// The Settings line for a project's hidden folders: how many, or loading; where this
+/// system's boundary cannot hold them (#590), one plain line, or how to clear a saved list.
+/// Takes the screen and look. Returns the row, with its edit key while editing is offered.
 fn hidden_line(screen: &ProjectScreen, look: &Look) -> Row {
+    if !screen.hidden_offered() {
+        return Row::of("Works only on macOS for now", look.muted);
+    }
+    let unheld = screen
+        .hidden_paths
+        .as_ref()
+        .is_some_and(|saved| saved.unavailable);
     let text = match screen
         .hidden_paths
         .as_ref()
@@ -2832,7 +2840,16 @@ fn hidden_line(screen: &ProjectScreen, look: &Look) -> Row {
         Some([one]) => one.clone(),
         Some(many) => format!("{} hidden folders", many.len()),
     };
-    Row::of(text, look.fg).push("   k Edit hidden folders", look.muted)
+    let row = Row::of(text, look.fg);
+    let row = if unheld {
+        row.push(
+            "  ! Only on macOS; remove them so agents start",
+            look.warning,
+        )
+    } else {
+        row
+    };
+    row.push("   k Edit hidden folders", look.muted)
 }
 
 fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) -> Drawn {
@@ -2878,15 +2895,13 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
         entry("Team", team_line(screen, look)),
         entry("Folders", folders_line(screen, look)),
     ];
-    if screen.hidden_offered() {
-        lines.push(entry("Hidden", hidden_line(screen, look)));
-        lines.extend(seers_line(screen, look).map(|row| entry("", row)));
-        lines.extend(
-            runs_lines(screen, content.saturating_sub(10), look)
-                .into_iter()
-                .map(|row| entry("", row)),
-        );
-    }
+    lines.push(entry("Hidden", hidden_line(screen, look)));
+    lines.extend(seers_line(screen, look).map(|row| entry("", row)));
+    lines.extend(
+        runs_lines(screen, content.saturating_sub(10), look)
+            .into_iter()
+            .map(|row| entry("", row)),
+    );
     lines.extend([
         entry(
             "Access",

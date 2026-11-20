@@ -2,8 +2,9 @@ import { Channel } from "@tauri-apps/api/core";
 import { call, type Result } from "../../api";
 
 /** A native view's place: the host element's `getBoundingClientRect()` in CSS pixels of the
- * webview's viewport. */
-export type NativeRect = { x: number; y: number; width: number; height: number };
+ * webview's viewport, and that viewport's height (`innerHeight`), by which the desktop frames
+ * the view below the part of its webview the page does not reach (the macOS title bar). */
+export type NativeRect = { x: number; y: number; width: number; height: number; viewport: number };
 
 /** The colours a native view draws with, each a CSS colour string (`#rgb`, `#rrggbb`,
  * `rgb()` or `rgba()`) read from the same `--terminal-*` tokens as today's panel. */
@@ -38,8 +39,8 @@ export type NativeStyle = { fontFamily: string; fontSize: number; cursorBlink: b
 /** What a native view tells its panel: `ready` once with its grid; at any time `menu` (a right
  * click, in CSS pixels), `mouse` (mouse reporting on or off), `behind` (scrolled off or back
  * to the bottom); last, at most once, `ended` with a plain code, after which the view is gone.
- * `final` is false when a reopen may find the agent again, true when it cannot help (grant
- * revoked, an invalid request, another agent or a newer view, typing overflow, no GPU). */
+ * `final`: a reopen by the page cannot help (grant revoked, an invalid request, another agent
+ * or a newer view, typing overflow), or a failed drawing, which only the owner's reopen retries. */
 export type NativeEvent =
   | { type: "ready"; cols: number; rows: number }
   | { type: "menu"; x: number; y: number }

@@ -112,6 +112,9 @@ const LEAD_SHELL: &str = "/bin/sh";
 /// The pane option naming the agent whose own app a pane of a lead's server runs, set by the
 /// engine at spawn, since the lead's window also holds the panes its teammates split off.
 const AGENT_TAG: &str = "@crazyagent";
+/// The window option marking a window whose app pane the engine tagged, set with the tag, so
+/// a window that lost its app pane never hands its one teammate pane to the app's prompts.
+const APP_MARK: &str = "@crazyagent-app";
 const TERMINAL_TYPE: &str = "xterm-256color";
 const TERMINAL_DEFAULTS: [(&str, &str); 2] = [("TERM", TERMINAL_TYPE), ("COLORTERM", "truecolor")];
 const VERSION_MIN: (u32, u32) = (3, 7);
@@ -708,6 +711,49 @@ impl Tmux {
             .ok_or_else(|| failure("terminal_agent_unknown"))
     }
 
+    /// The pane an agent's prompts go to (V243-PASTE-INTERLEAVE-N0): the one tagged with its
+    /// name, searched on the engine's server in the agent's window only. Only a window no
+    /// engine marked (`APP_MARK`) gives its one untagged pane, marked now; any other gives
+    /// none, never a pane that may be a teammate's. Takes the control client and the agent.
+    /// Returns the pane id, `APP_PANE_UNKNOWN`, or `terminal_agent_unknown` with no window.
+    fn app_pane(&self, control: &Control, agent: &AgentId) -> Result<String, HostError> {
+        if self.confined.is_some() {
+            return self.agent_target(control, agent);
+        }
+        let lines = control.ask(&format!(
+            "list-panes -t {} -F '#{{pane_id}} #{{{APP_MARK}}} #{{{AGENT_TAG}}}{FORMAT_END}'",
+            target(agent)
+        ))?;
+        let panes: Vec<(&str, &str, &str)> = lines
+            .iter()
+            .filter_map(|line| {
+                let mut fields = std::str::from_utf8(line).ok()?.splitn(3, ' ');
+                Some((fields.next()?, fields.next()?, fields.next()?))
+            })
+            .filter(|(pane, ..)| pane_id_valid(pane))
+            .take(PANES_LISTED_MAX)
+            .collect();
+        if let Some((pane, ..)) = panes.iter().find(|(.., tag)| *tag == agent.as_str()) {
+            return Ok((*pane).to_owned());
+        }
+        let [(pane, "", "")] = panes.as_slice() else {
+            return Err(failure(super::APP_PANE_UNKNOWN));
+        };
+        Self::mark_app(control, pane, agent)?;
+        Ok((*pane).to_owned())
+    }
+
+    /// Marks a pane's window as one whose app the engine tagged, then tags the pane as the
+    /// agent's app, so the one-pane fallback never takes a pane left beside it; a pane that
+    /// closes between the two leaves a marked window, which refuses (CR-0351 F1). Takes the
+    /// control client, the pane id and the agent. Returns once both are set, or tmux's error.
+    fn mark_app(control: &Control, pane: &str, agent: &AgentId) -> Result<(), HostError> {
+        assert!(pane_id_valid(pane), "only a pane id is tagged");
+        control.run(&format!("set-option -w -t {pane} {APP_MARK} {agent}"))?;
+        control.run(&format!("set-option -p -t {pane} {AGENT_TAG} {agent}"))?;
+        Ok(())
+    }
+
     /// Whether this lead server holds a pane tagged with the agent's name. Takes the agent.
     /// Returns false on the engine's server or when the server cannot answer.
     pub(super) fn holds(&self, agent: &AgentId) -> bool {
@@ -830,8 +876,9 @@ impl Tmux {
 
     /// Hands bytes to one tmux target: a request `pastes` takes goes through a named tmux
     /// buffer in one paste, any other is typed as hex keys, one command after another, in
-    /// order. Takes the control client, the target and the bytes. Returns once tmux took them
-    /// all, or `terminal_input_bounds`.
+    /// order, all into the pane a window target names at the start when there are several
+    /// (V243-PASTE-INTERLEAVE-N0). Takes the control client, the target and the bytes.
+    /// Returns once tmux took them all, `terminal_input_bounds`, or the lookup's code.
     fn send_bytes(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
         if bytes.len() > INPUT_BYTES_MAX {
             return Err(failure("terminal_input_bounds"));
@@ -839,7 +886,15 @@ impl Tmux {
         if pastes(bytes) {
             return Self::send_pasted(control, target, bytes);
         }
-        for line in send_keys_lines(target, bytes) {
+        let mut lines = send_keys_lines(target, bytes);
+        if lines.len() > 1 && !pane_id_valid(target) {
+            let pane = Self::displayed(control, target, "#{pane_id}")?;
+            if !pane_id_valid(&pane) {
+                return Err(failure("terminal_command_failed"));
+            }
+            lines = send_keys_lines(&pane, bytes);
+        }
+        for line in lines {
             control.run(&line)?;
         }
         Ok(())
@@ -892,12 +947,13 @@ impl Tmux {
     /// Reads one format of one tmux target. `display-message` answers for the current pane,
     /// with success, when its target is gone (tmux 3.8), so the answer also names its pane
     /// and window, and one of them must be the target. Takes the control client, a `%N` pane
-    /// or `session:=window` target, whose names hold no space, and the format. Returns the
-    /// format's text, or `terminal_agent_unknown` once the target is gone.
+    /// or `session:=window` target, and a format whose text holds no space; the names come
+    /// last and may. Returns the format's text, or `terminal_agent_unknown` once the target
+    /// is gone.
     fn displayed(control: &Control, target: &str, format: &str) -> Result<String, HostError> {
-        let named = "#{pane_id} #{session_name}:=#{window_name}";
+        let named = "#{session_name}:=#{window_name}";
         let lines = control.ask(&format!(
-            "display-message -p -t {target} '{named} {format}{FORMAT_END}'"
+            "display-message -p -t {target} '#{{pane_id}} {format} {named}{FORMAT_END}'"
         ))?;
         let unread = || failure("terminal_command_failed");
         let line = lines
@@ -905,11 +961,27 @@ impl Tmux {
             .and_then(|line| std::str::from_utf8(line).ok())
             .ok_or_else(unread)?;
         let (pane, rest) = line.split_once(' ').ok_or_else(unread)?;
-        let (window, text) = rest.split_once(' ').ok_or_else(unread)?;
+        let (text, window) = rest.split_once(' ').ok_or_else(unread)?;
         if pane != target && window != target {
             return Err(failure("terminal_agent_unknown"));
         }
         Ok(text.to_owned())
+    }
+
+    /// The held control client while it is the one that found a view's pane and still reads,
+    /// so a command aimed at that pane id never reaches a pane of a newer server, which can
+    /// reuse the id. Takes the view's pane. Returns the client, or none for a malformed id or
+    /// another or closed client.
+    fn control_at(&self, at: &PaneAt) -> Result<Option<Arc<Control>>, HostError> {
+        if !pane_id_valid(&at.pane) {
+            return Ok(None);
+        }
+        let held = self
+            .control
+            .lock()
+            .map_err(|_| failure("terminal_unavailable"))?
+            .clone();
+        Ok(held.filter(|control| control.serial == at.serial && !control.closed()))
     }
 }
 
@@ -960,6 +1032,18 @@ fn variable_names(lines: &[Vec<u8>]) -> Vec<String> {
         .filter_map(|line| line.split_once('=').map(|(name, _)| name.to_owned()))
         .filter(|name| !name.is_empty())
         .collect()
+}
+
+/// The pin a lookup hands out: a pane id the caller already checked, and the serial of the
+/// control connection that found it, which counts from 1. Inputs: the pane id and the
+/// serial. Output: the `PaneAt` that later pinned reads and sends must match.
+fn pin_at(pane: String, serial: u64) -> PaneAt {
+    assert!(serial > 0, "control serials start at 1");
+    assert!(
+        pane_id_valid(&pane),
+        "a pin names a pane id, never a window target"
+    );
+    PaneAt { pane, serial }
 }
 
 /// Pins a teammates' server to the pid it first answered with (PLC c): a server under
@@ -2308,15 +2392,10 @@ impl Tmux {
             let _ = control.run(&format!("kill-window -t {}", target(agent)));
             return Err(failure("terminal_command_failed"));
         }
-        if self.confined.is_some() {
-            let tagged = pane_id_valid(pane)
-                && control
-                    .run(&format!("set-option -p -t {pane} {AGENT_TAG} {agent}"))
-                    .is_ok();
-            if !tagged {
-                let _ = control.run(&format!("kill-window -t {}", target(agent)));
-                return Err(failure("terminal_command_failed"));
-            }
+        let tagged = pane_id_valid(pane) && Self::mark_app(&control, pane, agent).is_ok();
+        if !tagged {
+            let _ = control.run(&format!("kill-window -t {}", target(agent)));
+            return Err(failure("terminal_command_failed"));
         }
         Ok(PaneRef {
             agent: agent.clone(),
@@ -2357,19 +2436,90 @@ impl Host for Tmux {
     }
 
     fn input_at(&self, _agent: &AgentId, at: &PaneAt, bytes: &[u8]) -> Result<bool, HostError> {
-        if !pane_id_valid(&at.pane) {
-            return Ok(false);
-        }
-        let held = self
-            .control
-            .lock()
-            .map_err(|_| failure("terminal_unavailable"))?
-            .clone();
-        let Some(control) = held.filter(|control| control.serial == at.serial && !control.closed())
-        else {
+        let Some(control) = self.control_at(at)? else {
             return Ok(false);
         };
+        assert_eq!(
+            control.serial, at.serial,
+            "a pinned send uses the connection that found it"
+        );
         Self::send_bytes(&control, &at.pane, bytes).map(|()| true)
+    }
+
+    fn own_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        let control = self.live_control()?;
+        let pane = if self.confined.is_some() {
+            self.agent_target(&control, agent)?
+        } else {
+            Self::displayed(&control, &target(agent), "#{pane_id}")?
+        };
+        if !pane_id_valid(&pane) {
+            return Err(failure("terminal_command_failed"));
+        }
+        Ok(pin_at(pane, control.serial))
+    }
+
+    fn app_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        let control = self.live_control()?;
+        let pane = self.app_pane(&control, agent)?;
+        if !pane_id_valid(&pane) {
+            return Err(failure("terminal_command_failed"));
+        }
+        Ok(pin_at(pane, control.serial))
+    }
+
+    fn input_live_at(&self, _agent: &AgentId, at: &PaneAt) -> Result<Option<bool>, HostError> {
+        let Some(control) = self.control_at(at)? else {
+            return Ok(None);
+        };
+        Self::paste_on(&control, &at.pane).map(Some)
+    }
+
+    fn tag_app(&self, agent: &AgentId, pid: u32) -> Result<(), HostError> {
+        assert!(pid > 1, "a pane record keeps a real pid");
+        let control = self.live_control()?;
+        let app = self
+            .panes(agent)?
+            .into_iter()
+            .find(|pane| pane.pid == pid && !pane.dead)
+            .ok_or_else(|| failure(super::APP_PANE_UNKNOWN))?;
+        Self::mark_app(&control, &app.id, agent)
+    }
+
+    fn paste_at(&self, _agent: &AgentId, at: &PaneAt, keys: &[u8]) -> Result<bool, HostError> {
+        if keys.is_empty() || keys.len() > PASTE_BYTES_MAX {
+            return Err(failure("terminal_paste_bounds"));
+        }
+        let Some(control) = self.control_at(at)? else {
+            return Ok(false);
+        };
+        assert_eq!(
+            control.serial, at.serial,
+            "a pinned send uses the connection that found it"
+        );
+        Self::send_paste(&control, &at.pane, keys).map(|()| true)
+    }
+
+    fn resize_at(
+        &self,
+        _agent: &AgentId,
+        at: &PaneAt,
+        size: (u16, u16),
+    ) -> Result<bool, HostError> {
+        let (cols, rows) = size;
+        let bounds = SIZE_MIN..=SIZE_MAX;
+        if !bounds.contains(&cols) || !bounds.contains(&rows) {
+            return Err(failure("terminal_size_bounds"));
+        }
+        let Some(control) = self.control_at(at)? else {
+            return Ok(false);
+        };
+        assert_eq!(
+            control.serial, at.serial,
+            "a pinned send uses the connection that found it"
+        );
+        let line = format!("resize-window -t {} -x {cols} -y {rows}", at.pane);
+        control.run(&line).map(|_| true)
     }
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {

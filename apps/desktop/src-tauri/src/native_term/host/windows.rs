@@ -124,8 +124,9 @@ pub fn parent_scale(parent: &Parent) -> f64 {
 }
 
 /// Makes a hidden child window over the webview, its events going to the host's sink, and
-/// hands it to the render thread, started on the first open in the host's style. Inputs:
-/// the marker, the parent, the page id, the scale key, the label, the style, the events
+/// hands it to the render thread, started on the first open in the host's style; the view
+/// is placed on its first layout, so the open rect is not read here. Inputs: the marker, the
+/// parent, the page id, the scale key, the open rect, the label, the style, the events
 /// channel and the wall window's project. Output: the view, or a plain code.
 #[allow(clippy::too_many_arguments)]
 pub fn open_view(
@@ -133,6 +134,7 @@ pub fn open_view(
     parent: Parent,
     page: u64,
     key: u32,
+    _rect: [f64; 4],
     _label: &str,
     style: &Style,
     events: Channel<NativeEvent>,
@@ -158,10 +160,12 @@ pub fn focus_view(view: &View) {
     view.child.focus();
 }
 
-/// Puts a view over its page place and shows it, or hides it. Inputs: the view, the place
-/// in CSS pixels and whether it shows. Output: the backing scale of a view asked to show,
-/// faulted ones included so `fit` ends them, or none for a hidden or unplaceable one.
-pub fn place_view(view: &mut View, rect: [f64; 4], shown: bool) -> Option<f64> {
+/// Puts a view over its page place and shows it, or hides it. The Windows webview starts
+/// where its page does, so the page's viewport height moves nothing here. Inputs: the view,
+/// the place in CSS pixels, the viewport height and whether it shows. Output: the backing
+/// scale of a view asked to show, faulted ones included so `fit` ends them, or none for a
+/// hidden or unplaceable one.
+pub fn place_view(view: &mut View, rect: [f64; 4], _viewport: f64, shown: bool) -> Option<f64> {
     let [x, y, width, height] = rect;
     let placed = view.child.place(shown.then_some((x, y, width, height)));
     (shown && placed.is_ok()).then(|| view.child.scale())

@@ -607,7 +607,7 @@ fn git(repo: &Path, excludes: Option<&str>, args: &[&str]) -> Command {
         .env("GIT_ALLOW_PROTOCOL", "")
         .envs(crate::research::runner::GIT_SAFE_ENV)
         .arg("--no-optional-locks")
-        .args(crate::research::runner::GIT_SAFE);
+        .args(crate::research::runner::git_safe());
     if let Some(excludes) = excludes {
         command.arg("-c").arg(excludes);
     }

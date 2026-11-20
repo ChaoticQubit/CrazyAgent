@@ -73,6 +73,11 @@ const BACKENDS: wgpu::Backends = wgpu::Backends::DX12;
 /// The most background rectangles one frame draws.
 const RECTS_MAX: usize = 1 << 16;
 
+/// Device attempts each backing scale's renderer may make after its first lost device in
+/// one app run, failed ones counted: a GPU lost more often keeps its views ended until a
+/// restart, and each attempt blocks the main thread on an adapter and device request.
+const DEVICE_REPLACE_MAX: u32 = 2;
+
 /// Bytes of one rectangle: position, size and colour as f32.
 const RECT_BYTES: usize = 32;
 
@@ -81,9 +86,10 @@ struct Row {
     key: u64,
 }
 
-/// The device every native view draws with, made with the first view's surface: the
-/// largest texture side it allows, whether its error handler recorded a wgpu error since
-/// the last render call took it, and whether wgpu reported the device lost.
+/// The device every native view draws with, made with the first view's surface, or after
+/// a loss with the next one's: the largest texture side it allows, whether its error
+/// handler recorded a wgpu error since the last render call took it, and whether wgpu
+/// reported the device lost.
 struct Device {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
@@ -130,10 +136,12 @@ impl Device {
 /// What all native views share: one wgpu instance and device, one font system and glyph
 /// rasterizer cache, and the style: the family drawn with, the font size and cell size in
 /// device pixels and the colours. `generation` counts style changes, so a surface reshapes
-/// its rows after one.
+/// its rows after one. `attempts_left` is none until a device is lost, then the device
+/// attempts still allowed.
 pub struct Shared {
     instance: wgpu::Instance,
     device: Option<Device>,
+    attempts_left: Option<u32>,
     fonts: FontSystem,
     swash: SwashCache,
     scale: f32,
@@ -146,8 +154,10 @@ pub struct Shared {
 }
 
 /// One native view's own drawing state: its wgpu surface, glyph atlas, shaped rows (of the
-/// style generation they were shaped in) and rectangle buffers.
+/// style generation they were shaped in), rectangle buffers, and the lost flag of the
+/// device they were all made on.
 pub struct Surface {
+    lost: Arc<AtomicBool>,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
     viewport: Viewport,
@@ -158,6 +168,14 @@ pub struct Surface {
     rect_buffer: wgpu::Buffer,
     screen_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+}
+
+impl Surface {
+    /// Whether the device this surface was made on is lost. A device is only replaced once
+    /// lost, so a surface from an older device always answers yes. Output: the answer.
+    fn device_lost(&self) -> bool {
+        self.lost.load(Ordering::Acquire)
+    }
 }
 
 /// The underline under marked text: one line as tall as a cursor's underline, along the
@@ -351,10 +369,11 @@ fn rect_pipeline(
     (pipeline, layout)
 }
 
-/// Makes the device for the first surface: the low-power adapter that can present to it,
-/// with the adapter's own limits instead of wgpu's defaults (a 2D texture side of 8192),
-/// an error handler that logs a wgpu error and records it instead of panicking, and a
-/// lost callback that logs the loss and marks the device lost and faulted.
+/// Makes a device for a surface when none is held (the first, or after a loss or a failed
+/// attempt): the low-power adapter that can present to it, with the adapter's own limits
+/// instead of wgpu's defaults (a 2D texture side of 8192), an error handler that logs a wgpu
+/// error and records it instead of panicking, and a lost callback that logs the loss and
+/// marks the device lost and faulted.
 fn device_for(
     instance: &wgpu::Instance,
     surface: &wgpu::Surface<'static>,
@@ -428,6 +447,7 @@ impl Shared {
         let mut shared = Shared {
             instance,
             device: None,
+            attempts_left: None,
             fonts: load_fallbacks(&FALLBACKS),
             swash: SwashCache::new(),
             scale,
@@ -508,10 +528,39 @@ impl Shared {
         unsafe { self.surface_on(target, width, height) }
     }
 
-    /// Makes one view's surface on a surface target: the device on the first, then the
-    /// configure and the view's drawing state. Safety: the target must name a live layer or
-    /// window that outlives the returned surface. Inputs: the target, width and height in
-    /// physical pixels. Output: the surface, or the setup error.
+    /// The device a new surface is made on: the held one, or after a loss a fresh one while
+    /// attempts are left. A lost device is forgotten, never dropped: wgpu 25's queue drop
+    /// waits up to 6.3 s on the main thread and can panic. Leak: one device per loss, at most
+    /// `DEVICE_REPLACE_MAX` + 1 per scale per run (the first and each fresh one). Input: the
+    /// new surface. Output: the device, `native_terminal_gpu` once spent, or `device_for`'s error.
+    fn device_on(&mut self, surface: &wgpu::Surface<'static>) -> Result<&Device, String> {
+        if self.device.as_ref().is_some_and(Device::is_lost) {
+            std::mem::forget(self.device.take());
+            self.attempts_left.get_or_insert(DEVICE_REPLACE_MAX);
+        }
+        if self.device.is_none() {
+            if let Some(left) = self.attempts_left.as_mut() {
+                if *left == 0 {
+                    return Err(GPU_FAULT.to_owned());
+                }
+                *left -= 1;
+            }
+            self.device = Some(device_for(&self.instance, surface)?);
+        }
+        assert!(
+            self.attempts_left
+                .is_none_or(|left| left < DEVICE_REPLACE_MAX)
+        );
+        Ok(self
+            .device
+            .as_ref()
+            .expect("a device once device_for succeeded"))
+    }
+
+    /// Makes one view's surface on a surface target: the device on the first, or a fresh
+    /// one after a loss, then the configure and the view's drawing state. Safety: the target
+    /// must name a live layer or window that outlives the returned surface. Inputs: the
+    /// target, width and height in physical pixels. Output: the surface, or the setup error.
     unsafe fn surface_on(
         &mut self,
         target: wgpu::SurfaceTargetUnsafe,
@@ -520,10 +569,7 @@ impl Shared {
     ) -> Result<Surface, String> {
         let surface =
             unsafe { self.instance.create_surface_unsafe(target) }.map_err(|e| e.to_string())?;
-        if self.device.is_none() {
-            self.device = Some(device_for(&self.instance, &surface)?);
-        }
-        let set = self.device.as_ref().ok_or("no device")?;
+        let set = self.device_on(&surface)?;
         let mut config = surface
             .get_default_config(&set.adapter, set.fit(width), set.fit(height))
             .ok_or("surface not supported")?;
@@ -561,8 +607,10 @@ impl Shared {
                 resource: screen_buffer.as_entire_binding(),
             }],
         });
+        let lost = Arc::clone(&set.lost);
         set.fault()?;
         Ok(Surface {
+            lost,
             surface,
             config,
             viewport,
@@ -577,14 +625,18 @@ impl Shared {
     }
 
     /// Reconfigures a surface for a new size in physical pixels, held to the device's
-    /// largest texture side. Inputs: the surface, width and height; a zero side is ignored.
-    /// Output: ok, or `native_terminal_gpu` when wgpu refused the configure.
+    /// largest texture side; a surface whose device is lost is never moved onto another.
+    /// Inputs: the surface, width and height; a zero side is ignored. Output: ok, or
+    /// `native_terminal_gpu` when its device is lost or wgpu refused the configure.
     pub fn resize(
         &self,
         surface: &mut Surface,
         width: u32,
         height: u32,
     ) -> Result<(), &'static str> {
+        if surface.device_lost() {
+            return Err(GPU_FAULT);
+        }
         let Some(set) = self.device.as_ref() else {
             return Ok(());
         };
@@ -791,9 +843,10 @@ impl Shared {
     }
 
     /// Draws one frame on a surface and takes any wgpu error the frame raised, on every
-    /// exit, so the error is reported for this view and never for the next one drawn.
-    /// Inputs: the surface and the frame. Output: ok, why it was skipped, or
-    /// `native_terminal_gpu` when wgpu refused the frame's work.
+    /// exit, so the error is reported for this view and never for the next one drawn. A
+    /// surface whose device is lost reports `native_terminal_gpu` and leaves the current
+    /// device's errors to that device's views. Inputs: the surface and the frame. Output:
+    /// ok, why it was skipped, or `native_terminal_gpu` when wgpu refused the frame's work.
     #[cfg(target_os = "macos")]
     pub fn draw(&mut self, surface: &mut Surface, frame: &Frame) -> Result<(), String> {
         let painted = self.paint(surface, frame, None);
@@ -827,9 +880,13 @@ impl Shared {
     }
 
     /// Takes the wgpu error a frame raised, which wins over the paint's own result, and
-    /// checks the surface stayed within the GPU's texture side. Inputs: the surface and
-    /// the paint's result. Output: the frame's result.
+    /// checks the surface stayed within the GPU's texture side. A surface whose device is
+    /// lost reports `native_terminal_gpu` and takes none of the current device's errors.
+    /// Inputs: the surface and the paint's result. Output: the frame's result.
     fn taken(&self, surface: &Surface, painted: Result<(), String>) -> Result<(), String> {
+        if surface.device_lost() {
+            return Err(GPU_FAULT.to_owned());
+        }
         let Some(set) = self.device.as_ref() else {
             return painted;
         };
@@ -969,17 +1026,21 @@ impl Shared {
     }
 
     /// Builds one frame's GPU input: reshapes changed rows, uploads the rectangles, the
-    /// screen size and the glyphs. On a lost device it does no GPU work, since glyphon's
-    /// buffer map then panics in wgpu 25; a loss found inside glyphon's own buffer creation
-    /// goes through `guarded`. Inputs: the surface and the frame. Output: the rectangle
-    /// data, why the frame is skipped, or `native_terminal_gpu`.
+    /// screen size and the glyphs. When the surface's own device is lost it does no work,
+    /// since glyphon's buffer map then panics in wgpu 25; a loss found inside glyphon's own
+    /// buffer creation goes through `guarded`. Inputs: the surface and the frame. Output:
+    /// the rectangle data, why the frame is skipped, or `native_terminal_gpu`.
     fn build(&mut self, surface: &mut Surface, frame: &Frame) -> Result<Vec<f32>, String> {
+        if surface.device_lost() {
+            return Err(GPU_FAULT.to_owned());
+        }
         self.shape_rows(surface, frame);
         let rects = self.rect_bytes(frame);
         let set = self.device.as_ref().ok_or("no device")?;
-        if set.is_lost() {
-            return Err(GPU_FAULT.to_owned());
-        }
+        assert!(
+            Arc::ptr_eq(&surface.lost, &set.lost),
+            "a surface drawn by the renderer that made it"
+        );
         let (width, height) = (surface.config.width, surface.config.height);
         let screen = [width as f32, height as f32, 0.0, 0.0];
         set.queue
@@ -1423,6 +1484,97 @@ mod tests {
         assert_eq!(painted, Err(GPU_FAULT.to_owned()));
         drop(surface);
         drop(layer);
+    }
+
+    /// A view made after the device is lost draws on a fresh device, so Open again brings
+    /// the terminal back (V243-NATIVE-DEVICE-REPLACE). With `--nocapture` it prints how
+    /// long making that view took, the fresh device included.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_view_made_after_a_loss_draws_on_a_fresh_device() {
+        let mut shared = shared_at(2.0);
+        let layer = metal_layer();
+        let mut old = unsafe { shared.surface_on(on_layer(&layer), 64, 64) }.expect("a surface");
+        lose(&shared);
+        assert_eq!(
+            shared.draw(&mut old, &frame_of("a")),
+            Err(GPU_FAULT.to_owned())
+        );
+        let fresh = metal_layer();
+        let started = std::time::Instant::now();
+        let made = unsafe { shared.surface_on(on_layer(&fresh), 64, 64) };
+        eprintln!("a view after a loss made in {:?}", started.elapsed());
+        let mut new = made.expect("a surface on a fresh device");
+        assert_eq!(shared.draw(&mut new, &frame_of("b")), Ok(()));
+        assert_eq!(shared.draw(&mut new, &frame_of("c")), Ok(()));
+        drop((old, new));
+        drop((layer, fresh));
+    }
+
+    /// A view from the lost device never moves onto the fresh one: its resize and draw
+    /// report `native_terminal_gpu` with no GPU work, and dropping it leaves the fresh view
+    /// drawing. Without its own lost flag, the resize configures it onto the fresh device
+    /// and its draw raises device-mismatch errors there (probe 5aedcf53d).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_view_from_the_lost_device_never_moves_to_the_new_one() {
+        let mut shared = shared_at(2.0);
+        let layer = metal_layer();
+        let mut old = unsafe { shared.surface_on(on_layer(&layer), 64, 64) }.expect("a surface");
+        lose(&shared);
+        let fresh = metal_layer();
+        let mut new = unsafe { shared.surface_on(on_layer(&fresh), 64, 64) }
+            .expect("a surface on a fresh device");
+        assert_eq!(shared.resize(&mut old, 128, 96), Err(GPU_FAULT));
+        assert_eq!((old.config.width, old.config.height), (64, 64));
+        assert_eq!(
+            shared.draw(&mut old, &frame_of("a")),
+            Err(GPU_FAULT.to_owned())
+        );
+        drop(old);
+        assert_eq!(shared.draw(&mut new, &frame_of("b")), Ok(()));
+        drop(new);
+        drop((layer, fresh));
+    }
+
+    /// Device attempts after a loss stop at the budget: each loss within it gets a fresh
+    /// device, and the next one ends the new view with `native_terminal_gpu` without
+    /// asking wgpu for another device.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn device_attempts_after_a_loss_stop_at_the_budget() {
+        let mut shared = shared_at(2.0);
+        let rounds = DEVICE_REPLACE_MAX as usize;
+        let layers: Vec<_> = (0..rounds + 2).map(|_| metal_layer()).collect();
+        let first = unsafe { shared.surface_on(on_layer(&layers[0]), 64, 64) };
+        let mut views = vec![first.expect("a surface")];
+        for layer in &layers[1..=rounds] {
+            lose(&shared);
+            let made = unsafe { shared.surface_on(on_layer(layer), 64, 64) };
+            views.push(made.expect("a fresh device within the budget"));
+        }
+        lose(&shared);
+        let refused = unsafe { shared.surface_on(on_layer(&layers[rounds + 1]), 64, 64) };
+        assert_eq!(refused.err(), Some(GPU_FAULT.to_owned()));
+        assert!(shared.device.is_none());
+        drop(views);
+        drop(layers);
+    }
+
+    /// A surface drawn by a renderer other than the one whose device made it is a
+    /// programmer error: the host draws a view with the renderer of the scale it was made
+    /// at (host:1148-1163, :1216), so the draw asserts it instead of mixing two devices.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[should_panic(expected = "a surface drawn by the renderer that made it")]
+    fn a_surface_drawn_by_another_renderer_trips_the_device_assert() {
+        let mut maker = shared_at(2.0);
+        let mut other = shared_at(2.0);
+        let (layer, second) = (metal_layer(), metal_layer());
+        let mut surface = unsafe { maker.surface_on(on_layer(&layer), 64, 64) }.expect("a surface");
+        let _held = unsafe { other.surface_on(on_layer(&second), 64, 64) }
+            .expect("a device for the other renderer");
+        let _ = other.draw(&mut surface, &frame_of("a"));
     }
 
     /// A view as wide as the adapter's own largest texture side, past wgpu's default 8192

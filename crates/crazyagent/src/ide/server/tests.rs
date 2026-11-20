@@ -529,7 +529,7 @@ fn server_env_holds_only_allowlisted_names() {
         crate::ide::git::CEILING_VARIABLE,
         "/private/tmp/project/.crazyagent/worktrees",
     ));
-    expected.extend(crate::ide::git::CONFIG_ENV);
+    expected.extend(crate::ide::git::config_env());
     expected.push(("GIT_CONFIG_GLOBAL", "/private/tmp/ide/project/gitconfig"));
     expected.push(("GIT_CONFIG_NOSYSTEM", "1"));
     expected.sort();
@@ -544,7 +544,7 @@ fn server_env_holds_only_allowlisted_names() {
             || *name == crate::ide::git::CEILING_VARIABLE
             || *name == "GIT_CONFIG_GLOBAL"
             || *name == "GIT_CONFIG_NOSYSTEM"
-            || crate::ide::git::CONFIG_ENV
+            || crate::ide::git::config_env()
                 .iter()
                 .any(|(fixed, _)| name == fixed)
     }));
@@ -1447,6 +1447,88 @@ fn a_confined_start_never_reuses_an_earlier_start_s_temp_folder() {
     );
 }
 
+/// Leaves in a temp folder what a session may: a folder it shut with mode 000 and a file it
+/// made immutable. Input: the temp folder. Output: none.
+fn shut_and_pin(tmp: &Path) {
+    let shut = tmp.join("shut");
+    fs::create_dir_all(&shut).unwrap();
+    fs::set_permissions(&shut, fs::Permissions::from_mode(0o000)).unwrap();
+    let pinned = tmp.join("pinned");
+    fs::write(&pinned, b"left by a session\n").unwrap();
+    assert!(
+        crate::spawn_gate::status(Command::new("/usr/bin/chflags").arg("uchg").arg(&pinned))
+            .unwrap()
+            .success()
+    );
+}
+
+/// The folders in the system temp folder that [`retire`] made from `tmp`, its name followed
+/// by [`TMP_GONE`]. Input: the temp folder. Output: the folders found.
+fn moved_aside(tmp: &Path) -> Vec<PathBuf> {
+    let mut prefix = tmp.file_name().unwrap().to_os_string();
+    prefix.push(TMP_GONE);
+    let prefix = prefix.into_string().unwrap();
+    fs::read_dir(crate::sandbox::toolchains::TMP_PARENT)
+        .unwrap()
+        .flatten()
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+        .map(|entry| entry.path())
+        .collect()
+}
+
+/// V243-OWNER-BOOTSTRAP-IDE-TMP-LINE: the temp folder of an earlier confined start whose
+/// session shut a folder with mode 000 and made a file immutable in it is moved aside and
+/// removed by the next start, never left in the system temp folder, where every later
+/// engine start's sweep would report it as `ide_server_tmp_left`.
+#[test]
+fn the_next_confined_start_removes_an_earlier_temp_folder_its_session_shut_and_pinned() {
+    let (checkout, data) = (scratch(), scratch());
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let id = project("shut-its-tmp");
+    let folder = servers.prepare(&id).unwrap();
+    let first = server_tmp(&server_command(&servers, &id, &root, &folder).unwrap());
+    shut_and_pin(&first);
+    let next = server_tmp(&server_command(&servers, &id, &root, &folder).unwrap());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while (first.exists() || !moved_aside(&first).is_empty()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let (kept, left) = (first.exists(), moved_aside(&first));
+    for made in left.iter().chain([&first, &next]) {
+        let _ = crate::team::cleanup::remove_agent_tree(made);
+    }
+    assert_ne!(next, first);
+    assert!(!kept, "the earlier start's temp folder is still there");
+    assert!(left.is_empty(), "left in the system temp folder: {left:?}");
+}
+
+/// V243-OWNER-BOOTSTRAP-IDE-TMP-LINE: a temp folder an earlier engine moved aside and left
+/// behind, holding a folder shut with mode 000 and an immutable file, is removed by the
+/// engine-start sweep, so no later start reports it again.
+#[test]
+fn the_engine_start_sweep_removes_a_left_temp_folder_that_was_shut_and_pinned() {
+    let home = scratch();
+    let tmp = crate::sandbox::toolchains::make_tmp(&home.path().join("left")).unwrap();
+    shut_and_pin(&tmp);
+    let gone = retire(&tmp).expect("the temp folder moves aside");
+    assert!(retired(&gone), "{}", gone.display());
+    let entries = fs::read_dir(crate::sandbox::toolchains::TMP_PARENT)
+        .unwrap()
+        .count();
+    let removed = sweep_retired(entries + GONE_SCAN_MAX)
+        .expect("the sweep starts")
+        .join()
+        .unwrap();
+    let left = gone.exists();
+    let _ = crate::team::cleanup::remove_agent_tree(&gone);
+    assert!(
+        !left,
+        "the sweep left {} ({removed} removed)",
+        gone.display()
+    );
+}
+
 /// The temp folder a built server command gives the server as `TMPDIR`. Input: the command.
 /// Output: the folder.
 fn server_tmp(built: &Command) -> PathBuf {
@@ -2098,7 +2180,7 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
         "the server starts in a folder its profile lets it read, so getcwd works under Seatbelt"
     );
     let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = command.get_envs().collect();
-    for (name, value) in crate::ide::git::CONFIG_ENV {
+    for (name, value) in crate::ide::git::config_env() {
         assert!(
             envs.contains(&(
                 std::ffi::OsStr::new(name),
@@ -3177,9 +3259,9 @@ async fn a_full_access_stop_names_a_process_that_left_its_group() {
 }
 
 /// RV-DS241-189: removing a recorded temp folder only moves it aside, one rename however
-/// much it holds, so no stop, shutdown or next start waits on what a session left there;
-/// the folder is removed on a thread of its own, and one no remove can finish no longer
-/// stays at its path.
+/// much it holds or however it is shut, so no stop, shutdown or next start waits on what a
+/// session left there; the folder is removed on a thread of its own, so a moved folder is one
+/// the start sweep removes or already gone (#571 code F1).
 #[test]
 fn a_recorded_temp_folder_is_moved_aside_at_once_and_removed_off_the_stop_path() {
     let (data, keys) = (scratch(), scratch());
@@ -3204,7 +3286,9 @@ fn a_recorded_temp_folder_is_moved_aside_at_once_and_removed_off_the_stop_path()
                 .is_some_and(|name| name.starts_with(&prefix))
         })
         .collect();
-    let named = aside.iter().all(|path| retired(path));
+    let named = aside
+        .iter()
+        .all(|path| retired(path) || fs::symlink_metadata(path).is_err());
     for path in aside.iter().chain(stayed.then_some(&left)) {
         let _ = fs::set_permissions(path.join(&shut), fs::Permissions::from_mode(0o700));
         let _ = fs::remove_dir_all(path);

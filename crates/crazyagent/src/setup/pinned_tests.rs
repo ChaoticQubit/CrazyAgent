@@ -640,12 +640,14 @@ fn a_locked_tool_install_leaves_its_python_and_environment_writable_only_by_this
 }
 
 /// DEC-162: the permission fix acts only on what the installer resolves itself, in a
-/// fixture HOME with a uv-like graphify whose Python is group writable: the refused lookup
-/// names the Python's prefix as the fix target, a fix confirmed for another folder changes
-/// nothing (`tool_fix_changed`), the confirmed one removes go-w from that tree only, the
-/// tool then resolves, and a second fix is not needed.
+/// fixture HOME with a uv-like graphify whose Python every user can write, refused the same
+/// on every Unix, as Linux trusts a group-writable folder of the user's private group (G1):
+/// the refused lookup names the Python's prefix as the fix target, a fix confirmed for
+/// another folder changes nothing (`tool_fix_changed`), the confirmed one removes go-w from
+/// that tree only, the tool then resolves, and a second fix is not needed.
 #[test]
 fn the_permission_fix_acts_only_on_the_target_the_installer_resolved_and_confirmed() {
+    const OPEN: u32 = 0o777;
     let scratch = private_root();
     let home = scratch.path().join("home");
     let prefix = home.join(".local/share/uv/python/cpython-9.9.9-dummy");
@@ -653,7 +655,7 @@ fn the_permission_fix_acts_only_on_the_target_the_installer_resolved_and_confirm
     std::fs::create_dir_all(python.parent().unwrap()).unwrap();
     std::fs::write(&python, "#!/bin/sh\nexit 0\n").unwrap();
     for path in [&python, &prefix.join("bin"), &prefix] {
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o775)).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(OPEN)).unwrap();
     }
     let venv = home.join(".local/share/uv/tools/graphifyy/bin");
     std::fs::create_dir_all(&venv).unwrap();
@@ -693,7 +695,7 @@ fn the_permission_fix_acts_only_on_the_target_the_installer_resolved_and_confirm
         installer.fix_permissions(Dependency::Graphify, &elsewhere.display().to_string(), true),
         Err(crate::tools::permission_fix::TOOL_FIX_CHANGED)
     );
-    assert_eq!(mode(&python), 0o775);
+    assert_eq!(mode(&python), OPEN);
     assert_eq!(mode(&elsewhere), 0o777);
 
     let confirmed = target.path.display().to_string();
@@ -703,7 +705,7 @@ fn the_permission_fix_acts_only_on_the_target_the_installer_resolved_and_confirm
         "a confirmed single folder never runs as the whole tree"
     );
     for path in [&python, &prefix.join("bin"), &prefix] {
-        assert_eq!(mode(path), 0o775, "{}", path.display());
+        assert_eq!(mode(path), OPEN, "{}", path.display());
     }
     let report = installer
         .fix_permissions(Dependency::Graphify, &confirmed, true)

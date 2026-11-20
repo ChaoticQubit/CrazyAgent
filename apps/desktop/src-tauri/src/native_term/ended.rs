@@ -1,9 +1,10 @@
 use crate::bridge::terminal::NATIVE_OVERFLOW;
 
-/// The end codes a reopen cannot help: the app's access to the engine changed (the engine's
-/// `Closed` reason), the engine refused a request as invalid, an attach asked for a name or
-/// size it can never take, the engine opened another agent, a newer view took the terminal,
-/// or the view's own typing overflowed or its drawing failed.
+/// The end codes a reopen by the page cannot help: the app's access to the engine changed
+/// (the engine's `Closed` reason), the engine refused a request as invalid, an attach asked
+/// for a name or size it can never take, the engine opened another agent, a newer view took
+/// the terminal, or the view's typing overflowed; and a failed drawing, which only the owner
+/// retries (Open again, or the panel shown again), so no following view spends the device budget.
 pub const FINAL_CODES: [&str; 8] = [
     "owner_grant_stale_or_revoked",
     "terminal_request_invalid",

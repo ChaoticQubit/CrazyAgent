@@ -213,8 +213,32 @@ impl<H: Host> Host for LastScreenHost<H> {
         self.inner.input_at(agent, at, bytes)
     }
 
+    fn own_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        self.inner.own_pane_at(agent)
+    }
+
+    fn tag_app(&self, agent: &AgentId, pid: u32) -> Result<(), HostError> {
+        self.inner.tag_app(agent, pid)
+    }
+
+    fn app_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        self.inner.app_pane_at(agent)
+    }
+
+    fn paste_at(&self, agent: &AgentId, at: &PaneAt, keys: &[u8]) -> Result<bool, HostError> {
+        self.inner.paste_at(agent, at, keys)
+    }
+
+    fn resize_at(&self, agent: &AgentId, at: &PaneAt, size: (u16, u16)) -> Result<bool, HostError> {
+        self.inner.resize_at(agent, at, size)
+    }
+
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         self.inner.input_live(agent)
+    }
+
+    fn input_live_at(&self, agent: &AgentId, at: &PaneAt) -> Result<Option<bool>, HostError> {
+        self.inner.input_live_at(agent, at)
     }
 
     fn quiet(&self, agent: &AgentId) -> Result<Option<std::time::Duration>, HostError> {

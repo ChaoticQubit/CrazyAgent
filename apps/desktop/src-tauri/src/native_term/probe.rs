@@ -3,7 +3,9 @@ use super::view::TermView;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{ClassType, MainThreadMarker, msg_send};
-use objc2_app_kit::{NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSResponder};
+use objc2_app_kit::{
+    NSApplication, NSEvent, NSEventModifierFlags, NSEventType, NSResponder, NSView,
+};
 use objc2_foundation::{NSNotFound, NSPoint, NSRange, NSString};
 
 /// The longest text one trial step types or composes, in bytes.
@@ -25,8 +27,9 @@ pub enum Step {
 
 /// What a trial reads after its step: the visible rows, whether the direct path draws the
 /// view, whether the view is its window's first responder, whether the app is active and its
-/// window key, the window's backing scale (0 with no window), the marked text and the
-/// private pasteboard's text.
+/// window key, the window's backing scale (0 with no window), the marked text, the private
+/// pasteboard's text, the view's frame as x, y, width and height in its webview's own
+/// coordinates, and that webview's height, both in points.
 #[derive(serde::Serialize, Debug, PartialEq)]
 pub struct Seen {
     pub rows: Vec<String>,
@@ -37,6 +40,8 @@ pub struct Seen {
     pub scale: f64,
     pub marked: Option<String>,
     pub pasteboard: Option<String>,
+    pub frame: [f64; 4],
+    pub webview_height: f64,
 }
 
 /// Takes one trial step on a view the calling window opened, then reads it. Inputs: the
@@ -152,8 +157,28 @@ fn seen(mtm: MainThreadMarker, look: Look) -> Seen {
             .map_or(0.0, |window| window.backingScaleFactor()),
         marked: look.view.marked_text(),
         pasteboard: look.pasteboard,
+        frame: in_webview(&look.view, &look.webview),
+        webview_height: look.webview.bounds().size.height,
     };
     assert!(!seen.focused || window.is_some());
     assert!(seen.scale >= 0.0 && seen.scale.is_finite());
+    assert!(seen.webview_height >= 0.0 && seen.webview_height.is_finite());
     seen
+}
+
+/// Reads where AppKit placed a view, counted in its webview's own coordinates, so a trial
+/// can set it against the page rect it was given. Inputs: the view and its webview.
+/// Output: x, y, width and height in points.
+fn in_webview(view: &TermView, webview: &NSView) -> [f64; 4] {
+    let superview = unsafe { view.superview() };
+    let placed = webview.convertRect_fromView(view.frame(), superview.as_deref());
+    let frame = [
+        placed.origin.x,
+        placed.origin.y,
+        placed.size.width,
+        placed.size.height,
+    ];
+    assert!(frame.iter().all(|side| side.is_finite()));
+    assert!(frame[2] >= 0.0 && frame[3] >= 0.0);
+    frame
 }

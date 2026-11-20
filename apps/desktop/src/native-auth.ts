@@ -1,4 +1,4 @@
-import type { ModelAccessDetail } from "./engine-client";
+import { STORAGE_COPY, type ModelAccessDetail } from "./engine-client";
 import { displayText } from "./screens/conversation";
 
 export type NativeAuthMethod = "codex_browser" | "codex_device_code" | "codex_existing" | "claude_official" | "claude_existing";
@@ -313,6 +313,7 @@ export function reduceNativeAuth(state: NativeAuthState | undefined,
 }
 
 export function nativeAuthError(code: string): string {
+  if (Object.hasOwn(STORAGE_COPY, code)) return STORAGE_COPY[code];
   switch (code) {
     case "native_auth_cannot_display_safely":
       return "The challenge cannot display safely. No partial code or URL is shown.";
@@ -350,6 +351,7 @@ export function nativeAuthFailureCode(error: unknown): string {
     "native_profile_identity_invalid",
     "native_profile_capacity", "native_profile_new_home_not_empty", "native_profile_in_use",
     "native_profile_lock_unavailable", "owner_queue_not_submitted", "owner_busy",
+    "storage_starting_not_submitted", "storage_busy_not_submitted", "access_change_pending",
     "native_auth_identity_unavailable",
     "native_auth_cannot_display_safely", "native_auth_presentation_limit",
     "native_auth_sign_in_running"];
