@@ -1187,3 +1187,46 @@ fn an_output_log_that_is_a_fifo_is_no_probe_and_is_not_waited_on() {
         .open(&fifo);
     assert_eq!(answer, Ok(false), "the probe waited on the FIFO");
 }
+
+/// A stop never signals process 1 or group 1 for a holder of an agent's output log:
+/// `kill_process_group` sends `kill(-id)`, so group 1 would be every process the user may
+/// signal. A holder that leads its group, or sits in the recorded group, gets its group; a
+/// holder in the engine's group or another group gets itself alone; a gone one, nothing.
+#[cfg(unix)]
+#[test]
+fn a_log_holder_stop_never_signals_process_or_group_one() {
+    let pid = |raw: i32| rustix::process::Pid::from_raw(raw).unwrap();
+    let own = pid(500);
+    let cases = [
+        (pid(1), Ok(pid(1)), 1, None),
+        (pid(1), Ok(pid(1)), 4321, None),
+        (pid(1234), Ok(pid(1)), 1, Some(Signalled::One(pid(1234)))),
+        (
+            pid(1234),
+            Ok(pid(1234)),
+            4321,
+            Some(Signalled::Group(pid(1234))),
+        ),
+        (
+            pid(1234),
+            Ok(pid(777)),
+            777,
+            Some(Signalled::Group(pid(777))),
+        ),
+        (pid(1234), Ok(own), 500, Some(Signalled::One(pid(1234)))),
+        (
+            pid(1234),
+            Ok(pid(888)),
+            4321,
+            Some(Signalled::One(pid(1234))),
+        ),
+        (pid(1234), Err(rustix::io::Errno::SRCH), 4321, None),
+    ];
+    for (writer, leader, group, wanted) in cases {
+        assert_eq!(
+            holder_target(writer, leader, own, group),
+            wanted,
+            "{writer:?} {leader:?} {group}"
+        );
+    }
+}

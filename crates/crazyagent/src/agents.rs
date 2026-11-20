@@ -1566,6 +1566,38 @@ fn log_probe(path: &Path) -> Option<File> {
     (metadata.is_file() && metadata.uid() == rustix::process::geteuid().as_raw()).then_some(file)
 }
 
+/// What a stop signals for one process that holds an agent's output log for writing.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Signalled {
+    Group(rustix::process::Pid),
+    One(rustix::process::Pid),
+}
+
+/// Picks what a stop signals for one holder of an agent's output log: its group when the
+/// holder leads it or it is the agent's recorded group, but never the engine's own, else
+/// the holder alone, and nothing for a holder already gone. Inputs: the holder, its group
+/// as read, the engine's group and the recorded group. Output: the target, or None.
+#[cfg(unix)]
+fn holder_target(
+    writer: rustix::process::Pid,
+    leader: Result<rustix::process::Pid, rustix::io::Errno>,
+    own: rustix::process::Pid,
+    group: u32,
+) -> Option<Signalled> {
+    match leader {
+        Err(rustix::io::Errno::SRCH) => None,
+        Ok(leader)
+            if leader != own
+                && (leader == writer
+                    || u32::try_from(leader.as_raw_nonzero().get()) == Ok(group)) =>
+        {
+            Some(Signalled::Group(leader))
+        }
+        _ => Some(Signalled::One(writer)),
+    }
+}
+
 /// Ends what still holds a reattached agent's output log: TERM, then KILL after the
 /// grace time, each sent only to a process found holding the log for writing, or to its
 /// group when the holder leads it or sits in the agent's recorded group.
@@ -1585,18 +1617,14 @@ fn kill_holders(group: u32, output: &Path, probe: &File) -> bool {
             return false;
         };
         for writer in writers {
-            match rustix::process::getpgid(Some(writer)) {
-                Err(rustix::io::Errno::SRCH) => {}
-                Ok(leader)
-                    if leader != own
-                        && (leader == writer
-                            || u32::try_from(leader.as_raw_nonzero().get()) == Ok(group)) =>
-                {
+            match holder_target(writer, rustix::process::getpgid(Some(writer)), own, group) {
+                Some(Signalled::Group(leader)) => {
                     let _ = rustix::process::kill_process_group(leader, signal);
                 }
-                _ => {
-                    let _ = rustix::process::kill_process(writer, signal);
+                Some(Signalled::One(holder)) => {
+                    let _ = rustix::process::kill_process(holder, signal);
                 }
+                None => {}
             }
         }
         let until = Instant::now() + wait;
