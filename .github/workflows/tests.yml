@@ -17,7 +17,7 @@ env:
   RUST_TOOLCHAIN: "1.98.1"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
-  TIP: cefba03e70983bf617e67ea82d2fe519cee41bae
+  TIP: 3e7118ae722c6553ad56a3ddd1f605ad402a59ae
   FARM_FILES: ".github/farm/unc-share-setup.ps1 .github/workflows/tests.yml"
   PROBE: sandbox::windows::step_probe::w5b_step_probe
 
@@ -27,7 +27,7 @@ defaults:
 
 jobs:
   win-probe:
-    name: V244-WIN-LANDING W5b D2 step probe r3 quiet and loaded ${{ matrix.runner }} at cefba03e7 on chore/v244 3e45d7a38, facts only
+    name: V244-WIN-LANDING W5b D2 step probe r3 quiet and loaded ${{ matrix.runner }} at 3e7118ae7 on chore/v244 3e45d7a38, facts only
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
