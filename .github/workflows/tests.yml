@@ -20,7 +20,7 @@ env:
   BASE_SHA: 0277f210c
   RED_SHA: 28061a4f1
   FIX_SHA: 5dcf25403
-  TIP_SHA: ff013c6f0
+  TIP_SHA: 077964b46
 
 defaults:
   run:
@@ -28,7 +28,7 @@ defaults:
 
 jobs:
   s6c6:
-    name: V244 WIN-MASTER S6 C6 git-folder guard on ${{ matrix.runner }}, red is the tip without fix 5dcf25403, tip ff013c6f0
+    name: V244 WIN-MASTER S6 C6 git-folder guard on ${{ matrix.runner }}, red is the tip without fix 5dcf25403, tip 077964b46
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     strategy:
