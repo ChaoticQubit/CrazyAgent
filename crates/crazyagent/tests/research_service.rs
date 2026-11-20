@@ -399,7 +399,7 @@ fn research_on_linux_fails_once_with_the_plain_unavailable_line() {
     assert_eq!(job.attempts, 1);
     assert_eq!(
         job.error.as_deref(),
-        Some("Team agents and research are not available on Linux in this version.")
+        Some("Research is not available on Linux in this version.")
     );
     assert!(fs::read_dir(state.join("agents")).unwrap().next().is_none());
     assert!(!project.join(".git").exists());

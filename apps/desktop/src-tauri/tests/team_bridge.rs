@@ -351,7 +351,7 @@ async fn wake(bridge: &mut NativeBridge, root: &Path, id: &str) -> Result<(), Bo
         (found.finished, found.wakeable, found.wake_note.clone())
     };
     let team = bridge.team_status(id).await?;
-    let runs = cfg!(target_os = "macos");
+    let runs = !cfg!(windows);
     assert!(shown(&team, 501).0);
     assert_eq!(shown(&team, 501).1, runs, "{team:#?}");
     assert_eq!(

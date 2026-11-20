@@ -3673,6 +3673,29 @@ mod tests {
         }
     }
 
+    /// DEC-205 S5b: a policy confined to its own worktree or clone binds to Landlock; the
+    /// wrap's refusals hold it (no call supervisor, or bubblewrap alone), not the binding.
+    #[test]
+    fn a_worktree_or_clone_confined_policy_binds_to_landlock() {
+        let (_temp, project, sandbox, worktree) = linked();
+        let clone = project.join("worktrees").join("agent-2");
+        fs::create_dir(&clone).unwrap();
+        git(&clone, &["init", "-q"]);
+        let helper = std::env::current_exe().unwrap();
+        for confined in [
+            sandbox.confine_to_worktree(&worktree).unwrap(),
+            sandbox.confine_to_clone(&clone).unwrap(),
+        ] {
+            let bound = LinuxSandbox::new(
+                confined,
+                LinuxBackend::Landlock {
+                    helper: helper.clone(),
+                },
+            );
+            assert!(bound.is_ok(), "{bound:?}");
+        }
+    }
+
     #[test]
     fn a_supervised_clone_launches_with_its_store_held() {
         let (_temp, project, sandbox, _) = linked();

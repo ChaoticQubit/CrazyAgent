@@ -2265,7 +2265,7 @@ async fn mapping_on_linux_stops_with_the_plain_unavailable_line() {
     stop_service(service).await;
     assert_eq!(
         view.mapping,
-        failed("Team agents and research are not available on Linux in this version."),
+        failed("Research is not available on Linux in this version."),
         "{view:?}"
     );
     assert_eq!(agent_runs(&agents, "onboard-m-"), 0);

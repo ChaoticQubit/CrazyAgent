@@ -4832,10 +4832,10 @@ mod tests {
     }
 
     #[test]
-    fn linux_and_windows_refuse_team_agents_and_research_with_a_plain_line() {
+    fn linux_and_windows_refuse_research_with_a_plain_line() {
         assert_eq!(
             confined_unavailable("linux"),
-            Some("Team agents and research are not available on Linux in this version.")
+            Some("Research is not available on Linux in this version.")
         );
         assert_eq!(
             confined_unavailable("windows"),

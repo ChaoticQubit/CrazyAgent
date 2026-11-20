@@ -3894,20 +3894,18 @@ fn a_clone_launch_that_fails_after_making_the_clone_leaves_no_clone_behind() {
     );
 }
 
-/// On Linux, which runs no agent confined to its own worktree in V1 (DEC-094), a team agent
-/// stops before any sandbox or repository step, and its row carries the owner's plain line.
+/// Starts one codex sub-agent on Linux and checks that it was refused before any repository
+/// step: its row failed with the refusal line and the project has no `.git`. Input: the
+/// fixture. Output: the line the refused start gave.
 #[cfg(target_os = "linux")]
-#[test]
-fn a_team_agent_on_linux_stops_with_the_plain_unavailable_line() {
-    let fixture = Fixture::new(1);
+fn refused_before_any_repository_step(fixture: &Fixture) -> String {
     let mut team = fixture.runtime();
     let Accounts::Usable(accounts) =
         eligible_accounts(&fixture.access, &fixture.setup.project_id, "codex")
     else {
         panic!("the endpoint fits codex");
     };
-    let line = "Team agents and research are not available on Linux in this version.";
-    let refused = team
+    let start = team
         .spawn_run(
             &fixture.setup,
             AgentRole::Sub,
@@ -3918,13 +3916,102 @@ fn a_team_agent_on_linux_stops_with_the_plain_unavailable_line() {
             None,
         )
         .unwrap();
-    assert_eq!(refused, Start::Refused(line.into()));
+    let Start::Refused(line) = start else {
+        panic!("a Linux start went on: {start:?}");
+    };
     let agents = fixture.status().agents;
     assert_eq!(agents.len(), 1);
     assert_eq!(agents[0].status, AgentStatus::Failed);
-    assert_eq!(agents[0].problem.as_deref(), Some(line));
+    assert_eq!(agents[0].problem.as_deref(), Some(line.as_str()));
     assert!(!fixture.base.join("project").join(".git").exists());
     assert!(team.shutdown().unwrap().is_empty());
+    line
+}
+
+/// On a Linux with no call supervisor, which a lib test never starts since it records no
+/// engine root, a team agent confined to its own worktree stops before any repository step
+/// with the supervisor line (DEC-205 S5b, option A).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_team_agent_on_a_linux_without_the_call_supervisor_stops_before_any_repository_step() {
+    let fixture = Fixture::new(1);
+    assert!(crate::tools::engine_root().is_none());
+    let line = refused_before_any_repository_step(&fixture);
+    assert_eq!(line, crate::sandbox::linux::CONFINED_UNAVAILABLE);
+}
+
+/// On Linux, where only macOS runs Full access (DEC-102), a Full access team agent stops
+/// before any repository step with the plain macOS-only line (DEC-205 S5b).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_access_team_agent_on_linux_stops_before_any_repository_step() {
+    let fixture = Fixture::new(1);
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &crate::sandbox::policy::AgentPolicy {
+            access: AgentAccess::Full,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let line = refused_before_any_repository_step(&fixture);
+    assert!(
+        line.starts_with(crate::sandbox::FULL_ACCESS_NEEDS_MACOS),
+        "{line}"
+    );
+}
+
+/// On Linux, native teammates are out in this version (DEC-205 Q4): a lead whose project
+/// runs Claude Code sub-agents as native teammates is refused at prepare with the plain
+/// line, ahead of the terminal host check and before any repository step.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_native_teammates_lead_on_linux_is_refused_before_any_setup() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let runtime = exiting_claude_runtime(&fixture);
+    let account = TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "https://api.example.org/v1".into(),
+            model: "claude-test".into(),
+            key: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let Err(refused) = runtime.prepare(
+        &fixture.setup,
+        id,
+        AgentRole::Sub,
+        "claude-code",
+        true,
+        &account,
+        false,
+        crate::agent_git::Layout::Linked,
+        false,
+    ) else {
+        panic!("a native teammates lead was prepared on Linux");
+    };
+    assert!(
+        refused
+            .starts_with("Team agents with teammates are not available on Linux in this version."),
+        "{refused}"
+    );
+    assert!(!fixture.base.join("project").join(".git").exists());
 }
 
 /// Starts one sub-agent that writes page.md and stops it as the owner does, through the
@@ -23839,14 +23926,14 @@ fn hookless_saved(fixture: &Fixture, id: i64) -> bool {
 }
 
 /// Opens a team runtime whose only harness is a stand-in Claude Code that exits at once.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn exiting_claude_runtime(fixture: &Fixture) -> TeamRuntime {
     standin_claude_runtime(fixture, "#!/bin/sh\nexit 0\n")
 }
 
 /// Opens a team runtime whose only harness is a stand-in Claude Code running one script.
 /// Takes the fixture and the script. Returns the runtime.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn standin_claude_runtime(fixture: &Fixture, script: &str) -> TeamRuntime {
     let bin = fixture.base.join("claude-bin");
     std::fs::create_dir_all(&bin).unwrap();

@@ -210,7 +210,8 @@ fn finished_agents_say_whether_they_wake_and_hide_until_shown() {
         let agent = read.agents.iter().find(|a| a.id == id).unwrap();
         (agent.wakeable, agent.wake_note.clone())
     };
-    let unavailable = crate::research::runner::confined_unavailable(std::env::consts::OS);
+    let unavailable = crate::research::runner::confined_unavailable(std::env::consts::OS)
+        .filter(|_| cfg!(target_os = "windows"));
     assert_eq!(
         wake(&read, stopped),
         (unavailable.is_none(), unavailable.map(str::to_owned))
