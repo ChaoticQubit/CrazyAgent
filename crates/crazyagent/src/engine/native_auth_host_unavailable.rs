@@ -46,6 +46,14 @@ mod custodian;
 mod login_env;
 
 #[cfg(test)]
+#[path = "native_auth_host/child_group.rs"]
+mod child_group;
+
+#[cfg(test)]
+#[path = "native_auth_host/child_group_windows_tests.rs"]
+mod child_group_windows_tests;
+
+#[cfg(test)]
 #[path = "native_auth_host/login_windows_tests.rs"]
 mod login_windows_tests;
 

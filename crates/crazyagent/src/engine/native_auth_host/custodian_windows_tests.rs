@@ -427,7 +427,7 @@ fn waiter_with_grandchild() -> Command {
 
 /// Whether a process id runs the named image now, so a reused id never reads as the process
 /// a row started. Inputs: the id and the image, such as `PING.EXE`. Output: the answer.
-fn runs(pid: u32, image: &str) -> bool {
+pub(super) fn runs(pid: u32, image: &str) -> bool {
     let listed = crate::spawn_gate::collected(
         Command::new("tasklist")
             .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
@@ -441,7 +441,7 @@ fn runs(pid: u32, image: &str) -> bool {
 
 /// The id of the `ping.exe` a process started, waited for at most [`FIND_BOUND`]. Input:
 /// the parent's id. Output: the grandchild's id.
-fn ping_child_of(parent: u32) -> u32 {
+pub(super) fn ping_child_of(parent: u32) -> u32 {
     let started = Instant::now();
     let query = format!(
         "Get-CimInstance Win32_Process -Filter \"ParentProcessId={parent} AND Name='PING.EXE'\" \
@@ -478,7 +478,7 @@ fn end_ping_children_of(parent: u32) {
 
 /// Waits until none of the processes runs, at most `bound`. Inputs: the ids with their
 /// images, and the bound. Output: whether all ended within it.
-fn all_end_within(processes: &[(u32, &str)], bound: Duration) -> bool {
+pub(super) fn all_end_within(processes: &[(u32, &str)], bound: Duration) -> bool {
     let started = Instant::now();
     while processes.iter().any(|(pid, image)| runs(*pid, image)) {
         if started.elapsed() > bound {

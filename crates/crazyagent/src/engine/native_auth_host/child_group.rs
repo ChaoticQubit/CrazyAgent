@@ -12,6 +12,11 @@ const GROUP_SETTLE_TIME: Duration = Duration::from_millis(500);
 #[cfg(unix)]
 pub(super) type ChildGroup = rustix::process::Pid;
 
+/// What custody holds a sign-in login child's whole tree by: the kill-on-close job of its
+/// own the child was put in while still suspended, on Windows.
+#[cfg(windows)]
+pub(super) type ChildGroup = crazyagent_win_sandbox::ProcessTree;
+
 /// Sleeps one poll step, never past the deadline. Input: the deadline. Output: none.
 pub(super) fn sleep_until(deadline: Instant) {
     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -134,4 +139,27 @@ pub(super) fn cleanup_unretained(child: &mut Child, deadline: Instant) -> io::Re
         Some(group) => cleanup_owned_group(child, &group, deadline),
         None => cleanup_direct_child(child, deadline).map(|status| status.is_some()),
     }
+}
+
+/// Whether the tree of a login child that was already reaped has no process left, read from
+/// its job without ending anything, so a grandchild that outlived the child reads as a
+/// survivor. Not built yet (N4a red rows). Input: the tree. Output: the answer.
+#[cfg(windows)]
+pub(super) fn reaped_group_gone(group: &ChildGroup) -> bool {
+    let _ = (group, GROUP_SETTLE_TIME);
+    true
+}
+
+/// Ends a login child's whole tree and waits until the child is reaped and no process of
+/// the tree is left. Not built yet (N4a red rows): it ends the child alone. Inputs: the
+/// child, its tree and the deadline. Output: whether both happened in time, or the failed
+/// step.
+#[cfg(windows)]
+pub(super) fn cleanup_owned_group(
+    child: &mut Child,
+    group: &ChildGroup,
+    deadline: Instant,
+) -> io::Result<bool> {
+    let _ = group;
+    cleanup_direct_child(child, deadline).map(|status| status.is_some())
 }

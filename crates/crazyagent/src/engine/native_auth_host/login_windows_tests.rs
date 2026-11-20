@@ -1,6 +1,7 @@
 use super::login_env::{login_child, login_env};
 use crazyagent_win_sandbox::ProcessTree;
 use std::ffi::OsString;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -11,7 +12,7 @@ const OUTPUT_BOUND: Duration = Duration::from_secs(20);
 
 /// The real path of a fresh profile home in the plain `C:\...` spelling, removed when
 /// dropped. Output: the folder and its path.
-fn profile_home() -> (tempfile::TempDir, PathBuf) {
+pub(super) fn profile_home() -> (tempfile::TempDir, PathBuf) {
     let folder = tempfile::tempdir().unwrap();
     let real = std::fs::canonicalize(folder.path()).unwrap();
     let text = real.to_str().unwrap();
@@ -20,7 +21,7 @@ fn profile_home() -> (tempfile::TempDir, PathBuf) {
 }
 
 /// `cmd.exe` by its absolute path, as a login child's program always is.
-fn cmd() -> PathBuf {
+pub(super) fn cmd() -> PathBuf {
     let system = std::env::var_os("SystemRoot").expect("Windows sets SystemRoot");
     Path::new(&system).join("System32").join("cmd.exe")
 }
@@ -63,10 +64,10 @@ fn a_login_child_runs_only_once_held_and_sees_only_its_own_env() {
     let (_folder, home) = profile_home();
     let out = home.join("seen.txt");
     let mut command = Command::new(cmd());
-    command.args([
-        "/c",
-        "echo %USERPROFILE%^|%CODEX_HOME%^|%SystemRoot%^|%USERNAME%^|%TEMP%> seen.txt",
-    ]);
+    command.arg("/c").raw_arg(format!(
+        "echo %USERPROFILE%^|%CODEX_HOME%^|%SystemRoot%^|%USERNAME%^|%TEMP%> \"{}\"",
+        out.display()
+    ));
     login_child(&mut command, &home, "CODEX_HOME");
     command.stdin(Stdio::null());
     let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
