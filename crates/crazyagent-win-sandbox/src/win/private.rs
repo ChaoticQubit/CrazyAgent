@@ -55,6 +55,14 @@ pub fn dir(path: &Path) -> io::Result<File> {
     made_dir(path, None)
 }
 
+/// Makes the private folder at `path` as [`dir`] does, but only when nothing is there yet:
+/// an entry already at the path is `AlreadyExists` and is never adopted, the twin of a Unix
+/// `mkdirat` (rv-sec3 #716 C2). Input: the absolute path. Output: the held new folder, or
+/// the error.
+pub fn new_dir(_path: &Path) -> io::Result<File> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
 /// Opens the private folder at `path` as [`dir`] holds one, but never creates it: a missing
 /// folder is `NotFound`, the twin of a Unix `open(O_DIRECTORY | O_NOFOLLOW)`, so a caller
 /// that only opens never makes a folder in a race. Input: the absolute path. Output: the
