@@ -17,8 +17,8 @@ env:
   RUST_TOOLCHAIN: "1.98.1"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
-  RED_SHA: d85df0bca
-  TIP_SHA: 9c9fdeff0
+  FIX_SHA: 9c9fdeff0
+  TIP_SHA: 865665b09
 
 defaults:
   run:
@@ -26,7 +26,7 @@ defaults:
 
 jobs:
   s2:
-    name: V244 WIN-MASTER S2 stream log on ${{ matrix.runner }}, red at d85df0bca, tip 9c9fdeff0
+    name: V244 WIN-MASTER S2 stream log on ${{ matrix.runner }}, red = 865665b09 less 9c9fdeff0, tip 865665b09
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
@@ -90,12 +90,14 @@ jobs:
         run: |
           set -euo pipefail
           cargo clippy -p crazyagent --tests --locked -- -D warnings
-      - name: S2 red rows at d85df0bca
+      - name: S2 red rows, the tip's rows on the Windows stubs (865665b09 less 9c9fdeff0)
         if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
           set -euo pipefail
-          git checkout -q "$RED_SHA" -- crates
+          git checkout -q "$TIP_SHA" -- crates
+          git diff "$FIX_SHA^" "$FIX_SHA" -- crates | git apply -R
+          grep -q 'Err(failure("master_stream_log_unavailable"))' crates/crazyagent/src/engine/claude_host/diagnostic.rs
           set +e
           cargo test -p crazyagent --lib --locked -- --test-threads 1 engine::claude_host::diagnostic::windows_tests:: 2>&1 | tee "$RUNNER_TEMP/red.log"
           rc=${PIPESTATUS[0]}
@@ -107,7 +109,7 @@ jobs:
           grep -qE 'test result: FAILED\. 0 passed; 4 failed' "$RUNNER_TEMP/red.log"
           grep -q 'master_stream_log_unavailable' "$RUNNER_TEMP/red.log"
           echo "red as expected: the 4 stream log rows fail on master_stream_log_unavailable"
-      - name: S2 stream log rows at the tip 9c9fdeff0
+      - name: S2 stream log rows at the tip 865665b09
         if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
