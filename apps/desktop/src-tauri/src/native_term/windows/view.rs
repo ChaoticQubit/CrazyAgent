@@ -80,6 +80,14 @@ type Answers = Vec<(u32, i32, Vec<u16>)>;
 thread_local! {
     static TRIAL_KEY: Cell<Option<u32>> = const { Cell::new(None) };
     static TRIAL_COMPOSITION: RefCell<Option<Answers>> = const { RefCell::new(None) };
+    static TRIAL_LIVE: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Test builds only: whether a view's window-thread state is still held by anyone, its
+/// `View` or a window message running for it. Input: the view id. Output: the answer.
+#[cfg(test)]
+pub fn trial_inner_live(id: u64) -> bool {
+    TRIAL_LIVE.with(|live| live.borrow().contains(&id))
 }
 
 /// Test builds only: makes this thread's views read these answers in place of
@@ -242,6 +250,8 @@ impl View {
             alive: Cell::new(true),
             root: Root::new(Access::new(id, key)),
         });
+        #[cfg(test)]
+        TRIAL_LIVE.with(|live| live.borrow_mut().push(id));
         let geometry = Geometry {
             size: (1, 1),
             scale_key: key,
@@ -1000,6 +1010,13 @@ unsafe extern "system" fn window_proc(
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+    }
+}
+
+#[cfg(test)]
+impl Drop for Inner {
+    fn drop(&mut self) {
+        TRIAL_LIVE.with(|live| live.borrow_mut().retain(|held| *held != self.id));
     }
 }
 

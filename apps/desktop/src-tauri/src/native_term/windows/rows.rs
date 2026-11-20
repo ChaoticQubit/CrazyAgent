@@ -28,8 +28,8 @@ use windows_sys::Win32::UI::Input::Ime::{
     ImmGetCompositionWindow, ImmGetContext, ImmReleaseContext,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    ActivateKeyboardLayout, GetDoubleClickTime, GetFocus, GetKeyboardLayout, INPUT, INPUT_0,
-    INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+    ActivateKeyboardLayout, GetCapture, GetDoubleClickTime, GetFocus, GetKeyboardLayout, INPUT,
+    INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
     KEYEVENTF_UNICODE, KLF_ACTIVATE, LoadKeyboardLayoutW, MAPVK_VK_TO_VSC, MOUSEEVENTF_ABSOLUTE,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
     MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, MapVirtualKeyExW, ReleaseCapture,
@@ -44,9 +44,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SM_CXSCREEN, SM_CYSCREEN, SPI_GETWHEELSCROLLLINES, SW_MINIMIZE, SW_RESTORE, SendMessageW,
     SetWindowLongPtrW, ShowWindow, SystemParametersInfoW, TranslateMessage, WM_CHAR,
     WM_CONTEXTMENU, WM_DPICHANGED_AFTERPARENT, WM_IME_CHAR, WM_IME_COMPOSITION,
-    WM_IME_ENDCOMPOSITION, WM_IME_REQUEST, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_LBUTTONDOWN,
-    WM_MOUSEWHEEL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_TOPMOST,
-    WS_POPUP, WS_VISIBLE,
+    WM_IME_ENDCOMPOSITION, WM_IME_REQUEST, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KILLFOCUS,
+    WM_LBUTTONDOWN, WM_MOUSEWHEEL, WNDCLASSEXW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS,
+    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 use super::super::a11y;
@@ -2507,6 +2507,210 @@ fn the_mouse_selects_scrolls_and_opens_the_menu_as_the_panel_does() {
     wheel_and_right_click(&view, centre);
     keyboard_menus(&view);
     hidden_views_send_no_mouse(&view, centre);
+    drop(view);
+    assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the stand-in goes");
+}
+
+/// The views the dismissing rows open, one id per row, and the larger font the style row
+/// hands the render thread.
+const DISMISSED_CLICK: u64 = 41;
+const DISMISSED_COMPOSITION: u64 = 42;
+const DISMISSED_END: u64 = 43;
+const DISMISSED_HIDE: u64 = 44;
+const DISMISSED_FOCUS: u64 = 45;
+const STYLE_FIRST: u64 = 46;
+const STYLE_LATER: u64 = 47;
+const LARGER_PX: f64 = 22.0;
+
+thread_local! {
+    static KEPT: RefCell<Option<View>> = const { RefCell::new(None) };
+    static ARMED: std::cell::Cell<Option<(u64, &'static str)>> = const { std::cell::Cell::new(None) };
+    static SEEN_AT_DISMISS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Where a dismissing row's red leaves its mark: `H5C_R3_MARK`, else the temp folder.
+fn freed_mark() -> std::path::PathBuf {
+    std::env::var_os("H5C_R3_MARK")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("h5c-r3-freed.txt"))
+}
+
+/// A sink that drops the kept view when it hears the armed view's `Marked`, as the host's
+/// settle ends a view from inside a window message, then checks the view's state outlived
+/// the drop. It runs in a window procedure, where a panic aborts, so a freed state writes
+/// the mark and aborts. Inputs: the view id and the event.
+fn dismissing(id: u64, event: ViewEvent) {
+    let marked = event == ViewEvent::Marked;
+    sink(id, event);
+    let Some((armed, case)) = ARMED.get().filter(|(armed, _)| marked && *armed == id) else {
+        return;
+    };
+    ARMED.set(None);
+    let view = KEPT.with(|kept| kept.borrow_mut().take());
+    drop(view);
+    if !view::trial_inner_live(armed) {
+        let _ = std::fs::write(freed_mark(), format!("freed inside the dispatch: {case}\n"));
+        std::process::abort();
+    }
+    SEEN_AT_DISMISS.set(Some(SEEN.lock().expect("the seen events").len()));
+}
+
+/// Marks text on a view through a trial composition. Input: the view's window.
+fn mark_at(hwnd: HWND) {
+    let flags = isize::try_from(GCS_COMPSTR).expect("composition flags fit an LPARAM");
+    view::trial_composition(Some(vec![told(GCS_COMPSTR, "か")]));
+    let handled = unsafe { SendMessageW(hwnd, WM_IME_COMPOSITION, 0, flags) };
+    view::trial_composition(None);
+    assert_eq!(handled, 0, "the view handles a composition itself");
+}
+
+/// One dismissing row: a shown, focused view, with marked text unless the message itself
+/// marks it, is kept for the sink, which drops it on its `Marked` inside the message `arm`
+/// sends. The message reads nothing of the view after that: its state outlives the drop,
+/// goes once the message returns, and nothing reaches the sink and no capture is held after
+/// it. Inputs: the case, the view id, whether to mark first and the message.
+fn dismissed_inside(case: &'static str, id: u64, premark: bool, arm: impl FnOnce(HWND)) {
+    let (parent, webview) = stand_ins();
+    let view = View::new(parent, webview, id, dismissing, &style()).expect("a view");
+    let centre = placed_shown_and_drawn(parent, &view);
+    clicked_into(&view, centre);
+    let hwnd = view.hwnd();
+    if premark {
+        mark_at(hwnd);
+        assert!(view.marked_text().is_some(), "{case}: marked text");
+    }
+    KEPT.with(|kept| *kept.borrow_mut() = Some(view));
+    take_seen();
+    SEEN_AT_DISMISS.set(None);
+    ARMED.set(Some((id, case)));
+    arm(hwnd);
+    assert_eq!(ARMED.get(), None, "{case}: the sink dismissed the view");
+    assert!(
+        KEPT.with(|kept| kept.borrow().is_none()),
+        "{case}: the view went"
+    );
+    assert!(
+        !view::trial_inner_live(id),
+        "{case}: the view's state goes once the message returns"
+    );
+    let at = SEEN_AT_DISMISS.get().expect("the dismissal was seen");
+    let seen = take_seen();
+    assert_eq!(
+        seen.len(),
+        at,
+        "{case}: nothing after the dismissal: {seen:?}"
+    );
+    assert_ne!(unsafe { GetCapture() }, hwnd, "{case}: no capture held");
+    assert_eq!(unsafe { IsWindow(hwnd) }, 0, "{case}: the window went");
+    pump_for(KEY_TAIL);
+    assert_eq!(take_seen(), [], "{case}: nothing later either");
+    println!("h5c r3 row: {case}: the view went inside the message, nothing read after");
+    assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the stand-in goes");
+}
+
+/// A client point as a mouse message's lParam. Input: the point. Output: the lParam.
+fn client_lparam(x: i32, y: i32) -> LPARAM {
+    (((y & 0xffff) << 16) | (x & 0xffff)) as LPARAM
+}
+
+/// CR-0436 (view.rs:401): a click whose cancel of the marked text ends the view.
+#[test]
+#[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
+fn a_click_whose_cancel_dismisses_the_view_reads_nothing_after() {
+    dismissed_inside("click", DISMISSED_CLICK, true, |hwnd| unsafe {
+        SendMessageW(hwnd, WM_LBUTTONDOWN, 0, client_lparam(200, 150));
+    });
+}
+
+/// CR-0436: a composition whose redraw ends the view, before the IME is placed.
+#[test]
+#[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
+fn a_composition_whose_redraw_dismisses_the_view_reads_nothing_after() {
+    dismissed_inside("composition", DISMISSED_COMPOSITION, false, mark_at);
+}
+
+/// CR-0436: an end of composition whose redraw ends the view.
+#[test]
+#[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
+fn an_end_of_composition_that_dismisses_the_view_reads_nothing_after() {
+    dismissed_inside("end", DISMISSED_END, true, |hwnd| unsafe {
+        SendMessageW(hwnd, WM_IME_ENDCOMPOSITION, 0, 0);
+    });
+}
+
+/// CR-0436: a hide of a faulted view, on a DPI change, whose cancel ends the view.
+#[test]
+#[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
+fn a_hide_whose_cancel_dismisses_the_view_reads_nothing_after() {
+    dismissed_inside("hide", DISMISSED_HIDE, true, |hwnd| {
+        draw::BOARD.fault(DISMISSED_HIDE);
+        unsafe { SendMessageW(hwnd, WM_DPICHANGED_AFTERPARENT, 0, 0) };
+    });
+}
+
+/// CR-0436: a focus loss whose cancel ends the view, before its focus word.
+#[test]
+#[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
+fn a_focus_loss_whose_cancel_dismisses_the_view_reads_nothing_after() {
+    dismissed_inside("focus", DISMISSED_FOCUS, true, |hwnd| unsafe {
+        SendMessageW(hwnd, WM_KILLFOCUS, 0, 0);
+    });
+}
+
+/// The cell a style gives at a view's scale, as the host sizes grids with it. Inputs: the
+/// view and the style. Output: the cell.
+fn cell_in(view: &View, style: &Style) -> (f64, f64) {
+    let shared = Shared::new(view.scale() as f32, style).expect("a renderer in the style");
+    shared.cell_points()
+}
+
+/// CR-0436 (host/windows.rs:180): a style the render thread is handed after its first
+/// reaches it in order: a later open in a larger font, as the host's restyle gives every
+/// open, re-posts every live view's cell in that font, and the first style handed back
+/// restores it, so later rows in the process draw as before.
+#[test]
+#[ignore = "needs a Windows desktop: the farm runs it on windows-2022 and windows-2025"]
+fn a_later_style_reaches_the_render_thread_and_every_live_views_cell() {
+    let (parent, webview) = stand_ins();
+    let first = style();
+    let larger = Style {
+        font_px: LARGER_PX,
+        ..style()
+    };
+    let view = View::new(parent, webview, STYLE_FIRST, sink, &first).expect("a view");
+    let _ = placed_shown_and_drawn(parent, &view);
+    pump_until("the first cell", FARM_WAIT, || view.cell().is_some());
+    let (small, big) = (cell_in(&view, &first), cell_in(&view, &larger));
+    assert_ne!(small, big, "the larger font has a larger cell");
+    assert_eq!(
+        view.cell(),
+        Some(small),
+        "the first view's cell is its style's"
+    );
+    let later = View::new(parent, webview, STYLE_LATER, sink, &larger).expect("a later view");
+    let before = presents();
+    assert!(later.feed(fed_frame(&larger.theme, b"larger\r\n")));
+    later.place(Some(PAGE)).expect("a placed box");
+    await_present("the later view's present", before);
+    pump_until("the later view's cell", FARM_WAIT, || {
+        later.cell().is_some()
+    });
+    let cells = || (view.cell(), later.cell());
+    let wait = Instant::now() + FARM_WAIT;
+    while cells() != (Some(big), Some(big)) && Instant::now() < wait {
+        pump_for(Duration::from_millis(50));
+    }
+    println!("h5c r3 row: style cells {:?}, want {big:?}", cells());
+    assert_eq!(
+        cells(),
+        (Some(big), Some(big)),
+        "the later style reached the render thread and every live view's cell"
+    );
+    drop(later);
+    draw::start(&first).expect("the render thread");
+    pump_until("the first style's cell again", FARM_WAIT, || {
+        view.cell() == Some(small)
+    });
     drop(view);
     assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the stand-in goes");
 }
