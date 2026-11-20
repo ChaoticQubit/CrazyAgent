@@ -263,9 +263,9 @@ impl Pane {
         self.dirty |= dropped.is_some();
     }
 
-    /// Selects the whole output the view holds, as Cmd-A does. Output: whether there was a
-    /// terminal to select in.
-    #[cfg(any(target_os = "macos", test))]
+    /// Selects the whole output the view holds, as Cmd-A or Ctrl+Shift+A does. Output:
+    /// whether there was a terminal to select in.
+    #[cfg(any(target_os = "macos", target_os = "linux", test))]
     pub fn select_all(&mut self) -> bool {
         let Some(term) = self.term.as_mut() else {
             return false;
