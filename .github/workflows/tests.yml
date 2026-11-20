@@ -129,7 +129,7 @@ jobs:
             grep -qxF "test worktrees::identity_windows_tests::$row ... FAILED" "$RUNNER_TEMP/red.log"
             grep -qxF -- "---- worktrees::identity_windows_tests::$row stdout ----" "$RUNNER_TEMP/red.log"
           done
-          [ "$(grep -c "^thread '.*' panicked at crates.crazyagent.src.worktrees.identity_windows_tests\.rs:" "$RUNNER_TEMP/red.log" || true)" -eq 6 ]
+          [ "$(grep -cE "^thread '[^']+'( \([0-9]+\))? panicked at crates.crazyagent.src.worktrees.identity_windows_tests\.rs:" "$RUNNER_TEMP/red.log" || true)" -eq 6 ]
           echo "red as expected: identity and bounded read refuse, admission fails and engine git takes any git at 7cca9ae36"
       - name: W3-4a, W3-2 and W3-1 rows at the tip 08dfdb749
         if: ${{ !cancelled() && runner.os == 'Windows' }}
