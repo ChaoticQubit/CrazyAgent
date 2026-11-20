@@ -1135,3 +1135,43 @@ fn a_windows_engine_read_of_attributes_or_grafts_answers_with_the_null_device() 
         .unwrap();
     assert!(String::from_utf8_lossy(&patch).contains("+one"));
 }
+
+/// W5c1, the r2 finding W5c inherits: a plain Windows linked worktree, as the runner's git makes
+/// it, passes the place check as `Linked`. Its paths are the engine's plain drive form, not the
+/// verbatim `\\?\` form `canonicalize` returns, and git writes the admin folder's `gitdir` with
+/// forward slashes. An admin folder whose `gitdir` names another folder's `.git` stays refused.
+#[test]
+fn a_windows_linked_worktree_passes_the_place_check_as_linked() {
+    let place = place();
+    let ws = &place.workspace;
+    let gitdir = std::fs::read_to_string(ws.git_dir.join("gitdir")).unwrap();
+    assert!(gitdir.contains('/'), "git writes {gitdir:?}");
+    let layout = super::flow::check_places(&ws.repository, &ws.worktree, &ws.git_dir);
+    assert!(
+        matches!(layout, Ok(crate::agent_git::Layout::Linked)),
+        "gitdir {gitdir:?}, worktree {:?}, answer {}",
+        ws.worktree,
+        layout.as_ref().map_or_else(
+            |error| refusal_code(error).to_owned(),
+            |found| format!("{found:?}")
+        )
+    );
+    let elsewhere = place.home.join("other");
+    std::fs::create_dir(&elsewhere).unwrap();
+    std::fs::write(
+        ws.git_dir.join("gitdir"),
+        format!(
+            "{}\n",
+            elsewhere.join(".git").to_str().unwrap().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        code(super::flow::check_places(
+            &ws.repository,
+            &ws.worktree,
+            &ws.git_dir
+        )),
+        "changes_workspace_invalid"
+    );
+}

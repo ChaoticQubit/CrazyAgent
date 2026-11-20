@@ -55,11 +55,35 @@ fn invalid() -> EngineError {
     failure("changes_workspace_invalid")
 }
 
+/// Accepts a path only in its canonical form, the form the engine records: on Windows the
+/// plain drive form [`crate::sandbox::canonical`] gives, without the verbatim `\\?\` prefix.
+/// Input: the path. Output: Ok, or `changes_workspace_invalid`.
 fn canonical(path: &Path) -> Result<(), EngineError> {
-    if path.is_absolute() && std::fs::canonicalize(path).ok().as_deref() == Some(path) {
+    #[cfg(windows)]
+    let found = crate::sandbox::canonical(path).ok();
+    #[cfg(not(windows))]
+    let found = std::fs::canonicalize(path).ok();
+    if path.is_absolute() && found.as_deref() == Some(path) {
         return Ok(());
     }
     Err(invalid())
+}
+
+/// Whether a linked worktree's admin `gitdir` text names `worktree`'s own `.git`. Git for
+/// Windows writes it with forward slashes, so on Windows the text is read with backslashes
+/// before the exact compare. Inputs: the text, its trailing newline removed, and the worktree.
+/// Output: the answer.
+fn names_own_git(named: &str, worktree: &Path) -> bool {
+    let own = worktree.join(".git");
+    #[cfg(windows)]
+    {
+        own.to_str()
+            .is_some_and(|own| named.replace('/', "\\") == own)
+    }
+    #[cfg(not(windows))]
+    {
+        Path::new(named) == own
+    }
 }
 
 /// Checks an agent's workspace and says which layout it has: every path absolute and
@@ -98,7 +122,7 @@ pub(super) fn check_places(
     }
     let link = bounded_read(&git_dir.join("gitdir"), LINK_BYTES_MAX)?;
     let named = std::str::from_utf8(&link).map_err(|_| invalid())?;
-    if Path::new(named.trim_end_matches('\n')) != worktree.join(".git") {
+    if !names_own_git(named.trim_end_matches('\n'), worktree) {
         return Err(invalid());
     }
     Ok(Layout::Linked)
