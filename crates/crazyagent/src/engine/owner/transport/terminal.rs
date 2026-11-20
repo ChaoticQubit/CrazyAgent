@@ -1,3 +1,4 @@
+use super::sizing::{Apply, Seat, Units};
 use super::*;
 use crate::ipc::{OwnedReadHalf, OwnedWriteHalf};
 use crate::protocol::encode_frame;
@@ -199,24 +200,25 @@ impl OwnerClient {
         self.attach_with(agent, &request).await
     }
 
-    /// Opens an input-only view of the agent's terminal, or of one pane with `pane`, after the
-    /// engine sizes the window to the viewer: the engine checks the grant and records the
-    /// owner's keys as for any view but sends no output, for a viewer that draws the pane
-    /// from elsewhere. Takes the terminal name, the pane if any, and the size within
-    /// `SIZE_MIN..=SIZE_MAX`. Returns the session, whose output gives only the final `Closed`.
+    /// Opens an input-only view of the agent's terminal, or of one pane with `pane`, sized to
+    /// the viewer (a follower only while no other view sizes it), that records the owner's keys
+    /// but sends no output, for a viewer that draws the pane from elsewhere. Takes the name,
+    /// the pane if any, the size within `SIZE_MIN..=SIZE_MAX` and whether it follows. Returns
+    /// the session, whose output gives only the final `Closed`.
     #[cfg(unix)]
     pub async fn terminal_attach_input(
         &self,
         agent: AgentId,
         pane: Option<String>,
-        cols: u16,
-        rows: u16,
+        (cols, rows): (u16, u16),
+        follows: bool,
     ) -> Result<TerminalSession, EngineError> {
         let request = TerminalRequest::AttachInput {
             agent_id: agent.clone(),
             pane,
             cols,
             rows,
+            follows,
         };
         self.attach_with(agent, &request).await
     }
@@ -468,8 +470,9 @@ async fn redraw(
 type Sending = tokio::task::JoinHandle<Result<Option<String>, HostError>>;
 
 /// What one attach opened: the agent and the size its view starts at, the viewer whose
-/// history, screen and output it streams, none for an input-only view, and for an input-only
-/// view of an agent's own terminal the pane it stays on (see [`pin`]).
+/// history, screen and output it streams, none for an input-only view, for an input-only
+/// view of an agent's own terminal the pane it stays on (see [`pin`]), and its seat in the
+/// unit its resizes size, held while the view lives.
 #[cfg_attr(not(unix), allow(dead_code))]
 struct View {
     agent: AgentId,
@@ -477,18 +480,20 @@ struct View {
     rows: u16,
     viewer: Option<TerminalStream>,
     pinned: Option<PaneAt>,
+    seat: Arc<Seat>,
 }
 
 impl View {
     /// The full view of one attached viewer, at the viewer's agent and size. Takes the
-    /// viewer. Returns the view.
-    fn of(viewer: TerminalStream) -> View {
+    /// viewer and the view's seat. Returns the view.
+    fn of(viewer: TerminalStream, seat: Arc<Seat>) -> View {
         View {
             agent: viewer.agent.clone(),
             cols: viewer.cols,
             rows: viewer.rows,
             viewer: Some(viewer),
             pinned: None,
+            seat,
         }
     }
 }
@@ -522,33 +527,56 @@ fn sent_at(answer: Result<bool, HostError>) -> Result<Option<String>, HostError>
     }
 }
 
-/// Pins an input-only view's pane as it opens, then sizes the window of a sized or
-/// input-only attach: through the pin when there is one, else by name as before. Takes the
-/// host, the agent, the size and whether the view is input-only. Returns the pin, none for
-/// a full view or a host with no pane ids, or the host's error.
-fn pin_and_size(
-    host: &dyn Host,
+/// Seats a view in the unit its resizes size, which it then sizes through its pin when it
+/// has one, else by name. Takes the host, the units, the agent, the pin and whether the view
+/// follows. Returns the seat, or the host's error naming the unit.
+fn seat(
+    host: &Arc<dyn Host>,
+    units: &Arc<Units>,
+    agent: &AgentId,
+    pinned: Option<PaneAt>,
+    follows: bool,
+) -> Result<Arc<Seat>, HostError> {
+    let unit = host.unit(agent)?;
+    let (host, agent) = (host.clone(), agent.clone());
+    let apply: Apply = Arc::new(move |(cols, rows)| match &pinned {
+        Some(at) => sent_at(host.resize_at(&agent, at, (cols, rows))).map(drop),
+        None => host.resize(&agent, cols, rows),
+    });
+    Ok(Arc::new(Units::seat(units, unit, follows, apply)))
+}
+
+/// Pins an input-only view's pane as it opens, seats the view in the unit its resizes size,
+/// then sizes the window of a sized or input-only attach through that seat: through the pin
+/// when there is one, else by name as before. Takes the host, the units, the agent, the
+/// size, whether the view is input-only and whether it follows. Returns the pin, none for a
+/// full view or a host with no pane ids, and the seat, or the host's error.
+fn pin_and_seat(
+    host: &Arc<dyn Host>,
+    units: &Arc<Units>,
     agent: &AgentId,
     size: Option<(u16, u16)>,
-    input_only: bool,
-) -> Result<Option<PaneAt>, HostError> {
+    (input_only, follows): (bool, bool),
+) -> Result<(Option<PaneAt>, Arc<Seat>), HostError> {
     assert!(
         !input_only || size.is_some(),
         "an input-only attach has a size"
     );
-    let pinned = if input_only { pin(host, agent)? } else { None };
-    match (size, &pinned) {
-        (Some(size), Some(at)) => {
-            sent_at(host.resize_at(agent, at, size))?;
-        }
-        (Some((cols, rows)), None) => host.resize(agent, cols, rows)?,
-        (None, _) => {}
+    assert!(!follows || input_only, "only an input-only view follows");
+    let pinned = if input_only {
+        pin(host.as_ref(), agent)?
+    } else {
+        None
+    };
+    let seat = seat(host, units, agent, pinned.clone(), follows)?;
+    if let Some(size) = size {
+        seat.size(size)?;
     }
     assert!(
         pinned.is_none() || input_only,
         "only an input-only view is pinned"
     );
-    Ok(pinned)
+    Ok((pinned, seat))
 }
 
 /// One owner paste the engine gathers from its `Paste` chunks before it filters and pastes
@@ -642,16 +670,16 @@ async fn agent_gone(host: &Arc<dyn Host>, agent: &AgentId, pinned: Option<&PaneA
 }
 
 /// Starts sending one owner request to the host on a blocking thread: typed and wheel keys
-/// into the view's pane, a prompt, or a resize; a pinned view's keys, prompt and resize go
-/// to its pane only, never by name. Takes the host, the agent, the view's pane, its pin and
-/// the request. Returns the send, which answers the prompt's text once the agent took it as
-/// a prompt, none for any other request, or the host's error.
+/// into the view's pane, a prompt, or a resize through the view's seat; a pinned view's
+/// keys, prompt and resize go to its pane only, never by name. Takes the host, the agent,
+/// the view's pane, its pin, its seat and the request. Returns the send, which answers the
+/// prompt's text once the agent took it as a prompt, none for any other, or the host's error.
 #[cfg(unix)]
 fn send(
     host: &Arc<dyn Host>,
     agent: &AgentId,
-    at: Option<PaneAt>,
-    pinned: Option<PaneAt>,
+    (at, pinned): (Option<PaneAt>, Option<PaneAt>),
+    seat: &Arc<Seat>,
     request: TerminalRequest,
 ) -> Sending {
     assert!(
@@ -666,6 +694,7 @@ fn send(
     );
     let host = host.clone();
     let agent = agent.clone();
+    let seat = seat.clone();
     tokio::task::spawn_blocking(move || match (request, &pinned) {
         (TerminalRequest::Input { bytes } | TerminalRequest::Scroll { bytes }, Some(pin)) => {
             sent_at(host.input_at(&agent, pin, &bytes))
@@ -679,12 +708,7 @@ fn send(
         (TerminalRequest::Prompt { text }, None) => {
             type_prompt(host.as_ref(), &agent, &text).map(|heard| heard.then_some(text))
         }
-        (TerminalRequest::Resize { cols, rows }, Some(pin)) => {
-            sent_at(host.resize_at(&agent, pin, (cols, rows)))
-        }
-        (TerminalRequest::Resize { cols, rows }, None) => {
-            host.resize(&agent, cols, rows).map(|()| None)
-        }
+        (TerminalRequest::Resize { cols, rows }, _) => seat.size((cols, rows)).map(|_| None),
         (
             TerminalRequest::Attach { .. }
             | TerminalRequest::AttachPane { .. }
@@ -711,31 +735,35 @@ async fn open(
     verify_client(stream)?;
     let admission = granted(engine, authority, packet).await?;
     let frame = read_frame(stream).await?;
-    let (agent_id, pane, size, input_only) = match serde_json::from_slice(&frame[4..])
+    let (agent_id, pane, size, (input_only, follows)) = match serde_json::from_slice(&frame[4..])
         .map_err(|_| failure("terminal_request_invalid"))?
     {
-        TerminalRequest::Attach { agent_id } => (agent_id, None, None, false),
-        TerminalRequest::AttachPane { agent_id, pane } => (agent_id, Some(pane), None, false),
+        TerminalRequest::Attach { agent_id } => (agent_id, None, None, (false, false)),
+        TerminalRequest::AttachPane { agent_id, pane } => {
+            (agent_id, Some(pane), None, (false, false))
+        }
         TerminalRequest::AttachSized {
             agent_id,
             pane,
             cols,
             rows,
-        } => (agent_id, pane, Some((cols, rows)), false),
+        } => (agent_id, pane, Some((cols, rows)), (false, false)),
         TerminalRequest::AttachInput {
             agent_id,
             pane,
             cols,
             rows,
+            follows,
         } => {
             let size = crate::terminal::SIZE_MIN..=crate::terminal::SIZE_MAX;
             if !size.contains(&cols) || !size.contains(&rows) {
                 return Err(failure("terminal_size_bounds"));
             }
-            (agent_id, pane, Some((cols, rows)), true)
+            (agent_id, pane, Some((cols, rows)), (true, follows))
         }
         _ => return Err(failure("terminal_request_invalid")),
     };
+    assert!(!follows || input_only);
     assert!(!input_only || size.is_some());
     let member = agent_id.team_agent().filter(|_| pane.is_none());
     let engine_host = terminal_off_worker(engine, authority).await?;
@@ -744,8 +772,10 @@ async fn open(
         None => engine_host,
     };
     let attaching = host.clone();
+    let units = engine.terminal_units.clone();
     let view = tokio::task::spawn_blocking(move || {
-        let pinned = pin_and_size(attaching.as_ref(), &agent_id, size, input_only)?;
+        let kind = (input_only, follows);
+        let (pinned, seat) = pin_and_seat(&attaching, &units, &agent_id, size, kind)?;
         match size.filter(|_| input_only) {
             Some((cols, rows)) => {
                 attaching.input_live(&agent_id)?;
@@ -755,9 +785,10 @@ async fn open(
                     rows,
                     viewer: None,
                     pinned,
+                    seat,
                 })
             }
-            None => Ok(View::of(attaching.attach(&agent_id)?)),
+            None => Ok(View::of(attaching.attach(&agent_id)?, seat)),
         }
     })
     .await
@@ -896,14 +927,14 @@ impl OwnerClient {
         Err(failure("terminal_owner_unavailable"))
     }
 
-    /// Refuses an input-only view for the same reason. Takes the terminal name, pane and
-    /// size, unused. Returns `terminal_owner_unavailable`.
+    /// Refuses an input-only view for the same reason. Takes the terminal name, pane, size
+    /// and whether it follows, unused. Returns `terminal_owner_unavailable`.
     pub async fn terminal_attach_input(
         &self,
         _agent: AgentId,
         _pane: Option<String>,
-        _cols: u16,
-        _rows: u16,
+        _size: (u16, u16),
+        _follows: bool,
     ) -> Result<TerminalSession, EngineError> {
         Err(failure("terminal_owner_unavailable"))
     }
@@ -1051,6 +1082,7 @@ async fn pump(
         agent,
         mut viewer,
         pinned,
+        seat,
         ..
     } = view;
     let mut check = tokio::time::interval(GRANT_CHECK);
@@ -1117,7 +1149,7 @@ async fn pump(
                 Some(request) => {
                     viewing.typed(&request);
                     let at = viewer.as_ref().and_then(|viewer| viewer.at.clone());
-                    sending = Some(send(&host, &agent, at, pinned.clone(), request));
+                    sending = Some(send(&host, &agent, (at, pinned.clone()), &seat, request));
                 }
             },
             _ = check.tick() => {
