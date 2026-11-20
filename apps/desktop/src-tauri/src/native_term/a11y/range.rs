@@ -168,9 +168,10 @@ impl Text {
 }
 
 /// The cell nearest a point in view points (y grows down), for a range from a point: inside
-/// the grid the cell under it, outside it the nearest edge cell, a point that is not finite
-/// the first cell. Inputs: the geometry, the point, and the grid's rows and columns. Output:
-/// the row and column.
+/// the drawn rows the cell under it, outside them the nearest edge cell, a point that is not
+/// finite the first drawn cell. A view clipped to its rows from `top` reads that row at its
+/// top edge. Inputs: the geometry, the point, and the grid's rows and columns. Output: the
+/// row and column in the grid.
 pub fn cell_near(
     geometry: Geometry,
     point: (f64, f64),
@@ -180,12 +181,16 @@ pub fn cell_near(
     assert!(rows >= 1);
     assert!(columns >= 1);
     let Geometry {
-        cell, pad, scale, ..
+        cell,
+        pad,
+        scale,
+        top,
     } = geometry;
+    assert!(top < rows, "a view draws at least one row of its grid");
     assert!((1.0..=4.0).contains(&scale));
     assert!(cell.0 > 0.0 && cell.1 > 0.0 && pad >= 0.0);
     if !(point.0.is_finite() && point.1.is_finite()) {
-        return (0, 0);
+        return (top, 0);
     }
     let index = |at: f64, size: f64, count: usize| -> usize {
         let cells = ((at * scale - pad) / size).floor();
@@ -196,10 +201,10 @@ pub fn cell_near(
         }
     };
     let near = (
-        index(point.1, cell.1, rows),
+        top + index(point.1, cell.1, rows - top),
         index(point.0, cell.0, columns),
     );
-    assert!(near.0 < rows);
+    assert!(near.0 >= top && near.0 < rows);
     assert!(near.1 < columns);
     near
 }
