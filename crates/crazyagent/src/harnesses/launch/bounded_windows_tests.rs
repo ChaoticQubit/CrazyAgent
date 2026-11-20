@@ -373,3 +373,27 @@ fn a_home_granted_another_container_than_its_boundary_is_refused() {
         assert_eq!(refused.0, "launch_account_home_unsafe", "{foreign}");
     }
 }
+
+/// The engine's grants folder from an owner's data root with a slash, a UNC prefix or a
+/// relative part is refused before the plain-path assert of `install_with_grants`, and a plain
+/// drive folder is kept as it is (CR-1614 r4).
+#[test]
+fn grants_folder_outside_the_plain_drive_spelling_is_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let plain = crate::sandbox::canonical(temp.path())
+        .unwrap()
+        .join("grants");
+    assert_eq!(crate::sandbox::plain_grants(plain.clone()).unwrap(), plain);
+    for refused in [
+        r"C:/data\grants",
+        r"\\server\share\grants",
+        r"C:\data\..\grants",
+        "grants",
+    ] {
+        let error = crate::sandbox::plain_grants(PathBuf::from(refused)).unwrap_err();
+        assert!(
+            matches!(error, crate::sandbox::SandboxError::Invalid(_)),
+            "{refused}: {error:?}"
+        );
+    }
+}

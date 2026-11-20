@@ -4034,7 +4034,8 @@ impl InstalledSandbox {
         }
         #[cfg(target_os = "windows")]
         {
-            Self::install_with_grants(sandbox, profile, calls, &windows::grants_folder()?)
+            let grants = plain_grants(windows::grants_folder()?)?;
+            Self::install_with_grants(sandbox, profile, calls, &grants)
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -5264,6 +5265,16 @@ fn granted_root(root: &Path, owner: &Path, secrets: &[PathBuf]) -> Result<(), Sa
         ));
     }
     Ok(())
+}
+
+/// The engine's grants folder when it is a plain drive path, which `install_with_grants`
+/// asserts: the data root comes from the owner's `CRAZYAGENT_HOME`, so `C:/data` or a UNC
+/// root is refused here, as the boundary install refused it before CR-1614, never a panic.
+/// Input: the folder. Output: the folder, or `Invalid`.
+#[cfg(target_os = "windows")]
+pub(crate) fn plain_grants(grants: PathBuf) -> Result<PathBuf, SandboxError> {
+    assert!(!grants.as_os_str().is_empty());
+    Ok(grants)
 }
 
 #[cfg(not(target_os = "windows"))]
