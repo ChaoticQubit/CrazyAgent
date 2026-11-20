@@ -3,6 +3,8 @@ use crate::harnesses::launch::{self};
 use crate::harnesses::launch::{
     AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session,
 };
+#[cfg(unix)]
+use crate::harnesses::leftovers::LineageToken;
 use crate::protocol::{CredentialRef, ProjectId, SessionId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
@@ -32,7 +34,6 @@ const KILL_WAIT: Duration = Duration::from_secs(2);
 #[cfg(target_os = "macos")]
 const LSOF: &str = "/usr/sbin/lsof";
 const STOP_INCOMPLETE: &str = "agent_stop_incomplete";
-#[cfg(unix)]
 const LEFT_NAMED_MAX: usize = 8;
 const STOP_GRACE: Duration = Duration::from_secs(2);
 const RUN_TIME_SECS_MAX: u64 = 86_400;
@@ -56,10 +57,25 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS agent_runs(
     reason TEXT,
     last_text TEXT,
     started_ms INTEGER NOT NULL,
-    ended_ms INTEGER
+    ended_ms INTEGER,
+    lineage TEXT CHECK(lineage IS NULL OR length(lineage) = 32),
+    stop_left TEXT
 );
 CREATE INDEX IF NOT EXISTS agent_runs_project ON agent_runs(project, started_ms);";
-const COLUMNS: &str = "id,project,role,label,harness,state,reattached,attempt,exit_code,reason,last_text,started_ms,ended_ms,substr(spec,1,8)='{\"host\":'";
+/// The columns `agent_runs` gained after its first release, each with the statement that
+/// adds it to a register an older engine made.
+#[cfg(unix)]
+const ADDED_COLUMNS: [(&str, &str); 2] = [
+    (
+        "lineage",
+        "ALTER TABLE agent_runs ADD COLUMN lineage TEXT CHECK(lineage IS NULL OR length(lineage) = 32)",
+    ),
+    (
+        "stop_left",
+        "ALTER TABLE agent_runs ADD COLUMN stop_left TEXT",
+    ),
+];
+const COLUMNS: &str = "id,project,role,label,harness,state,reattached,attempt,exit_code,reason,last_text,started_ms,ended_ms,substr(spec,1,8)='{\"host\":',stop_left";
 
 fn failure(code: &str) -> LaunchError {
     LaunchError(code.into(), None)
@@ -548,6 +564,7 @@ enum Live {
     #[cfg(unix)]
     Reattached {
         group: u32,
+        token: Option<LineageToken>,
         output: Arc<PathBuf>,
         probe: Arc<File>,
         quit: Arc<AtomicBool>,
@@ -572,10 +589,23 @@ impl Recorder {
     /// agent's runtime folder under the same database lock a restart takes before it makes
     /// the folder again. Inputs: the state, exit code and reason. Output: none.
     fn finish(&self, state: AgentState, exit_code: Option<i32>, reason: Option<&str>) {
+        self.close(state, exit_code, reason, None);
+    }
+
+    /// Records how this attempt ended as [`Self::finish`] does, with the names of the holders
+    /// of its output log the stop left running, if any. Inputs: the state, exit code, reason
+    /// and those names. Output: none.
+    fn close(
+        &self,
+        state: AgentState,
+        exit_code: Option<i32>,
+        reason: Option<&str>,
+        left: Option<&str>,
+    ) {
         assert!(state != AgentState::Running);
         if let Ok(db) = self.db.lock() {
             let ended = db.execute(
-                "UPDATE agent_runs SET state=?4,exit_code=?5,reason=?6,ended_ms=?7
+                "UPDATE agent_runs SET state=?4,exit_code=?5,reason=?6,ended_ms=?7,stop_left=?8
                  WHERE id=?1 AND epoch=?2 AND attempt=?3 AND state='running'",
                 params![
                     self.id,
@@ -584,7 +614,8 @@ impl Recorder {
                     state.as_str(),
                     exit_code,
                     reason,
-                    now_ms() as i64
+                    now_ms() as i64,
+                    left
                 ],
             );
             if matches!(ended, Ok(1)) {
@@ -594,19 +625,28 @@ impl Recorder {
     }
 
     /// Records how a stopped agent ended: the given state and reason once no process
-    /// holding its output log is left, otherwise Failed with `agent_stop_incomplete`.
-    /// Inputs: the state, exit code and reason, and whether the stop completed.
+    /// holding its output log is left, otherwise Failed with `agent_stop_incomplete`, the
+    /// holders it left named for the agent's status and in the engine log.
+    /// Inputs: the state, exit code and reason, and how the stop ended.
     fn ended(
         &self,
         state: AgentState,
         exit_code: Option<i32>,
         reason: Option<&str>,
-        complete: bool,
+        ending: Ending,
     ) {
-        if complete {
-            self.finish(state, exit_code, reason);
-        } else {
-            self.finish(AgentState::Failed, exit_code, Some(STOP_INCOMPLETE));
+        match ending {
+            Ok(()) => self.finish(state, exit_code, reason),
+            Err(left) => {
+                let named = left_named(&left);
+                eprintln!("{}", left_line(&self.id, &named));
+                self.close(
+                    AgentState::Failed,
+                    exit_code,
+                    Some(STOP_INCOMPLETE),
+                    Some(&named),
+                );
+            }
         }
     }
 
@@ -661,6 +701,18 @@ impl Agents {
             .busy_timeout(Duration::from_secs(5))
             .map_err(database)?;
         connection.execute_batch(SCHEMA).map_err(database)?;
+        for (column, added) in ADDED_COLUMNS {
+            let present: bool = connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_runs') WHERE name=?1)",
+                    [column],
+                    |row| row.get(0),
+                )
+                .map_err(database)?;
+            if !present {
+                connection.execute_batch(added).map_err(database)?;
+            }
+        }
         let folder = root.join(AGENTS);
         match std::fs::DirBuilder::new().mode(0o700).create(&folder) {
             Ok(()) => {}
@@ -722,18 +774,18 @@ impl Agents {
 
     #[cfg(unix)]
     fn recover(&self) -> Result<(), LaunchError> {
-        let running: Vec<(String, Option<i64>)> = {
+        let running: Vec<(String, Option<i64>, Option<String>)> = {
             let db = self.db()?;
             let mut statement = db
-                .prepare("SELECT id,process_group FROM agent_runs WHERE state='running'")
+                .prepare("SELECT id,process_group,lineage FROM agent_runs WHERE state='running'")
                 .map_err(database)?;
             statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
                 .map_err(database)?
                 .collect::<Result<_, _>>()
                 .map_err(database)?
         };
-        for (id, group) in running {
+        for (id, group, lineage) in running {
             let alive = valid_id(&id)
                 .then(|| self.probe(&id))
                 .flatten()
@@ -755,7 +807,8 @@ impl Agents {
                         .map_err(database)?;
                     drop(db);
                     if claimed == 1 {
-                        self.watch(id, group, probe, attempt)?;
+                        let token = lineage.and_then(|token| LineageToken::try_from(token).ok());
+                        self.watch(id, group, token, probe, attempt)?;
                     }
                 }
                 None => {
@@ -813,7 +866,14 @@ impl Agents {
     }
 
     #[cfg(unix)]
-    fn watch(&self, id: String, group: u32, probe: File, attempt: u32) -> Result<(), LaunchError> {
+    fn watch(
+        &self,
+        id: String,
+        group: u32,
+        token: Option<LineageToken>,
+        probe: File,
+        attempt: u32,
+    ) -> Result<(), LaunchError> {
         let output = Arc::new(self.folder(&id).join(launch::DURABLE_OUTPUT));
         let probe = Arc::new(probe);
         let quit = Arc::new(AtomicBool::new(false));
@@ -846,6 +906,7 @@ impl Agents {
             id,
             Live::Reattached {
                 group,
+                token,
                 output,
                 probe,
                 quit,
@@ -912,6 +973,7 @@ impl Agents {
         };
         let busy = Arc::new(AtomicBool::new(false));
         let group = session.process_group();
+        let lineage = session.lineage().as_str().to_owned();
         let prepared = match &spec.prompt {
             Some(prompt) => session.send(prompt),
             None => Ok(()),
@@ -919,8 +981,8 @@ impl Agents {
         .and_then(|()| {
             self.db()?
                 .execute(
-                    "UPDATE agent_runs SET process_group=?4 WHERE id=?1 AND epoch=?2 AND attempt=?3",
-                    params![id, self.epoch, attempt, i64::from(group)],
+                    "UPDATE agent_runs SET process_group=?4,lineage=?5 WHERE id=?1 AND epoch=?2 AND attempt=?3",
+                    params![id, self.epoch, attempt, i64::from(group), lineage],
                 )
                 .map_err(database)
         });
@@ -928,8 +990,8 @@ impl Agents {
             .folder(id)
             .join(crate::harnesses::launch::DURABLE_OUTPUT);
         if let Err(error) = prepared {
-            let (_, complete) = end_session(session, &output);
-            recorder.ended(AgentState::Failed, None, Some(&error.0), complete);
+            let (_, ending) = end_session(session, &output);
+            recorder.ended(AgentState::Failed, None, Some(&error.0), ending);
             return Err(error);
         }
         busy.store(spec.prompt.is_some(), Ordering::Release);
@@ -1238,7 +1300,7 @@ impl Agents {
         let changed = self
             .db()?
             .execute(
-                "UPDATE agent_runs SET state='running',reattached=0,process_group=NULL,attempt=?2,epoch=?3,
+                "UPDATE agent_runs SET state='running',reattached=0,process_group=NULL,lineage=NULL,stop_left=NULL,attempt=?2,epoch=?3,
                  exit_code=NULL,reason=NULL,last_text=NULL,started_ms=?4,ended_ms=NULL
                  WHERE id=?1 AND state<>'running'",
                 params![id, next, self.epoch, now_ms() as i64],
@@ -1286,7 +1348,7 @@ impl Agents {
             if let Some(next) = attempt.and_then(|attempt| attempt.checked_add(1)) {
                 let changed = db
                     .execute(
-                        "UPDATE agent_runs SET state='running',reattached=0,process_group=NULL,attempt=?3,epoch=?4,
+                        "UPDATE agent_runs SET state='running',reattached=0,process_group=NULL,lineage=NULL,stop_left=NULL,attempt=?3,epoch=?4,
                          exit_code=NULL,reason=NULL,last_text=NULL,started_ms=?5,ended_ms=NULL
                          WHERE id=?1 AND spec=?2 AND state<>'running'",
                         params![id, spec, next, self.epoch, now],
@@ -1509,6 +1571,7 @@ fn end(live: Live, state: AgentState, recorder: Recorder) {
         #[cfg(unix)]
         Live::Reattached {
             group,
+            token,
             output,
             probe,
             quit,
@@ -1518,7 +1581,9 @@ fn end(live: Live, state: AgentState, recorder: Recorder) {
             if let Some(thread) = thread.take() {
                 let _ = thread.join();
             }
-            recorder.ended(state, None, None, kill_holders(group, &output, &probe));
+            let ending =
+                kill_holders(group, token.as_ref(), &output, &probe).map_err(named_holders);
+            recorder.ended(state, None, None, ending);
         }
         Live::Hosted { control } => {
             control.stop.store(true, Ordering::Release);
@@ -1527,26 +1592,42 @@ fn end(live: Live, state: AgentState, recorder: Recorder) {
     }
 }
 
-/// Stops an owned agent's session, then ends what still holds its output log, such as a
-/// child that left the agent's group with setsid. Inputs: the session and its log path.
-/// Output: the exit code, and true once no holder of the log is left and no warden of the
-/// session failed to confirm its sandbox empty.
+/// How a stop ended: Ok once no process holding the agent's output log is left and no
+/// warden failed to confirm its sandbox empty, else each holder it left, by id and program,
+/// none when they could not be listed.
+type Ending = Result<(), Vec<(i32, String)>>;
+
+/// Stops an owned agent's session, then ends what of its launch still holds its output log,
+/// such as a child that left the agent's group with setsid. Inputs: the session and its log
+/// path. Output: the exit code and how the stop ended.
 #[cfg(unix)]
-fn end_session(session: Session, output: &Path) -> (Option<i32>, bool) {
+fn end_session(session: Session, output: &Path) -> (Option<i32>, Ending) {
     let group = session.process_group();
+    let token = session.lineage().clone();
     let stopped = session.stop();
-    let complete = log_probe(output).is_some_and(|probe| kill_holders(group, output, &probe));
-    let confirmed = stopped.is_ok();
-    (stopped.ok().flatten(), complete && confirmed)
+    let holders = log_probe(output).map_or(Err(Vec::new()), |probe| {
+        kill_holders(group, Some(&token), output, &probe)
+    });
+    let ending = match holders {
+        Ok(()) if stopped.is_ok() => Ok(()),
+        Ok(()) => Err(Vec::new()),
+        Err(left) => Err(named_holders(left)),
+    };
+    (stopped.ok().flatten(), ending)
 }
 
 /// Stops an owned agent's session where no output log lock exists. Inputs: the session
-/// and the log path, unused. Output: the exit code, and true unless the stop was uncertain.
+/// and the log path, unused. Output: the exit code and how the stop ended, Ok unless it
+/// was uncertain.
 #[cfg(not(unix))]
-fn end_session(session: Session, _output: &Path) -> (Option<i32>, bool) {
+fn end_session(session: Session, _output: &Path) -> (Option<i32>, Ending) {
     let stopped = session.stop();
-    let confirmed = stopped.is_ok();
-    (stopped.ok().flatten(), confirmed)
+    let ending = if stopped.is_ok() {
+        Ok(())
+    } else {
+        Err(Vec::new())
+    };
+    (stopped.ok().flatten(), ending)
 }
 
 /// Opens an agent output log read-only to probe its lock, refusing a link, anything but
@@ -1576,36 +1657,39 @@ enum Signalled {
     One(rustix::process::Pid),
 }
 
-/// Picks what a stop signals for one holder of an agent's output log: its group when the
-/// holder leads it or it is the agent's recorded group, never the engine's own and never
-/// group 1 or 0 ([`launch::group_of`]), else the holder alone, and nothing for process 1 or
-/// a holder already gone. Inputs: the holder, its group as read, the engine's group and the
-/// recorded group. Output: the target, or None.
+/// Picks what a stop signals for one holder of an agent's output log: the recorded group
+/// when the holder sits in it; else, only for a holder carrying the launch's token, the
+/// group it leads or itself. Never the engine's group, group 1 or 0 ([`launch::group_of`]),
+/// process 1 or a holder already gone. Inputs: the holder, its group as read, the engine's
+/// group, the recorded group and whether it carries the token. Output: the target, or None.
 #[cfg(unix)]
 fn holder_target(
     writer: rustix::process::Pid,
     leader: Result<rustix::process::Pid, rustix::io::Errno>,
     own: rustix::process::Pid,
     group: u32,
-    _carries: bool,
+    carries: bool,
 ) -> Option<Signalled> {
     if writer.as_raw_nonzero().get() <= 1 {
         return None;
     }
+    let leader = match leader {
+        Err(rustix::io::Errno::SRCH) => return None,
+        Ok(leader) if leader != own => Some(leader),
+        _ => None,
+    };
+    let as_group = |leader: rustix::process::Pid| {
+        u32::try_from(leader.as_raw_nonzero().get())
+            .ok()
+            .and_then(launch::group_of)
+            .map_or(Signalled::One(writer), Signalled::Group)
+    };
     let target = match leader {
-        Err(rustix::io::Errno::SRCH) => None,
-        Ok(leader)
-            if leader != own
-                && (leader == writer
-                    || u32::try_from(leader.as_raw_nonzero().get()) == Ok(group)) =>
-        {
-            Some(
-                u32::try_from(leader.as_raw_nonzero().get())
-                    .ok()
-                    .and_then(launch::group_of)
-                    .map_or(Signalled::One(writer), Signalled::Group),
-            )
+        Some(leader) if u32::try_from(leader.as_raw_nonzero().get()) == Ok(group) => {
+            Some(as_group(leader))
         }
+        _ if !carries => None,
+        Some(leader) if leader == writer => Some(as_group(leader)),
         _ => Some(Signalled::One(writer)),
     };
     assert!(target.is_none_or(|target| match target {
@@ -1617,59 +1701,107 @@ fn holder_target(
 /// Names the holders of an agent's output log a stop left running: each by id and program,
 /// at most `LEFT_NAMED_MAX`, then how many more. Input: each holder's id and program, empty
 /// when unknown. Output: the names, empty for none.
-#[cfg(unix)]
-fn left_named(_left: &[(i32, String)]) -> String {
-    String::new()
+fn left_named(left: &[(i32, String)]) -> String {
+    let mut named: Vec<String> = left
+        .iter()
+        .take(LEFT_NAMED_MAX)
+        .map(|(pid, program)| {
+            if program.is_empty() {
+                pid.to_string()
+            } else {
+                format!("{pid} {program}")
+            }
+        })
+        .collect();
+    if left.len() > LEFT_NAMED_MAX {
+        named.push(format!("and {} more", left.len() - LEFT_NAMED_MAX));
+    }
+    named.join(", ")
 }
 
 /// The engine log line for a stop that left holders of an agent's output log running.
 /// Inputs: the agent id and the holders' names. Output: the line.
-#[cfg(unix)]
-fn left_line(_id: &str, _named: &str) -> String {
-    String::new()
+fn left_line(id: &str, named: &str) -> String {
+    let named = if named.is_empty() { "unlisted" } else { named };
+    format!("agent_stop_left agent={id} holders={named}")
 }
 
-/// Ends what still holds a reattached agent's output log: TERM, then KILL after the
-/// grace time, each sent only to a process found holding the log for writing, or to its
-/// group when the holder leads it or sits in the agent's recorded group.
-/// Inputs: the recorded group, the log path and a read-only open of the log.
-/// Output: true once no holder is left; false when holders survive or cannot be found.
+/// Names the holders of an agent's output log a stop left running by their programs, the
+/// first `LEFT_NAMED_MAX` of them. Input: the holders. Output: each holder's id and
+/// program, the program empty past that count or when no listing named it.
 #[cfg(unix)]
-fn kill_holders(group: u32, output: &Path, probe: &File) -> bool {
+fn named_holders(left: Vec<rustix::process::Pid>) -> Vec<(i32, String)> {
+    let ids: Vec<i32> = left.iter().map(|pid| pid.as_raw_nonzero().get()).collect();
+    let programs = crate::harnesses::leftovers::programs_of(&ids[..ids.len().min(LEFT_NAMED_MAX)]);
+    ids.into_iter()
+        .map(|id| (id, programs.get(&id).cloned().unwrap_or_default()))
+        .collect()
+}
+
+/// Ends what of an agent's launch still holds its output log: TERM, then KILL after the
+/// grace time, to the recorded group for a holder in it, else only to a holder whose
+/// environment shows the launch's token, so the owner's own writer of the log is left.
+/// Inputs: the recorded group, the token if kept, the log path and a read-only open of it.
+/// Output: Ok once no holder is left, else the writers still listed, none if unlisted.
+#[cfg(unix)]
+fn kill_holders(
+    group: u32,
+    token: Option<&LineageToken>,
+    output: &Path,
+    probe: &File,
+) -> Result<(), Vec<rustix::process::Pid>> {
     let own = rustix::process::getpgrp();
     for (signal, wait) in [
         (rustix::process::Signal::TERM, STOP_GRACE),
         (rustix::process::Signal::KILL, KILL_WAIT),
     ] {
         if !launch::holder_alive(probe) {
-            return true;
+            return Ok(());
         }
         let Some(writers) = writers(output, probe) else {
-            return false;
+            return Err(Vec::new());
         };
+        let ids: Vec<i32> = writers
+            .iter()
+            .map(|writer| writer.as_raw_nonzero().get())
+            .collect();
+        let asked = &ids[..ids.len().min(crate::harnesses::leftovers::ASKED_MAX)];
+        let carriers = token
+            .and_then(|token| crate::harnesses::leftovers::carriers_among(token, asked))
+            .unwrap_or_default();
+        let mut sent = false;
         for writer in writers {
+            let carries = carriers.contains(&writer.as_raw_nonzero().get());
             match holder_target(
                 writer,
                 rustix::process::getpgid(Some(writer)),
                 own,
                 group,
-                true,
+                carries,
             ) {
                 Some(Signalled::Group(leader)) => {
                     let _ = rustix::process::kill_process_group(leader, signal);
+                    sent = true;
                 }
                 Some(Signalled::One(holder)) => {
                     let _ = rustix::process::kill_process(holder, signal);
+                    sent = true;
                 }
                 None => {}
             }
+        }
+        if !sent {
+            break;
         }
         let until = Instant::now() + wait;
         while launch::holder_alive(probe) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
-    !launch::holder_alive(probe)
+    if !launch::holder_alive(probe) {
+        return Ok(());
+    }
+    Err(writers(output, probe).unwrap_or_default())
 }
 
 /// Lists the other processes that hold the agent output log open for writing, through
@@ -1806,14 +1938,14 @@ fn drive(
                 let _ = reply.send(session.interrupt());
             }
             Ok(Command::Stop(state, reply)) => {
-                let (code, complete) = end_session(session, output);
-                recorder.ended(state, code, None, complete);
+                let (code, ending) = end_session(session, output);
+                recorder.ended(state, code, None, ending);
                 let _ = reply.send(Ok(()));
                 return;
             }
             Err(TryRecvError::Disconnected) => {
-                let (code, complete) = end_session(session, output);
-                recorder.ended(AgentState::Closed, code, None, complete);
+                let (code, ending) = end_session(session, output);
+                recorder.ended(AgentState::Closed, code, None, ending);
                 return;
             }
             Err(TryRecvError::Empty) => {}
@@ -1840,8 +1972,8 @@ fn drive(
             Ok(_) => {}
             Err(error) => {
                 busy.store(false, Ordering::Release);
-                let (_, complete) = end_session(session, output);
-                recorder.ended(AgentState::Failed, None, Some(&error.0), complete);
+                let (_, ending) = end_session(session, output);
+                recorder.ended(AgentState::Failed, None, Some(&error.0), ending);
                 return;
             }
         }
@@ -1863,6 +1995,7 @@ struct Stored {
     started_ms: u64,
     ended_ms: Option<u64>,
     hosted: bool,
+    stop_left: Option<String>,
 }
 
 fn stored(row: &Row<'_>) -> rusqlite::Result<Stored> {
@@ -1889,6 +2022,7 @@ fn stored(row: &Row<'_>) -> rusqlite::Result<Stored> {
         started_ms: u64::try_from(started).unwrap_or(0),
         ended_ms: ended.and_then(|ended| u64::try_from(ended).ok()),
         hosted: row.get::<_, i64>(13)? == 1,
+        stop_left: row.get(14)?,
     })
 }
 
@@ -1926,7 +2060,15 @@ impl Stored {
                 Some(code) => crate::sandbox::held_stop(std::env::consts::OS, code)
                     .map_or_else(|| format!("Exited with code {code}"), str::to_owned),
             },
-            AgentState::Failed => "Failed".to_owned(),
+            AgentState::Failed => match (self.reason.as_deref(), self.stop_left.as_deref()) {
+                (Some(STOP_INCOMPLETE), Some("")) => {
+                    "Failed: its stop could not confirm that every process holding its output log ended".to_owned()
+                }
+                (Some(STOP_INCOMPLETE), Some(left)) => format!(
+                    "Failed: its stop left {left} running, holding its output log. CrazyAgent did not end them, since it could not tell they were the agent's"
+                ),
+                _ => "Failed".to_owned(),
+            },
             AgentState::Closed => "Stopped when CrazyAgent closed".to_owned(),
         };
         AgentView {

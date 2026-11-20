@@ -79,6 +79,9 @@ const TABLE_ROWS_MAX: usize = 65_536;
 const TABLE_TIME: Duration = Duration::from_secs(1);
 #[cfg(unix)]
 const TABLE_BYTES_MAX: u64 = 4 * 1024 * 1024;
+/// The most bytes of one process's environment a stop reads to find the launch's token.
+#[cfg(target_os = "linux")]
+const ENVIRON_BYTES_MAX: u64 = 1024 * 1024;
 #[cfg(unix)]
 const TABLE_POLL: Duration = Duration::from_millis(5);
 /// How long past `TABLE_TIME` a stop waits for the listing thread to report a listing it
@@ -124,6 +127,9 @@ const RECHECK_FIELDS: usize = 7;
 /// The most processes one hold signals in one pass, so the `-p` list stays bounded.
 #[cfg(unix)]
 const SIGNALLED_MAX: usize = 256;
+/// The most processes one [`carriers_among`] or [`programs_of`] call asks about.
+#[cfg(unix)]
+pub(crate) const ASKED_MAX: usize = SIGNALLED_MAX;
 /// The command that lists every process with its environment as macOS shows it to its
 /// user, the same as KERN_PROCARGS2.
 #[cfg(target_os = "macos")]
@@ -1595,10 +1601,55 @@ fn user_id(field: &str) -> Option<u32> {
 /// environment this user cannot read, as macOS hides its own platform programs', is never
 /// a carrier. Inputs: the token and the ids. Output: the carriers among them, or None when
 /// the environments could not be listed.
-#[cfg(unix)]
+#[cfg(target_os = "macos")]
+pub(crate) fn carriers_among(token: &LineageToken, asked: &[i32]) -> Option<Vec<i32>> {
+    assert!(asked.len() <= ASKED_MAX);
+    let carriers = carrying(token, &mut None).ok()?;
+    Some(
+        asked
+            .iter()
+            .copied()
+            .filter(|pid| carriers.iter().any(|(carrier, _)| carrier == pid))
+            .collect(),
+    )
+}
+
+/// Tells which of `asked` carry the launch's token, each by the exact
+/// `CRAZYAGENT_LINEAGE=<token>` entry of its `/proc/<pid>/environ`, read up to
+/// `ENVIRON_BYTES_MAX`. A process whose environment cannot be read, or is longer, is never a
+/// carrier. Inputs: the token and the ids. Output: the carriers among them.
+#[cfg(target_os = "linux")]
+pub(crate) fn carriers_among(token: &LineageToken, asked: &[i32]) -> Option<Vec<i32>> {
+    use std::io::Read;
+    assert!(asked.len() <= ASKED_MAX);
+    let word = format!("{LINEAGE_VARIABLE}={}", token.as_str());
+    let carries = |pid: i32| {
+        let Ok(file) = std::fs::File::open(format!("/proc/{pid}/environ")) else {
+            return false;
+        };
+        let mut environ = Vec::new();
+        file.take(ENVIRON_BYTES_MAX + 1)
+            .read_to_end(&mut environ)
+            .is_ok_and(|read| read as u64 <= ENVIRON_BYTES_MAX)
+            && environ
+                .split(|byte| *byte == 0)
+                .any(|entry| entry == word.as_bytes())
+    };
+    Some(
+        asked
+            .iter()
+            .copied()
+            .filter(|pid| *pid > 1 && carries(*pid))
+            .collect(),
+    )
+}
+
+/// Finds no carrier where no environment is read: every other system. Inputs: unused.
+/// Output: None.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
 pub(crate) fn carriers_among(_token: &LineageToken, asked: &[i32]) -> Option<Vec<i32>> {
-    assert!(asked.len() <= SIGNALLED_MAX);
-    Some(Vec::new())
+    assert!(asked.len() <= ASKED_MAX);
+    None
 }
 
 /// Names each of `asked` by its program's basename, cut to visible characters, from one
@@ -1606,8 +1657,23 @@ pub(crate) fn carriers_among(_token: &LineageToken, asked: &[i32]) -> Option<Vec
 /// did not name, or a listing that failed, gives no entry.
 #[cfg(unix)]
 pub(crate) fn programs_of(asked: &[i32]) -> BTreeMap<i32, String> {
-    assert!(asked.len() <= SIGNALLED_MAX);
-    BTreeMap::new()
+    assert!(asked.len() <= ASKED_MAX);
+    if asked.is_empty() {
+        return BTreeMap::new();
+    }
+    let mut argv = owned(PS_NAMES);
+    argv.push("-p".to_owned());
+    argv.push(
+        asked
+            .iter()
+            .map(i32::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    read_bounded(argv, &mut None, None)
+        .ok()
+        .and_then(|listing| names(&String::from_utf8_lossy(&listing), asked))
+        .unwrap_or_default()
 }
 
 /// Finds no process by its environment where none is listed here: Linux reads no token yet.

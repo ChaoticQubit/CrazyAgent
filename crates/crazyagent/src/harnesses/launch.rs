@@ -1494,6 +1494,7 @@ pub struct Session {
     _context: Option<Installed>,
     _relay: Option<Relay>,
     _key: Option<KeyFile>,
+    lineage: LineageToken,
     #[cfg(unix)]
     lifeline: Option<crate::research::runner::Lifeline>,
 }
@@ -1614,7 +1615,7 @@ impl Session {
         } else {
             crate::sandbox::LineageCheck::Unneeded
         };
-        let follower = Follower::start(child.id(), Some(token), check);
+        let follower = Follower::start(child.id(), Some(token.clone()), check);
         let mut session = Self {
             child,
             warden,
@@ -1631,6 +1632,7 @@ impl Session {
             _context: context,
             _relay: relay,
             _key: key,
+            lineage: token,
             #[cfg(unix)]
             lifeline: None,
         };
@@ -1654,6 +1656,13 @@ impl Session {
     /// Returns the process group id that `stop` signals.
     pub fn process_group(&self) -> u32 {
         self.child.id()
+    }
+
+    /// Returns the token every process of this launch inherits in its environment, so a
+    /// later stop, also one after an engine restart, can tell the launch's processes from
+    /// others. Output: the token.
+    pub fn lineage(&self) -> &LineageToken {
+        &self.lineage
     }
 
     /// Sends one prompt. A prompt sent before the harness is ready is held until it is.
