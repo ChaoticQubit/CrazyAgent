@@ -1,6 +1,6 @@
 use super::{
-    Anchor, EngineService, Identity, LOCATOR, Locator, PinnedLocator, check_database,
-    check_generation, discover_owner,
+    Anchor, EngineService, Identity, LOCATOR, Locator, PinnedLocator, SocketIdentity,
+    check_database, check_generation, check_socket, discover_owner, parse_locator,
 };
 use crate::engine::Engine;
 use crate::engine::owner::OwnerClientKind;
@@ -84,6 +84,16 @@ fn refusal<T>(result: Result<T, crate::engine::EngineError>) -> String {
     }
 }
 
+/// A recorded Windows endpoint: the random part filled with `seed` and a nonzero pin.
+/// Input: the seed. Output: the endpoint.
+fn endpoint(seed: u8) -> SocketIdentity {
+    SocketIdentity {
+        random: [seed; 16],
+        pid: 7,
+        created: 9,
+    }
+}
+
 /// A locator that parses, naming `generation` with the given folder identity. Inputs: the
 /// generation name and its identity. Output: the locator.
 fn locator(generation: &str, generation_identity: Identity) -> Locator {
@@ -98,9 +108,9 @@ fn locator(generation: &str, generation_identity: Identity) -> Locator {
         engine_epoch: "b".repeat(64),
         generation: generation.into(),
         generation_identity,
-        owner_socket: id,
+        owner_socket: endpoint(1),
         ordinary_name: "e.sock".into(),
-        ordinary_socket: id,
+        ordinary_socket: endpoint(2),
         engine_version: String::new(),
     }
 }
@@ -351,8 +361,8 @@ async fn a_replaced_generation_is_refused_before_the_endpoint_check() {
     let value = locator("o01234567", identity);
     assert_eq!(
         refusal(check_generation(&anchor, &value)),
-        "owner_anchor_unavailable",
-        "an intact generation reaches the endpoint check, which still refuses on Windows"
+        "owner_endpoint_replaced_or_unsafe",
+        "an intact generation reaches the endpoint check, which finds no pipes file in it"
     );
     std::fs::rename(path.join("o01234567"), path.join("old")).unwrap();
     drop(private::dir(&path.join("o01234567")).unwrap());
@@ -414,4 +424,143 @@ async fn a_windows_start_with_settings_sources_reaches_start_inner_and_serves() 
     assert!(std::fs::symlink_metadata(path.join("engine.db")).is_ok());
     service.ensure_ready(&stopped).unwrap();
     service.shutdown().await.unwrap();
+}
+
+/// W3-4b D1 (rv-sec2 #717 Q2/Q3): a locator whose owner or ordinary endpoint has a zero
+/// process ID, a zero creation time or an all-zero random part is refused, while one
+/// nonzero random byte parses.
+#[test]
+fn a_locator_endpoint_with_a_zero_part_is_refused() {
+    let parse = |value: &Locator| parse_locator(&serde_json::to_vec(value).unwrap()).map(|_| ());
+    let base = locator(
+        "o01234567",
+        Identity {
+            device: 1,
+            inode: 3,
+        },
+    );
+    parse(&base).expect("the control parses");
+    let mut one = base.clone();
+    one.ordinary_socket.random = [0; 16];
+    one.ordinary_socket.random[15] = 1;
+    parse(&one).expect("one nonzero random byte parses");
+    let changes: [fn(&mut Locator); 6] = [
+        |value| value.owner_socket.pid = 0,
+        |value| value.owner_socket.created = 0,
+        |value| value.owner_socket.random = [0; 16],
+        |value| value.ordinary_socket.pid = 0,
+        |value| value.ordinary_socket.created = 0,
+        |value| value.ordinary_socket.random = [0; 16],
+    ];
+    for (case, change) in changes.iter().enumerate() {
+        let mut value = base.clone();
+        change(&mut value);
+        assert_eq!(
+            refusal(parse(&value)),
+            "owner_locator_invalid",
+            "case {case}"
+        );
+    }
+}
+
+/// The names a stopped engine must not leave in its anchor: the locator, the pipes file, a
+/// generation folder or a capability file. Input: the anchor path. Output: those names.
+fn engine_leftovers(path: &Path) -> Vec<String> {
+    std::fs::read_dir(path)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| {
+            name == LOCATOR
+                || name == "pipes"
+                || name.ends_with(".cap")
+                || (name.len() == 9 && name.starts_with('o'))
+        })
+        .collect()
+}
+
+/// W3-4b D2 and D3, the first end-to-end row (PLAN-0328:87): a started engine's ordinary
+/// endpoint passes `check_socket` as recorded and fails with any part changed; an owner
+/// client connects through the ordinary endpoint; `check_engine` answers Ready with this
+/// version; and shutdown leaves no locator, pipes file, generation or capability file.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_started_windows_engine_serves_an_owner_client_and_stops_clean() {
+    let (_temp, base) = plain_temp();
+    let path = base.join("data");
+    drop(private::store_dir(&path, private::Store::Database).unwrap());
+    let config = settings(&base);
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start(&path, "e.sock", &config, &stopped)
+        .await
+        .expect("a Windows start serves");
+    let recorded = service.locator.as_ref().unwrap().value.ordinary_socket;
+    let ordinary = path.join("e.sock");
+    check_socket(&service.anchor, &ordinary, recorded).expect("the live endpoint passes");
+    let mut random = recorded.random;
+    random[0] ^= 1;
+    for changed in [
+        SocketIdentity {
+            pid: recorded.pid + 1,
+            ..recorded
+        },
+        SocketIdentity {
+            created: recorded.created + 1,
+            ..recorded
+        },
+        SocketIdentity { random, ..recorded },
+    ] {
+        assert_eq!(
+            refusal(check_socket(&service.anchor, &ordinary, changed)),
+            "owner_endpoint_replaced_or_unsafe"
+        );
+    }
+    let timeout = Duration::from_secs(5);
+    let (client, owner, identity) = crate::engine::Client::new(ordinary.clone(), timeout)
+        .unwrap()
+        .with_owner(OwnerClientKind::Tui)
+        .await
+        .expect("an owner client connects through the ordinary endpoint");
+    assert_eq!(identity.engine_version(), crate::version::VERSION);
+    assert_eq!(
+        crate::service::check_engine(&path, OwnerClientKind::Tui, timeout).await,
+        crate::service::EngineCheck::Ready {
+            version: crate::version::VERSION.into()
+        }
+    );
+    drop((client, owner));
+    service.shutdown().await.unwrap();
+    assert_eq!(
+        refusal(check_socket(&service.anchor, &ordinary, recorded)),
+        "owner_endpoint_replaced_or_unsafe"
+    );
+    assert!(
+        engine_leftovers(&path).is_empty(),
+        "{:?}",
+        engine_leftovers(&path)
+    );
+}
+
+/// rv-sec2 #738 Q5, D0/D3: a second start on the anchor while the first serves is refused at
+/// the engine database lock, before it publishes: the first engine's pipes file and locator
+/// keep their bytes, and its ordinary endpoint still answers.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_windows_start_on_a_served_anchor_is_refused_at_the_database_lock() {
+    let (_temp, base) = plain_temp();
+    let path = base.join("data");
+    drop(private::store_dir(&path, private::Store::Database).unwrap());
+    let config = settings(&base);
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut first = EngineService::start(&path, "e.sock", &config, &stopped)
+        .await
+        .expect("the first start serves");
+    let pipes = std::fs::read(path.join("pipes")).unwrap();
+    let published = std::fs::read(path.join(LOCATOR)).unwrap();
+    let refused = refusal(EngineService::start(&path, "e.sock", &config, &stopped).await);
+    assert!(
+        refused.starts_with("database_lock_acquire_failed"),
+        "{refused}"
+    );
+    assert_eq!(std::fs::read(path.join("pipes")).unwrap(), pipes);
+    assert_eq!(std::fs::read(path.join(LOCATOR)).unwrap(), published);
+    assert!(crate::ipc::owner_answering(&path.join("e.sock")));
+    first.shutdown().await.unwrap();
 }
