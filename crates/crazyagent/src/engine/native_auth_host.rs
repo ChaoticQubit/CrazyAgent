@@ -1,10 +1,7 @@
 use crate::engine::{EngineError, io_error};
-use rustix::fs::{Mode, OFlags};
-use sha2::{Digest, Sha256};
-use std::fs::{File, Metadata};
+use rustix::fs::OFlags;
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{FileExt, MetadataExt};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 /// The PATH every sign-in or token renewal child runs with, no folder added: a script
@@ -16,7 +13,7 @@ pub use launch::{CUSTODIAN_ARGUMENTS_MAX, HandedWord, handed_words};
 pub(crate) use launch::{LaunchWord, handed_command};
 #[cfg(test)]
 use pin::EXECUTABLE_BYTES_MAX;
-#[cfg(all(test, not(target_os = "macos")))]
+#[cfg(test)]
 use pin::SETTLE_AFTER;
 #[cfg(test)]
 use pin::settles;
