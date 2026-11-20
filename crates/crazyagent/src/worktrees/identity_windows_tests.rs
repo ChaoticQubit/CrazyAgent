@@ -1,6 +1,6 @@
 use super::{bounded_read, git, git_program_in, identity, inspect};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn plain_temp() -> (tempfile::TempDir, PathBuf) {
     let temp = tempfile::tempdir().unwrap();
@@ -10,7 +10,13 @@ fn plain_temp() -> (tempfile::TempDir, PathBuf) {
 }
 
 fn run(program: &str, args: &[&std::ffi::OsStr]) {
-    let done = Command::new(program).args(args).output().unwrap();
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let done = crate::spawn_gate::output(&mut command).unwrap();
     assert!(done.status.success(), "{program} {args:?}: {done:?}");
 }
 
