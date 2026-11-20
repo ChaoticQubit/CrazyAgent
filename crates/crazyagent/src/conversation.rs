@@ -9,11 +9,9 @@ pub const ENTRIES_MAX: usize = 1024;
 pub const PAGE_ITEMS_MAX: u8 = 32;
 const PAGE_BYTES_MAX: usize = FRAME_BYTES_MAX - 4096;
 
-#[cfg(unix)]
 const META: &str = "CREATE TABLE conversation_meta (
     version INTEGER PRIMARY KEY CHECK(version = 1)
 )";
-#[cfg(unix)]
 const ENTRIES: &str = "CREATE TABLE conversation_entries (
     project TEXT NOT NULL,
     event_cursor INTEGER NOT NULL UNIQUE CHECK(event_cursor > 0),
@@ -23,7 +21,6 @@ const ENTRIES: &str = "CREATE TABLE conversation_entries (
     PRIMARY KEY(project,event_cursor),
     CHECK((kind = 'message' AND brief_version = 0) OR (kind = 'brief' AND brief_version > 0))
 )";
-#[cfg(unix)]
 const BRIEFS: &str = "CREATE UNIQUE INDEX conversation_brief_version
     ON conversation_entries(project,brief_version) WHERE kind = 'brief'";
 const RECORD_COLUMNS: &str = "c.event_cursor,c.kind,c.brief_version,
