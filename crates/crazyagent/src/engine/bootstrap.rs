@@ -643,8 +643,7 @@ fn owner_timeout(anchor: &Anchor, value: &Locator) -> Result<Option<Duration>, E
 /// `owner_locator_unsafe` when oversized, or `owner_locator_invalid`.
 fn read_owner_timeout(file: &File) -> Result<Duration, EngineError> {
     let mut bytes = Vec::new();
-    (&*file)
-        .take(OWNER_TIMEOUT_MAX + 1)
+    file.take(OWNER_TIMEOUT_MAX + 1)
         .read_to_end(&mut bytes)
         .map_err(io_error)?;
     if bytes.len() as u64 > OWNER_TIMEOUT_MAX {
