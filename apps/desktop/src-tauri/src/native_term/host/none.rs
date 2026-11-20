@@ -2,6 +2,7 @@ use super::{NativeEvent, SKIPPED};
 use crate::native_term::a11y::Geometry;
 use crate::native_term::render::Shared;
 use crate::native_term::screen::Frame;
+use crate::native_term::style::Style;
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::term::Term;
 use tauri::ipc::Channel;
@@ -52,6 +53,7 @@ pub fn open_view(
     key: u32,
     _rect: [f64; 4],
     _label: &str,
+    _style: &Style,
     events: Channel<NativeEvent>,
     project: Option<String>,
 ) -> Result<View, &'static str> {
@@ -85,7 +87,7 @@ pub fn fit(_view: &mut View, _shared: &mut Shared, _pixels: (u32, u32)) -> bool 
 
 /// Draws a frame; nothing draws here. Inputs: the view, the renderer and the frame.
 /// Output: the skipped code.
-pub fn paint(_view: &mut View, _shared: &mut Shared, _frame: &Frame) -> Result<(), &'static str> {
+pub fn paint(_view: &mut View, _shared: &mut Shared, _frame: Frame) -> Result<(), &'static str> {
     Err(SKIPPED)
 }
 
