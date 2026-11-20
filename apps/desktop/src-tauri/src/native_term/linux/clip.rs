@@ -63,6 +63,16 @@ fn current_input() -> Option<EventType> {
     gtk::current_event().map(|event| event.event_type())
 }
 
+/// Whether the default display has a seat, which a command write needs in place of a user
+/// event; a unit row may stand one in. Output: the answer.
+fn has_seat() -> bool {
+    #[cfg(test)]
+    if let Some(seat) = AS_SEAT.with(std::cell::Cell::get) {
+        return seat;
+    }
+    gdk::Display::default().is_some_and(|display| display.default_seat().is_some())
+}
+
 /// A board's text as a paste takes it: 1 to `COPY_BYTES_MAX` bytes, else none. Input:
 /// the text read. Output: the text kept.
 pub fn bounded(text: Option<&str>) -> Option<String> {
@@ -101,7 +111,21 @@ impl Clip {
     /// Inputs: the board and 1 to `COPY_BYTES_MAX` bytes of text. Output: whether the write
     /// was made; a desktop board takes it as GTK hands it on.
     pub fn write(&self, board: Board, text: &str) -> bool {
-        if !user_input(current_input()) || text.is_empty() || text.len() > COPY_BYTES_MAX {
+        user_input(current_input()) && self.put(board, text)
+    }
+
+    /// Puts plain text on a board for the terminal window's own Copy command, which comes
+    /// over IPC with no GTK event: it needs the display's seat in place of a user event, and
+    /// only the terminal window's IPC path calls it. Inputs: the board and 1 to
+    /// `COPY_BYTES_MAX` bytes of text. Output: whether the write was made.
+    pub fn write_command(&self, board: Board, text: &str) -> bool {
+        has_seat() && self.put(board, text)
+    }
+
+    /// Puts 1 to `COPY_BYTES_MAX` bytes of plain text on a board, once a write's guard has
+    /// passed. Inputs: the board and the text. Output: whether the text was in bounds and put.
+    fn put(&self, board: Board, text: &str) -> bool {
+        if text.is_empty() || text.len() > COPY_BYTES_MAX {
             return false;
         }
         match &self.private {
@@ -109,14 +133,6 @@ impl Clip {
             None => gtk::Clipboard::get(&board.atom()).set_text(text),
         }
         true
-    }
-
-    /// Puts plain text on a board for the terminal window's own Copy command, which comes
-    /// over IPC with no GTK event: it needs the display's seat in place of a user event, and
-    /// only the terminal window's IPC path calls it. Inputs: the board and 1 to
-    /// `COPY_BYTES_MAX` bytes of text. Output: whether the write was made.
-    pub fn write_command(&self, _board: Board, _text: &str) -> bool {
-        false
     }
 
     /// Reads a board's plain text inside a user event only; the reply comes at once from
