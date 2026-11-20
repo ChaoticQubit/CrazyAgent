@@ -26,17 +26,19 @@ use windows_sys::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, ERROR_LOCK_VIOLATION, ERROR_NO_MORE_FILES, ERROR_SUCCESS, GENERIC_READ,
     GENERIC_WRITE, INVALID_HANDLE_VALUE,
 };
-use windows_sys::Win32::Foundation::{OBJ_CASE_INSENSITIVE, UNICODE_STRING};
+use windows_sys::Win32::Foundation::{
+    OBJ_CASE_INSENSITIVE, STATUS_FILE_IS_A_DIRECTORY, UNICODE_STRING,
+};
 use windows_sys::Win32::Security::Authorization::{
     GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo,
 };
-use windows_sys::Win32::Security::SE_DACL_PRESENT;
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, InitializeSecurityDescriptor, LABEL_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
     SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
     SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, SetSecurityDescriptorSacl,
 };
+use windows_sys::Win32::Security::{SE_DACL_AUTO_INHERIT_REQ, SE_DACL_PRESENT};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
@@ -542,7 +544,8 @@ pub enum Create {
 /// sharing no delete. The user is its owner; its list is inherited, or W1's protected
 /// private list for [`Create::PrivateFile`]; it is judged private before it is returned.
 /// Inputs: the held folder, one name and the kind. Output: the held entry, or the error;
-/// a name already there is `ERROR_ALREADY_EXISTS`.
+/// a name already there is `ERROR_ALREADY_EXISTS`, a folder or junction a file is asked at
+/// included (NTFS answers that with `STATUS_FILE_IS_A_DIRECTORY` before the collision).
 pub fn create_under(folder: &File, name: &OsStr, kind: Create) -> io::Result<File> {
     let units = one_component(name);
     let user = user_sid()?;
@@ -601,6 +604,10 @@ pub fn create_under(folder: &File, name: &OsStr, kind: Create) -> io::Result<Fil
             0,
         )
     };
+    if status == STATUS_FILE_IS_A_DIRECTORY {
+        assert!(!is_folder);
+        return Err(code(ERROR_ALREADY_EXISTS));
+    }
     if status < 0 {
         return Err(code(unsafe { RtlNtStatusToDosError(status) }));
     }
@@ -627,22 +634,26 @@ fn one_component(name: &OsStr) -> Vec<u16> {
     units
 }
 
-/// Fills a descriptor that names only an owner: no access list present and none protected,
-/// so the entry made with it inherits its folder's list (rv-sec2 RULING-15:12). Inputs: the
-/// descriptor and the owner's SID words, both outliving the create. Output: Ok, or the error.
+/// Fills a descriptor that names only an owner: no access list present, none protected, and
+/// automatic inheritance asked, so the entry made with it takes its folder's inheritable
+/// entries marked inherited, which a later change on the lease replaces (rv-sec2
+/// RULING-15:12). Inputs: the descriptor and the owner's SID words, both outliving the
+/// create. Output: Ok, or the error.
 fn owner_only(descriptor: &mut SECURITY_DESCRIPTOR, owner: &mut Words) -> io::Result<()> {
     let raw: PSECURITY_DESCRIPTOR = (&raw mut *descriptor).cast();
     let sid: PSID = owner.words.as_mut_ptr().cast();
     let built = unsafe {
         InitializeSecurityDescriptor(raw, SECURITY_DESCRIPTOR_REVISION) != 0
             && SetSecurityDescriptorOwner(raw, sid, 0) != 0
+            && SetSecurityDescriptorControl(raw, SE_DACL_AUTO_INHERIT_REQ, SE_DACL_AUTO_INHERIT_REQ)
+                != 0
     };
     if !built {
         return Err(io::Error::last_os_error());
     }
     assert_eq!(
-        descriptor.Control & (SE_DACL_PRESENT | SE_DACL_PROTECTED),
-        0
+        descriptor.Control & (SE_DACL_PRESENT | SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ),
+        SE_DACL_AUTO_INHERIT_REQ
     );
     Ok(())
 }

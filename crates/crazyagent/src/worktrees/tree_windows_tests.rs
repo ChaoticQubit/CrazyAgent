@@ -89,16 +89,15 @@ fn listed(folder: &Path) -> Vec<String> {
     names
 }
 
-fn null_list(path: &Path, folder: bool) {
-    let class = if folder { "Directory" } else { "File" };
+fn null_list(path: &Path) {
     let script = format!(
-        "$p='{}'; $s=New-Object System.Security.AccessControl.{class}Security; \
-         $s.SetSecurityDescriptorSddlForm('D:NO_ACCESS_CONTROL'); \
-         [System.IO.{}]::SetAccessControl($p,$s); \
-         [System.IO.{}]::GetAccessControl($p).GetSecurityDescriptorSddlForm('Access')",
-        path.display(),
-        if folder { "Directory" } else { "File" },
-        if folder { "Directory" } else { "File" },
+        "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; \
+         public static class W3 {{ [DllImport(\"advapi32.dll\", CharSet = CharSet.Unicode)] \
+         public static extern uint SetNamedSecurityInfoW(string n, int t, uint i, IntPtr o, \
+         IntPtr g, IntPtr d, IntPtr s); }}'; \
+         [W3]::SetNamedSecurityInfoW('{}', 1, 0x80000004, [IntPtr]::Zero, [IntPtr]::Zero, \
+         [IntPtr]::Zero, [IntPtr]::Zero)",
+        path.display()
     );
     let mut command = Command::new("powershell.exe");
     command
@@ -108,14 +107,25 @@ fn null_list(path: &Path, folder: bool) {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let done = crate::spawn_gate::output(&mut command).unwrap();
-    assert!(done.status.success(), "{done:?}");
-    let read = String::from_utf8(done.stdout).unwrap();
-    println!("{} list as set: {}", path.display(), read.trim());
-    assert_eq!(
-        read.trim(),
-        "D:NO_ACCESS_CONTROL",
-        "the row's own precondition"
+    println!(
+        "{} set: {} {:?} {:?}",
+        path.display(),
+        done.status,
+        String::from_utf8_lossy(&done.stdout).trim(),
+        String::from_utf8_lossy(&done.stderr).trim()
     );
+    assert!(done.status.success());
+    assert_eq!(String::from_utf8_lossy(&done.stdout).trim(), "0");
+    let opened = {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .access_mode(super::READ_CONTROL | super::FILE_READ_ATTRIBUTES)
+            .custom_flags(super::FILE_FLAG_OPEN_REPARSE_POINT | super::FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)
+            .unwrap()
+    };
+    let facts = private::facts(&opened).unwrap();
+    assert_eq!(facts.list, None, "the row's own precondition: a NULL list");
 }
 
 #[test]
@@ -247,8 +257,8 @@ fn a_folder_or_file_with_a_null_access_list_is_untrusted() {
     std::fs::create_dir(&folder).unwrap();
     let file = base.join("open-file");
     std::fs::write(&file, b"x").unwrap();
-    null_list(&folder, true);
-    null_list(&file, false);
+    null_list(&folder);
+    null_list(&file);
     assert_eq!(
         code(identity(&folder, true)),
         "untrusted_filesystem_identity"
