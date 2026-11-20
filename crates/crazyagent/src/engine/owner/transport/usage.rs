@@ -260,7 +260,7 @@ impl OwnerClient {
     }
 
     async fn usage_exchange(&self, action: Action) -> Result<Reply, EngineError> {
-        tokio::time::timeout(self.timeout.max(USAGE_TIMEOUT), async {
+        tokio::time::timeout(deferred_wait(self.timeout, USAGE_TIMEOUT), async {
             let read = read_kind(&action);
             let frame = encode_frame(&Envelope { usage: action })
                 .map_err(|_| failure("usage_request_bounds"))?;

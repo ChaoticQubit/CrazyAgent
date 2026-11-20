@@ -1571,3 +1571,68 @@ fn releasing_under_a_parent_without_auto_inheritance_keeps_the_access_with_inher
          leaves it at the next change above it; a path it never wrote stays exact\n{report}"
     );
 }
+
+/// A SID's bytes as its S-1-... text: the revision, the 6-byte authority read big endian,
+/// then each 4-byte part read little endian. Input: the bytes. Output: the text.
+fn sid_text(bytes: &[u8]) -> String {
+    assert!(
+        bytes.len() >= 8 && bytes.len() == 8 + 4 * usize::from(bytes[1]),
+        "{bytes:?}"
+    );
+    let authority = bytes[2..8]
+        .iter()
+        .fold(0_u64, |value, byte| (value << 8) | u64::from(*byte));
+    let parts = bytes[8..]
+        .chunks(4)
+        .map(|part| u32::from_le_bytes([part[0], part[1], part[2], part[3]]).to_string());
+    std::iter::once(format!("S-{}-{authority}", bytes[0]))
+        .chain(parts)
+        .collect::<Vec<_>>()
+        .join("-")
+}
+
+/// PLAN-0402 Q9 (w-v244-win-signin, fix10 answer 04:18): the exported container SID is the
+/// one the helper's launch puts on a granted root, in the byte form `dacl::entries` reads.
+#[test]
+fn the_exported_container_sid_is_the_one_a_launch_puts_on_a_granted_root() {
+    let case = repo("crazyagent.test.sid", &[]);
+    run(
+        &case,
+        &["/C", "echo", "first>", &plain(&at(&case, "first.txt"))],
+    );
+    let exported = crazyagent_win_sandbox::container_sid("crazyagent.test.sid").unwrap();
+    assert_eq!(sid_text(&exported), container_sid(&case));
+    assert!(sid_text(&exported).starts_with("S-1-15-2-"));
+}
+
+/// Q9 (CodeRabbit CR-0536): the SID comes from the name alone, so a caller gets it before
+/// the container's first launch has made its profile, and that launch then puts the same SID
+/// on the granted root. The name is used by no other row.
+#[test]
+fn the_container_sid_is_derived_before_the_first_launch_makes_a_profile() {
+    let name = "crazyagent.test.sidfirst";
+    let before = crazyagent_win_sandbox::container_sid(name).unwrap();
+    assert!(sid_text(&before).starts_with("S-1-15-2-"));
+    let case = repo(name, &[]);
+    run(
+        &case,
+        &["/C", "echo", "first>", &plain(&at(&case, "first.txt"))],
+    );
+    assert_eq!(sid_text(&before), container_sid(&case));
+}
+
+/// Q9: a name the container check refuses is refused before any derive, with the check's
+/// reason.
+#[test]
+fn a_container_name_the_check_refuses_gets_no_sid() {
+    for name in ["", "-lead", "has space", &"a".repeat(65)] {
+        let reason = crazyagent_win_sandbox::profile::check_container(name).unwrap_err();
+        assert!(
+            matches!(
+                crazyagent_win_sandbox::container_sid(name),
+                Err(crazyagent_win_sandbox::BoundaryError::Refused(refused)) if refused == reason
+            ),
+            "{name:?}"
+        );
+    }
+}

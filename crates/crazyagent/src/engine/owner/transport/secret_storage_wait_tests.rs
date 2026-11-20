@@ -414,11 +414,7 @@ async fn an_account_removed_while_storage_is_busy_leaves_no_key_on_disk() {
 
     let (swept, sweep) = busy.occupy_storage();
     let removed = busy.client.remove_account(added.id.clone()).await;
-    let code = removed.err().map(|error| error.0).unwrap_or_default();
-    assert!(
-        code.contains("outcome_unknown"),
-        "the request must outlast the owner wait behind the real sweep: {code}"
-    );
+    outlasted_the_owner_wait(removed, "access_change_pending");
     settled(&swept, sweep).await;
 
     assert!(
@@ -1097,6 +1093,7 @@ async fn a_native_connection_that_leaves_the_settings_loses_its_sign_in_files() 
         home.join("auth.json"),
         home.join(".credentials.json"),
         home.join("Library/Keychains/login.keychain-db"),
+        home.join("Library/Keychains/profile.keychain-db"),
     ];
     for (file, bytes) in kept
         .iter()
@@ -1106,7 +1103,7 @@ async fn a_native_connection_that_leaves_the_settings_loses_its_sign_in_files() 
         std::fs::write(file, bytes).unwrap();
         std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
     }
-    assert_eq!(holders(&busy.engine_root(), secret.as_bytes()), 3);
+    assert_eq!(holders(&busy.engine_root(), secret.as_bytes()), 4);
 
     remove_connection(&busy, "lab-native").await;
     assert!(

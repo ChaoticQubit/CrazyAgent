@@ -79,6 +79,39 @@ fn terminal_frames_use_the_documented_wire_shape() {
     assert!(crate::protocol::encode_frame(&largest).is_ok());
 }
 
+/// V243-PANE-SIZE-ACROSS-WINDOWS: a sizer's input-only attach keeps the wire shape an engine
+/// without `follows` reads, an attach without the key reads as a sizer, and a follower's
+/// carries `"follows":true` both ways.
+#[test]
+fn an_input_only_attach_names_follows_only_for_a_follower() {
+    let sizer = TerminalRequest::AttachInput {
+        agent_id: AgentId::team(3).unwrap(),
+        pane: None,
+        cols: 80,
+        rows: 24,
+        follows: false,
+    };
+    let shape = r#"{"kind":"attach_input","agent_id":"team-3","pane":null,"cols":80,"rows":24}"#;
+    assert_eq!(serde_json::to_string(&sizer).unwrap(), shape);
+    assert_eq!(
+        serde_json::from_str::<TerminalRequest>(shape).unwrap(),
+        sizer
+    );
+    let follower = TerminalRequest::AttachInput {
+        agent_id: AgentId::team(3).unwrap(),
+        pane: None,
+        cols: 80,
+        rows: 24,
+        follows: true,
+    };
+    let followed = r#"{"kind":"attach_input","agent_id":"team-3","pane":null,"cols":80,"rows":24,"follows":true}"#;
+    assert_eq!(serde_json::to_string(&follower).unwrap(), followed);
+    assert_eq!(
+        serde_json::from_str::<TerminalRequest>(followed).unwrap(),
+        follower
+    );
+}
+
 #[test]
 fn every_terminal_code_has_plain_words() {
     for code in [
@@ -96,6 +129,7 @@ fn every_terminal_code_has_plain_words() {
         "terminal_folder_unsafe",
         "terminal_not_answering",
         "owner_grant_stale_or_revoked",
+        APP_PANE_UNKNOWN,
     ] {
         let reason = plain_reason(code);
         assert_ne!(reason, plain_reason("something_else"), "{code}");
@@ -269,5 +303,98 @@ fn a_teammates_server_pid_record_is_read_for_its_own_socket_and_refused_once_dam
     assert_eq!(
         teammates_server_pid(root.path(), &lead, &latest),
         Err(failure(OWN_SERVER_UNAVAILABLE))
+    );
+}
+
+/// Slice C (DEC-203, fix5 parity): the engine filters an owner paste as the desktop's
+/// `pasteText` does: every C0 control, DEL and C1 control is dropped except tab, line feed
+/// and carriage return, then CR LF and LF become CR, so a paste cannot press Escape, end a
+/// bracketed paste or send a Ctrl key; other text passes unchanged.
+#[test]
+fn an_owner_paste_keeps_only_tab_and_enter_of_the_control_characters() {
+    let every: String = (0u32..=0x9f).filter_map(char::from_u32).collect();
+    let expected: Vec<u8> = b"\t\r\r".iter().copied().chain(0x20u8..0x7f).collect();
+    assert_eq!(paste_keys(&every), expected);
+    assert_eq!(paste_keys("a\r\nb\nc\rd"), b"a\rb\rc\rd");
+    assert_eq!(paste_keys("x\x1b[201~y\x03z"), b"x[201~yz");
+    assert_eq!(
+        paste_keys("\u{e9}\u{6f22}\u{1f642}"),
+        "\u{e9}\u{6f22}\u{1f642}".as_bytes()
+    );
+    assert!(paste_keys("\x00\x1b\u{9b}\x7f").is_empty());
+}
+
+/// A host whose app pane request answers one code and that records what it types by name:
+/// a tmux host whose control connect failed, or a host with no pane ids.
+struct PinRefused {
+    answer: &'static str,
+    typed: std::sync::Mutex<Vec<Vec<u8>>>,
+}
+
+impl Host for PinRefused {
+    fn spawn(&self, _: &AgentId, _: &InteractiveCommand) -> Result<PaneRef, HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
+    fn attach(&self, _: &AgentId) -> Result<TerminalStream, HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
+    fn input(&self, _: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
+        self.typed.lock().unwrap().push(bytes.to_vec());
+        Ok(())
+    }
+
+    fn resize(&self, _: &AgentId, _: u16, _: u16) -> Result<(), HostError> {
+        Ok(())
+    }
+
+    fn kill(&self, _: &AgentId) -> Result<(), HostError> {
+        Ok(())
+    }
+
+    fn alive(&self) -> Result<Vec<AgentId>, HostError> {
+        Ok(Vec::new())
+    }
+
+    fn app_pane_at(&self, _: &AgentId) -> Result<PaneAt, HostError> {
+        Err(failure(self.answer))
+    }
+}
+
+/// #686 r1 sec F1: only a host that answers `PINS_UNSUPPORTED` types a prompt by name. A host
+/// whose app pane request failed otherwise, as a tmux control connect can fail once, fails
+/// the prompt and types nothing by name, where the active pane may be a teammate's.
+#[test]
+fn a_failed_app_pane_request_fails_the_prompt_and_types_nothing_by_name() {
+    let agent = AgentId::team(1).unwrap();
+    let failed = PinRefused {
+        answer: "terminal_unavailable",
+        typed: std::sync::Mutex::default(),
+    };
+    let refused = type_prompt(&failed, &agent, "hello");
+    assert_eq!(refused, Err(failure("terminal_unavailable")));
+    assert!(
+        failed.typed.lock().unwrap().is_empty(),
+        "nothing typed by name"
+    );
+    let unpinned = PinRefused {
+        answer: PINS_UNSUPPORTED,
+        typed: std::sync::Mutex::default(),
+    };
+    assert_eq!(type_prompt(&unpinned, &agent, "hello"), Ok(true));
+    let keys = [prompt_keys("hello", true).unwrap(), b"\r".to_vec()].concat();
+    assert_eq!(unpinned.typed.lock().unwrap().concat(), keys);
+}
+
+/// #686 r1 F2: an unknown app pane of a live window is a refusal, not an ended terminal, so
+/// an owner view stays open and is never told its agent stopped; an unknown agent still ends.
+#[test]
+fn an_unknown_app_pane_is_refused_not_read_as_an_ended_terminal() {
+    assert!(!ended_code(APP_PANE_UNKNOWN));
+    assert!(ended_code("terminal_agent_unknown"));
+    assert_ne!(
+        plain_reason(APP_PANE_UNKNOWN),
+        plain_reason("terminal_agent_unknown")
     );
 }

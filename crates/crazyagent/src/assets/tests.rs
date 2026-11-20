@@ -9,9 +9,8 @@ use std::time::Duration;
 const DETACH_ATTEMPTS: usize = 40;
 const DETACH_PAUSE: Duration = Duration::from_millis(250);
 
-/// Keeps the tests of this file from attaching and detaching images at the same time, so
-/// a device number one test frees is never the one another test expects to change.
-static VOLUMES: Mutex<()> = Mutex::new(());
+#[path = "../../tests/image_support/mod.rs"]
+mod image_support;
 
 /// A scratch APFS disk image attached without Finder at its own mount point, detached
 /// when dropped, so a test can give its volume another device number as a restart does.
@@ -169,7 +168,7 @@ fn admitted(db: &Connection, id: &str) -> AdmittedSource {
 
 #[test]
 fn an_admitted_asset_is_read_after_its_volume_is_renumbered_and_a_replaced_one_is_refused() {
-    let _volumes = VOLUMES.lock().unwrap_or_else(PoisonError::into_inner);
+    let _images = image_support::lock();
     let root = tempfile::Builder::new()
         .prefix("ca-assets-dev-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -233,7 +232,7 @@ fn an_admitted_asset_is_read_after_its_volume_is_renumbered_and_a_replaced_one_i
 
 #[test]
 fn an_image_entry_of_hdiutil_info_holds_its_own_disk_and_never_the_next_images() {
-    let _volumes = VOLUMES.lock().unwrap_or_else(PoisonError::into_inner);
+    let _images = image_support::lock();
     let root = tempfile::Builder::new()
         .prefix("ca-assets-dev-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())

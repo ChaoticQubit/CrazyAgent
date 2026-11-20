@@ -3,6 +3,16 @@ pub mod ide;
 pub mod theme;
 mod updates;
 
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(
+        dead_code,
+        reason = "the Linux and Windows hosts wire the native views in (DEC-203)"
+    )
+)]
+mod native_term;
+
 #[cfg(feature = "native-webdriver")]
 mod e2e_window;
 #[cfg(feature = "native-webdriver")]
@@ -77,7 +87,9 @@ use crazyagent::usage::spend::SpendChoice;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::ipc::{Channel, Invoke, InvokeResponseBody};
+#[cfg(not(target_os = "macos"))]
+use tauri::ipc::InvokeResponseBody;
+use tauri::ipc::{Channel, Invoke};
 use tauri::{AppHandle, Manager, Runtime, State, Webview, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_notification::NotificationExt;
 use tokio::sync::{RwLockReadGuard, RwLockWriteGuard};
@@ -1900,6 +1912,520 @@ async fn desktop_team_graph(
     read(&state).await?.team_graph(&id).await
 }
 
+/// The one gate every terminal view passes, page or native: the main window or a wall window
+/// of the project it names, whose team graph shows the agent, and a free place among the
+/// window's views, taken in the same step. Takes the calling page, the bridge, the terminals,
+/// the terminal name, the pane and the wall window's project id. Returns the view's key and
+/// its held place, or the refusal.
+async fn attach_place(
+    webview: &Webview,
+    state: &NativeState,
+    terminals: &TerminalState,
+    agent: &str,
+    pane: Option<&str>,
+    id: Option<&str>,
+) -> Result<(bridge::terminal::ViewKey, bridge::terminal::Reservation), BridgeError> {
+    terminal_window(webview)?;
+    let key = bridge::terminal::view_key(agent, pane)?;
+    let project = bridge::terminal::place_project(webview.label(), id)?;
+    let shows = async {
+        if let Some(id) = project {
+            let graph = read(state).await?.team_graph(&id).await?;
+            if !bridge::terminal::graph_shows(&graph, &key.agent) {
+                return Err(engine_failure("window_denied"));
+            }
+        }
+        Ok::<(), BridgeError>(())
+    };
+    let place = terminals
+        .0
+        .checked_room(webview.label(), &key, shows)
+        .await?;
+    Ok((key, place))
+}
+
+/// The style a page sends a native view: read on macOS, skipped elsewhere.
+#[cfg(target_os = "macos")]
+type NativeStyleText = native_term::style::StyleText;
+/// The style a page sends a native view: read on macOS, skipped elsewhere.
+#[cfg(not(target_os = "macos"))]
+type NativeStyleText = serde::de::IgnoredAny;
+
+/// The channel a native view's events go to its panel on.
+#[cfg(target_os = "macos")]
+type NativeEvents = Channel<native_term::host::NativeEvent>;
+/// The channel a native view's events go to its panel on; no view sends off macOS.
+#[cfg(not(target_os = "macos"))]
+type NativeEvents = Channel<serde_json::Value>;
+
+/// The largest CSS pixel coordinate or side a native view's place may have.
+const NATIVE_RECT_MAX: f64 = 100_000.0;
+
+/// A native view's place on its page: the host element's rect in CSS pixels of the
+/// webview's viewport, and that viewport's height, which says how far the page starts
+/// below the top of the webview the view is framed in.
+#[derive(serde::Deserialize, Clone, Copy, Debug)]
+#[serde(deny_unknown_fields)]
+struct NativeRect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    #[serde(default)]
+    viewport: Option<f64>,
+}
+
+impl NativeRect {
+    /// The place as `[x, y, width, height]`, finite, bounded and with no negative side,
+    /// and the viewport height, finite, at least one point and bounded. Output: both, or
+    /// `native_terminal_rect_invalid`.
+    fn checked(self) -> Result<([f64; 4], f64), BridgeError> {
+        let place = [self.x, self.y, self.width, self.height];
+        let bounded = place
+            .iter()
+            .all(|side| side.is_finite() && side.abs() <= NATIVE_RECT_MAX);
+        let sides = bounded && self.width >= 0.0 && self.height >= 0.0;
+        let viewport = self
+            .viewport
+            .filter(|height| sides && (1.0..=NATIVE_RECT_MAX).contains(height));
+        let Some(viewport) = viewport else {
+            return Err(engine_failure("native_terminal_rect_invalid"));
+        };
+        assert!(place[2] >= 0.0 && place[3] >= 0.0);
+        Ok((place, viewport))
+    }
+}
+
+/// Moves a y counted from the top of a page to one counted from the top of the view the page
+/// draws in. On macOS that view reaches under the title bar and the page starts below it, so
+/// they differ by how much shorter the page is; a page read mid-resize that is taller than its
+/// view moves nothing. Inputs: the y, the view's height and the page's, in logical points.
+/// Output: the moved y.
+pub(crate) fn page_to_view_y(y: f64, view_height: f64, viewport: f64) -> f64 {
+    assert!(y.is_finite(), "a finite page y: {y}");
+    let heights = view_height.is_finite() && viewport.is_finite();
+    assert!(
+        heights,
+        "finite view and page heights: {view_height} {viewport}"
+    );
+    y + (view_height - viewport).max(0.0)
+}
+
+/// What a native copy takes: the selection, or the whole output the view holds.
+#[derive(serde::Deserialize, Clone, Copy, Debug)]
+#[serde(rename_all = "lowercase")]
+enum NativeCopy {
+    Selection,
+    Output,
+}
+
+/// The answer of every native view command but `enabled` off macOS, which draws no native
+/// view; the command checked the calling window first. Output: the refusal.
+#[cfg(not(target_os = "macos"))]
+fn native_unsupported<T>() -> Result<T, BridgeError> {
+    Err(engine_failure("native_terminal_unsupported"))
+}
+
+/// The tmux program and engine socket a native view's direct path draws from, when it may:
+/// the engine's own server under the root of the engine the desktop talks to, with its
+/// checks passed, an agent with no server of its own and tmux installed for the engine.
+/// Input: the checked agent window name. Output: both, or none for an engine-fed view.
+#[cfg(target_os = "macos")]
+fn native_direct(name: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let engine = desktop_socket(
+        std::env::var_os("CRAZYAGENT_DESKTOP_SOCKET"),
+        &crazyagent::paths::RootEnvironment::current(),
+    )?;
+    let root = engine.parent().filter(|root| root.is_absolute())?;
+    let socket = native_term::engine_socket(root).ok()?;
+    if native_term::own_server(root, name) != Ok(false) {
+        return None;
+    }
+    let tmux = crazyagent::terminal::tmux::installed(root)?;
+    assert!(tmux.is_absolute());
+    assert!(socket.starts_with(root));
+    Some((tmux, socket))
+}
+
+/// Takes a fresh place through the shared gate for a native view the host reopens
+/// engine-fed. Inputs: the app, the window label, the agent window name and the wall
+/// window's project. Output: the place, or the refusal.
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(
+        dead_code,
+        reason = "the Linux and Windows hosts reopen views engine-fed through it (DEC-203)"
+    )
+)]
+async fn native_place(
+    app: &AppHandle,
+    window: &str,
+    name: &str,
+    project: Option<&str>,
+) -> Result<bridge::terminal::Reservation, BridgeError> {
+    let webview = app
+        .get_webview(window)
+        .ok_or_else(|| engine_failure("native_terminal_view_unknown"))?;
+    let state = app.state::<NativeState>();
+    let terminals = app.state::<TerminalState>();
+    let (_, place) = attach_place(&webview, &state, &terminals, name, None, project).await?;
+    Ok(place)
+}
+
+/// Runs one call on a native view the calling window opened, on the main thread; the
+/// command checked the calling window first. Inputs: the calling page, the app, the view
+/// and the call. Output: ok, or a plain code.
+#[cfg(target_os = "macos")]
+async fn native_call(
+    webview: &Webview,
+    app: &AppHandle,
+    view: u64,
+    call: native_term::host::Command,
+) -> Result<(), BridgeError> {
+    let window = webview.label().to_owned();
+    native_term::host::on_main(app, move |_| {
+        native_term::host::command(&window, view, call)
+    })
+    .await
+    .map_err(engine_failure)?
+    .map_err(engine_failure)
+}
+
+/// Test builds only: takes one native-webdriver trial step on a native view the calling page
+/// opened, through the view's own AppKit selectors, and reads what the view and its window
+/// show. Inputs: the calling page, the view id and the step. Output: what it reads.
+#[cfg(all(target_os = "macos", feature = "native-webdriver"))]
+#[tauri::command]
+async fn desktop_native_terminal_probe(
+    webview: Webview,
+    app: AppHandle,
+    view: u64,
+    step: native_term::probe::Step,
+) -> Result<native_term::probe::Seen, BridgeError> {
+    terminal_window(&webview)?;
+    let window = webview.label().to_owned();
+    native_term::host::on_main(&app, move |mtm| {
+        native_term::probe::take(mtm, &window, view, step)
+    })
+    .await
+    .map_err(engine_failure)?
+    .map_err(engine_failure)
+}
+
+/// Whether this desktop draws terminals natively: true only in a macOS build. Input: the
+/// calling page. Output: the answer.
+#[tauri::command]
+fn desktop_native_terminal_enabled(webview: Webview) -> Result<bool, BridgeError> {
+    terminal_window(&webview)?;
+    Ok(cfg!(target_os = "macos"))
+}
+
+/// Opens a native view over the calling page's host element: the shared gate takes its
+/// place, and the direct path draws it when the engine's own server shows the agent. Off
+/// macOS it answers `native_terminal_unsupported`. Inputs: the page and its open
+/// (native-terminal.ts `NativeOpen`). Output: the view id.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+async fn desktop_native_terminal_open(
+    webview: Webview,
+    app: AppHandle,
+    state: State<'_, NativeState>,
+    terminals: State<'_, TerminalState>,
+    name: String,
+    pane: Option<String>,
+    label: String,
+    rect: NativeRect,
+    style: NativeStyleText,
+    covered: bool,
+    keys: bool,
+    tile: bool,
+    project: Option<String>,
+    events: NativeEvents,
+) -> Result<u64, BridgeError> {
+    terminal_window(&webview)?;
+    let (rect, viewport) = rect.checked()?;
+    #[cfg(target_os = "macos")]
+    {
+        let style = native_term::style::Style::from_text(&style).map_err(engine_failure)?;
+        let name = native_term::window_name(&name).map_err(engine_failure)?;
+        if label.len() > native_term::host::LABEL_BYTES_MAX {
+            return Err(engine_failure("native_terminal_label_invalid"));
+        }
+        let id = project.as_deref();
+        let agent = (name.as_str(), pane.as_deref());
+        let (_, place) = attach_place(&webview, &state, &terminals, agent.0, agent.1, id).await?;
+        let direct = pane.is_none().then(|| native_direct(&name)).flatten();
+        let window = webview.label().to_owned();
+        let open = native_term::host::Open {
+            window,
+            name,
+            label,
+            place,
+            direct,
+            rect,
+            viewport,
+            style,
+            covered,
+            keys,
+            tile,
+            project,
+            events,
+        };
+        native_open(&webview, app, open).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (
+            app, state, terminals, name, pane, label, rect, viewport, style, covered, keys,
+        );
+        let _ = (tile, project, events);
+        native_unsupported()
+    }
+}
+
+/// Opens a checked view on the main thread above the page's WKWebView. Inputs: the page,
+/// the app and the checked open. Output: the view id, or a plain code with the place
+/// given back.
+#[cfg(target_os = "macos")]
+async fn native_open(
+    webview: &Webview,
+    app: AppHandle,
+    open: native_term::host::Open,
+) -> Result<u64, BridgeError> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    webview
+        .with_webview(move |platform| {
+            let opened = match objc2::MainThreadMarker::new() {
+                Some(mtm) => native_term::host::open(&app, mtm, platform.inner(), open),
+                None => Err("native_terminal_main_busy"),
+            };
+            let _ = sender.send(opened);
+        })
+        .map_err(|_| engine_failure("native_terminal_webview_missing"))?;
+    let opened = receiver
+        .await
+        .map_err(|_| engine_failure("native_terminal_main_busy"))?;
+    let view = opened.map_err(engine_failure)?;
+    assert!(view > 0);
+    Ok(view)
+}
+
+/// Moves or resizes a native view to its host element's new place. Inputs: the page, the
+/// app, the view and the place. Output: ok once applied.
+#[tauri::command]
+async fn desktop_native_terminal_place(
+    webview: Webview,
+    app: AppHandle,
+    view: u64,
+    rect: NativeRect,
+) -> Result<(), BridgeError> {
+    terminal_window(&webview)?;
+    let (rect, viewport) = rect.checked()?;
+    #[cfg(target_os = "macos")]
+    {
+        native_call(
+            &webview,
+            &app,
+            view,
+            native_term::host::Command::Place(rect, viewport),
+        )
+        .await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, view, rect, viewport);
+        native_unsupported()
+    }
+}
+
+/// Hides a native view while something covers its place, or shows it again. Inputs: the
+/// page, the app, the view and whether it is covered. Output: ok once applied.
+#[tauri::command]
+async fn desktop_native_terminal_cover(
+    webview: Webview,
+    app: AppHandle,
+    view: u64,
+    covered: bool,
+) -> Result<(), BridgeError> {
+    terminal_window(&webview)?;
+    #[cfg(target_os = "macos")]
+    {
+        native_call(
+            &webview,
+            &app,
+            view,
+            native_term::host::Command::Cover(covered),
+        )
+        .await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, view, covered);
+        native_unsupported()
+    }
+}
+
+/// Makes a native view its window's first responder; it never activates the app or makes
+/// a window key. Inputs: the page, the app and the view. Output: ok.
+#[tauri::command]
+async fn desktop_native_terminal_focus(
+    webview: Webview,
+    app: AppHandle,
+    view: u64,
+) -> Result<(), BridgeError> {
+    terminal_window(&webview)?;
+    #[cfg(target_os = "macos")]
+    {
+        native_call(&webview, &app, view, native_term::host::Command::Focus).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, view);
+        native_unsupported()
+    }
+}
+
+/// Sets how every native view draws. Inputs: the page, the app and the style. Output: ok,
+/// or `native_terminal_style_invalid` with the old style kept.
+#[tauri::command]
+async fn desktop_native_terminal_style(
+    webview: Webview,
+    app: AppHandle,
+    style: NativeStyleText,
+) -> Result<(), BridgeError> {
+    terminal_window(&webview)?;
+    #[cfg(target_os = "macos")]
+    {
+        let style = native_term::style::Style::from_text(&style).map_err(engine_failure)?;
+        native_term::host::on_main(&app, move |_| native_term::host::style(style))
+            .await
+            .map_err(engine_failure)?
+            .map_err(engine_failure)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, style);
+        native_unsupported()
+    }
+}
+
+/// Copies a native view's selection or whole output to the pasteboard. Inputs: the page,
+/// the app, the view and what to copy. Output: ok, or a plain code.
+#[tauri::command]
+async fn desktop_native_terminal_copy(
+    webview: Webview,
+    app: AppHandle,
+    view: u64,
+    what: NativeCopy,
+) -> Result<(), BridgeError> {
+    terminal_window(&webview)?;
+    let output = matches!(what, NativeCopy::Output);
+    #[cfg(target_os = "macos")]
+    {
+        native_call(
+            &webview,
+            &app,
+            view,
+            native_term::host::Command::Copy(output),
+        )
+        .await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, view, output);
+        native_unsupported()
+    }
+}
+
+/// Pastes a console seed into a native view as the owner's paste would. Inputs: the page,
+/// the app, the view and the text. Output: ok once sent, or a plain code.
+#[tauri::command]
+async fn desktop_native_terminal_paste(
+    webview: Webview,
+    app: AppHandle,
+    view: u64,
+    text: String,
+) -> Result<(), BridgeError> {
+    terminal_window(&webview)?;
+    #[cfg(target_os = "macos")]
+    {
+        native_call(
+            &webview,
+            &app,
+            view,
+            native_term::host::Command::Paste(text),
+        )
+        .await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, view, text);
+        native_unsupported()
+    }
+}
+
+/// Scrolls a native view back to the bottom of its output. Inputs: the page, the app and
+/// the view. Output: ok.
+#[tauri::command]
+async fn desktop_native_terminal_jump(
+    webview: Webview,
+    app: AppHandle,
+    view: u64,
+) -> Result<(), BridgeError> {
+    terminal_window(&webview)?;
+    #[cfg(target_os = "macos")]
+    {
+        native_call(&webview, &app, view, native_term::host::Command::Jump).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, view);
+        native_unsupported()
+    }
+}
+
+/// Turns a native view's own keys on or off. Inputs: the page, the app, the view and
+/// whether keys go through. Output: ok.
+#[tauri::command]
+async fn desktop_native_terminal_keys(
+    webview: Webview,
+    app: AppHandle,
+    view: u64,
+    on: bool,
+) -> Result<(), BridgeError> {
+    terminal_window(&webview)?;
+    #[cfg(target_os = "macos")]
+    {
+        native_call(&webview, &app, view, native_term::host::Command::Keys(on)).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, view, on);
+        native_unsupported()
+    }
+}
+
+/// Closes a native view; its agent keeps running, and a second close is fine. Inputs: the
+/// page, the app and the view. Output: ok.
+#[tauri::command]
+async fn desktop_native_terminal_close(
+    webview: Webview,
+    app: AppHandle,
+    view: u64,
+) -> Result<(), BridgeError> {
+    terminal_window(&webview)?;
+    #[cfg(target_os = "macos")]
+    {
+        native_call(&webview, &app, view, native_term::host::Command::Close).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, view);
+        native_unsupported()
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 async fn desktop_terminal_attach(
     webview: Webview,
@@ -1911,39 +2437,27 @@ async fn desktop_terminal_attach(
     output: Channel<InvokeResponseBody>,
 ) -> Result<u64, BridgeError> {
     terminal_window(&webview)?;
-    let key = bridge::terminal::view_key(&agent, pane.as_deref())?;
-    let id = match webview.label() {
-        "main" => None,
-        _ => {
-            let id = id.ok_or_else(|| engine_failure("window_denied"))?;
-            terminal_window_for(&webview, &id)?;
-            Some(id)
-        }
-    };
-    let shows = async {
-        if let Some(id) = id {
-            let graph = read(&state).await?.team_graph(&id).await?;
-            if !bridge::terminal::graph_shows(&graph, &key.agent) {
-                return Err(engine_failure("window_denied"));
-            }
-        }
-        Ok::<(), BridgeError>(())
-    };
-    let room = terminals
-        .0
-        .checked_room(webview.label(), &key, shows)
-        .await?;
+    let (key, place) = attach_place(
+        &webview,
+        &state,
+        &terminals,
+        &agent,
+        pane.as_deref(),
+        id.as_deref(),
+    )
+    .await?;
     let session = lock(&state)
         .await?
-        .open_terminal(key.agent, key.pane)
+        .open_terminal(key.agent, key.pane, None, bridge::terminal::Session::Full)
         .await?;
-    room.attach(session, output)
+    place.attach(session, bridge::terminal::Sink::Page(output))
 }
 
 /// Types a view's keys into an attached agent terminal, the view of exactly that pane when
 /// one is named. Inputs: the window, the terminals, the terminal name, the bytes, whether
 /// the view made them from the owner's mouse wheel, which never counts as the owner typing,
 /// and the pane. Output: ok once queued, or a bridge error.
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 async fn desktop_terminal_input(
     webview: Webview,
@@ -1981,6 +2495,7 @@ async fn desktop_terminal_prompt(
 /// Sets an attached agent terminal's size, the view of exactly that pane when one is
 /// named. Inputs: the window, the terminals, the terminal name, columns, rows and the pane.
 /// Output: ok once queued, or a bridge error.
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 async fn desktop_terminal_resize(
     webview: Webview,
@@ -2002,6 +2517,7 @@ async fn desktop_terminal_resize(
         .await
 }
 
+#[cfg(not(target_os = "macos"))]
 #[tauri::command]
 fn desktop_terminal_detach(
     webview: Webview,
@@ -2278,6 +2794,8 @@ fn build_wall(
         .on_navigation(app_page)
         .on_page_load(|window, payload| {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                #[cfg(target_os = "macos")]
+                native_term::host::window_gone(window.app_handle(), window.label());
                 window
                     .state::<TerminalState>()
                     .0
@@ -2289,8 +2807,12 @@ fn build_wall(
     theme::dress(&wall);
     let terminals = Arc::clone(&app.state::<TerminalState>().0);
     let closed = label.to_owned();
+    #[cfg(target_os = "macos")]
+    let handle = app.clone();
     wall.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
+            #[cfg(target_os = "macos")]
+            native_term::host::window_gone(&handle, &closed);
             terminals.window_closed(&closed);
         }
     });
@@ -5334,15 +5856,25 @@ fn admit_pages<R: Runtime>(
 }
 
 /// Declares the native commands once: their names for whoever must walk them and their
-/// handler behind the page check. Input: the command functions. Output: `NATIVE_COMMANDS`
-/// and `native_handler`.
+/// handler behind the page check. The commands after the first `;` serve only the webview
+/// terminal, which a macOS build does not have (DEC-203), so they exist off macOS only; the
+/// ones after the second exist only in a macOS native-webdriver build, for its trials.
+/// Input: the command functions. Output: `NATIVE_COMMANDS` and `native_handler`.
 macro_rules! native_commands {
-    ($($command:ident,)+) => {
-        #[cfg(test)]
+    ($($command:ident,)+ ; $($webview:ident,)+ ; $($trial:ident,)+) => {
+        #[cfg(all(test, not(target_os = "macos")))]
+        const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+ $(stringify!($webview),)+];
+        #[cfg(all(test, target_os = "macos", not(feature = "native-webdriver")))]
         const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+];
+        #[cfg(all(test, target_os = "macos", feature = "native-webdriver"))]
+        const NATIVE_COMMANDS: &[&str] = &[$(stringify!($command),)+ $(stringify!($trial),)+];
 
         fn native_handler() -> impl Fn(Invoke) -> bool + Send + Sync + 'static {
-            admit_pages::<tauri::Wry>(tauri::generate_handler![$($command,)+])
+            admit_pages::<tauri::Wry>(tauri::generate_handler![
+                $($command,)+
+                $(#[cfg(not(target_os = "macos"))] $webview,)+
+                $(#[cfg(all(target_os = "macos", feature = "native-webdriver"))] $trial,)+
+            ])
         }
     };
 }
@@ -5440,11 +5972,7 @@ native_commands! {
     desktop_coord_questions,
     desktop_coord_answer,
     desktop_team_attention,
-    desktop_terminal_attach,
-    desktop_terminal_input,
     desktop_terminal_prompt,
-    desktop_terminal_resize,
-    desktop_terminal_detach,
     desktop_team_terminals_per_window,
     desktop_terminals_per_window,
     desktop_open_terminal_windows,
@@ -5707,6 +6235,24 @@ native_commands! {
     desktop_install_update,
     desktop_restart_app,
     desktop_link_cli,
+    desktop_native_terminal_enabled,
+    desktop_native_terminal_open,
+    desktop_native_terminal_place,
+    desktop_native_terminal_cover,
+    desktop_native_terminal_focus,
+    desktop_native_terminal_style,
+    desktop_native_terminal_copy,
+    desktop_native_terminal_paste,
+    desktop_native_terminal_jump,
+    desktop_native_terminal_keys,
+    desktop_native_terminal_close,
+    ;
+    desktop_terminal_attach,
+    desktop_terminal_input,
+    desktop_terminal_resize,
+    desktop_terminal_detach,
+    ;
+    desktop_native_terminal_probe,
 }
 
 pub fn run() {
@@ -5732,16 +6278,20 @@ pub fn run() {
                 .on_navigation(app_page)
                 .on_page_load(|window, payload| {
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                        #[cfg(target_os = "macos")]
+                        native_term::host::window_gone(window.app_handle(), window.label());
                         window
                             .state::<TerminalState>()
                             .0
                             .page_started(window.label());
                     }
-                })
-                .build()?;
+                });
+            let main = placed(main)?.build()?;
             let handle = app.handle().clone();
             main.on_window_event(move |event| {
                 if matches!(event, tauri::WindowEvent::Destroyed) {
+                    #[cfg(target_os = "macos")]
+                    native_term::host::window_gone(&handle, "main");
                     close_walls(&handle, None);
                     ide::shut_own_windows(handle.clone(), None);
                 }
@@ -5758,28 +6308,50 @@ pub fn run() {
             Ok(())
         });
     #[cfg(feature = "native-webdriver")]
-    let builder = {
-        let observer = native_refresh_observation::NativeObserver::from_environment();
-        builder
-            .on_page_load(move |webview, payload| {
-                if let Some(observer) = &observer {
-                    let phase = match payload.event() {
-                        tauri::webview::PageLoadEvent::Started => {
-                            native_refresh_observation::Phase::Started
-                        }
-                        tauri::webview::PageLoadEvent::Finished => {
-                            native_refresh_observation::Phase::Finished
-                        }
-                    };
-                    observer.observe(webview.label(), payload.url().as_str(), phase);
-                }
-            })
-            .plugin(tauri_plugin_wdio_webdriver::init())
-            .plugin(e2e_window::plugin())
-    };
+    let builder = trial(builder);
     builder
         .run(tauri::generate_context!())
         .expect("native desktop exited with an error");
+}
+
+/// Opens the main window where a test build's trial asked, unfocused (e2e_window `place`);
+/// every other build opens it as built. Input: the main window's builder. Output: the
+/// builder, or the trial's placement error.
+fn placed<'a, M: Manager<tauri::Wry>>(
+    main: WebviewWindowBuilder<'a, tauri::Wry, M>,
+) -> Result<WebviewWindowBuilder<'a, tauri::Wry, M>, String> {
+    #[cfg(feature = "native-webdriver")]
+    if let Some((x, y)) = e2e_window::place()? {
+        return Ok(main.position(x, y).focused(false));
+    }
+    Ok(main)
+}
+
+/// Test builds only: adds the refresh observer, the WebDriver server and the trial window
+/// plugin, and on macOS starts the app without bringing it forward when the environment
+/// places the main window. Input: the app builder. Output: the builder with them.
+#[cfg(feature = "native-webdriver")]
+fn trial(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    let observer = native_refresh_observation::NativeObserver::from_environment();
+    let builder = builder
+        .on_page_load(move |webview, payload| {
+            if let Some(observer) = &observer {
+                let phase = match payload.event() {
+                    tauri::webview::PageLoadEvent::Started => {
+                        native_refresh_observation::Phase::Started
+                    }
+                    tauri::webview::PageLoadEvent::Finished => {
+                        native_refresh_observation::Phase::Finished
+                    }
+                };
+                observer.observe(webview.label(), payload.url().as_str(), phase);
+            }
+        })
+        .plugin(tauri_plugin_wdio_webdriver::init())
+        .plugin(e2e_window::plugin());
+    #[cfg(target_os = "macos")]
+    let builder = builder.activate_ignoring_other_apps(!matches!(e2e_window::place(), Ok(Some(_))));
+    builder
 }
 
 #[cfg(test)]
@@ -5815,6 +6387,62 @@ mod tests {
             },
         )
         .map(|_| ())
+    }
+
+    /// V243-NATIVE-SESSION-HEADER: a y counted from the page's top moves to the view the page
+    /// draws in by how much shorter the page is: 32 points under a macOS title bar, none in
+    /// native full screen, and none for a page read mid-resize that is taller than its view.
+    #[test]
+    fn a_page_y_moves_below_the_title_bar_by_how_much_shorter_the_page_is() {
+        assert_eq!(page_to_view_y(306.0, 900.0, 868.0), 338.0);
+        assert_eq!(page_to_view_y(306.0, 868.0, 868.0), 306.0, "full screen");
+        assert_eq!(
+            page_to_view_y(306.0, 860.0, 868.0),
+            306.0,
+            "a page read mid-resize"
+        );
+        assert_eq!(page_to_view_y(0.0, 900.0, 868.0), 32.0);
+    }
+
+    /// V243-NATIVE-SESSION-HEADER: a page place with no finite height is a caller's bug,
+    /// never a place: the page values were checked before they got here.
+    #[test]
+    #[should_panic(expected = "finite view and page heights")]
+    fn a_page_y_with_no_finite_viewport_is_a_bug() {
+        page_to_view_y(306.0, 900.0, f64::NAN);
+    }
+
+    /// V243-NATIVE-SESSION-HEADER: a page y that is not finite is a caller's bug too.
+    #[test]
+    #[should_panic(expected = "a finite page y")]
+    fn a_page_y_that_is_not_finite_is_a_bug() {
+        page_to_view_y(f64::INFINITY, 900.0, 868.0);
+    }
+
+    /// V243-NATIVE-SESSION-HEADER: a native view's place carries the page's viewport height
+    /// beside its rect, and a place with none, a zero, a fraction below one point, a NaN or an
+    /// unbounded one is refused with the rect's named code.
+    #[test]
+    fn a_native_place_carries_the_page_viewport_or_is_refused() {
+        let rect = |viewport: Option<f64>| NativeRect {
+            x: 40.0,
+            y: 120.0,
+            width: 640.0,
+            height: 400.0,
+            viewport,
+        };
+        let placed = rect(Some(868.0)).checked().unwrap();
+        assert_eq!(placed, ([40.0, 120.0, 640.0, 400.0], 868.0));
+        for refused in [None, Some(0.0), Some(0.5), Some(f64::NAN), Some(1.0e9)] {
+            let code = rect(refused).checked().unwrap_err().code;
+            assert_eq!(code, "native_terminal_rect_invalid", "{refused:?}");
+        }
+        let body = json!({ "x": 40.0, "y": 120.0, "width": 640.0, "height": 400.0 });
+        let read: NativeRect = serde_json::from_value(body).unwrap();
+        assert_eq!(
+            read.checked().unwrap_err().code,
+            "native_terminal_rect_invalid"
+        );
     }
 
     /// DEC-134 addendum 1: the app replaces an engine on its own only when the engine's
@@ -6116,5 +6744,24 @@ mod tests {
             assert_eq!(ask(wall.as_ref(), command, json!({})), Ok(()), "{command}");
         }
         assert_eq!(reached.lock().unwrap().len(), NATIVE_COMMANDS.len() * 2);
+    }
+
+    #[test]
+    fn a_macos_build_answers_no_webview_terminal_attach_input_resize_or_detach() {
+        let webview = [
+            "desktop_terminal_attach",
+            "desktop_terminal_input",
+            "desktop_terminal_resize",
+            "desktop_terminal_detach",
+        ];
+        for command in webview {
+            assert_eq!(
+                NATIVE_COMMANDS.contains(&command),
+                cfg!(not(target_os = "macos")),
+                "{command}",
+            );
+        }
+        assert!(NATIVE_COMMANDS.contains(&"desktop_terminal_prompt"));
+        assert!(NATIVE_COMMANDS.contains(&"desktop_team_terminals_per_window"));
     }
 }

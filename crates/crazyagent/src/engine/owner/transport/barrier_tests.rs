@@ -10,7 +10,13 @@ const PATIENT_WAIT_MS: u64 = 30_000;
 const SWEEP_TIME_MAX: Duration = Duration::from_secs(60);
 const LAPSE_WAIT_MS: u64 = 250;
 const QUEUED_WAIT_MS: u64 = 3000;
+const CHANGE_CUT_MS: u64 = 1500;
+const CHANGE_CLIENT_MS: u64 = 1200;
+const REMOVAL_CUT_MS: u64 = 1000;
+const REMOVAL_BARRIER_HELD: Duration = Duration::from_millis(600);
 const PUBLISHED_WAIT: Duration = Duration::from_secs(5);
+const SLOW_ENGINE_MS: u64 = 3000;
+const FAST_CLIENT_MS: u64 = 1000;
 
 /// The owner control that revokes one client kind at its current epoch.
 /// Inputs: the runtime, the client kind and the operation name. Output: the control.
@@ -149,6 +155,20 @@ fn hold_storage(owner: &Usage) -> oneshot::Sender<()> {
         .unwrap();
     assert!(!release.is_closed(), "storage took the hold");
     release
+}
+
+/// Waits up to 5 s for the storage queue to hold exactly `count` jobs the worker has not
+/// received yet. Inputs: the engine and the count. Output: whether it did.
+async fn storage_queue_reaches(owner: &Usage, count: usize) -> bool {
+    let sender = &owner.runtime().engine.storage.sender;
+    let until = tokio::time::Instant::now() + Duration::from_secs(5);
+    while sender.max_capacity() - sender.capacity() != count {
+        if tokio::time::Instant::now() >= until {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    true
 }
 
 /// Waits until storage has answered every job queued before this call, so a change it ran
@@ -546,6 +566,472 @@ async fn a_folder_add_whose_grant_is_revoked_after_its_plan_moves_nothing() {
         "an add whose grant was revoked moves nothing"
     );
     drop(controller);
+    owner.stop().await;
+}
+
+/// A folder add whose replay check storage takes 1.3 s late, and whose plan then waits behind
+/// a second hold, is refused storage_busy_not_submitted by the projects home route before the
+/// exchange deadline cuts it: the late take puts the plan's storage bound past that cut, so
+/// the owner hears the refusal rather than an unknown outcome, and nothing moves
+/// (V243-STORAGE-BUSY-ROWS).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_folder_add_whose_plan_storage_cannot_take_is_refused_unsent_and_moves_nothing() {
+    let owner = Usage::start().await;
+    let disk = tempfile::tempdir().unwrap();
+    let place = disk.path().canonicalize().unwrap();
+    let (home, source) = (place.join("projects"), place.join("sources").join("kept"));
+    std::fs::create_dir(&home).unwrap();
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("main.rs"), "fn main() {}\n").unwrap();
+    let mut controller = OwnerController::attach(
+        owner.root.path(),
+        OwnerClientKind::Desktop,
+        Duration::from_secs(20),
+    )
+    .await
+    .unwrap();
+    controller.read(OwnerRead::ProjectsHome).await.unwrap();
+    controller
+        .begin_mutation(
+            OwnerMutation::SetProjectsHome {
+                path: home.to_str().unwrap().into(),
+            },
+            1,
+        )
+        .unwrap();
+    assert!(matches!(
+        controller.send_pending().await.unwrap(),
+        OwnerResponse::Applied { .. }
+    ));
+    controller.read(OwnerRead::ProjectsHome).await.unwrap();
+    controller
+        .begin_mutation(
+            OwnerMutation::AddExistingFolder {
+                source: source.to_str().unwrap().into(),
+                mode: AddMode::Move,
+                overrides: Vec::new(),
+            },
+            2,
+        )
+        .unwrap();
+
+    let first = hold_storage(&owner);
+    assert!(
+        storage_queue_reaches(&owner, 0).await,
+        "storage took the first hold"
+    );
+    let mut answered = Box::pin(tokio::time::timeout(
+        Duration::from_secs(20),
+        controller.send_pending(),
+    ));
+    assert!(
+        tokio::time::timeout(IN_FLIGHT, &mut answered)
+            .await
+            .is_err(),
+        "the replay check waits behind the first hold"
+    );
+    assert!(
+        storage_queue_reaches(&owner, 1).await,
+        "the replay check is queued behind the first hold"
+    );
+    let second = hold_storage(&owner);
+    assert!(
+        storage_queue_reaches(&owner, 2).await,
+        "the second hold is queued behind the replay check"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut answered)
+            .await
+            .is_err(),
+        "the replay check still waits, so the plan is submitted late"
+    );
+    drop(first);
+    let answered = answered.await.unwrap();
+    drop(second);
+    assert!(
+        matches!(
+            &answered,
+            Ok(OwnerResponse::Rejected { code }) if code == "storage_busy_not_submitted"
+        ),
+        "the route answered the refusal itself: {answered:?}"
+    );
+    storage_settled(&owner).await;
+    assert!(
+        source.join("main.rs").is_file() && !home.join("kept").exists(),
+        "a refused add moves nothing"
+    );
+    drop(controller);
+    owner.stop().await;
+}
+
+/// A New Project whose seed is done but whose record waits behind the owner barrier and busy
+/// storage until the post-disk cut drops its wait still lands once storage is free: the cut
+/// closes the exchange unanswered, the client reads unknown, which stays true, and the
+/// project folder replaces its staging folder (V243-STORAGE-BUSY-ROWS, #629 F1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_project_record_its_cut_drops_lands_once_storage_is_free() {
+    let owner = Usage::start().await;
+    let runtime = owner.runtime();
+    let disk = tempfile::tempdir().unwrap();
+    let home = disk.path().canonicalize().unwrap().join("projects");
+    std::fs::create_dir(&home).unwrap();
+    let names = |staging: bool| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(&home)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| match staging {
+                true => name.starts_with(".crazyagent-new-"),
+                false => !name.starts_with('.'),
+            })
+            .collect();
+        names.sort();
+        names
+    };
+    let mut controller = OwnerController::attach(
+        owner.root.path(),
+        OwnerClientKind::Desktop,
+        Duration::from_secs(20),
+    )
+    .await
+    .unwrap();
+    controller.read(OwnerRead::ProjectsHome).await.unwrap();
+    controller
+        .begin_mutation(
+            OwnerMutation::SetProjectsHome {
+                path: home.to_str().unwrap().into(),
+            },
+            1,
+        )
+        .unwrap();
+    assert!(matches!(
+        controller.send_pending().await.unwrap(),
+        OwnerResponse::Applied { .. }
+    ));
+    controller.project_catalog(None, Vec::new()).await.unwrap();
+    controller.read(OwnerRead::ProjectsHome).await.unwrap();
+    controller
+        .begin_mutation(
+            OwnerMutation::SetupProject {
+                project_id: ProjectId::new("books").unwrap(),
+                spec: crate::protocol::ProjectSpec {
+                    name: "Books".into(),
+                    repositories: Vec::new(),
+                },
+                setup: crate::project_setup::ProjectSetup {
+                    about: "Tracks the books I want to read.".into(),
+                    tech_stack: vec!["rust".into()],
+                    platforms: vec![crate::project_setup::Platform::Website],
+                    research: Vec::new(),
+                    pool: None,
+                    team: None,
+                    documents: Vec::new(),
+                },
+            },
+            2,
+        )
+        .unwrap();
+    let visible = names(false);
+
+    let first = runtime.engine.owner_egress.write().await;
+    let mut answered = Box::pin(tokio::time::timeout(
+        Duration::from_secs(20),
+        controller.send_pending(),
+    ));
+    assert!(
+        tokio::time::timeout(IN_FLIGHT, &mut answered)
+            .await
+            .is_err(),
+        "the planned project waits for the owner barrier at its grant check"
+    );
+    let release = hold_storage(&owner);
+    assert!(
+        storage_queue_reaches(&owner, 0).await,
+        "storage took the hold"
+    );
+    let mut again = Box::pin(runtime.engine.owner_egress.write());
+    assert!(
+        tokio::time::timeout(IN_FLIGHT, &mut again).await.is_err(),
+        "the test waits for the barrier behind the grant check"
+    );
+    drop(first);
+    let second = again.await;
+    assert!(
+        tokio::time::timeout(Duration::from_secs(3), &mut answered)
+            .await
+            .is_err(),
+        "the seeded project waits for the barrier the test holds"
+    );
+    assert_eq!(names(true).len(), 1, "the seed ran into its staging folder");
+    drop(second);
+    assert!(
+        storage_queue_reaches(&owner, 1).await,
+        "the record is queued behind the hold"
+    );
+    let answered = answered.await.unwrap();
+    assert!(
+        matches!(
+            &answered,
+            Err(error) if error.0 == "owner_outcome_unknown_reconcile_same_identity"
+        ),
+        "the cut closed the exchange unanswered, which the client reads as unknown: {answered:?}"
+    );
+    assert_eq!(names(false), visible, "the record has not landed yet");
+
+    drop(release);
+    storage_settled(&owner).await;
+    assert!(
+        names(true).is_empty() && names(false).len() == visible.len() + 1,
+        "the record landed once storage was free, so the project folder replaced its staging \
+         folder: staging {:?}, visible {:?}",
+        names(true),
+        names(false)
+    );
+    drop(controller);
+    owner.stop().await;
+}
+
+/// A plugin change storage cannot take in time is refused storage_busy_not_submitted to a
+/// client whose wait ends before the engine's exchange deadline, as a desktop client's fixed
+/// wait does under a longer owner timeout, or any wait whose connect outlasts the engine's
+/// reply room. The client waits past that deadline, so it hears the refusal, not
+/// plugins_outcome_unknown, and the change never lands (V243-STORAGE-BUSY-ROWS, #629 r2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plugin_change_storage_cannot_take_is_refused_to_a_client_whose_wait_ends_first() {
+    let owner = Usage::start_waiting(CHANGE_CUT_MS).await;
+    let client = OwnerClient::discover(
+        owner.root.path(),
+        OwnerClientKind::Tui,
+        Duration::from_millis(CHANGE_CLIENT_MS),
+    )
+    .await
+    .unwrap()
+    .0;
+    let release = hold_storage(&owner);
+    assert!(
+        storage_queue_reaches(&owner, 0).await,
+        "storage took the hold"
+    );
+    let started = tokio::time::Instant::now();
+    let added = client
+        .add_mcp_server(
+            Scope::Global,
+            "late-server".into(),
+            ServerSpec::Stdio {
+                command: "/usr/bin/true".into(),
+                args: Vec::new(),
+            },
+            Vec::new(),
+        )
+        .await;
+    let waited = started.elapsed();
+    assert_eq!(
+        added.map(|server| server.id).map_err(|error| error.0),
+        Err("storage_busy_not_submitted".to_owned()),
+        "the client heard the engine's refusal after {waited:?}"
+    );
+    assert!(
+        waited >= Duration::from_millis(CHANGE_CLIENT_MS),
+        "the refusal came at the engine's cut, past the client's own timeout: {waited:?}"
+    );
+    drop(release);
+    assert!(
+        stored_servers(&owner, "late-server").await.is_empty(),
+        "the refused change never landed"
+    );
+    owner.stop().await;
+}
+
+/// An account removal that waits for the owner barrier inside its serve bound, then behind
+/// busy storage, is answered access_change_pending before that bound cuts it: its storage
+/// job is decided by the serve's own cut, not by a bound counted from its later submit, so
+/// the owner hears the pending removal, not accounts_outcome_unknown, and it lands once
+/// storage is free (V243-STORAGE-BUSY-ROWS, #629 r2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_removal_held_at_the_barrier_then_behind_storage_is_pending_before_its_cut() {
+    let owner = Usage::start_waiting(REMOVAL_CUT_MS).await;
+    let runtime = owner.runtime();
+    let listener = crate::spawn_gate::bind_tcp("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    let added = owner
+        .client
+        .add_account(
+            crate::accounts::AccountDraft {
+                provider: crate::accounts::Provider::OpenaiCompatible,
+                method: crate::accounts::SignInMethod::Url,
+                name: "Held removal".into(),
+                url: Some(url),
+                model: Some("lab-model".into()),
+            },
+            Some(
+                crate::engine::owner::AccountSecret::new(
+                    format!("sk-held-removal-{}", std::process::id()).into_bytes(),
+                )
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    let held = runtime.engine.owner_egress.write().await;
+    let release = hold_storage(&owner);
+    assert!(
+        storage_queue_reaches(&owner, 0).await,
+        "storage took the hold"
+    );
+    let mut removed = Box::pin(owner.client.remove_account(added.id.clone()));
+    assert!(
+        tokio::time::timeout(REMOVAL_BARRIER_HELD, &mut removed)
+            .await
+            .is_err(),
+        "the removal waits for the owner barrier inside its serve bound"
+    );
+    drop(held);
+    let removed = tokio::time::timeout(Duration::from_secs(10), removed)
+        .await
+        .unwrap();
+    assert_eq!(
+        removed.map(|_| ()).map_err(|error| error.0),
+        Err("access_change_pending".to_owned()),
+        "the owner hears the pending removal, decided before the serve's cut"
+    );
+    drop(release);
+    storage_settled(&owner).await;
+    assert!(
+        owner
+            .client
+            .list_accounts(None, 10)
+            .await
+            .unwrap()
+            .accounts
+            .is_empty(),
+        "the pending removal landed once storage was free"
+    );
+    owner.stop().await;
+}
+
+/// Discovers a TUI owner client whose own timeout is far below the engine's, as the TUI's
+/// fixed timeout is below a raised timeout_ms. Input: the engine. Output: the client, which
+/// learns the engine's timeout from the locator it discovers through.
+async fn fast_client(owner: &Usage) -> OwnerClient {
+    OwnerClient::discover(
+        owner.root.path(),
+        OwnerClientKind::Tui,
+        Duration::from_millis(FAST_CLIENT_MS),
+    )
+    .await
+    .unwrap()
+    .0
+}
+
+/// A plugin change behind busy storage, sent by a client whose timeout is a third of the
+/// engine's, hears the engine's refusal at the engine's own cut: the client waits its own
+/// timeout plus the engine's, not its own timeout twice, so it never says
+/// plugins_outcome_unknown for a change refused unsent (V243-PLUGINS-CLIENT-TIMEOUT-BELOW-ENGINE).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plugin_change_behind_busy_storage_is_refused_to_a_client_far_below_the_engine() {
+    let owner = Usage::start_waiting(SLOW_ENGINE_MS).await;
+    let client = fast_client(&owner).await;
+    let release = hold_storage(&owner);
+    assert!(
+        storage_queue_reaches(&owner, 0).await,
+        "storage took the hold"
+    );
+    let started = tokio::time::Instant::now();
+    let added = client
+        .add_mcp_server(
+            Scope::Global,
+            "slow-engine-server".into(),
+            ServerSpec::Stdio {
+                command: "/usr/bin/true".into(),
+                args: Vec::new(),
+            },
+            Vec::new(),
+        )
+        .await;
+    let waited = started.elapsed();
+    assert_eq!(
+        added.map(|server| server.id).map_err(|error| error.0),
+        Err("storage_busy_not_submitted".to_owned()),
+        "the client heard the engine's refusal after {waited:?}"
+    );
+    assert!(
+        waited >= Duration::from_millis(2 * FAST_CLIENT_MS),
+        "the refusal came past twice the client's own timeout: {waited:?}"
+    );
+    drop(release);
+    assert!(
+        stored_servers(&owner, "slow-engine-server")
+            .await
+            .is_empty(),
+        "the refused change never landed"
+    );
+    owner.stop().await;
+}
+
+/// An account removal behind busy storage, sent by a client whose timeout is a third of the
+/// engine's, hears access_change_pending decided before the engine's cut: the client waits
+/// the removal's bound at the engine's timeout plus its own, not the bound at its own
+/// timeout, so it never says accounts_outcome_unknown, and the removal lands once storage
+/// is free (V243-PLUGINS-CLIENT-TIMEOUT-BELOW-ENGINE).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_removal_behind_busy_storage_is_pending_to_a_client_far_below_the_engine() {
+    let owner = Usage::start_waiting(SLOW_ENGINE_MS).await;
+    let listener = crate::spawn_gate::bind_tcp("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    let added = owner
+        .client
+        .add_account(
+            crate::accounts::AccountDraft {
+                provider: crate::accounts::Provider::OpenaiCompatible,
+                method: crate::accounts::SignInMethod::Url,
+                name: "Slow engine removal".into(),
+                url: Some(url),
+                model: Some("lab-model".into()),
+            },
+            Some(
+                crate::engine::owner::AccountSecret::new(
+                    format!("sk-slow-engine-{}", std::process::id()).into_bytes(),
+                )
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    let client = fast_client(&owner).await;
+    let release = hold_storage(&owner);
+    assert!(
+        storage_queue_reaches(&owner, 0).await,
+        "storage took the hold"
+    );
+    let started = tokio::time::Instant::now();
+    let removed = client.remove_account(added.id.clone()).await;
+    let waited = started.elapsed();
+    assert_eq!(
+        removed.map(|_| ()).map_err(|error| error.0),
+        Err("access_change_pending".to_owned()),
+        "the client heard the pending removal after {waited:?}"
+    );
+    assert!(
+        waited >= Duration::from_millis(2 * FAST_CLIENT_MS),
+        "the answer came past the removal's bound at the client's own timeout: {waited:?}"
+    );
+    drop(release);
+    storage_settled(&owner).await;
+    assert!(
+        owner
+            .client
+            .list_accounts(None, 10)
+            .await
+            .unwrap()
+            .accounts
+            .is_empty(),
+        "the pending removal landed once storage was free"
+    );
     owner.stop().await;
 }
 

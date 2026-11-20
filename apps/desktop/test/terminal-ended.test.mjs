@@ -26,3 +26,19 @@ test("a team pane whose lead's teammates' server ended says so when its attach i
   assert.deepEqual(io.terminalEvent({ kind: "rejected", code: "terminal_teammates_server_ended" }),
     { kind: "ended", copy });
 });
+
+test("a native view's end codes each say why in plain words, never the generic line, and name the cause only, since a following view reconnects by itself (V243-NATIVE-INPUT E5, #509 F2)", () => {
+  const copy = {
+    native_terminal_input_overflow: "More typing was waiting than this terminal could take, so the view closed.",
+    terminal_closed: "The connection to this terminal closed.",
+    owner_grant_stale_or_revoked: "This app's access to the engine changed, so the view closed.",
+  };
+  assert.equal(io.endCopy("not_a_code"), "This terminal closed.");
+  for (const [code, line] of Object.entries(copy)) assert.equal(io.endCopy(code), line, code);
+});
+
+test("a native view the GPU stopped drawing says so, that opening it again brings it back, and that a restart does once it keeps stopping, since the code is final and a fresh device is tried only a set number of times (V243-NATIVE-DEVICE-REPLACE, leader 11:58)", () => {
+  const line = io.endCopy("native_terminal_gpu");
+  assert.equal(line, "The GPU stopped drawing this terminal, so the view closed. Open it again to bring it back. If it stops again, restart CrazyAgent.");
+  assert.notEqual(line, io.endCopy("not_a_code"));
+});

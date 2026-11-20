@@ -1626,7 +1626,7 @@ async fn a_delete_waits_for_its_agents_on_home_another_is_refused_and_enter_ther
     shell.key(Key::Home);
     shell.key(Key::Enter);
     let (ended, _) = job_until(&mut shell, &mut connection, |job| {
-        !super::intake_job::running(job)
+        job.id == waiting.id && !super::intake_job::running(job)
     })
     .await;
     assert_eq!(

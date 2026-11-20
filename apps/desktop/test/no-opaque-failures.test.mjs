@@ -153,13 +153,19 @@ test("a bridge failure keeps its own sentence and names the engine code behind i
 
 const REPROOF = "engine/owner/transport/native_auth_channel/reproof.rs";
 const REPROOF_SKIPPED = /Some\(cause\) => \{\s*eprintln!\("native_auth_reproof_skipped harness=\{harness\} cause=\{cause\}"\)\s*\}/;
-const REPROOF_USES = [/\.filter\(\|start\| self\.unreprovable\(start\.method\)\.is_none\(\)\)/, /match self\.unreprovable\(start\.method\) \{/, /\|\| self\.unreprovable\(attempt\.method\)\.is_some\(\)/];
+const REPROOF_USES = [
+  /\.filter\(\|start\| self\.unreprovable\(start\.method\)\.is_none\(\)\)/,
+  /match self\.unreprovable\(start\.method\) \{/,
+  /\|\| self\.unreprovable\(attempt\.method\)\.is_some\(\)/,
+  /if let Some\(cause\) = self\.unreprovable\(method\) \{\s*eprintln!\("native_auth_sign_out_skipped harness=\{harness\} cause=\{cause\}"\);\s*continue;\s*\}/,
+];
 
 /**
  * Reads the causes a skipped engine-start re-proof only logs: the codes `skip_cause` returns,
  * which reach stderr as `native_auth_reproof_skipped` and no client. Takes nothing. Returns
  * the codes, after checking that no other engine file names or calls them and that reproof.rs
- * only filters on them, prints them and stops waiting on them, so any new use reads as a code.
+ * only filters on them, prints them, stops waiting on them or skips a due sign-out with a
+ * print, so any new use reads as a code.
  */
 function reproofSkipCauses() {
   const file = engineFiles.find(({ path }) => path === REPROOF);

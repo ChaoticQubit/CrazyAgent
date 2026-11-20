@@ -367,6 +367,63 @@ async fn a_skill_import_slower_than_the_owner_deadline_answers_with_the_skill() 
     owner.stop().await;
 }
 
+/// A skill import that first waits 2 s behind a held owner barrier, then finds storage never
+/// takes it within `IMPORT_TIMEOUT`, is refused storage_busy_not_submitted before its own
+/// serve bound cuts it: the wait puts its storage bound past that cut, so the owner hears the
+/// refusal rather than no reply, and nothing is imported (V243-STORAGE-BUSY-ROWS).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_skill_import_storage_never_takes_is_refused_before_its_serve_bound_cuts_it() {
+    let owner = Owner::start().await;
+    let source = owner.root.path().join("work/release-notes");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("SKILL.md"), SKILL).unwrap();
+    let engine = &owner.service.owner_runtime().unwrap().engine;
+    let (release, held) = oneshot::channel();
+    engine
+        .storage
+        .sender
+        .try_send(crate::storage::Job::Hold(held))
+        .unwrap();
+    let barrier = engine.owner_egress.write().await;
+
+    let started = std::time::Instant::now();
+    let mut imported = Box::pin(
+        owner
+            .client
+            .import_skill(source.to_str().unwrap().to_owned(), None),
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), &mut imported)
+            .await
+            .is_err(),
+        "the import waits behind the held owner barrier"
+    );
+    drop(barrier);
+    let imported = imported.await;
+    let waited = started.elapsed();
+    drop(release);
+    assert_eq!(
+        imported
+            .map(|imported| imported.skill.name)
+            .map_err(|error| error.0),
+        Err("storage_busy_not_submitted".to_owned()),
+        "the import answered its refusal itself before its serve bound cut it"
+    );
+    assert!(
+        waited < plugins::IMPORT_TIMEOUT + Duration::from_secs(5),
+        "the refusal came at the import's own bound, not the client's"
+    );
+    let listed = owner.client.plugin_skills(None, 0).await.unwrap();
+    assert!(
+        listed
+            .skills
+            .iter()
+            .all(|skill| skill.name != "release-notes"),
+        "the refused import never landed"
+    );
+    owner.stop().await;
+}
+
 /// Only skill import scans and imports leave the owner exchange to be served under
 /// `IMPORT_TIMEOUT`; every other plugins request, and one that does not parse, stays inline.
 #[test]

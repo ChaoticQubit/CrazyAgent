@@ -571,13 +571,16 @@ fn container_files(name: &str) -> (PathBuf, PathBuf) {
 
 /// V243-WIN-CONTAINER-RELEASE: the node probe releases the container it ran `node.exe` in once
 /// the probe ends, so npx's folder keeps no entry for it and no scratch folder is left; here
-/// `node.exe` is empty, so the probe names no version.
+/// `node.exe` is empty, so the probe does not run to an answer.
 #[test]
 fn the_node_probe_leaves_no_container_behind() {
     let case = case();
     let npm = case.root.join("setup").join("npm");
     let before = entries(&case.bin);
-    assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
+    assert_eq!(
+        node_supported(&case.root, &case.bin),
+        Err(InstallError(NODE_CHECK_FAILED))
+    );
     assert_eq!(entries(&case.bin), before);
     let left: Vec<_> = fs::read_dir(&npm)
         .unwrap()
@@ -694,7 +697,10 @@ fn a_node_probe_releases_the_container_a_crashed_probe_left() {
     let before = entries(&case.bin);
     let (scratch, record, package) = crashed_probe(&case);
     assert_ne!(entries(&case.bin), before);
-    assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
+    assert_eq!(
+        node_supported(&case.root, &case.bin),
+        Err(InstallError(NODE_CHECK_FAILED))
+    );
     assert_eq!(entries(&case.bin), before);
     assert!(!record.exists());
     assert!(!package.exists());
@@ -716,13 +722,19 @@ fn a_node_probe_leaves_a_live_probe_container_alone() {
         .open(case.root.join("setup").join("npm").join("node-check.lock"))
         .unwrap();
     held.lock_shared().unwrap();
-    assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
+    assert_eq!(
+        node_supported(&case.root, &case.bin),
+        Err(InstallError(NODE_CHECK_FAILED))
+    );
     assert!(record.is_file());
     assert!(package.is_dir());
     assert!(scratch.is_dir());
     held.unlock().unwrap();
     drop(held);
-    assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
+    assert_eq!(
+        node_supported(&case.root, &case.bin),
+        Err(InstallError(NODE_CHECK_FAILED))
+    );
     assert!(!record.exists());
     assert!(!package.exists());
     assert!(!scratch.exists());

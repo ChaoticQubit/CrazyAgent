@@ -13,6 +13,7 @@ use std::os::fd::OwnedFd;
 #[cfg(unix)]
 const KEYS: &str = crate::storage::accounts::ACCOUNT_KEYS;
 const SECRET_MAX: usize = 8192;
+const _: () = assert!(SECRET_MAX as u64 == crate::storage::accounts::KEY_BYTES_MAX);
 const LIST_PROBE: Duration = Duration::from_millis(400);
 const CHECK_PROBE: Duration = Duration::from_secs(4);
 
@@ -197,7 +198,7 @@ impl OwnerClient {
         action: Action,
         key: Option<AccountSecret>,
     ) -> Result<Reply, EngineError> {
-        let time = action.time(self.timeout) + self.timeout;
+        let time = action.time(self.engine_timeout) + self.timeout;
         tokio::time::timeout(time, async {
             let read = read_kind(&action);
             let envelope = Envelope {
@@ -257,9 +258,9 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
 }
 
 /// Serves one accounts owner request after the owner exchange deadline: the action runs
-/// under its own budget, which covers its network probes, and the reply write under the
-/// owner wait. Inputs: the stream, engine, authority, owner packet, admission and request
-/// bytes. Output: the reply written, a rejection code included.
+/// under its own budget, which covers its network probes and decides each storage job just
+/// before that budget cuts it, and the reply write under the owner wait. Inputs: the stream,
+/// engine, authority, owner packet, admission and request bytes. Output: the reply written.
 pub(super) async fn serve(
     stream: &mut Stream,
     engine: &Arc<Engine>,
@@ -276,12 +277,11 @@ pub(super) async fn serve(
         None
     };
     let time = envelope.accounts.time(engine.timeout);
-    let outcome = tokio::time::timeout(
-        time,
-        handle(engine, authority, packet, admission, envelope.accounts, key),
-    )
-    .await
-    .unwrap_or_else(|_| Err(unknown()));
+    let cut = tokio::time::Instant::now() + time;
+    let work = handle(engine, authority, packet, admission, envelope.accounts, key);
+    let outcome = tokio::time::timeout_at(cut, crate::storage::before_cut(cut, time, work))
+        .await
+        .unwrap_or_else(|_| Err(unknown()));
     let reply = match outcome {
         Ok(reply) => reply,
         Err(error) => Reply::Rejected {
@@ -628,18 +628,21 @@ pub(super) fn replace_key(
     Ok(())
 }
 
-/// Refuses to save an account key where the Unix owner-only key directory does not exist.
-/// Takes the owner root and credential, unused, and the key, which is zeroed before it drops.
-/// Returns `account_key_store_unavailable`.
-#[cfg(not(unix))]
+/// Saves an account key on Windows as a new W1 secret file in the engine root's key folder,
+/// through the one key-folder guard in storage. Inputs: owner root, credential reference and
+/// the key, which is zeroed after the write. Output: the folder synced, or the refusal.
+#[cfg(windows)]
 fn store_key(
-    _root: &Root,
-    _credential: &CredentialRef,
+    root: &Root,
+    credential: &CredentialRef,
     key: AccountSecret,
 ) -> Result<(), EngineError> {
     let mut bytes = key.into_bytes();
+    let stored = root
+        .engine_root()
+        .and_then(|engine| crate::storage::accounts::store_key_file(engine, credential, &bytes));
     crate::credentials::wipe(&mut bytes);
-    Err(failure("account_key_store_unavailable"))
+    stored
 }
 
 #[cfg(unix)]
@@ -671,24 +674,30 @@ fn open_key(root: &Root, credential: &CredentialRef) -> Result<Option<File>, Eng
     Ok(Some(file))
 }
 
-/// Refuses to replace an account key where the Unix owner-only key directory does not exist.
-/// Takes the owner root and credential, unused, and the key, which is zeroed before it drops.
-/// Returns `account_key_store_unavailable`.
-#[cfg(not(unix))]
+/// Swaps the saved key of one credential for a new one on Windows: storage writes a staged
+/// W1 secret file and renames it over the old one. Inputs: owner root, credential reference
+/// and the new key, which is zeroed after the write. Output: Ok, or the refusal; on a
+/// refusal the old key stays.
+#[cfg(windows)]
 pub(super) fn replace_key(
-    _root: &Root,
-    _credential: &CredentialRef,
+    root: &Root,
+    credential: &CredentialRef,
     key: AccountSecret,
 ) -> Result<(), EngineError> {
-    crate::credentials::wipe(&mut key.into_bytes());
-    Err(failure("account_key_store_unavailable"))
+    let mut bytes = key.into_bytes();
+    let replaced = root
+        .engine_root()
+        .and_then(|engine| crate::storage::accounts::replace_key_file(engine, credential, &bytes));
+    crate::credentials::wipe(&mut bytes);
+    replaced
 }
 
-/// Refuses to open an account key where the Unix owner-only key directory does not exist.
-/// Takes the owner root and credential, both unused. Returns `account_key_store_unavailable`.
-#[cfg(not(unix))]
-fn open_key(_root: &Root, _credential: &CredentialRef) -> Result<Option<File>, EngineError> {
-    Err(failure("account_key_store_unavailable"))
+/// Opens the saved key of one credential on Windows as a W1 private file read without delete
+/// sharing. Inputs: owner root and credential reference. Output: the file, none when no key
+/// was saved, or the storage refusal.
+#[cfg(windows)]
+fn open_key(root: &Root, credential: &CredentialRef) -> Result<Option<File>, EngineError> {
+    crate::storage::accounts::open_key_file(root.engine_root()?, credential)
 }
 
 fn read_key(root: &Root, credential: &CredentialRef) -> Result<Option<Vec<u8>>, EngineError> {
@@ -738,11 +747,12 @@ fn remove_key(root: &Root, credential: &CredentialRef) -> Result<(), EngineError
     }
 }
 
-/// Refuses to remove an account key where the Unix owner-only key directory does not exist.
-/// Takes the owner root and credential, both unused. Returns `account_key_store_unavailable`.
-#[cfg(not(unix))]
-fn remove_key(_root: &Root, _credential: &CredentialRef) -> Result<(), EngineError> {
-    Err(failure("account_key_store_unavailable"))
+/// Removes the saved key of one credential on Windows while its key folder is held.
+/// Inputs: owner root and credential reference. Output: Ok when the key is gone, including
+/// when it was never saved, or the storage refusal.
+#[cfg(windows)]
+fn remove_key(root: &Root, credential: &CredentialRef) -> Result<(), EngineError> {
+    crate::storage::accounts::remove_key_file(root.engine_root()?, credential.as_str())
 }
 
 fn http_url(connection: &ModelConnection) -> Option<url::Url> {
@@ -854,9 +864,7 @@ fn view(listed: &Listed, status: AccountStatus) -> AccountView {
 fn sign_out_reason(code: &str) -> &'static str {
     match code {
         crate::storage::SIGN_OUT_NOT_RUN => "the engine stopped before the harness signed out",
-        "native_auth_host_unavailable" | "native_auth_host_unregistered" => {
-            "the sign-in helper could not run the harness"
-        }
+        "native_auth_host_unavailable" => "the sign-in helper could not run the harness",
         _ => "the harness sign-out failed",
     }
 }

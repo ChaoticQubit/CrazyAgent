@@ -952,6 +952,54 @@ impl Host for Servers {
         self.on_panes(agent, |server| server.input_at(agent, at, bytes))
     }
 
+    fn own_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        self.on(agent, |server| server.own_pane_at(agent))
+    }
+
+    fn tag_app(&self, agent: &AgentId, pid: u32) -> Result<(), HostError> {
+        self.on(agent, |server| server.tag_app(agent, pid))
+    }
+
+    fn app_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        self.on(agent, |server| server.app_pane_at(agent))
+    }
+
+    /// Reads a pinned pane's paste mode on the server that found it: the agent's own server,
+    /// else, for a lead, its teammates' server, as `input_at` types into it. Takes the agent
+    /// and the pane. Returns the answer, or none when neither server holds that pin.
+    fn input_live_at(&self, agent: &AgentId, at: &PaneAt) -> Result<Option<bool>, HostError> {
+        if let Some(on) = self.on(agent, |server| server.input_live_at(agent, at))? {
+            return Ok(Some(on));
+        }
+        self.on_panes(agent, |server| server.input_live_at(agent, at))
+    }
+
+    fn paste_at(&self, agent: &AgentId, at: &PaneAt, keys: &[u8]) -> Result<bool, HostError> {
+        self.on(agent, |server| server.paste_at(agent, at, keys))
+    }
+
+    /// Sizes a pinned view's window on the server that found its pane and, for a lead whose
+    /// teammates' server this engine reaches, that server too, as `resize` does by name.
+    /// Takes the agent, the pane and the size. Returns whether the pinned window was sized.
+    fn resize_at(&self, agent: &AgentId, at: &PaneAt, size: (u16, u16)) -> Result<bool, HostError> {
+        if !self.on(agent, |server| server.resize_at(agent, at, size))? {
+            return Ok(false);
+        }
+        if self.own(agent)?.is_some()
+            && let Some(mates) = self.mates(agent)?
+        {
+            mates.resize(agent, size.0, size.1)?;
+        }
+        Ok(true)
+    }
+
+    /// Names the window a resize of the agent sizes on the server that runs it; a lead's
+    /// teammates' window is sized along with it, so it never counts apart. Takes the agent.
+    /// Returns that server's unit key.
+    fn unit(&self, agent: &AgentId) -> Result<String, HostError> {
+        self.on(agent, |server| server.unit(agent))
+    }
+
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         self.on(agent, |server| server.input_live(agent))
     }
@@ -1083,6 +1131,14 @@ impl Host for Servers {
 
     fn input_live_pane(&self, agent: &AgentId, pane: &str) -> Result<bool, HostError> {
         self.on_panes(agent, |server| server.input_live_pane(agent, pane))
+    }
+
+    fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
+        self.on(agent, |server| server.paste(agent, keys))
+    }
+
+    fn paste_pane(&self, agent: &AgentId, pane: &str, keys: &[u8]) -> Result<(), HostError> {
+        self.on_panes(agent, |server| server.paste_pane(agent, pane, keys))
     }
 
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
