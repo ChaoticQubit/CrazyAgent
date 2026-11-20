@@ -15,7 +15,6 @@ const FILE_SHARE_WRITE: u32 = 0x2;
 const FILE_SHARE_DELETE: u32 = 0x4;
 const UNSAFE: &str = "native_auth_host_executable_unsafe";
 const CHANGED: &str = "native_auth_host_executable_changed";
-const UNAVAILABLE: &str = "native_auth_host_unavailable";
 const SHARING_VIOLATION: i32 = 32;
 const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
 const HARNESS_BYTES: usize = 64 * 1024;

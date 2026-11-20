@@ -26,11 +26,6 @@ const FILE_SHARE_DELETE: u32 = 0x4;
 const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 #[cfg(windows)]
 const ERROR_SHARING_VIOLATION: i32 = 32;
-/// Whether the Windows pin serves engine start, the catalog and harness search: off until the
-/// sign-in custodian runs on Windows (N3 turns it on with finding.rs:464), so no harness is
-/// offered there that cannot sign in (leader 05:3x Q5).
-#[cfg(windows)]
-const PIN_LIVE: bool = false;
 
 pub(super) const EXECUTABLE_BYTES_MAX: u64 = 1024 * 1024 * 1024;
 
@@ -207,18 +202,10 @@ pub(crate) fn pinnable(metadata: &Metadata) -> Result<(), EngineError> {
     ExecutableIdentity::of(metadata).map(|_| ())
 }
 
-/// The pin's file rule for harness search on Windows, kept off until the custodian runs
-/// there (N3), so search finds no harness it could not sign in. Input: the metadata, unused.
-/// Output: `native_auth_host_unavailable`.
-#[cfg(windows)]
-pub(crate) fn pinnable(_metadata: &std::fs::Metadata) -> Result<(), EngineError> {
-    Err(EngineError("native_auth_host_unavailable".into()))
-}
-
 /// The pin's whole rule on Windows for one path, as [`RegisteredNativeAuthHost::capture_pinned`]
-/// judges it before hashing, for N3's harness search to call. Input: the absolute path.
-/// Output: Ok, or the refusal code.
-#[cfg(all(windows, test))]
+/// judges it before hashing, so a harness search refuses exactly the files a pin would.
+/// Input: the absolute path. Output: Ok, or the refusal code.
+#[cfg(windows)]
 pub(crate) fn pinnable_at(path: &Path) -> Result<(), EngineError> {
     let file = RegisteredNativeAuthHost::open(path)?;
     RegisteredNativeAuthHost::judged(path, &file).map(|_| ())
@@ -337,20 +324,10 @@ impl RegisteredNativeAuthHost {
         Ok(digest.finalize().into())
     }
 
-    #[cfg(unix)]
+    /// Pins a harness for engine start and the catalog, as [`Self::capture_pinned`] does.
+    /// Input: the absolute real path. Output: the host, or the refusal code.
     pub(crate) fn capture(path: &Path) -> Result<Self, EngineError> {
         Self::capture_pinned(path)
-    }
-
-    /// Pins a harness on Windows once [`PIN_LIVE`] turns the pin on there (N3); until then
-    /// every engine-start and catalog capture is refused, while the pin itself is
-    /// [`Self::capture_pinned`]. Input: the absolute real path. Output: the host, or the code.
-    #[cfg(windows)]
-    pub(crate) fn capture(path: &Path) -> Result<Self, EngineError> {
-        if PIN_LIVE {
-            return Self::capture_pinned(path);
-        }
-        Err(EngineError("native_auth_host_unavailable".into()))
     }
 
     /// Pins a harness: its file opened as [`Self::open`] opens it, judged, hashed, and looked

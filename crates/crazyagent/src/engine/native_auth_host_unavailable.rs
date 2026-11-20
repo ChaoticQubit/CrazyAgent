@@ -12,9 +12,7 @@ pub(in crate::engine) mod claude_auth {
 
 #[path = "native_auth_host/pin.rs"]
 mod pin;
-#[cfg(test)]
-use pin::pinnable_at;
-pub(crate) use pin::{RegisteredNativeAuthHost, pinnable};
+pub(crate) use pin::{RegisteredNativeAuthHost, pinnable_at};
 
 #[cfg(test)]
 #[path = "native_auth_host/pin_windows_tests.rs"]

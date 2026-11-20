@@ -40,7 +40,11 @@ pub use native_auth_host::{
 };
 
 pub(crate) use bootstrap::NativeProfileCustody;
-pub(crate) use native_auth_host::{RegisteredNativeAuthHost, pinnable};
+pub(crate) use native_auth_host::RegisteredNativeAuthHost;
+#[cfg(unix)]
+pub(crate) use native_auth_host::pinnable;
+#[cfg(not(unix))]
+pub(crate) use native_auth_host::pinnable_at;
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]

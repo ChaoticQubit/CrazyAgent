@@ -461,7 +461,10 @@ pub fn check_file(
     {
         return Err(failure(PATH_CHANGEABLE));
     }
+    #[cfg(unix)]
     crate::engine::pinnable(&metadata)?;
+    #[cfg(not(unix))]
+    crate::engine::pinnable_at(&real)?;
     assert!(path.is_absolute());
     Ok(path.to_path_buf())
 }
