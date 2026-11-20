@@ -3,7 +3,6 @@ use super::bootstrap::NativeProfileUse;
 use crate::adapters::NativeAction;
 #[cfg(unix)]
 use crate::adapters::NativeHarness;
-#[cfg(unix)]
 use crate::adapters::claude::{ClaudeProtocol, ProtocolError};
 use crate::adapters::events::ObservedEvent;
 use crate::harnesses::launch::CLAUDE_NO_TOOLS_PROMPT;
@@ -40,13 +39,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 #[cfg(unix)]
 use std::sync::mpsc::{SyncSender, sync_channel};
-#[cfg(unix)]
 use std::time::Duration;
 #[cfg(unix)]
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::mpsc;
+use tokio::sync::{oneshot, watch};
 
 pub(in crate::engine) mod diagnostic;
 #[cfg(unix)]
+mod process;
+#[cfg(windows)]
+#[path = "claude_host/process_windows_red.rs"]
 mod process;
 
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
@@ -123,7 +125,6 @@ fn plain_path(path: &Path) -> Option<String> {
 #[cfg(unix)]
 const STDOUT_BYTES_MAX: usize = 64 * 1024 * 1024;
 
-#[cfg(unix)]
 #[derive(Clone, Copy)]
 pub(in crate::engine) struct ClaudeHostLimits {
     pub(in crate::engine) run_time: Option<Duration>,
@@ -492,7 +493,6 @@ fn private_instructions(file: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
-#[cfg(unix)]
 #[derive(Clone, Copy, Debug)]
 enum Fault {
     Host(&'static str),
@@ -500,7 +500,6 @@ enum Fault {
     Exit(Option<i32>),
 }
 
-#[cfg(unix)]
 impl Fault {
     fn error(self) -> EngineError {
         match self {
@@ -530,7 +529,6 @@ impl Fault {
 /// Names a Claude protocol fault as a plain lowercase code that engine logs can show.
 /// Input: the protocol error. Output: `claude_host_protocol_` followed by the error's
 /// name in snake case, for example `claude_host_protocol_stale_message`.
-#[cfg(unix)]
 fn protocol_error(error: ProtocolError) -> EngineError {
     let name = format!("{error:?}");
     let mut code = String::from("claude_host_protocol");
@@ -543,7 +541,6 @@ fn protocol_error(error: ProtocolError) -> EngineError {
     EngineError(code)
 }
 
-#[cfg(unix)]
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum Phase {
     Starting,
@@ -552,14 +549,12 @@ enum Phase {
     Retired,
 }
 
-#[cfg(unix)]
 #[derive(Clone, Copy)]
 struct Status {
     phase: Phase,
     fault: Option<Fault>,
 }
 
-#[cfg(unix)]
 struct Turn {
     request_id: RequestId,
     text: String,
