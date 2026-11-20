@@ -3682,7 +3682,7 @@ mod tests {
         git(&clone, &["init", "-q"]);
         let helper = std::env::current_exe().unwrap();
         for confined in [
-            sandbox.confine_to_worktree(&worktree).unwrap(),
+            sandbox.clone().confine_to_worktree(&worktree).unwrap(),
             sandbox.confine_to_clone(&clone).unwrap(),
         ] {
             let bound = LinuxSandbox::new(
