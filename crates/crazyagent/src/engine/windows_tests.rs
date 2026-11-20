@@ -1,26 +1,11 @@
 use super::*;
-use std::io;
+use crazyagent_win_sandbox::principals;
 use std::os::windows::fs::OpenOptionsExt;
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::ptr::{null, null_mut};
+use std::os::windows::io::OwnedHandle;
 use std::sync::Arc;
-use windows_sys::Win32::Foundation::LocalFree;
-use windows_sys::Win32::Security::Authorization::ConvertStringSidToSidW;
-use windows_sys::Win32::Security::{
-    CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, DuplicateTokenEx, GetLengthSid, PSID,
-    RevertToSelf, SID_AND_ATTRIBUTES, SecurityImpersonation, SetTokenInformation, TOKEN_ALL_ACCESS,
-    TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenImpersonation, TokenIntegrityLevel,
-};
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken, SetThreadToken};
 
-/// The RESTRICTED SID, the usual restricting SID of a restricted token.
-const RESTRICTED: &str = "S-1-5-12";
-/// The medium mandatory level SID, an unelevated process's own.
-const MEDIUM_SID: &str = "S-1-16-8192";
 /// The medium integrity level.
 const MEDIUM: u32 = 0x2000;
-/// SE_GROUP_INTEGRITY, the attribute that marks a token's mandatory label SID.
-const SE_GROUP_INTEGRITY: u32 = 0x20;
 /// The impersonation level a client allows its server, SECURITY_IDENTIFICATION.
 const SECURITY_IDENTIFICATION: u32 = 0x0001_0000;
 
@@ -62,121 +47,12 @@ fn create_request(id: &str, folder: &Path) -> WireRequest {
     }
 }
 
-/// Converts a SID string; the caller frees the SID with `LocalFree`. Input: the SID
-/// string. Output: the SID.
-fn sid(text: &str) -> PSID {
-    let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut sid: PSID = null_mut();
-    assert_ne!(
-        unsafe { ConvertStringSidToSidW(wide.as_ptr(), &mut sid) },
-        0,
-        "{}",
-        io::Error::last_os_error()
-    );
-    sid
-}
-
-/// This process's token, opened to be duplicated. Output: the token.
-fn process_token() -> OwnedHandle {
-    let mut process = null_mut();
-    assert_ne!(
-        unsafe {
-            OpenProcessToken(
-                GetCurrentProcess(),
-                TOKEN_DUPLICATE | TOKEN_QUERY,
-                &mut process,
-            )
-        },
-        0,
-        "{}",
-        io::Error::last_os_error()
-    );
-    unsafe { OwnedHandle::from_raw_handle(process) }
-}
-
-/// An impersonation copy of `token`. Input: a token opened to be duplicated. Output: the
-/// copy.
-fn impersonation(token: &OwnedHandle) -> OwnedHandle {
-    let mut copy = null_mut();
-    assert_ne!(
-        unsafe {
-            DuplicateTokenEx(
-                token.as_raw_handle(),
-                TOKEN_ALL_ACCESS,
-                null(),
-                SecurityImpersonation,
-                TokenImpersonation,
-                &mut copy,
-            )
-        },
-        0,
-        "{}",
-        io::Error::last_os_error()
-    );
-    unsafe { OwnedHandle::from_raw_handle(copy) }
-}
-
-/// A restricted impersonation copy of this process's token with RESTRICTED as its only
-/// restricting SID, which no engine pipe list grants. Output: the token.
-fn restricted_token() -> OwnedHandle {
-    let restricting = sid(RESTRICTED);
-    let process = process_token();
-    let entry = SID_AND_ATTRIBUTES {
-        Sid: restricting,
-        Attributes: 0,
-    };
-    let mut restricted = null_mut();
-    let made = unsafe {
-        CreateRestrictedToken(
-            process.as_raw_handle(),
-            DISABLE_MAX_PRIVILEGE,
-            0,
-            null(),
-            0,
-            null(),
-            1,
-            &entry,
-            &mut restricted,
-        )
-    };
-    let failure = io::Error::last_os_error();
-    unsafe { LocalFree(restricting) };
-    assert_ne!(made, 0, "{failure}");
-    impersonation(&unsafe { OwnedHandle::from_raw_handle(restricted) })
-}
-
-/// An impersonation copy of this process's token lowered to medium integrity: the user's
-/// unelevated duplicate when the engine runs elevated. Output: the token.
-fn medium_token() -> OwnedHandle {
-    let token = impersonation(&process_token());
-    let level = sid(MEDIUM_SID);
-    let label = TOKEN_MANDATORY_LABEL {
-        Label: SID_AND_ATTRIBUTES {
-            Sid: level,
-            Attributes: SE_GROUP_INTEGRITY,
-        },
-    };
-    let bytes = size_of::<TOKEN_MANDATORY_LABEL>() as u32 + unsafe { GetLengthSid(level) };
-    let set = unsafe {
-        SetTokenInformation(
-            token.as_raw_handle(),
-            TokenIntegrityLevel,
-            std::ptr::from_ref(&label).cast(),
-            bytes,
-        )
-    };
-    let failure = io::Error::last_os_error();
-    unsafe { LocalFree(level) };
-    assert_ne!(set, 0, "{failure}");
-    token
-}
-
 /// Opens the pipe `name` as `token` on a blocking thread, writes `frame` and reads to the
 /// end: what a client of that principal gets back. Inputs: the token, the pipe name and the
 /// frame. Output: the reply bytes, none when the open or the exchange is refused.
 async fn exchange_as(token: OwnedHandle, name: String, frame: Vec<u8>) -> Vec<u8> {
     tokio::task::spawn_blocking(move || {
-        as_principal(&token, || {
+        principals::as_principal(&token, || {
             let opened = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -194,23 +70,6 @@ async fn exchange_as(token: OwnedHandle, name: String, frame: Vec<u8>) -> Vec<u8
     })
     .await
     .unwrap()
-}
-
-/// Runs `work` on this thread while it impersonates `token`, then reverts; a failed revert
-/// aborts the process, so no later code runs as the lowered principal. Inputs: the token
-/// and the work. Output: what the work returned.
-fn as_principal<T>(token: &OwnedHandle, work: impl FnOnce() -> T) -> T {
-    assert_ne!(
-        unsafe { SetThreadToken(null(), token.as_raw_handle()) },
-        0,
-        "{}",
-        io::Error::last_os_error()
-    );
-    let result = work();
-    if unsafe { RevertToSelf() } == 0 {
-        std::process::abort();
-    }
-    result
 }
 
 /// WIRE-2: an ordinary request reaches the engine over its pipe and its reply carries the
@@ -295,7 +154,7 @@ async fn a_restricted_client_is_refused_before_any_frame_is_parsed() {
     let running = tokio::spawn(server.run(stopped));
     let name = crate::ipc::pipe_name_at(&socket).unwrap();
     let frame = encode_frame(&create_request("restricted", temp.path())).unwrap();
-    let answered = exchange_as(restricted_token(), name, frame).await;
+    let answered = exchange_as(principals::restricted(), name, frame).await;
     assert!(answered.is_empty(), "{} reply bytes", answered.len());
     let client = Client::new(socket.clone(), Duration::from_secs(10)).unwrap();
     let reply = client
@@ -334,7 +193,7 @@ async fn a_medium_client_of_an_elevated_engine_gets_no_reply() {
     let name = crate::ipc::pipe_name_at(&socket).unwrap();
     let frame = encode_frame(&create_request("medium", temp.path())).unwrap();
     let own = crazyagent_win_sandbox::pipe::own_integrity().unwrap();
-    let answered = exchange_as(medium_token(), name, frame).await;
+    let answered = exchange_as(principals::medium(), name, frame).await;
     println!(
         "R6 engine integrity {own:#x}, medium client reply bytes {}",
         answered.len()

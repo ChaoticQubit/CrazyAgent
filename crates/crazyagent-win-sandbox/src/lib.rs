@@ -5,6 +5,11 @@ pub mod dacl;
 pub mod grants;
 pub mod pipe;
 pub mod plan;
+/// Test only: lowered principals a test thread impersonates, a restricted token (R4) and the
+/// user's medium duplicate (R6), behind the `test-principals` feature that only a
+/// dev-dependency turns on, so no release build carries them.
+#[cfg(all(windows, feature = "test-principals"))]
+pub mod principals;
 pub mod private;
 pub mod profile;
 pub mod quote;
