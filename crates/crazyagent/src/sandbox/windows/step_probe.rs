@@ -347,9 +347,29 @@ fn w5b_step_probe() {
             "objects hash-object-w",
             sandbox.wrap(&objects.command(&["hash-object", "-w", "a.txt"])),
         );
+        let index_o = step.join("index-o");
+        let uncontained = |facts: &mut Facts, name: &str, copy: &str| {
+            let index = step.join(copy);
+            std::fs::copy(&index_o, &index).unwrap();
+            let twin = Step {
+                index: &index,
+                ..absolute
+            };
+            facts.ran(name, Ok(twin.command(&["add", "-A"])));
+        };
+        uncontained(&mut facts, "objects add -A uncontained before", "index-u1");
         facts.ran(
             "objects add -A",
             sandbox.wrap(&objects.command(&["add", "-A"])),
+        );
+        uncontained(&mut facts, "objects add -A uncontained after", "index-u2");
+        facts.ran(
+            "objects add -A again",
+            sandbox.wrap(&objects.command(&["add", "-A"])),
+        );
+        facts.ran(
+            "objects rev-parse after add",
+            sandbox.wrap(&objects.command(&["rev-parse", "HEAD"])),
         );
         let mut listed = Command::new(&git);
         listed
