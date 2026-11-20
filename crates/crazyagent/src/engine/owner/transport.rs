@@ -588,9 +588,20 @@ impl Root {
 struct Slot {
     registration: Registration,
     token: [u8; 32],
-    file: File,
+    file: Option<File>,
     identity: Identity,
     closed: u64,
+}
+
+impl Slot {
+    /// The slot's held capability file, which Windows cleanup closes after it marks the
+    /// delete, so the name goes then. Output: the file, or `owner_authority_unavailable`
+    /// once cleanup has closed it.
+    fn held(&self) -> Result<&File, EngineError> {
+        self.file
+            .as_ref()
+            .ok_or_else(|| failure("owner_authority_unavailable"))
+    }
 }
 
 struct PinnedBootstrap {
@@ -1120,11 +1131,10 @@ impl Authority {
             .lock()
             .map_err(|_| failure("owner_authority_unavailable"))?;
         let slot = &slots[i];
-        self.root.verify_key(KEYS[i], &slot.file, slot.identity)?;
+        let file = slot.held()?;
+        self.root.verify_key(KEYS[i], file, slot.identity)?;
         let mut observed = [0; 32];
-        slot.file
-            .read_exact_at(&mut observed, 0)
-            .map_err(io_error)?;
+        file.read_exact_at(&mut observed, 0).map_err(io_error)?;
         if !bool::from(slot.token.ct_eq(&observed)) {
             return Err(failure("owner_capability_content_changed"));
         }
@@ -1174,10 +1184,11 @@ impl Authority {
             if registration.active {
                 let mut token = [0; 32];
                 getrandom::fill(&mut token).map_err(|_| failure("owner_entropy_unavailable"))?;
-                self.root.verify_key(KEYS[i], &slot.file, slot.identity)?;
-                slot.file.write_all_at(&token, 0).map_err(io_error)?;
-                slot.file.sync_all().map_err(io_error)?;
-                self.root.verify_key(KEYS[i], &slot.file, slot.identity)?;
+                let file = slot.held()?;
+                self.root.verify_key(KEYS[i], file, slot.identity)?;
+                file.write_all_at(&token, 0).map_err(io_error)?;
+                file.sync_all().map_err(io_error)?;
+                self.root.verify_key(KEYS[i], file, slot.identity)?;
                 slot.token = token;
             }
             slot.registration = registration;
@@ -1227,21 +1238,23 @@ impl Authority {
         let mut result = Ok(());
         result = result.and(self.ide.revoke_all());
         match self.slots.lock() {
-            Ok(slots) => {
-                for (i, slot) in slots.iter().enumerate() {
+            Ok(mut slots) => {
+                for (i, slot) in slots.iter_mut().enumerate() {
                     result = result.and(self.root.unlink_owned(
                         KEYS[i],
                         slot.identity,
                         false,
-                        Some(&slot.file),
+                        slot.file.as_ref(),
                     ));
+                    #[cfg(windows)]
+                    drop(slot.file.take());
                 }
             }
             Err(_) => result = result.and(Err(failure("owner_authority_unavailable"))),
         }
         match self.runners.lock() {
-            Ok(runners) => {
-                for slot in runners.iter().flatten() {
+            Ok(mut runners) => {
+                for slot in runners.iter_mut().flatten() {
                     if let Some(key) = &slot.key {
                         result = result.and(self.root.unlink_owned(
                             &format!("r{:02x}.cap", slot.prepared.slot),
@@ -1250,6 +1263,8 @@ impl Authority {
                             Some(&key.file),
                         ));
                     }
+                    #[cfg(windows)]
+                    drop(slot.key.take());
                 }
             }
             Err(_) => result = result.and(Err(failure("runner_authority_unavailable"))),
@@ -1627,7 +1642,7 @@ impl OwnerServer {
                 slots.push(Slot {
                     registration,
                     token,
-                    file,
+                    file: Some(file),
                     identity,
                     closed: 0,
                 });
