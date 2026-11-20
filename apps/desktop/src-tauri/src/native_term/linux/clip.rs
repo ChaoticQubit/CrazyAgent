@@ -168,9 +168,18 @@ thread_local! {
 pub struct Boards(Rc<Clip>);
 
 impl Boards {
-    /// The host's boards, made once on the main thread: the desktop's. Output: them.
+    /// The host's boards, made once on the main thread: the desktop's, or in a
+    /// `native-webdriver` build the in-process ones, so a driven paste never reads the
+    /// owner's boards. Output: them.
     pub fn new() -> Boards {
-        let shared = SHARED.with(|cell| Rc::clone(cell.get_or_init(|| Rc::new(Clip::desktop()))));
+        let made = || {
+            Rc::new(if cfg!(feature = "native-webdriver") {
+                Clip::private()
+            } else {
+                Clip::desktop()
+            })
+        };
+        let shared = SHARED.with(|cell| Rc::clone(cell.get_or_init(made)));
         assert!(SHARED.with(|cell| cell.get().is_some_and(|held| Rc::ptr_eq(held, &shared))));
         Boards(shared)
     }

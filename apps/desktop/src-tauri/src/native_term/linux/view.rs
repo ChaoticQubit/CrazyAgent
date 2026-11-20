@@ -92,8 +92,14 @@ pub fn primary_paste(focus: Focus, placed: bool, text: Option<String>) -> Option
 /// cover, a focus loss or a close never lands. Inputs: the view's focus and the text read.
 /// Output: the event.
 pub fn clipboard_paste(focus: Focus, text: Option<String>) -> Option<ViewEvent> {
-    let _ = (focus, text);
-    None
+    if !focus.active() {
+        return None;
+    }
+    let text = text.filter(|text| !text.is_empty())?;
+    Some(ViewEvent::Key(Input::Paste {
+        text,
+        primary: false,
+    }))
 }
 
 /// Where keyboard focus stands for one view: whether it holds native focus, whether its
@@ -644,7 +650,7 @@ impl Inner {
     /// command, the input method gets the key next, and a key it does not take goes to
     /// the key map. Input: the event. Output: whether the key goes on to the page, which
     /// it does only while inactive.
-    fn key_press(&self, event: &EventKey) -> Propagation {
+    fn key_press(self: &Rc<Self>, event: &EventKey) -> Propagation {
         if !self.focus.get().active() {
             return Propagation::Proceed;
         }
@@ -653,7 +659,11 @@ impl Inner {
             self.entries(event.hardware_keycode())
         });
         if let Some(command) = chord(keyval, state) {
-            self.send(command);
+            if command == ViewEvent::Paste {
+                self.paste_clipboard();
+            } else {
+                self.send(command);
+            }
             return Propagation::Stop;
         }
         if self.im.filter_keypress(event) {
@@ -663,6 +673,21 @@ impl Inner {
             self.send(ViewEvent::Key(input));
         }
         Propagation::Stop
+    }
+
+    /// Reads CLIPBOARD for a paste chord while its key press is handled, so the seat guard
+    /// passes; the reply, from GTK's main loop for a desktop board, goes through the sink
+    /// as a paste input only while the view is still active.
+    fn paste_clipboard(self: &Rc<Self>) {
+        let me = Rc::downgrade(self);
+        self.clip.read(Board::Clipboard, move |text| {
+            let Some(me) = me.upgrade() else {
+                return;
+            };
+            if let Some(event) = clipboard_paste(me.focus.get(), text) {
+                me.send(event);
+            }
+        });
     }
 
     fn entries(&self, keycode: u16) -> Vec<keys::Entry> {
