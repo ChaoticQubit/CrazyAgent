@@ -143,23 +143,42 @@ pub(super) fn cleanup_unretained(child: &mut Child, deadline: Instant) -> io::Re
 
 /// Whether the tree of a login child that was already reaped has no process left, read from
 /// its job without ending anything, so a grandchild that outlived the child reads as a
-/// survivor. Not built yet (N4a red rows). Input: the tree. Output: the answer.
+/// survivor; a process still leaving the job gets the settle bound. Input: the tree.
+/// Output: the answer, false when the job cannot be read.
 #[cfg(windows)]
 pub(super) fn reaped_group_gone(group: &ChildGroup) -> bool {
-    let _ = (group, GROUP_SETTLE_TIME);
-    true
+    let deadline = Instant::now() + GROUP_SETTLE_TIME;
+    loop {
+        match group.active_processes() {
+            Ok(0) => return true,
+            Ok(_) if Instant::now() < deadline => sleep_until(deadline),
+            _ => return false,
+        }
+    }
 }
 
 /// Ends a login child's whole tree and waits until the child is reaped and no process of
-/// the tree is left. Not built yet (N4a red rows): it ends the child alone. Inputs: the
-/// child, its tree and the deadline. Output: whether both happened in time, or the failed
-/// step.
+/// the tree is left, within [`DROP_TIME`] and the deadline. Inputs: the child, its tree and
+/// the deadline. Output: whether both happened in time, or the failed step.
 #[cfg(windows)]
 pub(super) fn cleanup_owned_group(
     child: &mut Child,
     group: &ChildGroup,
     deadline: Instant,
 ) -> io::Result<bool> {
-    let _ = group;
-    cleanup_direct_child(child, deadline).map(|status| status.is_some())
+    let started = Instant::now();
+    let deadline = deadline.min(started + DROP_TIME);
+    let mut ended = group.ended().map_err(io::Error::other)?;
+    if cleanup_direct_child(child, deadline)?.is_none() {
+        return Ok(false);
+    }
+    while !ended {
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        sleep_until(deadline);
+        ended = group.active_processes().map_err(io::Error::other)? == 0;
+    }
+    assert!(child.try_wait()?.is_some());
+    Ok(true)
 }
