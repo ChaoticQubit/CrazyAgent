@@ -6,7 +6,6 @@ use crate::adapters::NativeHarness;
 #[cfg(unix)]
 use crate::adapters::claude::{ClaudeProtocol, ProtocolError};
 use crate::adapters::events::ObservedEvent;
-#[cfg(unix)]
 use crate::harnesses::launch::CLAUDE_NO_TOOLS_PROMPT;
 use crate::harnesses::launch::{CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG};
 use crate::master_step_limit::StepLimit;
@@ -50,9 +49,7 @@ pub(in crate::engine) mod diagnostic;
 #[cfg(unix)]
 mod process;
 
-#[cfg(unix)]
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
-#[cfg(unix)]
 const INSTRUCTIONS_FLAG: &str = "--append-system-prompt-file";
 /// The most bytes of the instruction file Claude Code is launched with: room for the
 /// largest project context, the owner's app and project instructions and the instruction
@@ -182,7 +179,6 @@ impl ClaudeHostLimits {
 /// private profile home, the model and, when given, the engine's 0600 startup instruction
 /// file.
 /// Output: the command, or a plain refusal for an unsafe path, model or file.
-#[cfg(unix)]
 pub(in crate::engine) fn launch_command(
     executable: &Path,
     project_root: &Path,
@@ -205,8 +201,9 @@ pub(in crate::engine) fn launch_command(
 /// engine's team MCP server, and no step count, since the host's run time and output
 /// limits bound the turn (OB-5).
 /// Input: as `launch_command`, plus the engine executable, drop file, mailbox and tools
-/// switched off. Output: the command, or a plain refusal for an unsafe input.
-#[cfg(unix)]
+/// switched off. Output: the command, or a plain refusal for an unsafe input; on Windows
+/// `claude_host_unavailable` until a tools-on master's shell and team mailbox work there
+/// (V244-WIN-MASTER S8).
 pub(in crate::engine) fn tools_launch_command(
     executable: &Path,
     project_root: &Path,
@@ -299,7 +296,11 @@ fn delegate_config(tools: MasterTools<'_>) -> Result<String, EngineError> {
     Ok(config.to_string())
 }
 
-#[cfg(unix)]
+/// Builds one Claude Code master command, tools off or with `tools` on, after checking its
+/// paths, model, home and instruction file: on Unix a 0700 home and a 0600 single-name file
+/// owned by this user, on Windows plain drive paths and a home and file W1 finds private
+/// (V244-WIN-MASTER S3, D4). Inputs: as `tools_launch_command`, the tools optional.
+/// Output: the command, or a plain refusal.
 fn command_for(
     executable: &Path,
     project_root: &Path,
@@ -308,6 +309,10 @@ fn command_for(
     instructions: Option<&Path>,
     tools: Option<MasterTools<'_>>,
 ) -> Result<Command, EngineError> {
+    #[cfg(windows)]
+    if tools.is_some() {
+        return Err(failure("claude_host_unavailable"));
+    }
     let servers = match tools {
         Some(tools) => delegate_config(tools)?,
         None => NO_SERVERS.to_owned(),
@@ -324,31 +329,24 @@ fn command_for(
     {
         return Err(failure("claude_host_invalid_launch"));
     }
+    #[cfg(windows)]
+    if ![executable, project_root, profile_home].iter().all(|path| {
+        path.to_str()
+            .is_some_and(crate::sandbox::windows_clean_text)
+    }) {
+        return Err(failure("claude_host_invalid_launch"));
+    }
     let project =
         std::fs::metadata(project_root).map_err(|_| failure("claude_host_project_unavailable"))?;
-    let home = std::fs::symlink_metadata(profile_home)
-        .map_err(|_| failure("claude_host_profile_unavailable"))?;
-    if !project.is_dir()
-        || !home.is_dir()
-        || home.uid() != rustix::process::geteuid().as_raw()
-        || home.mode() & 0o7777 != 0o700
-    {
+    private_home(profile_home)?;
+    if !project.is_dir() {
         return Err(failure("claude_host_unsafe_directory"));
     }
     if let Some(file) = instructions {
         if !file.is_absolute() {
             return Err(failure("claude_host_unsafe_instructions"));
         }
-        let metadata = std::fs::symlink_metadata(file)
-            .map_err(|_| failure("claude_host_instructions_unavailable"))?;
-        if !metadata.is_file()
-            || metadata.uid() != rustix::process::geteuid().as_raw()
-            || metadata.mode() & 0o7777 != 0o600
-            || metadata.nlink() != 1
-            || metadata.len() > INSTRUCTIONS_BYTES_MAX
-        {
-            return Err(failure("claude_host_unsafe_instructions"));
-        }
+        private_instructions(file)?;
     }
     let mut command = Command::new(executable);
     command.args([
@@ -402,6 +400,7 @@ fn command_for(
             crate::harnesses::launch::CLAUDE_AUTO_MEMORY_OFF.1,
         )
         .env("TERM", "dumb");
+    #[cfg(unix)]
     if tools.is_some() {
         command
             .env("SHELL", TOOLS_SHELL)
@@ -412,33 +411,85 @@ fn command_for(
     Ok(command)
 }
 
-/// Refuses the Claude Code master command where the profile home's Unix owner and mode
-/// cannot be checked. Takes the executable, project, home, model and instruction file,
-/// all unused. Returns `claude_host_unavailable`.
-#[cfg(not(unix))]
-pub(in crate::engine) fn launch_command(
-    _executable: &Path,
-    _project_root: &Path,
-    _profile_home: &Path,
-    _model: &str,
-    _instructions: Option<&Path>,
-) -> Result<Command, EngineError> {
-    Err(failure("claude_host_unavailable"))
+/// Refuses a master profile home that is not a real 0700 folder this user owns.
+/// Input: the absolute home. Output: Ok, `claude_host_profile_unavailable` when it cannot
+/// be read, or `claude_host_unsafe_directory`.
+#[cfg(unix)]
+fn private_home(home: &Path) -> Result<(), EngineError> {
+    let metadata =
+        std::fs::symlink_metadata(home).map_err(|_| failure("claude_host_profile_unavailable"))?;
+    if !metadata.is_dir()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.mode() & 0o7777 != 0o700
+    {
+        return Err(failure("claude_host_unsafe_directory"));
+    }
+    Ok(())
 }
 
-/// Refuses the tools-on Claude Code master command where the profile home's Unix owner and
-/// mode cannot be checked. Takes the executable, project, home, model, instruction file and
-/// tools, all unused. Returns `claude_host_unavailable`.
-#[cfg(not(unix))]
-pub(in crate::engine) fn tools_launch_command(
-    _executable: &Path,
-    _project_root: &Path,
-    _profile_home: &Path,
-    _model: &str,
-    _instructions: Option<&Path>,
-    _tools: MasterTools<'_>,
-) -> Result<Command, EngineError> {
-    Err(failure("claude_host_unavailable"))
+/// Opens the existing master profile home without following a link or sharing delete, so it
+/// is neither made nor swapped while it is read, and refuses it unless W1 finds it a
+/// private folder: this user as owner, a protected list no other account is on, no link.
+/// Input: the absolute home. Output: Ok, `claude_host_profile_unavailable` when it cannot
+/// be opened, or `claude_host_unsafe_directory`.
+#[cfg(windows)]
+fn private_home(home: &Path) -> Result<(), EngineError> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const LIST_AND_READ_LIST: u32 = 0x0000_0001 | 0x0000_0080 | 0x0002_0000;
+    const SHARE_READ_AND_WRITE: u32 = 0x0000_0001 | 0x0000_0002;
+    let folder = std::fs::OpenOptions::new()
+        .access_mode(LIST_AND_READ_LIST)
+        .share_mode(SHARE_READ_AND_WRITE)
+        .custom_flags(
+            crate::platform::FILE_FLAG_BACKUP_SEMANTICS
+                | crate::platform::FILE_FLAG_OPEN_REPARSE_POINT,
+        )
+        .open(home)
+        .map_err(|_| failure("claude_host_profile_unavailable"))?;
+    crazyagent_win_sandbox::private::check(&folder)
+        .map_err(|_| failure("claude_host_unsafe_directory"))
+}
+
+/// Refuses a master instruction file that is not a 0600 file this user owns with one name
+/// and at most [`INSTRUCTIONS_BYTES_MAX`] bytes. Input: the absolute file. Output: Ok,
+/// `claude_host_instructions_unavailable` when it cannot be read, or
+/// `claude_host_unsafe_instructions`.
+#[cfg(unix)]
+fn private_instructions(file: &Path) -> Result<(), EngineError> {
+    let metadata = std::fs::symlink_metadata(file)
+        .map_err(|_| failure("claude_host_instructions_unavailable"))?;
+    if !metadata.is_file()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.mode() & 0o7777 != 0o600
+        || metadata.nlink() != 1
+        || metadata.len() > INSTRUCTIONS_BYTES_MAX
+    {
+        return Err(failure("claude_host_unsafe_instructions"));
+    }
+    Ok(())
+}
+
+/// Opens a master instruction file through W1's private read, never following a link, and
+/// refuses it unless W1 finds it private with one name, or past [`INSTRUCTIONS_BYTES_MAX`]
+/// bytes. Input: the absolute file. Output: Ok, `claude_host_instructions_unavailable` for
+/// a missing file, or `claude_host_unsafe_instructions`.
+#[cfg(windows)]
+fn private_instructions(file: &Path) -> Result<(), EngineError> {
+    let opened = crazyagent_win_sandbox::private::read_only(file).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            failure("claude_host_instructions_unavailable")
+        } else {
+            failure("claude_host_unsafe_instructions")
+        }
+    })?;
+    let length = opened
+        .metadata()
+        .map_err(|_| failure("claude_host_instructions_unavailable"))?
+        .len();
+    if length > INSTRUCTIONS_BYTES_MAX {
+        return Err(failure("claude_host_unsafe_instructions"));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

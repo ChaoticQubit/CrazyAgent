@@ -34,7 +34,6 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-#[cfg(unix)]
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -55,7 +54,6 @@ const MASTER_HOME: &str = "home";
 const MASTER_PROFILE: &str = "sandbox.sb";
 #[cfg(unix)]
 const HTTPS_PORT: u16 = 443;
-#[cfg(unix)]
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
 const MASTER_CONFIG: [&str; 16] = [
     "model_provider=\"openai\"",
@@ -795,8 +793,11 @@ fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineEr
 /// or with `tools` the tools-on settings and one `mcp_servers` entry for the engine's
 /// `delegate` server, plus the built-in provider's settings for `retry` (DEC-163 Q7). Inputs:
 /// the registered executable, the home, the working directory, the model, the tools-on parts
-/// and the connection-retry choice. Output: the command, or `master_runtime_binding`.
-#[cfg(unix)]
+/// and the connection-retry choice. Output: the command, or `master_runtime_binding`. On
+/// Windows the paths must be plain drive paths, as the boundary's `wrap` takes them, the
+/// command sets no `PATH` (the boundary's System32 one stays) and no process group (a job
+/// holds the tree), and a tools-on command is `master_host_unavailable` until its team
+/// mailbox works there (V244-WIN-MASTER S3, D4).
 fn master_command(
     executable: &Path,
     home: &Path,
@@ -818,6 +819,17 @@ fn master_command(
             .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/@+".contains(&byte))
     {
         return Err(failure("master_runtime_binding"));
+    }
+    #[cfg(windows)]
+    if ![executable, home, cwd].iter().all(|path| {
+        path.to_str()
+            .is_some_and(crate::sandbox::windows_clean_text)
+    }) {
+        return Err(failure("master_runtime_binding"));
+    }
+    #[cfg(windows)]
+    if tools.is_some() {
+        return Err(failure("master_host_unavailable"));
     }
     let mut command = Command::new(executable);
     if model != ACCOUNT_DEFAULT_MODEL {
@@ -845,39 +857,23 @@ fn master_command(
         .env("HOME", home)
         .env("CODEX_HOME", home)
         .env("TMPDIR", home)
-        .env("PATH", "/usr/bin:/bin")
         .env("LANG", "C")
         .env("LC_ALL", "C")
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.env("PATH", "/usr/bin:/bin").process_group(0);
     assert_eq!(command.get_program(), executable.as_os_str());
     assert_eq!(command.get_current_dir(), Some(cwd));
     Ok(command)
-}
-
-/// Refuses the master app-server command where the engine cannot give it its own
-/// process group to stop as a whole. Takes the executable, home, working directory, model,
-/// tools-on parts and retry choice, all unused. Returns `master_host_unavailable`.
-#[cfg(not(unix))]
-fn master_command(
-    _executable: &Path,
-    _home: &Path,
-    _cwd: &Path,
-    _model: &str,
-    _tools: Option<crate::engine::claude_host::MasterTools<'_>>,
-    _retry: crate::provider_retry::ProviderRetry,
-) -> Result<Command, EngineError> {
-    Err(failure("master_host_unavailable"))
 }
 
 /// Renders the one `mcp_servers` setting of a tools-on Codex master: the engine executable
 /// serving its team server on the turn's drop file and mailbox with the tools switched off.
 /// Input: the tools-on parts. Output: the setting, or `master_runtime_binding` for a relative
 /// path, one that is not text or an unknown tool name.
-#[cfg(unix)]
 fn delegate_servers(
     tools: &crate::engine::claude_host::MasterTools<'_>,
 ) -> Result<String, EngineError> {
