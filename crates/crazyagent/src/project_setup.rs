@@ -4105,6 +4105,8 @@ fn credential_path(word: &str) -> bool {
         })
 }
 
+#[cfg(all(test, windows))]
+mod access_windows_tests;
 #[cfg(all(test, unix))]
 mod engine_tests;
 pub mod links;

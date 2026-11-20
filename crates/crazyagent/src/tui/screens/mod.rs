@@ -59,6 +59,8 @@ mod new_project_frames;
 mod new_project_publish_tests;
 #[cfg(all(test, unix))]
 mod new_project_tests;
+#[cfg(all(test, windows))]
+mod new_project_windows_tests;
 #[cfg(all(test, unix))]
 mod planning_line_tests;
 #[cfg(all(test, unix))]
