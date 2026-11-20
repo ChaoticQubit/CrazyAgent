@@ -3235,6 +3235,9 @@ mod live_codex_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/live_rcli_tests.rs"]
 mod live_rcli_tests;
+#[cfg(all(test, windows))]
+#[path = "master_host_launch/windows_command_tests.rs"]
+mod windows_command_tests;
 
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/claude_turn_tests.rs"]

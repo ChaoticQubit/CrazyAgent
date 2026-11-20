@@ -1063,3 +1063,6 @@ fn validate_command(
 #[cfg(all(test, unix))]
 #[path = "claude_host/tests.rs"]
 mod tests;
+#[cfg(all(test, windows))]
+#[path = "claude_host/windows_tests.rs"]
+mod windows_tests;
