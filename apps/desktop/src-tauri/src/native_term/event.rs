@@ -29,6 +29,7 @@ pub enum ViewEvent {
     Menu {
         point: (f64, f64),
     },
+    #[cfg(target_os = "macos")]
     Copy,
     /// The copy chord of a host without Cmd (Ctrl+C, Ctrl+Shift+C): the host copies the
     /// selection if there is one, else applies this input (^C).
@@ -40,6 +41,7 @@ pub enum ViewEvent {
     #[cfg(windows)]
     Faulted,
     Paste,
+    #[cfg(target_os = "macos")]
     SelectAll,
     Focus(bool),
     Marked,

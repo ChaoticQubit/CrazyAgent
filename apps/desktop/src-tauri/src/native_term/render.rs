@@ -791,6 +791,7 @@ impl Shared {
     /// exit, so the error is reported for this view and never for the next one drawn.
     /// Inputs: the surface and the frame. Output: ok, why it was skipped, or
     /// `native_terminal_gpu` when wgpu refused the frame's work.
+    #[cfg(target_os = "macos")]
     pub fn draw(&mut self, surface: &mut Surface, frame: &Frame) -> Result<(), String> {
         let painted = self.paint(surface, frame, None);
         self.taken(surface, painted)
@@ -1543,6 +1544,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn a_font_file_with_no_face_is_refused_not_asserted() {
         let folder = tempfile::tempdir().expect("temp folder");
         let path = folder.path().join("Empty.ttc");

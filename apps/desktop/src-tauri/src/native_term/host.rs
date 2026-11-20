@@ -1,4 +1,6 @@
-use super::a11y::{self, Geometry};
+#[cfg(target_os = "macos")]
+use super::a11y;
+use super::a11y::Geometry;
 use super::codec;
 use super::control::{Control, Event};
 use super::ended::ended_final;
@@ -36,6 +38,8 @@ use mac as platform;
 pub(super) mod windows;
 #[cfg(windows)]
 use self::windows as platform;
+#[cfg(windows)]
+pub use self::windows::{main, mark_main};
 /// The stand-in on a system whose host has not landed yet: no native view opens there.
 #[cfg(not(any(target_os = "macos", windows)))]
 mod none;
@@ -119,8 +123,9 @@ pub enum NativeEvent {
     },
 }
 
-#[cfg(target_os = "macos")]
-pub use super::view::LABEL_BYTES_MAX;
+/// The longest label a screen reader says for a view, in bytes; a page's open past it is
+/// refused.
+pub const LABEL_BYTES_MAX: usize = 256;
 
 /// One open checked off the main thread: the calling window, the agent window name, the
 /// screen reader label, the place the shared gate took, the tmux program and engine socket
@@ -274,6 +279,7 @@ fn sink(page: u64, event: ViewEvent) {
 }
 
 /// The visible grid VoiceOver reads, or none while the state is in use.
+#[cfg(target_os = "macos")]
 fn screen(page: u64) -> Option<a11y::Grid> {
     NATIVE.with(|cell| {
         let held = cell.try_borrow().ok()?;
@@ -512,6 +518,7 @@ impl Native {
             Some((tmux, socket)) => self.ensure_control(tmux, socket),
             None => false,
         };
+        let style = self.style.as_ref().ok_or("native_terminal_style_invalid")?;
         let page = self.table.fresh();
         self.feed
             .bind(page, open.place, direct)
@@ -520,7 +527,6 @@ impl Native {
             self.feed.close(page);
             return Err(io_code(&error));
         }
-        let style = self.style.as_ref().ok_or("native_terminal_style_invalid")?;
         let opened = platform::open_view(
             mtm,
             parent,
@@ -746,12 +752,14 @@ impl Native {
     /// engine-fed, so no view waits for output from a client that is gone. Input: the event.
     fn on_direct(&mut self, event: Event) {
         match event {
+            #[cfg(unix)]
             Event::Restored { view, bytes } => {
                 if let Some(entry) = self.table.get_mut(view).filter(|e| e.direct) {
                     entry.pane.on_output(&bytes);
                 }
                 self.tell(view);
             }
+            #[cfg(unix)]
             Event::Output { views, bytes } => {
                 for page in views {
                     if let Some(entry) = self.table.get_mut(page).filter(|e| e.direct) {
@@ -760,6 +768,7 @@ impl Native {
                     self.tell(page);
                 }
             }
+            #[cfg(unix)]
             Event::Refused { view, .. } => self.reopen(view),
             Event::Closed => {
                 self.drop_control();
@@ -888,24 +897,13 @@ impl Native {
                 point,
                 option,
                 clicks,
-            } => {
-                let cell = cell_of(shared, entry, point);
-                let input = match kind {
-                    MouseKind::Press => Input::Press {
-                        cell,
-                        option,
-                        clicks,
-                    },
-                    MouseKind::Drag => Input::Drag { cell, option },
-                    MouseKind::Release => Input::Release { cell, option },
-                };
-                entry.pane.apply(input)
-            }
+            } => mouse(shared, entry, kind, point, option, clicks),
             ViewEvent::Menu { point } => {
                 let (x, y) = (entry.rect[0] + point.0, entry.rect[1] + point.1);
                 let _ = entry.platform.events.send(NativeEvent::Menu { x, y });
                 Action::Nothing
             }
+            #[cfg(target_os = "macos")]
             ViewEvent::Copy => {
                 if let Ok(text) = entry.pane.copy(false) {
                     let _ = clip.write(&text);
@@ -923,6 +921,7 @@ impl Native {
                 Some(text) => entry.pane.apply(Input::Paste { text }),
                 None => Action::Nothing,
             },
+            #[cfg(target_os = "macos")]
             ViewEvent::SelectAll => {
                 entry.pane.select_all();
                 Action::Local
@@ -1008,6 +1007,30 @@ fn cell_of(
     let cell = codec::cell_at(point.0, point.1, shared.cell_points(), columns, lines);
     assert!(cell.0 < columns && cell.1 < lines);
     cell
+}
+
+/// A press, drag or release at a view point, sent to the pane at the cell under it. Inputs:
+/// the scale table, the view's entry, the kind, the point, whether Option or Shift is held,
+/// and the click count. Output: what the pane asks for.
+fn mouse(
+    shared: &HashMap<u32, Shared>,
+    entry: &mut Entry<View>,
+    kind: MouseKind,
+    point: (f64, f64),
+    option: bool,
+    clicks: u8,
+) -> Action {
+    let cell = cell_of(shared, entry, point);
+    let input = match kind {
+        MouseKind::Press => Input::Press {
+            cell,
+            option,
+            clicks,
+        },
+        MouseKind::Drag => Input::Drag { cell, option },
+        MouseKind::Release => Input::Release { cell, option },
+    };
+    entry.pane.apply(input)
 }
 
 fn wheel(

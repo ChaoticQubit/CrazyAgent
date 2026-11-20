@@ -294,6 +294,7 @@ impl Text {
 
     /// The range of one line with its newline. Input: the line. Output: the UTF-16 location
     /// and length, or none past the last line.
+    #[cfg(any(target_os = "macos", test))]
     pub fn range_for_line(&self, line: usize) -> Option<(usize, usize)> {
         let start = *self.starts.get(line)?;
         let end = self.starts.get(line + 1).copied().unwrap_or(self.units);
