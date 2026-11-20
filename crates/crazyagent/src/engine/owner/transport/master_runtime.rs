@@ -28,7 +28,6 @@ use std::os::unix::fs::MetadataExt;
 use std::process::Command;
 use std::time::Duration;
 
-#[cfg(unix)]
 const CAPTURE_BYTES_MAX: u64 = 8 * 1024 * 1024;
 const INSPECT_INTERVAL: Duration = Duration::from_millis(100);
 /// How often a running master turn checks its grants against the policy the owner saved.
