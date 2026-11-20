@@ -512,15 +512,23 @@ impl Native {
             self.feed.close(page);
             return Err(io_code(&error));
         }
-        let platform = platform::open_view(
+        let opened = platform::open_view(
             mtm,
             parent,
             page,
             key,
+            open.rect,
             &open.label,
             open.events,
             open.project,
         );
+        let platform = match opened {
+            Ok(platform) => platform,
+            Err(code) => {
+                self.feed.close(page);
+                return Err(code);
+            }
+        };
         let entry = Entry {
             window: open.window,
             name: open.name,
@@ -648,7 +656,7 @@ impl Native {
             }
             Command::Copy(output) => {
                 let text = entry.pane.copy(output)?;
-                if !self.clip.write(&text) {
+                if !self.clip.write_command(&text) {
                     return Err("native_terminal_copy_failed");
                 }
                 return Ok(());
