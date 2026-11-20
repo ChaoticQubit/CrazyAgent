@@ -1575,9 +1575,10 @@ enum Signalled {
 }
 
 /// Picks what a stop signals for one holder of an agent's output log: its group when the
-/// holder leads it or it is the agent's recorded group, but never the engine's own, else
-/// the holder alone, and nothing for a holder already gone. Inputs: the holder, its group
-/// as read, the engine's group and the recorded group. Output: the target, or None.
+/// holder leads it or it is the agent's recorded group, never the engine's own and never
+/// group 1 or 0 ([`launch::group_of`]), else the holder alone, and nothing for process 1 or
+/// a holder already gone. Inputs: the holder, its group as read, the engine's group and the
+/// recorded group. Output: the target, or None.
 #[cfg(unix)]
 fn holder_target(
     writer: rustix::process::Pid,
@@ -1585,17 +1586,29 @@ fn holder_target(
     own: rustix::process::Pid,
     group: u32,
 ) -> Option<Signalled> {
-    match leader {
+    if writer.as_raw_nonzero().get() <= 1 {
+        return None;
+    }
+    let target = match leader {
         Err(rustix::io::Errno::SRCH) => None,
         Ok(leader)
             if leader != own
                 && (leader == writer
                     || u32::try_from(leader.as_raw_nonzero().get()) == Ok(group)) =>
         {
-            Some(Signalled::Group(leader))
+            Some(
+                u32::try_from(leader.as_raw_nonzero().get())
+                    .ok()
+                    .and_then(launch::group_of)
+                    .map_or(Signalled::One(writer), Signalled::Group),
+            )
         }
         _ => Some(Signalled::One(writer)),
-    }
+    };
+    assert!(target.is_none_or(|target| match target {
+        Signalled::Group(group) | Signalled::One(group) => group.as_raw_nonzero().get() > 1,
+    }));
+    target
 }
 
 /// Ends what still holds a reattached agent's output log: TERM, then KILL after the
