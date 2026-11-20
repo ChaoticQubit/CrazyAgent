@@ -65,9 +65,11 @@ fn present(connection: &Connection, table: &str) -> rusqlite::Result<bool> {
 }
 
 /// The SQL test that a path column names `?1` or a path inside it, compared by whole
-/// path parts. Input: the column. Output: the condition text.
+/// path parts split at the platform's separator, `\` on Windows and `/` elsewhere, as
+/// stored paths are (CR-1706). Input: the column. Output: the condition text.
 fn under(column: &str) -> String {
-    format!("({column}=?1 OR substr({column},1,length(?1)+1)=?1||'/')")
+    let separator = std::path::MAIN_SEPARATOR;
+    format!("({column}=?1 OR substr({column},1,length(?1)+1)=?1||'{separator}')")
 }
 
 /// The short name of a folder stored under the macOS data volume: the same path without the
