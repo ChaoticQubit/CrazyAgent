@@ -124,7 +124,12 @@ jobs:
           grep -E '^test .*_windows_tests|^test result|panicked|left:|right:' "$RUNNER_TEMP/red.log" || true
           [ "$rc" -ne 0 ]
           grep -qE 'test result: FAILED\. 0 passed; 6 failed' "$RUNNER_TEMP/red.log"
-          [ "$(grep -cE "panicked|W3-5|worktree_filesystem_unavailable|program not found|cannot find" "$RUNNER_TEMP/red.log")" -gt 0 ]
+          [ "$(grep -c '^error\[E' "$RUNNER_TEMP/red.log" || true)" -eq 0 ]
+          for row in a_plain_folder_and_its_one_named_file_have_a_stable_identity a_junction_a_hard_linked_file_and_a_kind_mismatch_are_untrusted a_folder_or_file_another_account_or_any_app_container_can_change_is_untrusted a_plain_repository_is_admitted_with_its_root_and_git_folder_identities engine_git_refuses_a_batch_git_and_a_git_another_account_can_change a_bounded_read_keeps_a_plain_file_and_refuses_a_link_a_folder_and_an_oversized_file; do
+            grep -qxF "test worktrees::identity_windows_tests::$row ... FAILED" "$RUNNER_TEMP/red.log"
+            grep -qxF -- "---- worktrees::identity_windows_tests::$row stdout ----" "$RUNNER_TEMP/red.log"
+          done
+          [ "$(grep -c "^thread '.*' panicked at crates.crazyagent.src.worktrees.identity_windows_tests\.rs:" "$RUNNER_TEMP/red.log" || true)" -eq 6 ]
           echo "red as expected: identity and bounded read refuse, admission fails and engine git takes any git at 7cca9ae36"
       - name: W3-4a, W3-2 and W3-1 rows at the tip 08dfdb749
         if: ${{ !cancelled() && runner.os == 'Windows' }}
