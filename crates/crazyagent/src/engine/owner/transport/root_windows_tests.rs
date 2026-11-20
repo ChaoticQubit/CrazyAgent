@@ -71,6 +71,11 @@ fn a_held_owner_root_and_its_parent_cannot_be_renamed() {
     );
     root.verify()
         .expect("the root still verifies after both refused renames");
+    drop(root);
+    std::fs::rename(&path, parent.join("moved"))
+        .expect("the same rename works once the root is no longer held");
+    std::fs::rename(&parent, base.join("moved"))
+        .expect("the same rename of the folder above works once nothing below it is held");
 }
 
 #[test]
@@ -175,4 +180,32 @@ fn a_root_syncs_its_entries_through_a_write_handle() {
     root.sync()
         .expect("the held root flushes, though its own handle only lists the folder");
     root.verify().unwrap();
+}
+
+#[test]
+fn a_root_spelled_as_canonicalize_spells_it_opens_and_a_junction_still_fails() {
+    let (_temp, base) = canonical_temp();
+    let real = private_folder(&base.join("real"));
+    let path = private_folder(&real.join("root"));
+    let spelled = std::fs::canonicalize(&path).unwrap();
+    assert!(spelled.to_str().unwrap().starts_with(r"\\?\"));
+    let root = Root::open(&spelled).expect("the verbatim spelling of the canonical root opens");
+    root.verify().unwrap();
+    let link = base.join("link");
+    run(
+        "cmd",
+        &[
+            "/C".as_ref(),
+            "mklink".as_ref(),
+            "/J".as_ref(),
+            link.as_os_str(),
+            real.as_os_str(),
+        ],
+    );
+    let mut through = std::ffi::OsString::from(r"\\?\");
+    through.push(link.join("root").as_os_str());
+    assert_eq!(
+        refusal(Root::open(Path::new(&through))),
+        "owner_root_requires_canonical_trusted_path"
+    );
 }
