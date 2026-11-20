@@ -219,6 +219,8 @@ fn identified(metadata: &std::fs::Metadata, directory: bool) -> Result<Identity,
 #[cfg(all(test, windows))]
 mod canonical_windows_tests;
 #[cfg(all(test, windows))]
+mod identity_windows_tests;
+#[cfg(all(test, windows))]
 mod root_and_git_windows_tests;
 
 fn canonical(path: &Path) -> Result<(), EngineError> {
