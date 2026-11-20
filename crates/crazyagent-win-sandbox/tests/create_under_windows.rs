@@ -165,19 +165,132 @@ fn a_name_that_is_not_one_component_trips_the_assertion() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
-/// QUESTION-1512 Q2, the one line rv-sec2 rules on: an entry `create_under` makes is owned by
-/// the engine's user, the owner W1 gives every private entry, even on an elevated token whose
-/// default owner is the administrators group. A null descriptor (#742 D6-3 as written) fails
-/// this row on such a token; W1's own descriptor passes it.
+/// The control bits of an open entry's security descriptor. Input: the handle, opened with
+/// read-control. Output: the bits.
+fn control(entry: &std::fs::File) -> u16 {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl};
+    let mut descriptor = std::ptr::null_mut();
+    let status = unsafe {
+        GetSecurityInfo(
+            entry.as_raw_handle(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    assert_eq!(status, 0);
+    let mut bits = 0u16;
+    let mut revision = 0u32;
+    let read = unsafe { GetSecurityDescriptorControl(descriptor, &mut bits, &mut revision) };
+    unsafe { LocalFree(descriptor) };
+    assert_ne!(read, 0);
+    bits
+}
+
+/// The entries of an access list as their flags and SIDs, for the allow and deny kinds.
+/// Input: the list's bytes. Output: one pair per entry.
+fn entries(list: &[u8]) -> Vec<(u8, Vec<u8>)> {
+    let count = usize::from(u16::from_le_bytes([list[4], list[5]]));
+    let mut at = 8;
+    let mut found = Vec::new();
+    for _ in 0..count {
+        let kind = list[at];
+        let flags = list[at + 1];
+        let size = usize::from(u16::from_le_bytes([list[at + 2], list[at + 3]]));
+        assert!(matches!(kind, 0 | 1), "entry kind {kind}");
+        found.push((flags, list[at + 8..at + size].to_vec()));
+        at += size;
+    }
+    assert_eq!(found.len(), count);
+    found
+}
+
+const PROTECTED: u16 = 0x1000;
+const INHERITED: u8 = 0x10;
+const ALL_APP_PACKAGES: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 15, 2, 0, 0, 0, 1, 0, 0, 0];
+
+/// rv-sec2 RULING-15:12 row 1: a folder and a file `create_under` makes for a lease have the
+/// engine's user as owner, even on an elevated token, and a list that is not protected and
+/// holds inherited entries only, so a later grant on the lease reaches them.
 #[test]
-fn a_made_entry_is_owned_by_the_engine_user() {
-    let root = scratch("owner");
+fn a_lease_entry_has_the_user_as_owner_and_an_unprotected_inherited_list() {
+    let root = scratch("inherited");
     let held = private::dir(&root).unwrap();
     let folder = private::create_under(&held, OsStr::new("src"), Create::Folder).unwrap();
     let file = private::create_under(&folder, OsStr::new("main.rs"), Create::File).unwrap();
     let user = private::user_sid().unwrap();
-    assert_eq!(private::facts(&folder).unwrap().owner, user);
-    assert_eq!(private::facts(&file).unwrap().owner, user);
+    for (name, entry) in [("src", &folder), ("src/main.rs", &file)] {
+        let facts = private::facts(entry).unwrap();
+        assert_eq!(facts.owner, user, "{name}");
+        assert_eq!(
+            control(entry) & PROTECTED,
+            0,
+            "{name}: the list is protected"
+        );
+        let found = entries(&facts.list.unwrap());
+        assert!(!found.is_empty(), "{name}");
+        assert!(
+            found.iter().all(|(flags, _)| flags & INHERITED != 0),
+            "{name}: an entry is not inherited: {found:?}"
+        );
+    }
     drop((file, folder, held));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// rv-sec2 RULING-15:12 row 2: after an inheritable grant on the lease root, as the sandbox
+/// grants an agent its worktree, a file made before the grant carries the grantee's entry
+/// as an inherited one.
+#[test]
+fn a_grant_on_the_lease_root_reaches_an_entry_made_before_it() {
+    let root = scratch("grant");
+    let held = private::dir(&root).unwrap();
+    let folder = private::create_under(&held, OsStr::new("src"), Create::Folder).unwrap();
+    let file = private::create_under(&folder, OsStr::new("main.rs"), Create::File).unwrap();
+    let status = std::process::Command::new("icacls")
+        .arg(&root)
+        .args(["/grant", "*S-1-15-2-1:(OI)(CI)(M)"])
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let found = entries(&private::facts(&file).unwrap().list.unwrap());
+    assert!(
+        found
+            .iter()
+            .any(|(flags, sid)| flags & INHERITED != 0 && sid[..] == ALL_APP_PACKAGES[..]),
+        "{found:?}"
+    );
+    drop((file, folder, held));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// rv-sec2 RULING-15:12 row 3: a file made as `Create::PrivateFile`, as
+/// `.config.worktree.partial` is in the repository's admin folder, has the user as owner and
+/// W1's protected private list, which W1's judge passes.
+#[test]
+fn a_private_file_has_a_protected_private_list() {
+    let root = scratch("private");
+    let held = private::dir(&root).unwrap();
+    let file = private::create_under(
+        &held,
+        OsStr::new(".config.worktree.partial"),
+        Create::PrivateFile,
+    )
+    .unwrap();
+    assert_ne!(control(&file) & PROTECTED, 0);
+    assert_eq!(
+        private::facts(&file).unwrap().owner,
+        private::user_sid().unwrap()
+    );
+    private::check(&file).unwrap();
+    drop((file, held));
     std::fs::remove_dir_all(&root).unwrap();
 }
