@@ -175,19 +175,74 @@ fn rejected(code: &str) -> Outcome {
     Outcome::Rejected { code: code.into() }
 }
 
-/// Refuses a worktree file identity where the Unix owner, mode, device and inode do not
-/// exist. Takes the path and kind, both unused. Returns `worktree_filesystem_unavailable`.
-#[cfg(not(unix))]
-fn identity(_path: &Path, _directory: bool) -> Result<Identity, EngineError> {
-    Err(error("worktree_filesystem_unavailable"))
+/// The Windows twin of the Unix owner, mode, kind and link checks, read from one handle
+/// opened on the entry itself, never through a link: no reparse point, the kind asked, one
+/// name for a file, a trusted owner and no other account or app container with a right that
+/// changes it (`dacl::held_only_by`; rv-sec2 #742 Q2). Inputs: the path and whether it must
+/// be a folder. Output: its volume serial and file id, or `untrusted_filesystem_identity`.
+#[cfg(windows)]
+fn identity(path: &Path, directory: bool) -> Result<Identity, EngineError> {
+    use crazyagent_win_sandbox::{dacl, private};
+    use std::os::windows::fs::OpenOptionsExt;
+    let entry = std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .map_err(error)?;
+    let kind = entry.metadata().map_err(error)?;
+    let facts = private::facts(&entry).map_err(error)?;
+    let user = private::user_sid().map_err(error)?;
+    let rights = if directory {
+        dacl::OWN_FOLDER_CHANGES
+    } else {
+        dacl::FILE_CHANGES
+    };
+    if facts.reparse
+        || (directory && !kind.is_dir())
+        || (!directory && (!kind.is_file() || facts.links != 1))
+        || dacl::held_only_by(&facts.owner, facts.list.as_deref(), &user, rights).is_err()
+    {
+        return Err(error("untrusted_filesystem_identity"));
+    }
+    let (device, inode) = private::identity(&entry).map_err(error)?;
+    assert!(!facts.reparse);
+    Ok(Identity { device, inode })
 }
 
-/// Refuses the identity of an entry already read where the Unix owner, mode, device and
-/// inode do not exist. Takes the entry and kind, both unused. Returns
-/// `worktree_filesystem_unavailable`.
-#[cfg(not(unix))]
-fn identified(_entry: &std::fs::Metadata, _directory: bool) -> Result<Identity, EngineError> {
-    Err(error("worktree_filesystem_unavailable"))
+/// The rights [`identity`] opens an entry with on Windows: its security descriptor and its
+/// attributes, nothing that reads or changes its data.
+#[cfg(windows)]
+const READ_CONTROL: u32 = 0x0002_0000;
+#[cfg(windows)]
+const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+/// The sharing [`identity`] allows on Windows, so its brief open never blocks a git.
+#[cfg(windows)]
+const FILE_SHARE_READ: u32 = 0x1;
+#[cfg(windows)]
+const FILE_SHARE_WRITE: u32 = 0x2;
+#[cfg(windows)]
+const FILE_SHARE_DELETE: u32 = 0x4;
+/// Opens a link or junction itself, never its target, and opens a folder at all.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+/// The identity of an entry a walk read without following a link: on Unix judged from that
+/// one read, on Windows from a no-follow handle on it, since Windows metadata names no owner
+/// or access list. Inputs: the entry's path and its metadata. Output: the identity, or the
+/// refusal.
+#[cfg(unix)]
+fn entry_identity(_path: &Path, entry: &std::fs::Metadata) -> Result<Identity, EngineError> {
+    identified(entry, entry.is_dir())
+}
+
+/// The Windows arm of [`entry_identity`]: [`identity`] of the path, as the kind it was listed.
+/// Inputs: the entry's path and its metadata. Output: the identity, or the refusal.
+#[cfg(windows)]
+fn entry_identity(path: &Path, entry: &std::fs::Metadata) -> Result<Identity, EngineError> {
+    identity(path, entry.is_dir())
 }
 
 #[cfg(unix)]
@@ -240,12 +295,37 @@ fn canonical(path: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Refuses a bounded worktree file read where no no-follow open is used here.
-/// Takes the path and limit, both unused. Returns `worktree_filesystem_unavailable`.
-#[cfg(not(unix))]
-fn bounded_read(_path: &Path, _limit: usize) -> Result<Vec<u8>, EngineError> {
-    Err(error("worktree_filesystem_unavailable"))
+/// The Windows twin of the no-follow, non-blocking bounded read: the entry itself is opened,
+/// never a link's target, and kept only when it is a regular file with no reparse point, at
+/// most `limit` bytes (W3-5 D3). Inputs: the path and the limit. Output: the bytes, or
+/// `expected_regular_file`, `file_capacity` or the open failure.
+#[cfg(windows)]
+fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .map_err(error)?;
+    let metadata = file.metadata().map_err(error)?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(error("expected_regular_file"));
+    }
+    let mut bytes = Vec::new();
+    file.take((limit + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(error)?;
+    if bytes.len() > limit {
+        return Err(error("file_capacity"));
+    }
+    assert!(bytes.len() <= limit);
+    Ok(bytes)
 }
+
+/// The attribute bit of an entry that is a link, junction or other reparse point.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
 /// Reads a small file an agent may have replaced: opened without following a link and
 /// without waiting on a FIFO or device, kept only when it is a regular file, at most
@@ -358,12 +438,24 @@ fn git_program() -> Result<PathBuf, EngineError> {
 }
 
 /// The git the engine's own git resolver finds in `path`, never a bare name a process
-/// search could match in a working folder. Input: a PATH value. Output: its absolute path,
-/// or [`GIT_OLD`] when none is found, since the owner then reads the same "update Git" line.
+/// search could match in a working folder, nor a batch file cmd.exe would parse the engine's
+/// arguments through, nor one another account can change with its install (rv-sec2 #742
+/// D5-1 D5-2). Input: a PATH value. Output: its path, [`GIT_OLD`] when none is found (the
+/// owner then reads "update Git"), or `worktree_git_untrusted`.
 #[cfg(windows)]
 fn git_program_in(path: Option<&std::ffi::OsStr>) -> Result<PathBuf, EngineError> {
     let found = crate::github::git_program(path).ok_or_else(|| error(GIT_OLD))?;
     assert!(found.is_absolute());
+    let batch = found.extension().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+    });
+    let install = crate::sandbox::windows::owner_git::install_root(&found);
+    if batch
+        || crate::service::changeable_by_others(&found).is_some()
+        || install.is_some_and(|root| crate::service::changeable_by_others(root).is_some())
+    {
+        return Err(error("worktree_git_untrusted"));
+    }
     Ok(found)
 }
 
@@ -511,7 +603,7 @@ fn walk_metadata(metadata: &Path, start: &Path) -> Result<(), EngineError> {
 /// inside .git.
 fn trusted(metadata: &Path, path: &Path) -> Result<std::fs::Metadata, EngineError> {
     let entry = std::fs::symlink_metadata(path).map_err(error)?;
-    identified(&entry, entry.is_dir()).map_err(|_| untrusted(metadata, path))?;
+    entry_identity(path, &entry).map_err(|_| untrusted(metadata, path))?;
     Ok(entry)
 }
 
@@ -576,7 +668,7 @@ fn listed(metadata: &Path, path: &Path) -> Result<Option<std::fs::Metadata>, Eng
     before_read(path, false);
     match std::fs::symlink_metadata(path) {
         Ok(entry) => {
-            identified(&entry, entry.is_dir()).map_err(|_| untrusted(metadata, path))?;
+            entry_identity(path, &entry).map_err(|_| untrusted(metadata, path))?;
             Ok(Some(entry))
         }
         Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -1204,6 +1296,11 @@ fn inspect(repository: &str) -> Result<Admission, EngineError> {
     refuse_old_git(path)?;
     validate_config(path)?;
     let actual = git(path, &["rev-parse", "--show-toplevel"])?;
+    #[cfg(windows)]
+    let actual: Vec<u8> = actual
+        .into_iter()
+        .map(|byte| if byte == b'/' { b'\\' } else { byte })
+        .collect();
     if actual.strip_suffix(b"\n") != Some(repository.as_bytes()) {
         return Err(error("repository_root_mismatch"));
     }
