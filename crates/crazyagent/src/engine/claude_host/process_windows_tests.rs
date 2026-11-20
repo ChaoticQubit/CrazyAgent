@@ -268,6 +268,35 @@ fn stopping_a_windows_claude_custody_ends_every_process_it_started() {
     ));
 }
 
+/// V244-WIN-MASTER S4 r4 (#734 L1, as CodeRabbit CR-1149 found in the Codex twin): a Windows
+/// Claude harness that exits on its own, leaving a process it started asleep with no pipe of
+/// its own, is retired only once its tree runs none, so that process is already gone when
+/// custody retires, read by tasklist at once, with no wait after the retire.
+#[test]
+fn a_windows_claude_harness_that_exits_leaving_a_sleeping_process_retires_only_once_it_is_gone() {
+    let folder = tempfile::tempdir().unwrap();
+    let marker = folder.path().join("holder.pid");
+    let exe = std::env::current_exe().unwrap();
+    let mut command = cmd(&format!(
+        "start \"\" /b \"{}\" {HOLDER_ARGS} >nul 2>nul & for /l %n in (1,1,60) do @(if exist \"{}\" (exit 0) else (ping -n 2 127.0.0.1 >nul)) & exit 1",
+        exe.display(),
+        marker.display()
+    ));
+    command.env(HOLDER_PID, &marker);
+    let watched = run_to_retired(command, limits(None, 65_536, 65_536));
+    let holder = std::fs::read_to_string(&marker)
+        .unwrap()
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+    assert!(
+        !running(holder),
+        "custody retired while the process its harness left still ran"
+    );
+    assert_eq!(fault(&watched), None);
+    assert!(!watched.doubt.load(Ordering::Acquire));
+}
+
 /// A quiet Windows custody waits on its wake instead of spinning, a few passes a second, and
 /// a stop with a raised wake reaches its loop at once.
 #[test]
