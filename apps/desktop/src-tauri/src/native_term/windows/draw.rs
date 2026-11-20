@@ -43,6 +43,8 @@ static LOSE_AFTER_WAIT: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static SHARED_MADE: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
+static REMOVE_AT_PRESENT: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
 static FAIL_WAITS: AtomicU64 = AtomicU64::new(0);
 
 /// Starts the one render thread, once, drawing in the first style it is given. Input: the
@@ -86,6 +88,21 @@ pub fn trial_lose_after_wait(id: u64) {
     assert_eq!(LOSE_AFTER_WAIT.load(Ordering::SeqCst), id);
 }
 
+/// Test builds only: removes the D3D12 device right before one view's next present, as a
+/// driver reset that `Present` itself finds would. Input: the view id, above 0.
+#[cfg(test)]
+pub fn trial_remove_at_present(id: u64) {
+    assert!(id > 0, "a view id");
+    REMOVE_AT_PRESENT.store(id, Ordering::SeqCst);
+    assert_eq!(REMOVE_AT_PRESENT.load(Ordering::SeqCst), id);
+}
+
+/// Test builds only: how many D3D12 devices the present seam removed. Output: the count.
+#[cfg(test)]
+pub fn trial_removals() -> u64 {
+    super::super::render::trial_removals()
+}
+
 /// Test builds only: fails every swap-chain wait of one view, or none, each recording a
 /// wgpu error as a refused reconfigure does. Input: the view id, above 0, or none.
 #[cfg(test)]
@@ -125,6 +142,10 @@ fn after_wait(id: u64, shared: &Shared) {
     let asked = LOSE_AFTER_WAIT.compare_exchange(id, 0, Ordering::SeqCst, Ordering::SeqCst);
     if asked.is_ok() {
         shared.trial_lose();
+    }
+    let removal = REMOVE_AT_PRESENT.compare_exchange(id, 0, Ordering::SeqCst, Ordering::SeqCst);
+    if removal.is_ok() {
+        shared.trial_remove_at_present();
     }
 }
 
