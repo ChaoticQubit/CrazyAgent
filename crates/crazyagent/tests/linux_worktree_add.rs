@@ -12,16 +12,17 @@ use std::process::Command;
 /// succeeded. Inputs: the folder and git's arguments. Output: none, or a panic with git's
 /// error output.
 fn owner_git(folder: &Path, arguments: &[&str]) {
-    let output = Command::new("git")
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .arg("-C")
-        .arg(folder)
-        .args(arguments)
-        .output()
-        .unwrap();
+    let output = crazyagent::spawn_gate::output(
+        Command::new("git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .arg("-C")
+            .arg(folder)
+            .args(arguments),
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "git {arguments:?}: {}",
