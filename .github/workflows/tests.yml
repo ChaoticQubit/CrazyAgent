@@ -19,7 +19,8 @@ env:
   CARGO_TERM_COLOR: never
   BASE_SHA: 0277f210c
   RED_SHA: 28061a4f1
-  TIP_SHA: 5dcf25403
+  FIX_SHA: 5dcf25403
+  TIP_SHA: ff013c6f0
 
 defaults:
   run:
@@ -27,7 +28,7 @@ defaults:
 
 jobs:
   s6c6:
-    name: V244 WIN-MASTER S6 C6 git-folder guard on ${{ matrix.runner }}, red at 28061a4f1, tip 5dcf25403
+    name: V244 WIN-MASTER S6 C6 git-folder guard on ${{ matrix.runner }}, red is the tip without fix 5dcf25403, tip ff013c6f0
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     strategy:
@@ -98,12 +99,13 @@ jobs:
           set -euo pipefail
           cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked
           cp target/debug/crazyagent-win-boundary.exe target/debug/deps/
-      - name: S6 C6 red rows with the sandbox files at 28061a4f1, where no profile is refused for the git folder
+      - name: S6 C6 red rows at the tip without fix 5dcf25403, where no profile is refused for the git folder
         if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
           set -euo pipefail
-          git restore -q --source="$RED_SHA" --staged --worktree -- crates/crazyagent/src/sandbox/windows.rs crates/crazyagent/src/sandbox/windows/owner_git.rs
+          git diff "$RED_SHA" "$FIX_SHA" -- crates | git apply -R
+          if git diff --quiet "$TIP_SHA" -- crates; then echo "::error::the fix did not come off"; exit 1; fi
           set +e
           cargo test -p crazyagent --lib --locked -- --test-threads 1 --exact sandbox::windows::tests::a_job_folder_profile_on_a_repository_is_refused_because_it_writes_the_git_folder sandbox::windows::tests::a_guarded_project_root_profile_on_a_repository_is_refused_and_a_worktree_profile_is_not sandbox::windows::owner_git::tests::owner_git_installs_on_a_repository_where_an_agent_job_folder_is_refused 2>&1 | tee "$RUNNER_TEMP/red.log"
           rc=${PIPESTATUS[0]}
