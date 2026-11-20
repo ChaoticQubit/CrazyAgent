@@ -145,15 +145,17 @@ fn a_junction_at_the_name_is_refused_and_not_followed() {
     std::fs::remove_dir_all(&elsewhere).unwrap();
 }
 
-/// rv-sec2 #742 D6-1 and #751 L1: a name that is not one plain component, or that ends in a
-/// dot or a space, trips `create_under`'s assertion before any call, the same shape
-/// `rename` asserts; callers refuse such names first.
+/// rv-sec2 #742 D6-1 and #751 L1: a name the one name rule `name::refused` refuses, a
+/// device name, a character Windows refuses or a trailing dot or space among them, trips
+/// `create_under`'s assertion before any call, as it does `rename`'s; callers refuse such
+/// names first.
 #[test]
 fn a_name_that_is_not_one_component_trips_the_assertion() {
     let root = scratch("name");
     let held = private::dir(&root).unwrap();
     for name in [
-        "", ".", "..", "a.", "a ", "a\\b", "a/b", "a:b", "x::$DATA", "a\0b",
+        "", ".", "..", "a.", "a ", "a\\b", "a/b", "a:b", "x::$DATA", "a\0b", "aux", "NUL.txt",
+        "com1", "a*b", "a?b", "a\u{1}b",
     ] {
         let tripped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             private::create_under(&held, OsStr::new(name), Create::File)

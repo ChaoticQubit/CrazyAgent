@@ -12,6 +12,11 @@ use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
+use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+use windows_sys::Wdk::Storage::FileSystem::{
+    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT,
+    FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
+};
 use windows_sys::Wdk::Storage::FileSystem::{
     FILE_RENAME_INFORMATION, FILE_RENAME_POSIX_SEMANTICS, FILE_RENAME_REPLACE_IF_EXISTS,
     FileRenameInformationEx, NtSetInformationFile,
@@ -21,9 +26,11 @@ use windows_sys::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, ERROR_LOCK_VIOLATION, ERROR_NO_MORE_FILES, ERROR_SUCCESS, GENERIC_READ,
     GENERIC_WRITE, INVALID_HANDLE_VALUE,
 };
+use windows_sys::Win32::Foundation::{OBJ_CASE_INSENSITIVE, UNICODE_STRING};
 use windows_sys::Win32::Security::Authorization::{
     GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo,
 };
+use windows_sys::Win32::Security::SE_DACL_PRESENT;
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, InitializeSecurityDescriptor, LABEL_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
@@ -41,6 +48,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, OPEN_EXISTING, READ_CONTROL, SetFileInformationByHandle,
     UnlockFileEx, WRITE_DAC, WRITE_OWNER,
 };
+use windows_sys::Win32::Storage::FileSystem::{FILE_TRAVERSE, SYNCHRONIZE};
 use windows_sys::Win32::System::IO::{IO_STATUS_BLOCK, OVERLAPPED};
 use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
 
@@ -514,21 +522,129 @@ pub fn rename(file: &File, folder: &File, name: &OsStr, mode: Mode) -> io::Resul
     Ok(())
 }
 
-/// What [`create_under`] makes (W3-5 D6).
+/// What [`create_under`] makes, and with which access list (W3-5 D6, rv-sec2 RULING-15:12).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Create {
-    /// A folder, held to make the entries below it.
+    /// A folder of a lease worktree, held to make the entries below it, its list inherited
+    /// so a grant on the lease reaches it.
     Folder,
-    /// A file, held with delete access so its holder can [`rename`] it.
+    /// A file of a lease worktree, held with delete access so its holder can [`rename`] it,
+    /// its list inherited so a grant on the lease reaches it.
     File,
+    /// A file no agent may reach, as in the repository's own folders, held with delete
+    /// access and created with W1's protected private list.
+    PrivateFile,
 }
 
-/// Makes the new entry `name` in the held folder `folder`, never by a path (W3-5 D6, rv-sec2
-/// #742 D6-3). Not yet written: every call is refused. Inputs: the held folder, one name and
-/// the kind. Output: the held entry, or the error.
+/// Makes the new entry `name` in the held folder `folder`, never by a path, the twin of
+/// `openat(.., O_CREAT | O_EXCL | O_NOFOLLOW)` (W3-5 D6, rv-sec2 #742 D6-3): NtCreateFile
+/// relative to the folder, a create only, case-insensitive, never following a reparse point,
+/// sharing no delete. The user is its owner; its list is inherited, or W1's protected
+/// private list for [`Create::PrivateFile`]; it is judged private before it is returned.
+/// Inputs: the held folder, one name and the kind. Output: the held entry, or the error;
+/// a name already there is `ERROR_ALREADY_EXISTS`.
 pub fn create_under(folder: &File, name: &OsStr, kind: Create) -> io::Result<File> {
-    let _ = (folder, name, kind);
-    Err(io::Error::from(io::ErrorKind::Unsupported))
+    let units = one_component(name);
+    let user = user_sid()?;
+    let is_folder = kind == Create::Folder;
+    let mut owner = Words::from_bytes(&user);
+    let mut bare = SECURITY_DESCRIPTOR::default();
+    let planned = match kind {
+        Create::PrivateFile => Some(Planned::new(&user, false, None)?),
+        Create::Folder | Create::File => {
+            owner_only(&mut bare, &mut owner)?;
+            None
+        }
+    };
+    let descriptor: *const SECURITY_DESCRIPTOR = planned
+        .as_ref()
+        .map_or(&raw const bare, |planned| &raw const planned.descriptor);
+    let length = u16::try_from(size_of_val(units.as_slice())).expect("a name fits");
+    let object = UNICODE_STRING {
+        Length: length,
+        MaximumLength: length,
+        Buffer: units.as_ptr().cast_mut(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: u32::try_from(size_of::<OBJECT_ATTRIBUTES>()).expect("the size fits"),
+        RootDirectory: folder.as_raw_handle(),
+        ObjectName: &raw const object,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        SecurityDescriptor: descriptor,
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let (access, shape) = if is_folder {
+        (
+            FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+            FILE_DIRECTORY_FILE,
+        )
+    } else {
+        (
+            GENERIC_READ | GENERIC_WRITE | READ_CONTROL | DELETE | SYNCHRONIZE,
+            FILE_NON_DIRECTORY_FILE,
+        )
+    };
+    let mut handle = std::ptr::null_mut();
+    let mut status_block = IO_STATUS_BLOCK::default();
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            access,
+            &attributes,
+            &mut status_block,
+            std::ptr::null(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_CREATE,
+            shape | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status < 0 {
+        return Err(code(unsafe { RtlNtStatusToDosError(status) }));
+    }
+    assert!(!handle.is_null());
+    let made = unsafe { File::from_raw_handle(handle) };
+    let facts = shaped(&made, is_folder)?;
+    judged(&facts, &user, is_folder)?;
+    if facts.owner != user {
+        return Err(refused("a made entry is not owned by the user"));
+    }
+    Ok(made)
+}
+
+/// The UTF-16 units of a name `create_under` may make: text the one name rule
+/// [`crate::name::refused`] passes, as [`rename`] asserts. Callers refuse other names
+/// first. Input: the name. Output: the units.
+fn one_component(name: &OsStr) -> Vec<u16> {
+    let units: Vec<u16> = name.encode_wide().collect();
+    assert!(!units.is_empty());
+    assert!(units.len() <= 255);
+    let text = name.to_str();
+    assert!(text.is_some(), "{name:?}");
+    assert!(!text.is_some_and(crate::name::refused), "{name:?}");
+    units
+}
+
+/// Fills a descriptor that names only an owner: no access list present and none protected,
+/// so the entry made with it inherits its folder's list (rv-sec2 RULING-15:12). Inputs: the
+/// descriptor and the owner's SID words, both outliving the create. Output: Ok, or the error.
+fn owner_only(descriptor: &mut SECURITY_DESCRIPTOR, owner: &mut Words) -> io::Result<()> {
+    let raw: PSECURITY_DESCRIPTOR = (&raw mut *descriptor).cast();
+    let sid: PSID = owner.words.as_mut_ptr().cast();
+    let built = unsafe {
+        InitializeSecurityDescriptor(raw, SECURITY_DESCRIPTOR_REVISION) != 0
+            && SetSecurityDescriptorOwner(raw, sid, 0) != 0
+    };
+    if !built {
+        return Err(io::Error::last_os_error());
+    }
+    assert_eq!(
+        descriptor.Control & (SE_DACL_PRESENT | SE_DACL_PROTECTED),
+        0
+    );
+    Ok(())
 }
 
 /// Deletes the private file at `path` only while it is still the object a caller pinned
