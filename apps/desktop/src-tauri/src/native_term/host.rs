@@ -137,9 +137,10 @@ pub enum NativeEvent {
 /// refused.
 pub const LABEL_BYTES_MAX: usize = 256;
 
-/// The main thread's marker on a system with a native host, for an open from the page's
-/// webview callback. Output: the marker, or none off the main thread.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+/// The GTK main thread's marker, for a Linux open from the page's webview callback; the
+/// macOS open takes AppKit's own marker and Windows re-exports its host's. Output: the
+/// marker, or none off the main thread.
+#[cfg(target_os = "linux")]
 pub use platform::main;
 
 /// One open checked off the main thread: the calling window, the agent window name, the
