@@ -90,15 +90,31 @@ async fn an_ordinary_request_round_trips_over_the_engine_pipe() {
     running.await.unwrap().unwrap();
 }
 
-/// WIRE-2: a root that is not private, as a plain folder made in the temp folder is, is
-/// refused at bind, and no pipes file is written into it.
+/// WIRE-2: a root another account may open is not private and is refused at bind, and no
+/// pipes file is written into it. A plain folder in the temp folder holds only the user,
+/// SYSTEM and Administrators entries W1 allows, so the row grants Users read first (farm run
+/// 44711305730).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_bind_in_a_root_that_is_not_private_is_refused() {
     let (temp, engine, config, _) = engine_at_a_private_root().await;
     let plain = temp.path().join("plain");
     std::fs::create_dir(&plain).unwrap();
-    let refused = Server::bind(&plain.join("engine.sock"), engine, &config);
-    assert!(refused.is_err());
+    let granted = std::process::Command::new("icacls")
+        .arg(&plain)
+        .args(["/grant", "*S-1-5-32-545:(OI)(CI)(RX)"])
+        .status()
+        .unwrap();
+    assert!(granted.success(), "icacls failed: {granted}");
+    let refused = Server::bind(&plain.join("engine.sock"), engine, &config)
+        .err()
+        .unwrap();
+    assert!(
+        refused
+            .0
+            .contains("another account may open a private path"),
+        "{}",
+        refused.0
+    );
     assert!(std::fs::read_dir(&plain).unwrap().next().is_none());
 }
 
