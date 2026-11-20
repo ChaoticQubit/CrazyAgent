@@ -434,7 +434,7 @@ fn sweep(root: &Path) -> io::Result<()> {
 /// holds it without delete sharing for the moment its read takes, so a rename refused for
 /// that is tried again, at most [`RENAME_TRIES`] times. Inputs: the staged file and the
 /// target. Output: Ok, or the last rename error.
-fn replace(staged: &Path, target: &Path) -> io::Result<()> {
+pub(super) fn replace(staged: &Path, target: &Path) -> io::Result<()> {
     let mut tries = 1;
     loop {
         match std::fs::rename(staged, target) {

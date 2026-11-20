@@ -85,6 +85,15 @@ pub(crate) fn owner_listened(listener: &Listener, path: &Path) -> io::Result<Pub
     listener.published(purpose)
 }
 
+/// Renames a staged private file over `target` on Windows with WIRE-1's retried rename, which
+/// tries again while a reader holds the target for the moment of its read (rv-sec2 #738
+/// Q1-a): the one replace the engine locator is published through. Inputs: the staged file
+/// and the target. Output: Ok, or the last rename error.
+#[cfg(windows)]
+pub(crate) fn replace_file(staged: &Path, target: &Path) -> io::Result<()> {
+    windows::replace(staged, target)
+}
+
 /// Closes a Windows listener and deletes its pipes file, reporting a delete that failed
 /// (V244-WIN-ENGINE-WIRING WIRE-2). Input: the listener. Output: Ok, or the delete's error.
 #[cfg(windows)]
@@ -275,7 +284,8 @@ const PIPES_BYTES_MAX: usize = 128;
 /// (DESIGN-0256 D7 and D10 step 1, leader 07:46): the per-start random part of the pipe name
 /// and the pin, process ID and creation time, of the engine that serves it.
 #[cfg(any(windows, test))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Published {
     pub(crate) random: [u8; 16],
     pub(crate) pid: u32,
@@ -1041,6 +1051,22 @@ mod windows_tests {
         std::fs::remove_file(root.join("pipes.swap")).unwrap();
         drop(listener);
         assert!(entries(&root).is_empty(), "{:?}", entries(&root));
+    }
+
+    /// rv-sec2 #738 Q5 guard 2, without the engine lock: while a live listener holds the
+    /// pipes file, a second publish of the same purpose on its root fails and the file keeps
+    /// its bytes; once the listener closes, the same publish lands.
+    #[tokio::test]
+    async fn a_publish_over_a_live_listeners_pipes_file_fails_until_it_closes() {
+        let (_temp, root) = private_root();
+        let listener = super::owner_listener(root.join("engine.sock"), 2).unwrap();
+        let kept = std::fs::read(root.join("pipes")).unwrap();
+        let refused = publish(&root, "engine.sock", [3; 16]).unwrap_err();
+        assert!(matches!(refused.raw_os_error(), Some(5 | 32)), "{refused}");
+        assert_eq!(std::fs::read(root.join("pipes")).unwrap(), kept);
+        super::owner_close(listener).unwrap();
+        let landed = publish(&root, "engine.sock", [3; 16]).unwrap();
+        assert_eq!(read(&root, "engine.sock").unwrap(), landed);
     }
 
     /// Decision 6: `answering` is true only while a listener serves the endpoint and its

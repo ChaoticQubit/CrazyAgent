@@ -1,13 +1,10 @@
-#[cfg(unix)]
 use super::Server;
 use super::owner::OwnerRuntimeHandle;
-#[cfg(unix)]
 use super::owner::OwnerServer;
 use super::owner::{
     OwnerClient, OwnerClientKind, OwnerData, OwnerOperation, OwnerRead, OwnerReply, OwnerRequest,
     OwnerResponse,
 };
-#[cfg(unix)]
 use super::verify_server;
 use super::{Engine, EngineError, io_error};
 use crate::config::EffectiveConfig;
@@ -21,6 +18,8 @@ use rustix::fs::{Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Read;
+#[cfg(windows)]
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
@@ -86,18 +85,6 @@ struct Identity {
 }
 
 impl Identity {
-    /// A placeholder identity for the metadata callers after the bootstrap twins (shutdown's
-    /// generation cleanup), which only a Unix start reaches until W3-4b. Takes the metadata,
-    /// unused. Returns zeros; `safe_directory` and `safe_file` refuse every Windows entry first,
-    /// so no Windows decision rests on this value.
-    #[cfg(not(unix))]
-    fn of(_metadata: &std::fs::Metadata) -> Self {
-        Self {
-            device: 0,
-            inode: 0,
-        }
-    }
-
     #[cfg(unix)]
     fn of(metadata: &std::fs::Metadata) -> Self {
         Self {
@@ -116,6 +103,31 @@ impl Identity {
     }
 }
 
+/// What the locator records for an owner-class endpoint: the socket file's identity on Unix
+/// (W3-4b D1).
+#[cfg(unix)]
+type SocketIdentity = Identity;
+/// What the locator records for an owner-class endpoint: on Windows the random part and
+/// engine pin the endpoint's pipes file publishes, compared over all three (W3-4b D1,
+/// rv-sec2 #717 Q2/Q3).
+#[cfg(windows)]
+type SocketIdentity = crate::ipc::Published;
+
+/// Whether a recorded endpoint is the zero value no real endpoint has: inode 0 on Unix.
+/// Input: the endpoint. Output: the answer.
+#[cfg(unix)]
+fn endpoint_unset(endpoint: &SocketIdentity) -> bool {
+    endpoint.inode == 0
+}
+
+/// Whether a recorded endpoint is the zero value no real endpoint has: on Windows a zero
+/// process ID, a zero creation time or an all-zero random part (rv-sec2 #717 Q2/Q3).
+/// Input: the endpoint. Output: the answer.
+#[cfg(windows)]
+fn endpoint_unset(endpoint: &SocketIdentity) -> bool {
+    endpoint.pid == 0 || endpoint.created == 0 || endpoint.random == [0; 16]
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Locator {
@@ -125,9 +137,9 @@ struct Locator {
     engine_epoch: String,
     generation: String,
     generation_identity: Identity,
-    owner_socket: Identity,
+    owner_socket: SocketIdentity,
     ordinary_name: String,
-    ordinary_socket: Identity,
+    ordinary_socket: SocketIdentity,
     #[serde(default)]
     engine_version: String,
 }
@@ -217,14 +229,12 @@ fn parse_locator(bytes: &[u8]) -> Result<Locator, EngineError> {
         || !hex(&locator.generation[1..], 8)
         || socket_name(&locator.ordinary_name).is_err()
         || !engine_version_valid(&locator.engine_version)
-        || [
-            locator.database,
-            locator.generation_identity,
-            locator.owner_socket,
-            locator.ordinary_socket,
-        ]
-        .iter()
-        .any(|id| id.inode == 0)
+        || [locator.database, locator.generation_identity]
+            .iter()
+            .any(|id| id.inode == 0)
+        || [locator.owner_socket, locator.ordinary_socket]
+            .iter()
+            .any(endpoint_unset)
     {
         return Err(fail("owner_locator_invalid"));
     }
@@ -236,21 +246,6 @@ struct Anchor {
     path: PathBuf,
     directory: File,
     identity: Identity,
-}
-
-/// Refuses every directory judged by metadata on Windows, where metadata carries no owner or
-/// list; the bootstrap twins judge by handle ([`Anchor::entry`]) and W3-4b moves the callers
-/// left. Takes the metadata, unused. Returns false.
-#[cfg(not(unix))]
-fn safe_directory(_m: &std::fs::Metadata) -> bool {
-    false
-}
-
-/// Refuses every file judged by metadata on Windows, as [`safe_directory`] does.
-/// Takes the metadata, unused. Returns false.
-#[cfg(not(unix))]
-fn safe_file(_m: &std::fs::Metadata) -> bool {
-    false
 }
 
 #[cfg(unix)]
@@ -350,6 +345,7 @@ impl Anchor {
         Ok(())
     }
 
+    #[cfg(unix)]
     fn metadata(&self, name: &str) -> Result<std::fs::Metadata, EngineError> {
         self.verify()?;
         std::fs::symlink_metadata(self.path.join(name)).map_err(io_error)
@@ -522,16 +518,26 @@ impl PinnedLocator {
     }
 }
 
-/// Refuses an engine socket where Unix domain sockets are not used.
-/// Takes the anchor, socket path and identity, all unused.
-/// Returns `owner_anchor_unavailable` until Windows has owner-only directory checks.
-#[cfg(not(unix))]
-fn check_socket(_anchor: &Anchor, _name: &Path, _identity: Identity) -> Result<(), EngineError> {
-    Err(fail("owner_anchor_unavailable"))
+/// Confirms on Windows that the owner-class endpoint at `name` in the anchor is the one the
+/// locator recorded (W3-4b D2): the anchor verified, then the pipes file beside the name,
+/// read through W1's private open, must publish the same random part and engine pin.
+/// Inputs: the anchor, the endpoint path and the recorded endpoint. Output: Ok, or
+/// `owner_endpoint_replaced_or_unsafe`.
+#[cfg(windows)]
+fn check_socket(anchor: &Anchor, name: &Path, identity: SocketIdentity) -> Result<(), EngineError> {
+    assert!(
+        name.starts_with(&anchor.path),
+        "an endpoint lies in the anchor"
+    );
+    anchor.verify()?;
+    match crate::ipc::owner_endpoint(name) {
+        Ok(found) if found == identity => Ok(()),
+        _ => Err(fail("owner_endpoint_replaced_or_unsafe")),
+    }
 }
 
 #[cfg(unix)]
-fn check_socket(anchor: &Anchor, name: &Path, identity: Identity) -> Result<(), EngineError> {
+fn check_socket(anchor: &Anchor, name: &Path, identity: SocketIdentity) -> Result<(), EngineError> {
     anchor.verify()?;
     let metadata = std::fs::symlink_metadata(name).map_err(io_error)?;
     if !metadata.file_type().is_socket()
@@ -567,7 +573,7 @@ fn check_database(anchor: &Anchor, identity: Identity) -> Result<(), EngineError
 }
 
 /// Confirms on Windows that the locator's generation is the private folder it recorded,
-/// then checks its owner endpoint (D4); the endpoint check still refuses until W3-4b.
+/// then checks its owner endpoint (D4, W3-4b D2).
 /// Inputs: the anchor and the locator. Output: Ok, or the refusal.
 #[cfg(windows)]
 fn check_generation(anchor: &Anchor, value: &Locator) -> Result<(), EngineError> {
@@ -603,15 +609,54 @@ fn check_generation(anchor: &Anchor, value: &Locator) -> Result<(), EngineError>
 /// It lives where no shipped binary reads, so the locator keeps the shape they parse.
 const OWNER_TIMEOUT: &str = "owner-timeout";
 /// The most bytes an owner timeout file holds: its decimal milliseconds, no line end.
-#[cfg(unix)]
 const OWNER_TIMEOUT_MAX: u64 = 16;
 
-/// Refuses to read the owner timeout without Unix directory-relative opens.
-/// Takes the anchor and the locator, both unused.
-/// Returns `owner_anchor_unavailable` until Windows has owner-only directory checks.
-#[cfg(not(unix))]
-fn owner_timeout(_anchor: &Anchor, _value: &Locator) -> Result<Option<Duration>, EngineError> {
-    Err(fail("owner_anchor_unavailable"))
+/// The owner timeout the engine wrote into the generation its locator pins, on Windows
+/// (W3-4b D11): the generation opened through [`Anchor::entry`] with its recorded identity,
+/// then its owner timeout file through W1 `read_secret`, under the Unix bounds. Inputs: the
+/// anchor and the pinned locator. Output: as the Unix twin.
+#[cfg(windows)]
+fn owner_timeout(anchor: &Anchor, value: &Locator) -> Result<Option<Duration>, EngineError> {
+    let (_folder, found) = anchor.entry(
+        &value.generation,
+        true,
+        "owner_generation_replaced_or_unsafe",
+    )?;
+    if found != value.generation_identity {
+        return Err(fail("owner_generation_replaced_or_unsafe"));
+    }
+    let path = anchor.path.join(&value.generation).join(OWNER_TIMEOUT);
+    let file = match private::read_secret(&path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(fail("owner_locator_unsafe")),
+    };
+    let metadata = file.metadata().map_err(io_error)?;
+    if !metadata.is_file() || metadata.len() > OWNER_TIMEOUT_MAX {
+        return Err(fail("owner_locator_unsafe"));
+    }
+    read_owner_timeout(&file).map(Some)
+}
+
+/// Reads an opened owner timeout file: at most [`OWNER_TIMEOUT_MAX`] bytes of decimal
+/// milliseconds inside the settings bounds. Input: the file. Output: the timeout,
+/// `owner_locator_unsafe` when oversized, or `owner_locator_invalid`.
+fn read_owner_timeout(file: &File) -> Result<Duration, EngineError> {
+    let mut bytes = Vec::new();
+    (&*file)
+        .take(OWNER_TIMEOUT_MAX + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_error)?;
+    if bytes.len() as u64 > OWNER_TIMEOUT_MAX {
+        return Err(fail("owner_locator_unsafe"));
+    }
+    let ms = std::str::from_utf8(&bytes)
+        .ok()
+        .filter(|text| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|text| text.parse::<u64>().ok())
+        .filter(|ms| crate::config::TIMEOUT_MS_BOUNDS.contains(ms))
+        .ok_or_else(|| fail("owner_locator_invalid"))?;
+    Ok(Duration::from_millis(ms))
 }
 
 /// The owner timeout the engine wrote into the generation its locator pins, read without
@@ -650,21 +695,7 @@ fn owner_timeout(anchor: &Anchor, value: &Locator) -> Result<Option<Duration>, E
     if !safe_file(&metadata) || metadata.len() > OWNER_TIMEOUT_MAX {
         return Err(fail("owner_locator_unsafe"));
     }
-    let mut bytes = Vec::new();
-    (&file)
-        .take(OWNER_TIMEOUT_MAX + 1)
-        .read_to_end(&mut bytes)
-        .map_err(io_error)?;
-    if bytes.len() as u64 > OWNER_TIMEOUT_MAX {
-        return Err(fail("owner_locator_unsafe"));
-    }
-    let ms = std::str::from_utf8(&bytes)
-        .ok()
-        .filter(|text| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
-        .and_then(|text| text.parse::<u64>().ok())
-        .filter(|ms| crate::config::TIMEOUT_MS_BOUNDS.contains(ms))
-        .ok_or_else(|| fail("owner_locator_invalid"))?;
-    Ok(Some(Duration::from_millis(ms)))
+    read_owner_timeout(&file).map(Some)
 }
 
 async fn capabilities(client: &OwnerClient) -> Result<(), EngineError> {
@@ -766,13 +797,16 @@ pub(super) fn runner_binding(
 
 /// Reads the version a running engine published in its locator, for the version message
 /// only; nothing else is trusted from it, so it reads any future locator shape. Input:
-/// the engine's data root. Output: the version, or none without a readable one.
-#[cfg(unix)]
+/// the engine's data root. Output: the version, or none without a readable one. On Windows
+/// it reads through W1 `read_secret`, which shares delete, so it never blocks a publish
+/// (W3-4b D10, rv-sec2 #738 Q1-a).
 pub fn reported_engine_version(root: &Path) -> Option<String> {
+    #[cfg(unix)]
+    let file = File::open(root.join(LOCATOR)).ok()?;
+    #[cfg(windows)]
+    let file = private::read_secret(&root.join(LOCATOR)).ok()?;
     let mut bytes = Vec::new();
-    File::open(root.join(LOCATOR))
-        .ok()?
-        .take(LOCATOR_MAX as u64 + 1)
+    file.take(LOCATOR_MAX as u64 + 1)
         .read_to_end(&mut bytes)
         .ok()?;
     if bytes.len() > LOCATOR_MAX {
@@ -781,13 +815,6 @@ pub fn reported_engine_version(root: &Path) -> Option<String> {
     let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     let version = value.get("engine_version")?.as_str()?;
     (!version.is_empty() && engine_version_valid(version)).then(|| version.to_owned())
-}
-
-/// Reports no engine version where no engine locator can exist yet. Input: the root,
-/// unused. Output: none.
-#[cfg(not(unix))]
-pub fn reported_engine_version(_root: &Path) -> Option<String> {
-    None
 }
 
 pub(super) async fn discover_pair(
@@ -823,7 +850,6 @@ pub struct EngineService {
     anchor: Anchor,
     engine: Arc<Engine>,
     owner_runtime: Option<OwnerRuntimeHandle>,
-    #[cfg(unix)]
     timeout: Duration,
     generation: Option<(String, Identity)>,
     temporary: Option<Identity>,
@@ -862,15 +888,6 @@ fn check_path_length(path: &Path) -> Result<(), EngineError> {
         return Err(fail("owner_socket_path_too_long"));
     }
     Ok(())
-}
-
-/// Refuses a Windows engine start before it opens, creates or migrates `engine.db`
-/// (rv-sec2 #717 Q5, leader 05:1x): temporary, until fix10's W3-4b makes `start_inner` work
-/// on Windows and removes this call. Input: none. Output: always `owner_anchor_unavailable`,
-/// the code a Windows start gave before W3-4a.
-#[cfg(not(unix))]
-fn refuse_start_until_w3_4b() -> Result<(), EngineError> {
-    Err(fail("owner_anchor_unavailable"))
 }
 
 /// Maps a W1 refusal to an engine code on Windows: a private-check refusal gives `code`,
@@ -1075,8 +1092,6 @@ impl EngineService {
         check_path_length(&anchor.path.join(ordinary))?;
         check_path_length(&anchor.path.join("o00000000/owner.sock"))?;
         let previous = PinnedLocator::read(&anchor)?;
-        #[cfg(not(unix))]
-        refuse_start_until_w3_4b()?;
         let engine = Arc::new(Engine::open(&anchor.path.join("engine.db"), config.clone()).await?);
         Self::start_engine(
             anchor,
@@ -1103,8 +1118,6 @@ impl EngineService {
         check_path_length(&anchor.path.join(ordinary))?;
         check_path_length(&anchor.path.join("o00000000/owner.sock"))?;
         let previous = PinnedLocator::read(&anchor)?;
-        #[cfg(not(unix))]
-        refuse_start_until_w3_4b()?;
         let (engine, config) =
             Engine::open_settings(&anchor.path.join("engine.db"), global, project).await?;
         Self::start_engine(
@@ -1130,7 +1143,6 @@ impl EngineService {
             anchor,
             engine,
             owner_runtime: None,
-            #[cfg(unix)]
             timeout: Duration::from_millis(config.settings.timeout_ms),
             generation: None,
             temporary: None,
@@ -1157,21 +1169,10 @@ impl EngineService {
         self.owner_runtime.as_ref()
     }
 
-    /// Refuses to start the owner and ordinary listeners without Unix domain sockets.
-    /// Takes the socket name, settings, previous locator and shutdown signal, all unused.
-    /// Returns `owner_anchor_unavailable` until Windows has owner-only directory checks.
-    #[cfg(not(unix))]
-    async fn start_inner(
-        &mut self,
-        _ordinary: &str,
-        _config: &EffectiveConfig,
-        _previous: Option<&PinnedLocator>,
-        _shutdown: &watch::Receiver<bool>,
-    ) -> Result<(), EngineError> {
-        Err(fail("owner_anchor_unavailable"))
-    }
-
-    #[cfg(unix)]
+    /// Starts the owner and ordinary listeners on the held anchor and publishes the locator
+    /// naming them, one body on Unix and Windows (W3-4b D3): each place the two differ is a
+    /// per-OS helper. Inputs: the ordinary endpoint name, the settings, the locator start read
+    /// and the shutdown signal. Output: Ok once the locator names this run, or the refusal.
     async fn start_inner(
         &mut self,
         ordinary: &str,
@@ -1180,7 +1181,7 @@ impl EngineService {
         shutdown: &watch::Receiver<bool>,
     ) -> Result<(), EngineError> {
         cancelled(shutdown)?;
-        let database = Identity::of(&self.anchor.metadata("engine.db")?);
+        let database = self.database_identity()?;
         check_database(&self.anchor, database)?;
         self.create_generation()?;
         let (name, generation_identity) = self.generation.as_ref().unwrap().clone();
@@ -1200,7 +1201,7 @@ impl EngineService {
             self.engine.clone(),
             config,
         )?;
-        let ordinary_socket = Identity::of(&self.anchor.metadata(ordinary)?);
+        let ordinary_socket = self.endpoint_at(&self.anchor.path.join(ordinary))?;
         let (stop, stopped) = oneshot::channel();
         self.stops.push(stop);
         self.tasks.spawn(server.run(stopped));
@@ -1237,9 +1238,7 @@ impl EngineService {
             cancelled(shutdown)?;
         }
         self.live()?;
-        let owner_socket = Identity::of(
-            &std::fs::symlink_metadata(generation.join("owner.sock")).map_err(io_error)?,
-        );
+        let owner_socket = self.endpoint_at(&generation.join("owner.sock"))?;
         let value = Locator {
             version: 1,
             database,
@@ -1254,9 +1253,70 @@ impl EngineService {
         };
         self.publish(value, previous)?;
         self.sweep_generations();
+        #[cfg(unix)]
         self.sweep_stale(ordinary).await;
         cancelled(shutdown)?;
         Ok(())
+    }
+
+    /// The identity of `engine.db` in the anchor, as the locator records it: lstat on Unix.
+    /// Output: the identity, or the anchor or I/O error.
+    #[cfg(unix)]
+    fn database_identity(&self) -> Result<Identity, EngineError> {
+        Ok(Identity::of(&self.anchor.metadata("engine.db")?))
+    }
+
+    /// The identity of `engine.db` in the anchor on Windows: the entry opened as a private
+    /// file through [`Anchor::entry`]. Output: the identity, or the refusal.
+    #[cfg(windows)]
+    fn database_identity(&self) -> Result<Identity, EngineError> {
+        let (_, identity) =
+            self.anchor
+                .entry("engine.db", false, "owner_locator_database_mismatch")?;
+        Ok(identity)
+    }
+
+    /// The endpoint at `path` as the locator records it: the socket file's identity on Unix,
+    /// read after the anchor is verified. Input: the endpoint path. Output: the identity.
+    #[cfg(unix)]
+    fn endpoint_at(&self, path: &Path) -> Result<SocketIdentity, EngineError> {
+        self.anchor.verify()?;
+        Ok(Identity::of(
+            &std::fs::symlink_metadata(path).map_err(io_error)?,
+        ))
+    }
+
+    /// The endpoint at `path` as the locator records it on Windows: what its pipes file
+    /// publishes, which must pin this engine process, as this run just bound it (W3-4b D3).
+    /// Input: the endpoint path. Output: the endpoint, or `owner_endpoint_replaced_or_unsafe`.
+    #[cfg(windows)]
+    fn endpoint_at(&self, path: &Path) -> Result<SocketIdentity, EngineError> {
+        self.anchor.verify()?;
+        let endpoint = crate::ipc::owner_endpoint(path)
+            .map_err(|_| fail("owner_endpoint_replaced_or_unsafe"))?;
+        if endpoint.pid != std::process::id() || endpoint_unset(&endpoint) {
+            return Err(fail("owner_endpoint_replaced_or_unsafe"));
+        }
+        Ok(endpoint)
+    }
+
+    /// Whether the anchor entry `name` is a private folder of this user: lstat plus
+    /// `safe_directory` on Unix. Input: the entry name. Output: the answer.
+    #[cfg(unix)]
+    fn private_folder(&self, name: &str) -> bool {
+        self.anchor
+            .metadata(name)
+            .is_ok_and(|metadata| safe_directory(&metadata))
+    }
+
+    /// Whether the anchor entry `name` is a private folder of this user on Windows: it opens
+    /// through [`Anchor::entry`], and the handle closes before the caller acts on it.
+    /// Input: the entry name. Output: the answer.
+    #[cfg(windows)]
+    fn private_folder(&self, name: &str) -> bool {
+        self.anchor
+            .entry(name, true, "owner_generation_replaced_or_unsafe")
+            .is_ok()
     }
 
     /// Removes the stale entries this or an earlier start set aside in the anchor, once the
@@ -1325,7 +1385,6 @@ impl EngineService {
     /// a crash or a failed shutdown, once the locator names this run's own generation; the
     /// engine database lock makes this the only run on the anchor. Input: none. Output:
     /// none; a folder that is not a private directory or cannot be removed is logged.
-    #[cfg(unix)]
     fn sweep_generations(&self) {
         let Some((current, _)) = &self.generation else {
             return;
@@ -1344,11 +1403,9 @@ impl EngineService {
             if !generation || &name == current {
                 continue;
             }
-            let private = self
-                .anchor
-                .metadata(&name)
-                .is_ok_and(|metadata| safe_directory(&metadata));
-            if !private || std::fs::remove_dir_all(self.anchor.path.join(&name)).is_err() {
+            if !self.private_folder(&name)
+                || std::fs::remove_dir_all(self.anchor.path.join(&name)).is_err()
+            {
                 eprintln!("owner_generation_sweep_kept");
             }
         }
@@ -1358,10 +1415,11 @@ impl EngineService {
     /// owner generation. Start holds the engine lock, so no earlier engine on this database
     /// is alive: a locator whose pinned database, instance, generation or owner socket no
     /// longer match, as when a reboot gives the volume another device number, is stale and
-    /// is set aside. A locator replaced since start read it is still refused.
+    /// is set aside. A locator replaced since start read it is still refused. On Windows a
+    /// stale locator is not set aside until N6's create-only rename lands (leader 12:22 Q2
+    /// (a)): it is logged and stays pinned, and publish renames this run's over it.
     /// Inputs: the locator read at start, the database identity and instance.
-    /// Output: the trusted locator or none, or the refusal.
-    #[cfg(unix)]
+    /// Output: the trusted locator, the stale one on Windows, or none, or the refusal.
     fn trusted_previous<'a>(
         &self,
         previous: Option<&'a PinnedLocator>,
@@ -1381,8 +1439,16 @@ impl EngineService {
             }
         };
         old.verify(&self.anchor)?;
-        self.set_aside(LOCATOR, &cause)?;
-        Ok(None)
+        #[cfg(unix)]
+        {
+            self.set_aside(LOCATOR, &cause)?;
+            Ok(None)
+        }
+        #[cfg(windows)]
+        {
+            eprintln!("owner_stale_entry_replaced name={LOCATOR} cause={cause}");
+            Ok(Some(old))
+        }
     }
 
     /// Moves a stale anchor entry to `<name>.stale-<8 hex>`, never over another entry and
@@ -1452,6 +1518,109 @@ impl EngineService {
             }
         }
         Err(fail("owner_generation_collision_limit"))
+    }
+
+    /// Retires nothing on Windows, once the anchor is confirmed (W3-4b D6, rv-sec2 #738 Q5):
+    /// the ordinary endpoint is the anchor's pipes file, which [`Server::bind`] refuses while
+    /// a checked engine answers it, and which a live listener holds without delete sharing,
+    /// so no rename replaces it. Inputs: the socket name and the previous locator, unused.
+    /// Output: Ok, or the anchor refusal.
+    #[cfg(windows)]
+    async fn retire_socket(
+        &self,
+        _ordinary: &str,
+        _previous: Option<&PinnedLocator>,
+    ) -> Result<(), EngineError> {
+        self.anchor.verify()
+    }
+
+    /// Makes this run's owner generation folder on Windows (W3-4b D4): a fresh `o<8 hex>`
+    /// name made through W1 `new_dir`, which refuses an entry already there, so no existing
+    /// folder is adopted; a taken name tries another, at most 8 times. Output: Ok with the
+    /// name and the folder's identity recorded, or the refusal.
+    #[cfg(windows)]
+    fn create_generation(&mut self) -> Result<(), EngineError> {
+        for _ in 0..8 {
+            self.anchor.verify()?;
+            let name = format!("o{}", random_hex()?);
+            match private::new_dir(&self.anchor.path.join(&name)) {
+                Ok(folder) => {
+                    let identity = Identity::of_file(&folder)?;
+                    drop(folder);
+                    generation_checked(&self.anchor, &name, identity)?;
+                    self.generation = Some((name, identity));
+                    return Ok(());
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(private_refusal(e, "owner_generation_replaced_or_unsafe")),
+            }
+        }
+        Err(fail("owner_generation_collision_limit"))
+    }
+
+    /// Publishes this run's locator on Windows (W3-4b D5) in the Unix order: the generation
+    /// confirmed, its owner timeout and staged locator made private and closed to lower
+    /// integrity opens through W1 `secret_file`, the bytes parsed before they are written,
+    /// the locator start read confirmed or none at the name, then the staged file renamed
+    /// over the anchor's through WIRE-1's retried replace (rv-sec2 #738 Q1-a). The locator
+    /// then read must have the staged creating handle's identity and the bytes written
+    /// (Q1-b). Inputs: the locator and the one start read. Output: Ok, or the refusal.
+    #[cfg(windows)]
+    fn publish(
+        &mut self,
+        value: Locator,
+        previous: Option<&PinnedLocator>,
+    ) -> Result<(), EngineError> {
+        let (generation, identity) = self
+            .generation
+            .clone()
+            .expect("publish follows create_generation");
+        generation_checked(&self.anchor, &generation, identity)?;
+        let folder = self.anchor.path.join(&generation);
+        let timeout = u64::try_from(self.timeout.as_millis())
+            .ok()
+            .filter(|ms| crate::config::TIMEOUT_MS_BOUNDS.contains(ms))
+            .ok_or_else(|| fail("owner_timeout_bounds"))?;
+        let mut named = private::secret_file(&folder.join(OWNER_TIMEOUT)).map_err(io_error)?;
+        named
+            .write_all(timeout.to_string().as_bytes())
+            .map_err(io_error)?;
+        named.sync_all().map_err(io_error)?;
+        drop(named);
+        let staged = folder.join("locator");
+        let mut file = private::secret_file(&staged).map_err(io_error)?;
+        let file_identity = Identity::of_file(&file)?;
+        self.temporary = Some(file_identity);
+        let bytes = serde_json::to_vec(&value).map_err(io_error)?;
+        parse_locator(&bytes)?;
+        file.write_all(&bytes).map_err(io_error)?;
+        file.sync_all().map_err(io_error)?;
+        drop(file);
+        if let Some(old) = previous {
+            old.verify(&self.anchor)?;
+        } else {
+            match std::fs::symlink_metadata(self.anchor.path.join(LOCATOR)) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                _ => return Err(fail("owner_locator_replaced_or_unsafe")),
+            }
+        }
+        generation_checked(&self.anchor, &generation, identity)?;
+        let held = private::read_secret(&staged)
+            .map_err(|e| private_refusal(e, "owner_locator_replaced_or_unsafe"))?;
+        if Identity::of_file(&held)? != file_identity {
+            return Err(fail("owner_locator_replaced_or_unsafe"));
+        }
+        crate::ipc::replace_file(&staged, &self.anchor.path.join(LOCATOR)).map_err(io_error)?;
+        drop(held);
+        self.temporary = None;
+        private::sync_folder(&self.anchor.path).map_err(io_error)?;
+        let pinned =
+            PinnedLocator::read(&self.anchor)?.ok_or_else(|| fail("owner_locator_missing"))?;
+        if pinned.identity != file_identity || pinned.bytes != bytes {
+            return Err(fail("owner_locator_replaced_or_unsafe"));
+        }
+        self.locator = Some(pinned);
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -1648,9 +1817,13 @@ impl EngineService {
             }
         }
         if let Some(locator) = self.locator.take() {
-            let result = locator
-                .verify(&self.anchor)
-                .and_then(|()| remove_locator(&self.anchor));
+            let result = locator.verify(&self.anchor).and_then(|()| {
+                #[cfg(unix)]
+                let removed = remove_locator(&self.anchor);
+                #[cfg(windows)]
+                let removed = remove_locator(&self.anchor, locator.identity);
+                removed
+            });
             if let Err(error) = result {
                 errors.push(error.0);
             }
@@ -1668,17 +1841,12 @@ impl EngineService {
         drop(self.owner_runtime.take());
         if let Some((generation, identity)) = self.generation.take() {
             let clean = (|| {
-                let metadata = self.anchor.metadata(&generation)?;
-                if !safe_directory(&metadata) || Identity::of(&metadata) != identity {
-                    return Err(fail("owner_generation_replaced_or_unsafe"));
-                }
+                generation_checked(&self.anchor, &generation, identity)?;
                 if let Some(temporary) = self.temporary.take() {
-                    let path = self.anchor.path.join(&generation).join("locator");
-                    let metadata = std::fs::symlink_metadata(&path).map_err(io_error)?;
-                    if !safe_file(&metadata) || Identity::of(&metadata) != temporary {
-                        return Err(fail("owner_locator_replaced_or_unsafe"));
-                    }
-                    std::fs::remove_file(path).map_err(io_error)?;
+                    remove_staged(
+                        &self.anchor.path.join(&generation).join("locator"),
+                        temporary,
+                    )?;
                 }
                 let path = self.anchor.path.join(&generation);
                 if let Err(error) = std::fs::remove_file(path.join(OWNER_TIMEOUT))
@@ -1716,7 +1884,6 @@ impl EngineService {
 
 /// Eight lowercase hex digits from the system's entropy, for fresh anchor entry names.
 /// Output: the digits, or `owner_entropy_unavailable`.
-#[cfg(unix)]
 fn random_hex() -> Result<String, EngineError> {
     let mut random = [0; 4];
     getrandom::fill(&mut random).map_err(|_| fail("owner_entropy_unavailable"))?;
@@ -1730,11 +1897,63 @@ fn remove_locator(anchor: &Anchor) -> Result<(), EngineError> {
     rustix::fs::unlinkat(&anchor.directory, LOCATOR, rustix::fs::AtFlags::empty()).map_err(io_error)
 }
 
-/// Refuses to remove the owner locator without directory-relative Unix unlinks.
-/// Takes the anchor, unused. Returns `owner_anchor_unavailable`.
-#[cfg(not(unix))]
-fn remove_locator(_anchor: &Anchor) -> Result<(), EngineError> {
-    Err(fail("owner_anchor_unavailable"))
+/// Removes the published owner locator on Windows (W3-4b D9, rv-sec2 #738 Q5-b) through
+/// W1 `remove`, only while the name is still the file this run pinned (R7), so an engine
+/// that closes after a newer start published keeps the newer locator. Inputs: the anchor
+/// and the pinned identity. Output: Ok, or the refusal.
+#[cfg(windows)]
+fn remove_locator(anchor: &Anchor, identity: Identity) -> Result<(), EngineError> {
+    anchor.verify()?;
+    private::remove(
+        &anchor.path.join(LOCATOR),
+        (identity.device, identity.inode),
+    )
+    .map_err(|e| private_refusal(e, "owner_locator_replaced_or_unsafe"))
+}
+
+/// Confirms the owner generation `name` in the anchor is the private folder recorded at its
+/// creation: lstat plus `safe_directory` on Unix. Inputs: the anchor, the name and the
+/// identity. Output: Ok, or `owner_generation_replaced_or_unsafe`.
+#[cfg(unix)]
+fn generation_checked(anchor: &Anchor, name: &str, identity: Identity) -> Result<(), EngineError> {
+    let metadata = anchor.metadata(name)?;
+    if !safe_directory(&metadata) || Identity::of(&metadata) != identity {
+        return Err(fail("owner_generation_replaced_or_unsafe"));
+    }
+    Ok(())
+}
+
+/// Confirms on Windows the owner generation `name` in the anchor is the private folder
+/// recorded at its creation, opened through [`Anchor::entry`] and closed again. Inputs: the
+/// anchor, the name and the identity. Output: Ok, or `owner_generation_replaced_or_unsafe`.
+#[cfg(windows)]
+fn generation_checked(anchor: &Anchor, name: &str, identity: Identity) -> Result<(), EngineError> {
+    let (_, found) = anchor.entry(name, true, "owner_generation_replaced_or_unsafe")?;
+    if found != identity {
+        return Err(fail("owner_generation_replaced_or_unsafe"));
+    }
+    Ok(())
+}
+
+/// Removes a staged locator a failed publish left, only while it is still the file publish
+/// made: lstat plus `safe_file` and the identity on Unix. Inputs: the path and the identity.
+/// Output: Ok, or the refusal.
+#[cfg(unix)]
+fn remove_staged(path: &Path, identity: Identity) -> Result<(), EngineError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(io_error)?;
+    if !safe_file(&metadata) || Identity::of(&metadata) != identity {
+        return Err(fail("owner_locator_replaced_or_unsafe"));
+    }
+    std::fs::remove_file(path).map_err(io_error)
+}
+
+/// Removes a staged locator a failed publish left on Windows, through W1 `remove` with the
+/// identity publish recorded (R7). Inputs: the path and the identity. Output: Ok, or the
+/// refusal.
+#[cfg(windows)]
+fn remove_staged(path: &Path, identity: Identity) -> Result<(), EngineError> {
+    private::remove(path, (identity.device, identity.inode))
+        .map_err(|e| private_refusal(e, "owner_locator_replaced_or_unsafe"))
 }
 
 impl Drop for EngineService {
