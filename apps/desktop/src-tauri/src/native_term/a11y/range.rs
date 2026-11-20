@@ -179,7 +179,9 @@ pub fn cell_near(
 ) -> (usize, usize) {
     assert!(rows >= 1);
     assert!(columns >= 1);
-    let Geometry { cell, pad, scale } = geometry;
+    let Geometry {
+        cell, pad, scale, ..
+    } = geometry;
     assert!((1.0..=4.0).contains(&scale));
     assert!(cell.0 > 0.0 && cell.1 > 0.0 && pad >= 0.0);
     if !(point.0.is_finite() && point.1.is_finite()) {
@@ -301,6 +303,7 @@ mod tests {
             cell: (16.0, 32.0),
             pad: 0.0,
             scale: 2.0,
+            top: 0,
         };
         assert_eq!(cell_near(geometry, (8.0, 16.0), 3, 10), (1, 1));
         assert_eq!(cell_near(geometry, (7.9, 15.9), 3, 10), (0, 0));
@@ -308,5 +311,11 @@ mod tests {
         assert_eq!(cell_near(geometry, (1e9, 1e9), 3, 10), (2, 9));
         assert_eq!(cell_near(geometry, (f64::NAN, 20.0), 3, 10), (0, 0));
         assert_eq!(cell_near(geometry, (f64::INFINITY, 20.0), 3, 10), (0, 0));
+        let clipped = Geometry { top: 1, ..geometry };
+        assert_eq!(cell_near(clipped, (8.0, 0.0), 3, 10), (1, 1));
+        assert_eq!(cell_near(clipped, (8.0, 16.0), 3, 10), (2, 1));
+        assert_eq!(cell_near(clipped, (-5.0, -5.0), 3, 10), (1, 0));
+        assert_eq!(cell_near(clipped, (1e9, 1e9), 3, 10), (2, 9));
+        assert_eq!(cell_near(clipped, (f64::NAN, 20.0), 3, 10), (1, 0));
     }
 }

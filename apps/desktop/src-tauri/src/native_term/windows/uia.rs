@@ -349,14 +349,16 @@ impl ITextProvider_Impl for Terminal_Impl {
     }
 }
 
-/// The geometry `a11y` measures device pixels with: one cell's pixel size at scale one.
-/// Input: the cell size in pixels. Output: the geometry.
+/// The geometry `a11y` measures device pixels with: one cell's pixel size at scale one,
+/// from the first row, since a Windows view is never on the direct path, so it sizes its
+/// pane and is never clipped. Input: the cell size in pixels. Output: the geometry.
 fn pixels(cell: (f64, f64)) -> Geometry {
     assert!(cell.0 > 0.0 && cell.1 > 0.0);
     Geometry {
         cell,
         pad: 0.0,
         scale: 1.0,
+        top: 0,
     }
 }
 

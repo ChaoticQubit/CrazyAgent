@@ -2251,6 +2251,7 @@ fn host_cell_and_access(view: &platform::View, shared: &Shared) {
         cell: shared.cell_points(),
         pad: 0.0,
         scale: 1.0,
+        top: 0,
     };
     platform::drawn(view, geometry, term);
 }
