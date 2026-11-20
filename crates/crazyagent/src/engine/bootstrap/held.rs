@@ -1,51 +1,110 @@
-use crate::engine::EngineError;
-use std::ffi::OsStr;
+use crazyagent_win_sandbox::name;
+#[cfg(windows)]
+use crazyagent_win_sandbox::private;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::path::Path;
 #[cfg(windows)]
 use std::path::PathBuf;
 
-const UNSAFE: &str = "native_profile_custody_unsafe";
-const INCOMPLETE: &str = "native_profile_incomplete";
-const IN_USE: &str = "native_profile_in_use";
-const LOCK_UNAVAILABLE: &str = "native_profile_lock_unavailable";
 const NAME_BYTES_MAX: usize = 255;
 const DEVICE_NAMES: [&str; 4] = ["AUX", "CON", "NUL", "PRN"];
-const NUMBERED_DEVICES: [&str; 2] = ["COM", "LPT"];
+
+/// Why a held open, make, listing, lock or remove failed, by cause (rv-sec3 #725 U5): the
+/// entry is missing, it is not the entry the layer may use, another handle holds it, the
+/// system refused for another reason, or a listing passed its bound. Each caller maps these
+/// kinds to its own codes, so no caller's code lives in the layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeldError {
+    Missing,
+    Unsafe,
+    InUse,
+    Unavailable,
+    Full,
+}
+
+/// How the root of a held chain was judged, inherited by every folder opened through it
+/// (rv-sec3 #725 U1): `Private` by W1's private judge on Windows and the 0700 owner check
+/// on Unix, `Caller` by a judge the caller named. Unjudged calls run only under `Caller`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Judged {
+    Private,
+    Caller,
+}
 
 /// One file's identity, compared to tell a swapped name from the held entry: device and
 /// inode on Unix, volume serial number and file id on Windows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct Pin {
-    pub(super) device: u64,
-    pub(super) inode: u64,
+pub(crate) struct Pin {
+    pub(crate) device: u64,
+    pub(crate) inode: u64,
 }
 
-/// A folder native profile custody holds open and opens its children through, so a name
-/// is always looked up in the held folder, never through a link (DESIGN-0515 D1). On
-/// Windows it also keeps its own plain place, read from the handle, never a caller's path,
-/// and binds every child to it (rv-sec3 #716 C1).
-pub(super) struct Folder {
+/// One plain component name every held call takes (DESIGN-0553 rule 3): made by
+/// `Name::constant` for the layer's callers' own names, which asserts, or by `Name::checked`
+/// for a name read off disk or from another program, which refuses.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Name(OsString);
+
+/// What one entry of a held folder is, read without following it: a file, a folder, or a
+/// link, which is any reparse point on Windows and a symbolic link on Unix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kind {
+    File,
+    Folder,
+    Link,
+}
+
+/// One entry a listing gives: its name as the folder holds it, not yet checked, and its kind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Child {
+    pub(crate) name: OsString,
+    pub(crate) kind: Kind,
+}
+
+/// A folder the layer holds open and opens its children through, so a name is always looked
+/// up in the held folder, never through a link (DESIGN-0515 D1). On Windows it also keeps
+/// its own plain place, read from the handle, never a caller's path, and binds every child
+/// to it (rv-sec3 #716 C1). It carries how its root was judged (rv-sec3 #725 U1).
+pub(crate) struct Folder {
     file: File,
     pin: Pin,
+    judged: Judged,
     #[cfg(windows)]
     path: PathBuf,
 }
 
-fn failure(code: &str) -> EngineError {
-    EngineError(code.to_owned())
+impl Name {
+    /// Makes a name from a constant the caller wrote, asserting it is one plain component
+    /// on every system (rv-sec3 #716 C3), so a bad constant is a programming error. Input:
+    /// the text. Output: the name.
+    pub(crate) fn constant(text: &'static str) -> Self {
+        assert_component(text);
+        assert!(!name::refused(text), "{text:?}");
+        Self(OsString::from(text))
+    }
+
+    /// Checks a name the layer's caller did not write, the same on every system (DESIGN-0553
+    /// rule 3, rv-sec3 #725 U6). Input: the name. Output: the name, or `Unsafe` for one that
+    /// is not UTF-8 or that [`name::refused`] turns away.
+    pub(crate) fn checked(text: &OsStr) -> Result<Self, HeldError> {
+        let plain = text.to_str().ok_or(HeldError::Unsafe)?;
+        if name::refused(plain) {
+            return Err(HeldError::Unsafe);
+        }
+        Ok(Self(text.to_owned()))
+    }
+
+    /// The name as the system takes it. Output: the text.
+    pub(crate) fn as_os_str(&self) -> &OsStr {
+        &self.0
+    }
 }
 
-fn unsafe_custody(_: impl std::fmt::Display) -> EngineError {
-    failure(UNSAFE)
-}
-
-/// Asserts that a custody name is one plain component on every system (rv-sec3 #716 C3):
+/// Asserts that a constant name is one plain component on every system (rv-sec3 #716 C3):
 /// ASCII letters, digits, `.`, `_` and `-` only, so no separator, colon or stream, not `.`
-/// or `..`, no trailing dot, and no Windows device name. Every custody name is a constant or
-/// a lowercase hex key, so a failure is a programming error. Input: the name.
-fn assert_component(name: &OsStr) {
-    let text = name.to_str().expect("a custody name is UTF-8");
+/// or `..`, no trailing dot, and no Windows device name. Input: the name.
+fn assert_component(text: &str) {
     assert!(!text.is_empty());
     assert!(text.len() <= NAME_BYTES_MAX, "{text:?}");
     assert!(
@@ -60,7 +119,7 @@ fn assert_component(name: &OsStr) {
         .unwrap_or_default()
         .to_ascii_uppercase();
     assert!(!DEVICE_NAMES.contains(&stem.as_str()), "{text:?}");
-    let numbered = NUMBERED_DEVICES.iter().any(|device| {
+    let numbered = name::NUMBERED_DEVICES.iter().any(|device| {
         stem.len() == 4 && stem.starts_with(device) && stem.as_bytes()[3].is_ascii_digit()
     });
     assert!(!numbered, "{text:?}");
@@ -68,13 +127,25 @@ fn assert_component(name: &OsStr) {
 
 impl Folder {
     /// The held folder's identity. Output: the pin.
-    pub(super) fn pin(&self) -> Pin {
+    pub(crate) fn pin(&self) -> Pin {
         self.pin
     }
 
     /// The held folder's handle. Output: the file.
-    pub(super) fn file(&self) -> &File {
+    pub(crate) fn file(&self) -> &File {
         &self.file
+    }
+
+    /// Asserts that this folder's root was judged by its caller (rv-sec3 #725 U1), the
+    /// first line of every unjudged call, so none ever runs on a tree held through
+    /// `Folder::root`'s private judge.
+    pub(crate) fn assert_caller_judged(&self) {
+        assert_ne!(
+            self.judged,
+            Judged::Private,
+            "an unjudged call on a private tree"
+        );
+        assert_eq!(self.judged, Judged::Caller);
     }
 }
 
@@ -82,77 +153,148 @@ impl Folder {
 impl Folder {
     /// Holds the first folder of a chain, opened without following a link and owned by the
     /// engine's user with mode 0700. Input: its absolute path. Output: the held folder,
-    /// `native_profile_incomplete` when it is missing, or `native_profile_custody_unsafe`.
-    pub(super) fn root(path: &Path) -> Result<Self, EngineError> {
+    /// `Missing`, or `Unsafe`.
+    pub(crate) fn root(path: &Path) -> Result<Self, HeldError> {
         use rustix::fs::{Mode, OFlags};
         assert!(path.is_absolute(), "{}", path.display());
         let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let file = File::from(rustix::fs::open(path, flags, Mode::empty()).map_err(opened)?);
-        if !super::safe_directory(&file.metadata().map_err(unsafe_custody)?) {
-            return Err(failure(UNSAFE));
+        let file = File::from(rustix::fs::open(path, flags, Mode::empty()).map_err(errno_cause)?);
+        if !super::safe_directory(&file.metadata().map_err(cause)?) {
+            return Err(HeldError::Unsafe);
         }
         let pin = pin_of(&file)?;
-        Ok(Self { file, pin })
+        Ok(Self {
+            file,
+            pin,
+            judged: Judged::Private,
+        })
     }
 
     /// Opens and holds one child folder through this folder, never following a link.
-    /// Input: its name. Output: the held child, `native_profile_incomplete` when it is
-    /// missing, or `native_profile_custody_unsafe`.
-    pub(super) fn open_dir(&self, name: &OsStr) -> Result<Self, EngineError> {
+    /// Input: its name. Output: the held child, `Missing`, or `Unsafe`.
+    pub(crate) fn open_dir(&self, name: &Name) -> Result<Self, HeldError> {
         use rustix::fs::{Mode, OFlags};
-        assert_component(name);
-        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let file =
-            File::from(rustix::fs::openat(&self.file, name, flags, Mode::empty()).map_err(opened)?);
+        let file = self.open_at(name, OFlags::RDONLY | OFlags::DIRECTORY, Mode::empty())?;
         let pin = pin_of(&file)?;
         self.verify(name, &file, pin, true)?;
-        Ok(Self { file, pin })
+        Ok(Self {
+            file,
+            pin,
+            judged: self.judged,
+        })
     }
 
     /// Makes one child folder with mode 0700 through this folder, create-only, so an entry
-    /// already at the name is unsafe (rv-sec3 #716 C2), then holds it. Input: its name.
-    /// Output: the held child, or `native_profile_custody_unsafe`.
-    pub(super) fn make_dir(&self, name: &OsStr) -> Result<Self, EngineError> {
+    /// already at the name is `Unsafe` (rv-sec3 #716 C2), then holds it. Input: its name.
+    /// Output: the held child, or the error.
+    pub(crate) fn make_dir(&self, name: &Name) -> Result<Self, HeldError> {
         use rustix::fs::Mode;
-        assert_component(name);
-        rustix::fs::mkdirat(&self.file, name, Mode::from_raw_mode(0o700))
-            .map_err(unsafe_custody)?;
-        self.file.sync_all().map_err(unsafe_custody)?;
+        rustix::fs::mkdirat(&self.file, name.as_os_str(), Mode::from_raw_mode(0o700))
+            .map_err(errno_cause)?;
+        self.file.sync_all().map_err(cause)?;
         self.open_dir(name)
     }
 
-    /// Opens one child file for reading through this folder, never following a link.
-    /// Input: its name. Output: the file and its identity, `native_profile_incomplete` when
-    /// it is missing, or `native_profile_custody_unsafe`.
-    pub(super) fn open_read(&self, name: &OsStr) -> Result<(File, Pin), EngineError> {
+    /// Opens one child file for reading through this folder, never following a link and
+    /// never waiting, so a FIFO at the name is refused rather than blocking (rv-sec3 #731
+    /// F1). Input: its name. Output: the file and its identity, `Missing`, or `Unsafe`.
+    pub(crate) fn open_read(&self, name: &Name) -> Result<(File, Pin), HeldError> {
         use rustix::fs::{Mode, OFlags};
-        assert_component(name);
-        let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let file =
-            File::from(rustix::fs::openat(&self.file, name, flags, Mode::empty()).map_err(opened)?);
-        let pin = pin_of(&file)?;
-        self.verify(name, &file, pin, false)?;
-        Ok((file, pin))
+        self.open_file(name, OFlags::RDONLY | OFlags::NONBLOCK, Mode::empty())
+    }
+
+    /// Makes one child file with mode 0600 through this folder, create-only, the twin of
+    /// `O_CREAT | O_EXCL`, so an entry already at the name is `Unsafe`, then writes this
+    /// folder's entries to disk. Input: its name. Output: the file and its identity.
+    pub(crate) fn make_file(&self, name: &Name) -> Result<(File, Pin), HeldError> {
+        use rustix::fs::{Mode, OFlags};
+        let flags = OFlags::RDWR | OFlags::CREATE | OFlags::EXCL;
+        let made = self.open_file(name, flags, Mode::from_raw_mode(0o600))?;
+        self.file.sync_all().map_err(cause)?;
+        Ok(made)
+    }
+
+    /// Opens one child file for reading and writing through this folder, never following a
+    /// link and never waiting (rv-sec3 #731 F1). Input: its name. Output: the file and its
+    /// identity, `Missing`, or `Unsafe`.
+    pub(crate) fn open_write(&self, name: &Name) -> Result<(File, Pin), HeldError> {
+        use rustix::fs::{Mode, OFlags};
+        self.open_file(name, OFlags::RDWR | OFlags::NONBLOCK, Mode::empty())
+    }
+
+    /// Lists this folder from its held descriptor, never by path, skipping `.` and `..` and
+    /// an entry gone meanwhile; the kind comes from a no-follow look at each name. Input:
+    /// the most entries allowed. Output: the entries, `Full` past the bound, or `Unsafe`
+    /// for an entry that is none of a file, a folder or a link.
+    pub(crate) fn list(&self, limit_count: usize) -> Result<Vec<Child>, HeldError> {
+        use rustix::fs::{AtFlags, Dir, FileType};
+        use std::os::unix::ffi::OsStrExt;
+        assert!(limit_count > 0);
+        let mut children = Vec::new();
+        for entry in Dir::read_from(&self.file).map_err(errno_cause)? {
+            let entry = entry.map_err(errno_cause)?;
+            let bytes = entry.file_name().to_bytes();
+            if bytes == b"." || bytes == b".." {
+                continue;
+            }
+            let name = OsStr::from_bytes(bytes);
+            let stat = match rustix::fs::statat(&self.file, name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => stat,
+                Err(error) if error == rustix::io::Errno::NOENT => continue,
+                Err(error) => return Err(errno_cause(error)),
+            };
+            let kind = match FileType::from_raw_mode(stat.st_mode) {
+                FileType::RegularFile => Kind::File,
+                FileType::Directory => Kind::Folder,
+                FileType::Symlink => Kind::Link,
+                _ => return Err(HeldError::Unsafe),
+            };
+            if children.len() == limit_count {
+                return Err(HeldError::Full);
+            }
+            children.push(Child {
+                name: name.to_owned(),
+                kind,
+            });
+        }
+        assert!(children.len() <= limit_count);
+        Ok(children)
+    }
+
+    /// Removes one entry through this folder while it is still the pinned, private entry:
+    /// opened without following a link, judged and compared with the pin by `verify`, then
+    /// unlinked by name, as the custody removes it replaces are. Inputs: its name and pin.
+    /// Output: Ok, `Missing`, or `Unsafe` for a link or a swapped or unsafe entry.
+    pub(crate) fn remove(&self, name: &Name, pin: Pin) -> Result<(), HeldError> {
+        use rustix::fs::{AtFlags, Mode, OFlags};
+        let entry = self.open_at(name, OFlags::RDONLY | OFlags::NONBLOCK, Mode::empty())?;
+        let directory = entry.metadata().map_err(cause)?.is_dir();
+        self.verify(name, &entry, pin, directory)?;
+        let flags = if directory {
+            AtFlags::REMOVEDIR
+        } else {
+            AtFlags::empty()
+        };
+        rustix::fs::unlinkat(&self.file, name.as_os_str(), flags).map_err(errno_cause)
     }
 
     /// Checks that a name in this folder still names the held entry: the entry is owned by
     /// the engine's user with a private mode, a file has one link, its identity is the pin,
     /// and a no-follow look at the name gives the same inode, device, owner, mode and links.
     /// Inputs: the name, the held entry, its pin and whether it is a folder. Output: Ok, or
-    /// `native_profile_custody_unsafe`.
-    pub(super) fn verify(
+    /// the error, `Unsafe` for any mismatch.
+    pub(crate) fn verify(
         &self,
-        name: &OsStr,
+        name: &Name,
         held: &File,
         pin: Pin,
         directory: bool,
-    ) -> Result<(), EngineError> {
+    ) -> Result<(), HeldError> {
         use rustix::fs::AtFlags;
         use std::os::unix::fs::MetadataExt;
-        assert_component(name);
-        let metadata = held.metadata().map_err(unsafe_custody)?;
-        let named = rustix::fs::statat(&self.file, name, AtFlags::SYMLINK_NOFOLLOW)
-            .map_err(unsafe_custody)?;
+        let metadata = held.metadata().map_err(cause)?;
+        let named = rustix::fs::statat(&self.file, name.as_os_str(), AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(errno_cause)?;
         let safe = if directory {
             super::safe_directory(&metadata)
         } else {
@@ -171,29 +313,76 @@ impl Folder {
             || named.st_mode as u32 != metadata.mode()
             || (!directory && named.st_nlink as u64 != metadata.nlink())
         {
-            return Err(failure(UNSAFE));
+            return Err(HeldError::Unsafe);
         }
         Ok(())
     }
-}
 
-/// Maps a failed open: a missing entry is `native_profile_incomplete`, anything else, a
-/// link or a file where a folder belongs among them, is `native_profile_custody_unsafe`.
-#[cfg(unix)]
-fn opened(error: rustix::io::Errno) -> EngineError {
-    if error == rustix::io::Errno::NOENT {
-        failure(INCOMPLETE)
-    } else {
-        failure(UNSAFE)
+    /// Opens one child file through this folder with the given access and creation flags,
+    /// then pins and verifies it. Inputs: its name, the flags and the creation mode. Output:
+    /// the file and its identity, or the error.
+    fn open_file(
+        &self,
+        name: &Name,
+        flags: rustix::fs::OFlags,
+        mode: rustix::fs::Mode,
+    ) -> Result<(File, Pin), HeldError> {
+        let file = self.open_at(name, flags, mode)?;
+        let pin = pin_of(&file)?;
+        self.verify(name, &file, pin, false)?;
+        Ok((file, pin))
+    }
+
+    /// Opens one name through this folder's descriptor, never following a link at it and
+    /// never inherited by a child process. Inputs: its name, the flags and the creation
+    /// mode. Output: the open entry, or the error by cause.
+    fn open_at(
+        &self,
+        name: &Name,
+        flags: rustix::fs::OFlags,
+        mode: rustix::fs::Mode,
+    ) -> Result<File, HeldError> {
+        use rustix::fs::OFlags;
+        let flags = flags | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        rustix::fs::openat(&self.file, name.as_os_str(), flags, mode)
+            .map(File::from)
+            .map_err(errno_cause)
     }
 }
 
-/// Reads an open entry's device and inode. Input: the handle. Output: the pin, or
-/// `native_profile_custody_unsafe`.
+/// Maps a failed Unix call by cause (rv-sec3 #725 U5): a missing entry is `Missing`; an
+/// entry already there, a link at a no-follow name and a file or folder where the other
+/// belongs are `Unsafe`; every other error is `Unavailable`. Input: the errno. Output: the
+/// kind.
 #[cfg(unix)]
-fn pin_of(file: &File) -> Result<Pin, EngineError> {
+fn errno_cause(error: rustix::io::Errno) -> HeldError {
+    use rustix::io::Errno;
+    if error == Errno::NOENT {
+        return HeldError::Missing;
+    }
+    let tampered = [Errno::EXIST, Errno::LOOP, Errno::NOTDIR, Errno::ISDIR];
+    if tampered.contains(&error) {
+        HeldError::Unsafe
+    } else {
+        HeldError::Unavailable
+    }
+}
+
+/// Maps a failed std call on Unix the way `errno_cause` maps a rustix one. Input: the error.
+/// Output: the kind, `Unavailable` for an error with no errno.
+#[cfg(unix)]
+fn cause(error: std::io::Error) -> HeldError {
+    error.raw_os_error().map_or(HeldError::Unavailable, |raw| {
+        errno_cause(rustix::io::Errno::from_raw_os_error(raw))
+    })
+}
+
+/// Reads an open entry's device and inode. Input: the handle. Output: the pin, or the
+/// error.
+#[cfg(unix)]
+fn pin_of(file: &File) -> Result<Pin, HeldError> {
     use std::os::unix::fs::MetadataExt;
-    let metadata = file.metadata().map_err(unsafe_custody)?;
+    let metadata = file.metadata().map_err(cause)?;
     Ok(Pin {
         device: metadata.dev(),
         inode: metadata.ino(),
@@ -206,104 +395,273 @@ impl Folder {
     /// at its name, and never sharing delete, so it cannot be renamed while held. The path
     /// must be the plain spelling (leader 05:2x, LIMITS line 15). The folder keeps the place
     /// read from its handle, not this path (rv-sec3 #716 C1). Input: its absolute plain
-    /// path. Output: the held folder, `native_profile_incomplete` when it is missing, or
-    /// `native_profile_custody_unsafe`.
-    pub(super) fn root(path: &Path) -> Result<Self, EngineError> {
+    /// path. Output: the held folder, `Missing`, or `Unsafe`.
+    pub(crate) fn root(path: &Path) -> Result<Self, HeldError> {
         assert!(plain_drive(path), "{}", path.display());
-        let file = crazyagent_win_sandbox::private::open_dir(path).map_err(opened)?;
+        let file = private::open_dir(path).map_err(cause)?;
         let place = place_of(&file)?;
         let pin = pin_of(&file)?;
         Ok(Self {
             file,
             pin,
+            judged: Judged::Private,
             path: place,
         })
     }
 
     /// Opens and holds one child folder at this folder's place with W1, never creating it,
-    /// then binds it to this folder. Input: its name. Output: the held child,
-    /// `native_profile_incomplete` when it is missing, or `native_profile_custody_unsafe`.
-    pub(super) fn open_dir(&self, name: &OsStr) -> Result<Self, EngineError> {
-        assert_component(name);
-        let path = self.path.join(name);
-        let file = crazyagent_win_sandbox::private::open_dir(&path).map_err(opened)?;
+    /// then binds it to this folder. Input: its name. Output: the held child, `Missing`, or
+    /// `Unsafe`.
+    pub(crate) fn open_dir(&self, name: &Name) -> Result<Self, HeldError> {
+        let path = self.path.join(name.as_os_str());
+        let file = private::open_dir(&path).map_err(cause)?;
         self.bind(name, &file)?;
         let pin = pin_of(&file)?;
-        Ok(Self { file, pin, path })
+        Ok(Self {
+            file,
+            pin,
+            judged: self.judged,
+            path,
+        })
     }
 
     /// Makes one private child folder with W1, create-only, so an entry already at the name
-    /// is unsafe (rv-sec3 #716 C2), writes this folder's entries to disk, then binds the
-    /// child to this folder. Input: its name. Output: the held child, or
-    /// `native_profile_custody_unsafe`.
-    pub(super) fn make_dir(&self, name: &OsStr) -> Result<Self, EngineError> {
-        use crazyagent_win_sandbox::private;
-        assert_component(name);
-        let path = self.path.join(name);
-        let file = private::new_dir(&path).map_err(unsafe_custody)?;
-        private::sync_folder(&self.path).map_err(unsafe_custody)?;
+    /// is `Unsafe` (rv-sec3 #716 C2), writes this folder's entries to disk, then binds the
+    /// child to this folder. Input: its name. Output: the held child, or the error.
+    pub(crate) fn make_dir(&self, name: &Name) -> Result<Self, HeldError> {
+        let path = self.path.join(name.as_os_str());
+        let file = private::new_dir(&path).map_err(cause)?;
+        private::sync_folder(&self.path).map_err(cause)?;
         self.bind(name, &file)?;
         let pin = pin_of(&file)?;
-        Ok(Self { file, pin, path })
+        Ok(Self {
+            file,
+            pin,
+            judged: self.judged,
+            path,
+        })
     }
 
     /// Opens one child file for reading with W1, which refuses a link, a second name and any
     /// list other than the private one, then binds it to this folder. Input: its name.
-    /// Output: the file and its identity, `native_profile_incomplete` when it is missing, or
-    /// `native_profile_custody_unsafe`.
-    pub(super) fn open_read(&self, name: &OsStr) -> Result<(File, Pin), EngineError> {
-        assert_component(name);
-        let path = self.path.join(name);
-        let file = crazyagent_win_sandbox::private::read_only(&path).map_err(opened)?;
+    /// Output: the file and its identity, `Missing`, `InUse`, or `Unsafe`.
+    pub(crate) fn open_read(&self, name: &Name) -> Result<(File, Pin), HeldError> {
+        let path = self.path.join(name.as_os_str());
+        let file = private::read_only(&path).map_err(cause)?;
         self.bind(name, &file)?;
         let pin = pin_of(&file)?;
         Ok((file, pin))
+    }
+
+    /// Makes one private child file with W1, create-only, so an entry already at the name is
+    /// `Unsafe`, writes this folder's entries to disk, then binds the file to this folder.
+    /// Input: its name. Output: the file, open for reading and writing, and its identity.
+    pub(crate) fn make_file(&self, name: &Name) -> Result<(File, Pin), HeldError> {
+        self.private_file(name, true)
+    }
+
+    /// Opens one private child file for reading and writing with W1, which refuses a link,
+    /// a second name and any list other than the private one, then binds it to this folder.
+    /// Input: its name. Output: the file and its identity, `Missing`, `InUse`, or `Unsafe`.
+    pub(crate) fn open_write(&self, name: &Name) -> Result<(File, Pin), HeldError> {
+        self.private_file(name, false)
+    }
+
+    /// Lists this folder by its bound place (rv-sec3 #725 Q2). Before and after the pass
+    /// the held handle must show no reparse point and the same place, so a folder turned
+    /// into a junction meanwhile is `Unsafe` (U4). The kind comes from the find data,
+    /// never followed. Input: the most entries allowed. Output: the entries, or `Full`.
+    pub(crate) fn list(&self, limit_count: usize) -> Result<Vec<Child>, HeldError> {
+        use std::os::windows::fs::MetadataExt;
+        assert!(limit_count > 0);
+        self.unmoved()?;
+        let mut children = Vec::new();
+        for entry in std::fs::read_dir(&self.path).map_err(cause)? {
+            let entry = entry.map_err(cause)?;
+            let attributes = entry.metadata().map_err(cause)?.file_attributes();
+            if children.len() == limit_count {
+                return Err(HeldError::Full);
+            }
+            children.push(Child {
+                name: entry.file_name(),
+                kind: kind_of(attributes),
+            });
+        }
+        self.unmoved()?;
+        assert!(children.len() <= limit_count);
+        Ok(children)
+    }
+
+    /// Removes one entry while it is still the pinned, private entry: opened as itself with
+    /// delete access, never sharing delete, bound to this folder, compared with the pin and
+    /// judged by W1, then deleted through that handle with POSIX semantics. Inputs: its name
+    /// and pin. Output: Ok, `Missing`, `InUse` while another handle holds it, or `Unsafe`.
+    pub(crate) fn remove(&self, name: &Name, pin: Pin) -> Result<(), HeldError> {
+        use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
+        use std::os::windows::fs::OpenOptionsExt;
+        let entry = std::fs::OpenOptions::new()
+            .access_mode(DELETE | READ_CONTROL | FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(self.path.join(name.as_os_str()))
+            .map_err(cause)?;
+        self.bind(name, &entry)?;
+        if pin.inode == 0 || pin_of(&entry)? != pin {
+            return Err(HeldError::Unsafe);
+        }
+        private::check(&entry).map_err(cause)?;
+        private::delete(&entry).map_err(cause)
     }
 
     /// Checks that a name in this folder still names the held entry (DESIGN-0515 D2): the
     /// name is opened again with W1 and bound to this folder, it is the same file as the held
     /// entry, the held entry passes W1's check, links included, and its identity is the pin.
     /// Inputs: the name, the held entry, its pin and whether it is a folder. Output: Ok, or
-    /// `native_profile_custody_unsafe`.
-    pub(super) fn verify(
+    /// the error, `Unsafe` for any mismatch.
+    pub(crate) fn verify(
         &self,
-        name: &OsStr,
+        name: &Name,
         held: &File,
         pin: Pin,
         directory: bool,
-    ) -> Result<(), EngineError> {
-        use crazyagent_win_sandbox::private;
-        assert_component(name);
-        let path = self.path.join(name);
+    ) -> Result<(), HeldError> {
+        let path = self.path.join(name.as_os_str());
         let reopened = if directory {
             private::open_dir(&path)
         } else {
             private::read_only(&path)
         }
-        .map_err(unsafe_custody)?;
+        .map_err(cause)?;
         self.bind(name, &reopened)?;
-        let same = private::same(held, &reopened).map_err(unsafe_custody)?;
-        private::check(held).map_err(unsafe_custody)?;
+        let same = private::same(held, &reopened).map_err(cause)?;
+        private::check(held).map_err(cause)?;
         let held_pin = pin_of(held)?;
         if pin.inode == 0 || held_pin != pin || !same {
-            return Err(failure(UNSAFE));
+            return Err(HeldError::Unsafe);
         }
         Ok(())
+    }
+
+    /// Makes or opens one private child file with W1 for reading and writing, then binds
+    /// it to this folder; a make writes this folder's entries to disk first. Inputs: its
+    /// name and whether to create it. Output: the file and its identity, or the error.
+    fn private_file(&self, name: &Name, create: bool) -> Result<(File, Pin), HeldError> {
+        let path = self.path.join(name.as_os_str());
+        let file = private::file(&path, create).map_err(cause)?;
+        if create {
+            private::sync_folder(&self.path).map_err(cause)?;
+        }
+        self.bind(name, &file)?;
+        let pin = pin_of(&file)?;
+        Ok((file, pin))
     }
 
     /// Binds a child opened at this folder's place to this folder (rv-sec3 #716 C1): this
     /// folder's place, read from its handle again now, must still be the one it was held
     /// at, and the child's place, read from its handle, must be that place joined with the
-    /// name. Inputs: the name and the child's handle. Output: Ok, or
-    /// `native_profile_custody_unsafe`.
-    fn bind(&self, name: &OsStr, child: &File) -> Result<(), EngineError> {
+    /// name. Inputs: the name and the child's handle. Output: Ok, or `Unsafe`.
+    fn bind(&self, name: &Name, child: &File) -> Result<(), HeldError> {
         assert!(plain_drive(&self.path), "{}", self.path.display());
         let parent = place_of(&self.file)?;
         let named = place_of(child)?;
-        if parent != self.path || named != self.path.join(name) {
-            return Err(failure(UNSAFE));
+        if parent != self.path || named != self.path.join(name.as_os_str()) {
+            return Err(HeldError::Unsafe);
         }
         Ok(())
+    }
+
+    /// Checks that the held folder is still a plain folder at its place (rv-sec3 #725 U4):
+    /// no reparse point on the held handle, and the place read from it unchanged. Output:
+    /// Ok, or `Unsafe`.
+    fn unmoved(&self) -> Result<(), HeldError> {
+        let facts = private::facts(&self.file).map_err(cause)?;
+        if facts.reparse || place_of(&self.file)? != self.path {
+            return Err(HeldError::Unsafe);
+        }
+        Ok(())
+    }
+}
+
+/// The access right to delete an object, `DELETE`.
+#[cfg(windows)]
+const DELETE: u32 = 0x0001_0000;
+
+/// The access right to read an object's owner and lists, `READ_CONTROL`.
+#[cfg(windows)]
+const READ_CONTROL: u32 = 0x0002_0000;
+
+/// The access right to read an object's attributes, `FILE_READ_ATTRIBUTES`.
+#[cfg(windows)]
+const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+
+/// The share mode that lets other handles read, `FILE_SHARE_READ`.
+#[cfg(windows)]
+const FILE_SHARE_READ: u32 = 0x1;
+
+/// The share mode that lets other handles write, `FILE_SHARE_WRITE`.
+#[cfg(windows)]
+const FILE_SHARE_WRITE: u32 = 0x2;
+
+/// The file attribute of a reparse point, `FILE_ATTRIBUTE_REPARSE_POINT`.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+
+/// The file attribute of a folder, `FILE_ATTRIBUTE_DIRECTORY`.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0010;
+
+/// The Windows error for a missing file, `ERROR_FILE_NOT_FOUND`.
+#[cfg(windows)]
+const FILE_NOT_FOUND: i32 = 2;
+
+/// The Windows error for a missing folder on the way, `ERROR_PATH_NOT_FOUND`.
+#[cfg(windows)]
+const PATH_NOT_FOUND: i32 = 3;
+
+/// The Windows error while another handle's share mode refuses this open,
+/// `ERROR_SHARING_VIOLATION`.
+#[cfg(windows)]
+const SHARING_VIOLATION: i32 = 32;
+
+/// The Windows error while another handle holds a lock, `ERROR_LOCK_VIOLATION`.
+#[cfg(windows)]
+const LOCK_VIOLATION: i32 = 33;
+
+/// The Windows error for a create-only open of a name already there, `ERROR_FILE_EXISTS`.
+#[cfg(windows)]
+const FILE_EXISTS: i32 = 80;
+
+/// The Windows error for a create-only folder already there, `ERROR_ALREADY_EXISTS`.
+#[cfg(windows)]
+const ALREADY_EXISTS: i32 = 183;
+
+/// Reads one listed entry's kind from its find-data attributes, never following it: any
+/// reparse point is a link. Input: the attributes. Output: the kind.
+#[cfg(windows)]
+fn kind_of(attributes: u32) -> Kind {
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        Kind::Link
+    } else if attributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        Kind::Folder
+    } else {
+        Kind::File
+    }
+}
+
+/// Maps a failed Windows call by cause (rv-sec3 #725 U5): sharing and lock violations are
+/// `InUse`; not found and path not found are `Missing`; an entry already there and W1's
+/// own refusals, a failed judge with no system code, are `Unsafe`; every other error,
+/// access denied on a busy hold among them, is `Unavailable`. Input: the error. Output: the
+/// kind.
+#[cfg(windows)]
+fn cause(error: std::io::Error) -> HeldError {
+    match error.raw_os_error() {
+        Some(SHARING_VIOLATION | LOCK_VIOLATION) => HeldError::InUse,
+        Some(FILE_NOT_FOUND | PATH_NOT_FOUND) => HeldError::Missing,
+        Some(FILE_EXISTS | ALREADY_EXISTS) => HeldError::Unsafe,
+        Some(_) => HeldError::Unavailable,
+        None if error.kind() == std::io::ErrorKind::PermissionDenied => HeldError::Unsafe,
+        None => HeldError::Unavailable,
     }
 }
 
@@ -322,51 +680,38 @@ fn plain_drive(path: &Path) -> bool {
 
 /// Reads where an open entry really is from its handle with W1 `place`, in the plain
 /// spelling: the one `\\?\` drive prefix W1 gives is dropped, and any other form, a share
-/// among them, is unsafe. The local strip goes once W3-4a's `one_spelling` arm lands
-/// (DESIGN-0515 D6). Input: the handle. Output: the plain place, or
-/// `native_profile_custody_unsafe`.
+/// among them, is `Unsafe`. The local strip goes once W3-4a's `one_spelling` arm lands
+/// (DESIGN-0515 D6). Input: the handle. Output: the plain place, or the error.
 #[cfg(windows)]
-fn place_of(file: &File) -> Result<PathBuf, EngineError> {
+fn place_of(file: &File) -> Result<PathBuf, HeldError> {
     use std::os::windows::ffi::OsStringExt;
-    let units = crazyagent_win_sandbox::private::place(file).map_err(unsafe_custody)?;
-    let verbatim = std::ffi::OsString::from_wide(&units);
+    let units = private::place(file).map_err(cause)?;
+    let verbatim = OsString::from_wide(&units);
     let plain = verbatim
         .to_str()
         .and_then(|text| text.strip_prefix(r"\\?\"))
         .map(PathBuf::from)
-        .ok_or_else(|| failure(UNSAFE))?;
+        .ok_or(HeldError::Unsafe)?;
     if !plain_drive(&plain) {
-        return Err(failure(UNSAFE));
+        return Err(HeldError::Unsafe);
     }
     Ok(plain)
 }
 
-/// Maps a failed W1 open: a missing entry is `native_profile_incomplete`, anything else, a
-/// link or an entry W1 does not judge private among them, is `native_profile_custody_unsafe`.
-#[cfg(windows)]
-fn opened(error: std::io::Error) -> EngineError {
-    if error.kind() == std::io::ErrorKind::NotFound {
-        failure(INCOMPLETE)
-    } else {
-        failure(UNSAFE)
-    }
-}
-
 /// Reads an open entry's volume serial number and 64-bit file id with W1 `identity`.
-/// Input: the handle. Output: the pin, or `native_profile_custody_unsafe`.
+/// Input: the handle. Output: the pin, or the error.
 #[cfg(windows)]
-fn pin_of(file: &File) -> Result<Pin, EngineError> {
-    let (device, inode) =
-        crazyagent_win_sandbox::private::identity(file).map_err(unsafe_custody)?;
+fn pin_of(file: &File) -> Result<Pin, HeldError> {
+    let (device, inode) = private::identity(file).map_err(cause)?;
     Ok(Pin { device, inode })
 }
 
 /// Takes one lock on a held file without waiting (DESIGN-0515 D4): `flock` on Unix; on
 /// Windows a shared lock is std's whole-file shared lock and an exclusive one W1's, both
 /// mandatory, so an exclusive lock also refuses other handles' reads. Inputs: the file and
-/// whether the lock is shared. Output: Ok, `native_profile_in_use` while a conflicting lock
-/// is held, or `native_profile_lock_unavailable`.
-pub(super) fn lock(file: &File, shared: bool) -> Result<(), EngineError> {
+/// whether the lock is shared. Output: Ok, `InUse` while a conflicting lock is held, or
+/// `Unavailable`.
+pub(crate) fn lock(file: &File, shared: bool) -> Result<(), HeldError> {
     #[cfg(unix)]
     let taken = {
         use rustix::fs::FlockOperation;
@@ -384,24 +729,25 @@ pub(super) fn lock(file: &File, shared: bool) -> Result<(), EngineError> {
         file.try_lock_shared()
             .map_err(|error| matches!(error, std::fs::TryLockError::WouldBlock))
     } else {
-        crazyagent_win_sandbox::private::lock(file)
-            .map_err(|error| error.raw_os_error() == Some(LOCK_VIOLATION))
+        private::lock(file).map_err(|error| error.raw_os_error() == Some(LOCK_VIOLATION))
     };
-    taken.map_err(|busy| failure(if busy { IN_USE } else { LOCK_UNAVAILABLE }))
+    taken.map_err(|busy| {
+        if busy {
+            HeldError::InUse
+        } else {
+            HeldError::Unavailable
+        }
+    })
 }
-
-/// The Windows error a lock held by another handle gives, `ERROR_LOCK_VIOLATION`.
-#[cfg(windows)]
-const LOCK_VIOLATION: i32 = 33;
 
 /// Releases a lock this handle took, now and not at the handle's close. A failed release
 /// is not reported: the lock still ends when the handle closes, as the custody guards'
 /// own unlocks already do on Unix. Input: the file.
-pub(super) fn unlock(file: &File) {
+pub(crate) fn unlock(file: &File) {
     #[cfg(unix)]
     let _ = rustix::fs::flock(file, rustix::fs::FlockOperation::Unlock);
     #[cfg(windows)]
-    let _ = crazyagent_win_sandbox::private::unlock(file);
+    let _ = private::unlock(file);
 }
 
 #[cfg(test)]

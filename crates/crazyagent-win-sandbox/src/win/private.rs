@@ -6,18 +6,31 @@ use crate::private::{
     Facts, Store, judge, judge_folder, judge_store_before_label, label_list, list,
     secret_file_label,
 };
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
+use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+use windows_sys::Wdk::Storage::FileSystem::{
+    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT,
+    FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
+};
+use windows_sys::Wdk::Storage::FileSystem::{
+    FILE_RENAME_INFORMATION, FILE_RENAME_POSIX_SEMANTICS, FILE_RENAME_REPLACE_IF_EXISTS,
+    FileRenameInformationEx, NtSetInformationFile,
+};
+use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
 use windows_sys::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, ERROR_LOCK_VIOLATION, ERROR_NO_MORE_FILES, ERROR_SUCCESS, GENERIC_READ,
     GENERIC_WRITE, INVALID_HANDLE_VALUE,
 };
+use windows_sys::Win32::Foundation::{OBJ_CASE_INSENSITIVE, UNICODE_STRING};
 use windows_sys::Win32::Security::Authorization::{
     GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo,
 };
+use windows_sys::Win32::Security::SE_DACL_PRESENT;
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, InitializeSecurityDescriptor, LABEL_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
@@ -35,7 +48,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, OPEN_EXISTING, READ_CONTROL, SetFileInformationByHandle,
     UnlockFileEx, WRITE_DAC, WRITE_OWNER,
 };
-use windows_sys::Win32::System::IO::OVERLAPPED;
+use windows_sys::Win32::Storage::FileSystem::{FILE_TRAVERSE, SYNCHRONIZE};
+use windows_sys::Win32::System::IO::{IO_STATUS_BLOCK, OVERLAPPED};
 use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
 
 const REMOTE_PREFIX: &str = r"\Device\Mup\";
@@ -52,7 +66,7 @@ pub fn user_sid() -> io::Result<Vec<u8>> {
 /// delete, so the folder cannot be renamed while it is held. Input: the absolute path.
 /// Output: the held folder, or why it is not private.
 pub fn dir(path: &Path) -> io::Result<File> {
-    made_dir(path, None, false)
+    made_dir(path, None, false, 0)
 }
 
 /// Makes the private folder at `path` as [`dir`] does, but only when nothing is there yet:
@@ -60,7 +74,7 @@ pub fn dir(path: &Path) -> io::Result<File> {
 /// `mkdirat` (rv-sec3 #716 C2). Input: the absolute path. Output: the held new folder, or
 /// the error.
 pub fn new_dir(path: &Path) -> io::Result<File> {
-    made_dir(path, None, true)
+    made_dir(path, None, true, 0)
 }
 
 /// Opens the private folder at `path` as [`dir`] holds one, but never creates it: a missing
@@ -68,11 +82,19 @@ pub fn new_dir(path: &Path) -> io::Result<File> {
 /// that only opens never makes a folder in a race. Input: the absolute path. Output: the
 /// held folder, or why it is missing or not private.
 pub fn open_dir(path: &Path) -> io::Result<File> {
+    opened_dir(path, 0)
+}
+
+/// The work of [`open_dir`] and of [`dir_deletable`] without `create`. Inputs: the absolute
+/// path and the access added to listing, read-control and attributes. Output: the held
+/// folder, or why it is missing or not private.
+fn opened_dir(path: &Path, extra: u32) -> io::Result<File> {
+    assert!(extra == 0 || extra == DELETE);
     let user = user_sid()?;
     let name = wide_path(path)?;
     let folder = open(
         &name,
-        FILE_LIST_DIRECTORY | READ_CONTROL | FILE_READ_ATTRIBUTES,
+        FILE_LIST_DIRECTORY | READ_CONTROL | FILE_READ_ATTRIBUTES | extra,
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS,
         None,
@@ -81,22 +103,35 @@ pub fn open_dir(path: &Path) -> io::Result<File> {
     Ok(folder)
 }
 
+/// Holds the private folder at `path` as [`new_dir`] makes one (`create`) or [`open_dir`]
+/// opens one, its handle also carrying delete access, so the holder renames it through that
+/// handle with [`rename`] (DESIGN-0601 R4); delete is never shared. Inputs: the absolute
+/// path and whether to create. Output: the held folder, or the error.
+pub fn dir_deletable(path: &Path, create: bool) -> io::Result<File> {
+    if create {
+        made_dir(path, None, true, DELETE)
+    } else {
+        opened_dir(path, DELETE)
+    }
+}
+
 /// Opens a secret store folder or the database folder at `path` as [`dir`] does, with that
 /// store's label of [`label_list`]: a new folder is made with it, and one already there
 /// takes it once judged private, whatever made it first (#524 r3, leader 06:32), an earlier
 /// build's weaker label included, and so do the files in it (V244-WIN-STORE-LABEL-NX).
 /// Inputs: the absolute path and the store. Output: the held folder, or why it is not private.
 pub fn store_dir(path: &Path, store: Store) -> io::Result<File> {
-    made_dir(path, Some(store), false)
+    made_dir(path, Some(store), false, 0)
 }
 
 /// The work of [`dir`] and [`store_dir`]: creates the folder when missing, with the store's
 /// label when one is named, then opens it. A store folder is judged by
 /// [`judge_store_before_label`] and given its label before the full judge. Inputs: the
-/// absolute path, the store, if any, and whether an entry already there is refused. Output:
-/// the held folder, or why it is not private.
-fn made_dir(path: &Path, store: Option<Store>, fresh: bool) -> io::Result<File> {
+/// absolute path, the store, if any, whether an entry already there is refused, and the
+/// access added to the held handle. Output: the held folder, or why it is not private.
+fn made_dir(path: &Path, store: Option<Store>, fresh: bool, extra: u32) -> io::Result<File> {
     assert!(!fresh || store.is_none());
+    assert!(extra == 0 || (extra == DELETE && fresh));
     let user = user_sid()?;
     let name = wide_path(path)?;
     let mut planned = Planned::new(&user, true, store.map(label_list))?;
@@ -110,7 +145,7 @@ fn made_dir(path: &Path, store: Option<Store>, fresh: bool) -> io::Result<File> 
     let relabel = if store.is_some() { WRITE_OWNER } else { 0 };
     let folder = open(
         &name,
-        FILE_LIST_DIRECTORY | READ_CONTROL | FILE_READ_ATTRIBUTES | relabel,
+        FILE_LIST_DIRECTORY | READ_CONTROL | FILE_READ_ATTRIBUTES | relabel | extra,
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS,
         None,
@@ -263,6 +298,21 @@ fn holds_entries(folder: &File) -> io::Result<bool> {
 /// of [`list`]; without it, it must exist. Inputs: the absolute path and whether to create.
 /// Output: the open file, `AlreadyExists` on a second create, or why it is not private.
 pub fn file(path: &Path, create: bool) -> io::Result<File> {
+    private_file(path, create, 0)
+}
+
+/// Opens the private file at `path` as [`file`] does, its handle also carrying delete access
+/// from the first open, so the holder renames it through that handle with [`rename`]
+/// (DESIGN-0601 R2, R3); delete is never shared, so no other open moves it. Inputs: the
+/// absolute path and whether to create. Output: the open file, or the error.
+pub fn file_deletable(path: &Path, create: bool) -> io::Result<File> {
+    private_file(path, create, DELETE)
+}
+
+/// The work of [`file`] and [`file_deletable`]. Inputs: the absolute path, whether to create
+/// and the access added to read, write and read-control. Output: the open file, or the error.
+fn private_file(path: &Path, create: bool, extra: u32) -> io::Result<File> {
+    assert!(extra == 0 || extra == DELETE);
     let user = user_sid()?;
     let name = wide_path(path)?;
     let mut planned = if create {
@@ -273,7 +323,7 @@ pub fn file(path: &Path, create: bool) -> io::Result<File> {
     let disposition = if create { CREATE_NEW } else { OPEN_EXISTING };
     let opened = open(
         &name,
-        GENERIC_READ | GENERIC_WRITE | READ_CONTROL,
+        GENERIC_READ | GENERIC_WRITE | READ_CONTROL | extra,
         disposition,
         0,
         planned.as_mut(),
@@ -349,6 +399,26 @@ pub fn read_only(path: &Path) -> io::Result<File> {
     Ok(opened)
 }
 
+/// Opens the private file at `path` for reading only, judged as [`read_only`] does, but
+/// sharing delete, so a [`rename`] with [`Mode::Replace`] takes its name while this handle
+/// keeps the old bytes (DESIGN-0601 R2; rv-sec3 #726 L2 names its only callers: custody's
+/// `identity.json`, `config.json` and agent copy). Input: the absolute path. Output: the
+/// open file, or why it is not private.
+pub fn read_only_replaceable(path: &Path) -> io::Result<File> {
+    let user = user_sid()?;
+    let name = wide_path(path)?;
+    let opened = open_sharing(
+        &name,
+        GENERIC_READ | READ_CONTROL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        OPEN_EXISTING,
+        0,
+        None,
+    )?;
+    private_as(&opened, &user, false)?;
+    Ok(opened)
+}
+
 /// The identity a store pins for an open private object: its volume serial number and its
 /// 64-bit file id, the twin of Unix `(dev, ino)`. A file id that needs all 128 bits, as on
 /// ReFS, is refused, so two files never share one identity. Input: the handle. Output: the
@@ -391,6 +461,189 @@ pub fn delete(file: &File) -> io::Result<()> {
     if marked == 0 {
         return Err(io::Error::last_os_error());
     }
+    Ok(())
+}
+
+/// How [`rename`] meets an entry already at the destination name (DESIGN-0601 R2, R5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// Refuses it with `ERROR_ALREADY_EXISTS`, the twin of `renameat2(.., RENAME_NOREPLACE)`.
+    NoReplace,
+    /// Takes its name with POSIX semantics, the twin of `renameat` over an existing name; an
+    /// entry another handle holds without sharing delete refuses it.
+    Replace,
+}
+
+/// Renames what a held handle names to `name` in the held folder `folder`, never by a path,
+/// the twin of `renameat2` (rv-sec3 #716 C6, #726 L5), through `NtSetInformationFile`: the
+/// kernel32 call refuses a held folder with error 87. The handle carries delete access from
+/// its own open; no fallback. The name must be UTF-8 and pass [`crate::name::refused`].
+/// Inputs: the handle, folder, one name and the [`Mode`]. Output: Ok, or the error.
+pub fn rename(file: &File, folder: &File, name: &OsStr, mode: Mode) -> io::Result<()> {
+    let units: Vec<u16> = name.encode_wide().collect();
+    assert!(!units.is_empty());
+    assert!(units.len() <= 255);
+    let text = name.to_str();
+    assert!(text.is_some(), "{name:?}");
+    assert!(!text.is_some_and(crate::name::refused), "{name:?}");
+    let flags = match mode {
+        Mode::NoReplace => 0,
+        Mode::Replace => FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS,
+    };
+    let length = size_of_val(units.as_slice());
+    let size = size_of::<FILE_RENAME_INFORMATION>() + length;
+    assert!(std::mem::offset_of!(FILE_RENAME_INFORMATION, FileName) + length < size);
+    let mut words = vec![0u64; size.div_ceil(size_of::<u64>())];
+    let info = words.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+    assert!(info.is_aligned());
+    unsafe {
+        (*info).Anonymous.Flags = flags;
+        (*info).RootDirectory = folder.as_raw_handle();
+        (*info).FileNameLength = u32::try_from(length).expect("a name fits");
+        std::ptr::copy_nonoverlapping(
+            units.as_ptr(),
+            (&raw mut (*info).FileName).cast::<u16>(),
+            units.len(),
+        );
+    }
+    let mut status_block = IO_STATUS_BLOCK::default();
+    let status = unsafe {
+        NtSetInformationFile(
+            file.as_raw_handle(),
+            &mut status_block,
+            info.cast(),
+            u32::try_from(size).expect("a name fits"),
+            FileRenameInformationEx,
+        )
+    };
+    if status < 0 {
+        return Err(code(unsafe { RtlNtStatusToDosError(status) }));
+    }
+    Ok(())
+}
+
+/// What [`create_under`] makes, and with which access list (W3-5 D6, rv-sec2 RULING-15:12).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Create {
+    /// A folder of a lease worktree, held to make the entries below it, its list inherited
+    /// so a grant on the lease reaches it.
+    Folder,
+    /// A file of a lease worktree, held with delete access so its holder can [`rename`] it,
+    /// its list inherited so a grant on the lease reaches it.
+    File,
+    /// A file no agent may reach, as in the repository's own folders, held with delete
+    /// access and created with W1's protected private list.
+    PrivateFile,
+}
+
+/// Makes the new entry `name` in the held folder `folder`, never by a path, the twin of
+/// `openat(.., O_CREAT | O_EXCL | O_NOFOLLOW)` (W3-5 D6, rv-sec2 #742 D6-3): NtCreateFile
+/// relative to the folder, a create only, case-insensitive, never following a reparse point,
+/// sharing no delete. The user is its owner; its list is inherited, or W1's protected
+/// private list for [`Create::PrivateFile`]; it is judged private before it is returned.
+/// Inputs: the held folder, one name and the kind. Output: the held entry, or the error;
+/// a name already there is `ERROR_ALREADY_EXISTS`.
+pub fn create_under(folder: &File, name: &OsStr, kind: Create) -> io::Result<File> {
+    let units = one_component(name);
+    let user = user_sid()?;
+    let is_folder = kind == Create::Folder;
+    let mut owner = Words::from_bytes(&user);
+    let mut bare = SECURITY_DESCRIPTOR::default();
+    let planned = match kind {
+        Create::PrivateFile => Some(Planned::new(&user, false, None)?),
+        Create::Folder | Create::File => {
+            owner_only(&mut bare, &mut owner)?;
+            None
+        }
+    };
+    let descriptor: *const SECURITY_DESCRIPTOR = planned
+        .as_ref()
+        .map_or(&raw const bare, |planned| &raw const planned.descriptor);
+    let length = u16::try_from(size_of_val(units.as_slice())).expect("a name fits");
+    let object = UNICODE_STRING {
+        Length: length,
+        MaximumLength: length,
+        Buffer: units.as_ptr().cast_mut(),
+    };
+    let attributes = OBJECT_ATTRIBUTES {
+        Length: u32::try_from(size_of::<OBJECT_ATTRIBUTES>()).expect("the size fits"),
+        RootDirectory: folder.as_raw_handle(),
+        ObjectName: &raw const object,
+        Attributes: OBJ_CASE_INSENSITIVE,
+        SecurityDescriptor: descriptor,
+        SecurityQualityOfService: std::ptr::null(),
+    };
+    let (access, shape) = if is_folder {
+        (
+            FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+            FILE_DIRECTORY_FILE,
+        )
+    } else {
+        (
+            GENERIC_READ | GENERIC_WRITE | READ_CONTROL | DELETE | SYNCHRONIZE,
+            FILE_NON_DIRECTORY_FILE,
+        )
+    };
+    let mut handle = std::ptr::null_mut();
+    let mut status_block = IO_STATUS_BLOCK::default();
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            access,
+            &attributes,
+            &mut status_block,
+            std::ptr::null(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_CREATE,
+            shape | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if status < 0 {
+        return Err(code(unsafe { RtlNtStatusToDosError(status) }));
+    }
+    assert!(!handle.is_null());
+    let made = unsafe { File::from_raw_handle(handle) };
+    let facts = shaped(&made, is_folder)?;
+    judged(&facts, &user, is_folder)?;
+    if facts.owner != user {
+        return Err(refused("a made entry is not owned by the user"));
+    }
+    Ok(made)
+}
+
+/// The UTF-16 units of a name `create_under` may make: text the one name rule
+/// [`crate::name::refused`] passes, as [`rename`] asserts. Callers refuse other names
+/// first. Input: the name. Output: the units.
+fn one_component(name: &OsStr) -> Vec<u16> {
+    let units: Vec<u16> = name.encode_wide().collect();
+    assert!(!units.is_empty());
+    assert!(units.len() <= 255);
+    let text = name.to_str();
+    assert!(text.is_some(), "{name:?}");
+    assert!(!text.is_some_and(crate::name::refused), "{name:?}");
+    units
+}
+
+/// Fills a descriptor that names only an owner: no access list present and none protected,
+/// so the entry made with it inherits its folder's list (rv-sec2 RULING-15:12). Inputs: the
+/// descriptor and the owner's SID words, both outliving the create. Output: Ok, or the error.
+fn owner_only(descriptor: &mut SECURITY_DESCRIPTOR, owner: &mut Words) -> io::Result<()> {
+    let raw: PSECURITY_DESCRIPTOR = (&raw mut *descriptor).cast();
+    let sid: PSID = owner.words.as_mut_ptr().cast();
+    let built = unsafe {
+        InitializeSecurityDescriptor(raw, SECURITY_DESCRIPTOR_REVISION) != 0
+            && SetSecurityDescriptorOwner(raw, sid, 0) != 0
+    };
+    if !built {
+        return Err(io::Error::last_os_error());
+    }
+    assert_eq!(
+        descriptor.Control & (SE_DACL_PRESENT | SE_DACL_PROTECTED),
+        0
+    );
     Ok(())
 }
 
