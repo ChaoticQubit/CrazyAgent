@@ -1,5 +1,5 @@
 use super::screen::{Cursor, Frame, Preedit, Span};
-use super::style::{FaceEm, FontSource, Style, Theme, cell_px};
+use super::style::{FaceEm, FontSource, JETBRAINS_MONO, Style, Theme, cell_px};
 use alacritty_terminal::vte::ansi::{CursorShape, Rgb};
 use glyphon::cosmic_text::{FeatureTag, FontFeatures};
 use glyphon::{
@@ -7,9 +7,11 @@ use glyphon::{
     Style as FontStyle, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
     Weight, Wrap, fontdb,
 };
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use std::collections::HashMap;
+#[cfg(target_os = "macos")]
 use std::ffi::c_void;
-use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,11 +23,49 @@ pub const GPU_FAULT: &str = "native_terminal_gpu";
 /// The fallback font files loaded beside the style's family, a fixed set instead of every
 /// system font, to keep memory small; Apple Color Emoji is the only system font with
 /// U+23FA, the bullet Claude Code prints. A missing fallback only leaves its glyphs blank.
-const FALLBACK_PATHS: [&str; 3] = [
-    "/System/Library/Fonts/Apple Symbols.ttf",
-    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-    "/System/Library/Fonts/Apple Color Emoji.ttc",
+#[cfg(target_os = "macos")]
+const FALLBACKS: [FontSource; 3] = [
+    FontSource::File("/System/Library/Fonts/Apple Symbols.ttf"),
+    FontSource::File("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
+    FontSource::File("/System/Library/Fonts/Apple Color Emoji.ttc"),
 ];
+
+/// The fallback font files on Linux: DejaVu Sans for symbols, Noto Color Emoji and Noto
+/// Sans CJK, each where Debian and Ubuntu, Fedora and Arch install it. A missing file only
+/// leaves its glyphs blank.
+#[cfg(target_os = "linux")]
+const FALLBACKS: [FontSource; 9] = [
+    FontSource::File("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+    FontSource::File("/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"),
+    FontSource::File("/usr/share/fonts/TTF/DejaVuSans.ttf"),
+    FontSource::File("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"),
+    FontSource::File("/usr/share/fonts/google-noto-color-emoji-fonts/Noto-COLRv1.ttf"),
+    FontSource::File("/usr/share/fonts/noto/NotoColorEmoji.ttf"),
+    FontSource::File("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+    FontSource::File("/usr/share/fonts/google-noto-sans-cjk-fonts/NotoSansCJK-Regular.ttc"),
+    FontSource::File("/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc"),
+];
+
+/// The fallback font files on Windows, in its fonts folder: Segoe UI Symbol and Segoe UI
+/// Emoji. A missing file only leaves its glyphs blank.
+#[cfg(windows)]
+const FALLBACKS: [FontSource; 2] = [
+    FontSource::Fonts("seguisym.ttf"),
+    FontSource::Fonts("seguiemj.ttf"),
+];
+
+/// The wgpu backends the native views draw with on macOS.
+#[cfg(target_os = "macos")]
+const BACKENDS: wgpu::Backends = wgpu::Backends::METAL;
+
+/// The wgpu backends on Linux: Vulkan and GL. wgpu ranks the adapters that can present by
+/// device type, a hardware GPU before a software one, and Vulkan before GL on the same type.
+#[cfg(target_os = "linux")]
+const BACKENDS: wgpu::Backends = wgpu::Backends::VULKAN.union(wgpu::Backends::GL);
+
+/// The wgpu backends on Windows: DX12, with the adapter left to wgpu.
+#[cfg(windows)]
+const BACKENDS: wgpu::Backends = wgpu::Backends::DX12;
 
 /// The most background rectangles one frame draws.
 const RECTS_MAX: usize = 1 << 16;
@@ -109,7 +149,7 @@ pub struct Shared {
     generation: u64,
 }
 
-/// One native view's own drawing state: its Metal surface, glyph atlas, shaped rows (of the
+/// One native view's own drawing state: its wgpu surface, glyph atlas, shaped rows (of the
 /// style generation they were shaped in), rectangle buffers, and the lost flag of the
 /// device they were all made on.
 pub struct Surface {
@@ -167,13 +207,20 @@ fn linear_rgba(color: Rgb, alpha: f32) -> [f32; 4] {
     ]
 }
 
-fn load_fallbacks() -> FontSystem {
+/// Loads the fallback font files that are present, then the four built-in JetBrains Mono
+/// faces last, so a span of any style and weight has a face even with no system font:
+/// cosmic-text panics while shaping a span no loaded face matches. Input: the files.
+/// Output: the font system.
+fn load_fallbacks(files: &[FontSource]) -> FontSystem {
     let mut db = fontdb::Database::new();
-    for path in FALLBACK_PATHS {
-        if Path::new(path).is_file() && db.load_font_file(path).is_err() {
+    for path in files.iter().filter_map(FontSource::file) {
+        if path.is_file() && db.load_font_file(&path).is_err() {
             continue;
         }
     }
+    let before = db.len();
+    load(&mut db, FontSource::Built(&JETBRAINS_MONO)).expect("the built-in faces load");
+    assert_eq!(db.len(), before + JETBRAINS_MONO.len());
     FontSystem::new_with_locale_and_db("en-US".into(), db)
 }
 
@@ -196,7 +243,6 @@ fn load(db: &mut fontdb::Database, source: FontSource) -> Result<(), &'static st
     let invalid = "native_terminal_style_invalid";
     let before = db.len();
     match source {
-        FontSource::File(path) => db.load_font_file(path).map_err(|_| invalid)?,
         FontSource::Built(faces) => {
             for face in faces {
                 let face: &'static [u8] = face;
@@ -207,6 +253,10 @@ fn load(db: &mut fontdb::Database, source: FontSource) -> Result<(), &'static st
                     return Err(invalid);
                 }
             }
+        }
+        system => {
+            let path = system.file().ok_or(invalid)?;
+            db.load_font_file(path).map_err(|_| invalid)?;
         }
     }
     if db.len() == before {
@@ -385,16 +435,16 @@ impl Shared {
     /// surface. Inputs: the display's backing scale and the style. Output: the shared state,
     /// or `native_terminal_style_invalid` when the style's font cannot be loaded.
     pub fn new(scale: f32, style: &Style) -> Result<Shared, &'static str> {
-        assert!((1.0..=4.0).contains(&scale), "a Mac backing scale");
+        assert!((1.0..=4.0).contains(&scale), "a display backing scale");
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::METAL,
+            backends: BACKENDS,
             ..Default::default()
         });
         let mut shared = Shared {
             instance,
             device: None,
             attempts_left: None,
-            fonts: load_fallbacks(),
+            fonts: load_fallbacks(&FALLBACKS),
             swash: SwashCache::new(),
             scale,
             family: String::new(),
@@ -440,24 +490,38 @@ impl Shared {
         )
     }
 
-    /// Makes one view's surface on its NSView, sized in physical pixels, Fifo present mode and
-    /// a frame latency of one. Inputs: the NSView pointer, width and height. Output: the
-    /// surface, or the setup error.
-    pub fn surface(
+    /// Makes one view's surface on its NSView through `surface_raw`. Safety: `view` must
+    /// point to a live NSView that outlives the returned surface. Inputs: the NSView pointer,
+    /// width and height. Output: the surface, or the setup error.
+    #[cfg(target_os = "macos")]
+    pub unsafe fn surface(
         &mut self,
         view: *mut c_void,
         width: u32,
         height: u32,
     ) -> Result<Surface, String> {
         let pointer = NonNull::new(view).ok_or("null NSView")?;
-        let handle = raw_window_handle::AppKitWindowHandle::new(pointer);
+        let display = RawDisplayHandle::AppKit(raw_window_handle::AppKitDisplayHandle::new());
+        let window = RawWindowHandle::AppKit(raw_window_handle::AppKitWindowHandle::new(pointer));
+        unsafe { self.surface_raw(display, window, width, height) }
+    }
+
+    /// Makes one view's surface on a native window, sized in physical pixels, Fifo present
+    /// mode and a frame latency of one. Safety: both handles must name a live display and
+    /// window that outlive the returned surface. Inputs: the handles, width and height.
+    /// Output: the surface, or the setup error.
+    pub unsafe fn surface_raw(
+        &mut self,
+        display: RawDisplayHandle,
+        window: RawWindowHandle,
+        width: u32,
+        height: u32,
+    ) -> Result<Surface, String> {
         let target = wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: raw_window_handle::RawDisplayHandle::AppKit(
-                raw_window_handle::AppKitDisplayHandle::new(),
-            ),
-            raw_window_handle: raw_window_handle::RawWindowHandle::AppKit(handle),
+            raw_display_handle: display,
+            raw_window_handle: window,
         };
-        self.surface_on(target, width, height)
+        unsafe { self.surface_on(target, width, height) }
     }
 
     /// The device a new surface is made on: the held one, or after a loss a fresh one while
@@ -489,11 +553,11 @@ impl Shared {
             .expect("a device once device_for succeeded"))
     }
 
-    /// Makes one view's surface on a surface target that outlives it: the device on the
-    /// first, or a fresh one after a loss, then the configure and the view's drawing state.
-    /// Inputs: the target, width and height in physical pixels. Output: the surface, or
-    /// the setup error.
-    fn surface_on(
+    /// Makes one view's surface on a surface target: the device on the first, or a fresh
+    /// one after a loss, then the configure and the view's drawing state. Safety: the target
+    /// must name a live layer or window that outlives the returned surface. Inputs: the
+    /// target, width and height in physical pixels. Output: the surface, or the setup error.
+    unsafe fn surface_on(
         &mut self,
         target: wgpu::SurfaceTargetUnsafe,
         width: u32,
@@ -1057,6 +1121,7 @@ mod tests {
 
     /// A bare CAMetalLayer: a surface target a row can draw on off the main thread, where
     /// an NSView target cannot be made. Output: the layer, which must outlive its surface.
+    #[cfg(target_os = "macos")]
     fn metal_layer() -> objc2::rc::Retained<objc2::runtime::AnyObject> {
         let class = objc2::runtime::AnyClass::get(c"CAMetalLayer").expect("QuartzCore loaded");
         let layer: objc2::rc::Retained<objc2::runtime::AnyObject> =
@@ -1065,12 +1130,14 @@ mod tests {
     }
 
     /// The surface target for a layer. Input: the layer. Output: the target.
+    #[cfg(target_os = "macos")]
     fn on_layer(layer: &objc2::runtime::AnyObject) -> wgpu::SurfaceTargetUnsafe {
         let pointer: *const objc2::runtime::AnyObject = layer;
         wgpu::SurfaceTargetUnsafe::CoreAnimationLayer(pointer.cast_mut().cast())
     }
 
     /// A one-row frame of text. Input: the text. Output: the frame.
+    #[cfg(target_os = "macos")]
     fn frame_of(text: &str) -> Frame {
         Frame {
             rows: vec![vec![span(text, 0, false)]],
@@ -1084,6 +1151,7 @@ mod tests {
     /// Loses a shared renderer's device as a GPU reset would: destroys it, then polls so
     /// wgpu runs its device-lost callback (wgpu-core resource.rs:561-575). Input: the
     /// renderer, with a device.
+    #[cfg(target_os = "macos")]
     fn lose(shared: &Shared) {
         let set = shared.device.as_ref().expect("a device");
         set.device.destroy();
@@ -1096,13 +1164,13 @@ mod tests {
     /// work. Its 200 glyphs overflow glyphon's first 4096-byte vertex buffer, so without the
     /// guard glyphon maps a new buffer on the lost device, which wgpu 25 panics on
     /// (V243-NATIVE-PRESENT-FATAL).
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_frame_on_a_lost_device_reports_the_gpu_code_before_glyphon_maps_a_buffer() {
         let mut shared = shared_at(2.0);
         let layer = metal_layer();
-        let mut surface = shared
-            .surface_on(on_layer(&layer), 4096, 128)
-            .expect("a surface");
+        let mut surface =
+            unsafe { shared.surface_on(on_layer(&layer), 4096, 128) }.expect("a surface");
         shared
             .draw(&mut surface, &frame_of("before"))
             .expect("drawn before the loss");
@@ -1123,13 +1191,12 @@ mod tests {
     /// A frame acquired before the device is lost is never presented, since present on a
     /// lost device panics in wgpu 25: the call reports `native_terminal_gpu`. Synthetic: no
     /// Metal call loses a device between acquire and present.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_frame_acquired_before_a_loss_is_not_presented() {
         let mut shared = shared_at(2.0);
         let layer = metal_layer();
-        let surface = shared
-            .surface_on(on_layer(&layer), 64, 64)
-            .expect("a surface");
+        let surface = unsafe { shared.surface_on(on_layer(&layer), 64, 64) }.expect("a surface");
         let output = surface.surface.get_current_texture().expect("a frame");
         lose(&shared);
         let set = shared.device.as_ref().expect("a device");
@@ -1141,13 +1208,12 @@ mod tests {
     /// A frame whose encode failed after the device was lost is never dropped as is, since
     /// the drop discards it and that panics on a lost device in wgpu 25: the call reports
     /// `native_terminal_gpu`. Synthetic, as above.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_frame_whose_encode_failed_on_a_lost_device_is_not_discarded() {
         let mut shared = shared_at(2.0);
         let layer = metal_layer();
-        let surface = shared
-            .surface_on(on_layer(&layer), 64, 64)
-            .expect("a surface");
+        let surface = unsafe { shared.surface_on(on_layer(&layer), 64, 64) }.expect("a surface");
         let output = surface.surface.get_current_texture().expect("a frame");
         lose(&shared);
         let set = shared.device.as_ref().expect("a device");
@@ -1160,13 +1226,12 @@ mod tests {
     /// A view made after the device is lost draws on a fresh device, so Open again brings
     /// the terminal back (V243-NATIVE-DEVICE-REPLACE). With `--nocapture` it prints how
     /// long making that view took, the fresh device included.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_view_made_after_a_loss_draws_on_a_fresh_device() {
         let mut shared = shared_at(2.0);
         let layer = metal_layer();
-        let mut old = shared
-            .surface_on(on_layer(&layer), 64, 64)
-            .expect("a surface");
+        let mut old = unsafe { shared.surface_on(on_layer(&layer), 64, 64) }.expect("a surface");
         lose(&shared);
         assert_eq!(
             shared.draw(&mut old, &frame_of("a")),
@@ -1174,7 +1239,7 @@ mod tests {
         );
         let fresh = metal_layer();
         let started = std::time::Instant::now();
-        let made = shared.surface_on(on_layer(&fresh), 64, 64);
+        let made = unsafe { shared.surface_on(on_layer(&fresh), 64, 64) };
         eprintln!("a view after a loss made in {:?}", started.elapsed());
         let mut new = made.expect("a surface on a fresh device");
         assert_eq!(shared.draw(&mut new, &frame_of("b")), Ok(()));
@@ -1187,17 +1252,15 @@ mod tests {
     /// report `native_terminal_gpu` with no GPU work, and dropping it leaves the fresh view
     /// drawing. Without its own lost flag, the resize configures it onto the fresh device
     /// and its draw raises device-mismatch errors there (probe 5aedcf53d).
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_view_from_the_lost_device_never_moves_to_the_new_one() {
         let mut shared = shared_at(2.0);
         let layer = metal_layer();
-        let mut old = shared
-            .surface_on(on_layer(&layer), 64, 64)
-            .expect("a surface");
+        let mut old = unsafe { shared.surface_on(on_layer(&layer), 64, 64) }.expect("a surface");
         lose(&shared);
         let fresh = metal_layer();
-        let mut new = shared
-            .surface_on(on_layer(&fresh), 64, 64)
+        let mut new = unsafe { shared.surface_on(on_layer(&fresh), 64, 64) }
             .expect("a surface on a fresh device");
         assert_eq!(shared.resize(&mut old, 128, 96), Err(GPU_FAULT));
         assert_eq!((old.config.width, old.config.height), (64, 64));
@@ -1214,20 +1277,21 @@ mod tests {
     /// Device attempts after a loss stop at the budget: each loss within it gets a fresh
     /// device, and the next one ends the new view with `native_terminal_gpu` without
     /// asking wgpu for another device.
+    #[cfg(target_os = "macos")]
     #[test]
     fn device_attempts_after_a_loss_stop_at_the_budget() {
         let mut shared = shared_at(2.0);
         let rounds = DEVICE_REPLACE_MAX as usize;
         let layers: Vec<_> = (0..rounds + 2).map(|_| metal_layer()).collect();
-        let first = shared.surface_on(on_layer(&layers[0]), 64, 64);
+        let first = unsafe { shared.surface_on(on_layer(&layers[0]), 64, 64) };
         let mut views = vec![first.expect("a surface")];
         for layer in &layers[1..=rounds] {
             lose(&shared);
-            let made = shared.surface_on(on_layer(layer), 64, 64);
+            let made = unsafe { shared.surface_on(on_layer(layer), 64, 64) };
             views.push(made.expect("a fresh device within the budget"));
         }
         lose(&shared);
-        let refused = shared.surface_on(on_layer(&layers[rounds + 1]), 64, 64);
+        let refused = unsafe { shared.surface_on(on_layer(&layers[rounds + 1]), 64, 64) };
         assert_eq!(refused.err(), Some(GPU_FAULT.to_owned()));
         assert!(shared.device.is_none());
         drop(views);
@@ -1237,17 +1301,15 @@ mod tests {
     /// A surface drawn by a renderer other than the one whose device made it is a
     /// programmer error: the host draws a view with the renderer of the scale it was made
     /// at (host:1148-1163, :1216), so the draw asserts it instead of mixing two devices.
+    #[cfg(target_os = "macos")]
     #[test]
     #[should_panic(expected = "a surface drawn by the renderer that made it")]
     fn a_surface_drawn_by_another_renderer_trips_the_device_assert() {
         let mut maker = shared_at(2.0);
         let mut other = shared_at(2.0);
         let (layer, second) = (metal_layer(), metal_layer());
-        let mut surface = maker
-            .surface_on(on_layer(&layer), 64, 64)
-            .expect("a surface");
-        let _held = other
-            .surface_on(on_layer(&second), 64, 64)
+        let mut surface = unsafe { maker.surface_on(on_layer(&layer), 64, 64) }.expect("a surface");
+        let _held = unsafe { other.surface_on(on_layer(&second), 64, 64) }
             .expect("a device for the other renderer");
         let _ = other.draw(&mut surface, &frame_of("a"));
     }
@@ -1256,13 +1318,13 @@ mod tests {
     /// (a window across two 6K displays is 12032 px; Apple GPUs allow 16384), configures
     /// at that full width and draws: the device asks the adapter's limits (#569). A GPU
     /// whose side is not past 8192 prints why the row skipped and passes.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_surface_past_the_default_texture_limit_configures_at_full_width_and_draws() {
         let mut shared = shared_at(2.0);
         let layer = metal_layer();
-        let mut surface = shared
-            .surface_on(on_layer(&layer), 64, 64)
-            .expect("a surface");
+        let mut surface =
+            unsafe { shared.surface_on(on_layer(&layer), 64, 64) }.expect("a surface");
         let default_max = wgpu::Limits::default().max_texture_dimension_2d;
         assert_eq!(default_max, 8192, "wgpu's default largest texture side");
         let set = shared.device.as_ref().expect("a device");
@@ -1287,13 +1349,13 @@ mod tests {
 
     /// A view past the device's own largest texture side is held to it, made and resized
     /// alike, and still draws with no GPU fault, never handed to wgpu to panic on (#569).
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_surface_past_the_device_texture_limit_is_held_to_it_and_still_draws() {
         let mut shared = shared_at(2.0);
         let layer = metal_layer();
-        let mut surface = shared
-            .surface_on(on_layer(&layer), 64, 64)
-            .expect("a surface");
+        let mut surface =
+            unsafe { shared.surface_on(on_layer(&layer), 64, 64) }.expect("a surface");
         let side_max = shared
             .device
             .as_ref()
@@ -1312,8 +1374,7 @@ mod tests {
             .draw(&mut surface, &frame_of("held"))
             .expect("drawn at the held size, no fault");
         let tall = metal_layer();
-        let made = shared
-            .surface_on(on_layer(&tall), 64, side_max * 2)
+        let made = unsafe { shared.surface_on(on_layer(&tall), 64, side_max * 2) }
             .expect("a surface made past the limit");
         assert_eq!((made.config.width, made.config.height), (64, side_max));
         drop((surface, made));
@@ -1323,13 +1384,13 @@ mod tests {
     /// A GPU validation error never panics: the device's handler records it, and the next
     /// render call for a view reports `native_terminal_gpu` so the host ends that view; the
     /// call after it draws again (#569).
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_gpu_validation_error_is_reported_as_the_gpu_code_not_a_panic() {
         let mut shared = shared_at(2.0);
         let layer = metal_layer();
-        let mut surface = shared
-            .surface_on(on_layer(&layer), 64, 64)
-            .expect("a surface");
+        let mut surface =
+            unsafe { shared.surface_on(on_layer(&layer), 64, 64) }.expect("a surface");
         let set = shared.device.as_ref().expect("a device");
         let side = set.device.limits().max_texture_dimension_2d + 1;
         let _texture = set.device.create_texture(&wgpu::TextureDescriptor {
@@ -1452,6 +1513,7 @@ mod tests {
         assert_eq!(cell_px(face, 13.0, 2.0), (15.0, 34.0));
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn menlo_loads_from_its_system_file() {
         let face = metrics_of("Menlo");
@@ -1480,6 +1542,76 @@ mod tests {
         let loaded = load(&mut db, FontSource::File(path));
         assert_eq!(loaded, Err("native_terminal_style_invalid"));
         assert_eq!(db.len(), 0);
+    }
+
+    #[test]
+    fn each_platform_draws_with_its_own_backends() {
+        #[cfg(target_os = "macos")]
+        assert_eq!(BACKENDS, wgpu::Backends::METAL);
+        #[cfg(target_os = "linux")]
+        assert_eq!(BACKENDS, wgpu::Backends::VULKAN | wgpu::Backends::GL);
+        #[cfg(windows)]
+        assert_eq!(BACKENDS, wgpu::Backends::DX12);
+    }
+
+    /// With no system font at all, an upright, bold, italic and bold italic span each find a
+    /// face of their own style and weight; with none, cosmic-text panics "no default font
+    /// found" while shaping, as an italic span did on DejaVu Sans Mono with no emoji font.
+    #[test]
+    fn every_style_finds_its_own_face_with_no_system_font() {
+        let mut fonts = load_fallbacks(&[]);
+        let styles = [FontStyle::Normal, FontStyle::Italic];
+        let weights = [Weight::NORMAL, Weight::BOLD];
+        let attrs = |style, weight| {
+            Attrs::new()
+                .family(Family::Name("DejaVu Sans Mono"))
+                .style(style)
+                .weight(weight)
+        };
+        for (style, weight) in styles.into_iter().flat_map(|s| weights.map(|w| (s, w))) {
+            assert!(
+                !fonts.get_font_matches(&attrs(style, weight)).is_empty(),
+                "a {style:?} {weight:?} span has a face"
+            );
+        }
+        let mut buffer = Buffer::new(&mut fonts, Metrics::new(13.0, 17.0));
+        for (style, weight) in styles.into_iter().flat_map(|s| weights.map(|w| (s, w))) {
+            buffer.set_text(&mut fonts, "ab", &attrs(style, weight), Shaping::Advanced);
+            buffer.shape_until_scroll(&mut fonts, false);
+            let ids: Vec<fontdb::ID> = buffer
+                .layout_runs()
+                .flat_map(|run| run.glyphs.iter().map(|glyph| glyph.font_id))
+                .collect();
+            assert_eq!(ids.len(), 2, "{style:?} {weight:?}");
+            for id in ids {
+                let face = fonts.db().face(id).expect("a loaded face");
+                assert_eq!((face.style, face.weight), (style, weight));
+            }
+        }
+    }
+
+    #[test]
+    fn every_present_fallback_file_loads_its_faces() {
+        let fonts = load_fallbacks(&FALLBACKS);
+        let present: Vec<std::path::PathBuf> = FALLBACKS
+            .iter()
+            .filter_map(FontSource::file)
+            .filter(|path| path.is_file())
+            .collect();
+        for path in &present {
+            let faces = fonts
+                .db()
+                .faces()
+                .filter(|face| match &face.source {
+                    fontdb::Source::File(file) | fontdb::Source::SharedFile(file, _) => {
+                        file == path
+                    }
+                    fontdb::Source::Binary(_) => false,
+                })
+                .count();
+            assert!(faces > 0, "{} loaded no face", path.display());
+        }
+        assert!(present.len() <= FALLBACKS.len());
     }
 
     #[test]
