@@ -158,9 +158,10 @@ impl Root {
     /// already exist and is held through W1 `open_dir`, so neither it nor a folder above it
     /// can be renamed while held. Then the twin of the Unix canonical check, in one walk:
     /// the held folder's real place (W1 `place`, every junction and link resolved) must be
-    /// `\\?\` plus the path, ordinal, so a junction or link anywhere on the path, a short
-    /// name or another case fails. Input: the absolute root path. Output: the held root, or
-    /// the refusal.
+    /// the path, ordinal, with `\\?\` put in front unless the path is already spelled that
+    /// way (as `std::fs::canonicalize` spells it), so a junction or link anywhere on the path,
+    /// a short name or another case fails. Input: the absolute root path. Output: the held
+    /// root, or the refusal.
     #[cfg(windows)]
     fn open(path: &Path) -> Result<Self, EngineError> {
         use crazyagent_win_sandbox::private;
@@ -170,10 +171,13 @@ impl Root {
         }
         let directory = private::open_dir(path)
             .map_err(|e| private_refusal(e, "owner_root_requires_private_owner_directory"))?;
-        let spelled: Vec<u16> = std::ffi::OsStr::new(r"\\?\")
-            .encode_wide()
-            .chain(path.as_os_str().encode_wide())
-            .collect();
+        let given: Vec<u16> = path.as_os_str().encode_wide().collect();
+        let verbatim: Vec<u16> = std::ffi::OsStr::new(r"\\?\").encode_wide().collect();
+        let spelled = if given.starts_with(&verbatim) {
+            given
+        } else {
+            verbatim.into_iter().chain(given).collect()
+        };
         if private::place(&directory).map_err(io_error)? != spelled {
             return Err(failure("owner_root_requires_canonical_trusted_path"));
         }
