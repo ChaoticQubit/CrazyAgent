@@ -1078,8 +1078,11 @@ impl AgentContext {
     /// Input: the harness id ("codex" or "claude-code"), the agent's 0700 home (its
     /// CODEX_HOME or CLAUDE_CONFIG_DIR) and the tools switch; with tools off no skill or
     /// MCP server is given. On macOS the files hold the agent's own `getconf`
-    /// ([`crate::sandbox::toolchains::write_getconf`]). Output: the guard holding the files
-    /// and the harness arguments, or `launch_home_busy` while another launch uses the home.
+    /// ([`crate::sandbox::toolchains::write_getconf`]). On Windows it is refused with
+    /// `launch_context_unavailable` once H1's check passes, before it takes the lock or
+    /// changes the home, until S9b writes its files handle-relative (CodeRabbit CR-1140).
+    /// Output: the guard holding the files and the harness arguments, or `launch_home_busy`
+    /// while another launch uses the home.
     pub fn install(
         &self,
         harness: &str,
@@ -1091,6 +1094,9 @@ impl AgentContext {
             .filter(|id| matches!(*id, "codex" | "claude-code"))
             .ok_or_else(|| failure("launch_harness_unsupported"))?;
         crate::harnesses::launch::validate_home(home)?;
+        if cfg!(windows) {
+            return Err(failure("launch_context_unavailable"));
+        }
         let lock = lock(home)?;
         let state = home.join(STATE);
         let mut installed = Installed {
@@ -1413,7 +1419,11 @@ impl Installed {
     /// Output: the guard, a `launch_account_home_*` code for a home that is no longer a
     /// private agent home, or `launch_home_busy` while another launch uses it.
     pub fn adopt(files: &InstalledFiles) -> Result<Self, LaunchError> {
+        #[cfg(windows)]
+        let held = pin(&files.home);
         crate::harnesses::launch::validate_home(&files.home)?;
+        #[cfg(windows)]
+        let _held = held?;
         let lock = lock(&files.home)?;
         Ok(Self {
             arguments: Vec::new(),
@@ -2517,11 +2527,24 @@ fn sized_json(value: &impl Serialize) -> Result<String, LaunchError> {
     })
 }
 
-/// V244-WIN-MASTER S9a r2 red stand-in for the Windows home hold: holds nothing. Input:
-/// the home, unused. Output: Ok.
+/// Holds a Windows agent home from before H1's check until its lock is taken (CodeRabbit
+/// CR-1140): read only, opened as itself rather than through a link, and without delete
+/// sharing, so neither the home nor a folder above it can be renamed or replaced while held,
+/// and the lock's by-path open reaches the folder H1 judged. A caller reports its error
+/// only after H1's check passes, so H1's codes stay first. Input: the home. Output: the held
+/// folder, or `launch_account_home_unavailable`.
 #[cfg(windows)]
-fn pin(_home: &Path) -> Result<(), LaunchError> {
-    Ok(())
+fn pin(home: &Path) -> Result<File, LaunchError> {
+    use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(home)
+        .map_err(|_| failure("launch_account_home_unavailable"))
 }
 
 /// Opens and locks the agent home's launch lock through W1 (V244-WIN-MASTER S9a): made a
@@ -2739,7 +2762,11 @@ pub(crate) fn lock_kept(metadata: &fs::Metadata) -> bool {
 /// does (CTXM1-R2-L1). Inputs: the agent's home and the harness id. Output: the lock guard,
 /// `launch_home_busy` or [`SKILLS_KEPT`].
 pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
+    #[cfg(windows)]
+    let held = pin(home);
     crate::harnesses::launch::validate_home(home)?;
+    #[cfg(windows)]
+    let _held = held?;
     let lock = lock(home)?;
     if crate::harnesses::spec(harness).is_some_and(|spec| spec.id == "codex") {
         remove_copies(home)?;
