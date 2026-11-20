@@ -1120,37 +1120,74 @@ pub(crate) fn validate_home(home: &Path) -> Result<(), LaunchError> {
     validate_home_for(home, owner.as_deref())
 }
 
-/// Checks an account home against a given owner profile folder, as [`validate_home`] does
-/// with this process's. The home is opened without following a link and without delete
-/// sharing, so it is not renamed while checked; its owner, access list and label are read
-/// from that handle. It is then compared, in its [`crate::sandbox::canonical`] spelling and
-/// ignoring letter case, with the profile folder and its `.codex` and `.claude`. Inputs:
-/// the home and the profile folder, none when unknown. Output: Ok, or a plain
-/// `launch_account_home_*` refusal code.
+/// Tells whether an account home is spelled as an absolute path on a drive, the only
+/// spelling H1 opens: a UNC share, a device name or a relative path is not. Input: the
+/// home. Output: the answer.
 #[cfg(windows)]
-fn validate_home_for(home: &Path, owner: Option<&Path>) -> Result<(), LaunchError> {
+fn on_drive(home: &Path) -> bool {
+    home.is_absolute()
+        && matches!(
+            home.components().next(),
+            Some(std::path::Component::Prefix(prefix))
+                if matches!(prefix.kind(), std::path::Prefix::Disk(_))
+        )
+}
+
+/// Holds an account home on Windows as H1's check opens it: only an absolute path on a
+/// drive, else `launch_account_home_unsafe` before anything is opened, so no share is
+/// contacted; then read only, as itself rather than through a link, and without delete
+/// sharing, so neither it nor a folder above it is renamed while held. Input: the home.
+/// Output: the held folder, `launch_account_home_unsafe` or `launch_account_home_unavailable`.
+#[cfg(windows)]
+pub(crate) fn hold_home(home: &Path) -> Result<std::fs::File, LaunchError> {
     use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
     use std::os::windows::fs::OpenOptionsExt;
     const FILE_SHARE_READ: u32 = 0x1;
     const FILE_SHARE_WRITE: u32 = 0x2;
-    let unavailable = |_: std::io::Error| failure("launch_account_home_unavailable");
-    let on_drive = matches!(
-        home.components().next(),
-        Some(std::path::Component::Prefix(prefix))
-            if matches!(prefix.kind(), std::path::Prefix::Disk(_))
-    );
-    if !home.is_absolute() || !on_drive {
+    if !on_drive(home) {
         return Err(failure("launch_account_home_unsafe"));
     }
-    let held = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
         .open(home)
-        .map_err(unavailable)?;
+        .map_err(|_| failure("launch_account_home_unavailable"))
+}
+
+/// Checks an account home a launch holds on Windows, as [`validate_home`] checks one by
+/// path, but judging the held folder itself (CodeRabbit CR-1252), so a junction above the
+/// home pointed elsewhere after the hold never makes H1 judge another folder. Inputs: the
+/// home and the folder [`hold_home`] gave for it. Output: Ok, or a plain
+/// `launch_account_home_*` refusal code.
+#[cfg(windows)]
+pub(crate) fn validate_held_home(home: &Path, held: &std::fs::File) -> Result<(), LaunchError> {
+    if !on_drive(home) {
+        return Err(failure("launch_account_home_unsafe"));
+    }
+    validate_held_for(home, held, std::env::home_dir().as_deref())
+}
+
+/// Checks a held account home against a given owner profile folder. Its kind, owner, access
+/// list and label are read from the held handle. The profile folder and its `.codex` and
+/// `.claude` are each opened and refused when they are the held folder itself, read from
+/// both handles, and also when their [`crate::sandbox::canonical`] spelling names the home,
+/// ignoring letter case. Inputs: the home, the held folder and the profile folder, none
+/// when unknown. Output: Ok, or a plain `launch_account_home_*` refusal code.
+#[cfg(windows)]
+fn validate_held_for(
+    home: &Path,
+    held: &std::fs::File,
+    owner: Option<&Path>,
+) -> Result<(), LaunchError> {
+    use crate::platform::FILE_FLAG_BACKUP_SEMANTICS;
+    use crazyagent_win_sandbox::private;
+    use std::os::windows::fs::OpenOptionsExt;
+    let unavailable = |_: std::io::Error| failure("launch_account_home_unavailable");
+    let forbidden_home = || failure("launch_account_home_forbidden");
     let folder = held.metadata().map_err(unavailable)?.is_dir();
-    let facts = crazyagent_win_sandbox::private::facts(&held).map_err(unavailable)?;
-    let user = crazyagent_win_sandbox::private::user_sid().map_err(unavailable)?;
+    let facts = private::facts(held).map_err(unavailable)?;
+    let user = private::user_sid().map_err(unavailable)?;
     if !folder || judge_home(&facts, &user).is_err() {
         return Err(failure("launch_account_home_unsafe"));
     }
@@ -1162,18 +1199,35 @@ fn validate_home_for(home: &Path, owner: Option<&Path>) -> Result<(), LaunchErro
             owner.join(".codex"),
             owner.join(".claude"),
         ] {
+            if let Ok(opened) = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(&forbidden)
+                && !matches!(private::same(held, &opened), Ok(false))
+            {
+                return Err(forbidden_home());
+            }
             let named = crate::sandbox::canonical(&forbidden).unwrap_or(forbidden);
             if named
                 .as_os_str()
                 .eq_ignore_ascii_case(canonical.as_os_str())
                 || named.as_os_str().eq_ignore_ascii_case(home.as_os_str())
             {
-                return Err(failure("launch_account_home_forbidden"));
+                return Err(forbidden_home());
             }
         }
     }
-    drop(held);
     Ok(())
+}
+
+/// Checks an account home against a given owner profile folder, as [`validate_home`] does
+/// with this process's: holds it with [`hold_home`], so it is not renamed while checked,
+/// and judges the held folder with [`validate_held_for`]. Inputs: the home and the profile
+/// folder, none when unknown. Output: Ok, or a plain `launch_account_home_*` refusal code.
+#[cfg(windows)]
+fn validate_home_for(home: &Path, owner: Option<&Path>) -> Result<(), LaunchError> {
+    let held = hold_home(home)?;
+    validate_held_for(home, &held, owner)
 }
 
 /// Judges an account home's security facts on Windows, the twin of the Unix owner and 0700
