@@ -216,3 +216,62 @@ fn a_windows_install_refuses_an_open_or_linked_home_before_a_lock() {
         context.install("claude-code", home, false)
     });
 }
+
+/// V244-WIN-MASTER S9a r3 (CodeRabbit CR-1252 1): a home that is not an absolute path on a
+/// drive, a device name, a network share or a relative path, is refused with H1's
+/// `launch_account_home_unsafe` before the hold opens anything, so no share is contacted.
+#[test]
+fn a_windows_launch_refuses_a_home_off_a_drive_before_it_holds_it() {
+    for home in [
+        r"\\.\NUL",
+        r"\\crazyagent.invalid\share\home",
+        "relative-home",
+    ] {
+        assert_eq!(
+            pin(Path::new(home)).unwrap_err().0,
+            "launch_account_home_unsafe",
+            "{home}"
+        );
+    }
+}
+
+/// V244-WIN-MASTER S9a r3 (CodeRabbit CR-1252 2): a hold blocks renaming the home and the
+/// folders above it, not pointing a junction above it elsewhere. A home spelled through a
+/// junction is held, the junction is then pointed at another folder, and the lock its path
+/// now reaches is refused with `launch_context_unsafe`; the lock in the held home passes.
+#[test]
+fn a_windows_launch_lock_its_path_reached_outside_the_held_home_is_refused() {
+    let (_temp, base) = base();
+    let first = private_home(&base, "first");
+    let held_home = private_home(&first, "home");
+    let second = private_home(&base, "second");
+    private_home(&second, "home");
+    let alias = base.join("alias");
+    let junction = |target: &Path| {
+        run(
+            "cmd.exe",
+            &[
+                "/d",
+                "/c",
+                "mklink",
+                "/J",
+                alias.to_str().unwrap(),
+                target.to_str().unwrap(),
+            ],
+        )
+    };
+    junction(&first);
+    let home = alias.join("home");
+    let held = pin(&home).unwrap();
+    run("cmd.exe", &["/d", "/c", "rmdir", alias.to_str().unwrap()]);
+    junction(&second);
+    let elsewhere = lock(&home).unwrap();
+    assert!(second.join("home").join(LOCK).exists());
+    assert_eq!(
+        locked_in(&elsewhere, &held).unwrap_err().0,
+        "launch_context_unsafe"
+    );
+    drop(elsewhere);
+    let own = lock(&held_home).unwrap();
+    locked_in(&own, &held).unwrap();
+}

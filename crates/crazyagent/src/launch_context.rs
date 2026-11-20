@@ -2547,6 +2547,13 @@ fn pin(home: &Path) -> Result<File, LaunchError> {
         .map_err(|_| failure("launch_account_home_unavailable"))
 }
 
+/// V244-WIN-MASTER S9a r3 red stand-in for the check that a launch lock is the lock name of
+/// the held home: passes every lock. Inputs: the lock and the held home. Output: Ok.
+#[cfg(windows)]
+fn locked_in(_lock: &File, _held: &File) -> Result<(), LaunchError> {
+    Ok(())
+}
+
 /// Opens and locks the agent home's launch lock through W1 (V244-WIN-MASTER S9a): made a
 /// private file when it is missing, else opened, never through a link, a second name or a
 /// list that is not private, then locked without waiting. A name a launched agent left as a
