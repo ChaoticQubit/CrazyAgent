@@ -743,9 +743,9 @@ fn delegate_engine(
     registered: &crate::engine::native_auth_host::RegisteredNativeAuthHost,
 ) -> Result<&Path, EngineError> {
     let path = registered.verified_path()?;
-    let canonical = crate::projects_home::is_canonical(path)
-        .map_err(|_| failure("master_delegate_unverified"))?;
-    if !canonical {
+    let canonical =
+        std::fs::canonicalize(path).map_err(|_| failure("master_delegate_unverified"))?;
+    if canonical != path {
         return Err(failure("master_delegate_unverified"));
     }
     Ok(path)
