@@ -527,7 +527,10 @@ fn the_peer_check_reads_a_client_of_this_user_and_leaves_no_thread_token() {
     assert_eq!(peer.user, user);
     assert!(!peer.app_container && !peer.restricted);
     assert!(peer.integrity >= 0x2000, "{:#x}", peer.integrity);
-    assert_eq!(pipe::judge_peer(&peer, &user), Ok(()));
+    assert_eq!(
+        pipe::judge_peer(&peer, &user, pipe::own_integrity().unwrap()),
+        Ok(())
+    );
     assert_eq!(thread_token(), Err(ERROR_NO_TOKEN as i32));
 }
 
@@ -556,7 +559,7 @@ fn a_restricted_client_the_list_lets_in_is_refused_by_the_peer_check() {
     assert_eq!(peer.user, user);
     assert!(peer.restricted);
     assert_eq!(
-        pipe::judge_peer(&peer, &user),
+        pipe::judge_peer(&peer, &user, pipe::own_integrity().unwrap()),
         Err("a restricted token is at the other end of the pipe")
     );
     assert_eq!(thread_token(), Err(ERROR_NO_TOKEN as i32));
@@ -694,7 +697,7 @@ fn a_client_refuses_a_pipe_a_low_integrity_child_serves() {
         Err("another process serves the pipe")
     );
     assert_eq!(
-        pipe::judge_peer(&served.peer, &user),
+        pipe::judge_peer(&served.peer, &user, pipe::own_integrity().unwrap()),
         Err("a lower integrity process is at the other end of the pipe")
     );
     drop(client);

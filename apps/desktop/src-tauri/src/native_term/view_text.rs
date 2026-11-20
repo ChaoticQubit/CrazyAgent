@@ -1,7 +1,8 @@
 use super::a11y::{self, Geometry, Marks, Text};
+use super::event::ViewEvent;
 use super::ime::{self, Took};
 use super::keymap::{Press, key_input};
-use super::view::{TermView, ViewEvent};
+use super::view::TermView;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AllocAnyThread, DefinedClass};

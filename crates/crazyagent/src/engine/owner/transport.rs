@@ -65,6 +65,7 @@ pub(crate) mod questions;
 pub(crate) mod recovery;
 pub(crate) mod roadmap;
 mod setup;
+pub(crate) mod sizing;
 pub(crate) mod terminal;
 pub(crate) mod usage;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
@@ -1554,7 +1555,11 @@ impl OwnerServer {
                 });
             }
             root.verify()?;
-            let listener = crate::ipc::owner_listener(root.path.join(SOCKET)).map_err(io_error)?;
+            let listener = crate::ipc::owner_listener(
+                root.path.join(SOCKET),
+                crate::protocol::OWNER_CLIENTS_MAX + HANDSHAKES_MAX,
+            )
+            .map_err(io_error)?;
             let created = std::fs::symlink_metadata(root.path.join(SOCKET)).map_err(io_error)?;
             created_socket = Some(Identity::of(&created));
             if !created.file_type().is_socket()
