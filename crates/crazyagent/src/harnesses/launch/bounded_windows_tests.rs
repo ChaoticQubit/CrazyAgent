@@ -4,8 +4,8 @@ use super::{
 };
 use crate::sandbox::windows::{HELPER_NAME, container_name};
 use crate::sandbox::{
-    AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, InstalledSandbox, LineageCheck, LinuxStrict,
-    LinuxSupervisor, ProjectSandbox, SandboxNetwork,
+    AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, InstalledSandbox, LineageCheck, LinuxSupervisor,
+    ProjectSandbox, SandboxNetwork,
 };
 use crazyagent_win_sandbox::private;
 use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
@@ -33,7 +33,8 @@ const BOUNDARY_NAMES: [&str; 13] = [
 const FOREIGN_CONTAINER: &str = "S-1-15-2-1-2-3-4-5-6-7";
 
 /// The folders of one Windows launch case, under a canonical temp base: the project, the
-/// agent's W1 private home and temp folder, and a profiles folder outside every root.
+/// agent's W1 private home and temp folder, and a profiles folder and the boundary's grants
+/// folder outside every root, so a case reads no data root and no environment variable.
 struct Case {
     _temp: tempfile::TempDir,
     base: PathBuf,
@@ -41,25 +42,15 @@ struct Case {
     home: PathBuf,
     tmp: PathBuf,
     profiles: PathBuf,
+    grants: PathBuf,
 }
 
-/// Readies the test binary once: `CRAZYAGENT_HOME` must name an absolute plain folder, so the
-/// boundary's grants folder is made there and never in a real data root, and the boundary
-/// helper the build puts in the target folder is copied beside the test binary, where
-/// `helper_beside_engine` looks.
-fn ready() {
-    static READY: OnceLock<()> = OnceLock::new();
-    READY.get_or_init(|| {
-        let data = std::env::var_os(crate::paths::HOME_ENV).map(PathBuf::from);
-        assert!(
-            data.as_deref().is_some_and(Path::is_absolute),
-            "set CRAZYAGENT_HOME to a fresh absolute folder for these rows"
-        );
-        assert!(
-            data.as_deref()
-                .is_some_and(|data| !data.as_os_str().to_string_lossy().contains('/')),
-            "CRAZYAGENT_HOME must be a plain Windows path: a grants folder with a slash is refused"
-        );
+/// Copies the boundary helper the build puts in the target folder beside the test binary,
+/// once, where `helper_beside_engine` looks. It reads no environment variable and no data
+/// root: each case gives its own grants folder (CR-1614).
+fn helper_beside() {
+    static COPIED: OnceLock<()> = OnceLock::new();
+    COPIED.get_or_init(|| {
         let tests = std::env::current_exe().unwrap();
         let built = tests.parent().unwrap().with_file_name(HELPER_NAME);
         assert!(
@@ -77,14 +68,15 @@ fn ready() {
 
 /// Makes the folders of one case. Output: the case.
 fn case() -> Case {
-    ready();
+    helper_beside();
     let temp = tempfile::tempdir().unwrap();
     let base = crate::sandbox::canonical(temp.path()).unwrap();
     let project = base.join("project");
     let home = base.join("agent").join("home");
     let tmp = base.join("agent").join("tmp");
     let profiles = base.join("profiles");
-    for folder in [&project, &base.join("agent"), &profiles] {
+    let grants = base.join("grants");
+    for folder in [&project, &base.join("agent"), &profiles, &grants] {
         std::fs::create_dir_all(folder).unwrap();
     }
     drop(private::dir(&home).unwrap());
@@ -96,20 +88,22 @@ fn case() -> Case {
         home,
         tmp,
         profiles,
+        grants,
     }
 }
 
 /// Installs the boundary of one agent of `project` with `home` and the case's temp folder,
-/// its profile at `profile` in the profiles folder. Inputs: the case, the project, the home
-/// and the profile name. Output: the installed boundary.
+/// its profile at `profile` in the profiles folder, with the case's own grants folder.
+/// Inputs: the case, the project, the home and the profile name. Output: the
+/// installed boundary.
 fn installed(case: &Case, project: &Path, home: &Path, profile: &str) -> Arc<InstalledSandbox> {
     let sandbox =
         ProjectSandbox::new(project, home, &case.tmp, SandboxNetwork::Only(Vec::new())).unwrap();
-    let installed = InstalledSandbox::install(
+    let installed = InstalledSandbox::install_with_grants(
         sandbox,
         &case.profiles.join(profile),
         LinuxSupervisor::Off,
-        LinuxStrict::Off,
+        &case.grants,
     )
     .unwrap();
     assert_eq!(installed.sandbox().agent_home(), home);
