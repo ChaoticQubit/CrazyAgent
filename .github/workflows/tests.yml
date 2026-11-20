@@ -18,9 +18,8 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
   TMUX_VERSION: "3.8"
-  RED_SHA: 932ccd82b
-  BASE_SHA: 82f2ef5d4
-  TIP_SHA: a74e31480
+  BASE_SHA: b7aad4177
+  TIP_SHA: 7233d5590
 
 defaults:
   run:
@@ -28,7 +27,7 @@ defaults:
 
 jobs:
   s5-windows:
-    name: V244 WIN-MASTER S5 turn folder on ${{ matrix.runner }}, red at 932ccd82b, tip a74e31480
+    name: V244 WIN-MASTER S5 land on ${{ matrix.runner }}, chore/v244 b7aad4177 + S5 a74e31480 = 7233d5590
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
@@ -87,27 +86,14 @@ jobs:
         run: |
           set -euo pipefail
           cargo clippy -p crazyagent --tests --locked -- -D warnings
-      - name: S5 red rows, master_host_launch.rs and master_runtime.rs at 932ccd82b on the tip's tree
+      - name: Build the Windows boundary helper the sandbox rows start
         if: ${{ !cancelled() }}
-        timeout-minutes: 60
+        timeout-minutes: 30
         run: |
           set -euo pipefail
-          git restore -q --source="$RED_SHA" --staged --worktree -- crates/crazyagent/src/engine/owner/transport/master_host_launch.rs crates/crazyagent/src/engine/owner/transport/master_runtime.rs
-          set +e
-          cargo test -p crazyagent --lib --locked -- --test-threads 1 engine::owner::transport::master_host_launch::turn_folder_windows_tests:: agent_home::windows_tests:: 2>&1 | tee "$RUNNER_TEMP/red.log"
-          rc=${PIPESTATUS[0]}
-          set -e
-          git restore -q --source="$TIP_SHA" --staged --worktree -- crates
-          git diff --quiet "$TIP_SHA" -- crates
-          grep -E '^test (engine|agent_home)::|^test result|panicked|left:|right:' "$RUNNER_TEMP/red.log" || true
-          [ "$rc" -ne 0 ]
-          grep -qE 'test result: FAILED\. 4 passed; 3 failed' "$RUNNER_TEMP/red.log"
-          for row in a_windows_turn_folder_and_its_capture_home_and_instructions_are_private a_windows_capture_with_bytes_a_users_grant_or_no_label_is_refused a_windows_turn_folder_refuses_large_or_planted_instructions_and_a_planted_home; do
-            grep -q "$row \.\.\. FAILED" "$RUNNER_TEMP/red.log"
-          done
-          grep -q 'a_launch_record_in_a_private_data_root_is_private \.\.\. ok' "$RUNNER_TEMP/red.log"
-          echo "red as expected: on the refusal stubs the 3 turn folder rows fail; the agent_home record row and the 3 earlier agent_home rows pass"
-      - name: S5 turn folder and record rows at the tip a74e31480, five rounds
+          cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked
+          cp target/debug/crazyagent-win-boundary.exe target/debug/deps/
+      - name: S5 turn folder and record rows at the land 7233d5590, five rounds
         if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
@@ -146,3 +132,27 @@ jobs:
           [ "$rc" -eq 0 ]
           grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/policy.log"
           grep -q 'full_access_on_windows_is_refused_with_its_own_reason_and_code \.\.\. ok' "$RUNNER_TEMP/policy.log"
+      - name: Every crazyagent library row on Windows at chore/v244 b7aad4177 and at the S5 land
+        if: ${{ !cancelled() }}
+        timeout-minutes: 120
+        run: |
+          set -euo pipefail
+          rows() {
+            set +e
+            cargo test -p crazyagent --lib --locked -- --test-threads 1 > "$RUNNER_TEMP/$1.log" 2>&1
+            echo "$1 rc=$?"
+            set -e
+            grep -E '^test result' "$RUNNER_TEMP/$1.log" || true
+            { grep -E ' \.\.\. FAILED$' "$RUNNER_TEMP/$1.log" || true; } | sed 's/^test //; s/ \.\.\. FAILED$//' | sort -u > "$RUNNER_TEMP/$1.failed"
+          }
+          git restore -q --source="$BASE_SHA" --staged --worktree -- crates
+          rows base
+          git restore -q --source="$TIP_SHA" --staged --worktree -- crates
+          git diff --quiet "$TIP_SHA" -- crates
+          rows tip
+          echo "failed at the base:"; cat "$RUNNER_TEMP/base.failed"
+          echo "failed at the tip:"; cat "$RUNNER_TEMP/tip.failed"
+          grep -qE 'test result: (ok|FAILED)\. [1-9][0-9]* passed' "$RUNNER_TEMP/tip.log"
+          new=$(comm -13 "$RUNNER_TEMP/base.failed" "$RUNNER_TEMP/tip.failed")
+          [ -z "$new" ] || { echo "::error::rows failing at the tip only: $new"; exit 1; }
+          echo "no row fails at the tip that passes at the base"
