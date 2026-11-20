@@ -703,7 +703,7 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         "claude-code" => claude_invocation(request, installed, key_file.as_deref()),
         _ => return Err(failure("launch_harness_unsupported")),
     };
-    if !cfg!(target_os = "macos") {
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
         return Err(failure("launch_sandbox_unavailable"));
     }
     let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
@@ -762,6 +762,7 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         command.get_current_dir(),
         Some(request.working_dir.as_path())
     );
+    #[cfg(target_os = "macos")]
     assert_eq!(
         crate::sandbox::starts_at_boundary(command.get_program()),
         !request.boundary.is_unconfined()
@@ -776,10 +777,10 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
 }
 
 /// Builds the harness command inside the request's boundary, in its working folder: on
-/// macOS from the confined profile through [`crate::sandbox::agent_command`], or the
-/// session shim for a Full access boundary; on every other system the refusal
-/// `launch_sandbox_unavailable`. Inputs: the request, the absolute program, its script
-/// words, the harness arguments, the base and the harness variables. Output: the command.
+/// macOS the confined profile through [`crate::sandbox::agent_command`] or the Full access
+/// session shim; on Linux an installed sandbox with the account's home, through
+/// [`InstalledSandbox::wrap`]; anything else is `launch_sandbox_unavailable`. Inputs: the
+/// request, program, script words, arguments, base and harness variables. Output: the command.
 fn bounded<'a>(
     request: &LaunchRequest,
     program: &Path,
@@ -801,7 +802,37 @@ fn bounded<'a>(
             .current_dir(&request.working_dir);
         Ok(command)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        let LaunchBoundary::Installed(boundary) = &request.boundary else {
+            return Err(failure("launch_sandbox_unavailable"));
+        };
+        if request.account.home() != boundary.sandbox().agent_home() {
+            return Err(failure("launch_environment_refused"));
+        }
+        let mut bare = Command::new(program);
+        bare.args(script)
+            .args(arguments)
+            .current_dir(&request.working_dir);
+        for (name, value) in base {
+            bare.env(name, value);
+        }
+        for (name, value) in harness_env {
+            match value {
+                Some(value) => bare.env(name, value),
+                None => bare.env_remove(name),
+            };
+        }
+        let command = boundary.wrap(&bare).map_err(|error| match error {
+            crate::sandbox::SandboxError::Invalid(_) => failure("launch_environment_refused"),
+            error => failure(
+                crate::sandbox::refusal_code(&error).unwrap_or("launch_sandbox_unavailable"),
+            ),
+        })?;
+        assert_eq!(command.get_program(), boundary.launcher().as_os_str());
+        Ok(command)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (request, program, script, arguments, base);
         let _ = harness_env.into_iter().count();

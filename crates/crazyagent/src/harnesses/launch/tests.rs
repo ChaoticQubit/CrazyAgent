@@ -739,9 +739,10 @@ fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_of
     );
 }
 
-/// Off macOS no agent launch is built, since agents run under Seatbelt alone in this
-/// version: a request that is valid in every other way, its sandbox profile named, is
-/// refused with `launch_sandbox_unavailable` and nothing is written into the agent's home.
+/// Off macOS a Seatbelt profile path is no boundary (V244-LINUX-TEAM S5a, rv-sec2 #710 C5):
+/// a request that is valid in every other way and names only a profile, as a stored agent
+/// row does, is refused with `launch_sandbox_unavailable`, and nothing is written into the
+/// agent's home.
 #[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn a_launch_off_macos_is_refused_with_the_sandbox_code() {
