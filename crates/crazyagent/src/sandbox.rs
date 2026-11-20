@@ -34,6 +34,34 @@ pub mod toolchains;
 pub mod warden;
 #[cfg(target_os = "windows")]
 pub mod windows;
+#[cfg(target_os = "windows")]
+pub use windows::owner_git::OwnerGit;
+
+/// Owner git's own container, which only Windows has (V244-WIN-GIT-UNC-SIBLINGS): elsewhere
+/// this type has no value, so a publish or `@` list there never routes its git anywhere and
+/// runs it as the owner, as before.
+#[cfg(not(target_os = "windows"))]
+#[derive(Debug)]
+pub enum OwnerGit {}
+
+#[cfg(not(target_os = "windows"))]
+impl OwnerGit {
+    /// Never runs: no value of this type exists outside Windows. Input: the command.
+    /// Output: none.
+    pub fn wrap(&self, _git: &Command) -> Result<Command, SandboxError> {
+        match *self {}
+    }
+
+    /// Never runs: no value of this type exists outside Windows. Output: none.
+    pub fn tmp(&self) -> &Path {
+        match *self {}
+    }
+
+    /// Never runs: no value of this type exists outside Windows. Output: none.
+    pub fn git(&self) -> &Path {
+        match *self {}
+    }
+}
 
 /// The variables that point an agent's tools at its tool cache (T8): uv's cache, and the
 /// pnpm store, the only store variable pnpm 12 reads (probe P5). [`agent_env`] keeps a
