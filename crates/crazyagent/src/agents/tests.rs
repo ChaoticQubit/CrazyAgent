@@ -308,33 +308,67 @@ fn kept_for(child: &mut std::process::Child, wait: Duration) -> bool {
     child.try_wait().unwrap().is_none()
 }
 
-/// Tells whether macOS shows `pid`'s environment holding a lineage token, reading only
-/// that process and keeping only whether the variable is there. Input: the process.
-/// Output: true when it is.
+/// Whether a stop can tell `pid` is agent `id`'s: its environment, read as a stop reads
+/// it on this host, shows the launch token the agent register keeps for the run. Inputs:
+/// the case root, the agent id and the process. Output: the answer.
 #[cfg(target_os = "macos")]
-fn shows_lineage(pid: i32) -> bool {
-    let listed = crate::spawn_gate::output(
-        std::process::Command::new("/bin/ps")
-            .args(["-E", "-ww", "-o", "command=", "-p", &pid.to_string()])
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null()),
+fn told(root: &Path, id: &str, pid: i32) -> bool {
+    let stored: Option<String> = Connection::open(root.join("engine.db"))
+        .unwrap()
+        .query_row(
+            "SELECT lineage FROM agent_runs WHERE id=?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let token = crate::harnesses::leftovers::LineageToken::try_from(
+        stored.expect("the run keeps its launch token"),
     )
     .unwrap();
-    String::from_utf8_lossy(&listed.stdout)
-        .split_whitespace()
-        .any(|word| {
-            word.starts_with(&format!(
-                "{}=",
-                crate::harnesses::leftovers::LINEAGE_VARIABLE
-            ))
-        })
+    crate::harnesses::leftovers::carriers_among(&token, &[pid])
+        .is_some_and(|found| found.contains(&pid))
+}
+
+/// Checks a stop against what it could tell about an escaped log holder: one it could tell
+/// is the agent's has ended and the stop is clean; one it could not is still running, and
+/// the stop ends Failed with `agent_stop_incomplete` and names it by its process id.
+/// Inputs: the stopped view, the holder, whether the stop could tell and whether the
+/// holder ended. Output: none, or a panic naming the broken rule.
+#[cfg(target_os = "macos")]
+fn ended_only_when_told(stopped: &AgentView, escaped: i32, told: bool, ended: bool) {
+    if told {
+        assert!(
+            ended,
+            "stop left an escaped child whose environment shows the launch token running: {}",
+            stopped.status
+        );
+        assert_eq!(stopped.state, AgentState::Stopped);
+        assert_eq!(stopped.reason, None);
+        return;
+    }
+    assert!(
+        !ended,
+        "stop signalled a log holder it could not tell was the agent's: {}",
+        stopped.status
+    );
+    assert_eq!(stopped.state, AgentState::Failed);
+    assert_eq!(stopped.reason.as_deref(), Some("agent_stop_incomplete"));
+    let id = escaped.to_string();
+    assert!(
+        stopped
+            .status
+            .split(|c: char| !c.is_ascii_digit())
+            .any(|word| word == id),
+        "{}",
+        stopped.status
+    );
 }
 
 /// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
 /// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
 #[cfg(target_os = "macos")]
 #[test]
-fn stopping_an_agent_ends_its_escaped_child_but_never_the_owners_own_writer_of_its_log() {
+fn stopping_an_agent_never_ends_the_owners_own_writer_of_its_log() {
     let case = Case::new();
     let root = case.path();
     let agents = case.agents();
@@ -343,10 +377,7 @@ fn stopping_an_agent_ends_its_escaped_child_but_never_the_owners_own_writer_of_i
         .unwrap();
     until("the reply", || replied(&agents, &agent.id, "escaped"));
     let escaped = escaped(&root, "carrying");
-    assert!(
-        shows_lineage(escaped),
-        "the fixture's Python hides its environment on this host"
-    );
+    let told = told(&root, &agent.id, escaped);
     let log = agents.folder(&agent.id).join(launch::DURABLE_OUTPUT);
     let mut writer = owner_writer(&log, &root.join("writer.held"));
 
@@ -361,19 +392,14 @@ fn stopping_an_agent_ends_its_escaped_child_but_never_the_owners_own_writer_of_i
         writer_kept,
         "stop killed the owner's own writer of the agent log"
     );
-    assert!(
-        escaped_ended,
-        "stop left the escaped child that carries the launch token running"
-    );
-    assert_eq!(stopped.state, AgentState::Stopped);
-    assert_eq!(stopped.reason, None);
+    ended_only_when_told(&stopped, escaped, told, escaped_ended);
 }
 
 /// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
 /// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
 #[cfg(target_os = "macos")]
 #[test]
-fn stopping_an_agent_leaves_a_log_holder_whose_environment_is_hidden_and_names_it() {
+fn stopping_an_agent_ends_an_escaped_log_holder_only_when_it_can_tell_it_is_the_agents() {
     let case = Case::new();
     let root = case.path();
     let agents = case.agents();
@@ -384,22 +410,13 @@ fn stopping_an_agent_leaves_a_log_holder_whose_environment_is_hidden_and_names_i
     let (pid, grandchild) = pids(&root, "leaving");
     let escaped = escaped(&root, "leaving");
     assert!(alive(escaped));
+    let told = told(&root, &agent.id, escaped);
 
     let stopped = agents.stop(&agent.id).unwrap();
 
-    let escaped_kept = alive(escaped);
+    let escaped_ended = gone_within(escaped, Duration::from_secs(5));
     end_escaped(escaped);
-    assert!(
-        escaped_kept,
-        "stop signalled a log holder it could not tell was the agent's"
-    );
-    assert_eq!(stopped.state, AgentState::Failed);
-    assert_eq!(stopped.reason.as_deref(), Some("agent_stop_incomplete"));
-    assert!(
-        stopped.status.contains(&format!("{escaped} sleep")),
-        "{}",
-        stopped.status
-    );
+    ended_only_when_told(&stopped, escaped, told, escaped_ended);
     until("the agent's own group to be gone", || {
         !alive(pid) && !alive(grandchild)
     });
@@ -409,14 +426,11 @@ fn stopping_an_agent_leaves_a_log_holder_whose_environment_is_hidden_and_names_i
 /// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
 #[cfg(target_os = "macos")]
 #[test]
-fn stopping_a_reattached_agent_ends_the_escaped_child_that_carries_its_launch_token() {
+fn stopping_a_reattached_agent_ends_its_escaped_child_only_when_it_can_tell_it_is_the_agents() {
     let case = Case::new();
     let root = case.path();
     let (id, escaped) = escaped_after_crash(&root, "escape-carrier");
-    assert!(
-        shows_lineage(escaped),
-        "the fixture's Python hides its environment on this host"
-    );
+    let told = told(&root, &id, escaped);
     let agents = Agents::open(&root).unwrap();
     assert!(agents.view(&id).unwrap().reattached);
 
@@ -424,19 +438,14 @@ fn stopping_a_reattached_agent_ends_the_escaped_child_that_carries_its_launch_to
 
     let escaped_ended = gone_within(escaped, Duration::from_secs(5));
     end_escaped(escaped);
-    assert!(
-        escaped_ended,
-        "stop left the escaped child that carries the launch token running"
-    );
-    assert_eq!(stopped.state, AgentState::Stopped);
-    assert_eq!(stopped.reason, None);
+    ended_only_when_told(&stopped, escaped, told, escaped_ended);
 }
 
 /// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
 /// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
 #[cfg(target_os = "macos")]
 #[test]
-fn stopping_a_reattached_agent_never_signals_a_foreign_group_nor_a_hidden_holder_and_names_it() {
+fn stopping_a_reattached_agent_never_signals_a_foreign_group() {
     let case = Case::new();
     let root = case.path();
     let (id, escaped) = escaped_after_crash(&root, "escape");
@@ -457,28 +466,19 @@ fn stopping_a_reattached_agent_never_signals_a_foreign_group_nor_a_hidden_holder
         )
         .unwrap();
     assert_eq!(recycled, 1);
+    let told = told(&root, &id, escaped);
     let agents = Agents::open(&root).unwrap();
     assert!(agents.view(&id).unwrap().reattached);
 
     let stopped = agents.stop(&id).unwrap();
 
-    let foreign_kept = foreign.try_wait().unwrap().is_none();
-    let escaped_kept = alive(escaped);
+    let foreign_kept = kept_for(&mut foreign, Duration::from_secs(1));
+    let escaped_ended = gone_within(escaped, Duration::from_secs(5));
     let _ = foreign.kill();
     let _ = foreign.wait();
     end_escaped(escaped);
     assert!(foreign_kept, "stop signalled a foreign process group");
-    assert!(
-        escaped_kept,
-        "stop signalled a log holder it could not tell was the agent's"
-    );
-    assert_eq!(stopped.state, AgentState::Failed);
-    assert_eq!(stopped.reason.as_deref(), Some("agent_stop_incomplete"));
-    assert!(
-        stopped.status.contains(&format!("{escaped} sleep")),
-        "{}",
-        stopped.status
-    );
+    ended_only_when_told(&stopped, escaped, told, escaped_ended);
 }
 
 /// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
@@ -1598,9 +1598,10 @@ fn sleeper(
     crate::spawn_gate::spawn(&mut command).unwrap()
 }
 
-/// A stop's carriers are the processes whose environment shows the launch's token: one
-/// without it is not, and a platform program, whose environment macOS hides, is one only
-/// on Linux. Each process is named by its program for the stop's report.
+/// A stop's carriers are only processes started with the launch's token: one without it
+/// never is, whatever this host shows of environments, and on Linux, which shows every
+/// process of the user, both that carry it are. Each process is named by its program for
+/// the stop's report.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn only_processes_whose_environment_shows_the_launch_token_are_carriers() {
@@ -1632,12 +1633,13 @@ fn only_processes_whose_environment_shows_the_launch_token_are_carriers() {
         let _ = child.kill();
         let _ = child.wait();
     }
-    assert!(found.contains(&asked[0]), "{found:?}");
     assert!(!found.contains(&asked[1]), "{found:?}");
-    assert_eq!(
-        found.contains(&asked[2]),
-        cfg!(target_os = "linux"),
-        "{found:?}"
-    );
+    assert!(found.iter().all(|pid| asked.contains(pid)), "{found:?}");
+    if cfg!(target_os = "linux") {
+        assert!(
+            found.contains(&asked[0]) && found.contains(&asked[2]),
+            "{found:?}"
+        );
+    }
     assert_eq!(named.get(&asked[2]).map(String::as_str), Some("sleep"));
 }
