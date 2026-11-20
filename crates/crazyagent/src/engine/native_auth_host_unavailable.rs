@@ -1,6 +1,4 @@
 use crate::engine::EngineError;
-use std::path::Path;
-use std::sync::Arc;
 
 #[path = "native_auth_host/claude_auth/types.rs"]
 pub(crate) mod claude_auth_types;
@@ -9,89 +7,15 @@ pub(in crate::engine) mod claude_auth {
     pub(crate) use super::claude_auth_types as types;
 }
 
-/// The pin's file rule on a platform with no pin: every file is refused as `capture`
-/// refuses it. Input: the metadata, unused. Output: `native_auth_host_unavailable`.
-pub(crate) fn pinnable(_metadata: &std::fs::Metadata) -> Result<(), EngineError> {
-    Err(EngineError("native_auth_host_unavailable".into()))
-}
-
-/// Red stand-in for N1's Windows pin rule on an open file, refused until the pin lands.
-/// Input: the path, unused. Output: `native_auth_host_unavailable`.
+#[path = "native_auth_host/pin.rs"]
+mod pin;
 #[cfg(test)]
-pub(crate) fn pinnable_at(_path: &Path) -> Result<(), EngineError> {
-    Err(EngineError("native_auth_host_unavailable".into()))
-}
+use pin::pinnable_at;
+pub(crate) use pin::{RegisteredNativeAuthHost, pinnable};
 
 #[cfg(test)]
 #[path = "native_auth_host/pin_windows_tests.rs"]
 mod pin_windows_tests;
-
-/// A registered native sign-in host executable, which cannot exist without the Unix
-/// owner, mode and inode checks that pin it. `capture` reports `native_auth_host_unavailable`,
-/// so every method below is unreachable by construction.
-pub(crate) enum RegisteredNativeAuthHost {}
-
-impl RegisteredNativeAuthHost {
-    /// Red stand-in for N1's Windows capture past the live-pin gate, refused until the pin
-    /// lands. Input: the path, unused. Output: `native_auth_host_unavailable`.
-    #[cfg(test)]
-    pub(crate) fn capture_pinned(_path: &Path) -> Result<Self, EngineError> {
-        Err(EngineError("native_auth_host_unavailable".into()))
-    }
-
-    /// Red stand-in for the count of hashes a host's checks ran; no host exists.
-    /// Input: the host. Output: none, the type has no value.
-    #[cfg(test)]
-    pub(crate) fn rehashes(&self) -> usize {
-        match *self {}
-    }
-
-    /// Refuses to pin a native sign-in host executable on this platform.
-    /// Takes the executable path, unused. Returns `native_auth_host_unavailable`.
-    pub(crate) fn capture(_path: &Path) -> Result<Self, EngineError> {
-        Err(EngineError("native_auth_host_unavailable".into()))
-    }
-
-    /// Refuses to pin a native sign-in host found through a PATH entry on this platform.
-    /// Takes the entry, unused. Returns `native_auth_host_unavailable`.
-    pub(crate) fn capture_entry(_entry: &Path) -> Result<Self, EngineError> {
-        Err(EngineError("native_auth_host_unavailable".into()))
-    }
-
-    /// Refuses to pin a checked native sign-in host found through a PATH entry on this
-    /// platform. Takes the entry and the check, unused. Returns `native_auth_host_unavailable`.
-    pub(crate) fn capture_entry_checked(
-        _entry: &Path,
-        _check: impl Fn(&Path) -> Result<(), EngineError>,
-    ) -> Result<Self, EngineError> {
-        Err(EngineError("native_auth_host_unavailable".into()))
-    }
-
-    /// Never runs: no host exists on this platform to re-pin. Inputs: the host and the
-    /// engine-start check, unused. Output: none, the type has no value.
-    pub(crate) fn current(
-        self: &Arc<Self>,
-        _trusted: impl Fn(&Path) -> Result<(), EngineError>,
-    ) -> Result<Arc<Self>, EngineError> {
-        match **self {}
-    }
-
-    pub(crate) fn entry(&self) -> Option<&Path> {
-        match *self {}
-    }
-
-    pub(crate) fn vanished(&self) -> bool {
-        match *self {}
-    }
-
-    pub(crate) fn verified_path(&self) -> Result<&Path, EngineError> {
-        match *self {}
-    }
-
-    pub(crate) fn verified_sha256(&self) -> Result<String, EngineError> {
-        match *self {}
-    }
-}
 
 /// Refuses to run native sign-in custody, which needs Unix process groups and fd handoff.
 /// Takes the queued work and its dispatch host, both dropped unused.

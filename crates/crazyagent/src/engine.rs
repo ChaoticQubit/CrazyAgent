@@ -395,7 +395,6 @@ fn io_error(error: impl std::fmt::Display) -> EngineError {
 /// hundreds of MB, so it never stalls the async runtime: on a multi-thread tokio runtime the
 /// worker first hands its other tasks to another thread; anywhere else the work runs in place.
 /// Input: the work. Output: its result.
-#[cfg(unix)]
 fn off_worker<R>(work: impl FnOnce() -> R) -> R {
     match tokio::runtime::Handle::try_current() {
         Ok(runtime) if runtime.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
