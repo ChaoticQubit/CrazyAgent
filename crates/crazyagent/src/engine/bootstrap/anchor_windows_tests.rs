@@ -520,13 +520,13 @@ async fn a_started_windows_engine_serves_an_owner_client_and_stops_clean() {
         .await
         .expect("an owner client connects through the ordinary endpoint");
     assert_eq!(identity.engine_version(), crate::version::VERSION);
+    drop((client, owner));
     assert_eq!(
         crate::service::check_engine(&path, OwnerClientKind::Tui, timeout).await,
         crate::service::EngineCheck::Ready {
             version: crate::version::VERSION.into()
         }
     );
-    drop((client, owner));
     service.shutdown().await.unwrap();
     assert_eq!(
         refusal(check_socket(&service.anchor, &ordinary, recorded)),
