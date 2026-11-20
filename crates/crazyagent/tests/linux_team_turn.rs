@@ -392,7 +392,14 @@ fn a_supervised_linux_sub_agent_turn_lands_its_page_and_is_refused_every_git_met
                 || (named.len() >= 40 && named.bytes().all(|byte| byte.is_ascii_hexdigit()))),
         "{head:?}"
     );
-    assert!(!admin.join("config.worktree").exists());
+    match fs::read(admin.join("config.worktree")) {
+        Ok(config) => assert_eq!(
+            config,
+            crazyagent::worktrees::REMOTE_LOCK,
+            "only the engine's remote lock may sit in config.worktree"
+        ),
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound, "{error}"),
+    }
     assert!(!worktree.join("nested").join(".git").exists());
 
     let landed = tokio::runtime::Builder::new_current_thread()
