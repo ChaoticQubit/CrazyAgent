@@ -1153,3 +1153,32 @@ impl Native {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::native_term::style::{FontSource, Theme};
+
+    /// CR-0452: the page's style and a view command asked on a thread with no main-thread
+    /// marker, as a caller off the main loop would reach them, are refused with the busy
+    /// code and never panic. Runs on every system, with no display.
+    #[test]
+    fn a_style_or_command_off_the_main_thread_is_refused_and_never_panics() {
+        let asked = Style {
+            family: "row",
+            source: FontSource::Built(&[]),
+            font_px: 13.0,
+            blink: false,
+            theme: Theme::default(),
+        };
+        let answered = std::thread::spawn(move || {
+            assert!(platform::main().is_none(), "a thread with no main marker");
+            (style(asked), command("main", 1, Command::Jump))
+        })
+        .join();
+        let (styled, commanded) =
+            answered.expect("a style or command off the main thread never panics");
+        assert_eq!(styled, Err("native_terminal_main_busy"));
+        assert_eq!(commanded, Err("native_terminal_main_busy"));
+    }
+}

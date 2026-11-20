@@ -6356,6 +6356,43 @@ fn trial(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    /// V244-LINUX-L5C-5: every native host use in lib.rs builds on Linux too, under a
+    /// nearest cfg that names Linux or is the macOS webdriver probe's, and the enabled
+    /// answer stays macOS-only until the Linux switch (L5e). Reads lib.rs's own text.
+    #[test]
+    fn every_native_host_use_builds_on_linux_and_native_stays_off_there() {
+        let text = include_str!("lib.rs");
+        let (product, _) = text
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the product part of lib.rs");
+        let lines: Vec<&str> = product.lines().collect();
+        let probe = "#[cfg(all(target_os = \"macos\", feature = \"native-webdriver\"))]";
+        let mut uses = 0;
+        for (at, line) in lines.iter().enumerate() {
+            if !line.contains("native_term::host::") {
+                continue;
+            }
+            uses += 1;
+            let nearest = lines[at.saturating_sub(30)..at]
+                .iter()
+                .rev()
+                .map(|above| above.trim())
+                .find(|above| above.starts_with("#[cfg("));
+            let Some(cfg) = nearest else {
+                continue;
+            };
+            let linux = cfg.contains("target_os = \"linux\"") && !cfg.starts_with("#[cfg(not(");
+            assert!(
+                linux || cfg == probe,
+                "lib.rs:{} uses the native host under {cfg}",
+                at + 1
+            );
+        }
+        assert!(uses >= 15, "lib.rs uses the native host {uses} times");
+        let enabled = product.matches("Ok(cfg!(target_os = \"macos\"))").count();
+        assert_eq!(enabled, 1, "the enabled answer stays macOS-only");
+    }
     use tauri::ipc::{CallbackFn, InvokeBody};
     use tauri::test::{
         INVOKE_KEY, MockRuntime, get_ipc_response, mock_builder, mock_context, noop_assets,
