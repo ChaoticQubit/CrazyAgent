@@ -11,21 +11,24 @@ use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt;
 #[cfg(test)]
 use std::path::Path;
-use std::process::{Child, ExitStatus};
+use std::process::Child;
+#[cfg(test)]
+use std::process::ExitStatus;
 #[cfg(test)]
 use std::process::{Command, Stdio};
 #[cfg(test)]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread;
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 pub(in crate::engine) use super::child_group::cleanup_direct_child;
+#[cfg(test)]
+use super::child_group::sleep_until;
 use super::child_group::{
     ChildGroup, DROP_TIME, cleanup_owned_group, cleanup_unretained, dedicated_group,
     reaped_group_gone,
 };
-#[cfg(test)]
-use super::child_group::{POLL_INTERVAL, sleep_until};
 
 #[cfg(test)]
 const RUN_TIME_MAX: Duration = Duration::from_secs(600);
