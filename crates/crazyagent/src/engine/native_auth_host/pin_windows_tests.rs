@@ -546,3 +546,52 @@ fn a_junction_into_agent_space_placed_after_the_pin_is_refused_through_current()
         PATH_AGENT_SPACE
     );
 }
+
+/// A stand-in `node.exe` in `folder`, a copy of the `where.exe` Windows ships, a real
+/// program. Input: the folder, made if missing. Output: the stand-in's real path.
+fn stand_in_node(folder: &Path) -> PathBuf {
+    std::fs::create_dir_all(folder).unwrap();
+    let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32")
+        .join("where.exe");
+    let node = folder.join("node.exe");
+    std::fs::copy(shipped, &node).unwrap();
+    std::fs::canonicalize(node).unwrap()
+}
+
+/// The interpreter the resolver starts an npm shim with, for the places given. Inputs: the
+/// shim and the folders searched in order. Output: the program word.
+fn node_for(shim: &Path, folders: Vec<PathBuf>) -> std::ffi::OsString {
+    let places = crate::tools::Places::new(folders, None);
+    let resolved = crate::tools::resolve_entry(shim, &places).unwrap();
+    resolved.argv().remove(0)
+}
+
+/// rv-sec3 #752 note 4: the `node.exe` a sign-in starts an npm shim's pinned script with is
+/// never one an agent placed earlier on the search path, in a `.crazyagent` folder or
+/// reached through a junction into one; the control shows the first `node.exe` found wins
+/// otherwise, so the row would see an agent's copy.
+#[test]
+fn an_agent_placed_node_exe_earlier_on_the_path_is_not_the_one_an_npm_shim_runs() {
+    let (_owner, folder) = owner_folder();
+    let (shim, _script) = npm_codex(&folder.join("npm"));
+    let owner_node = stand_in_node(&folder.join("nodejs"));
+    let other = folder.join("other");
+    let other_node = stand_in_node(&other);
+    assert_eq!(
+        node_for(&shim, vec![other.clone(), folder.join("nodejs")]),
+        other_node.into_os_string()
+    );
+    let agents = folder.join(".crazyagent").join("bin");
+    stand_in_node(&agents);
+    assert_eq!(
+        node_for(&shim, vec![agents.clone(), folder.join("nodejs")]),
+        owner_node.clone().into_os_string()
+    );
+    let linked = folder.join("linked");
+    junction(&linked, &agents);
+    assert_eq!(
+        node_for(&shim, vec![linked, folder.join("nodejs")]),
+        owner_node.into_os_string()
+    );
+}
