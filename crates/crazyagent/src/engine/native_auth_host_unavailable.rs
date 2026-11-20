@@ -41,6 +41,14 @@ mod entry_bootstrap;
 #[path = "native_auth_host/custodian.rs"]
 mod custodian;
 
+#[cfg(test)]
+#[path = "native_auth_host/login_env.rs"]
+mod login_env;
+
+#[cfg(test)]
+#[path = "native_auth_host/login_windows_tests.rs"]
+mod login_windows_tests;
+
 /// Runs the sign-in custodian as far as Windows has it: reads the bootstrap token the engine
 /// writes on its stdin pipe, then refuses, as its channel, custody and login child are not
 /// built on Windows yet (the engine gate flips in N4). Inputs: the runtime folder, unused,
