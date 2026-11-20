@@ -13,7 +13,6 @@ use crate::storage::CUSTODIAN_CODES;
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::Pid;
 use std::os::fd::OwnedFd;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -54,18 +53,8 @@ fn command(words: &[std::ffi::OsString], home: &Path) -> Result<Command, EngineE
             "--listen",
             "stdio://",
         ])
-        .env_clear()
-        .env("HOME", home)
-        .env("CODEX_HOME", home)
-        .env("TMPDIR", home)
-        .env("PATH", super::SIGN_IN_PATH)
-        .env("LANG", "C")
-        .env("LC_ALL", "C")
-        .current_dir(home)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
+        .stdin(Stdio::piped());
+    super::login_env::login_child(&mut command, home, "CODEX_HOME");
     assert_eq!(command.get_current_dir(), Some(home));
     assert!(Path::new(command.get_program()).is_absolute());
     Ok(command)

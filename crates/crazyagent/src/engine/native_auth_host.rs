@@ -245,4 +245,5 @@ mod handed;
 #[cfg(test)]
 mod hash_backend_tests;
 mod launch;
+mod login_env;
 mod pin;

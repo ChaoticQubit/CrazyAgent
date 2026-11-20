@@ -3,7 +3,6 @@ use crate::adapters::claude::{
     decode_auth_status,
 };
 use crate::engine::EngineError;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -50,23 +49,12 @@ fn auth_command(
         ClaudeAuthCommand::Logout => command.args(["auth", "logout"]),
         ClaudeAuthCommand::Renew => command.args(RENEWAL_TURN),
     };
-    command
-        .env_clear()
-        .env("HOME", home)
-        .env("CLAUDE_CONFIG_DIR", home)
-        .env("TMPDIR", home)
-        .env("PATH", super::SIGN_IN_PATH)
-        .env("LANG", "C")
-        .env("LC_ALL", "C")
-        .current_dir(home)
-        .stdin(if action == ClaudeAuthCommand::Renew {
-            Stdio::null()
-        } else {
-            Stdio::piped()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
+    super::login_env::login_child(&mut command, home, "CLAUDE_CONFIG_DIR");
+    command.stdin(if action == ClaudeAuthCommand::Renew {
+        Stdio::null()
+    } else {
+        Stdio::piped()
+    });
     if action == ClaudeAuthCommand::Renew {
         command.env(
             crate::harnesses::launch::CLAUDE_AUTO_MEMORY_OFF.0,
