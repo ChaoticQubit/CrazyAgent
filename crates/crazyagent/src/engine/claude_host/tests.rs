@@ -1792,6 +1792,142 @@ async fn a_burst_past_the_event_queue_waits_for_the_reader_and_is_not_a_failed_t
     );
 }
 
+/// A stand-in Claude Code that waits a second for its turn to be sent, writes 2,000 reply
+/// frames before it reads it, more than the host's event queue and its pipe hold, then reads
+/// the turn and ends it.
+const FLOOD_BEFORE_READ_HARNESS: &str = r#"#!/bin/sh
+/bin/sleep 1
+printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'
+i=0
+while [ "$i" -lt 2000 ]; do
+  i=$((i+1))
+  printf '{"type":"assistant","uuid":"said-%s","session_id":"native-session","parent_tool_use_id":null,"message":{"id":"message-%s","type":"message","role":"assistant","model":"observed-model","content":[{"type":"text","text":"line"}]}}\n' "$i" "$i"
+done
+IFS= read -r turn
+printf '%s\n' '{"type":"result","subtype":"success","uuid":"result-1","session_id":"native-session","is_error":false,"result":"line"}'
+/bin/cat > /dev/null
+exit 1
+"#;
+
+/// Starts [`FLOOD_BEFORE_READ_HARNESS`] as a Claude master with no clock, as a master with
+/// no time limit runs, frames up to a mebibyte and `output_bytes` of room. Inputs: the
+/// fixture, the lease operation and the bound. Output: the running host.
+async fn flood_host(
+    fixture: &mut crate::engine::master_host_fixture::MasterFixture,
+    operation: &str,
+    output_bytes: u64,
+) -> ClaudeHost {
+    let profile = fixture.lease(operation, 1).unwrap();
+    let home = profile.profile_path().unwrap();
+    let harness = fixture.stand_in("claude", FLOOD_BEFORE_READ_HARNESS);
+    let command =
+        launch_command(&harness, &fixture.project, &home, "native-default", None).unwrap();
+    let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
+    ClaudeHost::spawn(
+        command,
+        sandbox,
+        profile,
+        home,
+        NativeAction::Launch {
+            session_id: crate::protocol::SessionId::new("claude-flood-session").unwrap(),
+            harness: NativeHarness::Claude,
+            profile_ref: CredentialRef::new("flood-master-profile").unwrap(),
+            worktree_lease: RequestId::new("claude-flood-lease").unwrap(),
+        },
+        fixture.connection.account_ref.clone(),
+        fixture.project_id.clone(),
+        None,
+        ResourceBudget {
+            output_bytes,
+            ..ResourceBudget::unit()
+        },
+        crate::master_frame_limit::FrameSize::Mib1,
+    )
+    .await
+    .unwrap()
+}
+
+/// A 512 KiB turn, larger than any pipe the stand-in reads it from. Output: the text.
+fn large_turn() -> String {
+    "t".repeat(512 * 1024)
+}
+
+/// CodeRabbit CR-1354, as in the Codex host: a stand-in with no clock that writes 2,000
+/// frames before it reads its turn still takes a 512 KiB turn. The host waits on the turn and
+/// reads no event meanwhile, so custody used to wait on the full event queue, reading and
+/// writing nothing, and the turn never reached the stand-in.
+#[tokio::test]
+async fn a_turn_reaches_a_stand_in_that_floods_its_output_before_it_reads() {
+    use crate::adapters::events::{EventKind, TurnOutcome};
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = flood_host(&mut fixture, "claude-flood", 64 * 1024 * 1024).await;
+    let turn = RequestId::new("claude-flood-turn").unwrap();
+    let started = tokio::time::timeout(
+        Duration::from_secs(20),
+        claude.start_turn(turn, &large_turn()),
+    )
+    .await;
+    assert!(
+        started.is_ok(),
+        "the turn waited 20 s on a stand-in blocked on its unread output"
+    );
+    started.unwrap().unwrap();
+    let mut said = 0;
+    let finished = loop {
+        let event = tokio::time::timeout(Duration::from_secs(20), claude.next_event())
+            .await
+            .expect("the flooded turn never ended");
+        match event {
+            Ok(event) => match event.kind {
+                EventKind::AssistantText { text, .. } if text == "line" => said += 1,
+                EventKind::TurnFinished { outcome, .. } => break Ok(outcome),
+                _ => {}
+            },
+            Err(error) => break Err(error.0),
+        }
+    };
+    let _ = claude.close().await;
+    assert!(matches!(finished, Ok(TurnOutcome::Success)), "{finished:?}");
+    assert_eq!(said, 2_000, "every frame of the flood reached the reader");
+}
+
+/// CodeRabbit CR-1354: while a turn waits on a stand-in with no clock, custody holds its
+/// events past the full queue only up to the run's output bound. A flood past a 256 KiB bound
+/// ends the run with `claude_host_stdout_limit`, and the waiting turn is refused.
+#[tokio::test]
+async fn the_output_bound_ends_a_claude_run_that_floods_past_it_while_a_turn_waits() {
+    use crate::engine::master_host_fixture::MasterFixture;
+
+    let mut fixture = MasterFixture::new("claude");
+    let mut claude = flood_host(&mut fixture, "claude-flood-bound", 256 * 1024).await;
+    let turn = RequestId::new("claude-flood-bound-turn").unwrap();
+    let started = tokio::time::timeout(
+        Duration::from_secs(20),
+        claude.start_turn(turn, &large_turn()),
+    )
+    .await;
+    assert!(
+        started.is_ok(),
+        "the turn waited 20 s on a stand-in blocked on its unread output"
+    );
+    assert!(
+        started.unwrap().is_err(),
+        "a refused turn was reported as written"
+    );
+    let fault = loop {
+        let event = tokio::time::timeout(Duration::from_secs(20), claude.next_event())
+            .await
+            .expect("the run past its bound never ended");
+        if let Err(error) = event {
+            break error.0;
+        }
+    };
+    let _ = claude.close().await;
+    assert_eq!(fault, "claude_host_stdout_limit");
+}
+
 /// A stand-in Claude Code whose turn writes 10,000 small frames, each with its own id, 9,500
 /// tool answers and 500 reply lines, then ends the turn with DONE.
 const MANY_EVENTS_HARNESS: &str = r#"#!/bin/sh

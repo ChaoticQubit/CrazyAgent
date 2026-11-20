@@ -293,14 +293,15 @@ fn stopping_a_windows_claude_custody_ends_every_process_it_started() {
 /// V244-WIN-MASTER S4 r4 (#734 L1, as CodeRabbit CR-1149 found in the Codex twin): a Windows
 /// Claude harness that exits on its own, leaving a process it started asleep with no pipe of
 /// its own, is retired only once its tree runs none, so that process is already gone when
-/// custody retires, read by tasklist at once, with no wait after the retire.
+/// custody retires, read by tasklist at once, with no wait after the retire. Its exit 0 before
+/// any turn ends the run with that exit code, as the row above reads.
 #[test]
 fn a_windows_claude_harness_that_exits_leaving_a_sleeping_process_retires_only_once_it_is_gone() {
     let folder = tempfile::tempdir().unwrap();
     let marker = folder.path().join("holder.pid");
     let exe = std::env::current_exe().unwrap();
     let mut command = cmd(&format!(
-        "start \"\" /b \"{}\" {HOLDER_ARGS} >nul 2>nul & for /l %n in (1,1,60) do @(if exist \"{}\" (exit 0) else (ping -n 2 127.0.0.1 >nul)) & exit 1",
+        "start \"\" /b \"{}\" {HOLDER_ARGS} >nul 2>nul & for /l %n in (1,1,60) do @(if exist \"{}\" (exit 0) else (ping -n 2 127.0.0.1 >nul))",
         exe.display(),
         marker.display()
     ));
@@ -315,7 +316,10 @@ fn a_windows_claude_harness_that_exits_leaving_a_sleeping_process_retires_only_o
         !running(holder),
         "custody retired while the process its harness left still ran"
     );
-    assert_eq!(fault(&watched), None);
+    assert_eq!(
+        fault(&watched).as_deref(),
+        Some("claude_host_native_exit_0")
+    );
     assert!(!watched.doubt.load(Ordering::Acquire));
 }
 
@@ -444,7 +448,8 @@ fn claude_stand_in_holder() {
 /// The holder the nested-job row starts in a held tree: writes its own process id to the
 /// file [`HOLDER_PID`] names, waits for the file [`NESTED_GO`] names, then starts a sleeping
 /// PING with no console and holds it in a process tree of its own, a job nested in the
-/// row's, writes PING's id to the file [`NESTED_PID`] names and waits two minutes.
+/// row's, writes PING's id to the file [`NESTED_PID`] names and waits for PING, about two
+/// minutes.
 #[test]
 #[ignore = "a stand-in the nested-job row starts, not a row"]
 fn claude_stand_in_nested_holder() {
@@ -462,11 +467,11 @@ fn claude_stand_in_nested_holder() {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .creation_flags(SUSPENDED_DETACHED);
-    let child = crate::spawn_gate::spawn(&mut ping).unwrap();
+    let mut child = crate::spawn_gate::spawn(&mut ping).unwrap();
     let _nested = crazyagent_win_sandbox::ProcessTree::hold(&child).unwrap();
     let nested = PathBuf::from(std::env::var_os(NESTED_PID).unwrap());
     let written = nested.with_extension("part");
     std::fs::write(&written, child.id().to_string()).unwrap();
     std::fs::rename(&written, &nested).unwrap();
-    std::thread::sleep(Duration::from_secs(120));
+    child.wait().unwrap();
 }

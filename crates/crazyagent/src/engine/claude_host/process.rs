@@ -133,6 +133,7 @@ struct Process {
     stdout_bytes: usize,
     stderr_bytes: usize,
     events: usize,
+    held: std::collections::VecDeque<ObservedEvent>,
     completed_turns: usize,
     frame: Vec<u8>,
     deadline: Option<Instant>,
@@ -315,6 +316,7 @@ pub(super) fn start(
         stdout_bytes: 0,
         stderr_bytes: 0,
         events: 0,
+        held: std::collections::VecDeque::new(),
         completed_turns: 0,
         frame: Vec::new(),
         deadline: limits.run_time.map(|time| Instant::now() + time),
@@ -426,10 +428,16 @@ impl Process {
                 self.fail(Fault::Host("claude_host_deadline"));
                 return;
             }
+            if !self.hand_over() {
+                return;
+            }
             self.read_stdout(true);
             self.read_stderr();
             self.reap();
             if self.status.is_some() {
+                if !self.hand_over() {
+                    return;
+                }
                 let code = self.status.and_then(|status| status.code());
                 let held = Fault::Exit(code).held();
                 if !held && self.fault.is_none() && (self.stdout.is_some() || self.stderr.is_some())
@@ -693,23 +701,33 @@ impl Process {
             .is_some_and(|deadline| Instant::now() >= deadline)
     }
 
-    /// Hands one event to the turn's reader, waiting while the reader's queue is full, so a
-    /// burst of frames is never a failed turn (OB-5b); the harness waits on its pipe
-    /// meanwhile. The wait ends at the host's stop, at its deadline, which is recorded as the
-    /// fault, or with `claude_host_event_delivery_failed` when the reader is gone.
-    /// Input: the event. Output: whether the reader has it.
+    /// Hands one event to the turn's reader behind the ones custody holds, as
+    /// [`Self::hand_over`] does. Each event comes from at least one stdout byte, so what custody
+    /// holds stays within the stdout bound. Input: the event. Output: whether custody goes on.
     fn deliver(&mut self, event: ObservedEvent) -> bool {
         assert!(self.events >= 1);
         assert!(self.completed_turns <= self.events);
-        let mut waiting = event;
-        loop {
-            match self.output.try_send(waiting) {
-                Ok(()) => return true,
+        self.held.push_back(event);
+        self.hand_over()
+    }
+
+    /// Hands the held events to the turn's reader, oldest first. While a turn's input is
+    /// pending to a harness not yet reaped, a full queue leaves them held (CodeRabbit CR-1354),
+    /// as the host waits on that input and the harness may read it only once its output is
+    /// read. Otherwise it waits while the queue is full (OB-5b), until the stop, the deadline
+    /// (the fault) or a gone reader. Input: the process. Output: whether custody goes on.
+    fn hand_over(&mut self) -> bool {
+        while let Some(event) = self.held.pop_front() {
+            match self.output.try_send(event) {
+                Ok(()) => continue,
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     self.fail(Fault::Host("claude_host_event_delivery_failed"));
                     return false;
                 }
-                Err(mpsc::error::TrySendError::Full(event)) => waiting = event,
+                Err(mpsc::error::TrySendError::Full(event)) => self.held.push_front(event),
+            }
+            if self.pending.is_some() && self.status.is_none() {
+                return true;
             }
             if self.stop.load(Ordering::Acquire) {
                 return false;
@@ -720,6 +738,7 @@ impl Process {
             }
             std::thread::sleep(POLL_TIME);
         }
+        true
     }
 
     fn read_stderr(&mut self) {
