@@ -49,6 +49,8 @@ thread_local! {
     /// The event type a unit row stands in for GTK's current one, while it sets one.
     static AS_IF: std::cell::Cell<Option<Option<EventType>>> =
         const { std::cell::Cell::new(None) };
+    /// Whether a seat is there, as a unit row stands it in for the display's, while it sets one.
+    static AS_SEAT: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 /// The type of the event GTK is handling now, for the seat guard; a unit row may stand
@@ -109,6 +111,14 @@ impl Clip {
         true
     }
 
+    /// Puts plain text on a board for the terminal window's own Copy command, which comes
+    /// over IPC with no GTK event: it needs the display's seat in place of a user event, and
+    /// only the terminal window's IPC path calls it. Inputs: the board and 1 to
+    /// `COPY_BYTES_MAX` bytes of text. Output: whether the write was made.
+    pub fn write_command(&self, _board: Board, _text: &str) -> bool {
+        false
+    }
+
     /// Reads a board's plain text inside a user event only; the reply comes at once from
     /// a private board or a refused read, and from GTK's main loop for a desktop board.
     /// Inputs: the board and the reply. Output: none; the reply gets the text, bounded as a
@@ -137,7 +147,7 @@ mod tests {
     use gtk::gdk::EventType;
     use gtk::prelude::*;
     use serde_json::json;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
     use std::time::Duration;
 
@@ -188,6 +198,15 @@ mod tests {
         out
     }
 
+    /// Runs a board call as if the display had a seat, or none. Inputs: whether it has one
+    /// and the call. Output: what the call gives.
+    fn with_seat<R>(seat: bool, call: impl FnOnce() -> R) -> R {
+        AS_SEAT.with(|slot| slot.set(Some(seat)));
+        let out = call();
+        AS_SEAT.with(|slot| slot.set(None));
+        out
+    }
+
     fn read_now(clip: &Clip, board: Board, input: Option<EventType>) -> Option<String> {
         let got = Rc::new(RefCell::new(None));
         let called = Rc::new(RefCell::new(false));
@@ -227,6 +246,89 @@ mod tests {
             Some("one".to_owned())
         );
         assert_eq!(read_now(&clip, Board::Clipboard, None), None);
+    }
+
+    #[test]
+    fn a_command_write_needs_the_seat_not_an_event() {
+        let clip = Clip::private();
+        let command = |text: &str, seat| {
+            with_seat(seat, || {
+                as_if(None, || clip.write_command(Board::Clipboard, text))
+            })
+        };
+        assert!(
+            command("copied", true),
+            "a command writes with a seat and no event"
+        );
+        assert_eq!(
+            read_now(&clip, Board::Clipboard, KEY),
+            Some("copied".to_owned())
+        );
+        assert!(!command("seatless", false), "a command needs the seat");
+        assert!(!command("", true));
+        assert!(!command(&"x".repeat(COPY_BYTES_MAX + 1), true));
+        assert_eq!(
+            read_now(&clip, Board::Clipboard, KEY),
+            Some("copied".to_owned())
+        );
+        assert!(
+            !with_seat(true, || as_if(None, || clip
+                .write(Board::Clipboard, "event"))),
+            "a plain write still needs a user event"
+        );
+    }
+
+    /// The page's Copy on a real display. The command comes over IPC with no GTK event, which
+    /// a glib timeout after a key press stands in for: a plain write from that timeout is
+    /// refused, a command write puts its text on the desktop CLIPBOARD, and the farm reads it.
+    #[test]
+    #[ignore = "needs a display and the farm's clipboard tools: the farm runs it under Xvfb and sway"]
+    fn a_command_write_reaches_the_desktop_board_with_no_event() {
+        assert!(
+            row_dir().is_some(),
+            "NATIVE_ROW_DIR: the farm reads the board"
+        );
+        gtk::init().expect("a display");
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_title("native-row");
+        window.set_default_size(320, 200);
+        window.show_all();
+        pump_until("the window", || {
+            window.window().is_some_and(|gdk| gdk.is_viewable())
+        });
+        let clip = Rc::new(Clip::desktop());
+        let wrote = Rc::new(Cell::new(None));
+        {
+            let (clip, wrote) = (Rc::clone(&clip), Rc::clone(&wrote));
+            window.connect_key_press_event(move |_, event| {
+                if event.keyval().to_unicode() == Some('c') {
+                    let (clip, wrote) = (Rc::clone(&clip), Rc::clone(&wrote));
+                    let _ =
+                        gtk::glib::timeout_add_local_once(Duration::from_millis(10), move || {
+                            let plain = clip.write(Board::Clipboard, "native-plain-1");
+                            let command = clip.write_command(Board::Clipboard, "native-command-1");
+                            wrote.set(Some((plain, command)));
+                        });
+                }
+                gtk::glib::Propagation::Stop
+            });
+        }
+        pump_for(Duration::from_millis(300));
+
+        step("command");
+        pump_until("the timeout's writes", || wrote.get().is_some());
+        assert_eq!(
+            wrote.get(),
+            Some((false, true)),
+            "a timeout's plain write is refused and its command write is made"
+        );
+        step("commanded");
+        assert_eq!(
+            farm_text("farm-clipboard.txt"),
+            "native-command-1",
+            "the desktop board holds the command's text"
+        );
+        unsafe { window.destroy() };
     }
 
     fn farm_text(name: &str) -> String {
