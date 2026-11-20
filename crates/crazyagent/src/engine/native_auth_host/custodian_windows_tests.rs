@@ -1,4 +1,4 @@
-use super::custodian::{CAUSE_BYTES_MAX, CustodianCause};
+use super::custodian::{CAUSE_BYTES_MAX, CustodianCause, CustodianChild};
 use super::entry_bootstrap::read_bootstrap;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::terminal::windows::ConptyHost;
@@ -8,6 +8,7 @@ use std::fs::File;
 use std::io::ErrorKind;
 use std::io::Write;
 use std::os::windows::io::OwnedHandle;
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -27,6 +28,11 @@ const CAUSE_BOUND: Duration = Duration::from_secs(20);
 const RACE_SPAWNS: usize = 200;
 const RACE_PANES_MAX: usize = 32;
 const WAITER: &str = "ping -n 60 127.0.0.1 >NUL";
+const WAITER_WITH_CHILD: &str = "start /b ping -n 60 127.0.0.1 >NUL & ping -n 60 127.0.0.1 >NUL";
+const CREATE_SUSPENDED: u32 = 0x0000_0004;
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const TREE_END_BOUND: Duration = Duration::from_secs(2);
+const FIND_BOUND: Duration = Duration::from_secs(20);
 const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// The product binary the farm built for these rows, named by
@@ -405,4 +411,126 @@ fn what_a_custodian_does_with_no_system_root() {
         format!("no SystemRoot: code={code:?} elapsed={elapsed:?} stderr={line:?}\n"),
     )
     .unwrap();
+}
+
+/// A stand-in custodian whose first act starts a grandchild `ping.exe`, both waiting a minute,
+/// its stdio all named.
+fn waiter_with_grandchild() -> Command {
+    let mut command = Command::new(cmd());
+    command
+        .args(["/c", WAITER_WITH_CHILD])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+}
+
+/// Whether a process id runs the named image now, so a reused id never reads as the process
+/// a row started. Inputs: the id and the image, such as `PING.EXE`. Output: the answer.
+fn runs(pid: u32, image: &str) -> bool {
+    let listed = crate::spawn_gate::collected(
+        Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .stdin(Stdio::null()),
+    )
+    .unwrap();
+    String::from_utf8_lossy(&listed.stdout)
+        .to_ascii_lowercase()
+        .contains(&format!("\"{}\"", image.to_ascii_lowercase()))
+}
+
+/// The id of the `ping.exe` a process started, waited for at most [`FIND_BOUND`]. Input:
+/// the parent's id. Output: the grandchild's id.
+fn ping_child_of(parent: u32) -> u32 {
+    let started = Instant::now();
+    let query = format!(
+        "Get-CimInstance Win32_Process -Filter \"ParentProcessId={parent} AND Name='PING.EXE'\" \
+         | Select-Object -First 1 -ExpandProperty ProcessId"
+    );
+    loop {
+        let found = crate::spawn_gate::collected(
+            Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &query])
+                .stdin(Stdio::null()),
+        )
+        .unwrap();
+        if let Ok(pid) = String::from_utf8_lossy(&found.stdout).trim().parse() {
+            return pid;
+        }
+        assert!(started.elapsed() < FIND_BOUND, "no grandchild of {parent}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Waits until none of the processes runs, at most `bound`. Inputs: the ids with their
+/// images, and the bound. Output: whether all ended within it.
+fn all_end_within(processes: &[(u32, &str)], bound: Duration) -> bool {
+    let started = Instant::now();
+    while processes.iter().any(|(pid, image)| runs(*pid, image)) {
+        if started.elapsed() > bound {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+/// PLAN-0541 row 3: a custodian started suspended is in its job before it runs, so the
+/// grandchild its first act starts is in it too, and dropping the custodian ends both
+/// within two seconds. The control, the same stand-in with no job, leaves its grandchild
+/// running after its own kill, or the row would prove nothing.
+#[test]
+fn the_custodian_job_holds_its_tree_from_the_start_and_ends_it_on_drop() {
+    let mut loose = crate::spawn_gate::spawn(&mut waiter_with_grandchild()).unwrap();
+    let orphan = ping_child_of(loose.id());
+    loose.kill().unwrap();
+    loose.wait().unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    let survived = runs(orphan, "PING.EXE");
+    let _ = crate::spawn_gate::collected(
+        Command::new("taskkill")
+            .args(["/PID", &orphan.to_string(), "/F"])
+            .stdin(Stdio::null()),
+    );
+    assert!(
+        survived,
+        "a grandchild outside any job must outlive its parent's kill"
+    );
+    let mut command = waiter_with_grandchild();
+    command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
+    let custodian = CustodianChild::start(&mut command).unwrap();
+    let parent = custodian.id();
+    let grandchild = ping_child_of(parent);
+    assert!(runs(parent, "cmd.exe") && runs(grandchild, "PING.EXE"));
+    drop(custodian);
+    assert!(all_end_within(
+        &[(parent, "cmd.exe"), (grandchild, "PING.EXE")],
+        TREE_END_BOUND
+    ));
+}
+
+/// PLAN-0541 row 3: a custodian whose job cannot be made is killed, never left suspended or
+/// running outside a job.
+#[test]
+fn a_custodian_whose_hold_fails_is_killed() {
+    let mut command = waiter_with_grandchild();
+    command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
+    let child = crate::spawn_gate::spawn(&mut command).unwrap();
+    let pid = child.id();
+    assert!(runs(pid, "cmd.exe"));
+    let held = CustodianChild::held(child, |_| {
+        Err(crazyagent_win_sandbox::BoundaryError::Refused(
+            "a row's forced hold failure",
+        ))
+    });
+    assert!(held.is_err());
+    let ended = all_end_within(&[(pid, "cmd.exe")], TREE_END_BOUND);
+    if !ended {
+        let _ = crate::spawn_gate::collected(
+            Command::new("taskkill")
+                .args(["/PID", &pid.to_string(), "/F"])
+                .stdin(Stdio::null()),
+        );
+    }
+    assert!(ended, "the custodian outlived its failed hold");
 }

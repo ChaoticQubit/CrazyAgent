@@ -129,3 +129,37 @@ fn drain(mut stream: std::process::ChildStderr, sender: &Sender<Vec<u8>>) {
         }
     }
 }
+
+/// A sign-in custodian on Windows and every process it starts, held in a kill-on-close job
+/// from before its first instruction runs, so ending it ends its whole tree. Not built yet
+/// (N3 r2 red rows): it is never made.
+#[cfg(windows)]
+pub(super) enum CustodianChild {}
+
+#[cfg(windows)]
+impl CustodianChild {
+    /// Starts a custodian created suspended and holds its tree. Not built yet: refuses.
+    /// Input: the command. Output: `native_auth_host_unavailable`.
+    pub(super) fn start(_command: &mut std::process::Command) -> std::io::Result<Self> {
+        Err(std::io::Error::other("native_auth_host_unavailable"))
+    }
+
+    /// Holds a started custodian's tree with `hold`. Not built yet: refuses and leaves the
+    /// child as it is. Inputs: the child and the hold. Output: `native_auth_host_unavailable`.
+    pub(super) fn held(
+        _child: std::process::Child,
+        _hold: impl FnOnce(
+            &std::process::Child,
+        ) -> Result<
+            crazyagent_win_sandbox::ProcessTree,
+            crazyagent_win_sandbox::BoundaryError,
+        >,
+    ) -> std::io::Result<Self> {
+        Err(std::io::Error::other("native_auth_host_unavailable"))
+    }
+
+    /// The custodian's process id. Never runs, as none is made. Output: none.
+    pub(super) fn id(&self) -> u32 {
+        match *self {}
+    }
+}

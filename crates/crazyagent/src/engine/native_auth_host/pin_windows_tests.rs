@@ -1,10 +1,13 @@
-use super::{RegisteredNativeAuthHost, pinnable, pinnable_at};
+use super::{RegisteredNativeAuthHost, pinnable_at};
+use crate::engine::EngineError;
+use crate::harnesses::finding::{AgentSpace, check_file};
 use crazyagent_win_sandbox::test_files::{null_dacl, supersede, writable_view};
 use sha2::Digest;
 use std::fs::{File, OpenOptions};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 
 const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
 const FILE_SHARE_READ: u32 = 0x1;
@@ -306,18 +309,126 @@ fn a_batch_file_harness_is_refused_and_an_exe_passes() {
     assert_eq!(code(RegisteredNativeAuthHost::capture_pinned(&path)), "ok");
 }
 
-/// Q5: until N3 the live pin stays off on Windows, so harness search and every engine-start
-/// capture still answer unavailable while the pin itself works.
+/// Q5: with the custodian on Windows (N3 r2) the live pin is on there, so harness search and
+/// every engine-start capture pin as the pin itself does.
 #[test]
-fn the_live_pin_stays_off_on_windows_until_the_custodian_lands() {
+fn the_live_pin_is_on_on_windows_with_the_custodian() {
     let (_folder, path) = harness("codex.exe");
-    let metadata = std::fs::metadata(&path).unwrap();
-    assert_eq!(code(pinnable(&metadata)), UNAVAILABLE);
-    assert_eq!(code(RegisteredNativeAuthHost::capture(&path)), UNAVAILABLE);
-    assert_eq!(
-        code(RegisteredNativeAuthHost::capture_entry(&path)),
-        UNAVAILABLE
-    );
     assert_eq!(code(pinnable_at(&path)), "ok");
+    assert_eq!(code(RegisteredNativeAuthHost::capture(&path)), "ok");
+    assert_eq!(code(RegisteredNativeAuthHost::capture_entry(&path)), "ok");
     assert_eq!(code(RegisteredNativeAuthHost::capture_pinned(&path)), "ok");
+}
+
+/// The `.cmd` npm 11's cmd-shim 8.0.0 writes for Codex, the text of tools/batch.rs's row
+/// fixture, naming [`CODEX_SCRIPT`] below the shim's folder.
+const CODEX_SHIM: &str = "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js\" %*\r\n";
+/// The script [`CODEX_SHIM`] starts, below the shim's folder.
+const CODEX_SCRIPT: &str = r"node_modules\@openai\codex\bin\codex.js";
+
+/// A folder where an owner's npm install would be: below LOCALAPPDATA, private to this
+/// account and outside the temp folders the agent space holds. Output: the folder, removed
+/// when dropped, and its real path.
+fn owner_folder() -> (tempfile::TempDir, PathBuf) {
+    let local = std::env::var_os("LOCALAPPDATA").expect("Windows sets LOCALAPPDATA");
+    let folder = tempfile::Builder::new()
+        .prefix("n3-rows-")
+        .tempdir_in(local)
+        .unwrap();
+    let real = std::fs::canonicalize(folder.path()).unwrap();
+    (folder, real)
+}
+
+/// An npm install of Codex in `folder`: `codex.cmd` and the script it starts. Input: the
+/// folder's real path. Output: the shim in the plain spelling, and the script's real path.
+fn npm_codex(folder: &Path) -> (PathBuf, PathBuf) {
+    let script = folder.join(CODEX_SCRIPT);
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, vec![b'A'; HARNESS_BYTES]).unwrap();
+    let shim = folder.join("codex.cmd");
+    std::fs::write(&shim, CODEX_SHIM).unwrap();
+    (plain(&shim), std::fs::canonicalize(&script).unwrap())
+}
+
+/// The engine-start check harness search and a re-pin run on an entry, for an engine folder
+/// with no database yet. Input: the engine folder. Output: the check.
+fn start_check(engine: &Path) -> impl Fn(&Path) -> Result<(), EngineError> + '_ {
+    move |path| {
+        let space = AgentSpace::open(engine)?;
+        check_file(path, &space, None).map(|_| ())
+    }
+}
+
+/// rv-sec2 #741: harness search judges an npm shim by the script it starts, so a PATH-found
+/// `codex.cmd` passes the pin rule rather than being refused as a batch file.
+#[test]
+fn an_npm_codex_shim_passes_harness_search_by_the_script_it_starts() {
+    let (_owner, folder) = owner_folder();
+    let engine = tempfile::tempdir().unwrap();
+    let (shim, _script) = npm_codex(&folder);
+    assert_eq!(code(start_check(engine.path())(&shim)), "ok");
+}
+
+/// rv-sec2 #741: an npm shim pins the script it starts, and `current` resolves the entry as
+/// capture does, so the same host comes back rather than a re-pin of the `.cmd`.
+#[test]
+fn an_npm_codex_shim_pins_its_script_and_current_keeps_the_same_host() {
+    let (_owner, folder) = owner_folder();
+    let engine = tempfile::tempdir().unwrap();
+    let (shim, script) = npm_codex(&folder);
+    let host = Arc::new(RegisteredNativeAuthHost::capture_entry(&shim).unwrap());
+    assert_eq!(host.verified_path().unwrap(), script);
+    let now = host.current(start_check(engine.path())).unwrap();
+    assert!(Arc::ptr_eq(&host, &now));
+}
+
+/// rv-sec2 #741: the script of a pinned npm shim rewritten in place reads as changed through
+/// `current`, not as a fresh pin.
+#[test]
+fn a_rewritten_npm_script_reads_as_changed_through_current() {
+    let (_owner, folder) = owner_folder();
+    let engine = tempfile::tempdir().unwrap();
+    let (shim, script) = npm_codex(&folder);
+    let host = Arc::new(RegisteredNativeAuthHost::capture_entry(&shim).unwrap());
+    supersede(&script).unwrap();
+    assert_eq!(code(host.current(start_check(engine.path()))), CHANGED);
+}
+
+/// An npm shim that now names another script, as an npm update may write it, re-pins that
+/// script through `current` with the engine-start check, so an update is not refused.
+#[test]
+fn an_npm_shim_that_names_another_script_re_pins_it_through_current() {
+    let (_owner, folder) = owner_folder();
+    let engine = tempfile::tempdir().unwrap();
+    let (shim, script) = npm_codex(&folder);
+    let host = Arc::new(RegisteredNativeAuthHost::capture_entry(&shim).unwrap());
+    let moved = script.with_file_name("codex-next.js");
+    std::fs::write(&moved, vec![b'B'; HARNESS_BYTES]).unwrap();
+    std::fs::write(
+        &shim,
+        CODEX_SHIM.replace(r"bin\codex.js", r"bin\codex-next.js"),
+    )
+    .unwrap();
+    let now = host.current(start_check(engine.path())).unwrap();
+    assert!(!Arc::ptr_eq(&host, &now));
+    assert_eq!(
+        now.verified_path().unwrap(),
+        std::fs::canonicalize(&moved).unwrap()
+    );
+}
+
+/// rv-sec2 #721 r2 C1: one `verified` call gives the path and the hash from one check, one
+/// hash of the pinned harness, where `verified_path` then `verified_sha256` hash twice.
+#[test]
+fn one_verified_call_hashes_the_pinned_harness_once() {
+    let (_folder, path) = harness("codex.exe");
+    let host = RegisteredNativeAuthHost::capture_pinned(&path).unwrap();
+    let before = host.rehashes();
+    let (verified, sha256) = host.verified().unwrap();
+    assert_eq!(host.rehashes(), before + 1);
+    assert_eq!(verified, path);
+    assert_eq!(
+        sha256,
+        format!("{:x}", sha2::Sha256::digest(vec![b'A'; HARNESS_BYTES]))
+    );
 }

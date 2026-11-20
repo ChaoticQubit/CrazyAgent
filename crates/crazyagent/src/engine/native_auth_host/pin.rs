@@ -617,6 +617,13 @@ impl RegisteredNativeAuthHost {
         Ok(())
     }
 
+    /// The pinned path and its SHA-256 in hex, from one check. Not one check yet (N3 r2 red
+    /// rows, test builds only): it checks twice. Output: both, or the refusal.
+    #[cfg(test)]
+    pub(crate) fn verified(&self) -> Result<(&Path, String), EngineError> {
+        Ok((self.verified_path()?, self.verified_sha256()?))
+    }
+
     pub(crate) fn verified_sha256(&self) -> Result<String, EngineError> {
         self.verified_path()?;
         Ok(self
