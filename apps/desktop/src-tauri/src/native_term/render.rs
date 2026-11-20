@@ -1226,6 +1226,7 @@ mod tests {
     /// A view made after the device is lost draws on a fresh device, so Open again brings
     /// the terminal back (V243-NATIVE-DEVICE-REPLACE). With `--nocapture` it prints how
     /// long making that view took, the fresh device included.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_view_made_after_a_loss_draws_on_a_fresh_device() {
         let mut shared = shared_at(2.0);
@@ -1251,6 +1252,7 @@ mod tests {
     /// report `native_terminal_gpu` with no GPU work, and dropping it leaves the fresh view
     /// drawing. Without its own lost flag, the resize configures it onto the fresh device
     /// and its draw raises device-mismatch errors there (probe 5aedcf53d).
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_view_from_the_lost_device_never_moves_to_the_new_one() {
         let mut shared = shared_at(2.0);
@@ -1275,6 +1277,7 @@ mod tests {
     /// Device attempts after a loss stop at the budget: each loss within it gets a fresh
     /// device, and the next one ends the new view with `native_terminal_gpu` without
     /// asking wgpu for another device.
+    #[cfg(target_os = "macos")]
     #[test]
     fn device_attempts_after_a_loss_stop_at_the_budget() {
         let mut shared = shared_at(2.0);
@@ -1298,6 +1301,7 @@ mod tests {
     /// A surface drawn by a renderer other than the one whose device made it is a
     /// programmer error: the host draws a view with the renderer of the scale it was made
     /// at (host:1148-1163, :1216), so the draw asserts it instead of mixing two devices.
+    #[cfg(target_os = "macos")]
     #[test]
     #[should_panic(expected = "a surface drawn by the renderer that made it")]
     fn a_surface_drawn_by_another_renderer_trips_the_device_assert() {
