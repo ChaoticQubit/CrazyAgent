@@ -17,8 +17,8 @@ env:
   RUST_TOOLCHAIN: "1.98.1"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
-  BASE_SHA: 3e45d7a38
-  TIP_SHA: f4eed173b
+  BASE_SHA: 0277f210c
+  TIP_SHA: 0e2f2804d
 
 defaults:
   run:
@@ -26,7 +26,7 @@ defaults:
 
 jobs:
   s1:
-    name: V244 WIN-MASTER S1 land f4eed173b (the S1 tip plus chore/v244 3e45d7a38) on ${{ matrix.runner }}
+    name: V244 WIN-MASTER S1 land 0e2f2804d (the S1 tip plus chore/v244 0277f210c) on ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
@@ -107,7 +107,7 @@ jobs:
           mkdir -p target/debug/deps
           cp target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
           ls -l target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
-      - name: S1 land Codex host rows on Windows at the land tip f4eed173b
+      - name: S1 land Codex host rows on Windows at the land tip 0e2f2804d
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         timeout-minutes: 60
         run: |
@@ -118,7 +118,7 @@ jobs:
           grep -E '^test engine::codex_host::|^test result|panicked' "$RUNNER_TEMP/tip.log" || true
           [ "$rc" -eq 0 ]
           grep -qE 'test result: ok\. 24 passed; 0 failed; 1 ignored' "$RUNNER_TEMP/tip.log"
-      - name: S1 land Codex host rows on ubuntu at chore/v244 3e45d7a38 and at the land tip f4eed173b
+      - name: S1 land Codex host rows on ubuntu at chore/v244 0277f210c and at the land tip 0e2f2804d
         if: ${{ !cancelled() && runner.os == 'Linux' }}
         timeout-minutes: 120
         run: |
