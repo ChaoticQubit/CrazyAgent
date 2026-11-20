@@ -493,9 +493,9 @@ pub(crate) fn holds(connection: &Connection, folder: &Path) -> rusqlite::Result<
         .optional()?;
     Ok(origin.is_some_and(|origin| {
         let origin = one_spelling(PathBuf::from(origin));
-        folder.starts_with(&origin)
+        super::inside(folder, &origin)
             || std::fs::canonicalize(folder)
-                .is_ok_and(|real| one_spelling(real).starts_with(&origin))
+                .is_ok_and(|real| super::inside(&one_spelling(real), &origin))
     }))
 }
 
@@ -518,9 +518,9 @@ pub(crate) fn lands(connection: &Connection, folder: &Path) -> rusqlite::Result<
         .optional()?;
     Ok(target.is_some_and(|target| {
         let target = one_spelling(PathBuf::from(target));
-        folder.starts_with(&target)
+        super::inside(folder, &target)
             || std::fs::canonicalize(folder)
-                .is_ok_and(|real| one_spelling(real).starts_with(&target))
+                .is_ok_and(|real| super::inside(&one_spelling(real), &target))
     }))
 }
 
@@ -697,7 +697,7 @@ fn checked(
         return Err(refused("project_setup_missing"));
     }
     let real = std::fs::canonicalize(&found.folder).map_err(|_| refused("home_source_missing"))?;
-    if one_spelling(real.clone()).starts_with(one_spelling(home.clone())) {
+    if super::inside(&one_spelling(real.clone()), &one_spelling(home.clone())) {
         return Err(refused("move_project_already_home"));
     }
     if real != found.folder || (short_name(&real).is_some() && one_spelling(real.clone()) == real) {

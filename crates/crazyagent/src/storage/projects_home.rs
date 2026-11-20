@@ -86,11 +86,19 @@ fn start_watch(saved: &Path) -> Option<HomeWatch> {
     }
 }
 
+#[cfg(all(test, windows))]
+mod engine_root_windows_tests;
+
+/// The engine root, the folder that holds the engine database, resolved and in the one
+/// spelling every folder it is compared with is given (rv-sec2 #717 C1), so a containment
+/// check never sees two spellings of one folder. Input: the database path. Output: the root.
 fn engine_root(path: &Path) -> Result<PathBuf, EngineError> {
     let parent = path
         .parent()
         .ok_or_else(|| error("runtime_parent_missing"))?;
-    std::fs::canonicalize(parent).map_err(error)
+    Ok(crate::projects_home::one_spelling(
+        std::fs::canonicalize(parent).map_err(error)?,
+    ))
 }
 
 /// Lists every set-up project, none left out, so the trash guard and the
@@ -1580,9 +1588,13 @@ fn held_inside(
     ];
     let inside = |text: &str| {
         let path = Path::new(text);
-        names.iter().flatten().any(|name| path.starts_with(name))
-            || std::fs::canonicalize(path)
-                .is_ok_and(|real| crate::projects_home::one_spelling(real).starts_with(&home))
+        names
+            .iter()
+            .flatten()
+            .any(|name| crate::projects_home::inside(path, name))
+            || std::fs::canonicalize(path).is_ok_and(|real| {
+                crate::projects_home::inside(&crate::projects_home::one_spelling(real), &home)
+            })
     };
     let mut statement = tx.prepare(query).map_err(error)?;
     let columns = statement.column_count();
