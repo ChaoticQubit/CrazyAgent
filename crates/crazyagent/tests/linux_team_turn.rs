@@ -4,7 +4,9 @@ use crazyagent::engine::owner::OwnerClientKind;
 use crazyagent::landing::{AcceptOutcome, ChangeSetView, ChangeState};
 use crazyagent::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
 use crazyagent::protocol::{Outcome, ProjectId, ProjectSpec, StoredProject};
-use crazyagent::team::{TaskSource, TaskStatus, TeamAction, TeamStatus};
+use crazyagent::team::{
+    AgentRole, MessageAuthor, MessageState, TaskSource, TaskStatus, TeamAction, TeamStatus,
+};
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::os::unix::fs::PermissionsExt;
@@ -203,13 +205,22 @@ fn until(
     }
 }
 
-/// A Linux team sub-agent delegated by the owner runs in its linked worktree under the call
-/// supervisor, headless, as the engine the service starts runs it (DEC-205 S5b): it writes
-/// its page, each write into the worktree's git admin folder or a nested `.git` is refused
-/// and leaves the owner's bytes as they were, its turn ends with a change set the owner
-/// accepts onto the checked-out branch, and `git worktree list` and `prune` stay clean.
-#[test]
-fn a_supervised_linux_sub_agent_turn_lands_its_page_and_is_refused_every_git_metadata_write() {
+/// One engine and project for a row: a private root under /tmp holding the local pool as
+/// global settings, an owner home with a git identity, the project checked in on `main`, the
+/// engine started on it and the project's rows written. Fields are what the rows act on.
+struct Rig {
+    _temp: tempfile::TempDir,
+    root: PathBuf,
+    home: PathBuf,
+    folder: PathBuf,
+    engine: Engine,
+    database: rusqlite::Connection,
+    setup: StoredSetup,
+    access: crazyagent::config::ModelAccess,
+}
+
+/// Starts the rig. Output: the rig, with the engine ready.
+fn rig() -> Rig {
     let temp = tempfile::Builder::new()
         .prefix("ca-lt-")
         .tempdir_in("/tmp")
@@ -241,8 +252,8 @@ fn a_supervised_linux_sub_agent_turn_lands_its_page_and_is_refused_every_git_met
     owner_git(&folder, &home, &["add", "-A"]);
     owner_git(&folder, &home, &["commit", "-q", "-m", "Start the project"]);
 
-    let mut engine = Engine::start(&root, &home, &claude);
-    let mut database = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    let engine = Engine::start(&root, &home, &claude);
+    let database = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     database.busy_timeout(Duration::from_secs(5)).unwrap();
     let setup = setup(&folder);
     let stored = StoredProject {
@@ -270,21 +281,58 @@ fn a_supervised_linux_sub_agent_turn_lands_its_page_and_is_refused_every_git_met
             .settings
             .model_access
             .unwrap();
-    let tx = database
+    Rig {
+        _temp: temp,
+        root,
+        home,
+        folder,
+        engine,
+        database,
+        setup,
+        access,
+    }
+}
+
+/// Runs one owner action in its own immediate transaction. Inputs: the rig and the
+/// action. Output: the outcome.
+fn act(rig: &mut Rig, action: &TeamAction) -> Outcome {
+    let tx = rig
+        .database
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .unwrap();
-    let delegated = crazyagent::team::execute(
-        &tx,
-        &access,
+    let outcome = crazyagent::team::execute(&tx, &rig.access, action).unwrap();
+    tx.commit().unwrap();
+    outcome
+}
+
+/// A Linux team sub-agent delegated by the owner runs in its linked worktree under the call
+/// supervisor, headless, as the engine the service starts runs it (DEC-205 S5b): it writes
+/// its page, each write into the worktree's git admin folder or a nested `.git` is refused
+/// and leaves the owner's bytes as they were, its turn ends with a change set the owner
+/// accepts onto the checked-out branch, and `git worktree list` and `prune` stay clean.
+#[test]
+fn a_supervised_linux_sub_agent_turn_lands_its_page_and_is_refused_every_git_metadata_write() {
+    let mut rig = rig();
+    let project = rig.setup.project_id.clone();
+    let delegated = act(
+        &mut rig,
         &TeamAction::Delegate {
-            project_id: setup.project_id.clone(),
+            project_id: project.clone(),
             harness: Some("claude-code".into()),
             prompt: "Write page.md".into(),
         },
-    )
-    .unwrap();
-    tx.commit().unwrap();
+    );
     assert_eq!(delegated, Outcome::Applied);
+    let Rig {
+        _temp,
+        root,
+        home,
+        folder,
+        mut engine,
+        database,
+        setup,
+        ..
+    } = rig;
 
     let team = until(
         &database,
@@ -392,4 +440,58 @@ fn a_supervised_linux_sub_agent_turn_lands_its_page_and_is_refused_every_git_met
     for refusal in ["linux_supervisor_not_started", "linux_helper_missing"] {
         assert!(!stderr.contains(refusal), "{stderr}");
     }
+}
+
+/// A Linux master whose live switch is on still answers the owner, headless, since agent
+/// panes run only on macOS and the engine gives Linux team runtimes no terminal host
+/// (DEC-205 S5b, QUESTION-1544): the owner's line gets the master's reply, the master runs
+/// with no pane, and its live problem line is recorded for the row's report.
+#[test]
+fn a_linux_master_with_its_live_switch_on_still_answers_the_owner_headless() {
+    let mut rig = rig();
+    let project = rig.setup.project_id.clone();
+    let tx = rig
+        .database
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    crazyagent::team::master::set_live(&tx, &project, true).unwrap();
+    tx.commit().unwrap();
+    let asked = act(
+        &mut rig,
+        &TeamAction::Message {
+            project_id: project.clone(),
+            text: "Say hello.".into(),
+        },
+    );
+    assert_eq!(asked, Outcome::Applied);
+    let Rig {
+        _temp,
+        mut engine,
+        database,
+        setup,
+        ..
+    } = rig;
+    let team = until(
+        &database,
+        &setup,
+        "the master answers the owner",
+        &mut engine,
+        |team| {
+            team.messages.iter().any(|message| {
+                message.author == MessageAuthor::Master && message.state == MessageState::Reply
+            })
+        },
+    );
+    let master = team
+        .agents
+        .iter()
+        .find(|agent| agent.role == AgentRole::Master)
+        .unwrap();
+    assert!(master.pane.is_none(), "{team:#?}");
+    println!("live problem: {:?}", team.live_problem);
+    let stderr = engine.stop();
+    assert!(
+        stderr.contains("agent panes run only on macOS; Linux agents run headless"),
+        "{stderr}"
+    );
 }
