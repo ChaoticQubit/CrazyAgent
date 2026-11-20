@@ -20,7 +20,8 @@ env:
   BASE_SHA: 0277f210c
   RED_SHA: 28061a4f1
   FIX_SHA: 5dcf25403
-  TIP_SHA: b5b569d47
+  R5_RED_SHA: 06106faf3
+  TIP_SHA: df0eb4c27
 
 defaults:
   run:
@@ -28,7 +29,7 @@ defaults:
 
 jobs:
   s6c6:
-    name: V244 WIN-MASTER S6 C6 git-folder guard on ${{ matrix.runner }}, red is the tip without fix 5dcf25403, tip b5b569d47
+    name: V244 WIN-MASTER S6 C6 git-folder guard on ${{ matrix.runner }}, red is the tip without fixes 5dcf25403 and df0eb4c27, tip df0eb4c27
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     strategy:
@@ -99,24 +100,42 @@ jobs:
           set -euo pipefail
           cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked
           cp target/debug/crazyagent-win-boundary.exe target/debug/deps/
-      - name: S6 C6 red rows at the tip without fix 5dcf25403, where no profile is refused for the git folder
+      - name: S6 C6 r5 red row at the tip without fix df0eb4c27, where only the project root's git folder is checked
         if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
           set -euo pipefail
+          git diff "$R5_RED_SHA" "$TIP_SHA" -- crates | git apply -R
+          if git diff --quiet "$TIP_SHA" -- crates; then echo "::error::the r5 fix did not come off"; exit 1; fi
+          set +e
+          cargo test -p crazyagent --lib --locked -- --test-threads 1 --exact sandbox::windows::tests::a_worktree_profile_that_also_writes_its_repository_is_refused 2>&1 | tee "$RUNNER_TEMP/red5.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          git restore -q --source="$TIP_SHA" --staged --worktree -- crates
+          git diff --quiet "$TIP_SHA" -- crates
+          grep -E '^test |^test result|panicked' "$RUNNER_TEMP/red5.log" || true
+          [ "$rc" -ne 0 ]
+          grep -qE 'test result: FAILED\. 0 passed; 1 failed' "$RUNNER_TEMP/red5.log"
+          echo "red as expected: a worktree-rooted profile that writes its repository builds without r5"
+      - name: S6 C6 red rows at the tip without fixes 5dcf25403 and df0eb4c27, where no profile is refused for the git folder
+        if: ${{ !cancelled() }}
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          git diff "$R5_RED_SHA" "$TIP_SHA" -- crates | git apply -R
           git diff "$RED_SHA" "$FIX_SHA" -- crates | git apply -R
           if git diff --quiet "$TIP_SHA" -- crates; then echo "::error::the fix did not come off"; exit 1; fi
           set +e
-          cargo test -p crazyagent --lib --locked -- --test-threads 1 --exact sandbox::windows::tests::a_job_folder_profile_on_a_repository_is_refused_because_it_writes_the_git_folder sandbox::windows::tests::a_guarded_project_root_profile_on_a_repository_is_refused_and_a_worktree_profile_is_not sandbox::windows::tests::a_wrapped_agent_on_a_repository_is_refused_before_it_can_write_git_commondir sandbox::windows::owner_git::tests::owner_git_installs_on_a_repository_where_an_agent_job_folder_is_refused 2>&1 | tee "$RUNNER_TEMP/red.log"
+          cargo test -p crazyagent --lib --locked -- --test-threads 1 --exact sandbox::windows::tests::a_job_folder_profile_on_a_repository_is_refused_because_it_writes_the_git_folder sandbox::windows::tests::a_guarded_project_root_profile_on_a_repository_is_refused_and_a_worktree_profile_is_not sandbox::windows::tests::a_wrapped_agent_on_a_repository_is_refused_before_it_can_write_git_commondir sandbox::windows::tests::a_worktree_profile_that_also_writes_its_repository_is_refused sandbox::windows::owner_git::tests::owner_git_installs_on_a_repository_where_an_agent_job_folder_is_refused 2>&1 | tee "$RUNNER_TEMP/red.log"
           rc=${PIPESTATUS[0]}
           set -e
           git restore -q --source="$TIP_SHA" --staged --worktree -- crates
           git diff --quiet "$TIP_SHA" -- crates
           grep -E '^test |^test result|panicked|left:|right:' "$RUNNER_TEMP/red.log" || true
           [ "$rc" -ne 0 ]
-          grep -qE 'test result: FAILED\. 0 passed; 4 failed' "$RUNNER_TEMP/red.log"
+          grep -qE 'test result: FAILED\. 0 passed; 5 failed' "$RUNNER_TEMP/red.log"
           grep -qF 'commondir written: true' "$RUNNER_TEMP/red.log"
-          echo "red as expected: without the guard every git-folder profile builds, so all 4 rows fail, and a guarded project-root agent writes .git commondir"
+          echo "red as expected: without the guard every git-folder profile builds, so all 5 rows fail, and a guarded project-root agent writes .git commondir"
       - name: Windows sandbox and owner git rows at the tip, five rounds
         if: ${{ !cancelled() }}
         timeout-minutes: 90
