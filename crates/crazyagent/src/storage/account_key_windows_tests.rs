@@ -142,7 +142,7 @@ fn low_probe_child() {
     let whoami = PathBuf::from(std::env::var("SystemRoot").unwrap())
         .join("System32")
         .join("whoami.exe");
-    let groups = Command::new(whoami).arg("/groups").output().unwrap();
+    let groups = crate::spawn_gate::collected(Command::new(whoami).arg("/groups")).unwrap();
     println!("GROUPS {}", String::from_utf8_lossy(&groups.stdout));
     for path in line.split('|') {
         match std::fs::read(path) {
@@ -197,16 +197,21 @@ fn helper() -> PathBuf {
     helper
 }
 
-/// Whether the agent's box reads `path` with `type`, output discarded. Inputs: the installed
-/// sandbox, the project folder and the path. Output: whether `type` succeeded.
+/// Whether the agent's box reads `path` with `type`, output discarded. The path goes unquoted,
+/// as std quotes an argument holding a space and escapes an inner quote as `\"`, which cmd
+/// does not read, so a path with a space is refused here. Inputs: the installed sandbox, the
+/// project folder and the path. Output: whether `type` succeeded.
 fn boxed_read(installed: &WindowsSandbox, project: &Path, path: &Path) -> bool {
+    let named = path.to_str().unwrap();
+    assert!(!named.contains(' '), "{named}");
+    assert!(!named.contains('"'), "{named}");
     let shell = PathBuf::from(std::env::var("SystemRoot").unwrap())
         .join("System32")
         .join("cmd.exe");
     let mut command = Command::new(shell);
     command
         .arg("/C")
-        .arg(format!("type \"{}\"", path.display()))
+        .arg(format!("type {named}"))
         .current_dir(project);
     crate::spawn_gate::status(
         Sandbox::wrap(installed, &command)
