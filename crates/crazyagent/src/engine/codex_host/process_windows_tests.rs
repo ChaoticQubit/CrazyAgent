@@ -432,6 +432,6 @@ fn codex_host_stand_in() {
         },
         other => panic!("no stand-in mode {other}"),
     }
-    stdout.flush().unwrap();
+    let _ = stdout.flush();
     std::process::exit(0);
 }

@@ -1,6 +1,8 @@
 use super::process::{
     CLOSE_TIME, CodexHostOutput, OUTPUT_QUEUE_MAX, POLL_TIME, ProcessShared, WAIT_MAX, WriteRequest,
 };
+#[cfg(windows)]
+use super::pump;
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::harnesses::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
@@ -9,6 +11,8 @@ use crate::platform::fd_wait;
 use crate::protocol::ProjectId;
 use crate::sandbox::LineageCheck;
 use crate::sandbox::warden::{self, Warden};
+#[cfg(windows)]
+use crazyagent_win_sandbox::ProcessTree;
 #[cfg(unix)]
 use rustix::event::{PollFd, PollFlags};
 #[cfg(unix)]
@@ -22,7 +26,11 @@ use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+use std::process::{Child, Command, ExitStatus, Stdio};
+#[cfg(unix)]
+use std::process::{ChildStderr, ChildStdin, ChildStdout};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
@@ -39,6 +47,39 @@ const DRAIN_TIME: Duration = Duration::from_millis(100);
 /// reports its exit; each pass doubles it up to [`WAIT_MAX`].
 const EXIT_WAIT_MIN: Duration = Duration::from_millis(1);
 
+/// The Windows creation flag that starts a harness with its threads suspended, so the engine
+/// holds it in its tree before it runs.
+#[cfg(windows)]
+const CREATE_SUSPENDED: u32 = 0x0000_0004;
+
+/// The Windows creation flag that starts a console harness with no window.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// The harness's stdin as custody holds it: the non-blocking pipe custody polls.
+#[cfg(unix)]
+type StdinPipe = ChildStdin;
+
+/// The harness's stdout as custody holds it: the non-blocking pipe custody polls.
+#[cfg(unix)]
+type StdoutPipe = ChildStdout;
+
+/// The harness's stderr as custody holds it: the non-blocking pipe custody polls.
+#[cfg(unix)]
+type StderrPipe = ChildStderr;
+
+/// The harness's stdin as custody holds it: the end of a thread that writes the pipe.
+#[cfg(windows)]
+type StdinPipe = pump::Input;
+
+/// The harness's stdout as custody holds it: the end of a thread that reads the pipe ahead.
+#[cfg(windows)]
+type StdoutPipe = pump::Output;
+
+/// The harness's stderr as custody holds it: the end of a thread that reads the pipe ahead.
+#[cfg(windows)]
+type StderrPipe = pump::Output;
+
 struct PendingWrite {
     request: WriteRequest,
     written: usize,
@@ -51,9 +92,11 @@ struct OwnedChild {
     lineage: Option<Result<Lineage, Unstopped>>,
     profile: Option<NativeProfileUse>,
     project: Option<ProjectId>,
-    stdin: Option<ChildStdin>,
-    stdout: Option<ChildStdout>,
-    stderr: Option<ChildStderr>,
+    #[cfg(windows)]
+    tree: Option<ProcessTree>,
+    stdin: Option<StdinPipe>,
+    stdout: Option<StdoutPipe>,
+    stderr: Option<StderrPipe>,
     stdout_eof: bool,
     stderr_eof: bool,
     status: Option<ExitStatus>,
@@ -142,6 +185,8 @@ fn start(
             .stderr(Stdio::piped()),
     )
     .map_err(|_| "codex_host_spawn_failed")?;
+    #[cfg(windows)]
+    let (child, tree) = held_tree(child)?;
     let follower = Follower::start(child.id(), Some(token), check);
     let mut custody = Custody(Some(OwnedChild {
         child,
@@ -150,6 +195,8 @@ fn start(
         lineage: None,
         profile,
         project,
+        #[cfg(windows)]
+        tree: Some(tree),
         stdin: None,
         stdout: None,
         stderr: None,
@@ -180,6 +227,8 @@ fn selected_command(command: Command) -> Command {
     selected.args(command.get_args()).env_clear();
     #[cfg(unix)]
     selected.process_group(0);
+    #[cfg(windows)]
+    selected.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
     if let Some(cwd) = command.get_current_dir() {
         selected.current_dir(cwd);
     }
@@ -193,12 +242,13 @@ fn selected_command(command: Command) -> Command {
 
 impl OwnedChild {
     fn prepare_pipes(&mut self) -> Result<(), &'static str> {
-        self.stdin = self.child.stdin.take();
-        self.stdout = self.child.stdout.take();
-        self.stderr = self.child.stderr.take();
-        nonblocking(self.stdin.as_ref().ok_or("codex_host_stdin_missing")?)?;
-        nonblocking(self.stdout.as_ref().ok_or("codex_host_stdout_missing")?)?;
-        nonblocking(self.stderr.as_ref().ok_or("codex_host_stderr_missing")?)?;
+        #[cfg(unix)]
+        let (stdin, stdout, stderr) = held_pipes(&mut self.child)?;
+        #[cfg(windows)]
+        let (stdin, stdout, stderr) = held_pipes(&mut self.child, &self.shared.signal)?;
+        self.stdin = Some(stdin);
+        self.stdout = Some(stdout);
+        self.stderr = Some(stderr);
         Ok(())
     }
 
@@ -286,12 +336,13 @@ impl OwnedChild {
         self.shared.woken.drain();
     }
 
-    /// Sleeps the [`POLL_TIME`] tick where there is no poll(2) here. Input: the instant the
-    /// wait may run to. Output: none.
-    #[cfg(not(unix))]
+    /// Waits until the signal the pipe pumps and the host raise, or `until`. While the
+    /// output queue is full the stdout pump has stopped reading, so it raises nothing until
+    /// the reader makes room. Input: the instant to stop at. Output: none.
+    #[cfg(windows)]
     fn wait_until(&self, until: Instant) {
-        let _ = (&self.shared.woken, until);
-        std::thread::sleep(POLL_TIME);
+        let _ = &self.shared.woken;
+        self.shared.signal.wait_until(until);
     }
 
     fn write_pending(&mut self) {
@@ -417,12 +468,17 @@ impl OwnedChild {
         }
     }
 
-    /// Stands in for the group kill where processes have no groups: `stop` kills the child.
-    #[cfg(not(unix))]
-    fn kill_group(&mut self) {}
+    /// Ends the harness's tree: dropping it ends its kill-on-close job, so every process the
+    /// harness started ends with it, those a boundary helper nests in a job of its own
+    /// included. Takes nothing.
+    #[cfg(windows)]
+    fn kill_group(&mut self) {
+        self.tree = None;
+    }
 
     /// Notes when no process of the harness group is left. Only a reaped harness can leave
-    /// its group empty, and a group that refuses the probe still counts as present.
+    /// its group empty, and a group that refuses the probe still counts as present. On
+    /// Windows the reaped harness's tree is ended, so nothing it started outlives it.
     /// Takes nothing; records an uncertain cleanup when the group cannot be observed.
     fn observe_group(&mut self) {
         if self.status.is_none() || self.group_absent {
@@ -436,6 +492,10 @@ impl OwnedChild {
                 self.cleanup_uncertain("codex_host_group_uncertain");
                 return;
             }
+        }
+        #[cfg(windows)]
+        {
+            self.tree = None;
         }
         self.group_absent = true;
         self.fire_warden();
@@ -594,11 +654,52 @@ impl Drop for Custody {
     }
 }
 
-/// Refuses the host's child pipes where std offers no non-blocking anonymous pipe.
-/// Takes the pipe, unused. Returns `codex_host_unavailable`.
-#[cfg(not(unix))]
-fn nonblocking<T>(_pipe: &T) -> Result<(), &'static str> {
-    Err("codex_host_unavailable")
+/// Holds a harness started suspended in a kill-on-close job of its own, then lets it run,
+/// so it and every process it starts end with the job: when custody drops the tree, or when
+/// the engine exits. Input: the suspended child. Output: the child and its tree, or
+/// `codex_host_spawn_failed` once the child is killed and reaped.
+#[cfg(windows)]
+fn held_tree(mut child: Child) -> Result<(Child, ProcessTree), &'static str> {
+    match ProcessTree::hold(&child) {
+        Ok(tree) => Ok((child, tree)),
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err("codex_host_spawn_failed")
+        }
+    }
+}
+
+/// Takes the harness's pipes and makes each non-blocking for custody's poll. Input: the
+/// child. Output: its stdin, stdout and stderr, or a plain code.
+#[cfg(unix)]
+fn held_pipes(child: &mut Child) -> Result<(StdinPipe, StdoutPipe, StderrPipe), &'static str> {
+    let stdin = child.stdin.take().ok_or("codex_host_stdin_missing")?;
+    let stdout = child.stdout.take().ok_or("codex_host_stdout_missing")?;
+    let stderr = child.stderr.take().ok_or("codex_host_stderr_missing")?;
+    nonblocking(&stdin)?;
+    nonblocking(&stdout)?;
+    nonblocking(&stderr)?;
+    Ok((stdin, stdout, stderr))
+}
+
+/// Takes the harness's pipes and hands each to a thread of its own, since std has no
+/// non-blocking anonymous pipe here; each thread raises the custody signal. Inputs: the
+/// child and the signal. Output: its stdin, stdout and stderr, or a plain code.
+#[cfg(windows)]
+fn held_pipes(
+    child: &mut Child,
+    signal: &Arc<pump::Signal>,
+) -> Result<(StdinPipe, StdoutPipe, StderrPipe), &'static str> {
+    let stdin = child.stdin.take().ok_or("codex_host_stdin_missing")?;
+    let stdout = child.stdout.take().ok_or("codex_host_stdout_missing")?;
+    let stderr = child.stderr.take().ok_or("codex_host_stderr_missing")?;
+    let unavailable = |_: io::Error| "codex_host_pump_unavailable";
+    Ok((
+        pump::input(stdin, Arc::clone(signal), "codex-host-stdin").map_err(unavailable)?,
+        pump::output(stdout, Arc::clone(signal), "codex-host-stdout").map_err(unavailable)?,
+        pump::output(stderr, Arc::clone(signal), "codex-host-stderr").map_err(unavailable)?,
+    ))
 }
 
 #[cfg(unix)]
@@ -717,6 +818,8 @@ mod tests {
             ended: AtomicBool::new(false),
             wake,
             woken,
+            #[cfg(windows)]
+            signal: Arc::new(pump::Signal::new()),
             custody_passes: std::sync::atomic::AtomicU64::new(0),
             host_passes: std::sync::atomic::AtomicU64::new(0),
             after_read: Mutex::new(None),

@@ -1,32 +1,57 @@
 use std::io::{self, Read, Write};
-use std::sync::Arc;
+use std::sync::mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Instant;
 
 /// The most bytes one read takes from a pumped pipe.
 pub(super) const CHUNK_BYTES: usize = 4096;
 
+/// How many chunks a pumped output reads ahead of custody before its thread stops reading.
+const CHUNKS_AHEAD: usize = 4;
+
+/// How many writes a pumped input holds beyond the one its thread is writing.
+const WRITES_HELD: usize = 1;
+
 /// A wake a custody thread sleeps on with a bound, raised by the threads that pump its pipes
 /// and by its host, so custody waits for work instead of on a fixed tick where no poll(2)
 /// exists. A raise while no one waits is kept, and ends the next wait at once.
-pub(super) struct Signal {}
+pub(super) struct Signal {
+    raised: Mutex<bool>,
+    changed: Condvar,
+}
 
 impl Signal {
     /// Makes a signal that is not raised. Output: the signal.
     pub(super) fn new() -> Self {
-        todo!()
+        Self {
+            raised: Mutex::new(false),
+            changed: Condvar::new(),
+        }
     }
 
     /// Raises the signal, waking its waiter or ending its next wait at once. Input: the
     /// signal. Output: none.
     pub(super) fn raise(&self) {
-        todo!()
+        *self.raised.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.changed.notify_all();
     }
 
     /// Waits until the signal is raised or `until` passes, then lowers it. Inputs: the
     /// signal and the instant to stop at. Output: none.
     pub(super) fn wait_until(&self, until: Instant) {
-        let _ = until;
-        todo!()
+        let mut raised = self.raised.lock().unwrap_or_else(PoisonError::into_inner);
+        while !*raised {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            raised = self
+                .changed
+                .wait_timeout(raised, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        *raised = false;
     }
 }
 
@@ -34,24 +59,52 @@ impl Signal {
 /// what the queue holds, says `WouldBlock` while it holds nothing, and reads 0 once the pipe
 /// has ended and the queue is empty. While the queue is full the thread stops reading, so
 /// the writer waits on the pipe.
-pub(super) struct Output {}
+pub(super) struct Output {
+    chunks: Receiver<io::Result<Vec<u8>>>,
+    held: Vec<u8>,
+    at: usize,
+}
 
 impl Read for Output {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let _ = buf;
-        todo!()
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.at == self.held.len() {
+            match self.chunks.try_recv() {
+                Ok(Ok(chunk)) => {
+                    self.held = chunk;
+                    self.at = 0;
+                }
+                Ok(Err(error)) => return Err(error),
+                Err(TryRecvError::Empty) => return Err(io::ErrorKind::WouldBlock.into()),
+                Err(TryRecvError::Disconnected) => return Ok(0),
+            }
+        }
+        let count = (self.held.len() - self.at).min(buf.len());
+        buf[..count].copy_from_slice(&self.held[self.at..self.at + count]);
+        self.at += count;
+        Ok(count)
     }
 }
 
 /// The custody end of a pipe a thread writes to: a write hands its bytes to the thread
 /// whole, says `WouldBlock` while the thread still holds a write it has not begun, and
 /// `BrokenPipe` once the pipe has failed. Dropping it closes the pipe after the held writes.
-pub(super) struct Input {}
+pub(super) struct Input {
+    writes: SyncSender<Vec<u8>>,
+}
 
 impl Write for Input {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let _ = buf;
-        todo!()
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        match self.writes.try_send(buf.to_vec()) {
+            Ok(()) => Ok(buf.len()),
+            Err(TrySendError::Full(_)) => Err(io::ErrorKind::WouldBlock.into()),
+            Err(TrySendError::Disconnected(_)) => Err(io::ErrorKind::BrokenPipe.into()),
+        }
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -67,8 +120,15 @@ pub(super) fn output<R: Read + Send + 'static>(
     signal: Arc<Signal>,
     name: &str,
 ) -> io::Result<Output> {
-    let _ = (pipe, signal, name);
-    todo!()
+    let (send, chunks) = sync_channel(CHUNKS_AHEAD);
+    std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || read_ahead(pipe, send, &signal))?;
+    Ok(Output {
+        chunks,
+        held: Vec::new(),
+        at: 0,
+    })
 }
 
 /// Starts the thread that writes custody's writes to `pipe`, raising `signal` after each one
@@ -79,8 +139,52 @@ pub(super) fn input<W: Write + Send + 'static>(
     signal: Arc<Signal>,
     name: &str,
 ) -> io::Result<Input> {
-    let _ = (pipe, signal, name);
-    todo!()
+    let (writes, taken) = sync_channel(WRITES_HELD);
+    std::thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || write_behind(pipe, taken, &signal))?;
+    Ok(Input { writes })
+}
+
+/// Reads `pipe` into `send` one chunk at a time until the pipe ends, fails or custody drops
+/// its end, raising `signal` after each chunk; the channel's end, then a last raise, tell
+/// custody the pipe is done. Inputs: the pipe, the channel and the signal. Output: none.
+fn read_ahead<R: Read>(mut pipe: R, send: SyncSender<io::Result<Vec<u8>>>, signal: &Signal) {
+    loop {
+        let mut bytes = vec![0; CHUNK_BYTES];
+        let sent = match pipe.read(&mut bytes) {
+            Ok(0) => break,
+            Ok(count) => {
+                bytes.truncate(count);
+                send.send(Ok(bytes))
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => {
+                let _ = send.send(Err(error));
+                break;
+            }
+        };
+        if sent.is_err() {
+            break;
+        }
+        signal.raise();
+    }
+    drop(send);
+    signal.raise();
+}
+
+/// Writes each write `taken` brings to `pipe` whole until custody drops its end or the pipe
+/// fails, raising `signal` after each one, then closes the pipe and raises it once more.
+/// Inputs: the pipe, the channel and the signal. Output: none.
+fn write_behind<W: Write>(mut pipe: W, taken: Receiver<Vec<u8>>, signal: &Signal) {
+    for bytes in taken {
+        if pipe.write_all(&bytes).and_then(|()| pipe.flush()).is_err() {
+            break;
+        }
+        signal.raise();
+    }
+    drop(pipe);
+    signal.raise();
 }
 
 #[cfg(test)]

@@ -61,6 +61,8 @@ pub(super) struct ProcessShared {
     pub(super) ended: AtomicBool,
     pub(super) wake: Wake,
     pub(super) woken: Wake,
+    #[cfg(windows)]
+    pub(super) signal: Arc<super::pump::Signal>,
     #[cfg(test)]
     pub(super) custody_passes: std::sync::atomic::AtomicU64,
     #[cfg(test)]
@@ -85,6 +87,14 @@ impl ProcessShared {
         }
         self.stop.store(true, Ordering::Release);
         self.changed.notify_one();
+    }
+
+    /// Wakes the custody worker: through the wake pair where custody polls its pipes, and
+    /// through the signal its pipe pumps raise on Windows. Input: the state. Output: none.
+    pub(super) fn rouse(&self) {
+        self.wake.rouse();
+        #[cfg(windows)]
+        self.signal.raise();
     }
 
     pub(super) fn accounting_failed(&self) {
@@ -194,6 +204,8 @@ impl CodexHostProcess {
             ended: AtomicBool::new(false),
             wake,
             woken,
+            #[cfg(windows)]
+            signal: Arc::new(super::pump::Signal::new()),
             #[cfg(test)]
             custody_passes: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
@@ -324,7 +336,7 @@ impl CodexHostProcess {
             self.input
                 .try_send(request)
                 .map_err(|_| EngineError("codex_host_input_unavailable".into()))?;
-            self.shared.wake.rouse();
+            self.shared.rouse();
             self.pending_input = Some(PendingInput {
                 bytes: bytes.to_vec(),
                 reply,
@@ -354,7 +366,7 @@ impl CodexHostProcess {
 
     pub(super) fn close_stdin(&self) {
         self.shared.close_stdin.store(true, Ordering::Release);
-        self.shared.wake.rouse();
+        self.shared.rouse();
     }
 
     pub(super) fn request_stop(&self) {
@@ -400,7 +412,7 @@ impl CodexHostProcess {
                 }
                 if let Some(output) = state.output.pop_front() {
                     if state.output.len() + 1 == OUTPUT_QUEUE_MAX {
-                        self.shared.wake.rouse();
+                        self.shared.rouse();
                     }
                     return Ok(output);
                 }
