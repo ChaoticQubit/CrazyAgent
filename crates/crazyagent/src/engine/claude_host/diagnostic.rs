@@ -315,17 +315,22 @@ mod windows_tests {
         assert_eq!(lines, 41);
     }
 
-    /// A log name that holds a second name of another file, or a link to it, is refused as
-    /// `master_stream_log_unsafe`, and the other file keeps what it held.
+    /// A log name that holds a second name of another private file, or a link to it, is
+    /// refused as `master_stream_log_unsafe`, and the other file keeps what it held: the other
+    /// file is private itself, so only the second name or the link is what refuses it.
     #[test]
     fn a_windows_stream_log_name_holding_a_link_is_refused_and_its_target_kept() {
+        use std::io::Write;
         let root = tempfile::tempdir().unwrap();
         let logs = root.path().join("logs");
         append(&logs, &entry()).unwrap();
         let log = logs.join(LOG_FILE);
         fs::remove_file(&log).unwrap();
-        let elsewhere = root.path().join("elsewhere");
-        fs::write(&elsewhere, "kept").unwrap();
+        let elsewhere = logs.join("elsewhere");
+        let mut target = private::file(&elsewhere, true).unwrap();
+        target.write_all(b"kept").unwrap();
+        drop(target);
+        drop(private::read_only(&elsewhere).unwrap());
         fs::hard_link(&elsewhere, &log).unwrap();
         assert_eq!(
             append(&logs, &entry()).map_err(|error| error.0),
@@ -333,6 +338,7 @@ mod windows_tests {
         );
         assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "kept");
         fs::remove_file(&log).unwrap();
+        drop(private::read_only(&elsewhere).unwrap());
         std::os::windows::fs::symlink_file(&elsewhere, &log).unwrap();
         assert_eq!(
             append(&logs, &entry()).map_err(|error| error.0),
@@ -341,14 +347,19 @@ mod windows_tests {
         assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "kept");
     }
 
-    /// A logs folder the Users group can read is refused as `master_stream_log_unsafe`, and
-    /// no log is made in it.
+    /// A private logs folder the Users group is then given read on is refused as
+    /// `master_stream_log_unsafe`, and no log is made in it: the folder passes W1 before the
+    /// grant, so only the grant is what refuses it.
     #[test]
     fn a_windows_logs_folder_the_users_group_can_read_is_refused() {
         let root = tempfile::tempdir().unwrap();
         let logs = root.path().join("logs");
-        fs::create_dir(&logs).unwrap();
+        drop(private::dir(&logs).unwrap());
         grant_users_read(&logs);
+        assert!(
+            private::dir(&logs)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+        );
         assert_eq!(
             append(&logs, &entry()).map_err(|error| error.0),
             Err("master_stream_log_unsafe".to_owned())
