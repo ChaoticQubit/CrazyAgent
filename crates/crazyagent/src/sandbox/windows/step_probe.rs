@@ -325,20 +325,10 @@ fn w5b_step_probe() {
         .map(|out| out.stdout.iter().filter(|byte| **byte == b'\n').count())
         .unwrap_or(0)
     };
-    let system =
-        std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
-    let shell = |line: &str| {
-        let mut command = Command::new(system.join("System32").join("cmd.exe"));
-        command.args(["/d", "/c", line]).current_dir(&step);
-        command
-    };
-    let many = work.join("many");
-    let listing = format!("dir /s /b \"{}\"", many.display());
-    let reading = format!("findstr /s /m zzz \"{}\\*\"", many.display());
     if let Some(sandbox) = &objects_box {
         for (name, null) in [
-            ("timed contained NUL", "NUL"),
             ("timed contained empty", empty_text.as_str()),
+            ("timed contained NUL", "NUL"),
         ] {
             let index_t = step.join(format!("index-{}", name.len()));
             let timed = Step {
@@ -360,8 +350,6 @@ fn w5b_step_probe() {
                 sandbox.wrap(&timed.command(&["add", "-A"])),
             );
         }
-        facts.ran("timed contained dir /s", sandbox.wrap(&shell(&listing)));
-        facts.ran("timed contained findstr /s", sandbox.wrap(&shell(&reading)));
     }
     let index_u = step.join("index-tu");
     let twin = Step {
@@ -379,8 +367,6 @@ fn w5b_step_probe() {
         "timed uncontained add -A again",
         Ok(twin.command(&["add", "-A"])),
     );
-    facts.ran("timed uncontained dir /s", Ok(shell(&listing)));
-    facts.ran("timed uncontained findstr /s", Ok(shell(&reading)));
     let engine = |null: &str, args: &[&str]| {
         let mut command = Command::new(&git);
         command.env_clear();
