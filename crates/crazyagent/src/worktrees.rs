@@ -98,7 +98,6 @@ pub(crate) struct TreeBounds {
 
 /// One tracked file or symlink of the lease commit. Fields: whether it is a file (and
 /// executable) or a symlink, its blob id, its size in bytes and its path in the tree.
-#[cfg(unix)]
 #[derive(Debug)]
 struct TreeEntry {
     link: bool,
@@ -289,6 +288,8 @@ mod canonical_windows_tests;
 mod identity_windows_tests;
 #[cfg(all(test, windows))]
 mod root_and_git_windows_tests;
+#[cfg(all(test, windows))]
+mod tree_windows_tests;
 
 fn canonical(path: &Path) -> Result<(), EngineError> {
     if !path.is_absolute() || !crate::projects_home::is_canonical(path).map_err(error)? {
@@ -2175,6 +2176,30 @@ fn tree_entries(
     assert!(entries.len() <= bounds.files);
     assert!(total <= bounds.bytes);
     Ok(entries)
+}
+
+/// The Windows tree listing, not yet written: every tree is refused (W3-5b). Inputs: the
+/// repository, the commit, the bounds and the deadline. Output: the refusal.
+#[cfg(windows)]
+fn tree_entries(
+    _repository: &Path,
+    _head: &str,
+    _bounds: &TreeBounds,
+    _deadline: Instant,
+) -> Result<Vec<TreeEntry>, EngineError> {
+    Err(error("worktree_filesystem_unavailable"))
+}
+
+/// The Windows tree copy, not yet written: every copy is refused (W3-5b). Inputs: the
+/// repository, the held worktree folder, the entries and the deadline. Output: the refusal.
+#[cfg(windows)]
+fn write_tree(
+    _repository: &Path,
+    _directory: &std::fs::File,
+    _entries: &[TreeEntry],
+    _deadline: Instant,
+) -> Result<Vec<String>, EngineError> {
+    Err(error("worktree_filesystem_unavailable"))
 }
 
 /// Streams every entry's blob from one `git cat-file --batch` into the worktree folder,

@@ -518,6 +518,23 @@ pub fn rename(file: &File, folder: &File, name: &OsStr, mode: Mode) -> io::Resul
     Ok(())
 }
 
+/// What [`create_under`] makes (W3-5 D6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Create {
+    /// A folder, held to make the entries below it.
+    Folder,
+    /// A file, held with delete access so its holder can [`rename`] it.
+    File,
+}
+
+/// Makes the new entry `name` in the held folder `folder`, never by a path (W3-5 D6, rv-sec2
+/// #742 D6-3). Not yet written: every call is refused. Inputs: the held folder, one name and
+/// the kind. Output: the held entry, or the error.
+pub fn create_under(folder: &File, name: &OsStr, kind: Create) -> io::Result<File> {
+    let _ = (folder, name, kind);
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
 /// Deletes the private file at `path` only while it is still the object a caller pinned
 /// (R7): opened with delete access without following a link, judged private, its
 /// [`identity`] compared, then [`delete`]d through that handle. Another handle without

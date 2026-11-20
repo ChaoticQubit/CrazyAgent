@@ -4,6 +4,8 @@ use crate::dacl::{
 };
 
 #[cfg(windows)]
+pub use crate::win::private::{Create, create_under};
+#[cfg(windows)]
 pub use crate::win::private::{
     Mode, check, delete, dir, dir_deletable, facts, file, file_deletable, free, identity, lock,
     new_dir, open_dir, place, read_only, read_only_replaceable, read_secret, remove, rename,
