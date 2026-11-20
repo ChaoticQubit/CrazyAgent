@@ -1054,7 +1054,6 @@ pub(crate) fn execute(
     Ok(result)
 }
 
-#[cfg(unix)]
 pub(crate) fn restart(db: &mut Connection, config: &EffectiveConfig) -> Result<(), EngineError> {
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)

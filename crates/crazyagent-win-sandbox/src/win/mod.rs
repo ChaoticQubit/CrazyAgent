@@ -134,6 +134,21 @@ pub fn release(profile: &Path, container: &str) -> Result<(), BoundaryError> {
     container::delete(&profile.container)
 }
 
+/// The SID of the agent container named `name` as bytes in the form `dacl::entries` reads,
+/// for a caller that must tell this agent's container from another's (PLAN-0402 Q9): the
+/// name passes [`crate::profile::check_container`] first, then the SID is derived from it as
+/// Windows does, and no profile is created or opened. Input: the name. Output: the SID, or
+/// the refusal or failed step.
+pub fn container_sid(name: &str) -> Result<Vec<u8>, BoundaryError> {
+    crate::profile::check_container(name).map_err(BoundaryError::Refused)?;
+    let sid = container::sid(name)?.bytes();
+    assert!(
+        sid.len() >= 8 && sid.len() == 8 + 4 * usize::from(sid[1]) && sid[0] == 1,
+        "a derived SID is one revision 1 SID"
+    );
+    Ok(sid)
+}
+
 /// Bytes Windows wrote, such as a SID or an access list, kept in 4-byte words so they stay
 /// aligned when passed back to Windows.
 pub(crate) struct Words {

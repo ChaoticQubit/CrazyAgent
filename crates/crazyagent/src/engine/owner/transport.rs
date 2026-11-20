@@ -65,6 +65,7 @@ pub(crate) mod questions;
 pub(crate) mod recovery;
 pub(crate) mod roadmap;
 mod setup;
+pub(crate) mod sizing;
 pub(crate) mod terminal;
 pub(crate) mod usage;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
@@ -83,6 +84,8 @@ mod native_auth_dispatch_lifetime_tests;
 mod native_auth_restart_tests;
 #[cfg(all(test, unix))]
 mod owner_deadline_tests;
+#[cfg(all(test, windows))]
+mod owner_pipe_windows_tests;
 #[cfg(all(test, unix))]
 mod owner_server_tests;
 #[cfg(all(test, unix))]
@@ -136,6 +139,17 @@ impl Identity {
         Ok(identity)
     }
 }
+
+/// What a client compares before and after it connects to an owner-class endpoint: the
+/// socket file's identity on Unix, the published random part and engine pin on Windows,
+/// where the endpoint is a pipe named by the root's pipes file (W3-3).
+#[cfg(unix)]
+type SocketIdentity = Identity;
+/// What a client compares before and after it connects to an owner-class endpoint: the
+/// socket file's identity on Unix, the published random part and engine pin on Windows,
+/// where the endpoint is a pipe named by the root's pipes file (W3-3).
+#[cfg(windows)]
+type SocketIdentity = crate::ipc::Published;
 
 /// Whether `name` is one plain entry of a folder: not empty, no separator, drive colon or
 /// parent step, so joining it to a held root never leaves that root. Input: the name.
@@ -377,20 +391,92 @@ impl Root {
         Ok(())
     }
 
-    fn socket_identity(&self) -> Result<Identity, EngineError> {
+    fn socket_identity(&self) -> Result<SocketIdentity, EngineError> {
         self.socket_identity_at(SOCKET)
     }
 
-    /// Refuses to identify a socket where Unix domain sockets are not used.
-    /// Takes the socket name, unused.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn socket_identity_at(&self, _name: &str) -> Result<Identity, EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// The endpoint `name` in this held root names now (W3-3): the root is verified first,
+    /// then the pipes file is read through W1's private open and must publish `name`. A
+    /// refused or missing pipes file is `owner_socket_unsafe`. Input: the endpoint name.
+    /// Output: the published random part and pin, or the refusal.
+    #[cfg(windows)]
+    fn socket_identity_at(&self, name: &str) -> Result<SocketIdentity, EngineError> {
+        self.verify()?;
+        assert!(plain_entry(name), "an endpoint name is one plain entry");
+        crate::ipc::owner_endpoint(&self.path.join(name))
+            .map_err(|_| failure("owner_socket_unsafe"))
+    }
+
+    /// Serves the owner endpoint of this held root (W3-3) and names it: on Windows the pipe
+    /// the listener published, read from the pipes file the listener holds and required to
+    /// equal what a client reads by path, so the authority records the endpoint clients
+    /// compare (rv-sec2 #719 C2). A failed check closes the listener, deleting its pipes file.
+    /// Input: the Unix socket record, unused here. Output: the listener and its endpoint.
+    #[cfg(windows)]
+    fn listen(
+        &self,
+        _created: &mut Option<Identity>,
+    ) -> Result<(Listener, SocketIdentity), EngineError> {
+        let path = self.path.join(SOCKET);
+        let listener =
+            crate::ipc::owner_listener(&path, crate::protocol::OWNER_CLIENTS_MAX + HANDSHAKES_MAX)
+                .map_err(io_error)?;
+        let named = crate::ipc::owner_listened(&listener, &path).map_err(io_error);
+        let checked = named.and_then(|endpoint| {
+            if self.socket_identity()? == endpoint {
+                Ok(endpoint)
+            } else {
+                Err(failure("owner_socket_replaced"))
+            }
+        });
+        match checked {
+            Ok(endpoint) => Ok((listener, endpoint)),
+            Err(error) => {
+                let mut errors = vec![error.0];
+                if let Err(closed) = crate::ipc::owner_close(listener) {
+                    errors.push(closed.to_string());
+                }
+                Err(failure(&errors.join("; ")))
+            }
+        }
+    }
+
+    /// Serves the owner endpoint of this held root: binds the socket, records its identity
+    /// in `created` so a failed bind removes it, requires a user-owned single-link socket,
+    /// sets mode 0600 and requires the name to still be that socket. Input: the record.
+    /// Output: the listener and the socket's identity.
+    #[cfg(unix)]
+    fn listen(
+        &self,
+        created: &mut Option<Identity>,
+    ) -> Result<(Listener, SocketIdentity), EngineError> {
+        let listener = crate::ipc::owner_listener(
+            self.path.join(SOCKET),
+            crate::protocol::OWNER_CLIENTS_MAX + HANDSHAKES_MAX,
+        )
+        .map_err(io_error)?;
+        let made = std::fs::symlink_metadata(self.path.join(SOCKET)).map_err(io_error)?;
+        *created = Some(Identity::of(&made));
+        if !made.file_type().is_socket()
+            || made.uid() != rustix::process::getuid().as_raw()
+            || made.nlink() != 1
+        {
+            return Err(failure("owner_socket_replaced"));
+        }
+        std::fs::set_permissions(
+            self.path.join(SOCKET),
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .map_err(io_error)?;
+        let socket = self.socket_identity()?;
+        if socket != Identity::of(&made) {
+            return Err(failure("owner_socket_replaced"));
+        }
+        Ok((listener, socket))
     }
 
     #[cfg(unix)]
-    fn socket_identity_at(&self, name: &str) -> Result<Identity, EngineError> {
+    fn socket_identity_at(&self, name: &str) -> Result<SocketIdentity, EngineError> {
         self.verify()?;
         let m = std::fs::symlink_metadata(self.path.join(name)).map_err(io_error)?;
         if !m.file_type().is_socket()
@@ -504,9 +590,20 @@ impl Root {
 struct Slot {
     registration: Registration,
     token: [u8; 32],
-    file: File,
+    file: Option<File>,
     identity: Identity,
     closed: u64,
+}
+
+impl Slot {
+    /// The slot's held capability file, which Windows cleanup closes after it marks the
+    /// delete, so the name goes then. Output: the file, or `owner_authority_unavailable`
+    /// once cleanup has closed it.
+    fn held(&self) -> Result<&File, EngineError> {
+        self.file
+            .as_ref()
+            .ok_or_else(|| failure("owner_authority_unavailable"))
+    }
 }
 
 struct PinnedBootstrap {
@@ -627,7 +724,7 @@ struct RunnerSlot {
     binding: WorkerBinding,
     key: Option<RunnerKey>,
     boot: Option<RunnerBootIdentity>,
-    endpoint: Option<Identity>,
+    endpoint: Option<SocketIdentity>,
     active: bool,
     ready: Option<RunnerReady>,
 }
@@ -684,7 +781,7 @@ impl RunnerSlot {
 
 struct Authority {
     root: Root,
-    socket: Identity,
+    socket: SocketIdentity,
     host: HostStamp,
     slots: Mutex<[Slot; 2]>,
     runners: Mutex<Vec<Option<RunnerSlot>>>,
@@ -826,7 +923,7 @@ impl Authority {
         &self,
         prepared: &PreparedRunner,
         boot: RunnerBootIdentity,
-        endpoint: Identity,
+        endpoint: SocketIdentity,
         binding: &WorkerBinding,
     ) -> Result<(), EngineError> {
         self.runner_prepared(prepared)?;
@@ -1000,7 +1097,7 @@ impl Authority {
             .ok_or_else(|| failure("runner_ready_required"))
     }
 
-    fn delivery_target(&self, ready: &RunnerReady) -> Result<(Root, Identity), EngineError> {
+    fn delivery_target(&self, ready: &RunnerReady) -> Result<(Root, SocketIdentity), EngineError> {
         let runners = self
             .runners
             .lock()
@@ -1036,11 +1133,10 @@ impl Authority {
             .lock()
             .map_err(|_| failure("owner_authority_unavailable"))?;
         let slot = &slots[i];
-        self.root.verify_key(KEYS[i], &slot.file, slot.identity)?;
+        let file = slot.held()?;
+        self.root.verify_key(KEYS[i], file, slot.identity)?;
         let mut observed = [0; 32];
-        slot.file
-            .read_exact_at(&mut observed, 0)
-            .map_err(io_error)?;
+        file.read_exact_at(&mut observed, 0).map_err(io_error)?;
         if !bool::from(slot.token.ct_eq(&observed)) {
             return Err(failure("owner_capability_content_changed"));
         }
@@ -1090,10 +1186,11 @@ impl Authority {
             if registration.active {
                 let mut token = [0; 32];
                 getrandom::fill(&mut token).map_err(|_| failure("owner_entropy_unavailable"))?;
-                self.root.verify_key(KEYS[i], &slot.file, slot.identity)?;
-                slot.file.write_all_at(&token, 0).map_err(io_error)?;
-                slot.file.sync_all().map_err(io_error)?;
-                self.root.verify_key(KEYS[i], &slot.file, slot.identity)?;
+                let file = slot.held()?;
+                self.root.verify_key(KEYS[i], file, slot.identity)?;
+                file.write_all_at(&token, 0).map_err(io_error)?;
+                file.sync_all().map_err(io_error)?;
+                self.root.verify_key(KEYS[i], file, slot.identity)?;
                 slot.token = token;
             }
             slot.registration = registration;
@@ -1134,26 +1231,32 @@ impl Authority {
 
     /// Unlinks the owner socket, both owner keys, every runner key and every IDE capability
     /// file this server made, each only while it is still the engine's own file, and tries
-    /// all of them even after one fails. Input: none. Output: Ok, or the first failure.
+    /// all of them even after one fails. On Windows `run` closes the listener instead, which
+    /// deletes its pipes file. Input: none. Output: Ok, or the first failure.
     fn cleanup(&self) -> Result<(), EngineError> {
+        #[cfg(unix)]
         let mut result = self.root.unlink_owned(SOCKET, self.socket, true, None);
+        #[cfg(windows)]
+        let mut result = Ok(());
         result = result.and(self.ide.revoke_all());
         match self.slots.lock() {
-            Ok(slots) => {
-                for (i, slot) in slots.iter().enumerate() {
+            Ok(mut slots) => {
+                for (i, slot) in slots.iter_mut().enumerate() {
                     result = result.and(self.root.unlink_owned(
                         KEYS[i],
                         slot.identity,
                         false,
-                        Some(&slot.file),
+                        slot.file.as_ref(),
                     ));
+                    #[cfg(windows)]
+                    drop(slot.file.take());
                 }
             }
             Err(_) => result = result.and(Err(failure("owner_authority_unavailable"))),
         }
         match self.runners.lock() {
-            Ok(runners) => {
-                for slot in runners.iter().flatten() {
+            Ok(mut runners) => {
+                for slot in runners.iter_mut().flatten() {
                     if let Some(key) = &slot.key {
                         result = result.and(self.root.unlink_owned(
                             &format!("r{:02x}.cap", slot.prepared.slot),
@@ -1162,6 +1265,8 @@ impl Authority {
                             Some(&key.file),
                         ));
                     }
+                    #[cfg(windows)]
+                    drop(slot.key.take());
                 }
             }
             Err(_) => result = result.and(Err(failure("runner_authority_unavailable"))),
@@ -1496,19 +1601,6 @@ impl OwnerServer {
     /// Publishes authenticated native owner access under a host trusted root.
     /// Requires canonical private root and protected ancestors, processes and DB.
     /// Returns server and host control; it does not qualify worker containment.
-    #[cfg(not(unix))]
-    pub async fn bind(
-        _path: &Path,
-        _engine: Arc<Engine>,
-        _config: &crate::config::EffectiveConfig,
-    ) -> Result<(Self, OwnerRuntimeHandle), EngineError> {
-        Err(failure("owner_socket_unavailable"))
-    }
-
-    /// Publishes authenticated native owner access under a host trusted root.
-    /// Requires canonical private root and protected ancestors, processes and DB.
-    /// Returns server and host control; it does not qualify worker containment.
-    #[cfg(unix)]
     pub async fn bind(
         path: &Path,
         engine: Arc<Engine>,
@@ -1538,7 +1630,11 @@ impl OwnerServer {
             let mut slots = Vec::new();
             for (i, registration) in started.owners.into_iter().enumerate() {
                 let file = root.open_key(KEYS[i], true)?;
-                created_keys.push((KEYS[i], Identity::of_file(&file)?));
+                created_keys.push((
+                    KEYS[i],
+                    Identity::of_file(&file)?,
+                    file.try_clone().map_err(io_error)?,
+                ));
                 let mut token = [0; 32];
                 getrandom::fill(&mut token).map_err(|_| failure("owner_entropy_unavailable"))?;
                 file.write_all_at(&token, 0).map_err(io_error)?;
@@ -1548,34 +1644,17 @@ impl OwnerServer {
                 slots.push(Slot {
                     registration,
                     token,
-                    file,
+                    file: Some(file),
                     identity,
                     closed: 0,
                 });
             }
             root.verify()?;
-            let listener = crate::ipc::owner_listener(root.path.join(SOCKET)).map_err(io_error)?;
-            let created = std::fs::symlink_metadata(root.path.join(SOCKET)).map_err(io_error)?;
-            created_socket = Some(Identity::of(&created));
-            if !created.file_type().is_socket()
-                || created.uid() != rustix::process::getuid().as_raw()
-                || created.nlink() != 1
-            {
-                return Err(failure("owner_socket_replaced"));
-            }
-            std::fs::set_permissions(
-                root.path.join(SOCKET),
-                std::os::unix::fs::PermissionsExt::from_mode(0o600),
-            )
-            .map_err(io_error)?;
-            let socket = root.socket_identity()?;
-            if socket != Identity::of(&created) {
-                return Err(failure("owner_socket_replaced"));
-            }
             let slots: [Slot; 2] = slots
                 .try_into()
                 .map_err(|_| failure("owner_registration_count"))?;
             let ide = Arc::new(crate::ide::bridge::Grants::default());
+            #[cfg(unix)]
             let ide_servers = crate::ide::server::Servers::new(
                 root.path
                     .parent()
@@ -1586,6 +1665,7 @@ impl OwnerServer {
                 root.path.join(SOCKET),
                 engine.settings_files(),
             );
+            let (listener, socket) = root.listen(&mut created_socket)?;
             let authority = Arc::new(Authority {
                 root,
                 socket,
@@ -1624,19 +1704,23 @@ impl OwnerServer {
                 {
                     errors.push(error.0);
                 }
-                for (name, identity) in created_keys {
-                    if let Err(error) = rollback.unlink_owned(name, identity, false, None) {
+                for (name, identity, held) in created_keys {
+                    if let Err(error) = rollback.unlink_owned(name, identity, false, Some(&held)) {
                         errors.push(error.0);
                     }
                 }
                 return Err(failure(&errors.join("; ")));
             }
         };
+        #[cfg(unix)]
         authority.ide_servers.sweep_left().await;
         if let Ok(root) = changes::engine_root(&authority) {
             let swept = tokio::task::spawn_blocking(move || {
                 crate::landing::open(&root).and_then(|db| {
+                    #[cfg(unix)]
                     let locked = crate::worktrees::lock_existing(&db);
+                    #[cfg(windows)]
+                    let locked = Ok::<usize, EngineError>(0);
                     if let Err(problem) = crate::landing::sweep_regenerations(&db) {
                         eprintln!(
                             "landing_regenerate_sweep_failed cause={}",
@@ -1945,8 +2029,12 @@ impl OwnerServer {
                 .map(|_| ())
         }
         .await;
+        #[cfg(windows)]
+        let closed = crate::ipc::owner_close(self.listener).map_err(io_error);
+        #[cfg(unix)]
+        let closed = Ok(());
         let cleaned = self.authority.cleanup();
-        stopped.and(cleaned).and(result)
+        stopped.and(closed).and(cleaned).and(result)
     }
 }
 
@@ -3108,7 +3196,7 @@ fn dispatch_ipc_deadline(now: Instant, exchange_deadline: Instant) -> Option<Ins
 
 async fn runner_control(
     root: &Root,
-    endpoint: Identity,
+    endpoint: SocketIdentity,
     request: serde_json::Value,
     deadline: Instant,
 ) -> Result<serde_json::Value, EngineError> {
@@ -3701,7 +3789,7 @@ pub struct OwnerClient {
     root: Root,
     kind: OwnerClientKind,
     token: [u8; 32],
-    socket: Identity,
+    socket: SocketIdentity,
     timeout: Duration,
     engine_timeout: Duration,
 }

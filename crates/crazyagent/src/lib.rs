@@ -31,8 +31,8 @@ pub mod instruction_check;
 pub mod instruction_cleanup;
 pub mod instruction_files;
 /// The owner-class endpoints, named by path: the engine and owner listeners, their clients
-/// and the check of the peer at each end. A Unix socket guarded by its parent folder; a
-/// platform without one refuses with `unix_socket_unavailable`.
+/// and the check of the peer at each end: a Unix socket guarded by its parent folder, or on
+/// Windows a named pipe whose pipes file in that folder pins the serving engine.
 pub(crate) mod ipc;
 #[cfg(unix)]
 pub mod isolation;

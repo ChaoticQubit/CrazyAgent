@@ -4,7 +4,9 @@ use crazyagent::agent_git::Layout;
 use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{AccountSecret, OwnerClientKind, OwnerResponse, OwnerResult};
-use crazyagent::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Session};
+use crazyagent::harnesses::launch::{
+    AccountBinding, LaunchBoundary, LaunchLimits, LaunchRequest, Session,
+};
 use crazyagent::launch_context;
 use crazyagent::plugins::{Scope, ServerSpec};
 use crazyagent::project_setup::ProjectSetup;
@@ -237,8 +239,7 @@ async fn real_codex_and_claude_receive_the_approved_skill_server_and_context() {
                 },
                 model: Some("qwen2.5:0.5b".into()),
                 tools: true,
-                sandbox_profile: Some(profile.clone()),
-                unconfined: false,
+                boundary: LaunchBoundary::Profile(profile.clone()),
                 git_identity: None,
                 limits: LaunchLimits {
                     run_time: Duration::from_secs(180),
