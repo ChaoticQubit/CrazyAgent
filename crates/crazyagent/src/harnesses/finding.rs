@@ -413,7 +413,8 @@ pub fn at_start(root: &Path, home: Option<&Path>) -> crate::paths::Harnesses {
 /// of at most [`PATH_BYTES_MAX`] bytes with no control characters, to a runnable regular
 /// file, no version-manager shim, outside every folder agents can write ([`AgentSpace`]),
 /// in folders no other user can change, each link of its chain and each folder a `..` in
-/// it leaves too, whose real file passes the pin's own file rule.
+/// it leaves too, whose real file passes the pin's own file rule. On Windows the real file of
+/// an npm shim is the script it starts, which is held to the agent space too.
 /// Inputs: the id, the path, the agent space and HOME. Output: the path, links kept.
 pub fn check(
     id: &str,
@@ -464,9 +465,14 @@ pub fn check_file(
     #[cfg(unix)]
     crate::engine::pinnable(&metadata)?;
     #[cfg(not(unix))]
-    crate::engine::pinnable_at(
-        &crate::paths::executable_file(path).ok_or_else(|| failure(PATH_NOT_EXECUTABLE))?,
-    )?;
+    {
+        let pinned =
+            crate::paths::executable_file(path).ok_or_else(|| failure(PATH_NOT_EXECUTABLE))?;
+        if space.holds(&pinned) {
+            return Err(failure(PATH_AGENT_SPACE));
+        }
+        crate::engine::pinnable_at(&pinned)?;
+    }
     assert!(path.is_absolute());
     Ok(path.to_path_buf())
 }
