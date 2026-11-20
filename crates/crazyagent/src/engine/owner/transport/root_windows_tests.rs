@@ -165,3 +165,14 @@ fn create_directory_makes_one_private_folder_once() {
         "a second create of the same name is refused, as mkdirat refuses it"
     );
 }
+
+#[test]
+fn a_root_syncs_its_entries_through_a_write_handle() {
+    let (_temp, base) = canonical_temp();
+    let path = private_folder(&base.join("root"));
+    let root = Root::open(&path).unwrap();
+    root.create_directory("r00").unwrap();
+    root.sync()
+        .expect("the held root flushes, though its own handle only lists the folder");
+    root.verify().unwrap();
+}

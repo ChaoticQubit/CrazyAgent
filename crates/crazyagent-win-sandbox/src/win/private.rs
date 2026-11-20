@@ -53,6 +53,24 @@ pub fn dir(path: &Path) -> io::Result<File> {
     made_dir(path, None)
 }
 
+/// Opens the private folder at `path` as [`dir`] holds one, but never creates it: a missing
+/// folder is `NotFound`, the twin of a Unix `open(O_DIRECTORY | O_NOFOLLOW)`, so a caller
+/// that only opens never makes a folder in a race. Input: the absolute path. Output: the
+/// held folder, or why it is missing or not private.
+pub fn open_dir(path: &Path) -> io::Result<File> {
+    let user = user_sid()?;
+    let name = wide_path(path)?;
+    let folder = open(
+        &name,
+        FILE_LIST_DIRECTORY | READ_CONTROL | FILE_READ_ATTRIBUTES,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        None,
+    )?;
+    private_as(&folder, &user, true)?;
+    Ok(folder)
+}
+
 /// Opens a secret store folder or the database folder at `path` as [`dir`] does, with that
 /// store's label of [`label_list`]: a new folder is made with it, and one already there
 /// takes it once judged private, whatever made it first (#524 r3, leader 06:32), an earlier
@@ -296,6 +314,14 @@ pub fn identity(object: &File) -> io::Result<(u64, u64)> {
     let mut bytes = [0; 8];
     bytes.copy_from_slice(low);
     Ok((volume, u64::from_le_bytes(bytes)))
+}
+
+/// Where an open private folder or file really is, as a drive path such as `\\?\C:\work`,
+/// read from the handle with every junction and link resolved, so a caller compares it
+/// with the path it spelled in one walk (rv-sec2 #708). Input: the handle. Output: the name
+/// in UTF-16 units with no ending zero, or the Windows error.
+pub fn place(object: &File) -> io::Result<Vec<u16>> {
+    super::name::dos_name(object)
 }
 
 /// Writes a private folder's entries to disk after a create, rename or delete in it, the

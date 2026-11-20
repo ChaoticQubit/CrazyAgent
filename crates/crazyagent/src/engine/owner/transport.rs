@@ -111,17 +111,6 @@ struct Identity {
 }
 
 impl Identity {
-    /// A placeholder identity where the standard library has no stable device and inode.
-    /// Takes the metadata, unused. Returns zeros; `Root::open` refuses every Windows root
-    /// first, so no Windows decision ever rests on this value.
-    #[cfg(not(unix))]
-    fn of(_m: &std::fs::Metadata) -> Self {
-        Self {
-            device: 0,
-            inode: 0,
-        }
-    }
-
     #[cfg(unix)]
     fn of(m: &std::fs::Metadata) -> Self {
         Self {
@@ -129,22 +118,72 @@ impl Identity {
             inode: m.ino(),
         }
     }
+
+    /// The identity of an open file or folder: its device and inode on Unix, its volume
+    /// serial number and 64-bit file id on Windows (W1 `private::identity`, which refuses an
+    /// id that needs 128 bits). Input: the handle. Output: the identity, or the I/O error.
+    fn of_file(file: &File) -> Result<Self, EngineError> {
+        #[cfg(unix)]
+        let identity = Self::of(&file.metadata().map_err(io_error)?);
+        #[cfg(windows)]
+        let identity = {
+            let (device, inode) =
+                crazyagent_win_sandbox::private::identity(file).map_err(io_error)?;
+            Self { device, inode }
+        };
+        Ok(identity)
+    }
+}
+
+/// Maps a W1 private-object error to an owner refusal: a judge refusal (`PermissionDenied`)
+/// becomes `code`, any other error stays the I/O error it is. Inputs: the error and the
+/// refusal code. Output: the engine error.
+#[cfg(windows)]
+fn private_refusal(error: std::io::Error, code: &str) -> EngineError {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        failure(code)
+    } else {
+        io_error(error)
+    }
 }
 
 struct Root {
     path: PathBuf,
     directory: File,
-    #[cfg(unix)]
     identity: Identity,
 }
 
 impl Root {
-    /// Refuses an owner root without Unix owner, mode and directory-relative checks.
-    /// Takes the root path, unused.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn open(_path: &Path) -> Result<Self, EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// Opens an owner root on Windows (DESIGN-0256 D11, rv-sec2 #708): the folder must
+    /// already exist and is held through W1 `open_dir`, so neither it nor a folder above it
+    /// can be renamed while held. Then the twin of the Unix canonical check, in one walk:
+    /// the held folder's real place (W1 `place`, every junction and link resolved) must be
+    /// `\\?\` plus the path, ordinal, so a junction or link anywhere on the path, a short
+    /// name or another case fails. Input: the absolute root path. Output: the held root, or
+    /// the refusal.
+    #[cfg(windows)]
+    fn open(path: &Path) -> Result<Self, EngineError> {
+        use crazyagent_win_sandbox::private;
+        use std::os::windows::ffi::OsStrExt;
+        if !path.is_absolute() {
+            return Err(failure("owner_root_requires_canonical_trusted_path"));
+        }
+        let directory = private::open_dir(path)
+            .map_err(|e| private_refusal(e, "owner_root_requires_private_owner_directory"))?;
+        let spelled: Vec<u16> = std::ffi::OsStr::new(r"\\?\")
+            .encode_wide()
+            .chain(path.as_os_str().encode_wide())
+            .collect();
+        if private::place(&directory).map_err(io_error)? != spelled {
+            return Err(failure("owner_root_requires_canonical_trusted_path"));
+        }
+        let root = Self {
+            path: path.to_path_buf(),
+            identity: Identity::of_file(&directory)?,
+            directory,
+        };
+        root.verify()?;
+        Ok(root)
     }
 
     #[cfg(unix)]
@@ -176,12 +215,20 @@ impl Root {
         Ok(root)
     }
 
-    /// Refuses to confirm an owner root without Unix owner and mode checks.
-    /// Takes the root.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
+    /// Confirms on Windows that the root is still the folder opened (D11): the held handle
+    /// is still private (W1 `check`), and the folder at the path, reopened without creating
+    /// it, is private and has the file id recorded at open. Input: the root. Output: Ok, or
+    /// `owner_root_replaced_or_unsafe`.
+    #[cfg(windows)]
     fn verify(&self) -> Result<(), EngineError> {
-        Err(failure("owner_root_unavailable"))
+        use crazyagent_win_sandbox::private;
+        let replaced = "owner_root_replaced_or_unsafe";
+        private::check(&self.directory).map_err(|e| private_refusal(e, replaced))?;
+        let again = private::open_dir(&self.path).map_err(|e| private_refusal(e, replaced))?;
+        if Identity::of_file(&again)? != self.identity {
+            return Err(failure(replaced));
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -320,11 +367,39 @@ impl Root {
         rustix::fs::mkdirat(&self.directory, name, Mode::RWXU).map_err(io_error)
     }
 
-    /// Refuses to create a directory without directory-relative Unix mkdir.
-    /// Takes the name, unused. Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn create_directory(&self, _name: &str) -> Result<(), EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// Creates one private folder inside this root on Windows, the twin of `mkdirat`: the
+    /// held root cannot move, so the path resolves through it; an entry already at the name
+    /// is refused (`AlreadyExists`), W1 `dir` makes the folder with its protected list, and
+    /// the made folder must be empty. Input: one plain file name. Output: Ok once it exists,
+    /// or the refusal or I/O error.
+    #[cfg(windows)]
+    fn create_directory(&self, name: &str) -> Result<(), EngineError> {
+        assert!(!name.is_empty() && !name.contains(['\\', '/', ':']) && name != "..");
+        let path = self.path.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(error)),
+            Ok(_) => return Err(io_error(std::io::ErrorKind::AlreadyExists)),
+        }
+        drop(
+            crazyagent_win_sandbox::private::dir(&path)
+                .map_err(|e| private_refusal(e, "owner_root_replaced_or_unsafe"))?,
+        );
+        if std::fs::read_dir(&path).map_err(io_error)?.next().is_some() {
+            return Err(failure("owner_root_replaced_or_unsafe"));
+        }
+        Ok(())
+    }
+
+    /// Writes this root's entries to disk after a create, rename or delete in it: Unix
+    /// flushes the held folder, Windows reopens it for writing through W1 `sync_folder`,
+    /// since the held handle only lists it. Input: the root. Output: Ok, or the I/O error.
+    fn sync(&self) -> Result<(), EngineError> {
+        #[cfg(unix)]
+        let synced = self.directory.sync_all();
+        #[cfg(windows)]
+        let synced = crazyagent_win_sandbox::private::sync_folder(&self.path);
+        synced.map_err(io_error)
     }
 }
 
@@ -362,7 +437,7 @@ impl PinnedBootstrap {
         value.validate()?;
         let pinned = Self {
             #[cfg(unix)]
-            identity: Identity::of(&file.metadata().map_err(io_error)?),
+            identity: Identity::of_file(&file)?,
             #[cfg(unix)]
             file,
             #[cfg(unix)]
@@ -384,7 +459,7 @@ impl PinnedBootstrap {
         file.sync_all().map_err(io_error)?;
         let pinned = Self {
             #[cfg(unix)]
-            identity: Identity::of(&file.metadata().map_err(io_error)?),
+            identity: Identity::of_file(&file)?,
             #[cfg(unix)]
             file,
             #[cfg(unix)]
@@ -392,7 +467,7 @@ impl PinnedBootstrap {
             value,
         };
         pinned.verify(root)?;
-        root.directory.sync_all().map_err(io_error)?;
+        root.sync()?;
         Ok(pinned)
     }
 
@@ -617,7 +692,7 @@ impl Authority {
             ready: None,
         };
         slot.verify(&self.root)?;
-        parent.directory.sync_all().map_err(io_error)?;
+        parent.sync()?;
         assert_eq!(runners.len(), index);
         runners.push(Some(slot));
         assert!(runners.len() <= RUNNERS_MAX);
@@ -675,14 +750,14 @@ impl Authority {
                 .root
                 .open_key(&format!("r{:02x}.cap", prepared.slot), true)?;
             slot.key = Some(RunnerKey {
-                identity: Identity::of(&file.metadata().map_err(io_error)?),
+                identity: Identity::of_file(&file)?,
                 file,
                 token,
             });
             let key = slot.key.as_ref().unwrap();
             key.file.write_all_at(&key.token, 0).map_err(io_error)?;
             key.file.sync_all().map_err(io_error)?;
-            self.root.directory.sync_all().map_err(io_error)?;
+            self.root.sync()?;
         }
         slot.boot = Some(boot);
         slot.endpoint = Some(endpoint);
@@ -1352,12 +1427,12 @@ impl OwnerServer {
             let mut slots = Vec::new();
             for (i, registration) in started.owners.into_iter().enumerate() {
                 let file = root.open_key(KEYS[i], true)?;
-                created_keys.push((KEYS[i], Identity::of(&file.metadata().map_err(io_error)?)));
+                created_keys.push((KEYS[i], Identity::of_file(&file)?));
                 let mut token = [0; 32];
                 getrandom::fill(&mut token).map_err(|_| failure("owner_entropy_unavailable"))?;
                 file.write_all_at(&token, 0).map_err(io_error)?;
                 file.sync_all().map_err(io_error)?;
-                let identity = Identity::of(&file.metadata().map_err(io_error)?);
+                let identity = Identity::of_file(&file)?;
                 root.verify_key(KEYS[i], &file, identity)?;
                 slots.push(Slot {
                     registration,
@@ -3344,7 +3419,7 @@ impl RunnerClient {
             let generation = Root::open(&path)?;
             let name = format!("r{:02x}.cap", bootstrap.value.slot);
             let file = generation.open_key(&name, false)?;
-            let identity = Identity::of(&file.metadata().map_err(io_error)?);
+            let identity = Identity::of_file(&file)?;
             generation.verify_key(&name, &file, identity)?;
             let mut token = [0; 32];
             file.read_exact_at(&mut token, 0).map_err(io_error)?;
@@ -3538,7 +3613,7 @@ impl OwnerClient {
             OwnerClientKind::Desktop => 1,
         };
         let file = root.open_key(KEYS[i], false)?;
-        let identity = Identity::of(&file.metadata().map_err(io_error)?);
+        let identity = Identity::of_file(&file)?;
         root.verify_key(KEYS[i], &file, identity)?;
         let mut token = [0; 32];
         file.read_exact_at(&mut token, 0).map_err(io_error)?;
