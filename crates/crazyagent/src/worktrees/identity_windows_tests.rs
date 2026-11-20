@@ -27,6 +27,10 @@ fn grant(path: &Path, rule: &str) {
     );
 }
 
+/// The `git.cmd` npm 11's cmd-shim writes for a package `git` whose bin is `bin\\git.js`, the
+/// Codex shim of tools/batch.rs's rows with its target renamed.
+const NPM_SHIM: &str = "@ECHO off\r\nGOTO start\r\n:find_dp0\r\nSET dp0=%~dp0\r\nEXIT /b\r\n:start\r\nSETLOCAL\r\nCALL :find_dp0\r\n\r\nIF EXIST \"%dp0%\\node.exe\" (\r\n  SET \"_prog=%dp0%\\node.exe\"\r\n) ELSE (\r\n  SET \"_prog=node\"\r\n  SET PATHEXT=%PATHEXT:;.JS;=;%\r\n)\r\n\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & \"%_prog%\"  \"%dp0%\\node_modules\\git\\bin\\git.js\" %*\r\n";
+
 fn code<T: std::fmt::Debug>(result: Result<T, crate::engine::EngineError>) -> String {
     result.unwrap_err().0
 }
@@ -143,6 +147,16 @@ fn engine_git_refuses_a_batch_git_and_a_git_another_account_can_change() {
             "a git.cmd would run the engine's arguments through cmd.exe (rv-sec2 #742 D5-1): {found:?}"
         );
     }
+    let shim = base.join("shim");
+    let script = shim.join("node_modules").join("git").join("bin");
+    std::fs::create_dir_all(&script).unwrap();
+    std::fs::write(script.join("git.js"), b"").unwrap();
+    std::fs::write(shim.join("git.cmd"), NPM_SHIM).unwrap();
+    assert_eq!(
+        code(git_program_in(Some(shim.as_os_str()))),
+        "worktree_git_untrusted",
+        "an npm git.cmd the resolver maps to its script is refused: engine git is an .exe (rv-sec2 #742 D5-1)"
+    );
     let real = git_program_in(std::env::var_os("PATH").as_deref()).unwrap();
     let open = base.join("open");
     std::fs::create_dir(&open).unwrap();
