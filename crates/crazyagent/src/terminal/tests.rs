@@ -79,6 +79,39 @@ fn terminal_frames_use_the_documented_wire_shape() {
     assert!(crate::protocol::encode_frame(&largest).is_ok());
 }
 
+/// V243-PANE-SIZE-ACROSS-WINDOWS: a sizer's input-only attach keeps the wire shape an engine
+/// without `follows` reads, an attach without the key reads as a sizer, and a follower's
+/// carries `"follows":true` both ways.
+#[test]
+fn an_input_only_attach_names_follows_only_for_a_follower() {
+    let sizer = TerminalRequest::AttachInput {
+        agent_id: AgentId::team(3).unwrap(),
+        pane: None,
+        cols: 80,
+        rows: 24,
+        follows: false,
+    };
+    let shape = r#"{"kind":"attach_input","agent_id":"team-3","pane":null,"cols":80,"rows":24}"#;
+    assert_eq!(serde_json::to_string(&sizer).unwrap(), shape);
+    assert_eq!(
+        serde_json::from_str::<TerminalRequest>(shape).unwrap(),
+        sizer
+    );
+    let follower = TerminalRequest::AttachInput {
+        agent_id: AgentId::team(3).unwrap(),
+        pane: None,
+        cols: 80,
+        rows: 24,
+        follows: true,
+    };
+    let followed = r#"{"kind":"attach_input","agent_id":"team-3","pane":null,"cols":80,"rows":24,"follows":true}"#;
+    assert_eq!(serde_json::to_string(&follower).unwrap(), followed);
+    assert_eq!(
+        serde_json::from_str::<TerminalRequest>(followed).unwrap(),
+        follower
+    );
+}
+
 #[test]
 fn every_terminal_code_has_plain_words() {
     for code in [
