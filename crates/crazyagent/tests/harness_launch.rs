@@ -1,8 +1,11 @@
 #![cfg(target_os = "macos")]
+mod full_access_support;
+use full_access_support::full_access;
 
 use crazyagent::harnesses::interactive::{self, KEY_FILE, Run};
 use crazyagent::harnesses::launch::{
-    AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session, command, route,
+    AccountBinding, LaunchBoundary, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session,
+    command, route,
 };
 use crazyagent::harnesses::leftovers::{LEFT, UNCHECKED, Unstopped};
 use crazyagent::harnesses::{HarnessStatus, Search, catalog};
@@ -48,8 +51,7 @@ fn request(harness: &str, home: &Path, work: &Path, account: AccountBinding) -> 
         account,
         model: Some(LOCAL_MODEL.into()),
         tools: false,
-        sandbox_profile: Some(project_profile(work, home)),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(project_profile(work, home)),
         git_identity: None,
         limits: LaunchLimits {
             run_time: Duration::from_secs(420),
@@ -156,9 +158,9 @@ fn a_full_access_agent_starts_without_seatbelt_but_with_the_same_cleared_environ
         home: home.path().to_path_buf(),
     };
     let confined = command(&request("codex", home.path(), work.path(), subscription())).unwrap();
+    let scratch = private_dir("ca-launch-full-");
     let full = LaunchRequest {
-        sandbox_profile: None,
-        unconfined: true,
+        boundary: full_access(work.path(), scratch.path()),
         ..request("codex", home.path(), work.path(), subscription())
     };
     let built = command(&full).unwrap();
@@ -180,17 +182,6 @@ fn a_full_access_agent_starts_without_seatbelt_but_with_the_same_cleared_environ
     );
     assert_eq!(environment(&built), environment(&confined));
     assert_eq!(built.get_current_dir(), Some(work.path()));
-
-    let neither = LaunchRequest {
-        sandbox_profile: None,
-        ..request("codex", home.path(), work.path(), subscription())
-    };
-    assert_eq!(command(&neither).unwrap_err().0, "launch_sandbox_required");
-    let both = LaunchRequest {
-        unconfined: true,
-        ..request("codex", home.path(), work.path(), subscription())
-    };
-    assert_eq!(command(&both).unwrap_err().0, "launch_sandbox_conflict");
 }
 
 #[test]
@@ -261,8 +252,7 @@ fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_reads_its_token_fr
         account: keyed(),
         model: None,
         tools: false,
-        sandbox_profile: Some(project_profile(work.path(), home.path())),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(project_profile(work.path(), home.path())),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -399,9 +389,7 @@ fn claude_subscription_sets_both_config_directories_and_switches_tools() {
     assert!(!args.contains(&"--bare".to_owned()));
     let mut on = request("claude-code", home.path(), work.path(), subscription());
     on.tools = true;
-    on.sandbox_profile = None;
-    assert_eq!(command(&on).unwrap_err().0, "launch_sandbox_required");
-    on.sandbox_profile = Some(profile.clone());
+    on.boundary = LaunchBoundary::Profile(profile.clone());
     let wrapped = command(&on).unwrap();
     assert_eq!(wrapped.get_program(), "/usr/bin/sandbox-exec");
     let args = arguments(&wrapped);
@@ -429,7 +417,7 @@ fn codex_tools_on_runs_without_its_own_sandbox_inside_the_project_sandbox() {
         url_account(home.path(), OLLAMA_OPENAI),
     );
     on.tools = true;
-    on.sandbox_profile = Some(profile);
+    on.boundary = LaunchBoundary::Profile(profile);
     let built = command(&on).unwrap();
     assert_eq!(built.get_program(), "/usr/bin/sandbox-exec");
     let args = arguments(&built);
@@ -462,18 +450,12 @@ fn no_launch_starts_without_the_project_sandbox_profile() {
             );
             bare.tools = tools;
             assert!(command(&bare).is_ok(), "{harness} {tools}");
-            bare.sandbox_profile = None;
-            assert_eq!(
-                command(&bare).unwrap_err().0,
-                "launch_sandbox_required",
-                "{harness} {tools}"
-            );
             for unusable in [
                 PathBuf::from("project.sb"),
                 work.path().join("missing.sb"),
                 work.path().to_path_buf(),
             ] {
-                bare.sandbox_profile = Some(unusable);
+                bare.boundary = LaunchBoundary::Profile(unusable);
                 assert_eq!(
                     command(&bare).unwrap_err().0,
                     "launch_sandbox_profile_unavailable",
@@ -482,17 +464,6 @@ fn no_launch_starts_without_the_project_sandbox_profile() {
             }
         }
     }
-    let mut session = request(
-        "codex",
-        home.path(),
-        work.path(),
-        url_account(home.path(), OLLAMA_OPENAI),
-    );
-    session.sandbox_profile = None;
-    assert_eq!(
-        Session::start(session).err().unwrap().0,
-        "launch_sandbox_required"
-    );
 }
 
 #[test]
@@ -649,8 +620,7 @@ fn sandboxed_stand_in(
         account: AccountBinding::Subscription { home },
         model: None,
         tools: false,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     })
@@ -810,8 +780,7 @@ fn stopping_a_full_access_headless_agent_names_what_it_left_running_and_holds_un
         account: AccountBinding::Subscription { home },
         model: None,
         tools: false,
-        sandbox_profile: None,
-        unconfined: true,
+        boundary: full_access(&project, root.path()),
         git_identity: None,
         limits: LaunchLimits::default(),
     })
@@ -918,8 +887,7 @@ fn stopping_a_full_access_headless_agent_names_what_left_its_session_and_parent(
         account: AccountBinding::Subscription { home },
         model: None,
         tools: false,
-        sandbox_profile: None,
-        unconfined: true,
+        boundary: full_access(&project, root.path()),
         git_identity: None,
         limits: LaunchLimits::default(),
     })
@@ -995,8 +963,7 @@ fn a_full_access_headless_stop_names_a_setsid_child_whose_seen_parent_exited_at_
         account: AccountBinding::Subscription { home },
         model: None,
         tools: false,
-        sandbox_profile: None,
-        unconfined: true,
+        boundary: full_access(&project, root.path()),
         git_identity: None,
         limits: LaunchLimits::default(),
     })
@@ -1072,8 +1039,7 @@ fn a_full_access_headless_stop_names_or_misses_an_orphan_made_between_two_tables
         account: AccountBinding::Subscription { home },
         model: None,
         tools: false,
-        sandbox_profile: None,
-        unconfined: true,
+        boundary: full_access(&project, root.path()),
         git_identity: None,
         limits: LaunchLimits::default(),
     })
@@ -1320,8 +1286,7 @@ fn a_keyed_launch_writes_a_private_placeholder_key_file_that_ends_with_its_sessi
             },
             model: Some(LOCAL_MODEL.into()),
             tools: false,
-            sandbox_profile: Some(project_profile(&work, &home)),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(project_profile(&work, &home)),
             git_identity: None,
             limits: LaunchLimits::default(),
         })
@@ -1370,7 +1335,7 @@ fn live_tools_on_turn_completes_inside_the_project_sandbox() {
             url_account(home.path(), base_url),
         );
         on.tools = true;
-        on.sandbox_profile = Some(project_profile(work.path(), home.path()));
+        on.boundary = LaunchBoundary::Profile(project_profile(work.path(), home.path()));
         let mut session = Session::start(on).unwrap();
         let (_, events) = run_turn(&mut session, "Reply with one short greeting.");
         assert!(

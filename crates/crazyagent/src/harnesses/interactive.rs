@@ -343,7 +343,7 @@ pub fn command(
         .working_dir
         .canonicalize()
         .map_err(|_| failure("launch_working_dir_unavailable"))?;
-    let mut argv = match request.sandbox_profile.as_deref() {
+    let mut argv = match request.boundary.confined_profile() {
         Some(profile) => vec![SANDBOX_EXEC.to_owned(), "-f".to_owned(), text(profile)?],
         None => Vec::new(),
     };
@@ -481,7 +481,10 @@ pub fn command(
     if let Some(key) = request.account.key() {
         assert!(!exposes(&built, key));
     }
-    assert_eq!(built.argv[0] == SANDBOX_EXEC, !request.unconfined);
+    assert_eq!(
+        built.argv[0] == SANDBOX_EXEC,
+        !request.boundary.is_unconfined()
+    );
     Ok(built)
 }
 

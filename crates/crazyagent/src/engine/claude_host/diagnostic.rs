@@ -17,6 +17,12 @@ pub(in crate::engine) const LOG_FILE: &str = "master-stream.log";
 /// to `master-stream.log.1`, replacing the older copy.
 pub(in crate::engine) const ROTATE_BYTES: u64 = 256 * 1024;
 
+/// Makes the engine's log appends take turns on Windows, where W1's private file is written
+/// at a position, not opened for appending, so two appends at once would write over each
+/// other.
+#[cfg(windows)]
+static APPENDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// What a master host kept about its stream for the engine log: the fault that retired it,
 /// the line or frame that fault was found on, the kinds and count of the lines that came
 /// after a Claude Code turn's result, and the last raw stream bytes, which only name the
@@ -149,6 +155,10 @@ pub(in crate::engine) fn append_to(
     if length > ROTATE_BYTES {
         return Err(failure("master_stream_log_entry"));
     }
+    #[cfg(windows)]
+    let _appending = APPENDING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     private_folder(logs)?;
     let log = logs.join(name);
     if let Ok(metadata) = std::fs::symlink_metadata(&log)
@@ -211,16 +221,187 @@ fn open(log: &Path) -> Result<std::fs::File, EngineError> {
     Ok(file)
 }
 
-/// Refuses the logs folder where its Unix owner and mode cannot be checked. Takes the
-/// folder, unused. Returns `master_stream_log_unavailable`.
-#[cfg(not(unix))]
-fn private_folder(_logs: &Path) -> Result<(), EngineError> {
-    Err(failure("master_stream_log_unavailable"))
+/// Makes the logs folder private when it is missing, or checks the one already there,
+/// through W1's private folder: this user as owner, a protected list no other account is
+/// on, and no link. Input: the folder. Output: Ok, `master_stream_log_unsafe` for a folder
+/// that is not private, or `master_stream_log_unavailable`.
+#[cfg(windows)]
+fn private_folder(logs: &Path) -> Result<(), EngineError> {
+    crazyagent_win_sandbox::private::dir(logs)
+        .map(drop)
+        .map_err(|error| refusal(&error))
 }
 
-/// Refuses the log where its Unix owner and mode cannot be checked. Takes the log path,
-/// unused. Returns `master_stream_log_unavailable`.
-#[cfg(not(unix))]
-fn open(_log: &Path) -> Result<std::fs::File, EngineError> {
-    Err(failure("master_stream_log_unavailable"))
+/// Opens the log at its end for one append through W1's private file, made private when it
+/// is missing; a log name that is a link, a second name of another file or not private is
+/// refused. Input: the log path. Output: the file at its end, or a plain code.
+#[cfg(windows)]
+fn open(log: &Path) -> Result<std::fs::File, EngineError> {
+    use crazyagent_win_sandbox::private;
+    use std::io::{Seek, SeekFrom};
+    let mut file = match private::file(log, true) {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            private::file(log, false)
+        }
+        made => made,
+    }
+    .map_err(|error| refusal(&error))?;
+    file.seek(SeekFrom::End(0))
+        .map_err(|_| failure("master_stream_log_unavailable"))?;
+    Ok(file)
+}
+
+/// The code for a W1 refusal of the logs folder or the log: `master_stream_log_unsafe` when
+/// the path is not private, `master_stream_log_unavailable` for any other failure. Input:
+/// the error. Output: the code.
+#[cfg(windows)]
+fn refusal(error: &std::io::Error) -> EngineError {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        failure("master_stream_log_unsafe")
+    } else {
+        failure("master_stream_log_unavailable")
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use crazyagent_win_sandbox::private;
+    use std::fs;
+    use std::path::PathBuf;
+
+    /// A stream diagnostic entry of about 10 KB, so 41 of them rotate the log once.
+    fn entry() -> serde_json::Value {
+        serde_json::json!({"fault": "claude_host_protocol_invalid_state", "tail": "x".repeat(10_000)})
+    }
+
+    /// Grants the Users group read on `path` with icacls, so the path is no longer private.
+    /// Input: the path. Output: none.
+    fn grant_users_read(path: &Path) {
+        let icacls = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32")
+            .join("icacls.exe");
+        let mut command = std::process::Command::new(icacls);
+        command.arg(path).args(["/grant", "*S-1-5-32-545:(R)"]);
+        let granted = crate::spawn_gate::collected(&mut command).unwrap();
+        assert!(granted.status.success(), "icacls refused the grant");
+    }
+
+    /// V244-WIN-MASTER S2: the master stream log is made and appended on Windows through
+    /// W1's private folder and file, and its rotated copy stays private. It used to be
+    /// refused as `master_stream_log_unavailable`.
+    #[test]
+    fn a_windows_stream_log_is_appended_private_and_rotated_private() {
+        let root = tempfile::tempdir().unwrap();
+        let logs = root.path().join("logs");
+        let entry = entry();
+        append(&logs, &entry).unwrap();
+        drop(private::dir(&logs).unwrap());
+        let log = logs.join(LOG_FILE);
+        drop(private::read_only(&log).unwrap());
+        let text = fs::read_to_string(&log).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        let written: serde_json::Value = serde_json::from_str(text.trim_end()).unwrap();
+        assert_eq!(written, entry);
+        for _ in 0..40 {
+            append(&logs, &entry).unwrap();
+        }
+        let rotated = logs.join(format!("{LOG_FILE}.1"));
+        drop(private::read_only(&rotated).unwrap());
+        assert!(fs::metadata(&log).unwrap().len() <= ROTATE_BYTES);
+        assert!(fs::metadata(&rotated).unwrap().len() <= ROTATE_BYTES);
+        let lines = fs::read_to_string(&log).unwrap().lines().count()
+            + fs::read_to_string(&rotated).unwrap().lines().count();
+        assert_eq!(lines, 41);
+    }
+
+    /// A log name that holds a second name of another private file, or a link to it, is
+    /// refused as `master_stream_log_unsafe`, and the other file keeps what it held: the other
+    /// file is private itself, so only the second name or the link is what refuses it.
+    #[test]
+    fn a_windows_stream_log_name_holding_a_link_is_refused_and_its_target_kept() {
+        use std::io::Write;
+        let root = tempfile::tempdir().unwrap();
+        let logs = root.path().join("logs");
+        append(&logs, &entry()).unwrap();
+        let log = logs.join(LOG_FILE);
+        fs::remove_file(&log).unwrap();
+        let elsewhere = logs.join("elsewhere");
+        let mut target = private::file(&elsewhere, true).unwrap();
+        target.write_all(b"kept").unwrap();
+        drop(target);
+        drop(private::read_only(&elsewhere).unwrap());
+        fs::hard_link(&elsewhere, &log).unwrap();
+        assert_eq!(
+            append(&logs, &entry()).map_err(|error| error.0),
+            Err("master_stream_log_unsafe".to_owned())
+        );
+        assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "kept");
+        fs::remove_file(&log).unwrap();
+        drop(private::read_only(&elsewhere).unwrap());
+        std::os::windows::fs::symlink_file(&elsewhere, &log).unwrap();
+        assert_eq!(
+            append(&logs, &entry()).map_err(|error| error.0),
+            Err("master_stream_log_unsafe".to_owned())
+        );
+        assert_eq!(fs::read_to_string(&elsewhere).unwrap(), "kept");
+    }
+
+    /// A private logs folder the Users group is then given read on is refused as
+    /// `master_stream_log_unsafe`, and no log is made in it: the folder passes W1 before the
+    /// grant, so only the grant is what refuses it.
+    #[test]
+    fn a_windows_logs_folder_the_users_group_can_read_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let logs = root.path().join("logs");
+        drop(private::dir(&logs).unwrap());
+        grant_users_read(&logs);
+        assert!(
+            private::dir(&logs)
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+        );
+        assert_eq!(
+            append(&logs, &entry()).map_err(|error| error.0),
+            Err("master_stream_log_unsafe".to_owned())
+        );
+        assert!(!logs.join(LOG_FILE).exists());
+    }
+
+    /// Eight threads appending at once leave every line whole, once: a Windows private file
+    /// is written at a position, not appended to, so appends take turns.
+    #[test]
+    fn concurrent_windows_stream_log_appends_keep_every_line_whole() {
+        let root = tempfile::tempdir().unwrap();
+        let logs = root.path().join("logs");
+        let threads: Vec<_> = (0..8_u64)
+            .map(|thread| {
+                let logs = logs.clone();
+                std::thread::spawn(move || {
+                    for line in 0..25_u64 {
+                        let entry = serde_json::json!({"thread": thread, "line": line, "pad": "p".repeat(200)});
+                        append(&logs, &entry).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        let text = fs::read_to_string(logs.join(LOG_FILE)).unwrap();
+        let mut seen: Vec<(u64, u64)> = text
+            .lines()
+            .map(|line| {
+                let value: serde_json::Value = serde_json::from_str(line).unwrap();
+                (
+                    value["thread"].as_u64().unwrap(),
+                    value["line"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        seen.sort_unstable();
+        let expected: Vec<(u64, u64)> = (0..8)
+            .flat_map(|thread| (0..25).map(move |line| (thread, line)))
+            .collect();
+        assert_eq!(seen, expected);
+    }
 }

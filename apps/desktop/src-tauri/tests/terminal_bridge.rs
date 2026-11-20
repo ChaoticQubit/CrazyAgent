@@ -10,8 +10,8 @@ use crazyagent::terminal::{
     AgentId, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame, TerminalRequest,
 };
 use crazyagent_desktop::bridge::terminal::{
-    Terminals, VIEWERS_MAX, ViewKey, agent, channel_message, graph_shows, input_request, pane,
-    plain_code, request_valid,
+    Session, Terminals, VIEWERS_MAX, ViewKey, agent, channel_message, graph_shows, input_request,
+    pane, plain_code, request_valid,
 };
 use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
 use std::error::Error;
@@ -205,7 +205,8 @@ fn wall_windows_reach_only_the_terminal_graph_stop_and_setting_read_commands() {
     assert!(attach.contains("id: Option<String>"), "{attach}");
     assert!(attach.contains("attach_place("), "{attach}");
     assert!(
-        attach.contains(".open_terminal(key.agent, key.pane, None, false)"),
+        attach
+            .contains(".open_terminal(key.agent, key.pane, None, bridge::terminal::Session::Full)"),
         "{attach}"
     );
     let gate = include_str!("../src/lib.rs")
@@ -601,7 +602,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     assert_eq!(edge.reply, None);
 
     let unknown = bridge
-        .open_terminal(AgentId::team(99)?, None, None, false)
+        .open_terminal(AgentId::team(99)?, None, None, Session::Full)
         .await
         .err()
         .map(|e| e.code);

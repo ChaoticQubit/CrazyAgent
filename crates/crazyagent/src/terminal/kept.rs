@@ -217,6 +217,14 @@ impl<H: Host> Host for LastScreenHost<H> {
         self.inner.own_pane_at(agent)
     }
 
+    fn tag_app(&self, agent: &AgentId, pid: u32) -> Result<(), HostError> {
+        self.inner.tag_app(agent, pid)
+    }
+
+    fn app_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        self.inner.app_pane_at(agent)
+    }
+
     fn paste_at(&self, agent: &AgentId, at: &PaneAt, keys: &[u8]) -> Result<bool, HostError> {
         self.inner.paste_at(agent, at, keys)
     }
@@ -225,8 +233,22 @@ impl<H: Host> Host for LastScreenHost<H> {
         self.inner.resize_at(agent, at, size)
     }
 
+    /// Names the unit a resize of the agent sizes, as the platform host does; a terminal it
+    /// no longer finds, whose view may show a kept screen, gets the agent's own key, since no
+    /// resize can land on it and its attach decides. Takes the agent. Returns the key.
+    fn unit(&self, agent: &AgentId) -> Result<String, HostError> {
+        match self.inner.unit(agent) {
+            Err(problem) if problem.0 == "terminal_agent_unknown" => Ok(super::agent_unit(agent)),
+            named => named,
+        }
+    }
+
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         self.inner.input_live(agent)
+    }
+
+    fn input_live_at(&self, agent: &AgentId, at: &PaneAt) -> Result<Option<bool>, HostError> {
+        self.inner.input_live_at(agent, at)
     }
 
     fn quiet(&self, agent: &AgentId) -> Result<Option<std::time::Duration>, HostError> {
