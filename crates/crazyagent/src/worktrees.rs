@@ -301,7 +301,7 @@ fn git_command(repository: &Path, args: &[&str]) -> Process {
         .env("GIT_GRAFT_FILE", "/dev/null")
         .arg("--no-replace-objects")
         .arg("--no-optional-locks")
-        .args(crate::research::runner::GIT_SAFE)
+        .args(crate::research::runner::git_safe())
         .args([
             "-c",
             "core.attributesFile=/dev/null",
@@ -1193,7 +1193,6 @@ fn verify(admission: &Admission) -> Result<Admission, EngineError> {
     Ok(current)
 }
 
-#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(
@@ -1557,7 +1556,6 @@ const VERIFY_RETRY_WAIT: Duration = Duration::from_millis(50);
 const GIT_DEADLINE: &str = "git_deadline";
 /// The code of a lease check refused for a git older than the 2.39 floor. It says the
 /// computer's Git needs updating, not that the lease broke a rule (V243-WORKTREE-GIT-FLOOR).
-#[cfg(unix)]
 const GIT_OLD: &str = "worktree_git_old";
 /// The codes of a Git command that failed at once, which is no rule of the engine's about
 /// the repository. `git_deadline` is not among them: a Git command that ran out of time
@@ -2694,7 +2692,6 @@ fn verify_record(record: &LeaseRecord) -> Result<(), EngineError> {
 /// lock, its index exists, and no tracked file differs from that index; staged changes are
 /// its agent's or a turn end's. Read only: `status` honours `--no-optional-locks`, unlike
 /// `diff`, which refreshes the index. Input: the record. Output: success, or the refusal.
-#[cfg(unix)]
 fn worktree_matches_index(record: &LeaseRecord) -> Result<(), EngineError> {
     let metadata = worktree_metadata(record)?;
     match std::fs::symlink_metadata(metadata.join("index.lock")) {
@@ -2744,7 +2741,6 @@ fn worktree_matches_index(record: &LeaseRecord) -> Result<(), EngineError> {
 /// also [`worktree_matches_index`], so a checkout that failed after its folder was pinned
 /// is never requalified on its pins alone. Input: the stored record. Output: success, or
 /// the refusal code.
-#[cfg(unix)]
 fn verify_at_start(record: &LeaseRecord) -> Result<(), EngineError> {
     verify_record(record)?;
     if record.lease.state == LeaseState::Uncertain {
@@ -2756,7 +2752,6 @@ fn verify_at_start(record: &LeaseRecord) -> Result<(), EngineError> {
 /// Settles every stored lease when the engine starts, checking each through
 /// [`verify_at_start`]. Input: the connection, outside any transaction. Output: success,
 /// or `lease_capacity` or the storage failure.
-#[cfg(unix)]
 pub(crate) fn reconcile(connection: &Connection) -> Result<(), EngineError> {
     reconcile_with(connection, verify_at_start)
 }
@@ -2767,7 +2762,6 @@ pub(crate) fn reconcile(connection: &Connection) -> Result<(), EngineError> {
 /// before any use; any other lease is Uncertain. Each failed check is logged. Inputs: the
 /// connection, outside any transaction, and the lease check. Output: success,
 /// `lease_capacity` or the storage error.
-#[cfg(unix)]
 fn reconcile_with(
     connection: &Connection,
     mut verify: impl FnMut(&LeaseRecord) -> Result<(), EngineError>,
@@ -2807,6 +2801,9 @@ fn reconcile_with(
     assert!(connection.is_autocommit());
     Ok(())
 }
+
+#[cfg(all(test, windows))]
+mod windows_tests;
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -3883,6 +3880,70 @@ mod tests {
             .unwrap();
             assert_eq!(signed.ran(), Vec::<String>::new(), "{armor:?}");
         }
+    }
+
+    /// The engine's worktree git, asked outright 40 times for an ssh signature while three
+    /// busy threads per processor hold up its signature program, reads the subject every
+    /// time: the program it pins never starts, so none can exit before git writes it the
+    /// payload and kill git with SIGPIPE (V243-WORKTREES-GIT-FLAKE). Linux only, where the
+    /// farm saw that race.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "load row: run alone, its busy threads slow timing rows beside it (V243-WORKTREES-GIT-FLAKE)"]
+    fn engine_worktree_git_reads_an_ssh_signed_commit_under_load_every_time() {
+        use crate::landing::signature_tests::{Armor, SUBJECT, signed};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        /// Clears the busy flag when dropped, so the busy threads stop and the scope ends
+        /// even when a read panics. Input: the flag. Output: none.
+        struct Stop<'a>(&'a AtomicBool);
+        impl Drop for Stop<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Relaxed);
+            }
+        }
+
+        const RUNS: usize = 40;
+        let signed = signed(Armor::Ssh);
+        let busy = AtomicBool::new(true);
+        let threads = 3 * std::thread::available_parallelism().map_or(1, usize::from);
+        let reads: Vec<Result<Vec<u8>, EngineError>> = std::thread::scope(|scope| {
+            let _stop = Stop(&busy);
+            for _ in 0..threads {
+                scope.spawn(|| {
+                    while busy.load(Ordering::Relaxed) {
+                        std::hint::spin_loop();
+                    }
+                });
+            }
+            (0..RUNS)
+                .map(|_| {
+                    git_until(
+                        &signed.root,
+                        &["log", "--show-signature", "-1", "--format=%s"],
+                        OUTPUT_BYTES_MAX,
+                        Instant::now() + Duration::from_secs(60),
+                    )
+                })
+                .collect()
+        });
+        assert_eq!(reads.len(), RUNS);
+        let subject = format!("{SUBJECT}\n");
+        let failed: Vec<(usize, String)> = reads
+            .iter()
+            .enumerate()
+            .filter_map(|(run, read)| match read {
+                Ok(bytes) if bytes.ends_with(subject.as_bytes()) => None,
+                Ok(bytes) => Some((run, format!("read {:?}", String::from_utf8_lossy(bytes)))),
+                Err(EngineError(code)) => Some((run, code.clone())),
+            })
+            .collect();
+        assert!(
+            failed.is_empty(),
+            "Ssh: {} of {RUNS} runs failed under {threads} busy threads, (run, code): {failed:?}",
+            failed.len()
+        );
+        assert_eq!(signed.ran(), Vec::<String>::new(), "Ssh");
     }
 
     /// Runs [`restarted_with`] for a pinned lease stored at `state`. Inputs: the state and

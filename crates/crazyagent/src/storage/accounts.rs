@@ -35,6 +35,7 @@ pub(crate) struct Listed {
     pub(crate) launchable: bool,
     pub(crate) rejected: bool,
     pub(crate) rechecking: bool,
+    pub(crate) sign_out_unfinished: Option<String>,
 }
 
 pub(crate) enum ResultValue {
@@ -53,8 +54,55 @@ struct Record {
 
 /// The folder beside the engine database that holds account keys, one 0600 file per key
 /// named by its credential reference.
-#[cfg(unix)]
 pub(crate) const ACCOUNT_KEYS: &str = "account-keys";
+
+/// Deletes one account key file from the engine root's W1 private key folder on Windows, for
+/// the start sweep of keys a committed removal left behind; the folder is held while the
+/// file goes. Inputs: the engine root and the key's credential reference. Output: Ok when the
+/// file is gone, including when it or the folder was already missing;
+/// `account_key_store_unsafe` for a folder W1's check refuses.
+#[cfg(windows)]
+pub(crate) fn remove_key_file(root: &Path, name: &str) -> Result<(), EngineError> {
+    let Some((_held, folder)) = key_folder(root, name)? else {
+        return Ok(());
+    };
+    match std::fs::remove_file(folder.join(name)) {
+        Ok(()) => Ok(()),
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(error("account_key_store_unavailable")),
+    }
+}
+
+/// Opens the engine root's key folder on Windows as a W1 private folder for one key name,
+/// refusing a name that is not a plain credential reference or holds a colon, which Windows
+/// reads as a stream of another file. Inputs: the engine root and the key name. Output: the
+/// held folder and its path, none when it does not exist, `account_key_reference_invalid`,
+/// or `account_key_store_unsafe` for a folder W1's check refuses.
+#[cfg(windows)]
+fn key_folder(
+    root: &Path,
+    name: &str,
+) -> Result<Option<(std::fs::File, std::path::PathBuf)>, EngineError> {
+    if CredentialRef::new(name).is_err() || name.starts_with('.') || name.contains(':') {
+        return Err(error("account_key_reference_invalid"));
+    }
+    let path = root.join(ACCOUNT_KEYS);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => {}
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(error("account_key_store_unavailable")),
+    }
+    match crazyagent_win_sandbox::private::store_dir(
+        &path,
+        crazyagent_win_sandbox::private::Store::Secret,
+    ) {
+        Ok(held) => Ok(Some((held, path))),
+        Err(problem) if problem.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(error("account_key_store_unsafe"))
+        }
+        Err(_) => Err(error("account_key_store_unavailable")),
+    }
+}
 
 /// Deletes one account key file from the engine root's owner-only key folder, for the start
 /// sweep of keys a committed removal left behind. Inputs: the engine root and the key's
@@ -104,8 +152,55 @@ fn key_folder(root: &Path, name: &str) -> Result<Option<std::fs::File>, EngineEr
 }
 
 /// The longest account key the store holds, as the owner transport writes it.
-#[cfg(unix)]
 const KEY_BYTES_MAX: u64 = 8192;
+
+/// Reads an open account key file of at most `KEY_BYTES_MAX` bytes into a secret, wiping
+/// what was read when the read fails or runs past the bound. Inputs: the open key file and
+/// its length. Output: the key, `account_key_store_unavailable`, or
+/// `account_key_store_unsafe` for bytes that are not a key.
+fn key_text(
+    file: std::fs::File,
+    len: u64,
+) -> Result<crate::credentials::SecretString, EngineError> {
+    use std::io::Read;
+    assert!(len <= KEY_BYTES_MAX);
+    let mut bytes = Vec::with_capacity(len as usize);
+    let read = file.take(KEY_BYTES_MAX + 1).read_to_end(&mut bytes);
+    if read.is_err() || bytes.len() as u64 > KEY_BYTES_MAX {
+        crate::credentials::wipe(&mut bytes);
+        return Err(error("account_key_store_unavailable"));
+    }
+    crate::credentials::SecretString::new(bytes).map_err(|_| error("account_key_store_unsafe"))
+}
+
+/// Reads one saved account key on Windows so the engine can hand it to its key relay, never
+/// to an agent (DEC-141 PA-4), as a W1 private file read without delete sharing, so it is not
+/// renamed or replaced while read. Inputs: the engine root and the key's credential
+/// reference. Output: the key, none when it was never saved, or `account_key_store_unsafe`
+/// for a key file or folder W1's check refuses.
+#[cfg(windows)]
+pub(crate) fn read_key_file(
+    root: &Path,
+    credential: &CredentialRef,
+) -> Result<Option<crate::credentials::SecretString>, EngineError> {
+    let Some((_held, folder)) = key_folder(root, credential.as_str())? else {
+        return Ok(None);
+    };
+    let path = folder.join(credential.as_str());
+    let file = match crazyagent_win_sandbox::private::read_only(&path) {
+        Ok(file) => file,
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(problem) if problem.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(error("account_key_store_unsafe"));
+        }
+        Err(_) => return Err(error("account_key_store_unavailable")),
+    };
+    let metadata = file.metadata().map_err(error)?;
+    if !metadata.is_file() || metadata.len() > KEY_BYTES_MAX {
+        return Err(error("account_key_store_unsafe"));
+    }
+    key_text(file, metadata.len()).map(Some)
+}
 
 /// Reads one saved account key so the engine can hand it to its key relay, never to an agent
 /// (DEC-141 PA-4). Inputs: the engine root and the key's credential reference. Output: the
@@ -117,7 +212,6 @@ pub(crate) fn read_key_file(
     credential: &CredentialRef,
 ) -> Result<Option<crate::credentials::SecretString>, EngineError> {
     use rustix::fs::{Mode, OFlags};
-    use std::io::Read;
     use std::os::unix::fs::MetadataExt;
     let Some(directory) = key_folder(root, credential.as_str())? else {
         return Ok(None);
@@ -141,25 +235,7 @@ pub(crate) fn read_key_file(
     {
         return Err(error("account_key_store_unsafe"));
     }
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    let read = file.take(KEY_BYTES_MAX + 1).read_to_end(&mut bytes);
-    if read.is_err() || bytes.len() as u64 > KEY_BYTES_MAX {
-        crate::credentials::wipe(&mut bytes);
-        return Err(error("account_key_store_unavailable"));
-    }
-    crate::credentials::SecretString::new(bytes)
-        .map(Some)
-        .map_err(|_| error("account_key_store_unsafe"))
-}
-
-/// Refuses to read an account key where the Unix owner-only key folder does not exist.
-/// Inputs: the engine root and credential, both unused. Output: `account_key_store_unavailable`.
-#[cfg(not(unix))]
-pub(crate) fn read_key_file(
-    _root: &Path,
-    _credential: &CredentialRef,
-) -> Result<Option<crate::credentials::SecretString>, EngineError> {
-    Err(error("account_key_store_unavailable"))
+    key_text(file, metadata.len()).map(Some)
 }
 
 #[cfg(all(test, unix))]
@@ -721,13 +797,11 @@ fn list(
     Ok(ResultValue::Page(items, next))
 }
 
-/// Lists one account with its latest sign-in, whether the provider rejected it, whether it
-/// passes the launch check every master, team and research turn uses on this engine run, so
-/// status never shows an account as signed in when a launch or the master would refuse it,
-/// and whether a sign-in that fails only that check waits for this run's re-check (DEC-108);
-/// a re-check that cannot be read counts as none, so one account never fails the list.
-/// Inputs: the transaction, the admitted owner, the connection and its details.
-/// Output: the listed account.
+/// Lists one account: its latest sign-in, a provider rejection, the launch check every turn
+/// uses on this run (so status never says signed in when a launch would refuse), a pending
+/// re-check (DEC-108; one that cannot be read counts as none), and why its newest sign-out
+/// did not finish in the harness. Inputs: the transaction, the admitted owner, the
+/// connection and its details. Output: the listed account.
 fn listed(
     tx: &Transaction<'_>,
     admission: &Admission,
@@ -752,6 +826,16 @@ fn listed(
         && !rejected
         && crate::storage::sign_in_rechecking(tx, &host, &connection).unwrap_or(false);
     assert!(!(launchable && rechecking));
+    let sign_out_unfinished = match (&connection.auth, sign_in) {
+        (ModelAuthentication::NativeManaged { profile_ref }, Some(_)) => {
+            super::native_auth::unfinished_sign_out(
+                tx,
+                &crate::memory::hash(profile_ref.as_str().as_bytes()),
+            )?
+        }
+        _ => None,
+    };
+    assert!(sign_out_unfinished.is_none() || !launchable);
     Ok(Listed {
         connection,
         details,
@@ -759,6 +843,7 @@ fn listed(
         launchable,
         rejected,
         rechecking,
+        sign_out_unfinished,
     })
 }
 

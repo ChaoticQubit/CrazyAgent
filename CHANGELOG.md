@@ -11,6 +11,93 @@ Status of each version:
 
 ## [Unreleased]
 
+## [2.4.3] - 2026-11-19 - Dev build
+
+- Version set to 2.4.3 on 2026-11-19 16:54 UTC (8a5ab7185).
+- Work merged into the 2.4.3 line from 2026-11-17 02:47 UTC to 2026-11-19 16:52 UTC, last merge b73744705. Built on [2.4.2].
+- No stable tag yet. Latest stable stays [2.3.2].
+
+### Added
+
+- A native terminal on macOS. The app now draws every agent terminal itself, on the graphics card, instead of inside the web page. Each terminal panel keeps the frame and buttons it had, and the macOS build has no web terminal left behind it. Windows and Linux keep the web terminal.
+- Mouse, select and copy in the native terminal. A program that asks for the mouse gets your clicks, drags and wheel. Otherwise a drag selects text, Copy and Select All work, and a selection that ends on the left half of a wide character keeps that character.
+- Scrolling in the native terminal follows the wheel as the earlier terminal did, and the text is JetBrains Mono, with each character on its cell and ligatures off. Keys map as they did in the earlier terminal, and a terminal follows the Terminal input setting from the moment it opens.
+- Input methods work in the native terminal. Text you are composing shows underlined on the cursor's row, a key the input method passes back is sent after the composition commits, and the terminal is a text area that accessibility tools can read.
+- The session header and its buttons stay above the native terminal instead of under it.
+- A native terminal whose graphics card stopped or refused its frame ends with a line saying so, and Open again brings it back on a fresh device instead of the app crashing.
+- Settings, App, Terminal holds Terminal input and Terminal renderer, shared with Profile, Appearance. On macOS the Terminal renderer line is gone, since every terminal is drawn natively.
+- Home lists every Add folder, move and setup job, and a waiting job names its turn. Folder adds run side by side, other jobs wait in a queue, and a project move asked while another runs waits its turn.
+- Adding a folder kept in iCloud: the question lists the folders the add leaves in iCloud, with Download everything, and says that macOS does the downloading. Folders that can be rebuilt are left behind, and downloads are paced through one queue for the whole engine while adds download side by side.
+- After such an add, the project keeps a reinstall offer for each folder left behind until you dismiss it. In the app, Ask fills the master's input and Dismiss deletes the offer; in the TUI the offer reads under the master, with a to ask and d to dismiss.
+- Edit with AI runs once per text instead of once per engine, so several texts can be edited at the same time. Publish drafts never count toward its limit.
+- Several harnesses can update at once, and an update that shares a folder with another waits its turn. The sign-in panel for a harness that is too old says whose job its update waits for.
+
+### Faster
+
+- The engine uses less CPU while idle. Reads for waiting messages and the active project seek instead of walking the history, IDE workspaces are followed only after the database changed, the relay roster is written only when it changed, and the per-task reads are skipped when nothing is queued.
+- The team loop sleeps until it is woken, with its tick as the longest wait, and a lead's orders wait the same way, instead of checking again and again.
+- The IDE port check reads listening ports from the system directly instead of starting one lsof per request; a cold load makes 16 of these checks.
+- A paste longer than one send goes to the terminal through a tmux buffer.
+
+### Changed
+
+- The master diagnoses and plans first, then hands each sub-agent its part with an acceptance check. A probe that costs you something is asked of you once, and when you decline it, that travels with every hand-off: what you declined, and to reproduce without it.
+- On git older than 2.40, a change set waits for you instead of taking any automatic step that needs a newer git, the master's own conflict fix included. An agent worktree refuses a git older than 2.39 before its first git command.
+- A tmux install whose version cannot be read shows the version found and the version needed.
+
+### Fixed
+
+- Resume and send keep working when another account joins or leaves the pool: a session holds only its own connection.
+- A resume on a master whose terminal has ended waits instead of failing with a raw code.
+- Leaving a sub-agent's terminal view that the engine already closed reads as a normal leave, not as a terminal closed error.
+- A terminal view opened again on the wall gets only its own output, and a newer view of another terminal never ends this one.
+- An agent profile's keychain has its own name, profile.keychain-db, and is unlocked before every engine read. At a Claude sign-in, a profile keychain that cannot be opened is set aside instead of stopping the sign-in.
+- First-run setup holds one tool at a time, leaves only after its own permission fix has ended, and a run that ends with its fix's tool missing or failed leads with the fix's line and keeps the run's failure under it.
+- A Claude free resets source shows its free resets within seconds of being picked, in both apps.
+- A projects home or project folder picked or stored through /System/Volumes/Data is the same folder as its short path everywhere: the home refusals, a project move, and the check that agent work holds a move.
+- A queued Add folder or move job that ended before its turn no longer waits, a job plans against the current state, and a stale plan is made again under the same job.
+- A skills import started while the database is busy waits its own time limit, and a timed database job that was never taken is withdrawn without running.
+- An IDE temp folder that holds a locked folder or file is removed as an agent's tree is, so engine start no longer reports it every time. A deleted project's agent and run folders are removed the same way.
+- A git signing program set in your config can no longer end the engine's or the IDE's git: both name no signature program, and the IDE's git checks no log signature.
+- An RCLI master's host outlives the engine thread that started it.
+- A Codex agent's output that is published as its session ends is read, not lost, and a Codex launch reads its pinned hook keys from its own key list without waiting.
+- At engine start, change sets left uncertain are checked again by their content, and a stale git index.lock is refused.
+- An X10 mouse report and an SS3 key reach a terminal program whole, and a batched send never ends inside an escape sequence.
+- In the web terminal, a Shift drag selects on the normal screen off a Mac, and a held Shift press counts as a drag only after it moves 4 px.
+- A launch tells the agent why each MCP server was left out, one cause per line, and the apps wait for a plugin check as long as the engine's own limit.
+- The context-mode node check reads node the way npm's install does, and a check that did not run says so.
+- Settings, Terminal follows Terminal choices saved in the Profile dialog while it is open.
+- A pool summary uses the plural for API keys, URLs and local models counted more than once.
+- The TUI's reinstall notice shows each folder name by its last 40 cells, so a long path leaves room for the sentence.
+
+### Security
+
+- The engine's backups folder and the plugin keys folder are engine secrets that no grant can cover.
+- The @ file list pins git's common folder to the project's own .git, so a planted commondir file redirects nothing.
+- The engine keeps a private, durable record of each revocation or sign-out not yet committed, read back strictly and bounded, and it refuses links, shared modes and second names.
+- The keychain guards for profile and agent homes refuse a home that is your own or not its own real path, before any rename or keychain call, and know your home by device and inode.
+- An Ask's text is taken once and reaches a terminal with line breaks only inside a bracketed paste.
+- A harness launch refuses an npm script whose own node was passed over, with one rule for that node and the shim.
+- On macOS, cleanup changes a mode only on an entry that a no-follow look shows is a folder, grants read and search only, and writes through the opened folder handle.
+- The macOS agent sandbox profile compiles for long folder paths: each at-or-below rule is one pattern, so the profile stays under its 64 KiB limit.
+
+### Linux
+
+- An agent you hid a folder from cannot reach it: the bubblewrap sandbox keeps the hidden folder out, and that agent's mounts are cut off from the host's.
+- Agents limited to given ports start their network helper confined by the Linux helper, a refused connection fails at once instead of timing out, and the helper closes every file it inherited without a name before it runs anything.
+- A Linux sandbox refusal names its real reason, and a failed sandbox check's error text is read to a limit and logged safely.
+- A confined landing step keeps its first copy of the git index open through the step, so the agent's index never stays behind its work tree.
+
+### Windows
+
+- Dev releases now build and publish Windows apps for x64 and ARM64. They are unsigned for now.
+- An agent terminal draws its first screen instead of hanging before it.
+- MCP servers and harnesses that npm installs as .cmd files run through node and their script. Every other batch file is refused, and a program that is neither a full path nor a bare file name is not started.
+- A PowerShell MCP server whose check ran out of time says that PowerShell reading its installed modules is the likely cause.
+- Sandbox containers are released after each context-mode job, after a crashed one, when a check's server is no longer stored, and on removal with the profile deleted last. A first container creation that lost a race is tried again.
+- The check for files other users can change covers the Windows version read and the owner's access list, and unknown allow entries fail closed.
+- Research Retry is hidden where the engine runs no research, and the command that adds CrazyAgent to PATH reads the user's environment key as data.
+
 ## [2.4.2] - 2026-11-17 - Dev build
 
 - Version set to 2.4.2 on 2026-11-17 01:07 UTC (edf720af8).
@@ -29,6 +116,7 @@ Status of each version:
 - Edit with AI also checks the instructions file, on the project's master harness, and lists what it found above the diff: contradictions, references to files, skills, MCP servers or commands that don't exist, duplicates, and length over budget.
 - A Tool caches in agent homes setting: Keep, Clear when access is raised (the default) or Clear every launch, in the TUI and on the app's Agent access page. Clearing removes an agent home's .cache and npm cache, so code planted there cannot run with more access in a later launch.
 - The app icon follows the app theme: the macOS Dock tile and the app's windows change with it, System follows the operating system's changes, and the macOS app ships light and dark icons. Windows sets its icon too, and Linux keeps one icon.
+- A Terminal renderer setting under Profile, Appearance: GPU (the default on macOS and Windows), Automatic, or Standard (the default on Linux). GPU and Automatic draw terminals with WebGL on the graphics card, and keep the standard drawing on a software or virtual machine graphics driver or without WebGL2. Automatic also keeps the standard drawing for new terminals after one failed start on the graphics card. A hidden terminal gives back its graphics memory.
 
 ### Faster
 
@@ -38,6 +126,7 @@ Status of each version:
 - The app reads less while idle: Add folder and move status every 30 seconds and again when the window gets focus, found projects every 3 seconds on Home only (30 seconds elsewhere), and the Overview when the engine says it is due, at least 5 seconds apart.
 - Removing the IDE's temp folder no longer holds the IDE up: the removal is bounded and the rest is swept in the background.
 - The engine starts faster on a busy Mac. Its login service now runs it as an interactive process, so macOS no longer limits its CPU and disk use. An engine service set up by an earlier version is set up again the next time CrazyAgent starts or updates the engine.
+- Agent terminals draw on the graphics card, and a long paste no longer holds up the other terminals: the engine types it in short pieces that never split a character, a key or a mouse report. On a Mac, a 64 KB paste reached the agent in about 0.4 s instead of 2.2 s, and keys typed into another terminal meanwhile arrived in about 1 ms instead of 95 ms (middle values). A terminal goes back to the standard drawing when WebGL2 fails or its graphics context is lost.
 
 ### Fixed
 
@@ -68,7 +157,7 @@ Status of each version:
 - The TUI's Pick a pool box wraps its sentence inside the box instead of cutting it off.
 - On a project's Settings tab in the TUI, Move into CrazyAgent folder takes M instead of m, which the plugins section on that tab took for Add MCP server, so the move never started. Restart them, for the agents that can still open a hidden folder, takes R.
 - New Project asks for your GitHub sign-in once when the engine connects after the page opened, instead of twice.
-- The macOS release builds stopped at the app icon check: the dark app icon needs actool from Xcode 26, and the build machine's default Xcode is older. The build now runs actool from an installed Xcode 26 or newer, and stops before the long compile when none is installed.
+- The macOS release builds stopped at the app icon: actool on the build machines could not make the dark app icon. The app now ships the compiled icon file, so release builds no longer run actool, and a test fails when the icon changes without a rebuilt compiled file.
 
 ### Security
 

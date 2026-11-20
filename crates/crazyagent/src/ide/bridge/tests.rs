@@ -155,7 +155,7 @@ fn rejected(code: &str) -> Option<IdeReply> {
 }
 
 /// Reads one reply frame, or none once the engine closed the connection.
-async fn read_reply(stream: &mut UnixStream) -> Option<IdeReply> {
+async fn read_reply(stream: &mut Stream) -> Option<IdeReply> {
     let length = stream.read_u32().await.ok()? as usize;
     assert!(length > 0 && length <= FRAME_BYTES_MAX);
     let mut body = vec![0; length];
@@ -164,8 +164,8 @@ async fn read_reply(stream: &mut UnixStream) -> Option<IdeReply> {
 }
 
 /// Connects to the owner socket and sends one handshake and one request frame.
-async fn send(socket: &Path, packet: [u8; 37], body: &[u8]) -> UnixStream {
-    let mut stream = crate::spawn_gate::connect_unix(socket).await.unwrap();
+async fn send(socket: &Path, packet: [u8; 37], body: &[u8]) -> Stream {
+    let mut stream = crate::ipc::owner_connect(socket).await.unwrap();
     stream.write_all(&packet).await.unwrap();
     let mut frame = (body.len() as u32).to_be_bytes().to_vec();
     frame.extend(body);
@@ -180,7 +180,7 @@ async fn exchange(socket: &Path, packet: [u8; 37], body: &[u8]) -> Option<IdeRep
 }
 
 /// Opens an event subscription and waits for the engine to confirm it.
-async fn subscribe(socket: &Path, packet: [u8; 37], project: &str) -> UnixStream {
+async fn subscribe(socket: &Path, packet: [u8; 37], project: &str) -> Stream {
     let body = request(project, json!({ "name": "ide.events", "args": {} }));
     let mut stream = send(socket, packet, &body).await;
     assert_eq!(
@@ -1288,8 +1288,8 @@ async fn a_write_past_its_bound_answers_its_unknown_outcome_over_the_connection(
     for end in [&client, &server] {
         end.set_nonblocking(true).unwrap();
     }
-    let mut client = UnixStream::from_std(client).unwrap();
-    let server = UnixStream::from_std(server).unwrap();
+    let mut client = Stream::from_std(client).unwrap();
+    let server = Stream::from_std(server).unwrap();
     let serving = tokio::spawn(serve_within(
         server,
         ide,
@@ -1645,7 +1645,7 @@ async fn ide_git_calls_past_their_cap_are_refused_while_the_others_run() {
 }
 /// Reads one frame of any kind as JSON, or none once the engine closed the connection.
 #[cfg(target_os = "macos")]
-async fn read_value(stream: &mut UnixStream) -> Option<serde_json::Value> {
+async fn read_value(stream: &mut Stream) -> Option<serde_json::Value> {
     let length = stream.read_u32().await.ok()? as usize;
     assert!(length > 0 && length <= FRAME_BYTES_MAX);
     let mut body = vec![0; length];
@@ -1655,7 +1655,7 @@ async fn read_value(stream: &mut UnixStream) -> Option<serde_json::Value> {
 
 /// Sends one control frame on an open terminal connection.
 #[cfg(target_os = "macos")]
-async fn control(stream: &mut UnixStream, request: &crate::terminal::TerminalRequest) {
+async fn control(stream: &mut Stream, request: &crate::terminal::TerminalRequest) {
     let body = serde_json::to_vec(request).unwrap();
     let mut frame = (body.len() as u32).to_be_bytes().to_vec();
     frame.extend(body);
@@ -1665,7 +1665,7 @@ async fn control(stream: &mut UnixStream, request: &crate::terminal::TerminalReq
 /// Reads terminal output until it holds `wanted`, or with no `wanted` until the shell
 /// printed anything that is not blank, within 20 seconds. Returns everything read.
 #[cfg(target_os = "macos")]
-async fn output_until(stream: &mut UnixStream, wanted: Option<&str>) -> String {
+async fn output_until(stream: &mut Stream, wanted: Option<&str>) -> String {
     let mut seen = Vec::new();
     let read = async {
         loop {
@@ -1691,7 +1691,7 @@ async fn output_until(stream: &mut UnixStream, wanted: Option<&str>) -> String {
 
 /// Skips output frames until the terminal's final frame, within 20 seconds.
 #[cfg(target_os = "macos")]
-async fn closing(stream: &mut UnixStream) -> serde_json::Value {
+async fn closing(stream: &mut Stream) -> serde_json::Value {
     let read = async {
         loop {
             let frame = read_value(stream).await.expect("no closing frame");
@@ -1707,7 +1707,7 @@ async fn closing(stream: &mut UnixStream) -> serde_json::Value {
 
 /// Opens a Sandboxed terminal and reads its `ok`. Returns the stream and the pane's name.
 #[cfg(target_os = "macos")]
-async fn open_terminal(socket: &Path, packet: [u8; 37], body: &[u8]) -> (UnixStream, AgentId) {
+async fn open_terminal(socket: &Path, packet: [u8; 37], body: &[u8]) -> (Stream, AgentId) {
     let mut stream = send(socket, packet, body).await;
     let opened = read_value(&mut stream).await.unwrap();
     assert_eq!(opened["kind"], "ok", "{opened}");

@@ -2452,3 +2452,14 @@ fn process_says_when_the_project_text_changed_outside_until_a_save_lands() {
     save(&root, Some(project.clone()), "Pulled rule.\n", 0).unwrap();
     assert!(!read(&root, Some(project)).unwrap().outside);
 }
+
+#[test]
+fn a_storage_answer_reaches_the_process_wire_by_name() {
+    for code in crate::storage::STORAGE_ANSWERS {
+        assert_eq!(public_code(EngineError((*code).into())), *code);
+    }
+    assert_eq!(
+        public_code(EngineError("Not A Code".into())),
+        "process_outcome_unknown"
+    );
+}

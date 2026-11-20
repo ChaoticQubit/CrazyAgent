@@ -86,9 +86,10 @@ pub fn guarded<T>(create: impl FnOnce() -> T) -> T {
 }
 
 /// Starts a child process while no other thread of this process starts one or creates a
-/// socket, so the child inherits only its own pipes. On Windows a `.cmd` or `.bat` program is
-/// refused, since Windows would run it through cmd.exe ([`crate::tools::batch_file`]).
-/// Input: the configured command. Output: the child, or the error that kept it from starting.
+/// socket, so the child inherits only its own pipes. On Windows a `.cmd` or `.bat` program
+/// ([`crate::tools::batch_file`]) and a program neither absolute nor a bare file name
+/// ([`crate::tools::fixed_program`]) are refused. Input: the configured command. Output: the
+/// child, or the error that kept it from starting.
 #[allow(clippy::disallowed_methods)]
 pub fn spawn(command: &mut Command) -> io::Result<Child> {
     #[cfg(windows)]
@@ -96,6 +97,13 @@ pub fn spawn(command: &mut Command) -> io::Result<Child> {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "spawn_batch_file_refused",
+        ));
+    }
+    #[cfg(windows)]
+    if !crate::tools::fixed_program(std::path::Path::new(command.get_program())) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "spawn_relative_program_refused",
         ));
     }
     #[cfg(test)]

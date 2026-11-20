@@ -110,7 +110,7 @@ pub(super) async fn still_running(
 /// Where a served change's reply goes: the client that asked, or the intake job that runs
 /// the add, which keeps the reply and lends its tally to the copy.
 pub(super) enum Sink<'a> {
-    Client(&'a mut UnixStream),
+    Client(&'a mut Stream),
     Job(Arc<Tally>, &'a mut Option<Result<OwnerReply, EngineError>>),
 }
 
@@ -397,7 +397,7 @@ pub(super) async fn serve(
         true => match authority.intake.direct() {
             Ok(direct) => (Some(direct), None),
             Err(busy) => {
-                let replay = tokio::time::timeout_at(deadline, replayed(engine, a, &request))
+                let replay = by_deadline(engine, deadline, replayed(engine, a, &request))
                     .await
                     .unwrap_or_else(|_| Err(failure(UNKNOWN)));
                 match replay {
@@ -411,9 +411,13 @@ pub(super) async fn serve(
     };
     let planned = match recorded {
         Some(step) => Ok(Planned::Step(step)),
-        None => tokio::time::timeout_at(deadline, plan(engine, a, &request, deadline, exchange))
-            .await
-            .unwrap_or_else(|_| Err(failure(UNKNOWN))),
+        None => {
+            let expected = client.then(|| request.expected_revision.clone());
+            let planning = plan(engine, a, &request, expected, deadline, exchange);
+            by_deadline(engine, deadline, planning)
+                .await
+                .unwrap_or_else(|_| Err(failure(UNKNOWN)))
+        }
     };
     let moving = matches!(
         &request.operation,
@@ -457,7 +461,8 @@ pub(super) async fn serve(
             .await
             .unwrap_or_else(|_| Err(failure(UNKNOWN)));
             let admitted = match (admitted, &work) {
-                (Ok(()), Work::Move(_)) => tokio::time::timeout_at(
+                (Ok(()), Work::Move(_)) => by_deadline(
+                    engine,
                     deadline,
                     engine.owner_job(|reply| Job::HomeMoveRecheck(exchange, reply)),
                 )
@@ -567,7 +572,10 @@ pub(super) async fn serve(
         drop(barrier);
         (written, removed, forgotten)
     };
-    let answered = tokio::time::timeout_at(deadline, answer).await;
+    let answered = match ran {
+        true => tokio::time::timeout_at(deadline, answer).await,
+        false => by_deadline(engine, deadline, answer).await,
+    };
     if let (Ok((_, true, _)), Some((database, files))) = (&answered, deleted) {
         tally.mark_clearing();
         let done = tokio::task::spawn_blocking(move || {
@@ -608,6 +616,20 @@ pub(super) async fn serve(
     answered.map_err(|_| failure(UNKNOWN))?
 }
 
+/// Runs one step of a projects home exchange under its deadline, each timed storage job in it
+/// decided before the deadline cuts it, so the route answers that decision itself. Only for
+/// steps before the disk work: a refusal after it would deny an effect that already ran.
+/// Inputs: the engine, the deadline and the step. Output: the step's output, or the elapsed
+/// error when the deadline cut it.
+async fn by_deadline<F: std::future::Future>(
+    engine: &Engine,
+    deadline: Instant,
+    step: F,
+) -> Result<F::Output, tokio::time::error::Elapsed> {
+    let decided = crate::storage::before_cut(deadline, engine.timeout, step);
+    tokio::time::timeout_at(deadline, decided).await
+}
+
 /// Forgets a Delete everything's plan and ends or shows its mark. Inputs: the engine, the
 /// exchange and whether its folders reached the Trash, so a record that never came after the
 /// Trash move is shown as a delete cut short. Output: whether the plan is gone.
@@ -638,10 +660,15 @@ async fn settled(
     false
 }
 
+/// Plans the request's change, or answers a replay or a read. A client's change is checked
+/// against the revision its request names; a job's, whose `expected` is none (from the sink,
+/// never the request), plans at the current revision. Inputs: the engine, admission, request,
+/// expected revision, deadline and exchange. Output: the work or the step, or an engine error.
 async fn plan(
     engine: &Arc<Engine>,
     a: &Admission,
     request: &OwnerRequest,
+    expected: Option<Cursor>,
     deadline: Instant,
     exchange: u64,
 ) -> Result<Planned, EngineError> {
@@ -667,7 +694,6 @@ async fn plan(
     if let Some(step) = replayed(engine, a, request).await? {
         return Ok(Planned::Step(step));
     }
-    let expected = request.expected_revision.clone();
     let work = match mutation {
         OwnerMutation::AddExistingFolder {
             source,
@@ -689,6 +715,7 @@ async fn plan(
             let id = request.request_id.clone();
             engine
                 .owner_job(|reply| {
+                    let expected = request.expected_revision.clone();
                     Job::HomeMovePlan(a.clone(), expected, picked, id, exchange, reply)
                 })
                 .await
@@ -722,7 +749,9 @@ async fn plan(
             let request = Box::new(request.clone());
             return Ok(
                 match engine
-                    .owner_job(|reply| Job::DeletePlan(a.clone(), request, exchange, reply))
+                    .owner_job(|reply| {
+                        Job::DeletePlan(a.clone(), request, expected, exchange, reply)
+                    })
                     .await?
                 {
                     Ok((plan, research)) => Planned::Work(Work::Delete(plan, research)),
@@ -735,7 +764,7 @@ async fn plan(
             let request = Box::new(request.clone());
             return Ok(
                 match engine
-                    .owner_job(|reply| Job::SetupPlan(a.clone(), request, reply))
+                    .owner_job(|reply| Job::SetupPlan(a.clone(), request, expected, reply))
                     .await?
                 {
                     Ok(plan) if demo => Planned::Work(Work::Demo(plan)),

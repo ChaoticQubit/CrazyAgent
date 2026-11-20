@@ -5,7 +5,6 @@ use crate::protocol::Outcome;
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
-#[cfg(any(unix, test))]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS provider_retry_settings (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     choice TEXT NOT NULL CHECK(choice IN ('stop_at_once', 'retry_briefly', 'harness_default'))
@@ -124,7 +123,6 @@ fn invalid() -> EngineError {
 
 /// Creates the setting's table when it is missing. Input: the engine database. Output: Ok,
 /// or the database error.
-#[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(error)
 }

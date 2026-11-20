@@ -1523,6 +1523,10 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { read(state).await?.team_graph(&id).await }.await;
             routed(result)
         }
+        "desktop_native_terminal_enabled" => {
+            let result: Result<_, BridgeError> = async { Ok(cfg!(target_os = "macos")) }.await;
+            routed(result)
+        }
         "desktop_team_terminals_per_window" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

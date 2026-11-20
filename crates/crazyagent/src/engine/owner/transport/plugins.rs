@@ -348,7 +348,7 @@ impl OwnerClient {
         offset: u16,
     ) -> Result<SkillPage, EngineError> {
         match self
-            .plugins_exchange(Action::Skills { project, offset }, Vec::new(), self.timeout)
+            .plugins_exchange(Action::Skills { project, offset }, Vec::new())
             .await?
         {
             Reply::Skills { page } => Ok(page),
@@ -375,7 +375,6 @@ impl OwnerClient {
                     offset,
                 },
                 Vec::new(),
-                self.timeout,
             )
             .await?
         {
@@ -392,11 +391,7 @@ impl OwnerClient {
         offset: u16,
     ) -> Result<ServerPage, EngineError> {
         match self
-            .plugins_exchange(
-                Action::Servers { project, offset },
-                Vec::new(),
-                self.timeout,
-            )
+            .plugins_exchange(Action::Servers { project, offset }, Vec::new())
             .await?
         {
             Reply::Servers { page } => Ok(page),
@@ -422,11 +417,7 @@ impl OwnerClient {
         &self,
     ) -> Result<crate::skills::import::ImportList, EngineError> {
         match self
-            .plugins_exchange(
-                Action::ImportScan,
-                Vec::new(),
-                self.timeout.max(IMPORT_TIMEOUT),
-            )
+            .plugins_exchange(Action::ImportScan, Vec::new())
             .await?
         {
             Reply::ImportScan { list } => Ok(list),
@@ -444,11 +435,7 @@ impl OwnerClient {
         replace: Option<String>,
     ) -> Result<crate::skills::import::Imported, EngineError> {
         match self
-            .plugins_exchange(
-                Action::ImportSkill { folder, replace },
-                Vec::new(),
-                self.timeout.max(IMPORT_TIMEOUT),
-            )
+            .plugins_exchange(Action::ImportSkill { folder, replace }, Vec::new())
             .await?
         {
             Reply::Imported { imported } => Ok(imported),
@@ -486,7 +473,7 @@ impl OwnerClient {
         offset: u16,
     ) -> Result<HookPage, EngineError> {
         match self
-            .plugins_exchange(Action::Hooks { project, offset }, Vec::new(), self.timeout)
+            .plugins_exchange(Action::Hooks { project, offset }, Vec::new())
             .await?
         {
             Reply::Hooks { page } => Ok(page),
@@ -499,7 +486,7 @@ impl OwnerClient {
     /// global or project scope and the absolute plugin folder. Output: the added hooks.
     pub async fn add_hooks(&self, scope: Scope, folder: String) -> Result<HookPage, EngineError> {
         match self
-            .plugins_exchange(Action::AddHooks { scope, folder }, Vec::new(), self.timeout)
+            .plugins_exchange(Action::AddHooks { scope, folder }, Vec::new())
             .await?
         {
             Reply::Hooks { page } => Ok(page),
@@ -514,7 +501,7 @@ impl OwnerClient {
         enabled: bool,
     ) -> Result<HookView, EngineError> {
         match self
-            .plugins_exchange(Action::SetHook { id, enabled }, Vec::new(), self.timeout)
+            .plugins_exchange(Action::SetHook { id, enabled }, Vec::new())
             .await?
         {
             Reply::Hook { hook } => Ok(hook),
@@ -698,10 +685,7 @@ impl OwnerClient {
     }
 
     async fn tools_reply(&self, action: Action) -> Result<Vec<ToolView>, EngineError> {
-        match self
-            .plugins_exchange(action, Vec::new(), self.timeout)
-            .await?
-        {
+        match self.plugins_exchange(action, Vec::new()).await? {
             Reply::Tools { tools } => Ok(tools),
             _ => Err(unknown()),
         }
@@ -714,7 +698,7 @@ impl OwnerClient {
         project: ProjectId,
     ) -> Result<EffectivePlugins, EngineError> {
         match self
-            .plugins_exchange(Action::Effective { project }, Vec::new(), self.timeout)
+            .plugins_exchange(Action::Effective { project }, Vec::new())
             .await?
         {
             Reply::Effective { plugins } => Ok(plugins),
@@ -723,10 +707,7 @@ impl OwnerClient {
     }
 
     async fn skill_reply(&self, action: Action) -> Result<SkillView, EngineError> {
-        match self
-            .plugins_exchange(action, Vec::new(), self.timeout)
-            .await?
-        {
+        match self.plugins_exchange(action, Vec::new()).await? {
             Reply::Skill { skill } => Ok(skill),
             _ => Err(unknown()),
         }
@@ -737,29 +718,38 @@ impl OwnerClient {
         action: Action,
         secrets: Vec<AccountSecret>,
     ) -> Result<ServerView, EngineError> {
-        match self.plugins_exchange(action, secrets, self.timeout).await? {
+        match self.plugins_exchange(action, secrets).await? {
             Reply::Server { server } => Ok(server),
             _ => Err(unknown()),
         }
     }
 
     async fn done_reply(&self, action: Action) -> Result<(), EngineError> {
-        match self
-            .plugins_exchange(action, Vec::new(), self.timeout)
-            .await?
-        {
+        match self.plugins_exchange(action, Vec::new()).await? {
             Reply::Done => Ok(()),
             _ => Err(unknown()),
         }
+    }
+
+    /// The longest this client waits for one plugins request: its own timeout, which covers
+    /// the engine's admission, plus the bound the engine serves the request under: the import
+    /// bound for a skill import, else the engine's owner timeout from its generation. So the
+    /// engine's answer, a refusal included, comes first. Input: the request. Output: the wait.
+    fn wait(&self, action: &Action) -> Duration {
+        let bound = match action {
+            Action::ImportScan | Action::ImportSkill { .. } => IMPORT_TIMEOUT,
+            _ => self.engine_timeout,
+        };
+        deferred_wait(self.timeout, bound)
     }
 
     async fn plugins_exchange(
         &self,
         action: Action,
         secrets: Vec<AccountSecret>,
-        timeout: Duration,
     ) -> Result<Reply, EngineError> {
         action.validate()?;
+        let timeout = self.wait(&action);
         tokio::time::timeout(timeout, async {
             let read = read_kind(&action);
             let envelope = Envelope {
@@ -771,10 +761,10 @@ impl OwnerClient {
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
-            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
                 .await
                 .map_err(|_| failure("plugins_owner_unavailable"))?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             let mut packet = [0; 37];
             packet[..4].copy_from_slice(b"CAO1");
             packet[4] = match self.kind {
@@ -889,7 +879,7 @@ enum Prepared {
 /// Inputs: the connection, engine, authority, packet, admission and request body.
 /// Output: done once the reply is written.
 pub(super) async fn serve(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
@@ -1525,6 +1515,12 @@ fn boundary_check(
         ForCheck::Refused("context_mode_npx_not_found") => {
             return Err("server_npx_not_found".into());
         }
+        ForCheck::Refused("context_mode_node_folder_unreadable") => {
+            return Err("server_node_folder_unreadable".into());
+        }
+        ForCheck::Refused(crate::context_mode::NODE_DRIVE_ROOT_UNREADABLE) => {
+            return Err("server_node_drive_root_unreadable".into());
+        }
         ForCheck::Refused(code) => {
             eprintln!("plugin_check_install_refused cause={code}");
             return Err("server_cant_start".into());
@@ -1564,6 +1560,15 @@ fn boundary_check(
             eprintln!("plugin_check_boundary_refused cause={reason}");
             crate::plugins::check_refused(&reason)
         }
+        SandboxError::Unreadable(folder) => {
+            let reason = crate::sandbox::unreadable_reason(&folder);
+            eprintln!("plugin_check_boundary_refused cause={reason}");
+            if reason.len() <= crate::plugins::CHECK_REASON_BYTES_MAX {
+                crate::plugins::check_refused(&reason)
+            } else {
+                "server_cant_start".to_owned()
+            }
+        }
         other => refused(&other).to_owned(),
     };
     let checks = root.join(CHECK_FOLDER);
@@ -1594,6 +1599,10 @@ fn boundary_check(
         crate::sandbox::LinuxStrict::Off,
     );
     let profile = check_profile(&checks, id);
+    if let Some(problem) = crate::plugins::check_network_refused(std::env::consts::OS, &network) {
+        eprintln!("plugin_check_boundary_refused cause=windows_network_limit");
+        return Err(problem);
+    }
     let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], network)
         .map(ProjectSandbox::as_job_folder)
         .and_then(|sandbox| sandbox.keep_ports(kept))
@@ -1633,7 +1642,7 @@ fn secret_frames(action: &Action) -> usize {
     }
 }
 
-async fn receive_secret(stream: &mut UnixStream) -> Result<AccountSecret, EngineError> {
+async fn receive_secret(stream: &mut Stream) -> Result<AccountSecret, EngineError> {
     tokio::time::timeout(Duration::from_secs(5), async {
         let invalid = || failure("server_secret_invalid");
         let size = stream.read_u32().await.map_err(|_| invalid())? as usize;

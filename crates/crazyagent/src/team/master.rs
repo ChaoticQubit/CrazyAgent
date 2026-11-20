@@ -49,19 +49,20 @@ const ANSWER_REFUSED: &str = "Not recorded: the owner's message is blank, longer
 const _: () = assert!(crate::questions::PENDING_PER_PROJECT_MAX == 64);
 const _: () = assert!(crate::questions::PENDING_PER_ASKER_MAX == 8);
 
-/// Why the engine did not type into a project's live master. `NoMaster`: no live master
-/// runs. `Busy`: a turn is open, an earlier engine input has not started its turn yet, or
-/// a dropped turn still holds input (see `input_released`).
-/// `OwnerTyping`: the owner typed within the quiet window or left an unsent draft.
-/// `Unready`: the master's app does not read keys yet (bracketed paste off).
-/// `Invalid`: the text is empty or too long. `Failed`: the pane or state could not be used.
+/// Why the engine did not type into a project's live master.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputRefused {
+    /// No live master runs.
     NoMaster,
+    /// A turn is open, an earlier input has not started its turn, or a dropped turn holds input.
     Busy,
+    /// The master's app reads no keys yet (bracketed paste off), or its terminal ended.
     Unready,
+    /// The owner typed within the quiet window or left an unsent draft.
     OwnerTyping,
+    /// The text is empty or too long.
     Invalid,
+    /// The pane or state could not be used.
     Failed(String),
 }
 
@@ -668,11 +669,13 @@ fn master_input_at_when(
     let failed = |problem: rusqlite::Error| InputRefused::Failed(state(problem).0);
     let agent = input_open(connection, typing, project, now)?;
     let pane = AgentId::team(agent).map_err(|problem| InputRefused::Failed(problem.0))?;
-    if !host
-        .input_live(&pane)
-        .map_err(|problem| InputRefused::Failed(problem.0))?
-    {
-        return Err(InputRefused::Unready);
+    match host.input_live(&pane) {
+        Ok(true) => {}
+        Ok(false) => return Err(InputRefused::Unready),
+        Err(problem) if crate::terminal::ended_code(&problem.0) => {
+            return Err(InputRefused::Unready);
+        }
+        Err(problem) => return Err(InputRefused::Failed(problem.0)),
     }
     if !input_released(connection, host, agent)
         .map_err(|problem| InputRefused::Failed(problem.0))?

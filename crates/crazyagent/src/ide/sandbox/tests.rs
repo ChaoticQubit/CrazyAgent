@@ -1259,7 +1259,7 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
         let env: &[(&str, &str)] = if *agent == &bare {
             &[]
         } else {
-            &crate::ide::git::CONFIG_ENV
+            crate::ide::git::config_env()
         };
         let (added, _) = setup_git(agent, env, &["add", "notes.txt"]);
         assert!(

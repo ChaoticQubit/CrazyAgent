@@ -106,10 +106,11 @@ pub fn focus_view(view: &View) {
     }
 }
 
-/// Puts a view over its page place and shows it, or hides it, dropping marked text when a
-/// shown view hides. Inputs: the view, the place in CSS pixels and whether it shows.
-/// Output: the backing scale of a shown view, or none for a hidden one.
-pub fn place_view(view: &mut View, rect: [f64; 4], shown: bool) -> Option<f64> {
+/// Puts a view over its page place, below the part of the webview the page does not reach,
+/// and shows it, or hides it, dropping marked text when a shown view hides. Inputs: the
+/// view, the place in CSS pixels, the page's viewport height and whether it shows. Output:
+/// the backing scale of a shown view, or none for a hidden one.
+pub fn place_view(view: &mut View, rect: [f64; 4], viewport: f64, shown: bool) -> Option<f64> {
     let [x, y, width, height] = rect;
     if !shown {
         if !view.ns.isHidden() {
@@ -119,7 +120,8 @@ pub fn place_view(view: &mut View, rect: [f64; 4], shown: bool) -> Option<f64> {
         return None;
     }
     let host = unsafe { view.ns.superview() };
-    let css = NSRect::new(NSPoint::new(x, y), NSSize::new(width, height));
+    let webview_height = view.webview.bounds().size.height;
+    let css = page_frame([x, y, width, height], webview_height, viewport);
     view.ns
         .setFrame(view.webview.convertRect_toView(css, host.as_deref()));
     view.ns.setHidden(false);
@@ -240,11 +242,12 @@ fn backing(view: &NSView) -> f64 {
     scale
 }
 
-/// What a native-webdriver trial reads of one view: its NSView, its visible rows, whether
-/// the direct path draws it and the private pasteboard's text.
+/// What a native-webdriver trial reads of one view: its NSView, the webview it is placed
+/// over, its visible rows, whether the direct path draws it and the private pasteboard's text.
 #[cfg(feature = "native-webdriver")]
 pub struct Look {
     pub view: Retained<TermView>,
+    pub webview: Retained<NSView>,
     pub rows: Vec<String>,
     pub direct: bool,
     pub pasteboard: Option<String>,
@@ -269,6 +272,7 @@ pub fn look(window: &str, page: u64) -> Result<Look, &'static str> {
         assert!(rows.len() <= GRID_MAX);
         Ok(Look {
             view: entry.platform.ns.clone(),
+            webview: entry.platform.webview.clone(),
             rows,
             direct: entry.direct,
             pasteboard: clip.read(),
@@ -278,5 +282,44 @@ pub fn look(window: &str, page: u64) -> Result<Look, &'static str> {
         Ok(look) => look,
         Err((Held::Missing, _)) => Err("native_terminal_view_unknown"),
         Err((Held::Busy, _)) => Err("native_terminal_main_busy"),
+    }
+}
+
+/// The frame a view gets in its webview's own coordinates for its host's page rect: the
+/// rect moved below the part of the webview the page does not reach, under the title bar on
+/// macOS. Inputs: the page rect, the webview's height and the page's viewport height, in
+/// points. Output: the frame.
+fn page_frame(rect: [f64; 4], webview_height: f64, viewport: f64) -> NSRect {
+    let [x, y, width, height] = rect;
+    let top = crate::page_to_view_y(y, webview_height, viewport);
+    assert!(
+        width >= 0.0 && height >= 0.0,
+        "a page rect with no negative side"
+    );
+    NSRect::new(NSPoint::new(x, top), NSSize::new(width, height))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::page_frame;
+
+    /// V243-NATIVE-SESSION-HEADER: the frame a view gets for its host's page rect keeps the
+    /// rect's x and size and sits below the page's inset, so a host under the sessions bar
+    /// at page y 306 in a 900-point webview with an 868-point page is drawn at 338, not 306.
+    #[test]
+    fn a_host_rect_is_framed_below_the_page_inset() {
+        let frame = page_frame([245.0, 306.0, 694.0, 513.0], 900.0, 868.0);
+        assert_eq!((frame.origin.x, frame.origin.y), (245.0, 338.0));
+        assert_eq!((frame.size.width, frame.size.height), (694.0, 513.0));
+        let whole = page_frame([245.0, 306.0, 694.0, 513.0], 868.0, 868.0);
+        assert_eq!(whole.origin.y, 306.0, "native full screen has no inset");
+    }
+
+    /// V243-NATIVE-SESSION-HEADER: a rect with a negative side never reaches AppKit:
+    /// NativeRect::checked refused it, so one here is a caller's bug.
+    #[test]
+    #[should_panic(expected = "a page rect with no negative side")]
+    fn a_host_rect_with_a_negative_side_is_a_bug() {
+        page_frame([245.0, 306.0, -1.0, 513.0], 900.0, 868.0);
     }
 }

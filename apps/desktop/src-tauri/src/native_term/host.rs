@@ -116,8 +116,9 @@ pub use super::view::LABEL_BYTES_MAX;
 
 /// One open checked off the main thread: the calling window, the agent window name, the
 /// screen reader label, the place the shared gate took, the tmux program and engine socket
-/// when the direct path may draw it, the page place, the style, whether it opens covered,
-/// whether its keys go through, the wall window's project and the events channel.
+/// when the direct path may draw it, the page place and the page's viewport height, the
+/// style, whether it opens covered, whether its keys go through, the wall window's project
+/// and the events channel.
 pub struct Open {
     pub window: String,
     pub name: String,
@@ -125,6 +126,7 @@ pub struct Open {
     pub place: Reservation,
     pub direct: Option<(PathBuf, PathBuf)>,
     pub rect: [f64; 4],
+    pub viewport: f64,
     pub style: Style,
     pub covered: bool,
     pub keys: bool,
@@ -134,7 +136,7 @@ pub struct Open {
 
 /// One page call on an open view.
 pub enum Command {
-    Place([f64; 4]),
+    Place([f64; 4], f64),
     Cover(bool),
     Focus,
     Copy(bool),
@@ -536,6 +538,7 @@ impl Native {
             feed: page,
             direct,
             rect: open.rect,
+            viewport: open.viewport,
             covered: open.covered,
             told: Told::default(),
             carry: 0.0,
@@ -642,8 +645,9 @@ impl Native {
             Err(code) => return Err(code),
         };
         let action = match call {
-            Command::Place(rect) => {
+            Command::Place(rect, viewport) => {
                 entry.rect = rect;
+                entry.viewport = viewport;
                 Action::Nothing
             }
             Command::Cover(covered) => {
@@ -1058,7 +1062,7 @@ impl Native {
         let [_, _, width, height] = entry.rect;
         let shown = entry.pane.ready() && !entry.covered && width >= 1.0 && height >= 1.0;
         let view = &mut entry.platform;
-        let Some(scale) = platform::place_view(view, entry.rect, shown) else {
+        let Some(scale) = platform::place_view(view, entry.rect, entry.viewport, shown) else {
             return;
         };
         let key = scale_key(scale);

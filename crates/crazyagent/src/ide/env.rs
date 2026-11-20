@@ -29,7 +29,7 @@ const LOCALES_MAX: usize = 16;
 const VALUE_BYTES_MAX: usize = 16 * 1024;
 
 /// The most variables the IDE server's environment holds.
-pub const ENV_MAX: usize = ALLOWED.len() + LOCALES_MAX + 7 + super::git::CONFIG_ENV.len();
+pub const ENV_MAX: usize = ALLOWED.len() + LOCALES_MAX + 7 + super::git::CONFIG_ENV_LEN;
 
 /// Tells whether the IDE server may inherit a variable of this name: one of [`ALLOWED`], or
 /// `LC_` followed by capital letters. Input: the name. Output: the answer.
@@ -68,7 +68,7 @@ fn access_name(access: AgentAccess) -> &'static str {
 /// [`CAPABILITY_VARIABLE`] naming the capability file, [`SOCKET_VARIABLE`] naming the owner
 /// socket, the AI lock's [`super::settings::LOCKED_VARIABLE`] naming the locked-keys file and
 /// [`ACCESS_VARIABLE`] naming the project's level, then with `git` git's search ceiling [`super::git::CEILING_VARIABLE`], the IDE git
-/// configuration [`super::git::CONFIG_ENV`] and the config path of
+/// configuration [`super::git::config_env`] and the config path of
 /// [`super::git::global_env`]; none is ever taken from the engine's own variables. The server
 /// starts from a cleared environment holding exactly this. Inputs: the engine's variables,
 /// such as `std::env::vars_os()`, the capability file path, the owner socket path, the
@@ -122,7 +122,7 @@ pub fn server_env(
             git.ceiling.to_owned(),
         ));
         env.extend(
-            super::git::CONFIG_ENV
+            super::git::config_env()
                 .iter()
                 .map(|(name, value)| (OsString::from(name), OsString::from(value))),
         );
@@ -142,7 +142,7 @@ pub fn server_env(
             || name == super::settings::LOCKED_VARIABLE
             || name == super::git::CEILING_VARIABLE
             || global.iter().flatten().any(|(fixed, _)| name == fixed)
-            || super::git::CONFIG_ENV
+            || super::git::config_env()
                 .iter()
                 .any(|(fixed, _)| name == *fixed)
     }));

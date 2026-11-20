@@ -3,6 +3,17 @@ import type { AgentPolicy, PolicyView } from "./api-projects";
 import type { NativeAuthMethod, NativeAuthView } from "./native-auth";
 import { isWindows } from "./ui/keys";
 
+/** Storage's own answers to a request, one sentence each, the same on every page and in the
+ * terminal: a full queue, a database still starting and a request withdrawn unrun changed
+ * nothing, and an access change waiting its turn still takes effect. Input: none. Output:
+ * the sentence for each code. */
+export const STORAGE_COPY: Record<string, string> = {
+  owner_queue_not_submitted: "CrazyAgent had too many requests waiting, so nothing changed. It's safe to do it again now.",
+  storage_starting_not_submitted: "CrazyAgent's database was still starting, so nothing changed. It's safe to do it again now.",
+  access_change_pending: "CrazyAgent's database is busy, so this change is waiting its turn and takes effect when the database gets to it. If CrazyAgent stops before then, make the change again.",
+  storage_busy_not_submitted: "CrazyAgent's database was busy with earlier work, so nothing changed. It's safe to do it again now.",
+};
+
 /** Retries a bridge call the native side refused with "busy" because another call held
  * the bridge; such a refusal happens before any action, so repeating it is safe. Each pause
  * is spread at random so calls refused together do not all retry at the same moment again.
@@ -262,7 +273,12 @@ export function errorMessage(error: unknown): string {
     linux_limited_network_off: "The Linux limited-network sockets setting is 'Do not start limited-network agents', so this master does not start. Pick another Linux limited-network sockets option in Settings.",
     linux_resolver_needs_udp: "This harness cannot look up names over TCP, which the Linux setting 'TCP only' needs. Choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
     linux_harness_unchecked: "This harness starts through a script CrazyAgent cannot check for the Linux setting 'TCP only', so it does not start. Start it from a program, or a script whose first line names a program by its full path, or choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
+    sandbox_full_unavailable_windows: "Full access isn't available on Windows in this version.",
+    model_loopback_unavailable_windows: "A model on this computer, such as a local server or the relay, can't be reached by agents on Windows in this version, so this agent does not start. Use a model that runs elsewhere.",
     linux_sandbox_not_full: "This Linux cannot give this agent the full sandbox and the setting 'Refuse agents without the full Linux sandbox' is on, so it does not start. The lines under Agent access say what this Linux lacks. Turn the setting off in Settings to start agents with what this Linux holds.",
+    linux_hidden_needs_namespaces: "This project hides folders, and on Linux an agent with hidden folders starts only when bubblewrap can give it namespaces of its own, which this computer does not allow, so the agent does not start. Install bubblewrap and allow unprivileged user namespaces, then start it again, or take the folders off Hidden folders in the project's settings.",
+    linux_hidden_mounts_not_private: "This project hides folders, and on Linux an agent with hidden folders starts only when its mounts can be cut off from this computer's, so that no later mount on this computer reaches the folders. This computer does not let the sandbox helper make user namespaces of its own inside bubblewrap, so the agent does not start. Allow user namespaces for the programs bubblewrap starts, then start it again, or take the folders off Hidden folders in the project's settings.",
+    linux_hidden_mounted_again: "A folder this project hides sits on a disk that is mounted a second time where it shows that folder, so an agent could reach the folder there and the agent does not start. To start it, remove that mount or take the folder off Hidden folders in the project's settings.",
     pool_needs_account: "A pool needs at least one account. Add another account first, or delete the pool.",
     pool_project_limit: "A pool can serve up to 64 projects. Pick another pool for this project.",
     pool_name_bounds: "Use a pool name of 1 to 64 characters, without control characters.",
@@ -317,6 +333,8 @@ export function errorMessage(error: unknown): string {
     server_installs_busy: "Too many installs are running. Check again in a minute.",
     server_node_too_old: "context-mode needs Node.js 22.5 or newer. Update Node.js, then check again.",
     server_npx_not_found: "CrazyAgent did not find the npx this context-mode server runs on this computer, so it did not start it.",
+    server_node_folder_unreadable: "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and this Windows user cannot change that, so CrazyAgent did not start it.",
+    server_node_drive_root_unreadable: "Windows does not let sandboxed programs read the root of a drive context-mode uses, so CrazyAgent did not start it. Run the CrazyAgent installer again and approve the administrator step.",
     server_output_too_large: "The server sent too much output.",
     server_refused: "The server refused the request.",
     server_reply_invalid: "The server's answer was not valid MCP.",
@@ -409,6 +427,7 @@ export function errorMessage(error: unknown): string {
     invalid_baseline_data: "The engine returned a baseline that could not be validated.",
     unexpected_reply: "The engine returned an unexpected response. Refresh before continuing.",
   };
+  if (Object.hasOwn(STORAGE_COPY, code)) return STORAGE_COPY[code];
   return messages[code] ?? withCode("The owner request failed. Refresh before continuing.", code);
 }
 
