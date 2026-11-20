@@ -221,10 +221,6 @@ fn a_supervised_linux_sub_agent_turn_lands_its_page_and_is_refused_every_git_met
         fs::create_dir(folder).unwrap();
         fs::set_permissions(folder, fs::Permissions::from_mode(0o700)).unwrap();
     }
-    assert!(
-        crazyagent::terminal::tmux::installed(&root).is_none(),
-        "this row pins the headless path; this runner has a tmux the terminal runs"
-    );
     fs::write(
         home.join(".gitconfig"),
         "[user]\n\tname = Owner\n\temail = owner@example.invalid\n",
@@ -319,6 +315,10 @@ fn a_supervised_linux_sub_agent_turn_lands_its_page_and_is_refused_every_git_met
         .iter()
         .find(|agent| Some(agent.id) == task.agent)
         .unwrap();
+    assert!(
+        agent.pane.is_none(),
+        "this row pins the headless path; the engine ran the sub-agent in a pane: {team:#?}"
+    );
     let worktree = folder.join(agent.worktree.as_deref().unwrap());
     for probe in [
         "page=wrote",
