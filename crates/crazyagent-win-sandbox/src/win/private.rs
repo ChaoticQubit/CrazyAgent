@@ -6,6 +6,7 @@ use crate::private::{
     Facts, Store, judge, judge_folder, judge_store_before_label, label_list, list,
     secret_file_label,
 };
+use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -79,6 +80,14 @@ pub fn open_dir(path: &Path) -> io::Result<File> {
     )?;
     private_as(&folder, &user, true)?;
     Ok(folder)
+}
+
+/// Holds the private folder at `path` as [`new_dir`] makes one (`create`) or [`open_dir`]
+/// opens one, its handle also carrying delete access, so the holder renames it through that
+/// handle with [`rename`] (DESIGN-0601 R4); delete is never shared. Inputs: the absolute
+/// path and whether to create. Output: the held folder, or the error.
+pub fn dir_deletable(_path: &Path, _create: bool) -> io::Result<File> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
 /// Opens a secret store folder or the database folder at `path` as [`dir`] does, with that
@@ -282,6 +291,14 @@ pub fn file(path: &Path, create: bool) -> io::Result<File> {
     Ok(opened)
 }
 
+/// Opens the private file at `path` as [`file`] does, its handle also carrying delete access
+/// from the first open, so the holder renames it through that handle with [`rename`]
+/// (DESIGN-0601 R2, R3); delete is never shared, so no other open moves it. Inputs: the
+/// absolute path and whether to create. Output: the open file, or the error.
+pub fn file_deletable(_path: &Path, _create: bool) -> io::Result<File> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
 /// Creates the private file at `path` as [`file`] does with `create`, carrying from creation
 /// the medium no-write-up, no-read-up and no-execute-up label of [`secret_file_label`] on the
 /// file itself, so in any folder no lower integrity process opens or holds it (#555 N1, #562
@@ -349,6 +366,15 @@ pub fn read_only(path: &Path) -> io::Result<File> {
     Ok(opened)
 }
 
+/// Opens the private file at `path` for reading only, judged as [`read_only`] does, but
+/// sharing delete, so a [`rename`] with [`Mode::Replace`] takes its name while this handle
+/// keeps the old bytes (DESIGN-0601 R2; rv-sec3 #726 L2 names its only callers: custody's
+/// `identity.json`, `config.json` and agent copy). Input: the absolute path. Output: the
+/// open file, or why it is not private.
+pub fn read_only_replaceable(_path: &Path) -> io::Result<File> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
+}
+
 /// The identity a store pins for an open private object: its volume serial number and its
 /// 64-bit file id, the twin of Unix `(dev, ino)`. A file id that needs all 128 bits, as on
 /// ReFS, is refused, so two files never share one identity. Input: the handle. Output: the
@@ -392,6 +418,25 @@ pub fn delete(file: &File) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// How [`rename`] meets an entry already at the destination name (DESIGN-0601 R2, R5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// Refuses it with `ERROR_ALREADY_EXISTS`, the twin of `renameat2(.., RENAME_NOREPLACE)`.
+    NoReplace,
+    /// Takes its name with POSIX semantics, the twin of `renameat` over an existing name; an
+    /// entry another handle holds without sharing delete refuses it.
+    Replace,
+}
+
+/// Renames what a held handle names to `name` in the held folder `folder`, never by a path,
+/// the twin of `renameat2` (rv-sec3 #716 C6, #726 L5): the handle carries delete access from
+/// its own open, Windows looks the name up through `folder`, and a refused rename has no
+/// fallback. Inputs: the held handle and folder, one plain name and the [`Mode`]. Output: Ok,
+/// or the Windows error.
+pub fn rename(_file: &File, _folder: &File, _name: &OsStr, _mode: Mode) -> io::Result<()> {
+    Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
 /// Deletes the private file at `path` only while it is still the object a caller pinned

@@ -5,9 +5,9 @@ use crate::dacl::{
 
 #[cfg(windows)]
 pub use crate::win::private::{
-    check, delete, dir, facts, file, free, identity, lock, new_dir, open_dir, place, read_only,
-    read_secret, remove, repair, same, secret_file, secret_file_deletable, store_dir, sync_folder,
-    unlock, user_sid,
+    Mode, check, delete, dir, dir_deletable, facts, file, file_deletable, free, identity, lock,
+    new_dir, open_dir, place, read_only, read_only_replaceable, read_secret, remove, rename,
+    repair, same, secret_file, secret_file_deletable, store_dir, sync_folder, unlock, user_sid,
 };
 
 const FULL_ACCESS: u32 = 0x001f_01ff;
