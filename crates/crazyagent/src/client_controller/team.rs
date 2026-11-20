@@ -106,18 +106,19 @@ impl OwnerController {
 
     /// Opens an input-only view of an agent's terminal, or one pane of its window, for a
     /// viewer that draws the pane from elsewhere. Takes the terminal name, the pane if any,
-    /// and the columns and rows. Returns the session, whose output gives only its end.
+    /// the columns and rows, and whether it follows (sizes only while no other view does).
+    /// Returns the session, whose output gives only its end.
     pub async fn terminal_attach_input(
         &mut self,
         agent: AgentId,
         pane: Option<String>,
-        cols: u16,
-        rows: u16,
+        size: (u16, u16),
+        follows: bool,
     ) -> Result<TerminalSession, EngineError> {
         self.client
             .as_deref()
             .ok_or_else(|| EngineError("controller_disconnected".into()))?
-            .terminal_attach_input(agent, pane, cols, rows)
+            .terminal_attach_input(agent, pane, size, follows)
             .await
     }
 

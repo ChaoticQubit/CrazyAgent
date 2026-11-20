@@ -135,10 +135,10 @@ async fn the_owner_types_into_an_engine_terminal_and_the_team_graph_shows_the_ma
         read_until(
             &mut output,
             &mut seen,
-            format!("\r\ne2e-{marker}-42\r\n").as_bytes()
+            format!("\r\ne2e-{marker}-42\r\ne2e$ ").as_bytes()
         )
         .await,
-        "the shell ran the typed line: {}",
+        "the shell ran the typed line and prompts again: {}",
         String::from_utf8_lossy(&seen)
     );
     control.resize(100, 30).await.unwrap();
