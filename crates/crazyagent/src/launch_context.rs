@@ -1465,6 +1465,8 @@ impl Drop for Installed {
         }
         #[cfg(unix)]
         let _ = rustix::fs::flock(&self._lock, FlockOperation::Unlock);
+        #[cfg(windows)]
+        let _ = crazyagent_win_sandbox::private::unlock(&self._lock);
     }
 }
 
@@ -2515,11 +2517,31 @@ fn sized_json(value: &impl Serialize) -> Result<String, LaunchError> {
     })
 }
 
-/// Refuses launch context files where owner-only no-follow creation does not exist.
-/// Takes its inputs, all unused. Returns `launch_context_unavailable`.
-#[cfg(not(unix))]
-fn lock(_home: &Path) -> Result<File, LaunchError> {
-    Err(failure("launch_context_unavailable"))
+/// Opens and locks the agent home's launch lock through W1 (V244-WIN-MASTER S9a): made a
+/// private file when it is missing, else opened, never through a link, a second name or a
+/// list that is not private, then locked without waiting. A name a launched agent left as a
+/// link, a folder or an open file stays refused until S9b clears it handle-relative; no
+/// Windows launch reuses a home before then (D6, D8). Input: the home H1's check passed.
+/// Output: the locked file, `launch_context_unsafe` or `launch_home_busy`.
+#[cfg(windows)]
+fn lock(home: &Path) -> Result<File, LaunchError> {
+    use crazyagent_win_sandbox::private;
+    const LOCK_VIOLATION: i32 = 33;
+    let path = home.join(LOCK);
+    let file = match private::file(&path, true) {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            private::file(&path, false)
+        }
+        made => made,
+    }
+    .map_err(|_| failure("launch_context_unsafe"))?;
+    match private::lock(&file) {
+        Ok(()) => Ok(file),
+        Err(error) if error.raw_os_error() == Some(LOCK_VIOLATION) => {
+            Err(failure("launch_home_busy"))
+        }
+        Err(_) => Err(failure("launch_context_unsafe")),
+    }
 }
 
 /// Opens and locks the agent home's launch lock, made owner-only and never through a link.
@@ -2695,8 +2717,9 @@ pub(crate) fn lock_kept(found: &rustix::fs::Stat) -> bool {
         && (cfg!(not(target_os = "macos")) || found.st_nlink == 1)
 }
 
-/// Keeps a home's launch lock where it is a plain file, on systems with no owner-only lock,
-/// whose launches [`lock`] refuses. Input: its metadata. Output: the answer.
+/// Keeps a home's launch lock where it is a plain file read without following a link; on
+/// Windows whether it is private is W1's judge at the next [`lock`], which refuses one that
+/// is not. Input: its metadata. Output: the answer.
 #[cfg(not(unix))]
 pub(crate) fn lock_kept(metadata: &fs::Metadata) -> bool {
     metadata.is_file()
@@ -2893,11 +2916,12 @@ fn park(home: &Path) -> Option<(PathBuf, std::os::fd::OwnedFd)> {
     None
 }
 
-/// Leaves skill copies in place where descriptor-relative removal does not exist; no
-/// launch reaches this, because the home lock is refused first. Input: unused. Output: Ok.
+/// Refuses a Codex launch's skill removal where it is not yet handle-relative, so a Codex
+/// home is never launched with skills an earlier run left; S9b removes them through the
+/// held-folder layer (D8). Input: unused. Output: `launch_context_unavailable`.
 #[cfg(not(unix))]
 fn remove_copies(_home: &Path) -> Result<(), LaunchError> {
-    Ok(())
+    Err(failure("launch_context_unavailable"))
 }
 
 /// Whether `name` is still in `folder`, read without following a link. A read that fails
