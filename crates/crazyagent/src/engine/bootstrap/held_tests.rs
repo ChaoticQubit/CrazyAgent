@@ -174,7 +174,19 @@ fn a_linked_swapped_open_or_hard_linked_child_is_refused() {
 fn a_name_that_is_not_one_plain_component_trips_the_layer() {
     let (_temp, root) = private_root();
     let held = Folder::root(&root).unwrap();
-    let mut names = vec!["", ".", "..", "a/b", "a:b", "a.", "a ", "NUL", "con.txt"];
+    let mut names = vec![
+        "",
+        ".",
+        "..",
+        "a/b",
+        "a:b",
+        "ab:c",
+        "name::$DATA",
+        "a.",
+        "a ",
+        "NUL",
+        "con.txt",
+    ];
     if cfg!(windows) {
         names.push("a\\b");
     }
@@ -232,4 +244,56 @@ fn a_verbatim_root_trips_the_layer_and_the_plain_spelling_holds() {
     let held = std::panic::catch_unwind(|| Folder::root(&verbatim).is_ok());
     assert!(held.is_err(), "a verbatim root reached an open");
     Folder::root(&root).unwrap();
+}
+
+/// N2a row 3c (rv-sec3 #716 C2): making a folder is create-only, the twin of `mkdirat`, so a
+/// private folder already at the name is refused as unsafe and never adopted, and it stays
+/// the same folder.
+#[test]
+fn making_a_folder_over_an_existing_one_is_refused_and_keeps_it() {
+    let (_temp, root) = private_root();
+    let held = Folder::root(&root).unwrap();
+    let first = held.make_dir(name("home")).unwrap().pin();
+    assert_eq!(held.make_dir(name("home")).err().unwrap().0, UNSAFE);
+    assert_eq!(held.open_dir(name("home")).unwrap().pin(), first);
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+}
+
+/// N2a row 3d (rv-sec3 #716 C1): while a chain is held, the folder above its root cannot be
+/// renamed either, so the path the held root was read at keeps naming it.
+#[cfg(windows)]
+#[test]
+fn the_folder_above_a_held_chain_cannot_be_renamed() {
+    let (temp, root) = private_root();
+    let held = Folder::root(&root).unwrap();
+    let child = held.make_dir(name("a")).unwrap();
+    let above = root.parent().unwrap().to_path_buf();
+    let moved = temp.path().with_extension("moved");
+    assert!(std::fs::rename(&above, &moved).is_err());
+    assert!(root.is_dir());
+    assert!(!moved.exists());
+    drop(child);
+    drop(held);
+}
+
+/// N2a row 3e (rv-sec3 #716 C1): a root reached through a junction is held at its real
+/// place, so retargeting that junction later leaves every open and make in the held tree.
+#[cfg(windows)]
+#[test]
+fn retargeting_a_junction_above_the_root_leaves_opens_in_the_held_tree() {
+    let (_temp, root) = private_root();
+    let real = root.join("real");
+    let other = root.join("other");
+    for folder in [&real, &other, &real.join("anchor"), &other.join("anchor")] {
+        drop(crazyagent_win_sandbox::private::dir(folder).unwrap());
+    }
+    let link = root.join("link");
+    link_folder(&link, &real);
+    let held = Folder::root(&link.join("anchor")).unwrap();
+    std::fs::remove_dir(&link).unwrap();
+    link_folder(&link, &other);
+    let made = held.make_dir(name("b")).unwrap();
+    assert!(real.join("anchor").join("b").is_dir());
+    assert!(!other.join("anchor").join("b").exists());
+    assert_eq!(held.open_dir(name("b")).unwrap().pin(), made.pin());
 }
