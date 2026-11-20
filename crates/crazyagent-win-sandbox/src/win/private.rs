@@ -300,9 +300,9 @@ pub fn identity(object: &File) -> io::Result<(u64, u64)> {
 }
 
 /// Deletes the file a held handle names, never by path (rv-sec2 #702 R7, leader 03:5x): the
-/// handle must carry delete access, and POSIX semantics make the name go at once, while
-/// other handles to it stay open. Input: the held handle. Output: Ok, or the Windows error,
-/// access denied for a handle without delete access.
+/// handle must carry delete access, and POSIX semantics remove the name when that handle
+/// closes, even while other handles to the file stay open. Input: the held handle. Output:
+/// Ok, or the Windows error, access denied for a handle without delete access.
 pub fn delete(file: &File) -> io::Result<()> {
     let disposition = FILE_DISPOSITION_INFO_EX {
         Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
