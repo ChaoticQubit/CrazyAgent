@@ -608,6 +608,9 @@ fn busy(
 /// `destination` or inside it, so moving another project there would rewrite onto its
 /// stored rows. A folder that holds the destination does not count. Inputs: the
 /// destination and the project. Output: the answer.
+#[cfg(all(test, windows))]
+mod spelling_windows_tests;
+
 fn names_inside(destination: &Path, project: &Registered) -> bool {
     assert!(destination.is_absolute());
     std::iter::once(&project.folder)

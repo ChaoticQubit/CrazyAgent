@@ -577,3 +577,5 @@ pub(crate) fn managed_sign_in(
 #[cfg(test)]
 #[path = "accounts_tests.rs"]
 mod accounts_tests;
+#[cfg(all(test, windows))]
+mod plain_folder_windows_tests;
