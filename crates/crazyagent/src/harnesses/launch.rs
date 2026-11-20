@@ -412,9 +412,12 @@ pub(super) fn failure(code: &str) -> LaunchError {
 /// group, or None for an id no stop may signal.
 #[cfg(unix)]
 pub(crate) fn group_of(raw: u32) -> Option<rustix::process::Pid> {
-    i32::try_from(raw)
+    let group = i32::try_from(raw)
         .ok()
-        .and_then(rustix::process::Pid::from_raw)
+        .filter(|raw| *raw > 1)
+        .and_then(rustix::process::Pid::from_raw)?;
+    assert!(group.as_raw_nonzero().get() > 1);
+    Some(group)
 }
 
 /// Sends SIGKILL to every process of an agent's process group. Takes the group id, which
@@ -508,10 +511,7 @@ impl Drop for Ending {
 /// none to only watch. Output: whether the group is gone.
 #[cfg(unix)]
 pub(crate) fn end_pane_group(group: u32, held: Option<Ending>) -> bool {
-    let Some(pid) = i32::try_from(group)
-        .ok()
-        .and_then(rustix::process::Pid::from_raw)
-    else {
+    let Some(pid) = group_of(group) else {
         return true;
     };
     end_pane_group_with(
@@ -560,10 +560,7 @@ fn end_pane_group_with(
 /// the group is empty.
 #[cfg(unix)]
 pub(crate) fn await_group_exit(group: u32) -> bool {
-    let Some(pid) = i32::try_from(group)
-        .ok()
-        .and_then(rustix::process::Pid::from_raw)
-    else {
+    let Some(pid) = group_of(group) else {
         return true;
     };
     let started = Instant::now();
