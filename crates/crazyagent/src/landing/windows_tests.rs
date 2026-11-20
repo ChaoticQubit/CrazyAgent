@@ -690,6 +690,11 @@ fn a_windows_step_writes_only_its_step_folder_its_own_home_and_its_kind_target()
     let step = ws.git_dir.join("crazyagent-step");
     assert_eq!(places.step, step);
     assert!(places.lease.starts_with(data.join("step-profiles")));
+    assert!(
+        !places.git.to_str().unwrap().starts_with(r"\\?\"),
+        "a step starts git's plain program, the form the boundary takes"
+    );
+    assert!(places.git.starts_with(&places.git_root));
     let tmp = step.join("tmp");
     let home = |kind: &str| places.lease.join(format!("{kind}-home"));
     assert_eq!(
