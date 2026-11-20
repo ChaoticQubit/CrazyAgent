@@ -9,6 +9,7 @@ use crate::credentials::SecretString;
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
+use crate::sandbox::InstalledSandbox;
 use crate::sandbox::toolchains::{self, ToolHomes};
 use crate::usage::capture::Tokens;
 #[cfg(unix)]
@@ -24,6 +25,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
@@ -260,10 +262,10 @@ impl Default for LaunchLimits {
 }
 
 /// Everything needed to start one harness: catalog id, executable, working directory,
-/// account, optional model, tools switch, the project sandbox profile, whether the project
-/// gave its agents Full access, the owner's git identity for the agent's own commits and
-/// limits. Every launch is refused unless a sandbox profile is given, or no profile with
-/// `unconfined` set for a Full access project (DEC-102).
+/// account, optional model, tools switch, the boundary it starts in, the owner's git
+/// identity for the agent's own commits and limits. Every launch names its boundary; Full
+/// access is a boundary marked [`InstalledSandbox::unconfined`] (DEC-102), so no request
+/// can start an agent outside one by leaving a field out.
 #[derive(Debug)]
 pub struct LaunchRequest {
     pub harness: String,
@@ -272,10 +274,49 @@ pub struct LaunchRequest {
     pub account: AccountBinding,
     pub model: Option<String>,
     pub tools: bool,
-    pub sandbox_profile: Option<PathBuf>,
-    pub unconfined: bool,
+    pub boundary: LaunchBoundary,
     pub git_identity: Option<GitIdentity>,
     pub limits: LaunchLimits,
+}
+
+/// The boundary one launch starts in. `Profile` is an installed Seatbelt profile file, the
+/// form a stored agent row keeps, and starts only on macOS. `Installed` is an installed
+/// project sandbox, Full access when it is marked [`InstalledSandbox::unconfined`].
+#[derive(Debug, Clone)]
+pub enum LaunchBoundary {
+    Profile(PathBuf),
+    Installed(Arc<InstalledSandbox>),
+}
+
+impl LaunchBoundary {
+    /// Whether this boundary is a Full access project's (DEC-102). Output: true only for an
+    /// installed sandbox marked unconfined.
+    pub fn is_unconfined(&self) -> bool {
+        match self {
+            Self::Profile(_) => false,
+            Self::Installed(boundary) => boundary.is_unconfined(),
+        }
+    }
+
+    /// The installed profile a confined boundary starts from. Output: the profile file, or
+    /// None for Full access.
+    pub fn confined_profile(&self) -> Option<&Path> {
+        match self {
+            Self::Profile(profile) => Some(profile.as_path()),
+            Self::Installed(boundary) if boundary.is_unconfined() => None,
+            Self::Installed(boundary) => Some(boundary.profile()),
+        }
+    }
+
+    /// What a stop checks of the processes a run left outside its group: the installed
+    /// sandbox's own check, or nothing for a Seatbelt profile, which ends them all. Output:
+    /// the check.
+    pub fn lineage_check(&self) -> crate::sandbox::LineageCheck {
+        match self {
+            Self::Profile(_) => crate::sandbox::LineageCheck::Unneeded,
+            Self::Installed(boundary) => boundary.lineage_check(),
+        }
+    }
 }
 
 const GIT_IDENTITY_BYTES_MAX: usize = 256;
@@ -662,7 +703,7 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         "claude-code" => claude_invocation(request, installed, key_file.as_deref()),
         _ => return Err(failure("launch_harness_unsupported")),
     };
-    if !cfg!(target_os = "macos") {
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
         return Err(failure("launch_sandbox_unavailable"));
     }
     let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
@@ -712,15 +753,8 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         .split_first()
         .ok_or_else(|| failure("launch_environment_refused"))?;
     let program = Path::new(program);
-    let mut command = match &request.sandbox_profile {
-        Some(profile) => crate::sandbox::agent_command(profile, program, &base, harness_env),
-        None => crate::sandbox::unconfined_command(program, &base, harness_env),
-    }
-    .map_err(|_| failure("launch_environment_refused"))?;
+    let mut command = bounded(request, program, script, &arguments, &base, harness_env)?;
     command
-        .args(script)
-        .args(&arguments)
-        .current_dir(&request.working_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -728,9 +762,10 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         command.get_current_dir(),
         Some(request.working_dir.as_path())
     );
+    #[cfg(target_os = "macos")]
     assert_eq!(
         crate::sandbox::starts_at_boundary(command.get_program()),
-        request.sandbox_profile.is_some() && !request.unconfined
+        !request.boundary.is_unconfined()
     );
     assert!(command.get_args().all(|argument| {
         request
@@ -739,6 +774,70 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
             .is_none_or(|key| !argument.to_string_lossy().contains(&key.0))
     }));
     Ok(command)
+}
+
+/// Builds the harness command inside the request's boundary, in its working folder: on
+/// macOS the confined profile through [`crate::sandbox::agent_command`] or the Full access
+/// session shim; on Linux an installed sandbox with the account's home, through
+/// [`InstalledSandbox::wrap`]; anything else is `launch_sandbox_unavailable`. Inputs: the
+/// request, program, script words, arguments, base and harness variables. Output: the command.
+fn bounded<'a>(
+    request: &LaunchRequest,
+    program: &Path,
+    script: &[String],
+    arguments: &[OsString],
+    base: &[(&str, &OsStr)],
+    harness_env: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+) -> Result<Command, LaunchError> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = match request.boundary.confined_profile() {
+            Some(profile) => crate::sandbox::agent_command(profile, program, base, harness_env),
+            None => crate::sandbox::unconfined_command(program, base, harness_env),
+        }
+        .map_err(|_| failure("launch_environment_refused"))?;
+        command
+            .args(script)
+            .args(arguments)
+            .current_dir(&request.working_dir);
+        Ok(command)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let LaunchBoundary::Installed(boundary) = &request.boundary else {
+            return Err(failure("launch_sandbox_unavailable"));
+        };
+        if request.account.home() != boundary.sandbox().agent_home() {
+            return Err(failure("launch_environment_refused"));
+        }
+        let mut bare = Command::new(program);
+        bare.args(script)
+            .args(arguments)
+            .current_dir(&request.working_dir);
+        for (name, value) in base {
+            bare.env(name, value);
+        }
+        for (name, value) in harness_env {
+            match value {
+                Some(value) => bare.env(name, value),
+                None => bare.env_remove(name),
+            };
+        }
+        let command = boundary.wrap(&bare).map_err(|error| match error {
+            crate::sandbox::SandboxError::Invalid(_) => failure("launch_environment_refused"),
+            error => failure(
+                crate::sandbox::refusal_code(&error).unwrap_or("launch_sandbox_unavailable"),
+            ),
+        })?;
+        assert_eq!(command.get_program(), boundary.launcher().as_os_str());
+        Ok(command)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (request, program, script, arguments, base);
+        let _ = harness_env.into_iter().count();
+        Err(failure("launch_sandbox_unavailable"))
+    }
 }
 
 /// The Codex app-server command line. Every folder of the working folder's walk is recorded
@@ -1016,6 +1115,10 @@ pub(super) fn harness_id(request: &LaunchRequest) -> &'static str {
     super::spec(&request.harness).map_or("", |spec| spec.id)
 }
 
+/// Checks a launch request before any headless or pane command is built: the executable,
+/// working folder, account home, model, URL, profile path and limits, and that Full access
+/// is asked for only on macOS, so no unconfined boundary becomes a bare command elsewhere.
+/// Input: the request. Output: Ok, or a plain refusal code.
 pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
     let executable = std::fs::metadata(&request.executable)
         .map_err(|_| failure("launch_executable_unavailable"))?;
@@ -1049,13 +1152,10 @@ pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
             return Err(failure("launch_url_invalid"));
         }
     }
-    match (&request.sandbox_profile, request.unconfined) {
-        (Some(_), true) => return Err(failure("launch_sandbox_conflict")),
-        (Some(profile), false) if !profile.is_absolute() || !profile.is_file() => {
-            return Err(failure("launch_sandbox_profile_unavailable"));
-        }
-        (Some(_), false) | (None, true) => {}
-        (None, false) => return Err(failure("launch_sandbox_required")),
+    if let LaunchBoundary::Profile(profile) = &request.boundary
+        && (!profile.is_absolute() || !profile.is_file())
+    {
+        return Err(failure("launch_sandbox_profile_unavailable"));
     }
     let limits = request.limits;
     if limits.run_time.is_zero()
@@ -1063,6 +1163,9 @@ pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
         || limits.stop_grace > Duration::from_secs(30)
     {
         return Err(failure("launch_limits_invalid"));
+    }
+    if !cfg!(target_os = "macos") && request.boundary.is_unconfined() {
+        return Err(failure("launch_sandbox_unavailable"));
     }
     Ok(())
 }
@@ -1727,11 +1830,7 @@ impl Session {
                     .map_err(|_| failure("launch_reader_unavailable"))?;
             }
         }
-        let check = if request.unconfined {
-            crate::sandbox::LineageCheck::FullAccess
-        } else {
-            crate::sandbox::LineageCheck::Unneeded
-        };
+        let check = request.boundary.lineage_check();
         let follower = Follower::start(child.id(), Some(token), check);
         let mut session = Self {
             child,

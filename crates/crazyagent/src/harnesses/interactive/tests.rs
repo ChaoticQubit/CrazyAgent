@@ -1,5 +1,5 @@
 use super::*;
-use crate::harnesses::launch::{CLAUDE_NATIVE_TEAM_TOOLS, LaunchLimits};
+use crate::harnesses::launch::{CLAUDE_NATIVE_TEAM_TOOLS, LaunchBoundary, LaunchLimits};
 use std::os::unix::fs::PermissionsExt;
 
 const SESSION: &str = "0f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f";
@@ -66,8 +66,7 @@ impl Case {
             account,
             model: None,
             tools,
-            sandbox_profile: Some(self.profile()),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(self.profile()),
             git_identity: None,
             limits: LaunchLimits::default(),
         }
@@ -820,10 +819,10 @@ fn a_keyed_claude_gets_its_key_through_its_key_helper_and_a_local_one_a_placehol
 fn every_launch_needs_its_sandbox_profile_and_a_safe_home() {
     let case = Case::new();
     let mut bare = case.request("codex", case.subscription(), true);
-    bare.sandbox_profile = None;
+    bare.boundary = LaunchBoundary::Profile(PathBuf::from("agent.sb"));
     assert_eq!(
         command(&bare, None, &run(None)).unwrap_err().0,
-        "launch_sandbox_required"
+        "launch_sandbox_profile_unavailable"
     );
     std::fs::set_permissions(case.home(), std::fs::Permissions::from_mode(0o755)).unwrap();
     let open = case.request("claude-code", case.subscription(), true);
