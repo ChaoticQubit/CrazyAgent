@@ -11,7 +11,9 @@ const DIFF_TEXT_BYTES_MAX: usize = 4 * 1024 * 1024;
 const PAGE_BUDGET: usize = 24 * 1024;
 const RECENT_BYTES_MAX: usize = 16 * 1024 * 1024;
 pub(super) const RECENT_MAX: usize = 32;
+#[cfg(unix)]
 const LISTS_BYTES_MAX: usize = 4 * 1024 * 1024;
+#[cfg(unix)]
 const LISTS_MAX: usize = 64;
 const FED_SOURCES_MAX: usize = 16;
 
@@ -50,6 +52,7 @@ static RECENT: LazyLock<Mutex<Recent<Computed>>> = LazyLock::new(Default::defaul
 /// The file lists of recent changes, at most `LISTS_MAX` and `LISTS_BYTES_MAX` of paths
 /// apart from the newest. They are kept apart from the diffs, so a list the IDE polls
 /// stays while larger diffs push its own diff out.
+#[cfg(unix)]
 static LISTS: LazyLock<Mutex<Recent<[ChangedFile]>>> = LazyLock::new(Default::default);
 
 /// Takes a kept value and makes it the newest. Inputs: the cache and the key. Output: the
@@ -616,6 +619,7 @@ fn computed(repository: &Path, base: &str, head: &str) -> Result<Arc<Computed>, 
 /// Lists every file a change touches, from the recent lists, or from its diff once and
 /// kept when both sides are commit ids, whose files never change. Inputs: the repository
 /// and the two commits. Output: the files in path order.
+#[cfg(unix)]
 pub(super) fn listed(
     repository: &Path,
     base: &str,
@@ -634,6 +638,7 @@ pub(super) fn listed(
 }
 
 /// The bytes the paths of a file list hold. Input: the files. Output: the bytes.
+#[cfg(unix)]
 fn path_bytes(files: &[ChangedFile]) -> usize {
     files
         .iter()

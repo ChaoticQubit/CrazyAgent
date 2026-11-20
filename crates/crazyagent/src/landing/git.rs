@@ -14,7 +14,9 @@ use std::time::Instant;
 
 pub(super) const OUTPUT_BYTES_MAX: usize = 64 * 1024 * 1024;
 pub(super) const LISTING_BYTES_MAX: usize = 64 * 1024;
+#[cfg(unix)]
 const STEP_TIME: Duration = Duration::from_secs(90);
+#[cfg(unix)]
 const POLL: Duration = Duration::from_millis(2);
 /// The oldest git all of landing runs on, the floor the test farm's git is held to: 2.40,
 /// the first with `merge-tree --merge-base` and `check-attr --source`, which a squash merge
@@ -23,6 +25,7 @@ const VERSION_MIN: (u32, u32) = (2, 40);
 /// The oldest git that opening a repository, an agent worktree and every engine git call
 /// outside those two run on: 2.39, the Apple Git-154 of Xcode 16 and its Command Line Tools
 /// (W-GIT-FLOOR, V243-WORKTREE-GIT-FLOOR).
+#[cfg(unix)]
 pub(crate) const OPEN_VERSION_MIN: (u32, u32) = (2, 39);
 
 #[cfg(test)]
@@ -32,8 +35,10 @@ thread_local! {
     pub(super) static VERSION_PRINTED: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
 }
+#[cfg(unix)]
 const EXCLUDES_PATH_BYTES_MAX: usize = 1024;
 /// The longest the owner's ignore file is looked up for in a repository (RV-DS241-145).
+#[cfg(unix)]
 const EXCLUDES_LOOKUP_TIME: Duration = Duration::from_secs(10);
 #[cfg(unix)]
 const CHECK_LINE_BYTES_MAX: usize = 80;
@@ -259,6 +264,7 @@ fn landlock_helper() -> Option<PathBuf> {
 /// reflog created for a ref update and no commit-graph file, which a confined process could
 /// write to make git answer ancestry wrongly (land-19 r1 M1), and no advice about the grafts
 /// file the command's `GIT_GRAFT_FILE=/dev/null` names (land-19 r2).
+#[cfg(unix)]
 const ENGINE_SETTINGS: [&str; 22] = [
     "-c",
     "core.attributesFile=/dev/null",
@@ -600,7 +606,7 @@ impl Repo {
     /// The `-c` arguments that switch off the filter drivers this repository's config
     /// names, as every git call here carries them, for a test to read. Output: the
     /// arguments, eight for each driver.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(super) fn overrides(&self) -> &[String] {
         &self.overrides
     }

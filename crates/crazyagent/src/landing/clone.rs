@@ -1,4 +1,6 @@
-use super::flow::{bounded_read, set_engine_ref};
+#[cfg(unix)]
+use super::flow::bounded_read;
+use super::flow::set_engine_ref;
 use super::git::{LISTING_BYTES_MAX, Repo, failure};
 use crate::agent_git;
 use crate::engine::EngineError;
@@ -9,17 +11,25 @@ use std::path::Path;
 
 const FETCH_OUTPUT_BYTES_MAX: usize = 4096;
 const HEAD_BYTES_MAX: u64 = 512;
+#[cfg(unix)]
 const ALTERNATES_BYTES_MAX: usize = 4096;
+#[cfg(unix)]
 const REDIRECTS: [&str; 5] = [".git", "commondir", "shallow", "info/grafts", "../.git.git"];
+#[cfg(unix)]
 const PACK_EXTENSIONS: [&str; 7] = ["pack", "idx", "rev", "keep", "promisor", "mtimes", "bitmap"];
+#[cfg(unix)]
 const TEMP_KINDS: [&str; 5] = ["pack", "idx", "rev", "mtimes", "bitmap"];
+#[cfg(unix)]
 const TEMP_SUFFIX_LEN: usize = 6;
+#[cfg(unix)]
 const REPACK_TEMP_EXTENSIONS: [&str; 6] = ["pack", "idx", "rev", "mtimes", "bitmap", "promisor"];
+#[cfg(unix)]
 const PID_DIGITS_MAX: usize = 10;
 #[cfg(unix)]
 const REF_ENTRIES_MAX: usize = 1024;
 #[cfg(unix)]
 const REF_DEPTH_MAX: usize = 16;
+#[cfg(unix)]
 const PACKED_REFS_BYTES_MAX: u64 = 65_536;
 #[cfg(unix)]
 const REFS_LISTED_MAX: usize = 16;
@@ -27,6 +37,7 @@ const BASE_NAME_BYTES_MAX: usize = 128;
 #[cfg(unix)]
 const REF_STORES: [&str; 2] = ["reftable", "worktrees"];
 const TEAMMATES_MAX: usize = 64;
+#[cfg(unix)]
 const MAIN_LOCK: &str = "main.lock";
 /// The engine's ref in every agent clone, and in the owner repository for linked
 /// worktrees, that holds the tip of the project's Land on branch, so an agent brings main
