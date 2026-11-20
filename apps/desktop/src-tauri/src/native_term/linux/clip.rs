@@ -282,6 +282,19 @@ mod tests {
         got.take()
     }
 
+    /// L5c-3: the host's shared boards are the in-process ones exactly in a native-webdriver
+    /// build, so a driven paste never reads the owner's CLIPBOARD.
+    #[test]
+    fn the_host_boards_are_private_only_in_a_driven_build() {
+        let boards = Boards::new();
+        assert_eq!(
+            Boards::shared().is_private(),
+            cfg!(feature = "native-webdriver"),
+            "the host's boards are private only in a driven build"
+        );
+        drop(boards);
+    }
+
     #[test]
     fn a_private_board_keeps_each_board_in_process() {
         let clip = Clip::private();

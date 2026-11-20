@@ -87,6 +87,15 @@ pub fn primary_paste(focus: Focus, placed: bool, text: Option<String>) -> Option
     }))
 }
 
+/// The event a Ctrl+Shift+V CLIPBOARD read makes when it comes back: a paste input that is
+/// not the primary selection's, and only while the view is still active, so a reply after a
+/// cover, a focus loss or a close never lands. Inputs: the view's focus and the text read.
+/// Output: the event.
+pub fn clipboard_paste(focus: Focus, text: Option<String>) -> Option<ViewEvent> {
+    let _ = (focus, text);
+    None
+}
+
 /// Where keyboard focus stands for one view: whether it holds native focus, whether its
 /// toplevel has keyboard focus, whether a page element covers it and whether its rectangle
 /// shows inside the page. Keys go to the view only while it is active: native, in a focused
@@ -1364,6 +1373,32 @@ mod tests {
     }
 
     #[test]
+    fn a_clipboard_paste_lands_only_on_an_active_view() {
+        let text = || Some("c".to_owned());
+        let paste = Some(ViewEvent::Key(Input::Paste {
+            text: "c".to_owned(),
+            primary: false,
+        }));
+        let mut focus = Focus::new(true);
+        assert_eq!(focus.shown(true), None);
+        assert_eq!(clipboard_paste(focus, text()), None, "an inactive view");
+        assert_eq!(focus.native(true), Some(true));
+        assert_eq!(
+            clipboard_paste(focus, text()),
+            paste,
+            "an active view pastes the clipboard"
+        );
+        assert_eq!(clipboard_paste(focus, None), None);
+        assert_eq!(clipboard_paste(focus, Some(String::new())), None);
+        let mut covered = focus;
+        let _ = covered.cover(true);
+        assert_eq!(clipboard_paste(covered, text()), None, "a covered view");
+        let mut away = focus;
+        let _ = away.toplevel(false);
+        assert_eq!(clipboard_paste(away, text()), None, "an unfocused toplevel");
+    }
+
+    #[test]
     fn a_cover_during_a_press_leaves_the_rest_of_it_to_the_page() {
         let mut pointer = placed();
         pointer.press(1, (110.0, 130.0), 0, ModifierType::empty(), false, DOUBLE);
@@ -2001,6 +2036,64 @@ mod tests {
         pointer_step("covered-primary", &window, rect);
         pump_until("the overlay press", || counts(&page)[0] == 1);
         pump_for(Duration::from_millis(500));
+        assert_eq!(take_seen(), Vec::new(), "a covered view pastes nothing");
+        drop(view);
+    }
+
+    /// L5c-3: Ctrl+Shift+V in a focused view reads CLIPBOARD while the key press is handled
+    /// and pastes it once through the paste path, marked as not the primary selection's; a
+    /// covered view pastes nothing. The farm writes the board and presses the keys.
+    #[test]
+    #[ignore = "needs a display and the farm's typing: the farm runs it under Xvfb and sway"]
+    fn a_control_shift_v_pastes_the_clipboard_through_the_paste_path() {
+        assert!(
+            row_dir().is_some(),
+            "NATIVE_ROW_DIR: the farm types the keys"
+        );
+        gtk::init().expect("a display");
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        window.set_title("native-row");
+        window.set_default_size(640, 480);
+        let page = webkit2gtk::WebView::new();
+        window.add(&page);
+        window.show_all();
+        page.load_html(PAGE, None);
+        pump_until("page load", || {
+            !page.is_loading() && page_text(&page) == "v:"
+        });
+        let view = View::new(
+            &window,
+            page.upcast_ref(),
+            ID,
+            seen,
+            Rc::new(Clip::desktop()),
+        )
+        .expect("a view");
+        view.place(Some(Rect {
+            x: 20,
+            y: 20,
+            w: 200,
+            h: 100,
+        }));
+        view.focus(true);
+        assert_eq!(take_seen(), vec![ViewEvent::Focus(true)]);
+
+        step("paste");
+        pump_until("the clipboard paste", || seen_count() >= 1);
+        pump_for(Duration::from_millis(300));
+        assert_eq!(
+            take_seen(),
+            vec![ViewEvent::Key(Input::Paste {
+                text: "farm-clipboard-5".to_owned(),
+                primary: false,
+            })],
+            "Ctrl+Shift+V pastes CLIPBOARD once"
+        );
+
+        view.cover(true);
+        let _ = take_seen();
+        step("covered-paste");
+        pump_for(Duration::from_millis(800));
         assert_eq!(take_seen(), Vec::new(), "a covered view pastes nothing");
         drop(view);
     }
