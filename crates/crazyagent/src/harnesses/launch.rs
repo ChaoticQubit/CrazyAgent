@@ -1115,6 +1115,10 @@ pub(super) fn harness_id(request: &LaunchRequest) -> &'static str {
     super::spec(&request.harness).map_or("", |spec| spec.id)
 }
 
+/// Checks a launch request before any headless or pane command is built: the executable,
+/// working folder, account home, model, URL, profile path and limits, and that Full access
+/// is asked for only on macOS, so no unconfined boundary becomes a bare command elsewhere.
+/// Input: the request. Output: Ok, or a plain refusal code.
 pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
     let executable = std::fs::metadata(&request.executable)
         .map_err(|_| failure("launch_executable_unavailable"))?;
@@ -1159,6 +1163,9 @@ pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
         || limits.stop_grace > Duration::from_secs(30)
     {
         return Err(failure("launch_limits_invalid"));
+    }
+    if !cfg!(target_os = "macos") && request.boundary.is_unconfined() {
+        return Err(failure("launch_sandbox_unavailable"));
     }
     Ok(())
 }
