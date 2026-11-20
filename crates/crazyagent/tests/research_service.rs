@@ -357,12 +357,13 @@ fn research_waits_with_the_rate_limit_code_and_its_end_while_every_pool_account_
     );
 }
 
-/// On Linux, which runs no agent confined to its own worktree in V1 (DEC-094), a research job
-/// that has its harness and an account fails once, before any agent folder or worktree,
-/// with the owner's plain line instead of a sandbox error that is retried.
+/// On Linux, which runs research under its installed boundary (DEC-205 S6), a research job
+/// whose loopback provider refuses every connect is no longer stopped by a Linux line: it
+/// fails at once with the reach line, before any agent folder or worktree, and spends no
+/// attempt.
 #[cfg(target_os = "linux")]
 #[test]
-fn research_on_linux_fails_once_with_the_plain_unavailable_line() {
+fn research_on_linux_reaches_the_provider_check_and_fails_with_its_reach_line() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
     let project = root.join("project");
@@ -396,10 +397,12 @@ fn research_on_linux_fails_once_with_the_plain_unavailable_line() {
     assert_eq!(run.process_group, None);
     let job = jobs.get(id).unwrap().unwrap();
     assert_eq!(job.status, ResearchStatus::Failed);
-    assert_eq!(job.attempts, 1);
+    assert_eq!(job.attempts, 0);
     assert_eq!(
         job.error.as_deref(),
-        Some("Research is not available on Linux in this version.")
+        Some(
+            "Can't reach the model provider at 127.0.0.1:9. Start it or pick another account in this pool, then try again."
+        )
     );
     assert!(fs::read_dir(state.join("agents")).unwrap().next().is_none());
     assert!(!project.join(".git").exists());

@@ -2243,9 +2243,12 @@ async fn a_step_that_cannot_start_records_its_cause_code() {
     bench.stop().await;
 }
 
+/// On Linux, which runs read-only runs under their installed boundary (DEC-205 S6), the
+/// mapping is no longer stopped by a Linux line: with a loopback provider that refuses every
+/// connect it fails with the reach line, and starts no agent.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mapping_on_linux_stops_with_the_plain_unavailable_line() {
+async fn mapping_on_linux_reaches_the_provider_check_and_fails_with_its_reach_line() {
     let mut bench = Bench::start(|_| {}).await;
     let project = bench.start_onboarding().await;
     let account = ResearchAccount::Endpoint {
@@ -2265,7 +2268,9 @@ async fn mapping_on_linux_stops_with_the_plain_unavailable_line() {
     stop_service(service).await;
     assert_eq!(
         view.mapping,
-        failed("Research is not available on Linux in this version."),
+        failed(
+            "Can't reach the model provider at 127.0.0.1:9. Start it or pick another account in this pool, then try again."
+        ),
         "{view:?}"
     );
     assert_eq!(agent_runs(&agents, "onboard-m-"), 0);

@@ -4832,16 +4832,85 @@ mod tests {
     }
 
     #[test]
-    fn linux_and_windows_refuse_research_with_a_plain_line() {
-        assert_eq!(
-            confined_unavailable("linux"),
-            Some("Research is not available on Linux in this version.")
-        );
+    fn windows_refuses_research_with_a_plain_line_and_linux_runs_it() {
+        assert_eq!(confined_unavailable("linux"), None);
         assert_eq!(
             confined_unavailable("windows"),
             Some("Team agents and research are not available on Windows in this version.")
         );
         assert_eq!(confined_unavailable("macos"), None);
+    }
+
+    /// A read-only run on Linux, such as an onboarding mapping, runs its harness inside the
+    /// installed boundary (DEC-205 S6): its Codex stand-in reads the granted folder, is
+    /// refused a write into it, and its answer comes back.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_read_only_run_answers_from_inside_its_installed_boundary() {
+        let root = engine_root();
+        let folder = root.base.join("repo");
+        fs::create_dir(&folder).unwrap();
+        fs::write(folder.join("notes.md"), "kept notes\n").unwrap();
+        let codex = root.base.join("bin").join("codex");
+        fs::create_dir_all(codex.parent().unwrap()).unwrap();
+        fs::write(
+            &codex,
+            concat!(
+                "#!/bin/sh\n",
+                "out=\"\"\n",
+                "dir=\"\"\n",
+                "while [ $# -gt 0 ]; do\n",
+                "  case \"$1\" in -o) out=$2; shift ;; -C) dir=$2; shift ;; esac\n",
+                "  shift\n",
+                "done\n",
+                "read -r notes < \"$dir/notes.md\"\n",
+                "if e=$( { printf x >> \"$dir/notes.md\"; } 2>&1 ); then w=wrote; else w=\"denied($e)\"; fi\n",
+                "printf 'READ %s WRITE %s\\n' \"$notes\" \"$w\" > \"$out\"\n",
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
+        let pinned = codex.clone();
+        let runner =
+            ResearchRunner::without_codex(&root.database, &root.state, ResearchLimits::default())
+                .unwrap()
+                .with_harness_lookup(Arc::new(move |harness: &str| {
+                    (harness == "codex").then(|| pinned.clone())
+                }));
+        let account = ResearchAccount::Endpoint {
+            base_url: "http://127.0.0.1:9/v1".into(),
+            model: "local-model".into(),
+            key: None,
+        };
+        let run = ReadOnlyRun {
+            name: "overview-linux-1",
+            agent: "overview",
+            kind: Some(crate::sandbox::hidden_paths::RunKind::Overview),
+            project: None,
+            folder: &folder,
+            prompt: "Describe this project.",
+            account: &account,
+            wall_time: Duration::from_secs(60),
+            output_tokens: None,
+        };
+
+        let ending = runner.run_read_only(&run, &|| false);
+
+        let answer = match ending {
+            Ok(ReadOnlyEnding::Answered(answer)) => answer,
+            other => panic!("{other:?}"),
+        };
+        assert!(
+            answer.starts_with("READ kept notes WRITE denied("),
+            "{answer}"
+        );
+        assert!(
+            answer.contains("Permission denied")
+                || answer.contains("Operation not permitted")
+                || answer.contains("Read-only file system"),
+            "{answer}"
+        );
+        assert_eq!(fs::read(folder.join("notes.md")).unwrap(), b"kept notes\n");
     }
 
     /// Setting up one project's repository must not wait for another project's setup:
