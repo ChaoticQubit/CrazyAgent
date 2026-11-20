@@ -2968,6 +2968,7 @@ pub(crate) fn add_worktree_at(
     profile: &Path,
     worktree: &Path,
     _base: &str,
+    _calls: LinuxSupervisor,
 ) -> Result<(), RunError> {
     add_worktree(sandbox, profile, worktree)
 }
@@ -2985,18 +2986,26 @@ pub(crate) fn add_worktree(
     profile: &Path,
     worktree: &Path,
 ) -> Result<(), RunError> {
-    add_worktree_at(sandbox, profile, worktree, "HEAD")
+    add_worktree_at(
+        sandbox,
+        profile,
+        worktree,
+        "HEAD",
+        LinuxSupervisor::default(),
+    )
 }
 
 /// Adds a detached git worktree as `add_worktree` does, checked out at `base`: `HEAD`, or
 /// the full commit id a lead's worktree holds for a worker cut from it (N1).
-/// Takes the sandbox, its installed profile, the new worktree path and the commit.
+/// Takes the sandbox, its installed profile, the new worktree path, the commit and the
+/// owner's Linux call supervisor setting.
 #[cfg(unix)]
 pub(crate) fn add_worktree_at(
     sandbox: &ProjectSandbox,
     profile: &Path,
     worktree: &Path,
     base: &str,
+    _calls: LinuxSupervisor,
 ) -> Result<(), RunError> {
     assert!(
         base == "HEAD"
@@ -3082,6 +3091,13 @@ pub(crate) fn add_teammate_worktree_at(
         .args(["reset", "-q", "--hard", "HEAD"]);
     setup_step(&mut checkout, "worktree_checkout_failed")
 }
+
+/// Why a lead agent's own git, in its worktree and in its workers' and teammates' folders,
+/// is refused on Linux in this version: no confined boundary for it is built there yet, and
+/// no lead git runs outside one.
+#[cfg(target_os = "linux")]
+pub(crate) const LEAD_GIT_NEEDS_MACOS: &str =
+    "a lead agent's own git runs only on macOS in this version";
 
 /// Runs one worktree setup git step within the setup time limit. Takes the command and
 /// the plain code for a step that exits with a failure. Returns unit, or [`RunError::Setup`]
@@ -7012,6 +7028,93 @@ mod tests {
             key: None,
         };
         assert_eq!(model_remote(&remote).unwrap(), SandboxRemote::AnyHost(443));
+    }
+
+    /// A project with one commit, an agent home and temp folder, and a profiles folder, all
+    /// under `base`, with the agent's project sandbox. Input: the base folder. Output: the
+    /// project, the sandbox and the profile path, not installed.
+    #[cfg(target_os = "linux")]
+    fn linux_setup_case(base: &Path) -> (PathBuf, ProjectSandbox, PathBuf) {
+        let project = base.join("project");
+        let home = base.join("agent").join("home");
+        let tmp = base.join("agent").join("tmp");
+        let profiles = base.join("profiles");
+        for folder in [&project, &home, &tmp, &profiles] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        ensure_repository(&project, &tmp).unwrap();
+        let sandbox =
+            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        (project, sandbox, profiles.join("agent.sb"))
+    }
+
+    /// On Linux the engine adds an agent worktree with git inside the agent's installed
+    /// boundary, the Landlock helper or bubblewrap, never through `sandbox-exec` (V244-LINUX-TEAM
+    /// S4): the worktree, its admin folder and a clean checkout are made.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_agent_worktree_is_added_on_linux_inside_the_installed_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let (project, sandbox, profile) = linux_setup_case(&temp.path().canonicalize().unwrap());
+        let worktree = project.join("worktrees").join("agent-one");
+
+        add_worktree_at(&sandbox, &profile, &worktree, "HEAD", LinuxSupervisor::On).unwrap();
+
+        assert!(worktree.join(".git").is_file());
+        assert!(
+            project
+                .join(".git")
+                .join("worktrees")
+                .join("agent-one")
+                .is_dir()
+        );
+        let status = crate::spawn_gate::output(
+            Command::new(GIT)
+                .env_clear()
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .arg("-C")
+                .arg(&worktree)
+                .args(["status", "--porcelain"]),
+        )
+        .unwrap();
+        assert!(status.status.success());
+        assert!(
+            status.stdout.is_empty(),
+            "{}",
+            String::from_utf8_lossy(&status.stdout)
+        );
+    }
+
+    /// On Linux a lead agent's own git is refused before any git starts, in its own folder
+    /// and for a teammate's worktree, since no confined boundary for it is built there yet
+    /// and no lead git runs outside one (V244-LINUX-TEAM S4, leader answer A).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_lead_agents_own_git_is_refused_on_linux_before_any_git_starts() {
+        let temp = tempfile::tempdir().unwrap();
+        let (project, sandbox, profile) = linux_setup_case(&temp.path().canonicalize().unwrap());
+        let lead_refusal = |refused: RunError| {
+            assert!(
+                matches!(
+                    &refused,
+                    RunError::Sandbox(SandboxError::Unavailable(line)) if line == LEAD_GIT_NEEDS_MACOS
+                ),
+                "{refused:?}"
+            );
+        };
+
+        lead_refusal(agent_git(&sandbox, &profile, &project, &["status"], &[], 64).unwrap_err());
+        let teammate = project
+            .join(crate::agent_git::TEAMMATES_FOLDER)
+            .join("teammate-one");
+        let branch = format!("{}teammate-one", crate::agent_git::LINKED_PREFIX);
+        lead_refusal(
+            add_teammate_worktree_at(&sandbox, &profile, &teammate, &branch, None).unwrap_err(),
+        );
+
+        assert!(!profile.exists());
+        assert!(!teammate.exists());
     }
 
     #[cfg(target_os = "macos")]
