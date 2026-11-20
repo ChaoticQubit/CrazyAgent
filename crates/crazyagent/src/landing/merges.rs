@@ -1,5 +1,6 @@
 use super::flow::{check_places, clone_branch, open_agent};
 use super::git::{OUTPUT_BYTES_MAX, Repo, failure, is_object_id};
+#[cfg(unix)]
 use super::store::Record;
 use super::{AgentKind, Workspace, clone, store, subagent};
 use crate::agent_git::Layout;
@@ -22,6 +23,7 @@ const LISTING_BYTES_MAX: usize = (MERGES_MAX + 1) * (PARENTS_MAX + 1) * ID_FIELD
 const UNCOVERED_BYTES_MAX: usize = ID_FIELD_BYTES_MAX;
 /// The most commits of its own a master set may hold and still land by itself: one fix per
 /// conflicted set, well past the two sets of the HackerBlog case.
+#[cfg(unix)]
 const OWN_COMMITS_MAX: usize = 32;
 
 /// Refuses a change set whose own commits merge in work from another branch (DEC-107
@@ -95,6 +97,7 @@ pub(super) fn refuse_outside_merges(
 /// cannot merge again ([`holds_changes_since`]). The caller holds the repository hold and
 /// has verified the objects. Inputs: the owner repository, the master's set, the sets its
 /// head holds, the Land on tip and the commit its squash measures from. Output: the answer.
+#[cfg(unix)]
 pub(super) fn only_conflict_fixes(
     owner: &Repo,
     master: &Record,
@@ -128,6 +131,7 @@ pub(super) fn only_conflict_fixes(
 /// Inputs: the owner repository, the master's set, the sets, the tip and the commit the
 /// squash measures from. Output: the merges, or None when there are no own commits, too
 /// many, or one is not a merge of exactly two parents.
+#[cfg(unix)]
 fn own_merges(
     owner: &Repo,
     master: &Record,
@@ -174,6 +178,7 @@ fn own_merges(
 /// parents really conflicts, its tree keeps every clean change of that merge, and no
 /// conflicted file still holds a conflict marker or has a marker size of its own. Inputs:
 /// the owner repository, the commit and its two parents. Output: the answer.
+#[cfg(unix)]
 fn fixes_conflict(
     owner: &Repo,
     commit: &str,
@@ -352,6 +357,7 @@ fn line_counts(text: &[u8]) -> HashMap<&[u8], usize> {
 /// from each commit and the repository's own info/attributes, so its markers may be a
 /// length [`holds_conflict_marker`] does not know. Inputs: the owner repository, the paths
 /// as git printed them and the commits. Output: the answer.
+#[cfg(unix)]
 fn sets_marker_size(
     owner: &Repo,
     paths: &[Vec<u8>],
@@ -507,6 +513,7 @@ fn raw_header(header: &[u8]) -> Result<[&str; 5], EngineError> {
 /// deleted has none; a path git cannot show as one file, or too large to read, counts as
 /// having one, so the set waits. Inputs: the owner repository, the commit and the path as
 /// git printed it. Output: the answer.
+#[cfg(unix)]
 fn holds_conflict_marker(owner: &Repo, commit: &str, path: &[u8]) -> Result<bool, EngineError> {
     if path.contains(&b'\n') {
         return Ok(true);
@@ -681,6 +688,7 @@ fn merge_differences(
 /// Tells whether one of the merges brought a set's head in through its second parent, so
 /// a set the master fast-forwarded onto does not count. Inputs: the owner repository, the
 /// set's head and the merges. Output: the answer.
+#[cfg(unix)]
 fn brought_in(owner: &Repo, head: &str, merges: &[[String; 3]]) -> Result<bool, EngineError> {
     for [_, ours, theirs] in merges {
         if owner.test(&["merge-base", "--is-ancestor", head, theirs])?

@@ -1,6 +1,8 @@
 use super::clone;
 use super::diff;
-use super::flow::{self, ENGINE, hold, pending_ref, reset_if_quiet, shared, verify_objects};
+#[cfg(unix)]
+use super::flow::ENGINE;
+use super::flow::{self, hold, pending_ref, reset_if_quiet, shared, verify_objects};
 use super::git::{Repo, Writes, failure};
 use super::store::{self, Intent, Record};
 use super::{
@@ -14,10 +16,12 @@ use crate::protocol::ProjectId;
 use rusqlite::Connection;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError};
 
 /// The most bytes the owner's index entries of the chosen staged paths may print.
+#[cfg(unix)]
 const STAGED_LISTING_BYTES_MAX: usize = 128 * 1024;
 const IDENTITY_BYTES_MAX: usize = 256;
 const MAIN_PLACES_MAX: usize = 512;
@@ -42,10 +46,50 @@ const BUILT_IN_MERGES: [&str; 6] = ["unspecified", "unset", "set", "text", "bina
 /// that let it land and before the land starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Step {
+    #[cfg(unix)]
     Gated,
     Recorded,
     FilesWritten,
     BranchMoved,
+}
+
+/// Runs `git config --get <key>` on the owner repository with the owner's home and no
+/// system config. Inputs: the repository, the home and the key. Output: git's output, or
+/// the error starting it.
+#[cfg(unix)]
+fn identity_setting(
+    repository: &Path,
+    home: &Path,
+    key: &str,
+) -> Result<std::io::Result<std::process::Output>, EngineError> {
+    Ok(crate::spawn_gate::output(
+        Command::new(crate::research::runner::setup_git())
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("LC_ALL", "C")
+            .env("HOME", home)
+            .envs(crate::research::runner::GIT_SAFE_ENV)
+            .arg("--git-dir")
+            .arg(repository.join(".git"))
+            .args(["config", "--get", key])
+            .current_dir(repository)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    ))
+}
+
+/// Starts no git where owner git for landing has no design yet, Windows among them, and
+/// answers the not-ready refusal `Repo::open` gives there (PLAN-1336 W5a). Inputs: as the
+/// Unix twin, unused. Output: `changes_unavailable`.
+#[cfg(not(unix))]
+fn identity_setting(
+    repository: &Path,
+    home: &Path,
+    key: &str,
+) -> Result<std::io::Result<std::process::Output>, EngineError> {
+    let _ = (repository, home, key);
+    Err(failure("changes_unavailable"))
 }
 
 /// Reads the owner's own git identity with no system config: the repository's, then
@@ -58,22 +102,7 @@ pub(super) fn owner_identity(
 ) -> Result<(String, String), EngineError> {
     let read = |key: &str| -> Result<String, EngineError> {
         let missing = || failure("changes_owner_identity_missing");
-        let output = crate::spawn_gate::output(
-            Command::new(crate::research::runner::setup_git())
-                .env_clear()
-                .env("PATH", "/usr/bin:/bin")
-                .env("LC_ALL", "C")
-                .env("HOME", home)
-                .envs(crate::research::runner::GIT_SAFE_ENV)
-                .arg("--git-dir")
-                .arg(repository.join(".git"))
-                .args(["config", "--get", key])
-                .current_dir(repository)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null()),
-        )
-        .map_err(|_| missing())?;
+        let output = identity_setting(repository, home, key)?.map_err(|_| missing())?;
         let value = String::from_utf8(output.stdout).map_err(|_| missing())?;
         let value = value.trim_end_matches('\n');
         if !output.status.success()
@@ -371,6 +400,7 @@ fn landing_target(
 /// owner checkout root and the owner's choice, a branch name without `refs/heads/`.
 /// Output: the branch and tip, None when no such local branch exists and no choice was
 /// made, or `changes_target_invalid` for a choice that is no local branch.
+#[cfg(unix)]
 pub(super) fn master_branch(
     repository: &Path,
     chosen: Option<&str>,
@@ -798,6 +828,7 @@ fn dirty_paths(
 /// out as [`accept_held`] does, under the caller's repository hold. Inputs: the store, the
 /// settled change set and the target branch, None for the Land on branch. Output: None when
 /// no checkout is written or it would conflict, else the ref, its tip and [`dirty_paths`].
+#[cfg(unix)]
 fn blocking(
     db: &Connection,
     record: &Record,
@@ -844,6 +875,7 @@ fn blocking(
 /// the repository's hold. Inputs: the store, the change set and the target branch, None for
 /// the Land on branch. Output: the tracked files commit-first may take and the untracked
 /// ones the owner moves or deletes, both empty when none blocks.
+#[cfg(unix)]
 pub(super) fn owner_dirty(
     db: &Connection,
     id: &ChangeSetId,
@@ -862,6 +894,7 @@ pub(super) fn owner_dirty(
 /// stage 0; a staged path with no entry is a staged deletion. Inputs: the checkout and the
 /// paths. Output: the entries' records and the deleted paths, or `changes_git_unsupported`
 /// for an unmerged entry.
+#[cfg(unix)]
 fn staged_entries(owner: &Repo, paths: &[&str]) -> Result<(Vec<u8>, Vec<String>), EngineError> {
     assert!(paths.len() <= super::DIRTY_FILES_MAX);
     if paths.is_empty() {
@@ -911,6 +944,7 @@ fn staged_entries(owner: &Repo, paths: &[&str]) -> Result<(Vec<u8>, Vec<String>)
 /// copy; untracked or ignored files are refused. Inputs: the store, the owner's home, the set,
 /// the files, the message and the target, None for the Land on branch. Output: the commit
 /// and branch, or `changes_owner_untracked`, `changes_stale` or another code.
+#[cfg(unix)]
 pub(super) fn commit_owner_files(
     db: &Connection,
     home: &Path,
@@ -1049,6 +1083,7 @@ pub(super) fn commit_owner_files(
 /// test moves the branch. Output: the commit, the branch and the paths deleted, or
 /// `changes_import_none`, `changes_import_staged`, `changes_git_busy`,
 /// `changes_detached_head`, `changes_branch_moved` or another git code.
+#[cfg(unix)]
 pub(super) fn commit_deletions(
     repository: &Path,
     home: &Path,
@@ -1330,6 +1365,7 @@ impl<'a> By<'a> {
 /// nothing. The checks, the land and the close run under one hold, so an owner action
 /// cannot come between them (T3-R2-L1). Inputs: the store, the owner's home, the change set
 /// and where a test stops it. Output: the outcome, or None when nothing was tried.
+#[cfg(unix)]
 pub(super) fn land_master(
     db: &Connection,
     home: &Path,
@@ -1366,6 +1402,7 @@ pub(super) fn land_master(
 /// would land on, after the checks an Accept makes before reading objects an agent could
 /// have planted. The caller holds [`hold`]. Inputs: the store, the master's set and the
 /// sets its head holds. Output: the answer.
+#[cfg(unix)]
 fn only_fixes(db: &Connection, master: &Record, sets: &[Record]) -> Result<bool, EngineError> {
     let repository = &master.repository;
     flow::check_places(repository, &master.worktree, &master.git_dir)?;
@@ -1730,6 +1767,7 @@ fn accept_held(
 /// Output: the undo commit and branch, the conflicts, or `changes_undo_unavailable` for a
 /// set whose Accept made no commit, that is undone already, whose commit is not on that
 /// branch or that lands in an agent's branch.
+#[cfg(unix)]
 pub(super) fn undo(
     db: &Connection,
     home: &Path,
@@ -1962,6 +2000,7 @@ fn moved_on(
 /// a lead's worker while Lands is Lead, read before the hold, else the owner's branch.
 /// Inputs: the store and the change set. Output: Ok once the worktree holds the merge, or
 /// `changes_workspace_invalid` for a lead's worker whose lead's worktree is gone.
+#[cfg(unix)]
 pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
     store::initialize(db)?;
     let loaded = store::load(db, id)?;
@@ -2067,6 +2106,7 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
 /// filter or merge driver, which that merge would run, is refused before it runs, as
 /// `update` refuses it. Inputs: the store and the change set. Output: the conflicting
 /// paths, empty for a clean merge, `changes_git_unsupported`, or the plain git code.
+#[cfg(unix)]
 pub(super) fn conflicts_with_tip(
     db: &Connection,
     record: &Record,
@@ -2107,6 +2147,7 @@ pub(super) fn conflicts_with_tip(
 /// Inputs: the store, the change set, what runs after a regeneration that landed nothing
 /// and the owner's settings files. Output: the answer, or the plain code of a check that
 /// could not run.
+#[cfg(unix)]
 pub(super) fn conflicts_with_main(
     db: &Connection,
     id: &ChangeSetId,
@@ -2143,6 +2184,7 @@ pub(super) fn conflicts_with_main(
 /// change set at a time: a change set that cannot be settled now is logged by its plain
 /// code and stays in flight for the next run, so it never stops the others. Input: the
 /// store. Output: Ok once every change set it could settle holds no intent.
+#[cfg(unix)]
 pub(super) fn reconcile(db: &Connection) -> Result<(), EngineError> {
     store::initialize(db)?;
     for found in store::in_flight(db)? {
@@ -2169,6 +2211,7 @@ pub(super) fn reconcile(db: &Connection) -> Result<(), EngineError> {
 /// (dismissed Failed). A notice an earlier run left for the change set is ended with the
 /// outcome it showed and replaced, in one transaction; a ledger that cannot be written
 /// logs its plain code. Inputs: the store and the change set.
+#[cfg(unix)]
 fn list_accept(db: &Connection, id: &ChangeSetId) {
     use crate::ledger::{ActionKind, Outcome};
     let unavailable = |_: rusqlite::Error| failure("ledger_unavailable");
@@ -2852,6 +2895,7 @@ fn against(db: &Connection, records: &[Record]) -> Vec<Against> {
 /// and the sets of a project the engine no longer has are left alone, logged once (F24).
 /// Inputs: the store and the project, None for every project. Output: Ok once each was
 /// judged or left.
+#[cfg(unix)]
 pub(super) fn observe(db: &Connection, project: Option<&ProjectId>) -> Result<(), EngineError> {
     store::initialize(db)?;
     let mut by_repository: BTreeMap<(PathBuf, ProjectId), Vec<Record>> = BTreeMap::new();

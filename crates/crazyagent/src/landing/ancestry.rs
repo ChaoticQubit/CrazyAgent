@@ -1,14 +1,20 @@
 use super::flow;
 use super::git::{Repo, failure};
+#[cfg(unix)]
 use super::hold::hold_within;
-use super::{AgentKind, ChangeAgent, Workspace, clone, owner, store, subagent};
+use super::{AgentKind, ChangeAgent, owner, store, subagent};
+#[cfg(unix)]
+use super::{Workspace, clone};
 use crate::agent_git::Layout;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use crate::team::LandingMode;
-use rusqlite::{Connection, OptionalExtension, params};
+#[cfg(unix)]
+use rusqlite::OptionalExtension;
+use rusqlite::{Connection, params};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::time::Duration;
 
 /// The most agent commits one Merge commit landing may carry into the owner's history.
@@ -22,6 +28,7 @@ const MOVED_PLACES_MAX: usize = 512;
 
 /// How long a turn end or a task hand-off, both on the team runtime's own thread, waits for
 /// landing work that holds the repository before it leaves the move to the next one.
+#[cfg(unix)]
 const HOLD_WAIT: Duration = Duration::from_secs(2);
 
 /// The most bytes the commit list of the Merge commit check may print: 257 lines of a
@@ -287,6 +294,7 @@ pub(super) fn move_resting(
 /// [`move_place`] says, once its turn left nothing pending (DEC-147.6). Only a sub-agent's
 /// linked worktree moves; anything else, or a hold not free within [`HOLD_WAIT`], is left.
 /// Inputs: the store and the turn's workspace. Output: whether it moved.
+#[cfg(unix)]
 pub(super) fn move_after_turn(db: &Connection, workspace: &Workspace) -> Result<bool, EngineError> {
     if workspace.agent.kind != AgentKind::Sub {
         return Ok(false);
@@ -409,6 +417,7 @@ fn leads_elsewhere(
 /// nor the head whose landing [`owner::tell_landed`] already named with that tip. The
 /// clone is given the tip as `crazyagent/main` first, then one Note keyed by agent and
 /// tip. Inputs: the store, the project and the agent. Output: whether it was told.
+#[cfg(unix)]
 pub(super) fn tell_main_moved(
     db: &Connection,
     project: &ProjectId,
@@ -460,6 +469,7 @@ pub(super) fn tell_main_moved(
 /// The Note an own-clone sub-agent gets when main moved on (DEC-147.6, leader approved): the
 /// tip, and the commit its next work opens above, so `git log <base>..HEAD` tells whether it
 /// has commits of its own, under Squash too. Inputs: the tip and the base. Output: the text.
+#[cfg(unix)]
 pub(super) fn main_moved_text(tip: &str, base: &str) -> String {
     format!(
         "Main moved on to {}. If git log {}..HEAD shows no commits, start your next work from main: git reset --keep crazyagent/main.",
@@ -469,12 +479,14 @@ pub(super) fn main_moved_text(tip: &str, base: &str) -> String {
 }
 
 /// The first 12 characters of a commit id. Input: the id. Output: the short id.
+#[cfg(unix)]
 fn short(id: &str) -> &str {
     id.get(..12).unwrap_or(id)
 }
 
 /// The worktree the team records for one sub-agent of a project. Inputs: the store, the
 /// project and the agent. Output: the place, None when there is none or no team tables.
+#[cfg(unix)]
 fn place_of(
     db: &Connection,
     project: &ProjectId,

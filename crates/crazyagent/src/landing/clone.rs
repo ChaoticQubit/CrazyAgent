@@ -3,6 +3,7 @@ use super::git::{LISTING_BYTES_MAX, Repo, failure};
 use crate::agent_git;
 use crate::engine::EngineError;
 use crate::worktrees::TreeBounds;
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
@@ -15,11 +16,15 @@ const TEMP_KINDS: [&str; 5] = ["pack", "idx", "rev", "mtimes", "bitmap"];
 const TEMP_SUFFIX_LEN: usize = 6;
 const REPACK_TEMP_EXTENSIONS: [&str; 6] = ["pack", "idx", "rev", "mtimes", "bitmap", "promisor"];
 const PID_DIGITS_MAX: usize = 10;
+#[cfg(unix)]
 const REF_ENTRIES_MAX: usize = 1024;
+#[cfg(unix)]
 const REF_DEPTH_MAX: usize = 16;
 const PACKED_REFS_BYTES_MAX: u64 = 65_536;
+#[cfg(unix)]
 const REFS_LISTED_MAX: usize = 16;
 const BASE_NAME_BYTES_MAX: usize = 128;
+#[cfg(unix)]
 const REF_STORES: [&str; 2] = ["reftable", "worktrees"];
 const TEAMMATES_MAX: usize = 64;
 const MAIN_LOCK: &str = "main.lock";
@@ -74,6 +79,7 @@ fn invalid() -> EngineError {
 /// HEAD, and the branch, `agent_git::branch` or a task branch. Output: Ok once the clone
 /// holds the commit, else `changes_workspace_invalid`, `changes_git_unsupported` or
 /// `changes_git_failed`.
+#[cfg(unix)]
 pub(super) fn add(
     repository: &Path,
     worktree: &Path,
@@ -122,6 +128,7 @@ pub(super) fn add(
 /// the owner's commit and checked out with nothing left modified. Inputs: the new worktree, the branch, the
 /// alternates line, the object format and the commit. Output: Ok once checked out, else
 /// `changes_git_failed` or a git failure.
+#[cfg(unix)]
 fn fill(
     worktree: &Path,
     branch: &str,
@@ -171,6 +178,7 @@ fn fill(
 }
 
 /// The most bytes of a clone's `info/exclude` that `exclude_graph` reads and appends to.
+#[cfg(unix)]
 const EXCLUDE_BYTES_MAX: u64 = 256 * 1024;
 
 /// Adds the graph line to a clone's `info/exclude` when no line there keeps the project graph
@@ -179,6 +187,7 @@ const EXCLUDE_BYTES_MAX: u64 = 256 * 1024;
 /// without following a link, and only a plain file with no other hard link (F1) of at most
 /// `EXCLUDE_BYTES_MAX` bytes is read and appended to. Anything else, or a failed write,
 /// leaves the clone without the graph, never without its launch. Takes the clone's worktree.
+#[cfg(unix)]
 pub(super) fn exclude_graph(worktree: &Path) {
     use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, openat};
     use std::io::{Read, Write};
@@ -224,6 +233,7 @@ pub(super) fn exclude_graph(worktree: &Path) {
 /// folder opened without following a link at the worktree, `.git` or `objects`, so a link
 /// the agent put there is refused, not followed; an entry already there is left for
 /// `check_store`. Input: the worktree. Output: Ok, else `changes_workspace_invalid`.
+#[cfg(unix)]
 pub(super) fn store_folders(worktree: &Path) -> Result<(), EngineError> {
     use rustix::fs::{CWD, Mode, OFlags, mkdirat, openat};
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -251,6 +261,7 @@ pub(super) fn store_folders(worktree: &Path) -> Result<(), EngineError> {
 /// most `REFS_LISTED_MAX` names, empty when nothing else is held, else
 /// `changes_workspace_invalid` for ref data that is not a plain file or folder or
 /// `changes_too_large` past the bounds, never a clean read.
+#[cfg(unix)]
 pub(super) fn other_refs(
     worktree: &Path,
     branch: &str,
@@ -315,6 +326,7 @@ pub(super) fn other_refs(
 /// The clone reads the commit through its alternates. Inputs: the owner checkout root, the
 /// worktree and the tip. Output: Ok, else `changes_workspace_invalid` for a link or a
 /// foreign entry on the way.
+#[cfg(unix)]
 pub(super) fn give_main(repository: &Path, worktree: &Path, tip: &str) -> Result<(), EngineError> {
     use rustix::fs::{AtFlags, CWD, Mode, OFlags, mkdirat, openat, renameat, unlinkat};
     use std::io::Write;
@@ -359,11 +371,21 @@ pub(super) fn give_main(repository: &Path, worktree: &Path, tip: &str) -> Result
     written
 }
 
+/// Refuses this step where landing has no Windows design yet, so no folder is made or
+/// read through a path an agent could swap (PLAN-1336 W5a). Inputs: as the Unix twin,
+/// unused. Output: `changes_unavailable`.
+#[cfg(not(unix))]
+pub(super) fn give_main(repository: &Path, worktree: &Path, tip: &str) -> Result<(), EngineError> {
+    let _ = (repository, worktree, tip);
+    Err(failure("changes_unavailable"))
+}
+
 /// Says whether an agent's own clone still holds its branch, read as data from its git
 /// folder with no git run and no link followed: a loose ref file, a `packed-refs` line, or
 /// a `reftable` store, which the engine does not read and so counts as holding it. Inputs:
 /// the worktree and its branch. Output: the answer, else `changes_workspace_invalid` for
 /// ref data that is not a plain file or folder or `changes_too_large` past the bounds.
+#[cfg(unix)]
 pub(super) fn has_branch(worktree: &Path, branch: &str) -> Result<bool, EngineError> {
     use rustix::fs::{AtFlags, CWD, Mode, OFlags, openat, statat};
     let own = format!("refs/heads/{branch}");
@@ -406,11 +428,21 @@ pub(super) fn has_branch(worktree: &Path, branch: &str) -> Result<bool, EngineEr
     }))
 }
 
+/// Refuses this step where landing has no Windows design yet, so no folder is made or
+/// read through a path an agent could swap (PLAN-1336 W5a). Inputs: as the Unix twin,
+/// unused. Output: `changes_unavailable`.
+#[cfg(not(unix))]
+pub(super) fn has_branch(worktree: &Path, branch: &str) -> Result<bool, EngineError> {
+    let _ = (worktree, branch);
+    Err(failure("changes_unavailable"))
+}
+
 /// Walks one folder of a clone's loose refs for `other_refs`, opening each inner folder
 /// without following a link, at most `REF_DEPTH_MAX` deep and `REF_ENTRIES_MAX` entries in
 /// all. Inputs: the open folder, its ref path, its depth, the entries left, the branch's
 /// ref and the names found. Output: Ok, else `changes_workspace_invalid` for an entry that
 /// is not a plain file or folder, or `changes_too_large`.
+#[cfg(unix)]
 fn loose_refs(
     folder: &rustix::fd::OwnedFd,
     path: &str,
@@ -451,6 +483,7 @@ fn loose_refs(
 /// Adds a name to `other_refs`'s list while it holds fewer than `REFS_LISTED_MAX`, so the
 /// list stays capped while the walk still reads every entry within its bounds. Inputs: the
 /// list and the name.
+#[cfg(unix)]
 fn listed(found: &mut Vec<String>, name: String) {
     if found.len() < REFS_LISTED_MAX {
         found.push(name);
@@ -462,6 +495,7 @@ fn listed(found: &mut Vec<String>, name: String) {
 /// file of at most `limit` bytes. Inputs: the open folder, the name and the limit. Output:
 /// the bytes, None when it does not exist, else `changes_workspace_invalid` or
 /// `changes_too_large`.
+#[cfg(unix)]
 fn read_at(
     folder: &rustix::fd::OwnedFd,
     name: &str,
@@ -502,6 +536,7 @@ fn alternate_line(repository: &Path) -> Option<String> {
 /// written to a new file beside it and renamed over it. Inputs: the file, the content it
 /// must hold and the content it gets. Output: true once rewritten, false when it already
 /// holds the new content, else `changes_workspace_invalid` with nothing written.
+#[cfg(unix)]
 fn replace_exact(file: &Path, from: &[u8], to: &[u8]) -> Result<bool, EngineError> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -544,6 +579,7 @@ fn replace_exact(file: &Path, from: &[u8], to: &[u8]) -> Result<bool, EngineErro
 /// clone. Inputs: the clone's git folder and the old and new owner checkout roots. Output:
 /// true once rewritten, false when it already names the new store, else
 /// `changes_workspace_invalid` for a clone that is not as `add` left it.
+#[cfg(unix)]
 pub(super) fn repoint(git_dir: &Path, from: &Path, to: &Path) -> Result<bool, EngineError> {
     let objects = git_dir.join("objects");
     let info = objects.join("info");
@@ -566,6 +602,7 @@ pub(super) fn repoint(git_dir: &Path, from: &Path, to: &Path) -> Result<bool, En
 /// old path. Inputs: the admin folder and the worktree where they are now, then where they
 /// were. Output: true once either file was rewritten, false when both already name the
 /// new places, else `changes_workspace_invalid`.
+#[cfg(unix)]
 pub(super) fn repoint_linked(
     admin: &Path,
     worktree: &Path,
@@ -1011,6 +1048,7 @@ fn leave_out_teammates(shared: &Repo, tip: &str) -> Result<String, EngineError> 
 /// Where one teammate worktree inside a harness's clone stands: on a branch of the clone,
 /// or at a commit with no branch.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(unix)]
 pub(super) enum TeammateHead {
     Branch(String),
     Commit(String),
@@ -1019,6 +1057,7 @@ pub(super) enum TeammateHead {
 /// One teammate worktree inside a harness's clone, `<clone>/.worktrees/<name>`, as its
 /// git record in the clone names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(unix)]
 pub(super) struct Teammate {
     pub(super) folder: std::path::PathBuf,
     pub(super) head: TeammateHead,
@@ -1032,6 +1071,7 @@ pub(super) struct Teammate {
 /// root, the lead's worktree and its task branch. Output: the teammates, at most
 /// `TEAMMATES_MAX`, else `changes_workspace_invalid` for anything else there, or
 /// `changes_too_large`.
+#[cfg(unix)]
 pub(super) fn linked_teammates(
     repository: &Path,
     worktree: &Path,
@@ -1112,6 +1152,7 @@ pub(super) fn linked_teammates(
 /// folder must be such a recorded worktree, so nothing there is left uncounted. Inputs:
 /// the worktree and its task branch. Output: the teammates, at most `TEAMMATES_MAX`, else
 /// `changes_workspace_invalid` for anything else there, or `changes_too_large`.
+#[cfg(unix)]
 pub(super) fn teammates(worktree: &Path, branch: &str) -> Result<Vec<Teammate>, EngineError> {
     use rustix::fs::{CWD, Dir, Mode, OFlags, openat};
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;

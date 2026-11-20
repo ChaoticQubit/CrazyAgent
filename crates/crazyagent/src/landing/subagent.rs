@@ -1,12 +1,18 @@
-use super::flow::{
-    agent_branch, check_places, clone_branch, hold, now_ms, pending_ref, set_engine_ref, shared,
-    tip,
-};
-use super::git::{failure, object_id};
-use super::{ChangeState, LeadGit, MergeOutcome, clone, store};
-use crate::agent_git::{self, Layout};
+#[cfg(unix)]
+use super::flow::{agent_branch, check_places, clone_branch, hold, tip};
+use super::flow::{now_ms, pending_ref, set_engine_ref, shared};
+use super::git::failure;
+#[cfg(unix)]
+use super::git::object_id;
+use super::{ChangeState, store};
+#[cfg(unix)]
+use super::{LeadGit, MergeOutcome, clone};
+use crate::agent_git;
+#[cfg(unix)]
+use crate::agent_git::Layout;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
+#[cfg(unix)]
 use crate::research::runner::AgentGit;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
@@ -21,10 +27,15 @@ const _: () = assert!(SUB_AGENTS_MAX >= crate::terminal::PANES_PER_PROJECT_MAX);
 const NAME_BYTES_MAX: usize = 40;
 const _: () = assert!(NAME_BYTES_MAX + 3 <= 48);
 /// The most names one claim tries: the name, then `-2` to `-64`.
+#[cfg(unix)]
 const SUFFIXES_MAX: usize = 64;
+#[cfg(unix)]
 const LISTING_BYTES_MAX: usize = 4096;
+#[cfg(unix)]
 const ID_BYTES_MAX: usize = 256;
+#[cfg(unix)]
 const CONFLICTS_BYTES_MAX: usize = 64 * 1024;
+#[cfg(unix)]
 const CONFLICTS_SHOWN_MAX: usize = 50;
 /// The most levels of workers below one lead whose change sets close with the lead's.
 const WORKER_LEVELS_MAX: u8 = 3;
@@ -107,6 +118,7 @@ pub(super) fn sub_agents(
 /// as [`close_held`] says. A lead in a linked worktree never merges by hand, so its workers
 /// are left as they are. Inputs: the store, the project and the lead. Output: Ok, or the
 /// failure that kept the lead's tip from being read.
+#[cfg(unix)]
 pub(super) fn settle(db: &Connection, project: &ProjectId, lead: i64) -> Result<(), EngineError> {
     store::initialize(db)?;
     let mut open = Vec::new();
@@ -217,6 +229,7 @@ fn close_workers(
 /// pressed anything at a read, so every other set stays open for the owner. The caller
 /// holds [`hold`] on their repository. Inputs: the store and the open change sets of one
 /// repository. Output: Ok, or the first failure.
+#[cfg(unix)]
 pub(super) fn close_orphaned(
     db: &Connection,
     ids: &[super::ChangeSetId],
@@ -350,6 +363,7 @@ pub(super) fn lead_tip(
 /// The name of the branch a lead works on, for the text its workers read about it, read
 /// without git. Inputs: the store and the lead's place. Output: the branch, None when its
 /// place or name cannot be read.
+#[cfg(unix)]
 pub(super) fn lead_branch(db: &Connection, lead: &Place) -> Option<String> {
     let layout = check_places(&lead.repository, &lead.worktree, &lead.git_dir).ok()?;
     super::flow::agent_branch(db, &lead.worktree, layout)
@@ -418,6 +432,7 @@ fn team_kept(db: &Connection) -> Result<bool, EngineError> {
 /// Tells whether a change set's agent is a native teammate, whose work its lead lands and
 /// which takes no resolve task of its own (OP9B-L3). Inputs: the store, the project and the
 /// change set's agent. Output: the answer, false where the engine keeps no team tables.
+#[cfg(unix)]
 pub(super) fn is_teammate(
     db: &Connection,
     project: &ProjectId,
@@ -506,6 +521,7 @@ fn lead_copy_gone(db: &Connection, project: &ProjectId, lead: i64) -> Result<boo
 /// counts once the sub-agent has no open change set. No git runs in any agent's clone.
 /// Inputs: the engine database, the project and the lead. Output: the unmerged branches in
 /// sub-agent order, or `changes_workspace_invalid` for a lead with no worktree or branch.
+#[cfg(unix)]
 pub(super) fn unmerged(
     db: &Connection,
     project: &ProjectId,
@@ -570,6 +586,7 @@ pub(super) fn path_text(path: &Path) -> Result<&str, EngineError> {
 /// the lead's clone (None for a linked worktree) and the name, lower-case letters and
 /// digits joined by single hyphens. Output: the branch, None when the lead's branch cannot
 /// carry sub-agent branches, or `changes_agent_branch_exists` when every form is taken.
+#[cfg(unix)]
 pub(super) fn claim(
     db: &Connection,
     repository: &Path,
@@ -635,6 +652,7 @@ pub(super) fn claim(
 /// already merged (#274). Inputs: the engine database, the project,
 /// the lead, the sub-agent and the lead's git. Output: what the merge did, or a plain
 /// `changes_*` refusal the lead can act on.
+#[cfg(unix)]
 pub(super) fn merge(
     db: &Connection,
     project: &ProjectId,
@@ -853,6 +871,7 @@ pub(super) fn merge(
 /// the teammate's branch, and the record is read again after git. Inputs: the store, the
 /// lead's worktree and git folder, the teammate's name and the lead's git. Output: Ok, or
 /// a `changes_*` refusal.
+#[cfg(unix)]
 pub(super) fn add_teammate(
     db: &Connection,
     worktree: &Path,
@@ -917,6 +936,7 @@ pub(super) fn add_teammate(
 /// Inputs: the store, the owner checkout root, the lead's worktree and git folder, the
 /// teammate's name and the lead's teammates' setup git. Output: Ok, or a `changes_*`
 /// refusal.
+#[cfg(unix)]
 pub(super) fn add_linked_teammate(
     db: &Connection,
     repository: &Path,
@@ -983,6 +1003,7 @@ pub(super) fn add_linked_teammate(
 /// [`close_covered`] does, under the engine's hold on the repository. Inputs: the store,
 /// the sub-agent's place, the tip that was merged and the lead's commit holding it.
 /// Output: Ok, closed or left open.
+#[cfg(unix)]
 fn close_landed(
     db: &Connection,
     sub: &Place,
@@ -999,6 +1020,7 @@ fn close_landed(
 /// the engine's hold. Inputs: the store, the sub-agent's place, the commit that holds its
 /// head and the lead's tip. Output: true only when an open set stayed open because that
 /// tip does not hold its work.
+#[cfg(unix)]
 fn close_held(
     db: &Connection,
     sub: &Place,
@@ -1034,6 +1056,7 @@ fn holds_work(record: &store::Record, commit: &str) -> Result<bool, EngineError>
 /// it. A set with an owner action in flight, or holding work past `covering`, stays open.
 /// The caller holds [`hold`] on the sub-agent's repository. Inputs: the store, the
 /// sub-agent's place, the commit that holds its work and the commit it landed as.
+#[cfg(unix)]
 fn close_covered(
     db: &Connection,
     sub: &Place,

@@ -727,7 +727,6 @@ pub(crate) fn imports(path: &str, text: &str) -> Vec<String> {
 /// instruction file feeds to agents, paths compared as case-insensitive volumes compare
 /// names. Inputs: the fed paths, each with whether it is a folder, and the changed path.
 /// Output: true when fed.
-#[cfg(unix)]
 pub(crate) fn fed(feeds: &[(String, bool)], path: &str) -> bool {
     let path = folded(path);
     feeds.iter().any(|(feed, folder)| {

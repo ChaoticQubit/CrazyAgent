@@ -81,7 +81,6 @@ pub fn check_path(path: &str) -> Result<(), EngineError> {
 /// recorded, or drops them when the turn end left none open because nothing differs.
 /// Failing leaves them waiting for the next turn end. Inputs: the store, the worktree and
 /// the change set the turn end returned. Output: Ok once settled.
-#[cfg(unix)]
 pub(super) fn settle(
     db: &Connection,
     worktree: &Path,
@@ -107,7 +106,6 @@ pub(super) fn settle(
 /// Forgets the owner edits settled on a change set once no review can show them again:
 /// it was accepted, or discarded and pruned past its restore window. Inputs: the store and
 /// the change set. Output: Ok once forgotten.
-#[cfg(unix)]
 pub(super) fn forget(db: &Connection, change_set: &super::ChangeSetId) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(storage)?;
     db.execute(
@@ -135,7 +133,6 @@ pub(super) fn forget_worktree(db: &Connection, worktree: &Path) -> Result<(), En
 /// Logs a failed cleanup of owner edits by its plain code. The step it followed already
 /// took effect, so its outcome stands and only the rows wait for a later cleanup. Inputs:
 /// the step and the failure. Output: none.
-#[cfg(unix)]
 pub(super) fn logged(step: &str, failed: Result<(), EngineError>) {
     if let Err(problem) = failed {
         eprintln!(
@@ -149,7 +146,6 @@ pub(super) fn logged(step: &str, failed: Result<(), EngineError>) {
 /// end settled the edit on this change set, by path or, for a rename, old path. Inputs:
 /// the store, the worktree, the change set and the files of the page. Output: Ok once
 /// marked.
-#[cfg(unix)]
 pub(super) fn mark(
     db: &Connection,
     worktree: &Path,

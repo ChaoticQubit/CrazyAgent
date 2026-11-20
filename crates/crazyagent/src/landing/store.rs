@@ -169,6 +169,7 @@ pub(super) struct Earlier {
 
 impl Earlier {
     /// Copies what a change set holds now. Input: the set. Output: the copy.
+    #[cfg(unix)]
     pub(super) fn of(record: &Record) -> Self {
         Self {
             state: record.state,
@@ -560,6 +561,7 @@ fn write(db: &Connection, record: &Record) -> Result<(), EngineError> {
 /// removed project's sets alone instead of failing on them at every poll (F24); true where
 /// the store keeps no project table, as a store opened on its own. Inputs: the store and the
 /// project. Output: the answer.
+#[cfg(unix)]
 pub(super) fn project_kept(db: &Connection, project: &ProjectId) -> Result<bool, EngineError> {
     let tabled: bool = db
         .query_row(
@@ -750,6 +752,7 @@ pub(super) fn base_of(db: &Connection, worktree: &str) -> Result<Option<String>,
 /// linked worktree then commits on in place of the branch its folder names. Inputs: the
 /// store, the owner checkout root, the worktree and the branch, one
 /// `agent_git::is_agent_branch` accepts. Output: Ok once stored.
+#[cfg(unix)]
 pub(super) fn set_agent_branch(
     db: &Connection,
     repository: &std::path::Path,
@@ -788,6 +791,7 @@ pub(super) fn agent_branch(db: &Connection, worktree: &str) -> Result<Option<Str
 /// Says whether another agent worktree of the same owner repository already holds a task
 /// branch name; a row left for the asking worktree itself does not count. Inputs: the
 /// store, the owner checkout root, the asking worktree and the branch. Output: the answer.
+#[cfg(unix)]
 pub(super) fn agent_branch_taken(
     db: &Connection,
     repository: &std::path::Path,
@@ -805,6 +809,7 @@ pub(super) fn agent_branch_taken(
 
 /// Forgets the task branch of an agent worktree that is gone. Inputs: the store and the
 /// worktree path. Output: Ok.
+#[cfg(unix)]
 pub(super) fn forget_agent_branch(db: &Connection, worktree: &str) -> Result<(), EngineError> {
     db.execute(
         "DELETE FROM landing_agent_branches WHERE worktree=?1",
@@ -899,6 +904,7 @@ pub(super) fn open_heads(db: &Connection, project: &ProjectId) -> Result<Vec<Str
 /// Reads the worktrees of the change sets open directly inside one folder, such as a
 /// lead's teammates' folder, in path order. Inputs: the store, the folder path ending in
 /// `/` and the most worktrees to read. Output: the worktree paths.
+#[cfg(unix)]
 pub(super) fn open_inside(
     db: &Connection,
     folder: &str,
@@ -984,6 +990,7 @@ pub(super) fn waiting(
 
 /// Reads every change set with owner-checkout or worktree work in flight.
 /// Input: the store. Output: the records, oldest first.
+#[cfg(unix)]
 pub(super) fn in_flight(db: &Connection) -> Result<Vec<Record>, EngineError> {
     collect(db, "intent IS NOT NULL", rusqlite::params![])
 }
@@ -1022,6 +1029,7 @@ pub(super) fn closed_without_commit(
 
 /// Reads the discarded change sets whose restore window ended by `now` and whose ref
 /// is not deleted yet. Inputs: the store and the time now. Output: the records.
+#[cfg(unix)]
 pub(super) fn discarded_due(db: &Connection, now: u64) -> Result<Vec<Record>, EngineError> {
     collect(
         db,

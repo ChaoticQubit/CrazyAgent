@@ -5,38 +5,28 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-#[cfg(unix)]
 mod ancestry;
-#[cfg(unix)]
 mod clone;
-#[cfg(unix)]
 mod diff;
 pub(crate) mod evidence;
-#[cfg(unix)]
 mod flow;
-#[cfg(unix)]
 mod git;
 #[cfg(unix)]
 pub(crate) use git::owner_excludes_setting;
 #[cfg(unix)]
 pub(crate) use git::{OPEN_VERSION_MIN, refuse_older, version_numbers};
 mod hold;
-#[cfg(unix)]
 pub(crate) mod ide;
 #[cfg(unix)]
 mod lockfiles;
-#[cfg(unix)]
 mod merges;
-#[cfg(unix)]
 mod owner;
 pub mod owner_edit;
 #[cfg(unix)]
 mod retire;
 #[cfg(all(test, unix))]
 pub(crate) mod signature_tests;
-#[cfg(unix)]
 mod store;
-#[cfg(unix)]
 mod subagent;
 #[cfg(all(test, unix))]
 mod tests;
@@ -476,19 +466,15 @@ const SUBJECT_CHARS_MAX: usize = 48;
 const COMMIT_SUBJECT_CHARS_MAX: usize = 72;
 /// The marks a pasted shell prompt or a list starts a line with, cut from a prompt line or a
 /// summary line before it names a change set (F22).
-#[cfg(unix)]
 const PROMPT_GLYPHS: [char; 13] = [
     '\u{276F}', '\u{203A}', '\u{BB}', '\u{279C}', '\u{2192}', '\u{3BB}', '\u{2022}', '$', '%', '>',
     '#', '*', '-',
 ];
 /// The most leading words of prompt marks cut from one line.
-#[cfg(unix)]
 const PROMPT_WORDS_MAX: usize = 4;
 /// The most summary lines read for the one that names a change set.
-#[cfg(unix)]
 const SUMMARY_LINES_MAX: usize = 64;
 /// The most commit subjects a summarized message lists below its summary.
-#[cfg(unix)]
 const SUMMARY_LIST_LINES_MAX: usize = 512;
 
 /// The most distinct lines [`log_once`] keeps in one engine run.
@@ -523,6 +509,38 @@ fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
 }
 
+#[cfg(all(test, not(unix)))]
+thread_local! {
+    /// The landing functions refused on this thread, in call order, so a Windows row can
+    /// tell each refused function from one that ran.
+    pub(crate) static REFUSED: std::cell::RefCell<Vec<&'static str>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Logs, once per function, that a landing function Windows does not run in 2.4.4 was
+/// called, and keeps its name for a test. Input: the function's name. Output: none.
+#[cfg(not(unix))]
+fn note_refused(name: &'static str) {
+    assert!(
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+    );
+    log_once(&format!("landing_windows_refused name={name}"));
+    #[cfg(test)]
+    REFUSED.with(|names| names.borrow_mut().push(name));
+}
+
+/// The refusal of a landing function Windows does not run in 2.4.4: the same
+/// `changes_unavailable` every client already shows as not ready, after
+/// [`note_refused`]. Input: the function's name. Output: the error.
+#[cfg(not(unix))]
+fn refused(name: &'static str) -> EngineError {
+    note_refused(name);
+    unavailable()
+}
+
 /// Shapes what engine git on this thread reports as its version for the rest of a row, so a
 /// row in landing or outside it can cross the git floor (W-GIT-FLOOR). Input: the line
 /// `git version` prints, or None for the real git's own.
@@ -536,7 +554,6 @@ pub(crate) fn shape_git(printed: Option<&str>) {
 /// action itself never fails on it. A Discarded set closed outside the app says so, and
 /// ChangesReady is a discarded set brought back. Inputs: the store, the change set, the
 /// kind of event (Conflict, Discarded, SentBack or ChangesReady) and who acted.
-#[cfg(unix)]
 fn note_change(
     db: &Connection,
     record: &store::Record,
@@ -566,7 +583,6 @@ fn note_change(
 /// Records an Accept in its project's activity, naming the agents whose sets it closed.
 /// Inputs: the store, the accepted change set, who acted and the agents' labels. Output:
 /// none.
-#[cfg(unix)]
 fn note_accepted(db: &Connection, record: &store::Record, by: &str, closed: &[String]) {
     let mut text = crate::activity::accepted_text(by, &named(db, record));
     text.push_str(&closed_words(closed));
@@ -581,7 +597,6 @@ fn note_accepted(db: &Connection, record: &store::Record, by: &str, closed: &[St
 
 /// The words a landing's activity row ends with when it closed other sets. Input: the
 /// labels of their agents. Output: the words, empty when it closed none.
-#[cfg(unix)]
 fn closed_words(closed: &[String]) -> String {
     if closed.is_empty() {
         return String::new();
@@ -592,7 +607,6 @@ fn closed_words(closed: &[String]) -> String {
 /// The words an activity row names a change set by, with its number once it has one; a
 /// number that cannot be read is logged by its plain code and the set named without it.
 /// Inputs: the store and the change set. Output: the words.
-#[cfg(unix)]
 fn named(db: &Connection, record: &store::Record) -> String {
     let number = store::number_of(db, &record.id).unwrap_or_else(|error| {
         eprintln!(
@@ -613,7 +627,6 @@ fn named(db: &Connection, record: &store::Record) -> String {
 /// agent's title and the subject of its message, and the sets its merge closed whose work it
 /// reverted too; a failure is logged by its plain code. Inputs: the store, the undone set,
 /// the labels of those sets and who undid it.
-#[cfg(unix)]
 fn note_undo(db: &Connection, record: &store::Record, closed: &[String], by: &str) {
     let mut text = format!(
         "Undid the changes of {}: {}",
@@ -632,7 +645,6 @@ fn note_undo(db: &Connection, record: &store::Record, closed: &[String], by: &st
 /// Records one row about a change set with its words, at the time the set last changed and
 /// with its sub-agent for the goal; a failure is logged by its plain code. Inputs: the
 /// store, the change set, the kind of event, who acted and the words.
-#[cfg(unix)]
 fn note_text(
     db: &Connection,
     record: &store::Record,
@@ -658,7 +670,6 @@ fn note_text(
 
 /// Records that the engine closed a change set whose branch already took every file it
 /// changes, with no owner action behind it (HB-S4). Inputs: the store and the closed set.
-#[cfg(unix)]
 fn note_taken(db: &Connection, record: &store::Record) {
     let text = format!(
         "Closed the changes of {}: the branch they land on already took every file they change. {}",
@@ -703,7 +714,6 @@ pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
     }
     let db = Connection::open(runtime.join("engine.db")).map_err(|_| unavailable())?;
     db.busy_timeout(BUSY_WAIT).map_err(|_| unavailable())?;
-    #[cfg(unix)]
     store::initialize(&db)?;
     Ok(db)
 }
@@ -747,7 +757,7 @@ pub fn add_agent_clone_on(
     #[cfg(not(unix))]
     {
         let _ = (repository, worktree, base, branch);
-        Err(unavailable())
+        Err(refused("add_agent_clone_on"))
     }
 }
 
@@ -766,7 +776,7 @@ pub(crate) fn repoint_agent_clone(
     #[cfg(not(unix))]
     {
         let _ = (git_dir, from, to);
-        Err(unavailable())
+        Err(refused("repoint_agent_clone"))
     }
 }
 
@@ -785,7 +795,7 @@ pub(crate) fn repoint_linked_worktree(
     #[cfg(not(unix))]
     {
         let _ = (admin, worktree, old_admin, old_worktree);
-        Err(unavailable())
+        Err(refused("repoint_linked_worktree"))
     }
 }
 
@@ -806,7 +816,7 @@ pub fn claim_task_branch(
     #[cfg(not(unix))]
     {
         let _ = (db, repository, worktree, name);
-        Err(unavailable())
+        Err(refused("claim_task_branch"))
     }
 }
 
@@ -829,7 +839,7 @@ pub fn agent_branch(
     #[cfg(not(unix))]
     {
         let _ = (db, worktree, layout);
-        Err(unavailable())
+        Err(refused("agent_branch"))
     }
 }
 
@@ -848,7 +858,7 @@ pub fn master_branch(
     #[cfg(not(unix))]
     {
         let _ = (repository, chosen);
-        Err(unavailable())
+        Err(refused("master_branch"))
     }
 }
 
@@ -868,7 +878,7 @@ pub fn land_on(
     #[cfg(not(unix))]
     {
         let _ = (db, repository, project);
-        Err(unavailable())
+        Err(refused("land_on"))
     }
 }
 
@@ -890,7 +900,7 @@ pub fn main_tip(
     #[cfg(not(unix))]
     {
         let _ = (db, repository, project);
-        Err(unavailable())
+        Err(refused("main_tip"))
     }
 }
 
@@ -900,13 +910,7 @@ pub fn main_tip(
 /// for. A worktree it cannot reach is logged and skipped. Inputs: the engine database and
 /// the project. Output: Ok, else `changes_unavailable`.
 pub fn refresh_main(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
-    #[cfg(unix)]
-    return owner::refresh_main(db, project, None).map(|_| ());
-    #[cfg(not(unix))]
-    {
-        let _ = (db, project);
-        Err(unavailable())
-    }
+    owner::refresh_main(db, project, None).map(|_| ())
 }
 
 /// The commit a lead's worktree holds now, which its new worker's worktree is cut from
@@ -923,7 +927,7 @@ pub fn agent_tip(
     #[cfg(not(unix))]
     {
         let _ = (db, repository, worktree, git_dir);
-        Err(unavailable())
+        Err(refused("agent_tip"))
     }
 }
 
@@ -942,7 +946,7 @@ pub fn unmerged_sub_agents(
     #[cfg(not(unix))]
     {
         let _ = (db, project, lead);
-        Err(unavailable())
+        Err(refused("unmerged_sub_agents"))
     }
 }
 
@@ -964,7 +968,7 @@ pub fn claim_sub_agent_branch(
     #[cfg(not(unix))]
     {
         let _ = (db, repository, worktree, task_branch, lead_clone, name);
-        Err(unavailable())
+        Err(refused("claim_sub_agent_branch"))
     }
 }
 
@@ -990,7 +994,7 @@ pub fn merge_sub_agent(
     #[cfg(not(unix))]
     {
         let _ = (db, project, lead, sub, git);
-        Err(unavailable())
+        Err(refused("merge_sub_agent"))
     }
 }
 
@@ -1005,7 +1009,7 @@ pub fn ready_agent_clone(worktree: &Path) -> Result<(), EngineError> {
     #[cfg(not(unix))]
     {
         let _ = worktree;
-        Err(unavailable())
+        Err(refused("ready_agent_clone"))
     }
 }
 
@@ -1026,7 +1030,7 @@ pub fn name_agent_branch(
     #[cfg(not(unix))]
     {
         let _ = (db, repository, worktree, git_dir);
-        Err(unavailable())
+        Err(refused("name_agent_branch"))
     }
 }
 
@@ -1045,7 +1049,7 @@ pub fn record_worktree_start(
     #[cfg(not(unix))]
     {
         let _ = (db, repository, worktree, git_dir);
-        Err(unavailable())
+        Err(refused("record_worktree_start"))
     }
 }
 
@@ -1060,13 +1064,7 @@ pub fn record_master_start(
     worktree: &Path,
     git_dir: &Path,
 ) -> Result<(), EngineError> {
-    #[cfg(unix)]
-    return flow::start_master(db, repository, worktree, git_dir);
-    #[cfg(not(unix))]
-    {
-        let _ = (db, repository, worktree, git_dir);
-        Err(unavailable())
-    }
+    flow::start_master(db, repository, worktree, git_dir)
 }
 
 #[cfg(unix)]
@@ -1082,7 +1080,7 @@ pub fn tracked_files(checkout: &Path, paths: &[&str]) -> Result<Vec<bool>, Engin
     #[cfg(not(unix))]
     {
         let _ = (checkout, paths);
-        Err(unavailable())
+        Err(refused("tracked_files"))
     }
 }
 
@@ -1118,7 +1116,7 @@ pub fn committed_files(checkout: &Path, paths: &[&str]) -> Result<Vec<bool>, Eng
     #[cfg(not(unix))]
     {
         let _ = (checkout, paths);
-        Err(unavailable())
+        Err(refused("committed_files"))
     }
 }
 
@@ -1127,13 +1125,7 @@ pub fn committed_files(checkout: &Path, paths: &[&str]) -> Result<Vec<bool>, Eng
 /// Output: the name, none for a detached HEAD or a name over `BRANCH_BYTES_MAX`, or a
 /// plain git code.
 pub fn checked_out_branch(checkout: &Path) -> Result<Option<String>, EngineError> {
-    #[cfg(unix)]
-    return owner::checked_out_branch(checkout);
-    #[cfg(not(unix))]
-    {
-        let _ = checkout;
-        Err(unavailable())
-    }
+    owner::checked_out_branch(checkout)
 }
 
 #[cfg(unix)]
@@ -1186,7 +1178,7 @@ pub fn commit_deletions(
     #[cfg(not(unix))]
     {
         let _ = (repository, owner_home, paths, message);
-        Err(unavailable())
+        Err(refused("commit_deletions"))
     }
 }
 
@@ -1205,22 +1197,14 @@ pub fn record_turn_end(
     workspace: &Workspace,
     turn: &TurnEnd,
 ) -> Result<Option<ChangeSetId>, EngineError> {
-    #[cfg(unix)]
-    {
-        let now = flow::now_ms()?;
-        let kept = flow::record(db, workspace, turn, &crate::worktrees::TREE_BOUNDS, now)?;
-        owner_edit::logged(
-            "settle",
-            owner_edit::settle(db, &workspace.worktree, kept.as_ref()),
-        );
-        flow::hold_agent_claims(db, workspace, kept.as_ref(), now);
-        Ok(kept)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (db, workspace, turn);
-        Err(unavailable())
-    }
+    let now = flow::now_ms()?;
+    let kept = flow::record(db, workspace, turn, &crate::worktrees::TREE_BOUNDS, now)?;
+    owner_edit::logged(
+        "settle",
+        owner_edit::settle(db, &workspace.worktree, kept.as_ref()),
+    );
+    flow::hold_agent_claims(db, workspace, kept.as_ref(), now);
+    Ok(kept)
 }
 
 /// Posts or updates an agent's change set from what it committed while its turn is still
@@ -1233,16 +1217,8 @@ pub fn record_commits(
     workspace: &Workspace,
     turn: &TurnEnd,
 ) -> Result<Option<ChangeSetId>, EngineError> {
-    #[cfg(unix)]
-    {
-        let now = flow::now_ms()?;
-        flow::record_commits(db, workspace, turn, &crate::worktrees::TREE_BOUNDS, now)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (db, workspace, turn);
-        Err(unavailable())
-    }
+    let now = flow::now_ms()?;
+    flow::record_commits(db, workspace, turn, &crate::worktrees::TREE_BOUNDS, now)
 }
 
 /// Settles the claims of a project no turn end will (OS-8 r2): releases those of closed
@@ -1258,7 +1234,7 @@ pub fn sweep_claims(db: &Connection, project: &ProjectId, now: u64) -> Result<()
     #[cfg(not(unix))]
     {
         let _ = (db, project, now);
-        Err(unavailable())
+        Err(refused("sweep_claims"))
     }
 }
 
@@ -1301,7 +1277,7 @@ pub fn resolve_task_prompt(db: &Connection, id: &ChangeSetId) -> Result<String, 
     #[cfg(not(unix))]
     {
         let _ = (db, id);
-        Err(unavailable())
+        Err(refused("resolve_task_prompt"))
     }
 }
 
@@ -1313,7 +1289,6 @@ pub fn resolve_task_prompt(db: &Connection, id: &ChangeSetId) -> Result<String, 
 pub fn owner_list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {
     let sets = list(db, project)?;
     assert!(sets.len() <= LIST_MAX);
-    #[cfg(unix)]
     if subagent::leads_merge(db, project)? {
         let mut kept = Vec::with_capacity(sets.len());
         for set in sets {
@@ -1346,7 +1321,7 @@ pub fn settle_sub_agents(
     #[cfg(not(unix))]
     {
         let _ = (db, project, lead);
-        Err(unavailable())
+        Err(refused("settle_sub_agents"))
     }
 }
 /// Counts the change sets waiting for the owner in Changes: ready to review or conflicting
@@ -1357,28 +1332,16 @@ pub fn waiting(
     db: &Connection,
     project: Option<&ProjectId>,
 ) -> Result<WaitingChanges, EngineError> {
-    #[cfg(unix)]
-    return store::waiting(db, project);
-    #[cfg(not(unix))]
-    {
-        let _ = (db, project);
-        Err(unavailable())
-    }
+    store::waiting(db, project)
 }
 
 /// Lists one project's change sets, open ones first, then newest first, at most
 /// `LIST_MAX`. Inputs: the store and the project. Output: the change sets.
 pub fn list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {
-    #[cfg(unix)]
-    return store::of_project(db, project, LIST_MAX)?
+    store::of_project(db, project, LIST_MAX)?
         .iter()
         .map(|record| Ok(record.view(store::number_of(db, &record.id)?)))
-        .collect();
-    #[cfg(not(unix))]
-    {
-        let _ = (db, project);
-        Err(unavailable())
-    }
+        .collect()
 }
 
 /// Reads one change set by its id, however many change sets its project holds.
@@ -1388,18 +1351,12 @@ pub fn change_set(
     db: &Connection,
     id: &ChangeSetId,
 ) -> Result<Option<(ProjectId, ChangeSetView)>, EngineError> {
-    #[cfg(unix)]
-    return store::find(db, id)?
+    store::find(db, id)?
         .map(|record| {
             let number = store::number_of(db, &record.id)?;
             Ok((record.project.clone(), record.view(number)))
         })
-        .transpose();
-    #[cfg(not(unix))]
-    {
-        let _ = (db, id);
-        Err(unavailable())
-    }
+        .transpose()
 }
 
 /// Reads the change set open in one agent worktree, the one its next turn end adds to,
@@ -1409,20 +1366,12 @@ pub fn open_change_set(
     db: &Connection,
     worktree: &Path,
 ) -> Result<Option<ChangeSetView>, EngineError> {
-    #[cfg(unix)]
-    {
-        let Some(worktree) = worktree.to_str() else {
-            return Ok(None);
-        };
-        store::open_for(db, worktree)?
-            .map(|record| Ok(record.view(store::number_of(db, &record.id)?)))
-            .transpose()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (db, worktree);
-        Err(unavailable())
-    }
+    let Some(worktree) = worktree.to_str() else {
+        return Ok(None);
+    };
+    store::open_for(db, worktree)?
+        .map(|record| Ok(record.view(store::number_of(db, &record.id)?)))
+        .transpose()
 }
 
 /// Names the teammate worktrees `<worktree>/.worktrees/<name>` of a lead that hold an open
@@ -1451,7 +1400,7 @@ pub fn open_teammate_sets(
     #[cfg(not(unix))]
     {
         let _ = (db, worktree, max);
-        Err(unavailable())
+        Err(refused("open_teammate_sets"))
     }
 }
 
@@ -1470,32 +1419,24 @@ pub fn diff(
     head: &str,
     page: u16,
 ) -> Result<ChangeDiff, EngineError> {
-    #[cfg(unix)]
-    {
-        store::initialize(db)?;
-        let record = store::load(db, id)?;
-        if record.head != head {
-            return Err(EngineError("changes_stale".into()));
-        }
-        let range = owner::observe_for_diff(db, id).unwrap_or_else(|error| {
-            eprintln!(
-                "landing_observe_failed cause={}",
-                crate::protocol::plain_code(&error.0)
-            );
-            None
-        });
-        let mut shown = match range {
-            Some((from, to)) => diff::page(&record.repository, &from, &to, page)?,
-            None => diff::page(&record.repository, &record.base, &record.head, page)?,
-        };
-        owner_edit::mark(db, &record.worktree, &record.id, &mut shown.files)?;
-        Ok(shown)
+    store::initialize(db)?;
+    let record = store::load(db, id)?;
+    if record.head != head {
+        return Err(EngineError("changes_stale".into()));
     }
-    #[cfg(not(unix))]
-    {
-        let _ = (db, id, head, page);
-        Err(unavailable())
-    }
+    let range = owner::observe_for_diff(db, id).unwrap_or_else(|error| {
+        eprintln!(
+            "landing_observe_failed cause={}",
+            crate::protocol::plain_code(&error.0)
+        );
+        None
+    });
+    let mut shown = match range {
+        Some((from, to)) => diff::page(&record.repository, &from, &to, page)?,
+        None => diff::page(&record.repository, &record.base, &record.head, page)?,
+    };
+    owner_edit::mark(db, &record.worktree, &record.id, &mut shown.files)?;
+    Ok(shown)
 }
 
 /// Lands a change set as one squash commit on the owner's checked-out branch, authored
@@ -1512,15 +1453,9 @@ pub fn accept(
     message: Option<&str>,
     place: crate::activity::AcceptPlace,
 ) -> Result<AcceptOutcome, EngineError> {
-    #[cfg(unix)]
-    return owner::accept(db, owner_home, id, expected_head, message, place, &|_| {
+    owner::accept(db, owner_home, id, expected_head, message, place, &|_| {
         false
-    });
-    #[cfg(not(unix))]
-    {
-        let _ = (db, owner_home, id, expected_head, message, place);
-        Err(unavailable())
-    }
+    })
 }
 
 /// Lands a change set as one squash commit on a chosen local branch: the owner's
@@ -1561,7 +1496,7 @@ pub fn accept_into(
             target_branch,
             place,
         );
-        Err(unavailable())
+        Err(refused("accept_into"))
     }
 }
 
@@ -1613,7 +1548,7 @@ pub fn accept_into_as(
             target_branch,
             by,
         );
-        Err(unavailable())
+        Err(refused("accept_into_as"))
     }
 }
 
@@ -1628,7 +1563,7 @@ pub(crate) fn can_merge_again(repository: &Path) -> Result<bool, EngineError> {
     #[cfg(not(unix))]
     {
         let _ = repository;
-        Err(unavailable())
+        Err(refused("can_merge_again"))
     }
 }
 
@@ -1649,6 +1584,7 @@ pub fn land_master_set(
     #[cfg(not(unix))]
     {
         let _ = (db, owner_home, id);
+        note_refused("land_master_set");
         Ok(None)
     }
 }
@@ -1670,20 +1606,14 @@ pub fn undo_landing(
     #[cfg(not(unix))]
     {
         let _ = (db, owner_home, id);
-        Err(unavailable())
+        Err(refused("undo_landing"))
     }
 }
 
 /// Lists the local branches an Accept of a change set can land on and the owner's
 /// checked-out branch. Inputs: the store and the change set. Output: the branches.
 pub fn target_branches(db: &Connection, id: &ChangeSetId) -> Result<TargetBranches, EngineError> {
-    #[cfg(unix)]
-    return owner::branches(db, id);
-    #[cfg(not(unix))]
-    {
-        let _ = (db, id);
-        Err(unavailable())
-    }
+    owner::branches(db, id)
 }
 
 /// Reads the owner's git identity as the owner's own git sees it for a repository: the
@@ -1694,13 +1624,7 @@ pub fn owner_git_identity(
     repository: &Path,
     owner_home: &Path,
 ) -> Result<(String, String), EngineError> {
-    #[cfg(unix)]
-    return owner::owner_identity(repository, owner_home);
-    #[cfg(not(unix))]
-    {
-        let _ = (repository, owner_home);
-        Err(unavailable())
-    }
+    owner::owner_identity(repository, owner_home)
 }
 
 /// The owner's files that keep an Accept from landing (F21): `files` are tracked and may be
@@ -1727,7 +1651,7 @@ pub fn owner_dirty(
     #[cfg(not(unix))]
     {
         let _ = (db, id, target);
-        Err(unavailable())
+        Err(refused("owner_dirty"))
     }
 }
 
@@ -1749,7 +1673,7 @@ pub fn commit_owner_files(
     #[cfg(not(unix))]
     {
         let _ = (db, owner_home, id, files, message, target);
-        Err(unavailable())
+        Err(refused("commit_owner_files"))
     }
 }
 
@@ -1788,7 +1712,7 @@ pub fn discard_as(
     #[cfg(not(unix))]
     {
         let _ = (db, id, expected_head, now_ms, by);
-        Err(unavailable())
+        Err(refused("discard_as"))
     }
 }
 
@@ -1808,7 +1732,7 @@ pub fn restore(db: &Connection, id: &ChangeSetId, now_ms: u64) -> Result<(), Eng
     #[cfg(not(unix))]
     {
         let _ = (db, id, now_ms);
-        Err(unavailable())
+        Err(refused("restore"))
     }
 }
 
@@ -1832,7 +1756,7 @@ pub(crate) fn conflicts_with_main(
     #[cfg(not(unix))]
     {
         let _ = (db, id, after, settings);
-        Err(unavailable())
+        Err(refused("conflicts_with_main"))
     }
 }
 
@@ -1859,6 +1783,7 @@ pub fn move_after_turn(db: &Connection, workspace: &Workspace) -> bool {
     #[cfg(not(unix))]
     {
         let _ = (db, workspace);
+        note_refused("move_after_turn");
         false
     }
 }
@@ -1878,6 +1803,7 @@ pub fn tell_main_moved(db: &Connection, project: &ProjectId, agent: i64) -> bool
     #[cfg(not(unix))]
     {
         let _ = (db, project, agent);
+        note_refused("tell_main_moved");
         false
     }
 }
@@ -1891,6 +1817,7 @@ pub fn sweep_regenerations(db: &Connection) -> Result<usize, EngineError> {
     #[cfg(not(unix))]
     {
         let _ = db;
+        note_refused("sweep_regenerations");
         Ok(0)
     }
 }
@@ -1928,7 +1855,7 @@ pub fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
     #[cfg(not(unix))]
     {
         let _ = (db, id);
-        Err(unavailable())
+        Err(refused("update"))
     }
 }
 
@@ -1941,7 +1868,7 @@ pub fn resolve_handed_over(db: &Connection, id: &ChangeSetId) -> Result<(), Engi
     #[cfg(not(unix))]
     {
         let _ = (db, id);
-        Err(unavailable())
+        Err(refused("resolve_handed_over"))
     }
 }
 
@@ -2086,7 +2013,6 @@ pub(crate) fn commit_subject(text: &str, roots: &[&Path]) -> String {
 /// or "- " (F22): each leading word made only of `PROMPT_GLYPHS` is cut, at most
 /// `PROMPT_WORDS_MAX` of them. Input: the text. Output: the text from its first other word,
 /// empty when it holds nothing else.
-#[cfg(unix)]
 pub(crate) fn unprompted(text: &str) -> &str {
     let mut rest = text.trim_start();
     for _ in 0..PROMPT_WORDS_MAX {
@@ -2103,7 +2029,6 @@ pub(crate) fn unprompted(text: &str) -> &str {
 /// of at least two words once prompt and list marks are cut, as `commit_subject` makes it,
 /// so a heading such as "Summary" or a bare "Done." names nothing. Inputs: the summary and
 /// the folders, innermost first. Output: the subject, empty when no line fits.
-#[cfg(unix)]
 pub(crate) fn summary_subject(summary: &str, roots: &[&Path]) -> String {
     summary
         .lines()
@@ -2117,7 +2042,6 @@ pub(crate) fn summary_subject(summary: &str, roots: &[&Path]) -> String {
 /// subject first, then every commit subject of `proposed` as a list below it, or `proposed`
 /// alone without a summary. Inputs: the stored summary subject and the message made from
 /// the agent's commits. Output: the message.
-#[cfg(unix)]
 pub(crate) fn summarized(summary: &str, proposed: &str) -> String {
     if summary.is_empty() {
         return proposed.to_owned();
@@ -2150,18 +2074,10 @@ pub fn record_summary(
     id: &ChangeSetId,
     summary: &str,
 ) -> Result<(), EngineError> {
-    #[cfg(unix)]
-    {
-        let roots = [workspace.worktree.as_path(), workspace.repository.as_path()];
-        let subject = summary_subject(summary, &roots);
-        assert!(subject.chars().count() <= COMMIT_SUBJECT_CHARS_MAX);
-        store::set_summary(db, id, &subject)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (db, workspace, id, summary);
-        Err(unavailable())
-    }
+    let roots = [workspace.worktree.as_path(), workspace.repository.as_path()];
+    let subject = summary_subject(summary, &roots);
+    assert!(subject.chars().count() <= COMMIT_SUBJECT_CHARS_MAX);
+    store::set_summary(db, id, &subject)
 }
 
 /// The message a change set goes by in Changes and in the project's activity, live or
@@ -2195,16 +2111,8 @@ fn subject(message: &str) -> String {
 /// order they were made. Runs at every engine start. Input: the store. Output: how many
 /// sets got a number.
 pub fn number_change_sets(db: &Connection) -> Result<usize, EngineError> {
-    #[cfg(unix)]
-    {
-        store::initialize(db)?;
-        store::number_unnumbered(db)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = db;
-        Err(unavailable())
-    }
+    store::initialize(db)?;
+    store::number_unnumbered(db)
 }
 
 /// Finishes or undoes an Accept or worktree reset an engine stop interrupted.
@@ -2215,7 +2123,7 @@ pub fn reconcile(db: &Connection) -> Result<(), EngineError> {
     #[cfg(not(unix))]
     {
         let _ = db;
-        Err(unavailable())
+        Err(refused("reconcile"))
     }
 }
 
@@ -2232,7 +2140,7 @@ pub fn observe(db: &Connection, project: Option<&ProjectId>) -> Result<(), Engin
     #[cfg(not(unix))]
     {
         let _ = (db, project);
-        Err(unavailable())
+        Err(refused("observe"))
     }
 }
 
@@ -2255,7 +2163,7 @@ pub fn retire_blocker(
     #[cfg(not(unix))]
     {
         let _ = (db, repository, worktree, git_dir, now_ms);
-        Err(unavailable())
+        Err(refused("retire_blocker"))
     }
 }
 
@@ -2275,7 +2183,7 @@ pub fn unlanded_teammates(
     #[cfg(not(unix))]
     {
         let _ = (db, repository, worktree, git_dir);
-        Err(unavailable())
+        Err(refused("unlanded_teammates"))
     }
 }
 
@@ -2294,7 +2202,7 @@ pub fn teammate_worktrees(
     #[cfg(not(unix))]
     {
         let _ = (db, worktree, git_dir);
-        Err(unavailable())
+        Err(refused("teammate_worktrees"))
     }
 }
 
@@ -2315,7 +2223,7 @@ pub fn linked_teammate_place(
     #[cfg(not(unix))]
     {
         let _ = (db, worktree, git_dir, name);
-        Err(unavailable())
+        Err(refused("linked_teammate_place"))
     }
 }
 
@@ -2335,7 +2243,7 @@ pub fn teammate_unsaved(
     #[cfg(not(unix))]
     {
         let _ = (db, worktree, git_dir, name);
-        Err(unavailable())
+        Err(refused("teammate_unsaved"))
     }
 }
 
@@ -2364,7 +2272,7 @@ pub fn add_teammate_worktree(
     #[cfg(not(unix))]
     {
         let _ = (db, worktree, git_dir, name, git);
-        Err(unavailable())
+        Err(refused("add_teammate_worktree"))
     }
 }
 
@@ -2386,7 +2294,7 @@ pub fn retire_worktree(
     #[cfg(not(unix))]
     {
         let _ = (db, repository, worktree, git_dir, now_ms);
-        Err(unavailable())
+        Err(refused("retire_worktree"))
     }
 }
 
@@ -2398,6 +2306,6 @@ pub fn prune(db: &Connection, now_ms: u64) -> Result<usize, EngineError> {
     #[cfg(not(unix))]
     {
         let _ = (db, now_ms);
-        Err(unavailable())
+        Err(refused("prune"))
     }
 }

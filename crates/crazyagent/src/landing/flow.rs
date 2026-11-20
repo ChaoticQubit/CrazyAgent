@@ -16,6 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 pub(super) const ENGINE: (&str, &str) = ("CrazyAgent", "engine@crazyagent.invalid");
+#[cfg(unix)]
 const TASK_SUFFIXES_MAX: usize = 64;
 const LISTING_BYTES_MAX: usize = 64 * 1024 * 1024;
 const PATH_BYTES_MAX: usize = 1024;
@@ -26,12 +27,14 @@ const LAYOUT_LISTINGS_MAX: usize = 1024;
 const LINK_HEADER_BYTES_MAX: usize = 128;
 const NAME_BYTES_MAX: usize = 128;
 /// The most closed change sets holding claims one claims sweep releases.
+#[cfg(unix)]
 const SWEPT_SETS_MAX: usize = 16;
 const PROPOSED_BYTES_MAX: usize = 1024;
 const AGENT_COMMITS_READ_MAX: usize = 200;
 const MORE_COMMITS: &str = "\n- and more commits";
 const LINK_BYTES_MAX: usize = 4096;
 const HEAD_BYTES_MAX: usize = 512;
+#[cfg(unix)]
 const CONFLICTS_SHOWN_MAX: usize = 50;
 const INDEX_BYTES_MAX: u64 = 256 * 1024 * 1024;
 /// Takes the engine's hold on one owner repository for an owner's action, refusing at
@@ -514,6 +517,7 @@ fn move_detached(git_dir: &Path, old: Option<&str>, new: &str) -> Result<(), Eng
 /// rather than following it. No reflog is written. Inputs: the git folder, the commit HEAD
 /// must hold, None for any, and the new HEAD text. Output: Ok once written, or
 /// `changes_git_failed` with the lock removed.
+#[cfg(unix)]
 fn replace_head(git_dir: &Path, old: Option<&str>, text: &str) -> Result<(), EngineError> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -546,6 +550,15 @@ fn replace_head(git_dir: &Path, old: Option<&str>, text: &str) -> Result<(), Eng
         let _ = std::fs::remove_file(&lock);
     }
     moved
+}
+
+/// Refuses this step where landing has no Windows design yet, so no folder is made or
+/// read through a path an agent could swap (PLAN-1336 W5a). Inputs: as the Unix twin,
+/// unused. Output: `changes_unavailable`.
+#[cfg(not(unix))]
+fn replace_head(git_dir: &Path, old: Option<&str>, text: &str) -> Result<(), EngineError> {
+    let _ = (git_dir, old, text);
+    Err(failure("changes_unavailable"))
 }
 
 /// Refuses a reflog git would append to through a link: each folder on the way to
@@ -625,6 +638,7 @@ pub(super) fn open_agent(
 /// The engine runs this git; the agent writes no git metadata. A worktree already on the
 /// branch is left as it is. Inputs: the store and the three paths. Output: the branch, or
 /// `changes_agent_branch_exists`, `changes_agent_branch_invalid` or `changes_git_failed`.
+#[cfg(unix)]
 pub(super) fn name_branch(
     db: &Connection,
     repository: &Path,
@@ -677,6 +691,7 @@ pub(super) fn name_branch(
 /// `agent_git::task_branch` takes it. Output: the branch, or `changes_agent_branch_invalid`
 /// for a name no branch can take, or `changes_agent_branch_exists` when every form is
 /// taken.
+#[cfg(unix)]
 pub(super) fn claim_branch(
     db: &Connection,
     repository: &Path,
@@ -744,6 +759,7 @@ pub(super) fn clone_branch(db: &Connection, worktree: &Path) -> Result<String, E
 /// names the commit the worktree was retired at, so a branch moved since keeps its work.
 /// Inputs: the owner's checkout root, the branch and that commit. Output: true when
 /// deleted, false when the branch had moved or was already gone.
+#[cfg(unix)]
 pub(super) fn drop_branch(
     repository: &Path,
     branch: &str,
@@ -1992,6 +2008,7 @@ fn commit_worktree(
 /// open above: a linked worktree's HEAD, or the tip of a clone's branch as fetched into
 /// the owner repository. Inputs: the store, the owner checkout, the worktree and its git
 /// folder. Output: Ok once stored.
+#[cfg(unix)]
 pub(super) fn start(
     db: &Connection,
     repository: &Path,
@@ -2043,6 +2060,7 @@ pub(super) fn start_master(
 /// worktree's HEAD, or the tip of a clone's branch as fetched into the owner repository,
 /// so the worker's own copy reads it through the owner's objects. Inputs: the store, the
 /// owner checkout, the lead's worktree and its git folder. Output: the commit id.
+#[cfg(unix)]
 pub(super) fn tip(
     db: &Connection,
     repository: &Path,
@@ -2390,6 +2408,7 @@ fn already_on_tip(owner: &Repo, commit: &str, tip: Option<&str>) -> Result<bool,
 /// Notes that the agent of an updating change set was handed the work that resolves it,
 /// so the set no longer shows as waiting for its agent. Inputs: the store and the change
 /// set. Output: Ok, also when the set is no longer updating.
+#[cfg(unix)]
 pub(super) fn resolve_handed_over(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
     store::initialize(db)?;
     let repository = store::load(db, id)?.repository;
@@ -2406,6 +2425,7 @@ pub(super) fn resolve_handed_over(db: &Connection, id: &ChangeSetId) -> Result<(
 /// naming the branch it merged: its lead's branch for a lead's worker while Lands is Lead,
 /// else the owner's. Each conflicting file is on one line with its control characters
 /// replaced, newlines included. Inputs: the store and the change set. Output: the prompt.
+#[cfg(unix)]
 pub(super) fn resolve_prompt(db: &Connection, id: &ChangeSetId) -> Result<String, EngineError> {
     store::initialize(db)?;
     let record = store::load(db, id)?;
@@ -2464,6 +2484,7 @@ pub(super) fn resolve_prompt(db: &Connection, id: &ChangeSetId) -> Result<String
 /// workers' open sets close with it (DEC-107). Inputs: the store, the change set, the head
 /// that was reviewed, the time now and whether the owner pressed it. Output: the time it
 /// stays restorable until.
+#[cfg(unix)]
 pub(super) fn discard(
     db: &Connection,
     id: &ChangeSetId,
@@ -2546,6 +2567,7 @@ pub(super) fn hold_agent_claims(
 /// enough held sets that the open ones never crowd out `SWEPT_SETS_MAX` closed ones. A chat
 /// master's set records its session id, so a master takes the newest open master set.
 /// Inputs: the store, the project and the time now. Output: Ok or the first failure.
+#[cfg(unix)]
 pub(super) fn sweep_claims(
     db: &Connection,
     project: &ProjectId,
@@ -2643,6 +2665,7 @@ pub(super) fn discard_held(
 
 /// Whether a discarded change set can no longer come back: pruned, never given a restore
 /// window, or past it. Inputs: the record and the time now. Output: true when expired.
+#[cfg(unix)]
 fn restore_expired(record: &Record, now: u64) -> bool {
     record.pruned || record.restorable_until_ms.is_none_or(|until| now >= until)
 }
@@ -2657,6 +2680,7 @@ fn restore_expired(record: &Record, now: u64) -> bool {
 /// open change set, or while it holds unrecorded work or a HEAD, or a clone a branch tip,
 /// other than the commit the worktree's next change set would open above, so commits
 /// made since are kept and a later turn end cannot replace the restored head (GA-R4).
+#[cfg(unix)]
 pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(), EngineError> {
     store::initialize(db)?;
     let loaded = store::load(db, id)?;
@@ -2758,6 +2782,7 @@ pub(super) fn finish_restore(db: &Connection, record: &Record) -> Result<(), Eng
 /// whose ref cannot be deleted now is logged by its plain code and tried again at the next
 /// run, so it never stops the others. Inputs: the store and the time now. Output: how many
 /// were deleted.
+#[cfg(unix)]
 pub(super) fn prune(db: &Connection, now: u64) -> Result<usize, EngineError> {
     store::initialize(db)?;
     let mut pruned = 0;
@@ -2778,6 +2803,7 @@ pub(super) fn prune(db: &Connection, now: u64) -> Result<usize, EngineError> {
 /// Deletes one discarded change set's ref, marks it pruned and forgets the owner edits
 /// settled on it. The caller holds [`hold`] on its repository. Inputs: the store and the change set. Output: whether it was pruned
 /// now, false when it is no longer discarded or already pruned.
+#[cfg(unix)]
 fn prune_one(db: &Connection, id: &ChangeSetId) -> Result<bool, EngineError> {
     let mut record = store::load(db, id)?;
     if record.state != ChangeState::Discarded || record.pruned {

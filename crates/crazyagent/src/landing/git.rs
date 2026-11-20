@@ -1,9 +1,15 @@
 use crate::engine::EngineError;
+#[cfg(unix)]
 use std::collections::BTreeSet;
-use std::io::{Read, Write};
+use std::io::Read;
+#[cfg(unix)]
+use std::io::Write;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 pub(super) const OUTPUT_BYTES_MAX: usize = 64 * 1024 * 1024;
 pub(super) const LISTING_BYTES_MAX: usize = 64 * 1024;
@@ -28,6 +34,7 @@ thread_local! {
 const EXCLUDES_PATH_BYTES_MAX: usize = 1024;
 /// The longest the owner's ignore file is looked up for in a repository (RV-DS241-145).
 const EXCLUDES_LOOKUP_TIME: Duration = Duration::from_secs(10);
+#[cfg(unix)]
 const CHECK_LINE_BYTES_MAX: usize = 80;
 
 /// Refuses a git version older than `needed`, logging the version found and the one needed
@@ -565,7 +572,7 @@ impl Repo {
     /// no filter listing, no owner ignore file and no version check, which the owner
     /// repository opened before it already passed. Inputs: the git folder and the work
     /// tree, which must exist. Output: the repository.
-    #[cfg(unix)]
+    #[cfg(any(unix, test))]
     pub(super) fn fresh(git_dir: &Path, work_tree: &Path) -> Self {
         Self {
             git_dir: git_dir.to_path_buf(),
@@ -593,6 +600,7 @@ impl Repo {
     /// Points every later git call at a private index file the engine owns, so reading a
     /// work tree, such as an agent's own clone, neither reads nor writes an index in it.
     /// Input: the index path, which git creates. Output: the repository.
+    #[cfg(unix)]
     pub(super) fn private_index(mut self, index: &Path) -> Self {
         self.index = Some(index.to_path_buf());
         self
@@ -834,12 +842,13 @@ impl Repo {
         })
     }
 
-    /// This repository unchanged, since only macOS and Linux have a confined step: elsewhere
-    /// the step runs as any engine git call does. Input: what the step may write. Output:
-    /// the repository.
+    /// Refuses a confined step where no confinement exists yet, Windows among them, so a
+    /// step never runs on an agent's work tree with the engine's own rights (rv-sec3 #746
+    /// C6). Input: what the step may write, unused. Output: `changes_git_unsupported`.
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    pub(super) fn confined(&self, _writes: Writes) -> Result<Self, EngineError> {
-        Ok(self.clone())
+    pub(super) fn confined(&self, writes: Writes) -> Result<Self, EngineError> {
+        let _ = (self, writes);
+        Err(failure("changes_git_unsupported"))
     }
 
     /// This repository for a step that only reads an agent's work tree, confined to write
@@ -882,6 +891,7 @@ impl Repo {
         self.capture(&["version"], 256).map(version_numbers)
     }
 
+    #[cfg(unix)]
     fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
         let mut command = if self.confinement.is_empty() {
             Command::new(crate::research::runner::setup_git())
@@ -1195,8 +1205,25 @@ impl Repo {
         Ok(entries)
     }
 
+    /// Starts no git where engine git has no confined design yet, Windows among them, so
+    /// no landing git runs over the owner's or an agent's folders with the engine's own
+    /// rights (PLAN-1336 W5a). Inputs: as [`Self::exec`], unused. Output:
+    /// `changes_git_unsupported`.
+    #[cfg(not(unix))]
+    fn spawned(
+        &self,
+        args: &[&str],
+        input: Option<&[u8]>,
+        env: &[(&str, &str)],
+        limit: usize,
+    ) -> Result<Output, EngineError> {
+        let _ = (self, args, input, env, limit);
+        Err(failure("changes_git_unsupported"))
+    }
+
     /// Starts one git command and collects what [`Self::exec`] answers. Inputs and output:
     /// as there.
+    #[cfg(unix)]
     fn spawned(
         &self,
         args: &[&str],
@@ -1301,6 +1328,7 @@ impl Repo {
     /// Says which of the given object ids name a commit here, with one git run for all of
     /// them. Input: the ids; one that is not an object id is never sent. Output: the ids
     /// that are commits; a missing id or one naming another object type is left out.
+    #[cfg(unix)]
     pub(super) fn commits_among(&self, ids: &[&str]) -> Result<BTreeSet<String>, EngineError> {
         let asked: Vec<&str> = ids.iter().copied().filter(|id| is_object_id(id)).collect();
         if asked.is_empty() {
