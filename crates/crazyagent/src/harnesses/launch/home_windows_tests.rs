@@ -345,7 +345,12 @@ fn a_granted_home_passes_and_a_low_integrity_process_cannot_change_it() {
     let installed =
         WindowsSandbox::install(sandbox, &helper(), &profiles.join("agent.sb"), &grants).unwrap();
     let written = home.join("boxed.txt");
-    let line = format!("echo boxed>\"{}\"", written.display());
+    let named = written.to_str().unwrap();
+    assert!(
+        !named.contains(' '),
+        "std quotes a path with a space for cmd: {named}"
+    );
+    let line = format!("echo boxed>{named}");
     assert!(
         boxed(&installed, &project, &line),
         "the box writes its home"
