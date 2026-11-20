@@ -17,7 +17,7 @@ env:
   RUST_TOOLCHAIN: "1.98.1"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
-  TIP_SHA: 308114783
+  TIP_SHA: 36a87145c
   D2_TURNS: "20"
 
 defaults:
@@ -26,7 +26,7 @@ defaults:
 
 jobs:
   s6d2:
-    name: V244 WIN-MASTER S6 D2 turn boundary timing on ${{ matrix.runner }}, tip 308114783, quiet and under a parallel cargo build
+    name: V244 WIN-MASTER S6 D2 turn boundary timing on ${{ matrix.runner }}, tip 36a87145c, quiet and under a parallel cargo build
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     strategy:
