@@ -381,6 +381,47 @@ fn w5b_step_probe() {
     );
     facts.ran("timed uncontained dir /s", Ok(shell(&listing)));
     facts.ran("timed uncontained findstr /s", Ok(shell(&reading)));
+    let engine = |null: &str, args: &[&str]| {
+        let mut command = Command::new(&git);
+        command.env_clear();
+        for name in ["PATH", "SystemRoot"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+        command
+            .env("LC_ALL", "C")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", null)
+            .env("GIT_GRAFT_FILE", null)
+            .arg("-c")
+            .arg(format!("core.attributesFile={null}"))
+            .arg("--git-dir")
+            .arg(&private)
+            .args(args)
+            .current_dir(&private);
+        command
+    };
+    for (name, null) in [("NUL", "NUL"), ("empty", empty_text.as_str())] {
+        facts.ran(
+            &format!("engine {name} check-attr"),
+            Ok(engine(
+                null,
+                &["check-attr", "--source", "HEAD", "-a", "a.txt"],
+            )),
+        );
+        facts.ran(
+            &format!("engine {name} rev-list"),
+            Ok(engine(null, &["rev-list", "--count", "HEAD"])),
+        );
+        facts.ran(
+            &format!("engine {name} log -p"),
+            Ok(engine(
+                null,
+                &["log", "-1", "-p", "--format=%H", "HEAD", "--", "a.txt"],
+            )),
+        );
+    }
     let junction = work.join("jn");
     let made = crate::spawn_gate::collected(
         Command::new("cmd")
