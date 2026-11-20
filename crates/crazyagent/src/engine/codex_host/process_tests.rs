@@ -125,6 +125,134 @@ async fn a_stalled_reader_holds_the_harness_output_back_and_loses_none_of_it() {
     assert_eq!(process.close().await.unwrap(), status);
 }
 
+/// How many bytes a [`FLOOD_THEN_COUNT`] harness writes before it reads its input.
+const FLOOD_BYTES: usize = 2 * 1024 * 1024;
+
+/// The frame a row sends a [`FLOOD_THEN_COUNT`] harness: the owner's largest master frame.
+const FRAME_BYTES: usize = crate::master_frame_limit::BYTES_MAX;
+
+/// A harness that writes [`FLOOD_BYTES`] zero bytes, then reads its input to the end and
+/// writes how many bytes it read.
+const FLOOD_THEN_COUNT: &str = "dd if=/dev/zero bs=4096 count=512 2>/dev/null; wc -c | tr -d ' '";
+
+/// Starts a [`FLOOD_THEN_COUNT`] harness under custody with no clock, as a master with no
+/// time limit runs, with `output_bytes` of room and frames up to [`FRAME_BYTES`], then waits
+/// for it to fill its output. Inputs: the root and the bound. Output: the running process.
+async fn flood_then_count(root: &Path, output_bytes: u64) -> CodexHostProcess {
+    let mut command = selected_command("/bin/sh", root);
+    command.args(["-c", FLOOD_THEN_COUNT]);
+    let limits = ResourceBudget {
+        output_bytes,
+        wall_time_ms: 60_000,
+        ..ResourceBudget::unit()
+    };
+    let mut process = CodexHostProcess::spawn_guarded(
+        command,
+        &limits,
+        None,
+        None,
+        crate::sandbox::LineageCheck::Unneeded,
+    )
+    .await
+    .unwrap();
+    process.limit_input(FRAME_BYTES);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    process
+}
+
+/// One frame of [`FRAME_BYTES`] bytes, ending in a newline. Output: the frame.
+fn largest_frame() -> Vec<u8> {
+    let mut frame = vec![b'f'; FRAME_BYTES - 1];
+    frame.push(b'\n');
+    frame
+}
+
+/// CodeRabbit CR-1354: a harness with no clock that writes 2 MiB before it reads its input
+/// still takes a 1 MiB frame, larger than its pipe. The host waits on the frame without
+/// reading, so custody used to stop reading at a full queue, the harness blocked on its
+/// output and the frame never drained.
+#[tokio::test]
+async fn a_harness_that_floods_its_output_before_it_reads_still_takes_a_frame_larger_than_its_pipe()
+{
+    let root = tempfile::tempdir().unwrap();
+    let mut process = flood_then_count(root.path(), 4 * 1024 * 1024).await;
+    let sent = tokio::time::timeout(Duration::from_secs(20), process.send(&largest_frame())).await;
+    assert!(
+        sent.is_ok(),
+        "the frame waited 20 s on a harness blocked on its unread output"
+    );
+    sent.unwrap().unwrap();
+    process.close_stdin();
+    let mut stdout = Vec::new();
+    let status = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            match process.next_output().await.unwrap() {
+                CodexHostOutput::Stdout(bytes) => stdout.extend(bytes),
+                CodexHostOutput::Exited => break process.exit_status().expect("reaped status"),
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(status.success());
+    let count = format!("{FRAME_BYTES}\n");
+    assert_eq!(stdout.len(), FLOOD_BYTES + count.len());
+    assert!(stdout[..FLOOD_BYTES].iter().all(|byte| *byte == 0));
+    assert_eq!(&stdout[FLOOD_BYTES..], count.as_bytes());
+    assert_eq!(process.close().await.unwrap(), status);
+}
+
+/// CodeRabbit CR-1354: while a frame waits on a harness with no clock, custody reads its
+/// output past the full queue only up to the run's output bound. A harness that writes 2 MiB
+/// past a 1 MiB bound ends the run with `codex_host_output_limit`, the frame is refused, and
+/// the queue never held more than the bound.
+#[tokio::test]
+async fn the_output_bound_ends_a_run_that_floods_past_it_while_a_frame_waits() {
+    const BOUND: u64 = 1024 * 1024;
+    let root = tempfile::tempdir().unwrap();
+    let mut process = flood_then_count(root.path(), BOUND).await;
+    let sent = tokio::time::timeout(Duration::from_secs(20), process.send(&largest_frame())).await;
+    assert!(
+        sent.is_ok(),
+        "the frame waited 20 s on a harness blocked on its unread output"
+    );
+    assert!(
+        sent.unwrap().is_err(),
+        "a refused frame was reported as written"
+    );
+    let error = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            match process.next_output().await {
+                Ok(CodexHostOutput::Stdout(_)) => {}
+                Ok(CodexHostOutput::Exited) => panic!("the bound was reported as an exit"),
+                Err(error) => break error,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(error.0, "codex_host_output_limit");
+    let queued: usize = process
+        .shared()
+        .lock()
+        .unwrap()
+        .output
+        .iter()
+        .map(|output| match output {
+            CodexHostOutput::Stdout(bytes) => bytes.len(),
+            CodexHostOutput::Exited => 0,
+        })
+        .sum();
+    assert!(
+        queued as u64 <= BOUND,
+        "{queued} bytes queued past the bound"
+    );
+    tokio::time::timeout(Duration::from_secs(10), process.close())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 #[tokio::test]
 async fn codex_host_process_quiet_deadline_preserves_child_until_explicit_bounded_cleanup() {
     let root = tempfile::tempdir().unwrap();
