@@ -29,7 +29,6 @@ const AGENT_TMP: &str = "/private/tmp/ca-";
 #[cfg(not(target_os = "macos"))]
 const AGENT_TMP: &str = "/tmp/ca-";
 /// The most links one chain may pass through, the bound Linux puts on one lookup.
-#[cfg(unix)]
 const LINK_HOPS_MAX: usize = 40;
 /// The most rows read from one table that names folders agents can write, and the most
 /// repositories one project may declare; more is refused as unreadable, so no folder is
