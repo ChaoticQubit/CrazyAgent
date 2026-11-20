@@ -372,20 +372,46 @@ async fn a_client_on_an_anchor_with_no_locator_finds_no_owner() {
     );
 }
 
-#[tokio::test]
-async fn a_windows_engine_start_refuses_before_it_makes_a_database() {
+/// W3-4b D0 (#717 Q5 condition 3): with the early refusal gone, `start` on a product-made
+/// anchor goes on to `start_inner`, which makes `engine.db`, serves the engine and
+/// publishes the locator, and its shutdown removes the locator again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_windows_engine_start_reaches_start_inner_and_serves() {
     let (_temp, base) = plain_temp();
     let path = base.join("data");
     drop(private::store_dir(&path, private::Store::Database).unwrap());
     let config = settings(&base);
     let (_stop, stopped) = tokio::sync::watch::channel(false);
-    assert_eq!(
-        refusal(EngineService::start(&path, "e.sock", &config, &stopped).await),
-        "owner_anchor_unavailable"
-    );
-    assert!(
-        std::fs::symlink_metadata(path.join("engine.db")).is_err(),
-        "a refused Windows start makes no engine.db"
-    );
-    Anchor::open(&path).expect("the refusal is the early one: the anchor itself opens");
+    let mut service = EngineService::start(&path, "e.sock", &config, &stopped)
+        .await
+        .expect("a Windows start reaches start_inner and serves");
+    assert!(std::fs::symlink_metadata(path.join("engine.db")).is_ok());
+    assert!(std::fs::symlink_metadata(path.join(LOCATOR)).is_ok());
+    service.ensure_ready(&stopped).unwrap();
+    service.shutdown().await.unwrap();
+    assert!(std::fs::symlink_metadata(path.join(LOCATOR)).is_err());
+}
+
+/// W3-4b D0: `start_with_settings_sources`, the other caller of the early refusal, also
+/// reaches `start_inner` and serves, with its settings read from the two named files.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_windows_start_with_settings_sources_reaches_start_inner_and_serves() {
+    let (_temp, base) = plain_temp();
+    let path = base.join("data");
+    drop(private::store_dir(&path, private::Store::Database).unwrap());
+    let global = base.join("g");
+    std::fs::write(&global, "").unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        &path,
+        "e.sock",
+        &global,
+        &base.join("p"),
+        &stopped,
+    )
+    .await
+    .expect("a Windows start with settings sources reaches start_inner and serves");
+    assert!(std::fs::symlink_metadata(path.join("engine.db")).is_ok());
+    service.ensure_ready(&stopped).unwrap();
+    service.shutdown().await.unwrap();
 }
