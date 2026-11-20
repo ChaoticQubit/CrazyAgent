@@ -1,4 +1,4 @@
-use super::{WindowsSandbox, container_for};
+use super::{WindowsSandbox, Writer, container_for};
 use crate::sandbox::{
     AGENT_HOME_ENV, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, canonical,
     clean_absolute, invalid,
@@ -161,7 +161,8 @@ impl OwnerGit {
         fs::create_dir_all(&places.tmp)?;
         let git = plain_program(git)?;
         let policy = policy(&project, &git, &places)?;
-        let boundary = WindowsSandbox::install(policy, helper, &places.profile, grants)?;
+        let boundary =
+            WindowsSandbox::install_for(policy, helper, &places.profile, grants, Writer::OwnerGit)?;
         assert_eq!(boundary.profile(), places.profile);
         Ok(Self {
             boundary,

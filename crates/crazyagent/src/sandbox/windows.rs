@@ -28,6 +28,19 @@ pub const SEATBELT_MISSING: &str =
 
 /// The most processes one agent may run at once inside its job.
 pub const ACTIVE_PROCESSES: u32 = 512;
+
+/// Why an agent's profile is refused when one of its writable roots reaches the project's git
+/// folder, in plain words (rv-sec3 #764 L1).
+pub const WRITES_OWNER_GIT: &str = "an agent profile can't write the project's git folder";
+
+/// Who a boundary profile is for: an agent, which never writes the project's git folder, or the
+/// owner's own git ([`owner_git`]), the one profile that writes it, since the engine then runs
+/// git there as itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Writer {
+    Agent,
+    OwnerGit,
+}
 /// The lock file git writes beside `.git\config` while it changes the config. The Windows
 /// boundary leaves it out of the protected paths: Windows cannot refuse creating one name, so
 /// guarding a lock that is normally missing would keep `.git` from taking new entries, git's
@@ -82,11 +95,28 @@ impl WindowsSandbox {
         profile: &Path,
         grants: &Path,
     ) -> Result<Self, SandboxError> {
+        Self::install_for(sandbox, helper, profile, grants, Writer::Agent)
+    }
+
+    /// [`WindowsSandbox::install`] for one writer: an agent's profile is refused before any
+    /// folder is made when it would write the project's git folder ([`writes_owner_git`]).
+    /// Inputs: the policy, the helper, the profile path, the grants folder and the writer.
+    /// Output: the sandbox, or the [`SandboxError`] saying why not.
+    fn install_for(
+        sandbox: ProjectSandbox,
+        helper: &Path,
+        profile: &Path,
+        grants: &Path,
+        writer: Writer,
+    ) -> Result<Self, SandboxError> {
         let grants = Some(grants)
             .filter(|grants| clean_absolute(grants) && grants.is_dir())
             .ok_or_else(|| invalid("grants folder must exist"))?;
+        if writer == Writer::Agent && writes_owner_git(&sandbox) {
+            return Err(invalid(WRITES_OWNER_GIT));
+        }
         make_guarded_folders(&sandbox)?;
-        let boundary = boundary_profile(&sandbox, &canonical(grants)?)?;
+        let boundary = profile_for(&sandbox, &canonical(grants)?, writer)?;
         if let Some(root) = crazyagent_win_sandbox::unreadable_read_root(&boundary) {
             eprintln!("sandbox_read_root_refused cause=unreadable folder={root}");
             return Err(SandboxError::Unreadable(PathBuf::from(root)));
@@ -303,6 +333,38 @@ pub fn boundary_profile(
     sandbox: &ProjectSandbox,
     grants: &Path,
 ) -> Result<BoundaryProfile, SandboxError> {
+    profile_for(sandbox, grants, Writer::Agent)
+}
+
+/// Tells whether an agent under `sandbox` could write the project's git folder, where the
+/// engine's own git reads hooks, refs and objects as the engine: a writable root inside any
+/// `.git`, or one that holds or lies in the project's `.git` when that is a folder or a link
+/// rather than the plain file a worktree has. No guard holds the whole git folder (the project
+/// guards cover its hooks, config and modules, never its refs, objects or `HEAD`), so such a
+/// root is never allowed. Input: the policy. Output: the answer.
+fn writes_owner_git(sandbox: &ProjectSandbox) -> bool {
+    let git = sandbox.project_root().join(".git");
+    let folder = fs::symlink_metadata(&git).is_ok_and(|meta| !meta.is_file());
+    let in_git = |root: &Path| {
+        root.components()
+            .any(|part| part.as_os_str().eq_ignore_ascii_case(".git"))
+    };
+    sandbox
+        .writable_roots()
+        .any(|root| in_git(root) || (folder && (root.starts_with(&git) || git.starts_with(root))))
+}
+
+/// [`boundary_profile`] for one writer: an agent's profile that would write the project's git
+/// folder ([`writes_owner_git`]) is refused; owner git's is not. Inputs: the policy, the grants
+/// folder and the writer. Output: the profile, or the refusal.
+fn profile_for(
+    sandbox: &ProjectSandbox,
+    grants: &Path,
+    writer: Writer,
+) -> Result<BoundaryProfile, SandboxError> {
+    if writer == Writer::Agent && writes_owner_git(sandbox) {
+        return Err(invalid(WRITES_OWNER_GIT));
+    }
     let capabilities = capabilities(sandbox.network())?;
     let read_roots = sandbox
         .read_roots()
@@ -1182,9 +1244,6 @@ mod tests {
             assert!(!project.join(".git").exists() && !project.join(".crazyagent").exists());
         }
     }
-
-    /// The refusal a profile gets when an agent could write the owner's git folder.
-    const WRITES_OWNER_GIT: &str = "an agent profile can't write the project's git folder";
 
     /// Tells whether a profile build was refused because it writes the owner's git folder.
     /// Input: the build's result. Output: the answer.
