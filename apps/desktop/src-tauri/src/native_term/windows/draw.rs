@@ -1,6 +1,6 @@
 use std::num::NonZeroIsize;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -34,6 +34,18 @@ const UNAVAILABLE: &str = "native_terminal_render_unavailable";
 const DEVICE_REPLACE_MAX: u32 = 2;
 
 static STARTED: OnceLock<bool> = OnceLock::new();
+
+/// The style hand-off: the newest style the render thread has not taken, and the last one
+/// handed over, so the same style is not handed twice.
+static STYLE: Mutex<Posted> = Mutex::new(Posted {
+    newest: None,
+    last: None,
+});
+
+struct Posted {
+    newest: Option<Style>,
+    last: Option<Style>,
+}
 static PRESENTS: AtomicU64 = AtomicU64::new(0);
 static FAILURES: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
@@ -47,17 +59,43 @@ static REMOVE_AT_PRESENT: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static FAIL_WAITS: AtomicU64 = AtomicU64::new(0);
 
-/// Starts the one render thread, once, drawing in the first style it is given. Input: the
-/// style. Output: ok, or `native_terminal_render_unavailable`.
+/// Starts the one render thread, once, drawing in the first style it is given, and hands it
+/// any later style a view opens in. Input: the style. Output: ok, or
+/// `native_terminal_render_unavailable`.
 pub fn start(style: &Style) -> Result<(), &'static str> {
     let started = STARTED.get_or_init(|| {
+        styles().last = Some(style.clone());
         let style = style.clone();
         let spawned = thread::Builder::new()
             .name("native-term-render".into())
             .spawn(move || run(style));
         spawned.is_ok()
     });
-    if *started { Ok(()) } else { Err(UNAVAILABLE) }
+    if !*started {
+        return Err(UNAVAILABLE);
+    }
+    post_style(style);
+    Ok(())
+}
+
+/// The style hand-off, held; a poisoned lock still holds a whole style. Output: the guard.
+fn styles() -> std::sync::MutexGuard<'static, Posted> {
+    STYLE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Hands the render thread a style, taken before any frame posted after it is drawn; the
+/// style it was last handed is not handed again. Input: the style.
+pub fn post_style(style: &Style) {
+    let mut posted = styles();
+    if posted.last.as_ref() == Some(style) {
+        return;
+    }
+    posted.newest = Some(style.clone());
+    posted.last = Some(style.clone());
+    drop(posted);
+    BOARD.ring();
 }
 
 /// Test builds only: how many frames the render thread presented, and how many surface
@@ -243,6 +281,7 @@ impl Replaced {
 struct Painter {
     style: Style,
     shared: Vec<(u32, Shared)>,
+    unstyled: Vec<u32>,
     views: Vec<Drawn>,
     replaced: Replaced,
 }
@@ -251,11 +290,15 @@ fn run(style: Style) {
     let mut painter = Painter {
         style,
         shared: Vec::new(),
+        unstyled: Vec::new(),
         views: Vec::new(),
         replaced: Replaced::default(),
     };
     loop {
         let round = BOARD.wait();
+        if let Some(style) = round.rung.then(|| styles().newest.take()).flatten() {
+            painter.restyle(style);
+        }
         for id in round.gone {
             painter.views.retain(|view| view.id != id);
             BOARD.dropped(id);
@@ -275,6 +318,39 @@ fn failed() {
 }
 
 impl Painter {
+    /// Takes a style handed over after the first: every held shared state reshapes in it
+    /// and every live view's cell is posted again. A scale whose shared state refuses it
+    /// keeps the old one, so its views fault and no surface is made there until a later
+    /// style takes. Input: the style.
+    fn restyle(&mut self, style: Style) {
+        if style == self.style {
+            return;
+        }
+        self.unstyled.clear();
+        for (key, shared) in &mut self.shared {
+            if shared.set_style(&style).is_err() {
+                self.unstyled.push(*key);
+            }
+        }
+        self.style = style;
+        for index in 0..self.views.len() {
+            let view = &self.views[index];
+            let (id, key) = (view.id, view.geometry.scale_key);
+            if view.surface.is_none() {
+                continue;
+            }
+            if self.unstyled.contains(&key) {
+                failed();
+                self.fault(index);
+            } else {
+                self.post_cell(id, key);
+            }
+        }
+        assert!(self.views.iter().all(|view| {
+            view.surface.is_none() || !self.unstyled.contains(&view.geometry.scale_key)
+        }));
+    }
+
     /// Makes a fresh view's surface; one that cannot be made faults the view, as macOS
     /// ends a view with no surface. Input: the view the board handed over.
     fn make(&mut self, fresh: Fresh) {
@@ -310,6 +386,9 @@ impl Painter {
     fn surface(&mut self, handle: isize, geometry: Geometry) -> Result<Surface, String> {
         self.retire_lost();
         let key = geometry.scale_key;
+        if self.unstyled.contains(&key) {
+            return Err(GPU_FAULT.to_owned());
+        }
         let index = match self.shared.iter().position(|(held, _)| *held == key) {
             Some(index) => index,
             None => {

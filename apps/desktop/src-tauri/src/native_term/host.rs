@@ -621,6 +621,8 @@ impl Native {
             }
             return Err(code);
         }
+        #[cfg(windows)]
+        platform::restyle(&style);
         let blink = style.blink;
         self.style = Some(style);
         for page in self.table.pages() {

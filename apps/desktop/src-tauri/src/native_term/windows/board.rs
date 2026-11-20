@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -38,10 +39,11 @@ pub struct Fresh {
     pub geometry: Geometry,
 }
 
-/// What the render thread does next: drop the surfaces of removed views, make surfaces for
-/// fresh views, then draw each ready view.
+/// What the render thread does next: take what it was rung for, drop the surfaces of
+/// removed views, make surfaces for fresh views, then draw each ready view.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Round {
+    pub rung: bool,
     pub gone: Vec<u64>,
     pub fresh: Vec<Fresh>,
     pub ready: Vec<u64>,
@@ -49,7 +51,7 @@ pub struct Round {
 
 impl Round {
     fn is_empty(&self) -> bool {
-        self.gone.is_empty() && self.fresh.is_empty() && self.ready.is_empty()
+        !self.rung && self.gone.is_empty() && self.fresh.is_empty() && self.ready.is_empty()
     }
 }
 
@@ -81,6 +83,7 @@ impl<T> Slot<T> {
 pub struct Board<T> {
     slots: Mutex<Vec<Slot<T>>>,
     bell: Condvar,
+    rung: AtomicBool,
 }
 
 impl<T> Board<T> {
@@ -89,6 +92,7 @@ impl<T> Board<T> {
         Board {
             slots: Mutex::new(Vec::new()),
             bell: Condvar::new(),
+            rung: AtomicBool::new(false),
         }
     }
 
@@ -205,12 +209,21 @@ impl<T> Board<T> {
     pub fn wait(&self) -> Round {
         let mut slots = self.lock();
         loop {
-            let round = next_round(&mut slots);
+            let mut round = next_round(&mut slots);
+            round.rung = self.rung.swap(false, Ordering::SeqCst);
             if !round.is_empty() {
                 return round;
             }
             slots = self.bell.wait(slots).expect("the board lock");
         }
+    }
+
+    /// Rings the render thread for a hand-off held beside the board, so its next round
+    /// says so even with no view changed; a ring before the round's lock is never missed.
+    pub fn ring(&self) {
+        self.rung.store(true, Ordering::SeqCst);
+        drop(self.lock());
+        self.bell.notify_all();
     }
 
     /// The render thread's word that a view's surface is gone, or was never made. Input:
@@ -384,6 +397,23 @@ mod tests {
         assert!(round.ready.is_empty());
         assert!(board.post_shown(1, true));
         board
+    }
+
+    #[test]
+    fn a_ring_wakes_a_waiting_render_thread_once_with_no_view_changed() {
+        let board = shown_board();
+        let rung = round_after(&board, || board.ring());
+        assert_eq!(
+            rung,
+            Round {
+                rung: true,
+                ..Round::default()
+            }
+        );
+        let idle = round_after(&board, || assert!(board.post_frame(1, "a")));
+        assert!(!idle.rung, "a ring is taken once");
+        board.ring();
+        assert!(round_within(&board).rung, "a ring before the wait is kept");
     }
 
     #[test]

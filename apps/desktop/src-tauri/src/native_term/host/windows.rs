@@ -3,7 +3,7 @@ use crate::native_term::a11y::{self, Geometry};
 use crate::native_term::render::{GPU_FAULT, Shared};
 use crate::native_term::screen::Frame;
 use crate::native_term::style::Style;
-use crate::native_term::windows::{View as Child, scale_key};
+use crate::native_term::windows::{View as Child, post_style, scale_key};
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::term::Term;
 use std::marker::PhantomData;
@@ -145,6 +145,12 @@ pub fn open_view(
         events,
         project,
     })
+}
+
+/// Hands the render thread a style the host took, before the frames it paints in it, so
+/// the render thread draws in the cell the host sizes grids with. Input: the style.
+pub fn restyle(style: &Style) {
+    post_style(style);
 }
 
 /// Gives the view keyboard focus; a faulted view takes none. Input: the view.
