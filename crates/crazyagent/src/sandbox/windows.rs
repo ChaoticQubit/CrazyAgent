@@ -153,29 +153,38 @@ impl WindowsSandbox {
     }
 
     fn base_env(&self) -> Vec<(&'static str, OsString)> {
-        let home = self.sandbox.agent_home();
-        let tmp = self.sandbox.agent_tmp().as_os_str();
-        let system = system_root();
-        let drive = system.chars().take(2).collect::<String>();
-        let path = format!(
-            r"{system}\System32;{system};{system}\System32\Wbem;{system}\System32\WindowsPowerShell\v1.0"
-        );
-        vec![
-            ("USERPROFILE", home.as_os_str().to_owned()),
-            ("HOME", home.as_os_str().to_owned()),
-            ("APPDATA", home.join("AppData").join("Roaming").into()),
-            ("LOCALAPPDATA", home.join("AppData").join("Local").into()),
-            ("TEMP", tmp.to_owned()),
-            ("TMP", tmp.to_owned()),
-            ("TMPDIR", tmp.to_owned()),
-            ("SystemRoot", system.clone().into()),
-            ("SystemDrive", drive.into()),
-            ("windir", system.clone().into()),
-            ("ComSpec", format!(r"{system}\System32\cmd.exe").into()),
-            ("PATHEXT", PATHEXT.into()),
-            ("PATH", path.into()),
-        ]
+        windows_base_env(
+            self.sandbox.agent_home(),
+            self.sandbox.agent_tmp().as_os_str(),
+        )
     }
+}
+
+/// The environment every Windows boundary command starts with, shared with the sign-in
+/// login child so the two cannot drift: the home and its AppData folders, the temp folder,
+/// the system folders from a checked `SystemRoot`, `PATHEXT` and a system-only `PATH`.
+/// Inputs: the home and the temp folder. Output: the names and values.
+pub(crate) fn windows_base_env(home: &Path, tmp: &OsStr) -> Vec<(&'static str, OsString)> {
+    let system = system_root();
+    let drive = system.chars().take(2).collect::<String>();
+    let path = format!(
+        r"{system}\System32;{system};{system}\System32\Wbem;{system}\System32\WindowsPowerShell\v1.0"
+    );
+    vec![
+        ("USERPROFILE", home.as_os_str().to_owned()),
+        ("HOME", home.as_os_str().to_owned()),
+        ("APPDATA", home.join("AppData").join("Roaming").into()),
+        ("LOCALAPPDATA", home.join("AppData").join("Local").into()),
+        ("TEMP", tmp.to_owned()),
+        ("TMP", tmp.to_owned()),
+        ("TMPDIR", tmp.to_owned()),
+        ("SystemRoot", system.clone().into()),
+        ("SystemDrive", drive.into()),
+        ("windir", system.clone().into()),
+        ("ComSpec", format!(r"{system}\System32\cmd.exe").into()),
+        ("PATHEXT", PATHEXT.into()),
+        ("PATH", path.into()),
+    ]
 }
 
 impl Sandbox for WindowsSandbox {
