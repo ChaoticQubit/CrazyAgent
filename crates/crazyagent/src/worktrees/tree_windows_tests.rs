@@ -93,7 +93,7 @@ fn null_list(path: &Path) {
     let script = format!(
         "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; \
          public static class W3 {{ [DllImport(\"advapi32.dll\", CharSet = CharSet.Unicode)] \
-         public static extern uint SetNamedSecurityInfoW(string n, int t, uint i, IntPtr o, \
+         public static extern uint SetNamedSecurityInfoW(string n, int t, int i, IntPtr o, \
          IntPtr g, IntPtr d, IntPtr s); }}'; \
          [W3]::SetNamedSecurityInfoW('{}', 1, 0x80000004, [IntPtr]::Zero, [IntPtr]::Zero, \
          [IntPtr]::Zero, [IntPtr]::Zero)",
