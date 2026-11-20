@@ -1,6 +1,6 @@
 use super::{RegisteredNativeAuthHost, pinnable_at};
 use crate::engine::EngineError;
-use crate::harnesses::finding::{AgentSpace, check_file};
+use crate::harnesses::finding::{AgentSpace, PATH_AGENT_SPACE, check_file};
 use crazyagent_win_sandbox::test_files::{null_dacl, supersede, writable_view};
 use sha2::Digest;
 use std::fs::{File, OpenOptions};
@@ -366,6 +366,38 @@ fn an_npm_codex_shim_passes_harness_search_by_the_script_it_starts() {
     let engine = tempfile::tempdir().unwrap();
     let (shim, _script) = npm_codex(&folder);
     assert_eq!(code(start_check(engine.path())(&shim)), "ok");
+}
+
+/// A shim outside the agent space whose script lies in a `.crazyagent` folder is refused by
+/// harness search as agent space, as a link into one is on Unix, since engine start and the
+/// catalog pin the script with no second check.
+#[test]
+fn an_npm_shim_whose_script_is_in_agent_space_is_refused_by_harness_search() {
+    let (_owner, folder) = owner_folder();
+    let engine = tempfile::tempdir().unwrap();
+    let script = folder
+        .join("node_modules")
+        .join(".crazyagent")
+        .join("codex.js");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, vec![b'A'; HARNESS_BYTES]).unwrap();
+    let shim = folder.join("codex.cmd");
+    std::fs::write(
+        &shim,
+        CODEX_SHIM.replace(
+            r"node_modules\@openai\codex\bin\codex.js",
+            r"node_modules\.crazyagent\codex.js",
+        ),
+    )
+    .unwrap();
+    assert_eq!(
+        crate::paths::executable_file(&shim),
+        Some(std::fs::canonicalize(&script).unwrap())
+    );
+    assert_eq!(
+        code(start_check(engine.path())(&plain(&shim))),
+        PATH_AGENT_SPACE
+    );
 }
 
 /// rv-sec2 #741: an npm shim pins the script it starts, and `current` resolves the entry as
