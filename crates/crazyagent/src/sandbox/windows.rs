@@ -1367,4 +1367,89 @@ mod tests {
                 .any(|root| Path::new(root).starts_with(&folders.project))
         );
     }
+
+    /// Makes `files` small files in 100-file folders under `root`, as a checkout's tree.
+    /// Inputs: the folder and the count. Output: none; it panics on a failed write.
+    fn tree(root: &Path, files: usize) {
+        for index in 0..files {
+            let folder = root.join(format!("d{:03}", index / 100));
+            if index % 100 == 0 {
+                fs::create_dir_all(&folder).unwrap();
+            }
+            fs::write(folder.join(format!("f{index:05}.txt")), "x\r\n").unwrap();
+        }
+    }
+
+    /// D2 timing (PLAN-0410): the time a master turn's boundary takes on a 20 000-file
+    /// repository and its worktree, under (a) a container per turn, granted at start and
+    /// released at end, and (b) one container a session keeps, whose later turns write no list.
+    /// Each turn starts `cmd /C exit 0` through the helper; `D2_TURNS` turns per option. Writes
+    /// n, p50, p95 and max in ms per option to the file `D2_TIMING_OUT` names. Run by name.
+    #[test]
+    #[ignore]
+    fn d2_turn_boundary_time_per_turn_and_per_session() {
+        let out = PathBuf::from(std::env::var_os("D2_TIMING_OUT").expect("D2_TIMING_OUT"));
+        let turns: usize = std::env::var("D2_TURNS").map_or(10, |n| n.parse().unwrap());
+        assert!((2..=50).contains(&turns));
+        let folders = folders();
+        let helper = helper();
+        let root = folders.project.parent().unwrap().to_path_buf();
+        let repository = root.join("repository");
+        let worktree = root.join("worktree");
+        fs::create_dir_all(repository.join(".git").join("objects")).unwrap();
+        tree(&repository, 20_000);
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(worktree.join(".git"), "gitdir: elsewhere\r\n").unwrap();
+        tree(&worktree, 20_000);
+        let turn = |home: &Path, tmp: &Path, profile: &Path| {
+            for folder in [home, tmp] {
+                fs::create_dir_all(folder).unwrap();
+            }
+            let sandbox =
+                ProjectSandbox::new(&worktree, home, tmp, SandboxNetwork::Only(Vec::new()))
+                    .and_then(|sandbox| sandbox.allow_read(&repository))
+                    .unwrap();
+            let container = container_name(&sandbox);
+            let installed =
+                WindowsSandbox::install(sandbox, &helper, profile, &folders.grants).unwrap();
+            let mut command = Command::new(cmd());
+            command.arg("/C").arg("exit 0").current_dir(&worktree);
+            assert!(quiet(&installed, &command), "the turn ran");
+            container
+        };
+        let mut lines = Vec::new();
+        for option in ["a", "b"] {
+            let mut took = Vec::new();
+            let session = root.join(format!("session-{option}"));
+            for index in 0..turns {
+                let place = if option == "a" {
+                    session.join(format!("turn-{index}"))
+                } else {
+                    session.clone()
+                };
+                let profile = folders.profiles.join(format!("{option}-{index}.sb"));
+                let started = std::time::Instant::now();
+                let container = turn(&place.join("home"), &place.join("tmp"), &profile);
+                if option == "a" {
+                    crazyagent_win_sandbox::release(&profile, &container).unwrap();
+                }
+                took.push(started.elapsed().as_millis());
+                if option == "b" && index + 1 == turns {
+                    crazyagent_win_sandbox::release(&profile, &container).unwrap();
+                }
+            }
+            let first = took[0];
+            let mut sorted = took.clone();
+            sorted.sort_unstable();
+            let at = |share: usize| sorted[(sorted.len() * share).div_ceil(100) - 1];
+            lines.push(format!(
+                "D2 option={option} n={} first_ms={first} p50_ms={} p95_ms={} max_ms={} all_ms={took:?}",
+                took.len(),
+                at(50),
+                at(95),
+                sorted[sorted.len() - 1]
+            ));
+        }
+        fs::write(&out, lines.join("\n") + "\n").unwrap();
+    }
 }
