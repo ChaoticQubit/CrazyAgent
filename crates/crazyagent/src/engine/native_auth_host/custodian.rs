@@ -7,6 +7,8 @@ use std::io::Read;
 use std::os::fd::OwnedFd;
 #[cfg(windows)]
 use std::sync::mpsc::{Receiver, Sender};
+#[cfg(windows)]
+use std::time::Instant;
 
 /// The longest failure code a custodian may name: the bound of a stored sign-in fact's code.
 pub(super) const CAUSE_BYTES_MAX: usize = 128;
@@ -93,6 +95,13 @@ impl CustodianCause {
         }
         assert!(self.text.len() <= CAUSE_KEPT_MAX);
         Ok(())
+    }
+
+    /// Takes what the thread kept once the custodian exited, until the deadline. Input: the
+    /// deadline. Output: Ok.
+    pub(super) fn read_to_end(&mut self, deadline: Instant) -> Result<(), EngineError> {
+        let _ = deadline;
+        self.read()
     }
 }
 

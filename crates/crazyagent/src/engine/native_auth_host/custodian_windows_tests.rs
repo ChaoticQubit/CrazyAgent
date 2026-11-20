@@ -33,6 +33,13 @@ const CREATE_SUSPENDED: u32 = 0x0000_0004;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const TREE_END_BOUND: Duration = Duration::from_secs(2);
 const FIND_BOUND: Duration = Duration::from_secs(20);
+const LAST_WRITER: &str = "(echo last_code)1>&2";
+const LATE_WRITER: &str =
+    r#"start "" /b cmd /d /c "ping -n 2 127.0.0.1 >NUL & (echo late_code)1>&2""#;
+const LATE_HOLDER: &str = r#"start "" /b ping -n 60 127.0.0.1 >NUL"#;
+const DRAIN_BOUND: Duration = Duration::from_secs(2);
+const DRAIN_SLACK: Duration = Duration::from_secs(1);
+const CAUSE_TRIALS: usize = 200;
 const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// The product binary the farm built for these rows, named by
@@ -239,6 +246,75 @@ fn the_cause_reader_drains_a_large_error_stream_and_keeps_one_code() {
     let large = cause_of("'x' * 1048576");
     assert_eq!(large.text.len(), CAUSE_BYTES_MAX + 2);
     assert_eq!(large.code(), None);
+}
+
+/// Starts a stand-in custodian that runs `line` in `cmd`, its error stream piped, in a held
+/// tree, and waits for the custodian itself to exit. Input: the line. Output: the tree, still
+/// holding anything the stand-in started, and the cause, read by nothing yet.
+fn exited_custodian(line: &str) -> (crazyagent_win_sandbox::ProcessTree, CustodianCause) {
+    let mut command = Command::new(cmd());
+    command
+        .args(["/d", "/c"])
+        .raw_arg(line)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
+    let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+    let tree = crazyagent_win_sandbox::ProcessTree::hold(&child).unwrap();
+    let cause = CustodianCause::new(child.stderr.take().unwrap()).unwrap();
+    assert!(child.wait().unwrap().success());
+    (tree, cause)
+}
+
+/// rv-sec2 #747: a code the custodian writes just before it exits is read by the read
+/// dispatch makes after the exit, in every one of 200 trials.
+#[test]
+fn a_code_written_just_before_the_custodian_exits_is_read_every_time() {
+    let mut read = 0;
+    for _ in 0..CAUSE_TRIALS {
+        let (tree, mut cause) = exited_custodian(LAST_WRITER);
+        cause.read_to_end(Instant::now() + CAUSE_BOUND).unwrap();
+        drop(tree);
+        read += usize::from(cause.text.starts_with(b"last_code"));
+    }
+    assert_eq!(read, CAUSE_TRIALS);
+}
+
+/// rv-sec2 #747: the read after exit takes the error stream to its end, so a code a process
+/// the custodian started writes after the custodian itself exited is still read. The control:
+/// a poll read right after the exit has not seen it yet.
+#[test]
+fn the_read_after_exit_takes_the_error_stream_to_its_end() {
+    let (tree, mut cause) = exited_custodian(LATE_WRITER);
+    cause.read().unwrap();
+    assert!(
+        cause.text.is_empty(),
+        "the late code came before the poll read"
+    );
+    cause.read_to_end(Instant::now() + CAUSE_BOUND).unwrap();
+    drop(tree);
+    assert!(
+        cause.text.starts_with(b"late_code"),
+        "the read after exit missed a late code: {:?}",
+        String::from_utf8_lossy(&cause.text)
+    );
+}
+
+/// rv-sec2 #747: a process that keeps the custodian's error stream open holds the read after
+/// exit only to its deadline, never past it by more than a second, and never ends it early;
+/// the tree's drop then ends the holder.
+#[test]
+fn the_read_after_exit_returns_at_its_deadline_while_a_holder_keeps_the_stream_open() {
+    let (tree, mut cause) = exited_custodian(LATE_HOLDER);
+    let started = Instant::now();
+    cause.read_to_end(started + DRAIN_BOUND).unwrap();
+    let waited = started.elapsed();
+    drop(tree);
+    assert!(
+        waited >= DRAIN_BOUND && waited < DRAIN_BOUND + DRAIN_SLACK,
+        "the read after exit waited {waited:?} for a bound of {DRAIN_BOUND:?}"
+    );
 }
 
 /// The system's `cmd.exe`, found through `SystemRoot`.
