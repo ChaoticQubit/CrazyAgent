@@ -40,6 +40,8 @@ mod store;
 mod subagent;
 #[cfg(all(test, unix))]
 mod tests;
+#[cfg(all(test, windows))]
+mod windows_tests;
 
 /// How long a discarded change set stays restorable before its ref is deleted.
 pub const RESTORE_WINDOW_MS: u64 = 7 * 24 * 60 * 60 * 1000;
