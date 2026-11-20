@@ -246,8 +246,8 @@ impl Pane {
             .is_some_and(|t| t.grid().display_offset() > 0)
     }
 
-    /// Whether the pane holds a selection of at least one cell, blank or not; the empty one a
-    /// plain click leaves is none, as xterm's `hasSelection` reads. Output: the answer.
+    /// Whether the pane holds a selection of at least one cell, blank or not; the empty
+    /// selection a plain click leaves is none. Output: the answer.
     #[cfg(windows)]
     pub fn has_selection(&self) -> bool {
         let selection = self.term.as_ref().and_then(|term| term.selection.as_ref());
