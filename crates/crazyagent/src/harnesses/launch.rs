@@ -1117,6 +1117,23 @@ pub(crate) fn validate_home(_home: &Path) -> Result<(), LaunchError> {
     Err(failure("launch_account_home_unavailable"))
 }
 
+/// Refuses an account home on Windows. Takes the home and the owner's profile folder, both
+/// unused. Returns `launch_account_home_unavailable`.
+#[cfg(windows)]
+fn validate_home_for(_home: &Path, _owner: Option<&Path>) -> Result<(), LaunchError> {
+    Err(failure("launch_account_home_unavailable"))
+}
+
+/// Refuses every Windows account home's security facts. Takes the facts and the user's SID,
+/// both unused. Returns the reason.
+#[cfg(windows)]
+fn judge_home(
+    _facts: &crazyagent_win_sandbox::private::Facts,
+    _user: &[u8],
+) -> Result<(), &'static str> {
+    Err("the home is not judged on Windows")
+}
+
 /// What a harness output reader hands the session: one line, the note that a line longer
 /// than `LINE_BYTES_MAX` was passed over, or the end of the output.
 enum Line {
@@ -2085,3 +2102,6 @@ mod tests;
 
 #[cfg(all(test, windows))]
 pub(crate) mod low_probe;
+
+#[cfg(all(test, windows))]
+mod home_windows_tests;
