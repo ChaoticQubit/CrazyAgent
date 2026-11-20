@@ -345,15 +345,27 @@ mod endpoint_tests {
     }
 
     /// Decision 1: a file name outside D7's plain shape, or a path with no folder above it,
-    /// names no endpoint, and the refusal is an error the caller reports, never a panic.
+    /// names no endpoint, and the refusal is an error the caller reports, never a panic. A
+    /// backslash is a name byte on Unix, refused, and a separator on Windows (farm run
+    /// 44709311585).
     #[test]
     fn an_endpoint_path_outside_the_plain_shape_is_refused() {
         let long = "a".repeat(33);
         let root = Path::new("data");
-        for name in ["Engine.sock", "engine sock", "e\\s", long.as_str()] {
+        for name in ["Engine.sock", "engine sock", "e+s", long.as_str()] {
             let refused = endpoint(&root.join(name)).unwrap_err();
             assert_eq!(refused.to_string(), "ipc_endpoint_not_plain", "{name:?}");
         }
+        #[cfg(unix)]
+        assert_eq!(
+            endpoint(&root.join("e\\s")).unwrap_err().to_string(),
+            "ipc_endpoint_not_plain"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            endpoint(&root.join("e\\s")).unwrap(),
+            (Path::new("data\\e"), "s")
+        );
         for path in [Path::new("engine.sock"), Path::new("")] {
             let refused = endpoint(path).unwrap_err();
             assert_eq!(refused.to_string(), "ipc_endpoint_not_plain", "{path:?}");
