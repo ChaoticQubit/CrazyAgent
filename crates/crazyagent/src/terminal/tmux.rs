@@ -743,13 +743,14 @@ impl Tmux {
         Ok((*pane).to_owned())
     }
 
-    /// Tags a pane as the agent's app and marks its window as one whose app the engine tagged,
-    /// so the one-pane fallback never takes a pane left beside it. Takes the control client,
-    /// the pane id and the agent. Returns once both options are set, or tmux's error.
+    /// Marks a pane's window as one whose app the engine tagged, then tags the pane as the
+    /// agent's app, so the one-pane fallback never takes a pane left beside it; a pane that
+    /// closes between the two leaves a marked window, which refuses (CR-0351 F1). Takes the
+    /// control client, the pane id and the agent. Returns once both are set, or tmux's error.
     fn mark_app(control: &Control, pane: &str, agent: &AgentId) -> Result<(), HostError> {
         assert!(pane_id_valid(pane), "only a pane id is tagged");
-        control.run(&format!("set-option -p -t {pane} {AGENT_TAG} {agent}"))?;
         control.run(&format!("set-option -w -t {pane} {APP_MARK} {agent}"))?;
+        control.run(&format!("set-option -p -t {pane} {AGENT_TAG} {agent}"))?;
         Ok(())
     }
 
