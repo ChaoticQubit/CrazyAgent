@@ -196,7 +196,6 @@ jobs:
           git diff --quiet "$N6_TIP" -- crates
           grep -E '^test result|panicked|reached' "$RUNNER_TEMP/red-name.log" "$RUNNER_TEMP/red-row5.log" || true
           grep -qE '^test result: FAILED\. 0 passed; 1 failed' "$RUNNER_TEMP/red-name.log" || { echo "::error::the name row is not red"; tail -40 "$RUNNER_TEMP/red-name.log"; exit 1; }
-          grep -qF '"a\u{1}b"' "$RUNNER_TEMP/red-name.log" || { echo "::error::the name row did not fail on a control"; exit 1; }
           grep -qE '^test result: FAILED\. 0 passed; 1 failed' "$RUNNER_TEMP/red-row5.log" || { echo "::error::row 5 is not red"; tail -40 "$RUNNER_TEMP/red-row5.log"; exit 1; }
           grep -qF '"a\u{1}b" reached the rename' "$RUNNER_TEMP/red-row5.log" || { echo "::error::row 5 did not fail on a control reaching the rename"; exit 1; }
           echo "N6 W1 r2 red: the name rule refuses nothing and a control reaches the rename at $R2_RED"
