@@ -2,6 +2,9 @@ use super::pane::Input;
 use crazyagent::terminal::INPUT_BYTES_MAX;
 use unicode_width::UnicodeWidthChar;
 
+#[cfg(any(windows, test))]
+pub mod compose;
+
 /// The most UTF-16 units of marked text a view keeps; an input method never composes this
 /// much, and a longer marked text is kept cut at a character boundary.
 pub const MARKED_UNITS_MAX: usize = 1024;
@@ -14,6 +17,7 @@ pub const COMMIT_BYTES_MAX: usize = 1 << 20;
 const FUNCTION_CHARS: std::ops::RangeInclusive<char> = '\u{F700}'..='\u{F8FF}';
 
 /// The modifier keys of one key event that decide its route.
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Mods {
     pub command: bool,
@@ -25,6 +29,7 @@ pub struct Mods {
 /// pane at once as the key map's bytes (Control bytes, Option as Meta), or through the input
 /// method, whose passed-back commands (Return, Shift+Enter, Tab, arrows) send the key map's
 /// bytes too.
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Route {
     Ignore,
@@ -36,6 +41,7 @@ pub enum Route {
 /// belongs to the input method; else Control and Option keys go straight to the key map and
 /// the rest go through the input method. Inputs: the modifiers and whether marked text was
 /// shown before the key. Output: the route.
+#[cfg(any(target_os = "macos", test))]
 pub fn route(mods: Mods, composing: bool) -> Route {
     let route = if mods.command {
         Route::Ignore
@@ -55,6 +61,7 @@ pub fn route(mods: Mods, composing: bool) -> Route {
 /// What the input method did with one interpreted key: whether it inserted or marked text,
 /// whether it passed a command back (Return, Tab, Backspace, Escape, arrows arrive so), and
 /// whether marked text was shown before and after the key.
+#[cfg(any(target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Took {
     pub handled: bool,
@@ -68,6 +75,7 @@ pub struct Took {
 /// passed a command back (Korean commits the syllable, then Return or an arrow goes on);
 /// otherwise when it passed a command or took nothing. Input: what it did. Output: true to
 /// send the key's own bytes after any committed text.
+#[cfg(any(target_os = "macos", test))]
 pub fn own_bytes(took: Took) -> bool {
     let sends = if took.after {
         false
@@ -205,6 +213,7 @@ impl Ime {
 
     /// Commits the marked text itself (the input method asked to unmark it). Output: the
     /// inputs to send, none when not composing.
+    #[cfg(any(target_os = "macos", test))]
     pub fn unmark(&mut self) -> Vec<Input> {
         let marked = std::mem::take(&mut self.marked);
         self.selected = (0, 0);
@@ -237,6 +246,7 @@ impl Ime {
     /// The part of the marked text a range asks for, clamped to it. Input: the UTF-16
     /// location and length. Output: the text and the range it covers, or none when the range
     /// misses the marked text.
+    #[cfg(any(target_os = "macos", test))]
     pub fn substring(&self, range: (usize, usize)) -> Option<(String, (usize, usize))> {
         if !self.composing() {
             return None;
