@@ -1,9 +1,9 @@
-use super::git::{GIT_RUNS, Repo, Writes};
+use super::git::{Repo, Writes};
 use super::*;
 use std::process::{Command, Stdio};
 
 /// The landing functions Windows refuses in 2.4.4, in `landing.rs` order (PLAN-1336 D3).
-const REFUSED_NAMES: [&str; 47] = [
+const REFUSED_NAMES: [&str; 50] = [
     "add_agent_clone_on",
     "repoint_agent_clone",
     "repoint_linked_worktree",
@@ -24,7 +24,10 @@ const REFUSED_NAMES: [&str; 47] = [
     "commit_deletions",
     "sweep_claims",
     "resolve_task_prompt",
+    "owner_list",
     "settle_sub_agents",
+    "waiting",
+    "list",
     "open_teammate_sets",
     "accept_into",
     "accept_into_as",
@@ -141,8 +144,8 @@ fn code<T>(answer: Result<T, EngineError>) -> String {
     }
 }
 
-/// W5a a5-1: every landing function Windows does not run in 2.4.4 answers what it answered
-/// before W5a, `changes_unavailable`, or nothing done for the four the engine calls on every
+/// W5a a5-1: every landing function Windows does not run in 2.4.4, the Changes list among
+/// them so the Changes screen stays not ready, answers what it answered before W5a, `changes_unavailable`, or nothing done for the four the engine calls on every
 /// turn or sweep, and records its own name, so none of them starts work that Windows has no
 /// landing design for (PLAN-1336 D3).
 #[test]
@@ -189,7 +192,10 @@ fn each_refused_landing_function_refuses_by_name_on_windows() {
         code(commit_deletions(repo, home, &["a.txt"], "m")),
         code(sweep_claims(db, project, 1)),
         code(resolve_task_prompt(db, &id)),
+        code(owner_list(db, project)),
         code(settle_sub_agents(db, project, 1)),
+        code(waiting(db, Some(project))),
+        code(list(db, project)),
         code(open_teammate_sets(db, tree, 4)),
         code(accept_into(
             db,
@@ -236,14 +242,13 @@ fn each_refused_landing_function_refuses_by_name_on_windows() {
     }
     let names = REFUSED.with(|names| names.borrow().clone());
     assert_eq!(names, REFUSED_NAMES.to_vec());
-    assert_eq!(GIT_RUNS.with(std::cell::Cell::get), 0);
 }
 
 /// W5a a5-2, rv-sec3 #746 C6: a Windows confined step answers `changes_git_unsupported`
-/// for every kind and for a reading step, so no state of the branch reaches git on an
-/// agent's work tree unconfined.
+/// for every kind and for a reading step, and an engine git call starts no process and
+/// answers the same, so no state of the branch runs git with the engine's own rights.
 #[test]
-fn a_windows_confined_or_reading_step_is_refused_until_its_container_exists() {
+fn a_windows_engine_git_step_or_call_is_refused_and_starts_nothing() {
     let place = place();
     let ws = &place.workspace;
     let repo = Repo::fresh(&ws.git_dir, &ws.worktree);
@@ -251,43 +256,62 @@ fn a_windows_confined_or_reading_step_is_refused_until_its_container_exists() {
     for writes in [Writes::Objects, Writes::WorkTree, Writes::Index] {
         assert_eq!(code(repo.confined(writes)), "changes_git_unsupported");
     }
-    assert_eq!(GIT_RUNS.with(std::cell::Cell::get), 0);
+    let marker = ws.worktree.join("ran");
+    let marker_text = marker.to_str().unwrap();
+    assert_eq!(
+        code(repo.exec(
+            &["config", "--file", marker_text, "a.b", "c"],
+            None,
+            &[],
+            4096
+        )),
+        "changes_git_unsupported"
+    );
+    assert!(!marker.exists());
 }
 
-/// W5a a5-3: the master path's landing functions, wired on Windows, start no engine git and
-/// record nothing while Windows engine git has no confined design: each answers an error,
-/// no change set is listed and no engine ref exists in the project.
+/// W5a a5-3: the master path's landing functions on Windows answer an error and record
+/// nothing: a turn end stops at the worktree check, whose Windows path shape W5c makes
+/// match, and the owner reads stop at engine git's not-ready refusal.
 #[test]
-fn the_master_landing_path_on_windows_starts_no_git_and_records_nothing() {
-    let place = place();
+fn the_master_landing_path_on_windows_records_nothing() {
+    let mut place = place();
+    place.workspace.agent.kind = AgentKind::Sub;
     let db = &place.db;
     let ws = &place.workspace;
     let home = place.home.as_path();
-    GIT_RUNS.with(|runs| runs.set(0));
     let turn = TurnEnd {
         outcome: TurnOutcome::Succeeded,
         turn: "turn-1".into(),
         prompt_line: "edit a".into(),
     };
-    let id = ChangeSetId("cs-1".into());
-    assert!(record_master_start(db, &ws.repository, &ws.worktree, &ws.git_dir).is_err());
-    assert!(record_turn_end(db, ws, &turn).is_err());
-    assert!(record_commits(db, ws, &turn).is_err());
-    assert!(diff(db, &id, "h", 0).is_err());
-    assert!(
-        accept(
+    assert_eq!(
+        code(record_master_start(
             db,
-            home,
-            &id,
-            "h",
-            None,
-            crate::activity::AcceptPlace::Changes
-        )
-        .is_err()
+            &ws.repository,
+            &ws.worktree,
+            &ws.git_dir
+        )),
+        "changes_workspace_invalid"
     );
-    assert!(owner_git_identity(&ws.repository, home).is_err());
-    assert_eq!(GIT_RUNS.with(std::cell::Cell::get), 0);
-    assert!(list(db, &ws.project).unwrap().is_empty());
+    assert_eq!(
+        code(record_turn_end(db, ws, &turn)),
+        "changes_workspace_invalid"
+    );
+    assert_eq!(
+        code(record_commits(db, ws, &turn)),
+        "changes_workspace_invalid"
+    );
+    assert_eq!(
+        code(owner_git_identity(&ws.repository, home)),
+        "changes_unavailable"
+    );
+    assert_eq!(
+        code(checked_out_branch(&ws.repository)),
+        "changes_unavailable"
+    );
+    assert!(open_change_set(db, &ws.worktree).unwrap().is_none());
+    assert_eq!(number_change_sets(db).unwrap(), 0);
     assert!(
         !ws.repository
             .join(".git")
@@ -297,15 +321,13 @@ fn the_master_landing_path_on_windows_starts_no_git_and_records_nothing() {
     );
 }
 
-/// W5a a5-4: the landing functions that read only the engine's store answer on Windows
-/// over an empty store, as they do on macOS and Linux.
+/// W5a a5-4: the landing functions that read one change set from the engine's store
+/// answer on Windows over an empty store, as they do on macOS and Linux.
 #[test]
-fn the_store_only_landing_functions_answer_on_windows() {
+fn the_store_reads_of_one_change_set_answer_on_windows() {
     let place = place();
     let db = &place.db;
     let ws = &place.workspace;
-    assert!(list(db, &ws.project).unwrap().is_empty());
-    assert!(owner_list(db, &ws.project).unwrap().is_empty());
     assert_eq!(number_change_sets(db).unwrap(), 0);
     assert!(open_change_set(db, &ws.worktree).unwrap().is_none());
     assert!(
@@ -313,5 +335,25 @@ fn the_store_only_landing_functions_answer_on_windows() {
             .unwrap()
             .is_none()
     );
-    waiting(db, Some(&ws.project)).unwrap();
+}
+
+/// W5a a5-5, PLAN-1336 D1: a file an agent may have replaced is read on Windows only when
+/// it is a plain file, never through a symbolic link it was swapped for, as the Unix twin
+/// opens it without following a link.
+#[test]
+fn a_bounded_read_on_windows_refuses_a_link_and_reads_a_plain_file() {
+    let place = place();
+    let folder = place.home.join("reads");
+    std::fs::create_dir(&folder).unwrap();
+    let secret = folder.join("secret.txt");
+    std::fs::write(&secret, "owner bytes\n").unwrap();
+    let plain = folder.join("plain.txt");
+    std::fs::write(&plain, "plain\n").unwrap();
+    let link = folder.join("gitdir");
+    std::os::windows::fs::symlink_file(&secret, &link).unwrap();
+    assert_eq!(super::flow::bounded_read(&plain, 64).unwrap(), b"plain\n");
+    assert_eq!(
+        code(super::flow::bounded_read(&link, 64)),
+        "changes_workspace_invalid"
+    );
 }
