@@ -1,44 +1,134 @@
 use std::io;
 use std::path::Path;
 
+#[cfg(unix)]
 pub(crate) use crate::platform::unix_socket::{
     OwnedReadHalf, OwnedWriteHalf, ReadHalf, UnixListener as Listener, UnixStream as Stream,
 };
+#[cfg(windows)]
+pub(crate) use windows::{
+    OwnedReadHalf, OwnedWriteHalf, PipeListener as Listener, PipeStream as Stream, ReadHalf,
+};
 
-/// Binds the owner-class listener at `path`: a socket made inside the spawn gate, guarded by
-/// its parent, the protected root. Must run inside a Tokio runtime.
-/// Input: the endpoint path. Output: the listener.
-#[cfg(unix)]
-pub(crate) fn owner_listener(path: impl AsRef<Path>) -> io::Result<Listener> {
-    crate::spawn_gate::bind_unix(path)
+/// Binds the owner-class listener at `path` for at most `streams` streams at once: on Unix a
+/// socket made inside the spawn gate, guarded by its parent, the protected root; on Windows
+/// the named pipe of that root and the file name, with `streams + 1` instances (DESIGN-0256
+/// D7-D8). Must run inside a Tokio runtime. Inputs: the endpoint path and the stream bound,
+/// 1 or more. Output: the listener.
+pub(crate) fn owner_listener(path: impl AsRef<Path>, streams: usize) -> io::Result<Listener> {
+    assert!(streams > 0, "a listener serves at least one stream");
+    #[cfg(unix)]
+    {
+        crate::spawn_gate::bind_unix(path)
+    }
+    #[cfg(windows)]
+    {
+        let (root, purpose) = endpoint(path.as_ref())?;
+        windows::bind(root, purpose, instances(streams))
+    }
 }
 
-/// Accepts one owner-class connection, taking the spawn gate only for each accept attempt.
-/// Input: the listener. Output: the stream, whose peer is not checked yet.
+/// Accepts one owner-class connection; on Unix the spawn gate is taken only for each accept
+/// attempt. Input: the listener. Output: the stream, whose peer is not checked yet.
 pub(crate) async fn owner_accept(listener: &Listener) -> io::Result<Stream> {
-    crate::spawn_gate::accept_unix(listener)
-        .await
-        .map(|(stream, _)| stream)
+    #[cfg(unix)]
+    {
+        crate::spawn_gate::accept_unix(listener)
+            .await
+            .map(|(stream, _)| stream)
+    }
+    #[cfg(windows)]
+    {
+        listener.accept().await
+    }
 }
 
-/// Connects to the owner-class endpoint at `path`, whose server is not checked yet.
-/// Input: the endpoint path. Output: the stream, or `unix_socket_unavailable` where this
-/// platform has no owner-class transport yet.
+/// Connects to the owner-class endpoint at `path`, whose server is not checked yet; on
+/// Windows the pipe name and the server's pin come from the root's pipes file. Input: the
+/// endpoint path. Output: the stream.
 pub(crate) async fn owner_connect(path: impl AsRef<Path>) -> io::Result<Stream> {
-    crate::spawn_gate::connect_unix(path).await
+    #[cfg(unix)]
+    {
+        crate::spawn_gate::connect_unix(path).await
+    }
+    #[cfg(windows)]
+    {
+        let (root, purpose) = endpoint(path.as_ref())?;
+        windows::connect(root, purpose).await
+    }
 }
 
-/// The server side's check of an accepted stream: its client runs as this user.
-/// Input: the stream. Output: Ok, `peer_owner_mismatch`, or the error reading the peer.
+/// Says whether a checked engine serves the owner-class endpoint at `path` now, writing no
+/// byte to it (V244-WIN-ENGINE-WIRING decision 6): the server must pass the client's whole
+/// check. Input: the endpoint path. Output: the answer; any failure reads false.
+#[cfg(windows)]
+pub(crate) fn owner_answering(path: &Path) -> bool {
+    endpoint(path).is_ok_and(|(root, purpose)| windows::answering(root, purpose))
+}
+
+/// The server side's check of an accepted stream: its client runs as this user (on Windows
+/// also in no AppContainer, unrestricted and at medium or above). Input: the stream. Output:
+/// Ok, `peer_owner_mismatch`, or the error reading the peer.
 pub(crate) fn verify_client(stream: &Stream) -> io::Result<()> {
-    same_user(stream)
+    #[cfg(unix)]
+    {
+        same_user(stream)
+    }
+    #[cfg(windows)]
+    {
+        windows::verify_client(stream)
+    }
 }
 
 /// The client side's check, right after connect and before any byte is written: the server
-/// runs as this user. Input: the stream. Output: Ok, `peer_owner_mismatch`, or the error
-/// reading the peer.
+/// runs as this user (on Windows it is also the engine start the pipes file pins). Input:
+/// the stream. Output: Ok, `peer_owner_mismatch`, or the error reading the peer.
 pub(crate) fn verify_server(stream: &Stream) -> io::Result<()> {
-    same_user(stream)
+    #[cfg(unix)]
+    {
+        same_user(stream)
+    }
+    #[cfg(windows)]
+    {
+        windows::verify_server(stream)
+    }
+}
+
+/// Splits an owner-class endpoint path into the protected root that holds it and its
+/// purpose, the file name, which D7 places verbatim in the pipe name (V244-WIN-ENGINE-WIRING
+/// decision 1). Input: the endpoint path. Output: the root and the purpose, or
+/// `ipc_endpoint_not_plain`.
+#[cfg(any(windows, test))]
+fn endpoint(path: &Path) -> io::Result<(&Path, &str)> {
+    let purpose = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| plain_purpose(name));
+    let root = path.parent().filter(|root| !root.as_os_str().is_empty());
+    match (root, purpose) {
+        (Some(root), Some(purpose)) => Ok((root, purpose)),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ipc_endpoint_not_plain",
+        )),
+    }
+}
+
+/// Windows' cap on the instances of one pipe name (win-sandbox `pipe::INSTANCES_MAX`).
+#[cfg(any(windows, test))]
+const PIPE_INSTANCES_MAX: u32 = 254;
+
+/// The pipe instances a Windows listener of `streams` streams makes: one per stream plus the
+/// one listening while a stream is handed off (DESIGN-0256 D8 caps). Input: the stream bound,
+/// 1 to 253. Output: the instance cap.
+#[cfg(any(windows, test))]
+fn instances(streams: usize) -> u32 {
+    assert!(streams > 0, "a listener serves at least one stream");
+    let cap = u32::try_from(streams)
+        .ok()
+        .and_then(|streams| streams.checked_add(1))
+        .filter(|cap| *cap <= PIPE_INSTANCES_MAX);
+    cap.expect("a listener's streams fit Windows' instance cap")
 }
 
 /// The Unix peer check both sides share: the kernel's credentials of the peer name this
@@ -59,13 +149,6 @@ fn same_user(stream: &Stream) -> io::Result<()> {
     Ok(())
 }
 
-/// The peer check of a stream that cannot exist where there is no owner-class transport.
-/// Input: that stream. Output: unreachable by construction.
-#[cfg(not(unix))]
-fn same_user(stream: &Stream) -> io::Result<()> {
-    match *stream {}
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -76,7 +159,7 @@ mod tests {
     async fn an_owner_endpoint_serves_a_client_of_this_user_at_its_path() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("engine.sock");
-        let listener = owner_listener(&path).unwrap();
+        let listener = owner_listener(&path, 1).unwrap();
         let kind = std::fs::symlink_metadata(&path).unwrap().file_type();
         assert!(kind.is_socket());
         let (client, served) = tokio::join!(owner_connect(&path), owner_accept(&listener));
@@ -599,7 +682,7 @@ mod windows_tests {
     #[tokio::test]
     async fn a_bound_pipe_serves_a_client_of_this_user_with_both_checks_passing() {
         let (_temp, root) = private_root();
-        let listener = bind(&root, "engine.sock").unwrap();
+        let listener = bind(&root, "engine.sock", 3).unwrap();
         let (client, served) = tokio::join!(connect(&root, "engine.sock"), listener.accept());
         let (mut client, mut served) = (client.unwrap(), served.unwrap());
         verify_server(&client).unwrap();

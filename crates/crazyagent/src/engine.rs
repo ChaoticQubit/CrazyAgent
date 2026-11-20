@@ -226,7 +226,8 @@ impl Server {
             _ => return Err(EngineError("socket_path_already_exists".into())),
         }
         let directory = std::fs::symlink_metadata(socket.parent().unwrap()).map_err(io_error)?;
-        let listener = crate::ipc::owner_listener(socket).map_err(io_error)?;
+        let listener =
+            crate::ipc::owner_listener(socket, config.settings.clients_max).map_err(io_error)?;
         let metadata = std::fs::symlink_metadata(socket).map_err(io_error)?;
         let checked = (|| {
             if !metadata.file_type().is_socket()
