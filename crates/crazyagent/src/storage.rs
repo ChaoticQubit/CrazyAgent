@@ -285,7 +285,6 @@ pub(crate) enum Job {
         Box<worker_dispatch::DispatchJob>,
         oneshot::Sender<Result<worker_dispatch::DispatchResult, EngineError>>,
     ),
-    #[cfg(unix)]
     OwnerStart(oneshot::Sender<Result<Started, EngineError>>),
     OwnerStop(HostStamp, oneshot::Sender<Result<(), EngineError>>),
     OwnerControl(
@@ -1133,7 +1132,6 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
-                        #[cfg(unix)]
                         Job::OwnerStart(reply) => {
                             let result = if readonly || owner_runtime.is_some() {
                                 Err(error("owner_runtime_unavailable_or_busy"))
@@ -2989,7 +2987,6 @@ fn owner_schema(tx: &Transaction<'_>) -> Result<bool, EngineError> {
     Ok(true)
 }
 
-#[cfg(unix)]
 fn owner_start(db: &mut Connection) -> Result<Started, EngineError> {
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)

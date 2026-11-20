@@ -711,7 +711,7 @@ struct RunnerSlot {
     binding: WorkerBinding,
     key: Option<RunnerKey>,
     boot: Option<RunnerBootIdentity>,
-    endpoint: Option<Identity>,
+    endpoint: Option<SocketIdentity>,
     active: bool,
     ready: Option<RunnerReady>,
 }
@@ -1084,7 +1084,7 @@ impl Authority {
             .ok_or_else(|| failure("runner_ready_required"))
     }
 
-    fn delivery_target(&self, ready: &RunnerReady) -> Result<(Root, Identity), EngineError> {
+    fn delivery_target(&self, ready: &RunnerReady) -> Result<(Root, SocketIdentity), EngineError> {
         let runners = self
             .runners
             .lock()
@@ -1700,7 +1700,10 @@ impl OwnerServer {
         if let Ok(root) = changes::engine_root(&authority) {
             let swept = tokio::task::spawn_blocking(move || {
                 crate::landing::open(&root).and_then(|db| {
+                    #[cfg(unix)]
                     let locked = crate::worktrees::lock_existing(&db);
+                    #[cfg(windows)]
+                    let locked = Ok::<usize, EngineError>(0);
                     if let Err(problem) = crate::landing::sweep_regenerations(&db) {
                         eprintln!(
                             "landing_regenerate_sweep_failed cause={}",

@@ -480,14 +480,10 @@ mod pipes_tests {
     };
     const SHAPE: &str = "the pipes file is not in the engine's shape";
 
-    /// DESIGN-0256 D7 pipes file (leader 07:46): one line with the version, the endpoint's
-    /// purpose, the per-start random part and the engine's pin, read back the same.
-
     /// W3-3 D2: two endpoints are the same only when the random part, the process ID and
     /// the creation time all match, so a client's compare sees a change in any one.
     #[test]
     fn an_endpoint_equals_another_only_on_random_pid_and_created() {
-        assert_eq!(PUBLISHED, PUBLISHED);
         let mut random = PUBLISHED;
         random.random[15] ^= 1;
         let pid = Published {
@@ -501,7 +497,16 @@ mod pipes_tests {
         for other in [random, pid, created] {
             assert_ne!(other, PUBLISHED);
         }
+        let same = Published {
+            random: PUBLISHED.random,
+            pid: PUBLISHED.pid,
+            created: PUBLISHED.created,
+        };
+        assert_eq!(same, PUBLISHED);
     }
+
+    /// DESIGN-0256 D7 pipes file (leader 07:46): one line with the version, the endpoint's
+    /// purpose, the per-start random part and the engine's pin, read back the same.
     #[test]
     fn a_pipes_file_reads_back_what_the_engine_wrote() {
         let text = encode_pipes("engine.sock", &PUBLISHED);
