@@ -200,7 +200,7 @@ fn the_worktree_add_step_cannot_write_an_admin_folder_it_holds() {
     let mut wrapped = step
         .wrap(&harness)
         .expect("the step's boundary holds agent-one under the call supervisor");
-    let output = crazyagent::spawn_gate::output(&mut wrapped).unwrap();
+    let output = crazyagent::spawn_gate::collected(&mut wrapped).unwrap();
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
