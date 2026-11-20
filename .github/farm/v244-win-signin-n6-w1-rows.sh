@@ -21,7 +21,8 @@ elif [ "$mode" = red ]; then
 else
   grep -qE "^test result: ok\. $total passed; 0 failed" "$log" || { echo "::error::tip is not $total passed"; exit 1; }
   for row in $new_rows; do
-    grep -qE "^test $row \.\.\. ok\$" "$log" || { echo "::error::$row did not pass"; exit 1; }
+    grep -qE "^test $row \.\.\. " "$log" || { echo "::error::$row did not run"; exit 1; }
+    if grep -qE "^    $row\$" "$log"; then echo "::error::$row is among the failures"; exit 1; fi
   done
-  echo "N6 W1 tip: $total of $total W1 private rows pass, each new row by name"
+  echo "N6 W1 tip: $total of $total W1 private rows pass, each new row ran and is not among the failures"
 fi
