@@ -479,11 +479,9 @@ const SUMMARY_LINES_MAX: usize = 64;
 const SUMMARY_LIST_LINES_MAX: usize = 512;
 
 /// The most distinct lines [`log_once`] keeps in one engine run.
-#[cfg(unix)]
 const LOGGED_ONCE_MAX: usize = 4096;
 
 /// The lines [`log_once`] wrote in this engine run.
-#[cfg(unix)]
 static LOGGED_ONCE: std::sync::Mutex<std::collections::BTreeSet<String>> =
     std::sync::Mutex::new(std::collections::BTreeSet::new());
 
@@ -491,7 +489,6 @@ static LOGGED_ONCE: std::sync::Mutex<std::collections::BTreeSet<String>> =
 /// Changes poll meets again, such as a change set whose lead is gone, does not drown every
 /// other line; past `LOGGED_ONCE_MAX` kept lines a new one is written without being kept.
 /// Input: the line, codes and ids only. Output: none.
-#[cfg(unix)]
 pub(crate) fn log_once(line: &str) {
     let mut kept = LOGGED_ONCE
         .lock()
