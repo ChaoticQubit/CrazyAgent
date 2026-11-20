@@ -99,12 +99,17 @@ async fn a_bind_in_a_root_that_is_not_private_is_refused() {
     let (temp, engine, config, _) = engine_at_a_private_root().await;
     let plain = temp.path().join("plain");
     std::fs::create_dir(&plain).unwrap();
-    let granted = std::process::Command::new("icacls")
-        .arg(&plain)
-        .args(["/grant", "*S-1-5-32-545:(OI)(CI)(RX)"])
-        .status()
-        .unwrap();
-    assert!(granted.success(), "icacls failed: {granted}");
+    let granted = crate::spawn_gate::collected(
+        std::process::Command::new("icacls")
+            .arg(&plain)
+            .args(["/grant", "*S-1-5-32-545:(OI)(CI)(RX)"]),
+    )
+    .unwrap();
+    assert!(
+        granted.status.success(),
+        "icacls failed: {}",
+        String::from_utf8_lossy(&granted.stderr)
+    );
     let refused = Server::bind(&plain.join("engine.sock"), engine, &config)
         .err()
         .unwrap();
