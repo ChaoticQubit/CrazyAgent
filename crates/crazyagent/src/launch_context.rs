@@ -3264,3 +3264,7 @@ fn copy_file(source: &Path, target: &Path, budget: &mut Budget) -> Result<(), La
 #[cfg(all(test, unix))]
 #[path = "launch_context/tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+#[path = "launch_context/windows_tests.rs"]
+mod windows_tests;
