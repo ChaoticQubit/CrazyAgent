@@ -27,7 +27,7 @@ defaults:
 
 jobs:
   win-probe:
-    name: V244-WIN-LANDING W5b D2 step probe r2 ${{ matrix.runner }} at cefba03e7 on chore/v244 3e45d7a38, facts only
+    name: V244-WIN-LANDING W5b D2 step probe r3 quiet and loaded ${{ matrix.runner }} at cefba03e7 on chore/v244 3e45d7a38, facts only
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     strategy:
@@ -87,7 +87,7 @@ jobs:
         run: '& "$env:RUNNER_TEMP\unc-share-setup.ps1"'
       - name: The probe, then its facts
         if: ${{ !cancelled() && steps.shares.outcome == 'success' }}
-        timeout-minutes: 20
+        timeout-minutes: 30
         run: |
           set +e -uo pipefail
           cargo test -p crazyagent --lib --locked -- --ignored --exact "$PROBE" > "$RUNNER_TEMP/probe-run.txt" 2>&1
@@ -97,4 +97,18 @@ jobs:
           echo "=== FACTS ${{ matrix.runner }}"
           cat "$RUNNER_TEMP/w5b-probe.txt"
           echo "=== END FACTS"
+          mv "$RUNNER_TEMP/w5b-probe.txt" "$RUNNER_TEMP/w5b-probe-quiet.txt"
+          CARGO_TARGET_DIR="$RUNNER_TEMP/load-target" cargo build -p crazyagent --release --locked > "$RUNNER_TEMP/load.txt" 2>&1 &
+          load=$!
+          sleep 45
+          kill -0 "$load" && echo "load running at probe start"
+          cargo test -p crazyagent --lib --locked -- --ignored --exact "$PROBE" > "$RUNNER_TEMP/probe-loaded.txt" 2>&1
+          loaded=$?
+          kill -0 "$load" && echo "load still running at probe end"
+          kill "$load" 2>/dev/null
+          grep -E "^test result" "$RUNNER_TEMP/probe-loaded.txt" | cut -c1-300 | head -2
+          echo "=== LOADED FACTS ${{ matrix.runner }}"
+          cat "$RUNNER_TEMP/w5b-probe.txt"
+          echo "=== END LOADED FACTS"
+          [ "$rc" -eq 0 ] && exit "$loaded"
           exit "$rc"
