@@ -127,10 +127,12 @@ fn a_windows_claude_master_home_that_is_missing_linked_or_open_is_refused() {
     );
 }
 
-/// A Windows instruction file that is missing, not private, a second name of another file
-/// or past the length bound refuses the master command: `claude_host_instructions_unavailable`
-/// for the missing one, `claude_host_unsafe_instructions` for the others; each starts from
-/// a private file that passes.
+/// A Windows instruction file that is missing, relative, one the Users group can read, a
+/// second name of another file or past the length bound refuses the master command:
+/// `claude_host_instructions_unavailable` for the missing one,
+/// `claude_host_unsafe_instructions` for the others; each starts from a private file that
+/// passes. A runner's temporary folder is private to its user, so a file the row writes
+/// there is opened to the Users group by name.
 #[test]
 fn a_windows_claude_master_instruction_file_that_is_open_linked_or_too_long_is_refused() {
     let (root, project, home, instructions) = turn();
@@ -143,10 +145,11 @@ fn a_windows_claude_master_instruction_file_that_is_open_linked_or_too_long_is_r
         refusal(&project, &home, Some(Path::new("instructions.md"))).as_deref(),
         unsafe_instructions
     );
-    let inherited = root.path().join("inherited.md");
-    fs::write(&inherited, "instructions").unwrap();
+    let open = root.path().join("open.md");
+    fs::write(&open, "instructions").unwrap();
+    grant_users_read(&open);
     assert_eq!(
-        refusal(&project, &home, Some(&inherited)).as_deref(),
+        refusal(&project, &home, Some(&open)).as_deref(),
         unsafe_instructions
     );
     assert_eq!(refusal(&project, &home, Some(&instructions)), None);
@@ -159,7 +162,7 @@ fn a_windows_claude_master_instruction_file_that_is_open_linked_or_too_long_is_r
     fs::remove_file(&second).unwrap();
     assert_eq!(refusal(&project, &home, Some(&instructions)), None);
     let long = home.join("long.md");
-    let mut file = private::file(&long, true).unwrap();
+    let file = private::file(&long, true).unwrap();
     file.set_len(INSTRUCTIONS_BYTES_MAX + 1).unwrap();
     drop(file);
     drop(private::read_only(&long).unwrap());
