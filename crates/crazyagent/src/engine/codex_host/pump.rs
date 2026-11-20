@@ -335,30 +335,54 @@ mod tests {
         assert_eq!(thread.join().unwrap(), b"onetwo");
     }
 
+    /// CodeRabbit CR-1149 (1): a pumped input says a write is done only once its pipe took
+    /// it whole. While the pipe's reader takes nothing, a write larger than the pipe stays
+    /// `WouldBlock`, and so does any other write, so custody keeps the request pending; once
+    /// the reader drains the pipe the same write is done, and every byte arrives in order.
     #[test]
-    fn a_pumped_input_holds_one_write_beyond_the_one_its_pipe_is_taking() {
+    fn a_pumped_input_write_is_done_only_once_its_pipe_took_it_whole() {
         let (mut reader, writer) = std::io::pipe().unwrap();
         let signal = Arc::new(Signal::new());
         let mut input = input(writer, Arc::clone(&signal), "pump-test-input").unwrap();
         let first = vec![1_u8; 1024 * 1024];
-        let second = vec![2_u8; 1024];
-        assert_eq!(input.write(&first).unwrap(), first.len());
-        std::thread::sleep(Duration::from_millis(200));
-        assert_eq!(input.write(&second).unwrap(), second.len());
-        let refused = input.write(b"third").unwrap_err();
-        assert_eq!(refused.kind(), io::ErrorKind::WouldBlock);
+        for _ in 0..4 {
+            let held = input.write(&first).unwrap_err();
+            assert_eq!(held.kind(), io::ErrorKind::WouldBlock);
+            std::thread::sleep(Duration::from_millis(50));
+        }
         let thread = std::thread::spawn(move || {
             let mut read = Vec::new();
             reader.read_to_end(&mut read).unwrap();
             read
         });
-        write_whole(&mut input, &signal, b"third");
+        write_whole(&mut input, &signal, &first);
+        write_whole(&mut input, &signal, b"second");
         drop(input);
         let read = thread.join().unwrap();
-        assert_eq!(read.len(), first.len() + second.len() + 5);
+        assert_eq!(read.len(), first.len() + 6);
         assert!(read[..first.len()].iter().all(|byte| *byte == 1));
-        assert_eq!(&read[first.len()..first.len() + second.len()], &second[..]);
-        assert_eq!(&read[first.len() + second.len()..], b"third");
+        assert_eq!(&read[first.len()..], b"second");
+    }
+
+    /// CodeRabbit CR-1149 (1): a pumped input whose one write fails on its pipe reports the
+    /// failure for that write, so custody fails the request instead of counting it written
+    /// and never hearing of the pipe's end.
+    #[test]
+    fn a_pumped_input_reports_the_failure_of_its_one_write() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        let signal = Arc::new(Signal::new());
+        let mut input = input(writer, Arc::clone(&signal), "pump-test-input").unwrap();
+        drop(reader);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let failed = loop {
+            match input.write(b"lost") {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                done => break done,
+            }
+            assert!(Instant::now() < deadline, "the write never ended");
+            signal.wait_until(Instant::now() + Duration::from_millis(250));
+        };
+        assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
     }
 
     #[test]
