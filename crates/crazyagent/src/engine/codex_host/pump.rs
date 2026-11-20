@@ -4,7 +4,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Instant;
 
 /// The most bytes one read takes from a pumped pipe.
-pub(super) const CHUNK_BYTES: usize = 4096;
+pub(in crate::engine) const CHUNK_BYTES: usize = 4096;
 
 /// How many chunks a pumped output reads ahead of custody before its thread stops reading.
 const CHUNKS_AHEAD: usize = 4;
@@ -16,14 +16,14 @@ const WRITES_HELD: usize = 1;
 /// A wake a custody thread sleeps on with a bound, raised by the threads that pump its pipes
 /// and by its host, so custody waits for work instead of on a fixed tick where no poll(2)
 /// exists. A raise while no one waits is kept, and ends the next wait at once.
-pub(super) struct Signal {
+pub(in crate::engine) struct Signal {
     raised: Mutex<bool>,
     changed: Condvar,
 }
 
 impl Signal {
     /// Makes a signal that is not raised. Output: the signal.
-    pub(super) fn new() -> Self {
+    pub(in crate::engine) fn new() -> Self {
         Self {
             raised: Mutex::new(false),
             changed: Condvar::new(),
@@ -32,14 +32,14 @@ impl Signal {
 
     /// Raises the signal, waking its waiter or ending its next wait at once. Input: the
     /// signal. Output: none.
-    pub(super) fn raise(&self) {
+    pub(in crate::engine) fn raise(&self) {
         *self.raised.lock().unwrap_or_else(PoisonError::into_inner) = true;
         self.changed.notify_all();
     }
 
     /// Waits until the signal is raised or `until` passes, then lowers it. Inputs: the
     /// signal and the instant to stop at. Output: none.
-    pub(super) fn wait_until(&self, until: Instant) {
+    pub(in crate::engine) fn wait_until(&self, until: Instant) {
         let mut raised = self.raised.lock().unwrap_or_else(PoisonError::into_inner);
         while !*raised {
             let left = until.saturating_duration_since(Instant::now());
@@ -60,7 +60,7 @@ impl Signal {
 /// what the queue holds, says `WouldBlock` while it holds nothing, and reads 0 once the pipe
 /// has ended and the queue is empty. While the queue is full the thread stops reading, so
 /// the writer waits on the pipe.
-pub(super) struct Output {
+pub(in crate::engine) struct Output {
     chunks: Receiver<io::Result<Vec<u8>>>,
     held: Vec<u8>,
     at: usize,
@@ -94,7 +94,7 @@ impl Read for Output {
 /// written them all to the pipe; custody asks again with the same bytes, which are then done,
 /// or `BrokenPipe` when the pipe failed, after part of them included. Dropping it closes the
 /// pipe after the write the thread holds.
-pub(super) struct Input {
+pub(in crate::engine) struct Input {
     writes: SyncSender<Vec<u8>>,
     hand: Arc<Mutex<Hand>>,
 }
@@ -146,7 +146,7 @@ impl Write for Input {
 /// Starts the thread that reads `pipe` ahead for custody, raising `signal` after each chunk
 /// and at the pipe's end. Inputs: the pipe, the custody signal and the thread's name.
 /// Output: the custody end, or the error starting the thread.
-pub(super) fn output<R: Read + Send + 'static>(
+pub(in crate::engine) fn output<R: Read + Send + 'static>(
     pipe: R,
     signal: Arc<Signal>,
     name: &str,
@@ -165,7 +165,7 @@ pub(super) fn output<R: Read + Send + 'static>(
 /// Starts the thread that writes custody's writes to `pipe`, raising `signal` after each one
 /// and when the pipe fails. Inputs: the pipe, the custody signal and the thread's name.
 /// Output: the custody end, or the error starting the thread.
-pub(super) fn input<W: Write + Send + 'static>(
+pub(in crate::engine) fn input<W: Write + Send + 'static>(
     pipe: W,
     signal: Arc<Signal>,
     name: &str,
