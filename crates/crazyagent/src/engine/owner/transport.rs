@@ -85,6 +85,8 @@ mod owner_deadline_tests;
 mod owner_server_tests;
 #[cfg(all(test, unix))]
 mod reply_skew_tests;
+#[cfg(all(test, windows))]
+mod root_windows_tests;
 #[cfg(all(test, unix))]
 mod secret_storage_wait_tests;
 #[cfg(all(test, unix))]
