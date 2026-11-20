@@ -45,7 +45,7 @@ impl Skewed {
         let generation = fixture.client().await.root.path.clone();
         let socket = generation.join(SOCKET);
         std::fs::rename(&socket, generation.join(ASIDE)).unwrap();
-        let listener = crate::ipc::owner_listener(&socket).unwrap();
+        let listener = crate::ipc::owner_listener(&socket, 1).unwrap();
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
         let server = tokio::spawn(serve(listener, replies));
         let client =

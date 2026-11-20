@@ -1636,10 +1636,12 @@ pub fn answering(socket: &Path) -> bool {
     crate::spawn_gate::connect_unix_std(socket).is_ok()
 }
 
-/// Says no engine listens where the Unix socket transport does not exist. Input unused.
-#[cfg(not(unix))]
-pub fn answering(_socket: &Path) -> bool {
-    false
+/// Says whether a checked engine serves the ordinary endpoint now on Windows: its pipe
+/// answers and its server is the start the pipes file pins, with no byte written. Input:
+/// the ordinary endpoint path. Output: the answer.
+#[cfg(windows)]
+pub fn answering(socket: &Path) -> bool {
+    crate::ipc::owner_answering(socket)
 }
 
 /// What a client learns when it checks the engine before opening.

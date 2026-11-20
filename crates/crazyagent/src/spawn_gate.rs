@@ -238,19 +238,6 @@ fn passing(error: &io::Error) -> bool {
     )
 }
 
-/// Accepts on the platform's stand-in listener where there are no Unix sockets;
-/// no such listener can exist, so nothing is created.
-/// Input: the listener. Output: unreachable by construction.
-#[cfg(not(unix))]
-pub(crate) async fn accept_unix(
-    listener: &crate::platform::unix_socket::UnixListener,
-) -> io::Result<(
-    crate::platform::unix_socket::UnixStream,
-    crate::platform::unix_socket::SocketAddr,
-)> {
-    listener.accept().await
-}
-
 /// Accepts one connection on a Tokio TCP listener, taking the gate only for
 /// each accept attempt, never while waiting.
 /// Input: the listener. Output: the stream and its peer address.
@@ -271,15 +258,6 @@ pub async fn connect_unix(path: impl AsRef<std::path::Path>) -> io::Result<tokio
     guarded(tokio::net::UnixSocket::new_stream)?
         .connect(address)
         .await
-}
-
-/// Reports the platform's `unix_socket_unavailable` where there are no Unix
-/// sockets; nothing is created. Input: the socket path. Output: that error.
-#[cfg(not(unix))]
-pub(crate) async fn connect_unix(
-    path: impl AsRef<std::path::Path>,
-) -> io::Result<crate::platform::unix_socket::UnixStream> {
-    crate::platform::unix_socket::UnixStream::connect(path).await
 }
 
 /// Connects a Tokio TCP stream to the first address of `host:port` that

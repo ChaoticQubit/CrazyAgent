@@ -909,8 +909,9 @@ impl OwnerClient {
     }
 }
 
-/// Never runs where no Unix domain socket can exist: its stream has no value, so there is
-/// no viewer to serve. Takes the same inputs as the Unix version, all unused.
+/// Ends a view at once where the engine has no terminal pump yet (Windows until W4): the
+/// stream is closed unanswered. Takes the same inputs as the Unix version; only the stream
+/// is used.
 #[cfg(not(unix))]
 #[allow(clippy::too_many_arguments)]
 async fn watch(
@@ -923,7 +924,7 @@ async fn watch(
     _engine: &Engine,
     _authority: &Authority,
 ) {
-    match stream {}
+    drop(stream);
 }
 
 #[cfg(unix)]
