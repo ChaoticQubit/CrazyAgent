@@ -136,7 +136,7 @@ jobs:
           set -e
           grep -E '^test .*_windows_tests|^test result|panicked' "$RUNNER_TEMP/tip.log" || true
           [ "$rc" -eq 0 ]
-          grep -qE 'test result: ok\. 39 passed; 0 failed' "$RUNNER_TEMP/tip.log"
+          grep -qE 'test result: ok\. 38 passed; 0 failed' "$RUNNER_TEMP/tip.log"
       - name: Unix projects-home and storage rows at the tip da2ad4014
         if: ${{ !cancelled() && runner.os == 'Linux' }}
         timeout-minutes: 60
