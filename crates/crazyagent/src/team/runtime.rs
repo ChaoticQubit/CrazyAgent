@@ -9543,12 +9543,7 @@ impl TeamRuntime {
         let settings = settings
             .map_err(|e| with_code("the owner's sandbox settings could not be read", Some(&e.0)))?;
         #[cfg(target_os = "linux")]
-        if policy.access == AgentAccess::Full {
-            return Err(with_code(
-                crate::sandbox::FULL_ACCESS_NEEDS_MACOS,
-                Some("sandbox_unavailable"),
-            ));
-        }
+        assert_eq!(policy.access, AgentAccess::Sandboxed);
         #[cfg(target_os = "linux")]
         if !crate::sandbox::linux_host()
             .is_some_and(|host| host.under(Some(settings.linux_supervisor)).supervised)
