@@ -1673,35 +1673,47 @@ fn confined(checkouts: &Checkouts) -> ProjectSandbox {
     .unwrap()
 }
 
-/// Neither backend holds an agent confined to its own worktree: inside the worktree's git
-/// admin folder and the object store it must write, Landlock cannot keep `commondir`,
-/// `gitdir` or the existing objects read-only, and bubblewrap cannot bind every object.
+/// An agent confined to its own worktree binds to Landlock and is detected (DEC-205 S5b),
+/// but starts only under the call supervisor: inside the worktree's git admin folder and the
+/// object store it must write, Landlock alone cannot keep `commondir`, `gitdir` or the
+/// existing objects read-only, so with no supervisor its wrap is refused, and bubblewrap
+/// alone never starts it.
 #[test]
-fn an_agent_confined_to_its_worktree_is_refused_on_both_backends() {
+fn an_agent_confined_to_its_worktree_starts_only_under_the_call_supervisor() {
     let checkouts = checkouts();
     let bwrap = BWRAP_PATHS
         .iter()
         .map(Path::new)
         .find(|path| path.is_file())
         .expect("Linux test machines need bubblewrap installed");
-    for backend in [
+    let mut harness = Command::new("/bin/true");
+    harness.current_dir(&checkouts.own);
+    let unsupervised = |wrapped: Result<Command, SandboxError>| {
+        matches!(&wrapped, Err(SandboxError::Unavailable(reason))
+            if reason.contains("only under the call supervisor"))
+    };
+    let landlock = LinuxSandbox::new(
+        confined(&checkouts),
         LinuxBackend::Landlock {
             helper: PathBuf::from(HELPER),
         },
+    )
+    .unwrap();
+    assert!(unsupervised(landlock.wrap(&harness)));
+    let detected = LinuxSandbox::detect(confined(&checkouts), Path::new(HELPER)).unwrap();
+    assert!(unsupervised(detected.wrap(&harness)));
+    let bubblewrap = LinuxSandbox::new(
+        confined(&checkouts),
         LinuxBackend::Bubblewrap {
             bwrap: bwrap.to_path_buf(),
             helper: PathBuf::from(HELPER),
         },
-    ] {
-        assert!(matches!(
-            LinuxSandbox::new(confined(&checkouts), backend),
-            Err(SandboxError::Unavailable(_))
-        ));
-    }
-    assert!(matches!(
-        LinuxSandbox::detect(confined(&checkouts), Path::new(HELPER)),
-        Err(SandboxError::Unavailable(_))
-    ));
+    )
+    .and_then(|alone| alone.wrap(&harness));
+    assert!(
+        matches!(&bubblewrap, Err(SandboxError::Unavailable(_))),
+        "{bubblewrap:?}"
+    );
 }
 
 /// An agent writing the project folder may add objects and refs as git does, but may not
@@ -4638,28 +4650,39 @@ fn an_installed_sandbox_with_a_hidden_folder_keeps_it_out_or_refuses_it() {
     );
 }
 
-/// A confined agent whose project hides a folder is still refused on Linux, for its
-/// confinement and not for the folder, since neither backend holds a confined agent yet:
-/// team and research launches stay refused as they were (leader 12:25).
+/// A confined agent whose project hides a folder installs on Linux as any confined agent
+/// does (DEC-205 S5b): where this computer nests agents, the hidden folder is held by the
+/// agent's own mount namespace and, with no call supervisor, its start is refused for its
+/// confinement; where it does not, the install is refused for the folder.
 #[test]
-fn a_confined_agent_with_a_hidden_folder_is_refused_as_confined_not_for_the_folder() {
+fn a_confined_agent_with_a_hidden_folder_starts_only_nested_and_supervised() {
     let checkouts = checkouts();
     let folder = checkouts.project.join("private");
     fs::create_dir(&folder).unwrap();
     let profiles = checkouts.project.parent().unwrap().join("profiles");
     fs::create_dir_all(&profiles).unwrap();
-    let refused = InstalledSandbox::install(
+    let installed = InstalledSandbox::install(
         confined(&checkouts).hide(&folder).unwrap(),
         &profiles.join("agent.sb"),
         LinuxSupervisor::On,
         LinuxStrict::Off,
-    )
-    .err();
-    assert!(
-        matches!(&refused, Some(SandboxError::Unavailable(reason))
-            if reason.contains("confined") && !reason.contains("hidden")),
-        "{refused:?}"
     );
+    match installed {
+        Ok(installed) => {
+            let mut harness = Command::new("/bin/true");
+            harness.current_dir(&checkouts.own);
+            let refused = installed.wrap(&harness).err();
+            assert!(
+                matches!(&refused, Some(SandboxError::Unavailable(reason))
+                    if reason.contains("only under the call supervisor")),
+                "{refused:?}"
+            );
+        }
+        Err(SandboxError::Unavailable(reason)) => {
+            assert!(reason.starts_with("hidden folders on Linux"), "{reason}");
+        }
+        Err(other) => panic!("a confined agent with a hidden folder: {other:?}"),
+    }
 }
 
 /// A launch request for the case's project at `boundary`, signed in with the account home
