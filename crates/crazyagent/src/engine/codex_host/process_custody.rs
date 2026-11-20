@@ -468,17 +468,24 @@ impl OwnedChild {
         }
     }
 
-    /// Ends the harness's tree: dropping it ends its kill-on-close job, so every process the
-    /// harness started ends with it, those a boundary helper nests in a job of its own
-    /// included. Takes nothing.
+    /// Ends the harness's tree: its job ends every process the harness started, those a
+    /// boundary helper nests in a job of its own included. The tree is kept, so
+    /// [`Self::observe_group`] counts it gone only once its job runs none (CodeRabbit CR-1149,
+    /// #734 L1). Takes nothing; records an uncertain cleanup when the job refuses the end.
     #[cfg(windows)]
     fn kill_group(&mut self) {
-        self.tree = None;
+        if let Some(tree) = &self.tree
+            && tree.ended().is_err()
+        {
+            self.cleanup_uncertain("codex_host_kill_uncertain");
+        }
     }
 
     /// Notes when no process of the harness group is left. Only a reaped harness can leave
     /// its group empty, and a group that refuses the probe still counts as present. On
-    /// Windows the reaped harness's tree is ended, so nothing it started outlives it.
+    /// Windows the reaped harness's tree is ended, so nothing it started outlives it, and
+    /// counts as gone only once its job runs no process; until then custody is stopping, so
+    /// a tree still running `CLOSE_TIME` later is given up with an uncertain cleanup.
     /// Takes nothing; records an uncertain cleanup when the group cannot be observed.
     fn observe_group(&mut self) {
         if self.status.is_none() || self.group_absent {
@@ -494,8 +501,18 @@ impl OwnedChild {
             }
         }
         #[cfg(windows)]
-        {
-            self.tree = None;
+        if let Some(tree) = &self.tree {
+            match tree.ended() {
+                Ok(true) => self.tree = None,
+                Ok(false) => {
+                    self.stopped_at.get_or_insert_with(Instant::now);
+                    return;
+                }
+                Err(_) => {
+                    self.cleanup_uncertain("codex_host_group_uncertain");
+                    return;
+                }
+            }
         }
         self.group_absent = true;
         self.fire_warden();

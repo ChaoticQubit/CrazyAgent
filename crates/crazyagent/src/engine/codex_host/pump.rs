@@ -9,7 +9,8 @@ pub(super) const CHUNK_BYTES: usize = 4096;
 /// How many chunks a pumped output reads ahead of custody before its thread stops reading.
 const CHUNKS_AHEAD: usize = 4;
 
-/// How many writes a pumped input holds beyond the one its thread is writing.
+/// How many writes the channel to a pumped input's thread holds: custody hands it one at a
+/// time and waits for that one to reach the pipe.
 const WRITES_HELD: usize = 1;
 
 /// A wake a custody thread sleeps on with a bound, raised by the threads that pump its pipes
@@ -88,11 +89,22 @@ impl Read for Output {
     }
 }
 
-/// The custody end of a pipe a thread writes to: a write hands its bytes to the thread
-/// whole, says `WouldBlock` while the thread still holds a write it has not begun, and
-/// `BrokenPipe` once the pipe has failed. Dropping it closes the pipe after the held writes.
+/// The custody end of a pipe a thread writes to, one write at a time (CodeRabbit CR-1149):
+/// a write hands its bytes to the thread whole and says `WouldBlock` until the thread has
+/// written them all to the pipe; custody asks again with the same bytes, which are then done,
+/// or `BrokenPipe` when the pipe failed, after part of them included. Dropping it closes the
+/// pipe after the write the thread holds.
 pub(super) struct Input {
     writes: SyncSender<Vec<u8>>,
+    hand: Arc<Mutex<Hand>>,
+}
+
+/// Where the one write custody handed a pumped input stands, shared with its thread.
+#[derive(Default)]
+struct Hand {
+    taken: Option<usize>,
+    written: Option<usize>,
+    failed: bool,
 }
 
 impl Write for Input {
@@ -100,10 +112,29 @@ impl Write for Input {
         if buf.is_empty() {
             return Ok(0);
         }
+        let mut hand = self.hand.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(hand.taken.is_none() || hand.written.is_none());
+        if hand.failed {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        if let Some(count) = hand.written.take() {
+            assert_eq!(count, buf.len());
+            return Ok(count);
+        }
+        if let Some(count) = hand.taken {
+            assert_eq!(count, buf.len());
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
         match self.writes.try_send(buf.to_vec()) {
-            Ok(()) => Ok(buf.len()),
+            Ok(()) => {
+                hand.taken = Some(buf.len());
+                Err(io::ErrorKind::WouldBlock.into())
+            }
             Err(TrySendError::Full(_)) => Err(io::ErrorKind::WouldBlock.into()),
-            Err(TrySendError::Disconnected(_)) => Err(io::ErrorKind::BrokenPipe.into()),
+            Err(TrySendError::Disconnected(_)) => {
+                hand.failed = true;
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
         }
     }
 
@@ -140,10 +171,12 @@ pub(super) fn input<W: Write + Send + 'static>(
     name: &str,
 ) -> io::Result<Input> {
     let (writes, taken) = sync_channel(WRITES_HELD);
+    let hand = Arc::new(Mutex::new(Hand::default()));
+    let held = Arc::clone(&hand);
     std::thread::Builder::new()
         .name(name.to_owned())
-        .spawn(move || write_behind(pipe, taken, &signal))?;
-    Ok(Input { writes })
+        .spawn(move || write_behind(pipe, taken, &held, &signal))?;
+    Ok(Input { writes, hand })
 }
 
 /// Reads `pipe` into `send` one chunk at a time until the pipe ends, fails or custody drops
@@ -174,14 +207,32 @@ fn read_ahead<R: Read>(mut pipe: R, send: SyncSender<io::Result<Vec<u8>>>, signa
 }
 
 /// Writes each write `taken` brings to `pipe` whole until custody drops its end or the pipe
-/// fails, raising `signal` after each one, then closes the pipe and raises it once more.
-/// Inputs: the pipe, the channel and the signal. Output: none.
-fn write_behind<W: Write>(mut pipe: W, taken: Receiver<Vec<u8>>, signal: &Signal) {
+/// fails, marking in `hand` that it was written or that the pipe failed and raising `signal`
+/// after each one, then closes the pipe and raises it once more. Inputs: the pipe, the
+/// channel, the shared hand and the signal. Output: none.
+fn write_behind<W: Write>(
+    mut pipe: W,
+    taken: Receiver<Vec<u8>>,
+    hand: &Mutex<Hand>,
+    signal: &Signal,
+) {
     for bytes in taken {
-        if pipe.write_all(&bytes).and_then(|()| pipe.flush()).is_err() {
-            break;
+        let written = pipe.write_all(&bytes).and_then(|()| pipe.flush()).is_ok();
+        {
+            let mut hand = hand.lock().unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(hand.taken, Some(bytes.len()));
+            assert!(hand.written.is_none() && !hand.failed);
+            hand.taken = None;
+            if written {
+                hand.written = Some(bytes.len());
+            } else {
+                hand.failed = true;
+            }
         }
         signal.raise();
+        if !written {
+            break;
+        }
     }
     drop(pipe);
     signal.raise();

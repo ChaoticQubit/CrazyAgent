@@ -74,10 +74,17 @@ impl ProcessTree {
         Ok(info.ActiveProcesses)
     }
 
-    /// V244-WIN-MASTER S1 r2 red stand-in for the confirmed end of the tree: says it ended
-    /// without ending it. Output: true.
+    /// Ends every process of the tree, then says whether none still runs, read through
+    /// [`Self::active_processes`]: the job ends its processes asynchronously, so only a job
+    /// that counts no active process has ended. Asking again ends nothing new. Relies on the
+    /// job handle being live. Output: true once the tree has ended, false while a process of
+    /// it is still ending, or the failed step.
     pub fn ended(&self) -> Result<bool, BoundaryError> {
-        Ok(true)
+        let terminated = unsafe { TerminateJobObject(self.job.as_raw_handle(), ENDED_EXIT_CODE) };
+        if terminated == 0 {
+            return Err(windows("end the tree's job")(last_error()));
+        }
+        Ok(self.active_processes()? == 0)
     }
 }
 
