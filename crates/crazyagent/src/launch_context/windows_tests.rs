@@ -197,7 +197,7 @@ fn a_windows_home_and_its_parent_cannot_be_moved_while_its_launch_holds_it() {
     let (_temp, base) = base();
     let parent = private_home(&base, "parent");
     let home = private_home(&parent, "home");
-    let held = pin(&home).unwrap();
+    let held = crate::harnesses::launch::hold_home(&home).unwrap();
     assert!(std::fs::rename(&home, parent.join("moved")).is_err());
     assert!(std::fs::rename(&parent, base.join("moved")).is_err());
     drop(held);
@@ -228,7 +228,9 @@ fn a_windows_launch_refuses_a_home_off_a_drive_before_it_holds_it() {
         "relative-home",
     ] {
         assert_eq!(
-            pin(Path::new(home)).unwrap_err().0,
+            crate::harnesses::launch::hold_home(Path::new(home))
+                .unwrap_err()
+                .0,
             "launch_account_home_unsafe",
             "{home}"
         );
@@ -262,7 +264,7 @@ fn a_windows_launch_lock_its_path_reached_outside_the_held_home_is_refused() {
     };
     junction(&first);
     let home = alias.join("home");
-    let held = pin(&home).unwrap();
+    let held = crate::harnesses::launch::hold_home(&home).unwrap();
     run("cmd.exe", &["/d", "/c", "rmdir", alias.to_str().unwrap()]);
     junction(&second);
     let elsewhere = lock(&home).unwrap();

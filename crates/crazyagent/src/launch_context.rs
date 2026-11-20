@@ -1420,10 +1420,11 @@ impl Installed {
     /// private agent home, or `launch_home_busy` while another launch uses it.
     pub fn adopt(files: &InstalledFiles) -> Result<Self, LaunchError> {
         #[cfg(windows)]
-        let held = pin(&files.home);
-        crate::harnesses::launch::validate_home(&files.home)?;
+        let held = crate::harnesses::launch::hold_home(&files.home)?;
         #[cfg(windows)]
-        let held = held?;
+        crate::harnesses::launch::validate_held_home(&files.home, &held)?;
+        #[cfg(unix)]
+        crate::harnesses::launch::validate_home(&files.home)?;
         let lock = lock(&files.home)?;
         #[cfg(windows)]
         locked_in(&lock, &held)?;
@@ -2529,36 +2530,6 @@ fn sized_json(value: &impl Serialize) -> Result<String, LaunchError> {
     })
 }
 
-/// Holds a Windows agent home from before H1's check until its lock is taken (CodeRabbit
-/// CR-1140): read only, opened as itself rather than through a link, and without delete
-/// sharing, so neither the home nor a folder above it can be renamed or replaced while held.
-/// A junction above it can still be pointed elsewhere, so the lock is confirmed in the held
-/// home with [`locked_in`] (CR-1252). A spelling H1 refuses, not an absolute path on a
-/// drive, is refused with H1's code before anything is opened, so no share is contacted.
-/// Input: the home. Output: the held folder, `launch_account_home_unsafe`, or
-/// `launch_account_home_unavailable`, which a caller reports only after H1's check passes.
-#[cfg(windows)]
-fn pin(home: &Path) -> Result<File, LaunchError> {
-    use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_SHARE_READ: u32 = 0x1;
-    const FILE_SHARE_WRITE: u32 = 0x2;
-    let on_drive = matches!(
-        home.components().next(),
-        Some(std::path::Component::Prefix(prefix))
-            if matches!(prefix.kind(), std::path::Prefix::Disk(_))
-    );
-    if !home.is_absolute() || !on_drive {
-        return Err(failure("launch_account_home_unsafe"));
-    }
-    std::fs::OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(home)
-        .map_err(|_| failure("launch_account_home_unavailable"))
-}
-
 /// Confirms on Windows that a launch lock is the lock name directly in the held home
 /// (CodeRabbit CR-1252): both real places are read from their handles, so a lock the home's
 /// path reached in another folder, as after a junction above the home was pointed elsewhere
@@ -2796,10 +2767,11 @@ pub(crate) fn lock_kept(metadata: &fs::Metadata) -> bool {
 /// `launch_home_busy` or [`SKILLS_KEPT`].
 pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
     #[cfg(windows)]
-    let held = pin(home);
-    crate::harnesses::launch::validate_home(home)?;
+    let held = crate::harnesses::launch::hold_home(home)?;
     #[cfg(windows)]
-    let held = held?;
+    crate::harnesses::launch::validate_held_home(home, &held)?;
+    #[cfg(unix)]
+    crate::harnesses::launch::validate_home(home)?;
     let lock = lock(home)?;
     #[cfg(windows)]
     locked_in(&lock, &held)?;
