@@ -71,14 +71,40 @@ fn impersonation(token: &OwnedHandle) -> OwnedHandle {
 }
 
 /// A restricted impersonation copy of this process's token with RESTRICTED as its only
-/// restricting SID, which no engine pipe list grants (R4). Output: the token.
+/// restricting SID, which no engine pipe list grants, so Windows refuses its open of an
+/// engine pipe before the engine sees it (R4). Output: the token.
 pub fn restricted() -> OwnedHandle {
+    restricted_by(false)
+}
+
+/// A restricted impersonation copy of this process's token whose restricting SIDs are
+/// RESTRICTED and the user's own, so the pipe list that grants the user passes both of its
+/// checks and the open reaches the engine, whose peer check then refuses the restricted
+/// token (R4). Output: the token.
+pub fn restricted_with_user() -> OwnedHandle {
+    restricted_by(true)
+}
+
+/// Makes a restricted impersonation copy of this process's token. Input: whether the user's
+/// own SID is a restricting SID beside RESTRICTED. Output: the token.
+fn restricted_by(with_user: bool) -> OwnedHandle {
     let restricting = sid(RESTRICTED);
-    let process = process_token();
-    let entry = SID_AND_ATTRIBUTES {
+    let user = crate::private::user_sid().expect("the process token names its user");
+    let mut user_words = vec![0u32; user.len().div_ceil(size_of::<u32>())];
+    unsafe {
+        std::ptr::copy_nonoverlapping(user.as_ptr(), user_words.as_mut_ptr().cast(), user.len())
+    };
+    let mut entries = vec![SID_AND_ATTRIBUTES {
         Sid: restricting,
         Attributes: 0,
-    };
+    }];
+    if with_user {
+        entries.push(SID_AND_ATTRIBUTES {
+            Sid: user_words.as_mut_ptr().cast(),
+            Attributes: 0,
+        });
+    }
+    let process = process_token();
     let mut made = null_mut();
     let done = unsafe {
         CreateRestrictedToken(
@@ -88,8 +114,8 @@ pub fn restricted() -> OwnedHandle {
             null(),
             0,
             null(),
-            1,
-            &entry,
+            u32::try_from(entries.len()).expect("two entries at most"),
+            entries.as_ptr(),
             &mut made,
         )
     };
