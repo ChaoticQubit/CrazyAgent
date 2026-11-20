@@ -469,3 +469,80 @@ fn one_verified_call_hashes_the_pinned_harness_once() {
         format!("{:x}", sha2::Sha256::digest(vec![b'A'; HARNESS_BYTES]))
     );
 }
+
+/// Makes `link` a junction to `target`, as npm link and pnpm lay out `node_modules`. Inputs:
+/// the link and the target folder. Output: none.
+fn junction(link: &Path, target: &Path) {
+    let made = crate::spawn_gate::collected(
+        Command::new("cmd")
+            .arg("/c")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .stdin(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert!(made.status.success(), "mklink /J {}", link.display());
+}
+
+/// An npm install of Codex whose package folder is a junction to `real`, the script inside
+/// it. Inputs: the owner folder and the package's real folder. Output: the shim in the plain
+/// spelling, the package junction's path and the script's real path.
+fn npm_codex_linked(folder: &Path, real: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let script = real.join("bin").join("codex.js");
+    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+    std::fs::write(&script, vec![b'A'; HARNESS_BYTES]).unwrap();
+    let package = folder.join(r"node_modules\@openai\codex");
+    std::fs::create_dir_all(package.parent().unwrap()).unwrap();
+    let shim = folder.join("codex.cmd");
+    std::fs::write(&shim, CODEX_SHIM).unwrap();
+    (
+        plain(&shim),
+        package,
+        std::fs::canonicalize(&script).unwrap(),
+    )
+}
+
+/// rv-sec3 #752 C1: a shim whose script is reached through a junction sitting in the agent
+/// space is refused by harness search, though the script's real file lies outside it, since
+/// an agent could retarget that junction between the check and node opening the script.
+#[test]
+fn an_npm_shim_reaching_its_script_through_a_junction_in_agent_space_is_refused_by_search() {
+    let (_owner, folder) = owner_folder();
+    let engine = tempfile::tempdir().unwrap();
+    let real = folder.join("real-codex");
+    let (shim, package, script) = npm_codex_linked(&folder, &real);
+    let hop = folder.join(".crazyagent").join("hop");
+    std::fs::create_dir_all(hop.parent().unwrap()).unwrap();
+    junction(&hop, &real);
+    junction(&package, &hop);
+    assert_eq!(crate::paths::executable_file(&shim), Some(script.clone()));
+    assert!(!AgentSpace::open(engine.path()).unwrap().holds(&script));
+    assert_eq!(code(start_check(engine.path())(&shim)), PATH_AGENT_SPACE);
+}
+
+/// rv-sec3 #752 C1: a pinned npm shim whose package junction is moved after the pin to pass
+/// through a junction in the agent space is refused through `current`, even when the chain
+/// still ends at the pinned script, so the hop an agent holds is never left to the launch.
+#[test]
+fn a_junction_into_agent_space_placed_after_the_pin_is_refused_through_current() {
+    let (_owner, folder) = owner_folder();
+    let engine = tempfile::tempdir().unwrap();
+    let real = folder.join("real-codex");
+    let (shim, package, script) = npm_codex_linked(&folder, &real);
+    junction(&package, &real);
+    assert_eq!(code(start_check(engine.path())(&shim)), "ok");
+    let host = Arc::new(RegisteredNativeAuthHost::capture_entry(&shim).unwrap());
+    assert_eq!(host.verified_path().unwrap(), script);
+    std::fs::remove_dir(&package).unwrap();
+    let hop = folder.join(".crazyagent").join("hop");
+    std::fs::create_dir_all(hop.parent().unwrap()).unwrap();
+    junction(&hop, &real);
+    junction(&package, &hop);
+    assert_eq!(crate::paths::executable_file(&shim), Some(script));
+    assert_eq!(
+        code(host.current(start_check(engine.path()))),
+        PATH_AGENT_SPACE
+    );
+}
