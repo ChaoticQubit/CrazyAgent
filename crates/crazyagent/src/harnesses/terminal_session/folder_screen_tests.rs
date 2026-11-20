@@ -1,7 +1,9 @@
 use super::TerminalSession;
 use crate::harnesses::codex_folder::{SCREEN_WAIT, Screen, read_screen};
 use crate::harnesses::interactive::InteractiveCommand;
-use crate::harnesses::launch::{AccountBinding, LaunchError, LaunchLimits, LaunchRequest};
+use crate::harnesses::launch::{
+    AccountBinding, LaunchBoundary, LaunchError, LaunchLimits, LaunchRequest,
+};
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
 use crate::terminal::{AgentId, FOLDER, Host, HostError, PaneRef, TerminalStream};
 use std::os::unix::fs::PermissionsExt;
@@ -106,8 +108,7 @@ pub(crate) fn start(name: &str, first: &str, then: Option<&str>, codex_folder: b
         },
         model: None,
         tools: false,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -317,6 +318,111 @@ fn an_adopted_pane_whose_first_screen_look_fails_stays_up_and_is_ready() {
     assert!(pane.session.poll_ready().unwrap());
     std::thread::sleep(WATCH);
     assert_eq!(pane.keys(), Vec::<String>::new());
+    pane.close();
+}
+
+/// A real pane's host that cannot write the app tag, as a failed tmux `set-option` gives.
+/// Holds the real host. Every other call goes through.
+struct TagRefused {
+    real: Arc<dyn Host>,
+}
+
+impl Host for TagRefused {
+    fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError> {
+        self.real.spawn(agent, command)
+    }
+
+    fn attach(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
+        self.real.attach(agent)
+    }
+
+    fn screen(&self, agent: &AgentId) -> Result<Vec<u8>, HostError> {
+        self.real.screen(agent)
+    }
+
+    fn snapshot(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
+        self.real.snapshot(agent)
+    }
+
+    fn kept(&self, agent: &AgentId) -> bool {
+        self.real.kept(agent)
+    }
+
+    fn keep_last(&self, agent: &AgentId) {
+        self.real.keep_last(agent);
+    }
+
+    fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
+        self.real.input(agent, bytes)
+    }
+
+    fn resize(&self, agent: &AgentId, cols: u16, rows: u16) -> Result<(), HostError> {
+        self.real.resize(agent, cols, rows)
+    }
+
+    fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
+        self.real.kill(agent)
+    }
+
+    fn unkept(&self, agent: &AgentId) -> bool {
+        self.real.unkept(agent)
+    }
+
+    fn end_kept_server(&self, agent: &AgentId) -> Option<bool> {
+        self.real.end_kept_server(agent)
+    }
+
+    fn alive(&self) -> Result<Vec<AgentId>, HostError> {
+        self.real.alive()
+    }
+
+    fn pane_pid(&self, agent: &AgentId) -> Result<Option<u32>, HostError> {
+        self.real.pane_pid(agent)
+    }
+
+    fn tag_app(&self, _agent: &AgentId, _pid: u32) -> Result<(), HostError> {
+        Err(HostError("terminal_command_failed".into()))
+    }
+}
+
+/// #687 r3 F3: a kept pane whose app tag cannot be written at a restart is still adopted, so
+/// a live agent is never ended, with its context files removed, for a tag that only steers
+/// later prompts.
+#[test]
+fn an_adopted_pane_whose_app_tag_fails_is_still_adopted_and_keeps_running() {
+    let pane = start("adopt-untag", INPUT_BOX, None, false);
+    pane.shows(Screen::InputBox);
+    let Pane {
+        session,
+        keys,
+        _server,
+        _root,
+    } = pane;
+    let record = session.record().cloned().unwrap();
+    let (real, agent) = (session.host.clone(), session.agent.clone());
+    session.leave();
+    let refusing = TagRefused { real: real.clone() };
+    let session = TerminalSession::adopt(
+        Arc::new(refusing),
+        agent.clone(),
+        &record,
+        LaunchLimits::default(),
+    )
+    .expect("a failed app tag must not refuse the adoption");
+    assert!(
+        real.alive().unwrap().contains(&agent),
+        "the live agent keeps running"
+    );
+    let mut pane = Pane {
+        session,
+        keys,
+        _server,
+        _root,
+    };
+    assert!(
+        pane.session.poll_ready().unwrap(),
+        "the adopted agent is ready"
+    );
     pane.close();
 }
 
