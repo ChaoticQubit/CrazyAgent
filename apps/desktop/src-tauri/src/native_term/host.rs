@@ -962,7 +962,7 @@ impl Native {
                 let _ = entry.platform.events.send(NativeEvent::Menu { x, y });
                 Action::Nothing
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             ViewEvent::Copy => {
                 if let Ok(text) = entry.pane.copy(false) {
                     let _ = clip.write(&text);
@@ -983,7 +983,7 @@ impl Native {
                 }),
                 None => Action::Nothing,
             },
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             ViewEvent::SelectAll => {
                 entry.pane.select_all();
                 Action::Local

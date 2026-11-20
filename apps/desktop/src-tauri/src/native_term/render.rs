@@ -847,7 +847,7 @@ impl Shared {
     /// surface whose device is lost reports `native_terminal_gpu` and leaves the current
     /// device's errors to that device's views. Inputs: the surface and the frame. Output:
     /// ok, why it was skipped, or `native_terminal_gpu` when wgpu refused the frame's work.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub fn draw(&mut self, surface: &mut Surface, frame: &Frame) -> Result<(), String> {
         let painted = self.paint(surface, frame, None);
         self.taken(surface, painted)
