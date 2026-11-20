@@ -499,8 +499,8 @@ fn publish_held(root: &Path, purpose: &str, random: [u8; 16]) -> io::Result<(Pub
     ))
 }
 
-/// What `parse_pipes` answers for a pipes file of another endpoint.
-const OTHER_ENDPOINT: Result<Published, &str> = Err("the pipes file names another endpoint");
+/// The reason `parse_pipes` gives for a pipes file of another endpoint.
+const OTHER_ENDPOINT: &str = "the pipes file names another endpoint";
 
 /// Reads an opened pipes file's bytes, at most one past [`PIPES_BYTES_MAX`]. Input: the
 /// file. Output: the bytes, or the read error.
