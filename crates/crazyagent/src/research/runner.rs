@@ -2963,7 +2963,7 @@ pub(crate) fn add_worktree(
 /// Refuses to add a worktree at a commit, as `add_worktree` does where Seatbelt is missing.
 /// Takes the sandbox, profile, worktree and commit, all unused. Returns the same refusal.
 #[cfg(not(unix))]
-pub(crate) fn add_worktree_at(
+pub fn add_worktree_at(
     sandbox: &ProjectSandbox,
     profile: &Path,
     worktree: &Path,
@@ -3000,7 +3000,7 @@ pub(crate) fn add_worktree(
 /// Takes the sandbox, its installed profile, the new worktree path, the commit and the
 /// owner's Linux call supervisor setting.
 #[cfg(unix)]
-pub(crate) fn add_worktree_at(
+pub fn add_worktree_at(
     sandbox: &ProjectSandbox,
     profile: &Path,
     worktree: &Path,
