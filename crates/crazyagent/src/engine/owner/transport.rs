@@ -71,6 +71,8 @@ pub(crate) use native_auth_channel::NativeAuthDispatchHost;
 use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
 #[cfg(all(test, unix))]
 mod intake_parallel_tests;
+#[cfg(all(test, windows))]
+mod key_windows_tests;
 #[cfg(all(test, unix))]
 mod native_auth_channel_tests;
 #[cfg(all(test, unix))]
@@ -341,15 +343,31 @@ impl Root {
     }
 
     /// Refuses to remove an owned artifact without directory-relative Unix unlinks.
-    /// Takes the name, identity and socket flag, all unused.
+    /// Takes the name, identity, socket flag and held handle, all unused.
     /// Returns `owner_root_unavailable`.
     #[cfg(not(unix))]
-    fn unlink_owned(&self, _name: &str, _id: Identity, _socket: bool) -> Result<(), EngineError> {
+    fn unlink_owned(
+        &self,
+        _name: &str,
+        _id: Identity,
+        _socket: bool,
+        _held: Option<&File>,
+    ) -> Result<(), EngineError> {
         Err(failure("owner_root_unavailable"))
     }
 
+    /// Unlinks an artifact this root made, relative to the held folder, only while the name
+    /// still holds the recorded identity, owner, mode and one link. Inputs: the name, the
+    /// identity, whether it is a socket, and the artifact's held handle, which Unix does not
+    /// need (Windows deletes through it). Output: Ok, or the preserved-artifact refusal.
     #[cfg(unix)]
-    fn unlink_owned(&self, name: &str, id: Identity, socket: bool) -> Result<(), EngineError> {
+    fn unlink_owned(
+        &self,
+        name: &str,
+        id: Identity,
+        socket: bool,
+        _held: Option<&File>,
+    ) -> Result<(), EngineError> {
         self.verify()?;
         let m = std::fs::symlink_metadata(self.path.join(name)).map_err(io_error)?;
         if Identity::of(&m) != id
@@ -1035,12 +1053,17 @@ impl Authority {
     /// file this server made, each only while it is still the engine's own file, and tries
     /// all of them even after one fails. Input: none. Output: Ok, or the first failure.
     fn cleanup(&self) -> Result<(), EngineError> {
-        let mut result = self.root.unlink_owned(SOCKET, self.socket, true);
+        let mut result = self.root.unlink_owned(SOCKET, self.socket, true, None);
         result = result.and(self.ide.revoke_all());
         match self.slots.lock() {
             Ok(slots) => {
                 for (i, slot) in slots.iter().enumerate() {
-                    result = result.and(self.root.unlink_owned(KEYS[i], slot.identity, false));
+                    result = result.and(self.root.unlink_owned(
+                        KEYS[i],
+                        slot.identity,
+                        false,
+                        Some(&slot.file),
+                    ));
                 }
             }
             Err(_) => result = result.and(Err(failure("owner_authority_unavailable"))),
@@ -1053,6 +1076,7 @@ impl Authority {
                             &format!("r{:02x}.cap", slot.prepared.slot),
                             key.identity,
                             false,
+                            Some(&key.file),
                         ));
                     }
                 }
@@ -1513,12 +1537,12 @@ impl OwnerServer {
                     errors.push(error.0);
                 }
                 if let Some(identity) = created_socket
-                    && let Err(error) = rollback.unlink_owned(SOCKET, identity, true)
+                    && let Err(error) = rollback.unlink_owned(SOCKET, identity, true, None)
                 {
                     errors.push(error.0);
                 }
                 for (name, identity) in created_keys {
-                    if let Err(error) = rollback.unlink_owned(name, identity, false) {
+                    if let Err(error) = rollback.unlink_owned(name, identity, false, None) {
                         errors.push(error.0);
                     }
                 }
@@ -4187,7 +4211,9 @@ fallback_allowed = false
         )
         .unwrap();
         assert_eq!(
-            root.unlink_owned(KEYS[0], identity, false).unwrap_err().0,
+            root.unlink_owned(KEYS[0], identity, false, None)
+                .unwrap_err()
+                .0,
             "owner_cleanup_replaced_artifact_preserved"
         );
         assert!(directory.path().join(KEYS[0]).exists());
