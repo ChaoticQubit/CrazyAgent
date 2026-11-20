@@ -1601,8 +1601,8 @@ fn sleeper(
 
 /// A stop's carriers are only processes started with the launch's token: one without it
 /// never is, whatever this host shows of environments, and on Linux, which shows every
-/// process of the user, both that carry it are. Each process is named by its program for
-/// the stop's report.
+/// process of the user, both that carry it are, once each one's environment is set up after
+/// its exec. Each process is named by its program for the stop's report.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn only_processes_whose_environment_shows_the_launch_token_are_carriers() {
@@ -1625,7 +1625,10 @@ fn only_processes_whose_environment_shows_the_launch_token_are_carriers() {
     let asked = [id(&carrier), id(&plain), id(&platform)];
     let deadline = Instant::now() + WAIT;
     let mut found = Vec::new();
-    while Instant::now() < deadline && !found.contains(&asked[0]) {
+    let shown = |found: &[i32]| {
+        found.contains(&asked[0]) && (cfg!(not(target_os = "linux")) || found.contains(&asked[2]))
+    };
+    while Instant::now() < deadline && !shown(&found) {
         found = crate::harnesses::leftovers::carriers_among(&token, &asked).unwrap_or_default();
         std::thread::sleep(Duration::from_millis(25));
     }
