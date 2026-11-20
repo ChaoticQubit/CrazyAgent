@@ -113,7 +113,7 @@ jobs:
         timeout-minutes: 60
         run: |
           set +e
-          cargo test -p crazyagent --lib --locked -- --test-threads 1 key_windows_tests:: root_windows_tests:: 2>&1 | tee "$RUNNER_TEMP/tip.log"
+          cargo test -p crazyagent --lib --locked -- --test-threads 1 engine::owner::transport::key_windows_tests:: engine::owner::transport::root_windows_tests:: 2>&1 | tee "$RUNNER_TEMP/tip.log"
           rc=${PIPESTATUS[0]}
           set -e
           grep -E '^test .*_windows_tests|^test result|panicked' "$RUNNER_TEMP/tip.log" || true
