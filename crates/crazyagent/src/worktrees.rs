@@ -1183,7 +1183,6 @@ fn validate_config(repository: &Path) -> Result<(), EngineError> {
 /// so the owner reads which Git to update (V243-WORKTREE-GIT-FLOOR). Input: the
 /// repository. Output: Ok, else `worktree_git_old`, or `changes_git_unsupported` for a
 /// version line that names no version.
-#[cfg(unix)]
 fn refuse_old_git(repository: &Path) -> Result<(), EngineError> {
     let found = crate::landing::version_numbers(git(repository, &["version"])?);
     crate::landing::refuse_older(&found, crate::landing::OPEN_VERSION_MIN, GIT_OLD)
@@ -1195,7 +1194,6 @@ fn inspect(repository: &str) -> Result<Admission, EngineError> {
     let root = identity(path, true)?;
     let metadata = identity(&path.join(".git"), true)?;
     validate_metadata(path)?;
-    #[cfg(unix)]
     refuse_old_git(path)?;
     validate_config(path)?;
     let actual = git(path, &["rev-parse", "--show-toplevel"])?;

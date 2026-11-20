@@ -1,4 +1,4 @@
-use super::{git, private_worktree_root};
+use super::{git, private_worktree_root, refuse_old_git};
 use std::path::PathBuf;
 
 fn plain_temp() -> (tempfile::TempDir, PathBuf) {
@@ -31,5 +31,18 @@ fn engine_git_runs_on_windows_through_the_one_git_resolver() {
         printed.starts_with(b"git version "),
         "engine git runs on Windows (W3-5 D5): {}",
         String::from_utf8_lossy(&printed)
+    );
+}
+
+#[test]
+fn git_for_windows_meets_the_agent_worktree_floor_and_its_version_line_reads_as_numbers() {
+    let (_temp, repository) = plain_temp();
+    refuse_old_git(&repository)
+        .map_err(|refusal| refusal.0)
+        .unwrap();
+    assert_eq!(
+        crate::landing::version_numbers(b"git version 2.47.1.windows.2\n".to_vec()),
+        [2, 47, 1],
+        "a Git for Windows version line reads as its first three numbers (W3-5 D5)"
     );
 }
