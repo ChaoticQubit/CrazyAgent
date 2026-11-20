@@ -450,19 +450,19 @@ fn git_program() -> Result<PathBuf, EngineError> {
 }
 
 /// The git the engine's own git resolver finds in `path`, never a bare name a process
-/// search could match in a working folder, nor a batch file cmd.exe would parse the engine's
-/// arguments through, nor one another account can change with its install (rv-sec2 #742
-/// D5-1 D5-2). Input: a PATH value. Output: its path, [`GIT_OLD`] when none is found (the
-/// owner then reads "update Git"), or `worktree_git_untrusted`.
+/// search could match in a working folder: an `.exe`, never a batch file cmd.exe would parse
+/// the engine's arguments through nor the script an npm shim names, that no other account
+/// can change with its install (rv-sec2 #742 D5-1 D5-2). Input: a PATH value. Output: its
+/// path, [`GIT_OLD`] when none is found (the owner reads "update Git"), or `worktree_git_untrusted`.
 #[cfg(windows)]
 fn git_program_in(path: Option<&std::ffi::OsStr>) -> Result<PathBuf, EngineError> {
     let found = crate::github::git_program(path).ok_or_else(|| error(GIT_OLD))?;
     assert!(found.is_absolute());
-    let batch = found.extension().is_some_and(|extension| {
-        extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
-    });
+    let program = found
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"));
     let install = crate::sandbox::windows::owner_git::install_root(&found);
-    if batch
+    if !program
         || crate::service::changeable_by_others(&found).is_some()
         || install.is_some_and(|root| crate::service::changeable_by_others(root).is_some())
     {

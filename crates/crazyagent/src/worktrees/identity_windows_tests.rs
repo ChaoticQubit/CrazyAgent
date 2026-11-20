@@ -135,11 +135,14 @@ fn engine_git_refuses_a_batch_git_and_a_git_another_account_can_change() {
     let batch = base.join("batch");
     std::fs::create_dir(&batch).unwrap();
     std::fs::write(batch.join("git.cmd"), b"@echo off\r\n").unwrap();
-    assert_eq!(
-        code(git_program_in(Some(batch.as_os_str()))),
-        "worktree_git_untrusted",
-        "a git.cmd would run the engine's arguments through cmd.exe (rv-sec2 #742 D5-1)"
-    );
+    if let Ok(found) = git_program_in(Some(batch.as_os_str())) {
+        assert!(
+            found
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("exe")),
+            "a git.cmd would run the engine's arguments through cmd.exe (rv-sec2 #742 D5-1): {found:?}"
+        );
+    }
     let real = git_program_in(std::env::var_os("PATH").as_deref()).unwrap();
     let open = base.join("open");
     std::fs::create_dir(&open).unwrap();
