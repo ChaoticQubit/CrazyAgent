@@ -25,13 +25,14 @@ use windows_sys::Win32::Security::{
     SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, SetSecurityDescriptorSacl,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
+    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FileFullDirectoryInfo,
-    FileFullDirectoryRestartInfo, FileIdInfo, GetFileInformationByHandle,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfoEx,
+    FileFullDirectoryInfo, FileFullDirectoryRestartInfo, FileIdInfo, GetFileInformationByHandle,
     GetFileInformationByHandleEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
-    OPEN_EXISTING, READ_CONTROL, UnlockFileEx, WRITE_DAC, WRITE_OWNER,
+    OPEN_EXISTING, READ_CONTROL, SetFileInformationByHandle, UnlockFileEx, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
@@ -296,6 +297,50 @@ pub fn identity(object: &File) -> io::Result<(u64, u64)> {
     let mut bytes = [0; 8];
     bytes.copy_from_slice(low);
     Ok((volume, u64::from_le_bytes(bytes)))
+}
+
+/// Deletes the file a held handle names, never by path (rv-sec2 #702 R7, leader 03:5x): the
+/// handle must carry delete access, and POSIX semantics remove the name when that handle
+/// closes, even while other handles to the file stay open. Input: the held handle. Output:
+/// Ok, or the Windows error, access denied for a handle without delete access.
+pub fn delete(file: &File) -> io::Result<()> {
+    let disposition = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    };
+    let marked = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfoEx,
+            std::ptr::from_ref(&disposition).cast(),
+            size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+        )
+    };
+    if marked == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Deletes the private file at `path` only while it is still the object a caller pinned
+/// (R7): opened with delete access without following a link, judged private, its
+/// [`identity`] compared, then [`delete`]d through that handle. Another handle without
+/// delete sharing makes the open fail, and the file stays. Inputs: the absolute path and the
+/// pinned identity. Output: Ok, or the error.
+pub fn remove(path: &Path, expected: (u64, u64)) -> io::Result<()> {
+    let user = user_sid()?;
+    let name = wide_path(path)?;
+    let opened = open(
+        &name,
+        DELETE | READ_CONTROL | FILE_READ_ATTRIBUTES,
+        OPEN_EXISTING,
+        0,
+        None,
+    )?;
+    private_as(&opened, &user, false)?;
+    if identity(&opened)? != expected {
+        return Err(refused("a private file changed before its delete"));
+    }
+    delete(&opened)
 }
 
 /// Writes a private folder's entries to disk after a create, rename or delete in it, the

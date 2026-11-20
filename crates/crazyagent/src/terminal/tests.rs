@@ -129,6 +129,7 @@ fn every_terminal_code_has_plain_words() {
         "terminal_folder_unsafe",
         "terminal_not_answering",
         "owner_grant_stale_or_revoked",
+        APP_PANE_UNKNOWN,
     ] {
         let reason = plain_reason(code);
         assert_ne!(reason, plain_reason("something_else"), "{code}");
@@ -321,4 +322,79 @@ fn an_owner_paste_keeps_only_tab_and_enter_of_the_control_characters() {
         "\u{e9}\u{6f22}\u{1f642}".as_bytes()
     );
     assert!(paste_keys("\x00\x1b\u{9b}\x7f").is_empty());
+}
+
+/// A host whose app pane request answers one code and that records what it types by name:
+/// a tmux host whose control connect failed, or a host with no pane ids.
+struct PinRefused {
+    answer: &'static str,
+    typed: std::sync::Mutex<Vec<Vec<u8>>>,
+}
+
+impl Host for PinRefused {
+    fn spawn(&self, _: &AgentId, _: &InteractiveCommand) -> Result<PaneRef, HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
+    fn attach(&self, _: &AgentId) -> Result<TerminalStream, HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
+    fn input(&self, _: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
+        self.typed.lock().unwrap().push(bytes.to_vec());
+        Ok(())
+    }
+
+    fn resize(&self, _: &AgentId, _: u16, _: u16) -> Result<(), HostError> {
+        Ok(())
+    }
+
+    fn kill(&self, _: &AgentId) -> Result<(), HostError> {
+        Ok(())
+    }
+
+    fn alive(&self) -> Result<Vec<AgentId>, HostError> {
+        Ok(Vec::new())
+    }
+
+    fn app_pane_at(&self, _: &AgentId) -> Result<PaneAt, HostError> {
+        Err(failure(self.answer))
+    }
+}
+
+/// #686 r1 sec F1: only a host that answers `PINS_UNSUPPORTED` types a prompt by name. A host
+/// whose app pane request failed otherwise, as a tmux control connect can fail once, fails
+/// the prompt and types nothing by name, where the active pane may be a teammate's.
+#[test]
+fn a_failed_app_pane_request_fails_the_prompt_and_types_nothing_by_name() {
+    let agent = AgentId::team(1).unwrap();
+    let failed = PinRefused {
+        answer: "terminal_unavailable",
+        typed: std::sync::Mutex::default(),
+    };
+    let refused = type_prompt(&failed, &agent, "hello");
+    assert_eq!(refused, Err(failure("terminal_unavailable")));
+    assert!(
+        failed.typed.lock().unwrap().is_empty(),
+        "nothing typed by name"
+    );
+    let unpinned = PinRefused {
+        answer: PINS_UNSUPPORTED,
+        typed: std::sync::Mutex::default(),
+    };
+    assert_eq!(type_prompt(&unpinned, &agent, "hello"), Ok(true));
+    let keys = [prompt_keys("hello", true).unwrap(), b"\r".to_vec()].concat();
+    assert_eq!(unpinned.typed.lock().unwrap().concat(), keys);
+}
+
+/// #686 r1 F2: an unknown app pane of a live window is a refusal, not an ended terminal, so
+/// an owner view stays open and is never told its agent stopped; an unknown agent still ends.
+#[test]
+fn an_unknown_app_pane_is_refused_not_read_as_an_ended_terminal() {
+    assert!(!ended_code(APP_PANE_UNKNOWN));
+    assert!(ended_code("terminal_agent_unknown"));
+    assert_ne!(
+        plain_reason(APP_PANE_UNKNOWN),
+        plain_reason("terminal_agent_unknown")
+    );
 }
