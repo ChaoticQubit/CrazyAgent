@@ -381,16 +381,22 @@ fn an_npm_codex_shim_pins_its_script_and_current_keeps_the_same_host() {
     assert!(Arc::ptr_eq(&host, &now));
 }
 
-/// rv-sec2 #741: the script of a pinned npm shim rewritten in place reads as changed through
-/// `current`, not as a fresh pin.
+/// rv-sec2 #741: the script of a pinned npm shim rewritten in place is refused through
+/// `current`, never re-pinned: the held pin lets no write in, so the one rewrite Windows
+/// allows is a supersede that empties the file, which the pin's rule refuses.
 #[test]
-fn a_rewritten_npm_script_reads_as_changed_through_current() {
+fn a_rewritten_npm_script_is_refused_through_current() {
     let (_owner, folder) = owner_folder();
     let engine = tempfile::tempdir().unwrap();
     let (shim, script) = npm_codex(&folder);
     let host = Arc::new(RegisteredNativeAuthHost::capture_entry(&shim).unwrap());
-    supersede(&script).unwrap();
-    assert_eq!(code(host.current(start_check(engine.path()))), CHANGED);
+    assert!(Arc::ptr_eq(
+        &host,
+        &host.current(start_check(engine.path())).unwrap()
+    ));
+    supersede(&plain(&script)).unwrap();
+    assert_eq!(std::fs::metadata(&script).unwrap().len(), 0);
+    assert_eq!(code(host.current(start_check(engine.path()))), UNSAFE);
 }
 
 /// An npm shim that now names another script, as an npm update may write it, re-pins that
