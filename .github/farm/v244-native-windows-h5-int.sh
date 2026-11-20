@@ -34,6 +34,11 @@ menu_keys_row=native_term::windows::keys::tests::shift_f10_and_the_menu_key_go_t
 carry_row=native_term::windows::mouse::tests::small_deltas_add_up_to_exactly_the_lines_of_a_notch
 dl_fault_row=native_term::windows::rows::a_device_removed_inside_present_faults_the_view
 dl_answer_row=native_term::windows::rows::the_render_thread_answers_a_view_placed_after_a_removal_inside_present
+mark_rows=(
+  native_term::host::windows::tests::main_answers_only_on_the_recorded_thread
+  native_term::host::windows::tests::a_mark_holds_its_first_thread_and_takes_that_thread_again
+  native_term::host::windows::tests::a_mark_from_a_second_thread_is_a_bug
+)
 guard_rows=(
   native_term::render::tests::a_panic_inside_a_guarded_call_that_lost_the_device_is_the_gpu_code
   native_term::render::tests::a_panic_inside_a_guarded_call_on_a_live_device_goes_on
@@ -231,6 +236,7 @@ n1fault_rc=na
 n1end_rc=na
 drop_rc=na
 mouse_rc=na
+one_rc=na
 guard_rc=na
 dlfault_rc=na
 dlanswer_rc=na
@@ -293,6 +299,13 @@ if [ "$rows_built" = 0 ]; then
     display "$host_row" host
     host_rc=$?
     grep -Eq "^test $host_row \\.\\.\\. ok" "$RUNNER_TEMP/host.txt" || { log "::error::the host platform row did not pass"; want=1; }
+    log "== green: the host platform row and the mark rows in one process (want 0: one row marks)"
+    timeout 600 cargo test "${pkg[@]}" --lib -- --include-ignored --exact "$host_row" "${mark_rows[@]}" --test-threads=1 \
+      > "$RUNNER_TEMP/one-process.txt" 2>&1
+    one_rc=$?
+    grep -E '^test |^test result|panicked' "$RUNNER_TEMP/one-process.txt" | tee -a "$out"
+    [ "$one_rc" = 0 ] || { log "::error::the marking rows clash in one process"; want=1; }
+    [ "$(grep -cE ' \.\.\. ok$' "$RUNNER_TEMP/one-process.txt")" = 4 ] || { log "::error::not all four rows ran in one process"; want=1; }
     log "== green: the H1 view display row"
     display "$view_row" view
     view_rc=$?
@@ -367,6 +380,7 @@ rows_ok=0
   printf '| full reader row (want 0) | %s |\n' "$uia_rc"
   printf '| N1 fault row, N1 end row (Windows only) | %s, %s |\n' "$n1fault_rc" "$n1end_rc"
   printf '| H5 drop row, H5 host platform row (Windows only) | %s, %s |\n' "$drop_rc" "$host_rc"
+  printf '| host platform row and the mark rows in one process (want 0) | %s |\n' "$one_rc"
   printf '| mouse display row (Windows only) | %s |\n' "$mouse_rc"
   printf '| device-lost guarded call rows, removed view row, later view row (Windows only) | %s, %s, %s |\n' \
     "$guard_rc" "$dlfault_rc" "$dlanswer_rc"
