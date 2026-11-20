@@ -48,14 +48,14 @@ async fn closed(output: &mut TerminalOutput) -> String {
 
 /// A connected viewer and engine socket pair made inside the spawn gate, as the engine makes
 /// every socket. Takes nothing. Returns the viewer's end and the engine's end.
-fn socket_pair() -> (UnixStream, UnixStream) {
+fn socket_pair() -> (Stream, Stream) {
     let (viewer, engine) = crate::spawn_gate::unix_pair_std().unwrap();
     for end in [&viewer, &engine] {
         end.set_nonblocking(true).unwrap();
     }
     (
-        UnixStream::from_std(viewer).unwrap(),
-        UnixStream::from_std(engine).unwrap(),
+        Stream::from_std(viewer).unwrap(),
+        Stream::from_std(engine).unwrap(),
     )
 }
 
