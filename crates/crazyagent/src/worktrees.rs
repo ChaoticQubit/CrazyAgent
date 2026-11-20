@@ -441,14 +441,14 @@ fn git_command(repository: &Path, args: &[&str]) -> Result<Process, EngineError>
 /// The git every engine worktree command runs: the host `/usr/bin/git` on Unix.
 /// Output: its path.
 #[cfg(unix)]
-fn git_program() -> Result<PathBuf, EngineError> {
+pub(crate) fn git_program() -> Result<PathBuf, EngineError> {
     Ok(PathBuf::from("/usr/bin/git"))
 }
 
 /// The git every engine worktree command runs on Windows, [`git_program_in`] the engine's
 /// own PATH. Output: its absolute path, or the refusal.
 #[cfg(windows)]
-fn git_program() -> Result<PathBuf, EngineError> {
+pub(crate) fn git_program() -> Result<PathBuf, EngineError> {
     git_program_in(std::env::var_os("PATH").as_deref())
 }
 
