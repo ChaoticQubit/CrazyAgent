@@ -19,6 +19,28 @@ const HOLDER_PID: &str = "CLAUDE_STAND_IN_PID";
 /// The libtest arguments that run only [`claude_stand_in_holder`] in this test binary.
 const HOLDER_ARGS: &str = "--exact engine::claude_host::process::windows_tests::claude_stand_in_holder --ignored --nocapture --test-threads 1";
 
+/// The environment name of the file whose presence lets the nested holder stand-in start
+/// its nested process.
+const NESTED_GO: &str = "CLAUDE_STAND_IN_NESTED_GO";
+
+/// The environment name of the file the nested holder stand-in writes its nested process's
+/// id to, once that process is held in a job of its own.
+const NESTED_PID: &str = "CLAUDE_STAND_IN_NESTED_PID";
+
+/// The libtest arguments that run only [`claude_stand_in_nested_holder`] in this test binary.
+const NESTED_ARGS: [&str; 6] = [
+    "--exact",
+    "engine::claude_host::process::windows_tests::claude_stand_in_nested_holder",
+    "--ignored",
+    "--nocapture",
+    "--test-threads",
+    "1",
+];
+
+/// The creation flags of the nested holder's process: started suspended, so it is held in
+/// its job before it runs, and with no console, so no console host joins the job with it.
+const SUSPENDED_DETACHED: u32 = 0x0000_0004 | 0x0000_0008;
+
 /// What a row keeps of a custody run: its status, its stop, its wake, its pass count and the
 /// harness id, plus the ends custody would otherwise see closed.
 struct Watched {
@@ -297,6 +319,71 @@ fn a_windows_claude_harness_that_exits_leaving_a_sleeping_process_retires_only_o
     assert!(!watched.doubt.load(Ordering::Acquire));
 }
 
+/// Reads the process id a stand-in writes to `marker`, waiting up to 30 seconds for it.
+/// Input: the file. Output: the id.
+fn written_pid(marker: &Path) -> u32 {
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(pid) = std::fs::read_to_string(marker)
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+        {
+            return pid;
+        }
+        assert!(
+            Instant::now() < until,
+            "{} was never written",
+            marker.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// V244-WIN-MASTER S4 r4 (rv-sec2 #734 r2, owed before S7): a process a harness's child
+/// holds in a job of its own, as a boundary helper nests one, counts among the harness
+/// tree's active processes, and ending the tree ends it, so custody's `ended` never reads a
+/// tree as empty while a nested process runs. The tree is held here as custody holds it.
+#[test]
+fn a_process_in_a_job_nested_in_a_held_tree_counts_until_the_tree_ends_it() {
+    let folder = tempfile::tempdir().unwrap();
+    let started = folder.path().join("started.pid");
+    let go = folder.path().join("go");
+    let nested = folder.path().join("nested.pid");
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(NESTED_ARGS)
+        .env(HOLDER_PID, &started)
+        .env(NESTED_GO, &go)
+        .env(NESTED_PID, &nested)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(super::SUSPENDED_WITHOUT_WINDOW);
+    let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+    let tree = crazyagent_win_sandbox::ProcessTree::hold(&child).unwrap();
+    let holder = written_pid(&started);
+    assert_eq!(holder, child.id());
+    let before = tree.active_processes().unwrap();
+    assert!(before >= 1);
+    std::fs::write(&go, "go").unwrap();
+    let inner = written_pid(&nested);
+    assert!(running(inner));
+    let after = tree.active_processes().unwrap();
+    assert!(
+        after > before,
+        "the nested process is not counted: {before} before it, {after} after"
+    );
+    let until = Instant::now() + Duration::from_secs(10);
+    while !tree.ended().unwrap() {
+        assert!(Instant::now() < until, "the tree never ended");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(tree.active_processes().unwrap(), 0);
+    assert!(!running(inner));
+    assert!(!running(holder));
+    assert_eq!(child.wait().unwrap().code(), Some(super::TREE_ENDED_CODE));
+}
+
 /// A quiet Windows custody waits on its wake instead of spinning, a few passes a second, and
 /// a stop with a raised wake reaches its loop at once.
 #[test]
@@ -351,5 +438,35 @@ fn a_quiet_windows_claude_custody_waits_on_its_wake_and_a_stop_reaches_it_at_onc
 fn claude_stand_in_holder() {
     let marker = PathBuf::from(std::env::var_os(HOLDER_PID).unwrap());
     std::fs::write(&marker, std::process::id().to_string()).unwrap();
+    std::thread::sleep(Duration::from_secs(120));
+}
+
+/// The holder the nested-job row starts in a held tree: writes its own process id to the
+/// file [`HOLDER_PID`] names, waits for the file [`NESTED_GO`] names, then starts a sleeping
+/// PING with no console and holds it in a process tree of its own, a job nested in the
+/// row's, writes PING's id to the file [`NESTED_PID`] names and waits two minutes.
+#[test]
+#[ignore = "a stand-in the nested-job row starts, not a row"]
+fn claude_stand_in_nested_holder() {
+    let marker = PathBuf::from(std::env::var_os(HOLDER_PID).unwrap());
+    std::fs::write(&marker, std::process::id().to_string()).unwrap();
+    let go = PathBuf::from(std::env::var_os(NESTED_GO).unwrap());
+    let until = Instant::now() + Duration::from_secs(60);
+    while !go.exists() {
+        assert!(Instant::now() < until, "the row never let the holder go on");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut ping = Command::new(system32().join("PING.EXE"));
+    ping.args(["-n", "120", "127.0.0.1"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(SUSPENDED_DETACHED);
+    let child = crate::spawn_gate::spawn(&mut ping).unwrap();
+    let _nested = crazyagent_win_sandbox::ProcessTree::hold(&child).unwrap();
+    let nested = PathBuf::from(std::env::var_os(NESTED_PID).unwrap());
+    let written = nested.with_extension("part");
+    std::fs::write(&written, child.id().to_string()).unwrap();
+    std::fs::rename(&written, &nested).unwrap();
     std::thread::sleep(Duration::from_secs(120));
 }
