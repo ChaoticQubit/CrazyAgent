@@ -2529,7 +2529,9 @@ impl Sandbox for LinuxSandbox {
         }
         let grants = Grants::of(&self.sandbox)?;
         let confined = self.sandbox.checkout.is_some() || self.sandbox.clone.is_some();
-        if confined && matches!(self.backend, LinuxBackend::Bubblewrap { .. }) {
+        if (confined || !grants.git_write.is_empty())
+            && matches!(self.backend, LinuxBackend::Bubblewrap { .. })
+        {
             return Err(SandboxError::Unavailable(CONFINED_NEEDS_LANDLOCK.into()));
         }
         let unheld = !grants.guarded.is_empty() && self.supervision.is_none();
@@ -2598,11 +2600,13 @@ impl Sandbox for LinuxSandbox {
 }
 
 /// What a launch's Landlock rules grant: folders read, folders written whole, git folders
-/// written with [`git_folder_rights`], and `guarded`, what Landlock cannot keep read-only
+/// written with [`git_folder_rights`] (a confined agent's admin folder, or `.git/worktrees`
+/// for the engine's worktree-add step), and `guarded`, what Landlock cannot keep read-only
 /// under those grants, as the call supervisor holds it (protected paths in a git grant,
-/// [`ADMIN_WRITES`] and [`ADMIN_LINKS`] in the admin folder, the worktree's `.git` link and
-/// a clone's store names, [`clone_store`]), which that supervisor must hold before a
-/// confined launch starts, the nested binds a second layer (DEC-185 S1, S2).
+/// [`ADMIN_WRITES`] and [`ADMIN_LINKS`] in the admin folder, each admin folder already in
+/// `.git/worktrees` for the add, the worktree's `.git` link and a clone's store names,
+/// [`clone_store`]), which that supervisor must hold before the launch starts, the nested
+/// binds a second layer (DEC-185 S1, S2; V244-LINUX-TEAM S4).
 struct Grants {
     read: Vec<PathBuf>,
     write: Vec<PathBuf>,
@@ -2656,6 +2660,34 @@ impl Grants {
             if folder(&state) {
                 writable_children(&state, &[], &protected, &mut write)?;
             }
+        }
+        let mut admins_held = Vec::new();
+        if sandbox.adds_worktrees && folder(&git) {
+            let admins = git.join("worktrees");
+            match fs::create_dir(&admins) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error.into()),
+            }
+            if !fs::symlink_metadata(&admins)?.is_dir() {
+                return Err(invalid(
+                    "the git worktrees folder is no longer a plain folder",
+                ));
+            }
+            for entry in fs::read_dir(&admins)? {
+                admins_held.push(entry?.path());
+                if admins_held.len() > GRANTS_MAX {
+                    return Err(invalid(
+                        "the git worktrees folder has too many entries to hold",
+                    ));
+                }
+            }
+            assert!(
+                admins_held
+                    .iter()
+                    .all(|held| held.parent() == Some(admins.as_path()))
+            );
+            git_write.push(admins);
         }
         for hidden in &sandbox.hidden {
             split_above(hidden, &protected, &mut write)?;
@@ -2722,6 +2754,7 @@ impl Grants {
                 .collect(),
             ..Held::default()
         };
+        guarded.trees.extend(admins_held);
         if let Some(checkout) = checkout {
             if git_write.contains(&checkout.admin) {
                 let held = ADMIN_WRITES.iter().chain(&ADMIN_LINKS);
