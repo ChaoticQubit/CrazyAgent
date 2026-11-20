@@ -339,7 +339,7 @@ fn a_handed_launch_refuses_a_changed_file_and_every_other_shape() {
 /// the bound refuses only a longer launch.
 #[test]
 fn a_handed_launch_of_the_most_words_is_read_pinned_and_started_in_order() {
-    let max = super::launch::LAUNCH_WORDS_MAX;
+    let max = super::handed::LAUNCH_WORDS_MAX;
     let root = tempfile::tempdir().unwrap();
     let node = executable(root.path(), "node");
     let pinned_node = RegisteredNativeAuthHost::capture(&node).unwrap();

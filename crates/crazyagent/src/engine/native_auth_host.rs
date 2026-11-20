@@ -9,7 +9,7 @@ use std::sync::Arc;
 /// [`sign_in_command`]).
 pub(crate) const SIGN_IN_PATH: &str = "/usr/bin:/bin";
 
-pub use launch::{CUSTODIAN_ARGUMENTS_MAX, HandedWord, handed_words};
+pub use handed::{CUSTODIAN_ARGUMENTS_MAX, HandedWord, handed_words};
 pub(crate) use launch::{LaunchWord, handed_command};
 #[cfg(test)]
 use pin::EXECUTABLE_BYTES_MAX;
@@ -286,6 +286,7 @@ pub(in crate::engine) mod entry;
 mod entry_tests;
 #[cfg(test)]
 mod executable_tests;
+mod handed;
 #[cfg(test)]
 mod hash_backend_tests;
 mod launch;
