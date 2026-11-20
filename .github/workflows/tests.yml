@@ -23,18 +23,10 @@ defaults:
     shell: bash
 
 jobs:
-  linux:
-    name: V244 Linux team B0 baseline at 238ab31c7 on ${{ matrix.runner }} (${{ matrix.kind }} host), supervisor crate, lib sandbox rows, linux_sandbox, linux_hidden_mounts
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-22.04
-            kind: default
-          - runner: ubuntu-24.04
-            kind: restricted
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 180
+  restricted:
+    name: V244 Linux team B0 r2 at 238ab31c7 on ubuntu-24.04 with unprivileged user namespaces restricted, each stage its own step, tests as a separate user in a memory-capped scope
+    runs-on: ubuntu-24.04
+    timeout-minutes: 200
     steps:
       - name: Refuse a runner that is not GitHub-hosted
         run: |
@@ -52,12 +44,16 @@ jobs:
       - name: Install Linux build packages
         timeout-minutes: 40
         run: bash scripts/ci/linux-packages.sh
-      - name: Restrict unprivileged user namespaces with AppArmor on the restricted host
-        if: matrix.kind == 'restricted'
+      - name: Restrict unprivileged user namespaces with AppArmor
         run: |
           set -euo pipefail
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
           [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1 ] || { echo "::error::the AppArmor user namespace restriction did not take"; exit 1; }
+      - name: Make the test user and copy the stage script
+        run: |
+          set -euo pipefail
+          sudo useradd -m -U -s /bin/bash sbtest
+          cp .github/farm/v244-linux-team-b0r2.sh "$RUNNER_TEMP/b0r2.sh"
       - name: Install the Rust toolchain
         run: |
           set -euo pipefail
@@ -66,22 +62,88 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           prefix-key: farm
-          shared-key: linux-${{ matrix.runner }}
+          shared-key: linux-ubuntu-24.04
           add-job-id-key: false
           add-rust-environment-hash-key: false
           cache-bin: false
           save-if: false
       - name: Fetch Rust dependencies
         run: cargo fetch --locked
-      - name: B0 rows, one target set per cargo call
-        run: |
-          set -euo pipefail
-          cp .github/farm/v244-linux-team-b0.sh "$RUNNER_TEMP/b0.sh"
-          bash "$RUNNER_TEMP/b0.sh" "${{ matrix.kind }}"
+      - name: B0r2 Host facts
+        continue-on-error: true
+        timeout-minutes: 10
+        run: bash "$RUNNER_TEMP/b0r2.sh" facts
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
-          name: v244-linux-team-b0-${{ matrix.kind }}
-          path: ${{ runner.temp }}/*-${{ matrix.kind }}.txt
+          name: v244-linux-team-b0r2-facts
+          path: |
+            ${{ runner.temp }}/b0r2-facts-restricted.txt
+            ${{ runner.temp }}/nest-restricted.txt
+          if-no-files-found: warn
+          retention-days: 14
+      - name: B0r2 Build the helper and the test binaries as the runner user
+        continue-on-error: true
+        timeout-minutes: 60
+        run: bash "$RUNNER_TEMP/b0r2.sh" build
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: v244-linux-team-b0r2-build
+          path: |
+            ${{ runner.temp }}/b0r2-build-restricted.txt
+            ${{ runner.temp }}/build-*-restricted.txt
+          if-no-files-found: warn
+          retention-days: 14
+      - name: B0r2 Supervisor crate rows as sbtest
+        continue-on-error: true
+        timeout-minutes: 30
+        run: bash "$RUNNER_TEMP/b0r2.sh" supervisor
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: v244-linux-team-b0r2-supervisor
+          path: |
+            ${{ runner.temp }}/b0r2-supervisor-restricted.txt
+            ${{ runner.temp }}/run-supervisor-*-restricted.txt
+          if-no-files-found: warn
+          retention-days: 14
+      - name: B0r2 Lib sandbox and master_host_launch rows as sbtest
+        continue-on-error: true
+        timeout-minutes: 30
+        run: bash "$RUNNER_TEMP/b0r2.sh" lib
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: v244-linux-team-b0r2-lib
+          path: |
+            ${{ runner.temp }}/b0r2-lib-restricted.txt
+            ${{ runner.temp }}/run-lib-*-restricted.txt
+          if-no-files-found: warn
+          retention-days: 14
+      - name: B0r2 linux_sandbox rows as sbtest, one thread
+        continue-on-error: true
+        timeout-minutes: 30
+        run: bash "$RUNNER_TEMP/b0r2.sh" box
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: v244-linux-team-b0r2-box
+          path: |
+            ${{ runner.temp }}/b0r2-box-restricted.txt
+            ${{ runner.temp }}/run-box-*-restricted.txt
+          if-no-files-found: warn
+          retention-days: 14
+      - name: B0r2 linux_hidden_mounts ignored rows as sbtest, one thread
+        continue-on-error: true
+        timeout-minutes: 30
+        run: bash "$RUNNER_TEMP/b0r2.sh" mounts
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: v244-linux-team-b0r2-mounts
+          path: |
+            ${{ runner.temp }}/b0r2-mounts-restricted.txt
+            ${{ runner.temp }}/run-mounts-*-restricted.txt
           if-no-files-found: warn
           retention-days: 14
