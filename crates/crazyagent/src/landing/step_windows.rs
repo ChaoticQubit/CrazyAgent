@@ -17,8 +17,8 @@ pub(super) const PROFILES_FOLDER: &str = "step-profiles";
 /// How many hex digits of the lease key name a lease's folder: 128 bits.
 const LEASE_KEY_CHARS: usize = 32;
 
-/// The places one lease's Windows step runs in: the work tree, the common git folder, the
-/// step folder in the worktree's git folder, the lease's W1-private folder in the data root,
+/// The places one lease's Windows step runs in: the work tree, the common git folder whose
+/// object store alone a step reaches, the step folder in the worktree's git folder, the lease's W1-private folder in the data root,
 /// and git's plain program with its marked install folder.
 #[derive(Debug, Clone)]
 pub(super) struct StepPlaces {
@@ -152,29 +152,36 @@ const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 /// The attribute of a link or junction.
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
-/// The policy one step kind runs under (rv-sec3 #746 C1, C2, C5). Every kind reads the work
-/// tree, the common git folder and git's install folder, writes its own home in the lease's
-/// folder and the step folder's temp folder, and has no network. An Index step writes only
-/// the step folder, an Objects step the object store too, and a WorkTree step the work tree,
-/// reading the step folder's index copy. Inputs: the places and the kind. Output: the policy,
-/// or `changes_git_unsupported`.
+/// The policy one step kind runs under (rv-sec3 #746 C1, C2, C5 and RULING 17:42 R2-a). Every
+/// kind reads the work tree, the object store and git's install folder, but no other part of
+/// the common git folder, so a junction an agent toggles in the work tree after the engine's
+/// walk reaches no config, hook or ref; W3 already refuses a repository whose object store
+/// names alternates. Every kind writes its own home in the lease's folder and the step
+/// folder's temp folder, and has no network. An Index step writes only the step folder, an
+/// Objects step the object store too, and a WorkTree step the work tree, reading the step
+/// folder's index copy and shadow git folder. Inputs: the places and the kind. Output: the
+/// policy, or `changes_git_unsupported`.
 pub(super) fn policy(places: &StepPlaces, writes: Writes) -> Result<ProjectSandbox, EngineError> {
     let refused = |_| failure("changes_git_unsupported");
     let home = places.lease.join(format!("{}-home", kind(writes)));
     let tmp = places.step.join("tmp");
+    let objects = places.common.join("objects");
     let network = SandboxNetwork::Only(Vec::new());
     let sandbox = match writes {
         Writes::Index => ProjectSandbox::new(&places.step, &home, &tmp, network)
             .map(ProjectSandbox::as_job_folder)
-            .and_then(|sandbox| sandbox.allow_read(&places.work)),
+            .and_then(|sandbox| sandbox.allow_read(&objects)),
         Writes::Objects => ProjectSandbox::new(&places.step, &home, &tmp, network)
             .map(ProjectSandbox::as_job_folder)
-            .and_then(|sandbox| sandbox.allow_worktree(&places.common.join("objects")))
-            .and_then(|sandbox| sandbox.allow_read(&places.work)),
+            .and_then(|sandbox| sandbox.allow_worktree(&objects)),
         Writes::WorkTree => ProjectSandbox::new(&places.work, &home, &tmp, network)
-            .and_then(|sandbox| sandbox.allow_read(&places.step)),
+            .and_then(|sandbox| sandbox.allow_read(&places.step))
+            .and_then(|sandbox| sandbox.allow_read(&objects)),
     }
-    .and_then(|sandbox| sandbox.allow_read(&places.common))
+    .and_then(|sandbox| match writes {
+        Writes::WorkTree => Ok(sandbox),
+        Writes::Index | Writes::Objects => sandbox.allow_read(&places.work),
+    })
     .and_then(|sandbox| sandbox.allow_read(&places.git_root))
     .map_err(refused)?;
     assert!(sandbox.network() == &SandboxNetwork::Only(Vec::new()));
