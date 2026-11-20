@@ -24,7 +24,7 @@ defaults:
 
 jobs:
   restricted:
-    name: V244 Linux team B0 r2 at 238ab31c7 on ubuntu-24.04 with unprivileged user namespaces restricted, each stage its own step, tests as a separate user in a memory-capped scope
+    name: V244 Linux team B0 r3 at 238ab31c7 on ubuntu-24.04 with unprivileged user namespaces restricted, each stage its own step, tests as a separate user in a memory-capped scope
     runs-on: ubuntu-24.04
     timeout-minutes: 200
     steps:
@@ -58,7 +58,12 @@ jobs:
         run: |
           set -euo pipefail
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
-          echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
+          {
+            echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN"
+            echo "CARGO_PROFILE_DEV_DEBUG=0"
+            echo "CARGO_PROFILE_TEST_DEBUG=0"
+            echo "CARGO_BUILD_JOBS=2"
+          } >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           prefix-key: farm
@@ -76,23 +81,75 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
-          name: v244-linux-team-b0r2-facts
+          name: v244-linux-team-b0r3-facts
           path: |
             ${{ runner.temp }}/b0r2-facts-restricted.txt
             ${{ runner.temp }}/nest-restricted.txt
           if-no-files-found: warn
           retention-days: 14
-      - name: B0r2 Build the helper and the test binaries as the runner user
+      - name: B0r3 Build the Landlock helper as the runner user
         continue-on-error: true
         timeout-minutes: 60
-        run: bash "$RUNNER_TEMP/b0r2.sh" build
+        run: bash "$RUNNER_TEMP/b0r2.sh" build-helper
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
-          name: v244-linux-team-b0r2-build
+          name: v244-linux-team-b0r3-build-helper
           path: |
-            ${{ runner.temp }}/b0r2-build-restricted.txt
-            ${{ runner.temp }}/build-*-restricted.txt
+            ${{ runner.temp }}/b0r2-build-helper-restricted.txt
+            ${{ runner.temp }}/build-helper-restricted.txt
+          if-no-files-found: warn
+          retention-days: 14
+      - name: B0r3 Build the supervisor crate test binaries as the runner user
+        continue-on-error: true
+        timeout-minutes: 60
+        run: bash "$RUNNER_TEMP/b0r2.sh" build-supervisor
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: v244-linux-team-b0r3-build-supervisor
+          path: |
+            ${{ runner.temp }}/b0r2-build-supervisor-restricted.txt
+            ${{ runner.temp }}/build-supervisor-restricted.txt
+          if-no-files-found: warn
+          retention-days: 14
+      - name: B0r3 Build the engine library test binary as the runner user
+        continue-on-error: true
+        timeout-minutes: 60
+        run: bash "$RUNNER_TEMP/b0r2.sh" build-lib
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: v244-linux-team-b0r3-build-lib
+          path: |
+            ${{ runner.temp }}/b0r2-build-lib-restricted.txt
+            ${{ runner.temp }}/build-lib-restricted.txt
+          if-no-files-found: warn
+          retention-days: 14
+      - name: B0r3 Build the linux_sandbox test binary as the runner user
+        continue-on-error: true
+        timeout-minutes: 60
+        run: bash "$RUNNER_TEMP/b0r2.sh" build-box
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: v244-linux-team-b0r3-build-box
+          path: |
+            ${{ runner.temp }}/b0r2-build-box-restricted.txt
+            ${{ runner.temp }}/build-box-restricted.txt
+          if-no-files-found: warn
+          retention-days: 14
+      - name: B0r3 Build the linux_hidden_mounts test binary as the runner user
+        continue-on-error: true
+        timeout-minutes: 60
+        run: bash "$RUNNER_TEMP/b0r2.sh" build-mounts
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: v244-linux-team-b0r3-build-mounts
+          path: |
+            ${{ runner.temp }}/b0r2-build-mounts-restricted.txt
+            ${{ runner.temp }}/build-mounts-restricted.txt
           if-no-files-found: warn
           retention-days: 14
       - name: B0r2 Supervisor crate rows as sbtest
@@ -102,7 +159,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
-          name: v244-linux-team-b0r2-supervisor
+          name: v244-linux-team-b0r3-supervisor
           path: |
             ${{ runner.temp }}/b0r2-supervisor-restricted.txt
             ${{ runner.temp }}/run-supervisor-*-restricted.txt
@@ -115,7 +172,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
-          name: v244-linux-team-b0r2-lib
+          name: v244-linux-team-b0r3-lib
           path: |
             ${{ runner.temp }}/b0r2-lib-restricted.txt
             ${{ runner.temp }}/run-lib-*-restricted.txt
@@ -128,7 +185,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
-          name: v244-linux-team-b0r2-box
+          name: v244-linux-team-b0r3-box
           path: |
             ${{ runner.temp }}/b0r2-box-restricted.txt
             ${{ runner.temp }}/run-box-*-restricted.txt
@@ -141,7 +198,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
-          name: v244-linux-team-b0r2-mounts
+          name: v244-linux-team-b0r3-mounts
           path: |
             ${{ runner.temp }}/b0r2-mounts-restricted.txt
             ${{ runner.temp }}/run-mounts-*-restricted.txt

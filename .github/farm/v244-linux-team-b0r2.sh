@@ -1,5 +1,5 @@
 set -uo pipefail
-stage=${1:?stage: facts, build, supervisor, lib, box or mounts}
+stage=${1:?stage: facts, build-helper, build-supervisor, build-lib, build-box, build-mounts, supervisor, lib, box or mounts}
 out="$RUNNER_TEMP/b0r2-$stage-restricted.txt"
 base=238ab31c7
 failed=0
@@ -17,6 +17,8 @@ host_state() {
   free -m | tee -a "$out"
   echo "runner processes $(pgrep -u runner -c || true), sbtest processes $(pgrep -u sbtest -c || true)" | tee -a "$out"
   sudo dmesg -T 2>/dev/null | grep -iE 'oom|killed process|segfault|apparmor="DENIED"|landlock' | tail -20 | tee -a "$out" || true
+  echo "systemd-oomd $(systemctl is-active systemd-oomd 2>/dev/null || true), memory pressure $(cat /proc/pressure/memory 2>/dev/null | tr '\n' ' ')" | tee -a "$out"
+  sudo journalctl -u systemd-oomd --no-pager 2>/dev/null | grep -iE 'kill|pressure|swap' | tail -10 | tee -a "$out" || true
 }
 whole() {
   local label=$1 file=$2 rc=$3
@@ -69,36 +71,48 @@ facts)
   row "test user" record "$(id sbtest)"
   host_state facts
   ;;
-build)
+build-helper)
+  host_state "before the helper build"
   cargo build -p crazyagent --bin crazyagent-landlock --locked > "$RUNNER_TEMP/build-helper-restricted.txt" 2>&1
   if [ -x target/debug/crazyagent-landlock ]; then
     row "helper built" built "built $(sha256sum target/debug/crazyagent-landlock | cut -c1-12)"
   else
     row "helper built" built "NOT: missing"
     tail -30 "$RUNNER_TEMP/build-helper-restricted.txt" | tee -a "$out"
-    exit 1
-  fi
-  cargo test -p crazyagent-linux-supervisor --locked --no-run > "$RUNNER_TEMP/build-supervisor-restricted.txt" 2>&1
-  executables "$RUNNER_TEMP/build-supervisor-restricted.txt" > "$RUNNER_TEMP/exe-supervisor"
-  cargo test -p crazyagent --lib --locked --no-run > "$RUNNER_TEMP/build-lib-restricted.txt" 2>&1
-  executables "$RUNNER_TEMP/build-lib-restricted.txt" > "$RUNNER_TEMP/exe-lib"
-  cargo test -p crazyagent --test linux_sandbox --locked --no-run > "$RUNNER_TEMP/build-box-restricted.txt" 2>&1
-  executables "$RUNNER_TEMP/build-box-restricted.txt" > "$RUNNER_TEMP/exe-box"
-  cargo test -p crazyagent --test linux_hidden_mounts --locked --no-run > "$RUNNER_TEMP/build-mounts-restricted.txt" 2>&1
-  executables "$RUNNER_TEMP/build-mounts-restricted.txt" > "$RUNNER_TEMP/exe-mounts"
-  for name in supervisor lib box mounts; do
-    row "test binaries $name" "at least 1" "$(wc -l < "$RUNNER_TEMP/exe-$name" | tr -d ' ') $(xargs -n1 basename < "$RUNNER_TEMP/exe-$name" | tr '\n' ' ')"
-    [ -s "$RUNNER_TEMP/exe-$name" ] || failed=1
-  done
-  mkdir -p target/tmp
-  chmod 1777 target/tmp
-  sudo chmod o+x /home/runner /home/runner/work "$(dirname "$GITHUB_WORKSPACE")"
-  chmod -R o+rX "$GITHUB_WORKSPACE"
-  if sudo -u sbtest test -x "$GITHUB_WORKSPACE/target/debug/crazyagent-landlock"; then
-    row "sbtest reaches the helper" yes yes
-  else
-    row "sbtest reaches the helper" yes NOT
     failed=1
+  fi
+  host_state "after the helper build"
+  ;;
+build-supervisor | build-lib | build-box | build-mounts)
+  name=${stage#build-}
+  case "$name" in
+  supervisor) target=(-p crazyagent-linux-supervisor) ;;
+  lib) target=(-p crazyagent --lib) ;;
+  box) target=(-p crazyagent --test linux_sandbox) ;;
+  mounts) target=(-p crazyagent --test linux_hidden_mounts) ;;
+  esac
+  host_state "before the $name build"
+  started=$(date +%s)
+  cargo test "${target[@]}" --locked --no-run > "$RUNNER_TEMP/build-$name-restricted.txt" 2>&1
+  rc=$?
+  executables "$RUNNER_TEMP/build-$name-restricted.txt" > "$RUNNER_TEMP/exe-$name"
+  row "test binaries $name" "at least 1, rc 0" "rc $rc, $(( $(date +%s) - started )) s, $(wc -l < "$RUNNER_TEMP/exe-$name" | tr -d ' ') $(xargs -n1 basename < "$RUNNER_TEMP/exe-$name" | tr '\n' ' ')"
+  if [ "$rc" -ne 0 ] || [ ! -s "$RUNNER_TEMP/exe-$name" ]; then
+    tail -30 "$RUNNER_TEMP/build-$name-restricted.txt" | tee -a "$out"
+    failed=1
+  fi
+  host_state "after the $name build"
+  if [ "$name" = mounts ]; then
+    mkdir -p target/tmp
+    chmod 1777 target/tmp
+    sudo chmod o+x /home/runner /home/runner/work "$(dirname "$GITHUB_WORKSPACE")"
+    chmod -R o+rX "$GITHUB_WORKSPACE"
+    if sudo -u sbtest test -x "$GITHUB_WORKSPACE/target/debug/crazyagent-landlock"; then
+      row "sbtest reaches the helper" yes yes
+    else
+      row "sbtest reaches the helper" yes NOT
+      failed=1
+    fi
   fi
   ;;
 supervisor|lib|box|mounts)
