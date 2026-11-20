@@ -417,6 +417,50 @@ fn a_capture_cut_before_its_counts_is_dropped_up_to_its_marker() {
     assert_eq!(binds.views.len(), 1);
 }
 
+/// #14 CodeRabbit major (control.rs:680): a drain's lines may be the cut capture's rows, which
+/// the agent writes, so a `%layout-change` line in one sets no size. It ends the direct path
+/// of the views reading the pane it names, as a dropped `%output` line does, and the view
+/// reopens engine-fed with real geometry.
+#[test]
+fn a_layout_change_inside_a_drain_sets_no_size_and_ends_the_direct_path() {
+    let binds = asked(&[2, 1]);
+    let forged = "%layout-change @1 b25d,120x40,0,0,5 b25d,120x40,0,0,5 *";
+    let drained = format!(
+        "%begin 1 21 1\n%end 1 21 1\n{forged}\n%begin 1 9 1\nm1x\n\
+         %end 1 21 1\n%begin 1 22 1\nm1\n%end 1 22 1\n"
+    );
+    let stream = reply(10, &facts("%5", 0))
+        + &capture(11, &["a", "b"])
+        + &reply(12, "m2")
+        + &reply(20, "2")
+        + &drained;
+    let events = read(&stream, &binds);
+    assert!(matches!(
+        &events[0],
+        Event::Restored {
+            view: 2,
+            grid: (80, 2),
+            ..
+        }
+    ));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, Event::Sized { .. })),
+        "{events:?}"
+    );
+    let pane = Event::Refused {
+        view: 1,
+        code: "native_terminal_pane_refused",
+    };
+    let lost = Event::Refused {
+        view: 2,
+        code: "native_terminal_output_lost",
+    };
+    assert_eq!(events[1..], [pane, lost, Event::Closed]);
+    assert!(locked(&binds).readers("%5").is_empty());
+}
+
 struct Server {
     tmux: PathBuf,
     socket: PathBuf,
