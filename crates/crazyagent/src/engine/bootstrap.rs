@@ -1439,16 +1439,34 @@ impl EngineService {
             }
         };
         old.verify(&self.anchor)?;
-        #[cfg(unix)]
-        {
-            self.set_aside(LOCATOR, &cause)?;
-            Ok(None)
-        }
-        #[cfg(windows)]
-        {
-            eprintln!("owner_stale_entry_replaced name={LOCATOR} cause={cause}");
-            Ok(Some(old))
-        }
+        self.stale_previous(old, &cause)
+    }
+
+    /// Deals with a locator start read that no longer names this database and its owner
+    /// generation: on Unix it is set aside. Inputs: the stale locator and the cause code.
+    /// Output: none, or the set-aside error.
+    #[cfg(unix)]
+    fn stale_previous<'a>(
+        &self,
+        _old: &'a PinnedLocator,
+        cause: &str,
+    ) -> Result<Option<&'a PinnedLocator>, EngineError> {
+        self.set_aside(LOCATOR, cause)?;
+        Ok(None)
+    }
+
+    /// Deals with a stale locator on Windows until N6's create-only rename lands (leader
+    /// 12:22 Q2 (a)): it is logged and stays pinned, so publish confirms it and renames this
+    /// run's locator over it. Inputs: the stale locator and the cause code. Output: the stale
+    /// locator.
+    #[cfg(windows)]
+    fn stale_previous<'a>(
+        &self,
+        old: &'a PinnedLocator,
+        cause: &str,
+    ) -> Result<Option<&'a PinnedLocator>, EngineError> {
+        eprintln!("owner_stale_entry_replaced name={LOCATOR} cause={cause}");
+        Ok(Some(old))
     }
 
     /// Moves a stale anchor entry to `<name>.stale-<8 hex>`, never over another entry and
