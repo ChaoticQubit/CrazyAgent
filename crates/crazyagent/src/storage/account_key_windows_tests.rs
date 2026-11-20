@@ -1,4 +1,5 @@
 use super::{ACCOUNT_KEYS, read_key_file, remove_key_file, replace_key_file, store_key_file};
+use crate::harnesses::launch::low_probe::{Try, low_probe, probe};
 use crate::protocol::CredentialRef;
 use crate::sandbox::windows::{HELPER_NAME, WindowsSandbox};
 use crate::sandbox::{ProjectSandbox, Sandbox, SandboxNetwork};
@@ -8,8 +9,6 @@ use std::process::{Command, Stdio};
 
 const NAME: &str = "anthropic-key-0123456789abcdef0123";
 const OTHER: &str = "openai-key-0123456789abcdef0123";
-const PROBE: &str = "ACCOUNT_KEY_LOW_PROBE";
-const LOW_LEVEL_SID: &str = "S-1-16-4096";
 
 fn reference(name: &str) -> CredentialRef {
     CredentialRef::new(name).unwrap()
@@ -96,62 +95,6 @@ fn a_key_is_stored_read_replaced_and_removed_as_a_labelled_secret_file() {
     remove_key_file(&root, NAME).unwrap();
 }
 
-/// A copy of this test binary whose file carries a low mandatory label, so a process started
-/// from it runs at low integrity, the lower of its parent's level and its file's.
-/// Input: the folder to copy into. Output: the copy's path.
-fn low_probe(folder: &Path) -> PathBuf {
-    let probe = folder.join("low-probe.exe");
-    std::fs::copy(std::env::current_exe().unwrap(), &probe).unwrap();
-    run(
-        "icacls",
-        &[probe.to_str().unwrap(), "/setintegritylevel", "low"],
-    );
-    probe
-}
-
-/// Runs the low probe on `paths` and returns what it printed: its own groups, then one
-/// `READ` or `DENIED` line per path, never the bytes read. Inputs: the probe and the paths.
-fn probe_reads(probe: &Path, paths: &[&Path]) -> String {
-    let test = format!(
-        "{}::low_probe_child",
-        module_path!().split_once("::").unwrap().1
-    );
-    let line: Vec<&str> = paths.iter().map(|path| path.to_str().unwrap()).collect();
-    let mut command = Command::new(probe);
-    command
-        .args([
-            test.as_str(),
-            "--exact",
-            "--nocapture",
-            "--test-threads",
-            "1",
-        ])
-        .env(PROBE, line.join("|"));
-    let output = crate::spawn_gate::collected(&mut command).unwrap();
-    assert!(output.status.success(), "{output:?}");
-    String::from_utf8_lossy(&output.stdout).into_owned()
-}
-
-/// The low probe's body: runs only with `ACCOUNT_KEY_LOW_PROBE` set, prints the groups of its
-/// own token from whoami, then tries to read each path and prints the outcome.
-#[test]
-fn low_probe_child() {
-    let Ok(line) = std::env::var(PROBE) else {
-        return;
-    };
-    let whoami = PathBuf::from(std::env::var("SystemRoot").unwrap())
-        .join("System32")
-        .join("whoami.exe");
-    let groups = Command::new(whoami).arg("/groups").output().unwrap();
-    println!("GROUPS {}", String::from_utf8_lossy(&groups.stdout));
-    for path in line.split('|') {
-        match std::fs::read(path) {
-            Ok(_) => println!("READ {path}"),
-            Err(problem) => println!("DENIED {path} {problem}"),
-        }
-    }
-}
-
 /// K1 row 2: a process of the same user at low integrity cannot read a stored or replaced
 /// key, while it reads an unlabelled file beside the engine root and the engine reads the key.
 #[test]
@@ -161,12 +104,8 @@ fn a_low_integrity_process_cannot_read_a_stored_key() {
     std::fs::write(&plain, "plain").unwrap();
     let key = root.join(ACCOUNT_KEYS).join(NAME);
     store_key_file(&root, &reference(NAME), b"sk-ant-low").unwrap();
-    let probe = low_probe(temp.path());
-    let seen = probe_reads(&probe, &[&plain, &key]);
-    assert!(
-        seen.contains(LOW_LEVEL_SID),
-        "the probe runs at low: {seen}"
-    );
+    let low = low_probe(temp.path());
+    let seen = probe(&low, &[(Try::Read, &plain), (Try::Read, &key)]);
     assert!(
         seen.contains(&format!("READ {}", plain.display())),
         "{seen}"
@@ -177,7 +116,7 @@ fn a_low_integrity_process_cannot_read_a_stored_key() {
     );
     assert_eq!(saved(&root, NAME), "sk-ant-low");
     replace_key_file(&root, &reference(NAME), b"sk-ant-low-replaced").unwrap();
-    let seen = probe_reads(&probe, &[&key]);
+    let seen = probe(&low, &[(Try::Read, &key)]);
     assert!(
         seen.contains(&format!("DENIED {}", key.display())),
         "{seen}"

@@ -2082,3 +2082,6 @@ fn tail(output: File, probe: File, sender: SyncSender<Line>) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, windows))]
+pub(crate) mod low_probe;
