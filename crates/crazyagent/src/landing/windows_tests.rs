@@ -404,9 +404,35 @@ fn a_windows_engine_call_on_a_work_tree_without_a_step_is_refused_and_starts_not
     assert_eq!(GIT_RUNS.with(std::cell::Cell::get), before);
 }
 
+/// A git config file a row planted lines in, put back as it was when the row ends, the
+/// file removed when there was none. Holds the path and its bytes before the row.
+struct Planted(PathBuf, Option<Vec<u8>>);
+
+impl Drop for Planted {
+    fn drop(&mut self) {
+        let _ = match &self.1 {
+            Some(before) => std::fs::write(&self.0, before),
+            None => std::fs::remove_file(&self.0),
+        };
+    }
+}
+
+/// Appends `lines` to the git config file at `path`, made when missing. Inputs: the file and
+/// the lines. Output: the guard that puts the file back.
+fn plant(path: PathBuf, lines: &str) -> Planted {
+    let before = std::fs::read(&path).ok();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut bytes = before.clone().unwrap_or_default();
+    bytes.extend_from_slice(lines.as_bytes());
+    std::fs::write(&path, bytes).unwrap();
+    Planted(path, before)
+}
+
 /// W5b G3: an engine git read on Windows clears its environment to the engine set, names the
 /// null device as Windows spells it for every file it must not read, and reads no system,
-/// global or other config outside the repository's own git folder.
+/// global or other config outside the repository's own git folder. On the farm the row also
+/// plants a marker in the machine's system and user git config, as W3-5a's row does, and the
+/// landing read lists neither (rv-sec3 #746 Q3b row 3).
 #[test]
 fn a_windows_engine_read_keeps_the_engine_settings_spelled_for_windows_and_reads_no_outside_config()
 {
@@ -441,9 +467,21 @@ fn a_windows_engine_read_keeps_the_engine_settings_spelled_for_windows_and_reads
             .get_args()
             .any(|arg| arg.to_string_lossy().contains("/dev/null"))
     );
+    let farm = std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true");
+    let _planted = farm.then(|| {
+        let system = PathBuf::from(std::env::var_os("ProgramData").unwrap())
+            .join("Git")
+            .join("config");
+        let global = PathBuf::from(std::env::var_os("USERPROFILE").unwrap()).join(".gitconfig");
+        [
+            plant(system, "\n[w5b]\n\tplanted = system\n"),
+            plant(global, "\n[w5b]\n\tplanted = global\n"),
+        ]
+    });
     let listing = repo
         .capture(&["config", "--show-origin", "--list"], 65536)
         .unwrap();
+    assert!(!String::from_utf8_lossy(&listing).contains("w5b"));
     let listing = String::from_utf8(listing).unwrap();
     for line in listing.lines() {
         let origin = line
