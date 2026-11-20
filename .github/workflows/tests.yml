@@ -18,7 +18,7 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
   RED_SHA: 03d19d16e
-  TIP_SHA: 169479dcf
+  TIP_SHA: 2a30ce5bb
 
 defaults:
   run:
@@ -26,7 +26,7 @@ defaults:
 
 jobs:
   s1:
-    name: V244 WIN-MASTER S1 Codex custody on ${{ matrix.runner }}, red at 03d19d16e, tip 169479dcf
+    name: V244 WIN-MASTER S1 Codex custody on ${{ matrix.runner }}, red at 03d19d16e, tip 2a30ce5bb
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
@@ -109,7 +109,16 @@ jobs:
           grep -q 'a_windows_codex_host_passes_its_input_to_its_output_and_is_reaped \.\.\. FAILED' "$RUNNER_TEMP/red.log"
           grep -q 'codex_host_unavailable' "$RUNNER_TEMP/red.log"
           echo "red as expected: the 8 Windows custody rows refuse with codex_host_unavailable and the 8 pump rows hit todo"
-      - name: S1 Codex host rows at the tip 169479dcf
+      - name: Build the Linux sandbox helper the custody rows start
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          cargo build -p crazyagent --bin crazyagent-landlock --locked
+          mkdir -p target/debug/deps
+          cp target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
+          ls -l target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
+      - name: S1 Codex host rows at the tip 2a30ce5bb
         if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
