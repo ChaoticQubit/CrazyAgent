@@ -32,7 +32,7 @@ row "rows listed in linux_team_turn" 2 "$listed"
 for name in $rows; do
   file="$RUNNER_TEMP/linux-team-turn-$name-linux.txt"
   start=$(date +%s)
-  (cd crates/crazyagent && CARGO_MANIFEST_DIR="$PWD" timeout 900 "$built" --exact "$name" --nocapture > "$file" 2>&1)
+  (cd crates/crazyagent && CARGO_MANIFEST_DIR="$PWD" timeout 900 "$built" --exact "$name" --show-output > "$file" 2>&1)
   rc=$?
   row "$name seconds" "under 900" "$(( $(date +%s) - start ))"
   grep -E '^live problem: ' "$file" | head -2 | tee -a "$out" || true
