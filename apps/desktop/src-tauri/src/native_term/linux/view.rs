@@ -2100,6 +2100,7 @@ mod tests {
             w: 200,
             h: 100,
         }));
+        step("focus");
         view.focus(true);
         assert_eq!(take_seen(), vec![ViewEvent::Focus(true)]);
 
