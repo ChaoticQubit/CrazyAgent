@@ -126,10 +126,13 @@ fn w5b_step_probe() {
     let mut facts = Facts(String::new());
     let temp = tempfile::tempdir().unwrap();
     let root = canonical(temp.path()).unwrap();
-    let git = crate::github::git_program(std::env::var_os("PATH").as_deref()).expect("git on PATH");
+    let found =
+        crate::github::git_program(std::env::var_os("PATH").as_deref()).expect("git on PATH");
+    let git = PathBuf::from(found.to_str().unwrap().trim_start_matches(r"\\?\"));
     let install = canonical(install_root(&git).unwrap()).unwrap();
     facts.note(&format!(
-        "git {} install {}",
+        "git found {} run as {} install {}",
+        found.display(),
         git.display(),
         install.display()
     ));
@@ -275,13 +278,16 @@ fn w5b_step_probe() {
         let mut started_in_work = absolute.command(&["rev-parse", "HEAD"]);
         started_in_work.current_dir(&work);
         facts.ran("index start in work tree", sandbox.wrap(&started_in_work));
-        let env = install.join("usr").join("bin").join("env.exe");
-        let mut listed = Command::new(&env);
+        let system = std::env::var_os("SystemRoot")
+            .map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+        let mut listed = Command::new(system.join("System32").join("cmd.exe"));
         listed
+            .args(["/d", "/c", "set"])
             .current_dir(&step)
             .env("GIT_DIR", &private)
+            .env("GIT_INDEX_FILE", &index)
             .env("PROBE_KEPT", "1");
-        facts.ran("index env.exe", sandbox.wrap(&listed));
+        facts.ran("index cmd set", sandbox.wrap(&listed));
     }
     let junction = work.join("jn");
     let made = crate::spawn_gate::collected(
