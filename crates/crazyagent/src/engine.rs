@@ -24,6 +24,8 @@ pub mod codex_host;
 pub(crate) mod keychain;
 #[cfg(all(test, unix))]
 mod master_host_fixture;
+#[cfg(all(test, windows))]
+mod windows_tests;
 #[cfg(unix)]
 mod native_auth_host;
 #[cfg(not(unix))]
