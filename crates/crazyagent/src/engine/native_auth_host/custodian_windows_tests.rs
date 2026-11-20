@@ -1,0 +1,241 @@
+use super::custodian::CustodianCause;
+use super::entry_bootstrap::read_bootstrap;
+use std::fs::File;
+use std::io::Write;
+use std::os::windows::io::OwnedHandle;
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+const NOT_PIPE: &str = "native_auth_bootstrap_input_not_pipe";
+const TIMEOUT: &str = "native_auth_bootstrap_timeout";
+const TRUNCATED: &str = "native_auth_bootstrap_truncated";
+const EXCESS: &str = "native_auth_bootstrap_excess";
+const UNAVAILABLE: &str = "native_auth_host_unavailable";
+const TOO_LONG: &str = "native_auth_host_launch_too_long";
+const DIGEST_INVALID: &str = "native_auth_host_executable_digest_invalid";
+const UNSAFE: &str = "native_auth_host_executable_unsafe";
+const USAGE: &str = "usage: crazyagent native-auth-custodian RUNTIME_DIR";
+const ARGUMENTS_PAST_BOUND: usize = 60;
+const BOOTSTRAP_BOUND: Duration = Duration::from_secs(11);
+const CAUSE_BOUND: Duration = Duration::from_secs(20);
+const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+/// The product binary the farm built for these rows, named by
+/// `CRAZYAGENT_TEST_NATIVE_AUTH_HOST` as the Unix custodian rows name it.
+fn executable() -> PathBuf {
+    let path = std::env::var_os("CRAZYAGENT_TEST_NATIVE_AUTH_HOST")
+        .map(PathBuf::from)
+        .expect("the farm supplies the product custodian executable path");
+    assert!(path.is_absolute());
+    path
+}
+
+/// Starts the custodian with the arguments after `native-auth-custodian` and the given
+/// standard input, its error stream piped and its output dropped. Its runtime folder is the
+/// temp folder: every outcome these rows check comes before the custodian opens it.
+fn custodian(args: &[&str], stdin: Stdio) -> Child {
+    crate::spawn_gate::spawn(
+        Command::new(executable())
+            .arg("native-auth-custodian")
+            .arg(std::env::temp_dir())
+            .args(args)
+            .stdin(stdin)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap()
+}
+
+/// Waits for a custodian, at most `bound`, and returns its error line and exit code; a
+/// custodian still running at the bound is killed and fails the row.
+fn ended(mut child: Child, bound: Duration) -> (String, Option<i32>, Duration) {
+    let started = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if started.elapsed() > bound {
+            child.kill().unwrap();
+            panic!("the custodian ran past {bound:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let elapsed = started.elapsed();
+    let output = child.wait_with_output().unwrap();
+    (
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code(),
+        elapsed,
+    )
+}
+
+/// A pipe's read end as an owned file, and its write end.
+fn pipe() -> (File, std::io::PipeWriter) {
+    let (reader, writer) = std::io::pipe().unwrap();
+    (File::from(OwnedHandle::from(reader)), writer)
+}
+
+/// Reads a bootstrap from `input` on a runtime of its own, with the given deadline.
+fn bootstrap(input: File, deadline: Instant) -> Result<[u8; 32], String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(read_bootstrap(input, deadline))
+        .map_err(|error| error.0)
+}
+
+/// A custodian whose standard input is a file or NUL is refused before it reads anything,
+/// the twin of the Unix FIFO check (rv-sec2 #728: `FILE_TYPE_PIPE`).
+#[test]
+fn a_custodian_with_a_file_or_nul_on_stdin_is_refused_as_not_a_pipe() {
+    let folder = tempfile::tempdir().unwrap();
+    let token = folder.path().join("token");
+    std::fs::write(&token, [7; 32]).unwrap();
+    let from_file = custodian(&[], Stdio::from(File::open(&token).unwrap()));
+    assert_eq!(ended(from_file, BOOTSTRAP_BOUND).0, format!("{NOT_PIPE}\n"));
+    let from_nul = custodian(&[], Stdio::from(File::open("NUL").unwrap()));
+    let (line, code, _) = ended(from_nul, BOOTSTRAP_BOUND);
+    assert_eq!(line, format!("{NOT_PIPE}\n"));
+    assert_eq!(code, Some(1));
+}
+
+/// The argument checks run before the input, as on Unix: a word count past the bound, a
+/// relative harness, a bad digest and a wrong shape are each refused with their own code.
+#[test]
+fn a_custodian_with_bad_arguments_is_refused_before_its_input() {
+    let many: Vec<String> = (0..ARGUMENTS_PAST_BOUND).map(|n| n.to_string()).collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    assert_eq!(
+        ended(custodian(&many, Stdio::null()), BOOTSTRAP_BOUND).0,
+        format!("{TOO_LONG}\n")
+    );
+    let relative = ["--codex-executable", "codex.exe", "--codex-sha256", DIGEST];
+    assert_eq!(
+        ended(custodian(&relative, Stdio::null()), BOOTSTRAP_BOUND).0,
+        format!("{UNSAFE}\n")
+    );
+    let bad_digest = [
+        "--claude-executable",
+        r"C:\Program Files\claude.exe",
+        "--claude-sha256",
+        "ZZ",
+    ];
+    assert_eq!(
+        ended(custodian(&bad_digest, Stdio::null()), BOOTSTRAP_BOUND).0,
+        format!("{DIGEST_INVALID}\n")
+    );
+    assert_eq!(
+        ended(custodian(&["extra"], Stdio::null()), BOOTSTRAP_BOUND).0,
+        format!("{USAGE}\n")
+    );
+}
+
+/// A custodian on a pipe reads its bootstrap before it answers: closed and empty is
+/// truncated, a whole token then EOF reaches the engine, which still answers unavailable
+/// until the gate flips in N4.
+#[test]
+fn a_custodian_on_a_pipe_reads_its_bootstrap_before_it_answers() {
+    let mut empty = custodian(&[], Stdio::piped());
+    drop(empty.stdin.take());
+    assert_eq!(ended(empty, BOOTSTRAP_BOUND).0, format!("{TRUNCATED}\n"));
+    let mut whole = custodian(&[], Stdio::piped());
+    whole.stdin.take().unwrap().write_all(&[7; 32]).unwrap();
+    assert_eq!(ended(whole, BOOTSTRAP_BOUND).0, format!("{UNAVAILABLE}\n"));
+}
+
+/// A custodian whose pipe stays open and empty ends itself at the bootstrap bound, so the
+/// timeout ends the process, not only the read (rv-sec2 #728, PLAN-0541 row 2).
+#[test]
+fn a_custodian_whose_pipe_stays_open_and_empty_exits_at_the_bootstrap_bound() {
+    let mut open = custodian(&[], Stdio::piped());
+    let held = open.stdin.take().unwrap();
+    let (line, code, elapsed) = ended(open, BOOTSTRAP_BOUND);
+    drop(held);
+    assert_eq!(line, format!("{TIMEOUT}\n"));
+    assert_eq!(code, Some(1));
+    assert!(elapsed >= Duration::from_secs(10), "{elapsed:?}");
+}
+
+/// The Windows bootstrap read takes exactly 32 bytes then EOF; fewer is truncated, more is
+/// excess, and an open, empty pipe times out at the deadline, within a second of it.
+#[test]
+fn the_windows_bootstrap_read_takes_32_bytes_and_refuses_the_rest() {
+    let soon = || Instant::now() + Duration::from_secs(5);
+    let (input, mut writer) = pipe();
+    writer.write_all(&[9; 32]).unwrap();
+    drop(writer);
+    assert_eq!(bootstrap(input, soon()), Ok([9; 32]));
+    for (bytes, refusal) in [(31, TRUNCATED), (33, EXCESS), (0, TRUNCATED)] {
+        let (input, mut writer) = pipe();
+        writer.write_all(&vec![9; bytes]).unwrap();
+        drop(writer);
+        assert_eq!(bootstrap(input, soon()), Err(refusal.to_owned()), "{bytes}");
+    }
+    let (input, writer) = pipe();
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(2);
+    assert_eq!(bootstrap(input, deadline), Err(TIMEOUT.to_owned()));
+    let elapsed = started.elapsed();
+    drop(writer);
+    assert!(
+        elapsed >= Duration::from_secs(2) && elapsed < Duration::from_secs(3),
+        "{elapsed:?}"
+    );
+}
+
+/// The cause reader never lets a custodian block on its error stream: a writer of 1 MB
+/// exits, and the first line reads as the code; a 129-byte line reads as none.
+#[test]
+fn the_cause_reader_drains_a_large_error_stream_and_keeps_one_code() {
+    let long = "a".repeat(129);
+    for (first, expected) in [("some_code", Some("some_code")), (long.as_str(), None)] {
+        let script =
+            format!("[Console]::Error.Write('{first}' + [char]10 + ('x' * 1048576)); exit 3");
+        let mut child = crate::spawn_gate::spawn(
+            Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        let mut cause = CustodianCause::new(child.stderr.take().unwrap()).unwrap();
+        let started = Instant::now();
+        let status = loop {
+            cause.read().unwrap();
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            assert!(started.elapsed() < CAUSE_BOUND, "the writer blocked");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(status.code(), Some(3));
+        cause.read().unwrap();
+        assert_eq!(cause.code(), expected, "{}", first.len());
+    }
+}
+
+/// Records what a custodian does with no `SystemRoot` in its environment, for PLAN-0541's
+/// design 2, written to the file the farm names, never asserted.
+#[test]
+#[ignore = "farm probe, run with --ignored"]
+fn what_a_custodian_does_with_no_system_root() {
+    let out = std::env::var_os("CRAZYAGENT_FARM_PROBE_OUT").unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let mut child = crate::spawn_gate::spawn(
+        Command::new(executable())
+            .arg("native-auth-custodian")
+            .arg(folder.path())
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    drop(child.stdin.take());
+    let (line, code, elapsed) = ended(child, BOOTSTRAP_BOUND);
+    std::fs::write(
+        out,
+        format!("no SystemRoot: code={code:?} elapsed={elapsed:?} stderr={line:?}\n"),
+    )
+    .unwrap();
+}

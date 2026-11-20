@@ -103,6 +103,18 @@ pub(in crate::engine) async fn dispatch(
     Err(EngineError("native_auth_host_unavailable".into()))
 }
 
+#[cfg(test)]
+#[path = "native_auth_host/entry_bootstrap.rs"]
+mod entry_bootstrap;
+
+#[cfg(test)]
+#[path = "native_auth_host/custodian.rs"]
+mod custodian;
+
+#[cfg(test)]
+#[path = "native_auth_host/custodian_windows_tests.rs"]
+mod custodian_windows_tests;
+
 pub(super) mod custody {
     #[cfg(unix)]
     use crate::engine::EngineError;
