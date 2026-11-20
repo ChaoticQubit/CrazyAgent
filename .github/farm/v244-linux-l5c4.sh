@@ -21,6 +21,8 @@ timeout_row=native_term::linux::clip::tests::a_board_call_from_a_timeout_is_refu
 command_unit_row=native_term::linux::clip::tests::a_command_write_needs_the_seat_not_an_event
 command_row=native_term::linux::clip::tests::a_command_write_reaches_the_desktop_board_with_no_event
 command_red="a timeout's plain write is refused and its command write is made"
+command_unit_red="a command writes with a seat and no event"
+red_result="test result: FAILED. 0 passed; 1 failed;"
 red_rows=("$command_unit_row")
 kept_rows=(
   native_term::linux::clip::tests::a_private_board_keeps_each_board_in_process
@@ -52,7 +54,7 @@ red_build() {
   [ "$built" = 0 ] || red_ok=1
 }
 red_fails() {
-  local sha=$1 row=$2 how=$3
+  local sha=$1 row=$2 how=$3 message=$4
   local file="$RUNNER_TEMP/red-run-${row##*::}.txt" rc failed=1
   log "== red $sha: $row must fail by its assertion"
   if [ "$how" = x11 ]; then
@@ -62,7 +64,7 @@ red_fails() {
   fi
   rc=$?
   tail -n 20 "$file" >> "$out"
-  if [ "$rc" = 101 ] && grep -qxF "test $row ... FAILED" "$file" && grep -q "panicked at" "$file"; then
+  if [ "$rc" = 101 ] && grep -qF "$red_result" "$file" && grep -q "panicked at" "$file" && grep -qF "$message" "$file"; then
     failed=0
   fi
   [ "$failed" = 0 ] || red_ok=1
@@ -70,7 +72,7 @@ red_fails() {
   log "red $sha: $row exit $rc, failed by its assertion (0 = yes) $failed"
 }
 red_build "$RED1_SHA"
-red_fails "$RED1_SHA" "$command_unit_row" plain
+red_fails "$RED1_SHA" "$command_unit_row" plain "$command_unit_red"
 git checkout -q --detach "$GREEN_SHA"
 
 log "== green $GREEN_SHA: lib build"
@@ -450,7 +452,7 @@ red_display() {
   wait "$pid"
   rc=$?
   tail -n 20 "$dir/row.txt" >> "$out"
-  if [ "$rc" = 101 ] && grep -qxF "test $command_row ... FAILED" "$dir/row.txt" && grep -qF "$command_red" "$dir/row.txt"; then
+  if [ "$rc" = 101 ] && grep -qF "$red_result" "$dir/row.txt" && grep -q "panicked at" "$dir/row.txt" && grep -qF "$command_red" "$dir/row.txt"; then
     failed=0
   fi
   [ "$failed" = 0 ] || red_ok=1
