@@ -2166,6 +2166,28 @@ mod windows_tests {
         );
     }
 
+    /// V244-WIN-MASTER S5 (PLAN-0410 agent_home row): a launch record the engine writes on
+    /// Windows lands in a record folder made inside the engine's W1-private data root, and
+    /// the folder and the record pass W1's private check: both inherit only the data root's
+    /// private list, though `write_record` makes the folder with a plain `DirBuilder`.
+    #[test]
+    fn a_launch_record_in_a_private_data_root_is_private() {
+        use crazyagent_win_sandbox::private;
+        let temp = tempfile::tempdir().unwrap();
+        let base = crate::sandbox::canonical(temp.path()).unwrap();
+        let data = base.join("data");
+        drop(private::dir(&data).unwrap());
+        let home = base.join("home");
+        std::fs::create_dir(&home).unwrap();
+        super::write_record(&data, super::GIVEN_FOLDER, &home, "rules").unwrap();
+        let (folder, name) = super::record_place(&data, super::GIVEN_FOLDER, &home).unwrap();
+        private::check(&private::open_dir(&folder).unwrap()).unwrap();
+        let record = private::read_only(&folder.join(&name)).unwrap();
+        private::check(&record).unwrap();
+        drop(record);
+        assert_eq!(std::fs::read_to_string(folder.join(name)).unwrap(), "rules");
+    }
+
     /// #512 r2 (rv-sec2 N2): a link opened as itself is no kept file, even with one name and
     /// a trusted owner, so a link an agent swaps in for a kept file is never kept as a file.
     #[test]
