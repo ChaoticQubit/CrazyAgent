@@ -599,6 +599,501 @@ fn buffers_left(host: &Tmux) -> usize {
     names.len()
 }
 
+/// V243-PASTE-INTERLEAVE-N0 R1: a prompt typed by name goes, keys and Enter, into the
+/// agent's own pane even when the active pane moves after its first command, as a focus
+/// change can move it in the middle of one request.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_prompt_stays_in_the_agents_pane_when_the_active_pane_moves_mid_request() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, server, agent, own) = raw_cat_pane(home.path(), false);
+    let window = target(&agent);
+    let app = tmux_client(
+        &server,
+        &["display-message", "-p", "-t", &window, "#{pane_id}"],
+    );
+    let (mate, theirs) = split_cat(&server, &agent, home.path(), "teammate", false);
+    let moved = format!("select-pane -t {mate}");
+    tmux_client(
+        &server,
+        &["set-hook", "-w", "-t", &window, "after-send-keys", &moved],
+    );
+    assert_eq!(
+        crate::terminal::type_prompt(&*host, &agent, "hello"),
+        Ok(true)
+    );
+    let typed = marked(&host, &[(&app, &own), (&mate, &theirs)]);
+    assert_eq!(
+        typed[0], b"hello\r#",
+        "the prompt and its Enter reach the agent's pane"
+    );
+    assert_eq!(typed[1], b"#", "nothing of the prompt reaches the teammate");
+}
+
+/// V243-PASTE-INTERLEAVE-N0 R2: one input request that needs several `send-keys` runs, here
+/// 600 bytes holding a NUL, stays in the pane that was active at its start while the active
+/// pane moves after every run.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_multi_run_input_stays_in_one_pane_when_the_active_pane_moves() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, server, agent, own) = raw_cat_pane(home.path(), false);
+    let window = target(&agent);
+    let app = tmux_client(
+        &server,
+        &["display-message", "-p", "-t", &window, "#{pane_id}"],
+    );
+    let (mate, theirs) = split_cat(&server, &agent, home.path(), "teammate", false);
+    let moved = format!("select-pane -t {mate}");
+    tmux_client(
+        &server,
+        &["set-hook", "-w", "-t", &window, "after-send-keys", &moved],
+    );
+    let bytes: Vec<u8> = (0..600)
+        .map(|at| if at == 300 { 0 } else { b'a' + (at % 26) as u8 })
+        .collect();
+    assert!(!pastes(&bytes), "a NUL keeps the request typed, not pasted");
+    assert!(send_keys_lines(&window, &bytes).len() >= 3);
+    host.input(&agent, &bytes).unwrap();
+    let typed = marked(&host, &[(&app, &own), (&mate, &theirs)]);
+    assert_eq!(
+        typed[0],
+        [bytes.as_slice(), b"#"].concat(),
+        "every run reaches one pane"
+    );
+    assert_eq!(
+        typed[1], b"#",
+        "no run reaches the pane made active after the first"
+    );
+}
+
+/// V243-PASTE-INTERLEAVE-N0 R3 (Q1): a prompt into a pinned pane reads whether bracketed
+/// paste is on in that pane, not in the window's active pane, so a teammate that turned it
+/// on never wraps the pinned pane's prompt in paste marks.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_pinned_prompt_reads_the_paste_mode_of_its_own_pane_not_the_active_one() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, server, agent, own) = raw_cat_pane(home.path(), false);
+    let pin = host.own_pane_at(&agent).unwrap();
+    let (mate, theirs) = split_cat(&server, &agent, home.path(), "teammate", true);
+    tmux_client(&server, &["select-pane", "-t", &mate]);
+    let typed = crate::terminal::type_prompt_at(&*host, &agent, &pin, "hello");
+    assert_eq!(typed, Ok(true));
+    let typed = marked(&host, &[(&pin.pane, &own), (&mate, &theirs)]);
+    assert_eq!(
+        typed[0], b"hello\r#",
+        "the pinned pane never turned bracketed paste on"
+    );
+    assert_eq!(typed[1], b"#");
+}
+
+/// V243-PASTE-INTERLEAVE-N0 R5 (leader 08:52): a prompt to a lead by name reaches the lead's
+/// own app pane while a teammate split off the lead's window is the active pane, so the
+/// lead's prompt never goes to the teammate.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_prompt_by_name_reaches_the_leads_pane_not_the_active_teammate() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, server, agent, own) = raw_cat_pane(home.path(), false);
+    let window = target(&agent);
+    let app = tmux_client(
+        &server,
+        &["display-message", "-p", "-t", &window, "#{pane_id}"],
+    );
+    let (mate, theirs) = split_cat(&server, &agent, home.path(), "teammate", false);
+    tmux_client(&server, &["select-pane", "-t", &mate]);
+    assert_eq!(
+        crate::terminal::type_prompt(&*host, &agent, "hello"),
+        Ok(true)
+    );
+    let typed = marked(&host, &[(&app, &own), (&mate, &theirs)]);
+    assert_eq!(
+        typed[0], b"hello\r#",
+        "the lead's prompt reaches the lead's pane"
+    );
+    assert_eq!(typed[1], b"#", "the active teammate gets nothing of it");
+}
+
+/// V243-PASTE-INTERLEAVE-N0 R6: in a split window whose app pane an older engine left with
+/// no tag, a prompt by name is refused and types nothing, never into the active pane; once
+/// the pane whose pid is the recorded one is tagged, the prompt reaches it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_split_window_with_no_app_tag_takes_no_prompt_until_its_app_pane_is_tagged() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, server, agent, own) = raw_cat_pane(home.path(), false);
+    let window = target(&agent);
+    let app = tmux_client(
+        &server,
+        &["display-message", "-p", "-t", &window, "#{pane_id}"],
+    );
+    let (mate, theirs) = split_cat(&server, &agent, home.path(), "teammate", false);
+    untag(&server, &app);
+    tmux_client(&server, &["select-pane", "-t", &mate]);
+    let refused = crate::terminal::type_prompt(&*host, &agent, "hello");
+    let unknown = HostError(crate::terminal::APP_PANE_UNKNOWN.to_owned());
+    assert_eq!(
+        refused,
+        Err(unknown),
+        "no tag in a split window types into no pane, and the live agent is not read as ended"
+    );
+    let pid = host
+        .panes(&agent)
+        .unwrap()
+        .into_iter()
+        .find(|pane| pane.id == app);
+    host.tag_app(&agent, pid.unwrap().pid).unwrap();
+    assert_eq!(
+        crate::terminal::type_prompt(&*host, &agent, "hello"),
+        Ok(true)
+    );
+    let typed = marked(&host, &[(&app, &own), (&mate, &theirs)]);
+    assert_eq!(
+        typed[0], b"hello\r#",
+        "the pane tagged by its pid takes the prompt"
+    );
+    assert_eq!(typed[1], b"#", "the refused prompt typed nothing anywhere");
+}
+
+/// V243-PASTE-INTERLEAVE-N0 R7 (leader 08:55): a one-pane window whose pane an older engine
+/// left with no tag holds only the agent's app, so a prompt by name reaches that pane and
+/// tags it as the app pane.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_one_pane_window_with_no_app_tag_takes_the_prompt_and_is_tagged() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, server, agent, own) = raw_cat_pane(home.path(), false);
+    let window = target(&agent);
+    let app = tmux_client(
+        &server,
+        &["display-message", "-p", "-t", &window, "#{pane_id}"],
+    );
+    untag(&server, &app);
+    assert_eq!(
+        crate::terminal::type_prompt(&*host, &agent, "hello"),
+        Ok(true)
+    );
+    let typed = marked(&host, &[(&app, &own)]);
+    assert_eq!(typed[0], b"hello\r#");
+    assert_eq!(
+        tag_of(&server, &app),
+        agent.as_str(),
+        "the one pane now carries the tag"
+    );
+    assert_eq!(
+        mark_of(&server, &app),
+        agent.as_str(),
+        "its window is now marked as one whose app the engine tagged"
+    );
+}
+
+/// #686 r1 code F1: once a lead's tagged app pane closes beside the teammate it split off,
+/// the window lists one untagged pane, the teammate's. The window's mark says the engine
+/// tagged its app, so a prompt by name is refused as an unknown app pane of a live window
+/// and the teammate gets nothing, instead of being tagged as the lead's app.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_window_whose_tagged_app_pane_closed_hands_its_teammate_no_prompt() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, server, agent, _own) = raw_cat_pane(home.path(), false);
+    let window = target(&agent);
+    let app = tmux_client(
+        &server,
+        &["display-message", "-p", "-t", &window, "#{pane_id}"],
+    );
+    let (mate, theirs) = split_cat(&server, &agent, home.path(), "teammate", false);
+    tmux_client(&server, &["kill-pane", "-t", &app]);
+    let left = tmux_client(&server, &["list-panes", "-t", &window, "-F", "#{pane_id}"]);
+    assert_eq!(left, mate, "the window lives on with the teammate alone");
+    let refused = crate::terminal::type_prompt(&*host, &agent, "hello");
+    let unknown = HostError(crate::terminal::APP_PANE_UNKNOWN.to_owned());
+    assert_eq!(
+        refused,
+        Err(unknown),
+        "a live window with no app pane takes no prompt"
+    );
+    assert_eq!(
+        tag_of(&server, &mate),
+        "",
+        "the teammate is never tagged as the app"
+    );
+    let typed = marked(&host, &[(&mate, &theirs)]);
+    assert_eq!(typed[0], b"#", "the teammate gets only the mark");
+}
+
+/// CR-0351 F1 (#16 CodeRabbit major): an older engine's one-pane window whose app splits a
+/// teammate and closes between the two option commands of its first tagging. The window's
+/// mark is set first, so the teammate left alone is refused as an unknown app pane and is
+/// never tagged as the app, as it would be if only the pane tag had landed.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_app_closing_while_its_window_is_tagged_hands_its_teammate_no_prompt() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, server, agent, _own) = raw_cat_pane(home.path(), false);
+    let window = target(&agent);
+    let app = tmux_client(
+        &server,
+        &["display-message", "-p", "-t", &window, "#{pane_id}"],
+    );
+    untag(&server, &app);
+    let closes = format!("split-window -d -t {app} ; kill-pane -t {app}");
+    tmux_client(
+        &server,
+        &["set-hook", "-w", "-t", &window, "after-set-option", &closes],
+    );
+    assert!(
+        crate::terminal::type_prompt(&*host, &agent, "hello").is_err(),
+        "a tagging whose pane closes under it sends nothing"
+    );
+    tmux_client(
+        &server,
+        &["set-hook", "-uw", "-t", &window, "after-set-option"],
+    );
+    let mate = tmux_client(&server, &["list-panes", "-t", &window, "-F", "#{pane_id}"]);
+    assert!(
+        pane_id_valid(&mate) && mate != app,
+        "the window lives on with the teammate alone: {mate}"
+    );
+    let refused = crate::terminal::type_prompt(&*host, &agent, "hello");
+    let unknown = HostError(crate::terminal::APP_PANE_UNKNOWN.to_owned());
+    assert_eq!(
+        refused,
+        Err(unknown),
+        "the teammate left alone takes no prompt"
+    );
+    assert_eq!(
+        tag_of(&server, &mate),
+        "",
+        "the teammate is never tagged as the app"
+    );
+}
+
+/// Runs one tmux client command on a test's server with an empty environment, as a person
+/// or a native lead runs one. Takes the server and the arguments. Returns the output,
+/// trimmed; a failed command fails the test.
+#[cfg(target_os = "macos")]
+fn tmux_client(server: &Server, args: &[&str]) -> String {
+    assert!(!args.is_empty());
+    let output = crate::spawn_gate::output(
+        Command::new(&server.tmux)
+            .arg("-S")
+            .arg(&server.socket)
+            .args(args)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "tmux {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// A teammate pane split off an agent's window with `-d`, as a native lead splits one: a raw
+/// `cat` that writes what it receives to `home/<name>`, and with `bracketed` first turns
+/// bracketed paste on; waits until tmux reads the pane's mode. Takes the server, the agent,
+/// the home folder, the name and that choice. Returns the pane id and its file.
+#[cfg(target_os = "macos")]
+fn split_cat(
+    server: &Server,
+    agent: &AgentId,
+    home: &Path,
+    name: &str,
+    bracketed: bool,
+) -> (String, PathBuf) {
+    let (ready, received) = (home.join(format!("{name}.ready")), home.join(name));
+    let bracket = if bracketed {
+        "printf '\\033[?2004h'; "
+    } else {
+        ""
+    };
+    let script = format!(
+        "stty raw -echo; {bracket}: > '{}'; exec /bin/cat > '{}'",
+        ready.display(),
+        received.display()
+    );
+    let window = target(agent);
+    let split = [
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &window,
+        "--",
+    ];
+    let pane = tmux_client(server, &[&split[..], &["/bin/sh", "-c", &script]].concat());
+    assert!(pane_id_valid(&pane), "tmux names the split pane: {pane}");
+    let mode = if bracketed { "1" } else { "0" };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let flag = [
+        "display-message",
+        "-p",
+        "-t",
+        &pane,
+        "#{bracket_paste_flag}",
+    ];
+    while !ready.exists() || tmux_client(server, &flag) != mode {
+        assert!(
+            Instant::now() < deadline,
+            "the teammate pane never got ready"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    (pane, received)
+}
+
+/// Types `#` straight into each pane by its id, then waits, for at most ten seconds, until
+/// each pane's file ends with it, so every byte typed into that pane before it has arrived.
+/// Takes the host and the panes with their files. Returns each file's bytes, in order.
+#[cfg(target_os = "macos")]
+fn marked(host: &Tmux, panes: &[(&str, &Path)]) -> Vec<Vec<u8>> {
+    assert!(!panes.is_empty());
+    let control = host.live_control().unwrap();
+    for (pane, _) in panes {
+        assert!(pane_id_valid(pane));
+        control.run(&format!("send-keys -t {pane} -H 23")).unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    panes
+        .iter()
+        .map(|(_, file)| {
+            loop {
+                let bytes = std::fs::read(file).unwrap_or_default();
+                if bytes.ends_with(b"#") {
+                    break bytes;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "no mark reached {}",
+                    file.display()
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        })
+        .collect()
+}
+
+/// The app tag one pane carries now. Takes the server and the pane. Returns the tag, empty
+/// when the pane carries none.
+#[cfg(target_os = "macos")]
+fn tag_of(server: &Server, pane: &str) -> String {
+    assert!(pane_id_valid(pane));
+    tmux_client(
+        server,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            pane,
+            &format!("#{{{AGENT_TAG}}}"),
+        ],
+    )
+}
+
+/// The app mark the window of one pane carries now. Takes the server and the pane. Returns
+/// the mark, empty when the window carries none.
+#[cfg(target_os = "macos")]
+fn mark_of(server: &Server, pane: &str) -> String {
+    assert!(pane_id_valid(pane));
+    let format = format!("#{{{APP_MARK}}}");
+    tmux_client(server, &["display-message", "-p", "-t", pane, &format])
+}
+
+/// Clears the app tag on one pane and the app mark on its window, as an engine from before
+/// V243-PASTE-INTERLEAVE-N0 left every pane and window of its own server. Takes the server
+/// and the pane. Returns nothing; checks neither is left after.
+#[cfg(target_os = "macos")]
+fn untag(server: &Server, pane: &str) {
+    tmux_client(server, &["set-option", "-pu", "-t", pane, AGENT_TAG]);
+    tmux_client(server, &["set-option", "-wu", "-t", pane, APP_MARK]);
+    assert_eq!(tag_of(server, pane), "");
+    assert_eq!(mark_of(server, pane), "");
+}
+
+/// V243-PASTE-INTERLEAVE-N0: a request piece longer than one input request is a caller's
+/// bug, caught before the host is asked, so no prompt is ever cut across two requests to
+/// two panes.
+#[test]
+#[should_panic(expected = "a piece fits one input request")]
+fn a_typed_piece_over_one_input_request_is_a_bug() {
+    let host = Tmux::open(None, Path::new("/nonexistent"));
+    let agent = AgentId::team(1).unwrap();
+    let piece = vec![b'x'; INPUT_BYTES_MAX + 1];
+    let stale = crate::terminal::APP_PANE_UNKNOWN;
+    let _ = crate::terminal::type_piece(&host, &agent, None, &piece, stale);
+}
+
+/// #686 r1 F2: a stale pin answers only an unknown app pane, which refuses the request, or
+/// an unknown agent, which ends a view; any other code is a caller's bug, caught before the
+/// host is asked.
+#[test]
+#[should_panic(expected = "a stale pin refuses the request or ends the view")]
+fn a_typed_piece_whose_stale_code_is_neither_refusal_is_a_bug() {
+    let host = Tmux::open(None, Path::new("/nonexistent"));
+    let agent = AgentId::team(1).unwrap();
+    let _ = crate::terminal::type_piece(&host, &agent, None, b"x", "terminal_unavailable");
+}
+
+/// #687 NOTE-0944 item 2: a pin under serial 0 is a bug, since control serials count from 1
+/// and `control_at` matches a pin to its connection by serial alone.
+#[test]
+#[should_panic(expected = "control serials start at 1")]
+fn a_pin_under_control_serial_zero_is_a_bug() {
+    let _ = pin_at("%1".to_owned(), 0);
+}
+
+/// #687 NOTE-0944 item 2: a pin that names a window target is a bug, since every pinned read
+/// and send would then land on whichever pane is active.
+#[test]
+#[should_panic(expected = "a pin names a pane id, never a window target")]
+fn a_pin_naming_a_window_target_is_a_bug() {
+    let _ = pin_at("crazyagent:=team-1".to_owned(), 1);
+}
+
+/// #686 r1 code F1: marking a window target as an agent's app pane is a caller's bug, since
+/// the tag would land on whichever pane is active, which may be a teammate's.
+#[cfg(target_os = "macos")]
+#[test]
+#[should_panic(expected = "only a pane id is tagged")]
+fn marking_a_window_target_as_the_app_pane_is_a_bug() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, _server, agent, _own) = raw_cat_pane(home.path(), false);
+    let control = host.live_control().unwrap();
+    let _ = Tmux::mark_app(&control, &target(&agent), &agent);
+}
+
+/// V243-PASTE-INTERLEAVE-N0: a pinned piece whose pin is a window target, not a pane id, is
+/// a caller's bug, since a window target names whichever pane is active and would undo the
+/// pin.
+#[test]
+#[should_panic(expected = "a pin is a pane id")]
+fn a_typed_piece_pinned_to_no_pane_id_is_a_bug() {
+    let host = Tmux::open(None, Path::new("/nonexistent"));
+    let at = PaneAt {
+        pane: "crazyagent:=team-1".to_owned(),
+        serial: 1,
+    };
+    let agent = AgentId::team(1).unwrap();
+    let stale = crate::terminal::APP_PANE_UNKNOWN;
+    let _ = crate::terminal::type_piece(&host, &agent, Some(&at), b"x", stale);
+}
+
+/// V243-PASTE-INTERLEAVE-N0: tagging the app pane by pid 0 or 1, which no pane record keeps
+/// for a pane tmux started, is a caller's bug, caught before the server is asked.
+#[test]
+#[should_panic(expected = "a pane record keeps a real pid")]
+fn tagging_an_app_pane_by_pid_one_is_a_bug() {
+    let host = Tmux::open(None, Path::new("/nonexistent"));
+    let _ = host.tag_app(&AgentId::team(1).unwrap(), 1);
+}
+
 #[test]
 fn quoted_arguments_keep_every_character_inside_one_tmux_word() {
     assert_eq!(
