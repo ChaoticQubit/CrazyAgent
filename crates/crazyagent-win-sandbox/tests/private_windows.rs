@@ -1045,8 +1045,9 @@ fn a_rename_name_that_is_not_one_component_trips_the_assertion() {
 }
 
 /// DESIGN-0601 R2 and probe P5 (QUESTION-0520 r3): a Replace rename over a target W1 holds
-/// with `read_only`, which never shares delete, is refused with access denied, and both
-/// files keep their bytes.
+/// with `read_only`, which never shares delete, is refused, and both files keep their
+/// bytes. The native rename names this a sharing violation (32), where std's path rename
+/// in P5 gave access denied (5).
 #[test]
 fn a_replace_over_a_held_target_is_refused_and_changes_nothing() {
     let root = scratch("replace-held");
@@ -1061,7 +1062,7 @@ fn a_replace_over_a_held_target_is_refused_and_changes_nothing() {
         private::Mode::Replace,
     )
     .unwrap_err();
-    assert_eq!(refused.raw_os_error(), Some(5), "{refused}");
+    assert_eq!(refused.raw_os_error(), Some(32), "{refused}");
     assert_eq!(std::fs::read(&target).unwrap(), b"old");
     assert_eq!(std::fs::read(root.join("staged.json")).unwrap(), b"new");
     drop((holder, file, held));
