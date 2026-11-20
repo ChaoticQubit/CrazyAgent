@@ -52,7 +52,7 @@ describe("the Windows native terminal in the real app, before the flag", () => {
     const tag = await browser.execute(() => window.__TAURI_INTERNALS__.transformCallback(() => {}));
     const answer = await call("desktop_native_terminal_open", {
       name: "h5c-guard", pane: null, label: "H5c guard row", rect: RECT, style: STYLE,
-      covered: false, keys: false, project: null, events: `__CHANNEL__:${tag}`,
+      covered: false, keys: false, tile: false, project: null, events: `__CHANNEL__:${tag}`,
     });
     assert.equal(answer.value, undefined, `the open answered a view: ${answer.value}`);
     console.log(`h5c row: open refused ${answer.failed}`);
