@@ -1,0 +1,362 @@
+use super::owner_git::{farm, install_root};
+use super::{GRANTS_FOLDER, HELPER_NAME, WindowsSandbox};
+use crate::sandbox::{ProjectSandbox, Sandbox, SandboxError, SandboxNetwork, canonical};
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+/// The facts one probe run took, one line each, in the order taken.
+struct Facts(String);
+
+impl Facts {
+    /// Records one line. Input: the line.
+    fn note(&mut self, line: &str) {
+        self.0.push_str(line);
+        self.0.push('\n');
+    }
+
+    /// Runs a wrapped command and records its exit code and the start of its output, or why
+    /// it never started. Inputs: the case name and the wrapped command or its refusal.
+    fn ran(&mut self, name: &str, wrapped: Result<Command, SandboxError>) {
+        let line = match wrapped {
+            Err(refused) => format!("{name}: wrap refused {refused:?}"),
+            Ok(mut command) => match crate::spawn_gate::collected(command.stdin(Stdio::null())) {
+                Err(error) => format!("{name}: start failed {error}"),
+                Ok(out) => format!(
+                    "{name}: rc={:?} out={:?} err={:?}",
+                    out.status.code(),
+                    clip(&out.stdout),
+                    clip(&out.stderr)
+                ),
+            },
+        };
+        self.note(&line);
+    }
+}
+
+/// The first 600 characters of a process output, as text. Input: the bytes. Output: the text.
+fn clip(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).chars().take(600).collect()
+}
+
+/// Runs the engine's own git in `folder`, failing the probe when it fails. Inputs: git, the
+/// folder and the arguments. Output: what it printed.
+fn plain(git: &Path, folder: &Path, args: &[&str]) -> String {
+    let out = crate::spawn_gate::collected(
+        Command::new(git)
+            .args(["-c", "user.name=p", "-c", "user.email=p@p.invalid"])
+            .args(args)
+            .current_dir(folder)
+            .stdin(Stdio::null()),
+    )
+    .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// Where one step git runs and what it names: the start folder, `GIT_DIR`, the work tree,
+/// the index and the null device spelling for its settings.
+struct Step<'a> {
+    git: &'a Path,
+    start: &'a Path,
+    git_dir: &'a OsStr,
+    work: &'a Path,
+    index: &'a Path,
+    null: &'a str,
+}
+
+impl Step<'_> {
+    /// The git command for `args`, built as a Windows step would build it. Input: the
+    /// arguments. Output: the unwrapped command.
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(self.git);
+        command
+            .current_dir(self.start)
+            .env("GIT_DIR", self.git_dir)
+            .env("GIT_WORK_TREE", self.work)
+            .env("GIT_INDEX_FILE", self.index)
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .env("LC_ALL", "C")
+            .arg("-c")
+            .arg(format!("core.attributesFile={}", self.null))
+            .arg("-c")
+            .arg(format!("core.excludesFile={}", self.null))
+            .args(args);
+        command
+    }
+}
+
+/// Installs one step policy, or records why not. Inputs: the facts, the case name, the
+/// policy, the helper and the folder for profiles and grants. Output: the installed sandbox.
+fn installed(
+    facts: &mut Facts,
+    name: &str,
+    policy: Result<ProjectSandbox, SandboxError>,
+    helper: &Path,
+    place: &Path,
+) -> Option<WindowsSandbox> {
+    let profile = place.join(format!("{name}.sb"));
+    match policy.and_then(|policy| {
+        WindowsSandbox::install(policy, helper, &profile, &place.join(GRANTS_FOLDER))
+    }) {
+        Ok(sandbox) => {
+            facts.note(&format!(
+                "{name}: installed {}",
+                sandbox.sandbox().project_root().display()
+            ));
+            Some(sandbox)
+        }
+        Err(refused) => {
+            facts.note(&format!("{name}: install refused {refused:?}"));
+            None
+        }
+    }
+}
+
+/// W5b D2 probe (PLAN-1336, #746 C1-C5): takes the Windows facts the confined landing step
+/// rests on, through the real ProjectSandbox, WindowsSandbox::install and wrap path, and writes
+/// them to `w5b-probe.txt` in the runner's temp folder. It asserts nothing about the answers.
+#[test]
+#[ignore = "probe: needs unc-share-setup.ps1's device entries on an elevated runner (test farm)"]
+fn w5b_step_probe() {
+    let mut facts = Facts(String::new());
+    let temp = tempfile::tempdir().unwrap();
+    let root = canonical(temp.path()).unwrap();
+    let git = crate::github::git_program(std::env::var_os("PATH").as_deref()).expect("git on PATH");
+    let install = canonical(install_root(&git).unwrap()).unwrap();
+    facts.note(&format!(
+        "git {} install {}",
+        git.display(),
+        install.display()
+    ));
+    let repo = root.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    plain(&git, &repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+    plain(&git, &repo, &["add", "a.txt"]);
+    plain(&git, &repo, &["commit", "-q", "-m", "one"]);
+    let work = root.join("wt");
+    plain(
+        &git,
+        &repo,
+        &["worktree", "add", "-q", "-b", "w1", work.to_str().unwrap()],
+    );
+    let outside = root.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("marker.txt"), "outside\n").unwrap();
+    let common = repo.join(".git");
+    let private = common.join("worktrees").join("wt");
+    let step = private.join("crazyagent-step");
+    for folder in ["", "home", "tmp", "o-home", "o-tmp", "w-home", "w-tmp"] {
+        std::fs::create_dir_all(step.join(folder)).unwrap();
+    }
+    let place = root.join("place");
+    std::fs::create_dir_all(place.join(GRANTS_FOLDER)).unwrap();
+    farm::own(&root);
+    let helper: PathBuf = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .with_file_name(HELPER_NAME);
+    let network = || SandboxNetwork::Only(Vec::new());
+    let reads = |sandbox: ProjectSandbox| {
+        sandbox
+            .allow_read(&work)
+            .and_then(|sandbox| sandbox.allow_read(&common))
+            .and_then(|sandbox| sandbox.allow_read(&install))
+    };
+    let index_policy = ProjectSandbox::new(&step, &step.join("home"), &step.join("tmp"), network())
+        .map(ProjectSandbox::as_job_folder)
+        .and_then(reads);
+    let objects_policy =
+        ProjectSandbox::new(&step, &step.join("o-home"), &step.join("o-tmp"), network())
+            .map(ProjectSandbox::as_job_folder)
+            .and_then(|sandbox| sandbox.allow_worktree(&common.join("objects")))
+            .and_then(reads);
+    let work_policy =
+        ProjectSandbox::new(&work, &step.join("w-home"), &step.join("w-tmp"), network())
+            .and_then(|sandbox| sandbox.allow_read(&common))
+            .and_then(|sandbox| sandbox.allow_read(&install))
+            .and_then(|sandbox| sandbox.allow_read(&step));
+    let index_box = installed(&mut facts, "index", index_policy, &helper, &place);
+    let objects_box = installed(&mut facts, "objects", objects_policy, &helper, &place);
+    let work_box = installed(&mut facts, "worktree", work_policy, &helper, &place);
+    if let (Some(a), Some(b), Some(c)) = (&index_box, &objects_box, &work_box) {
+        let name = |sandbox: &WindowsSandbox| {
+            super::boundary_profile(sandbox.sandbox(), &place.join(GRANTS_FOLDER))
+                .map(|profile| profile.container)
+        };
+        facts.note(&format!(
+            "containers index={:?} objects={:?} worktree={:?}",
+            name(a),
+            name(b),
+            name(c)
+        ));
+    }
+    std::fs::write(work.join("a.txt"), "two\n").unwrap();
+    std::fs::write(work.join("u.txt"), "untracked\n").unwrap();
+    let index = step.join("index");
+    let absolute = Step {
+        git: &git,
+        start: &step,
+        git_dir: private.as_os_str(),
+        work: &work,
+        index: &index,
+        null: "NUL",
+    };
+    if let Some(sandbox) = &index_box {
+        for (name, args) in [
+            ("index abs rev-parse", &["rev-parse", "HEAD"][..]),
+            ("index abs read-tree", &["read-tree", "HEAD"][..]),
+            (
+                "index abs refresh",
+                &["update-index", "-q", "--refresh"][..],
+            ),
+            ("index abs diff-files", &["diff-files", "--name-only"][..]),
+            (
+                "index abs others",
+                &["ls-files", "--others", "--exclude-standard"][..],
+            ),
+            (
+                "index abs config-list",
+                &["config", "--show-origin", "--list"][..],
+            ),
+            (
+                "index abs hash-object-w",
+                &["hash-object", "-w", "a.txt"][..],
+            ),
+        ] {
+            facts.ran(name, sandbox.wrap(&absolute.command(args)));
+        }
+        let lock = step.join("index.lock");
+        facts.note(&format!("index abs leaves index.lock: {}", lock.exists()));
+        let relative = Step {
+            git_dir: OsStr::new(".."),
+            index: &step.join("index-rel"),
+            ..absolute
+        };
+        facts.ran(
+            "index rel rev-parse",
+            sandbox.wrap(&relative.command(&["rev-parse", "HEAD"])),
+        );
+        facts.ran(
+            "index rel read-tree",
+            sandbox.wrap(&relative.command(&["read-tree", "HEAD"])),
+        );
+        let dev_null = Step {
+            null: "/dev/null",
+            ..absolute
+        };
+        facts.ran(
+            "index devnull others",
+            sandbox.wrap(&dev_null.command(&["ls-files", "--others", "--exclude-standard"])),
+        );
+        for (name, file) in [
+            ("index graft NUL", "NUL"),
+            ("index graft devnull", "/dev/null"),
+        ] {
+            let mut command = absolute.command(&["rev-parse", "HEAD"]);
+            command.env("GIT_GRAFT_FILE", file);
+            facts.ran(name, sandbox.wrap(&command));
+        }
+        for (name, file) in [
+            ("index config-file NUL", "NUL"),
+            ("index config-file devnull", "/dev/null"),
+        ] {
+            facts.ran(
+                name,
+                sandbox.wrap(&absolute.command(&["config", "--file", file, "--list"])),
+            );
+        }
+        let mut started_in_work = absolute.command(&["rev-parse", "HEAD"]);
+        started_in_work.current_dir(&work);
+        facts.ran("index start in work tree", sandbox.wrap(&started_in_work));
+        let env = install.join("usr").join("bin").join("env.exe");
+        let mut listed = Command::new(&env);
+        listed
+            .current_dir(&step)
+            .env("GIT_DIR", &private)
+            .env("PROBE_KEPT", "1");
+        facts.ran("index env.exe", sandbox.wrap(&listed));
+    }
+    let junction = work.join("jn");
+    let made = crate::spawn_gate::collected(
+        Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&outside)
+            .stdin(Stdio::null()),
+    )
+    .unwrap();
+    facts.note(&format!("junction made: {:?}", made.status.code()));
+    if let Some(sandbox) = &objects_box {
+        let objects = Step {
+            index: &step.join("index-o"),
+            ..absolute
+        };
+        facts.ran(
+            "objects read-tree",
+            sandbox.wrap(&objects.command(&["read-tree", "HEAD"])),
+        );
+        facts.ran(
+            "objects hash-object-w",
+            sandbox.wrap(&objects.command(&["hash-object", "-w", "a.txt"])),
+        );
+        facts.ran(
+            "objects add -A",
+            sandbox.wrap(&objects.command(&["add", "-A"])),
+        );
+        let mut listed = Command::new(&git);
+        listed
+            .current_dir(&step)
+            .env("GIT_DIR", &private)
+            .env("GIT_WORK_TREE", &work)
+            .env("GIT_INDEX_FILE", step.join("index-o"))
+            .args(["ls-files", "-s"]);
+        facts.ran("objects engine ls-files -s", Ok(listed));
+        let mut objects_start = objects.command(&["rev-parse", "HEAD"]);
+        objects_start.current_dir(common.join("objects"));
+        facts.ran("objects start in objects", sandbox.wrap(&objects_start));
+    }
+    if let Some(sandbox) = &work_box {
+        let in_work = Step {
+            start: &work,
+            ..absolute
+        };
+        facts.ran(
+            "worktree checkout-index",
+            sandbox.wrap(&in_work.command(&["checkout-index", "-f", "a.txt"])),
+        );
+        facts.note(&format!(
+            "worktree a.txt now {:?}",
+            std::fs::read_to_string(work.join("a.txt")).ok()
+        ));
+        facts.ran(
+            "worktree read-tree -u",
+            sandbox.wrap(&in_work.command(&["read-tree", "-u", "-m", "HEAD"])),
+        );
+        facts.ran(
+            "worktree checkout-index through junction",
+            sandbox.wrap(&in_work.command(&["checkout-index", "-f", "--prefix=jn/", "a.txt"])),
+        );
+        facts.note(&format!(
+            "outside a.txt written: {}",
+            outside.join("a.txt").exists()
+        ));
+        let in_step = Step {
+            start: &step,
+            ..absolute
+        };
+        facts.ran(
+            "worktree start in step",
+            sandbox.wrap(&in_step.command(&["rev-parse", "HEAD"])),
+        );
+    }
+    let out = std::env::var_os("RUNNER_TEMP").map_or_else(std::env::temp_dir, PathBuf::from);
+    std::fs::write(out.join("w5b-probe.txt"), &facts.0).unwrap();
+    assert!(facts.0.lines().count() > 10);
+}
