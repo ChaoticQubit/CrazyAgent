@@ -2313,3 +2313,6 @@ pub(crate) mod low_probe;
 
 #[cfg(all(test, windows))]
 mod home_windows_tests;
+
+#[cfg(all(test, windows))]
+mod bounded_windows_tests;
