@@ -27,7 +27,6 @@ const UNTRUSTED_GIT_ENTRY: &str = "untrusted_git_entry:";
 const SHOWN_ENTRY_BYTES_MAX: usize = 160;
 const SHARED_WORKTREE_FILES: &[&str] = &["HEAD", "commondir", "gitdir", "locked"];
 const HEAD_BYTES_MAX: usize = 512;
-#[cfg(unix)]
 pub(crate) const TREE_BOUNDS: TreeBounds = TreeBounds {
     files: 262_144,
     bytes: 2 * 1024 * 1024 * 1024,
@@ -77,7 +76,6 @@ const WORKTREE_CONFIG_TRIES: usize = 3;
 
 /// The largest commit tree a lease copies. Fields: the most tracked files and symlinks,
 /// the most content bytes across them, and the most path components in one path.
-#[cfg(unix)]
 pub(crate) struct TreeBounds {
     pub(crate) files: usize,
     pub(crate) bytes: u64,
@@ -1516,7 +1514,6 @@ pub(crate) fn lease_git_dir(
 /// Names the branch of the lease whose worktree is at `path`, the only ref a master
 /// worktree's HEAD may name when the engine reads or moves it. Inputs: the connection and
 /// the worktree path. Output: the branch, or `lease_missing`.
-#[cfg(unix)]
 pub(crate) fn lease_branch(connection: &Connection, path: &Path) -> Result<String, EngineError> {
     let path = path.to_str().ok_or_else(|| error("lease_missing"))?;
     let body: Option<String> = connection
