@@ -810,3 +810,44 @@ fn remove_leaves_a_held_file_and_a_hard_linked_one() {
     assert!(private::remove(&link, pinned).is_err());
     assert!(path.exists() && link.exists());
 }
+
+/// W3 D12 (DESIGN-0256): a cap file made with delete access is read by a reader that shares
+/// delete while its maker holds it, refused to a reader that does not, never renamed, gone
+/// once its maker deletes it through its own handle and closes it, and closed to a lower
+/// integrity process of the user with its medium full label.
+#[test]
+fn a_deletable_secret_file_is_read_while_held_and_deleted_through_its_own_handle() {
+    use std::io::{Read, Write};
+    let root = scratch("w3-cap");
+    let held = private::dir(&root).unwrap();
+    let path = root.join("owner-tui.cap");
+    let maker = private::secret_file_deletable(&path).unwrap();
+    (&maker).write_all(&[7; 32]).unwrap();
+    let reader =
+        private::read_secret(&path).expect("a reader that shares delete opens the held file");
+    let mut seen = Vec::new();
+    (&reader).read_to_end(&mut seen).unwrap();
+    assert_eq!(seen, [7; 32]);
+    assert!(
+        private::read_only(&path).is_err(),
+        "a reader that does not share delete is refused while the maker holds delete access"
+    );
+    assert!(std::fs::rename(&path, root.join("moved.cap")).is_err());
+    assert_eq!(
+        private::identity(&maker).unwrap(),
+        private::identity(&reader).unwrap()
+    );
+    private::delete(&maker).unwrap();
+    drop(maker);
+    assert!(
+        std::fs::symlink_metadata(&path).is_err(),
+        "the name goes when the deleting handle closes, though the reader still holds it"
+    );
+    drop(reader);
+    let closed = root.join("closed.cap");
+    drop(private::secret_file_deletable(&closed).unwrap());
+    closed_to_low_holders(&closed);
+    let reread = private::read_secret(&closed).unwrap();
+    assert_eq!(own_label(&reread), MEDIUM_FULL);
+    drop((reread, held));
+}

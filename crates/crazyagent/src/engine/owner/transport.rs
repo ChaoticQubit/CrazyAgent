@@ -137,6 +137,14 @@ impl Identity {
     }
 }
 
+/// Whether `name` is one plain entry of a folder: not empty, no separator, drive colon or
+/// parent step, so joining it to a held root never leaves that root. Input: the name.
+/// Output: the answer.
+#[cfg(windows)]
+fn plain_entry(name: &str) -> bool {
+    !name.is_empty() && !name.contains(['\\', '/', ':']) && name != "." && name != ".."
+}
+
 /// Maps a W1 private-object error to an owner refusal: a judge refusal (`PermissionDenied`)
 /// becomes `code`, any other error stays the I/O error it is. Inputs: the error and the
 /// refusal code. Output: the engine error.
@@ -256,12 +264,58 @@ impl Root {
             .ok_or_else(|| failure("owner_root_unavailable"))
     }
 
-    /// Refuses to open a capability file without directory-relative Unix opens.
-    /// Takes the file name and create flag, both unused.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn open_key(&self, _name: &str, _create: bool) -> Result<File, EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// Opens a capability file in this root on Windows (DESIGN-0256 D12), never following a
+    /// link. A create makes it with W1 `secret_file_deletable`: private, the medium
+    /// no-write-up, no-read-up and no-execute-up label, and a handle with delete access, so
+    /// it is later deleted through that handle. An open reads it through W1 `read_secret`,
+    /// which shares delete so it works while the engine holds the file. The held root cannot
+    /// move, so the path resolves through it; `verify_key` then checks the entry is this
+    /// handle. Inputs: one plain file name and whether to create. Output: the open file, or
+    /// the refusal or I/O error.
+    #[cfg(windows)]
+    fn open_key(&self, name: &str, create: bool) -> Result<File, EngineError> {
+        use crazyagent_win_sandbox::private;
+        assert!(plain_entry(name));
+        self.verify()?;
+        let path = self.path.join(name);
+        let opened = if create {
+            private::secret_file_deletable(&path)
+        } else {
+            private::read_secret(&path)
+        };
+        opened.map_err(|e| private_refusal(e, "owner_capability_replaced_or_unsafe"))
+    }
+
+    /// Requires on Windows that an open file in this root is the private, labelled entry
+    /// `name` names: a file, W1 `check` passes (owner, list, label policy, no reparse point,
+    /// one link, local), its own label is the medium full label of W1 `secret_file_label`,
+    /// and its real place (W1 `place`) is this root's place plus `\` and the name, both read
+    /// with the same flags. Inputs: the name, the file and the refusal code. Output: Ok, or
+    /// the refusal.
+    #[cfg(windows)]
+    fn held_entry(&self, name: &str, file: &File, code: &str) -> Result<(), EngineError> {
+        use crazyagent_win_sandbox::{dacl, private};
+        use std::os::windows::ffi::OsStrExt;
+        assert!(plain_entry(name));
+        if !file.metadata().map_err(io_error)?.is_file() {
+            return Err(failure(code));
+        }
+        private::check(file).map_err(|e| private_refusal(e, code))?;
+        let wanted = dacl::label(&private::secret_file_label()).map_err(|_| failure(code))?;
+        let held = match private::facts(file).map_err(io_error)?.label {
+            Some(sacl) => dacl::label(&sacl).map_err(|_| failure(code))?,
+            None => None,
+        };
+        if wanted.is_none() || held != wanted {
+            return Err(failure(code));
+        }
+        let mut expected = private::place(&self.directory).map_err(io_error)?;
+        expected.push(u16::from(b'\\'));
+        expected.extend(std::ffi::OsStr::new(name).encode_wide());
+        if private::place(file).map_err(io_error)? != expected {
+            return Err(failure(code));
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -284,12 +338,18 @@ impl Root {
         Ok(f)
     }
 
-    /// Refuses to confirm a capability file without Unix owner and inode checks.
-    /// Takes the name, file and identity, all unused.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn verify_key(&self, _name: &str, _file: &File, _id: Identity) -> Result<(), EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// Confirms on Windows that a capability file is still the one recorded (D12): the root
+    /// verifies, the handle has the file id recorded at create, it holds exactly 32 bytes,
+    /// and `held_entry` passes. Inputs: the name, the open file and the recorded identity.
+    /// Output: Ok, or `owner_capability_replaced_or_unsafe`.
+    #[cfg(windows)]
+    fn verify_key(&self, name: &str, file: &File, id: Identity) -> Result<(), EngineError> {
+        let refused = "owner_capability_replaced_or_unsafe";
+        self.verify()?;
+        if Identity::of_file(file)? != id || file.metadata().map_err(io_error)?.len() != 32 {
+            return Err(failure(refused));
+        }
+        self.held_entry(name, file, refused)
     }
 
     #[cfg(unix)]
@@ -338,18 +398,33 @@ impl Root {
         Ok(Identity::of(&m))
     }
 
-    /// Refuses to remove an owned artifact without directory-relative Unix unlinks.
-    /// Takes the name, identity, socket flag and held handle, all unused.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
+    /// Deletes a file this root made on Windows through its held handle, never by path
+    /// (rv-sec2 #702 R7): only while the handle has the recorded file id and the name still
+    /// names that handle (`held_entry`), then W1 `delete` with POSIX semantics, so the name
+    /// goes when the handle closes. A socket has no file here; the owner pipe is W3-3's.
+    /// Inputs: the name, the recorded identity, the socket flag and the held handle. Output:
+    /// Ok, `owner_socket_unavailable`, or `owner_cleanup_replaced_artifact_preserved`.
+    #[cfg(windows)]
     fn unlink_owned(
         &self,
-        _name: &str,
-        _id: Identity,
-        _socket: bool,
-        _held: Option<&File>,
+        name: &str,
+        id: Identity,
+        socket: bool,
+        held: Option<&File>,
     ) -> Result<(), EngineError> {
-        Err(failure("owner_root_unavailable"))
+        let preserved = "owner_cleanup_replaced_artifact_preserved";
+        if socket {
+            return Err(failure("owner_socket_unavailable"));
+        }
+        self.verify()?;
+        let Some(file) = held else {
+            return Err(failure(preserved));
+        };
+        if Identity::of_file(file)? != id {
+            return Err(failure(preserved));
+        }
+        self.held_entry(name, file, preserved)?;
+        crazyagent_win_sandbox::private::delete(file).map_err(io_error)
     }
 
     /// Unlinks an artifact this root made, relative to the held folder, only while the name
@@ -392,7 +467,7 @@ impl Root {
     /// or the refusal or I/O error.
     #[cfg(windows)]
     fn create_directory(&self, name: &str) -> Result<(), EngineError> {
-        assert!(!name.is_empty() && !name.contains(['\\', '/', ':']) && name != "..");
+        assert!(plain_entry(name));
         let path = self.path.join(name);
         match std::fs::symlink_metadata(&path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -430,11 +505,8 @@ struct Slot {
 }
 
 struct PinnedBootstrap {
-    #[cfg(unix)]
     file: File,
-    #[cfg(unix)]
     identity: Identity,
-    #[cfg(unix)]
     bytes: Vec<u8>,
     value: RunnerBootstrap,
 }
@@ -454,11 +526,8 @@ impl PinnedBootstrap {
             serde_json::from_slice(&bytes).map_err(|_| failure("runner_bootstrap_invalid"))?;
         value.validate()?;
         let pinned = Self {
-            #[cfg(unix)]
             identity: Identity::of_file(&file)?,
-            #[cfg(unix)]
             file,
-            #[cfg(unix)]
             bytes,
             value,
         };
@@ -476,11 +545,8 @@ impl PinnedBootstrap {
         file.write_all_at(&bytes, 0).map_err(io_error)?;
         file.sync_all().map_err(io_error)?;
         let pinned = Self {
-            #[cfg(unix)]
             identity: Identity::of_file(&file)?,
-            #[cfg(unix)]
             file,
-            #[cfg(unix)]
             bytes,
             value,
         };
@@ -489,12 +555,28 @@ impl PinnedBootstrap {
         Ok(pinned)
     }
 
-    /// Refuses to confirm the runner bootstrap file without Unix owner and inode checks.
-    /// Takes the root, unused.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn verify(&self, _root: &Root) -> Result<(), EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// Confirms on Windows that the runner bootstrap file is still the one pinned: the root
+    /// verifies, the handle is a file of the pinned length with the pinned file id, the name
+    /// still names this private labelled handle (`held_entry`), and it holds the pinned
+    /// bytes. Input: the root. Output: Ok, or the replaced or changed refusal.
+    #[cfg(windows)]
+    fn verify(&self, root: &Root) -> Result<(), EngineError> {
+        let replaced = "runner_bootstrap_replaced_or_unsafe";
+        root.verify()?;
+        let actual = self.file.metadata().map_err(io_error)?;
+        if !actual.is_file()
+            || actual.len() != self.bytes.len() as u64
+            || Identity::of_file(&self.file)? != self.identity
+        {
+            return Err(failure(replaced));
+        }
+        root.held_entry("engine-bootstrap", &self.file, replaced)?;
+        let mut bytes = vec![0; self.bytes.len()];
+        self.file.read_exact_at(&mut bytes, 0).map_err(io_error)?;
+        if bytes != self.bytes {
+            return Err(failure("runner_bootstrap_content_changed"));
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
