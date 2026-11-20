@@ -17,8 +17,9 @@ env:
   RUST_TOOLCHAIN: "1.98.1"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
-  RED_SHA: 6fbfa0fec
-  TIP_SHA: 512b3f596
+  RED_SHA: 72e8478a4
+  BASE_SHA: 9f266121a
+  TIP_SHA: 627b4b858
 
 defaults:
   run:
@@ -26,7 +27,7 @@ defaults:
 
 jobs:
   s9a-windows:
-    name: V244 WIN-MASTER S9a launch lock on ${{ matrix.runner }}, red at 6fbfa0fec, tip 512b3f596
+    name: V244 WIN-MASTER S9a launch lock on ${{ matrix.runner }}, red at 72e8478a4, tip 627b4b858
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
@@ -85,7 +86,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo clippy -p crazyagent --tests --locked -- -D warnings
-      - name: S9a red rows at 6fbfa0fec
+      - name: S9a r2 red rows at 72e8478a4
         if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
@@ -99,12 +100,12 @@ jobs:
           git diff --quiet "$TIP_SHA" -- crates
           grep -E '^test launch_context::|^test result|panicked|left:|right:' "$RUNNER_TEMP/red.log" || true
           [ "$rc" -ne 0 ]
-          grep -qE 'test result: FAILED\. 3 passed; 3 failed' "$RUNNER_TEMP/red.log"
-          for row in a_windows_lock_only_refuses_an_open_or_linked_home_before_a_lock a_windows_adopt_refuses_an_open_or_linked_home_before_a_lock a_windows_install_refuses_an_open_or_linked_home_before_a_lock; do
-            grep -q "$row \.\.\. ok" "$RUNNER_TEMP/red.log"
+          grep -qE 'test result: FAILED\. 5 passed; 2 failed' "$RUNNER_TEMP/red.log"
+          for row in a_windows_install_is_refused_before_it_changes_the_home a_windows_home_and_its_parent_cannot_be_moved_while_its_launch_holds_it; do
+            grep -q "$row \.\.\. FAILED" "$RUNNER_TEMP/red.log"
           done
-          echo "red as expected: with launch_context.rs at the red commit on the tip's tree, the 3 pass rows fail on the refusing Windows lock and the 3 refusal rows already hold on H1's check"
-      - name: S9a launch lock rows at the tip 512b3f596, five rounds
+          echo "red as expected: with launch_context.rs at 72e8478a4 on the tip's tree, the install and hold rows fail and the 5 others pass"
+      - name: S9a r2 launch lock rows at the tip 627b4b858, five rounds
         if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
@@ -117,9 +118,9 @@ jobs:
             echo "round $round rc=$rc"
             grep -E '^test launch_context::|^test result|panicked|left:|right:' "$RUNNER_TEMP/tip-$round.log" || true
             [ "$rc" -eq 0 ]
-            grep -qE 'test result: ok\. 6 passed; 0 failed' "$RUNNER_TEMP/tip-$round.log"
+            grep -qE 'test result: ok\. 7 passed; 0 failed' "$RUNNER_TEMP/tip-$round.log"
           done
-          echo "6 rows green in 5 rounds"
+          echo "7 rows green in 5 rounds"
       - name: Build the Windows boundary helper H1's row 5 starts
         if: ${{ !cancelled() }}
         timeout-minutes: 30
@@ -150,3 +151,85 @@ jobs:
           [ "$rc" -eq 0 ]
           grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/policy.log"
           grep -q 'full_access_on_windows_is_refused_with_its_own_reason_and_code \.\.\. ok' "$RUNNER_TEMP/policy.log"
+  s9a-linux:
+    name: V244 WIN-MASTER S9a r2 Unix launch context rows on ubuntu-22.04 at 627b4b858 against 9f266121a
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - name: Refuse a runner that is not GitHub-hosted
+        run: |
+          set -euo pipefail
+          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install Linux build packages
+        timeout-minutes: 10
+        run: bash scripts/ci/linux-packages.sh
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
+          {
+            echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN"
+            echo "CARGO_PROFILE_DEV_DEBUG=0"
+            echo "CARGO_PROFILE_TEST_DEBUG=0"
+          } >> "$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
+        with:
+          prefix-key: farm
+          shared-key: linux
+          add-job-id-key: false
+          add-rust-environment-hash-key: false
+          cache-bin: false
+          save-if: false
+      - name: Check the tree is the tip
+        run: |
+          set -euo pipefail
+          git diff --quiet "$TIP_SHA" -- crates
+          echo "crates at $TIP_SHA"
+      - name: Clippy on the crazyagent library
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          cargo clippy -p crazyagent --lib --locked -- -D warnings
+      - name: Clippy on the crazyagent test rows
+        if: ${{ !cancelled() }}
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          cargo clippy -p crazyagent --tests --locked -- -D warnings
+      - name: Build the Linux sandbox helper the Unix master rows start
+        if: ${{ !cancelled() }}
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          cargo build -p crazyagent --bin crazyagent-landlock --locked
+          mkdir -p target/debug/deps
+          cp target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
+          ls -l target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
+      - name: Unix launch context rows at the base 9f266121a and at the tip 627b4b858
+        if: ${{ !cancelled() }}
+        timeout-minutes: 120
+        run: |
+          set -euo pipefail
+          rows() {
+            set +e
+            cargo test -p crazyagent --lib --locked -- --test-threads 1 launch_context:: > "$RUNNER_TEMP/$1.log" 2>&1
+            echo "$1 rc=$?"
+            set -e
+            grep -E '^test result' "$RUNNER_TEMP/$1.log" || true
+            { grep -E ' \.\.\. FAILED$' "$RUNNER_TEMP/$1.log" || true; } | sed 's/^test //; s/ \.\.\. FAILED$//' | sort -u > "$RUNNER_TEMP/$1.failed"
+          }
+          git restore -q --source="$BASE_SHA" --staged --worktree -- crates
+          rows base
+          git restore -q --source="$TIP_SHA" --staged --worktree -- crates
+          git diff --quiet "$TIP_SHA" -- crates
+          rows tip
+          echo "failed at the base:"; cat "$RUNNER_TEMP/base.failed"
+          echo "failed at the tip:"; cat "$RUNNER_TEMP/tip.failed"
+          grep -qE 'test result: (ok|FAILED)\. [1-9][0-9]* passed' "$RUNNER_TEMP/tip.log"
+          new=$(comm -13 "$RUNNER_TEMP/base.failed" "$RUNNER_TEMP/tip.failed")
+          [ -z "$new" ] || { echo "::error::rows failing at the tip only: $new"; exit 1; }
+          echo "no row fails at the tip that passes at the base"
