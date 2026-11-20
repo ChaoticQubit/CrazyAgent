@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::ptr;
+use std::rc::Rc;
 use std::sync::OnceLock;
 
 use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -189,10 +190,12 @@ struct Inner {
 }
 
 /// One terminal view's native child window over the webview on Windows. Its window thread
-/// only places, hides and focuses it and posts frames; the render thread draws it.
+/// only places, hides and focuses it and posts frames; the render thread draws it. Its
+/// window-thread state is shared with each window message running for it, so a sink that
+/// ends the view inside a message leaves that message a live state to finish on.
 pub struct View {
     hwnd: HWND,
-    inner: Box<Inner>,
+    inner: Rc<Inner>,
 }
 
 impl View {
@@ -230,7 +233,7 @@ impl View {
         }
         let key = read_key(hwnd).unwrap_or(KEY_DEFAULT);
         assert!(SCALE_KEYS.contains(&key));
-        let inner = Box::new(Inner {
+        let inner = Rc::new(Inner {
             id,
             sink,
             parent,
@@ -260,7 +263,7 @@ impl View {
             unsafe { DestroyWindow(hwnd) };
             return Err(code);
         }
-        unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr::from_ref(&*inner) as isize) };
+        unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, Rc::as_ptr(&inner) as isize) };
         Ok(View { hwnd, inner })
     }
 
@@ -352,7 +355,9 @@ impl Inner {
         unsafe { ShowWindow(hwnd, SW_HIDE) };
         if self.shown.replace(false) {
             self.cancel_marked(hwnd);
-            BOARD.post_shown(self.id, false);
+            if self.alive.get() {
+                BOARD.post_shown(self.id, false);
+            }
         }
     }
 
@@ -407,7 +412,13 @@ impl Inner {
         match message {
             WM_LBUTTONDOWN => {
                 self.cancel_marked(hwnd);
+                if !self.alive.get() {
+                    return 0;
+                }
                 unsafe { SetFocus(hwnd) };
+                if !self.alive.get() {
+                    return 0;
+                }
                 self.press(hwnd, lparam);
             }
             WM_MOUSEMOVE => {
@@ -434,8 +445,9 @@ impl Inner {
         0
     }
 
-    /// A left press, counted against the system's double-click limits: it takes the
-    /// capture for its drag and goes to the sink. Inputs: the window and the lParam.
+    /// A left press, counted against the system's double-click limits: it goes to the sink
+    /// and takes the capture for its drag, unless the sink ended the view. Inputs: the window
+    /// and the lParam.
     fn press(&self, hwnd: HWND, lparam: LPARAM) {
         let (px, point) = self.mouse_at(lparam);
         let limits = mouse::Limits {
@@ -450,7 +462,9 @@ impl Inner {
         let time_ms = unsafe { GetMessageTime() } as u32;
         let shift = held_mods().shift;
         self.step(|state| Some(state.press(time_ms, px, point, shift, limits)));
-        unsafe { SetCapture(hwnd) };
+        if self.alive.get() {
+            unsafe { SetCapture(hwnd) };
+        }
     }
 
     /// Runs one step of the view's mouse state and sends the event it makes, while mouse
@@ -489,7 +503,9 @@ impl Inner {
     /// into a dead pane nor reads its last frame as live.
     fn fail_closed(&self, hwnd: HWND) {
         self.give_focus_back(hwnd);
-        let _ = self.apply(hwnd);
+        if self.alive.get() {
+            let _ = self.apply(hwnd);
+        }
     }
 
     /// Hands keyboard focus to the page when this view holds it: its webview window, or the
@@ -713,21 +729,27 @@ impl Inner {
         };
         let done = compose::compose(&mut self.ime.borrow_mut(), self.active(), read);
         for input in done.inputs {
+            if !self.alive.get() {
+                return;
+            }
             (self.sink)(self.id, ViewEvent::Key(input));
         }
-        if done.redraw {
+        if done.redraw && self.alive.get() {
             (self.sink)(self.id, ViewEvent::Marked);
         }
-        self.place_ime(hwnd);
+        if self.alive.get() {
+            self.place_ime(hwnd);
+        }
     }
 
     /// A WM_IME_ENDCOMPOSITION: any marked text left goes with nothing sent, and the host
     /// hears to redraw.
     fn end_composition(&self) {
-        if self.ime.borrow_mut().cancel() {
+        let was = self.ime.borrow_mut().cancel();
+        assert!(!self.ime.borrow().composing());
+        if was {
             (self.sink)(self.id, ViewEvent::Marked);
         }
-        assert!(!self.ime.borrow().composing());
     }
 
     /// Drops any marked text with nothing sent (hidden, focus lost, clicked, destroyed):
@@ -829,7 +851,9 @@ impl Inner {
         self.swallow.set(false);
         self.held.set(None);
         self.cancel_marked(hwnd);
-        (self.sink)(self.id, ViewEvent::Focus(false));
+        if self.alive.get() {
+            (self.sink)(self.id, ViewEvent::Focus(false));
+        }
     }
 }
 
@@ -953,9 +977,11 @@ unsafe extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     let held = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const Inner;
-    let Some(inner) = (unsafe { held.as_ref() }) else {
+    if held.is_null() {
         return unsafe { DefWindowProcW(hwnd, message, wparam, lparam) };
-    };
+    }
+    unsafe { Rc::increment_strong_count(held) };
+    let inner = unsafe { Rc::from_raw(held) };
     match message {
         WM_MOUSEACTIVATE => MA_ACTIVATE as LRESULT,
         WM_LBUTTONDOWN | WM_MOUSEMOVE | WM_LBUTTONUP | WM_CAPTURECHANGED | WM_RBUTTONDOWN
@@ -1024,7 +1050,8 @@ impl Drop for View {
     /// Hands a held focus to the page, takes the view from the render thread, waiting bounded
     /// for its surface to drop, then destroys its window. A surface still held past the bound
     /// keeps the window, hidden and cut off from this view, since the surface must not
-    /// outlive it.
+    /// outlive it. Either way the view is dead to a message still running for it, which
+    /// holds its state until it returns and reads nothing more of the window.
     fn drop(&mut self) {
         if self.inner.alive.get() {
             self.inner.give_focus_back(self.hwnd);
@@ -1038,7 +1065,8 @@ impl Drop for View {
             unsafe { DestroyWindow(self.hwnd) };
         } else {
             unsafe { ShowWindow(self.hwnd, SW_HIDE) };
-            unsafe { SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0) };
         }
+        self.inner.alive.set(false);
+        unsafe { SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0) };
     }
 }
