@@ -553,6 +553,7 @@ mod tests {
         Painter {
             style,
             shared: Vec::new(),
+            unstyled: Vec::new(),
             views,
             replaced: Replaced::default(),
         }
