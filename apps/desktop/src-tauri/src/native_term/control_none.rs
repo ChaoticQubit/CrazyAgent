@@ -1,12 +1,10 @@
 use std::io;
 use std::path::Path;
 
-/// One event of the direct tmux path, as the unix client reports it. Off unix no client
-/// attaches, so a host only ever takes `Closed`, from a drain that finds its queue lost.
+/// One event of the direct tmux path. Off unix no client attaches, so a host only ever
+/// takes `Closed`, from a drain that finds its queue lost; the unix client's other events
+/// do not exist here.
 pub enum Event {
-    Restored { view: u64, bytes: Vec<u8> },
-    Output { views: Vec<u64>, bytes: Vec<u8> },
-    Refused { view: u64, code: &'static str },
     Closed,
 }
 
