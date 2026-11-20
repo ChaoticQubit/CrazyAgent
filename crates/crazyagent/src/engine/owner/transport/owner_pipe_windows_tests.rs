@@ -169,3 +169,33 @@ async fn after_the_owner_server_stops_no_pipes_or_capability_file_is_left() {
     assert!(!crate::ipc::owner_answering(&owners.join(SOCKET)));
     engine.close().await.unwrap();
 }
+
+/// W3-3 bracket (rv-sec2 #719 condition 2): a client whose recorded endpoint no longer
+/// matches the pipes file's first read refuses before it connects. The row changes only
+/// the pin, so a client that went on would reach the real pipe and fail `verify_server`
+/// with `peer_owner_mismatch`; `owner_socket_replaced` shows the refusal came first.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_whose_recorded_endpoint_differs_refuses_before_it_connects() {
+    let (_temp, engine, config, owners) = engine_and_owner_root().await;
+    let (server, _host) = OwnerServer::bind(&owners, engine.clone(), &config)
+        .await
+        .unwrap();
+    let (stop, stopped) = oneshot::channel();
+    let running = tokio::spawn(server.run(stopped));
+    let client =
+        OwnerClient::attach(&owners, OwnerClientKind::Desktop, Duration::from_secs(10)).unwrap();
+    let pipes = owners.join("pipes");
+    let text = std::fs::read_to_string(&pipes).unwrap();
+    let (line, pin) = text.trim_end().rsplit_once(' ').unwrap();
+    let moved = pin.parse::<u64>().unwrap() + 1;
+    std::fs::write(&pipes, format!("{line} {moved}\n")).unwrap();
+    let refused = client
+        .request(read_capabilities("moved-endpoint"))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.0, "owner_socket_replaced");
+    std::fs::write(&pipes, text).unwrap();
+    stop.send(()).unwrap();
+    let _ = running.await.unwrap();
+    engine.close().await.unwrap();
+}
