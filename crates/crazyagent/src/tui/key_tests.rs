@@ -1,5 +1,5 @@
 use super::client::{Connection, OwnerEvent};
-use super::{App, Focus, UiEvent, key_events};
+use super::{App, Focus, UiEvent, key_events, reconnect_key, run_queued_reconnect};
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::protocol::{
@@ -518,4 +518,113 @@ async fn control_shortcuts_and_form_routes_keep_existing_mapping() {
         assert!(app.declaration.open);
     })
     .await;
+}
+
+async fn start_engine(root: &std::path::Path, stopped: &watch::Receiver<bool>) -> EngineService {
+    EngineService::start_with_settings_sources(
+        root,
+        "engine.sock",
+        &root.join("global.toml"),
+        &root.join("project.toml"),
+        stopped,
+    )
+    .await
+    .unwrap()
+}
+
+/// Applies every owner event until the native worker is idle, as the TUI loop does.
+/// Inputs: the connection and the app. Output: the readiness of each `Access` event, in
+/// order, one per reconnect job or lost connection.
+async fn answer_owner(connection: &mut Connection, app: &mut App) -> Vec<bool> {
+    let mut access = Vec::new();
+    while connection.busy() {
+        let event = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(event) = connection.poll_owner().unwrap() {
+                    return event;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the owner worker answers within 20 s");
+        if let OwnerEvent::Access { ready, .. } = &event {
+            access.push(*ready);
+        }
+        app.apply_owner(event).unwrap();
+    }
+    access
+}
+
+/// Ctrl-R while an owner job is in flight reconnects once that job answers, and a Ctrl-R
+/// during that reconnect starts no second one (V243-TUI-RECONNECT-WHILE-BUSY). Drives
+/// `reconnect_key` and `run_queued_reconnect` as the TUI loop does, on a real engine
+/// restarted under the same root, as the tui_project_master restart stage does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ctrl_r_during_an_owner_job_reconnects_once_that_job_answers() {
+    tokio::time::timeout(Duration::from_secs(90), async {
+        let root = tempfile::Builder::new()
+            .prefix("ca-key-busy-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (_stop, stopped) = watch::channel(false);
+        let mut service = start_engine(root.path(), &stopped).await;
+        let client = Client::new(root.path().join("engine.sock"), Duration::from_secs(2)).unwrap();
+        let mut connection = Connection::connect_paired(client).unwrap();
+        let mut app = App::new();
+        let access = next_owner(&mut connection).await;
+        assert!(matches!(&access, OwnerEvent::Access { ready: true, .. }));
+        app.apply_owner(access).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(10), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        let project = ProjectId::new("missing").unwrap();
+        connection.team_graph(project.clone()).unwrap();
+        assert_eq!(
+            answer_owner(&mut connection, &mut app).await,
+            [false],
+            "a read on the stopped engine loses the owner"
+        );
+        assert!(!app.owner_ready);
+        service = start_engine(root.path(), &stopped).await;
+
+        connection.team_graph(project).unwrap();
+        let mut queued = false;
+        reconnect_key(&mut app, &mut connection, &mut queued);
+        reconnect_key(&mut app, &mut connection, &mut queued);
+        let mut access = answer_owner(&mut connection, &mut app).await;
+        if queued {
+            queued = false;
+            run_queued_reconnect(&mut app, &mut connection);
+            assert!(connection.busy(), "the queued reconnect starts once the owner job answers");
+            reconnect_key(&mut app, &mut connection, &mut queued);
+            access.extend(answer_owner(&mut connection, &mut app).await);
+        }
+        if queued {
+            queued = false;
+            run_queued_reconnect(&mut app, &mut connection);
+            access.extend(answer_owner(&mut connection, &mut app).await);
+        }
+        assert!(
+            app.owner_ready,
+            "a Ctrl-R during an owner job reconnects once that job answers"
+        );
+        assert_eq!(
+            access,
+            [true],
+            "one reconnect: presses during the owner job collapse, one during the reconnect is a no-op"
+        );
+        assert!(!queued && !connection.busy(), "nothing is left queued or in flight");
+
+        drop(connection);
+        tokio::time::timeout(Duration::from_secs(10), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    })
+    .await
+    .expect("real Ctrl-R while busy case deadline");
 }

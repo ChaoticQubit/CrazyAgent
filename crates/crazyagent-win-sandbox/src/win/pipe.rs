@@ -251,6 +251,17 @@ fn label_of(pipe: BorrowedHandle<'_>) -> io::Result<Option<u32>> {
     Ok(level)
 }
 
+/// This process's own integrity level, the floor its peer judge admits clients at (R6).
+/// Output: the level, or the Windows error.
+pub fn own_integrity() -> io::Result<u32> {
+    let mut token = std::ptr::null_mut();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    integrity_of(&token)
+}
+
 /// What a token says about its holder for D9 and D10: its user SID, whether it is an
 /// AppContainer token, whether it has restricting SIDs (what `IsTokenRestricted` reports,
 /// read so that a failed read refuses) and its integrity level. Input: a token opened with
