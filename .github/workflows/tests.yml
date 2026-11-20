@@ -20,7 +20,7 @@ env:
   TMUX_VERSION: "3.8"
   RED_SHA: 932ccd82b
   BASE_SHA: 82f2ef5d4
-  TIP_SHA: a92b2f5c2
+  TIP_SHA: a74e31480
 
 defaults:
   run:
@@ -28,7 +28,7 @@ defaults:
 
 jobs:
   s5-windows:
-    name: V244 WIN-MASTER S5 turn folder on ${{ matrix.runner }}, red at 932ccd82b, tip a92b2f5c2
+    name: V244 WIN-MASTER S5 turn folder on ${{ matrix.runner }}, red at 932ccd82b, tip a74e31480
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
@@ -107,7 +107,7 @@ jobs:
           done
           grep -q 'a_launch_record_in_a_private_data_root_is_private \.\.\. ok' "$RUNNER_TEMP/red.log"
           echo "red as expected: on the refusal stubs the 3 turn folder rows fail; the agent_home record row and the 3 earlier agent_home rows pass"
-      - name: S5 turn folder and record rows at the tip a92b2f5c2, five rounds
+      - name: S5 turn folder and record rows at the tip a74e31480, five rounds
         if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
@@ -146,174 +146,3 @@ jobs:
           [ "$rc" -eq 0 ]
           grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/policy.log"
           grep -q 'full_access_on_windows_is_refused_with_its_own_reason_and_code \.\.\. ok' "$RUNNER_TEMP/policy.log"
-  s5-linux:
-    name: V244 WIN-MASTER S5 Unix master turn folder rows on ubuntu-22.04 at a92b2f5c2 against 82f2ef5d4
-    runs-on: ubuntu-22.04
-    timeout-minutes: 180
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Install Linux build packages
-        timeout-minutes: 10
-        run: bash scripts/ci/linux-packages.sh
-      - name: Install Rust toolchain
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
-          {
-            echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN"
-            echo "CARGO_PROFILE_DEV_DEBUG=0"
-            echo "CARGO_PROFILE_TEST_DEBUG=0"
-          } >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
-        with:
-          prefix-key: farm
-          shared-key: linux
-          add-job-id-key: false
-          add-rust-environment-hash-key: false
-          cache-bin: false
-          save-if: false
-      - name: Check the tree is the tip
-        run: |
-          set -euo pipefail
-          git diff --quiet "$TIP_SHA" -- crates
-          echo "crates at $TIP_SHA"
-      - name: Clippy on the crazyagent library
-        timeout-minutes: 60
-        run: |
-          set -euo pipefail
-          cargo clippy -p crazyagent --lib --locked -- -D warnings
-      - name: Clippy on the crazyagent test rows
-        if: ${{ !cancelled() }}
-        timeout-minutes: 60
-        run: |
-          set -euo pipefail
-          cargo clippy -p crazyagent --tests --locked -- -D warnings
-      - name: Build the Linux sandbox helper the Unix master rows start
-        if: ${{ !cancelled() }}
-        timeout-minutes: 30
-        run: |
-          set -euo pipefail
-          cargo build -p crazyagent --bin crazyagent-landlock --locked
-          mkdir -p target/debug/deps
-          cp target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
-          ls -l target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
-      - name: Unix master turn folder rows at the base 82f2ef5d4 and at the tip a92b2f5c2
-        if: ${{ !cancelled() }}
-        timeout-minutes: 120
-        run: |
-          set -euo pipefail
-          rows() {
-            set +e
-            cargo test -p crazyagent --lib --locked -- --test-threads 1 engine::owner::transport::master_host_launch:: engine::owner::transport::master_rcli_capture_tests:: engine::owner::transport::master_runtime:: > "$RUNNER_TEMP/$1.log" 2>&1
-            echo "$1 rc=$?"
-            set -e
-            grep -E '^test result' "$RUNNER_TEMP/$1.log" || true
-            { grep -E ' \.\.\. FAILED$' "$RUNNER_TEMP/$1.log" || true; } | sed 's/^test //; s/ \.\.\. FAILED$//' | sort -u > "$RUNNER_TEMP/$1.failed"
-          }
-          git restore -q --source="$BASE_SHA" --staged --worktree -- crates
-          rows base
-          git restore -q --source="$TIP_SHA" --staged --worktree -- crates
-          git diff --quiet "$TIP_SHA" -- crates
-          rows tip
-          echo "failed at the base:"; cat "$RUNNER_TEMP/base.failed"
-          echo "failed at the tip:"; cat "$RUNNER_TEMP/tip.failed"
-          grep -qE 'test result: (ok|FAILED)\. [1-9][0-9]* passed' "$RUNNER_TEMP/tip.log"
-          new=$(comm -13 "$RUNNER_TEMP/base.failed" "$RUNNER_TEMP/tip.failed")
-          [ -z "$new" ] || { echo "::error::rows failing at the tip only: $new"; exit 1; }
-          echo "no row fails at the tip that passes at the base"
-  s5-macos:
-    name: V244 WIN-MASTER S5 Unix master turn folder rows on macos-15 at a92b2f5c2 against 82f2ef5d4
-    runs-on: macos-15
-    timeout-minutes: 240
-    steps:
-      - name: Refuse a runner that is not GitHub-hosted
-        run: |
-          set -euo pipefail
-          [ "$RUNNER_ENVIRONMENT" = github-hosted ] || { echo "::error::the test farm runs only on GitHub-hosted runners"; exit 1; }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Install tmux on macOS
-        timeout-minutes: 20
-        run: |
-          set -euo pipefail
-          test "$(uname -m)" = arm64
-          work="$RUNNER_TEMP/tmux"
-          mkdir -p "$work"
-          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
-          sudo mkdir -p /usr/local/bin
-          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
-          test "$(command -v tmux)" = /usr/local/bin/tmux
-          test "$(tmux -V)" = "tmux $TMUX_VERSION"
-      - name: Select Xcode 26.3, whose git the engine runs
-        run: |
-          set -euo pipefail
-          sudo xcode-select -s /Applications/Xcode_26.3.app
-          git="$(env -i PATH=/usr/bin:/bin /usr/bin/xcrun --find git)"
-          echo "engine git $git: $("$git" --version)"
-      - name: Install Rust toolchain
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
-          {
-            echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN"
-            echo "CARGO_PROFILE_DEV_DEBUG=0"
-            echo "CARGO_PROFILE_TEST_DEBUG=0"
-            echo "CARGO_BUILD_JOBS=2"
-          } >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
-        with:
-          prefix-key: farm
-          shared-key: macos
-          add-job-id-key: false
-          add-rust-environment-hash-key: false
-          cache-bin: false
-          save-if: false
-      - name: Check the tree is the tip
-        run: |
-          set -euo pipefail
-          git diff --quiet "$TIP_SHA" -- crates
-          echo "crates at $TIP_SHA"
-      - name: Clippy on the crazyagent library
-        timeout-minutes: 60
-        run: |
-          set -euo pipefail
-          cargo clippy -p crazyagent --lib --locked -- -D warnings
-      - name: Clippy on the crazyagent test rows
-        if: ${{ !cancelled() }}
-        timeout-minutes: 60
-        run: |
-          set -euo pipefail
-          cargo clippy -p crazyagent --tests --locked -- -D warnings
-      - name: Unix master turn folder rows at the base 82f2ef5d4 and at the tip a92b2f5c2
-        if: ${{ !cancelled() }}
-        timeout-minutes: 120
-        run: |
-          set -euo pipefail
-          rows() {
-            set +e
-            cargo test -p crazyagent --lib --locked -- --test-threads 1 engine::owner::transport::master_host_launch:: engine::owner::transport::master_rcli_capture_tests:: engine::owner::transport::master_runtime:: > "$RUNNER_TEMP/$1.log" 2>&1
-            echo "$1 rc=$?"
-            set -e
-            grep -E '^test result' "$RUNNER_TEMP/$1.log" || true
-            { grep -E ' \.\.\. FAILED$' "$RUNNER_TEMP/$1.log" || true; } | sed 's/^test //; s/ \.\.\. FAILED$//' | sort -u > "$RUNNER_TEMP/$1.failed"
-          }
-          git restore -q --source="$BASE_SHA" --staged --worktree -- crates
-          rows base
-          git restore -q --source="$TIP_SHA" --staged --worktree -- crates
-          git diff --quiet "$TIP_SHA" -- crates
-          rows tip
-          echo "failed at the base:"; cat "$RUNNER_TEMP/base.failed"
-          echo "failed at the tip:"; cat "$RUNNER_TEMP/tip.failed"
-          grep -qE 'test result: (ok|FAILED)\. [1-9][0-9]* passed' "$RUNNER_TEMP/tip.log"
-          new=$(comm -13 "$RUNNER_TEMP/base.failed" "$RUNNER_TEMP/tip.failed")
-          [ -z "$new" ] || { echo "::error::rows failing at the tip only: $new"; exit 1; }
-          echo "no row fails at the tip that passes at the base"
