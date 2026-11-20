@@ -171,7 +171,6 @@ pub(crate) const GIT_SAFE_ENV: [(&str, &str); 4] = [
 ];
 #[cfg(unix)]
 const GIT_CONFIG_LISTING_BYTES_MAX: usize = 64 * 1024;
-#[cfg(unix)]
 const FILTER_DRIVERS_MAX: usize = 64;
 static REPOSITORIES_SETTING_UP: Mutex<std::collections::BTreeSet<PathBuf>> =
     Mutex::new(std::collections::BTreeSet::new());
