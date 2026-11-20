@@ -1483,3 +1483,20 @@ fn an_owner_folder_named_through_the_data_volume_is_no_account_home() {
         assert_eq!(checked, forbidden, "home {home:?}, HOME {given:?}");
     }
 }
+
+/// A stop never names group 1 or 0, nor an id past a process id: `kill_process_group`
+/// sends `kill(-id)`, so group 1 would be every process the user may signal, the whole
+/// session, and 0 the engine's own group. Only a group above 1 comes back.
+#[cfg(unix)]
+#[test]
+fn a_stop_names_no_group_at_or_below_one_nor_past_a_process_id() {
+    for raw in [0, 1, u32::MAX, (i32::MAX as u32) + 1] {
+        assert_eq!(super::group_of(raw), None, "{raw}");
+    }
+    for raw in [2, i32::MAX as u32] {
+        assert_eq!(
+            super::group_of(raw).map(|group| group.as_raw_nonzero().get()),
+            Some(raw as i32)
+        );
+    }
+}

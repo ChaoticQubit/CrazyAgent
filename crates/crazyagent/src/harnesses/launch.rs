@@ -406,6 +406,17 @@ pub(super) fn failure(code: &str) -> LaunchError {
     LaunchError(code.into(), None)
 }
 
+/// The process group a stop may signal, from its raw id: one above 1 that fits a process
+/// id. `kill_process_group` sends `kill(-id)`, so group 1 would reach every process the
+/// user may signal and 0 names the caller's own group. Input: the raw id. Output: the
+/// group, or None for an id no stop may signal.
+#[cfg(unix)]
+pub(crate) fn group_of(raw: u32) -> Option<rustix::process::Pid> {
+    i32::try_from(raw)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+}
+
 /// Sends SIGKILL to every process of an agent's process group. Takes the group id, which
 /// names the group's leader and is above 1; an id that names no process does nothing.
 #[cfg(unix)]
