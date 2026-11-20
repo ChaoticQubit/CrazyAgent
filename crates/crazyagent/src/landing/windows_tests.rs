@@ -1069,3 +1069,69 @@ fn no_windows_step_profile_guards_a_path_inside_the_work_tree() {
         assert!(inside.is_empty(), "guards inside the work tree: {inside:?}");
     }
 }
+
+/// W5b2b, rv-sec3 RULING 18:04 E-1: the empty file a non-Index step names as its excludes file,
+/// since git stops on `NUL` there (probe r4), is W1-private in the lease's folder of the data
+/// root, outside every step kind's write roots, so no step git can plant a pattern that hides a
+/// path from a later turn commit. A file the engine finds holding anything stops the step.
+#[test]
+fn the_windows_no_excludes_file_sits_where_no_step_container_writes() {
+    let place = place();
+    let data = place.home.parent().unwrap().join("data");
+    std::fs::create_dir(&data).unwrap();
+    let grants = data.join(crate::sandbox::windows::GRANTS_FOLDER);
+    std::fs::create_dir(&grants).unwrap();
+    let places = step_places(&place, &data);
+    let empty = super::step_windows::no_excludes(&places).unwrap();
+    assert_eq!(super::step_windows::no_excludes(&places).unwrap(), empty);
+    assert!(empty.starts_with(&places.lease));
+    assert_eq!(std::fs::metadata(&empty).unwrap().len(), 0);
+    assert!(crazyagent_win_sandbox::private::read_only(&empty).is_ok());
+    let named = empty.to_str().unwrap().to_lowercase();
+    for writes in [Writes::Index, Writes::Objects, Writes::WorkTree] {
+        let policy = super::step_windows::policy(&places, writes).unwrap();
+        let profile = crate::sandbox::windows::boundary_profile(&policy, &grants).unwrap();
+        assert!(
+            !profile
+                .write_roots
+                .iter()
+                .any(|root| named.starts_with(&root.to_lowercase())),
+            "no step kind writes the no-excludes file"
+        );
+    }
+    std::fs::write(&empty, "*\n").unwrap();
+    assert_eq!(
+        code(super::step_windows::no_excludes(&places)),
+        "changes_git_unsupported"
+    );
+}
+
+/// W5b2b, rv-sec3 RULING 18:04 E-2: an engine read that reads attributes or grafts answers on
+/// Windows with the null device the engine names for `core.attributesFile` and
+/// `GIT_GRAFT_FILE`, as the excludes file does not: `check-attr` on the commit, a commit count
+/// and a commit's patch all succeed.
+#[test]
+fn a_windows_engine_read_of_attributes_or_grafts_answers_with_the_null_device() {
+    let place = place();
+    let ws = &place.workspace;
+    let repo = Repo::open(&ws.repository, &ws.git_dir, None).unwrap();
+    let attributes = repo
+        .capture(&["check-attr", "--source", "HEAD", "-a", "a.txt"], 4096)
+        .unwrap();
+    assert!(
+        attributes.is_empty(),
+        "{:?}",
+        String::from_utf8_lossy(&attributes)
+    );
+    assert_eq!(
+        repo.capture(&["rev-list", "--count", "HEAD"], 64).unwrap(),
+        b"1\n"
+    );
+    let patch = repo
+        .capture(
+            &["log", "-1", "-p", "--format=%H", "HEAD", "--", "a.txt"],
+            4096,
+        )
+        .unwrap();
+    assert!(String::from_utf8_lossy(&patch).contains("+one"));
+}
