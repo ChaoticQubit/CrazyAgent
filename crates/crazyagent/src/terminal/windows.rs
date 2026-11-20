@@ -1,7 +1,7 @@
 use super::buffer::{Feed, buffer};
 use super::{
-    AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, PaneRef, SIZE_MAX, SIZE_MIN,
-    TerminalStream, VIEWERS_MAX, failure,
+    AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, PASTE_BYTES_MAX, PASTE_CLOSE,
+    PaneRef, SIZE_MAX, SIZE_MIN, TerminalStream, VIEWERS_MAX, failure,
 };
 use crate::harnesses::interactive::InteractiveCommand;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
@@ -23,6 +23,10 @@ const ENV_MAX: usize = 256;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const CURSOR_QUERY: &[u8] = b"\x1b[6n";
 const CURSOR_REPLY: &[u8] = b"\x1b[1;1R";
+const PASTE_OPEN: &[u8] = b"\x1b[200~";
+/// Keeps a shell in a terminal from running a program of the same name planted in its
+/// folder ahead of `PATH`, such as a project's `git.bat` when the owner types `git` (C4).
+const NO_FOLDER_SEARCH: (&str, &str) = ("NoDefaultCurrentDirectoryInExePath", "1");
 const BASE_ENV: &[&str] = &[
     "SystemRoot",
     "SystemDrive",
@@ -134,6 +138,7 @@ impl Host for ConptyHost {
         for (key, value) in &command.env {
             builder.env(key, value);
         }
+        builder.env(NO_FOLDER_SEARCH.0, NO_FOLDER_SEARCH.1);
         let mut child = pair
             .slave
             .spawn_command(builder)
@@ -218,6 +223,48 @@ impl Host for ConptyHost {
         let mut writer = lock(&pane.writer);
         writer
             .write_all(bytes)
+            .and_then(|()| writer.flush())
+            .map_err(|_| unavailable())
+    }
+
+    /// Tells whether the terminal's app turned bracketed paste on (DECSET 2004), as its
+    /// screen parser read it through ConPTY. Takes the name. Returns the answer, or
+    /// `terminal_agent_unknown` once the terminal ended, which ends an input-only view.
+    fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
+        let mut panes = lock(&self.panes);
+        let pane = live(&mut panes, agent)?;
+        let on = lock(&pane.view).parser.screen().bracketed_paste();
+        Ok(on)
+    }
+
+    /// Pastes the owner's keys as one write, bracketed only once the app turned bracketed
+    /// paste on. Takes the name and 1 to `PASTE_BYTES_MAX` keys from `paste_keys`, which
+    /// hold no escape, so no paste ends its own bracket. Returns once written, or a code.
+    fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
+        if keys.is_empty() || keys.len() > PASTE_BYTES_MAX || keys.contains(&0x1b) {
+            return Err(failure("terminal_paste_bounds"));
+        }
+        let mut panes = lock(&self.panes);
+        let pane = live(&mut panes, agent)?;
+        let bracketed = lock(&pane.view).parser.screen().bracketed_paste();
+        let mut bytes = Vec::with_capacity(keys.len() + PASTE_OPEN.len() + PASTE_CLOSE.len());
+        if bracketed {
+            bytes.extend_from_slice(PASTE_OPEN);
+        }
+        bytes.extend_from_slice(keys);
+        if bracketed {
+            bytes.extend_from_slice(PASTE_CLOSE);
+        }
+        assert!(
+            bytes
+                .windows(PASTE_CLOSE.len())
+                .filter(|w| *w == PASTE_CLOSE)
+                .count()
+                <= 1
+        );
+        let mut writer = lock(&pane.writer);
+        writer
+            .write_all(&bytes)
             .and_then(|()| writer.flush())
             .map_err(|_| unavailable())
     }
