@@ -17,8 +17,8 @@ env:
   RUST_TOOLCHAIN: "1.98.1"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
-  RED_SHA: 1d5841e52
-  TIP_SHA: 65b2b21d0
+  BASE_SHA: 3e45d7a38
+  TIP_SHA: f4eed173b
 
 defaults:
   run:
@@ -26,7 +26,7 @@ defaults:
 
 jobs:
   s1:
-    name: V244 WIN-MASTER S1 r3 Codex custody (CR-1354) on ${{ matrix.runner }}, red at 1d5841e52, tip 65b2b21d0
+    name: V244 WIN-MASTER S1 land f4eed173b (the S1 tip plus chore/v244 3e45d7a38) on ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
@@ -44,7 +44,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          fetch-depth: 10
+          fetch-depth: 0
       - name: Install Linux build packages
         if: ${{ runner.os == 'Linux' }}
         timeout-minutes: 10
@@ -98,33 +98,6 @@ jobs:
           set -euo pipefail
           cargo clippy -p crazyagent-win-sandbox --lib --locked -- -D warnings
           cargo clippy -p crazyagent-win-sandbox --tests --locked -- -D warnings
-      - name: S1 r3 red rows at 1d5841e52, a frame sent to a harness that floods before it reads
-        if: ${{ !cancelled() }}
-        timeout-minutes: 60
-        run: |
-          set -euo pipefail
-          if [ "$RUNNER_OS" = Windows ]; then
-            rows="engine::codex_host::process_windows_tests::a_windows_harness_that_floods_its_output_before_it_reads engine::codex_host::process_windows_tests::the_output_bound_ends_a_windows_run_that_floods_past_it"
-            names="a_windows_harness_that_floods_its_output_before_it_reads_still_takes_a_frame_larger_than_its_pipe the_output_bound_ends_a_windows_run_that_floods_past_it_while_a_frame_waits"
-          else
-            rows="engine::codex_host::process_tests::a_harness_that_floods_its_output_before_it_reads engine::codex_host::process_tests::the_output_bound_ends_a_run_that_floods_past_it"
-            names="a_harness_that_floods_its_output_before_it_reads_still_takes_a_frame_larger_than_its_pipe the_output_bound_ends_a_run_that_floods_past_it_while_a_frame_waits"
-          fi
-          git restore -q --source="$RED_SHA" --staged --worktree -- crates
-          set +e
-          cargo test -p crazyagent --lib --locked -- --test-threads 1 $rows 2>&1 | tee "$RUNNER_TEMP/red.log"
-          rc=${PIPESTATUS[0]}
-          set -e
-          git restore -q --source="$TIP_SHA" --staged --worktree -- crates
-          git diff --quiet "$TIP_SHA" -- crates
-          grep -E '^test engine::codex_host::|^test result|panicked|waited' "$RUNNER_TEMP/red.log" || true
-          [ "$rc" -ne 0 ]
-          grep -qE 'test result: FAILED\. 0 passed; 2 failed' "$RUNNER_TEMP/red.log"
-          for row in $names; do
-            grep -q "$row \.\.\. FAILED" "$RUNNER_TEMP/red.log"
-          done
-          [ "$(grep -c 'the frame waited 20 s on a harness blocked on its unread output' "$RUNNER_TEMP/red.log")" -ge 2 ]
-          echo "red as expected: without the fix both frames wait 20 s on a harness blocked on its unread output"
       - name: Build the Linux sandbox helper the custody rows start
         if: ${{ !cancelled() && runner.os == 'Linux' }}
         timeout-minutes: 30
@@ -134,8 +107,8 @@ jobs:
           mkdir -p target/debug/deps
           cp target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
           ls -l target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
-      - name: S1 r3 Codex host rows at the tip 65b2b21d0
-        if: ${{ !cancelled() }}
+      - name: S1 land Codex host rows on Windows at the land tip f4eed173b
+        if: ${{ !cancelled() && runner.os == 'Windows' }}
         timeout-minutes: 60
         run: |
           set +e
@@ -144,12 +117,32 @@ jobs:
           set -e
           grep -E '^test engine::codex_host::|^test result|panicked' "$RUNNER_TEMP/tip.log" || true
           [ "$rc" -eq 0 ]
-          if [ "$RUNNER_OS" = Windows ]; then
-            grep -qE 'test result: ok\. 24 passed; 0 failed; 1 ignored' "$RUNNER_TEMP/tip.log"
-          else
-            grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/tip.log"
-          fi
-      - name: S1 r3 Codex host Windows rows, pump rows and the tree row five times at the tip
+          grep -qE 'test result: ok\. 24 passed; 0 failed; 1 ignored' "$RUNNER_TEMP/tip.log"
+      - name: S1 land Codex host rows on ubuntu at chore/v244 3e45d7a38 and at the land tip f4eed173b
+        if: ${{ !cancelled() && runner.os == 'Linux' }}
+        timeout-minutes: 120
+        run: |
+          set -euo pipefail
+          rows() {
+            set +e
+            cargo test -p crazyagent --lib --locked -- --test-threads 1 engine::codex_host:: > "$RUNNER_TEMP/$1.log" 2>&1
+            echo "$1 rc=$?"
+            set -e
+            grep -E '^test result' "$RUNNER_TEMP/$1.log" || true
+            { grep -E ' \.\.\. FAILED$' "$RUNNER_TEMP/$1.log" || true; } | sed 's/^test //; s/ \.\.\. FAILED$//' | sort -u > "$RUNNER_TEMP/$1.failed"
+          }
+          git restore -q --source="$BASE_SHA" --staged --worktree -- crates
+          rows base
+          git restore -q --source="$TIP_SHA" --staged --worktree -- crates
+          git diff --quiet "$TIP_SHA" -- crates
+          rows tip
+          echo "failed at the base:"; cat "$RUNNER_TEMP/base.failed"
+          echo "failed at the tip:"; cat "$RUNNER_TEMP/tip.failed"
+          grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/tip.log"
+          new=$(comm -13 "$RUNNER_TEMP/base.failed" "$RUNNER_TEMP/tip.failed")
+          [ -z "$new" ] || { echo "::error::rows failing at the tip only: $new"; exit 1; }
+          echo "no row fails at the tip that passes at the base"
+      - name: S1 land Codex host Windows rows, pump rows and the tree row five times at the land tip
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         timeout-minutes: 60
         run: |
