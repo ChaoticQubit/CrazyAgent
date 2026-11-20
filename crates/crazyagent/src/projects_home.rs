@@ -1,3 +1,5 @@
+#[cfg(all(test, windows))]
+mod compare_windows_tests;
 pub(crate) mod delete_mark;
 pub mod icloud;
 mod intake;
