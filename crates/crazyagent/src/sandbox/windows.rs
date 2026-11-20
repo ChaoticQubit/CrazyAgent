@@ -1182,4 +1182,90 @@ mod tests {
             assert!(!project.join(".git").exists() && !project.join(".crazyagent").exists());
         }
     }
+
+    /// The refusal a profile gets when an agent could write the owner's git folder.
+    const WRITES_OWNER_GIT: &str = "an agent profile can't write the project's git folder";
+
+    /// Tells whether a profile build was refused because it writes the owner's git folder.
+    /// Input: the build's result. Output: the answer.
+    fn refused_for_git<T: std::fmt::Debug>(built: Result<T, SandboxError>) -> bool {
+        matches!(built, Err(SandboxError::Invalid(reason)) if reason == WRITES_OWNER_GIT)
+    }
+
+    /// rv-sec3 #764 L1 (C6): a job folder on a repository writes its `.git` through its
+    /// writable top, so an agent could plant a hook the engine's own git runs; its profile is
+    /// refused at the chokepoint, at build and at install, and so is a job folder that is the
+    /// git folder itself, while the same job folder on a folder with no git folder installs.
+    #[test]
+    fn a_job_folder_profile_on_a_repository_is_refused_because_it_writes_the_git_folder() {
+        let folders = folders();
+        let git = folders.project.join(".git");
+        fs::create_dir_all(git.join("hooks")).unwrap();
+        fs::create_dir_all(git.join("refs")).unwrap();
+        let job = policy(&folders, SandboxNetwork::Only(Vec::new())).as_job_folder();
+        assert!(job.writes(&git.join("hooks")));
+        assert!(refused_for_git(boundary_profile(&job, &folders.grants)));
+        let helper = std::env::current_exe().unwrap();
+        let profile = folders.profiles.join("job.sb");
+        assert!(refused_for_git(WindowsSandbox::install(
+            job,
+            &helper,
+            &profile,
+            &folders.grants
+        )));
+        assert!(!profile.exists());
+        let inside = ProjectSandbox::new(
+            &git,
+            &folders.home,
+            &folders.tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .as_job_folder();
+        assert!(refused_for_git(boundary_profile(&inside, &folders.grants)));
+        let plain = folders.project.parent().unwrap().join("plain");
+        fs::create_dir_all(&plain).unwrap();
+        let elsewhere = ProjectSandbox::new(
+            &plain,
+            &folders.home,
+            &folders.tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .as_job_folder();
+        assert!(boundary_profile(&elsewhere, &folders.grants).is_ok());
+    }
+
+    /// C6: the project guards hold `.git`'s hooks, config and modules, never its refs, objects
+    /// or `HEAD`, so a project-root profile on a repository still writes the git folder and is
+    /// refused too; a worktree's profile, whose `.git` is the file naming its admin folder and
+    /// whose repository is read only, installs, as the master's turn builds it.
+    #[test]
+    fn a_guarded_project_root_profile_on_a_repository_is_refused_and_a_worktree_profile_is_not() {
+        let folders = folders();
+        let git = folders.project.join(".git");
+        fs::create_dir_all(git.join("refs")).unwrap();
+        let guarded = policy(&folders, SandboxNetwork::Only(Vec::new()));
+        assert!(guarded.holds_project_guards());
+        assert!(!guarded.protected_paths().contains(&git.join("refs")));
+        assert!(refused_for_git(boundary_profile(&guarded, &folders.grants)));
+        let worktree = folders.project.parent().unwrap().join("worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(worktree.join(".git"), "gitdir: elsewhere\r\n").unwrap();
+        let turn = ProjectSandbox::new(
+            &worktree,
+            &folders.home,
+            &folders.tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .and_then(|sandbox| sandbox.allow_read(&folders.project))
+        .unwrap();
+        let profile = boundary_profile(&turn, &folders.grants).unwrap();
+        assert!(
+            !profile
+                .write_roots
+                .iter()
+                .any(|root| Path::new(root).starts_with(&folders.project))
+        );
+    }
 }
