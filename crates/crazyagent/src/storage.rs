@@ -2921,7 +2921,6 @@ pub(crate) fn store_config(
     Ok(())
 }
 
-#[cfg(unix)]
 const OWNER_META: &str = "CREATE TABLE owner_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     schema_version INTEGER NOT NULL CHECK(schema_version = 1),
@@ -2929,14 +2928,12 @@ const OWNER_META: &str = "CREATE TABLE owner_meta (
     engine_epoch TEXT NOT NULL CHECK(length(engine_epoch) = 64),
     runtime_state TEXT NOT NULL CHECK(runtime_state IN ('offline', 'active'))
 )";
-#[cfg(unix)]
 const OWNER_IDENTITIES: &str = "CREATE TABLE owner_identities (
     owner_id TEXT NOT NULL PRIMARY KEY CHECK(length(owner_id) = 64),
     client_kind TEXT NOT NULL UNIQUE CHECK(client_kind IN ('tui', 'desktop')),
     owner_epoch INTEGER NOT NULL CHECK(owner_epoch >= 1),
     status TEXT NOT NULL CHECK(status IN ('active', 'revoked'))
 )";
-#[cfg(unix)]
 const OWNER_OPERATIONS: &str = "CREATE TABLE owner_operations (
     origin TEXT NOT NULL CHECK(origin IN ('native_owner', 'trusted_host')),
     owner_id TEXT NOT NULL,
@@ -2951,10 +2948,8 @@ const OWNER_OPERATIONS: &str = "CREATE TABLE owner_operations (
     event_cursor INTEGER CHECK(event_cursor IS NULL OR event_cursor >= 1),
     PRIMARY KEY(origin, owner_id, operation_id)
 )";
-#[cfg(unix)]
 const OWNER_EVENT: &str = "CREATE UNIQUE INDEX owner_operation_event ON owner_operations(event_cursor) WHERE event_cursor IS NOT NULL";
 
-#[cfg(unix)]
 fn owner_schema(tx: &Transaction<'_>) -> Result<bool, EngineError> {
     let expected = [
         ("owner_meta", OWNER_META),

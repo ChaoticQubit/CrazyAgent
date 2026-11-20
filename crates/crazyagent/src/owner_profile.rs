@@ -195,7 +195,6 @@ pub fn stack_item_problem(item: &str) -> Option<String> {
     })
 }
 
-#[cfg(unix)]
 pub(crate) fn initialize(tx: &Transaction<'_>) -> Result<(), EngineError> {
     tx.execute_batch(TABLE).map_err(error)
 }

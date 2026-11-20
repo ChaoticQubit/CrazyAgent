@@ -138,7 +138,6 @@ pub(crate) fn validate_history(
     Ok(())
 }
 
-#[cfg(unix)]
 pub(crate) fn initialize(tx: &Transaction<'_>) -> Result<(), EngineError> {
     let expected = [
         ("conversation_meta", META),
