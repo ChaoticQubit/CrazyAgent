@@ -1,3 +1,4 @@
+use crazyagent_win_sandbox::name;
 #[cfg(windows)]
 use crazyagent_win_sandbox::private;
 use std::ffi::{OsStr, OsString};
@@ -7,11 +8,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 const NAME_BYTES_MAX: usize = 255;
-const NAME_UNITS_MAX: usize = 255;
 const DEVICE_NAMES: [&str; 4] = ["AUX", "CON", "NUL", "PRN"];
-const CHECKED_DEVICE_NAMES: [&str; 6] = ["AUX", "CON", "CONIN$", "CONOUT$", "NUL", "PRN"];
-const NUMBERED_DEVICES: [&str; 2] = ["COM", "LPT"];
-const FORBIDDEN: [char; 9] = ['/', '\\', ':', '<', '>', '"', '|', '?', '*'];
 
 /// Why a held open, make, listing, lock or remove failed, by cause (rv-sec3 #725 U5): the
 /// entry is missing, it is not the entry the layer may use, another handle holds it, the
@@ -83,16 +80,16 @@ impl Name {
     /// the text. Output: the name.
     pub(crate) fn constant(text: &'static str) -> Self {
         assert_component(text);
-        assert!(!refused(text), "{text:?}");
+        assert!(!name::refused(text), "{text:?}");
         Self(OsString::from(text))
     }
 
     /// Checks a name the layer's caller did not write, the same on every system (DESIGN-0553
     /// rule 3, rv-sec3 #725 U6). Input: the name. Output: the name, or `Unsafe` for one that
-    /// is not UTF-8 or that `refused` turns away.
+    /// is not UTF-8 or that [`name::refused`] turns away.
     pub(crate) fn checked(text: &OsStr) -> Result<Self, HeldError> {
         let plain = text.to_str().ok_or(HeldError::Unsafe)?;
-        if refused(plain) {
+        if name::refused(plain) {
             return Err(HeldError::Unsafe);
         }
         Ok(Self(text.to_owned()))
@@ -122,48 +119,10 @@ fn assert_component(text: &str) {
         .unwrap_or_default()
         .to_ascii_uppercase();
     assert!(!DEVICE_NAMES.contains(&stem.as_str()), "{text:?}");
-    let numbered = NUMBERED_DEVICES.iter().any(|device| {
+    let numbered = name::NUMBERED_DEVICES.iter().any(|device| {
         stem.len() == 4 && stem.starts_with(device) && stem.as_bytes()[3].is_ascii_digit()
     });
     assert!(!numbered, "{text:?}");
-}
-
-/// Says whether a name is not one plain component on some system: empty, over 255 UTF-16
-/// units, holding a control character, a separator, a colon or another character Windows
-/// refuses, ending in a dot or a space, `.` and `..` among them, or a device name. Input:
-/// the name. Output: true when it is refused.
-fn refused(text: &str) -> bool {
-    text.is_empty()
-        || text.encode_utf16().count() > NAME_UNITS_MAX
-        || text
-            .chars()
-            .any(|character| character.is_control() || FORBIDDEN.contains(&character))
-        || text.ends_with('.')
-        || text.ends_with(' ')
-        || device(text)
-}
-
-/// Says whether a name is a Windows device in any case, with or without an extension and
-/// with spaces before it: CON, PRN, AUX, NUL, CONIN$, CONOUT$, and COM or LPT followed by
-/// one digit or a superscript one, two or three. Input: the name. Output: the answer.
-fn device(text: &str) -> bool {
-    let stem = text
-        .split('.')
-        .next()
-        .unwrap_or_default()
-        .trim_end_matches(' ')
-        .to_uppercase();
-    let numbered = NUMBERED_DEVICES.iter().any(|prefix| {
-        stem.strip_prefix(prefix).is_some_and(|tail| {
-            let mut units = tail.chars();
-            matches!(
-                (units.next(), units.next()),
-                (Some(digit), None)
-                    if digit.is_ascii_digit() || matches!(digit, '\u{b9}' | '\u{b2}' | '\u{b3}')
-            )
-        })
-    });
-    CHECKED_DEVICE_NAMES.contains(&stem.as_str()) || numbered
 }
 
 impl Folder {

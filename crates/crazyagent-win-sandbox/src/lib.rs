@@ -3,6 +3,7 @@
 
 pub mod dacl;
 pub mod grants;
+pub mod name;
 pub mod pipe;
 pub mod plan;
 /// Test only: lowered principals a test thread impersonates, a restricted token (R4) and the
