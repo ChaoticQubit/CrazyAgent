@@ -207,6 +207,40 @@ mod tests {
         assert!(read >= 2, "read {read} files");
     }
 
+    #[test]
+    fn only_the_page_copy_command_writes_a_board_with_no_user_event() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native_term");
+        let host = std::fs::read_to_string(root.join("host.rs")).expect("host.rs");
+        let calls: Vec<usize> = host
+            .match_indices(".write_command(")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(calls.len(), 1, "host.rs calls write_command once");
+        let arm = host
+            .find("Command::Copy(output) => {")
+            .expect("the page's Copy arm");
+        let end = arm
+            + host[arm..]
+                .find("Command::Paste(")
+                .expect("the arm after Copy");
+        assert!(
+            (arm..end).contains(&calls[0]),
+            "the one write_command call is the page's Copy command"
+        );
+        let mut read = 0;
+        for entry in std::fs::read_dir(root.join("host")).expect("host folder") {
+            let path = entry.expect("folder entry").path();
+            let text = std::fs::read_to_string(&path).expect("source file");
+            assert!(
+                !text.contains(".write_command("),
+                "{} calls write_command",
+                path.display()
+            );
+            read += 1;
+        }
+        assert!(read >= 2, "read {read} files");
+    }
+
     #[cfg(unix)]
     #[test]
     fn only_an_engine_socket_shape_passes() {

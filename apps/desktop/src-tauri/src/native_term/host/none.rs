@@ -44,20 +44,22 @@ pub fn parent_scale(_parent: &Parent) -> f64 {
 
 /// Makes a view with no drawing parts; never reached, as `parent` refuses first. Inputs:
 /// as the macOS host takes them. Output: the view.
+#[allow(clippy::too_many_arguments)]
 pub fn open_view(
     _mtm: Main,
     _parent: Parent,
     _page: u64,
     key: u32,
+    _rect: [f64; 4],
     _label: &str,
     events: Channel<NativeEvent>,
     project: Option<String>,
-) -> View {
-    View {
+) -> Result<View, &'static str> {
+    Ok(View {
         scale: key,
         events,
         project,
-    }
+    })
 }
 
 /// Gives a view focus; no view exists to focus. Input: the view.
@@ -129,6 +131,11 @@ impl Clip {
 
     /// Refuses a copy. Input: the text. Output: false.
     pub fn write(&self, _text: &str) -> bool {
+        false
+    }
+
+    /// Refuses the page's Copy command. Input: the text. Output: false.
+    pub fn write_command(&self, _text: &str) -> bool {
         false
     }
 

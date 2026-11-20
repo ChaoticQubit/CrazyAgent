@@ -67,30 +67,34 @@ pub fn parent_scale(parent: &Parent) -> f64 {
 }
 
 /// Makes a hidden view above its webview, labelled for VoiceOver, its events going to the
-/// host's sink. Inputs: the marker, the parent, the page id, the scale key, the label, the
-/// events channel and the wall window's project. Output: the view.
+/// host's sink; macOS places it on its first layout, so the open rect is not read here.
+/// Inputs: the marker, the parent, the page id, the scale key, the open rect, the label,
+/// the events channel and the wall window's project. Output: the view; a macOS open never
+/// fails here.
+#[allow(clippy::too_many_arguments)]
 pub fn open_view(
     mtm: Main,
     parent: Parent,
     page: u64,
     key: u32,
+    _rect: [f64; 4],
     label: &str,
     events: Channel<NativeEvent>,
     project: Option<String>,
-) -> View {
+) -> Result<View, &'static str> {
     let Parent { webview, host } = parent;
     let ns = TermView::new(mtm, page, sink, screen);
     ns.set_label(label);
     ns.setHidden(true);
     host.addSubview_positioned_relativeTo(&ns, NSWindowOrderingMode::Above, Some(&webview));
-    View {
+    Ok(View {
         ns,
         webview,
         surface: None,
         scale: key,
         events,
         project,
-    }
+    })
 }
 
 /// Makes the view its window's first responder; the app and its key window stay as they
