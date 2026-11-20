@@ -559,7 +559,7 @@ pub(in crate::engine) struct ClaudeHost {
     expires: Option<tokio::time::Instant>,
     frame_bytes: usize,
     wake: HostWake,
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     passes: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -631,7 +631,7 @@ impl ClaudeHost {
                 .map(|time| tokio::time::Instant::now() + time),
             frame_bytes,
             wake,
-            #[cfg(test)]
+            #[cfg(all(test, unix))]
             passes: Arc::clone(&passes),
         };
         let _custodian = std::thread::Builder::new()
@@ -786,7 +786,7 @@ impl ClaudeHost {
 
     /// How many passes the custodian's drive loop has made, shared, so a row can count them
     /// while it stops the host. Output: the shared count.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(in crate::engine) fn drive_passes(&self) -> Arc<std::sync::atomic::AtomicU64> {
         Arc::clone(&self.passes)
     }
