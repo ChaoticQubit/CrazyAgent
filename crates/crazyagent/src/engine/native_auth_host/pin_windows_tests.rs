@@ -570,11 +570,13 @@ fn node_for(shim: &Path, folders: Vec<PathBuf>) -> std::ffi::OsString {
 /// rv-sec3 #752 note 4: the `node.exe` a sign-in starts an npm shim's pinned script with is
 /// never one an agent placed earlier on the search path, in a `.crazyagent` folder or
 /// reached through a junction into one; the control shows the first `node.exe` found wins
-/// otherwise, so the row would see an agent's copy.
+/// otherwise, so the row would see an agent's copy. The script names node on its first line,
+/// as npm's does, or the resolver runs it as a program of its own.
 #[test]
 fn an_agent_placed_node_exe_earlier_on_the_path_is_not_the_one_an_npm_shim_runs() {
     let (_owner, folder) = owner_folder();
-    let (shim, _script) = npm_codex(&folder.join("npm"));
+    let (shim, script) = npm_codex(&folder.join("npm"));
+    std::fs::write(&script, "#!/usr/bin/env node\n").unwrap();
     let owner_node = stand_in_node(&folder.join("nodejs"));
     let other = folder.join("other");
     let other_node = stand_in_node(&other);
