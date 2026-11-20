@@ -130,6 +130,20 @@ fn plain_program(git: &Path) -> Result<PathBuf, SandboxError> {
     Ok(plain)
 }
 
+/// Git's plain program and its marked Git for Windows install folder, as owner git starts
+/// and reads them, for another engine container that runs the same git, such as a landing
+/// step (W5b2). Input: git's program as the engine's lookup gives it. Output: the plain
+/// program and the canonical install folder, or `Invalid` for a program no boundary starts.
+pub(crate) fn plain_git(git: &Path) -> Result<(PathBuf, PathBuf), SandboxError> {
+    let plain = plain_program(git)?;
+    let root = install_root(&plain)
+        .filter(|root| marked(root))
+        .ok_or_else(|| invalid("git is not in a Git for Windows install folder"))?;
+    let root = canonical(root)?;
+    assert!(plain.starts_with(&root));
+    Ok((plain, root))
+}
+
 /// The owner's git for one project, run inside an AppContainer of its own with no capability
 /// (owner option 1, V244-WIN-GIT-UNC-SIBLINGS), so a `.git` that points git at a share or a
 /// folder outside the project reaches nothing. Every command reuses the profile written once.

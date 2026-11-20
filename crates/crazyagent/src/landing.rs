@@ -27,6 +27,8 @@ pub mod owner_edit;
 mod retire;
 #[cfg(all(test, unix))]
 pub(crate) mod signature_tests;
+#[cfg(windows)]
+mod step_windows;
 mod store;
 mod subagent;
 #[cfg(all(test, unix))]
