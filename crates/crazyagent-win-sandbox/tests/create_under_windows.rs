@@ -196,9 +196,9 @@ fn control(entry: &std::fs::File) -> u16 {
     bits
 }
 
-/// The entries of an access list as their flags and SIDs, for the allow and deny kinds.
-/// Input: the list's bytes. Output: one pair per entry.
-fn entries(list: &[u8]) -> Vec<(u8, Vec<u8>)> {
+/// The entries of an access list as their SIDs, access masks and flags, for the allow and
+/// deny kinds. Input: the list's bytes. Output: one triple per entry.
+fn entries(list: &[u8]) -> Vec<(Vec<u8>, u32, u8)> {
     let count = usize::from(u16::from_le_bytes([list[4], list[5]]));
     let mut at = 8;
     let mut found = Vec::new();
@@ -207,7 +207,8 @@ fn entries(list: &[u8]) -> Vec<(u8, Vec<u8>)> {
         let flags = list[at + 1];
         let size = usize::from(u16::from_le_bytes([list[at + 2], list[at + 3]]));
         assert!(matches!(kind, 0 | 1), "entry kind {kind}");
-        found.push((flags, list[at + 8..at + size].to_vec()));
+        let mask = u32::from_le_bytes(list[at + 4..at + 8].try_into().unwrap());
+        found.push((list[at + 8..at + size].to_vec(), mask, flags));
         at += size;
     }
     assert_eq!(found.len(), count);
@@ -215,61 +216,84 @@ fn entries(list: &[u8]) -> Vec<(u8, Vec<u8>)> {
 }
 
 const PROTECTED: u16 = 0x1000;
+const OBJECT_INHERIT: u8 = 0x01;
+const CONTAINER_INHERIT: u8 = 0x02;
+const INHERIT_ONLY: u8 = 0x08;
 const INHERITED: u8 = 0x10;
-const ALL_APP_PACKAGES: [u8; 16] = [1, 2, 0, 0, 0, 0, 0, 15, 2, 0, 0, 0, 1, 0, 0, 0];
 
-/// rv-sec2 RULING-15:12 row 1: a folder and a file `create_under` makes for a lease have the
-/// engine's user as owner, even on an elevated token, and a list that is not protected and
-/// holds inherited entries only, so a later grant on the lease reaches them.
+/// The entries an entry made in a folder takes from it, as (SID, mask, flags less the
+/// inherit-only and inherited marks): for a folder each entry that passes on to folders or
+/// files, for a file each entry that passes on to files, with no flags. Inputs: the folder's
+/// list and whether the entry made is a folder. Output: the sorted triples.
+fn passed_on(list: &[u8], folder: bool) -> Vec<(Vec<u8>, u32, u8)> {
+    let mut found: Vec<_> = entries(list)
+        .into_iter()
+        .filter(|(_, _, flags)| {
+            flags
+                & if folder {
+                    OBJECT_INHERIT | CONTAINER_INHERIT
+                } else {
+                    OBJECT_INHERIT
+                }
+                != 0
+        })
+        .map(|(sid, mask, flags)| {
+            (
+                sid,
+                mask,
+                if folder {
+                    flags & !(INHERIT_ONLY | INHERITED)
+                } else {
+                    0
+                },
+            )
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// An entry's own list as (SID, mask, flags less the inherit-only and inherited marks),
+/// sorted. Input: the held entry. Output: the triples.
+fn held_as(entry: &std::fs::File) -> Vec<(Vec<u8>, u32, u8)> {
+    let mut found: Vec<_> = entries(&private::facts(entry).unwrap().list.unwrap())
+        .into_iter()
+        .map(|(sid, mask, flags)| (sid, mask, flags & !(INHERIT_ONLY | INHERITED)))
+        .collect();
+    found.sort();
+    found
+}
+
+/// rv-sec2 RULING-16:21 row 1 (A): a folder and a file `create_under` makes for a lease have
+/// the engine's user as owner, a list that is present and not protected, holding exactly the
+/// entries its folder passes on (SID, mask and flags), nothing added and nothing missing, and
+/// they pass W1's check. NTFS does not mark them inherited at create, since W1's `dir` list is
+/// not auto-inherited (probe run 44815671302); the first propagating write on the lease does.
 #[test]
-fn a_lease_entry_has_the_user_as_owner_and_an_unprotected_inherited_list() {
+fn a_lease_entry_has_the_user_as_owner_and_exactly_the_entries_its_folder_passes_on() {
     let root = scratch("inherited");
     let held = private::dir(&root).unwrap();
     let folder = private::create_under(&held, OsStr::new("src"), Create::Folder).unwrap();
     let file = private::create_under(&folder, OsStr::new("main.rs"), Create::File).unwrap();
     let user = private::user_sid().unwrap();
-    for (name, entry) in [("src", &folder), ("src/main.rs", &file)] {
+    for (name, parent, entry, is_folder) in [
+        ("src", &held, &folder, true),
+        ("src/main.rs", &folder, &file, false),
+    ] {
         let facts = private::facts(entry).unwrap();
         assert_eq!(facts.owner, user, "{name}");
+        assert!(facts.list.is_some(), "{name}: no list");
         assert_eq!(
             control(entry) & PROTECTED,
             0,
             "{name}: the list is protected"
         );
-        let found = entries(&facts.list.unwrap());
-        assert!(!found.is_empty(), "{name}");
-        assert!(
-            found.iter().all(|(flags, _)| flags & INHERITED != 0),
-            "{name}: an entry is not inherited: {found:?}"
-        );
+        let parent_list = private::facts(parent).unwrap().list.unwrap();
+        let expected = passed_on(&parent_list, is_folder);
+        assert!(!expected.is_empty(), "{name}");
+        assert_eq!(held_as(entry), expected, "{name}");
+        private::check(entry).unwrap();
     }
-    drop((file, folder, held));
-    std::fs::remove_dir_all(&root).unwrap();
-}
-
-/// rv-sec2 RULING-15:12 row 2: after an inheritable grant on the lease root, as the sandbox
-/// grants an agent its worktree, a file made before the grant carries the grantee's entry
-/// as an inherited one.
-#[test]
-fn a_grant_on_the_lease_root_reaches_an_entry_made_before_it() {
-    let root = scratch("grant");
-    let held = private::dir(&root).unwrap();
-    let folder = private::create_under(&held, OsStr::new("src"), Create::Folder).unwrap();
-    let file = private::create_under(&folder, OsStr::new("main.rs"), Create::File).unwrap();
-    let status = std::process::Command::new("icacls")
-        .arg(&root)
-        .args(["/grant", "*S-1-15-2-1:(OI)(CI)(M)"])
-        .stdout(std::process::Stdio::null())
-        .status()
-        .unwrap();
-    assert!(status.success());
-    let found = entries(&private::facts(&file).unwrap().list.unwrap());
-    assert!(
-        found
-            .iter()
-            .any(|(flags, sid)| flags & INHERITED != 0 && sid[..] == ALL_APP_PACKAGES[..]),
-        "{found:?}"
-    );
     drop((file, folder, held));
     std::fs::remove_dir_all(&root).unwrap();
 }

@@ -32,13 +32,13 @@ use windows_sys::Win32::Foundation::{
 use windows_sys::Win32::Security::Authorization::{
     GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo,
 };
+use windows_sys::Win32::Security::SE_DACL_PRESENT;
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, InitializeSecurityDescriptor, LABEL_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
     SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
     SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, SetSecurityDescriptorSacl,
 };
-use windows_sys::Win32::Security::{SE_DACL_AUTO_INHERIT_REQ, SE_DACL_PRESENT};
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE,
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
@@ -634,26 +634,23 @@ fn one_component(name: &OsStr) -> Vec<u16> {
     units
 }
 
-/// Fills a descriptor that names only an owner: no access list present, none protected, and
-/// automatic inheritance asked, so the entry made with it takes its folder's inheritable
-/// entries marked inherited, which a later change on the lease replaces (rv-sec2
-/// RULING-15:12). Inputs: the descriptor and the owner's SID words, both outliving the
-/// create. Output: Ok, or the error.
+/// Fills a descriptor that names only an owner: no access list present and none protected,
+/// so the entry made with it takes the entries its folder passes on; the first propagating
+/// write on the lease marks them inherited (rv-sec2 RULING-15:12, RULING-16:21). Inputs: the
+/// descriptor and the owner's SID words, both outliving the create. Output: Ok, or the error.
 fn owner_only(descriptor: &mut SECURITY_DESCRIPTOR, owner: &mut Words) -> io::Result<()> {
     let raw: PSECURITY_DESCRIPTOR = (&raw mut *descriptor).cast();
     let sid: PSID = owner.words.as_mut_ptr().cast();
     let built = unsafe {
         InitializeSecurityDescriptor(raw, SECURITY_DESCRIPTOR_REVISION) != 0
             && SetSecurityDescriptorOwner(raw, sid, 0) != 0
-            && SetSecurityDescriptorControl(raw, SE_DACL_AUTO_INHERIT_REQ, SE_DACL_AUTO_INHERIT_REQ)
-                != 0
     };
     if !built {
         return Err(io::Error::last_os_error());
     }
     assert_eq!(
-        descriptor.Control & (SE_DACL_PRESENT | SE_DACL_PROTECTED | SE_DACL_AUTO_INHERIT_REQ),
-        SE_DACL_AUTO_INHERIT_REQ
+        descriptor.Control & (SE_DACL_PRESENT | SE_DACL_PROTECTED),
+        0
     );
     Ok(())
 }
@@ -1039,3 +1036,6 @@ fn code(error: u32) -> io::Error {
 fn refused(reason: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, reason)
 }
+
+#[cfg(test)]
+mod lease_tests;
