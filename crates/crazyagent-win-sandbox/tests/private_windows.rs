@@ -855,3 +855,31 @@ fn a_deletable_secret_file_is_read_while_held_and_deleted_through_its_own_handle
     assert_eq!(own_label(&reread), MEDIUM_FULL);
     drop((reread, held));
 }
+
+/// rv-sec3 #716 C2: `new_dir` makes a missing private folder and holds it, so it passes the
+/// check and cannot be renamed while held, and refuses any entry already at the path, a
+/// private folder or a file, which stays as it was.
+#[test]
+fn new_dir_makes_only_a_missing_private_folder() {
+    let root = scratch("new-dir");
+    drop(private::dir(&root).unwrap());
+    let path = root.join("home");
+    let made = private::new_dir(&path).unwrap();
+    private::check(&made).unwrap();
+    let pinned = private::identity(&made).unwrap();
+    assert!(std::fs::rename(&path, root.join("moved")).is_err());
+    drop(made);
+    let again = private::new_dir(&path).unwrap_err();
+    assert_eq!(again.kind(), io::ErrorKind::AlreadyExists, "{again}");
+    let kept = private::open_dir(&path).unwrap();
+    assert_eq!(private::identity(&kept).unwrap(), pinned);
+    let file = root.join("file");
+    drop(private::file(&file, true).unwrap());
+    let over_file = private::new_dir(&file).unwrap_err();
+    assert_eq!(
+        over_file.kind(),
+        io::ErrorKind::AlreadyExists,
+        "{over_file}"
+    );
+    assert!(file.is_file());
+}

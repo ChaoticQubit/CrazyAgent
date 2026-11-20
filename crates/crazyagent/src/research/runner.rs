@@ -6,8 +6,8 @@ use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::harnesses::launch::{
-    AccountBinding, CLAUDE_TOOLS_OFF, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
-    rate_limited,
+    AccountBinding, CLAUDE_TOOLS_OFF, LaunchBoundary, LaunchError, LaunchEvent, LaunchLimits,
+    LaunchRequest, rate_limited,
 };
 #[cfg(unix)]
 use crate::harnesses::launch::{await_group_exit, kill_group};
@@ -22,7 +22,10 @@ use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
 use crate::sandbox::policy::{AgentAccess, Narrowing, narrowing};
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
 use crate::sandbox::warden::Warden;
-use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
+use crate::sandbox::{
+    InstalledSandbox, LinuxStrict, LinuxSupervisor, ProjectSandbox, SandboxError, SandboxNetwork,
+    SandboxRemote,
+};
 #[cfg(unix)]
 use crate::setup::AGENT_GIT_NEEDS_TOOLS;
 use crate::terminal::{AgentId, Host};
@@ -1217,7 +1220,7 @@ impl ResearchRunner {
         sandbox = allow_harness(sandbox, &program)?;
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
-        let (sandbox, listed) = self.keep_held(job, || -> Result<_, RunError> {
+        let (sandbox, boundary, listed) = self.keep_held(job, || -> Result<_, RunError> {
             let _setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
             ensure_repository(&root, &tmp)?;
             add_worktree(&sandbox, &profile, &worktree)?;
@@ -1242,8 +1245,13 @@ impl ResearchRunner {
                     crate::sandbox::shared_folders::apply(sandbox, &root, &policy.shared_folders)
                         .map_err(|code| RunError::Invalid(code.into()))?;
             }
-            sandbox.install(&profile)?;
-            Ok((sandbox, listed))
+            let boundary = InstalledSandbox::install(
+                sandbox.clone(),
+                &profile,
+                LinuxSupervisor::default(),
+                LinuxStrict::Off,
+            )?;
+            Ok((sandbox, boundary, listed))
         })??;
         still_held(jobs, job)?;
         let linked = self.linked_research(job, &root)?;
@@ -1262,8 +1270,11 @@ impl ResearchRunner {
                 account: binding,
                 model,
                 tools: job.tools,
-                sandbox_profile: (!unconfined).then(|| profile.clone()),
-                unconfined,
+                boundary: LaunchBoundary::Installed(Arc::new(if unconfined {
+                    boundary.unconfined()
+                } else {
+                    boundary
+                })),
                 git_identity: None,
                 limits: LaunchLimits {
                     run_time: self.limits.wall_time,

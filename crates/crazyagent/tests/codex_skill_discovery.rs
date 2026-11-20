@@ -7,7 +7,7 @@ use crazyagent::coord::delivery::codex;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crazyagent::harnesses::launch::{
-    AccountBinding, LaunchLimits, LaunchRequest, command_with_context,
+    AccountBinding, LaunchBoundary, LaunchLimits, LaunchRequest, command_with_context,
 };
 use crazyagent::launch_context;
 use crazyagent::plugins::Scope;
@@ -190,8 +190,7 @@ async fn a_supported_codex_discovers_every_skill_the_engine_copies_into_the_agen
             },
             model: Some("qwen2.5:0.5b".into()),
             tools: true,
-            sandbox_profile: Some(profile),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(profile),
             git_identity: None,
             limits: LaunchLimits::default(),
         },
