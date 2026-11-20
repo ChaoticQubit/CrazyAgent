@@ -86,6 +86,9 @@ fn start_watch(saved: &Path) -> Option<HomeWatch> {
     }
 }
 
+#[cfg(all(test, windows))]
+mod engine_root_windows_tests;
+
 fn engine_root(path: &Path) -> Result<PathBuf, EngineError> {
     let parent = path
         .parent()
