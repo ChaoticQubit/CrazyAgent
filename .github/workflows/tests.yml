@@ -18,25 +18,16 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
   N2A_TIP: b3b1c6f51
-  HELD_RED: 7afb7d50e
-  W1_RED: be4d85422
 
 defaults:
   run:
     shell: bash
 
 jobs:
-  n2a:
-    name: V244 N2a held-folder layer, red held.rs at 7afb7d50e and W1 at be4d85422, tip b3b1c6f51, on ${{ matrix.runner }}
-    runs-on: ${{ matrix.runner }}
+  macos:
+    name: V244 N2a held-folder layer at b3b1c6f51 on macos-15, held rows, native_profiles rows, clippy lib and tests
+    runs-on: macos-15
     timeout-minutes: 240
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: windows-2022
-          - runner: windows-2025
-          - runner: ubuntu-22.04
     steps:
       - name: Refuse a runner that is not GitHub-hosted
         run: |
@@ -45,21 +36,31 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          fetch-depth: 20
-      - name: Install Linux build packages
-        if: ${{ runner.os == 'Linux' }}
-        timeout-minutes: 10
-        run: bash scripts/ci/linux-packages.sh
-      - name: Install SQLite for Windows
-        if: ${{ runner.os == 'Windows' }}
+          fetch-depth: 10
+      - name: Check the tree is the N2a tip
         run: |
           set -euo pipefail
-          vcpkg install sqlite3:x64-windows-static-md
-          {
-            echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT"
-            echo "VCPKGRS_TRIPLET=x64-windows-static-md"
-          } >> "$GITHUB_ENV"
-      - name: Install Rust toolchain
+          git diff --quiet "$N2A_TIP" -- crates
+          echo "crates at $N2A_TIP"
+      - name: Install tmux on macOS
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          work="$RUNNER_TEMP/tmux"
+          mkdir -p "$work"
+          scripts/release/build-tmux.sh --target aarch64-apple-darwin --work "$work/build" --out "$work/tmux"
+          sudo mkdir -p /usr/local/bin
+          sudo install -m 0755 "$work/tmux" /usr/local/bin/tmux
+          test "$(command -v tmux)" = /usr/local/bin/tmux
+          test "$(tmux -V)" = "tmux 3.8"
+      - name: Select Xcode 26.3, whose git the engine runs
+        run: |
+          set -euo pipefail
+          sudo xcode-select -s /Applications/Xcode_26.3.app
+          git="$(env -i PATH=/usr/bin:/bin /usr/bin/xcrun --find git)"
+          echo "engine git $git: $("$git" --version)"
+      - name: Install the Rust toolchain
         run: |
           set -euo pipefail
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component clippy
@@ -67,60 +68,25 @@ jobs:
             echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN"
             echo "CARGO_PROFILE_DEV_DEBUG=0"
             echo "CARGO_PROFILE_TEST_DEBUG=0"
+            echo "CARGO_BUILD_JOBS=2"
           } >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0
         with:
           prefix-key: farm
-          shared-key: ${{ runner.os == 'Windows' && 'windows' || 'linux' }}
+          shared-key: macos
           add-job-id-key: false
           add-rust-environment-hash-key: false
           cache-bin: false
           save-if: false
-      - name: Check the tree is the N2a tip
+      - name: Fetch Rust dependencies
+        run: cargo fetch --locked
+      - name: Build the crazyagent library test binary at b3b1c6f51
+        timeout-minutes: 120
         run: |
           set -euo pipefail
-          git diff --quiet "$N2A_TIP" -- crates
-          echo "crates at $N2A_TIP"
-      - name: Build the boundary helper beside the test binary
-        if: ${{ runner.os == 'Windows' }}
-        timeout-minutes: 30
-        run: |
-          set -euo pipefail
-          cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked
-          mkdir -p target/debug/deps
-          cp target/debug/crazyagent-win-boundary.exe target/debug/deps/
-          ls -l target/debug/crazyagent-win-boundary.exe
-      - name: N2a red, the tip's rows over the red held.rs at 7afb7d50e and the red W1 private.rs at be4d85422
-        if: ${{ !cancelled() }}
-        timeout-minutes: 60
-        run: |
-          set -euo pipefail
-          git checkout -q "$HELD_RED" -- crates/crazyagent/src/engine/bootstrap/held.rs
-          git checkout -q "$W1_RED" -- crates/crazyagent-win-sandbox/src/win/private.rs
-          set +e
-          cargo test -p crazyagent --lib --locked -- --test-threads 1 engine::bootstrap::held::tests:: 2>&1 | tee "$RUNNER_TEMP/red-held.log"
-          held_rc=${PIPESTATUS[0]}
-          w1_rc=1
-          if [ "$RUNNER_OS" = Windows ]; then
-            cargo test -p crazyagent-win-sandbox --test private_windows --locked -- --test-threads 1 new_dir_makes_only_a_missing_private_folder 2>&1 | tee "$RUNNER_TEMP/red-w1.log"
-            w1_rc=${PIPESTATUS[0]}
-          fi
-          set -e
-          git checkout -q "$N2A_TIP" -- crates
-          git diff --quiet "$N2A_TIP" -- crates
-          grep -E '^test .*held::tests|test result' "$RUNNER_TEMP/red-held.log" || true
-          grep -E -A4 'panicked' "$RUNNER_TEMP/red-held.log" || true
-          [ "$held_rc" -ne 0 ]
-          if [ "$RUNNER_OS" = Windows ]; then
-            grep -qE 'test result: FAILED\. 0 passed; 8 failed' "$RUNNER_TEMP/red-held.log"
-            grep -E 'test result|panicked' "$RUNNER_TEMP/red-w1.log" || true
-            [ "$w1_rc" -ne 0 ]
-            grep -qE 'test result: FAILED\. 0 passed; 1 failed' "$RUNNER_TEMP/red-w1.log"
-            echo "red as expected: 8 of 8 held rows and the new_dir row fail at the red stubs"
-          else
-            grep -qE 'test result: FAILED\. 0 passed; 5 failed' "$RUNNER_TEMP/red-held.log"
-            echo "red as expected: 5 of 5 held rows fail at the red stub"
-          fi
+          start=$(date +%s)
+          cargo test -p crazyagent --lib --locked --no-run
+          echo "built in $(( $(date +%s) - start )) s"
       - name: N2a clippy on the crazyagent library at b3b1c6f51
         if: ${{ !cancelled() }}
         timeout-minutes: 60
@@ -135,16 +101,9 @@ jobs:
           set -euo pipefail
           git diff --quiet "$N2A_TIP" -- crates
           cargo clippy -p crazyagent --tests --locked -- -D warnings
-      - name: N2a clippy on win-sandbox, every target, at b3b1c6f51
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
-        timeout-minutes: 60
-        run: |
-          set -euo pipefail
-          git diff --quiet "$N2A_TIP" -- crates
-          cargo clippy -p crazyagent-win-sandbox --all-targets --locked -- -D warnings
       - name: N2a held rows at b3b1c6f51
         if: ${{ !cancelled() }}
-        timeout-minutes: 60
+        timeout-minutes: 30
         run: |
           set -euo pipefail
           git diff --quiet "$N2A_TIP" -- crates
@@ -155,40 +114,32 @@ jobs:
           grep -E '^test .*held::tests|test result' "$RUNNER_TEMP/held.log" || true
           grep -E -A4 'panicked' "$RUNNER_TEMP/held.log" || true
           [ "$rc" -eq 0 ]
-          if [ "$RUNNER_OS" = Windows ]; then rows="a_held_folder_makes_opens_and_pins_its_children a_linked_swapped_open_or_hard_linked_child_is_refused a_name_that_is_not_one_plain_component_trips_the_layer shared_locks_meet_an_exclusive_one_waits_and_unlock_frees_it making_a_folder_over_an_existing_one_is_refused_and_keeps_it a_verbatim_root_trips_the_layer_and_the_plain_spelling_holds the_folder_above_a_held_chain_cannot_be_renamed retargeting_a_junction_above_the_root_leaves_opens_in_the_held_tree"; count=8; else rows="a_held_folder_makes_opens_and_pins_its_children a_linked_swapped_open_or_hard_linked_child_is_refused a_name_that_is_not_one_plain_component_trips_the_layer shared_locks_meet_an_exclusive_one_waits_and_unlock_frees_it making_a_folder_over_an_existing_one_is_refused_and_keeps_it"; count=5; fi
-          grep -qE "test result: ok\. $count passed; 0 failed" "$RUNNER_TEMP/held.log"
+          rows="a_held_folder_makes_opens_and_pins_its_children a_linked_swapped_open_or_hard_linked_child_is_refused a_name_that_is_not_one_plain_component_trips_the_layer shared_locks_meet_an_exclusive_one_waits_and_unlock_frees_it making_a_folder_over_an_existing_one_is_refused_and_keeps_it"
+          grep -qE "test result: ok\. 5 passed; 0 failed" "$RUNNER_TEMP/held.log"
           for row in $rows; do
             grep -qE "held::tests::$row " "$RUNNER_TEMP/held.log" || { echo "::error::$row did not run"; exit 1; }
           done
-          echo "N2a at $N2A_TIP: $count of $count held rows pass, each named row ran"
-      - name: W1 private rows, new_dir among them, at b3b1c6f51
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
+          echo "N2a at $N2A_TIP on macos-15: 5 of 5 held rows pass, each named row ran"
+      - name: native_profiles rows at b3b1c6f51, every listed row run
+        if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
           set -euo pipefail
           git diff --quiet "$N2A_TIP" -- crates
+          cargo test -p crazyagent --lib --locked -- --list engine::bootstrap::native_profiles > "$RUNNER_TEMP/profiles-list.txt"
+          listed=$(grep -cE ': test$' "$RUNNER_TEMP/profiles-list.txt" || true)
+          echo "listed $listed native_profiles rows"
+          [ "$listed" -gt 0 ]
           set +e
-          cargo test -p crazyagent-win-sandbox --test private_windows --locked -- --test-threads 1 2>&1 | tee "$RUNNER_TEMP/w1.log"
+          cargo test -p crazyagent --lib --locked -- engine::bootstrap::native_profiles 2>&1 | tee "$RUNNER_TEMP/profiles.log"
           rc=${PIPESTATUS[0]}
           set -e
-          grep -E 'test result' "$RUNNER_TEMP/w1.log" || true
-          grep -E -A4 'panicked' "$RUNNER_TEMP/w1.log" || true
+          grep -E 'test result|FAILED' "$RUNNER_TEMP/profiles.log" || true
+          grep -E -A4 'panicked' "$RUNNER_TEMP/profiles.log" || true
           [ "$rc" -eq 0 ]
-          grep -qE 'test result: ok\. 30 passed; 0 failed' "$RUNNER_TEMP/w1.log"
-          grep -qE 'new_dir_makes_only_a_missing_private_folder ' "$RUNNER_TEMP/w1.log"
-          echo "W1 at $N2A_TIP: 30 of 30 private rows pass, new_dir among them"
-      - name: Storage Windows rows over the changed W1 dir and store_dir at b3b1c6f51
-        if: ${{ !cancelled() && runner.os == 'Windows' }}
-        timeout-minutes: 60
-        run: |
-          set -euo pipefail
-          git diff --quiet "$N2A_TIP" -- crates
-          set +e
-          cargo test -p crazyagent --lib --locked -- --test-threads 1 storage::windows_tests:: 2>&1 | tee "$RUNNER_TEMP/storage.log"
-          rc=${PIPESTATUS[0]}
-          set -e
-          grep -E 'test result' "$RUNNER_TEMP/storage.log" || true
-          grep -E -A4 'panicked' "$RUNNER_TEMP/storage.log" || true
-          [ "$rc" -eq 0 ]
-          grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/storage.log"
-          echo "storage Windows rows pass at $N2A_TIP"
+          result=$(grep -E '^test result: ok\. [0-9]+ passed; 0 failed; [0-9]+ ignored' "$RUNNER_TEMP/profiles.log")
+          passed=$(echo "$result" | sed -E 's/.* ok\. ([0-9]+) passed.*/\1/')
+          ignored=$(echo "$result" | sed -E 's/.* ([0-9]+) ignored.*/\1/')
+          [ "$ignored" -eq 2 ] || { echo "::error::expected the 2 ignored renewal rows, got $ignored"; exit 1; }
+          [ $(( passed + ignored )) -eq "$listed" ] || { echo "::error::$passed passed and $ignored ignored of $listed listed"; exit 1; }
+          echo "native_profiles at $N2A_TIP on macos-15: $passed passed, the 2 ignored renewal rows ignored, of $listed listed"
