@@ -1241,10 +1241,13 @@ fn stop_background(
 /// Looks for the engine's terminal host again, as tmux is found now, for a team runtime
 /// that started without one, so tmux installed after the engine started runs the live
 /// master with no engine restart. Takes the engine service. Returns the probe, or none
-/// without an owner runtime.
+/// without an owner runtime or on Linux, where agent panes are refused ([`AGENT_PANES`]).
 fn terminal_probe(
     service: &crazyagent::engine::bootstrap::EngineService,
 ) -> Option<crazyagent::team::runtime::TerminalProbe> {
+    if !AGENT_PANES {
+        return None;
+    }
     let handle = service.owner_runtime()?.clone();
     Some(Box::new(move || {
         let host = handle.terminal().ok()?;
@@ -1253,12 +1256,22 @@ fn terminal_probe(
     }))
 }
 
+/// Whether this system starts team and research agents in terminal panes: not on Linux,
+/// where every agent pane is refused (`launch_unavailable_on_linux`, DEC-094) and agents run
+/// headless in their installed boundary instead (DEC-205 S5b).
+const AGENT_PANES: bool = !cfg!(target_os = "linux");
+
 /// Opens the engine's terminal host for team and research agents when it can run now.
 /// Takes the engine service. Returns the host, or none after saying why on stderr; team
-/// agents then run headless until a live master start finds tmux ([`terminal_probe`]).
+/// agents then run headless until a live master start finds tmux ([`terminal_probe`]). On
+/// Linux it is always none ([`AGENT_PANES`]).
 fn agent_terminal(
     service: &crazyagent::engine::bootstrap::EngineService,
 ) -> Option<std::sync::Arc<dyn crazyagent::terminal::Host>> {
+    if !AGENT_PANES {
+        eprintln!("agent panes run only on macOS; Linux agents run headless");
+        return None;
+    }
     let host = service.owner_runtime()?.terminal().ok()?;
     match host.alive() {
         Ok(_) => Some(host),
