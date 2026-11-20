@@ -18,7 +18,7 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
   RED_SHA: 6fbfa0fec
-  TIP_SHA: f91aaf8ba
+  TIP_SHA: 512b3f596
 
 defaults:
   run:
@@ -26,7 +26,7 @@ defaults:
 
 jobs:
   s9a-windows:
-    name: V244 WIN-MASTER S9a launch lock on ${{ matrix.runner }}, red at 6fbfa0fec, tip f91aaf8ba
+    name: V244 WIN-MASTER S9a launch lock on ${{ matrix.runner }}, red at 6fbfa0fec, tip 512b3f596
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          fetch-depth: 6
+          fetch-depth: 10
       - name: Install SQLite for Windows
         run: |
           set -euo pipefail
@@ -90,7 +90,7 @@ jobs:
         timeout-minutes: 60
         run: |
           set -euo pipefail
-          git restore -q --source="$RED_SHA" --staged --worktree -- crates
+          git restore -q --source="$RED_SHA" --staged --worktree -- crates/crazyagent/src/launch_context.rs
           set +e
           cargo test -p crazyagent --lib --locked -- --test-threads 1 launch_context::windows_tests:: 2>&1 | tee "$RUNNER_TEMP/red.log"
           rc=${PIPESTATUS[0]}
@@ -103,8 +103,8 @@ jobs:
           for row in a_windows_lock_only_refuses_an_open_or_linked_home_before_a_lock a_windows_adopt_refuses_an_open_or_linked_home_before_a_lock a_windows_install_refuses_an_open_or_linked_home_before_a_lock; do
             grep -q "$row \.\.\. ok" "$RUNNER_TEMP/red.log"
           done
-          echo "red as expected: the 3 pass rows fail on the refusing Windows lock, the 3 refusal rows already hold on H1's check"
-      - name: S9a launch lock rows at the tip f91aaf8ba, five rounds
+          echo "red as expected: with launch_context.rs at the red commit on the tip's tree, the 3 pass rows fail on the refusing Windows lock and the 3 refusal rows already hold on H1's check"
+      - name: S9a launch lock rows at the tip 512b3f596, five rounds
         if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
@@ -120,6 +120,13 @@ jobs:
             grep -qE 'test result: ok\. 6 passed; 0 failed' "$RUNNER_TEMP/tip-$round.log"
           done
           echo "6 rows green in 5 rounds"
+      - name: Build the Windows boundary helper H1's row 5 starts
+        if: ${{ !cancelled() }}
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked
+          cp target/debug/crazyagent-win-boundary.exe target/debug/deps/
       - name: H1's Windows home rows stay green at the tip
         if: ${{ !cancelled() }}
         timeout-minutes: 60
