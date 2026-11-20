@@ -2,8 +2,9 @@
 
 use crazyagent_win_sandbox::dacl::{self, ADMINISTRATORS, SYSTEM};
 use crazyagent_win_sandbox::private;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::io;
+use std::os::windows::ffi::OsStringExt;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
@@ -1023,22 +1024,55 @@ fn a_folder_with_an_open_child_is_not_renamed() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
-/// rv-sec3 #716 C6 (QUESTION-0520 r2 row 8): a name that is not one plain component, or that
-/// ends in a dot or a space, which a path open cannot name again, trips the rename's
-/// assertion before any call, and the file stays.
+/// rv-sec3 #716 C6 (QUESTION-0520 r2 row 8) and V244-N6-W1-SEC-L1 (#751): a name that is not
+/// one plain component, that ends in a dot or a space, that the one name rule refuses
+/// (controls, `< > " | ? *`, device names, over 255 units) or that is not UTF-8 trips the
+/// rename's assertion before any call, and the file stays.
 #[test]
 fn a_rename_name_that_is_not_one_component_trips_the_assertion() {
     let root = scratch("rename-name");
     let held = private::dir(&root).unwrap();
     let file = staged(&root, "staged.json", b"new");
+    let long = "a".repeat(256);
     for name in [
-        "", ".", "..", "a.", "a ", "a\\b", "a/b", "a:b", "x::$DATA", "a\0b",
+        "",
+        ".",
+        "..",
+        "a.",
+        "a ",
+        "a\\b",
+        "a/b",
+        "a:b",
+        "x::$DATA",
+        "a\0b",
+        "a\u{1}b",
+        "a<b",
+        "a>b",
+        "a\"b",
+        "a|b",
+        "a?b",
+        "a*b",
+        "CON",
+        "con.txt",
+        "COM1",
+        "lpt\u{b2}.txt",
+        "CONIN$",
+        "CON .txt",
+        long.as_str(),
     ] {
         let tripped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             private::rename(&file, &held, OsStr::new(name), private::Mode::Replace)
         }));
         assert!(tripped.is_err(), "{name:?} reached the rename");
     }
+    let lone = OsString::from_wide(&[0x61, 0xd800]);
+    let tripped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        private::rename(&file, &held, &lone, private::Mode::Replace)
+    }));
+    assert!(
+        tripped.is_err(),
+        "a name that is not UTF-8 reached the rename"
+    );
     assert_eq!(listed(&root), ["staged.json"]);
     drop((file, held));
     std::fs::remove_dir_all(&root).unwrap();
