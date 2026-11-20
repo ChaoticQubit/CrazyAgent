@@ -120,6 +120,17 @@ pub fn wait_mapped(window: &gtk::Window) {
 /// background the farm's screenshots look for. Input: the child. Output: them.
 pub fn green_terminal(child: &Child) -> (Shared, Surface, Frame) {
     let (width, height) = child.size();
+    let (mut shared, frame) = green_shared(child.scale());
+    let (display, handle) = child.handles();
+    let surface =
+        unsafe { shared.surface_raw(display, handle, width, height) }.expect("a wgpu surface");
+    (shared, surface, frame)
+}
+
+/// A GPU renderer at a scale and an empty frame, drawn in the farm's green, for a host row
+/// that makes its own surface. Input: the scale, 1 to 8. Output: them.
+pub fn green_shared(scale: i32) -> (Shared, Frame) {
+    assert!((1..=8).contains(&scale));
     let (family, source) = font_for("JetBrains Mono").expect("built in");
     let style = Style {
         family,
@@ -131,10 +142,7 @@ pub fn green_terminal(child: &Child) -> (Shared, Surface, Frame) {
             ..Theme::default()
         },
     };
-    let mut shared = Shared::new(child.scale() as f32, &style).expect("a GPU");
-    let (display, handle) = child.handles();
-    let surface =
-        unsafe { shared.surface_raw(display, handle, width, height) }.expect("a wgpu surface");
+    let shared = Shared::new(scale as f32, &style).expect("a GPU");
     let frame = Frame {
         rows: Vec::new(),
         keys: Vec::new(),
@@ -142,5 +150,5 @@ pub fn green_terminal(child: &Child) -> (Shared, Surface, Frame) {
         cursor: None,
         preedit: None,
     };
-    (shared, surface, frame)
+    (shared, frame)
 }

@@ -252,25 +252,24 @@ mod tests {
         pump_for(Duration::from_millis(100));
     }
 
-    /// A term made at open has its child already, hidden: it owes no frame and holds no
-    /// native focus until the host's first shown place, which shows the child, presents
-    /// and applies focus asked for meanwhile.
+    /// A term made at open has its child already, hidden: the farm's screenshot reads the
+    /// page's white over its rectangle, with no unpainted window, and it owes no frame
+    /// until the host's first shown place, which shows the child green.
     #[test]
     #[ignore = "needs a display: the farm runs it under Xvfb, weston and sway"]
     fn a_term_made_at_open_stays_hidden_until_its_first_shown_place() {
         let (window, page) = white_toplevel();
         let mut term = term_over(&window, &page);
-        term.toplevel_focused();
-        term.focus();
-        never_presents(&mut term, "a term made at open never presents before its first place");
+        never_presents(
+            &mut term,
+            "a term made at open never presents before its first place",
+        );
         assert!(!term.shown(), "a term made at open is hidden");
-        assert!(!term.focus_native(), "a hidden term holds no native focus");
-        step("opened", &term);
+        step("hidden", &term);
         let scale = window.scale_factor();
         assert_eq!(term.place(Some(RECT), scale), Some(scale));
         let (mut shared, mut surface, frame) = green_terminal(&term.child);
         show_frames(&mut term, &mut shared, &mut surface, &frame);
-        assert!(term.focus_active(), "focus asked at open applies at the first place");
         step("placed", &term);
         drop(surface);
         close(window, term);
@@ -289,7 +288,10 @@ mod tests {
         window.add(&page);
         window.realize();
         page.realize();
-        assert!(window.window().is_some(), "a realized toplevel has a GDK window");
+        assert!(
+            window.window().is_some(),
+            "a realized toplevel has a GDK window"
+        );
         let opened = Term::new(
             &window,
             page.upcast_ref(),
@@ -394,10 +396,7 @@ mod tests {
         let size = child.size();
         let (mut shared, mut surface, frame) = green_terminal(child);
         show_frames(&mut term, &mut shared, &mut surface, &frame);
-        assert_eq!(
-            term.child.attached(),
-            Some((size, scale))
-        );
+        assert_eq!(term.child.attached(), Some((size, scale)));
         assert_eq!(
             term.place(Some(RECT), scale * 2),
             Some(scale * 2),

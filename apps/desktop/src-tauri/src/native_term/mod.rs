@@ -239,6 +239,29 @@ mod tests {
             read += 1;
         }
         assert!(read >= 2, "read {read} files");
+        let mut linux = 0;
+        for entry in std::fs::read_dir(root.join("linux")).expect("linux folder") {
+            let path = entry.expect("folder entry").path();
+            let text = std::fs::read_to_string(&path).expect("source file");
+            let product = text.split("#[cfg(test)]\nmod tests {").next().unwrap_or("");
+            let calls = product.matches(".write_command(").count();
+            if path.file_name() == Some(std::ffi::OsStr::new("clip.rs")) {
+                let boards = product.find("impl Boards {").expect("the Boards adapter");
+                let at = product.find(".write_command(").expect("the adapter's call");
+                assert_eq!(calls, 1, "clip.rs calls write_command once, in the adapter");
+                assert!(at > boards, "the one call is the Boards adapter's");
+            } else {
+                assert_eq!(calls, 0, "{} calls write_command", path.display());
+            }
+            linux += 1;
+        }
+        assert!(linux >= 7, "read {linux} files");
+    }
+
+    #[test]
+    fn no_host_platform_file_raises_or_focuses_a_window() {
+        let read = scan("src/native_term/host", raise_call);
+        assert!(read >= 3, "read {read} files");
     }
 
     #[cfg(unix)]

@@ -28,10 +28,16 @@ use tokio::sync::mpsc;
 mod mac;
 #[cfg(target_os = "macos")]
 use mac as platform;
+/// The Linux halves of the host: the GTK child surface and input view, their place,
+/// focus, frame pacing and drawing hand-off.
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux as platform;
 /// The stand-in on a system whose host has not landed yet: no native view opens there.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 mod none;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 use none as platform;
 
 use platform::View;
