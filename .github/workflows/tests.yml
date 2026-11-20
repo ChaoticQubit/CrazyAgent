@@ -26,7 +26,7 @@ defaults:
 
 jobs:
   wire1-windows:
-    name: V244-WIN-LANDING W5b r1 ${{ matrix.runner }} at 803db1ab2 (a5f36aa7e + a merge of W3-5b 9316947af) on e3036f4a6, clippy crazyagent lib and tests, landing rows, red at the rows commit 0a65280dd
+    name: V244-WIN-LANDING W5b2 r2 ${{ matrix.runner }} at 4f67dfa65 (26d105948 with the R2-a policy, C3 walk, shadow git folder, on the W5b farm tree with W3-5b 9316947af) on e3036f4a6, clippy, the boundary helper, landing rows, red at 3af496d43
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     strategy:
