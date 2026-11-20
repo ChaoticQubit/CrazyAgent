@@ -1144,12 +1144,12 @@ mod tests {
         );
     }
 
-    /// #764 L1: a guarded project-root agent on a repository is refused at install, so it never
-    /// takes git's `index.lock` or touches the git folder; on the same project with no `.git`,
-    /// the agent cannot change the state context or remove it, and the root context is its to
-    /// change once `.crazyagent` holds the state.
+    /// #764 L1 and #765: a guarded project-root agent on a repository is refused at install, so
+    /// it never writes `.git\commondir` (which would point the engine's git at config and hooks
+    /// the agent holds) or takes git's `index.lock`; on the same project with no `.git`, the
+    /// agent cannot change or remove the state context, and the root context is its to change.
     #[test]
-    fn a_wrapped_agent_on_a_repository_is_refused_and_takes_no_git_lock() {
+    fn a_wrapped_agent_on_a_repository_is_refused_before_it_can_write_git_commondir() {
         let folders = folders();
         let helper = helper();
         let project = &folders.project;
@@ -1161,12 +1161,17 @@ mod tests {
         fs::write(state.join("brief.md"), "brief\r\n").unwrap();
         let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
         let profile = folders.profiles.join("agent.sb");
-        assert!(refused_for_git(WindowsSandbox::install(
-            sandbox.clone(),
-            &helper,
-            &profile,
-            &folders.grants
-        )));
+        match WindowsSandbox::install(sandbox.clone(), &helper, &profile, &folders.grants) {
+            Ok(installed) => {
+                let wrote = shell(&installed, &folders, r"echo ..\planted>.git\commondir");
+                panic!(
+                    "an agent profile installed on a repository; .git\\commondir written: {}",
+                    wrote && git.join("commondir").is_file()
+                );
+            }
+            Err(error) => assert!(refused_for_git::<()>(Err(error))),
+        }
+        assert!(!git.join("commondir").exists());
         assert!(!profile.exists());
         assert!(!git.join("index.lock").exists() && !git.join("index").exists());
         assert!(!git.join("modules").exists());
