@@ -473,6 +473,46 @@ mod tests {
         close(window, view);
     }
 
+    /// The first fit, made before the renderer knows its device's largest texture side,
+    /// gives a child wider than that side at scale 3 a surface that is a whole number of
+    /// scaled pixels, as a Wayland buffer at that scale must be.
+    #[test]
+    #[ignore = "needs a display: the farm runs it under Xvfb, weston and sway"]
+    fn a_first_fit_past_the_texture_side_makes_a_whole_number_of_scaled_pixels() {
+        let (window, page) = white_toplevel();
+        let mut view = opened(&page);
+        let scale = 3;
+        let wide = Rect {
+            x: 0,
+            y: 0,
+            w: crate::native_term::linux::RECT_MAX,
+            h: 8,
+        };
+        assert_eq!(view.term.place(Some(wide), scale), Some(scale));
+        let (mut shared, _frame) = green_shared(scale);
+        assert!(shared.side_max().is_none(), "a renderer with no device yet");
+        assert!(
+            fit(&mut view, &mut shared, (0, 0)),
+            "the first fit makes a surface"
+        );
+        let side_max = shared.side_max().expect("a device after the first surface");
+        let (width, height) = view.term.size();
+        assert!(
+            width > side_max,
+            "child {width} within the largest side {side_max}"
+        );
+        let made = view.surface.as_ref().expect("a surface").size();
+        assert!(
+            made.0 <= side_max && made.0.is_multiple_of(3),
+            "a first surface {} wide at scale 3, largest side {side_max}",
+            made.0
+        );
+        assert_eq!(made.1, height);
+        let _ = view.surface.take();
+        drop(shared);
+        close(window, view);
+    }
+
     /// An open place that is not finite is refused before any GTK part is made.
     #[test]
     #[ignore = "needs a display: the farm runs it under Xvfb, weston and sway"]
