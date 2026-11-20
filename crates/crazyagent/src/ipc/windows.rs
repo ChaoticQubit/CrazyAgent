@@ -1,3 +1,11 @@
+#![cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "the Windows listener's first callers are the engine and owner servers, V244-WIN-ENGINE-WIRING WIRE-2 and W3-3"
+    )
+)]
+
 use super::{PIPE_INSTANCES_MAX, PIPES_BYTES_MAX, Published, encode_pipes, parse_pipes, pipe_name};
 use crazyagent_win_sandbox::pipe::{self, Peer};
 use crazyagent_win_sandbox::private;

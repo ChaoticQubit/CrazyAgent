@@ -15,6 +15,13 @@ pub(crate) use windows::{
 /// the named pipe of that root and the file name, with `streams + 1` instances (DESIGN-0256
 /// D7-D8). Must run inside a Tokio runtime. Inputs: the endpoint path and the stream bound,
 /// 1 or more. Output: the listener.
+#[cfg_attr(
+    all(windows, not(test)),
+    allow(
+        dead_code,
+        reason = "the engine and owner servers bind on Windows from V244-WIN-ENGINE-WIRING WIRE-2 and W3-3"
+    )
+)]
 pub(crate) fn owner_listener(path: impl AsRef<Path>, streams: usize) -> io::Result<Listener> {
     assert!(streams > 0, "a listener serves at least one stream");
     #[cfg(unix)]
@@ -121,6 +128,13 @@ const PIPE_INSTANCES_MAX: u32 = 254;
 /// The pipe instances a Windows listener of `streams` streams makes: one per stream plus the
 /// one listening while a stream is handed off (DESIGN-0256 D8 caps). Input: the stream bound,
 /// 1 to 253. Output: the instance cap.
+#[cfg_attr(
+    all(windows, not(test)),
+    allow(
+        dead_code,
+        reason = "the engine and owner servers bind on Windows from V244-WIN-ENGINE-WIRING WIRE-2 and W3-3"
+    )
+)]
 #[cfg(any(windows, test))]
 fn instances(streams: usize) -> u32 {
     assert!(streams > 0, "a listener serves at least one stream");
