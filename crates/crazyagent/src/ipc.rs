@@ -203,6 +203,64 @@ fn parse_pipes(bytes: &[u8], purpose: &str) -> Result<Published, &'static str> {
 mod windows;
 
 #[cfg(test)]
+mod endpoint_tests {
+    use super::{endpoint, instances};
+    use std::path::Path;
+
+    /// V244-WIN-ENGINE-WIRING decision 1: an owner-class endpoint path names its protected
+    /// root, the folder holding it, and its purpose, the file name, so every caller keeps
+    /// passing the path it passes on Unix.
+    #[test]
+    fn an_endpoint_path_names_its_root_and_its_file_name_as_the_purpose() {
+        let root = Path::new("data").join("o00000001");
+        for name in ["engine.sock", "owner.sock", "control.sock", "e.sock"] {
+            let path = root.join(name);
+            let (held, purpose) = endpoint(&path).unwrap();
+            assert_eq!(held, root.as_path());
+            assert_eq!(purpose, name);
+        }
+    }
+
+    /// Decision 1: a file name outside D7's plain shape, or a path with no folder above it,
+    /// names no endpoint, and the refusal is an error the caller reports, never a panic.
+    #[test]
+    fn an_endpoint_path_outside_the_plain_shape_is_refused() {
+        let long = "a".repeat(33);
+        let root = Path::new("data");
+        for name in ["Engine.sock", "engine sock", "e\\s", long.as_str()] {
+            let refused = endpoint(&root.join(name)).unwrap_err();
+            assert_eq!(refused.to_string(), "ipc_endpoint_not_plain", "{name:?}");
+        }
+        for path in [Path::new("engine.sock"), Path::new("")] {
+            let refused = endpoint(path).unwrap_err();
+            assert_eq!(refused.to_string(), "ipc_endpoint_not_plain", "{path:?}");
+        }
+    }
+
+    /// Decision 2 (DESIGN-0256 D8 caps): a listener of n streams makes n + 1 pipe instances,
+    /// one listening while a stream is handed off: the engine 129, the owner 33.
+    #[test]
+    fn a_listener_of_n_streams_makes_n_plus_one_instances() {
+        assert_eq!(instances(1), 2);
+        assert_eq!(instances(32), 33);
+        assert_eq!(instances(128), 129);
+        assert_eq!(instances(253), 254);
+    }
+
+    /// Decision 2: no streams, or more than Windows' instance cap allows, is a programming
+    /// error in the caller's bound.
+    #[test]
+    fn a_stream_count_outside_the_instance_cap_is_a_programming_error() {
+        for streams in [0, 254, usize::MAX] {
+            assert!(
+                std::panic::catch_unwind(|| instances(streams)).is_err(),
+                "{streams}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod name_tests {
     use super::pipe_name;
 
@@ -685,30 +743,150 @@ mod windows_tests {
 
     /// DESIGN-0256 D10: a client whose pipes file pins another start of the engine refuses
     /// the server it reached before it writes a byte, with the error the Unix check gives.
+    /// The listener holds the pipes file for its life (rv-sec2 #702 5a), so this row serves
+    /// the name itself, under a pipes file that pins another start of this process.
     #[tokio::test]
     async fn a_server_the_pipes_file_does_not_pin_is_refused() {
         let (_temp, root) = private_root();
-        let listener = bind_with(&root, "engine.sock", [11; 16], 2).unwrap();
-        let published = read(&root, "engine.sock").unwrap();
+        let own = pipe::own_pin().unwrap();
         let other = super::Published {
-            created: published.created + 1,
-            ..published
+            random: [11; 16],
+            pid: own.pid,
+            created: own.created + 1,
         };
         let mut file = private::secret_file(&root.join("pipes.other")).unwrap();
         file.write_all(super::encode_pipes("engine.sock", &other).as_bytes())
             .unwrap();
         drop(file);
         std::fs::rename(root.join("pipes.other"), root.join("pipes")).unwrap();
-        let (client, _served) = tokio::join!(connect(&root, "engine.sock"), listener.accept());
+        let name = name_of(&root, "engine.sock", &[11; 16]).unwrap();
+        let served = pipe::instance(&name, true, 2).unwrap();
+        let (client, _) = tokio::join!(connect(&root, "engine.sock"), served.connect());
         let refused = verify_server(&client.unwrap()).unwrap_err();
         assert_eq!(refused.to_string(), "peer_owner_mismatch");
     }
 
+    /// V244-WIN-ENGINE-WIRING decision 1: the owner-class entry points every caller uses serve
+    /// a client of this user at a path on Windows, the root being its folder and the purpose
+    /// its file name, with both checks passing.
     #[tokio::test]
-    async fn an_owner_connect_refuses_until_the_pipe_transport_lands() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("engine.sock");
-        let refused = super::owner_connect(&path).await.unwrap_err();
-        assert_eq!(refused.to_string(), "unix_socket_unavailable");
+    async fn an_owner_endpoint_at_a_path_serves_a_client_of_this_user() {
+        let (_temp, root) = private_root();
+        let path = root.join("engine.sock");
+        let listener = super::owner_listener(&path, 2).unwrap();
+        assert_eq!(read(&root, "engine.sock").unwrap().pid, std::process::id());
+        let (client, served) =
+            tokio::join!(super::owner_connect(&path), super::owner_accept(&listener));
+        let (mut client, mut served) = (client.unwrap(), served.unwrap());
+        super::verify_server(&client).unwrap();
+        super::verify_client(&served).unwrap();
+        client.write_all(b"ping").await.unwrap();
+        let mut bytes = [0; 4];
+        served.read_exact(&mut bytes).await.unwrap();
+        assert_eq!(&bytes, b"ping");
+    }
+
+    /// Decision 3: the halves of a pipe stream, owned and borrowed, carry bytes both ways at
+    /// once, so a terminal's output and its typed input never wait on each other.
+    #[tokio::test]
+    async fn the_halves_of_a_pipe_stream_run_both_ways_at_once() {
+        let (_temp, root) = private_root();
+        let path = root.join("owner.sock");
+        let listener = super::owner_listener(&path, 2).unwrap();
+        let (client, served) =
+            tokio::join!(super::owner_connect(&path), super::owner_accept(&listener));
+        let (mut client, served) = (client.unwrap(), served.unwrap());
+        super::verify_server(&client).unwrap();
+        let (mut from_client, mut to_client) = served.into_split();
+        let echo = tokio::spawn(async move {
+            tokio::io::copy(&mut from_client, &mut to_client)
+                .await
+                .unwrap()
+        });
+        let sent: Vec<u8> = (0..400_000).map(|index| (index % 251) as u8).collect();
+        let (mut reader, mut writer) = client.split();
+        let mut back = vec![0; sent.len()];
+        let both = async { tokio::join!(writer.write_all(&sent), reader.read_exact(&mut back)) };
+        let (written, read_back) = tokio::time::timeout(Duration::from_secs(20), both)
+            .await
+            .expect("both halves move at once");
+        written.unwrap();
+        read_back.unwrap();
+        assert_eq!(back, sent);
+        drop(client);
+        assert_eq!(echo.await.unwrap(), sent.len() as u64);
+    }
+
+    /// Decision 2: a listener of one stream makes two instances, so with one stream served
+    /// and a second client on the listening instance, a third client gets pipe busy once the
+    /// client's wait runs out, instead of an instance past the cap.
+    #[tokio::test]
+    async fn a_listener_refuses_the_client_past_its_cap_with_pipe_busy() {
+        let (_temp, root) = private_root();
+        let path = root.join("engine.sock");
+        let listener = super::owner_listener(&path, 1).unwrap();
+        let (first, served) =
+            tokio::join!(super::owner_connect(&path), super::owner_accept(&listener));
+        let _first = (first.unwrap(), served.unwrap());
+        let _second = super::owner_connect(&path).await.unwrap();
+        let third = tokio::time::timeout(Duration::from_secs(15), super::owner_connect(&path))
+            .await
+            .expect("the client's own wait ends first");
+        assert_eq!(third.unwrap_err().raw_os_error(), Some(231));
+    }
+
+    /// Decision 1: a root holds one endpoint, so a bind over a pipes file naming another
+    /// purpose is refused with `pipes_purpose_taken`, and that file stays as it was.
+    #[tokio::test]
+    async fn a_bind_over_a_pipes_file_of_another_endpoint_is_refused() {
+        let (_temp, root) = private_root();
+        let kept = publish(&root, "owner.sock", [12; 16]).unwrap();
+        let refused = super::owner_listener(root.join("engine.sock"), 2).unwrap_err();
+        assert_eq!(refused.to_string(), "pipes_purpose_taken");
+        assert_eq!(read(&root, "owner.sock").unwrap(), kept);
+    }
+
+    /// rv-sec2 #702 5a: while a listener lives it holds its root and its pipes file, so
+    /// neither is renamed or replaced; once it drops, the pipes file is gone.
+    #[tokio::test]
+    async fn a_listener_holds_its_root_and_pipes_file_and_removes_the_file_at_drop() {
+        let (temp, root) = private_root();
+        let listener = super::owner_listener(root.join("engine.sock"), 2).unwrap();
+        let moved = std::fs::rename(&root, temp.path().join("moved")).unwrap_err();
+        assert!(matches!(moved.raw_os_error(), Some(5 | 32)), "{moved}");
+        let mut file = private::secret_file(&root.join("pipes.swap")).unwrap();
+        file.write_all(b"swap").unwrap();
+        drop(file);
+        let swapped = std::fs::rename(root.join("pipes.swap"), root.join("pipes")).unwrap_err();
+        assert!(matches!(swapped.raw_os_error(), Some(5 | 32)), "{swapped}");
+        std::fs::remove_file(root.join("pipes.swap")).unwrap();
+        drop(listener);
+        assert!(entries(&root).is_empty(), "{:?}", entries(&root));
+    }
+
+    /// Decision 6: `answering` is true only while a listener serves the endpoint and its
+    /// server passes the client's whole check, and it writes no byte to the engine.
+    #[tokio::test]
+    async fn answering_is_true_only_while_a_checked_listener_serves() {
+        let (_temp, root) = private_root();
+        let path = root.join("engine.sock");
+        assert!(!super::owner_answering(&path));
+        let listener = super::owner_listener(&path, 2).unwrap();
+        let probe = tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || super::owner_answering(&path)
+        });
+        let mut served = super::owner_accept(&listener).await.unwrap();
+        assert!(probe.await.unwrap());
+        let mut bytes = Vec::new();
+        served.read_to_end(&mut bytes).await.unwrap();
+        assert!(bytes.is_empty(), "{bytes:?}");
+        drop(listener);
+        assert!(!super::owner_answering(&path));
+        publish(&root, "engine.sock", [13; 16]).unwrap();
+        assert!(
+            !super::owner_answering(&path),
+            "a pinned start with no pipe"
+        );
     }
 }
