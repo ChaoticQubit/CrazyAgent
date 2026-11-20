@@ -571,7 +571,8 @@ fn node_for(shim: &Path, folders: Vec<PathBuf>) -> std::ffi::OsString {
 /// never one an agent placed earlier on the search path, in a `.crazyagent` folder or
 /// reached through a junction into one; the control shows the first `node.exe` found wins
 /// otherwise, so the row would see an agent's copy. The script names node on its first line,
-/// as npm's does, or the resolver runs it as a program of its own.
+/// as npm's does, or the resolver runs it as a program of its own; the agents' folder sits in
+/// a folder of its own, since a `.crazyagent` folder makes its whole parent a project.
 #[test]
 fn an_agent_placed_node_exe_earlier_on_the_path_is_not_the_one_an_npm_shim_runs() {
     let (_owner, folder) = owner_folder();
@@ -584,7 +585,8 @@ fn an_agent_placed_node_exe_earlier_on_the_path_is_not_the_one_an_npm_shim_runs(
         node_for(&shim, vec![other.clone(), folder.join("nodejs")]),
         other_node.into_os_string()
     );
-    let agents = folder.join(".crazyagent").join("bin");
+    let (_project, project) = owner_folder();
+    let agents = project.join(".crazyagent").join("bin");
     stand_in_node(&agents);
     assert_eq!(
         node_for(&shim, vec![agents.clone(), folder.join("nodejs")]),
