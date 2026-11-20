@@ -3,11 +3,12 @@
     allow(dead_code, reason = "W5b2b starts confined steps through these")
 )]
 
-use super::git::{STEP_FOLDER, Writes, failure};
+use super::git::{Repo, STEP_FOLDER, Writes, failure};
 use crate::engine::EngineError;
 use crate::sandbox::windows::WindowsSandbox;
 use crate::sandbox::{ProjectSandbox, SandboxNetwork};
 use sha2::{Digest, Sha256};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// The folder of the engine's data root that holds every lease's step profiles and homes,
@@ -268,4 +269,118 @@ pub(super) fn reparse_free(work: &Path) -> Result<(), EngineError> {
     }
     assert!(entries <= WALK_ENTRIES_MAX);
     Ok(())
+}
+
+/// The shadow git folder's name in the step folder (rv-sec3 RULING 17:42 R2).
+pub(super) const SHADOW_FOLDER: &str = "git";
+
+/// The owner settings a shadow git folder's config keeps, as `git config --list` names them:
+/// only those that change what `add`, refresh, `diff-files` and `ls-files` produce (rv-sec3
+/// RULING 17:42 R2-b). The engine's own settings ride on every command line instead.
+pub(super) const SHADOW_KEYS: [&str; 10] = [
+    "core.autocrlf",
+    "core.eol",
+    "core.safecrlf",
+    "core.filemode",
+    "core.ignorecase",
+    "core.precomposeunicode",
+    "core.symlinks",
+    "core.longpaths",
+    "core.quotepath",
+    "core.checkroundtripencoding",
+];
+
+/// The most bytes of the owner's config listing a shadow config is made from.
+const SHADOW_LISTING_BYTES_MAX: usize = 256 * 1024;
+
+/// Makes a shadow git folder's config from the owner's `git config -z --list` output, keeping
+/// only [`SHADOW_KEYS`], the last value of a key winning as git reads it, and a key with no
+/// value meaning true. Input: the listing. Output: the config text, or `changes_git_unsupported`
+/// for a listing that is not text or a kept value that is not a plain word.
+pub(super) fn shadow_config(listing: &[u8]) -> Result<String, EngineError> {
+    let unsupported = || failure("changes_git_unsupported");
+    let mut kept: Vec<(String, String)> = Vec::new();
+    for item in listing
+        .split(|byte| *byte == 0)
+        .filter(|item| !item.is_empty())
+    {
+        let text = std::str::from_utf8(item).map_err(|_| unsupported())?;
+        let (key, value) = text.split_once('\n').unwrap_or((text, "true"));
+        let key = key.to_ascii_lowercase();
+        if !SHADOW_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+        let plain = |byte: u8| byte.is_ascii_alphanumeric() || b"._-".contains(&byte);
+        if value.is_empty() || !value.bytes().all(plain) {
+            return Err(unsupported());
+        }
+        kept.retain(|(name, _)| *name != key);
+        kept.push((key, value.to_owned()));
+    }
+    let mut text = String::from("[core]\n");
+    for (key, value) in &kept {
+        let name = key.strip_prefix("core.").ok_or_else(unsupported)?;
+        text.push_str(&format!("\t{name} = {value}\n"));
+    }
+    assert!(kept.len() <= SHADOW_KEYS.len());
+    Ok(text)
+}
+
+/// Writes the step's shadow git folder in the step folder (rv-sec3 RULING 17:42 R2-b, R2-c): a
+/// `HEAD` detached at `commit`, an empty `refs` folder and the config [`shadow_config`] makes
+/// from the owner's own config file, read by the engine, each file written through W1. No ref,
+/// packed ref or log is copied, and a folder holding anything else stops the step. Inputs: the
+/// places, the repository read as the engine and the commit id. Output: the shadow folder, or
+/// `changes_workspace_invalid` for a commit that is no full id or a folder not as written, or
+/// `changes_git_unsupported`.
+pub(super) fn write_shadow(
+    places: &StepPlaces,
+    repo: &Repo,
+    commit: &str,
+) -> Result<PathBuf, EngineError> {
+    let invalid = || failure("changes_workspace_invalid");
+    let id = |byte: u8| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte);
+    if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(id) {
+        return Err(invalid());
+    }
+    let listing = repo.capture(
+        &["config", "-z", "--local", "--list"],
+        SHADOW_LISTING_BYTES_MAX,
+    )?;
+    let config = shadow_config(&listing)?;
+    let shadow = places.step.join(SHADOW_FOLDER);
+    for folder in [shadow.clone(), shadow.join("refs")] {
+        match std::fs::create_dir(&folder) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err(invalid()),
+        }
+        let meta = std::fs::symlink_metadata(&folder).map_err(|_| invalid())?;
+        if !meta.is_dir() || meta.file_type().is_symlink() {
+            return Err(invalid());
+        }
+    }
+    for entry in std::fs::read_dir(&shadow).map_err(|_| invalid())? {
+        let name = entry.map_err(|_| invalid())?.file_name();
+        if !["HEAD", "config", "refs"].iter().any(|kept| name == *kept) {
+            return Err(invalid());
+        }
+    }
+    if std::fs::read_dir(shadow.join("refs"))
+        .map_err(|_| invalid())?
+        .next()
+        .is_some()
+    {
+        return Err(invalid());
+    }
+    for (name, body) in [("HEAD", format!("{commit}\n")), ("config", config)] {
+        let path = shadow.join(name);
+        let exists = std::fs::symlink_metadata(&path).is_ok();
+        let mut file =
+            crazyagent_win_sandbox::private::file(&path, !exists).map_err(|_| invalid())?;
+        file.set_len(0).map_err(|_| invalid())?;
+        file.write_all(body.as_bytes()).map_err(|_| invalid())?;
+    }
+    assert!(shadow.starts_with(&places.step));
+    Ok(shadow)
 }
