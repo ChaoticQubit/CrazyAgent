@@ -7,7 +7,6 @@ use std::path::Path;
 /// engine log; the bytes themselves are never written there.
 pub(in crate::engine) const TAIL_BYTES: usize = 8192;
 /// How many lines after a turn's result a host names by kind; later ones are only counted.
-#[cfg(unix)]
 const LATE_KINDS_MAX: usize = 16;
 /// The longest stream type, subtype or method name a host copies into the engine log.
 const KIND_BYTES_MAX: usize = 64;
@@ -46,7 +45,6 @@ impl StreamDiagnostic {
 
     /// Counts one line that came after the turn's result and names its kind while fewer than
     /// `LATE_KINDS_MAX` are named. Input: the line. Output: none.
-    #[cfg(unix)]
     pub(in crate::engine) fn late(&mut self, line: &[u8]) {
         self.late_lines = self.late_lines.saturating_add(1);
         if self.late.len() < LATE_KINDS_MAX {
@@ -56,7 +54,6 @@ impl StreamDiagnostic {
     }
 
     /// Names the kind of the first line the protocol refused. Input: the line. Output: none.
-    #[cfg(unix)]
     pub(in crate::engine) fn failed(&mut self, line: &[u8]) {
         if self.message.is_none() {
             self.message = Some(kind(line));
