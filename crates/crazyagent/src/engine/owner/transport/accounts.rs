@@ -13,6 +13,7 @@ use std::os::fd::OwnedFd;
 #[cfg(unix)]
 const KEYS: &str = crate::storage::accounts::ACCOUNT_KEYS;
 const SECRET_MAX: usize = 8192;
+const _: () = assert!(SECRET_MAX as u64 == crate::storage::accounts::KEY_BYTES_MAX);
 const LIST_PROBE: Duration = Duration::from_millis(400);
 const CHECK_PROBE: Duration = Duration::from_secs(4);
 
