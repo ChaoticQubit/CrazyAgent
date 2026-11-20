@@ -134,7 +134,7 @@ impl Drop for Engine {
 /// system PATH, and checks it succeeded. Inputs: the folder, the home and the arguments.
 /// Output: git's standard output and error, joined.
 fn owner_git(folder: &Path, home: &Path, arguments: &[&str]) -> String {
-    let output = crazyagent::spawn_gate::output(
+    let output = crazyagent::spawn_gate::collected(
         Command::new("git")
             .env_clear()
             .env("HOME", home)
