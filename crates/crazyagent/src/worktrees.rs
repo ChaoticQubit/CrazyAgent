@@ -218,6 +218,8 @@ fn identified(metadata: &std::fs::Metadata, directory: bool) -> Result<Identity,
 
 #[cfg(all(test, windows))]
 mod canonical_windows_tests;
+#[cfg(all(test, windows))]
+mod root_and_git_windows_tests;
 
 fn canonical(path: &Path) -> Result<(), EngineError> {
     if !path.is_absolute() || !crate::projects_home::is_canonical(path).map_err(error)? {
