@@ -200,6 +200,18 @@ fn w5b_step_probe() {
             name(c)
         ));
     }
+    for folder in [&step, &common.join("objects"), &work, &private] {
+        let mut names: Vec<String> = std::fs::read_dir(folder)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        facts.note(&format!("after install {}: {names:?}", folder.display()));
+    }
     std::fs::write(work.join("a.txt"), "two\n").unwrap();
     std::fs::write(work.join("u.txt"), "untracked\n").unwrap();
     let index = step.join("index");
@@ -299,6 +311,19 @@ fn w5b_step_probe() {
     )
     .unwrap();
     facts.note(&format!("junction made: {:?}", made.status.code()));
+    let readable = work.join("jn-git");
+    let made = crate::spawn_gate::collected(
+        Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&readable)
+            .arg(&common)
+            .stdin(Stdio::null()),
+    )
+    .unwrap();
+    facts.note(&format!(
+        "junction to the readable .git made: {:?}",
+        made.status.code()
+    ));
     if let Some(sandbox) = &objects_box {
         let objects = Step {
             index: &step.join("index-o"),
