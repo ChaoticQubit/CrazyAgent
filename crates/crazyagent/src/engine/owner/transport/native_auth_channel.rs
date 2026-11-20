@@ -1433,10 +1433,10 @@ impl Authority {
             .enumerate()
             .find(|(_, slot)| slot.registration.active && &slot.registration.admission == admission)
             .ok_or_else(|| failure("owner_grant_stale_or_revoked"))?;
-        self.root
-            .verify_key(KEYS[index], &slot.file, slot.identity)?;
+        let file = slot.held()?;
+        self.root.verify_key(KEYS[index], file, slot.identity)?;
         let mut actual = [0; 32];
-        slot.file.read_exact_at(&mut actual, 0).map_err(io_error)?;
+        file.read_exact_at(&mut actual, 0).map_err(io_error)?;
         if !bool::from(slot.token.ct_eq(&actual)) || self.root.socket_identity()? != self.socket {
             return Err(failure("owner_capability_content_changed"));
         }
