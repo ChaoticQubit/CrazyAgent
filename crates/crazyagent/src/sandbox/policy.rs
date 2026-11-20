@@ -12,8 +12,7 @@ const TABLE: &str = "CREATE TABLE IF NOT EXISTS project_agent_policy (
 const BODY_BYTES_MAX: usize = 16 * 1024;
 
 #[cfg(target_os = "windows")]
-const WINDOWS_UNAVAILABLE: &str =
-    "Agents don't start on Windows in this version: their launch needs the Windows sandbox helper.";
+const WINDOWS_UNAVAILABLE: &str = "On Windows, agents run Sandboxed in this version.";
 
 #[cfg(target_os = "linux")]
 const LINUX_UNAVAILABLE: &str = "On Linux, agents run Sandboxed in this version.";
@@ -79,16 +78,16 @@ impl AgentAccess {
     }
 
     /// Why this level cannot run agents on this computer and the code it is refused with,
-    /// or None when it can: Full access on Windows has its own (DESIGN-0256 O3a). Output:
-    /// the reason and the code, or none.
+    /// or None when it can. Windows runs Sandboxed alone, and Full access there has its own
+    /// reason and code (DESIGN-0256 O3a). Output: the reason and the code, or none.
     pub fn refusal(self) -> Option<(&'static str, &'static str)> {
         #[cfg(target_os = "windows")]
         {
-            Some(if self == Self::Full {
-                (FULL_WINDOWS_UNAVAILABLE, SANDBOX_FULL_UNAVAILABLE_WINDOWS)
-            } else {
-                (WINDOWS_UNAVAILABLE, AGENT_ACCESS_UNAVAILABLE)
-            })
+            match self {
+                Self::Sandboxed => None,
+                Self::OwnBranch => Some((WINDOWS_UNAVAILABLE, AGENT_ACCESS_UNAVAILABLE)),
+                Self::Full => Some((FULL_WINDOWS_UNAVAILABLE, SANDBOX_FULL_UNAVAILABLE_WINDOWS)),
+            }
         }
         #[cfg(target_os = "linux")]
         {
