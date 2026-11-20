@@ -295,9 +295,10 @@ fn same_entry(left: &Path, right: &Path) -> bool {
 
 /// One spelling for a path: on macOS a path under the data volume that names the same entry as
 /// the path without that prefix is given without it, the spelling `canonicalize` gives the
-/// short form, so both compare equal as text. Input: a path, resolved or not; only its text
-/// changes, and the same-entry check stats both names, following links. Output: that spelling,
-/// or the path unchanged when the two names are absent or differ, or off macOS.
+/// short form, so both compare equal as text; on Windows a verbatim disk path is given plain
+/// ([`windows_plain`]) and any other form is kept, so the plain-path checks refuse it. Input:
+/// a path, resolved or not; only its text changes. Output: that spelling, or the path
+/// unchanged.
 pub(crate) fn one_spelling(real: PathBuf) -> PathBuf {
     #[cfg(target_os = "macos")]
     if let Ok(rest) = real.strip_prefix(DATA_VOLUME) {
@@ -305,6 +306,10 @@ pub(crate) fn one_spelling(real: PathBuf) -> PathBuf {
         if same_entry(&real, &short) {
             return short;
         }
+    }
+    #[cfg(windows)]
+    if let Some(plain) = real.to_str().and_then(windows_plain) {
+        return PathBuf::from(plain);
     }
     real
 }
@@ -315,8 +320,9 @@ pub(crate) fn one_spelling(real: PathBuf) -> PathBuf {
 /// or text Win32 would normalise to another name, gives none. Input: the text. Output: the
 /// plain text, or none.
 #[cfg(any(windows, test))]
-pub(crate) fn windows_plain(_text: &str) -> Option<&str> {
-    None
+pub(crate) fn windows_plain(text: &str) -> Option<&str> {
+    let plain = text.strip_prefix(r"\\?\").unwrap_or(text);
+    crate::sandbox::windows_clean_text(plain).then_some(plain)
 }
 
 /// The data volume's name for a path in its one spelling, when that names the same entry,
