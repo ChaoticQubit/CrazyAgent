@@ -3328,6 +3328,10 @@ mod tests {
 #[path = "master_host_launch/turn_folder_windows_tests.rs"]
 mod turn_folder_windows_tests;
 
+#[cfg(all(test, windows))]
+#[path = "master_host_launch/turn_boundary_windows_tests.rs"]
+mod turn_boundary_windows_tests;
+
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/dec_090_tests.rs"]
 mod dec_090_tests;
