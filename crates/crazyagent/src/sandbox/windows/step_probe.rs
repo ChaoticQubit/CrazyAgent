@@ -20,10 +20,14 @@ impl Facts {
     fn ran(&mut self, name: &str, wrapped: Result<Command, SandboxError>) {
         let line = match wrapped {
             Err(refused) => format!("{name}: wrap refused {refused:?}"),
-            Ok(mut command) => match crate::spawn_gate::collected(command.stdin(Stdio::null())) {
+            Ok(mut command) => match {
+                let started = std::time::Instant::now();
+                crate::spawn_gate::collected(command.stdin(Stdio::null()))
+                    .map(|out| (out, started.elapsed().as_millis()))
+            } {
                 Err(error) => format!("{name}: start failed {error}"),
-                Ok(out) => format!(
-                    "{name}: rc={:?} out={:?} err={:?}",
+                Ok((out, millis)) => format!(
+                    "{name}: {millis} ms rc={:?} out={:?} err={:?}",
                     out.status.code(),
                     clip(&out.stdout),
                     clip(&out.stderr)
@@ -140,7 +144,12 @@ fn w5b_step_probe() {
     std::fs::create_dir(&repo).unwrap();
     plain(&git, &repo, &["init", "-q", "-b", "main"]);
     std::fs::write(repo.join("a.txt"), "one\n").unwrap();
-    plain(&git, &repo, &["add", "a.txt"]);
+    let many = repo.join("many");
+    std::fs::create_dir(&many).unwrap();
+    for at in 0..2000 {
+        std::fs::write(many.join(format!("f{at}.txt")), format!("file {at}\n")).unwrap();
+    }
+    plain(&git, &repo, &["add", "a.txt", "many"]);
     plain(&git, &repo, &["commit", "-q", "-m", "one"]);
     let work = root.join("wt");
     plain(
