@@ -287,29 +287,40 @@ fn git_until(
     output_max: usize,
     deadline: Instant,
 ) -> Result<Vec<u8>, EngineError> {
-    let child = crate::spawn_gate::spawn(&mut git_command(repository, args)).map_err(error)?;
+    let child = crate::spawn_gate::spawn(&mut git_command(repository, args)?).map_err(error)?;
     collect_git_output(child, output_max, deadline)
 }
 
 /// Builds the engine's Git process: the host Git with a cleared environment, no system
 /// or global config, the engine's safe settings (no hooks, fsmonitor, pager, protocols or
 /// signature programs), no replace objects, grafts, commit-graph files or automatic
-/// maintenance. Inputs: the repository and the arguments. Output: the unspawned process.
-fn git_command(repository: &Path, args: &[&str]) -> Process {
-    let mut command = Process::new("/usr/bin/git");
+/// maintenance. Inputs: the repository and the arguments. Output: the unspawned process,
+/// or [`GIT_OLD`] when no git is found.
+fn git_command(repository: &Path, args: &[&str]) -> Result<Process, EngineError> {
+    let mut command = Process::new(git_program()?);
+    command.env_clear();
+    #[cfg(unix)]
+    command.env("PATH", "/usr/bin:/bin");
+    #[cfg(windows)]
+    for name in ["PATH", "SystemRoot"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
     command
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE)
         .envs(crate::research::runner::GIT_SAFE_ENV)
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_GRAFT_FILE", "/dev/null")
+        .env("GIT_GRAFT_FILE", crate::github::NULL_DEVICE)
         .arg("--no-replace-objects")
         .arg("--no-optional-locks")
         .args(crate::research::runner::git_safe())
+        .arg("-c")
+        .arg(format!(
+            "core.attributesFile={}",
+            crate::github::NULL_DEVICE
+        ))
         .args([
-            "-c",
-            "core.attributesFile=/dev/null",
             "-c",
             "gc.auto=0",
             "-c",
@@ -327,7 +338,26 @@ fn git_command(repository: &Path, args: &[&str]) -> Process {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    command
+    Ok(command)
+}
+
+/// The git every engine worktree command runs: the host `/usr/bin/git` on Unix.
+/// Output: its path.
+#[cfg(unix)]
+fn git_program() -> Result<PathBuf, EngineError> {
+    Ok(PathBuf::from("/usr/bin/git"))
+}
+
+/// The git every engine worktree command runs on Windows: the one the engine's own git
+/// resolver finds, never a bare name a process search could match in a working folder.
+/// Output: its absolute path, or [`GIT_OLD`] when none is found, since the owner then
+/// reads the same "update Git" line.
+#[cfg(windows)]
+fn git_program() -> Result<PathBuf, EngineError> {
+    let found = crate::github::git_program(std::env::var_os("PATH").as_deref())
+        .ok_or_else(|| error(GIT_OLD))?;
+    assert!(found.is_absolute());
+    Ok(found)
 }
 
 fn collect_git_output(
@@ -1439,11 +1469,18 @@ fn prepare(
     })
 }
 
-/// Refuses the private worktree root where no 0700 directory can be made or checked.
-/// Takes the runtime folder, unused. Returns `worktree_filesystem_unavailable`.
-#[cfg(not(unix))]
-fn private_worktree_root(_runtime: &Path) -> Result<PathBuf, EngineError> {
-    Err(error("worktree_filesystem_unavailable"))
+/// The private folder every agent worktree is made in, the Windows twin of the 0700 root:
+/// `worktrees` in the canonical runtime folder, made or opened by W1's `private::dir`, which
+/// gives a new folder the user-only protected list each worktree below inherits and refuses
+/// one that is not private (W3-5 D4). Input: the runtime folder. Output: the root, or the refusal.
+#[cfg(windows)]
+fn private_worktree_root(runtime: &Path) -> Result<PathBuf, EngineError> {
+    canonical(runtime)?;
+    let root = runtime.join("worktrees");
+    drop(crazyagent_win_sandbox::private::dir(&root).map_err(error)?);
+    canonical(&root)?;
+    assert!(root.starts_with(runtime));
+    Ok(root)
 }
 
 #[cfg(unix)]
@@ -2032,7 +2069,7 @@ fn write_tree(
     deadline: Instant,
 ) -> Result<Vec<String>, EngineError> {
     let mut child = crate::spawn_gate::spawn(
-        git_command(repository, &["cat-file", "--batch"]).stdin(Stdio::piped()),
+        git_command(repository, &["cat-file", "--batch"])?.stdin(Stdio::piped()),
     )
     .map_err(error)?;
     let input = child
