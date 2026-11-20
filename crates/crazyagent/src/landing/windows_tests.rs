@@ -69,7 +69,8 @@ struct Place {
 /// Runs the runner's git in `folder` with `args` and requires it to succeed. Inputs: the
 /// folder and the arguments. Output: none; a failed git fails the row.
 fn git(folder: &Path, args: &[&str]) {
-    let status = Command::new("git")
+    let mut command = Command::new("git");
+    command
         .args([
             "-c",
             "user.name=row",
@@ -80,9 +81,8 @@ fn git(folder: &Path, args: &[&str]) {
         .current_dir(folder)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .unwrap();
+        .stderr(Stdio::null());
+    let status = crate::spawn_gate::status(&mut command).unwrap();
     assert!(status.success(), "git {args:?}");
 }
 
@@ -117,6 +117,11 @@ fn place() -> Place {
     let git_dir = repository.join(".git").join("worktrees").join("agent");
     assert!(git_dir.is_dir());
     let db = open(&runtime).unwrap();
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL); \
+         INSERT INTO projects(id, body) VALUES ('project-1', '{}');",
+    )
+    .unwrap();
     let workspace = Workspace {
         project: ProjectId::new("project-1").unwrap(),
         agent: ChangeAgent {
