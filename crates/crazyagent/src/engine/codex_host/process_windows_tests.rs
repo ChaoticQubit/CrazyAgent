@@ -20,6 +20,12 @@ const MARK: &[u8] = b"<codex-stand-in>\n";
 /// The line a `turn` stand-in answers its turn request with.
 const TURN_STARTED: &[u8] = b"{\"method\":\"turn/started\"}\n";
 
+/// How many bytes a `flood-then-count` stand-in writes before it reads its input.
+const FLOOD_BYTES: usize = 2 * 1024 * 1024;
+
+/// The frame a row sends a `flood-then-count` stand-in: the owner's largest master frame.
+const FRAME_BYTES: usize = crate::master_frame_limit::BYTES_MAX;
+
 /// The test binary as a stand-in Codex harness: the arguments that run
 /// [`codex_host_stand_in`] alone. Output: the arguments.
 const STAND_IN_ARGS: [&str; 6] = [
@@ -185,6 +191,115 @@ async fn a_stalled_reader_holds_a_windows_harness_output_back_and_loses_none_of_
     assert!(process.exit_status().expect("reaped status").success());
     process.close().await.unwrap();
     assert!(process.settled());
+}
+
+/// Starts the `flood-then-count` stand-in under custody with no clock, as a master with no
+/// time limit runs, with `output_bytes` of room and frames up to [`FRAME_BYTES`], then waits
+/// for it to fill its output. Inputs: the root and the bound. Output: the running process.
+async fn flood_then_count(root: &Path, output_bytes: u64) -> CodexHostProcess {
+    let limits = ResourceBudget {
+        output_bytes,
+        wall_time_ms: 60_000,
+        ..ResourceBudget::unit()
+    };
+    let mut process = CodexHostProcess::spawn_guarded(
+        stand_in_command(root, "flood-then-count"),
+        &limits,
+        None,
+        None,
+        crate::sandbox::LineageCheck::Unneeded,
+    )
+    .await
+    .unwrap();
+    process.limit_input(FRAME_BYTES);
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    process
+}
+
+/// One frame of [`FRAME_BYTES`] bytes, ending in a newline. Output: the frame.
+fn largest_frame() -> Vec<u8> {
+    let mut frame = vec![b'f'; FRAME_BYTES - 1];
+    frame.push(b'\n');
+    frame
+}
+
+/// CodeRabbit CR-1354: a Windows harness with no clock that writes 2 MiB before it reads its
+/// input still takes a 1 MiB frame, larger than its pipe. The host waits on the frame without
+/// reading, so custody used to stop reading at a full queue, the harness blocked on its
+/// output and the frame never drained.
+#[tokio::test]
+async fn a_windows_harness_that_floods_its_output_before_it_reads_still_takes_a_frame_larger_than_its_pipe()
+ {
+    let root = tempfile::tempdir().unwrap();
+    let mut process = flood_then_count(root.path(), 4 * 1024 * 1024).await;
+    let sent = tokio::time::timeout(Duration::from_secs(20), process.send(&largest_frame())).await;
+    assert!(
+        sent.is_ok(),
+        "the frame waited 20 s on a harness blocked on its unread output"
+    );
+    sent.unwrap().unwrap();
+    process.close_stdin();
+    let stdout = read_to_exit(&mut process, Duration::from_secs(30)).await;
+    let written = payload(&stdout);
+    let count = format!("{FRAME_BYTES}\n");
+    assert_eq!(written.len(), FLOOD_BYTES + count.len());
+    assert!(written[..FLOOD_BYTES].iter().all(|byte| *byte == b'w'));
+    assert_eq!(&written[FLOOD_BYTES..], count.as_bytes());
+    assert!(process.exit_status().expect("reaped status").success());
+    process.close().await.unwrap();
+}
+
+/// CodeRabbit CR-1354: while a frame waits on a Windows harness with no clock, custody reads
+/// its output past the full queue only up to the run's output bound. A harness that writes
+/// 2 MiB past a 1 MiB bound ends the run with `codex_host_output_limit`, the frame is refused,
+/// and the queue never held more than the bound.
+#[tokio::test]
+async fn the_output_bound_ends_a_windows_run_that_floods_past_it_while_a_frame_waits() {
+    const BOUND: u64 = 1024 * 1024;
+    let root = tempfile::tempdir().unwrap();
+    let mut process = flood_then_count(root.path(), BOUND).await;
+    let pid = process.pid();
+    let sent = tokio::time::timeout(Duration::from_secs(20), process.send(&largest_frame())).await;
+    assert!(
+        sent.is_ok(),
+        "the frame waited 20 s on a harness blocked on its unread output"
+    );
+    assert!(
+        sent.unwrap().is_err(),
+        "a refused frame was reported as written"
+    );
+    let error = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            match process.next_output().await {
+                Ok(CodexHostOutput::Stdout(_)) => {}
+                Ok(CodexHostOutput::Exited) => panic!("the bound was reported as an exit"),
+                Err(error) => break error,
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(error.0, "codex_host_output_limit");
+    let queued: usize = process
+        .shared()
+        .lock()
+        .unwrap()
+        .output
+        .iter()
+        .map(|output| match output {
+            CodexHostOutput::Stdout(bytes) => bytes.len(),
+            CodexHostOutput::Exited => 0,
+        })
+        .sum();
+    assert!(
+        queued as u64 <= BOUND,
+        "{queued} bytes queued past the bound"
+    );
+    tokio::time::timeout(Duration::from_secs(10), process.close())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(ends(pid), "the stand-in {pid} outlived its close");
 }
 
 /// A quiet Windows harness meets its wall clock: the reader gets `codex_host_deadline`, and
@@ -371,7 +486,8 @@ async fn a_windows_harness_whose_output_fills_the_queue_is_waited_for_without_sp
 /// `quiet` waits two minutes; `stderr` writes 1,024 bytes to stderr, then waits; `holder`
 /// starts ping for two minutes, writes its id to the [`STAND_IN_PID`] file, then waits;
 /// `turn` answers one input line with [`TURN_STARTED`], then waits; `yes` writes lines until
-/// it is ended.
+/// it is ended; `flood-then-count` writes [`FLOOD_BYTES`] bytes, then reads its input to the
+/// end and writes how many bytes it read.
 #[test]
 #[ignore]
 fn codex_host_stand_in() {
@@ -425,6 +541,16 @@ fn codex_host_stand_in() {
             stdout.write_all(TURN_STARTED).unwrap();
             stdout.flush().unwrap();
             wait();
+        }
+        "flood-then-count" => {
+            let block = [b'w'; 4096];
+            for _ in 0..FLOOD_BYTES / block.len() {
+                stdout.write_all(&block).unwrap();
+            }
+            stdout.flush().unwrap();
+            let mut input = Vec::new();
+            std::io::stdin().lock().read_to_end(&mut input).unwrap();
+            writeln!(stdout, "{}", input.len()).unwrap();
         }
         "yes" => loop {
             if stdout.write_all(b"y\n").is_err() {
