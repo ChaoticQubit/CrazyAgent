@@ -348,14 +348,19 @@ fn git_program() -> Result<PathBuf, EngineError> {
     Ok(PathBuf::from("/usr/bin/git"))
 }
 
-/// The git every engine worktree command runs on Windows: the one the engine's own git
-/// resolver finds, never a bare name a process search could match in a working folder.
-/// Output: its absolute path, or [`GIT_OLD`] when none is found, since the owner then
-/// reads the same "update Git" line.
+/// The git every engine worktree command runs on Windows, [`git_program_in`] the engine's
+/// own PATH. Output: its absolute path, or the refusal.
 #[cfg(windows)]
 fn git_program() -> Result<PathBuf, EngineError> {
-    let found = crate::github::git_program(std::env::var_os("PATH").as_deref())
-        .ok_or_else(|| error(GIT_OLD))?;
+    git_program_in(std::env::var_os("PATH").as_deref())
+}
+
+/// The git the engine's own git resolver finds in `path`, never a bare name a process
+/// search could match in a working folder. Input: a PATH value. Output: its absolute path,
+/// or [`GIT_OLD`] when none is found, since the owner then reads the same "update Git" line.
+#[cfg(windows)]
+fn git_program_in(path: Option<&std::ffi::OsStr>) -> Result<PathBuf, EngineError> {
+    let found = crate::github::git_program(path).ok_or_else(|| error(GIT_OLD))?;
     assert!(found.is_absolute());
     Ok(found)
 }
