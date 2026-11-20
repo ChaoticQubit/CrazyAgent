@@ -17,6 +17,12 @@ pub(in crate::engine) const LOG_FILE: &str = "master-stream.log";
 /// to `master-stream.log.1`, replacing the older copy.
 pub(in crate::engine) const ROTATE_BYTES: u64 = 256 * 1024;
 
+/// Makes the engine's log appends take turns on Windows, where W1's private file is written
+/// at a position, not opened for appending, so two appends at once would write over each
+/// other.
+#[cfg(windows)]
+static APPENDING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// What a master host kept about its stream for the engine log: the fault that retired it,
 /// the line or frame that fault was found on, the kinds and count of the lines that came
 /// after a Claude Code turn's result, and the last raw stream bytes, which only name the
@@ -149,6 +155,10 @@ pub(in crate::engine) fn append_to(
     if length > ROTATE_BYTES {
         return Err(failure("master_stream_log_entry"));
     }
+    #[cfg(windows)]
+    let _appending = APPENDING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     private_folder(logs)?;
     let log = logs.join(name);
     if let Ok(metadata) = std::fs::symlink_metadata(&log)
@@ -211,18 +221,46 @@ fn open(log: &Path) -> Result<std::fs::File, EngineError> {
     Ok(file)
 }
 
-/// Refuses the logs folder where its Unix owner and mode cannot be checked. Takes the
-/// folder, unused. Returns `master_stream_log_unavailable`.
-#[cfg(not(unix))]
-fn private_folder(_logs: &Path) -> Result<(), EngineError> {
-    Err(failure("master_stream_log_unavailable"))
+/// Makes the logs folder private when it is missing, or checks the one already there,
+/// through W1's private folder: this user as owner, a protected list no other account is
+/// on, and no link. Input: the folder. Output: Ok, `master_stream_log_unsafe` for a folder
+/// that is not private, or `master_stream_log_unavailable`.
+#[cfg(windows)]
+fn private_folder(logs: &Path) -> Result<(), EngineError> {
+    crazyagent_win_sandbox::private::dir(logs)
+        .map(drop)
+        .map_err(|error| refusal(&error))
 }
 
-/// Refuses the log where its Unix owner and mode cannot be checked. Takes the log path,
-/// unused. Returns `master_stream_log_unavailable`.
-#[cfg(not(unix))]
-fn open(_log: &Path) -> Result<std::fs::File, EngineError> {
-    Err(failure("master_stream_log_unavailable"))
+/// Opens the log at its end for one append through W1's private file, made private when it
+/// is missing; a log name that is a link, a second name of another file or not private is
+/// refused. Input: the log path. Output: the file at its end, or a plain code.
+#[cfg(windows)]
+fn open(log: &Path) -> Result<std::fs::File, EngineError> {
+    use crazyagent_win_sandbox::private;
+    use std::io::{Seek, SeekFrom};
+    let mut file = match private::file(log, true) {
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            private::file(log, false)
+        }
+        made => made,
+    }
+    .map_err(|error| refusal(&error))?;
+    file.seek(SeekFrom::End(0))
+        .map_err(|_| failure("master_stream_log_unavailable"))?;
+    Ok(file)
+}
+
+/// The code for a W1 refusal of the logs folder or the log: `master_stream_log_unsafe` when
+/// the path is not private, `master_stream_log_unavailable` for any other failure. Input:
+/// the error. Output: the code.
+#[cfg(windows)]
+fn refusal(error: &std::io::Error) -> EngineError {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        failure("master_stream_log_unsafe")
+    } else {
+        failure("master_stream_log_unavailable")
+    }
 }
 
 #[cfg(all(test, windows))]
