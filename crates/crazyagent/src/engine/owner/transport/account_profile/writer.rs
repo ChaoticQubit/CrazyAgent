@@ -168,8 +168,7 @@ fn perform(
         return Err(unknown());
     }
     let secret = work.secret.take().ok_or_else(unknown)?;
-    let path = executable.verified_path()?;
-    let _digest = executable.verified_sha256()?;
+    let (path, _digest) = executable.verified()?;
     let mut command = Command::new(path);
     command
         .args(["--private-key-write", &metadata])
@@ -265,8 +264,7 @@ fn perform(
         held.verify()?;
     }
     work.guard.revalidate_retained()?;
-    executable.verified_path()?;
-    executable.verified_sha256()?;
+    executable.verified()?;
     Ok(true)
 }
 

@@ -464,7 +464,9 @@ pub fn check_file(
     #[cfg(unix)]
     crate::engine::pinnable(&metadata)?;
     #[cfg(not(unix))]
-    crate::engine::pinnable_at(&real)?;
+    crate::engine::pinnable_at(
+        &crate::paths::executable_file(path).ok_or_else(|| failure(PATH_NOT_EXECUTABLE))?,
+    )?;
     assert!(path.is_absolute());
     Ok(path.to_path_buf())
 }

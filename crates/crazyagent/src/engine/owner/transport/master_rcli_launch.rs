@@ -26,8 +26,8 @@ impl OwnerRuntimeHandle {
                 .map_err(|error| EngineError(error.0))?;
         profile.revalidate_retained()?;
         let executable = self.registered_rcli_master_executable()?;
-        let executable_path = executable.verified_path()?.to_path_buf();
-        let artifact_sha256 = executable.verified_sha256()?;
+        let (executable_path, artifact_sha256) = executable.verified()?;
+        let executable_path = executable_path.to_path_buf();
         if !is_hex_id(&artifact_sha256) || !is_hex_id(&profile_config_sha256) {
             return Err(failure("master_runtime_binding"));
         }

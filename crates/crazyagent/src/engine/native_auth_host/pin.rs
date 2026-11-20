@@ -439,7 +439,8 @@ impl RegisteredNativeAuthHost {
         let unavailable = |_| EngineError("native_auth_host_unavailable".into());
         let used = crate::paths::launch_entry(entry, std::env::var_os("PATH").as_deref())
             .map_err(unavailable)?;
-        let real = std::fs::canonicalize(&used).map_err(unavailable)?;
+        let real = crate::paths::executable_file(&used)
+            .ok_or_else(|| EngineError("native_auth_host_unavailable".into()))?;
         if real == self.path && self.verified_path().is_ok() {
             return Ok(self.clone());
         }
@@ -594,19 +595,22 @@ impl RegisteredNativeAuthHost {
         Ok(())
     }
 
-    /// The pinned path and its SHA-256 in hex, from one check. Not one check yet (N3 r2 red
-    /// rows, test builds only): it checks twice. Output: both, or the refusal.
-    #[cfg(test)]
+    /// The pinned path and its SHA-256 in hex from one check ([`Self::verified_path`]), so a
+    /// caller that needs both hashes the pinned file once (rv-sec2 #721 r2 C1). Output: both,
+    /// or the refusal.
     pub(crate) fn verified(&self) -> Result<(&Path, String), EngineError> {
-        Ok((self.verified_path()?, self.verified_sha256()?))
-    }
-
-    pub(crate) fn verified_sha256(&self) -> Result<String, EngineError> {
-        self.verified_path()?;
-        Ok(self
+        let path = self.verified_path()?;
+        let sha256 = self
             .digest
             .iter()
             .map(|byte| format!("{byte:02x}"))
-            .collect())
+            .collect();
+        Ok((path, sha256))
+    }
+
+    /// The pinned file's SHA-256 in hex once [`Self::verified`] passes. Output: the hex
+    /// digest, or the refusal.
+    pub(crate) fn verified_sha256(&self) -> Result<String, EngineError> {
+        self.verified().map(|(_, sha256)| sha256)
     }
 }

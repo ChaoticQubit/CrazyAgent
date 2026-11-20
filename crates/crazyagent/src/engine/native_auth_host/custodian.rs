@@ -13,6 +13,10 @@ pub(super) const CAUSE_BYTES_MAX: usize = 128;
 /// The bytes a cause keeps: one code, its line end and one more byte, so a longer line still
 /// reads as too long.
 const CAUSE_KEPT_MAX: usize = CAUSE_BYTES_MAX + 2;
+#[cfg(windows)]
+const CREATE_SUSPENDED: u32 = 0x0000_0004;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// What a custodian wrote on its error stream, kept up to one code and its line end and read
 /// without ever waiting, so a custodian that writes more never blocks on a full pipe.
@@ -131,35 +135,51 @@ fn drain(mut stream: std::process::ChildStderr, sender: &Sender<Vec<u8>>) {
 }
 
 /// A sign-in custodian on Windows and every process it starts, held in a kill-on-close job
-/// from before its first instruction runs, so ending it ends its whole tree. Not built yet
-/// (N3 r2 red rows): it is never made.
+/// from before its first instruction runs, so dropping it ends its whole tree (PLAN-0541
+/// row 3). The child drops first, then the tree, whose drop terminates the job.
 #[cfg(windows)]
-pub(super) enum CustodianChild {}
+pub(super) struct CustodianChild {
+    child: std::process::Child,
+    _tree: crazyagent_win_sandbox::ProcessTree,
+}
 
 #[cfg(windows)]
 impl CustodianChild {
-    /// Starts a custodian created suspended and holds its tree. Not built yet: refuses.
-    /// Input: the command. Output: `native_auth_host_unavailable`.
-    pub(super) fn start(_command: &mut std::process::Command) -> std::io::Result<Self> {
-        Err(std::io::Error::other("native_auth_host_unavailable"))
+    /// Starts a custodian through the spawn gate created suspended and with no window, then
+    /// holds its tree ([`Self::held`]), so nothing it starts runs outside the job. Input: the
+    /// command; its creation flags are set here. Output: the held custodian, or the error.
+    pub(super) fn start(command: &mut std::process::Command) -> std::io::Result<Self> {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
+        let child = crate::spawn_gate::spawn(command)?;
+        Self::held(child, crazyagent_win_sandbox::ProcessTree::hold)
     }
 
-    /// Holds a started custodian's tree with `hold`. Not built yet: refuses and leaves the
-    /// child as it is. Inputs: the child and the hold. Output: `native_auth_host_unavailable`.
+    /// Holds a custodian started suspended with `hold`; when the hold fails the child is
+    /// killed and reaped, never left suspended or running outside a job. Inputs: the child
+    /// and the hold. Output: the held custodian, or `native_auth_host_unavailable`.
     pub(super) fn held(
-        _child: std::process::Child,
-        _hold: impl FnOnce(
+        mut child: std::process::Child,
+        hold: impl FnOnce(
             &std::process::Child,
         ) -> Result<
             crazyagent_win_sandbox::ProcessTree,
             crazyagent_win_sandbox::BoundaryError,
         >,
     ) -> std::io::Result<Self> {
-        Err(std::io::Error::other("native_auth_host_unavailable"))
+        assert_ne!(child.id(), 0);
+        match hold(&child) {
+            Ok(tree) => Ok(Self { child, _tree: tree }),
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(std::io::Error::other("native_auth_host_unavailable"))
+            }
+        }
     }
 
-    /// The custodian's process id. Never runs, as none is made. Output: none.
+    /// The custodian's process id. Output: the id.
     pub(super) fn id(&self) -> u32 {
-        match *self {}
+        self.child.id()
     }
 }
