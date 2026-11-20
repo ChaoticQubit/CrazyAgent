@@ -25,7 +25,7 @@ pub type Webview = gtk::Widget;
 /// The main thread's marker, or none on another thread or before GTK starts. Output: the
 /// marker, if any.
 pub fn main() -> Option<Main> {
-    gtk::is_initialized_main_thread().then(|| Main(PhantomData))
+    gtk::is_initialized_main_thread().then_some(Main(PhantomData))
 }
 
 /// A view's GTK and drawing parts: its wgpu surface, dropped before the term whose child
@@ -271,6 +271,10 @@ mod tests {
     /// The page's viewport height the host passes; Linux does not read it.
     const VIEWPORT: f64 = 480.0;
 
+    /// The presents the tick row makes: a compositor may answer one present's frame
+    /// callback before the next read, so the row needs one present held back among them.
+    const PRESENTS: usize = 20;
+
     fn opened(page: &gtk::DrawingArea) -> View {
         let _ = Clip::new();
         let parent = parent(page.clone().upcast()).expect("a parent");
@@ -347,8 +351,8 @@ mod tests {
     }
 
     /// A dirty view whose child still waits on its last present's frame callback is not
-    /// ready, and arms one tick that asks for a drain; the tick clears itself once it ran,
-    /// and the view is ready again after the callback.
+    /// ready, and arms one tick that asks for a drain, which clears itself once it ran.
+    /// Across repeated presents at least one is held back, and each held one arms a tick.
     #[test]
     #[ignore = "needs a display: the farm runs it under Xvfb, weston and sway"]
     fn a_view_held_back_by_its_frame_callback_arms_one_tick() {
@@ -362,18 +366,24 @@ mod tests {
             "a surface on the child"
         );
         assert_eq!(view.scale, key);
-        pump_until("the first frame ready", || ready(&mut view));
-        assert_eq!(paint(&mut view, &mut shared, &frame), Ok(()));
+        let mut held = 0;
+        for _ in 0..PRESENTS {
+            pump_until("the next frame ready", || ready(&mut view));
+            assert_eq!(paint(&mut view, &mut shared, &frame), Ok(()));
+            if ready(&mut view) {
+                continue;
+            }
+            held += 1;
+            assert!(
+                view.tick.borrow().is_some(),
+                "a view held back by its frame callback arms one tick"
+            );
+            pump_until("the tick ran", || view.tick.borrow().is_none());
+        }
         assert!(
-            !ready(&mut view),
-            "a view waiting on its frame callback is not ready"
+            held >= 1,
+            "a view waiting on its frame callback is not ready after at least one of {PRESENTS} presents"
         );
-        assert!(
-            view.tick.borrow().is_some(),
-            "a view held back by its frame callback arms one tick"
-        );
-        pump_until("the tick ran", || view.tick.borrow().is_none());
-        pump_until("the next frame ready", || ready(&mut view));
         drop(shared);
         close(window, view);
     }
