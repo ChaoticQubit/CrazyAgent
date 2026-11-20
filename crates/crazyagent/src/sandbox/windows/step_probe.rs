@@ -368,10 +368,40 @@ fn w5b_step_probe() {
             start: &work,
             ..absolute
         };
+        let system = std::env::var_os("SystemRoot")
+            .map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+        let shell = |line: &str| {
+            let mut command = Command::new(system.join("System32").join("cmd.exe"));
+            command.args(["/d", "/c", line]).current_dir(&work);
+            command
+        };
+        let acl = |path: &Path| {
+            crate::spawn_gate::collected(Command::new("icacls").arg(path).stdin(Stdio::null()))
+                .map(|out| clip(&out.stdout))
+                .unwrap_or_default()
+        };
+        facts.note(&format!("worktree acl before: {}", acl(&work)));
+        facts.note(&format!(
+            "worktree a.txt acl before: {}",
+            acl(&work.join("a.txt"))
+        ));
+        facts.ran(
+            "worktree cmd new file",
+            sandbox.wrap(&shell("echo x> probe-new.txt")),
+        );
+        facts.ran(
+            "worktree cmd new file in many",
+            sandbox.wrap(&shell("echo x> many\\probe-new.txt")),
+        );
+        facts.ran(
+            "worktree cmd rewrite a.txt",
+            sandbox.wrap(&shell("echo y> a.txt")),
+        );
         facts.ran(
             "worktree checkout-index",
             sandbox.wrap(&in_work.command(&["checkout-index", "-f", "a.txt"])),
         );
+        facts.note(&format!("worktree acl after: {}", acl(&work)));
         facts.note(&format!(
             "worktree a.txt now {:?}",
             std::fs::read_to_string(work.join("a.txt")).ok()
