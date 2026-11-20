@@ -407,3 +407,7 @@ pub(super) fn unlock(file: &File) {
 #[cfg(test)]
 #[path = "held_tests.rs"]
 mod tests;
+
+#[cfg(all(test, windows))]
+#[path = "held_probe_tests.rs"]
+mod probes;
