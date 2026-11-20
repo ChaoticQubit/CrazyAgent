@@ -3940,8 +3940,8 @@ fn a_team_agent_on_a_linux_without_the_call_supervisor_stops_before_any_reposito
     assert_eq!(line, crate::sandbox::linux::CONFINED_UNAVAILABLE);
 }
 
-/// On Linux, where only macOS runs Full access (DEC-102), a Full access team agent stops
-/// before any repository step with the plain macOS-only line (DEC-205 S5b).
+/// On Linux, where agents run only Sandboxed (DEC-102), a Full access team agent stops
+/// before any repository step with the agent access refusal (DEC-205 S5b).
 #[cfg(target_os = "linux")]
 #[test]
 fn a_full_access_team_agent_on_linux_stops_before_any_repository_step() {
@@ -3956,10 +3956,8 @@ fn a_full_access_team_agent_on_linux_stops_before_any_repository_step() {
     )
     .unwrap();
     let line = refused_before_any_repository_step(&fixture);
-    assert!(
-        line.starts_with(crate::sandbox::FULL_ACCESS_NEEDS_MACOS),
-        "{line}"
-    );
+    let (refusal, code) = AgentAccess::Full.refusal().unwrap();
+    assert_eq!(line, with_code(refusal, Some(code)));
 }
 
 /// On Linux, native teammates are out in this version (DEC-205 Q4): a lead whose project
@@ -20582,6 +20580,20 @@ fn a_failing_delivery_still_lets_the_team_step_dispatch() {
     );
 }
 
+/// What a native Teams lead's start answers once a terminal host is attached: it starts,
+/// except on Linux, where native teammates are refused before any setup (DEC-205 S5b Q4).
+/// Output: the answer `native_lead` gives.
+fn teams_lead() -> Result<bool, String> {
+    if cfg!(target_os = "linux") {
+        Err(with_code(
+            TEAMMATES_NEED_MACOS,
+            Some("native_mode_unavailable"),
+        ))
+    } else {
+        Ok(true)
+    }
+}
+
 #[test]
 fn a_lead_runs_native_only_as_its_own_row_says_whatever_the_setting_says_later() {
     use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
@@ -20601,7 +20613,7 @@ fn a_lead_runs_native_only_as_its_own_row_says_whatever_the_setting_says_later()
     let team = fixture.runtime().with_terminal(fixture.host()).unwrap();
     assert_eq!(
         team.native_lead(&project, native, AgentRole::Sub, "claude-code"),
-        Ok(true)
+        teams_lead()
     );
     set_mode(
         &fixture.connection,
@@ -20612,7 +20624,7 @@ fn a_lead_runs_native_only_as_its_own_row_says_whatever_the_setting_says_later()
     .unwrap();
     assert_eq!(
         team.native_lead(&project, native, AgentRole::Sub, "claude-code"),
-        Ok(true)
+        teams_lead()
     );
     let spawned = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
     assert_eq!(
@@ -24270,7 +24282,7 @@ fn native_mode_only_for_master_started_claude_lead() {
     let mut team = fixture.runtime().with_terminal(fixture.host()).unwrap();
     assert_eq!(
         team.native_lead(&project, lead, AgentRole::Sub, "claude-code"),
-        Ok(true)
+        teams_lead()
     );
     assert_eq!(
         team.native_lead(&project, nested, AgentRole::Sub, "claude-code"),
@@ -24295,7 +24307,7 @@ fn native_mode_only_for_master_started_claude_lead() {
     .unwrap();
     assert_eq!(
         team.native_lead(&project, lead, AgentRole::Sub, "claude-code"),
-        Ok(true),
+        teams_lead(),
         "a lead keeps the mode of its first start"
     );
     let later = sub("claude-code", None);
