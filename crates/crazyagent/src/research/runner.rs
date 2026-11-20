@@ -7106,7 +7106,8 @@ mod tests {
 
     /// On Linux the engine adds an agent worktree with git inside the agent's installed
     /// boundary, the Landlock helper or bubblewrap, never through `sandbox-exec` (V244-LINUX-TEAM
-    /// S4): the worktree, its admin folder and a clean checkout are made.
+    /// S4): the worktree, a clean checkout and its admin folder, the only entry the add makes
+    /// in the project's `.git/worktrees`, are made.
     #[cfg(target_os = "linux")]
     #[test]
     fn an_agent_worktree_is_added_on_linux_inside_the_installed_boundary() {
@@ -7117,6 +7118,11 @@ mod tests {
         add_worktree_at(&sandbox, &profile, &worktree, "HEAD", LinuxSupervisor::On).unwrap();
 
         assert!(worktree.join(".git").is_file());
+        let admins: Vec<String> = fs::read_dir(project.join(".git").join("worktrees"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(admins, ["agent-one"]);
         assert!(
             project
                 .join(".git")
@@ -7140,6 +7146,72 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&status.stdout)
         );
+    }
+
+    /// On Linux an agent worktree add is refused, before its git starts, while another
+    /// worktree's admin folder sits in the project's `.git/worktrees` and no call supervisor
+    /// holds it, since the add's grant on that folder would reach it: the refusal is the
+    /// confined one, and neither a second worktree nor a second admin folder is made, and the
+    /// first admin folder is unchanged (V244-LINUX-TEAM S4, leader 12:2x A).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_linux_worktree_add_is_refused_while_no_supervisor_holds_another_admin_folder() {
+        let temp = tempfile::tempdir().unwrap();
+        let (project, sandbox, profile) = linux_setup_case(&temp.path().canonicalize().unwrap());
+        let first = project.join("worktrees").join("agent-one");
+        let owner_add = crate::spawn_gate::output(
+            Command::new(GIT)
+                .env_clear()
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .arg("-C")
+                .arg(&project)
+                .args(["worktree", "add", "-q", "--detach"])
+                .arg(&first)
+                .arg("HEAD"),
+        )
+        .unwrap();
+        assert!(
+            owner_add.status.success(),
+            "{}",
+            String::from_utf8_lossy(&owner_add.stderr)
+        );
+        let admins = project.join(".git").join("worktrees");
+        let contents = |folder: &Path| -> Vec<(String, Vec<u8>)> {
+            let mut files: Vec<(String, Vec<u8>)> = fs::read_dir(folder)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .filter(|path| path.is_file())
+                .map(|path| {
+                    let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                    (name, fs::read(&path).unwrap())
+                })
+                .collect();
+            files.sort();
+            files
+        };
+        let before = contents(&admins.join("agent-one"));
+        assert!(before.iter().any(|(name, _)| name == "gitdir"));
+        let second = project.join("worktrees").join("agent-two");
+
+        let refused =
+            add_worktree_at(&sandbox, &profile, &second, "HEAD", LinuxSupervisor::On).unwrap_err();
+
+        assert!(
+            matches!(
+                &refused,
+                RunError::Sandbox(SandboxError::Unavailable(line))
+                    if line == crate::sandbox::linux::CONFINED_UNAVAILABLE
+            ),
+            "{refused:?}"
+        );
+        assert!(!second.exists());
+        let names: Vec<String> = fs::read_dir(&admins)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["agent-one"]);
+        assert_eq!(contents(&admins.join("agent-one")), before);
     }
 
     /// On Linux a lead agent's own git is refused before any git starts, in its own folder

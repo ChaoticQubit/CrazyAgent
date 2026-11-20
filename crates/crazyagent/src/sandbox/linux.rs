@@ -233,7 +233,7 @@ const GIT_FOLLOWED: &[&str] = &[
     "worktrees",
 ];
 
-const CONFINED_UNAVAILABLE: &str = "an agent confined to its own worktree cannot run on Linux yet: \
+pub(crate) const CONFINED_UNAVAILABLE: &str = "an agent confined to its own worktree cannot run on Linux yet: \
      neither Landlock nor bubblewrap can keep the worktree's git links and the existing git \
      objects read-only inside the git folders it must write";
 
