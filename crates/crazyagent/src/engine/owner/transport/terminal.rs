@@ -1250,3 +1250,6 @@ pub(super) async fn refuse(
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests;
