@@ -258,12 +258,12 @@ impl CodexHostProcess {
 
     /// The state the process shares with its custody worker, so a row can count the passes
     /// of both loops while it drives the process. Output: the shared state.
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(super) fn shared(&self) -> Arc<ProcessShared> {
         Arc::clone(&self.shared)
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(super) fn observed_bytes(&self) -> (u64, u64) {
         match self.shared.state.lock() {
             Ok(state) => state.observed,
@@ -286,7 +286,7 @@ impl CodexHostProcess {
         assert!(self.shared.state.is_poisoned());
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(test)]
     pub(super) fn exit_status(&self) -> Option<ExitStatus> {
         match self.shared.state.lock() {
             Ok(state) => state.status,
