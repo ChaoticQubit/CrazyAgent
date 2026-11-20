@@ -2674,14 +2674,8 @@ impl Grants {
                     "the git worktrees folder is no longer a plain folder",
                 ));
             }
-            for entry in fs::read_dir(&admins)? {
-                admins_held.push(entry?.path());
-                if admins_held.len() > GRANTS_MAX {
-                    return Err(invalid(
-                        "the git worktrees folder has too many entries to hold",
-                    ));
-                }
-            }
+            admins_held.clone_from(&sandbox.held_admins);
+            assert!(admins_held.len() <= GRANTS_MAX);
             assert!(
                 admins_held
                     .iter()
@@ -2788,6 +2782,36 @@ impl Grants {
             hidden,
         })
     }
+}
+
+/// The entries a project's `.git/worktrees` holds now, none when it or `.git` is no
+/// folder, at most [`GRANTS_MAX`]: the admin folders a worktree-add step holds whole for
+/// all its git calls, while the one it adds stays writable (V244-LINUX-TEAM S4, r4).
+/// Input: the project folder. Output: the entries, or the error reading them.
+pub(crate) fn admin_entries(project: &Path) -> Result<Vec<PathBuf>, SandboxError> {
+    let admins = project.join(".git").join("worktrees");
+    let listing = match fs::read_dir(&admins) {
+        Ok(listing) => listing,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(Vec::new());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let mut entries = Vec::new();
+    for entry in listing {
+        entries.push(entry?.path());
+        if entries.len() > GRANTS_MAX {
+            return Err(invalid(
+                "the git worktrees folder has too many entries to hold",
+            ));
+        }
+    }
+    Ok(entries)
 }
 
 /// Refuses a launch whose hidden folders a second mount of their disk shows ([`mounted_again`]),
@@ -6178,7 +6202,11 @@ mod tests {
         assert_eq!(git_own(&sandbox), alone);
         let lease = temp.path().canonicalize().unwrap().join("lease");
         fs::create_dir(&lease).unwrap();
-        let worked = sandbox.allow_worktree(&lease).unwrap().adding_worktrees();
+        let worked = sandbox
+            .allow_worktree(&lease)
+            .unwrap()
+            .adding_worktrees()
+            .unwrap();
         let state = project.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
         let expected = GitOwn {
             trees: vec![project.clone(), lease],

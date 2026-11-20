@@ -3018,7 +3018,7 @@ pub fn add_worktree_at(
     }
     fs::create_dir_all(&worktrees)?;
     let adding = InstalledSandbox::install(
-        sandbox.clone().adding_worktrees(),
+        sandbox.clone().adding_worktrees()?,
         profile,
         calls,
         LinuxStrict::Off,
