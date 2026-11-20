@@ -1,23 +1,16 @@
 use crate::engine::EngineError;
 #[cfg(unix)]
 use std::collections::BTreeSet;
-#[cfg(unix)]
 use std::io::Read;
-#[cfg(unix)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
 use std::process::{Command, Stdio};
-#[cfg(unix)]
 use std::time::Duration;
-#[cfg(unix)]
 use std::time::Instant;
 
 pub(super) const OUTPUT_BYTES_MAX: usize = 64 * 1024 * 1024;
 pub(super) const LISTING_BYTES_MAX: usize = 64 * 1024;
-#[cfg(unix)]
 const STEP_TIME: Duration = Duration::from_secs(90);
-#[cfg(unix)]
 const POLL: Duration = Duration::from_millis(2);
 /// The oldest git all of landing runs on, the floor the test farm's git is held to: 2.40,
 /// the first with `merge-tree --merge-base` and `check-attr --source`, which a squash merge
@@ -26,7 +19,6 @@ const VERSION_MIN: (u32, u32) = (2, 40);
 /// The oldest git that opening a repository, an agent worktree and every engine git call
 /// outside those two run on: 2.39, the Apple Git-154 of Xcode 16 and its Command Line Tools
 /// (W-GIT-FLOOR, V243-WORKTREE-GIT-FLOOR).
-#[cfg(unix)]
 pub(crate) const OPEN_VERSION_MIN: (u32, u32) = (2, 39);
 
 #[cfg(test)]
@@ -259,16 +251,22 @@ fn landlock_helper() -> Option<PathBuf> {
     Some(engine.with_file_name(crate::sandbox::linux::HELPER_NAME))
 }
 
+/// The setting that names no attributes file, with the null device as the platform spells it
+/// (rv-sec3 #746 Q3b G3: Git for Windows reads `NUL`).
+#[cfg(unix)]
+const ATTRIBUTES_OFF: &str = "core.attributesFile=/dev/null";
+#[cfg(windows)]
+const ATTRIBUTES_OFF: &str = "core.attributesFile=NUL";
+
 /// The settings every engine git call carries on top of the research runner's
 /// `git_safe`: no attributes file from outside the repository, no automatic upkeep, the
 /// case-folding path checks on, no signing, no untracked or split index caches, no
 /// reflog created for a ref update and no commit-graph file, which a confined process could
 /// write to make git answer ancestry wrongly (land-19 r1 M1), and no advice about the grafts
 /// file the command's `GIT_GRAFT_FILE=/dev/null` names (land-19 r2).
-#[cfg(unix)]
 const ENGINE_SETTINGS: [&str; 22] = [
     "-c",
-    "core.attributesFile=/dev/null",
+    ATTRIBUTES_OFF,
     "-c",
     "gc.auto=0",
     "-c",
@@ -294,7 +292,6 @@ const ENGINE_SETTINGS: [&str; 22] = [
 /// The git arguments that list every include entry of every config file git reads, with
 /// the file each came from, NUL-separated: `include.path` and `includeIf.<condition>.path`,
 /// whatever the condition says now. Git answers 1 with nothing printed when there is none.
-#[cfg(unix)]
 const INCLUDE_KEYS: [&str; 5] = [
     "config",
     "--show-origin",
@@ -510,8 +507,10 @@ impl Repo {
     /// ignore file for a work tree, and refuses a config hook or an include placed in the
     /// checkout or work tree (rv-sec2 N1). The git folder is the owner checkout's `.git` or a
     /// linked worktree's, never an agent's clone (CC-N1). Inputs: the checkout root, the git
-    /// folder and the work tree, if any. Output: the repository or a `changes_git_*` refusal.
-    #[cfg(unix)]
+    /// folder and the work tree, if any. Its own reads name no work tree, as every read of the
+    /// git database does on Windows (rv-sec3 #746 Q3b G1, G5), and on Windows any include is
+    /// refused, since the placement check reads Unix paths. Output: the repository or a
+    /// `changes_git_*` refusal.
     pub(super) fn open(
         repository: &Path,
         git_dir: &Path,
@@ -522,8 +521,11 @@ impl Repo {
             git_dir == metadata || git_dir.parent() == Some(metadata.join("worktrees").as_path()),
             "engine git opens only the owner checkout's git folder or a linked worktree's"
         );
+        #[cfg(unix)]
         let excludes =
             work_tree.and_then(|_| owner_excludes_setting(super::Within::GitDir(git_dir)));
+        #[cfg(windows)]
+        let excludes = None;
         let mut repo = Self {
             git_dir: git_dir.to_path_buf(),
             work_tree: work_tree.map(Path::to_path_buf),
@@ -537,10 +539,15 @@ impl Repo {
             copies: false,
             version: None,
         };
-        let found = repo.found_version()?;
+        let reads = Self {
+            work_tree: None,
+            excludes: None,
+            ..repo.clone()
+        };
+        let found = reads.found_version()?;
         refuse_older(&found, OPEN_VERSION_MIN, "changes_git_old")?;
         repo.version = found.first().copied().zip(found.get(1).copied());
-        let listing = repo.capture(&crate::research::runner::FILTER_KEYS, LISTING_BYTES_MAX)?;
+        let listing = reads.capture(&crate::research::runner::FILTER_KEYS, LISTING_BYTES_MAX)?;
         let keys = crate::research::runner::listed_filter_keys(&listing)
             .ok_or_else(|| failure("changes_git_failed"))?;
         assert!(keys.len() < listing.len());
@@ -553,14 +560,20 @@ impl Repo {
             .map(crate::sandbox::canonical)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| failure("changes_git_failed"))?;
-        let includes = repo.exec(&INCLUDE_KEYS, None, &[], LISTING_BYTES_MAX)?;
+        let includes = reads.exec(&INCLUDE_KEYS, None, &[], LISTING_BYTES_MAX)?;
         let listed = includes.code == 0 || (includes.code == 1 && includes.stdout.is_empty());
         if includes.overflow || !listed {
             return Err(failure("changes_git_failed"));
         }
+        #[cfg(unix)]
         let outside =
             crate::ide::bridge::remote_git::includes_placed_outside(&includes.stdout, &folders)
                 .ok_or_else(|| failure("changes_git_failed"))?;
+        #[cfg(windows)]
+        let outside = {
+            assert!(!folders.is_empty());
+            includes.stdout.is_empty()
+        };
         if !outside {
             eprintln!("landing_config_include_refused");
             return Err(failure("changes_git_include"));
@@ -569,18 +582,6 @@ impl Repo {
             .map_err(|_| failure("changes_git_unsupported"))?;
         assert!(repo.overrides.len().is_multiple_of(8));
         Ok(repo)
-    }
-
-    /// Refuses engine git where the host git and the research runner's filter listing
-    /// do not exist. Takes the checkout root, git folder and work tree, unused.
-    /// Returns `changes_unavailable`.
-    #[cfg(not(unix))]
-    pub(super) fn open(
-        _repository: &Path,
-        _git_dir: &Path,
-        _work_tree: Option<&Path>,
-    ) -> Result<Self, EngineError> {
-        Err(failure("changes_unavailable"))
     }
 
     /// Opens a repository the engine is making itself, whose config only the engine wrote:
@@ -906,8 +907,15 @@ impl Repo {
         self.capture(&["version"], 256).map(version_numbers)
     }
 
-    #[cfg(unix)]
-    fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
+    /// Builds one git command over this repository with the engine's environment and
+    /// settings ([`ENGINE_SETTINGS`], `git_safe`, the null device for every config, graft and
+    /// attributes file). On Windows only a call that reads the git database starts this way:
+    /// it names no work tree and starts in the git folder, never in a folder an agent writes,
+    /// and runs the one judged git (rv-sec3 #746 Q3b G1, G3, G4). Inputs: the arguments and
+    /// extra environment. Output: the command, or `changes_git_unsupported` on Windows for a
+    /// call with a work tree and no step, or with no judged git.
+    fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Result<Command, EngineError> {
+        #[cfg(unix)]
         let mut command = if self.confinement.is_empty() {
             Command::new(crate::research::runner::setup_git())
         } else if cfg!(target_os = "linux") {
@@ -919,14 +927,30 @@ impl Repo {
             confined.args(&self.confinement);
             confined
         };
+        #[cfg(windows)]
+        let mut command = {
+            if !self.confinement.is_empty() || self.work_tree.is_some() {
+                return Err(failure("changes_git_unsupported"));
+            }
+            let git =
+                crate::worktrees::git_program().map_err(|_| failure("changes_git_unsupported"))?;
+            Command::new(git)
+        };
+        command.env_clear();
+        #[cfg(unix)]
+        command.env("PATH", "/usr/bin:/bin");
+        #[cfg(windows)]
+        for name in ["PATH", "SystemRoot"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
         command
-            .env_clear()
-            .env("PATH", "/usr/bin:/bin")
             .env("LC_ALL", "C")
             .envs(crate::research::runner::GIT_SAFE_ENV)
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE)
             .env("GIT_NO_REPLACE_OBJECTS", "1")
-            .env("GIT_GRAFT_FILE", "/dev/null")
+            .env("GIT_GRAFT_FILE", crate::github::NULL_DEVICE)
             .envs(env.iter().copied())
             .envs(self.index.iter().map(|index| ("GIT_INDEX_FILE", index)))
             .arg("--no-optional-locks")
@@ -949,7 +973,15 @@ impl Repo {
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        command
+        assert!(cfg!(unix) || command.get_current_dir() == Some(self.git_dir.as_path()));
+        Ok(command)
+    }
+
+    /// The command [`Self::command`] builds for `args`, for a row to read. Input: the
+    /// arguments. Output: as there.
+    #[cfg(test)]
+    pub(super) fn built(&self, args: &[&str]) -> Result<Command, EngineError> {
+        self.command(args, &[])
     }
 
     /// Runs one git command within `STEP_TIME`, feeding it `input` and keeping at most
@@ -1220,25 +1252,8 @@ impl Repo {
         Ok(entries)
     }
 
-    /// Starts no git where engine git has no confined design yet, Windows among them, so
-    /// no landing git runs over the owner's or an agent's folders with the engine's own
-    /// rights (PLAN-1336 W5a). Inputs: as [`Self::exec`], unused. Output:
-    /// `changes_git_unsupported`.
-    #[cfg(not(unix))]
-    fn spawned(
-        &self,
-        args: &[&str],
-        input: Option<&[u8]>,
-        env: &[(&str, &str)],
-        limit: usize,
-    ) -> Result<Output, EngineError> {
-        let _ = (self, args, input, env, limit);
-        Err(failure("changes_git_unsupported"))
-    }
-
     /// Starts one git command and collects what [`Self::exec`] answers. Inputs and output:
     /// as there.
-    #[cfg(unix)]
     fn spawned(
         &self,
         args: &[&str],
@@ -1246,7 +1261,7 @@ impl Repo {
         env: &[(&str, &str)],
         limit: usize,
     ) -> Result<Output, EngineError> {
-        let mut command = self.command(args, env);
+        let mut command = self.command(args, env)?;
         #[cfg(test)]
         GIT_RUNS.with(|runs| runs.set(runs.get() + 1));
         #[cfg(test)]

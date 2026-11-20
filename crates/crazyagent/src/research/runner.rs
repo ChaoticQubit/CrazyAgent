@@ -3423,7 +3423,6 @@ fn filter_keys(
 /// smudge, clean and process commands and `required=false`, so a checkout runs none of them
 /// and still succeeds. Takes NUL-separated config keys, as [`listed_filter_keys`] gives them.
 /// Returns the arguments, or `Invalid` for a driver name a `-c` cannot carry or too many.
-#[cfg(unix)]
 pub(crate) fn filter_overrides(listing: &[u8]) -> Result<Vec<String>, RunError> {
     let refused = || {
         RunError::Invalid(
