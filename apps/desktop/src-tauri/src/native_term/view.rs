@@ -1,5 +1,6 @@
 use super::a11y::{Geometry, Grid};
 use super::event::{MouseKind, Sink, ViewEvent};
+use super::host::LABEL_BYTES_MAX;
 use super::ime::{self, Ime, Mods, Route};
 use super::view_text::{Access, KeyDown, attributed, range_or_none};
 use objc2::rc::Retained;
@@ -17,9 +18,6 @@ use std::cell::{Cell, RefCell};
 
 /// The most clicks a press reports: 1 places the cursor, 2 a word, 3 a line.
 const CLICKS_MAX: u8 = 3;
-
-/// The longest label VoiceOver says for a view, in bytes.
-pub const LABEL_BYTES_MAX: usize = 256;
 
 /// The host function VoiceOver's text is read from, with the view's id: the visible grid,
 /// or none while the screen is busy, when the last text read serves.

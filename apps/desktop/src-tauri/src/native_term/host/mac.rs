@@ -7,6 +7,7 @@ use crate::native_term::a11y::{self, Geometry};
 use crate::native_term::pane::GRID_MAX;
 use crate::native_term::render::{GPU_FAULT, Shared, Surface};
 use crate::native_term::screen::Frame;
+use crate::native_term::style::Style;
 use crate::native_term::view::TermView;
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::term::Term;
@@ -79,6 +80,7 @@ pub fn open_view(
     key: u32,
     _rect: [f64; 4],
     label: &str,
+    _style: &Style,
     events: Channel<NativeEvent>,
     project: Option<String>,
 ) -> Result<View, &'static str> {
@@ -159,11 +161,11 @@ pub fn fit(view: &mut View, shared: &mut Shared, pixels: (u32, u32)) -> bool {
 /// Draws a frame into the view's surface on the main thread. Inputs: the view, the
 /// renderer at its scale and the frame. Output: ok, `native_terminal_gpu` when the GPU
 /// refused the frame, or the skipped code when there is no surface or the draw skipped.
-pub fn paint(view: &mut View, shared: &mut Shared, frame: &Frame) -> Result<(), &'static str> {
+pub fn paint(view: &mut View, shared: &mut Shared, frame: Frame) -> Result<(), &'static str> {
     let Some(surface) = view.surface.as_mut() else {
         return Err(SKIPPED);
     };
-    match shared.draw(surface, frame) {
+    match shared.draw(surface, &frame) {
         Ok(()) => Ok(()),
         Err(code) if code == GPU_FAULT => Err(GPU_FAULT),
         Err(_) => Err(SKIPPED),
