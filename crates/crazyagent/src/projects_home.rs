@@ -9,6 +9,8 @@ mod move_tests;
 mod platform;
 pub mod reinstall;
 pub(crate) mod setup_mark;
+#[cfg(test)]
+mod spelling_tests;
 mod watch;
 
 pub use intake::{
@@ -305,6 +307,16 @@ pub(crate) fn one_spelling(real: PathBuf) -> PathBuf {
         }
     }
     real
+}
+
+/// The plain Windows spelling of path text (leader 11-20 05:2x, rv-sec2 #717 C1): a
+/// verbatim disk path `\\?\C:\...` gives `C:\...`, and plain text stays as it is, when the
+/// result passes [`crate::sandbox::windows_clean_text`]. A UNC, device or other verbatim form,
+/// or text Win32 would normalise to another name, gives none. Input: the text. Output: the
+/// plain text, or none.
+#[cfg(any(windows, test))]
+pub(crate) fn windows_plain(_text: &str) -> Option<&str> {
+    None
 }
 
 /// The data volume's name for a path in its one spelling, when that names the same entry,

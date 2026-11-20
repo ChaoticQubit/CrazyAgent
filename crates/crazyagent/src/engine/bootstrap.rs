@@ -102,6 +102,13 @@ impl Identity {
             inode: metadata.ino(),
         }
     }
+
+    /// Refuses to read an open object's identity on Windows until W3-4a builds it.
+    /// Takes the handle, unused. Returns `owner_anchor_unavailable`.
+    #[cfg(windows)]
+    fn of_file(_file: &File) -> Result<Self, EngineError> {
+        Err(fail("owner_anchor_unavailable"))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -313,6 +320,19 @@ impl Anchor {
     fn metadata(&self, name: &str) -> Result<std::fs::Metadata, EngineError> {
         self.verify()?;
         std::fs::symlink_metadata(self.path.join(name)).map_err(io_error)
+    }
+
+    /// Refuses to open an anchor entry on Windows until W3-4a builds it.
+    /// Takes the name, the kind and the refusal code, all unused. Returns
+    /// `owner_anchor_unavailable`.
+    #[cfg(windows)]
+    fn entry(
+        &self,
+        _name: &str,
+        _folder: bool,
+        _code: &str,
+    ) -> Result<(File, Identity), EngineError> {
+        Err(fail("owner_anchor_unavailable"))
     }
 }
 
@@ -1573,6 +1593,9 @@ impl Drop for EngineService {
         }
     }
 }
+
+#[cfg(all(test, windows))]
+mod anchor_windows_tests;
 
 #[cfg(all(test, unix))]
 mod tests {

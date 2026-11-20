@@ -190,6 +190,10 @@ fn a_root_spelled_as_canonicalize_spells_it_opens_and_a_junction_still_fails() {
     let spelled = std::fs::canonicalize(&path).unwrap();
     assert!(spelled.to_str().unwrap().starts_with(r"\\?\"));
     let root = Root::open(&spelled).expect("the verbatim spelling of the canonical root opens");
+    assert_eq!(
+        root.path, path,
+        "a verbatim root is stored in its one plain spelling (rv-sec2 #717 C1)"
+    );
     root.verify().unwrap();
     let link = base.join("link");
     run(
@@ -207,5 +211,31 @@ fn a_root_spelled_as_canonicalize_spells_it_opens_and_a_junction_still_fails() {
     assert_eq!(
         refusal(Root::open(Path::new(&through))),
         "owner_root_requires_canonical_trusted_path"
+    );
+}
+
+#[test]
+fn a_short_name_root_and_a_verbatim_unc_root_are_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let full = std::fs::canonicalize(temp.path()).unwrap();
+    let plain = PathBuf::from(full.to_str().unwrap().strip_prefix(r"\\?\").unwrap());
+    let path = private_folder(&plain.join("root"));
+    Root::open(&path).expect("the root opens at its plain long name");
+    let short = temp.path().join("root");
+    assert!(
+        short.to_str().unwrap().contains('~'),
+        "the hosted runner's temp folder is spelled with a short name: {}",
+        short.display()
+    );
+    assert_eq!(
+        refusal(Root::open(&short)),
+        "owner_root_requires_canonical_trusted_path"
+    );
+    let text = path.to_str().unwrap();
+    let unc = format!(r"\\?\UNC\localhost\{}$\{}", &text[..1], &text[3..]);
+    assert_eq!(
+        refusal(Root::open(Path::new(&unc))),
+        "owner_root_requires_canonical_trusted_path",
+        "a verbatim UNC root is refused by its spelling, before any open"
     );
 }
