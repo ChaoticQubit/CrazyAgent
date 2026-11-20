@@ -15,12 +15,37 @@ pub(crate) fn pinnable(_metadata: &std::fs::Metadata) -> Result<(), EngineError>
     Err(EngineError("native_auth_host_unavailable".into()))
 }
 
+/// Red stand-in for N1's Windows pin rule on an open file, refused until the pin lands.
+/// Input: the path, unused. Output: `native_auth_host_unavailable`.
+#[cfg(test)]
+pub(crate) fn pinnable_at(_path: &Path) -> Result<(), EngineError> {
+    Err(EngineError("native_auth_host_unavailable".into()))
+}
+
+#[cfg(test)]
+#[path = "native_auth_host/pin_windows_tests.rs"]
+mod pin_windows_tests;
+
 /// A registered native sign-in host executable, which cannot exist without the Unix
 /// owner, mode and inode checks that pin it. `capture` reports `native_auth_host_unavailable`,
 /// so every method below is unreachable by construction.
 pub(crate) enum RegisteredNativeAuthHost {}
 
 impl RegisteredNativeAuthHost {
+    /// Red stand-in for N1's Windows capture past the live-pin gate, refused until the pin
+    /// lands. Input: the path, unused. Output: `native_auth_host_unavailable`.
+    #[cfg(test)]
+    pub(crate) fn capture_pinned(_path: &Path) -> Result<Self, EngineError> {
+        Err(EngineError("native_auth_host_unavailable".into()))
+    }
+
+    /// Red stand-in for the count of hashes a host's checks ran; no host exists.
+    /// Input: the host. Output: none, the type has no value.
+    #[cfg(test)]
+    pub(crate) fn rehashes(&self) -> usize {
+        match *self {}
+    }
+
     /// Refuses to pin a native sign-in host executable on this platform.
     /// Takes the executable path, unused. Returns `native_auth_host_unavailable`.
     pub(crate) fn capture(_path: &Path) -> Result<Self, EngineError> {

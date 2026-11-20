@@ -18,6 +18,8 @@ path = "src/bin/crazyagent-win-boundary.rs"
 [target.'cfg(windows)'.dependencies]
 tokio = { version = "=1.53.2", features = ["net"] }
 windows-sys = { version = "=0.61.2", features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
     "Win32_Networking_WinSock",
@@ -28,6 +30,7 @@ windows-sys = { version = "=0.61.2", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_IO",
     "Win32_System_JobObjects",
+    "Win32_System_Memory",
     "Win32_System_Pipes",
     "Win32_System_SystemInformation",
     "Win32_System_SystemServices",

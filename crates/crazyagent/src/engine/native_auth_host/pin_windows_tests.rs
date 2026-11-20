@@ -1,0 +1,323 @@
+use super::{RegisteredNativeAuthHost, pinnable, pinnable_at};
+use crazyagent_win_sandbox::test_files::{null_dacl, supersede, writable_view};
+use sha2::Digest;
+use std::fs::{File, OpenOptions};
+use std::os::windows::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+const FILE_SHARE_READ: u32 = 0x1;
+const FILE_SHARE_WRITE: u32 = 0x2;
+const FILE_SHARE_DELETE: u32 = 0x4;
+const UNSAFE: &str = "native_auth_host_executable_unsafe";
+const CHANGED: &str = "native_auth_host_executable_changed";
+const UNAVAILABLE: &str = "native_auth_host_unavailable";
+const SHARING_VIOLATION: i32 = 32;
+const SHARE_ALL: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+const HARNESS_BYTES: usize = 64 * 1024;
+
+/// A private folder for one row and a harness file in it.
+/// Input: the harness file name. Output: the folder guard and the harness's absolute path.
+fn harness(name: &str) -> (tempfile::TempDir, PathBuf) {
+    let folder = tempfile::tempdir().unwrap();
+    let path = std::fs::canonicalize(folder.path()).unwrap().join(name);
+    std::fs::write(&path, vec![b'A'; HARNESS_BYTES]).unwrap();
+    assert!(path.is_absolute());
+    (folder, plain(&path))
+}
+
+/// The plain `C:\...` spelling of a canonical path, as the one-spelling rule asks.
+/// Input: the path. Output: the path without a `\\?\` prefix.
+fn plain(path: &Path) -> PathBuf {
+    let text = path.to_str().unwrap();
+    PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(text))
+}
+
+/// Gives Everyone the rights an `icacls` grant names on a file or folder.
+/// Inputs: the path and the grant, such as `(W)` or `(DC)`. Output: none; panics on failure.
+fn grant_everyone(path: &Path, rights: &str) {
+    let granted = crate::spawn_gate::collected(
+        Command::new("icacls")
+            .arg(path)
+            .arg("/grant")
+            .arg(format!("*S-1-1-0:{rights}")),
+    )
+    .unwrap();
+    assert!(
+        granted.status.success(),
+        "icacls failed: {}",
+        String::from_utf8_lossy(&granted.stderr)
+    );
+}
+
+/// The code an engine error carries. Input: the result. Output: the code, or "ok".
+fn code<T>(result: Result<T, crate::engine::EngineError>) -> String {
+    match result {
+        Ok(_) => "ok".to_owned(),
+        Err(error) => error.0,
+    }
+}
+
+/// Opens a file again with the given access and every share mode, as another program would.
+/// Inputs: the path and the access mask. Output: the open file or the OS error.
+fn open_as(path: &Path, access: u32) -> std::io::Result<File> {
+    OpenOptions::new()
+        .access_mode(access)
+        .share_mode(SHARE_ALL)
+        .open(path)
+}
+
+/// A harness the user owns, with no other writer on it or its folder, is pinned and its hash is
+/// the file's SHA-256; an Everyone write entry or a NULL access list is refused as unsafe.
+#[test]
+fn a_private_harness_is_pinned_and_an_everyone_write_entry_or_a_null_dacl_is_refused() {
+    let (_folder, path) = harness("codex.exe");
+    let host = RegisteredNativeAuthHost::capture_pinned(&path).unwrap();
+    let expected = sha2::Sha256::digest(std::fs::read(&path).unwrap());
+    let expected: String = expected.iter().map(|byte| format!("{byte:02x}")).collect();
+    assert_eq!(host.verified_sha256().unwrap(), expected);
+    let (_open, written) = harness("codex.exe");
+    grant_everyone(&written, "(W)");
+    assert_eq!(
+        code(RegisteredNativeAuthHost::capture_pinned(&written)),
+        UNSAFE
+    );
+    let (_null, nulled) = harness("codex.exe");
+    null_dacl(&nulled).unwrap();
+    assert_eq!(
+        code(RegisteredNativeAuthHost::capture_pinned(&nulled)),
+        UNSAFE
+    );
+}
+
+/// The harness's folder chain is judged as harness search judges it
+/// (`service::changeable_by_others`): Everyone with delete-child or add-file on the harness's
+/// folder is refused, since either lets another account swap the harness or plant a DLL
+/// beside it; the same harness in a private folder passes.
+#[test]
+fn a_harness_folder_others_can_delete_or_add_files_in_is_refused() {
+    let (_private, path) = harness("claude.exe");
+    assert_eq!(code(RegisteredNativeAuthHost::capture_pinned(&path)), "ok");
+    assert_eq!(code(pinnable_at(&path)), "ok");
+    for grant in ["(DC)", "(WD)"] {
+        let (_folder, opened) = harness("claude.exe");
+        grant_everyone(opened.parent().unwrap(), grant);
+        assert_eq!(
+            code(RegisteredNativeAuthHost::capture_pinned(&opened)),
+            UNSAFE,
+            "{grant}"
+        );
+        assert_eq!(code(pinnable_at(&opened)), UNSAFE, "{grant}");
+    }
+}
+
+/// While pinned no program opens the harness for write (sharing violation) and its bytes stay;
+/// a capture while another handle holds write access, or while a writable mapped view made
+/// before it lives, is refused as changed (probe 2c).
+#[test]
+fn a_pinned_harness_takes_no_write_and_a_harness_open_for_write_is_never_pinned() {
+    let (_folder, path) = harness("codex.exe");
+    let host = RegisteredNativeAuthHost::capture_pinned(&path).unwrap();
+    let before = host.verified_sha256().unwrap();
+    let refused = OpenOptions::new()
+        .write(true)
+        .share_mode(SHARE_ALL)
+        .open(&path);
+    assert_eq!(refused.unwrap_err().raw_os_error(), Some(SHARING_VIOLATION));
+    assert_eq!(host.verified_sha256().unwrap(), before);
+    drop(host);
+    let writer = OpenOptions::new()
+        .write(true)
+        .share_mode(SHARE_ALL)
+        .open(&path)
+        .unwrap();
+    assert_eq!(
+        code(RegisteredNativeAuthHost::capture_pinned(&path)),
+        CHANGED
+    );
+    drop(writer);
+    let view = writable_view(&path).unwrap();
+    assert_eq!(
+        code(RegisteredNativeAuthHost::capture_pinned(&path)),
+        CHANGED
+    );
+    drop(view);
+    assert_eq!(code(RegisteredNativeAuthHost::capture_pinned(&path)), "ok");
+}
+
+/// Probe 2d1 as a row: a supersede with DELETE access alone succeeds under the pin and empties
+/// the same file id, so the next pre-spawn check refuses the harness as changed.
+#[test]
+fn a_supersede_through_delete_sharing_is_refused_at_the_next_check() {
+    let (_folder, path) = harness("claude.exe");
+    let host = RegisteredNativeAuthHost::capture_pinned(&path).unwrap();
+    assert_eq!(code(host.verified_path()), "ok");
+    supersede(&path).unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+    assert_eq!(code(host.verified_path()), CHANGED);
+    assert_eq!(code(host.verified_sha256()), CHANGED);
+}
+
+/// B: every pre-spawn check hashes the pinned file again on Windows, since no time on Windows
+/// proves its bytes; three checks are three hashes, and a time change alone keeps the pin.
+#[test]
+fn every_check_hashes_the_pinned_harness_again_and_a_time_change_alone_keeps_it() {
+    let (_folder, path) = harness("codex.exe");
+    let host = RegisteredNativeAuthHost::capture_pinned(&path).unwrap();
+    let digest = host.verified_sha256().unwrap();
+    let after_first = host.rehashes();
+    assert_eq!(code(host.verified_path()), "ok");
+    assert_eq!(code(host.verified_path()), "ok");
+    assert_eq!(host.rehashes(), after_first + 2);
+    let touch = open_as(&path, FILE_WRITE_ATTRIBUTES).unwrap();
+    touch
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(86_400))
+        .unwrap();
+    drop(touch);
+    assert_eq!(host.verified_sha256().unwrap(), digest);
+}
+
+/// rv-sec2 #721 r1 5b: a hard link made after capture changes the link count, which a retime
+/// never adopts, so the next check refuses the harness as changed.
+#[test]
+fn a_hard_link_made_after_capture_is_refused_not_adopted() {
+    let (_folder, path) = harness("codex.exe");
+    let host = RegisteredNativeAuthHost::capture_pinned(&path).unwrap();
+    assert_eq!(code(host.verified_path()), "ok");
+    std::fs::hard_link(&path, path.with_file_name("second.exe")).unwrap();
+    assert_eq!(code(host.verified_path()), CHANGED);
+}
+
+/// rv-sec2 #721 r2 C5: the time one pre-spawn check takes on this image for a harness of the
+/// installed Claude Code's size (360 MB), written to the file the farm names, never asserted.
+#[test]
+#[ignore = "farm timing probe, run with --ignored"]
+fn the_time_one_check_takes_for_a_360_mb_harness() {
+    let out = std::env::var_os("CRAZYAGENT_FARM_PROBE_OUT").unwrap();
+    let (_folder, path) = harness("claude.exe");
+    std::fs::write(&path, vec![0x5a; 360 * 1024 * 1024]).unwrap();
+    let captured = std::time::Instant::now();
+    let host = RegisteredNativeAuthHost::capture_pinned(&path).unwrap();
+    let capture = captured.elapsed();
+    let mut checks = Vec::new();
+    for _ in 0..3 {
+        let started = std::time::Instant::now();
+        host.verified_path().unwrap();
+        checks.push(started.elapsed().as_millis());
+    }
+    std::fs::write(
+        out,
+        format!("capture_ms={} check_ms={checks:?}\n", capture.as_millis()),
+    )
+    .unwrap();
+}
+
+/// A second name (a hard link) or a symbolic link at the path is refused; the plain file passes.
+#[test]
+fn a_hard_linked_harness_or_a_link_at_the_path_is_refused() {
+    let (_folder, path) = harness("codex.exe");
+    assert_eq!(code(RegisteredNativeAuthHost::capture_pinned(&path)), "ok");
+    let second = path.with_file_name("second.exe");
+    std::fs::hard_link(&path, &second).unwrap();
+    assert_eq!(
+        code(RegisteredNativeAuthHost::capture_pinned(&path)),
+        UNSAFE
+    );
+    std::fs::remove_file(&second).unwrap();
+    let link = path.with_file_name("link.exe");
+    std::os::windows::fs::symlink_file(&path, &link).unwrap();
+    assert_eq!(
+        code(RegisteredNativeAuthHost::capture_pinned(&link)),
+        UNSAFE
+    );
+    assert_eq!(code(RegisteredNativeAuthHost::capture_pinned(&path)), "ok");
+}
+
+/// An updater's swap at the path: a rename aside with a new file, and a replace over the pinned
+/// path, leave another file at the path, refused as changed; the new file pins on its own.
+#[test]
+fn a_harness_swapped_aside_or_replaced_over_is_refused_and_the_new_file_pins() {
+    let (_folder, path) = harness("claude.exe");
+    let host = RegisteredNativeAuthHost::capture_pinned(&path).unwrap();
+    std::fs::rename(&path, path.with_extension("old")).unwrap();
+    std::fs::write(&path, vec![b'D'; HARNESS_BYTES]).unwrap();
+    assert_eq!(code(host.verified_path()), CHANGED);
+    let fresh = RegisteredNativeAuthHost::capture_pinned(&path).unwrap();
+    let replacement = path.with_extension("new");
+    std::fs::write(&replacement, vec![b'E'; HARNESS_BYTES]).unwrap();
+    match std::fs::rename(&replacement, &path) {
+        Ok(()) => assert_eq!(code(fresh.verified_path()), CHANGED),
+        Err(error) => {
+            assert!(error.raw_os_error().is_some());
+            assert_eq!(code(fresh.verified_path()), "ok");
+        }
+    }
+}
+
+/// Q2 row 4c: while pinned, the harness's own folder cannot be renamed and a new folder put in
+/// its place, and the pin still verifies.
+#[test]
+fn the_folder_of_a_pinned_harness_cannot_be_renamed_while_pinned() {
+    let (_folder, path) = harness("codex.exe");
+    let host = RegisteredNativeAuthHost::capture_pinned(&path).unwrap();
+    let parent = path.parent().unwrap().to_path_buf();
+    let moved = parent.with_file_name(format!(
+        "{}-moved",
+        parent.file_name().unwrap().to_str().unwrap()
+    ));
+    assert!(std::fs::rename(&parent, &moved).is_err());
+    assert_eq!(code(host.verified_path()), "ok");
+}
+
+/// Length bounds: an empty file and one past 1 GiB are refused; a 1-byte file passes.
+#[test]
+fn an_empty_or_over_long_harness_is_refused_and_one_byte_passes() {
+    let (_folder, path) = harness("codex.exe");
+    std::fs::write(&path, b"").unwrap();
+    assert_eq!(
+        code(RegisteredNativeAuthHost::capture_pinned(&path)),
+        UNSAFE
+    );
+    File::create(&path)
+        .unwrap()
+        .set_len(1024 * 1024 * 1024 + 1)
+        .unwrap();
+    assert_eq!(
+        code(RegisteredNativeAuthHost::capture_pinned(&path)),
+        UNSAFE
+    );
+    std::fs::write(&path, b"A").unwrap();
+    assert_eq!(code(RegisteredNativeAuthHost::capture_pinned(&path)), "ok");
+}
+
+/// Q3 row 6b: a batch file is never a harness, whatever the case of its extension.
+#[test]
+fn a_batch_file_harness_is_refused_and_an_exe_passes() {
+    for name in ["codex.bat", "codex.cmd", "codex.BAT", "codex.Cmd"] {
+        let (_folder, path) = harness(name);
+        assert_eq!(
+            code(RegisteredNativeAuthHost::capture_pinned(&path)),
+            UNSAFE,
+            "{name}"
+        );
+    }
+    let (_folder, path) = harness("codex.exe");
+    assert_eq!(code(RegisteredNativeAuthHost::capture_pinned(&path)), "ok");
+}
+
+/// Q5: until N3 the live pin stays off on Windows, so harness search and every engine-start
+/// capture still answer unavailable while the pin itself works.
+#[test]
+fn the_live_pin_stays_off_on_windows_until_the_custodian_lands() {
+    let (_folder, path) = harness("codex.exe");
+    let metadata = std::fs::metadata(&path).unwrap();
+    assert_eq!(code(pinnable(&metadata)), UNAVAILABLE);
+    assert_eq!(code(RegisteredNativeAuthHost::capture(&path)), UNAVAILABLE);
+    assert_eq!(
+        code(RegisteredNativeAuthHost::capture_entry(&path)),
+        UNAVAILABLE
+    );
+    assert_eq!(code(pinnable_at(&path)), "ok");
+    assert_eq!(code(RegisteredNativeAuthHost::capture_pinned(&path)), "ok");
+}
