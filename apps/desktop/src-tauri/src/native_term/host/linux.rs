@@ -265,7 +265,20 @@ fn host_rect(page: &gtk::Widget, toplevel: &gtk::Window, css: [f64; 4]) -> Optio
 mod tests {
     use super::*;
     use crate::native_term::linux::rows::{green_shared, pump_for, pump_until, white_toplevel};
+    use crate::native_term::style::{FontSource, Theme};
     use std::time::Duration;
+
+    /// The style a row view opens with; the Linux host draws with its renderer's own
+    /// style, so only the shape matters. Output: the style.
+    fn row_style() -> Style {
+        Style {
+            family: "row",
+            source: FontSource::Built(&[]),
+            font_px: 13.0,
+            blink: false,
+            theme: Theme::default(),
+        }
+    }
 
     /// The page place the rows open and show at, inside the 640x480 page.
     const PLACE: [f64; 4] = [100.0, 80.0, 200.0, 150.0];
@@ -288,6 +301,7 @@ mod tests {
             100,
             PLACE,
             "row",
+            &row_style(),
             events,
             None,
         )
@@ -362,7 +376,7 @@ mod tests {
         let mut view = opened(&page);
         let scale = place_view(&mut view, PLACE, VIEWPORT, true).expect("shown");
         let key = (scale * 100.0) as u32;
-        let (mut shared, frame) = green_shared(scale as i32);
+        let (mut shared, _) = green_shared(scale as i32);
         assert!(
             fit(&mut view, &mut shared, (0, 0)),
             "a surface on the child"
@@ -371,7 +385,14 @@ mod tests {
         let mut held = 0;
         for _ in 0..PRESENTS {
             pump_until("the next frame ready", || ready(&mut view));
-            assert_eq!(paint(&mut view, &mut shared, &frame), Ok(()));
+            let frame = Frame {
+                rows: Vec::new(),
+                keys: Vec::new(),
+                fills: Vec::new(),
+                cursor: None,
+                preedit: None,
+            };
+            assert_eq!(paint(&mut view, &mut shared, frame), Ok(()));
             if ready(&mut view) {
                 continue;
             }
@@ -429,6 +450,7 @@ mod tests {
             100,
             bad,
             "row",
+            &row_style(),
             events,
             None,
         );
