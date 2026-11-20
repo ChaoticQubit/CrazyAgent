@@ -1,6 +1,8 @@
 mod process;
 mod process_custody;
 mod protocol;
+#[cfg(any(windows, test))]
+mod pump;
 
 pub use protocol::{CodexHostBatch, CodexHostProtocol};
 
