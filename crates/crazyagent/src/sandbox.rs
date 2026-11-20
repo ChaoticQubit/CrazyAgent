@@ -1453,6 +1453,8 @@ pub struct ProjectSandbox {
     tool_cache: Option<(PathBuf, bool)>,
     lead_branch: Option<String>,
     adds_worktrees: bool,
+    #[cfg(target_os = "linux")]
+    held_admins: Vec<PathBuf>,
     agent_files: Option<policy::AgentFilesRule>,
     granted: Vec<PathBuf>,
     owner_tmp: Option<PathBuf>,
@@ -1544,6 +1546,8 @@ impl ProjectSandbox {
             tool_cache: None,
             lead_branch: None,
             adds_worktrees: false,
+            #[cfg(target_os = "linux")]
+            held_admins: Vec::new(),
             agent_files: None,
             granted: Vec::new(),
             owner_tmp: None,
@@ -1873,15 +1877,19 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Lets git create a checkout's `.git` link in the project's worktrees folders and the
-    /// `gitdir` and `commondir` files of its admin folder, which no other profile may plant
-    /// (SECAUDIT-WORKTREE-ADMIN-PLANT). Only the engine's own worktree-add step installs it,
-    /// and its callers confine and reinstall the profile before any agent runs.
-    /// Output: the sandbox with that exemption.
+    /// Lets the engine's own worktree-add step make a checkout's `.git` link and its admin
+    /// folder, which no other profile may plant (SECAUDIT-WORKTREE-ADMIN-PLANT); on Linux it
+    /// keeps the admin folders already there, which the step's boundary holds whole
+    /// ([`linux::admin_entries`]). Callers confine and reinstall it before any agent runs.
+    /// Output: the sandbox with that exemption, or the error listing those folders.
     #[cfg(unix)]
-    pub(crate) fn adding_worktrees(mut self) -> Self {
+    pub(crate) fn adding_worktrees(mut self) -> Result<Self, SandboxError> {
         self.adds_worktrees = true;
-        self
+        #[cfg(target_os = "linux")]
+        {
+            self.held_admins = linux::admin_entries(&self.project_root)?;
+        }
+        Ok(self)
     }
 
     /// Confines the agent's writes to its own worktree, its `.git/worktrees` admin folder

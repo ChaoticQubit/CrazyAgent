@@ -9682,6 +9682,9 @@ impl TeamRuntime {
         if !adopt {
             spawn_ledger::begin_worktree(&self.root, id, &root, &worktree)?;
         }
+        let calls = crate::sandbox_settings::load(&self.connection)
+            .map(|settings| settings.linux_supervisor)
+            .unwrap_or_default();
         let mut made = NewClone(None);
         match (adopt, layout) {
             (true, Layout::Linked) => {}
@@ -9696,6 +9699,7 @@ impl TeamRuntime {
                 &profile,
                 &worktree,
                 base.as_deref().unwrap_or("HEAD"),
+                calls,
             )
             .map_err(|e| with_code("the agent worktree could not be added", Some(run_code(&e))))?,
             (false, Layout::Clone) => {
@@ -9816,9 +9820,6 @@ impl TeamRuntime {
                 .install(&agent_teammates_profile(&self.state, id))
                 .map_err(sandboxed)?;
         }
-        let calls = crate::sandbox_settings::load(&self.connection)
-            .map(|settings| settings.linux_supervisor)
-            .unwrap_or_default();
         let full_access = InstalledSandbox::install(sandbox, &profile, calls, LinuxStrict::Off)
             .map_err(sandboxed)?
             .unconfined();
