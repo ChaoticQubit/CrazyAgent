@@ -329,8 +329,7 @@ impl SettingsResolver {
         projects_root: &Path,
         database: &Path,
     ) -> Result<Self, String> {
-        let projects_root = projects_root
-            .canonicalize()
+        let projects_root = crate::projects_home::resolved(projects_root)
             .map_err(|error| format!("projects folder: {error}"))?;
         if !projects_root.is_dir() {
             return Err("projects folder must be a directory".into());
@@ -505,7 +504,7 @@ impl SettingsResolver {
             .and_then(|database| stored_folder(database, project))
             .unwrap_or_else(|| self.projects_root.join(project));
         let metadata = std::fs::symlink_metadata(&folder).ok()?;
-        if !metadata.file_type().is_dir() || folder.canonicalize().ok()? != folder {
+        if !metadata.file_type().is_dir() || !crate::projects_home::is_canonical(&folder).ok()? {
             return None;
         }
         Some(folder)

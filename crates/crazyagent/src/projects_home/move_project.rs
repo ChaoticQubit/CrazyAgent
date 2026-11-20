@@ -460,7 +460,7 @@ pub(super) fn landing_repositories(
             |row| row.get::<_, String>(0),
         )
         .map_err(sql)?;
-    let under_origin = |path: &Path| path.starts_with(origin) || path.starts_with(&short);
+    let under_origin = |path: &Path| super::inside(path, origin) || super::inside(path, &short);
     for repository in stored {
         let repository = PathBuf::from(repository.map_err(sql)?);
         let inside = under_origin(&repository)
@@ -615,7 +615,7 @@ fn names_inside(destination: &Path, project: &Registered) -> bool {
     assert!(destination.is_absolute());
     std::iter::once(&project.folder)
         .chain(&project.repositories)
-        .any(|used| used.starts_with(destination))
+        .any(|used| super::inside(used, destination))
 }
 
 /// Tells whether an agent of the project works in a linked git worktree of its
@@ -699,7 +699,7 @@ fn checked(
     if set_up == 0 {
         return Err(refused("project_setup_missing"));
     }
-    let real = std::fs::canonicalize(&found.folder).map_err(|_| refused("home_source_missing"))?;
+    let real = super::resolved(&found.folder).map_err(|_| refused("home_source_missing"))?;
     if super::inside(&one_spelling(real.clone()), &one_spelling(home.clone())) {
         return Err(refused("move_project_already_home"));
     }
