@@ -7,11 +7,9 @@ use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::fs::OpenOptions;
 use std::io::Read;
-#[cfg(unix)]
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
-#[cfg(unix)]
 use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::process::{Command as Process, Stdio};
@@ -27,17 +25,20 @@ const UNTRUSTED_GIT_ENTRY: &str = "untrusted_git_entry:";
 const SHOWN_ENTRY_BYTES_MAX: usize = 160;
 const SHARED_WORKTREE_FILES: &[&str] = &["HEAD", "commondir", "gitdir", "locked"];
 const HEAD_BYTES_MAX: usize = 512;
-#[cfg(unix)]
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "used on Windows once W5a builds landing there; W5a removes this"
+    )
+)]
 pub(crate) const TREE_BOUNDS: TreeBounds = TreeBounds {
     files: 262_144,
     bytes: 2 * 1024 * 1024 * 1024,
     components: 64,
 };
-#[cfg(unix)]
 const TREE_LISTING_BYTES_MAX: usize = 64 * 1024 * 1024;
-#[cfg(unix)]
 const LINK_TARGET_BYTES_MAX: u64 = 1024;
-#[cfg(unix)]
 const LINKS_LEFT_OUT_MAX: usize = 64;
 #[cfg(unix)]
 const MATERIALIZE_TIME_MAX: Duration = Duration::from_secs(60);
@@ -77,7 +78,13 @@ const WORKTREE_CONFIG_TRIES: usize = 3;
 
 /// The largest commit tree a lease copies. Fields: the most tracked files and symlinks,
 /// the most content bytes across them, and the most path components in one path.
-#[cfg(unix)]
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "used on Windows once W5a builds landing there; W5a removes this"
+    )
+)]
 pub(crate) struct TreeBounds {
     pub(crate) files: usize,
     pub(crate) bytes: u64,
@@ -86,7 +93,13 @@ pub(crate) struct TreeBounds {
 
 /// One tracked file or symlink of the lease commit. Fields: whether it is a file (and
 /// executable) or a symlink, its blob id, its size in bytes and its path in the tree.
-#[cfg(unix)]
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "W3-5c calls it from materialize on Windows; W3-5c removes this"
+    )
+)]
 #[derive(Debug)]
 struct TreeEntry {
     link: bool,
@@ -175,19 +188,74 @@ fn rejected(code: &str) -> Outcome {
     Outcome::Rejected { code: code.into() }
 }
 
-/// Refuses a worktree file identity where the Unix owner, mode, device and inode do not
-/// exist. Takes the path and kind, both unused. Returns `worktree_filesystem_unavailable`.
-#[cfg(not(unix))]
-fn identity(_path: &Path, _directory: bool) -> Result<Identity, EngineError> {
-    Err(error("worktree_filesystem_unavailable"))
+/// The Windows twin of the Unix owner, mode, kind and link checks, read from one handle
+/// opened on the entry itself, never through a link: no reparse point, the kind asked, one
+/// name for a file, a trusted owner and no other account or app container with a right that
+/// changes it (`dacl::held_only_by`; rv-sec2 #742 Q2). Inputs: the path and whether it must
+/// be a folder. Output: its volume serial and file id, or `untrusted_filesystem_identity`.
+#[cfg(windows)]
+fn identity(path: &Path, directory: bool) -> Result<Identity, EngineError> {
+    use crazyagent_win_sandbox::{dacl, private};
+    use std::os::windows::fs::OpenOptionsExt;
+    let entry = std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL | FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .map_err(error)?;
+    let kind = entry.metadata().map_err(error)?;
+    let facts = private::facts(&entry).map_err(error)?;
+    let user = private::user_sid().map_err(error)?;
+    let rights = if directory {
+        dacl::OWN_FOLDER_CHANGES
+    } else {
+        dacl::FILE_CHANGES
+    };
+    if facts.reparse
+        || (directory && !kind.is_dir())
+        || (!directory && (!kind.is_file() || facts.links != 1))
+        || dacl::held_only_by(&facts.owner, facts.list.as_deref(), &user, rights).is_err()
+    {
+        return Err(error("untrusted_filesystem_identity"));
+    }
+    let (device, inode) = private::identity(&entry).map_err(error)?;
+    assert!(!facts.reparse);
+    Ok(Identity { device, inode })
 }
 
-/// Refuses the identity of an entry already read where the Unix owner, mode, device and
-/// inode do not exist. Takes the entry and kind, both unused. Returns
-/// `worktree_filesystem_unavailable`.
-#[cfg(not(unix))]
-fn identified(_entry: &std::fs::Metadata, _directory: bool) -> Result<Identity, EngineError> {
-    Err(error("worktree_filesystem_unavailable"))
+/// The rights [`identity`] opens an entry with on Windows: its security descriptor and its
+/// attributes, nothing that reads or changes its data.
+#[cfg(windows)]
+const READ_CONTROL: u32 = 0x0002_0000;
+#[cfg(windows)]
+const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+/// The sharing [`identity`] allows on Windows, so its brief open never blocks a git.
+#[cfg(windows)]
+const FILE_SHARE_READ: u32 = 0x1;
+#[cfg(windows)]
+const FILE_SHARE_WRITE: u32 = 0x2;
+#[cfg(windows)]
+const FILE_SHARE_DELETE: u32 = 0x4;
+/// Opens a link or junction itself, never its target, and opens a folder at all.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+/// The identity of an entry a walk read without following a link: on Unix judged from that
+/// one read, on Windows from a no-follow handle on it, since Windows metadata names no owner
+/// or access list. Inputs: the entry's path and its metadata. Output: the identity, or the
+/// refusal.
+#[cfg(unix)]
+fn entry_identity(_path: &Path, entry: &std::fs::Metadata) -> Result<Identity, EngineError> {
+    identified(entry, entry.is_dir())
+}
+
+/// The Windows arm of [`entry_identity`]: [`identity`] of the path, as the kind it was listed.
+/// Inputs: the entry's path and its metadata. Output: the identity, or the refusal.
+#[cfg(windows)]
+fn entry_identity(path: &Path, entry: &std::fs::Metadata) -> Result<Identity, EngineError> {
+    identity(path, entry.is_dir())
 }
 
 #[cfg(unix)]
@@ -216,8 +284,17 @@ fn identified(metadata: &std::fs::Metadata, directory: bool) -> Result<Identity,
     })
 }
 
+#[cfg(all(test, windows))]
+mod canonical_windows_tests;
+#[cfg(all(test, windows))]
+mod identity_windows_tests;
+#[cfg(all(test, windows))]
+mod root_and_git_windows_tests;
+#[cfg(all(test, windows))]
+mod tree_windows_tests;
+
 fn canonical(path: &Path) -> Result<(), EngineError> {
-    if !path.is_absolute() || std::fs::canonicalize(path).map_err(error)? != path {
+    if !path.is_absolute() || !crate::projects_home::is_canonical(path).map_err(error)? {
         return Err(error("repository_path_not_canonical"));
     }
     for ancestor in path.ancestors() {
@@ -233,12 +310,37 @@ fn canonical(path: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Refuses a bounded worktree file read where no no-follow open is used here.
-/// Takes the path and limit, both unused. Returns `worktree_filesystem_unavailable`.
-#[cfg(not(unix))]
-fn bounded_read(_path: &Path, _limit: usize) -> Result<Vec<u8>, EngineError> {
-    Err(error("worktree_filesystem_unavailable"))
+/// The Windows twin of the no-follow, non-blocking bounded read: the entry itself is opened,
+/// never a link's target, and kept only when it is a regular file with no reparse point, at
+/// most `limit` bytes (W3-5 D3). Inputs: the path and the limit. Output: the bytes, or
+/// `expected_regular_file`, `file_capacity` or the open failure.
+#[cfg(windows)]
+fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .map_err(error)?;
+    let metadata = file.metadata().map_err(error)?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(error("expected_regular_file"));
+    }
+    let mut bytes = Vec::new();
+    file.take((limit + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(error)?;
+    if bytes.len() > limit {
+        return Err(error("file_capacity"));
+    }
+    assert!(bytes.len() <= limit);
+    Ok(bytes)
 }
+
+/// The attribute bit of an entry that is a link, junction or other reparse point.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 
 /// Reads a small file an agent may have replaced: opened without following a link and
 /// without waiting on a FIFO or device, kept only when it is a regular file, at most
@@ -282,29 +384,40 @@ fn git_until(
     output_max: usize,
     deadline: Instant,
 ) -> Result<Vec<u8>, EngineError> {
-    let child = crate::spawn_gate::spawn(&mut git_command(repository, args)).map_err(error)?;
+    let child = crate::spawn_gate::spawn(&mut git_command(repository, args)?).map_err(error)?;
     collect_git_output(child, output_max, deadline)
 }
 
 /// Builds the engine's Git process: the host Git with a cleared environment, no system
 /// or global config, the engine's safe settings (no hooks, fsmonitor, pager, protocols or
 /// signature programs), no replace objects, grafts, commit-graph files or automatic
-/// maintenance. Inputs: the repository and the arguments. Output: the unspawned process.
-fn git_command(repository: &Path, args: &[&str]) -> Process {
-    let mut command = Process::new("/usr/bin/git");
+/// maintenance. Inputs: the repository and the arguments. Output: the unspawned process,
+/// or [`GIT_OLD`] when no git is found.
+fn git_command(repository: &Path, args: &[&str]) -> Result<Process, EngineError> {
+    let mut command = Process::new(git_program()?);
+    command.env_clear();
+    #[cfg(unix)]
+    command.env("PATH", "/usr/bin:/bin");
+    #[cfg(windows)]
+    for name in ["PATH", "SystemRoot"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
     command
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE)
         .envs(crate::research::runner::GIT_SAFE_ENV)
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_GRAFT_FILE", "/dev/null")
+        .env("GIT_GRAFT_FILE", crate::github::NULL_DEVICE)
         .arg("--no-replace-objects")
         .arg("--no-optional-locks")
         .args(crate::research::runner::git_safe())
+        .arg("-c")
+        .arg(format!(
+            "core.attributesFile={}",
+            crate::github::NULL_DEVICE
+        ))
         .args([
-            "-c",
-            "core.attributesFile=/dev/null",
             "-c",
             "gc.auto=0",
             "-c",
@@ -322,7 +435,43 @@ fn git_command(repository: &Path, args: &[&str]) -> Process {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    command
+    Ok(command)
+}
+
+/// The git every engine worktree command runs: the host `/usr/bin/git` on Unix.
+/// Output: its path.
+#[cfg(unix)]
+pub(crate) fn git_program() -> Result<PathBuf, EngineError> {
+    Ok(PathBuf::from("/usr/bin/git"))
+}
+
+/// The git every engine worktree command runs on Windows, [`git_program_in`] the engine's
+/// own PATH. Output: its absolute path, or the refusal.
+#[cfg(windows)]
+pub(crate) fn git_program() -> Result<PathBuf, EngineError> {
+    git_program_in(std::env::var_os("PATH").as_deref())
+}
+
+/// The git the engine's own git resolver finds in `path`, never a bare name a process
+/// search could match in a working folder: an `.exe`, never a batch file cmd.exe would parse
+/// the engine's arguments through nor the script an npm shim names, that no other account
+/// can change with its install (rv-sec2 #742 D5-1 D5-2). Input: a PATH value. Output: its
+/// path, [`GIT_OLD`] when none is found (the owner reads "update Git"), or `worktree_git_untrusted`.
+#[cfg(windows)]
+fn git_program_in(path: Option<&std::ffi::OsStr>) -> Result<PathBuf, EngineError> {
+    let found = crate::github::git_program(path).ok_or_else(|| error(GIT_OLD))?;
+    assert!(found.is_absolute());
+    let program = found
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"));
+    let install = crate::sandbox::windows::owner_git::install_root(&found);
+    if !program
+        || crate::service::changeable_by_others(&found).is_some()
+        || install.is_some_and(|root| crate::service::changeable_by_others(root).is_some())
+    {
+        return Err(error("worktree_git_untrusted"));
+    }
+    Ok(found)
 }
 
 fn collect_git_output(
@@ -469,7 +618,7 @@ fn walk_metadata(metadata: &Path, start: &Path) -> Result<(), EngineError> {
 /// inside .git.
 fn trusted(metadata: &Path, path: &Path) -> Result<std::fs::Metadata, EngineError> {
     let entry = std::fs::symlink_metadata(path).map_err(error)?;
-    identified(&entry, entry.is_dir()).map_err(|_| untrusted(metadata, path))?;
+    entry_identity(path, &entry).map_err(|_| untrusted(metadata, path))?;
     Ok(entry)
 }
 
@@ -534,7 +683,7 @@ fn listed(metadata: &Path, path: &Path) -> Result<Option<std::fs::Metadata>, Eng
     before_read(path, false);
     match std::fs::symlink_metadata(path) {
         Ok(entry) => {
-            identified(&entry, entry.is_dir()).map_err(|_| untrusted(metadata, path))?;
+            entry_identity(path, &entry).map_err(|_| untrusted(metadata, path))?;
             Ok(Some(entry))
         }
         Err(gone) if gone.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -1148,7 +1297,6 @@ fn validate_config(repository: &Path) -> Result<(), EngineError> {
 /// so the owner reads which Git to update (V243-WORKTREE-GIT-FLOOR). Input: the
 /// repository. Output: Ok, else `worktree_git_old`, or `changes_git_unsupported` for a
 /// version line that names no version.
-#[cfg(unix)]
 fn refuse_old_git(repository: &Path) -> Result<(), EngineError> {
     let found = crate::landing::version_numbers(git(repository, &["version"])?);
     crate::landing::refuse_older(&found, crate::landing::OPEN_VERSION_MIN, GIT_OLD)
@@ -1160,10 +1308,14 @@ fn inspect(repository: &str) -> Result<Admission, EngineError> {
     let root = identity(path, true)?;
     let metadata = identity(&path.join(".git"), true)?;
     validate_metadata(path)?;
-    #[cfg(unix)]
     refuse_old_git(path)?;
     validate_config(path)?;
     let actual = git(path, &["rev-parse", "--show-toplevel"])?;
+    #[cfg(windows)]
+    let actual: Vec<u8> = actual
+        .into_iter()
+        .map(|byte| if byte == b'/' { b'\\' } else { byte })
+        .collect();
     if actual.strip_suffix(b"\n") != Some(repository.as_bytes()) {
         return Err(error("repository_root_mismatch"));
     }
@@ -1434,11 +1586,18 @@ fn prepare(
     })
 }
 
-/// Refuses the private worktree root where no 0700 directory can be made or checked.
-/// Takes the runtime folder, unused. Returns `worktree_filesystem_unavailable`.
-#[cfg(not(unix))]
-fn private_worktree_root(_runtime: &Path) -> Result<PathBuf, EngineError> {
-    Err(error("worktree_filesystem_unavailable"))
+/// The private folder every agent worktree is made in, the Windows twin of the 0700 root:
+/// `worktrees` in the canonical runtime folder, made or opened by W1's `private::dir`, which
+/// gives a new folder the user-only protected list each worktree below inherits and refuses
+/// one that is not private (W3-5 D4). Input: the runtime folder. Output: the root, or the refusal.
+#[cfg(windows)]
+fn private_worktree_root(runtime: &Path) -> Result<PathBuf, EngineError> {
+    canonical(runtime)?;
+    let root = runtime.join("worktrees");
+    drop(crazyagent_win_sandbox::private::dir(&root).map_err(error)?);
+    canonical(&root)?;
+    assert!(root.starts_with(runtime));
+    Ok(root)
 }
 
 #[cfg(unix)]
@@ -1516,7 +1675,13 @@ pub(crate) fn lease_git_dir(
 /// Names the branch of the lease whose worktree is at `path`, the only ref a master
 /// worktree's HEAD may name when the engine reads or moves it. Inputs: the connection and
 /// the worktree path. Output: the branch, or `lease_missing`.
-#[cfg(unix)]
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "used on Windows once W5a builds landing there; W5a removes this"
+    )
+)]
 pub(crate) fn lease_branch(connection: &Connection, path: &Path) -> Result<String, EngineError> {
     let path = path.to_str().ok_or_else(|| error("lease_missing"))?;
     let body: Option<String> = connection
@@ -1948,9 +2113,18 @@ fn ensure_submodule_stores(repository: &Path, admin: &Path) -> Result<(), Engine
 
 /// Lists the files and symlinks of a commit tree and refuses one the lease cannot copy:
 /// past its bounds, holding a submodule or other non-blob entry, an unsafe or `.git`
-/// path, or a symlink target longer than the system path limit. Inputs: the repository,
-/// the commit, the bounds and the deadline. Output: the entries in Git's tree order.
-#[cfg(unix)]
+/// path, or a symlink target longer than the system path limit. On Windows a path part the
+/// shared name rule refuses is refused too ([`refused_on_windows`]), since a create
+/// relative to a folder writes a name literally that Git reads through Win32 normalisation
+/// (rv-sec2 #742 D6-1, #751 L1). Inputs: the repository, the commit, the bounds and the
+/// deadline. Output: the entries in Git's tree order.
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "W3-5c calls it from materialize on Windows; W3-5c removes this"
+    )
+)]
 fn tree_entries(
     repository: &Path,
     head: &str,
@@ -1984,6 +2158,7 @@ fn tree_entries(
             || path
                 .components()
                 .any(|p| crate::instruction_files::names_git(&p.as_os_str().to_string_lossy()))
+            || refused_on_windows(&path)
         {
             return Err(error("unsupported_or_unsafe_tree_entry"));
         }
@@ -2015,11 +2190,45 @@ fn tree_entries(
     Ok(entries)
 }
 
+/// Says whether a tree path holds a part Windows cannot name again once made relative to a
+/// folder: one the shared name rule `crazyagent_win_sandbox::name::refused` refuses, which
+/// W1 `create_under` and `rename` assert (rv-sec2 #742 D6-1, #751 L1). Input: the tree path.
+/// Output: the answer.
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "W3-5c calls it from materialize on Windows; W3-5c removes this"
+    )
+)]
+#[cfg(windows)]
+fn refused_on_windows(path: &Path) -> bool {
+    path.components().any(|part| {
+        part.as_os_str()
+            .to_str()
+            .is_none_or(crazyagent_win_sandbox::name::refused)
+    })
+}
+
+/// Off Windows no tree path part is refused beyond the checks [`tree_entries`] makes
+/// itself. Input: the tree path, unused. Output: false.
+#[cfg(unix)]
+fn refused_on_windows(_path: &Path) -> bool {
+    false
+}
+
 /// Streams every entry's blob from one `git cat-file --batch` into the worktree folder,
 /// killing Git when the deadline passes. Inputs: the repository, the sealed worktree
 /// folder, the listed entries and the deadline. Output: the paths of the symlinks left
-/// out because they would point outside the lease, or the refusal code.
-#[cfg(unix)]
+/// out because they would point outside the lease, or on Windows every symlink, or the
+/// refusal code.
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "W3-5c calls it from materialize on Windows; W3-5c removes this"
+    )
+)]
 fn write_tree(
     repository: &Path,
     directory: &std::fs::File,
@@ -2027,7 +2236,7 @@ fn write_tree(
     deadline: Instant,
 ) -> Result<Vec<String>, EngineError> {
     let mut child = crate::spawn_gate::spawn(
-        git_command(repository, &["cat-file", "--batch"]).stdin(Stdio::piped()),
+        git_command(repository, &["cat-file", "--batch"])?.stdin(Stdio::piped()),
     )
     .map_err(error)?;
     let input = child
@@ -2076,7 +2285,13 @@ fn write_tree(
 /// Asks Git for each entry's blob in turn and writes it: a file with its exact bytes and
 /// mode, a symlink when its target stays inside the lease. Inputs: Git's batch input and
 /// output, the worktree folder and the entries. Output: the left-out symlink paths.
-#[cfg(unix)]
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "W3-5c calls it from materialize on Windows; W3-5c removes this"
+    )
+)]
 fn copy_blobs(
     mut input: std::process::ChildStdin,
     output: std::process::ChildStdout,
@@ -2107,9 +2322,7 @@ fn copy_blobs(
             if target.len() as u64 != entry.size {
                 return Err(error("tree_object_truncated"));
             }
-            if link_stays_inside(&entry.path, &target) {
-                folders.write_link(&entry.path, &target)?;
-            } else {
+            if !folders.kept_link(&entry.path, &target)? {
                 if left_out.len() >= LINKS_LEFT_OUT_MAX {
                     return Err(error("tree_link_capacity"));
                 }
@@ -2161,13 +2374,25 @@ fn link_stays_inside(link: &Path, target: &[u8]) -> bool {
 /// The worktree folder and the chain of subfolders opened for the previous entry, so
 /// entries in Git's tree order reuse open folders. Every folder is created or opened
 /// relative to its parent descriptor without following a symlink.
-#[cfg(unix)]
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "W3-5c calls it from materialize on Windows; W3-5c removes this"
+    )
+)]
 struct Folders<'a> {
     root: &'a std::fs::File,
     open: Vec<(std::ffi::OsString, std::fs::File)>,
 }
 
-#[cfg(unix)]
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "W3-5c calls it from materialize on Windows; W3-5c removes this"
+    )
+)]
 impl<'a> Folders<'a> {
     fn new(root: &'a std::fs::File) -> Self {
         Self {
@@ -2182,7 +2407,6 @@ impl<'a> Folders<'a> {
         &mut self,
         path: &'p Path,
     ) -> Result<(&std::fs::File, &'p std::ffi::OsStr), EngineError> {
-        use rustix::fs::{Mode, OFlags, mkdirat, openat};
         let components = path
             .components()
             .map(|c| match c {
@@ -2205,18 +2429,7 @@ impl<'a> Folders<'a> {
         self.open.truncate(shared);
         for folder in &folders[shared..] {
             let parent = self.open.last().map_or(self.root, |(_, file)| file);
-            match mkdirat(parent, *folder, Mode::from_raw_mode(0o700)) {
-                Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-                Err(e) => return Err(error(e)),
-            }
-            let next = openat(
-                parent,
-                *folder,
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map(std::fs::File::from)
-            .map_err(error)?;
+            let next = subfolder(parent, folder)?;
             self.open.push((folder.to_os_string(), next));
         }
         assert_eq!(self.open.len(), folders.len());
@@ -2232,29 +2445,42 @@ impl<'a> Folders<'a> {
         size: u64,
         executable: bool,
     ) -> Result<(), EngineError> {
-        use rustix::fs::{Mode, OFlags, openat};
         let (parent, name) = self.parent(path)?;
-        let mode = Mode::from_raw_mode(if executable { 0o700 } else { 0o600 });
-        let mut file = openat(
-            parent,
-            name,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            mode,
-        )
-        .map(std::fs::File::from)
-        .map_err(error)?;
+        let mut file = new_file(parent, name, executable)?;
         let written = std::io::copy(&mut source.take(size), &mut file).map_err(error)?;
         if written != size {
             return Err(error("tree_object_truncated"));
         }
         let metadata = file.metadata().map_err(error)?;
         assert_eq!(metadata.len(), size);
+        #[cfg(unix)]
         assert_eq!(metadata.nlink(), 1);
         Ok(())
     }
 
+    /// Writes a tracked symlink when it stays inside the lease ([`link_stays_inside`]).
+    /// Inputs: the link's tree path and its target. Output: whether it was written, so a
+    /// false answer leaves it out, or the error.
+    #[cfg(unix)]
+    fn kept_link(&mut self, path: &Path, target: &[u8]) -> Result<bool, EngineError> {
+        if !link_stays_inside(path, target) {
+            return Ok(false);
+        }
+        self.write_link(path, target)?;
+        Ok(true)
+    }
+
+    /// Leaves every tracked symlink out on Windows, where making one needs a privilege or
+    /// developer mode (PLAN-1325 Q3). Inputs: the link's tree path and target, unused.
+    /// Output: false.
+    #[cfg(windows)]
+    fn kept_link(&mut self, _path: &Path, _target: &[u8]) -> Result<bool, EngineError> {
+        Ok(false)
+    }
+
     /// Creates a symlink at a tree path. Inputs: the path and a target that
     /// `link_stays_inside` accepted. Output: success or the error.
+    #[cfg(unix)]
     fn write_link(&mut self, path: &Path, target: &[u8]) -> Result<(), EngineError> {
         assert!(link_stays_inside(path, target));
         let target = std::str::from_utf8(target).map_err(error)?;
@@ -2262,6 +2488,86 @@ impl<'a> Folders<'a> {
         rustix::fs::symlinkat(target, parent, name).map_err(error)?;
         Ok(())
     }
+}
+
+/// Makes, or opens when already there, the folder `name` in `parent` without following a
+/// symlink, private to the user. Inputs: the parent descriptor and the name. Output: the
+/// folder's descriptor, or the error.
+#[cfg(unix)]
+fn subfolder(parent: &std::fs::File, name: &std::ffi::OsStr) -> Result<std::fs::File, EngineError> {
+    use rustix::fs::{Mode, OFlags, mkdirat, openat};
+    match mkdirat(parent, name, Mode::from_raw_mode(0o700)) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Err(e) => return Err(error(e)),
+    }
+    openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map(std::fs::File::from)
+    .map_err(error)
+}
+
+/// Makes the new folder `name` in the held folder `parent` through W1 `create_under`, which
+/// refuses a name already there, case-only included, since a tree never lists a folder twice
+/// (rv-sec2 #742 D6-3). Inputs: the held parent and the name. Output: the held folder, or the
+/// error.
+#[cfg(windows)]
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "W3-5c calls it from materialize on Windows; W3-5c removes this"
+    )
+)]
+fn subfolder(parent: &std::fs::File, name: &std::ffi::OsStr) -> Result<std::fs::File, EngineError> {
+    use crazyagent_win_sandbox::private::{Create, create_under};
+    create_under(parent, name, Create::Folder).map_err(error)
+}
+
+/// Creates the new file `name` in `parent` without following a symlink, refusing a name
+/// already there, read and write for the user only, executable when asked. Inputs: the
+/// parent descriptor, the name and whether it is executable. Output: the open file, or the
+/// error.
+#[cfg(unix)]
+fn new_file(
+    parent: &std::fs::File,
+    name: &std::ffi::OsStr,
+    executable: bool,
+) -> Result<std::fs::File, EngineError> {
+    use rustix::fs::{Mode, OFlags, openat};
+    let mode = Mode::from_raw_mode(if executable { 0o700 } else { 0o600 });
+    openat(
+        parent,
+        name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        mode,
+    )
+    .map(std::fs::File::from)
+    .map_err(error)
+}
+
+/// Creates the new file `name` in the held folder `parent` through W1 `create_under`,
+/// refusing a name already there; Windows keeps no executable bit, and the lease runs with
+/// `core.fileMode=false`. Inputs: the held parent, the name and the bit, unused. Output: the
+/// held file, or the error.
+#[cfg(windows)]
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "W3-5c calls it from materialize on Windows; W3-5c removes this"
+    )
+)]
+fn new_file(
+    parent: &std::fs::File,
+    name: &std::ffi::OsStr,
+    _executable: bool,
+) -> Result<std::fs::File, EngineError> {
+    use crazyagent_win_sandbox::private::{Create, create_under};
+    create_under(parent, name, Create::File).map_err(error)
 }
 
 /// Finds a linked worktree's Git metadata folder from its `.git` file and checks that it
@@ -2294,8 +2600,10 @@ fn worktree_metadata(record: &LeaseRecord) -> Result<PathBuf, EngineError> {
     )?;
     validate_admin(Path::new(&record.lease.repository), &path)?;
     if bounded_read(&path.join("commondir"), 32)? != b"../..\n"
-        || bounded_read(&path.join("gitdir"), 4096)?
-            != format!("{}/.git\n", record.lease.path).as_bytes()
+        || !backlink_matches(
+            &bounded_read(&path.join("gitdir"), 4096)?,
+            Path::new(&record.lease.path),
+        )
     {
         return Err(error("worktree_backlink_mismatch"));
     }
@@ -2303,6 +2611,30 @@ fn worktree_metadata(record: &LeaseRecord) -> Result<PathBuf, EngineError> {
         return Err(error("worktree_config_present"));
     }
     Ok(path)
+}
+
+/// Says whether a lease's admin `gitdir` file links back to the lease worktree: the
+/// worktree's path, `/.git` and one newline, compared byte for byte. Inputs: the file's bytes
+/// and the lease path. Output: the answer.
+#[cfg(unix)]
+fn backlink_matches(bytes: &[u8], lease: &Path) -> bool {
+    bytes == format!("{}/.git\n", lease.display()).as_bytes()
+}
+
+/// Says whether a lease's admin `gitdir` file links back to the lease worktree on Windows:
+/// one newline ends it, and before it `/.git` follows a path equal to the lease's by
+/// component, since Git for Windows writes `/` where the lease path has `\`. Inputs: the
+/// file's bytes and the lease path. Output: the answer.
+#[cfg(windows)]
+fn backlink_matches(bytes: &[u8], lease: &Path) -> bool {
+    let Some(text) = bytes
+        .strip_suffix(b"\n")
+        .and_then(|line| std::str::from_utf8(line).ok())
+    else {
+        return false;
+    };
+    text.strip_suffix("/.git")
+        .is_some_and(|worktree| Path::new(worktree) == lease)
 }
 
 /// Reads a worktree's `config.worktree`. Input: the worktree's Git metadata folder.

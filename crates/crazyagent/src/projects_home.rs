@@ -1,3 +1,5 @@
+#[cfg(all(test, windows))]
+mod compare_windows_tests;
 pub(crate) mod delete_mark;
 pub mod icloud;
 mod intake;
@@ -9,6 +11,8 @@ mod move_tests;
 mod platform;
 pub mod reinstall;
 pub(crate) mod setup_mark;
+#[cfg(test)]
+mod spelling_tests;
 mod watch;
 
 pub use intake::{
@@ -293,9 +297,10 @@ fn same_entry(left: &Path, right: &Path) -> bool {
 
 /// One spelling for a path: on macOS a path under the data volume that names the same entry as
 /// the path without that prefix is given without it, the spelling `canonicalize` gives the
-/// short form, so both compare equal as text. Input: a path, resolved or not; only its text
-/// changes, and the same-entry check stats both names, following links. Output: that spelling,
-/// or the path unchanged when the two names are absent or differ, or off macOS.
+/// short form, so both compare equal as text; on Windows a verbatim disk path is given plain
+/// ([`windows_plain`]) and any other form is kept, so the plain-path checks refuse it. Input:
+/// a path, resolved or not; only its text changes. Output: that spelling, or the path
+/// unchanged.
 pub(crate) fn one_spelling(real: PathBuf) -> PathBuf {
     #[cfg(target_os = "macos")]
     if let Ok(rest) = real.strip_prefix(DATA_VOLUME) {
@@ -304,7 +309,22 @@ pub(crate) fn one_spelling(real: PathBuf) -> PathBuf {
             return short;
         }
     }
+    #[cfg(windows)]
+    if let Some(plain) = real.to_str().and_then(windows_plain) {
+        return PathBuf::from(plain);
+    }
     real
+}
+
+/// The plain Windows spelling of path text (leader 11-20 05:2x, rv-sec2 #717 C1): a
+/// verbatim disk path `\\?\C:\...` gives `C:\...`, and plain text stays as it is, when the
+/// result passes [`crate::sandbox::windows_clean_text`]. A UNC, device or other verbatim form,
+/// or text Win32 would normalise to another name, gives none. Input: the text. Output: the
+/// plain text, or none.
+#[cfg(any(windows, test))]
+pub(crate) fn windows_plain(text: &str) -> Option<&str> {
+    let plain = text.strip_prefix(r"\\?\").unwrap_or(text);
+    crate::sandbox::windows_clean_text(plain).then_some(plain)
 }
 
 /// The data volume's name for a path in its one spelling, when that names the same entry,
@@ -343,13 +363,62 @@ fn real_folder(path: &Path, missing: &str, not_folder: &str) -> Result<PathBuf, 
 /// the home's names on macOS. Inputs: a path in its one spelling and the owner's home.
 pub(crate) fn holds_owner_home(path: &Path, owner: &Path) -> bool {
     path.parent().is_none()
-        || owner.starts_with(path)
-        || data_twin(owner).is_some_and(|twin| twin.starts_with(path))
+        || inside(owner, path)
+        || data_twin(owner).is_some_and(|twin| inside(&twin, path))
 }
 
 /// True when one of the two folders is inside the other or they are the same.
 fn overlaps(left: &Path, right: &Path) -> bool {
-    left.starts_with(right) || right.starts_with(left)
+    inside(left, right) || inside(right, left)
+}
+
+/// A path resolved, then on Windows given the spelling [`one_spelling`] stores folders in;
+/// on macOS and Linux the resolved path as it is, so a check that compares it keeps its
+/// meaning there (W3-4c, leader 13:20 Q1). Input: the path. Output: the resolved path, or
+/// the I/O error.
+pub(crate) fn resolved(path: &Path) -> std::io::Result<PathBuf> {
+    let real = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    let real = one_spelling(real);
+    Ok(real)
+}
+
+/// Whether `path` names itself as [`resolved`] names it: no link on its way and, on
+/// Windows, the stored spelling. Input: the path. Output: the answer, or the I/O error of
+/// resolving it.
+pub(crate) fn is_canonical(path: &Path) -> std::io::Result<bool> {
+    Ok(resolved(path)? == path)
+}
+
+/// True when `path` is `folder` or lies below it, each compared by its [`compare_key`], so
+/// a refusal that asks whether one folder holds another never misses because one side kept
+/// a verbatim spelling (rv-sec2 #736 L1). Inputs: the path and the folder. Output: the answer.
+pub(crate) fn inside(path: &Path, folder: &Path) -> bool {
+    compare_key(path).starts_with(compare_key(folder))
+}
+
+/// The spelling a containment compare reads a path in. On Windows a verbatim drive path
+/// `\\?\C:\...` reads as `C:\...` even when [`one_spelling`] keeps it verbatim for a name
+/// the sandbox refuses; the stored spelling stays [`one_spelling`]'s. Elsewhere the path
+/// itself. Input: the path. Output: the key, borrowed from the path.
+fn compare_key(path: &Path) -> &Path {
+    #[cfg(windows)]
+    if let Some(plain) = path.to_str().and_then(windows_drive_plain) {
+        return Path::new(plain);
+    }
+    path
+}
+
+/// The drive path a verbatim drive path names, whatever names it holds: `\\?\C:\work` gives
+/// `C:\work`. Text in any other form, a UNC, device or plain path included, gives none.
+/// Input: the text. Output: the plain drive text, or none.
+#[cfg(any(windows, test))]
+pub(crate) fn windows_drive_plain(text: &str) -> Option<&str> {
+    let plain = text.strip_prefix(r"\\?\")?;
+    let bytes = plain.as_bytes();
+    let drive =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\';
+    drive.then_some(plain)
 }
 
 /// True when a real folder overlaps a folder the project uses: its own folder
@@ -596,11 +665,11 @@ pub fn check_add(
         "home_source_not_folder",
     )?;
     let saved = one_spelling(home.to_path_buf());
-    if real.starts_with(&saved) {
+    if inside(&real, &saved) {
         return Err(refused("home_source_in_home"));
     }
     let owner = owner_home()?;
-    if holds_owner_home(&real, &owner) || saved.starts_with(&real) || overlaps(&real, engine_root) {
+    if holds_owner_home(&real, &owner) || inside(&saved, &real) || overlaps(&real, engine_root) {
         return Err(refused("home_source_unsafe"));
     }
     let name = real
@@ -1362,9 +1431,8 @@ pub(crate) fn move_holds(
         .optional()?;
     Ok(origin.is_some_and(|origin| {
         let origin = one_spelling(PathBuf::from(origin));
-        folder.starts_with(&origin)
-            || std::fs::canonicalize(folder)
-                .is_ok_and(|real| one_spelling(real).starts_with(&origin))
+        inside(folder, &origin)
+            || std::fs::canonicalize(folder).is_ok_and(|real| inside(&one_spelling(real), &origin))
     }))
 }
 

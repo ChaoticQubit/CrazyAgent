@@ -9710,8 +9710,7 @@ impl TeamRuntime {
                 made = NewClone(Some(worktree.clone()));
             }
         }
-        let working_dir = worktree
-            .canonicalize()
+        let working_dir = crate::projects_home::resolved(&worktree)
             .map_err(|e| with_code("the agent worktree could not be opened", Some(io_code(&e))))?;
         if working_dir != worktree {
             return Err("the agent worktree is not a plain folder in the project".into());

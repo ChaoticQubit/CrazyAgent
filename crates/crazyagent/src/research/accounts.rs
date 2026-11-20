@@ -329,8 +329,7 @@ impl SettingsResolver {
         projects_root: &Path,
         database: &Path,
     ) -> Result<Self, String> {
-        let projects_root = projects_root
-            .canonicalize()
+        let projects_root = crate::projects_home::resolved(projects_root)
             .map_err(|error| format!("projects folder: {error}"))?;
         if !projects_root.is_dir() {
             return Err("projects folder must be a directory".into());
@@ -367,14 +366,7 @@ impl SettingsResolver {
     ) -> Option<(PathBuf, AccountPick)> {
         CredentialRef::new(project).ok()?;
         let database = self.engine();
-        let folder = database
-            .as_ref()
-            .and_then(|database| stored_folder(database, project))
-            .unwrap_or_else(|| self.projects_root.join(project));
-        let metadata = std::fs::symlink_metadata(&folder).ok()?;
-        if !metadata.file_type().is_dir() || folder.canonicalize().ok()? != folder {
-            return None;
-        }
+        let folder = self.plain_folder(database.as_ref(), project)?;
         let config = crate::config::resolve_config(&self.global, &self.project).ok()?;
         let access = config.settings.model_access.unwrap_or_default();
         let pools: Vec<&CredentialRef> = access
@@ -503,6 +495,21 @@ impl SettingsResolver {
         waiting
     }
 
+    /// The project's folder, as the engine recorded it or else under the projects folder,
+    /// while it is a real folder named in its canonical spelling, never through a link.
+    /// Inputs: the engine database, if it opened, and the project id. Output: the folder,
+    /// or `None`.
+    fn plain_folder(&self, database: Option<&Connection>, project: &str) -> Option<PathBuf> {
+        let folder = database
+            .and_then(|database| stored_folder(database, project))
+            .unwrap_or_else(|| self.projects_root.join(project));
+        let metadata = std::fs::symlink_metadata(&folder).ok()?;
+        if !metadata.file_type().is_dir() || !crate::projects_home::is_canonical(&folder).ok()? {
+            return None;
+        }
+        Some(folder)
+    }
+
     /// Opens the engine database for one resolve, or `None` when it cannot be
     /// opened, so managed accounts are then treated as signed out.
     fn engine(&self) -> Option<Connection> {
@@ -569,3 +576,5 @@ pub(crate) fn managed_sign_in(
 #[cfg(test)]
 #[path = "accounts_tests.rs"]
 mod accounts_tests;
+#[cfg(all(test, windows))]
+mod plain_folder_windows_tests;

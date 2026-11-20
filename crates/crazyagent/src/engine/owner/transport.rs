@@ -167,33 +167,34 @@ struct Root {
 impl Root {
     /// Opens an owner root on Windows (DESIGN-0256 D11, rv-sec2 #708): the folder must
     /// already exist and is held through W1 `open_dir`, so neither it nor a folder above it
-    /// can be renamed while held. Then the twin of the Unix canonical check, in one walk:
-    /// the held folder's real place (W1 `place`, every junction and link resolved) must be
-    /// the path, ordinal, with `\\?\` put in front unless the path is already spelled that
-    /// way (as `std::fs::canonicalize` spells it), so a junction or link anywhere on the path,
-    /// a short name or another case fails. Input: the absolute root path. Output: the held
-    /// root, or the refusal.
+    /// can be renamed while held. The path is first put in the one plain spelling (rv-sec2
+    /// #717 C1, `one_spelling`), and anything that is not then plain is refused. Then the twin
+    /// of the Unix canonical check, in one walk: the held folder's real place (W1 `place`)
+    /// must be `\\?\` plus the plain path, ordinal, so a junction or link anywhere on the
+    /// path, a short name or another case fails. Input: the root path. Output: the held root,
+    /// stored plain, or the refusal.
     #[cfg(windows)]
     fn open(path: &Path) -> Result<Self, EngineError> {
         use crazyagent_win_sandbox::private;
         use std::os::windows::ffi::OsStrExt;
-        if !path.is_absolute() {
+        let path = crate::projects_home::one_spelling(path.to_path_buf());
+        if !path
+            .to_str()
+            .is_some_and(crate::sandbox::windows_clean_text)
+        {
             return Err(failure("owner_root_requires_canonical_trusted_path"));
         }
-        let directory = private::open_dir(path)
+        let directory = private::open_dir(&path)
             .map_err(|e| private_refusal(e, "owner_root_requires_private_owner_directory"))?;
-        let given: Vec<u16> = path.as_os_str().encode_wide().collect();
-        let verbatim: Vec<u16> = std::ffi::OsStr::new(r"\\?\").encode_wide().collect();
-        let spelled = if given.starts_with(&verbatim) {
-            given
-        } else {
-            verbatim.into_iter().chain(given).collect()
-        };
+        let spelled: Vec<u16> = std::ffi::OsStr::new(r"\\?\")
+            .encode_wide()
+            .chain(path.as_os_str().encode_wide())
+            .collect();
         if private::place(&directory).map_err(io_error)? != spelled {
             return Err(failure("owner_root_requires_canonical_trusted_path"));
         }
         let root = Self {
-            path: path.to_path_buf(),
+            path,
             identity: Identity::of_file(&directory)?,
             directory,
         };
