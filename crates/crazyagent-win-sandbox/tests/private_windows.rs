@@ -846,6 +846,10 @@ fn a_deletable_secret_file_is_read_while_held_and_deleted_through_its_own_handle
     drop(reader);
     let closed = root.join("closed.cap");
     drop(private::secret_file_deletable(&closed).unwrap());
+    drop(
+        private::read_only(&closed)
+            .expect("a reader that does not share delete opens it once no maker holds it"),
+    );
     closed_to_low_holders(&closed);
     let reread = private::read_secret(&closed).unwrap();
     assert_eq!(own_label(&reread), MEDIUM_FULL);

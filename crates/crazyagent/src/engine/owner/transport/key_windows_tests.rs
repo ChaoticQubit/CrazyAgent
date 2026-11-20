@@ -87,6 +87,9 @@ fn a_cap_file_round_trips_while_the_engine_holds_it() {
         std::fs::rename(path.join("owner-tui.cap"), path.join("moved.cap")).is_err(),
         "a held cap file is never renamed"
     );
+    drop((engine, read));
+    std::fs::rename(path.join("owner-tui.cap"), path.join("moved.cap"))
+        .expect("the same rename works once no handle holds the cap file");
 }
 
 #[test]
