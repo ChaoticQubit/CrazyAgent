@@ -822,6 +822,53 @@ fn a_window_whose_tagged_app_pane_closed_hands_its_teammate_no_prompt() {
     assert_eq!(typed[0], b"#", "the teammate gets only the mark");
 }
 
+/// CR-0351 F1 (#16 CodeRabbit major): an older engine's one-pane window whose app splits a
+/// teammate and closes between the two option commands of its first tagging. The window's
+/// mark is set first, so the teammate left alone is refused as an unknown app pane and is
+/// never tagged as the app, as it would be if only the pane tag had landed.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_app_closing_while_its_window_is_tagged_hands_its_teammate_no_prompt() {
+    let home = tempfile::tempdir().unwrap();
+    let (host, server, agent, _own) = raw_cat_pane(home.path(), false);
+    let window = target(&agent);
+    let app = tmux_client(
+        &server,
+        &["display-message", "-p", "-t", &window, "#{pane_id}"],
+    );
+    untag(&server, &app);
+    let closes = format!("split-window -d -t {app} ; kill-pane -t {app}");
+    tmux_client(
+        &server,
+        &["set-hook", "-w", "-t", &window, "after-set-option", &closes],
+    );
+    assert!(
+        crate::terminal::type_prompt(&*host, &agent, "hello").is_err(),
+        "a tagging whose pane closes under it sends nothing"
+    );
+    tmux_client(
+        &server,
+        &["set-hook", "-uw", "-t", &window, "after-set-option"],
+    );
+    let mate = tmux_client(&server, &["list-panes", "-t", &window, "-F", "#{pane_id}"]);
+    assert!(
+        pane_id_valid(&mate) && mate != app,
+        "the window lives on with the teammate alone: {mate}"
+    );
+    let refused = crate::terminal::type_prompt(&*host, &agent, "hello");
+    let unknown = HostError(crate::terminal::APP_PANE_UNKNOWN.to_owned());
+    assert_eq!(
+        refused,
+        Err(unknown),
+        "the teammate left alone takes no prompt"
+    );
+    assert_eq!(
+        tag_of(&server, &mate),
+        "",
+        "the teammate is never tagged as the app"
+    );
+}
+
 /// Runs one tmux client command on a test's server with an empty environment, as a person
 /// or a native lead runs one. Takes the server and the arguments. Returns the output,
 /// trimmed; a failed command fails the test.
