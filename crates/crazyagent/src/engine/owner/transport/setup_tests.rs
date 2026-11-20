@@ -349,3 +349,94 @@ fn an_explicit_setup_run_asks_the_probes_to_look_again_at_once() {
     assert!(second > first);
     crate::setup::progress::with(root.path(), |state| state.running = false);
 }
+
+/// The schema rows of an engine database, one line each, sorted. Input: the connection.
+/// Output: type, name, table and SQL of every table, index, trigger and view.
+#[cfg(unix)]
+fn schema_rows(db: &rusqlite::Connection) -> Vec<String> {
+    let rows: Vec<String> = db
+        .prepare(
+            "SELECT type || ' ' || name || ' ' || tbl_name || ' ' || coalesce(sql, '') \
+             FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+        )
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(!rows.is_empty() && rows.len() <= 4096);
+    rows
+}
+
+/// V243-NATIVE-PROFILE-TEAM-RETIRING-FLAKE: the database calls of each task the owner server
+/// starts beside its requests (the finished-agents sweep, the landing upkeep and the hooks
+/// backfill, with an installed entry so it writes) leave a database the engine start made with
+/// that schema, so no table appears while the server already answers. No server and no
+/// request runs here, so only those calls can add one.
+#[cfg(unix)]
+#[test]
+fn the_owner_server_s_start_tasks_add_nothing_to_the_schema_the_engine_start_made() {
+    let made = tempfile::tempdir().unwrap();
+    let root = made.path();
+    let setup = root.join("setup");
+    let mut db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let source = work.path().join("caveman");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: caveman\ndescription: The caveman skill.\n---\n",
+    )
+    .unwrap();
+    crate::storage::setup::execute(
+        &mut db,
+        root,
+        crate::storage::setup::Command::Install {
+            id: "caveman".into(),
+            source: "https://example.invalid/caveman@1".into(),
+            skills: vec![source],
+            server: None,
+        },
+    )
+    .unwrap();
+    pack_checkout(&setup, "caveman");
+    let started = schema_rows(&db);
+    crate::cleanup_settings::initialize(&db).unwrap();
+    let settings = crate::cleanup_settings::load(&db).unwrap();
+    crate::team::cleanup::sweep(&db, root, &settings, 0, crate::team::now_ms()).unwrap();
+    let landing = crate::landing::open(root).unwrap();
+    crate::landing::reconcile(&landing).unwrap();
+    crate::landing::number_change_sets(&landing).unwrap();
+    crate::landing::observe(&landing, None).unwrap();
+    let now = u64::try_from(crate::team::now_ms()).unwrap();
+    crate::landing::prune(&landing, now).unwrap();
+    drop(landing);
+    if let Err(problem) = crate::setup::bundled::extract_hooks(&setup) {
+        eprintln!("pack_hooks_not_unpacked cause={}", problem.0);
+    }
+    let manifest = crate::setup::pack::default_pack().unwrap();
+    for entry in &manifest.entries {
+        let Some(plugin) = crate::setup::fetch::plugin_folder(&setup, entry) else {
+            continue;
+        };
+        let seeded = crate::storage::setup::execute(
+            &mut db,
+            root,
+            crate::storage::setup::Command::SeedHooks {
+                id: entry.id.clone(),
+                plugin,
+            },
+        );
+        assert!(entry.id != "caveman" || seeded.is_ok(), "{seeded:?}");
+    }
+    assert_eq!(stored_hooks(root), ["caveman/SessionStart/1"]);
+    drop(db);
+    let after = schema_rows(&rusqlite::Connection::open(root.join("engine.db")).unwrap());
+    let added: Vec<&String> = after.iter().filter(|row| !started.contains(row)).collect();
+    let gone: Vec<&String> = started.iter().filter(|row| !after.contains(row)).collect();
+    assert!(
+        added.is_empty() && gone.is_empty(),
+        "added {added:#?}, gone {gone:#?}"
+    );
+}

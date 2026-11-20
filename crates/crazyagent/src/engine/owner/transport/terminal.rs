@@ -116,13 +116,11 @@ impl TerminalControl {
 
     /// Ends this view; the agent and its terminal keep running.
     /// Takes the control half.
-    /// Returns once the engine was told and the connection closed.
+    /// Returns once the engine was told and the viewer's half closed, also when the engine
+    /// closed the connection first; a `Detach` that could not be sent is `terminal_closed`.
     pub async fn detach(mut self) -> Result<(), EngineError> {
         self.send(&TerminalRequest::Detach).await?;
-        self.writer
-            .shutdown()
-            .await
-            .map_err(|_| failure("terminal_closed"))
+        close_detached(&mut self.writer).await
     }
 
     async fn send(&mut self, request: &TerminalRequest) -> Result<(), EngineError> {
@@ -131,6 +129,19 @@ impl TerminalControl {
             .await
             .map_err(|_| failure("terminal_closed"))?
             .map_err(|_| failure("terminal_closed"))
+    }
+}
+
+/// Shuts the viewer's half of a connection whose `Detach` was already sent. The engine closes
+/// the connection as soon as it serves a detach, and macOS then refuses the shutdown as not
+/// connected, which is that detach done. Takes that write half. Returns once it is shut or
+/// the engine closed it first, or `terminal_closed` for any other failure.
+async fn close_detached(writer: &mut OwnedWriteHalf) -> Result<(), EngineError> {
+    match writer.shutdown().await {
+        Err(error) if error.kind() != std::io::ErrorKind::NotConnected => {
+            Err(failure("terminal_closed"))
+        }
+        _ => Ok(()),
     }
 }
 

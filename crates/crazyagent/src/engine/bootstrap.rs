@@ -442,6 +442,74 @@ fn check_generation(anchor: &Anchor, value: &Locator) -> Result<(), EngineError>
     )
 }
 
+/// The file in an engine run's own generation that names the owner timeout it serves under.
+/// It lives where no shipped binary reads, so the locator keeps the shape they parse.
+const OWNER_TIMEOUT: &str = "owner-timeout";
+/// The most bytes an owner timeout file holds: its decimal milliseconds, no line end.
+#[cfg(unix)]
+const OWNER_TIMEOUT_MAX: u64 = 16;
+
+/// Refuses to read the owner timeout without Unix directory-relative opens.
+/// Takes the anchor and the locator, both unused.
+/// Returns `owner_anchor_unavailable` until Windows has owner-only directory checks.
+#[cfg(not(unix))]
+fn owner_timeout(_anchor: &Anchor, _value: &Locator) -> Result<Option<Duration>, EngineError> {
+    Err(fail("owner_anchor_unavailable"))
+}
+
+/// The owner timeout the engine wrote into the generation its locator pins, read without
+/// following links. Takes the anchor and the pinned locator. Returns none for an engine that
+/// wrote none, `owner_locator_unsafe` for a link or a file not the owner's alone or oversized,
+/// `owner_locator_invalid` for anything but a decimal inside the settings bounds, or the
+/// generation refusal for a folder the locator does not pin.
+#[cfg(unix)]
+fn owner_timeout(anchor: &Anchor, value: &Locator) -> Result<Option<Duration>, EngineError> {
+    anchor.verify()?;
+    let replaced = || fail("owner_generation_replaced_or_unsafe");
+    let directory = File::from(
+        rustix::fs::openat(
+            &anchor.directory,
+            value.generation.as_str(),
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|_| replaced())?,
+    );
+    let folder = directory.metadata().map_err(io_error)?;
+    if !safe_directory(&folder) || Identity::of(&folder) != value.generation_identity {
+        return Err(replaced());
+    }
+    let file = match rustix::fs::openat(
+        &directory,
+        OWNER_TIMEOUT,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => File::from(fd),
+        Err(rustix::io::Errno::NOENT) => return Ok(None),
+        Err(_) => return Err(fail("owner_locator_unsafe")),
+    };
+    let metadata = file.metadata().map_err(io_error)?;
+    if !safe_file(&metadata) || metadata.len() > OWNER_TIMEOUT_MAX {
+        return Err(fail("owner_locator_unsafe"));
+    }
+    let mut bytes = Vec::new();
+    (&file)
+        .take(OWNER_TIMEOUT_MAX + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_error)?;
+    if bytes.len() as u64 > OWNER_TIMEOUT_MAX {
+        return Err(fail("owner_locator_unsafe"));
+    }
+    let ms = std::str::from_utf8(&bytes)
+        .ok()
+        .filter(|text| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
+        .and_then(|text| text.parse::<u64>().ok())
+        .filter(|ms| crate::config::TIMEOUT_MS_BOUNDS.contains(ms))
+        .ok_or_else(|| fail("owner_locator_invalid"))?;
+    Ok(Some(Duration::from_millis(ms)))
+}
+
 async fn capabilities(client: &OwnerClient) -> Result<(), EngineError> {
     let reply: OwnerReply = client
         .request(OwnerRequest {
@@ -506,11 +574,13 @@ async fn discover_owner(
     let pinned = PinnedLocator::read(&anchor)?.ok_or_else(|| fail("owner_locator_missing"))?;
     let binding = NativeBinding { anchor, pinned };
     binding.verify()?;
+    let engine_timeout = owner_timeout(&binding.anchor, &binding.pinned.value)?;
     let client = OwnerClient::attach(
         &binding.anchor.path.join(&binding.pinned.value.generation),
         kind,
         timeout,
-    )?;
+    )?
+    .serving_under(engine_timeout);
     capabilities(&client).await?;
     binding.verify()?;
     let identity = OwnerConnectionIdentity {
@@ -1258,6 +1328,23 @@ impl EngineService {
         if Identity::of(&directory.metadata().map_err(io_error)?) != *identity {
             return Err(fail("owner_generation_replaced_or_unsafe"));
         }
+        let timeout = u64::try_from(self.timeout.as_millis())
+            .ok()
+            .filter(|ms| crate::config::TIMEOUT_MS_BOUNDS.contains(ms))
+            .ok_or_else(|| fail("owner_timeout_bounds"))?;
+        let named = File::from(
+            rustix::fs::openat(
+                &directory,
+                OWNER_TIMEOUT,
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::RUSR | Mode::WUSR,
+            )
+            .map_err(io_error)?,
+        );
+        named
+            .write_all_at(timeout.to_string().as_bytes(), 0)
+            .map_err(io_error)?;
+        named.sync_all().map_err(io_error)?;
         let file = File::from(
             rustix::fs::openat(
                 &directory,
@@ -1412,6 +1499,11 @@ impl EngineService {
                     std::fs::remove_file(path).map_err(io_error)?;
                 }
                 let path = self.anchor.path.join(&generation);
+                if let Err(error) = std::fs::remove_file(path.join(OWNER_TIMEOUT))
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    return Err(io_error(error));
+                }
                 for entry in std::fs::read_dir(&path).map_err(io_error)? {
                     let entry = entry.map_err(io_error)?;
                     if entry
@@ -1504,6 +1596,144 @@ mod tests {
             ordinary_socket: id,
             engine_version: crate::version::VERSION.into(),
         }
+    }
+
+    /// #665 r2: the locator a new engine writes still parses under the shape 2.4.2-dev shipped
+    /// (build-2.4.2-dev.202611172137, 977c408ed008), so an older engine or client meeting it
+    /// after an unclean stop starts and discovers as before, while the new client reads the
+    /// engine's timeout from the generation the locator names (V243-PLUGINS-CLIENT-TIMEOUT-BELOW-ENGINE).
+    #[tokio::test]
+    async fn a_new_engines_locator_parses_under_the_shipped_shape_and_its_timeout_is_read() {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Shipped {
+            version: u8,
+            database: Identity,
+            db_instance: String,
+            engine_epoch: String,
+            generation: String,
+            generation_identity: Identity,
+            owner_socket: Identity,
+            ordinary_name: String,
+            ordinary_socket: Identity,
+            #[serde(default)]
+            engine_version: String,
+        }
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("global.toml");
+        std::fs::write(&global, "version = 1\ntimeout_ms = 3000\n").unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let config =
+            crate::config::resolve_config(&global, &root.path().join("project.toml")).unwrap();
+        assert_eq!(config.settings.timeout_ms, 3000);
+        let (_stop, stopped) = watch::channel(false);
+        let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+            .await
+            .unwrap();
+        let bytes = std::fs::read(root.path().join(LOCATOR)).unwrap();
+        let shipped: Shipped = serde_json::from_slice(&bytes)
+            .unwrap_or_else(|error| panic!("the shipped shape refuses the locator: {error}"));
+        let value = parse_locator(&bytes).unwrap();
+        assert_eq!(
+            (
+                shipped.version,
+                shipped.database,
+                shipped.db_instance,
+                shipped.engine_epoch,
+                shipped.generation,
+                shipped.generation_identity,
+                shipped.owner_socket,
+                shipped.ordinary_name,
+                shipped.ordinary_socket,
+                shipped.engine_version,
+            ),
+            (
+                value.version,
+                value.database,
+                value.db_instance.clone(),
+                value.engine_epoch.clone(),
+                value.generation.clone(),
+                value.generation_identity,
+                value.owner_socket,
+                value.ordinary_name.clone(),
+                value.ordinary_socket,
+                value.engine_version.clone(),
+            )
+        );
+        let anchor = Anchor::open(root.path()).unwrap();
+        assert_eq!(
+            owner_timeout(&anchor, &value).map_err(|error| error.0),
+            Ok(Some(Duration::from_millis(3000))),
+            "the new client reads the engine's timeout"
+        );
+        service.shutdown().await.unwrap();
+        assert!(
+            !root.path().join(&value.generation).exists(),
+            "shutdown removes the generation with its timeout file"
+        );
+    }
+
+    /// #665 r2: a client takes the owner timeout only from the generation its locator pins:
+    /// none from an older engine that wrote no file, never another generation's file,
+    /// `owner_locator_unsafe` for a link, a file others can read or an oversized one,
+    /// `owner_locator_invalid` for anything but a bounded decimal, and the generation check's
+    /// refusal for a replaced folder (V243-PLUGINS-CLIENT-TIMEOUT-BELOW-ENGINE).
+    #[test]
+    fn the_owner_timeout_is_read_only_from_the_locators_own_generation() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let anchor = Anchor::open(root.path()).unwrap();
+        let folder = |name: &str| {
+            let path = root.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            Identity::of(&std::fs::symlink_metadata(&path).unwrap())
+        };
+        let mut value = sample();
+        value.generation = "o01234567".into();
+        value.generation_identity = folder("o01234567");
+        let other = folder("o89abcdef");
+        let elsewhere = root.path().join("o89abcdef").join(OWNER_TIMEOUT);
+        std::fs::write(&elsewhere, b"3000").unwrap();
+        std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let file = root.path().join("o01234567").join(OWNER_TIMEOUT);
+        let read = |value: &Locator| owner_timeout(&anchor, value).map_err(|error| error.0);
+        assert_eq!(read(&value), Ok(None), "an older engine wrote no file");
+        let write = |text: &[u8], mode: u32| {
+            let _ = std::fs::remove_file(&file);
+            std::fs::write(&file, text).unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        for (text, ms) in [
+            (&b"30000"[..], 30_000),
+            (&b"10"[..], 10),
+            (&b"3000"[..], 3000),
+        ] {
+            write(text, 0o600);
+            assert_eq!(read(&value), Ok(Some(Duration::from_millis(ms))));
+        }
+        for bad in [&b"9"[..], b"30001", b"abc", b"", b" 3000", b"3000\n"] {
+            write(bad, 0o600);
+            assert_eq!(
+                read(&value),
+                Err("owner_locator_invalid".to_owned()),
+                "{bad:?}"
+            );
+        }
+        for (text, mode) in [(&b"3000"[..], 0o644), (&[b'1'; 17][..], 0o600)] {
+            write(text, mode);
+            assert_eq!(read(&value), Err("owner_locator_unsafe".to_owned()));
+        }
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &file).unwrap();
+        assert_eq!(read(&value), Err("owner_locator_unsafe".to_owned()));
+        let mut replaced = value.clone();
+        replaced.generation_identity = other;
+        assert_eq!(
+            read(&replaced),
+            Err("owner_generation_replaced_or_unsafe".to_owned())
+        );
     }
 
     #[test]

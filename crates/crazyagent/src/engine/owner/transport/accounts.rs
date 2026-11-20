@@ -197,7 +197,7 @@ impl OwnerClient {
         action: Action,
         key: Option<AccountSecret>,
     ) -> Result<Reply, EngineError> {
-        let time = action.time(self.timeout) + self.timeout;
+        let time = action.time(self.engine_timeout) + self.timeout;
         tokio::time::timeout(time, async {
             let read = read_kind(&action);
             let envelope = Envelope {

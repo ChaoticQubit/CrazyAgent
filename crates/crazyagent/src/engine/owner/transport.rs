@@ -2657,10 +2657,10 @@ async fn within<F: std::future::Future>(bound: Duration, served: F) {
     let _ = tokio::time::timeout_at(cut, crate::storage::before_cut(cut, bound, served)).await;
 }
 
-/// The longest an owner client waits for a request the engine serves past its exchange under
-/// `bound`: the client's own timeout, which covers the engine's admission of the request, plus
-/// the bound, so the engine's answer, a refusal included, always arrives before the client
-/// gives up. Inputs: the client timeout and the bound. Output: the wait.
+/// The longest an owner client waits for a request the engine serves under `bound` once it
+/// admits it: the client's own timeout, which covers the admission and the reply's write,
+/// plus the bound, so the engine's answer, a refusal included, arrives before the client gives
+/// up. Inputs: the client timeout and the engine's bound. Output: the wait.
 fn deferred_wait(timeout: Duration, bound: Duration) -> Duration {
     timeout + bound
 }
@@ -3515,6 +3515,7 @@ pub struct OwnerClient {
     token: [u8; 32],
     socket: Identity,
     timeout: Duration,
+    engine_timeout: Duration,
 }
 
 impl OwnerClient {
@@ -3547,7 +3548,18 @@ impl OwnerClient {
             token,
             socket,
             timeout,
+            engine_timeout: timeout,
         })
+    }
+
+    /// Takes the owner timeout the engine serves its requests under, as its generation names
+    /// it to the client that discovered it. None, for an older engine that names none, keeps
+    /// the client's own timeout in its place. Input: the engine's timeout. Output: the client.
+    pub(crate) fn serving_under(mut self, engine: Option<Duration>) -> Self {
+        if let Some(engine) = engine {
+            self.engine_timeout = engine;
+        }
+        self
     }
 
     /// Says what a reply that would not parse means. For a read it is an engine writing what

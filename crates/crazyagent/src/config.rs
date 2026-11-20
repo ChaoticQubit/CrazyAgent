@@ -53,6 +53,10 @@ pub struct ModelAccess {
 
 pub const ACCOUNTS_MAX: usize = 4096;
 pub const CONFIG_BYTES_MAX: usize = 8 << 20;
+/// The owner timeout_ms values the engine accepts: in its settings, and in the owner
+/// timeout file of the generation a client discovers it through.
+/// Values: milliseconds, both ends included.
+pub const TIMEOUT_MS_BOUNDS: std::ops::RangeInclusive<u64> = 10..=30000;
 /// The settings file version this engine reads and writes. A file with a higher
 /// `version` came from a newer engine and is refused, never rewritten.
 pub const SETTINGS_VERSION: u16 = 1;
@@ -1146,7 +1150,7 @@ pub fn validate_settings(settings: &Settings) -> Result<(), ConfigError> {
     }
     if !(1..=1024).contains(&settings.queue_capacity)
         || !(1..=128).contains(&settings.clients_max)
-        || !(10..=30000).contains(&settings.timeout_ms)
+        || !TIMEOUT_MS_BOUNDS.contains(&settings.timeout_ms)
         || !(1..=256).contains(&settings.events_retained)
         || !(1..=1024).contains(&settings.bulk_queue_capacity)
         || settings.allowed_destinations.len() > APPROVALS_MAX

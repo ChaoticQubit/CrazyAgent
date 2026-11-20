@@ -685,6 +685,14 @@ fn noted(db: &Connection, id: &ChangeSetId, kind: crate::activity::ActivityKind,
     }
 }
 
+/// Creates the landing store's tables and columns in an engine database, for the engine
+/// start, so no landing call made later adds a table while the engine already answers.
+/// Input: the engine connection. Output: Ok once the store has every table and column.
+#[cfg(unix)]
+pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
+    store::initialize(db)
+}
+
 /// Opens the change set store in the engine database, adding its table when missing.
 /// Input: the engine root holding `engine.db`. Output: the connection.
 pub fn open(runtime: &Path) -> Result<Connection, EngineError> {

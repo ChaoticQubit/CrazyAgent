@@ -90,6 +90,13 @@ impl Action {
             _ => ACTION_TIME,
         }
     }
+
+    /// The longest a client waits for this request: the bound the engine serves the action
+    /// under plus the client's own timeout, which covers the admission and the reply's write.
+    /// Input: the client's timeout. Output: the wait.
+    pub(super) fn wait(&self, client: Duration) -> Duration {
+        self.time() + client
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -380,7 +387,7 @@ impl OwnerClient {
         action: Action,
         token: Option<AccountSecret>,
     ) -> Result<Reply, EngineError> {
-        let time = self.timeout.max(action.time());
+        let time = action.wait(self.timeout);
         tokio::time::timeout(time, async {
             let read = read_kind(&action);
             let envelope = Envelope {

@@ -15,6 +15,8 @@ const CHANGE_CLIENT_MS: u64 = 1200;
 const REMOVAL_CUT_MS: u64 = 1000;
 const REMOVAL_BARRIER_HELD: Duration = Duration::from_millis(600);
 const PUBLISHED_WAIT: Duration = Duration::from_secs(5);
+const SLOW_ENGINE_MS: u64 = 3000;
+const FAST_CLIENT_MS: u64 = 1000;
 
 /// The owner control that revokes one client kind at its current epoch.
 /// Inputs: the runtime, the client kind and the operation name. Output: the control.
@@ -893,6 +895,130 @@ async fn an_account_removal_held_at_the_barrier_then_behind_storage_is_pending_b
         removed.map(|_| ()).map_err(|error| error.0),
         Err("access_change_pending".to_owned()),
         "the owner hears the pending removal, decided before the serve's cut"
+    );
+    drop(release);
+    storage_settled(&owner).await;
+    assert!(
+        owner
+            .client
+            .list_accounts(None, 10)
+            .await
+            .unwrap()
+            .accounts
+            .is_empty(),
+        "the pending removal landed once storage was free"
+    );
+    owner.stop().await;
+}
+
+/// Discovers a TUI owner client whose own timeout is far below the engine's, as the TUI's
+/// fixed timeout is below a raised timeout_ms. Input: the engine. Output: the client, which
+/// learns the engine's timeout from the locator it discovers through.
+async fn fast_client(owner: &Usage) -> OwnerClient {
+    OwnerClient::discover(
+        owner.root.path(),
+        OwnerClientKind::Tui,
+        Duration::from_millis(FAST_CLIENT_MS),
+    )
+    .await
+    .unwrap()
+    .0
+}
+
+/// A plugin change behind busy storage, sent by a client whose timeout is a third of the
+/// engine's, hears the engine's refusal at the engine's own cut: the client waits its own
+/// timeout plus the engine's, not its own timeout twice, so it never says
+/// plugins_outcome_unknown for a change refused unsent (V243-PLUGINS-CLIENT-TIMEOUT-BELOW-ENGINE).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plugin_change_behind_busy_storage_is_refused_to_a_client_far_below_the_engine() {
+    let owner = Usage::start_waiting(SLOW_ENGINE_MS).await;
+    let client = fast_client(&owner).await;
+    let release = hold_storage(&owner);
+    assert!(
+        storage_queue_reaches(&owner, 0).await,
+        "storage took the hold"
+    );
+    let started = tokio::time::Instant::now();
+    let added = client
+        .add_mcp_server(
+            Scope::Global,
+            "slow-engine-server".into(),
+            ServerSpec::Stdio {
+                command: "/usr/bin/true".into(),
+                args: Vec::new(),
+            },
+            Vec::new(),
+        )
+        .await;
+    let waited = started.elapsed();
+    assert_eq!(
+        added.map(|server| server.id).map_err(|error| error.0),
+        Err("storage_busy_not_submitted".to_owned()),
+        "the client heard the engine's refusal after {waited:?}"
+    );
+    assert!(
+        waited >= Duration::from_millis(2 * FAST_CLIENT_MS),
+        "the refusal came past twice the client's own timeout: {waited:?}"
+    );
+    drop(release);
+    assert!(
+        stored_servers(&owner, "slow-engine-server")
+            .await
+            .is_empty(),
+        "the refused change never landed"
+    );
+    owner.stop().await;
+}
+
+/// An account removal behind busy storage, sent by a client whose timeout is a third of the
+/// engine's, hears access_change_pending decided before the engine's cut: the client waits
+/// the removal's bound at the engine's timeout plus its own, not the bound at its own
+/// timeout, so it never says accounts_outcome_unknown, and the removal lands once storage
+/// is free (V243-PLUGINS-CLIENT-TIMEOUT-BELOW-ENGINE).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_account_removal_behind_busy_storage_is_pending_to_a_client_far_below_the_engine() {
+    let owner = Usage::start_waiting(SLOW_ENGINE_MS).await;
+    let listener = crate::spawn_gate::bind_tcp("127.0.0.1:0").await.unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/v1",
+        listener.local_addr().unwrap().port()
+    );
+    let added = owner
+        .client
+        .add_account(
+            crate::accounts::AccountDraft {
+                provider: crate::accounts::Provider::OpenaiCompatible,
+                method: crate::accounts::SignInMethod::Url,
+                name: "Slow engine removal".into(),
+                url: Some(url),
+                model: Some("lab-model".into()),
+            },
+            Some(
+                crate::engine::owner::AccountSecret::new(
+                    format!("sk-slow-engine-{}", std::process::id()).into_bytes(),
+                )
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    let client = fast_client(&owner).await;
+    let release = hold_storage(&owner);
+    assert!(
+        storage_queue_reaches(&owner, 0).await,
+        "storage took the hold"
+    );
+    let started = tokio::time::Instant::now();
+    let removed = client.remove_account(added.id.clone()).await;
+    let waited = started.elapsed();
+    assert_eq!(
+        removed.map(|_| ()).map_err(|error| error.0),
+        Err("access_change_pending".to_owned()),
+        "the client heard the pending removal after {waited:?}"
+    );
+    assert!(
+        waited >= Duration::from_millis(2 * FAST_CLIENT_MS),
+        "the answer came past the removal's bound at the client's own timeout: {waited:?}"
     );
     drop(release);
     storage_settled(&owner).await;

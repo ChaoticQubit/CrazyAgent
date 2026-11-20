@@ -25,6 +25,7 @@ const INSTALL_TIME: Duration = Duration::from_secs(900);
 const NODE_CHECK_TIME: Duration = Duration::from_secs(10);
 const NODE_OLDEST: (u32, u32) = (22, 5);
 const NODE_TOO_OLD: &str = "context_mode_node_too_old";
+const NODE_CHECK_FAILED: &str = "context_mode_node_check_failed";
 const NODE_FOLDER_UNREADABLE: &str = "context_mode_node_folder_unreadable";
 /// The install code for a drive root of the node probe's paths that keeps every app container
 /// from reading its attributes, so a boxed Node.js script fails to resolve its own path
@@ -366,16 +367,11 @@ fn fixture_program(_: Option<&str>) -> bool {
     false
 }
 
-/// Whether the `node` beside npx runs the shared install: its `--version`, read inside a
-/// boundary in a scratch folder ([`node_command`]), names 22.5 or newer, which has the
-/// built-in SQLite context-mode uses without building a dependency. After the run the
-/// boundary's container is released ([`os::release`]), named from the scratch folder read
-/// before the run, and the scratch folder is removed, after a refused release too, which is
-/// logged, so a lasting refusal adds no folder per probe. Every probe holds the check lock
-/// shared while it runs; one that finds it free first ends what crashed probes left
-/// ([`end_left_checks`]). Inputs: the engine root and npx's folder. Output: false when it is
-/// older, fails or names no version, or `context_mode_sandbox_unavailable` when no boundary
-/// can hold it.
+/// Whether npx's `node` runs the shared install: its `--version`, read in a boundary in a
+/// scratch folder ([`node_command`]) under the shared check lock, names 22.5 or newer; the
+/// folder and its container ([`os::release`]) go after the run. Inputs: the engine root and
+/// npx's folder. Output: false for an older or no version, `context_mode_node_check_failed`
+/// when it did not run to an answer, `context_mode_sandbox_unavailable` with no boundary.
 fn node_supported(root: &Path, bin: &Path) -> Result<bool, InstallError> {
     let parent = root.join("setup").join("npm");
     private_folder(&parent)?;
@@ -389,9 +385,11 @@ fn node_supported(root: &Path, bin: &Path) -> Result<bool, InstallError> {
         let _ = std::fs::remove_dir_all(&scratch);
         return Err(InstallError("setup_store_unavailable"));
     };
-    let supported = node_command(root, &scratch, bin).map(|command| {
-        run_command(command, NODE_CHECK_TIME)
-            .is_ok_and(|(ok, output)| ok && supported_node(&output))
+    let supported = node_command(root, &scratch, bin).and_then(|command| {
+        match run_command(command, NODE_CHECK_TIME) {
+            Ok((true, output)) if !output.trim_ascii().is_empty() => Ok(supported_node(&output)),
+            _ => Err(InstallError(NODE_CHECK_FAILED)),
+        }
     });
     end_check(&scratch, &base);
     supported
@@ -432,11 +430,11 @@ fn end_left_checks(parent: &Path) {
     }
 }
 
-/// The `node --version` command of npx's folder inside the boundary npm installs in, with no
-/// network: the scratch folder's own project, home and temp folders, the engine's secrets
-/// denied, Node's tool folders and npx's folder read, a cleared environment (RV-DS241-150)
-/// and, on Linux, the owner's call supervisor choice. Inputs: the engine root, the scratch
-/// folder and npx's folder. Output: the command, or `context_mode_sandbox_unavailable`.
+/// The `node --version` command of npx's folder in npm's install boundary, no network: the
+/// scratch folder's project, home and temp, engine secrets denied, Node's tools, npx's folder
+/// and on Unix npm's grant ([`ProjectSandbox::allow_node_for`]) read, a cleared environment
+/// (RV-DS241-150), on Linux the owner's call supervisor. Inputs: the engine root, the scratch
+/// folder and npx's folder. Output: the command, or the refusal.
 fn node_command(
     root: &Path,
     scratch: &Path,
@@ -462,6 +460,10 @@ fn node_command(
     .map_err(refused)?;
     let real = canonical(bin)?;
     let sandbox = sandbox.allow_read(&real).map_err(refused)?;
+    #[cfg(unix)]
+    let sandbox = sandbox
+        .allow_node_for(&canonical(&bin.join("npm"))?)
+        .map_err(refused)?;
     let settings = os::boundary_settings(root)?;
     let (calls, strict) = (settings.linux_supervisor, settings.linux_strict);
     let profile = scratch.join(NODE_PROFILE);
@@ -765,6 +767,11 @@ fn npm_profile(parent: &Path, version: &str) -> PathBuf {
     parent.join(format!("{PACKAGE}@{version}.sb"))
 }
 
+/// Builds npm's command under the install profile: it reads npm's folder and, on Unix, the
+/// npm package `bin/npm` links into and the `node` beside it ([`ProjectSandbox::allow_node_for`]),
+/// read only, so an npm laid out as setup-node lays it out starts outside every system root.
+/// Inputs: the engine root, staging and work folders, npm's folder and the version. Output:
+/// the command, or the refusal.
 fn npm_command(
     root: &Path,
     staged: &Path,
@@ -794,6 +801,10 @@ fn npm_command(
     .and_then(|sandbox| sandbox.allow_tools(&Toolchains::grant(&homes, &[Toolchain::Node])))
     .map_err(refused)?;
     let sandbox = sandbox.allow_read(&canonical(bin)?).map_err(refused)?;
+    #[cfg(unix)]
+    let sandbox = sandbox
+        .allow_node_for(&canonical(&bin.join("npm"))?)
+        .map_err(refused)?;
     let profile = npm_profile(parent, version);
     os::npm_wrap(sandbox, root, &profile, bin, &canonical(staged)?)
 }
