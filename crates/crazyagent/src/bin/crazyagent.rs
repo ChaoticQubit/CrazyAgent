@@ -310,45 +310,59 @@ fn run_git_credential(args: &[OsString]) -> Result<(), String> {
 
 /// Runs the native sign-in custodian from the process's own command line, read up to
 /// [`crazyagent::engine::CUSTODIAN_ARGUMENTS_MAX`] entries, which the longest launch the
-/// engine hands fits, rather than the general bound (RV-DS241-52). No input. Output: Ok,
-/// `native_auth_host_launch_too_long` past the bound, or the custodian's failure.
-#[cfg(unix)]
+/// engine hands fits, rather than the general bound (RV-DS241-52). The arguments are checked
+/// before the input. No input. Output: Ok, `native_auth_host_launch_too_long` past the
+/// bound, or the custodian's failure.
 fn run_native_auth_custodian() -> Result<(), String> {
-    let usage = "usage: crazyagent native-auth-custodian RUNTIME_DIR";
     let args: Vec<OsString> = std::env::args_os()
         .skip(1)
         .take(crazyagent::engine::CUSTODIAN_ARGUMENTS_MAX + 1)
         .collect();
-    if args.len() > crazyagent::engine::CUSTODIAN_ARGUMENTS_MAX {
-        return Err("native_auth_host_launch_too_long".into());
-    }
-    let args = args.as_slice();
-    let codex = match args.len() {
-        2 => None,
-        count
-            if count >= 6
-                && ((args[2] == "--codex-executable" && args[4] == "--codex-sha256")
-                    || (args[2] == "--claude-executable" && args[4] == "--claude-sha256")) =>
-        {
-            let executable = Path::new(&args[3]);
-            if !executable.is_absolute() {
-                return Err("native_auth_host_executable_unsafe".into());
-            }
-            let digest = args[5]
-                .to_str()
-                .filter(|value| {
-                    value.len() == 64
-                        && value
-                            .bytes()
-                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-                })
-                .ok_or("native_auth_host_executable_digest_invalid")?;
-            Some((executable, digest))
-        }
-        _ => return Err(usage.into()),
-    };
-    let launch = crazyagent::engine::handed_words(args.get(6..).unwrap_or_default())
+    let custodian =
+        crazyagent::engine::custodian_arguments(&args).map_err(|error| error.to_string())?;
+    let input = custodian_input()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
         .map_err(|error| error.to_string())?;
+    let runtime_dir = custodian.runtime_dir;
+    runtime
+        .block_on(async {
+            match custodian.harness {
+                Some(harness) if harness.kind == "claude" => {
+                    crazyagent::engine::run_native_auth_custodian_with_claude(
+                        runtime_dir,
+                        input.into(),
+                        harness.executable,
+                        harness.sha256,
+                        &custodian.launch,
+                    )
+                    .await
+                }
+                Some(harness) => {
+                    crazyagent::engine::run_native_auth_custodian_with_codex(
+                        runtime_dir,
+                        input.into(),
+                        harness.executable,
+                        harness.sha256,
+                        &custodian.launch,
+                    )
+                    .await
+                }
+                None => {
+                    crazyagent::engine::run_native_auth_custodian(runtime_dir, input.into()).await
+                }
+            }
+        })
+        .map_err(|error| error.to_string())
+}
+
+/// The custodian's token pipe on Unix: its stdin duplicated to fd 3 or above with
+/// close-on-exec, so no child it starts inherits it. No input. Output: the pipe,
+/// `native_auth_bootstrap_stdin_unavailable`, or `native_auth_bootstrap_input_not_pipe`
+/// for stdin that is no FIFO.
+#[cfg(unix)]
+fn custodian_input() -> Result<std::fs::File, String> {
     let input = rustix::io::fcntl_dupfd_cloexec(io::stdin(), 3)
         .map(std::fs::File::from)
         .map_err(|_| "native_auth_bootstrap_stdin_unavailable".to_owned())?;
@@ -360,44 +374,21 @@ fn run_native_auth_custodian() -> Result<(), String> {
     {
         return Err("native_auth_bootstrap_input_not_pipe".into());
     }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| error.to_string())?;
-    runtime
-        .block_on(async {
-            if let Some((executable, digest)) = codex {
-                if args[2] == "--claude-executable" {
-                    return crazyagent::engine::run_native_auth_custodian_with_claude(
-                        Path::new(&args[1]),
-                        input.into(),
-                        executable,
-                        digest,
-                        &launch,
-                    )
-                    .await;
-                }
-                crazyagent::engine::run_native_auth_custodian_with_codex(
-                    Path::new(&args[1]),
-                    input.into(),
-                    executable,
-                    digest,
-                    &launch,
-                )
-                .await
-            } else {
-                crazyagent::engine::run_native_auth_custodian(Path::new(&args[1]), input.into())
-                    .await
-            }
-        })
-        .map_err(|error| error.to_string())
+    Ok(input)
 }
 
-/// Refuses the native sign-in custodian, which needs Unix fd handoff and process groups.
-/// No input. Returns `native_auth_host_unavailable`.
-#[cfg(not(unix))]
-fn run_native_auth_custodian() -> Result<(), String> {
-    Err("native_auth_host_unavailable".into())
+/// The custodian's token pipe on Windows: stdout and stderr made non-inheritable, then stdin
+/// taken when it is a pipe, with NUL left as the standard input, so no child the custodian
+/// starts gets either pipe (rv-sec2 #728 C1). Nothing reads stdin before. No input. Output:
+/// the pipe, `native_auth_bootstrap_stdin_unavailable`, or
+/// `native_auth_bootstrap_input_not_pipe` for a file, NUL or a console.
+#[cfg(windows)]
+fn custodian_input() -> Result<std::fs::File, String> {
+    let unavailable = |_| "native_auth_bootstrap_stdin_unavailable".to_owned();
+    crazyagent_win_sandbox::output_not_inherited().map_err(unavailable)?;
+    crazyagent_win_sandbox::take_stdin_pipe()
+        .map_err(unavailable)?
+        .ok_or_else(|| "native_auth_bootstrap_input_not_pipe".to_owned())
 }
 
 /// Registers the requests that stop the engine: SIGINT and SIGTERM.

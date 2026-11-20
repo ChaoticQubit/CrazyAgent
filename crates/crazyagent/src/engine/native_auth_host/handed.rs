@@ -11,6 +11,71 @@ pub(crate) const LAUNCH_WORDS_MAX: usize = 12;
 pub const CUSTODIAN_ARGUMENTS_MAX: usize = 6 + 4 * LAUNCH_WORDS_MAX;
 /// The longest first-line word a handed launch carries.
 const ARGUMENT_BYTES_MAX: usize = 256;
+/// The answer to a custodian command line of any other shape.
+const CUSTODIAN_USAGE: &str = "usage: crazyagent native-auth-custodian RUNTIME_DIR";
+
+/// The harness a custodian's command line pins: `codex` or `claude`, its absolute file and
+/// the SHA-256 the engine hashed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HandedHarness<'a> {
+    pub kind: &'static str,
+    pub executable: &'a Path,
+    pub sha256: &'a str,
+}
+
+/// A sign-in custodian's command line as the engine writes it: the runtime folder, then for
+/// a Codex or Claude Code sign-in the pinned harness and the launch resolved for it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct CustodianArguments<'a> {
+    pub runtime_dir: &'a Path,
+    pub harness: Option<HandedHarness<'a>>,
+    pub launch: Vec<HandedWord<'a>>,
+}
+
+/// Reads a sign-in custodian's command line, the one parser every OS's custodian runs before
+/// it reads its input. Input: the entries after the program, `native-auth-custodian` first,
+/// at most [`CUSTODIAN_ARGUMENTS_MAX`] plus one read. Output: the arguments, or
+/// `native_auth_host_launch_too_long`, the usage line, `native_auth_host_executable_unsafe`
+/// for a relative harness, `native_auth_host_executable_digest_invalid` or
+/// `native_auth_host_launch_invalid`.
+pub fn custodian_arguments(args: &[OsString]) -> Result<CustodianArguments<'_>, EngineError> {
+    if args.len() > CUSTODIAN_ARGUMENTS_MAX {
+        return Err(EngineError("native_auth_host_launch_too_long".into()));
+    }
+    let usage = || EngineError(CUSTODIAN_USAGE.into());
+    let harness = match args.len() {
+        2 => None,
+        count if count >= 6 => {
+            let kind = ["codex", "claude"]
+                .into_iter()
+                .find(|kind| {
+                    args[2] == *format!("--{kind}-executable")
+                        && args[4] == *format!("--{kind}-sha256")
+                })
+                .ok_or_else(usage)?;
+            let executable = Path::new(&args[3]);
+            if !executable.is_absolute() {
+                return Err(EngineError("native_auth_host_executable_unsafe".into()));
+            }
+            let sha256 = sha256_text(&args[5])
+                .ok_or_else(|| EngineError("native_auth_host_executable_digest_invalid".into()))?;
+            Some(HandedHarness {
+                kind,
+                executable,
+                sha256,
+            })
+        }
+        _ => return Err(usage()),
+    };
+    assert!(args.len() >= 2);
+    let launch = handed_words(args.get(6..).unwrap_or_default())?;
+    assert!(harness.is_some() || launch.is_empty());
+    Ok(CustodianArguments {
+        runtime_dir: Path::new(&args[1]),
+        harness,
+        launch,
+    })
+}
 
 /// One word of a handed launch as a custodian's command line names it: a file by its real
 /// path and the SHA-256 the engine hashed, or a first-line word.

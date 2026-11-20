@@ -1,4 +1,5 @@
 use super::custody::CustodySession;
+use super::entry_bootstrap::{BOOTSTRAP_TIME_MAX, TOKEN_BYTES};
 use super::{HandedWord, RegisteredNativeAuthHost};
 use crate::engine::bootstrap::runner_binding;
 use crate::engine::owner::transport::native_auth_channel::NativeAuthCustodyChannel;
@@ -11,8 +12,6 @@ use std::time::{Duration, Instant};
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 
-const TOKEN_BYTES: usize = 32;
-const BOOTSTRAP_TIME_MAX: Duration = Duration::from_secs(10);
 const CHECK_RENEWAL_WAIT: Duration = Duration::from_secs(90);
 
 pub(super) async fn read_bootstrap(

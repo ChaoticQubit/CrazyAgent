@@ -1,4 +1,7 @@
 use crate::engine::EngineError;
+use std::fs::File;
+use std::path::Path;
+use std::time::Instant;
 
 #[path = "native_auth_host/claude_auth/types.rs"]
 pub(crate) mod claude_auth_types;
@@ -27,13 +30,55 @@ pub(in crate::engine) async fn dispatch(
     Err(EngineError("native_auth_host_unavailable".into()))
 }
 
-#[cfg(test)]
+#[path = "native_auth_host/handed.rs"]
+mod handed;
+pub use handed::{
+    CUSTODIAN_ARGUMENTS_MAX, CustodianArguments, HandedHarness, HandedWord, custodian_arguments,
+};
+
 #[path = "native_auth_host/entry_bootstrap.rs"]
 mod entry_bootstrap;
 
 #[cfg(test)]
 #[path = "native_auth_host/custodian.rs"]
 mod custodian;
+
+/// Runs the sign-in custodian as far as Windows has it: reads the bootstrap token the engine
+/// writes on its stdin pipe, then refuses, as its channel, custody and login child are not
+/// built on Windows yet (the engine gate flips in N4). Inputs: the runtime folder, unused,
+/// and the pipe. Output: the bootstrap refusal, or `native_auth_host_unavailable`.
+pub async fn run_native_auth_custodian(
+    _runtime_dir: &Path,
+    input: File,
+) -> Result<(), EngineError> {
+    entry_bootstrap::read_bootstrap(input, Instant::now() + entry_bootstrap::BOOTSTRAP_TIME_MAX)
+        .await?;
+    Err(EngineError("native_auth_host_unavailable".into()))
+}
+
+/// The Codex sign-in custodian on Windows, as [`run_native_auth_custodian`]: the harness and
+/// its launch are read and checked by the parser, then unused until N4. Output: as there.
+pub async fn run_native_auth_custodian_with_codex(
+    runtime_dir: &Path,
+    input: File,
+    _executable: &Path,
+    _expected_sha256: &str,
+    _launch: &[HandedWord<'_>],
+) -> Result<(), EngineError> {
+    run_native_auth_custodian(runtime_dir, input).await
+}
+
+/// The Claude Code sign-in custodian on Windows, as [`run_native_auth_custodian_with_codex`].
+/// Output: as there.
+pub async fn run_native_auth_custodian_with_claude(
+    runtime_dir: &Path,
+    input: File,
+    _executable: &Path,
+    _expected_sha256: &str,
+    _launch: &[HandedWord<'_>],
+) -> Result<(), EngineError> {
+    run_native_auth_custodian(runtime_dir, input).await
+}
 
 #[cfg(test)]
 #[path = "native_auth_host/custodian_windows_tests.rs"]

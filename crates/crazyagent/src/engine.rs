@@ -33,10 +33,10 @@ pub(crate) mod owner_trace;
 #[cfg(all(test, windows))]
 mod windows_tests;
 
-#[cfg(unix)]
 pub use native_auth_host::{
-    CUSTODIAN_ARGUMENTS_MAX, HandedWord, handed_words, run_native_auth_custodian,
-    run_native_auth_custodian_with_claude, run_native_auth_custodian_with_codex,
+    CUSTODIAN_ARGUMENTS_MAX, CustodianArguments, HandedHarness, HandedWord, custodian_arguments,
+    run_native_auth_custodian, run_native_auth_custodian_with_claude,
+    run_native_auth_custodian_with_codex,
 };
 
 pub(crate) use bootstrap::NativeProfileCustody;
