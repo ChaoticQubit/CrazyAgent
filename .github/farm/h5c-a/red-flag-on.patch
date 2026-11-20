@@ -1,0 +1,13 @@
+diff --git a/apps/desktop/src-tauri/src/lib.rs b/apps/desktop/src-tauri/src/lib.rs
+index 860b35d78..646dd995b 100644
+--- a/apps/desktop/src-tauri/src/lib.rs
++++ b/apps/desktop/src-tauri/src/lib.rs
+@@ -2104,7 +2104,7 @@ async fn desktop_native_terminal_probe(
+ /// Whether this build lets a page open native terminal views: macOS only, until H5c proves
+ /// the Windows host on the real app and adds Windows here. Output: the answer.
+ fn native_enabled() -> bool {
+-    cfg!(target_os = "macos")
++    cfg!(any(target_os = "macos", windows))
+ }
+ 
+ /// The Windows open's guard at the IPC boundary: the host is built and reviewed, but no
