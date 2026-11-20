@@ -9,6 +9,9 @@ use crazyagent::sandbox::{
     SandboxError, SandboxNetwork, SandboxRemote,
 };
 
+use crazyagent::harnesses::launch::{
+    AccountBinding, GitIdentity, LaunchBoundary, LaunchLimits, LaunchRequest,
+};
 use crazyagent::spawn_gate::Keeper;
 
 use landlock::{CompatLevel, Compatible, Ruleset, RulesetAttr, Scope};
@@ -24,6 +27,8 @@ use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
 use std::process::{Child, ChildStdout, Command, ExitStatus, Output, Stdio};
+
+use std::sync::Arc;
 
 use std::time::{Duration, Instant};
 
@@ -4655,4 +4660,172 @@ fn a_confined_agent_with_a_hidden_folder_is_refused_as_confined_not_for_the_fold
             if reason.contains("confined") && !reason.contains("hidden")),
         "{refused:?}"
     );
+}
+
+/// A launch request for the case's project at `boundary`, signed in with the account home
+/// `home`, made owner-only as every account home is, with the owner's git identity. Inputs:
+/// the case, the boundary and the home. Output: the request, built only at the boundary.
+fn linux_launch(case: &Case, boundary: LaunchBoundary, home: &Path) -> LaunchRequest {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(home, fs::Permissions::from_mode(0o700)).unwrap();
+    LaunchRequest {
+        harness: "codex".into(),
+        executable: PathBuf::from("/usr/bin/true"),
+        working_dir: case.project.clone(),
+        account: AccountBinding::Subscription {
+            home: home.to_path_buf(),
+        },
+        model: None,
+        tools: false,
+        boundary,
+        git_identity: Some(
+            GitIdentity::new("Repo Owner".into(), "owner@example.invalid".into()).unwrap(),
+        ),
+        limits: LaunchLimits::default(),
+    }
+}
+
+/// Lists every path under `root`, sorted, without following links, so a row can tell that
+/// a refused step made nothing there. Input: the folder. Output: the paths below it.
+fn tree(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(folder) = pending.pop() {
+        for entry in fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            if fs::symlink_metadata(&path).unwrap().is_dir() {
+                pending.push(path.clone());
+            }
+            found.push(path);
+        }
+    }
+    found.sort();
+    found
+}
+
+/// The case's project sandbox installed the way a team agent's start takes it: with the
+/// call supervisor and the strict switch off. Input: the case. Output: the boundary.
+fn team_boundary(case: &Case) -> InstalledSandbox {
+    let profiles = case.outside.join("profiles");
+    fs::create_dir_all(&profiles).unwrap();
+    InstalledSandbox::install(
+        policy(case, SandboxNetwork::Open),
+        &profiles.join("agent.sb"),
+        LinuxSupervisor::On,
+        LinuxStrict::Off,
+    )
+    .unwrap()
+}
+
+/// A launched agent on Linux starts at its installed boundary (V244-LINUX-TEAM S5a): the
+/// command's program is the boundary's launcher, the harness follows the boundary's own
+/// arguments, it starts in the working folder, and its environment holds the agent's home
+/// and temp folder, the tools-off PATH, the C locale and the owner's git identity.
+#[test]
+fn a_linux_launch_starts_at_its_installed_boundary_with_the_agent_environment() {
+    let case = case();
+    let installed = team_boundary(&case);
+    let launcher = installed.launcher().to_path_buf();
+    let request = linux_launch(
+        &case,
+        LaunchBoundary::Installed(Arc::new(installed)),
+        &case.home,
+    );
+    let built = crazyagent::harnesses::launch::command(&request).unwrap();
+    assert_eq!(built.get_program(), launcher.as_os_str());
+    let args: Vec<&OsStr> = built.get_args().collect();
+    let start = args
+        .iter()
+        .rposition(|arg| *arg == OsStr::new("/usr/bin/true"))
+        .unwrap_or_else(|| panic!("the harness program is in the command: {args:?}"));
+    assert!(args[..start].contains(&OsStr::new("--")), "{args:?}");
+    assert!(
+        start + 1 < args.len(),
+        "the harness arguments follow: {args:?}"
+    );
+    assert_eq!(built.get_current_dir(), Some(case.project.as_path()));
+    let environment: std::collections::BTreeMap<&OsStr, Option<&OsStr>> =
+        built.get_envs().collect();
+    let value = |name: &str| {
+        environment
+            .get(OsStr::new(name))
+            .copied()
+            .flatten()
+            .map(|value| value.to_string_lossy().into_owned())
+    };
+    assert_eq!(value("HOME"), Some(case.home.display().to_string()));
+    assert_eq!(value("TMPDIR"), Some(case.tmp.display().to_string()));
+    assert!(
+        value("PATH").is_some_and(|path| path.ends_with("/usr/bin:/bin")),
+        "{:?}",
+        value("PATH")
+    );
+    assert_eq!(value("LANG").as_deref(), Some("C"));
+    assert_eq!(value("GIT_AUTHOR_NAME").as_deref(), Some("Repo Owner"));
+    assert_eq!(
+        value("GIT_COMMITTER_EMAIL").as_deref(),
+        Some("owner@example.invalid")
+    );
+}
+
+/// A Full access launch on Linux is refused and builds nothing (rv-sec3 #709 F1, rv-sec2
+/// #710 C5): Full access is only an installed boundary marked unconfined, and that boundary
+/// refuses with the macOS-only line, so no request reaches the unconfined command here.
+#[test]
+fn a_full_access_launch_on_linux_is_refused_and_builds_nothing() {
+    let case = case();
+    let full = team_boundary(&case).unconfined();
+    assert!(matches!(
+        full.wrap(&Command::new("/usr/bin/true")),
+        Err(SandboxError::Unavailable(reason))
+            if reason == crazyagent::sandbox::FULL_ACCESS_NEEDS_MACOS
+    ));
+    let request = linux_launch(&case, LaunchBoundary::Installed(Arc::new(full)), &case.home);
+    assert!(request.boundary.is_unconfined());
+    let before = tree(&case.home);
+    let refused = crazyagent::harnesses::launch::command(&request).unwrap_err();
+    assert_eq!(refused.0, "launch_sandbox_unavailable");
+    assert_eq!(tree(&case.home), before);
+}
+
+/// A launch on Linux whose account home is not the boundary's agent home is refused: the
+/// boundary sets HOME to its own agent home, so the harness would otherwise run with a home
+/// its account was not made in.
+#[test]
+fn a_linux_launch_with_another_home_than_its_boundary_is_refused() {
+    let case = case();
+    let other = case.outside.join("other-home");
+    fs::create_dir_all(&other).unwrap();
+    let request = linux_launch(
+        &case,
+        LaunchBoundary::Installed(Arc::new(team_boundary(&case))),
+        &other,
+    );
+    let refused = crazyagent::harnesses::launch::command(&request).unwrap_err();
+    assert_eq!(refused.0, "launch_environment_refused");
+}
+
+/// A Full access pane on Linux is refused before its command is built (rv-sec3 #709 F1,
+/// rv-sec2 #710 C5): the pane path takes the same launch check as a headless start, so an
+/// unconfined boundary never becomes a bare pane command that runs outside any sandbox.
+#[test]
+fn a_full_access_pane_on_linux_is_refused_before_its_command_is_built() {
+    let case = case();
+    let full = team_boundary(&case).unconfined();
+    let mut request = linux_launch(&case, LaunchBoundary::Installed(Arc::new(full)), &case.home);
+    request.harness = "claude-code".into();
+    let before = tree(&case.home);
+    let refused = crazyagent::harnesses::interactive::command(
+        &request,
+        None,
+        &crazyagent::harnesses::interactive::Run {
+            session_id: "s5a-full-access-pane",
+            key_file: None,
+            resume: false,
+        },
+    )
+    .err()
+    .unwrap_or_else(|| panic!("a Full access pane command was built on Linux"));
+    assert_eq!(refused.0, "launch_sandbox_unavailable");
+    assert_eq!(tree(&case.home), before);
 }

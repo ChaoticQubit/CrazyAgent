@@ -15,6 +15,7 @@ const COLOR_BYTES_MAX: usize = 64;
 /// the Windows fonts folder, or faces built into the app.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FontSource {
+    #[cfg(not(windows))]
     File(&'static str),
     #[cfg(windows)]
     Fonts(&'static str),
@@ -27,6 +28,7 @@ impl FontSource {
     /// folder the shell does not name.
     pub fn file(&self) -> Option<PathBuf> {
         match self {
+            #[cfg(not(windows))]
             FontSource::File(path) => Some(PathBuf::from(path)),
             #[cfg(windows)]
             FontSource::Fonts(name) => {

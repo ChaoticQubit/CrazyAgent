@@ -1,0 +1,260 @@
+use std::ops::RangeInclusive;
+
+/// The largest device-pixel origin, edge or webview offset a native view is placed at.
+pub const RECT_MAX: i32 = 32_768;
+
+/// The plain code for a page rectangle or webview offset that cannot be placed.
+pub const RECT_INVALID: &str = "native_terminal_rect_invalid";
+
+/// The display scale keys a view draws at, in percent of 96 DPI: the render core's 1x to
+/// 4x bounds.
+pub const SCALE_KEYS: RangeInclusive<u32> = 100..=400;
+
+/// The DPI Windows calls 100 percent.
+const DPI_BASE: u32 = 96;
+
+/// A native view's rectangle in its parent window's client area, in device pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rect {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// The scale key for a window's DPI: percent of 96, rounded, held to `SCALE_KEYS`. Input:
+/// GetDpiForWindow's answer. Output: the key, or none for 0, which GetDpiForWindow returns
+/// for a window it cannot read.
+pub fn scale_key(dpi: u32) -> Option<u32> {
+    if dpi == 0 {
+        return None;
+    }
+    let base = u64::from(DPI_BASE);
+    let percent = (u64::from(dpi) * 100 + base / 2) / base;
+    let held = percent.clamp(u64::from(*SCALE_KEYS.start()), u64::from(*SCALE_KEYS.end()));
+    let key = u32::try_from(held).expect("a held key fits");
+    assert!(SCALE_KEYS.contains(&key));
+    Some(key)
+}
+
+/// One page coordinate in device pixels: scaled, rounded, then moved by the offset. The
+/// inputs are bounded by `rect`, so the result stays well inside i32.
+fn edge(css: f64, scale: f64, offset: i32) -> f64 {
+    let device = (css * scale).round() + f64::from(offset);
+    assert!(device.is_finite());
+    assert!(device.abs() <= f64::from(RECT_MAX) * 10.0);
+    device
+}
+
+/// The device rectangle for the page's terminal box. Inputs: x, y, width and height in CSS
+/// pixels, the scale key, and the webview's offset in the parent's client area in device
+/// pixels. Output: the rectangle, edges rounded so boxes that touch on the page touch on
+/// screen, or `RECT_INVALID` for a value that is not finite, out of bounds or under a pixel.
+pub fn rect(
+    page: (f64, f64, f64, f64),
+    key: u32,
+    offset: (i32, i32),
+) -> Result<Rect, &'static str> {
+    assert!(
+        SCALE_KEYS.contains(&key),
+        "a scale key of 100 to 400, got {key}"
+    );
+    let (x, y, w, h) = page;
+    let max = f64::from(RECT_MAX);
+    let page_ok = [x, y, w, h].iter().all(|v| v.is_finite() && v.abs() <= max);
+    let bound = RECT_MAX.unsigned_abs();
+    let offset_ok = offset.0.unsigned_abs() <= bound && offset.1.unsigned_abs() <= bound;
+    if !page_ok || !offset_ok {
+        return Err(RECT_INVALID);
+    }
+    let scale = f64::from(key) / 100.0;
+    let (left, top) = (edge(x, scale, offset.0), edge(y, scale, offset.1));
+    let (right, bottom) = (edge(x + w, scale, offset.0), edge(y + h, scale, offset.1));
+    let (width, height) = (right - left, bottom - top);
+    let sized = (1.0..=max).contains(&width) && (1.0..=max).contains(&height);
+    if !sized || left.abs() > max || top.abs() > max {
+        return Err(RECT_INVALID);
+    }
+    let placed = Rect {
+        x: left as i32,
+        y: top as i32,
+        w: width as u32,
+        h: height as u32,
+    };
+    assert!(placed.w >= 1 && placed.h >= 1);
+    Ok(placed)
+}
+
+/// A view's IME spot in client device pixels: the cursor cell's top left, where the
+/// composition window goes, and the cell itself, which the candidate list keeps clear of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Spot {
+    pub point: (i32, i32),
+    pub cell: (i32, i32, i32, i32),
+}
+
+/// Where the IME's windows sit for a cursor cell. Inputs: the cursor's row and column, the
+/// cell size in points and the scale key. Output: the spot, or none for a cell that is not
+/// finite and positive or a spot past `RECT_MAX`.
+pub fn ime_spot(cursor: (usize, usize), cell_points: (f64, f64), key: u32) -> Option<Spot> {
+    assert!(
+        SCALE_KEYS.contains(&key),
+        "a scale key of 100 to 400, got {key}"
+    );
+    let (width, height) = cell_points;
+    let sized = width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0;
+    if !sized {
+        return None;
+    }
+    let scale = f64::from(key) / 100.0;
+    let edge = |cells: usize, size: f64| {
+        let px = (cells as f64 * size * scale).round();
+        (px <= f64::from(RECT_MAX)).then_some(px as i32)
+    };
+    let (row, column) = cursor;
+    let (left, top) = (edge(column, width)?, edge(row, height)?);
+    let right = edge(column.saturating_add(1), width)?.max(left + 1);
+    let bottom = edge(row.saturating_add(1), height)?.max(top + 1);
+    let spot = Spot {
+        point: (left, top),
+        cell: (left, top, right, bottom),
+    };
+    assert!(spot.cell.2 > spot.cell.0 && spot.cell.3 > spot.cell.1);
+    Some(spot)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_dpi_gives_a_scale_key_held_to_one_to_four_times() {
+        let keys = [
+            (96, 100),
+            (120, 125),
+            (144, 150),
+            (168, 175),
+            (192, 200),
+            (384, 400),
+        ];
+        for (dpi, key) in keys {
+            assert_eq!(scale_key(dpi), Some(key), "dpi {dpi}");
+        }
+        assert_eq!(scale_key(72), Some(100));
+        assert_eq!(scale_key(480), Some(400));
+        assert_eq!(scale_key(u32::MAX), Some(400));
+        assert_eq!(scale_key(0), None);
+    }
+
+    #[test]
+    fn a_page_rect_is_finite_bounded_and_at_least_one_device_pixel() {
+        let placed = rect((10.0, 20.0, 300.0, 200.0), 100, (0, 0));
+        assert_eq!(
+            placed,
+            Ok(Rect {
+                x: 10,
+                y: 20,
+                w: 300,
+                h: 200
+            })
+        );
+        let refused = [
+            (f64::NAN, 0.0, 10.0, 10.0),
+            (0.0, f64::INFINITY, 10.0, 10.0),
+            (0.0, 0.0, f64::NEG_INFINITY, 10.0),
+            (0.0, 0.0, 10.0, 0.0),
+            (0.0, 0.0, 0.4, 10.0),
+            (0.0, 0.0, -10.0, 10.0),
+            (40_000.0, 0.0, 10.0, 10.0),
+            (0.0, 0.0, 40_000.0, 10.0),
+            (0.0, 0.0, 10.0, f64::MAX),
+        ];
+        for page in refused {
+            assert_eq!(rect(page, 100, (0, 0)), Err(RECT_INVALID), "{page:?}");
+        }
+        assert_eq!(
+            rect((0.0, 0.0, 20_000.0, 10.0), 200, (0, 0)),
+            Err(RECT_INVALID)
+        );
+    }
+
+    #[test]
+    fn fractional_scales_round_edges_so_touching_boxes_touch() {
+        for key in [125, 150, 175] {
+            let left = rect((0.3, 0.0, 100.9, 50.0), key, (0, 0)).expect("left box");
+            let right = rect((101.2, 0.0, 99.0, 50.0), key, (0, 0)).expect("right box");
+            let edge = left.x + i32::try_from(left.w).expect("a width");
+            assert_eq!(edge, right.x, "scale {key}");
+            let scale = f64::from(key) / 100.0;
+            assert_eq!(f64::from(right.x), (101.2 * scale).round(), "scale {key}");
+            let far = (200.2 * scale).round();
+            assert_eq!(f64::from(right.x) + f64::from(right.w), far, "scale {key}");
+        }
+        let at = rect((0.5, 0.5, 1.0, 1.0), 150, (0, 0)).expect("a small box");
+        assert_eq!(
+            at,
+            Rect {
+                x: 1,
+                y: 1,
+                w: 1,
+                h: 1
+            }
+        );
+    }
+
+    #[test]
+    fn the_webview_offset_moves_the_rect_and_is_bounded() {
+        let placed = rect((10.0, 10.0, 100.0, 50.0), 150, (8, 31)).expect("an offset box");
+        assert_eq!(
+            placed,
+            Rect {
+                x: 23,
+                y: 46,
+                w: 150,
+                h: 75
+            }
+        );
+        let moved = rect((0.0, 0.0, 10.0, 10.0), 100, (-5, -5)).expect("a negative offset");
+        assert_eq!((moved.x, moved.y), (-5, -5));
+        for offset in [
+            (RECT_MAX + 1, 0),
+            (0, -RECT_MAX - 1),
+            (i32::MIN, 0),
+            (0, i32::MAX),
+        ] {
+            let page = (0.0, 0.0, 10.0, 10.0);
+            assert_eq!(rect(page, 100, offset), Err(RECT_INVALID), "{offset:?}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "a scale key")]
+    fn a_scale_key_out_of_range_is_a_bug() {
+        let _ = rect((0.0, 0.0, 10.0, 10.0), 99, (0, 0));
+    }
+
+    #[test]
+    fn the_ime_spot_is_the_cursor_cell_in_device_pixels() {
+        let plain = ime_spot((2, 3), (7.0, 17.0), 100);
+        assert_eq!(
+            plain,
+            Some(Spot {
+                point: (21, 34),
+                cell: (21, 34, 28, 51)
+            })
+        );
+        let scaled = ime_spot((2, 3), (7.0, 17.0), 150);
+        assert_eq!(
+            scaled,
+            Some(Spot {
+                point: (32, 51),
+                cell: (32, 51, 42, 77)
+            })
+        );
+        let origin = ime_spot((0, 0), (7.0, 17.0), 100).map(|spot| spot.point);
+        assert_eq!(origin, Some((0, 0)));
+        assert_eq!(ime_spot((2, 3), (0.0, 17.0), 100), None);
+        assert_eq!(ime_spot((2, 3), (f64::NAN, 17.0), 100), None);
+        assert_eq!(ime_spot((0, 10_000), (7.0, 17.0), 400), None);
+    }
+}

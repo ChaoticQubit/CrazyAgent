@@ -4,6 +4,7 @@ pub const COPY_BYTES_MAX: usize = 1 << 20;
 /// Decodes a `%output` payload: tmux writes each byte below 32 and the backslash as a
 /// backslash and three octal digits. Input: the escaped payload. Output: the raw bytes; a
 /// backslash not followed by three octal digits stays as it is.
+#[cfg(any(unix, test))]
 pub fn unescape(escaped: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(escaped.len());
     let mut at = 0;
@@ -46,6 +47,7 @@ pub fn escape(raw: &[u8]) -> Vec<u8> {
 }
 
 /// Whether a target is a plain pane id such as `%12`. Input: the target. Output: the answer.
+#[cfg(any(unix, test))]
 pub fn pane_id_valid(target: &str) -> bool {
     let digits = target.strip_prefix('%').unwrap_or("");
     !digits.is_empty() && digits.len() <= 9 && digits.bytes().all(|b| b.is_ascii_digit())

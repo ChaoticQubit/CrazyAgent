@@ -224,6 +224,18 @@ impl PipeStream {
 }
 
 impl PipeListener {
+    /// The endpoint this listener published, read from the pipes file it holds open, so no
+    /// other file named `pipes` can stand in (W3-3). Input: the endpoint's purpose. Output:
+    /// the random part and pin, or why the held file is not in the engine's shape.
+    pub(super) fn published(&self, purpose: &str) -> io::Result<Published> {
+        let held = self
+            .held
+            .as_ref()
+            .expect("a listener holds its pipes file until it closes");
+        parse_pipes(&contents(&held.pipes)?, purpose)
+            .map_err(|reason| io::Error::new(io::ErrorKind::InvalidData, reason))
+    }
+
     /// Stops serving and deletes the pipes file, reporting a delete that failed: a file a
     /// client is reading, or one that changed since it was published, stays. Output: Ok, or
     /// the delete's error.

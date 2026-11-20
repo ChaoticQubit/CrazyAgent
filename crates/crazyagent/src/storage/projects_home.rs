@@ -1588,9 +1588,13 @@ fn held_inside(
     ];
     let inside = |text: &str| {
         let path = Path::new(text);
-        names.iter().flatten().any(|name| path.starts_with(name))
-            || std::fs::canonicalize(path)
-                .is_ok_and(|real| crate::projects_home::one_spelling(real).starts_with(&home))
+        names
+            .iter()
+            .flatten()
+            .any(|name| crate::projects_home::inside(path, name))
+            || std::fs::canonicalize(path).is_ok_and(|real| {
+                crate::projects_home::inside(&crate::projects_home::one_spelling(real), &home)
+            })
     };
     let mut statement = tx.prepare(query).map_err(error)?;
     let columns = statement.column_count();

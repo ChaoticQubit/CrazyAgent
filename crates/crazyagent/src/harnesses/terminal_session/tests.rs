@@ -59,7 +59,8 @@ mod own_turns {
     use super::super::{TerminalSession, TranscriptEvent};
     use crate::harnesses::interactive::claude_project_folder;
     use crate::harnesses::launch::{
-        AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret, group_alive,
+        AccountBinding, LaunchBoundary, LaunchEvent, LaunchLimits, LaunchRequest, Secret,
+        group_alive,
     };
     use crate::terminal::tmux::{SOCKET, Tmux, installed};
     use crate::terminal::{AgentId, FOLDER, Host};
@@ -152,6 +153,27 @@ mod own_turns {
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let profile = base.join("agent.sb");
         std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+        let boundary = if unconfined {
+            let tmp = base.join("full-access-tmp");
+            private(&tmp);
+            let sandbox = crate::sandbox::ProjectSandbox::new(
+                &work,
+                &home,
+                &tmp,
+                crate::sandbox::SandboxNetwork::Open,
+            )
+            .unwrap();
+            let installed = crate::sandbox::InstalledSandbox::install(
+                sandbox,
+                &base.join("full-access.sb"),
+                crate::sandbox::LinuxSupervisor::On,
+                crate::sandbox::LinuxStrict::Off,
+            )
+            .unwrap();
+            LaunchBoundary::Installed(Arc::new(installed.unconfined()))
+        } else {
+            LaunchBoundary::Profile(profile)
+        };
         let request = LaunchRequest {
             harness: "claude-code".into(),
             executable,
@@ -163,8 +185,7 @@ mod own_turns {
             },
             model: None,
             tools: true,
-            sandbox_profile: (!unconfined).then_some(profile),
-            unconfined,
+            boundary,
             git_identity: None,
             limits: LaunchLimits::default(),
         };
