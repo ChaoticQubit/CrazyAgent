@@ -1,6 +1,11 @@
 use super::custodian::CustodianCause;
 use super::entry_bootstrap::read_bootstrap;
+use crate::harnesses::interactive::{InteractiveCommand, Transcript};
+use crate::terminal::windows::ConptyHost;
+use crate::terminal::{AgentId, Host};
+use crazyagent_win_sandbox::test_files::inheritable;
 use std::fs::File;
+use std::io::ErrorKind;
 use std::io::Write;
 use std::os::windows::io::OwnedHandle;
 use std::path::PathBuf;
@@ -19,6 +24,9 @@ const USAGE: &str = "usage: crazyagent native-auth-custodian RUNTIME_DIR";
 const ARGUMENTS_PAST_BOUND: usize = 60;
 const BOOTSTRAP_BOUND: Duration = Duration::from_secs(11);
 const CAUSE_BOUND: Duration = Duration::from_secs(20);
+const RACE_SPAWNS: usize = 200;
+const RACE_PANES_MAX: usize = 32;
+const WAITER: &str = "ping -n 60 127.0.0.1 >NUL";
 const DIGEST: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 /// The product binary the farm built for these rows, named by
@@ -212,6 +220,152 @@ fn the_cause_reader_drains_a_large_error_stream_and_keeps_one_code() {
         cause.read().unwrap();
         assert_eq!(cause.code(), expected, "{}", first.len());
     }
+}
+
+/// The system's `cmd.exe`, found through `SystemRoot`.
+fn cmd() -> PathBuf {
+    let root = std::env::var_os("SystemRoot").expect("Windows sets SystemRoot");
+    let cmd = PathBuf::from(root).join("System32").join("cmd.exe");
+    assert!(cmd.is_absolute());
+    cmd
+}
+
+/// Starts a std child that waits a minute, its stdio all named, through the spawn gate, as
+/// every engine spawn starts: std starts it with handle inheritance on.
+fn std_waiter() -> Child {
+    crate::spawn_gate::spawn(
+        Command::new(cmd())
+            .args(["/c", WAITER])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap()
+}
+
+/// Opens a ConPTY pane for `name` through the engine's real terminal path, its command
+/// waiting a minute.
+fn pane(host: &ConptyHost, name: &str) -> AgentId {
+    let agent = AgentId::new(name).unwrap();
+    let command = InteractiveCommand {
+        argv: vec![
+            cmd().to_string_lossy().into_owned(),
+            "/c".to_owned(),
+            WAITER.to_owned(),
+        ],
+        cwd: cmd().parent().unwrap().to_path_buf(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    host.spawn(&agent, &command).unwrap();
+    agent
+}
+
+/// Whether anyone but this process holds a pipe's read end: the row drops its own read end
+/// first, so a one-byte write succeeds only into a pipe another process holds open.
+fn held_elsewhere(reader: std::io::PipeReader, writer: &mut std::io::PipeWriter) -> bool {
+    drop(reader);
+    match writer.write_all(b"x") {
+        Ok(()) => true,
+        Err(error) => {
+            assert_eq!(error.kind(), ErrorKind::BrokenPipe, "{error}");
+            false
+        }
+    }
+}
+
+/// rv-sec2 #728 row 4, in order: a handle the engine holds inheritable while a ConPTY pane
+/// starts reaches neither the pane's child nor the conhost `CreatePseudoConsole` starts, so
+/// a custodian's token pipe never does. The positive control, a std child, which starts
+/// with handle inheritance on, is seen holding the same kind of handle, or the check would
+/// prove nothing.
+#[test]
+fn a_conpty_pane_and_its_conhost_get_no_inheritable_handle_of_the_engine() {
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    inheritable(&reader).unwrap();
+    let mut control = std_waiter();
+    assert!(control.try_wait().unwrap().is_none());
+    let control_held = held_elsewhere(reader, &mut writer);
+    control.kill().unwrap();
+    control.wait().unwrap();
+    assert!(
+        control_held,
+        "the std child must hold the inheritable read end"
+    );
+    let (reader, mut writer) = std::io::pipe().unwrap();
+    inheritable(&reader).unwrap();
+    let host = ConptyHost::new();
+    let agent = pane(&host, "row-four");
+    assert!(host.alive().unwrap().contains(&agent));
+    let pane_held = held_elsewhere(reader, &mut writer);
+    assert!(host.alive().unwrap().contains(&agent));
+    host.kill(&agent).unwrap();
+    assert!(
+        !pane_held,
+        "a ConPTY pane or its conhost holds the engine's handle"
+    );
+}
+
+/// rv-sec2 #728 row 4, the race: ConPTY panes keep opening while a stand-in custodian, with
+/// a piped stdin as the custodian's token pipe, starts and ends 200 times. After each ends,
+/// a write to its stdin must fail while every pane and its conhost still runs, so no pane
+/// start took the pipe std makes inheritable during the custodian's spawn. The control, the
+/// stand-in still running, takes the write.
+#[test]
+fn a_custodian_token_pipe_reaches_no_conpty_pane_started_at_the_same_time() {
+    let mut alive = crate::spawn_gate::spawn(
+        Command::new(cmd())
+            .args(["/c", WAITER])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    alive.stdin.take().unwrap().write_all(b"x").unwrap();
+    alive.kill().unwrap();
+    alive.wait().unwrap();
+    let host = std::sync::Arc::new(ConptyHost::new());
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let opener = {
+        let (host, stop) = (std::sync::Arc::clone(&host), std::sync::Arc::clone(&stop));
+        std::thread::spawn(move || {
+            let mut opened = Vec::new();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) && opened.len() < RACE_PANES_MAX
+            {
+                opened.push(pane(&host, &format!("race-{}", opened.len())));
+            }
+            opened
+        })
+    };
+    let mut held = 0;
+    for _ in 0..RACE_SPAWNS {
+        let mut child = crate::spawn_gate::spawn(
+            Command::new(cmd())
+                .args(["/c", "exit 0"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        child.wait().unwrap();
+        match input.write_all(b"x") {
+            Ok(()) => held += 1,
+            Err(error) => assert_eq!(error.kind(), ErrorKind::BrokenPipe, "{error}"),
+        }
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let opened = opener.join().unwrap();
+    let running = host.alive().unwrap();
+    for agent in &opened {
+        assert!(running.contains(agent), "{agent:?} ended before the checks");
+        host.kill(agent).unwrap();
+    }
+    assert!(!opened.is_empty());
+    assert_eq!(
+        held, 0,
+        "{held} of {RACE_SPAWNS} token pipes reached a pane"
+    );
 }
 
 /// Records what a custodian does with no `SystemRoot` in its environment, for PLAN-0541's

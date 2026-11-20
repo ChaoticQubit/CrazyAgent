@@ -9,7 +9,9 @@ use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
     FILE_NON_DIRECTORY_FILE, FILE_SUPERSEDE, FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
 };
-use windows_sys::Win32::Foundation::{HANDLE, UNICODE_STRING};
+use windows_sys::Win32::Foundation::{
+    GetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, UNICODE_STRING,
+};
 use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
 use windows_sys::Win32::Security::DACL_SECURITY_INFORMATION;
 use windows_sys::Win32::Storage::FileSystem::{
@@ -134,5 +136,19 @@ pub fn null_dacl(path: &Path) -> io::Result<()> {
     if set != 0 {
         return Err(io::Error::from_raw_os_error(set as i32));
     }
+    Ok(())
+}
+
+/// Test only: marks a handle inheritable, so a child started with handle inheritance gets
+/// it, the state the N3 conhost probe and the N4 holder control set up. Relies on the handle
+/// being live for the call. Input: the handle's owner. Output: Ok, or the Windows error.
+pub fn inheritable(object: &impl AsRawHandle) -> io::Result<()> {
+    let handle = object.as_raw_handle();
+    if unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut flags = 0;
+    assert!(unsafe { GetHandleInformation(handle, &mut flags) } != 0);
+    assert_eq!(flags & HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
     Ok(())
 }
