@@ -293,7 +293,8 @@ fn stopping_a_windows_claude_custody_ends_every_process_it_started() {
 /// V244-WIN-MASTER S4 r4 (#734 L1, as CodeRabbit CR-1149 found in the Codex twin): a Windows
 /// Claude harness that exits on its own, leaving a process it started asleep with no pipe of
 /// its own, is retired only once its tree runs none, so that process is already gone when
-/// custody retires, read by tasklist at once, with no wait after the retire.
+/// custody retires, read by tasklist at once, with no wait after the retire. Its exit 0 before
+/// any turn ends the run with that exit code, as the row above reads.
 #[test]
 fn a_windows_claude_harness_that_exits_leaving_a_sleeping_process_retires_only_once_it_is_gone() {
     let folder = tempfile::tempdir().unwrap();
@@ -315,7 +316,10 @@ fn a_windows_claude_harness_that_exits_leaving_a_sleeping_process_retires_only_o
         !running(holder),
         "custody retired while the process its harness left still ran"
     );
-    assert_eq!(fault(&watched), None);
+    assert_eq!(
+        fault(&watched).as_deref(),
+        Some("claude_host_native_exit_0")
+    );
     assert!(!watched.doubt.load(Ordering::Acquire));
 }
 
