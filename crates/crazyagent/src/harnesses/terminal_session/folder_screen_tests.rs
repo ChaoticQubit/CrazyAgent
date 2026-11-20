@@ -1,7 +1,9 @@
 use super::TerminalSession;
 use crate::harnesses::codex_folder::{SCREEN_WAIT, Screen, read_screen};
 use crate::harnesses::interactive::InteractiveCommand;
-use crate::harnesses::launch::{AccountBinding, LaunchError, LaunchLimits, LaunchRequest};
+use crate::harnesses::launch::{
+    AccountBinding, LaunchBoundary, LaunchError, LaunchLimits, LaunchRequest,
+};
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
 use crate::terminal::{AgentId, FOLDER, Host, HostError, PaneRef, TerminalStream};
 use std::os::unix::fs::PermissionsExt;
@@ -106,8 +108,7 @@ pub(crate) fn start(name: &str, first: &str, then: Option<&str>, codex_folder: b
         },
         model: None,
         tools: false,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
