@@ -364,31 +364,36 @@ impl NativeBridge {
 
     /// Opens one owner terminal session on an agent's terminal or one pane of its window,
     /// first sized to the viewer when a size is given; an input-only session needs a size and
-    /// sends no output. Takes the terminal name, the checked pane, the size if any and
-    /// whether the session is input-only. Returns the session with its size, output and
-    /// controls.
+    /// sends no output, and a following one sizes only while no other view does. Takes the
+    /// terminal name, the checked pane, the size if any and the session kind. Returns the
+    /// session with its size, output and controls.
     pub async fn open_terminal(
         &mut self,
         agent: AgentId,
         pane: Option<String>,
         size: Option<(u16, u16)>,
-        input_only: bool,
+        kind: Session,
     ) -> Result<TerminalSession, BridgeError> {
         let controller = self.controller()?;
-        let session = match (size, input_only, pane) {
-            (Some((cols, rows)), true, pane) => {
+        let session = match (size, kind, pane) {
+            (Some(size), Session::Input | Session::Follow, pane) => {
+                let follows = kind == Session::Follow;
                 controller
-                    .terminal_attach_input(agent.clone(), pane, cols, rows)
+                    .terminal_attach_input(agent.clone(), pane, size, follows)
                     .await
             }
-            (None, true, _) => return Err(failure("terminal_size_bounds")),
-            (Some((cols, rows)), false, pane) => {
+            (None, Session::Input | Session::Follow, _) => {
+                return Err(failure("terminal_size_bounds"));
+            }
+            (Some((cols, rows)), Session::Full, pane) => {
                 controller
                     .terminal_attach_sized(agent.clone(), pane, cols, rows)
                     .await
             }
-            (None, false, Some(pane)) => controller.terminal_attach_pane(agent.clone(), pane).await,
-            (None, false, None) => controller.terminal_attach(agent.clone()).await,
+            (None, Session::Full, Some(pane)) => {
+                controller.terminal_attach_pane(agent.clone(), pane).await
+            }
+            (None, Session::Full, None) => controller.terminal_attach(agent.clone()).await,
         }
         .map_err(|e| attach_failure(&e.0))?;
         if session.agent != agent {
@@ -396,6 +401,16 @@ impl NativeBridge {
         }
         Ok(session)
     }
+}
+
+/// How one engine session of a desktop view opens: a full view that streams output, an
+/// input-only view for a viewer that draws the pane from elsewhere, or an input-only view
+/// that sizes the window only while no other view does (V243-PANE-SIZE-ACROSS-WINDOWS).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Session {
+    Full,
+    Input,
+    Follow,
 }
 
 struct Viewer {

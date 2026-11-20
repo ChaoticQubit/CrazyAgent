@@ -1,5 +1,7 @@
 #[cfg(windows)]
-pub use crate::win::pipe::{INSTANCES_MAX, client, create, instance, own_pin, pin_of, server};
+pub use crate::win::pipe::{
+    INSTANCES_MAX, client, create, instance, own_integrity, own_pin, pin_of, server,
+};
 
 const MEDIUM_LEVEL: u32 = 0x2000;
 /// Windows' ERROR_NO_TOKEN: the thread holds no token of its own.
@@ -39,9 +41,10 @@ pub struct Peer {
 
 /// Judges the process at the other end of an engine pipe (DESIGN-0140 D9 step 2,
 /// DESIGN-0256 D10 step 2): the engine's own user, not an AppContainer, not restricted, and
-/// at medium integrity or above. Inputs: the peer and the engine's user SID. Output: Ok, or
-/// why the peer is refused.
-pub fn judge_peer(peer: &Peer, user: &[u8]) -> Result<(), &'static str> {
+/// at medium integrity or above, and at or above `floor`, the judging side's own level, so
+/// an elevated engine admits no unelevated duplicate (rv-sec2 #702 D1 fix (b), R6). Inputs:
+/// the peer, the engine's user SID and the floor. Output: Ok, or why the peer is refused.
+pub fn judge_peer(peer: &Peer, user: &[u8], floor: u32) -> Result<(), &'static str> {
     assert!(!user.is_empty(), "the engine's user SID is never empty");
     if peer.user != user {
         return Err("another account is at the other end of the pipe");
@@ -52,7 +55,7 @@ pub fn judge_peer(peer: &Peer, user: &[u8]) -> Result<(), &'static str> {
     if peer.restricted {
         return Err("a restricted token is at the other end of the pipe");
     }
-    if peer.integrity < MEDIUM_LEVEL {
+    if peer.integrity < floor.max(MEDIUM_LEVEL) {
         return Err("a lower integrity process is at the other end of the pipe");
     }
     Ok(())
@@ -84,7 +87,7 @@ pub fn judge_server(served: &Served, expected: Pin, user: &[u8]) -> Result<(), &
     if served.pin != expected {
         return Err("another process serves the pipe");
     }
-    judge_peer(&served.peer, user)?;
+    judge_peer(&served.peer, user, MEDIUM_LEVEL)?;
     if served.label.is_some_and(|level| level < MEDIUM_LEVEL) {
         return Err("the pipe carries a label below medium");
     }

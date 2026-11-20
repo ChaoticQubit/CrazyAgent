@@ -12,6 +12,12 @@ use std::time::Duration;
 
 const WAIT: Duration = Duration::from_secs(10);
 
+/// A sizer's seat alone in a fresh unit table, sizing through the pin as `open` seats a
+/// view. Takes the host, the agent and the pin. Returns the seat.
+fn seated(host: &Arc<dyn Host>, agent: &AgentId, pinned: Option<PaneAt>) -> Arc<Seat> {
+    seat(host, &Arc::default(), agent, pinned, false).expect("a stub host names a unit")
+}
+
 struct Server {
     tmux: PathBuf,
     socket: PathBuf,
@@ -448,7 +454,7 @@ async fn output_reaches_the_view_while_a_typed_keys_send_is_held() {
     let pumping = tokio::spawn(async move {
         pump(
             &mut ours,
-            View::of(viewer),
+            View::of(viewer, seated(&host, &AgentId::team(1).unwrap(), None)),
             &mut asked,
             host,
             &Open::default(),
@@ -527,9 +533,10 @@ async fn a_prompt_held_as_its_view_ends_is_still_recorded_as_heard() {
     let viewing = Arc::new(Open::default());
     let mut pumping = {
         let viewing = viewing.clone();
-        tokio::spawn(
-            async move { pump(&mut ours, View::of(viewer), &mut asked, host, &*viewing).await },
-        )
+        tokio::spawn(async move {
+            let view = View::of(viewer, seated(&host, &AgentId::team(1).unwrap(), None));
+            pump(&mut ours, view, &mut asked, host, &*viewing).await
+        })
     };
     let text = "go".to_owned();
     requests
@@ -839,14 +846,15 @@ async fn pumped(
     }
     drop(queue);
     let (mut ours, _theirs) = tokio::io::duplex(1 << 16);
+    let host: Arc<dyn Host> = host;
     let view = View {
         agent: agent.clone(),
         cols: 80,
         rows: 24,
         viewer: None,
         pinned: None,
+        seat: seated(&host, agent, None),
     };
-    let host: Arc<dyn Host> = host;
     tokio::time::timeout(WAIT, pump(&mut ours, view, &mut asked, host, viewing))
         .await
         .unwrap_or("no end within ten seconds")
@@ -1003,6 +1011,7 @@ async fn an_input_only_view_types_writes_nothing_and_ends_when_its_agent_is_gone
     let (_queue, mut asked) = tokio::sync::mpsc::channel::<TerminalRequest>(1);
     let (mut ours, mut theirs) = tokio::io::duplex(1 << 16);
     let view = View {
+        seat: seated(&gone, &agent, None),
         agent,
         cols: 80,
         rows: 24,
@@ -1074,7 +1083,7 @@ async fn an_input_only_view_types_and_pastes_without_sending_output() {
 
     assert_eq!(
         owner
-            .terminal_attach_input(agent.clone(), None, 1, 30)
+            .terminal_attach_input(agent.clone(), None, (1, 30), false)
             .await
             .err()
             .map(|error| error.0),
@@ -1087,7 +1096,7 @@ async fn an_input_only_view_types_and_pastes_without_sending_output() {
         mut control,
         ..
     } = owner
-        .terminal_attach_input(agent.clone(), None, 100, 30)
+        .terminal_attach_input(agent.clone(), None, (100, 30), false)
         .await
         .unwrap();
     assert_eq!((cols, rows), (100, 30));
@@ -1138,6 +1147,190 @@ async fn an_input_only_view_types_and_pastes_without_sending_output() {
         .unwrap();
 }
 
+/// The size of one agent's window on the engine's tmux server, read by name with
+/// `list-windows`, so no view of the engine reads or sets it. Takes the tmux program, the
+/// server's socket and the agent. Returns the columns and rows, or none for no such window.
+fn window_size(tmux: &Path, socket: &Path, agent: &AgentId) -> Option<(u16, u16)> {
+    let listed = crate::spawn_gate::collected(
+        Command::new(tmux)
+            .arg("-S")
+            .arg(socket)
+            .args(["list-windows", "-t", crate::terminal::tmux::SESSION, "-F"])
+            .arg("#{window_name} #{window_width} #{window_height}")
+            .env_clear(),
+    )
+    .ok()?;
+    let name = agent.to_string();
+    String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .find_map(|line| {
+            let [window, cols, rows] = line.split(' ').collect::<Vec<_>>()[..] else {
+                return None;
+            };
+            (window == name).then(|| Some((cols.parse().ok()?, rows.parse().ok()?)))?
+        })
+}
+
+/// V243-PANE-SIZE-ACROSS-WINDOWS: on the engine's own host a live agent's unit is its
+/// server's socket and its window's id, read the same every time, another agent's window is
+/// another unit, and once the terminal ended the host names the agent's own key, so a view
+/// of its kept last screen still opens.
+#[test]
+fn a_live_agent_s_unit_is_its_window_and_an_ended_one_keeps_its_own_key() {
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-term-unit-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root = tmp.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(root).expect("tmux must be installed on this machine");
+    let socket = root.join(FOLDER).join(SOCKET);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let host = crate::terminal::tmux_host(root, Some(tmux));
+    let (named, other) = (AgentId::team(1).unwrap(), AgentId::team(2).unwrap());
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sh".into(), "-c".into(), "exec /bin/sleep 30".into()],
+        cwd: root.to_path_buf(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    host.spawn(&named, &command).unwrap();
+    host.spawn(&other, &command).unwrap();
+    let live = host.unit(&named).unwrap();
+    let (server, window) = live.rsplit_once(" @").expect("a socket and a window id");
+    assert_eq!(server, socket.display().to_string());
+    assert!(!window.is_empty() && window.bytes().all(|byte| byte.is_ascii_digit()));
+    assert_eq!(host.unit(&named), Ok(live.clone()), "one window, one key");
+    assert_ne!(
+        host.unit(&other).unwrap(),
+        live,
+        "another window, another unit"
+    );
+    host.kill(&named).unwrap();
+    assert!(
+        host.kept(&named),
+        "the ended terminal's last screen is kept"
+    );
+    assert_eq!(host.unit(&named), Ok(format!("agent {named}")));
+    assert!(
+        host.attach(&named).is_ok(),
+        "its kept last screen still opens"
+    );
+    host.kill(&other).unwrap();
+}
+
+/// V243-PANE-SIZE-ACROSS-WINDOWS: a follower sizes its agent's window only while no sizer
+/// view of that window is open. Alone it sizes; a sizer's open wins; the follower's resize
+/// then waits; once the sizer's client is gone without a detach, the window takes the
+/// follower's last ask with no new resize.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_follower_sizes_its_window_only_while_no_sizer_is_open() {
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-term-follow-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root = tmp.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let global = root.join("g.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 2000\n").unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let tmux = installed(root).expect("tmux must be installed on this machine");
+    let folder = root.join(FOLDER);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: folder.join(SOCKET),
+    };
+    let agent = AgentId::team(1).unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sh".into()],
+        cwd: root.to_path_buf(),
+        env: vec![("PS1".into(), "ready$ ".into())],
+        transcript: Transcript::Unavailable,
+    };
+    let _launcher = {
+        let (agent, folder) = (agent.clone(), folder.clone());
+        tokio::task::spawn_blocking(move || {
+            let launcher = Tmux::open(Some(tmux), &folder);
+            launcher.spawn(&agent, &command).unwrap();
+            launcher
+        })
+        .await
+        .unwrap()
+    };
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root,
+        "e.sock",
+        &global,
+        &root.join("p.toml"),
+        &stopped,
+    )
+    .await
+    .unwrap();
+    let (_, owner, _) = Client::new(root.join("e.sock"), WAIT)
+        .unwrap()
+        .with_owner(OwnerClientKind::Tui)
+        .await
+        .unwrap();
+    let tmux = installed(root).unwrap();
+    let socket = folder.join(SOCKET);
+    let window = || window_size(&tmux, &socket, &agent);
+
+    let mut follower = owner
+        .terminal_attach_input(agent.clone(), None, (47, 11), true)
+        .await
+        .unwrap();
+    assert_eq!(window(), Some((47, 11)), "a follower alone sizes");
+    let sizer = owner
+        .terminal_attach_input(agent.clone(), None, (100, 30), false)
+        .await
+        .unwrap();
+    assert_eq!(window(), Some((100, 30)), "a sizer's open wins");
+
+    follower.control.resize(40, 10).await.unwrap();
+    let marker = root.join("resize-sent");
+    let touch = format!("touch {}\r", marker.display());
+    follower.control.input(touch.into_bytes()).await.unwrap();
+    let typed = tokio::time::timeout(WAIT, async {
+        while !marker.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        typed.is_ok(),
+        "the follower's keys after its resize reached the pane"
+    );
+    assert_eq!(
+        window(),
+        Some((100, 30)),
+        "a follower's resize waits while a sizer is open"
+    );
+
+    drop(sizer);
+    let replayed = tokio::time::timeout(WAIT, async {
+        while window() != Some((40, 10)) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        replayed.is_ok(),
+        "the window took the follower's last ask once the sizer's client was gone, it reads {:?}",
+        window()
+    );
+
+    drop(follower);
+    drop(owner);
+    tokio::time::timeout(WAIT, service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 /// #477 r1 F2: an input-only view's terminal is gone only by the call its keys take: a
 /// teammate the engine adopted onto its lead's server answers there although the host's
 /// agent list never names it, so it stays; an ended terminal, teammates' server or pane is
@@ -1179,6 +1372,7 @@ async fn an_input_only_view_of_a_teammate_its_host_does_not_list_stays_open() {
         tokio::spawn(async move {
             let (mut ours, _theirs) = tokio::io::duplex(1 << 16);
             let view = View {
+                seat: seated(&host, &agent, None),
                 agent,
                 cols: 80,
                 rows: 24,
@@ -1294,7 +1488,7 @@ async fn an_input_only_view_never_moves_to_a_new_terminal_under_its_agents_name(
         mut control,
         ..
     } = owner
-        .terminal_attach_input(agent.clone(), None, 100, 30)
+        .terminal_attach_input(agent.clone(), None, (100, 30), false)
         .await
         .unwrap();
     control.input(b"echo own-pane\r".to_vec()).await.unwrap();
@@ -1400,6 +1594,7 @@ async fn a_pinned_input_only_view_sends_only_to_its_pane_and_ends_once_it_cannot
         tokio::spawn(async move {
             let (mut ours, _theirs) = tokio::io::duplex(1 << 16);
             let view = View {
+                seat: seated(&host, &agent, pinned.clone()),
                 agent,
                 cols: 80,
                 rows: 24,
@@ -1489,7 +1684,8 @@ async fn a_pin_that_is_no_pane_id_trips_every_pinned_path() {
         let request = TerminalRequest::Input {
             bytes: b"a".to_vec(),
         };
-        send(&host, &agent, None, Some(bogus.clone()), request)
+        let seat = seated(&host, &agent, None);
+        send(&host, &agent, (None, Some(bogus.clone())), &seat, request)
     }));
     assert!(sending.is_err(), "a pinned send to no pane id panics");
     let prompting = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1534,6 +1730,7 @@ async fn a_prompt_through_a_pinned_view_lands_in_its_pane_and_is_heard() {
         tokio::spawn(async move {
             let (mut ours, _theirs) = tokio::io::duplex(1 << 16);
             let view = View {
+                seat: seated(&host, &agent, pinned.clone()),
                 agent,
                 cols: 80,
                 rows: 24,
@@ -1647,7 +1844,7 @@ async fn a_prompt_through_an_input_only_view_lands_in_a_real_tmux_pane() {
         .await
         .unwrap();
     let TerminalSession { mut control, .. } = owner
-        .terminal_attach_input(agent.clone(), None, 100, 30)
+        .terminal_attach_input(agent.clone(), None, (100, 30), false)
         .await
         .unwrap();
     control.prompt("pinned prompt".into()).await.unwrap();

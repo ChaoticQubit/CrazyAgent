@@ -1,44 +1,174 @@
 use std::io;
 use std::path::Path;
 
+#[cfg(unix)]
 pub(crate) use crate::platform::unix_socket::{
     OwnedReadHalf, OwnedWriteHalf, ReadHalf, UnixListener as Listener, UnixStream as Stream,
 };
+#[cfg(windows)]
+pub(crate) use windows::{
+    OwnedReadHalf, OwnedWriteHalf, PipeListener as Listener, PipeStream as Stream, ReadHalf,
+};
 
-/// Binds the owner-class listener at `path`: a socket made inside the spawn gate, guarded by
-/// its parent, the protected root. Must run inside a Tokio runtime.
-/// Input: the endpoint path. Output: the listener.
-#[cfg(unix)]
-pub(crate) fn owner_listener(path: impl AsRef<Path>) -> io::Result<Listener> {
-    crate::spawn_gate::bind_unix(path)
+/// Binds the owner-class listener at `path` for at most `streams` streams at once: on Unix a
+/// socket made inside the spawn gate, guarded by its parent, the protected root; on Windows
+/// the named pipe of that root and the file name, with `streams + 1` instances (DESIGN-0256
+/// D7-D8). Must run inside a Tokio runtime. Inputs: the endpoint path and the stream bound,
+/// 1 or more. Output: the listener.
+pub(crate) fn owner_listener(path: impl AsRef<Path>, streams: usize) -> io::Result<Listener> {
+    assert!(streams > 0, "a listener serves at least one stream");
+    #[cfg(unix)]
+    {
+        crate::spawn_gate::bind_unix(path)
+    }
+    #[cfg(windows)]
+    {
+        let (root, purpose) = endpoint(path.as_ref())?;
+        windows::bind(root, purpose, instances(streams))
+    }
 }
 
-/// Accepts one owner-class connection, taking the spawn gate only for each accept attempt.
-/// Input: the listener. Output: the stream, whose peer is not checked yet.
+/// Accepts one owner-class connection; on Unix the spawn gate is taken only for each accept
+/// attempt. Input: the listener. Output: the stream, whose peer is not checked yet.
 pub(crate) async fn owner_accept(listener: &Listener) -> io::Result<Stream> {
-    crate::spawn_gate::accept_unix(listener)
-        .await
-        .map(|(stream, _)| stream)
+    #[cfg(unix)]
+    {
+        crate::spawn_gate::accept_unix(listener)
+            .await
+            .map(|(stream, _)| stream)
+    }
+    #[cfg(windows)]
+    {
+        listener.accept().await
+    }
 }
 
-/// Connects to the owner-class endpoint at `path`, whose server is not checked yet.
-/// Input: the endpoint path. Output: the stream, or `unix_socket_unavailable` where this
-/// platform has no owner-class transport yet.
+/// Connects to the owner-class endpoint at `path`, whose server is not checked yet; on
+/// Windows the pipe name and the server's pin come from the root's pipes file. Input: the
+/// endpoint path. Output: the stream.
 pub(crate) async fn owner_connect(path: impl AsRef<Path>) -> io::Result<Stream> {
-    crate::spawn_gate::connect_unix(path).await
+    #[cfg(unix)]
+    {
+        crate::spawn_gate::connect_unix(path).await
+    }
+    #[cfg(windows)]
+    {
+        let (root, purpose) = endpoint(path.as_ref())?;
+        windows::connect(root, purpose).await
+    }
 }
 
-/// The server side's check of an accepted stream: its client runs as this user.
-/// Input: the stream. Output: Ok, `peer_owner_mismatch`, or the error reading the peer.
+/// Says whether a checked engine serves the owner-class endpoint at `path` now, writing no
+/// byte to it (V244-WIN-ENGINE-WIRING decision 6): the server must pass the client's whole
+/// check. Input: the endpoint path. Output: the answer; any failure reads false.
+#[cfg(windows)]
+pub(crate) fn owner_answering(path: &Path) -> bool {
+    endpoint(path).is_ok_and(|(root, purpose)| windows::answering(root, purpose))
+}
+
+/// Closes a Windows listener and deletes its pipes file, reporting a delete that failed
+/// (V244-WIN-ENGINE-WIRING WIRE-2). Input: the listener. Output: Ok, or the delete's error.
+#[cfg(windows)]
+pub(crate) fn owner_close(listener: Listener) -> io::Result<()> {
+    listener.close()
+}
+
+/// Test only: publishes a pipes file at `path`'s root that pins another start of this
+/// process and serves its name from here, as a rogue server would (R1). Input: the endpoint
+/// path. Output: the rogue's first instance.
+#[cfg(all(test, windows))]
+pub(crate) fn serve_unpinned(
+    path: &Path,
+) -> io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use std::io::Write;
+    let (root, purpose) = endpoint(path)?;
+    let own = crazyagent_win_sandbox::pipe::own_pin()?;
+    let rogue = Published {
+        random: [13; 16],
+        pid: own.pid,
+        created: own.created + 1,
+    };
+    let staged = root.join("pipes.rogue");
+    let mut file = crazyagent_win_sandbox::private::secret_file(&staged)?;
+    file.write_all(encode_pipes(purpose, &rogue).as_bytes())?;
+    drop(file);
+    std::fs::rename(&staged, root.join("pipes"))?;
+    let name = windows::name_of(root, purpose, &rogue.random)?;
+    crazyagent_win_sandbox::pipe::instance(&name, true, 2)
+}
+
+/// Test only: the pipe name the pipes file at `path`'s root names. Input: the endpoint
+/// path. Output: the name.
+#[cfg(all(test, windows))]
+pub(crate) fn pipe_name_at(path: &Path) -> io::Result<String> {
+    let (root, purpose) = endpoint(path)?;
+    let published = windows::read(root, purpose)?;
+    windows::name_of(root, purpose, &published.random)
+}
+
+/// The server side's check of an accepted stream: its client runs as this user (on Windows
+/// also in no AppContainer, unrestricted and at medium or above). Input: the stream. Output:
+/// Ok, `peer_owner_mismatch`, or the error reading the peer.
 pub(crate) fn verify_client(stream: &Stream) -> io::Result<()> {
-    same_user(stream)
+    #[cfg(unix)]
+    {
+        same_user(stream)
+    }
+    #[cfg(windows)]
+    {
+        windows::verify_client(stream)
+    }
 }
 
 /// The client side's check, right after connect and before any byte is written: the server
-/// runs as this user. Input: the stream. Output: Ok, `peer_owner_mismatch`, or the error
-/// reading the peer.
+/// runs as this user (on Windows it is also the engine start the pipes file pins). Input:
+/// the stream. Output: Ok, `peer_owner_mismatch`, or the error reading the peer.
 pub(crate) fn verify_server(stream: &Stream) -> io::Result<()> {
-    same_user(stream)
+    #[cfg(unix)]
+    {
+        same_user(stream)
+    }
+    #[cfg(windows)]
+    {
+        windows::verify_server(stream)
+    }
+}
+
+/// Splits an owner-class endpoint path into the protected root that holds it and its
+/// purpose, the file name, which D7 places verbatim in the pipe name (V244-WIN-ENGINE-WIRING
+/// decision 1). Input: the endpoint path. Output: the root and the purpose, or
+/// `ipc_endpoint_not_plain`.
+#[cfg(any(windows, test))]
+fn endpoint(path: &Path) -> io::Result<(&Path, &str)> {
+    let purpose = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| plain_purpose(name));
+    let root = path.parent().filter(|root| !root.as_os_str().is_empty());
+    match (root, purpose) {
+        (Some(root), Some(purpose)) => Ok((root, purpose)),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ipc_endpoint_not_plain",
+        )),
+    }
+}
+
+/// Windows' cap on the instances of one pipe name (win-sandbox `pipe::INSTANCES_MAX`).
+#[cfg(any(windows, test))]
+const PIPE_INSTANCES_MAX: u32 = 254;
+
+/// The pipe instances a Windows listener of `streams` streams makes: one per stream plus the
+/// one listening while a stream is handed off (DESIGN-0256 D8 caps). Input: the stream bound,
+/// 1 to 253. Output: the instance cap.
+#[cfg(any(windows, test))]
+fn instances(streams: usize) -> u32 {
+    assert!(streams > 0, "a listener serves at least one stream");
+    let cap = u32::try_from(streams)
+        .ok()
+        .and_then(|streams| streams.checked_add(1))
+        .filter(|cap| *cap <= PIPE_INSTANCES_MAX);
+    cap.expect("a listener's streams fit Windows' instance cap")
 }
 
 /// The Unix peer check both sides share: the kernel's credentials of the peer name this
@@ -59,13 +189,6 @@ fn same_user(stream: &Stream) -> io::Result<()> {
     Ok(())
 }
 
-/// The peer check of a stream that cannot exist where there is no owner-class transport.
-/// Input: that stream. Output: unreachable by construction.
-#[cfg(not(unix))]
-fn same_user(stream: &Stream) -> io::Result<()> {
-    match *stream {}
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -76,7 +199,7 @@ mod tests {
     async fn an_owner_endpoint_serves_a_client_of_this_user_at_its_path() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("engine.sock");
-        let listener = owner_listener(&path).unwrap();
+        let listener = owner_listener(&path, 1).unwrap();
         let kind = std::fs::symlink_metadata(&path).unwrap().file_type();
         assert!(kind.is_socket());
         let (client, served) = tokio::join!(owner_connect(&path), owner_accept(&listener));
@@ -201,6 +324,76 @@ fn parse_pipes(bytes: &[u8], purpose: &str) -> Result<Published, &'static str> {
 
 #[cfg(windows)]
 mod windows;
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::{endpoint, instances};
+    use std::path::Path;
+
+    /// V244-WIN-ENGINE-WIRING decision 1: an owner-class endpoint path names its protected
+    /// root, the folder holding it, and its purpose, the file name, so every caller keeps
+    /// passing the path it passes on Unix.
+    #[test]
+    fn an_endpoint_path_names_its_root_and_its_file_name_as_the_purpose() {
+        let root = Path::new("data").join("o00000001");
+        for name in ["engine.sock", "owner.sock", "control.sock", "e.sock"] {
+            let path = root.join(name);
+            let (held, purpose) = endpoint(&path).unwrap();
+            assert_eq!(held, root.as_path());
+            assert_eq!(purpose, name);
+        }
+    }
+
+    /// Decision 1: a file name outside D7's plain shape, or a path with no folder above it,
+    /// names no endpoint, and the refusal is an error the caller reports, never a panic. A
+    /// backslash is a name byte on Unix, refused, and a separator on Windows (farm run
+    /// 44709311585).
+    #[test]
+    fn an_endpoint_path_outside_the_plain_shape_is_refused() {
+        let long = "a".repeat(33);
+        let root = Path::new("data");
+        for name in ["Engine.sock", "engine sock", "e+s", long.as_str()] {
+            let refused = endpoint(&root.join(name)).unwrap_err();
+            assert_eq!(refused.to_string(), "ipc_endpoint_not_plain", "{name:?}");
+        }
+        #[cfg(unix)]
+        assert_eq!(
+            endpoint(&root.join("e\\s")).unwrap_err().to_string(),
+            "ipc_endpoint_not_plain"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            endpoint(&root.join("e\\s")).unwrap(),
+            (Path::new("data\\e"), "s")
+        );
+        for path in [Path::new("engine.sock"), Path::new("")] {
+            let refused = endpoint(path).unwrap_err();
+            assert_eq!(refused.to_string(), "ipc_endpoint_not_plain", "{path:?}");
+        }
+    }
+
+    /// Decision 2 (DESIGN-0256 D8 caps): a listener of n streams makes n + 1 pipe instances,
+    /// one listening while a stream is handed off: the engine 129, the owner 33.
+    #[test]
+    fn a_listener_of_n_streams_makes_n_plus_one_instances() {
+        assert_eq!(instances(1), 2);
+        assert_eq!(instances(32), 33);
+        assert_eq!(instances(128), 129);
+        assert_eq!(instances(253), 254);
+    }
+
+    /// Decision 2: no streams, or more than Windows' instance cap allows, is a programming
+    /// error in the caller's bound.
+    #[test]
+    fn a_stream_count_outside_the_instance_cap_is_a_programming_error() {
+        for streams in [0, 254, usize::MAX] {
+            assert!(
+                std::panic::catch_unwind(|| instances(streams)).is_err(),
+                "{streams}"
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 mod name_tests {
@@ -541,7 +734,7 @@ mod windows_tests {
     #[tokio::test]
     async fn a_bound_pipe_serves_a_client_of_this_user_with_both_checks_passing() {
         let (_temp, root) = private_root();
-        let listener = bind(&root, "engine.sock").unwrap();
+        let listener = bind(&root, "engine.sock", 3).unwrap();
         let (client, served) = tokio::join!(connect(&root, "engine.sock"), listener.accept());
         let (mut client, mut served) = (client.unwrap(), served.unwrap());
         verify_server(&client).unwrap();
@@ -685,30 +878,150 @@ mod windows_tests {
 
     /// DESIGN-0256 D10: a client whose pipes file pins another start of the engine refuses
     /// the server it reached before it writes a byte, with the error the Unix check gives.
+    /// The listener holds the pipes file for its life (rv-sec2 #702 5a), so this row serves
+    /// the name itself, under a pipes file that pins another start of this process.
     #[tokio::test]
     async fn a_server_the_pipes_file_does_not_pin_is_refused() {
         let (_temp, root) = private_root();
-        let listener = bind_with(&root, "engine.sock", [11; 16], 2).unwrap();
-        let published = read(&root, "engine.sock").unwrap();
+        let own = pipe::own_pin().unwrap();
         let other = super::Published {
-            created: published.created + 1,
-            ..published
+            random: [11; 16],
+            pid: own.pid,
+            created: own.created + 1,
         };
         let mut file = private::secret_file(&root.join("pipes.other")).unwrap();
         file.write_all(super::encode_pipes("engine.sock", &other).as_bytes())
             .unwrap();
         drop(file);
         std::fs::rename(root.join("pipes.other"), root.join("pipes")).unwrap();
-        let (client, _served) = tokio::join!(connect(&root, "engine.sock"), listener.accept());
+        let name = name_of(&root, "engine.sock", &[11; 16]).unwrap();
+        let served = pipe::instance(&name, true, 2).unwrap();
+        let (client, _) = tokio::join!(connect(&root, "engine.sock"), served.connect());
         let refused = verify_server(&client.unwrap()).unwrap_err();
         assert_eq!(refused.to_string(), "peer_owner_mismatch");
     }
 
+    /// V244-WIN-ENGINE-WIRING decision 1: the owner-class entry points every caller uses serve
+    /// a client of this user at a path on Windows, the root being its folder and the purpose
+    /// its file name, with both checks passing.
     #[tokio::test]
-    async fn an_owner_connect_refuses_until_the_pipe_transport_lands() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("engine.sock");
-        let refused = super::owner_connect(&path).await.unwrap_err();
-        assert_eq!(refused.to_string(), "unix_socket_unavailable");
+    async fn an_owner_endpoint_at_a_path_serves_a_client_of_this_user() {
+        let (_temp, root) = private_root();
+        let path = root.join("engine.sock");
+        let listener = super::owner_listener(&path, 2).unwrap();
+        assert_eq!(read(&root, "engine.sock").unwrap().pid, std::process::id());
+        let (client, served) =
+            tokio::join!(super::owner_connect(&path), super::owner_accept(&listener));
+        let (mut client, mut served) = (client.unwrap(), served.unwrap());
+        super::verify_server(&client).unwrap();
+        super::verify_client(&served).unwrap();
+        client.write_all(b"ping").await.unwrap();
+        let mut bytes = [0; 4];
+        served.read_exact(&mut bytes).await.unwrap();
+        assert_eq!(&bytes, b"ping");
+    }
+
+    /// Decision 3: the halves of a pipe stream, owned and borrowed, carry bytes both ways at
+    /// once, so a terminal's output and its typed input never wait on each other.
+    #[tokio::test]
+    async fn the_halves_of_a_pipe_stream_run_both_ways_at_once() {
+        let (_temp, root) = private_root();
+        let path = root.join("owner.sock");
+        let listener = super::owner_listener(&path, 2).unwrap();
+        let (client, served) =
+            tokio::join!(super::owner_connect(&path), super::owner_accept(&listener));
+        let (mut client, served) = (client.unwrap(), served.unwrap());
+        super::verify_server(&client).unwrap();
+        let (mut from_client, mut to_client) = served.into_split();
+        let echo = tokio::spawn(async move {
+            tokio::io::copy(&mut from_client, &mut to_client)
+                .await
+                .unwrap()
+        });
+        let sent: Vec<u8> = (0..400_000).map(|index| (index % 251) as u8).collect();
+        let (mut reader, mut writer) = client.split();
+        let mut back = vec![0; sent.len()];
+        let both = async { tokio::join!(writer.write_all(&sent), reader.read_exact(&mut back)) };
+        let (written, read_back) = tokio::time::timeout(Duration::from_secs(20), both)
+            .await
+            .expect("both halves move at once");
+        written.unwrap();
+        read_back.unwrap();
+        assert_eq!(back, sent);
+        drop(client);
+        assert_eq!(echo.await.unwrap(), sent.len() as u64);
+    }
+
+    /// Decision 2: a listener of one stream makes two instances, so with one stream served
+    /// and a second client on the listening instance, a third client gets pipe busy once the
+    /// client's wait runs out, instead of an instance past the cap.
+    #[tokio::test]
+    async fn a_listener_refuses_the_client_past_its_cap_with_pipe_busy() {
+        let (_temp, root) = private_root();
+        let path = root.join("engine.sock");
+        let listener = super::owner_listener(&path, 1).unwrap();
+        let (first, served) =
+            tokio::join!(super::owner_connect(&path), super::owner_accept(&listener));
+        let _first = (first.unwrap(), served.unwrap());
+        let _second = super::owner_connect(&path).await.unwrap();
+        let third = tokio::time::timeout(Duration::from_secs(15), super::owner_connect(&path))
+            .await
+            .expect("the client's own wait ends first");
+        assert_eq!(third.unwrap_err().raw_os_error(), Some(231));
+    }
+
+    /// Decision 1: a root holds one endpoint, so a bind over a pipes file naming another
+    /// purpose is refused with `pipes_purpose_taken`, and that file stays as it was.
+    #[tokio::test]
+    async fn a_bind_over_a_pipes_file_of_another_endpoint_is_refused() {
+        let (_temp, root) = private_root();
+        let kept = publish(&root, "owner.sock", [12; 16]).unwrap();
+        let refused = super::owner_listener(root.join("engine.sock"), 2).unwrap_err();
+        assert_eq!(refused.to_string(), "pipes_purpose_taken");
+        assert_eq!(read(&root, "owner.sock").unwrap(), kept);
+    }
+
+    /// rv-sec2 #702 5a: while a listener lives it holds its root and its pipes file, so
+    /// neither is renamed or replaced; once it drops, the pipes file is gone.
+    #[tokio::test]
+    async fn a_listener_holds_its_root_and_pipes_file_and_removes_the_file_at_drop() {
+        let (temp, root) = private_root();
+        let listener = super::owner_listener(root.join("engine.sock"), 2).unwrap();
+        let moved = std::fs::rename(&root, temp.path().join("moved")).unwrap_err();
+        assert!(matches!(moved.raw_os_error(), Some(5 | 32)), "{moved}");
+        let mut file = private::secret_file(&root.join("pipes.swap")).unwrap();
+        file.write_all(b"swap").unwrap();
+        drop(file);
+        let swapped = std::fs::rename(root.join("pipes.swap"), root.join("pipes")).unwrap_err();
+        assert!(matches!(swapped.raw_os_error(), Some(5 | 32)), "{swapped}");
+        std::fs::remove_file(root.join("pipes.swap")).unwrap();
+        drop(listener);
+        assert!(entries(&root).is_empty(), "{:?}", entries(&root));
+    }
+
+    /// Decision 6: `answering` is true only while a listener serves the endpoint and its
+    /// server passes the client's whole check, and it writes no byte to the engine.
+    #[tokio::test]
+    async fn answering_is_true_only_while_a_checked_listener_serves() {
+        let (_temp, root) = private_root();
+        let path = root.join("engine.sock");
+        assert!(!super::owner_answering(&path));
+        let listener = super::owner_listener(&path, 2).unwrap();
+        let probe = tokio::task::spawn_blocking({
+            let path = path.clone();
+            move || super::owner_answering(&path)
+        });
+        let mut served = super::owner_accept(&listener).await.unwrap();
+        assert!(probe.await.unwrap());
+        let mut bytes = Vec::new();
+        served.read_to_end(&mut bytes).await.unwrap();
+        assert!(bytes.is_empty(), "{bytes:?}");
+        drop(listener);
+        assert!(!super::owner_answering(&path));
+        publish(&root, "engine.sock", [13; 16]).unwrap();
+        assert!(
+            !super::owner_answering(&path),
+            "a pinned start with no pipe"
+        );
     }
 }
