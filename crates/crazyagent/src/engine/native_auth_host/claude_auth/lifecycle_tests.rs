@@ -1,5 +1,6 @@
 use super::super::RegisteredNativeAuthHost;
-use super::super::custody::{CustodySession, Retirement, cleanup_owned_group};
+use super::super::child_group::cleanup_owned_group;
+use super::super::custody::{CustodySession, Retirement};
 use crate::config::{ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference};
 use crate::engine::bootstrap::{NativeProfileCustody, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
@@ -117,7 +118,7 @@ impl Case {
         assert_eq!(rustix::process::getpgid(Some(group)).unwrap(), group);
         if let Err((error, mut child)) = self.session().retain_child(child) {
             drop(input);
-            assert!(cleanup_owned_group(&mut child, group, Instant::now() + CHILD_TIME).unwrap());
+            assert!(cleanup_owned_group(&mut child, &group, Instant::now() + CHILD_TIME).unwrap());
             panic!("real process fixture could not be retained: {error}");
         }
         assert!(
@@ -295,7 +296,7 @@ fn claude_auth_lifecycle_refuses_status_handoff_until_first_group_is_absent() {
     assert!(
         cleanup_owned_group(
             case.session().child_mut().unwrap(),
-            group,
+            &group,
             Instant::now() + CHILD_TIME,
         )
         .unwrap()

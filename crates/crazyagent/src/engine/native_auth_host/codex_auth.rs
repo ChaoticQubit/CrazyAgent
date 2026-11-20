@@ -1,4 +1,4 @@
-use super::custody::{CustodySession, Retirement, cleanup_owned_group};
+use super::custody::{CustodySession, Retirement};
 use crate::adapters::codex::{AuthControl, CodexProtocol, Event, FRAME_BYTES_MAX, LoginChallenge};
 use crate::engine::owner::native_auth::{
     CODEX_DEVICE_CODE_LIFE, CODEX_LOG_DROPPED_MAX, CODEX_LOG_NAME_BYTES_MAX,
@@ -11,7 +11,6 @@ use crate::engine::owner::{NativeAuthAction, NativeAuthMethod};
 use crate::engine::{EngineError, io_error};
 use crate::storage::CUSTODIAN_CODES;
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-use rustix::process::Pid;
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
@@ -655,10 +654,8 @@ pub(in crate::engine) async fn run(
     let Ok(child) = crate::spawn_gate::spawn(&mut launch) else {
         return session.seal_without_effect();
     };
-    let group = Pid::from_raw(i32::try_from(child.id()).map_err(io_error)?)
-        .ok_or_else(|| failure("native_auth_child_cleanup_uncertain"))?;
     if let Err((error, mut child)) = session.retain_child(child) {
-        let _ = cleanup_owned_group(&mut child, group, Instant::now() + CLEANUP_TIME);
+        let _ = CustodySession::cleanup_returned(&mut child, Instant::now() + CLEANUP_TIME);
         return Err(error);
     }
     let pipes = Pipes::take(session.child_mut()?)?;
@@ -683,7 +680,7 @@ pub(in crate::engine) async fn run(
     let result = driver.run().await;
     let log = result.as_ref().err().and_then(|_| driver.take_log());
     drop(driver);
-    let cleaned = cleanup_owned_group(session.child_mut()?, group, Instant::now() + CLEANUP_TIME);
+    let cleaned = session.cleanup_child(Instant::now() + CLEANUP_TIME)?;
     if !cleaned.map_err(io_error)? {
         return Err(result
             .err()

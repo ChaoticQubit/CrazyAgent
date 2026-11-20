@@ -1,5 +1,5 @@
 use super::super::RegisteredNativeAuthHost;
-use super::super::custody::{CustodySession, cleanup_direct_child, cleanup_owned_group};
+use super::super::custody::CustodySession;
 use super::transcript::Transcript;
 use super::types::{ClaudeAuthObservation, completion_bytes};
 use super::{CHECK_TIME, ClaudeAuthCommand, RENEWAL_TIME, auth_command};
@@ -8,7 +8,6 @@ use crate::engine::owner::transport::native_auth_channel::{
 };
 use crate::engine::{EngineError, io_error};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-use rustix::process::Pid;
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::process::Child;
@@ -263,28 +262,20 @@ pub(in crate::engine) async fn run_child(
     let child = crate::spawn_gate::spawn(&mut command)
         .map_err(|_| failure("native_auth_claude_launch_failed"))?;
     if let Err((error, mut child)) = session.retain_child(child) {
-        let group = i32::try_from(child.id()).ok().and_then(Pid::from_raw);
-        let clean = match group {
-            Some(group) => cleanup_owned_group(&mut child, group, Instant::now() + CLEANUP),
-            None => cleanup_direct_child(&mut child, Instant::now() + CLEANUP)
-                .map(|status| status.is_some()),
-        };
+        let clean = CustodySession::cleanup_returned(&mut child, Instant::now() + CLEANUP);
         if !matches!(clean, Ok(true)) {
             std::mem::forget(child);
             return Err(failure("native_auth_child_cleanup_uncertain"));
         }
         return Err(error);
     }
-    let group = i32::try_from(session.child_mut()?.id())
-        .ok()
-        .and_then(Pid::from_raw)
-        .ok_or_else(|| failure("native_auth_child_cleanup_uncertain"))?;
     let deadline = operation_deadline.min(Instant::now() + command_bound(action));
     let result = match Pipes::take(session.child_mut()?, action) {
         Ok(mut pipes) => drive(session, channel, &mut pipes, action, deadline).await,
         Err(error) => Err(error),
     };
-    if !cleanup_owned_group(session.child_mut()?, group, Instant::now() + CLEANUP)
+    if !session
+        .cleanup_child(Instant::now() + CLEANUP)?
         .map_err(|_| failure("native_auth_child_cleanup_uncertain"))?
     {
         return Err(failure("native_auth_child_cleanup_uncertain"));

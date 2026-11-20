@@ -1,5 +1,6 @@
 #[cfg(test)]
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+#[cfg(test)]
 use rustix::process::{Pid, Signal};
 #[cfg(test)]
 use std::ffi::OsString;
@@ -18,17 +19,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+pub(in crate::engine) use super::child_group::cleanup_direct_child;
+use super::child_group::{
+    ChildGroup, DROP_TIME, cleanup_owned_group, cleanup_unretained, dedicated_group,
+    reaped_group_gone,
+};
+#[cfg(test)]
+use super::child_group::{POLL_INTERVAL, sleep_until};
+
 #[cfg(test)]
 const RUN_TIME_MAX: Duration = Duration::from_secs(600);
 #[cfg(test)]
 const CLEANUP_TIME_MAX: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const STREAM_BYTES_MAX: usize = 65_536;
-const POLL_INTERVAL: Duration = Duration::from_millis(5);
 #[cfg(test)]
 const TERM_GRACE: Duration = Duration::from_millis(100);
-const DROP_TIME: Duration = Duration::from_secs(2);
-const GROUP_SETTLE_TIME: Duration = Duration::from_millis(500);
 #[cfg(test)]
 const READ_BYTES: usize = 4096;
 #[cfg(test)]
@@ -469,27 +475,6 @@ impl Drop for OwnedProcess {
     }
 }
 
-fn sleep_until(deadline: Instant) {
-    let remaining = deadline.saturating_duration_since(Instant::now());
-    thread::sleep(POLL_INTERVAL.min(remaining));
-}
-
-/// Waits until the process group of a dedicated child that was already reaped is gone.
-/// macOS can still find such a group for some milliseconds and answer EPERM, no member it
-/// may signal, before it answers ESRCH; a member it may signal answers at once and is a
-/// survivor. Input: the group. Output: whether the group was gone within the settle bound.
-fn reaped_group_gone(group: Pid) -> bool {
-    assert!(group.as_raw_nonzero().get() > 1);
-    let deadline = Instant::now() + GROUP_SETTLE_TIME;
-    loop {
-        match rustix::process::test_kill_process_group(group) {
-            Err(rustix::io::Errno::SRCH) => return true,
-            Err(rustix::io::Errno::PERM) if Instant::now() < deadline => sleep_until(deadline),
-            _ => return false,
-        }
-    }
-}
-
 pub(super) fn retain_direct_child(
     retained: &mut Option<Child>,
     incoming: Child,
@@ -504,37 +489,6 @@ pub(super) fn retain_direct_child(
     Ok(())
 }
 
-pub(in crate::engine) fn cleanup_direct_child(
-    child: &mut Child,
-    deadline: Instant,
-) -> io::Result<Option<ExitStatus>> {
-    if let Some(status) = child.try_wait()? {
-        return Ok(Some(status));
-    }
-    let started = Instant::now();
-    if started >= deadline {
-        return Ok(None);
-    }
-    let deadline = deadline.min(started + DROP_TIME);
-    assert!(deadline > started);
-    assert!(deadline.duration_since(started) <= DROP_TIME);
-    if let Err(error) = child.kill() {
-        return match child.try_wait()? {
-            Some(status) => Ok(Some(status)),
-            None => Err(error),
-        };
-    }
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Some(status));
-        }
-        if Instant::now() >= deadline {
-            return Ok(None);
-        }
-        sleep_until(deadline);
-    }
-}
-
 use crate::engine::EngineError;
 use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::transport::native_auth_channel::{
@@ -545,7 +499,7 @@ use crate::protocol::RequestId;
 
 pub(in crate::engine) struct CustodySession {
     child: Option<Child>,
-    child_group: Option<Pid>,
+    child_group: Option<ChildGroup>,
     child_attempted: bool,
     status_child: StatusChild,
     guard: Option<NativeProfileUse>,
@@ -603,9 +557,7 @@ impl CustodySession {
             if let Err(error) = self.revalidate_reaped_child() {
                 return Err((error, child));
             }
-            let group = i32::try_from(child.id()).ok().and_then(Pid::from_raw);
-            let group = group.filter(|pid| rustix::process::getpgid(Some(*pid)) == Ok(*pid));
-            let Some(group) = group else {
+            let Some(group) = dedicated_group(&child) else {
                 return Err((
                     EngineError("native_auth_child_cleanup_uncertain".into()),
                     child,
@@ -624,8 +576,7 @@ impl CustodySession {
                 child,
             ));
         }
-        let group = i32::try_from(child.id()).ok().and_then(Pid::from_raw);
-        let group = group.filter(|pid| rustix::process::getpgid(Some(*pid)) == Ok(*pid));
+        let group = dedicated_group(&child);
         match retain_direct_child(&mut self.child, child) {
             Ok(()) => {
                 self.child_group = group;
@@ -654,14 +605,14 @@ impl CustodySession {
     }
 
     fn revalidate_reaped_child(&mut self) -> Result<(), EngineError> {
-        let group = self
-            .child_group
-            .ok_or_else(|| EngineError("native_auth_child_cleanup_uncertain".into()));
         let child = self.child_mut()?;
         if child.try_wait().map_err(crate::engine::io_error)?.is_none() {
             return Err(EngineError("native_auth_child_cleanup_uncertain".into()));
         }
-        let group = group?;
+        let group = self
+            .child_group
+            .as_ref()
+            .ok_or_else(|| EngineError("native_auth_child_cleanup_uncertain".into()))?;
         if !reaped_group_gone(group) {
             return Err(EngineError("native_auth_child_cleanup_uncertain".into()));
         }
@@ -692,6 +643,31 @@ impl CustodySession {
     /// child was handed over.
     pub(in crate::engine) fn child_attempted(&self) -> bool {
         self.child_attempted
+    }
+
+    /// Ends the retained login child and its whole group once custody is done with it,
+    /// within the deadline. Input: the deadline. Output: whether all of it ended in time, the
+    /// failed step, or `native_auth_child_cleanup_uncertain` with no group to name.
+    pub(in crate::engine) fn cleanup_child(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<io::Result<bool>, EngineError> {
+        let child = self.child_mut()?;
+        let group = i32::try_from(child.id())
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+            .ok_or_else(|| EngineError("native_auth_child_cleanup_uncertain".into()))?;
+        Ok(cleanup_owned_group(child, &group, deadline))
+    }
+
+    /// Cleans up a login child [`Self::retain_child`] handed back: its own group when it
+    /// leads one, else the child alone. Inputs: the child and the deadline. Output: whether it
+    /// ended in time, or the failed step.
+    pub(in crate::engine) fn cleanup_returned(
+        child: &mut Child,
+        deadline: Instant,
+    ) -> io::Result<bool> {
+        cleanup_unretained(child, deadline)
     }
 
     pub(in crate::engine) fn child_mut(&mut self) -> Result<&mut Child, EngineError> {
@@ -768,14 +744,14 @@ impl CustodySession {
     }
 
     pub(in crate::engine) fn seal_after_child_reaped(mut self) -> Result<Retirement, EngineError> {
-        let group = self
-            .child_group
-            .ok_or_else(|| EngineError("native_auth_child_cleanup_uncertain".into()));
         let child = self.child_mut()?;
         if child.try_wait().map_err(crate::engine::io_error)?.is_none() {
             return Err(EngineError("native_auth_child_cleanup_uncertain".into()));
         }
-        let group = group?;
+        let group = self
+            .child_group
+            .as_ref()
+            .ok_or_else(|| EngineError("native_auth_child_cleanup_uncertain".into()))?;
         if !reaped_group_gone(group) {
             return Err(EngineError("native_auth_child_cleanup_uncertain".into()));
         }
@@ -823,7 +799,7 @@ impl Drop for CustodySession {
     fn drop(&mut self) {
         if let Some(child) = self.child.as_mut() {
             let deadline = Instant::now() + DROP_TIME;
-            let cleaned = match self.child_group {
+            let cleaned = match self.child_group.as_ref() {
                 Some(group) => cleanup_owned_group(child, group, deadline),
                 None => cleanup_direct_child(child, deadline).map(|status| status.is_some()),
             };
@@ -835,42 +811,6 @@ impl Drop for CustodySession {
             }
         }
     }
-}
-
-pub(super) fn cleanup_owned_group(
-    child: &mut Child,
-    group: Pid,
-    deadline: Instant,
-) -> io::Result<bool> {
-    let direct_id = child.id();
-    let direct = Pid::from_raw(i32::try_from(direct_id).map_err(io::Error::other)?)
-        .ok_or_else(|| io::Error::other("invalid direct child identity"))?;
-    if group != direct {
-        return Err(io::Error::other("child group is not dedicated"));
-    }
-    let started = Instant::now();
-    let deadline = deadline.min(started + DROP_TIME);
-    let mut signalled = false;
-    while Instant::now() < deadline {
-        let reaped = child.try_wait()?.is_some();
-        match rustix::process::test_kill_process_group(group) {
-            Err(rustix::io::Errno::SRCH) if reaped => return Ok(true),
-            Err(rustix::io::Errno::SRCH) => {}
-            Ok(()) if !signalled => {
-                match rustix::process::kill_process_group(group, Signal::KILL) {
-                    Ok(()) | Err(rustix::io::Errno::PERM) | Err(rustix::io::Errno::SRCH) => {}
-                    Err(error) => return Err(error.into()),
-                }
-                signalled = true;
-            }
-            Ok(()) | Err(rustix::io::Errno::PERM) => {}
-            Err(error) => return Err(error.into()),
-        }
-        assert_eq!(group, direct);
-        assert_eq!(child.id(), direct_id);
-        sleep_until(deadline);
-    }
-    Ok(false)
 }
 
 impl Retirement {
