@@ -15971,7 +15971,7 @@ fn full_access_boundary(scratch: &Path) -> Option<Arc<InstalledSandbox>> {
             sandbox,
             &scratch.join("full-access.sb"),
             crate::sandbox::LinuxSupervisor::On,
-            LinuxStrict::Off,
+            crate::sandbox::LinuxStrict::Off,
         )
         .unwrap();
         Some(Arc::new(installed.unconfined()))
@@ -16016,6 +16016,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         tools: true,
         sandbox_profile: PathBuf::from("/tmp/agent-1.sb"),
         full_access: full_access.clone(),
+        confined: None,
         access: AgentAccess::Full,
         toolchains: Vec::new(),
         network: crate::sandbox::policy::AgentNetwork::Open,
@@ -16068,6 +16069,90 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         "{refused}"
     );
     assert!(refused.contains(crate::protocol::plain_code("agent_access_lowered")));
+}
+
+/// On Linux every confined start runs in the installed confined boundary the plan carries
+/// (DEC-205 S5b), with that boundary's profile, and a start at Full access is refused with
+/// the plain macOS-only line, since a Linux plan carries no Full access boundary.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_linux_plan_starts_confined_in_its_installed_boundary_and_refuses_full_access() {
+    let scratch = tempfile::tempdir().unwrap();
+    let root = scratch.path().canonicalize().unwrap();
+    let [project, home, tmp] = ["project", "home", "tmp"].map(|name| root.join(name));
+    let clone = project.join("worktrees").join("agent-1");
+    for folder in [&project, &home, &tmp, &clone] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    for folder in [&project, &clone] {
+        let made = crate::spawn_gate::output(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(folder)
+                .stdin(Stdio::null()),
+        )
+        .unwrap();
+        assert!(made.status.success(), "{made:?}");
+    }
+    let profile = root.join("agent-1.sb");
+    let sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Open)
+        .and_then(|sandbox| sandbox.confine_to_clone(&clone))
+        .unwrap();
+    let boundary_made = Arc::new(
+        InstalledSandbox::install(
+            sandbox,
+            &profile,
+            crate::sandbox::LinuxSupervisor::On,
+            crate::sandbox::LinuxStrict::Off,
+        )
+        .unwrap(),
+    );
+    let plan = || Plan {
+        harness: "codex".into(),
+        executable: PathBuf::from("/bin/sh"),
+        entry: PathBuf::from("/bin/sh"),
+        working_dir: clone.clone(),
+        model: None,
+        tools: true,
+        sandbox_profile: profile.clone(),
+        full_access: None,
+        confined: Some(Arc::clone(&boundary_made)),
+        access: AgentAccess::OwnBranch,
+        toolchains: Vec::new(),
+        network: crate::sandbox::policy::AgentNetwork::Open,
+        grants: Vec::new(),
+        layout: Layout::Clone,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+        pane: None,
+        live: false,
+        resume: None,
+        continues: true,
+        native: false,
+        native_threads: None,
+        tmux: None,
+        hookless: false,
+        scratch_pin: None,
+        proxy: None,
+        freeze_record: None,
+        relay: None,
+        terminal_display: crate::coord::settings::TerminalDisplay::Classic,
+        task_start: None,
+        hidden: Vec::new(),
+    };
+    let account = || AccountBinding::Subscription { home: home.clone() };
+    let own = plan().request(account(), AgentAccess::OwnBranch).unwrap();
+    assert!(!own.boundary.is_unconfined());
+    assert_eq!(own.boundary.confined_profile(), Some(profile.as_path()));
+    let LaunchBoundary::Installed(boundary) = &own.boundary else {
+        panic!("a Linux start runs under a bare profile");
+    };
+    assert!(Arc::ptr_eq(boundary, &boundary_made));
+    let refused = plan().request(account(), AgentAccess::Full).unwrap_err();
+    assert!(
+        refused.starts_with(crate::sandbox::FULL_ACCESS_NEEDS_MACOS),
+        "{refused}"
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -23868,6 +23953,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         tools: true,
         sandbox_profile: PathBuf::from("/tmp/agent-1.sb"),
         full_access: None,
+        confined: None,
         access: AgentAccess::OwnBranch,
         network: crate::sandbox::policy::AgentNetwork::Open,
         grants: Vec::new(),
@@ -25711,6 +25797,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         tools: true,
         sandbox_profile: PathBuf::from("/private/tmp/agent-1.sb"),
         full_access: full_access_boundary(&scratch.path().canonicalize().unwrap()),
+        confined: None,
         access: AgentAccess::Sandboxed,
         network: crate::sandbox::policy::AgentNetwork::Open,
         grants: Vec::new(),

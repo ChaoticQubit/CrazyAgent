@@ -1269,6 +1269,7 @@ mod live {
             tools: plan.tools,
             sandbox_profile: plan.sandbox_profile.clone(),
             full_access: plan.full_access.clone(),
+            confined: plan.confined.clone(),
             access: plan.access,
             toolchains: plan.toolchains.clone(),
             network: plan.network,

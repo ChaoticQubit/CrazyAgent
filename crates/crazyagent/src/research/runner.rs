@@ -2933,14 +2933,14 @@ pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError>
     Ok(())
 }
 
-/// The owner's line for a team agent, research job or onboarding mapping run on a system
-/// that runs no such agent in V1: Linux (DEC-094), whose boundaries cannot keep a worktree's
-/// git links read-only, and Windows, which cannot load the Seatbelt profile they run under.
-/// Input: the operating system name as `std::env::consts::OS` gives it. Output: the line,
-/// or None where such agents run.
+/// The owner's line for a research job or onboarding mapping run on a system that runs none
+/// in this version: Linux until research runs under its installed boundary (DEC-205 S6), and
+/// Windows, which cannot load the Seatbelt profile they run under. Team agents read
+/// [`crate::team::team_unavailable`]. Input: the operating system name as
+/// `std::env::consts::OS` gives it. Output: the line, or None where research runs.
 pub(crate) fn confined_unavailable(os: &str) -> Option<&'static str> {
     match os {
-        "linux" => Some("Team agents and research are not available on Linux in this version."),
+        "linux" => Some("Research is not available on Linux in this version."),
         "windows" => Some("Team agents and research are not available on Windows in this version."),
         _ => None,
     }

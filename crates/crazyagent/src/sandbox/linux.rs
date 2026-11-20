@@ -233,9 +233,10 @@ const GIT_FOLLOWED: &[&str] = &[
     "worktrees",
 ];
 
-pub(crate) const CONFINED_UNAVAILABLE: &str = "an agent confined to its own worktree cannot run on Linux yet: \
-     neither Landlock nor bubblewrap can keep the worktree's git links and the existing git \
-     objects read-only inside the git folders it must write";
+/// Why an agent confined to its own worktree or clone does not start on this Linux: only the
+/// call supervisor holds its git links and objects read-only inside the git folders it
+/// writes (DEC-205 option A), and none runs here, by the owner's setting or this computer.
+pub(crate) const CONFINED_UNAVAILABLE: &str = "An agent confined to its own worktree or clone runs on Linux only under the call supervisor. Turn on \"Linux call supervisor\" in Settings, or this computer cannot run it.";
 
 const CONFINED_NEEDS_LANDLOCK: &str = "an agent confined to its own worktree or clone needs \
      Landlock file rules on Linux (Linux 6.2 or newer), and this Linux runs agents under \
@@ -2481,13 +2482,11 @@ pub(crate) fn host_kept() -> super::LinuxHost {
     host_within(None)
 }
 
-/// Refuses a policy neither Linux backend starts: one confined to its own worktree, or a
-/// limited network under [`LinuxSockets::Refuse`]. Input: the policy. Output: Ok, or the
-/// plain `Unavailable` reason.
+/// Refuses a policy neither Linux backend starts: a limited network under
+/// [`LinuxSockets::Refuse`]. A policy confined to its own worktree or clone is admitted; its
+/// wrap refuses it with no call supervisor or on bubblewrap alone (DEC-205 S5b). Input: the
+/// policy. Output: Ok, or the plain `Unavailable` reason.
 fn admitted(sandbox: &ProjectSandbox) -> Result<(), SandboxError> {
-    if sandbox.checkout.is_some() || sandbox.clone.is_some() {
-        return Err(SandboxError::Unavailable(CONFINED_UNAVAILABLE.into()));
-    }
     if matches!(sandbox.network(), SandboxNetwork::Only(_))
         && sandbox.linux_sockets() == LinuxSockets::Refuse
     {

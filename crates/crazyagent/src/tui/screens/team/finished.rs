@@ -83,10 +83,8 @@ fn words(code: &str) -> &'static str {
         "team_agent_running" => "It is already running.",
         "team_agent_no_worktree" => "Its worktree was cleaned up. Hand its work to a new agent.",
         "team_agent_not_found" => "That agent is no longer part of this team.",
-        "team_agents_unavailable" => {
-            crate::research::runner::confined_unavailable(std::env::consts::OS)
-                .unwrap_or("Team agents cannot run on this system.")
-        }
+        "team_agents_unavailable" => crate::team::team_unavailable(std::env::consts::OS)
+            .unwrap_or("Team agents cannot run on this system."),
         "engine_support_not_ready" => "Waking agents is not available in this engine yet.",
         "trusted_connection_unavailable" | "controller_disconnected" => {
             "The engine connection is not ready yet."

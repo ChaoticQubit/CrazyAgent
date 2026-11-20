@@ -3072,13 +3072,23 @@ fn wake_note(code: &str) -> String {
             "Its worktree was cleaned up, so it cannot be woken. Hand its work to a new agent."
                 .into()
         }
-        "team_agents_unavailable" => {
-            crate::research::runner::confined_unavailable(std::env::consts::OS)
-                .unwrap_or("Team agents cannot run on this system.")
-                .into()
-        }
+        "team_agents_unavailable" => team_unavailable(std::env::consts::OS)
+            .unwrap_or("Team agents cannot run on this system.")
+            .into(),
         _ => "That agent is no longer part of this team.".into(),
     }
+}
+
+/// The owner's line for a team agent on a system that runs none in this version: Windows,
+/// which shares research's line ([`crate::research::runner::confined_unavailable`]). Linux
+/// runs team agents (DEC-205), and a host that cannot hold one refuses it at prepare.
+/// Input: the operating system name as `std::env::consts::OS` gives it. Output: the line,
+/// or None where team agents run.
+pub(crate) fn team_unavailable(os: &str) -> Option<&'static str> {
+    if os == "linux" {
+        return None;
+    }
+    crate::research::runner::confined_unavailable(os)
 }
 
 /// Tells why a sub-agent cannot be woken now (DEC-102), or none when it can: it must be a
@@ -3109,7 +3119,7 @@ pub fn wake_refusal(
         Some("team_agent_running")
     } else if !kept {
         Some("team_agent_no_worktree")
-    } else if crate::research::runner::confined_unavailable(std::env::consts::OS).is_some() {
+    } else if team_unavailable(std::env::consts::OS).is_some() {
         Some("team_agents_unavailable")
     } else {
         None

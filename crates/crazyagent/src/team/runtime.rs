@@ -34,7 +34,7 @@ use crate::project_setup::{StoredSetup, load_setup};
 use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
 use crate::research::runner::{
     CLAUDE_MODEL_HOSTS, CODEX_MODEL_HOSTS, ResearchAccount, RunError, add_worktree_at,
-    confined_unavailable, endpoint_model_host, ensure_repository, model_remote,
+    endpoint_model_host, ensure_repository, model_remote,
 };
 use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
 use crate::sandbox::policy::{
@@ -42,7 +42,7 @@ use crate::sandbox::policy::{
 };
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
 use crate::sandbox::{
-    InstalledSandbox, LinuxStrict, ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote,
+    InstalledSandbox, ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote,
 };
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -274,7 +274,9 @@ struct Grant {
 /// `task_start` is a sub-agent's or master's Task-start reminder from its launch context
 /// (T3-15, DEC-116); `hidden` the digests of the project folders its sandbox hides, read
 /// once with the profile (SA-VID14-A); `full_access` the same sandbox marked Full access
-/// (DEC-102), installed with the profile, which a start at Full access runs in.
+/// (DEC-102), installed with the profile, which a start at Full access runs in, none on
+/// Linux; `confined` the installed confined sandbox every Linux start runs in, none elsewhere,
+/// where a start runs under the profile (DEC-205 S5b).
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -284,6 +286,7 @@ struct Plan {
     tools: bool,
     sandbox_profile: PathBuf,
     full_access: Option<Arc<InstalledSandbox>>,
+    confined: Option<Arc<InstalledSandbox>>,
     access: AgentAccess,
     toolchains: Vec<Toolchain>,
     network: AgentNetwork,
@@ -335,6 +338,10 @@ fn adoptable(reach: &TeamReach) -> Result<(), String> {
 /// Why a native-mode lead does not start at Full access: its own tmux server, its teammate
 /// panes and the engine's client on that server must all run inside its Seatbelt profile.
 const NATIVE_NEEDS_SANDBOX: &str = "Native teammates need a sandboxed lead. Choose Sandboxed or Own branch for this project, or start sub-agents from the app.";
+
+/// Why a lead does not run native teammates on Linux in this version (DEC-205 Q4).
+const TEAMMATES_NEED_MACOS: &str =
+    "Team agents with teammates are not available on Linux in this version.";
 
 /// Why a lead Claude Code starts `--bare` does not run native teammates: no hook fires there,
 /// so the relay that counts, guards and reports its teammates never runs (DEC-104 bare-hooks).
@@ -410,6 +417,9 @@ impl Plan {
                 )
             })?;
             LaunchBoundary::Installed(full)
+        } else if let Some(confined) = &self.confined {
+            assert!(!confined.is_unconfined());
+            LaunchBoundary::Installed(Arc::clone(confined))
         } else {
             LaunchBoundary::Profile(self.sandbox_profile.clone())
         };
@@ -8329,6 +8339,12 @@ impl TeamRuntime {
         if self.native_kind(project, id, role, launch)? != Some(NativeSubAgents::Teams) {
             return Ok(false);
         }
+        if cfg!(target_os = "linux") {
+            return Err(with_code(
+                TEAMMATES_NEED_MACOS,
+                Some("native_mode_unavailable"),
+            ));
+        }
         if self.terminal.is_none() {
             return Err(with_code(
                 "this lead runs sub-agents as native teammates, which needs the engine's terminal host",
@@ -9390,7 +9406,7 @@ impl TeamRuntime {
     ) -> Result<(PathBuf, Plan, Mode), String> {
         let launch = launch_harness(harness).ok_or("harness has no launch adapter")?;
         let executable = &self.harness(launch).ok_or("harness is not installed")?;
-        if let Some(line) = confined_unavailable(std::env::consts::OS) {
+        if let Some(line) = crate::team::team_unavailable(std::env::consts::OS) {
             return Err(line.to_owned());
         }
         let sandboxed = |e: SandboxError| {
@@ -9522,6 +9538,32 @@ impl TeamRuntime {
         if let Some((reason, code)) = policy.access.refusal() {
             return Err(with_code(reason, Some(code)));
         }
+        let settings = crate::sandbox_settings::load(&self.connection);
+        #[cfg(target_os = "linux")]
+        let settings = settings
+            .map_err(|e| with_code("the owner's sandbox settings could not be read", Some(&e.0)))?;
+        #[cfg(target_os = "linux")]
+        if policy.access == AgentAccess::Full {
+            return Err(with_code(
+                crate::sandbox::FULL_ACCESS_NEEDS_MACOS,
+                Some("sandbox_unavailable"),
+            ));
+        }
+        #[cfg(target_os = "linux")]
+        if !crate::sandbox::linux_host()
+            .is_some_and(|host| host.under(Some(settings.linux_supervisor)).supervised)
+        {
+            return Err(crate::sandbox::linux::CONFINED_UNAVAILABLE.to_owned());
+        }
+        #[cfg(target_os = "linux")]
+        let (calls, strict) = (settings.linux_supervisor, settings.linux_strict);
+        #[cfg(not(target_os = "linux"))]
+        let (calls, strict) = (
+            settings
+                .map(|settings| settings.linux_supervisor)
+                .unwrap_or_default(),
+            crate::sandbox::LinuxStrict::Off,
+        );
         let kept = match (tools, &self.settings) {
             (true, Some((global, project))) => crate::sandbox::settings_owner_ports(global, project)
                 .map_err(|code| {
@@ -9594,6 +9636,16 @@ impl TeamRuntime {
         let program =
             crate::paths::launch_executable(executable, std::env::var_os("PATH").as_deref())
                 .map_err(|_| "harness is not installed")?;
+        #[cfg(target_os = "linux")]
+        {
+            sandbox = sandbox.limit_sockets(settings.linux_sockets);
+            if let Some(code) = sandbox.linux_refusal(&program) {
+                return Err(with_code(
+                    "the agent sandbox could not be set up",
+                    Some(code),
+                ));
+            }
+        }
         let install = program
             .parent()
             .map(Path::to_path_buf)
@@ -9682,9 +9734,6 @@ impl TeamRuntime {
         if !adopt {
             spawn_ledger::begin_worktree(&self.root, id, &root, &worktree)?;
         }
-        let calls = crate::sandbox_settings::load(&self.connection)
-            .map(|settings| settings.linux_supervisor)
-            .unwrap_or_default();
         let mut made = NewClone(None);
         match (adopt, layout) {
             (true, Layout::Linked) => {}
@@ -9820,15 +9869,13 @@ impl TeamRuntime {
                 .install(&agent_teammates_profile(&self.state, id))
                 .map_err(sandboxed)?;
         }
-        let full_access = InstalledSandbox::install(sandbox, &profile, calls, LinuxStrict::Off)
-            .map_err(sandboxed)?
-            .unconfined();
-        self.note_unbridged(
-            &stored.project_id,
-            id,
-            policy.network,
-            full_access.sandbox(),
-        );
+        let installed =
+            InstalledSandbox::install(sandbox, &profile, calls, strict).map_err(sandboxed)?;
+        self.note_unbridged(&stored.project_id, id, policy.network, installed.sandbox());
+        #[cfg(target_os = "linux")]
+        let (full_access, confined) = (None, Some(Arc::new(installed)));
+        #[cfg(not(target_os = "linux"))]
+        let (full_access, confined) = (Some(Arc::new(installed.unconfined())), None);
         let terminal_display = crate::coord::settings::read(&self.connection, &stored.project_id)
             .map_err(|e| {
                 with_code(
@@ -9846,7 +9893,8 @@ impl TeamRuntime {
             model,
             tools,
             sandbox_profile: profile,
-            full_access: Some(Arc::new(full_access)),
+            full_access,
+            confined,
             access: policy.access,
             toolchains,
             network: policy.network,
