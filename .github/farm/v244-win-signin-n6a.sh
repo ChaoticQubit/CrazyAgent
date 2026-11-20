@@ -26,7 +26,7 @@ if [ "$kind" = windows ]; then
   git checkout -q "$red" -- crates
   red_rows=$(listed "$module::")
   cargo test -p crazyagent --lib --locked -- --test-threads 1 "$module::" > "$RUNNER_TEMP/red-$kind.txt" 2>&1
-  git checkout -q "$tip" -- crates
+  git reset -q --hard HEAD
   git clean -fdq -- crates
   git diff --quiet "$tip" -- crates && [ -z "$(git status --porcelain -- crates)" ] || { row "restore after red" "$tip" NOT; exit 1; }
   if [ "$red_rows" = 7 ] && grep -qE '^test result: FAILED\. 1 passed; 6 failed' "$RUNNER_TEMP/red-$kind.txt"; then row "red rows at $red ($red_rows listed)" "1 passed, 6 failed" "1 passed, 6 failed"; else
