@@ -30,11 +30,11 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     FileDispositionInfoEx, FileFullDirectoryInfo, FileFullDirectoryRestartInfo, FileIdInfo,
-    GetFileInformationByHandle, GetFileInformationByHandleEx, LOCKFILE_EXCLUSIVE_LOCK,
-    LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, OPEN_EXISTING, READ_CONTROL, SetFileInformationByHandle,
-    UnlockFileEx, WRITE_DAC, WRITE_OWNER,
+    FileRenameInfoEx, GetFileInformationByHandle, GetFileInformationByHandleEx,
+    LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, OPEN_EXISTING, READ_CONTROL,
+    SetFileInformationByHandle, UnlockFileEx, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
@@ -53,7 +53,7 @@ pub fn user_sid() -> io::Result<Vec<u8>> {
 /// delete, so the folder cannot be renamed while it is held. Input: the absolute path.
 /// Output: the held folder, or why it is not private.
 pub fn dir(path: &Path) -> io::Result<File> {
-    made_dir(path, None, false)
+    made_dir(path, None, false, 0)
 }
 
 /// Makes the private folder at `path` as [`dir`] does, but only when nothing is there yet:
@@ -61,7 +61,7 @@ pub fn dir(path: &Path) -> io::Result<File> {
 /// `mkdirat` (rv-sec3 #716 C2). Input: the absolute path. Output: the held new folder, or
 /// the error.
 pub fn new_dir(path: &Path) -> io::Result<File> {
-    made_dir(path, None, true)
+    made_dir(path, None, true, 0)
 }
 
 /// Opens the private folder at `path` as [`dir`] holds one, but never creates it: a missing
@@ -69,11 +69,19 @@ pub fn new_dir(path: &Path) -> io::Result<File> {
 /// that only opens never makes a folder in a race. Input: the absolute path. Output: the
 /// held folder, or why it is missing or not private.
 pub fn open_dir(path: &Path) -> io::Result<File> {
+    opened_dir(path, 0)
+}
+
+/// The work of [`open_dir`] and of [`dir_deletable`] without `create`. Inputs: the absolute
+/// path and the access added to listing, read-control and attributes. Output: the held
+/// folder, or why it is missing or not private.
+fn opened_dir(path: &Path, extra: u32) -> io::Result<File> {
+    assert!(extra == 0 || extra == DELETE);
     let user = user_sid()?;
     let name = wide_path(path)?;
     let folder = open(
         &name,
-        FILE_LIST_DIRECTORY | READ_CONTROL | FILE_READ_ATTRIBUTES,
+        FILE_LIST_DIRECTORY | READ_CONTROL | FILE_READ_ATTRIBUTES | extra,
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS,
         None,
@@ -86,8 +94,12 @@ pub fn open_dir(path: &Path) -> io::Result<File> {
 /// opens one, its handle also carrying delete access, so the holder renames it through that
 /// handle with [`rename`] (DESIGN-0601 R4); delete is never shared. Inputs: the absolute
 /// path and whether to create. Output: the held folder, or the error.
-pub fn dir_deletable(_path: &Path, _create: bool) -> io::Result<File> {
-    Err(io::Error::from(io::ErrorKind::Unsupported))
+pub fn dir_deletable(path: &Path, create: bool) -> io::Result<File> {
+    if create {
+        made_dir(path, None, true, DELETE)
+    } else {
+        opened_dir(path, DELETE)
+    }
 }
 
 /// Opens a secret store folder or the database folder at `path` as [`dir`] does, with that
@@ -96,16 +108,17 @@ pub fn dir_deletable(_path: &Path, _create: bool) -> io::Result<File> {
 /// build's weaker label included, and so do the files in it (V244-WIN-STORE-LABEL-NX).
 /// Inputs: the absolute path and the store. Output: the held folder, or why it is not private.
 pub fn store_dir(path: &Path, store: Store) -> io::Result<File> {
-    made_dir(path, Some(store), false)
+    made_dir(path, Some(store), false, 0)
 }
 
 /// The work of [`dir`] and [`store_dir`]: creates the folder when missing, with the store's
 /// label when one is named, then opens it. A store folder is judged by
 /// [`judge_store_before_label`] and given its label before the full judge. Inputs: the
-/// absolute path, the store, if any, and whether an entry already there is refused. Output:
-/// the held folder, or why it is not private.
-fn made_dir(path: &Path, store: Option<Store>, fresh: bool) -> io::Result<File> {
+/// absolute path, the store, if any, whether an entry already there is refused, and the
+/// access added to the held handle. Output: the held folder, or why it is not private.
+fn made_dir(path: &Path, store: Option<Store>, fresh: bool, extra: u32) -> io::Result<File> {
     assert!(!fresh || store.is_none());
+    assert!(extra == 0 || (extra == DELETE && fresh));
     let user = user_sid()?;
     let name = wide_path(path)?;
     let mut planned = Planned::new(&user, true, store.map(label_list))?;
@@ -119,7 +132,7 @@ fn made_dir(path: &Path, store: Option<Store>, fresh: bool) -> io::Result<File> 
     let relabel = if store.is_some() { WRITE_OWNER } else { 0 };
     let folder = open(
         &name,
-        FILE_LIST_DIRECTORY | READ_CONTROL | FILE_READ_ATTRIBUTES | relabel,
+        FILE_LIST_DIRECTORY | READ_CONTROL | FILE_READ_ATTRIBUTES | relabel | extra,
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS,
         None,
@@ -272,6 +285,21 @@ fn holds_entries(folder: &File) -> io::Result<bool> {
 /// of [`list`]; without it, it must exist. Inputs: the absolute path and whether to create.
 /// Output: the open file, `AlreadyExists` on a second create, or why it is not private.
 pub fn file(path: &Path, create: bool) -> io::Result<File> {
+    private_file(path, create, 0)
+}
+
+/// Opens the private file at `path` as [`file`] does, its handle also carrying delete access
+/// from the first open, so the holder renames it through that handle with [`rename`]
+/// (DESIGN-0601 R2, R3); delete is never shared, so no other open moves it. Inputs: the
+/// absolute path and whether to create. Output: the open file, or the error.
+pub fn file_deletable(path: &Path, create: bool) -> io::Result<File> {
+    private_file(path, create, DELETE)
+}
+
+/// The work of [`file`] and [`file_deletable`]. Inputs: the absolute path, whether to create
+/// and the access added to read, write and read-control. Output: the open file, or the error.
+fn private_file(path: &Path, create: bool, extra: u32) -> io::Result<File> {
+    assert!(extra == 0 || extra == DELETE);
     let user = user_sid()?;
     let name = wide_path(path)?;
     let mut planned = if create {
@@ -282,21 +310,13 @@ pub fn file(path: &Path, create: bool) -> io::Result<File> {
     let disposition = if create { CREATE_NEW } else { OPEN_EXISTING };
     let opened = open(
         &name,
-        GENERIC_READ | GENERIC_WRITE | READ_CONTROL,
+        GENERIC_READ | GENERIC_WRITE | READ_CONTROL | extra,
         disposition,
         0,
         planned.as_mut(),
     )?;
     private_as(&opened, &user, false)?;
     Ok(opened)
-}
-
-/// Opens the private file at `path` as [`file`] does, its handle also carrying delete access
-/// from the first open, so the holder renames it through that handle with [`rename`]
-/// (DESIGN-0601 R2, R3); delete is never shared, so no other open moves it. Inputs: the
-/// absolute path and whether to create. Output: the open file, or the error.
-pub fn file_deletable(_path: &Path, _create: bool) -> io::Result<File> {
-    Err(io::Error::from(io::ErrorKind::Unsupported))
 }
 
 /// Creates the private file at `path` as [`file`] does with `create`, carrying from creation
@@ -371,8 +391,19 @@ pub fn read_only(path: &Path) -> io::Result<File> {
 /// keeps the old bytes (DESIGN-0601 R2; rv-sec3 #726 L2 names its only callers: custody's
 /// `identity.json`, `config.json` and agent copy). Input: the absolute path. Output: the
 /// open file, or why it is not private.
-pub fn read_only_replaceable(_path: &Path) -> io::Result<File> {
-    Err(io::Error::from(io::ErrorKind::Unsupported))
+pub fn read_only_replaceable(path: &Path) -> io::Result<File> {
+    let user = user_sid()?;
+    let name = wide_path(path)?;
+    let opened = open_sharing(
+        &name,
+        GENERIC_READ | READ_CONTROL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        OPEN_EXISTING,
+        0,
+        None,
+    )?;
+    private_as(&opened, &user, false)?;
+    Ok(opened)
 }
 
 /// The identity a store pins for an open private object: its volume serial number and its
@@ -420,6 +451,14 @@ pub fn delete(file: &File) -> io::Result<()> {
     Ok(())
 }
 
+/// `FILE_RENAME_FLAG_REPLACE_IF_EXISTS` of the Windows SDK, kept here so the crate needs no
+/// further windows-sys feature: a rename takes the name of an entry already there.
+const RENAME_REPLACE_IF_EXISTS: u32 = 0x1;
+
+/// `FILE_RENAME_FLAG_POSIX_SEMANTICS` of the Windows SDK: the replaced entry's name goes at
+/// once, while handles that share delete keep the old file open.
+const RENAME_POSIX_SEMANTICS: u32 = 0x2;
+
 /// How [`rename`] meets an entry already at the destination name (DESIGN-0601 R2, R5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -435,8 +474,49 @@ pub enum Mode {
 /// its own open, Windows looks the name up through `folder`, and a refused rename has no
 /// fallback. Inputs: the held handle and folder, one plain name and the [`Mode`]. Output: Ok,
 /// or the Windows error.
-pub fn rename(_file: &File, _folder: &File, _name: &OsStr, _mode: Mode) -> io::Result<()> {
-    Err(io::Error::from(io::ErrorKind::Unsupported))
+pub fn rename(file: &File, folder: &File, name: &OsStr, mode: Mode) -> io::Result<()> {
+    let units: Vec<u16> = name.encode_wide().collect();
+    assert!(!units.is_empty());
+    assert!(units.len() <= 255);
+    assert!(
+        !units
+            .iter()
+            .any(|unit| matches!(*unit, 0 | 0x2f | 0x3a | 0x5c))
+    );
+    assert_ne!(units, [0x2e]);
+    assert_ne!(units, [0x2e, 0x2e]);
+    let flags = match mode {
+        Mode::NoReplace => 0,
+        Mode::Replace => RENAME_REPLACE_IF_EXISTS | RENAME_POSIX_SEMANTICS,
+    };
+    let length = size_of_val(units.as_slice());
+    let size = size_of::<FILE_RENAME_INFO>() + length;
+    assert!(std::mem::offset_of!(FILE_RENAME_INFO, FileName) + length < size);
+    let mut words = vec![0u64; size.div_ceil(size_of::<u64>())];
+    let info = words.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    assert!(info.is_aligned());
+    unsafe {
+        (*info).Anonymous.Flags = flags;
+        (*info).RootDirectory = folder.as_raw_handle();
+        (*info).FileNameLength = u32::try_from(length).expect("a name fits");
+        std::ptr::copy_nonoverlapping(
+            units.as_ptr(),
+            (&raw mut (*info).FileName).cast::<u16>(),
+            units.len(),
+        );
+    }
+    let renamed = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileRenameInfoEx,
+            info.cast(),
+            u32::try_from(size).expect("a name fits"),
+        )
+    };
+    if renamed == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Deletes the private file at `path` only while it is still the object a caller pinned
