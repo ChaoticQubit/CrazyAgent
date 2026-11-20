@@ -2,6 +2,7 @@
 
 use crazyagent_win_sandbox::dacl::{self, ADMINISTRATORS, SYSTEM};
 use crazyagent_win_sandbox::private;
+use std::ffi::OsStr;
 use std::io;
 use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
@@ -15,8 +16,9 @@ use windows_sys::Win32::Security::{
     TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenImpersonation, TokenIntegrityLevel,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_EXECUTE, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_DATA, READ_CONTROL, WRITE_OWNER,
+    DELETE, FILE_EXECUTE, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_GENERIC_READ, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_DATA,
+    READ_CONTROL, WRITE_OWNER,
 };
 use windows_sys::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken, SetThreadToken};
@@ -854,4 +856,345 @@ fn a_deletable_secret_file_is_read_while_held_and_deleted_through_its_own_handle
     let reread = private::read_secret(&closed).unwrap();
     assert_eq!(own_label(&reread), MEDIUM_FULL);
     drop((reread, held));
+}
+
+/// rv-sec3 #716 C2: `new_dir` makes a missing private folder and holds it, so it passes the
+/// check and cannot be renamed while held, and refuses any entry already at the path, a
+/// private folder or a file, which stays as it was.
+#[test]
+fn new_dir_makes_only_a_missing_private_folder() {
+    let root = scratch("new-dir");
+    drop(private::dir(&root).unwrap());
+    let path = root.join("home");
+    let made = private::new_dir(&path).unwrap();
+    private::check(&made).unwrap();
+    let pinned = private::identity(&made).unwrap();
+    assert!(std::fs::rename(&path, root.join("moved")).is_err());
+    drop(made);
+    let again = private::new_dir(&path).unwrap_err();
+    assert_eq!(again.kind(), io::ErrorKind::AlreadyExists, "{again}");
+    let kept = private::open_dir(&path).unwrap();
+    assert_eq!(private::identity(&kept).unwrap(), pinned);
+    let file = root.join("file");
+    drop(private::file(&file, true).unwrap());
+    let over_file = private::new_dir(&file).unwrap_err();
+    assert_eq!(
+        over_file.kind(),
+        io::ErrorKind::AlreadyExists,
+        "{over_file}"
+    );
+    assert!(file.is_file());
+}
+
+/// Makes the private file `name` in `folder` holding `bytes`, then closes it. Inputs: the
+/// folder path, the name and the bytes. Output: the file's path.
+fn private_file_with(folder: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+    use std::io::Write;
+    let path = folder.join(name);
+    let file = private::file(&path, true).unwrap();
+    (&file).write_all(bytes).unwrap();
+    path
+}
+
+/// Makes the private file `name` in `folder` holding `bytes`, held with delete access from
+/// its first open as custody stages one (DESIGN-0601 R2). Inputs: the folder path, the name
+/// and the bytes. Output: the held file.
+fn staged(folder: &Path, name: &str, bytes: &[u8]) -> std::fs::File {
+    use std::io::Write;
+    let file = private::file_deletable(&folder.join(name), true).unwrap();
+    (&file).write_all(bytes).unwrap();
+    file
+}
+
+/// The names in a folder, sorted. Input: the folder path. Output: the names.
+fn listed(folder: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+/// Opens a folder's lock stream as custody does, never following a link and sharing delete,
+/// so the stream never blocks the folder's own rename (DESIGN-0601 R1, R4). Input: the folder
+/// path. Output: the open stream.
+fn lock_stream(folder: &Path) -> std::fs::File {
+    let mut name = folder.as_os_str().to_owned();
+    name.push(":crazyagent.lock");
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(PathBuf::from(name))
+        .unwrap()
+}
+
+/// rv-sec3 #716 C6 and #726 L5 (QUESTION-0520 r2 row 4): a file held with delete access from
+/// its first open renames by name into a second held folder, whose unchanged W1 `dir` handle
+/// is the root; the old name is gone, the new name is in that folder only, the identity is
+/// kept, and a path rename of the held file is refused.
+#[test]
+fn a_deletable_file_renames_by_name_into_a_held_folder() {
+    let root = scratch("rename-into");
+    let held = private::dir(&root).unwrap();
+    let source = private::dir(&root.join("source")).unwrap();
+    let target = private::dir(&root.join("target")).unwrap();
+    let file = staged(&root.join("source"), "staged.json", b"new");
+    let pinned = private::identity(&file).unwrap();
+    let from = root.join("source").join("staged.json");
+    assert!(std::fs::rename(&from, root.join("source").join("moved.json")).is_err());
+    private::rename(
+        &file,
+        &target,
+        OsStr::new("config.json"),
+        private::Mode::NoReplace,
+    )
+    .unwrap();
+    assert!(std::fs::symlink_metadata(&from).is_err());
+    assert!(listed(&root.join("source")).is_empty());
+    let landed = root.join("target").join("config.json");
+    assert_eq!(std::fs::read(&landed).unwrap(), b"new");
+    let reread = private::read_only_replaceable(&landed).unwrap();
+    assert_eq!(private::identity(&reread).unwrap(), pinned);
+    assert_eq!(listed(&root), ["source", "target"]);
+    drop((reread, file, source, target, held));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// rv-sec3 #716 C7 and #726 L5 (QUESTION-0520 r2 row 5): a NoReplace rename onto a name
+/// already there fails with ERROR_ALREADY_EXISTS, and so does one onto a name that differs
+/// only in letter case; both entries stay, with their bytes.
+#[test]
+fn a_no_replace_rename_onto_a_taken_or_case_only_name_is_refused() {
+    let root = scratch("rename-taken");
+    let held = private::dir(&root).unwrap();
+    let existing = private_file_with(&root, "CONFIG.json", b"old");
+    let file = staged(&root, "staged.json", b"new");
+    for taken in ["CONFIG.json", "config.json"] {
+        let refused =
+            private::rename(&file, &held, OsStr::new(taken), private::Mode::NoReplace).unwrap_err();
+        assert_eq!(refused.raw_os_error(), Some(183), "{taken}: {refused}");
+    }
+    assert_eq!(std::fs::read(&existing).unwrap(), b"old");
+    assert_eq!(std::fs::read(root.join("staged.json")).unwrap(), b"new");
+    assert_eq!(listed(&root), ["CONFIG.json", "staged.json"]);
+    drop((file, held));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// rv-sec3 #716 C6 (QUESTION-0520 r2 row 6): a handle opened without delete access is
+/// refused with access denied, and nothing moves.
+#[test]
+fn a_rename_through_a_handle_without_delete_access_is_refused() {
+    let root = scratch("rename-no-delete");
+    let held = private::dir(&root).unwrap();
+    let path = private_file_with(&root, "staged.json", b"new");
+    let file = private::file(&path, false).unwrap();
+    let refused = private::rename(
+        &file,
+        &held,
+        OsStr::new("config.json"),
+        private::Mode::NoReplace,
+    )
+    .unwrap_err();
+    assert_eq!(refused.raw_os_error(), Some(5), "{refused}");
+    assert_eq!(listed(&root), ["staged.json"]);
+    drop((file, held));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// rv-sec3 #716 C7 and probe P6 (QUESTION-0520 r2 row 7): a folder held with delete access
+/// cannot be renamed while a handle to its child is open, and stays where it was.
+#[test]
+fn a_folder_with_an_open_child_is_not_renamed() {
+    let root = scratch("rename-busy-folder");
+    let held = private::dir(&root).unwrap();
+    let folder = private::dir_deletable(&root.join("staging"), true).unwrap();
+    let child = private::file(&root.join("staging").join("identity.json"), true).unwrap();
+    let refused =
+        private::rename(&folder, &held, OsStr::new("home"), private::Mode::NoReplace).unwrap_err();
+    assert_eq!(refused.raw_os_error(), Some(5), "{refused}");
+    assert_eq!(listed(&root), ["staging"]);
+    drop((child, folder, held));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// rv-sec3 #716 C6 (QUESTION-0520 r2 row 8): a name that is not one plain component, or that
+/// ends in a dot or a space, which a path open cannot name again, trips the rename's
+/// assertion before any call, and the file stays.
+#[test]
+fn a_rename_name_that_is_not_one_component_trips_the_assertion() {
+    let root = scratch("rename-name");
+    let held = private::dir(&root).unwrap();
+    let file = staged(&root, "staged.json", b"new");
+    for name in [
+        "", ".", "..", "a.", "a ", "a\\b", "a/b", "a:b", "x::$DATA", "a\0b",
+    ] {
+        let tripped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            private::rename(&file, &held, OsStr::new(name), private::Mode::Replace)
+        }));
+        assert!(tripped.is_err(), "{name:?} reached the rename");
+    }
+    assert_eq!(listed(&root), ["staged.json"]);
+    drop((file, held));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// DESIGN-0601 R2 and probe P5 (QUESTION-0520 r3): a Replace rename over a target W1 holds
+/// with `read_only`, which never shares delete, is refused, and both files keep their
+/// bytes. The native rename names this a sharing violation (32), where std's path rename
+/// in P5 gave access denied (5).
+#[test]
+fn a_replace_over_a_held_target_is_refused_and_changes_nothing() {
+    let root = scratch("replace-held");
+    let held = private::dir(&root).unwrap();
+    let target = private_file_with(&root, "config.json", b"old");
+    let holder = private::read_only(&target).unwrap();
+    let file = staged(&root, "staged.json", b"new");
+    let refused = private::rename(
+        &file,
+        &held,
+        OsStr::new("config.json"),
+        private::Mode::Replace,
+    )
+    .unwrap_err();
+    assert_eq!(refused.raw_os_error(), Some(32), "{refused}");
+    assert_eq!(std::fs::read(&target).unwrap(), b"old");
+    assert_eq!(std::fs::read(root.join("staged.json")).unwrap(), b"new");
+    drop((holder, file, held));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// DESIGN-0601 R2 and probe P5 (QUESTION-0520 r3): a Replace rename over a target held with
+/// `read_only_replaceable` passes; the old handle still reads the old bytes, and the name
+/// now carries the staged file's identity and bytes.
+#[test]
+fn a_replace_over_a_replaceable_hold_passes_and_the_old_handle_keeps_the_old_bytes() {
+    use std::io::Read;
+    let root = scratch("replace-shared");
+    let held = private::dir(&root).unwrap();
+    let target = private_file_with(&root, "config.json", b"old");
+    let holder = private::read_only_replaceable(&target).unwrap();
+    let file = staged(&root, "staged.json", b"new");
+    let pinned = private::identity(&file).unwrap();
+    private::rename(
+        &file,
+        &held,
+        OsStr::new("config.json"),
+        private::Mode::Replace,
+    )
+    .unwrap();
+    let mut seen = Vec::new();
+    (&holder).read_to_end(&mut seen).unwrap();
+    assert_eq!(seen, b"old");
+    assert_eq!(std::fs::read(&target).unwrap(), b"new");
+    let reread = private::read_only_replaceable(&target).unwrap();
+    assert_eq!(private::identity(&reread).unwrap(), pinned);
+    assert_eq!(listed(&root), ["config.json"]);
+    drop((reread, holder, file, held));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// rv-sec3 #726 L5 (QUESTION-0520 r3): a Replace rename over a symbolic link replaces the
+/// link itself and never writes through it: the name becomes a plain file with the staged
+/// bytes, and the link's target keeps its own.
+#[test]
+fn a_replace_over_a_link_replaces_the_link_and_not_its_target() {
+    let root = scratch("replace-link");
+    let held = private::dir(&root).unwrap();
+    let real = private_file_with(&root, "real.json", b"real");
+    let link = root.join("config.json");
+    std::os::windows::fs::symlink_file(&real, &link).expect("the hosted runner may make links");
+    let file = staged(&root, "staged.json", b"new");
+    private::rename(
+        &file,
+        &held,
+        OsStr::new("config.json"),
+        private::Mode::Replace,
+    )
+    .unwrap();
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_file()
+    );
+    assert_eq!(std::fs::read(&link).unwrap(), b"new");
+    assert_eq!(std::fs::read(&real).unwrap(), b"real");
+    drop((file, held));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// DESIGN-0601 R4 (QUESTION-0520 r3): a staging folder held with delete access renames
+/// through its own handle into its held parent while its lock stream, opened sharing delete,
+/// is open and locked and no child is open; the lock holds across the rename.
+#[test]
+fn a_deletable_folder_renames_through_its_handle_while_its_lock_stream_is_held() {
+    let root = scratch("rename-folder");
+    let held = private::dir(&root).unwrap();
+    let staging = root.join("staging-1");
+    let folder = private::dir_deletable(&staging, true).unwrap();
+    let pinned = private::identity(&folder).unwrap();
+    let lock = lock_stream(&staging);
+    lock.try_lock().unwrap();
+    private::rename(&folder, &held, OsStr::new("home"), private::Mode::NoReplace).unwrap();
+    assert!(std::fs::symlink_metadata(&staging).is_err());
+    assert_eq!(private::identity(&folder).unwrap(), pinned);
+    assert_eq!(listed(&root), ["home"]);
+    let second = lock_stream(&root.join("home"));
+    assert!(
+        second.try_lock().is_err(),
+        "the lock holds across the rename"
+    );
+    drop((second, lock, folder, held));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// QUESTION-0520 r3 item 2: `dir_deletable` with `create` makes only a missing private
+/// folder and holds it, never sharing delete, so a path rename is refused; without `create`
+/// it opens the folder already there with its identity, and a missing one is `NotFound`.
+#[test]
+fn dir_deletable_makes_only_a_missing_folder_and_opens_only_an_existing_one() {
+    let root = scratch("dir-deletable");
+    let held = private::dir(&root).unwrap();
+    let path = root.join("staging");
+    let made = private::dir_deletable(&path, true).unwrap();
+    private::check(&made).unwrap();
+    let pinned = private::identity(&made).unwrap();
+    assert!(std::fs::rename(&path, root.join("moved")).is_err());
+    let again = private::dir_deletable(&path, true).unwrap_err();
+    assert_eq!(again.kind(), io::ErrorKind::AlreadyExists, "{again}");
+    drop(made);
+    let opened = private::dir_deletable(&path, false).unwrap();
+    assert_eq!(private::identity(&opened).unwrap(), pinned);
+    let missing = private::dir_deletable(&root.join("missing"), false).unwrap_err();
+    assert_eq!(missing.kind(), io::ErrorKind::NotFound, "{missing}");
+    drop((opened, held));
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// QUESTION-0520 r3 item 3: `read_only_replaceable` judges what it opens as `read_only`
+/// does: a private file opens, while a file another account may read and a symbolic link
+/// to a private file are both refused.
+#[test]
+fn read_only_replaceable_refuses_a_shared_file_and_a_link() {
+    let root = scratch("replaceable-judged");
+    let held = private::dir(&root).unwrap();
+    let kept = private_file_with(&root, "identity.json", b"{}");
+    drop(private::read_only_replaceable(&kept).unwrap());
+    let shared = private_file_with(&root, "shared.json", b"{}");
+    run(
+        "icacls",
+        &[shared.to_str().unwrap(), "/grant", "*S-1-1-0:(R)"],
+    );
+    assert!(private::read_only_replaceable(&shared).is_err());
+    let link = root.join("link.json");
+    std::os::windows::fs::symlink_file(&kept, &link).expect("the hosted runner may make links");
+    assert!(private::read_only_replaceable(&link).is_err());
+    drop(held);
+    std::fs::remove_dir_all(&root).unwrap();
 }
