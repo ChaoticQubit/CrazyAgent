@@ -1883,7 +1883,7 @@ impl ProjectSandbox {
     /// ([`linux::admin_entries`]). Callers confine and reinstall it before any agent runs.
     /// Output: the sandbox with that exemption, or the error listing those folders.
     #[cfg(unix)]
-    pub(crate) fn adding_worktrees(mut self) -> Result<Self, SandboxError> {
+    pub fn adding_worktrees(mut self) -> Result<Self, SandboxError> {
         self.adds_worktrees = true;
         #[cfg(target_os = "linux")]
         {
