@@ -979,7 +979,7 @@ impl Repo {
 
     /// The command [`Self::command`] builds for `args`, for a row to read. Input: the
     /// arguments. Output: as there.
-    #[cfg(test)]
+    #[cfg(all(test, windows))]
     pub(super) fn built(&self, args: &[&str]) -> Result<Command, EngineError> {
         self.command(args, &[])
     }
