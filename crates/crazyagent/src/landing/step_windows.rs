@@ -219,3 +219,53 @@ pub(super) fn installed(
     assert_eq!(sandbox.profile(), profile);
     Ok(sandbox)
 }
+
+/// The deepest folder, in path components below the work tree, that [`reparse_free`] walks.
+pub(super) const WALK_DEPTH_MAX: usize = 64;
+
+/// The most entries, ignored or not, that [`reparse_free`] reads in one work tree.
+pub(super) const WALK_ENTRIES_MAX: usize = 1_048_576;
+
+/// Walks the whole work tree before a step scans it (rv-sec3 RULING 17:42 C3 condition A),
+/// reading each entry's attributes from its folder's listing and never opening or following
+/// a child, and refuses at the first reparse point of any kind: a junction, a symlink or a
+/// mount point. Only the work tree's own `.git` file is passed over, and the root itself must
+/// be a plain folder. Ignored paths are walked too, since a scanning step takes no excludes.
+/// Input: the work tree. Output: Ok, `changes_workspace_invalid` for a reparse point or an
+/// unreadable folder, or `changes_workspace_capacity` past [`WALK_DEPTH_MAX`] or
+/// [`WALK_ENTRIES_MAX`].
+pub(super) fn reparse_free(work: &Path) -> Result<(), EngineError> {
+    use std::os::windows::fs::MetadataExt;
+    let invalid = || failure("changes_workspace_invalid");
+    let root = std::fs::symlink_metadata(work).map_err(|_| invalid())?;
+    if !root.is_dir() || root.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(invalid());
+    }
+    let mut folders = vec![(work.to_path_buf(), 0_usize)];
+    let mut entries = 0_usize;
+    while let Some((folder, depth)) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).map_err(|_| invalid())? {
+            let entry = entry.map_err(|_| invalid())?;
+            entries += 1;
+            if entries > WALK_ENTRIES_MAX {
+                return Err(failure("changes_workspace_capacity"));
+            }
+            let meta = entry.metadata().map_err(|_| invalid())?;
+            if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+                eprintln!("landing_step_reparse_point_refused depth={depth}");
+                return Err(invalid());
+            }
+            if depth == 0 && entry.file_name() == ".git" && meta.is_file() {
+                continue;
+            }
+            if meta.is_dir() {
+                if depth + 1 > WALK_DEPTH_MAX {
+                    return Err(failure("changes_workspace_capacity"));
+                }
+                folders.push((entry.path(), depth + 1));
+            }
+        }
+    }
+    assert!(entries <= WALK_ENTRIES_MAX);
+    Ok(())
+}
