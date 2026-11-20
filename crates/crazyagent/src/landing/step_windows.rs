@@ -388,3 +388,25 @@ pub(super) fn write_shadow(
     assert!(shadow.starts_with(&places.step));
     Ok(shadow)
 }
+
+/// The name of the empty excludes file in a lease's folder.
+const NO_EXCLUDES_FILE: &str = "no-excludes";
+
+/// The empty file a step that takes no excludes names as `core.excludesFile`, since git stops on
+/// the null device there (probe r4). It is W1-private in the lease's folder of the data root,
+/// outside every step kind's write roots, and judged empty before each use, so no step git can
+/// plant a pattern that hides a path from a later turn commit (rv-sec3 RULING 18:04 E-1). Input:
+/// the places. Output: the file, or `changes_git_unsupported` for one that is not private or
+/// not empty.
+pub(super) fn no_excludes(places: &StepPlaces) -> Result<PathBuf, EngineError> {
+    let unsupported = || failure("changes_git_unsupported");
+    let path = places.lease.join(NO_EXCLUDES_FILE);
+    let exists = std::fs::symlink_metadata(&path).is_ok();
+    let file = crazyagent_win_sandbox::private::file(&path, !exists).map_err(|_| unsupported())?;
+    if file.metadata().map_err(|_| unsupported())?.len() != 0 {
+        eprintln!("landing_step_no_excludes_not_empty");
+        return Err(unsupported());
+    }
+    assert!(path.starts_with(&places.lease));
+    Ok(path)
+}
