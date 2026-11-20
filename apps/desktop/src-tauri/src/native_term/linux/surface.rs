@@ -248,10 +248,14 @@ impl Frames {
         self.sent
     }
 
-    /// Notes a frame callback's done event. Input: the callback's number. Output: none.
+    /// Notes a frame callback's done event; only the last one asked for ends the wait, as
+    /// an earlier one may ride a later commit than its own present's. Input: the callback's
+    /// number. Output: none.
     fn answered(&mut self, sent: u64) {
         assert!(sent <= self.sent, "a callback never asked for");
-        self.done = true;
+        if sent == self.sent {
+            self.done = true;
+        }
     }
 }
 

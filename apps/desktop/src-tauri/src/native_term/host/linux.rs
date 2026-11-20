@@ -167,11 +167,20 @@ pub fn fit(view: &mut View, shared: &mut Shared, _pixels: (u32, u32)) -> bool {
 }
 
 /// One side of the view's wgpu surface: the child's side in device pixels, held to the
-/// device's largest texture side. Inputs: the side, the scale it is drawn at, 1 to 8, and
-/// the largest side. Output: the side.
+/// device's largest texture side rounded down to a whole number of the scale's pixels, as
+/// a Wayland buffer at that scale must be. Inputs: the side, the scale it is drawn at, 1
+/// to 8, and the largest side. Output: the side.
 fn surface_side(side: u32, scale: i32, side_max: u32) -> u32 {
     assert!((1..=SCALE_MAX).contains(&scale));
-    side.min(side_max)
+    let scale = u32::try_from(scale).expect("a positive scale");
+    let most = side_max - side_max % scale;
+    assert!(
+        most >= scale,
+        "a largest texture side under one scaled pixel"
+    );
+    let fitted = side.min(most);
+    assert!(fitted <= side_max && (fitted == side || fitted % scale == 0));
+    fitted
 }
 
 /// Draws a frame into the view's surface and presents it on the child's frame pacing; the
@@ -185,7 +194,7 @@ pub fn paint(view: &mut View, shared: &mut Shared, frame: Frame) -> Result<(), &
     if !view.term.shown() {
         return Err(SKIPPED);
     }
-    view.term.presenting();
+    view.term.presenting(surface.size());
     match shared.draw(surface, &frame) {
         Ok(()) => {
             view.term.presented();

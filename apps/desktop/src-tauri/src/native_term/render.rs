@@ -176,6 +176,13 @@ impl Surface {
     fn device_lost(&self) -> bool {
         self.lost.load(Ordering::Acquire)
     }
+
+    /// The size the surface is configured to, which the buffers it presents carry. Output:
+    /// width and height in device pixels.
+    #[cfg(target_os = "linux")]
+    pub fn size(&self) -> (u32, u32) {
+        (self.config.width, self.config.height)
+    }
 }
 
 /// The underline under marked text: one line as tall as a cursor's underline, along the

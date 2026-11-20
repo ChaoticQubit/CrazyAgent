@@ -127,12 +127,13 @@ impl Term {
         self.child.handles()
     }
 
-    /// Notes a present about to happen at the child's size and scale, which the host
-    /// configures its wgpu surface to in the same layout as each place. Output: none.
-    pub fn presenting(&mut self) {
+    /// Notes a present about to happen at the size the host's wgpu surface is configured
+    /// to, which may be held under the child's own size, and at the child's scale. Input:
+    /// the configured size in device pixels. Output: none.
+    pub fn presenting(&mut self, size: (u32, u32)) {
         assert!(self.shown, "a present only while shown");
-        let (size, scale) = (self.child.size(), self.child.scale());
-        self.child.presenting(size, scale);
+        assert!(size.0 >= 1 && size.1 >= 1, "a configured surface size");
+        self.child.presenting(size, self.child.scale());
     }
 
     /// Notes that the present went out. Output: none.
@@ -215,7 +216,7 @@ mod tests {
     fn show_frames(term: &mut Term, shared: &mut Shared, surface: &mut Surface, frame: &Frame) {
         for _ in 0..3 {
             pump_until("the term ready to present", || term.ready());
-            term.presenting();
+            term.presenting(surface.size());
             shared.draw(surface, frame).expect("a present");
             term.presented();
             term.changed();

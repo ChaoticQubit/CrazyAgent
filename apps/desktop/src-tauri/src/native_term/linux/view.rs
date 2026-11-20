@@ -52,14 +52,31 @@ pub fn chord(keyval: Key, state: ModifierType) -> Option<ViewEvent> {
     Some(command)
 }
 
-/// The inputs one input method commit makes: its UTF-8 bytes as text inputs, the one
-/// path text takes (spike run 3: IBus commits every plain letter). Input: the committed
-/// text. Output: the inputs, none for empty text or text over `COMMIT_BYTES_MAX` bytes.
+/// The inputs one input method commit makes: its UTF-8 bytes as text inputs of at most
+/// `INPUT_BYTES_MAX` bytes each, cut at character boundaries, the one path text takes
+/// (spike run 3: IBus commits every plain letter). Input: the committed text. Output: the
+/// inputs, none for empty text or text over `COMMIT_BYTES_MAX` bytes.
 pub fn commit_inputs(text: &str) -> Vec<Input> {
+    let chunk_max = crazyagent::terminal::INPUT_BYTES_MAX;
     if text.is_empty() || text.len() > COMMIT_BYTES_MAX {
         return Vec::new();
     }
-    vec![Input::Text(text.as_bytes().to_vec())]
+    let mut inputs = Vec::new();
+    let mut start = 0;
+    while start < text.len() {
+        let mut end = (start + chunk_max).min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        assert!(end > start, "a character longer than one input");
+        inputs.push(Input::Text(text.as_bytes()[start..end].to_vec()));
+        start = end;
+    }
+    assert!(inputs.iter().all(|input| matches!(
+        input,
+        Input::Text(bytes) if !bytes.is_empty() && bytes.len() <= chunk_max
+    )));
+    inputs
 }
 
 /// The events an input method commit makes for a view: its text inputs while the view is
