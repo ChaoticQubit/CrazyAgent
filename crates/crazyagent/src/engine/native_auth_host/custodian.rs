@@ -6,7 +6,7 @@ use std::io::Read;
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
 #[cfg(windows)]
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 #[cfg(windows)]
 use std::time::Instant;
 
@@ -90,18 +90,33 @@ impl CustodianCause {
     /// ended.
     pub(super) fn read(&mut self) -> Result<(), EngineError> {
         while let Ok(bytes) = self.kept.try_recv() {
-            let room = CAUSE_KEPT_MAX.saturating_sub(self.text.len());
-            self.text.extend_from_slice(&bytes[..bytes.len().min(room)]);
+            self.keep(&bytes);
         }
         assert!(self.text.len() <= CAUSE_KEPT_MAX);
         Ok(())
     }
 
-    /// Takes what the thread kept once the custodian exited, until the deadline. Input: the
-    /// deadline. Output: Ok.
+    /// Takes what the thread sends until the stream's end, when every holder of the error
+    /// stream has ended and the thread closed its channel, or until the deadline, whichever
+    /// comes first, so dispatch reads a code written just before the custodian exited
+    /// (rv-sec2 #747). Input: the deadline. Output: Ok, with what was kept by then.
     pub(super) fn read_to_end(&mut self, deadline: Instant) -> Result<(), EngineError> {
-        let _ = deadline;
-        self.read()
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self.kept.recv_timeout(remaining) {
+                Ok(bytes) => self.keep(&bytes),
+                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        assert!(self.text.len() <= CAUSE_KEPT_MAX);
+        Ok(())
+    }
+
+    /// Keeps the bytes that still fit in one code, its line end and one more byte. Input:
+    /// the bytes. Output: none.
+    fn keep(&mut self, bytes: &[u8]) {
+        let room = CAUSE_KEPT_MAX.saturating_sub(self.text.len());
+        self.text.extend_from_slice(&bytes[..bytes.len().min(room)]);
     }
 }
 
