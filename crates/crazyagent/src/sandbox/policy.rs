@@ -1468,12 +1468,14 @@ mod tests {
                 AgentAccess::Full.refusal(),
                 Some((FULL_WINDOWS_UNAVAILABLE, SANDBOX_FULL_UNAVAILABLE_WINDOWS))
             );
-            for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
-                assert_eq!(
-                    access.refusal(),
-                    Some((WINDOWS_UNAVAILABLE, AGENT_ACCESS_UNAVAILABLE))
-                );
-            }
+            assert_eq!(AgentAccess::Sandboxed.refusal(), None);
+            assert_eq!(
+                AgentAccess::OwnBranch.refusal(),
+                Some((
+                    "On Windows, agents run Sandboxed in this version.",
+                    AGENT_ACCESS_UNAVAILABLE
+                ))
+            );
         }
         #[cfg(target_os = "linux")]
         for access in [AgentAccess::OwnBranch, AgentAccess::Full] {
@@ -1564,11 +1566,8 @@ mod tests {
         assert!(!plain.contains("always run"), "{plain}");
         #[cfg(target_os = "windows")]
         {
-            assert!(
-                AgentAccess::ALL
-                    .iter()
-                    .all(|level| level.refusal().is_some())
-            );
+            assert_eq!(AgentAccess::Sandboxed.refusal(), None);
+            assert!(AgentAccess::OwnBranch.refusal().is_some());
             for level in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
                 assert!(!FULL_WINDOWS_UNAVAILABLE.contains(level.label()));
             }
@@ -1600,11 +1599,10 @@ mod tests {
             .collect();
         #[cfg(target_os = "windows")]
         {
-            assert!(offered.is_empty());
-            assert!(
-                [AgentAccess::Sandboxed, AgentAccess::OwnBranch]
-                    .iter()
-                    .all(|access| access.unavailable() == Some(WINDOWS_UNAVAILABLE))
+            assert_eq!(offered, [AgentAccess::Sandboxed]);
+            assert_eq!(
+                AgentAccess::OwnBranch.unavailable(),
+                Some("On Windows, agents run Sandboxed in this version.")
             );
             assert_eq!(
                 AgentAccess::Full.unavailable(),
