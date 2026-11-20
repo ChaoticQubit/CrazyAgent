@@ -12,6 +12,11 @@ use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::Path;
+use windows_sys::Wdk::Storage::FileSystem::{
+    FILE_RENAME_INFORMATION, FILE_RENAME_POSIX_SEMANTICS, FILE_RENAME_REPLACE_IF_EXISTS,
+    FileRenameInformationEx, NtSetInformationFile,
+};
+use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
 use windows_sys::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, ERROR_LOCK_VIOLATION, ERROR_NO_MORE_FILES, ERROR_SUCCESS, GENERIC_READ,
     GENERIC_WRITE, INVALID_HANDLE_VALUE,
@@ -30,13 +35,13 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY,
-    FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
     FileDispositionInfoEx, FileFullDirectoryInfo, FileFullDirectoryRestartInfo, FileIdInfo,
-    FileRenameInfoEx, GetFileInformationByHandle, GetFileInformationByHandleEx,
-    LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, OPEN_EXISTING, READ_CONTROL,
-    SetFileInformationByHandle, UnlockFileEx, WRITE_DAC, WRITE_OWNER,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, LOCKFILE_EXCLUSIVE_LOCK,
+    LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, OPEN_EXISTING, READ_CONTROL, SetFileInformationByHandle,
+    UnlockFileEx, WRITE_DAC, WRITE_OWNER,
 };
-use windows_sys::Win32::System::IO::OVERLAPPED;
+use windows_sys::Win32::System::IO::{IO_STATUS_BLOCK, OVERLAPPED};
 use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
 
 const REMOTE_PREFIX: &str = r"\Device\Mup\";
@@ -451,14 +456,6 @@ pub fn delete(file: &File) -> io::Result<()> {
     Ok(())
 }
 
-/// `FILE_RENAME_FLAG_REPLACE_IF_EXISTS` of the Windows SDK, kept here so the crate needs no
-/// further windows-sys feature: a rename takes the name of an entry already there.
-const RENAME_REPLACE_IF_EXISTS: u32 = 0x1;
-
-/// `FILE_RENAME_FLAG_POSIX_SEMANTICS` of the Windows SDK: the replaced entry's name goes at
-/// once, while handles that share delete keep the old file open.
-const RENAME_POSIX_SEMANTICS: u32 = 0x2;
-
 /// How [`rename`] meets an entry already at the destination name (DESIGN-0601 R2, R5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -470,10 +467,10 @@ pub enum Mode {
 }
 
 /// Renames what a held handle names to `name` in the held folder `folder`, never by a path,
-/// the twin of `renameat2` (rv-sec3 #716 C6, #726 L5): the handle carries delete access from
-/// its own open, Windows looks the name up through `folder`, and a refused rename has no
-/// fallback. Inputs: the held handle and folder, one plain name and the [`Mode`]. Output: Ok,
-/// or the Windows error.
+/// the twin of `renameat2` (rv-sec3 #716 C6, #726 L5), through `NtSetInformationFile`: the
+/// kernel32 call refuses a held folder with error 87. The handle carries delete access from
+/// its own open; no fallback. Inputs: the handle, folder, one name and the [`Mode`]. Output:
+/// Ok, or the error.
 pub fn rename(file: &File, folder: &File, name: &OsStr, mode: Mode) -> io::Result<()> {
     let units: Vec<u16> = name.encode_wide().collect();
     assert!(!units.is_empty());
@@ -483,17 +480,17 @@ pub fn rename(file: &File, folder: &File, name: &OsStr, mode: Mode) -> io::Resul
             .iter()
             .any(|unit| matches!(*unit, 0 | 0x2f | 0x3a | 0x5c))
     );
-    assert_ne!(units, [0x2e]);
-    assert_ne!(units, [0x2e, 0x2e]);
+    assert_ne!(units.last(), Some(&0x2e));
+    assert_ne!(units.last(), Some(&0x20));
     let flags = match mode {
         Mode::NoReplace => 0,
-        Mode::Replace => RENAME_REPLACE_IF_EXISTS | RENAME_POSIX_SEMANTICS,
+        Mode::Replace => FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS,
     };
     let length = size_of_val(units.as_slice());
-    let size = size_of::<FILE_RENAME_INFO>() + length;
-    assert!(std::mem::offset_of!(FILE_RENAME_INFO, FileName) + length < size);
+    let size = size_of::<FILE_RENAME_INFORMATION>() + length;
+    assert!(std::mem::offset_of!(FILE_RENAME_INFORMATION, FileName) + length < size);
     let mut words = vec![0u64; size.div_ceil(size_of::<u64>())];
-    let info = words.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    let info = words.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
     assert!(info.is_aligned());
     unsafe {
         (*info).Anonymous.Flags = flags;
@@ -505,16 +502,18 @@ pub fn rename(file: &File, folder: &File, name: &OsStr, mode: Mode) -> io::Resul
             units.len(),
         );
     }
-    let renamed = unsafe {
-        SetFileInformationByHandle(
+    let mut status_block = IO_STATUS_BLOCK::default();
+    let status = unsafe {
+        NtSetInformationFile(
             file.as_raw_handle(),
-            FileRenameInfoEx,
+            &mut status_block,
             info.cast(),
             u32::try_from(size).expect("a name fits"),
+            FileRenameInformationEx,
         )
     };
-    if renamed == 0 {
-        return Err(io::Error::last_os_error());
+    if status < 0 {
+        return Err(code(unsafe { RtlNtStatusToDosError(status) }));
     }
     Ok(())
 }
