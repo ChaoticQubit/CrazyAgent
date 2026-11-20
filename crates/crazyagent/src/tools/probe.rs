@@ -119,15 +119,13 @@ pub(crate) fn refresh_now() {
 
 /// Whether the first folder run is going and none has finished yet, as right after the
 /// engine starts, so a resolve that missed may wait for its answer ([`first_run_bound`]).
-/// Output: the answer.
-#[cfg(unix)]
+/// Where no folder run starts, as on Windows, it is always false. Output: the answer.
 pub(crate) fn first_run_going() -> bool {
     lock(&FOLDERS).first_run_going()
 }
 
 /// The longest a folder run may take: the login shell's limit and npm's, each with the
 /// grace for its last output. Output: the bound.
-#[cfg(unix)]
 pub(crate) fn first_run_bound() -> Duration {
     let bound = SHELL_LIMIT + NPM_LIMIT + OUTPUT_GRACE + OUTPUT_GRACE;
     assert!(bound > SHELL_LIMIT && bound < Duration::from_secs(60));
@@ -224,7 +222,6 @@ impl Probes {
     }
 
     /// Whether the first run is going and none has finished yet. Output: the answer.
-    #[cfg(unix)]
     pub(crate) fn first_run_going(&self) -> bool {
         self.running && self.last.is_none()
     }
