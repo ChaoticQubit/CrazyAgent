@@ -4663,9 +4663,11 @@ fn a_confined_agent_with_a_hidden_folder_is_refused_as_confined_not_for_the_fold
 }
 
 /// A launch request for the case's project at `boundary`, signed in with the account home
-/// `home`, with the owner's git identity. Inputs: the case, the boundary and the home.
-/// Output: the request, which builds on Linux only through the boundary.
+/// `home`, made owner-only as every account home is, with the owner's git identity. Inputs:
+/// the case, the boundary and the home. Output: the request, built only at the boundary.
 fn linux_launch(case: &Case, boundary: LaunchBoundary, home: &Path) -> LaunchRequest {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(home, fs::Permissions::from_mode(0o700)).unwrap();
     LaunchRequest {
         harness: "codex".into(),
         executable: PathBuf::from("/usr/bin/true"),
