@@ -2101,6 +2101,9 @@ mod tests {
             h: 100,
         }));
         step("focus");
+        pump_until("the toplevel's keyboard focus", || {
+            window.has_toplevel_focus()
+        });
         view.focus(true);
         assert_eq!(take_seen(), vec![ViewEvent::Focus(true)]);
 
