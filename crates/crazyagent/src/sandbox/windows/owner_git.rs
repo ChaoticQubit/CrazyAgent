@@ -637,6 +637,30 @@ mod tests {
         plain.current_dir(&made.project);
         assert!(owner.wrap(&plain).is_ok());
     }
+
+    /// rv-sec3 #764 L1 (C6): owner git is the one profile allowed to write a repository's
+    /// `.git`, since it is the owner's own git run in a container of its own, so it installs on
+    /// a project that holds one, where an agent's job folder on the same project is refused.
+    #[test]
+    fn owner_git_installs_on_a_repository_where_an_agent_job_folder_is_refused() {
+        let made = made();
+        fs::create_dir_all(made.project.join(".git").join("hooks")).unwrap();
+        let owner = installed(&made, &made.project);
+        assert!(owner.profile().is_file());
+        let home = made.root.join("agent-home");
+        let tmp = made.root.join("agent-tmp");
+        for folder in [&home, &tmp] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let agent =
+            ProjectSandbox::new(&made.project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+                .unwrap()
+                .as_job_folder();
+        assert!(matches!(
+            crate::sandbox::windows::boundary_profile(&agent, &made.grants),
+            Err(SandboxError::Invalid(reason)) if reason == "an agent profile can't write the project's git folder"
+        ));
+    }
 }
 
 /// What the share-stop rows share on the test farm: the shares and the runner user that
@@ -835,29 +859,5 @@ pub(crate) mod farm {
             }
             _ => unreachable!(),
         }
-    }
-
-    /// rv-sec3 #764 L1 (C6): owner git is the one profile allowed to write a repository's
-    /// `.git`, since it is the owner's own git run in a container of its own, so it installs on
-    /// a project that holds one, where an agent's job folder on the same project is refused.
-    #[test]
-    fn owner_git_installs_on_a_repository_where_an_agent_job_folder_is_refused() {
-        let made = made();
-        fs::create_dir_all(made.project.join(".git").join("hooks")).unwrap();
-        let owner = installed(&made, &made.project);
-        assert!(owner.profile().is_file());
-        let home = made.root.join("agent-home");
-        let tmp = made.root.join("agent-tmp");
-        for folder in [&home, &tmp] {
-            fs::create_dir_all(folder).unwrap();
-        }
-        let agent =
-            ProjectSandbox::new(&made.project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
-                .unwrap()
-                .as_job_folder();
-        assert!(matches!(
-            crate::sandbox::windows::boundary_profile(&agent, &made.grants),
-            Err(SandboxError::Invalid(reason)) if reason == "an agent profile can't write the project's git folder"
-        ));
     }
 }
