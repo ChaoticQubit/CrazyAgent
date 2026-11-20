@@ -531,6 +531,7 @@ pub struct Engine {
     harness_updates: std::sync::Arc<crate::harnesses::update::Updates>,
     settings_files: Option<(std::path::PathBuf, std::path::PathBuf)>,
     master_activity: owner::transport::master_activity::Board,
+    terminal_units: std::sync::Arc<owner::transport::sizing::Units>,
 }
 
 const HARNESS_PROBE_FRESH: Duration = Duration::from_secs(10);
@@ -696,6 +697,7 @@ impl Engine {
                 harness_updates: crate::harnesses::update::Updates::new(),
                 settings_files: Some((global.to_path_buf(), project.to_path_buf())),
                 master_activity: Default::default(),
+                terminal_units: Default::default(),
             },
             config,
         ))
@@ -719,6 +721,7 @@ impl Engine {
             harness_updates: crate::harnesses::update::Updates::new(),
             settings_files: None,
             master_activity: Default::default(),
+            terminal_units: Default::default(),
         })
     }
 
@@ -740,6 +743,7 @@ impl Engine {
             harness_updates: crate::harnesses::update::Updates::new(),
             settings_files: None,
             master_activity: Default::default(),
+            terminal_units: Default::default(),
         })
     }
 

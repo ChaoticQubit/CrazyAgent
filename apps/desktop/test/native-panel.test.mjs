@@ -292,6 +292,18 @@ test("V243-NATIVE-ONLY: a wall tile opens its own native view and closes it with
   assert.deepEqual(seen, { view: 1, closed: true });
 });
 
+test("V243-PANE-SIZE-ACROSS-WINDOWS: a wall tile's native open says tile, so its size follows its window's while another view sets it; a panel's open does not", async () => {
+  const seen = await page(`
+    await F.stage();
+    F.mount("a", F.agent("sub", "Brook", "team-2"), { tile: true });
+    await F.until(() => F.calls("desktop_native_terminal_open").length === 1);
+    F.mount("b", F.agent("sub", "Wren", "team-3"));
+    await F.until(() => F.calls("desktop_native_terminal_open").length === 2);
+    return F.calls("desktop_native_terminal_open").map((entry) => [entry.args.name, entry.args.tile]);
+  `);
+  assert.deepEqual(seen, [["team-2", true], ["team-3", false]]);
+});
+
 test("V243-NATIVE-ONLY: an agent with no terminal yet opens no native view, and a desktop without the native view command shows Not ready, never the webview terminal", async () => {
   const seen = await page(`
     await F.stage();
