@@ -64,7 +64,11 @@ impl Drop for Planted {
 /// the read's error for any other failure, so a file that exists is never taken as absent
 /// and removed when the row ends (CR group 1 W3-5a). Input: the path. Output: the bytes.
 fn snapshot(path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
-    Ok(std::fs::read(path).ok())
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 fn plant(path: PathBuf, lines: &str) -> Planted {
