@@ -524,3 +524,67 @@ fn a_windows_work_tree_compare_or_untracked_listing_is_a_step_and_stays_refused(
         );
     }
 }
+
+/// Whether a boundary profile may write the owner's git folder: a write root that is it,
+/// lies in it or holds it. Inputs: the profile and the repository. Output: the answer.
+fn writes_git(
+    profile: &crazyagent_win_sandbox::profile::BoundaryProfile,
+    repository: &Path,
+) -> bool {
+    let git = repository.join(".git").to_string_lossy().to_lowercase();
+    profile.write_roots.iter().any(|root| {
+        let root = root.to_lowercase();
+        git == root
+            || git.starts_with(&format!("{root}\\"))
+            || root.starts_with(&format!("{git}\\"))
+    })
+}
+
+/// W5b G2, rv-sec3 #746 Q3b: engine git reads the owner's git folder as the engine only while
+/// no agent may write it. A profile built as the master's turn builds it, its worktree with the
+/// repository read only, writes nothing under `<repo>\.git`; the check trips on a profile
+/// that holds the repository; and a worktree checkout, which writes the git folder's
+/// `worktrees` entry and objects, is refused on Windows.
+#[test]
+fn no_windows_agent_profile_writes_the_owner_git_folder_and_a_worktree_checkout_is_refused() {
+    use crate::sandbox::windows::{GRANTS_FOLDER, boundary_profile};
+    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+    let place = place();
+    let ws = &place.workspace;
+    let root = ws.repository.parent().unwrap();
+    let (tmp, grants) = (root.join("tmp"), root.join(GRANTS_FOLDER));
+    for folder in [&tmp, &grants] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    let network = || SandboxNetwork::Only(Vec::new());
+    let master = ProjectSandbox::new(&ws.worktree, &place.home, &tmp, network())
+        .and_then(|sandbox| sandbox.allow_read(&ws.repository))
+        .unwrap();
+    let profile = boundary_profile(&master, &grants).unwrap();
+    assert!(!profile.write_roots.is_empty());
+    assert!(!writes_git(&profile, &ws.repository));
+    let whole = ProjectSandbox::new(&ws.repository, &place.home, &tmp, network())
+        .unwrap()
+        .as_job_folder();
+    assert!(writes_git(
+        &boundary_profile(&whole, &grants).unwrap(),
+        &ws.repository
+    ));
+    let worktrees = crate::projects_home::state_folder(&ws.repository).join("worktrees");
+    std::fs::create_dir_all(&worktrees).unwrap();
+    let checkout = worktrees.join("w1");
+    git(
+        &ws.repository,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "w1",
+            checkout.to_str().unwrap(),
+        ],
+    );
+    let checkout = crate::sandbox::canonical(&checkout).unwrap();
+    let team = ProjectSandbox::new(&ws.repository, &place.home, &tmp, network()).unwrap();
+    assert!(team.confine_to_worktree(&checkout).is_err());
+}
