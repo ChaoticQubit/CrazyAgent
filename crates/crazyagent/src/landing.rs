@@ -1287,24 +1287,32 @@ pub fn resolve_task_prompt(db: &Connection, id: &ChangeSetId) -> Result<String, 
 /// restored, whose lead's copy is gone or whose lead's set closed and left it open, since
 /// no lead will (TEAM-3-F3). Inputs: the store and the project. Output: the change sets.
 pub fn owner_list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {
-    let sets = list(db, project)?;
-    assert!(sets.len() <= LIST_MAX);
-    if subagent::leads_merge(db, project)? {
-        let mut kept = Vec::with_capacity(sets.len());
-        for set in sets {
-            let open = matches!(
-                set.state,
-                ChangeState::Pending | ChangeState::Conflict | ChangeState::Updating
-            );
-            if !subagent::is_lead_worker(db, project, &set.agent)?
-                || (open && subagent::lead_left(db, project, &set)?)
-            {
-                kept.push(set);
+    #[cfg(unix)]
+    {
+        let sets = list(db, project)?;
+        assert!(sets.len() <= LIST_MAX);
+        if subagent::leads_merge(db, project)? {
+            let mut kept = Vec::with_capacity(sets.len());
+            for set in sets {
+                let open = matches!(
+                    set.state,
+                    ChangeState::Pending | ChangeState::Conflict | ChangeState::Updating
+                );
+                if !subagent::is_lead_worker(db, project, &set.agent)?
+                    || (open && subagent::lead_left(db, project, &set)?)
+                {
+                    kept.push(set);
+                }
             }
+            return Ok(kept);
         }
-        return Ok(kept);
+        Ok(sets)
     }
-    Ok(sets)
+    #[cfg(not(unix))]
+    {
+        let _ = (db, project);
+        Err(refused("owner_list"))
+    }
 }
 
 /// Closes the open change sets of a lead's workers whose work the lead's own clone
@@ -1332,16 +1340,32 @@ pub fn waiting(
     db: &Connection,
     project: Option<&ProjectId>,
 ) -> Result<WaitingChanges, EngineError> {
-    store::waiting(db, project)
+    #[cfg(unix)]
+    {
+        store::waiting(db, project)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (db, project);
+        Err(refused("waiting"))
+    }
 }
 
 /// Lists one project's change sets, open ones first, then newest first, at most
 /// `LIST_MAX`. Inputs: the store and the project. Output: the change sets.
 pub fn list(db: &Connection, project: &ProjectId) -> Result<Vec<ChangeSetView>, EngineError> {
-    store::of_project(db, project, LIST_MAX)?
-        .iter()
-        .map(|record| Ok(record.view(store::number_of(db, &record.id)?)))
-        .collect()
+    #[cfg(unix)]
+    {
+        store::of_project(db, project, LIST_MAX)?
+            .iter()
+            .map(|record| Ok(record.view(store::number_of(db, &record.id)?)))
+            .collect()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (db, project);
+        Err(refused("list"))
+    }
 }
 
 /// Reads one change set by its id, however many change sets its project holds.

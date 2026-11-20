@@ -926,6 +926,7 @@ pub(super) fn open_inside(
 
 /// Reads the change set of one team sub-agent of a project changed last. Inputs: the
 /// store, the project and the agent id. Output: the record, None when it has none.
+#[cfg(unix)]
 pub(super) fn newest_of(
     db: &Connection,
     project: &ProjectId,
@@ -945,6 +946,7 @@ pub(super) fn newest_of(
 
 /// Reads one project's change sets, open ones first, then newest first.
 /// Inputs: the store, the project and the most to read. Output: the records.
+#[cfg(unix)]
 pub(super) fn of_project(
     db: &Connection,
     project: &ProjectId,
@@ -968,6 +970,7 @@ pub(super) fn of_project(
 /// Counts the change sets ready to review or conflicting, in projects the engine still has,
 /// and among them the given project's, in one read. Inputs: the store and the project, if
 /// any. Output: both counts; `here` is None without a project.
+#[cfg(unix)]
 pub(super) fn waiting(
     db: &Connection,
     project: Option<&ProjectId>,

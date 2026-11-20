@@ -20,7 +20,6 @@ impl Drop for Held {
 
 /// Waits for and takes the engine's hold on one owner repository.
 /// Input: the repository root. Output: the hold.
-#[cfg(unix)]
 pub(super) fn hold(repository: &Path) -> Held {
     let mut busy = BUSY.lock().unwrap_or_else(PoisonError::into_inner);
     while busy.contains(repository) {

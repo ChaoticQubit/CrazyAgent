@@ -1,7 +1,7 @@
 use super::clone;
 use super::diff::{self, plain};
 use super::git::{Repo, Writes, failure, is_object_id, object_id};
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) use super::hold::busy;
 pub(super) use super::hold::{Held, hold};
 use super::store::{self, Intent, Record};
@@ -232,11 +232,13 @@ fn open_plain(path: &Path) -> Option<std::fs::File> {
     file.metadata().ok()?.is_file().then_some(file)
 }
 
-/// Opens a regular file for reading where the unix flags do not exist. Input: the path.
-/// Output: the open file, or none.
-#[cfg(not(unix))]
+/// Opens a regular file for reading on Windows as the reparse point itself
+/// ([`crate::platform::open_plain`]), so a symbolic link an agent swapped in opens as a link,
+/// which is not a regular file, and is refused, as the Unix twin's `O_NOFOLLOW` refuses it
+/// (PLAN-1336 D1). Input: the path. Output: the open file, or none.
+#[cfg(windows)]
 fn open_plain(path: &Path) -> Option<std::fs::File> {
-    let file = std::fs::File::open(path).ok()?;
+    let file = crate::platform::open_plain(path).ok()?;
     file.metadata().ok()?.is_file().then_some(file)
 }
 

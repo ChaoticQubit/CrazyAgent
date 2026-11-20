@@ -7,6 +7,7 @@ use super::git::object_id;
 use super::{ChangeState, store};
 #[cfg(unix)]
 use super::{LeadGit, MergeOutcome, clone};
+#[cfg(unix)]
 use crate::agent_git;
 #[cfg(unix)]
 use crate::agent_git::Layout;
@@ -265,6 +266,7 @@ pub(super) fn close_orphaned(
 
 /// The lead of one sub-agent. Inputs: the store, the project and the sub-agent. Output: its
 /// lead, None for a sub-agent the master started.
+#[cfg(unix)]
 fn sub_agent_lead(
     db: &Connection,
     project: &ProjectId,
@@ -285,6 +287,7 @@ fn sub_agent_lead(
 /// app, the only close that is both discarded and outside. No one pressed anything in the
 /// app, so it leaves its workers' open sets open (HB-S4-LANDED). Input: the change set.
 /// Output: the answer.
+#[cfg(unix)]
 fn removed_outside(record: &store::Record) -> bool {
     record.outside && record.state == ChangeState::Discarded
 }
@@ -454,6 +457,7 @@ pub(super) fn is_teammate(
 
 /// Tells whether a change set's agent is a worker of a lead. Inputs: the store, the
 /// project and the change set's agent. Output: the answer.
+#[cfg(unix)]
 pub(super) fn is_lead_worker(
     db: &Connection,
     project: &ProjectId,
@@ -479,6 +483,7 @@ pub(super) fn is_lead_worker(
 /// was removed outside the app (HB-S4-LANDED); or the lead's newest set closed after this
 /// one opened and left it open (fix/v21-team-4). Inputs: the store, the project and the
 /// change set. Output: the answer.
+#[cfg(unix)]
 pub(super) fn lead_left(
     db: &Connection,
     project: &ProjectId,
@@ -507,6 +512,7 @@ pub(super) fn lead_left(
 /// Tells whether a lead's copy is gone, so no lead lands its workers' sets: no worktree is
 /// recorded for it now, or its folder cannot be found, read without following a link
 /// (TEAM-3-F3). Inputs: the store, the project and the lead. Output: the answer.
+#[cfg(unix)]
 fn lead_copy_gone(db: &Connection, project: &ProjectId, lead: i64) -> Result<bool, EngineError> {
     let Some(lead) = place(db, project, lead)? else {
         return Ok(true);

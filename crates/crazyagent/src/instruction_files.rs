@@ -16,7 +16,6 @@ pub const FILE_BYTES_MAX: usize = 64 * 1024;
 pub const FILES_BYTES_MAX: usize = 64 * 1024;
 pub const FILES_MAX: usize = NAMES.len();
 const NAME_BYTES_MAX: usize = 32;
-#[cfg(unix)]
 const IMPORTS_MAX: usize = 64;
 const HEADING: &str = "\n## Instruction files\n\nThe owner's instruction files, read by CrazyAgent from the project's committed files and, when the owner chose so, from the owner's own files. Follow them as you would follow these files in your harness.\n";
 const FILE_HEADING: &str = "\n### \n\n";
@@ -677,7 +676,6 @@ pub fn instruction_file(path: &str) -> bool {
 /// the project, from the file's folder. Inputs: the file's path in the project and the
 /// target. Output: the path, or None for an empty, absolute or home target or one that
 /// leaves the project.
-#[cfg(unix)]
 pub(crate) fn resolved(path: &str, target: &str) -> Option<String> {
     if target.is_empty() || target.starts_with('/') || target.starts_with('~') {
         return None;
@@ -700,7 +698,6 @@ pub(crate) fn resolved(path: &str, target: &str) -> Option<String> {
 /// reads imports: each word that starts with `@`, with and without trailing punctuation,
 /// resolved from the file's folder, at most `IMPORTS_MAX`. Inputs: the file's path in the
 /// project and its text. Output: the paths.
-#[cfg(unix)]
 pub(crate) fn imports(path: &str, text: &str) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     for word in text.split_whitespace() {

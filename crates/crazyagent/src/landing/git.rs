@@ -1,6 +1,7 @@
 use crate::engine::EngineError;
 #[cfg(unix)]
 use std::collections::BTreeSet;
+#[cfg(unix)]
 use std::io::Read;
 #[cfg(unix)]
 use std::io::Write;
@@ -442,6 +443,13 @@ pub(crate) fn owner_excludes_setting(within: super::Within<'_>) -> Option<String
 /// ignore file the owner's git applies in that repository, its own value first, so what the
 /// owner's git ignores the engine never stages.
 #[derive(Clone)]
+#[cfg_attr(
+    windows,
+    allow(
+        dead_code,
+        reason = "W5a: Windows engine git refuses before a repository is made; W5b makes one for its contained step"
+    )
+)]
 pub(super) struct Repo {
     git_dir: PathBuf,
     work_tree: Option<PathBuf>,

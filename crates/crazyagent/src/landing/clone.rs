@@ -525,6 +525,7 @@ fn read_at(
 /// The one alternates line `add` writes and `fetch` requires: the owner repository's
 /// object folder and a newline. Input: the owner checkout root. Output: the line, or none
 /// for a path that is not text or holds a control character.
+#[cfg(unix)]
 fn alternate_line(repository: &Path) -> Option<String> {
     let objects = repository.join(".git").join("objects");
     let alternate = objects.to_str()?;
@@ -650,6 +651,7 @@ pub(super) fn repoint_linked(
 /// the agent's git repacks them away. Inputs: the owner checkout root, the clone's git
 /// folder and the bounds. Output: Ok, else `changes_workspace_invalid` or
 /// `changes_too_large`.
+#[cfg(unix)]
 fn check_store(repository: &Path, git_dir: &Path, bounds: &TreeBounds) -> Result<(), EngineError> {
     let objects = git_dir.join("objects");
     let info = objects.join("info");
@@ -719,12 +721,22 @@ fn check_store(repository: &Path, git_dir: &Path, bounds: &TreeBounds) -> Result
     Ok(())
 }
 
+/// Refuses the store check where landing has no Windows design yet, so no agent's object
+/// store is walked through a path it could swap (PLAN-1336 W5a). Inputs: as the Unix twin,
+/// unused. Output: `changes_unavailable`.
+#[cfg(not(unix))]
+fn check_store(repository: &Path, git_dir: &Path, bounds: &TreeBounds) -> Result<(), EngineError> {
+    let _ = (repository, git_dir, bounds);
+    Err(failure("changes_unavailable"))
+}
+
 /// Tells whether a name in the clone's pack folder is one of git's own pack files:
 /// `pack-`, a lower-case SHA-1 or SHA-256 hex id and one of `PACK_EXTENSIONS`, a temp
 /// file an interrupted git command left, `tmp_<kind>_` and six letters or digits, which
 /// git never reads as a pack since only names ending in `.idx` are, or one an interrupted
 /// `git repack` left (`repack_temp`). Input: the file name. Output: the answer; a
 /// `multi-pack-index` or any other name is not one.
+#[cfg(unix)]
 fn pack_file(name: &std::ffi::OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
@@ -755,6 +767,7 @@ fn pack_file(name: &std::ffi::OsStr) -> bool {
 /// such a pack, and the fetch would serve it, when its `.idx` and `.pack` are both there,
 /// so `check_store` refuses that pair. Input: the file name. Output: the name without its
 /// extension and the extension, or None for any other name.
+#[cfg(unix)]
 fn repack_temp(name: &str) -> Option<(&str, &str)> {
     let (pid, rest) = name.strip_prefix(".tmp-")?.split_once("-pack-")?;
     let (id, extension) = rest.split_once('.')?;
@@ -767,6 +780,7 @@ fn repack_temp(name: &str) -> Option<(&str, &str)> {
 
 /// Tells whether a pack id is git's: a lower-case SHA-1 or SHA-256 hex digest.
 /// Input: the id. Output: the answer.
+#[cfg(unix)]
 fn pack_id(id: &str) -> bool {
     matches!(id.len(), 40 | 64)
         && id
