@@ -17,8 +17,8 @@ env:
   RUST_TOOLCHAIN: "1.98.1"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
-  RED_SHA: 03d19d16e
-  TIP_SHA: 2a30ce5bb
+  RED_SHA: caa607702
+  TIP_SHA: a0b086ec6
 
 defaults:
   run:
@@ -26,7 +26,7 @@ defaults:
 
 jobs:
   s1:
-    name: V244 WIN-MASTER S1 Codex custody on ${{ matrix.runner }}, red at 03d19d16e, tip 2a30ce5bb
+    name: V244 WIN-MASTER S1 r2 Codex custody on ${{ matrix.runner }}, red at caa607702, tip a0b086ec6
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
@@ -44,7 +44,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          fetch-depth: 5
+          fetch-depth: 10
       - name: Install Linux build packages
         if: ${{ runner.os == 'Linux' }}
         timeout-minutes: 10
@@ -91,24 +91,42 @@ jobs:
         run: |
           set -euo pipefail
           cargo clippy -p crazyagent --tests --locked -- -D warnings
-      - name: S1 red rows at 03d19d16e
+      - name: Clippy on the win-sandbox library and its test rows
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         timeout-minutes: 60
         run: |
           set -euo pipefail
-          git checkout -q "$RED_SHA" -- crates
+          cargo clippy -p crazyagent-win-sandbox --lib --locked -- -D warnings
+          cargo clippy -p crazyagent-win-sandbox --tests --locked -- -D warnings
+      - name: S1 r2 red rows, pump.rs, process_custody.rs and win/tree.rs at caa607702 on the tip's tree
+        if: ${{ !cancelled() }}
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          git restore -q --source="$RED_SHA" --staged --worktree -- crates/crazyagent/src/engine/codex_host/pump.rs crates/crazyagent/src/engine/codex_host/process_custody.rs crates/crazyagent-win-sandbox/src/win/tree.rs
           set +e
-          cargo test -p crazyagent --lib --locked -- --test-threads 1 engine::codex_host:: 2>&1 | tee "$RUNNER_TEMP/red.log"
+          cargo test -p crazyagent --lib --locked -- --test-threads 1 engine::codex_host::pump:: 2>&1 | tee "$RUNNER_TEMP/red.log"
           rc=${PIPESTATUS[0]}
+          if [ "$RUNNER_OS" = Windows ]; then
+            cargo test -p crazyagent-win-sandbox --lib --locked -- --test-threads 1 win::tree::tests:: 2>&1 | tee "$RUNNER_TEMP/red-tree.log"
+            tree_rc=${PIPESTATUS[0]}
+          fi
           set -e
-          git checkout -q "$TIP_SHA" -- crates
+          git restore -q --source="$TIP_SHA" --staged --worktree -- crates
           git diff --quiet "$TIP_SHA" -- crates
-          grep -E '^test engine::codex_host::|^test result' "$RUNNER_TEMP/red.log" || true
+          grep -E '^test engine::codex_host::|^test result|panicked|left:|right:' "$RUNNER_TEMP/red.log" || true
           [ "$rc" -ne 0 ]
-          grep -qE 'test result: FAILED\. 4 passed; 16 failed; 1 ignored' "$RUNNER_TEMP/red.log"
-          grep -q 'a_windows_codex_host_passes_its_input_to_its_output_and_is_reaped \.\.\. FAILED' "$RUNNER_TEMP/red.log"
-          grep -q 'codex_host_unavailable' "$RUNNER_TEMP/red.log"
-          echo "red as expected: the 8 Windows custody rows refuse with codex_host_unavailable and the 8 pump rows hit todo"
+          grep -qE 'test result: FAILED\. 7 passed; 2 failed' "$RUNNER_TEMP/red.log"
+          for row in a_pumped_input_write_is_done_only_once_its_pipe_took_it_whole a_pumped_input_reports_the_failure_of_its_one_write; do
+            grep -q "$row \.\.\. FAILED" "$RUNNER_TEMP/red.log"
+          done
+          if [ "$RUNNER_OS" = Windows ]; then
+            grep -E '^test win::|^test result|panicked|left:|right:' "$RUNNER_TEMP/red-tree.log" || true
+            [ "$tree_rc" -ne 0 ]
+            grep -qE 'test result: FAILED\. 0 passed; 1 failed' "$RUNNER_TEMP/red-tree.log"
+            grep -q 'a_held_tree_with_a_sleeping_child_says_ended_only_once_none_runs \.\.\. FAILED' "$RUNNER_TEMP/red-tree.log"
+          fi
+          echo "red as expected: the 2 new pump rows fail and the 7 others pass; on Windows the stand-in ended says true while ping still runs"
       - name: Build the Linux sandbox helper the custody rows start
         if: ${{ !cancelled() && runner.os == 'Linux' }}
         timeout-minutes: 30
@@ -118,7 +136,7 @@ jobs:
           mkdir -p target/debug/deps
           cp target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
           ls -l target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
-      - name: S1 Codex host rows at the tip 2a30ce5bb
+      - name: S1 r2 Codex host rows at the tip a0b086ec6
         if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
@@ -129,21 +147,28 @@ jobs:
           grep -E '^test engine::codex_host::|^test result|panicked' "$RUNNER_TEMP/tip.log" || true
           [ "$rc" -eq 0 ]
           if [ "$RUNNER_OS" = Windows ]; then
-            grep -qE 'test result: ok\. 20 passed; 0 failed; 1 ignored' "$RUNNER_TEMP/tip.log"
+            grep -qE 'test result: ok\. 21 passed; 0 failed; 1 ignored' "$RUNNER_TEMP/tip.log"
           else
             grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/tip.log"
           fi
-      - name: S1 Codex host Windows rows five times at the tip
+      - name: S1 r2 Codex host Windows rows, pump rows and the tree row five times at the tip
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         timeout-minutes: 60
         run: |
           set +e
           for round in 1 2 3 4 5; do
-            cargo test -p crazyagent --lib --locked -- --test-threads 1 engine::codex_host::process_windows_tests:: > "$RUNNER_TEMP/round-$round.log" 2>&1
+            cargo test -p crazyagent --lib --locked -- --test-threads 1 engine::codex_host::process_windows_tests:: engine::codex_host::pump:: > "$RUNNER_TEMP/round-$round.log" 2>&1
             rc=$?
             echo "round $round rc=$rc"
             grep -E 'FAILED|panicked|^test result' "$RUNNER_TEMP/round-$round.log" || true
             [ "$rc" -eq 0 ] || exit 1
+            grep -qE 'test result: ok\. 17 passed; 0 failed' "$RUNNER_TEMP/round-$round.log" || exit 1
+            cargo test -p crazyagent-win-sandbox --lib --locked -- --test-threads 1 win::tree::tests:: > "$RUNNER_TEMP/tree-$round.log" 2>&1
+            rc=$?
+            echo "tree round $round rc=$rc"
+            grep -E 'FAILED|panicked|^test result' "$RUNNER_TEMP/tree-$round.log" || true
+            [ "$rc" -eq 0 ] || exit 1
+            grep -qE 'test result: ok\. 1 passed; 0 failed' "$RUNNER_TEMP/tree-$round.log" || exit 1
           done
       - name: Windows access refusal rows stay green at the tip
         if: ${{ !cancelled() && runner.os == 'Windows' }}
