@@ -8,10 +8,10 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 /// The environment name that tells [`codex_host_stand_in`] which harness to stand in for.
-const STAND_IN: &str = "CRAZYAGENT_CODEX_STAND_IN";
+const STAND_IN: &str = "CODEX_STAND_IN";
 
 /// The environment name of the file a `holder` stand-in writes its grandchild's id to.
-const STAND_IN_PID: &str = "CRAZYAGENT_CODEX_STAND_IN_PID";
+const STAND_IN_PID: &str = "CODEX_STAND_IN_PID";
 
 /// The line a stand-in writes before what it stands in for writes, so a row reads past what
 /// the test harness itself prints first.
@@ -61,11 +61,8 @@ async fn stand_in(root: &Path, mode: &str) -> CodexHostProcess {
 async fn read_to_exit(process: &mut CodexHostProcess, limit: Duration) -> Vec<u8> {
     let mut stdout = Vec::new();
     tokio::time::timeout(limit, async {
-        loop {
-            match process.next_output().await.unwrap() {
-                CodexHostOutput::Stdout(bytes) => stdout.extend(bytes),
-                CodexHostOutput::Exited => break,
-            }
+        while let CodexHostOutput::Stdout(bytes) = process.next_output().await.unwrap() {
+            stdout.extend(bytes);
         }
     })
     .await
@@ -414,6 +411,10 @@ fn codex_host_stand_in() {
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
+            #[expect(
+                clippy::zombie_processes,
+                reason = "the holder leaves its grandchild running for the host to end"
+            )]
             let grandchild = crate::spawn_gate::spawn(&mut command).unwrap();
             std::fs::write(&marker, grandchild.id().to_string()).unwrap();
             wait();
