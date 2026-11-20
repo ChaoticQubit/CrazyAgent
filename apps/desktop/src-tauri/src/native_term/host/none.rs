@@ -65,9 +65,9 @@ pub fn open_view(
 /// Gives a view focus; no view exists to focus. Input: the view.
 pub fn focus_view(_view: &View) {}
 
-/// Places a view; no view shows here. Inputs: the view, the place and whether it shows.
-/// Output: none, as for a hidden view.
-pub fn place_view(_view: &mut View, _rect: [f64; 4], _shown: bool) -> Option<f64> {
+/// Places a view; no view shows here. Inputs: the view, the place, the page's viewport
+/// height and whether it shows. Output: none, as for a hidden view.
+pub fn place_view(_view: &mut View, _rect: [f64; 4], _viewport: f64, _shown: bool) -> Option<f64> {
     None
 }
 

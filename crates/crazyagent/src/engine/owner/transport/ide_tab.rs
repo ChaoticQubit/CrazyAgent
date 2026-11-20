@@ -189,7 +189,7 @@ impl OwnerClient {
     }
 
     async fn ide_tab_exchange(&self, action: Action) -> Result<Reply, EngineError> {
-        tokio::time::timeout(self.timeout.max(IDE_TAB_TIMEOUT), async {
+        tokio::time::timeout(deferred_wait(self.timeout, IDE_TAB_TIMEOUT), async {
             let read = read_kind(&action);
             let frame = encode_frame(&Envelope { ide_tab: action })
                 .map_err(|_| failure("ide_tab_request_bounds"))?;
@@ -198,10 +198,10 @@ impl OwnerClient {
                 return Err(failure("owner_socket_replaced"));
             }
             let unavailable = |_| failure("ide_tab_owner_unavailable");
-            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
                 .await
                 .map_err(unavailable)?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             let mut packet = [0; 37];
             packet[..4].copy_from_slice(b"CAO1");
             packet[4] = match self.kind {
@@ -231,7 +231,7 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
 }
 
 pub(super) async fn serve(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
@@ -255,7 +255,7 @@ pub(super) async fn serve(
 }
 
 fn public_code(error: EngineError) -> String {
-    if IDE_TAB_CODES.contains(&error.0.as_str()) {
+    if IDE_TAB_CODES.contains(&error.0.as_str()) || crate::storage::storage_answer(&error.0) {
         error.0
     } else {
         "ide_tab_outcome_unknown".into()

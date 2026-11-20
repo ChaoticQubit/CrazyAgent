@@ -111,9 +111,9 @@ fn npm_runs_through_node_exe_and_npm_cli_never_npm_cmd() {
     assert!(!npm_ready(&case.bin), "npm.cmd alone never runs");
 }
 
-/// WIN-CONTEXT-MODE: the AppContainer refuses every endpoint limit, so the install step's
-/// npm gets the open network on Windows, for that step only, while `node --version` keeps
-/// no network (leader 04:22 and 04:36, answer A).
+/// WIN-CONTEXT-MODE: the AppContainer widens any host limit to the internet client
+/// (DESIGN-0256 O2a), so the install step's npm gets the open network on Windows, for that
+/// step only, while `node --version` keeps no network (leader 04:22 and 04:36, answer A).
 #[test]
 fn the_install_step_gets_the_open_network_on_windows() {
     assert_eq!(os::npm_network(), crate::sandbox::SandboxNetwork::Open);
@@ -457,6 +457,87 @@ fn npm_installs_into_a_fresh_staging_folder() {
     assert!(staged.join(MODULES).join(PACKAGE).join(PROGRAM).is_file());
 }
 
+/// V244-WIN-NPM: where Node.js's folder is one no app container reads and this standard user
+/// cannot change, as on the test farm's runners, the node probe and the npm install both
+/// refuse with Node.js's own code before the helper runs, never as a Node.js too old.
+#[test]
+#[ignore = "needs the farm runner's Node.js folder and a standard user (test farm)"]
+fn a_node_folder_only_an_administrator_can_open_to_containers_is_refused_by_its_own_code() {
+    let bin = system_bin();
+    assert!(
+        crazyagent_win_sandbox::unreadable_root(&bin, "crazyagent.test.node"),
+        "{}",
+        bin.display()
+    );
+    let case = case();
+    let unreadable = InstallError("context_mode_node_folder_unreadable");
+    assert_eq!(node_supported(&case.root, &bin), Err(unreadable));
+    let npm = case.root.join("setup").join("npm");
+    let prefix = format!("{PACKAGE}@{VERSION}");
+    let work = staging_folder(&npm, &format!("{prefix}-work")).unwrap();
+    let staged = staging_folder(&npm, &prefix).unwrap();
+    let source = OsStr::new("context-mode.tgz");
+    assert_eq!(
+        fill(&case.root, &staged, &work, &bin, VERSION, source),
+        Err(unreadable)
+    );
+    assert!(!staged.join(MODULES).exists());
+}
+
+/// V244-WIN-ADMIN-STEP: where the root of the drive Node.js sits on keeps every app container
+/// from reading its attributes, as on the test farm's runners before the installer's
+/// administrator step, an install whose Node.js passes the version probe is refused by the
+/// drive root's own code before npm starts, never as a failed set-up.
+#[test]
+#[ignore = "needs the farm runner's Node.js and a system drive root without the entry (test farm)"]
+fn a_drive_root_no_app_container_reads_refuses_the_install_by_its_own_code() {
+    let bin = system_bin();
+    assert!(
+        crazyagent_win_sandbox::unreadable_drive_root([bin.as_path()]).is_some(),
+        "{}",
+        bin.display()
+    );
+    let case = case();
+    assert_eq!(node_supported(&case.root, &bin), Ok(true));
+    assert_eq!(
+        can_install(&case.root, &bin, VERSION),
+        Some(Begin::Refused(NODE_DRIVE_ROOT_UNREADABLE))
+    );
+    assert_eq!(
+        begin_install(&case.root, &bin, VERSION),
+        Begin::Refused(NODE_DRIVE_ROOT_UNREADABLE)
+    );
+    assert!(!install_folder(&case.root, VERSION).exists());
+}
+
+/// V244-WIN-NPM r2 F3: an agent launch whose npx folder no app container reads and this
+/// standard user cannot change, since an OWNER RIGHTS entry takes the owner's right to change
+/// its list while the user keeps modify, leaves context-mode out as Node.js's folder, never as
+/// a failed set-up.
+#[test]
+#[ignore = "needs a standard user, whom an OWNER RIGHTS entry stops changing a list (test farm)"]
+fn an_agent_launch_whose_node_folder_this_user_cannot_change_says_so() {
+    let case = case();
+    let user = std::env::var("USERNAME").unwrap();
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+    let locked = crate::spawn_gate::collected(
+        std::process::Command::new(system.join("icacls.exe"))
+            .arg(&case.bin)
+            .args(["/inheritance:r", "/grant:r", "*S-1-3-4:(OI)(CI)(RX)"])
+            .arg(format!("{user}:(OI)(CI)(M)")),
+    )
+    .unwrap();
+    assert!(locked.status.success(), "{}", shown(&locked));
+    assert!(crazyagent_win_sandbox::unreadable_root(
+        &case.bin,
+        "crazyagent.test.node"
+    ));
+    assert_eq!(
+        for_launch(&case.root, npx_in(&case)),
+        Err(ContextModeOff::NodeFolderUnreadable)
+    );
+}
+
 /// The access list of a folder a job read or wrote, as `icacls` prints it, without the
 /// inherited mark a rewritten list may change. Only lists this case owns are compared, since
 /// other rows' containers come and go in the machine-wide Packages and grants folders while
@@ -490,13 +571,16 @@ fn container_files(name: &str) -> (PathBuf, PathBuf) {
 
 /// V243-WIN-CONTAINER-RELEASE: the node probe releases the container it ran `node.exe` in once
 /// the probe ends, so npx's folder keeps no entry for it and no scratch folder is left; here
-/// `node.exe` is empty, so the probe names no version.
+/// `node.exe` is empty, so the probe does not run to an answer.
 #[test]
 fn the_node_probe_leaves_no_container_behind() {
     let case = case();
     let npm = case.root.join("setup").join("npm");
     let before = entries(&case.bin);
-    assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
+    assert_eq!(
+        node_supported(&case.root, &case.bin),
+        Err(InstallError(NODE_CHECK_FAILED))
+    );
     assert_eq!(entries(&case.bin), before);
     let left: Vec<_> = fs::read_dir(&npm)
         .unwrap()
@@ -613,7 +697,10 @@ fn a_node_probe_releases_the_container_a_crashed_probe_left() {
     let before = entries(&case.bin);
     let (scratch, record, package) = crashed_probe(&case);
     assert_ne!(entries(&case.bin), before);
-    assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
+    assert_eq!(
+        node_supported(&case.root, &case.bin),
+        Err(InstallError(NODE_CHECK_FAILED))
+    );
     assert_eq!(entries(&case.bin), before);
     assert!(!record.exists());
     assert!(!package.exists());
@@ -635,13 +722,19 @@ fn a_node_probe_leaves_a_live_probe_container_alone() {
         .open(case.root.join("setup").join("npm").join("node-check.lock"))
         .unwrap();
     held.lock_shared().unwrap();
-    assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
+    assert_eq!(
+        node_supported(&case.root, &case.bin),
+        Err(InstallError(NODE_CHECK_FAILED))
+    );
     assert!(record.is_file());
     assert!(package.is_dir());
     assert!(scratch.is_dir());
     held.unlock().unwrap();
     drop(held);
-    assert_eq!(node_supported(&case.root, &case.bin), Ok(false));
+    assert_eq!(
+        node_supported(&case.root, &case.bin),
+        Err(InstallError(NODE_CHECK_FAILED))
+    );
     assert!(!record.exists());
     assert!(!package.exists());
     assert!(!scratch.exists());

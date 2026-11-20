@@ -121,6 +121,33 @@ impl Jobs {
         crate::storage::reinstall::at(&db, folder).unwrap()
     }
 
+    /// Reads the owner ledger's result kept under one request id straight from the engine's
+    /// database. Input: the id. Output: the recorded result, or None when the id has no row.
+    fn recorded(&self, id: &str) -> Option<OwnerResult> {
+        use rusqlite::OptionalExtension;
+        let db = rusqlite::Connection::open(self.root.path().join("engine.db")).unwrap();
+        let bytes: Option<Vec<u8>> = db
+            .query_row(
+                "SELECT result FROM owner_operations \
+                 WHERE origin = 'native_owner' AND operation_id = ?1",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        bytes.map(|bytes| serde_json::from_slice(&bytes).unwrap())
+    }
+
+    /// The packet the owner client sends and the admission it gets, for rows that serve a
+    /// change the way a job does. Output: the packet and its admission.
+    fn admitted(&self) -> ([u8; 37], Admission) {
+        let mut packet = [0; 37];
+        packet[..4].copy_from_slice(b"CAO1");
+        packet[5..].copy_from_slice(&self.owner.owner_client().unwrap().token);
+        let admission = self.authority().authenticate(&packet).unwrap();
+        (packet, admission)
+    }
+
     /// Starts an add of `path` under the request id `id`. Inputs: the id, the folder and the
     /// mode. Output: the start's answer.
     async fn add(&mut self, id: &str, path: &str, mode: AddMode) -> Result<JobView, EngineError> {
@@ -369,6 +396,11 @@ async fn waiting_jobs_start_by_themselves_and_a_start_past_the_waiting_list_is_b
     release.send(()).unwrap();
     for n in 0..total {
         assert_eq!(jobs.ended(&format!("add-{n}")).await.state, JobState::Done);
+        assert_eq!(
+            jobs.recorded(&format!("add-{n}")),
+            Some(OwnerResult::Applied),
+            "add-{n} keeps one ledger row, the applied one"
+        );
         let landed = jobs.home().join(format!("folder-{n}"));
         assert_eq!(note(&landed), n.to_string());
     }
@@ -548,6 +580,134 @@ async fn a_question_stays_listed_past_other_starts_until_its_answer_starts() {
     );
     assert!(listed.iter().any(|id| id == "add-linked-anyway"));
     jobs.ended("add-linked-anyway").await;
+    jobs.stop().await;
+}
+
+/// A job's change plans at the current revision, whatever revision its request carries: an
+/// add served as a job with a revision the engine has moved past ends applied with one applied
+/// ledger row, while the same request from a client stays a recorded stale refusal and moves
+/// nothing, so a client cannot skip the check.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_plans_at_the_current_revision_and_a_client_keeps_its_stale_refusal() {
+    let mut jobs = Jobs::start().await;
+    let (by_job, by_client) = (jobs.folder("by-job", "j"), jobs.folder("by-client", "c"));
+    let read = jobs.owner.read(OwnerRead::ProjectsHome).await.unwrap();
+    assert!(
+        read.revision.value() >= 1,
+        "the home's set moved the revision"
+    );
+    let old = crate::protocol::Cursor::new(read.revision.value() - 1);
+    let add = |id: &str, source: &str| OwnerRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: RequestId::new(id).unwrap(),
+        expected_revision: old.clone(),
+        operation: OwnerOperation::Apply {
+            mutation: OwnerMutation::AddExistingFolder {
+                source: source.to_owned(),
+                mode: AddMode::Copy,
+                overrides: Vec::new(),
+            },
+        },
+    };
+    let (packet, admission) = jobs.admitted();
+    let engine = Arc::clone(&jobs.service.owner_runtime().unwrap().engine);
+    let authority = jobs.authority();
+    let tally = Arc::new(crate::projects_home::Tally::default());
+    let mut kept = None;
+    let deadline = tokio::time::Instant::now() + ENGINE_WAIT;
+    super::projects_home::serve(
+        super::projects_home::Sink::Job(tally, &mut kept),
+        &engine,
+        &authority,
+        &packet,
+        &admission,
+        add("job-old", &by_job),
+        deadline,
+    )
+    .await
+    .unwrap();
+    let reply = kept
+        .expect("the job's sink keeps the reply")
+        .expect("a job plans at the current revision");
+    assert!(
+        matches!(&reply.response, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied),
+        "{:?}",
+        reply.response
+    );
+    assert_eq!(note(&jobs.home().join("by-job")), "j");
+    assert_eq!(jobs.recorded("job-old"), Some(OwnerResult::Applied));
+    let stale = OwnerResult::Rejected {
+        code: "stale_revision".into(),
+    };
+    let refused = jobs
+        .owner
+        .owner_client()
+        .unwrap()
+        .request(add("client-old", &by_client))
+        .await
+        .unwrap();
+    assert!(
+        matches!(&refused.response, OwnerResponse::Applied { operation } if operation.result == stale),
+        "{:?}",
+        refused.response
+    );
+    assert_eq!(jobs.recorded("client-old"), Some(stale));
+    assert!(!jobs.home().join("by-client").exists());
+    assert_eq!(note(Path::new(&by_client)), "c");
+    jobs.stop().await;
+}
+
+/// A job under an id the owner ledger already holds for a different change still ends with
+/// `operation_identity_conflict`. The job's folder is not added and the first change's row
+/// stays. The start waits out `job_busy` while the client's add still ends after its reply.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_job_under_an_id_kept_for_a_different_change_ends_with_the_identity_conflict() {
+    let mut jobs = Jobs::start().await;
+    let first = jobs.folder("first", "1");
+    let second = jobs.folder("second", "2");
+    let read = jobs.owner.read(OwnerRead::ProjectsHome).await.unwrap();
+    let request = OwnerRequest {
+        protocol_version: PROTOCOL_VERSION,
+        request_id: RequestId::new("add-same").unwrap(),
+        expected_revision: read.revision,
+        operation: OwnerOperation::Apply {
+            mutation: OwnerMutation::AddExistingFolder {
+                source: first,
+                mode: AddMode::Copy,
+                overrides: Vec::new(),
+            },
+        },
+    };
+    let reply = jobs
+        .owner
+        .owner_client()
+        .unwrap()
+        .request(request)
+        .await
+        .unwrap();
+    assert!(
+        matches!(&reply.response, OwnerResponse::Applied { operation } if operation.result == OwnerResult::Applied),
+        "the client's add is recorded under the id: {:?}",
+        reply.response
+    );
+    let deadline = std::time::Instant::now() + ENGINE_WAIT;
+    let started = loop {
+        match jobs.add("add-same", &second, AddMode::Copy).await {
+            Err(e) if e.0 == "job_busy" && std::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            started => break started,
+        }
+    };
+    started.expect("the job starts once the client's add has ended");
+    let ended = jobs.ended("add-same").await.state;
+    assert!(
+        matches!(&ended, JobState::Failed { code, .. } if code == "operation_identity_conflict"),
+        "a different change under a kept id is refused: {ended:?}"
+    );
+    assert!(!jobs.home().join("second").exists());
+    assert_eq!(note(&jobs.home().join("first")), "1");
+    assert_eq!(jobs.recorded("add-same"), Some(OwnerResult::Applied));
     jobs.stop().await;
 }
 

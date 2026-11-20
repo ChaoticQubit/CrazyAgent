@@ -113,9 +113,18 @@ pub fn settings_owner_ports(global: &Path, project: &Path) -> Result<Vec<u16>, &
         .map_or_else(Vec::new, |access| owner_ports(&access)))
 }
 
-/// Why a sandbox with hidden folders does not start on Linux or Windows: their boundaries
-/// grant whole roots and cannot keep a folder inside one out of reach.
+/// Why a sandbox with hidden folders does not start on Windows, nor one with kept-out paths
+/// or open tops on Linux or Windows: those boundaries cannot keep a path inside a granted
+/// root out of reach as Seatbelt does. Linux holds hidden folders on its bubblewrap
+/// backends and names its own refusals otherwise (`linux::HIDDEN_NEEDS_NAMESPACES`,
+/// `linux::HIDDEN_MOUNTED_AGAIN`).
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
+
+/// Whether this system's boundary cannot hold a hidden folder, so a sandbox with one does not
+/// start ([`HIDDEN_NEEDS_SEATBELT`]), a save that hides a folder is refused and neither app
+/// offers the setting (#590): true on Windows only. Linux holds them, and each launch there
+/// refuses with its own code where the host cannot (V244-FWD-V243-4).
+pub const HIDDEN_UNHELD: bool = cfg!(target_os = "windows");
 
 /// Why a native-mode lead's own tmux server does not start off macOS: only Seatbelt holds
 /// its one-socket grant, and DEC-094 keeps team agents macOS-only in V1.
@@ -975,11 +984,53 @@ pub fn linux_holds_fully(
     })
 }
 
-/// Tells whether a launch refusal is the strict setting's ([`LINUX_NOT_FULL_LINE`]), so a
-/// caller can give it its own code ([`LINUX_NOT_FULL`]). Input: the refusal. Output: the
-/// answer.
-pub fn linux_not_full(error: &SandboxError) -> bool {
-    matches!(error, SandboxError::Unavailable(reason) if reason == LINUX_NOT_FULL_LINE)
+/// The engine refusal code of a Windows launch whose limited network names a loopback port
+/// (DESIGN-0256 O2a).
+pub const MODEL_LOOPBACK_UNAVAILABLE_WINDOWS: &str = "model_loopback_unavailable_windows";
+
+/// Why a Windows launch is refused when its network names a loopback port: the AppContainer
+/// cannot reach this computer's own network without an admin exemption (probe P6).
+pub const MODEL_LOOPBACK_WINDOWS_LINE: &str = "a Windows agent cannot reach a port on this computer, such as a local model server or the relay, because its AppContainer has no way to this computer's own network";
+
+/// Tells whether a launch refusal is the Windows loopback one ([`MODEL_LOOPBACK_WINDOWS_LINE`]),
+/// so a caller can give it its own code ([`MODEL_LOOPBACK_UNAVAILABLE_WINDOWS`]). Input: the
+/// refusal. Output: the answer.
+pub fn model_loopback_windows(error: &SandboxError) -> bool {
+    matches!(error, SandboxError::Unavailable(reason) if reason == MODEL_LOOPBACK_WINDOWS_LINE)
+}
+
+/// The engine refusal code of a Linux launch whose project hides folders on a computer
+/// where bubblewrap cannot start agents in namespaces of their own.
+pub const LINUX_HIDDEN_NEEDS_NAMESPACES: &str = "linux_hidden_needs_namespaces";
+
+/// The engine refusal code of a Linux launch whose project hides a folder that this
+/// computer mounts a second time where it shows that folder.
+pub const LINUX_HIDDEN_MOUNTED_AGAIN: &str = "linux_hidden_mounted_again";
+
+/// The engine refusal code of a Linux launch whose project hides folders on a computer
+/// where the sandbox helper cannot cut the agent's mounts off from this computer's.
+pub const LINUX_HIDDEN_MOUNTS_NOT_PRIVATE: &str = "linux_hidden_mounts_not_private";
+
+/// The code a launch refusal has of its own, so a caller shows its plain line: the strict
+/// setting's ([`LINUX_NOT_FULL`]), the Windows loopback's
+/// ([`MODEL_LOOPBACK_UNAVAILABLE_WINDOWS`]) and, on Linux, the hidden folders' three
+/// ([`LINUX_HIDDEN_NEEDS_NAMESPACES`], [`LINUX_HIDDEN_MOUNTED_AGAIN`],
+/// [`LINUX_HIDDEN_MOUNTS_NOT_PRIVATE`]). Input: the refusal. Output: the code, or none.
+pub fn refusal_code(error: &SandboxError) -> Option<&'static str> {
+    let SandboxError::Unavailable(reason) = error else {
+        return None;
+    };
+    match reason.as_str() {
+        LINUX_NOT_FULL_LINE => Some(LINUX_NOT_FULL),
+        MODEL_LOOPBACK_WINDOWS_LINE => Some(MODEL_LOOPBACK_UNAVAILABLE_WINDOWS),
+        #[cfg(target_os = "linux")]
+        linux::HIDDEN_NEEDS_NAMESPACES => Some(LINUX_HIDDEN_NEEDS_NAMESPACES),
+        #[cfg(target_os = "linux")]
+        linux::HIDDEN_MOUNTED_AGAIN => Some(LINUX_HIDDEN_MOUNTED_AGAIN),
+        #[cfg(target_os = "linux")]
+        linux::HIDDEN_MOUNTS_NOT_PRIVATE => Some(LINUX_HIDDEN_MOUNTS_NOT_PRIVATE),
+        _ => None,
+    }
 }
 
 /// The launch refusal when the Linux sockets setting starts no limited-network agent.
@@ -1273,8 +1324,8 @@ impl LinuxHost {
     }
 }
 
-/// What this computer holds as [`LinuxHost`] says, read through the sandbox helper beside
-/// this executable, again once what is kept is a minute old. No input. Output: none on
+/// What this computer holds as [`LinuxHost`] says, read through the sandbox helper its
+/// launches take, again once what is kept is a minute old. No input. Output: none on
 /// another system; on Linux the facts, each false when it cannot be read, so its gap line
 /// is shown.
 pub fn linux_host() -> Option<LinuxHost> {
@@ -1318,11 +1369,15 @@ pub fn linux_other_git(project: &Path) -> bool {
     }
 }
 
-/// Refusal to build or install a project sandbox, with a plain reason.
+/// Refusal to build or install a project sandbox: `Invalid` for an unsafe path or policy,
+/// `Unavailable` with a plain reason, such as a missing Windows helper or loopback limit,
+/// `Unreadable` for a Windows read root no app container may read and this user cannot change
+/// (V244-WIN-NPM), or `Io`.
 #[derive(Debug)]
 pub enum SandboxError {
     Invalid(String),
     Unavailable(String),
+    Unreadable(PathBuf),
     Io(io::Error),
 }
 
@@ -1331,9 +1386,22 @@ impl fmt::Display for SandboxError {
         match self {
             Self::Invalid(reason) => write!(f, "sandbox refused: {reason}"),
             Self::Unavailable(reason) => write!(f, "sandbox unavailable: {reason}"),
+            Self::Unreadable(folder) => {
+                write!(f, "sandbox unavailable: {}", unreadable_reason(folder))
+            }
             Self::Io(error) => write!(f, "sandbox I/O: {error}"),
         }
     }
+}
+
+/// Why a Windows read root refuses a launch, in plain words naming the folder: no app
+/// container may read it and this Windows user cannot change who may. Input: the folder.
+/// Output: the reason.
+pub fn unreadable_reason(folder: &Path) -> String {
+    format!(
+        "Windows does not let sandboxed programs read {}, and this Windows user cannot change who reads it",
+        folder.display()
+    )
 }
 
 impl std::error::Error for SandboxError {}
@@ -2337,8 +2405,8 @@ impl ProjectSandbox {
     /// Keeps one folder inside a granted root out of the agent's reach, read and write, as
     /// the secret paths are; the graph step hides the project's `.crazyagent/` from graphify.
     /// Input: a clean absolute path below a root, in a real parent folder, absent or a real
-    /// folder. Output: the narrowed sandbox, or `Invalid`. Only Seatbelt holds it, so the
-    /// Linux and Windows boundaries refuse a sandbox with hidden folders.
+    /// folder. Output: the narrowed sandbox, or `Invalid`. Seatbelt holds it, the Linux
+    /// bubblewrap backends too where no second mount shows it; plain Landlock and Windows refuse.
     pub fn hide(mut self, folder: &Path) -> Result<Self, SandboxError> {
         if self.hidden.len() >= HIDDEN_MAX {
             return Err(invalid("too many hidden folders"));
@@ -2861,10 +2929,11 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Marks the project folder as one the engine made for one job of its own, a plugin
-    /// server's check or a context-mode install, not a project: on Windows it holds no project
-    /// guards, so the boundary leaves it writable at its top (DEC-193); Seatbelt and Landlock
-    /// are unchanged. Input: a sandbox confined to no worktree, clone or setup. Output: it, marked.
+    /// Marks the project folder as one only the engine's own process works in under this sandbox:
+    /// a folder it made for one job, a plugin server's check, a context-mode install, or a project
+    /// owner git runs in, which must write `.git` and which plain owner git writes in full anyway.
+    /// On Windows it gets no project guards, its top writable (DEC-193); Seatbelt and Landlock are
+    /// unchanged. Input: a sandbox confined to no worktree, clone or setup. Output: it, marked.
     pub fn as_job_folder(mut self) -> Self {
         assert_eq!(self.confinements(), 0);
         assert!(!self.job_folder);
@@ -3943,9 +4012,11 @@ impl InstalledSandbox {
     ) -> Result<Self, SandboxError> {
         #[cfg(not(target_os = "linux"))]
         let _ = strict;
+        if HIDDEN_UNHELD && !sandbox.hidden.is_empty() {
+            return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
+        }
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() || sandbox.open_tops.is_some()
-        {
+        if !sandbox.kept_out.is_empty() || sandbox.open_tops.is_some() {
             return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
         }
         #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -3982,7 +4053,7 @@ impl InstalledSandbox {
             assert!(profile.is_file());
             #[cfg(target_os = "linux")]
             let linux = {
-                let helper = std::env::current_exe()?.with_file_name(linux::HELPER_NAME);
+                let helper = linux::helper_beside_engine()?;
                 let data = crate::tools::engine_root();
                 linux::LinuxSandbox::detect(sandbox.clone(), &helper)?.supervise(calls, data)
             };
@@ -5594,14 +5665,41 @@ mod linux_sockets_tests {
     }
 
     #[test]
+    fn the_windows_loopback_refusal_has_its_own_code_and_reads_plainly() {
+        assert!(model_loopback_windows(&SandboxError::Unavailable(
+            MODEL_LOOPBACK_WINDOWS_LINE.into()
+        )));
+        assert!(!model_loopback_windows(&SandboxError::Unavailable(
+            "other".into()
+        )));
+        assert!(!model_loopback_windows(&SandboxError::Invalid(
+            MODEL_LOOPBACK_WINDOWS_LINE.into()
+        )));
+        for code in [
+            MODEL_LOOPBACK_UNAVAILABLE_WINDOWS,
+            crate::sandbox::policy::SANDBOX_FULL_UNAVAILABLE_WINDOWS,
+        ] {
+            assert!(
+                crate::config::plain_problem(code).is_some(),
+                "{code} has a plain sentence"
+            );
+        }
+    }
+
+    #[test]
     fn the_strict_refusal_has_its_own_code_and_reads_plainly() {
-        assert!(linux_not_full(&SandboxError::Unavailable(
-            LINUX_NOT_FULL_LINE.into()
-        )));
-        assert!(!linux_not_full(&SandboxError::Unavailable("other".into())));
-        assert!(!linux_not_full(&SandboxError::Invalid(
-            LINUX_NOT_FULL_LINE.into()
-        )));
+        assert_eq!(
+            refusal_code(&SandboxError::Unavailable(LINUX_NOT_FULL_LINE.into())),
+            Some(LINUX_NOT_FULL)
+        );
+        assert_eq!(
+            refusal_code(&SandboxError::Unavailable("other".into())),
+            None
+        );
+        assert_eq!(
+            refusal_code(&SandboxError::Invalid(LINUX_NOT_FULL_LINE.into())),
+            None
+        );
         let line = crate::config::plain_problem(LINUX_NOT_FULL);
         assert!(line.is_some(), "the strict refusal has a plain sentence");
         let line = line.unwrap();
@@ -5611,6 +5709,45 @@ mod linux_sockets_tests {
             "Settings",
         ] {
             assert!(line.contains(part), "{line}");
+        }
+    }
+
+    /// rv-code4 F2 (#622): each Linux refusal of hidden folders, where bubblewrap cannot
+    /// start agents in namespaces of their own, where a second mount shows the folder and
+    /// where the helper cannot cut the agent's mounts off (V24x-LINUX-NEST-MOUNT-PROPAGATION),
+    /// has its own code, so the owner reads what to change instead of the generic line.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_hidden_folder_refusals_have_their_own_codes_and_read_plainly() {
+        for (reason, code, parts) in [
+            (
+                linux::HIDDEN_NEEDS_NAMESPACES,
+                LINUX_HIDDEN_NEEDS_NAMESPACES,
+                ["bubblewrap", "namespaces", "Hidden folders"],
+            ),
+            (
+                linux::HIDDEN_MOUNTED_AGAIN,
+                LINUX_HIDDEN_MOUNTED_AGAIN,
+                [
+                    "mounted a second time",
+                    "remove that mount",
+                    "Hidden folders",
+                ],
+            ),
+            (
+                linux::HIDDEN_MOUNTS_NOT_PRIVATE,
+                LINUX_HIDDEN_MOUNTS_NOT_PRIVATE,
+                ["user namespaces", "later mount", "Hidden folders"],
+            ),
+        ] {
+            let refused = SandboxError::Unavailable(reason.into());
+            assert_eq!(refusal_code(&refused), Some(code));
+            let line = crate::config::plain_problem(code);
+            assert!(line.is_some(), "{code} has a plain sentence");
+            let line = line.unwrap();
+            for part in parts {
+                assert!(line.contains(part), "{line}");
+            }
         }
     }
 

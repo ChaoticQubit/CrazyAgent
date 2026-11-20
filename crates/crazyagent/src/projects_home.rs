@@ -37,7 +37,6 @@ pub const NAME_BYTES_MAX: usize = 255;
 pub const SLUG_BYTES_MAX: usize = 64;
 pub const LINKED_WORKTREES_MAX: usize = 4096;
 
-#[cfg(unix)]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS projects_home (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     path TEXT NOT NULL CHECK(length(CAST(path AS BLOB)) BETWEEN 1 AND 1024)
@@ -1024,7 +1023,6 @@ pub(crate) const RECORDED_NAME_BYTES_MAX: usize = 96;
 /// The statement that makes the record of the engine files a Delete everything moved when
 /// it is missing, its names checked to hold [`RECORDED_NAME_BYTES_MAX`] bytes. Output: the
 /// statement.
-#[cfg(unix)]
 fn delete_files_table() -> String {
     format!(
         "CREATE TABLE IF NOT EXISTS projects_delete_files (
@@ -1138,14 +1136,11 @@ fn folder_inode(folder: &Path) -> Option<i64> {
     i64::try_from(number).ok()
 }
 
-/// Removes the engine files a delete recorded: an agent's state folder, sandbox profiles
-/// and teammates' records, a research run's folder, a roadmap status run's folder and
-/// Seatbelt profile, or a project's tool caches, which an agent may have closed or pinned
-/// inside and are cleared of that first. Only the
-/// folder the record was written for goes: under any other identity it stays, logged as
-/// `project_files_kept`, and the record is finished. A name that is no engine file removes
-/// nothing. A file left behind is logged as `project_files_left` and keeps its record.
-/// Inputs: the engine database path and the records. Output: the names that are finished.
+/// Removes the engine files a delete recorded, each folder as an agent's tree: an agent's
+/// state folder, sandbox profiles and teammates' records, a research or roadmap status run's
+/// folder and Seatbelt profile, or a project's tool caches. A non-engine name, or a folder now
+/// under another identity (`project_files_kept`), is finished; a file left keeps its record
+/// (`project_files_left`). Inputs: the database path and the records. Output: finished names.
 pub fn remove_engine_files(database: &Path, files: &[RecordedFile]) -> Vec<String> {
     let Some(root) = database.parent() else {
         return Vec::new();
@@ -1161,13 +1156,11 @@ pub fn remove_engine_files(database: &Path, files: &[RecordedFile]) -> Vec<Strin
                     Ok(())
                 } else if let EngineFile::Agent(id) = file {
                     crate::team::cleanup::remove_agent_files(&root.join("team"), id)
-                } else if matches!(file, EngineFile::ToolCache) {
-                    crate::team::cleanup::remove_agent_tree(&folder)
                 } else if matches!(file, EngineFile::StatusRun) {
-                    crate::team::cleanup::remove_tree(&folder)
+                    crate::team::cleanup::remove_agent_tree(&folder)
                         .and_then(|()| remove_run_profile(root, name))
                 } else {
-                    crate::team::cleanup::remove_tree(&folder)
+                    crate::team::cleanup::remove_agent_tree(&folder)
                 }
             }
         };
@@ -1296,7 +1289,6 @@ pub fn found(
 /// the table that holds each Delete everything planned and not yet settled, when the
 /// engine database opens; a database from before gains the tables it lacks.
 /// Input: the engine connection. Output: any SQLite failure.
-#[cfg(unix)]
 pub(crate) fn initialize(connection: &rusqlite::Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(TABLE)

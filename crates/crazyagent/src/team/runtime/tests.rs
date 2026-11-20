@@ -212,6 +212,27 @@ impl Fixture {
         }
     }
 
+    /// Starts a pane whose process ignores terminate and waits until its shell has set that
+    /// trap, so a terminate sent at once cannot end it before the trap holds (S4B-B1 rows).
+    /// Inputs: the host and the agent. Output: the pane's record.
+    #[cfg(target_os = "macos")]
+    fn pane_ignoring_terminate(&self, host: &Arc<dyn Host>, id: i64) -> PaneRecord {
+        let ready = self.base.join(format!("terminate-ignored-{id}"));
+        let shown = ready.display().to_string();
+        assert!(!shown.contains('\''), "{shown}");
+        let script = format!("trap '' TERM; : > '{shown}'; exec cat");
+        let record = self.pane_running(host, id, &["/bin/sh", "-c", &script]);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the pane never set its trap: {shown}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        record
+    }
+
     fn keep(&self, id: i64, record: &PaneRecord) {
         self.connection
             .execute(
@@ -2464,11 +2485,16 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     };
     let mut wrong = Vec::new();
 
-    std::fs::write(&brief, "# Panes\n\nPlan the page.\n").unwrap();
+    const NOTE_BYTES_MAX: usize = 128;
+    let normal = "# Panes\n\nPlan the page.\n";
+    std::fs::write(&brief, normal).unwrap();
     let framed = frame();
+    let around_bytes = framed
+        .as_deref()
+        .map_or(0, |text| text.len().saturating_sub(normal.len()));
     if !framed
         .as_deref()
-        .is_some_and(|text| text.contains("Project brief:\n# Panes\n\nPlan the page.\n"))
+        .is_some_and(|text| text.contains(&format!("Project brief:\n{normal}")))
     {
         wrong.push(("normal", framed));
     }
@@ -2511,7 +2537,7 @@ fn the_master_framing_reads_only_a_bounded_regular_brief_and_never_blocks() {
     if !framed.as_deref().is_some_and(|text| {
         text.contains("Project brief:\n# Panes\n\naaaa")
             && text.contains(&format!("The brief is {huge} bytes"))
-            && text.len() < BRIEF_BYTES_MAX + 2048
+            && text.len() <= around_bytes + BRIEF_BYTES_MAX + NOTE_BYTES_MAX
     }) {
         wrong.push(("oversized", framed.map(|text| bound_text(&text, 200))));
     }
@@ -4889,6 +4915,65 @@ fn a_live_claude_master_whose_terminal_ends_resumes_its_conversation_and_logs_ea
         terminal_ended_notes(&fixture),
         1,
         "an owner stop adds no restart note"
+    );
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// V243-MASTER-INPUT-ENDED-PANE (leader 04:56): a live master's interrupted run whose note
+/// comes due just as the master's pane ends, before the next tick sees it gone, waits instead
+/// of failing: the master's input reads the ended pane as not reading keys, so the run stays
+/// interrupted with no reason, never failed with the terminal's own code.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_interrupted_master_run_waits_when_its_live_master_s_pane_has_just_ended() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = claude_runtime(&fixture, &host, RESUMING_CLAUDE);
+    let project = fixture.setup.project_id.clone();
+    set_master(&fixture, "claude-code");
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the Claude Code master runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    let deadline = Instant::now() + WAIT;
+    while !(team.workers[&master].live && team.workers[&master].briefed) {
+        assert!(
+            Instant::now() < deadline,
+            "the live master is never briefed"
+        );
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        super::super::master::quiet(&fixture.connection, None, &project, now_ms()),
+        "the briefed master is idle, so its input reaches the pane check"
+    );
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO recovery_runs(agent,project,kind,harness,at_ms,turn,state) VALUES (?1,?2,'master','claude-code',1,1,'interrupted')",
+            params![master, PROJECT],
+        )
+        .unwrap();
+    host.kill(&AgentId::team(master).unwrap()).unwrap();
+
+    team.resume_interrupted(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    let run: (String, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT state,reason FROM recovery_runs WHERE agent=?1",
+            [master],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        run,
+        ("interrupted".to_owned(), None),
+        "a run whose master's pane just ended waits, never failed with the terminal's code"
     );
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
@@ -24876,7 +24961,7 @@ fn a_taken_over_lead_not_proven_gone_reports_an_uncertain_cleanup() {
         ),
     ] {
         let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
-        let record = fixture.pane_running(&host, id, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
+        let record = fixture.pane_ignoring_terminate(&host, id);
         let agent = AgentId::team(id).unwrap();
         let adoption = Adoption {
             host: host.clone(),
@@ -28356,14 +28441,16 @@ fn a_panicking_teammate_end_leaves_no_id_behind_and_reads_as_uncertain() {
 /// #393 F1 (DEC-200): a native teammate's end that fails with a host error other than an
 /// unknown agent leaves its row to a later tick, so its end thread does not wake the team
 /// loop; a wake there would run the loop back to back for as long as the error lasts. The
-/// host here has no tmux, so every end the owner's stop pass starts fails the same way.
+/// host here has no tmux and is set as the terminal as is, since attaching one asks it for
+/// its panes first, so every end the owner's stop pass starts fails the same way.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_failed_teammate_end_leaves_the_team_loop_to_its_tick() {
     const PASSES: u64 = 40;
     let fixture = Fixture::new(1);
     let host: Arc<dyn Host> = Arc::new(Tmux::open(None, &fixture.base.join(FOLDER)));
-    let mut team = limited_runtime(&fixture, &host, LEAD_CODEX, TeamLimits::default());
+    let mut team = fixture.runtime();
+    team.terminal = Some(host);
     let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
     let mate = fixture.agent(AgentRole::Teammate, "codex", AgentStatus::Working);
     fixture
@@ -28542,7 +28629,7 @@ fn a_stopped_teammate_not_proven_gone_is_marked_uncertain() {
             params![mate, lead],
         )
         .unwrap();
-    let _record = fixture.pane_running(&host, mate, &["/bin/sh", "-c", "trap '' TERM; exec cat"]);
+    let _record = fixture.pane_ignoring_terminate(&host, mate);
     fixture
         .connection
         .execute(

@@ -197,7 +197,7 @@ impl OwnerClient {
         action: Action,
         key: Option<AccountSecret>,
     ) -> Result<Reply, EngineError> {
-        let time = action.time(self.timeout) + self.timeout;
+        let time = action.time(self.engine_timeout) + self.timeout;
         tokio::time::timeout(time, async {
             let read = read_kind(&action);
             let envelope = Envelope {
@@ -209,10 +209,10 @@ impl OwnerClient {
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
-            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
                 .await
                 .map_err(|_| failure("accounts_owner_unavailable"))?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             let mut packet = [0; 37];
             packet[..4].copy_from_slice(b"CAO1");
             packet[4] = match self.kind {
@@ -257,11 +257,11 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
 }
 
 /// Serves one accounts owner request after the owner exchange deadline: the action runs
-/// under its own budget, which covers its network probes, and the reply write under the
-/// owner wait. Inputs: the stream, engine, authority, owner packet, admission and request
-/// bytes. Output: the reply written, a rejection code included.
+/// under its own budget, which covers its network probes and decides each storage job just
+/// before that budget cuts it, and the reply write under the owner wait. Inputs: the stream,
+/// engine, authority, owner packet, admission and request bytes. Output: the reply written.
 pub(super) async fn serve(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
@@ -276,12 +276,11 @@ pub(super) async fn serve(
         None
     };
     let time = envelope.accounts.time(engine.timeout);
-    let outcome = tokio::time::timeout(
-        time,
-        handle(engine, authority, packet, admission, envelope.accounts, key),
-    )
-    .await
-    .unwrap_or_else(|_| Err(unknown()));
+    let cut = tokio::time::Instant::now() + time;
+    let work = handle(engine, authority, packet, admission, envelope.accounts, key);
+    let outcome = tokio::time::timeout_at(cut, crate::storage::before_cut(cut, time, work))
+        .await
+        .unwrap_or_else(|_| Err(unknown()));
     let reply = match outcome {
         Ok(reply) => reply,
         Err(error) => Reply::Rejected {
@@ -474,7 +473,7 @@ async fn authenticate(
     Ok(())
 }
 
-async fn receive_key(stream: &mut UnixStream) -> Result<AccountSecret, EngineError> {
+async fn receive_key(stream: &mut Stream) -> Result<AccountSecret, EngineError> {
     tokio::time::timeout(Duration::from_secs(5), async {
         let invalid = || failure("accounts_key_frame_invalid");
         let size = stream.read_u32().await.map_err(|_| invalid())? as usize;
@@ -830,16 +829,32 @@ fn view(listed: &Listed, status: AccountStatus) -> AccountView {
         },
         model: (!native).then(|| listed.connection.model.id.clone()),
         status,
-        status_label: if status == AccountStatus::NotSignedIn && listed.rejected {
-            "Sign-in rejected"
-        } else if status == AccountStatus::SigningIn
-            && listed.sign_in == Some(NativeAuthPhase::AuthenticatedObserved)
-        {
-            "Checking sign-in"
-        } else {
-            status.label()
-        }
-        .into(),
+        status_label: match &listed.sign_out_unfinished {
+            Some(code) if status == AccountStatus::NotSignedIn => {
+                format!("Sign-out not finished: {}", sign_out_reason(code))
+            }
+            _ if status == AccountStatus::NotSignedIn && listed.rejected => {
+                "Sign-in rejected".into()
+            }
+            _ if status == AccountStatus::SigningIn
+                && listed.sign_in == Some(NativeAuthPhase::AuthenticatedObserved) =>
+            {
+                "Checking sign-in".into()
+            }
+            _ => status.label().into(),
+        },
+    }
+}
+
+/// Says in plain words why a sign-out did not finish in the harness, for the Accounts page:
+/// the profile is signed out here, but the harness may still hold its credentials.
+/// Input: the stored code. Output: the reason, a fixed sentence for any code it does not
+/// name, so no harness output ever reaches the page.
+fn sign_out_reason(code: &str) -> &'static str {
+    match code {
+        crate::storage::SIGN_OUT_NOT_RUN => "the engine stopped before the harness signed out",
+        "native_auth_host_unavailable" => "the sign-in helper could not run the harness",
+        _ => "the harness sign-out failed",
     }
 }
 

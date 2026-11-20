@@ -600,11 +600,7 @@ fn below(base: &Path, relative: &str) -> PathBuf {
 /// only the owner and the system can change, and none of them in a `.crazyagent` folder
 /// ([`in_crazyagent_folder`]). Input: the harness's real file. Output: the prefix, or none.
 pub fn node_prefix(program: &Path) -> Option<PathBuf> {
-    let prefix = program
-        .ancestors()
-        .take(NODE_PREFIX_DEPTH_MAX)
-        .find(|folder| folder.ends_with("lib/node_modules"))
-        .and_then(|modules| modules.parent()?.parent())?;
+    let prefix = npm_prefix(program)?;
     let bin = prefix.join("bin");
     let node = bin.join("node");
     let usable = bin.is_absolute()
@@ -616,6 +612,19 @@ pub fn node_prefix(program: &Path) -> Option<PathBuf> {
         && std::fs::canonicalize(&node).is_ok_and(|real| !in_crazyagent_folder(&real))
         && crate::service::changeable_by_others(&node).is_none();
     usable.then(|| prefix.to_path_buf())
+}
+
+/// The npm prefix a program's path names: for a file under `<prefix>/lib/node_modules/`
+/// within [`NODE_PREFIX_DEPTH_MAX`] folders, that prefix, read from the path alone with no
+/// check on what it holds. Input: the program's real file. Output: the prefix, or none.
+pub(crate) fn npm_prefix(program: &Path) -> Option<&Path> {
+    let prefix = program
+        .ancestors()
+        .take(NODE_PREFIX_DEPTH_MAX)
+        .find(|folder| folder.ends_with("lib/node_modules"))
+        .and_then(|modules| modules.parent()?.parent())?;
+    assert!(program.starts_with(prefix));
+    Some(prefix)
 }
 
 /// Whether a path runs through a `.crazyagent` folder, where every project keeps the

@@ -105,12 +105,10 @@ async fn the_tui_controller_lists_the_harness_catalog_from_a_discovered_engine()
     }));
 }
 
-/// A folder for the row's Claude install where an owner's install would be: outside the
-/// engine's data folder and every folder the agent space holds, the shared temp folder's
-/// `ca-` folders among them, and outside the shared temp folder, which a re-pin's start
-/// checks refuse as changeable by others: this user's cache folder, `DARWIN_USER_CACHE_DIR`
-/// on macOS and `~/.cache` elsewhere. Input: the folder name's prefix. Output: the folder,
-/// removed when dropped.
+/// A folder for the row's Claude install where an owner's install would be, outside the engine's
+/// data folder, the agent space and the shared temp folder (a re-pin refuses /tmp as changeable
+/// by others): this user's cache folder, `DARWIN_USER_CACHE_DIR` on macOS, `~/.cache` elsewhere.
+/// Input: the folder name's prefix. Output: the folder, removed when dropped.
 fn owner_folder(prefix: &str) -> tempfile::TempDir {
     let cache = if cfg!(target_os = "macos") {
         let cache = crazyagent::spawn_gate::output(

@@ -2452,7 +2452,7 @@ fn report_loss(
 /// Starts the engine, or repairs its login service, as `crazyagent tui` does before it
 /// opens, and gives up once the TUI stops so a quit never waits on it (DS-118). Inputs:
 /// the default layout and service and the stop flag. Output: Ok once the engine answers,
-/// else `engine_backup_failed` when its upgrade backup failed or `engine_start_failed`.
+/// else `git_safe_unavailable` (#598 sec N1), `engine_backup_failed` or `engine_start_failed`.
 async fn start_engine(
     engine: &(crate::paths::Layout, crate::service::Service),
     stopped: &AtomicBool,
@@ -2478,10 +2478,7 @@ async fn start_engine(
     if started {
         return Ok(());
     }
-    if crate::service::backup_failure(layout).is_some() {
-        return Err("engine_backup_failed".into());
-    }
-    Err("engine_start_failed".into())
+    Err(crate::service::start_failure(layout).into())
 }
 
 /// The connection problem the TUI shows when it cannot attach: the plain line for a
@@ -2733,11 +2730,7 @@ mod creation_recovery_tests {
             .expect("the engine serves its owner socket in a generation under the root");
         let mut silent = Vec::new();
         for _ in 0..crate::protocol::OWNER_CLIENTS_MAX {
-            silent.push(
-                crate::spawn_gate::connect_unix(&owner_socket)
-                    .await
-                    .unwrap(),
-            );
+            silent.push(crate::ipc::owner_connect(&owner_socket).await.unwrap());
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
         let busy = h
@@ -2799,11 +2792,7 @@ mod creation_recovery_tests {
             .expect("the engine serves its owner socket in a generation under the root");
         let mut silent = Vec::new();
         for _ in 0..crate::protocol::OWNER_CLIENTS_MAX {
-            silent.push(
-                crate::spawn_gate::connect_unix(&owner_socket)
-                    .await
-                    .unwrap(),
-            );
+            silent.push(crate::ipc::owner_connect(&owner_socket).await.unwrap());
         }
         tokio::time::sleep(Duration::from_millis(300)).await;
         let result = h

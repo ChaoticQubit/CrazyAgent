@@ -377,6 +377,40 @@ test("every test farm Linux tmux install first takes group and other write off t
   }
 });
 
+test("every uv the Rust shard action installs puts its folder on the job's PATH, so the rows that run uv find it on macOS as they do on Linux (G1 macOS M1)", async () => {
+  const shard = await readFile(new URL("../../.github/actions/rust-shard/action.yml", import.meta.url), "utf8");
+  const sites = shard.split(/\n(?= {4}- )/).map((step) => `${step}\n`).filter((step) => step.includes('install -m 0755 "$work/uv-$UV_TARGET/uv" "$work/bin/uv"\n'));
+  assert.equal(sites.length, 2, "the Linux uv step and the macOS graphify step");
+  for (const site of sites) {
+    const installed = site.indexOf('install -m 0755 "$work/uv-$UV_TARGET/uv" "$work/bin/uv"\n');
+    assert(site.indexOf('echo "$work/bin" >> "$GITHUB_PATH"\n') > installed, site.split("\n")[0]);
+  }
+});
+
+test("the macOS Rust shard links the graphify it installs into the uv folder on the job's PATH, never the venv's bin, so an engine started by a row finds it where the graph step looks (G1 macOS M3)", async () => {
+  const shard = await readFile(new URL("../../.github/actions/rust-shard/action.yml", import.meta.url), "utf8");
+  const step = shard.split(/\n(?= {4}- )/).map((text) => `${text}\n`).find((text) => text.includes("name: Install pinned graphify for the graph rows\n"));
+  assert(step, "the macOS graphify step");
+  const checked = step.indexOf('"$venv/bin/graphify" --help > /dev/null\n');
+  assert(checked >= 0, "the step runs the graphify it installed");
+  assert(step.indexOf('ln -s "$venv/bin/graphify" "$work/bin/graphify"\n') > checked, "the link names the graphify just checked");
+  assert(step.includes('echo "$work/bin" >> "$GITHUB_PATH"\n'), "the linked folder is on the job's PATH");
+  assert.doesNotMatch(step, /"\$venv\/bin" >> "\$GITHUB_PATH"/, "the venv's python never shadows the runner's");
+});
+
+test("the macOS Rust shard installs the uv it checked as a root-owned file in /usr/local/bin and runs it there on the engine's fixed tool path, so rows that look uv up as the engine does find it; a link would resolve back into the runner temp folder the engine does not trust (G1 macOS M1b)", async () => {
+  const shard = await readFile(new URL("../../.github/actions/rust-shard/action.yml", import.meta.url), "utf8");
+  const step = shard.split(/\n(?= {4}- )/).map((text) => `${text}\n`).find((text) => text.includes("name: Install pinned graphify for the graph rows\n"));
+  assert(step, "the macOS graphify step");
+  const checked = step.indexOf('test "$("$work/bin/uv" --version | cut -d\' \' -f2)" = "$UV_VERSION"\n');
+  assert(checked >= 0, "the step checks the uv it unpacked");
+  const copied = step.indexOf('sudo install -m 0755 -o root -g wheel "$work/bin/uv" /usr/local/bin/uv\n');
+  assert(copied > checked, "the copy is the uv just checked");
+  const run = step.indexOf('test "$(/usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin HOME=/tmp uv --version | cut -d\' \' -f2)" = "$UV_VERSION"\n');
+  assert(run > copied, "the copied uv runs on the engine's fixed tool path");
+  assert.doesNotMatch(step, /ln -s[^\n]*\/usr\/local\/bin/, "no link into /usr/local/bin");
+});
+
 test("both test farm engine cargo builds turn on the engine's owner-trace feature only where the built tree's engine defines it, so a failed row's captured stderr holds one line per owner exchange and a tree from any other base still builds; the Windows boundary build has no engine and builds without it (leader 02:58, #297 F1; #326 r1 F1; clean_mac_release.rs keeps it out of every release build)", async () => {
   const archive = await readFile(new URL("../../.github/actions/rust-archive/action.yml", import.meta.url), "utf8");
   const parts = archive.split(/\n(?= {4}- )/);

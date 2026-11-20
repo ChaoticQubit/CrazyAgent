@@ -1811,6 +1811,34 @@ fn a_check_of_a_context_mode_npx_the_resolver_does_not_find_reads_the_engine_wor
     );
 }
 
+/// V244-WIN-NPM: a check whose Node.js folder no Windows sandbox may read shows the engine's
+/// own sentence for it.
+#[test]
+fn a_check_on_a_node_folder_windows_sandboxes_cannot_read_reads_the_engine_words() {
+    assert_eq!(
+        plugin_plain("server_node_folder_unreadable"),
+        "Windows does not let sandboxed programs read the Node.js folder context-mode runs from, and this Windows user cannot change that, so CrazyAgent did not start it."
+    );
+    assert_eq!(
+        Some(plugin_plain("server_node_folder_unreadable")),
+        crate::plugins::plain_problem("server_node_folder_unreadable")
+    );
+}
+
+/// V244-WIN-ADMIN-STEP: a check on a drive root no Windows sandbox may read shows the
+/// engine's own sentence for it.
+#[test]
+fn a_check_on_a_drive_root_windows_sandboxes_cannot_read_reads_the_engine_words() {
+    assert_eq!(
+        plugin_plain("server_node_drive_root_unreadable"),
+        "Windows does not let sandboxed programs read the root of a drive context-mode uses, so CrazyAgent did not start it. Run the CrazyAgent installer again and approve the administrator step."
+    );
+    assert_eq!(
+        Some(plugin_plain("server_node_drive_root_unreadable")),
+        crate::plugins::plain_problem("server_node_drive_root_unreadable")
+    );
+}
+
 fn hook(plugin: &str, event: &str, matcher: Option<&str>, enabled: bool) -> HookView {
     HookView {
         id: format!("hook-{plugin}-{event}-{}", matcher.unwrap_or("all")),

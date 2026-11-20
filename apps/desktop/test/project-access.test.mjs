@@ -286,9 +286,16 @@ test("Hiding a folder takes an absolute path, rejects duplicates and caps at the
   assert.ok("error" in settings.addHiddenPath(full, "/one-more"));
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
   assert.match(page, /<HiddenSection data=\{data\} \/>/);
-  for (const code of ["hidden_paths_too_many", "hidden_paths_invalid", "hidden_path_not_absolute", "hidden_path_not_plain", "hidden_path_missing", "hidden_path_not_folder", "hidden_path_outside_project", "hidden_path_tracked", "hidden_path_unchecked"]) {
+  for (const code of ["hidden_paths_too_many", "hidden_paths_invalid", "hidden_path_not_absolute", "hidden_path_not_plain", "hidden_path_missing", "hidden_path_not_folder", "hidden_path_outside_project", "hidden_path_tracked", "hidden_path_unchecked", "hidden_path_name_unchecked"]) {
     assert.ok(api.KNOWN_ERROR_CODES.includes(code), code);
   }
+  const nonEnglish = "A folder path with non-English letters or symbols can't be checked against git on this system yet. Rename the folder or pick another.";
+  assert.equal(api.knownError("hidden_path_name_unchecked"), nonEnglish);
+  const tuiProject = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project.rs", import.meta.url), "utf8");
+  assert.ok(tuiProject.includes(`"${nonEnglish}"`));
+  const macosOnly = "Hidden folders work only on macOS for now, so a list with folders can't be saved here. Remove them all and save.";
+  assert.equal(api.knownError("hidden_paths_need_macos"), macosOnly);
+  assert.ok(tuiProject.includes(`"${macosOnly}"`));
 });
 
 test("Settings says beside the toolchain switches that turning one off stops agents, research jobs and master turns running with it, in both UIs", () => {
@@ -522,4 +529,26 @@ test("the access choice shows what the engine says this Linux can't hold for the
   for (const page of ["../src/screens/project/settings.tsx", "../src/screens/new-project/index.tsx"]) {
     assert.match(readFileSync(new URL(page, import.meta.url), "utf8"), /<AccessLevels [^\n]* gaps=\{/, page);
   }
+});
+
+test("on Windows Full access is refused with its own sentence, a loopback model reads plainly, and a limited network says it reaches the whole internet, in both UIs (DESIGN-0256 O3a, O2a)", async () => {
+  const client = await import("../src/engine-client.ts");
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
+  const config = readFileSync(new URL("../../../crates/crazyagent/src/config.rs", import.meta.url), "utf8");
+  const wide = engine.match(/pub const WINDOWS_NETWORK_WIDE_LINE: &str = "([^"]+)";/)?.[1];
+  assert.ok(wide, "the engine names the Windows network line");
+  for (const network of ["https", "none"]) assert.equal(access.networkGap(null, network, "windows"), wide, network);
+  assert.equal(access.networkGap(null, "open", "windows"), null);
+  for (const platform of ["macos", "linux"]) assert.notEqual(access.networkGap(null, "none", platform), wide, platform);
+  for (const code of ["sandbox_full_unavailable_windows", "model_loopback_unavailable_windows"]) {
+    const sentence = api.knownError(code);
+    assert.ok(sentence, `${code} has its own sentence`);
+    assert.equal(client.errorMessage({ code }), sentence, `${code} reads the same on the owner path`);
+    const arm = config.slice(config.indexOf(`"${code}" =>`)).match(/^"[a-z_]+" => \{?\s*Some\(\s*"((?:[^"\\]|\\.)*)"/)?.[1];
+    assert.equal(arm, sentence, `${code} reads the same in the TUI`);
+  }
+  const full = api.knownError("sandbox_full_unavailable_windows");
+  assert.match(full, /Full access[\s\S]*Windows/);
+  assert.doesNotMatch(full, /Sandboxed|Own branch|always run/, "Full's sentence names no level Windows refuses in this version (#519 F3)");
+  assert.match(api.knownError("model_loopback_unavailable_windows"), /on this computer[\s\S]*Windows/);
 });

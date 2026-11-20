@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 /// of steps follows, as in `master_step_limit_50`, a plain code an owner window may show.
 const CAUSE_PREFIX: &str = "master_step_limit_";
 
-#[cfg(any(unix, test))]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS configured_master_steps (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     step_limit TEXT NOT NULL CHECK(step_limit IN ('no_limit', 'steps50', 'steps100', 'steps200'))
@@ -88,7 +87,6 @@ fn invalid() -> EngineError {
 
 /// Creates the settings table when it is missing. Input: the engine database. Output: Ok,
 /// or the database error.
-#[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(error)
 }

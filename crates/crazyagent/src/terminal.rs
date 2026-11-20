@@ -478,6 +478,33 @@ pub trait Host: Send + Sync {
         Ok(false)
     }
 
+    /// The pane an input-only view of an agent stays on: the agent's own pane now, the one
+    /// `attach` would view, and the serial of the connection that found it. Takes the name.
+    /// Returns the pane, `terminal_agent_unknown` once the terminal is gone, or
+    /// `terminal_unavailable` for a host with no pane ids, whose views type by name.
+    fn own_pane_at(&self, _agent: &AgentId) -> Result<PaneAt, HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
+    /// Pastes keys straight into the pane a view stays on, as `paste` does by name, while the
+    /// connection that found that pane still serves it. Takes the name, the pane and 1 to
+    /// `PASTE_BYTES_MAX` keys. Returns true once pasted, false when this host cannot use it.
+    fn paste_at(&self, _agent: &AgentId, _at: &PaneAt, _keys: &[u8]) -> Result<bool, HostError> {
+        Ok(false)
+    }
+
+    /// Sizes the window of the pane a view stays on, as `resize` does by name, while the
+    /// connection that found that pane still serves it. Takes the name, the pane and the
+    /// size. Returns true once sized, false when this host cannot use that pane.
+    fn resize_at(
+        &self,
+        _agent: &AgentId,
+        _at: &PaneAt,
+        _size: (u16, u16),
+    ) -> Result<bool, HostError> {
+        Ok(false)
+    }
+
     /// Tells whether the app in an agent terminal reads keys itself yet: interactive apps
     /// turn on bracketed paste once their own input is live, and keys typed before that
     /// go through the terminal's line editing, which turns Enter into a newline.
@@ -701,6 +728,18 @@ impl Host for OwnServer {
     }
     fn input_at(&self, agent: &AgentId, at: &PaneAt, bytes: &[u8]) -> Result<bool, HostError> {
         self.0.input_at(agent, at, bytes)
+    }
+
+    fn own_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        self.0.own_pane_at(agent)
+    }
+
+    fn paste_at(&self, agent: &AgentId, at: &PaneAt, keys: &[u8]) -> Result<bool, HostError> {
+        self.0.paste_at(agent, at, keys)
+    }
+
+    fn resize_at(&self, agent: &AgentId, at: &PaneAt, size: (u16, u16)) -> Result<bool, HostError> {
+        self.0.resize_at(agent, at, size)
     }
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
@@ -1460,16 +1499,53 @@ pub fn paste_keys(text: &str) -> Vec<u8> {
 /// the text. Returns whether it was typed; blank or oversized text types nothing.
 pub fn type_prompt(host: &dyn Host, agent: &AgentId, text: &str) -> Result<bool, HostError> {
     let bracketed = host.input_live(agent)?;
+    prompt_into(text, bracketed, |keys| host.input(agent, keys))
+}
+
+/// Types one prompt into the pane a pinned view stays on, as `type_prompt` does by name: the
+/// same keys and Enter, each straight into that pane, never by name. Takes the host, the
+/// terminal name, the pane and the text. Returns as `type_prompt`, or `terminal_agent_unknown`
+/// once that pane is no longer one the host can type into.
+#[cfg(unix)]
+pub(crate) fn type_prompt_at(
+    host: &dyn Host,
+    agent: &AgentId,
+    at: &PaneAt,
+    text: &str,
+) -> Result<bool, HostError> {
+    assert!(pane_id_valid(&at.pane), "a pin is a pane id");
+    assert!(
+        at.serial > 0,
+        "a pin names the control connection that found it"
+    );
+    let bracketed = host.input_live(agent)?;
+    prompt_into(text, bracketed, |keys| {
+        match host.input_at(agent, at, keys)? {
+            true => Ok(()),
+            false => Err(failure("terminal_agent_unknown")),
+        }
+    })
+}
+
+/// Types one prompt's keys as one submission through the given typing: the keys in chunks of
+/// at most `INPUT_BYTES_MAX`, a settle when they went as a paste, then Enter. Takes the text,
+/// whether the app turned bracketed paste on and the typing. Returns whether it was typed;
+/// blank or oversized text types nothing.
+fn prompt_into(
+    text: &str,
+    bracketed: bool,
+    mut typing: impl FnMut(&[u8]) -> Result<(), HostError>,
+) -> Result<bool, HostError> {
     let Some(keys) = prompt_keys(text, bracketed) else {
         return Ok(false);
     };
     for chunk in keys.chunks(INPUT_BYTES_MAX) {
-        host.input(agent, chunk)?;
+        typing(chunk)?;
     }
     if bracketed {
         std::thread::sleep(PASTE_SETTLE);
     }
-    host.input(agent, b"\r")?;
+    typing(b"\r")?;
     Ok(true)
 }
 

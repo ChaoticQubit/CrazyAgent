@@ -81,7 +81,7 @@ impl Bounds {
     /// Output: the moved bounds.
     fn below_inset(self, content_height: f64) -> Self {
         Self {
-            y: self.y + (content_height - self.viewport).max(0.0),
+            y: crate::page_to_view_y(self.y, content_height, self.viewport),
             ..self
         }
     }

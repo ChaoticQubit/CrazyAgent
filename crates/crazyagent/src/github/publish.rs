@@ -2,7 +2,7 @@ use super::GitHubRule;
 use super::clone;
 use crate::engine::EngineError;
 use crate::project_setup::SECRET_PREFIXES;
-use crate::research::runner::GIT_SAFE;
+use crate::research::runner::git_safe;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -14,6 +14,8 @@ use std::time::Duration;
 
 #[cfg(all(test, target_os = "macos"))]
 mod publish_tests;
+#[cfg(all(test, windows))]
+mod windows_tests;
 
 const SCAN_FILES_MAX: usize = 20_000;
 const SCAN_BYTES_MAX: u64 = 200 << 20;
@@ -24,6 +26,22 @@ const CONFIG_BYTES_MAX: u64 = 64 << 10;
 const OUTPUT_BYTES_MAX: u64 = 1 << 20;
 const GITIGNORE_BYTES_MAX: u64 = 1 << 20;
 const FINDINGS_MAX: usize = 1000;
+const TREE_ENTRIES_MAX: usize = 2_000_000;
+/// The repository config keys that name a file outside the tree, turned off on every publish
+/// git that reads the tree ([`project_git`]), so a `.git/config` an agent wrote never has git
+/// open a share or another outside file as the owner: the excludes and attributes files and the
+/// mailmap. On Unix too, so an owner's own repository `core.excludesFile` no longer hides files
+/// from the publish scan or commit; `.gitignore`, `.git/info/exclude` and `.gitattributes` apply.
+const OUTSIDE_FILES_OFF: [&str; 8] = [
+    "-c",
+    "core.excludesFile=/dev/null",
+    "-c",
+    "core.attributesFile=/dev/null",
+    "-c",
+    "log.mailmap=false",
+    "-c",
+    "mailmap.file=/dev/null",
+];
 const FILE_FINDINGS_MAX: usize = 20;
 const LOOKUP_TIME: Duration = Duration::from_secs(20);
 /// The longest a publish Start's own git can run: [`inspect`] reads the remotes once and
@@ -246,18 +264,19 @@ pub(super) fn git() -> Result<PathBuf, EngineError> {
         .ok_or_else(|| failure("github_git_missing"))
 }
 
-/// Starts a git command in the project's own repository with the engine's safe options and
-/// the empty home, so no hook folder, pager, fsmonitor or owner configuration outside the
-/// repository runs, and git never looks for a repository above the project. A config hook
-/// these options do not stop is refused by [`refuse_hooks`] first. Inputs: git, its empty
-/// home and the project. Output: the command, without arguments.
+/// Starts a git command in the project's own repository with the engine's safe options and the
+/// empty home, so no hook folder, pager, fsmonitor, owner config outside the repository or
+/// outside file its config names ([`OUTSIDE_FILES_OFF`]) runs or is read, and git never looks
+/// above the project. [`refuse_hooks`] first refuses a config hook these options do not stop.
+/// Inputs: git, its empty home and the project. Output: the command, without arguments.
 fn project_git(git: &Path, home: &Path, project: &Path) -> Command {
     let mut command = clone::git_command(git, home);
     command
         .current_dir(project)
+        .args(OUTSIDE_FILES_OFF)
         .env("GIT_DIR", project.join(".git"))
         .env("GIT_WORK_TREE", project)
-        .args(GIT_SAFE)
+        .args(git_safe())
         .stdin(Stdio::null())
         .stderr(Stdio::null());
     command
@@ -502,14 +521,58 @@ pub(super) fn no_remote(root: &Path, project: &Path, host: &str) -> bool {
 }
 
 /// Tells whether a project holds its own repository: a plain `.git` folder, not a link
-/// or a file that names a git folder elsewhere. Input: the project. Output: true for a
-/// plain folder, false for none, or `github_publish_not_plain_repo`.
+/// or a file that names a git folder elsewhere, and on Windows not one that points Git for
+/// Windows elsewhere either ([`crate::project_files::redirected`]). Input: the project.
+/// Output: true for a plain folder, false for none, or `github_publish_not_plain_repo`.
 fn plain_repository(project: &Path) -> Result<bool, EngineError> {
-    match std::fs::symlink_metadata(project.join(".git")) {
+    let git_dir = project.join(".git");
+    match std::fs::symlink_metadata(&git_dir) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(true),
+        Ok(metadata)
+            if metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && !(cfg!(windows) && crate::project_files::redirected(&git_dir)) =>
+        {
+            Ok(true)
+        }
         _ => Err(failure("github_publish_not_plain_repo")),
     }
+}
+
+/// Refuses a project whose work tree holds a `.git` entry of any kind below its own, a
+/// submodule's or a nested repository's, which owner git would open as the owner; the engine
+/// log names its folder. The walk follows no link and stops past [`TREE_ENTRIES_MAX`] entries.
+/// Input: the project. Output: Ok, `github_publish_nested_repository`, too large or failed.
+fn nested_repository(project: &Path) -> Result<(), EngineError> {
+    let failed = |_| failure("github_publish_failed");
+    let mut folders = vec![PathBuf::new()];
+    let mut seen = 0_usize;
+    while let Some(relative) = folders.pop() {
+        for entry in std::fs::read_dir(project.join(&relative)).map_err(failed)? {
+            seen += 1;
+            if seen > TREE_ENTRIES_MAX {
+                return Err(failure("github_publish_tree_too_large"));
+            }
+            let entry = entry.map_err(failed)?;
+            let name = entry.file_name();
+            if crate::instruction_files::names_git(&name.to_string_lossy()) {
+                if relative.as_os_str().is_empty() {
+                    continue;
+                }
+                let folder: Vec<_> = relative.iter().map(|part| part.to_string_lossy()).collect();
+                eprintln!(
+                    "github_publish_nested_repository folder={}",
+                    folder.join("/").escape_debug()
+                );
+                return Err(failure("github_publish_nested_repository"));
+            }
+            let kind = entry.file_type().map_err(failed)?;
+            if kind.is_dir() && !kind.is_symlink() {
+                folders.push(relative.join(name));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Reads the branch HEAD names and what the history holds: none while HEAD is unborn,
@@ -689,7 +752,7 @@ fn github_url(url: &str, host: &str) -> bool {
 /// Inputs: git, its empty home, the project folder, its state and the owner's choices.
 /// Output: the paths publish wrote, or `github_publish_ignore_invalid`,
 /// `github_publish_gitignore_invalid`, `github_publish_file_invalid`,
-/// `github_publish_failed`.
+/// `github_publish_not_plain_repo`, `github_publish_failed`.
 pub(super) fn prepare(
     git: &Path,
     home: &Path,
@@ -700,6 +763,9 @@ pub(super) fn prepare(
     let approved = &choices.approved;
     if !lines_valid(approved) {
         return Err(failure("github_publish_ignore_invalid"));
+    }
+    if local.repository {
+        plain_repository(project)?;
     }
     let ignore = project.join(GITIGNORE);
     let existing = read_gitignore(&ignore)?;
@@ -899,8 +965,8 @@ fn write_new(project: &Path, path: &str, text: &str) -> Result<(), EngineError> 
 /// Finds the lines that would push a secret: with no owner history, the files the first
 /// commit would take, from the working tree; with owner history, the files of HEAD's
 /// tree, from git, since that is what is pushed. Older commits are not read. Inputs: git,
-/// its empty home, the project folder and its history. Output: the findings by file and
-/// line, or `github_publish_too_large` past 20,000 files or 200 MiB.
+/// its empty home, the project folder and its history. Output: the findings by file and line,
+/// or a refusal [`findings_within`] names, `github_publish_too_large` past 20,000 files or 200 MiB.
 pub(super) fn secret_findings(
     git: &Path,
     home: &Path,
@@ -990,7 +1056,9 @@ pub(super) fn written_findings(
 
 /// Finds the secret lines as [`secret_findings`] does, within the given bounds.
 /// Inputs: git, its empty home, the project, its history, the most files and the most
-/// bytes read. Output: the findings, or `github_publish_too_large`, `github_publish_failed`.
+/// bytes read. Output: the findings, or `github_publish_not_plain_repo`,
+/// `github_publish_too_large`, `github_publish_failed`, or on Windows
+/// `github_publish_nested_repository` or `github_publish_tree_too_large` ([`nested_repository`]).
 fn findings_within(
     git: &Path,
     home: &Path,
@@ -1007,6 +1075,9 @@ fn findings_within(
     }
     if history == GitHubHistory::Owner {
         return tree_findings(git, home, project, "HEAD", files_max, bytes_max, limit);
+    }
+    if cfg!(windows) {
+        nested_repository(project)?;
     }
     let mut findings = Vec::new();
     let mut truncated = false;
@@ -1403,15 +1474,18 @@ pub(super) struct Author {
 /// The identity the owner's own git commits with in the project: git reads the project's
 /// settings and the owner's own, from the owner's home, as a commit there would. A name
 /// or email git would refuse or mangle counts as none. Inputs: git, the owner's home
-/// folder and the project. Output: the author, or None.
+/// folder and the project. Output: the author, or None, also for a `.git` that is not plain.
 pub(super) fn configured_author(git: &Path, owner_home: &Path, project: &Path) -> Option<Author> {
+    if plain_repository(project).is_err() {
+        return None;
+    }
     let value = |key: &str| {
         let mut command = clone::git_command(git, owner_home);
         command
             .env_remove("GIT_CONFIG_GLOBAL")
             .current_dir(project)
             .env("GIT_DIR", project.join(".git"))
-            .args(GIT_SAFE)
+            .args(git_safe())
             .args(["config", "--get", key])
             .stdin(Stdio::null())
             .stderr(Stdio::null());
@@ -1483,6 +1557,9 @@ fn commit_within(
         .collect();
     if !plain_repository(project)? {
         return Err(failure("github_publish_not_plain_repo"));
+    }
+    if cfg!(windows) {
+        nested_repository(project)?;
     }
     refuse_hooks(git, home, project)?;
     let (branch, history) = head_state(git, home, project, LOOKUP_TIME)?;
@@ -1683,7 +1760,8 @@ fn object_id(output: &Output) -> Result<String, EngineError> {
 
 /// Tells whether a commit's tree holds GitHub Actions workflows, which a push needs the
 /// `workflow` scope for. Inputs: git, its empty home, the project and the commit.
-/// Output: true when `.github/workflows` is in it, or `github_publish_failed`.
+/// Output: true when `.github/workflows` is in it, `github_publish_not_plain_repo`, or
+/// `github_publish_failed`.
 pub(super) fn has_workflows(
     git: &Path,
     home: &Path,
@@ -1692,6 +1770,9 @@ pub(super) fn has_workflows(
 ) -> Result<bool, EngineError> {
     if commit.is_empty() || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(failure("github_publish_failed"));
+    }
+    if !plain_repository(project)? {
+        return Err(failure("github_publish_not_plain_repo"));
     }
     let listed = run(project_git(git, home, project).args([
         "ls-tree",
@@ -1752,7 +1833,7 @@ pub(super) fn push(
     let stage = home.join(STAGE);
     let reference = format!("refs/heads/{branch}");
     let mut init = clone::git_command(git, home);
-    init.args(GIT_SAFE)
+    init.args(git_safe())
         .args(["init", "--bare", "-q", "--template="]);
     if commit.len() == 64 {
         init.arg("--object-format=sha256");
@@ -1771,7 +1852,7 @@ pub(super) fn push(
         .map_err(|_| failed())?;
     let staged = run(clone::git_command(git, home)
         .env("GIT_DIR", &stage)
-        .args(GIT_SAFE)
+        .args(git_safe())
         .args(["update-ref", reference.as_str(), commit.as_str()])
         .stdin(Stdio::null())
         .stderr(Stdio::null()))?;
@@ -1828,3 +1909,6 @@ pub(super) fn push(
     }
     Ok(())
 }
+
+#[cfg(all(test, windows))]
+mod publish_windows_tests;
