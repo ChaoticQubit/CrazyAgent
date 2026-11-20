@@ -16,6 +16,10 @@ pub const GRID_MIN: usize = SIZE_MIN as usize;
 
 const _: () = assert!(GRID_MAX == 1000 && GRID_MIN == 2);
 
+/// The code a copy answers when the pane has nothing to copy: no terminal yet, or no
+/// selection, or only blank cells.
+pub const COPY_EMPTY: &str = "native_terminal_copy_empty";
+
 /// The xterm modifier bits a named key carries: Shift, Alt (Option) and Control.
 pub const SHIFT: u8 = 1;
 pub const ALT: u8 = 2;
@@ -240,6 +244,22 @@ impl Pane {
         self.term
             .as_ref()
             .is_some_and(|t| t.grid().display_offset() > 0)
+    }
+
+    /// Whether the pane holds a selection of at least one cell, blank or not; the empty one a
+    /// plain click leaves is none, as xterm's `hasSelection` reads. Output: the answer.
+    #[cfg(windows)]
+    pub fn has_selection(&self) -> bool {
+        let selection = self.term.as_ref().and_then(|term| term.selection.as_ref());
+        selection.is_some_and(|selection| !selection.is_empty())
+    }
+
+    /// Drops the local selection, as the copy chord off a Mac does once it copied, and marks
+    /// the pane for a redraw when there was one.
+    #[cfg(windows)]
+    pub fn clear_selection(&mut self) {
+        let dropped = self.term.as_mut().and_then(|term| term.selection.take());
+        self.dirty |= dropped.is_some();
     }
 
     /// Selects the whole output the view holds, as Cmd-A does. Output: whether there was a
@@ -499,7 +519,7 @@ impl Pane {
     /// and screen). Input: whether to take the whole output. Output: the text, or a plain
     /// code when there is nothing to copy or it is over `COPY_BYTES_MAX`.
     pub fn copy(&self, output: bool) -> Result<String, &'static str> {
-        let term = self.term.as_ref().ok_or("native_terminal_copy_empty")?;
+        let term = self.term.as_ref().ok_or(COPY_EMPTY)?;
         let text = if output {
             let top = Point::new(Line(-(term.grid().history_size() as i32)), Column(0));
             let bottom = Point::new(
@@ -513,9 +533,7 @@ impl Pane {
         } else {
             term.selection_to_string()
         };
-        let text = text
-            .filter(|t| !t.trim().is_empty())
-            .ok_or("native_terminal_copy_empty")?;
+        let text = text.filter(|t| !t.trim().is_empty()).ok_or(COPY_EMPTY)?;
         if text.len() > codec::COPY_BYTES_MAX {
             return Err("native_terminal_copy_too_large");
         }

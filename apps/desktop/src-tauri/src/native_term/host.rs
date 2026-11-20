@@ -3,6 +3,8 @@ use super::codec;
 use super::control::{Control, Event};
 use super::ended::ended_final;
 use super::event::{MouseKind, ViewEvent};
+#[cfg(windows)]
+use super::pane::Pane;
 use super::pane::{Action, GRID_MAX, Input};
 use super::render::{GPU_FAULT, Shared};
 use super::screen;
@@ -28,10 +30,16 @@ use tokio::sync::mpsc;
 mod mac;
 #[cfg(target_os = "macos")]
 use mac as platform;
+/// The Windows halves of the host: the child window over the webview, its place, focus
+/// and the frames it posts its render thread.
+#[cfg(windows)]
+pub(super) mod windows;
+#[cfg(windows)]
+use self::windows as platform;
 /// The stand-in on a system whose host has not landed yet: no native view opens there.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 mod none;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 use none as platform;
 
 use platform::View;
@@ -512,15 +520,24 @@ impl Native {
             self.feed.close(page);
             return Err(io_code(&error));
         }
-        let platform = platform::open_view(
+        let style = self.style.as_ref().ok_or("native_terminal_style_invalid")?;
+        let opened = platform::open_view(
             mtm,
             parent,
             page,
             key,
             &open.label,
+            style,
             open.events,
             open.project,
         );
+        let platform = match opened {
+            Ok(view) => view,
+            Err(code) => {
+                self.feed.close(page);
+                return Err(code);
+            }
+        };
         let entry = Entry {
             window: open.window,
             name: open.name,
@@ -895,6 +912,13 @@ impl Native {
                 }
                 Action::Nothing
             }
+            #[cfg(windows)]
+            ViewEvent::CopyKey(input) => copy_key(&mut entry.pane, clip, input),
+            #[cfg(windows)]
+            ViewEvent::Faulted => {
+                self.end(page, GPU_FAULT);
+                return;
+            }
             ViewEvent::Paste => match clip.read() {
                 Some(text) => entry.pane.apply(Input::Paste { text }),
                 None => Action::Nothing,
@@ -955,6 +979,23 @@ impl Native {
     }
 }
 
+/// The copy chord of a host without Cmd (Ctrl+C, Ctrl+Shift+C), as the panel off a Mac: a
+/// selection, blank cells included, goes to the board and is dropped, so the next chord
+/// interrupts; with none the chord's own input (^C) goes to the pane. Blank text or text
+/// too large for the board is not put on it, and the chord still sends nothing. Inputs: the
+/// pane, the board and the chord's input. Output: what the pane asks for.
+#[cfg(windows)]
+fn copy_key(pane: &mut Pane, clip: &platform::Clip, input: Input) -> Action {
+    if !pane.has_selection() {
+        return pane.apply(input);
+    }
+    if let Ok(text) = pane.copy(false) {
+        let _ = clip.write(&text);
+    }
+    pane.clear_selection();
+    Action::Local
+}
+
 fn cell_of(
     shared: &HashMap<u32, Shared>,
     entry: &Entry<View>,
@@ -1011,7 +1052,7 @@ fn draw_view(
     };
     let frame = screen::frame(term, &style.theme, shown, marked.as_deref());
     assert_eq!(frame.rows.len(), term.screen_lines());
-    match platform::paint(view, shared, &frame) {
+    match platform::paint(view, shared, frame) {
         Ok(()) => {}
         Err(code) if code == GPU_FAULT => return Err(GPU_FAULT),
         Err(_) => return Ok(false),
@@ -1130,5 +1171,109 @@ impl Native {
             self.end(page, code);
             assert!(self.table.get(page).is_none());
         }
+    }
+}
+
+#[cfg(all(windows, test))]
+mod tests {
+    use super::super::pane::{Action, Input, Pane};
+    use super::{copy_key, platform};
+
+    fn selected(output: &[u8], last: usize) -> Pane {
+        dragged(output, (0, 0), Some((last, 0)))
+    }
+
+    fn dragged(output: &[u8], from: (usize, usize), to: Option<(usize, usize)>) -> Pane {
+        let mut pane = Pane::new(true);
+        assert!(pane.on_attached(20, 4));
+        assert!(pane.on_output(output));
+        let press = Input::Press {
+            cell: from,
+            option: false,
+            clicks: 1,
+        };
+        assert_eq!(pane.apply(press), Action::Local);
+        if let Some(cell) = to {
+            let drag = Input::Drag {
+                cell,
+                option: false,
+            };
+            assert_eq!(pane.apply(drag), Action::Local);
+        }
+        let release = Input::Release {
+            cell: to.unwrap_or(from),
+            option: false,
+        };
+        assert_eq!(pane.apply(release), Action::Local);
+        pane
+    }
+
+    fn interrupt() -> Action {
+        Action::Input {
+            bytes: vec![0x03],
+            wheel: false,
+        }
+    }
+
+    #[test]
+    fn the_copy_chord_with_a_selection_copies_and_sends_no_interrupt() {
+        let mut pane = selected(b"hello world", 4);
+        let clip = platform::Clip::new();
+        let chord = Input::Text(vec![0x03]);
+        assert_eq!(copy_key(&mut pane, &clip, chord), Action::Local);
+        assert_eq!(clip.read().as_deref(), Some("hello"), "the board holds it");
+    }
+
+    #[test]
+    fn the_copy_chord_with_no_selection_sends_the_interrupt() {
+        let mut pane = Pane::new(true);
+        assert!(pane.on_attached(20, 4));
+        assert!(pane.on_output(b"hello world"));
+        let clip = platform::Clip::new();
+        let sent = copy_key(&mut pane, &clip, Input::Text(vec![0x03]));
+        let interrupt = Action::Input {
+            bytes: vec![0x03],
+            wheel: false,
+        };
+        assert_eq!(sent, interrupt);
+    }
+
+    #[test]
+    fn the_copy_chord_over_blank_cells_uses_the_selection_up_and_sends_no_interrupt() {
+        let mut pane = dragged(b"hello world", (0, 1), Some((5, 1)));
+        let clip = platform::Clip::new();
+        let chord = Input::Text(vec![0x03]);
+        let sent = copy_key(&mut pane, &clip, chord);
+        assert_eq!(sent, Action::Local, "a blank selection is a selection");
+        assert_eq!(clip.read(), None, "blank text does not go to the board");
+        let again = copy_key(&mut pane, &clip, Input::Text(vec![0x03]));
+        assert_eq!(again, interrupt(), "the chord used the blank selection up");
+    }
+
+    #[test]
+    fn the_copy_chord_after_a_plain_click_sends_the_interrupt() {
+        let mut pane = dragged(b"hello world", (2, 0), None);
+        let clip = platform::Clip::new();
+        let sent = copy_key(&mut pane, &clip, Input::Text(vec![0x03]));
+        assert_eq!(sent, interrupt(), "a click selects nothing");
+        assert_eq!(clip.read(), None);
+    }
+
+    #[test]
+    fn a_second_copy_chord_after_a_copy_sends_the_interrupt() {
+        let mut pane = selected(b"hello world", 4);
+        let clip = platform::Clip::new();
+        let _ = copy_key(&mut pane, &clip, Input::Text(vec![0x03]));
+        assert_eq!(
+            clip.read().as_deref(),
+            Some("hello"),
+            "the first chord copies"
+        );
+        let sent = copy_key(&mut pane, &clip, Input::Text(vec![0x03]));
+        let interrupt = Action::Input {
+            bytes: vec![0x03],
+            wheel: false,
+        };
+        assert_eq!(sent, interrupt, "the copy used the selection up");
     }
 }

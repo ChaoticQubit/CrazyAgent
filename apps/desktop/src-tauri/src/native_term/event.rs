@@ -34,6 +34,11 @@ pub enum ViewEvent {
     /// selection if there is one, else applies this input (^C).
     #[cfg(windows)]
     CopyKey(Input),
+    /// The render thread faulted the view for good (Windows), told by its window once it
+    /// hid: the host ends it with `native_terminal_gpu`, as macOS ends a view whose frame
+    /// the GPU refused.
+    #[cfg(windows)]
+    Faulted,
     Paste,
     SelectAll,
     Focus(bool),

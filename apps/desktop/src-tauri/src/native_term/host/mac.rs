@@ -7,6 +7,7 @@ use crate::native_term::a11y::{self, Geometry};
 use crate::native_term::pane::GRID_MAX;
 use crate::native_term::render::{GPU_FAULT, Shared, Surface};
 use crate::native_term::screen::Frame;
+use crate::native_term::style::Style;
 use crate::native_term::view::TermView;
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::term::Term;
@@ -68,29 +69,32 @@ pub fn parent_scale(parent: &Parent) -> f64 {
 
 /// Makes a hidden view above its webview, labelled for VoiceOver, its events going to the
 /// host's sink. Inputs: the marker, the parent, the page id, the scale key, the label, the
-/// events channel and the wall window's project. Output: the view.
+/// style (drawn here by the host's renderer), the events channel and the wall window's
+/// project. Output: the view; macOS always makes one.
+#[allow(clippy::too_many_arguments)]
 pub fn open_view(
     mtm: Main,
     parent: Parent,
     page: u64,
     key: u32,
     label: &str,
+    _style: &Style,
     events: Channel<NativeEvent>,
     project: Option<String>,
-) -> View {
+) -> Result<View, &'static str> {
     let Parent { webview, host } = parent;
     let ns = TermView::new(mtm, page, sink, screen);
     ns.set_label(label);
     ns.setHidden(true);
     host.addSubview_positioned_relativeTo(&ns, NSWindowOrderingMode::Above, Some(&webview));
-    View {
+    Ok(View {
         ns,
         webview,
         surface: None,
         scale: key,
         events,
         project,
-    }
+    })
 }
 
 /// Makes the view its window's first responder; the app and its key window stay as they
@@ -153,11 +157,11 @@ pub fn fit(view: &mut View, shared: &mut Shared, pixels: (u32, u32)) -> bool {
 /// Draws a frame into the view's surface on the main thread. Inputs: the view, the
 /// renderer at its scale and the frame. Output: ok, `native_terminal_gpu` when the GPU
 /// refused the frame, or the skipped code when there is no surface or the draw skipped.
-pub fn paint(view: &mut View, shared: &mut Shared, frame: &Frame) -> Result<(), &'static str> {
+pub fn paint(view: &mut View, shared: &mut Shared, frame: Frame) -> Result<(), &'static str> {
     let Some(surface) = view.surface.as_mut() else {
         return Err(SKIPPED);
     };
-    match shared.draw(surface, frame) {
+    match shared.draw(surface, &frame) {
         Ok(()) => Ok(()),
         Err(code) if code == GPU_FAULT => Err(GPU_FAULT),
         Err(_) => Err(SKIPPED),

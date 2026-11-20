@@ -266,9 +266,29 @@ impl View {
         let _ = self.inner.apply(self.hwnd);
     }
 
-    /// Gives the view keyboard focus.
+    /// Gives the view keyboard focus, unless the render thread faulted it: a faulted view is
+    /// hidden and types nothing, so a page's focus call never hands it the keys.
     pub fn focus(&self) {
-        unsafe { SetFocus(self.hwnd) };
+        if !self.faulted() {
+            unsafe { SetFocus(self.hwnd) };
+        }
+    }
+
+    /// Whether the view shows over its box. Output: the answer.
+    pub fn shown(&self) -> bool {
+        self.inner.shown.get()
+    }
+
+    /// The backing scale of the view's window, from its scale key. Output: 1 to 4.
+    pub fn scale(&self) -> f64 {
+        f64::from(self.inner.key.get()) / 100.0
+    }
+
+    /// Test builds only: the cell size the render thread posted for the view, in points.
+    /// Output: the cell, or none before the render thread made the view.
+    #[cfg(test)]
+    pub fn cell(&self) -> Option<(f64, f64)> {
+        BOARD.cell(self.inner.id)
     }
 
     /// Hands the render thread the view's newest screen, keeping its cursor cell and its
@@ -825,7 +845,9 @@ unsafe extern "system" fn window_proc(
             0
         }
         FAULTED => {
+            let (sink, id) = (inner.sink, inner.id);
             inner.fail_closed(hwnd);
+            sink(id, ViewEvent::Faulted);
             0
         }
         WM_GETOBJECT => inner
