@@ -147,6 +147,14 @@ pub fn rescale(view: &mut View, key: u32) {
 /// and the host's size in device pixels. Output: whether the view has a surface.
 pub fn fit(view: &mut View, shared: &mut Shared, _pixels: (u32, u32)) -> bool {
     let (width, height) = view.term.size();
+    let scale = view.term.scale();
+    let (width, height) = match shared.side_max() {
+        Some(side_max) => (
+            surface_side(width, scale, side_max),
+            surface_side(height, scale, side_max),
+        ),
+        None => (width, height),
+    };
     match view.surface.as_mut() {
         Some(surface) => shared.resize(surface, width, height).is_ok(),
         None => {
@@ -156,6 +164,14 @@ pub fn fit(view: &mut View, shared: &mut Shared, _pixels: (u32, u32)) -> bool {
             view.surface.is_some()
         }
     }
+}
+
+/// One side of the view's wgpu surface: the child's side in device pixels, held to the
+/// device's largest texture side. Inputs: the side, the scale it is drawn at, 1 to 8, and
+/// the largest side. Output: the side.
+fn surface_side(side: u32, scale: i32, side_max: u32) -> u32 {
+    assert!((1..=SCALE_MAX).contains(&scale));
+    side.min(side_max)
 }
 
 /// Draws a frame into the view's surface and presents it on the child's frame pacing; the
@@ -267,6 +283,20 @@ mod tests {
     use crate::native_term::linux::rows::{green_shared, pump_for, pump_until, white_toplevel};
     use crate::native_term::style::{FontSource, Theme};
     use std::time::Duration;
+
+    /// A child wider than the device's largest texture side gets a surface side that is
+    /// a whole number of its scale's pixels, as a Wayland buffer at that scale must be, or
+    /// the compositor ends the connection with invalid_size (CR-1630).
+    #[test]
+    fn a_surface_side_past_the_texture_side_stays_a_whole_number_of_scaled_pixels() {
+        assert_eq!(surface_side(300, 3, 8192), 300);
+        for scale in 1..=SCALE_MAX {
+            let scale_px = u32::try_from(scale).expect("a positive scale");
+            let side = surface_side(16_384 * scale_px, scale, 8192);
+            assert!(side <= 8192, "scale {scale}: side {side}");
+            assert_eq!(side % scale_px, 0, "scale {scale}: side {side}");
+        }
+    }
 
     /// The style a row view opens with; the Linux host draws with its renderer's own
     /// style, so only the shape matters. Output: the style.

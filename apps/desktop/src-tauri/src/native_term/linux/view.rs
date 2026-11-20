@@ -52,24 +52,27 @@ pub fn chord(keyval: Key, state: ModifierType) -> Option<ViewEvent> {
     Some(command)
 }
 
-/// The input one input method commit makes: its UTF-8 bytes as one text input, the one
+/// The inputs one input method commit makes: its UTF-8 bytes as text inputs, the one
 /// path text takes (spike run 3: IBus commits every plain letter). Input: the committed
-/// text. Output: the input, or none for empty text or text over `COMMIT_BYTES_MAX` bytes.
-pub fn commit_input(text: &str) -> Option<Input> {
+/// text. Output: the inputs, none for empty text or text over `COMMIT_BYTES_MAX` bytes.
+pub fn commit_inputs(text: &str) -> Vec<Input> {
     if text.is_empty() || text.len() > COMMIT_BYTES_MAX {
-        return None;
+        return Vec::new();
     }
-    Some(Input::Text(text.as_bytes().to_vec()))
+    vec![Input::Text(text.as_bytes().to_vec())]
 }
 
-/// The event an input method commit makes for a view: its text input while the view is
+/// The events an input method commit makes for a view: its text inputs while the view is
 /// active, none otherwise, so a commit that comes after a cover, a focus loss or a
-/// close never lands. Inputs: the view's focus and the committed text. Output: the event.
-pub fn commit_event(focus: Focus, text: &str) -> Option<ViewEvent> {
+/// close never lands. Inputs: the view's focus and the committed text. Output: the events.
+pub fn commit_events(focus: Focus, text: &str) -> Vec<ViewEvent> {
     if !focus.active() {
-        return None;
+        return Vec::new();
     }
-    commit_input(text).map(ViewEvent::Key)
+    commit_inputs(text)
+        .into_iter()
+        .map(ViewEvent::Key)
+        .collect()
 }
 
 /// The event a middle click's PRIMARY read makes when it comes back: a paste input marked
@@ -843,7 +846,7 @@ impl View {
         let commit = {
             let me = Rc::clone(&inner);
             inner.im.connect_commit(move |_, text| {
-                if let Some(event) = commit_event(me.focus.get(), text) {
+                for event in commit_events(me.focus.get(), text) {
                     me.send(event);
                 }
             })
@@ -1061,16 +1064,39 @@ mod tests {
     }
 
     #[test]
-    fn a_commit_is_one_text_input_within_its_bound() {
-        assert_eq!(commit_input("a"), Some(Input::Text(b"a".to_vec())));
+    fn a_commit_is_text_input_within_its_bound() {
+        assert_eq!(commit_inputs("a"), vec![Input::Text(b"a".to_vec())]);
         assert_eq!(
-            commit_input("é"),
-            Some(Input::Text("é".as_bytes().to_vec()))
+            commit_inputs("é"),
+            vec![Input::Text("é".as_bytes().to_vec())]
         );
-        assert_eq!(commit_input(""), None);
+        assert_eq!(commit_inputs(""), Vec::new());
         let most = "x".repeat(COMMIT_BYTES_MAX);
-        assert!(commit_input(&most).is_some());
-        assert_eq!(commit_input(&format!("{most}x")), None);
+        assert!(!commit_inputs(&most).is_empty());
+        assert_eq!(commit_inputs(&format!("{most}x")), Vec::new());
+    }
+
+    /// A commit longer than one input goes out as inputs the pane takes, each at most
+    /// `INPUT_BYTES_MAX` bytes and cut at character boundaries, losing nothing; one input
+    /// past that bound hits the pane's own bound and ends the host (CR-1630).
+    #[test]
+    fn a_commit_past_one_input_goes_out_in_inputs_the_pane_takes() {
+        let long = "界".repeat(crazyagent::terminal::INPUT_BYTES_MAX);
+        let inputs = commit_inputs(&long);
+        let mut joined = Vec::new();
+        for input in &inputs {
+            let Input::Text(bytes) = input else {
+                panic!("a commit makes text inputs only");
+            };
+            assert!(
+                !bytes.is_empty() && bytes.len() <= crazyagent::terminal::INPUT_BYTES_MAX,
+                "an input of {} bytes",
+                bytes.len()
+            );
+            assert!(std::str::from_utf8(bytes).is_ok(), "cut inside a character");
+            joined.extend_from_slice(bytes);
+        }
+        assert_eq!(joined, long.as_bytes());
     }
 
     #[test]
@@ -1104,17 +1130,17 @@ mod tests {
     fn a_commit_lands_only_while_the_view_is_active() {
         let mut focus = Focus::new(true);
         assert_eq!(focus.shown(true), None);
-        assert_eq!(commit_event(focus, "a"), None);
+        assert_eq!(commit_events(focus, "a"), Vec::new());
         assert_eq!(focus.native(true), Some(true));
-        assert_eq!(commit_event(focus, "a"), Some(text(b"a")));
-        assert_eq!(commit_event(focus, ""), None);
+        assert_eq!(commit_events(focus, "a"), vec![text(b"a")]);
+        assert_eq!(commit_events(focus, ""), Vec::new());
         assert_eq!(focus.toplevel(false), Some(false));
-        assert_eq!(commit_event(focus, "a"), None);
+        assert_eq!(commit_events(focus, "a"), Vec::new());
         assert_eq!(focus.toplevel(true), Some(true));
         assert_eq!(focus.cover(true), Some(false));
-        assert_eq!(commit_event(focus, "a"), None);
+        assert_eq!(commit_events(focus, "a"), Vec::new());
         assert_eq!(focus.cover(false), None);
-        assert_eq!(commit_event(focus, "a"), None);
+        assert_eq!(commit_events(focus, "a"), Vec::new());
     }
 
     #[test]

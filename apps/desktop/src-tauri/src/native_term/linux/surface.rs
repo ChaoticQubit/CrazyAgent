@@ -228,10 +228,31 @@ fn mark_gone(pacing: &Cell<Pacing>) {
     pacing.set(next);
 }
 
-/// The Wayland queue state: whether the last present's frame callback has come.
+/// The Wayland queue state: the number of the last frame callback asked for, and whether
+/// the last present's frame callback has come.
 #[derive(Default)]
 struct Frames {
+    sent: u64,
     done: bool,
+}
+
+impl Frames {
+    /// Notes a present's frame callback asked for, so its wait starts. Output: the
+    /// callback's number, which its done event brings back.
+    fn asked(&mut self) -> u64 {
+        self.sent = self
+            .sent
+            .checked_add(1)
+            .expect("frame callbacks within u64");
+        self.done = false;
+        self.sent
+    }
+
+    /// Notes a frame callback's done event. Input: the callback's number. Output: none.
+    fn answered(&mut self, sent: u64) {
+        assert!(sent <= self.sent, "a callback never asked for");
+        self.done = true;
+    }
 }
 
 delegate_noop!(Frames: WlCompositor);
@@ -255,18 +276,19 @@ impl Dispatch<WlRegistry, GlobalListContents> for Frames {
     }
 }
 
-impl Dispatch<WlCallback, ()> for Frames {
-    /// Notes a frame callback's done event. Input: the event. Output: none.
+impl Dispatch<WlCallback, u64> for Frames {
+    /// Notes a frame callback's done event. Inputs: the event and the callback's number.
+    /// Output: none.
     fn event(
         state: &mut Self,
         _: &WlCallback,
         event: wl_callback::Event,
-        _: &(),
+        sent: &u64,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
         if let wl_callback::Event::Done { .. } = event {
-            state.done = true;
+            state.answered(*sent);
         }
     }
 }
@@ -852,8 +874,11 @@ impl Child {
         match &mut self.native {
             Native::X11 { presented, .. } => *presented = Some(Instant::now()),
             Native::Wayland(wayland) => {
-                wayland.frames.done = false;
-                let _callback = wayland.surfaces.surface.frame(&wayland.queue.handle(), ());
+                let sent = wayland.frames.asked();
+                let _callback = wayland
+                    .surfaces
+                    .surface
+                    .frame(&wayland.queue.handle(), sent);
             }
         }
         self.crop.drawing(size, scale);
@@ -1095,6 +1120,24 @@ mod tests {
     use crate::native_term::render::{Shared, Surface};
     use crate::native_term::screen::Frame;
     use serde_json::{Value, json};
+
+    /// A frame callback asked for by a present that failed rides the next commit of the
+    /// child surface, a place's crop commit among them, so it can come after a retry asked
+    /// for its own; it must never end the retry's wait, or the next FIFO present blocks on
+    /// the retry's callback (CR-1630).
+    #[test]
+    fn a_frame_callback_of_an_earlier_present_never_ends_a_later_present_wait() {
+        let mut frames = Frames::default();
+        let failed = frames.asked();
+        let retry = frames.asked();
+        frames.answered(failed);
+        assert!(
+            !frames.done,
+            "the failed present's callback ended the retry's wait"
+        );
+        frames.answered(retry);
+        assert!(frames.done);
+    }
 
     /// The 95th percentile one present may take: under the 16.7 ms of a 60 Hz output, so
     /// presents that wait on a frame callback fail the row.

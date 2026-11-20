@@ -116,6 +116,11 @@ impl Term {
         self.child.size()
     }
 
+    /// The scale the child is placed at, 1 to 8. Output: it.
+    pub fn scale(&self) -> i32 {
+        self.child.scale()
+    }
+
     /// The child's display and window handles a wgpu surface is made on, live as long as
     /// the term. Output: both.
     pub fn handles(&self) -> (RawDisplayHandle, RawWindowHandle) {

@@ -485,6 +485,13 @@ impl Shared {
         Ok(())
     }
 
+    /// The device's largest texture side, which a surface side is held to. Output: it, or
+    /// none before a device is made.
+    #[cfg(target_os = "linux")]
+    pub fn side_max(&self) -> Option<u32> {
+        self.device.as_ref().map(|set| set.side_max)
+    }
+
     /// The cell size in the view's points (CSS pixels), for the grid a host rect gives.
     pub fn cell_points(&self) -> (f64, f64) {
         let scale = f64::from(self.scale);
