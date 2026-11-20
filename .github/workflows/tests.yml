@@ -117,7 +117,7 @@ jobs:
           [ "$rc" -ne 0 ]
           grep -qE 'test result: FAILED\. 0 passed; 1 failed' "$RUNNER_TEMP/red5.log"
           echo "red as expected: a worktree-rooted profile that writes its repository builds without r5"
-      - name: S6 C6 red rows at the tip without fixes 5dcf25403 and df0eb4c27, where no profile is refused for the git folder
+      - name: S6 C6 red rows at the tip without fixes 5dcf25403 and fc11645ab, where no profile is refused for the git folder
         if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
