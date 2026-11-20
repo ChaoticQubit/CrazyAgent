@@ -1,11 +1,3 @@
-#![cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "the Windows listener's first callers are the engine and owner servers, V244-WIN-ENGINE-WIRING WIRE-2 and W3-3"
-    )
-)]
-
 use super::{PIPE_INSTANCES_MAX, PIPES_BYTES_MAX, Published, encode_pipes, parse_pipes, pipe_name};
 use crazyagent_win_sandbox::pipe::{self, Peer};
 use crazyagent_win_sandbox::private;
@@ -213,6 +205,13 @@ impl PipeListener {
 impl PipeStream {
     /// Splits the stream into owned halves that move apart (V244-WIN-ENGINE-WIRING decision
     /// 3). Every check runs on the whole stream before this. Output: the read and write half.
+    #[cfg_attr(
+        not(test),
+        allow(
+            dead_code,
+            reason = "the owner terminal pump, its first Windows caller, lands in V244-WIN-OWNER-TERMINAL T1"
+        )
+    )]
     pub(crate) fn into_split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
         tokio::io::split(self)
     }
@@ -224,22 +223,42 @@ impl PipeStream {
     }
 }
 
+impl PipeListener {
+    /// Stops serving and deletes the pipes file, reporting a delete that failed: a file a
+    /// client is reading, or one that changed since it was published, stays. Output: Ok, or
+    /// the delete's error.
+    pub(crate) fn close(mut self) -> io::Result<()> {
+        self.task.abort();
+        self.held.take().map_or(Ok(()), Held::remove)
+    }
+}
+
+impl Held {
+    /// Closes the read hold on the pipes file, deletes the file while it is still the one
+    /// published, with the root still held so no folder swap moves the path, then lets the
+    /// root go. Output: Ok, or the delete's error.
+    fn remove(self) -> io::Result<()> {
+        let Self {
+            root,
+            pipes,
+            path,
+            identity,
+        } = self;
+        drop(pipes);
+        let removed = private::remove(&path, identity);
+        drop(root);
+        removed
+    }
+}
+
 impl Drop for PipeListener {
-    /// Stops the serving task, then deletes the pipes file through a checked handle while it
-    /// is still the one this listener published; a file a client is reading, or one that
-    /// changed, stays, and names a start no server answers for.
+    /// Stops the serving task and, unless [`PipeListener::close`] ran, deletes the pipes
+    /// file the same way, best effort: a file that stays names a start no server answers
+    /// for.
     fn drop(&mut self) {
         self.task.abort();
         if let Some(held) = self.held.take() {
-            let Held {
-                root,
-                pipes,
-                path,
-                identity,
-            } = held;
-            drop(pipes);
-            let _ = private::remove(&path, identity);
-            drop(root);
+            let _ = held.remove();
         }
     }
 }
@@ -431,6 +450,7 @@ fn staged_name(name: &str) -> bool {
 /// Publishes a start of the endpoint `purpose` in its protected root (DESIGN-0256 D7, leader
 /// 07:46), keeping nothing open: [`publish_held`] with its holds dropped. Inputs: the root,
 /// the purpose and the random part. Output: what was published.
+#[cfg(test)]
 pub(super) fn publish(root: &Path, purpose: &str, random: [u8; 16]) -> io::Result<Published> {
     publish_held(root, purpose, random).map(|(published, _)| published)
 }

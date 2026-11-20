@@ -15,13 +15,6 @@ pub(crate) use windows::{
 /// the named pipe of that root and the file name, with `streams + 1` instances (DESIGN-0256
 /// D7-D8). Must run inside a Tokio runtime. Inputs: the endpoint path and the stream bound,
 /// 1 or more. Output: the listener.
-#[cfg_attr(
-    all(windows, not(test)),
-    allow(
-        dead_code,
-        reason = "the engine and owner servers bind on Windows from V244-WIN-ENGINE-WIRING WIRE-2 and W3-3"
-    )
-)]
 pub(crate) fn owner_listener(path: impl AsRef<Path>, streams: usize) -> io::Result<Listener> {
     assert!(streams > 0, "a listener serves at least one stream");
     #[cfg(unix)]
@@ -71,6 +64,46 @@ pub(crate) async fn owner_connect(path: impl AsRef<Path>) -> io::Result<Stream> 
 #[cfg(windows)]
 pub(crate) fn owner_answering(path: &Path) -> bool {
     endpoint(path).is_ok_and(|(root, purpose)| windows::answering(root, purpose))
+}
+
+/// Closes a Windows listener and deletes its pipes file, reporting a delete that failed
+/// (V244-WIN-ENGINE-WIRING WIRE-2). Input: the listener. Output: Ok, or the delete's error.
+#[cfg(windows)]
+pub(crate) fn owner_close(listener: Listener) -> io::Result<()> {
+    listener.close()
+}
+
+/// Test only: publishes a pipes file at `path`'s root that pins another start of this
+/// process and serves its name from here, as a rogue server would (R1). Input: the endpoint
+/// path. Output: the rogue's first instance.
+#[cfg(all(test, windows))]
+pub(crate) fn serve_unpinned(
+    path: &Path,
+) -> io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use std::io::Write;
+    let (root, purpose) = endpoint(path)?;
+    let own = crazyagent_win_sandbox::pipe::own_pin()?;
+    let rogue = Published {
+        random: [13; 16],
+        pid: own.pid,
+        created: own.created + 1,
+    };
+    let staged = root.join("pipes.rogue");
+    let mut file = crazyagent_win_sandbox::private::secret_file(&staged)?;
+    file.write_all(encode_pipes(purpose, &rogue).as_bytes())?;
+    drop(file);
+    std::fs::rename(&staged, root.join("pipes"))?;
+    let name = windows::name_of(root, purpose, &rogue.random)?;
+    crazyagent_win_sandbox::pipe::instance(&name, true, 2)
+}
+
+/// Test only: the pipe name the pipes file at `path`'s root names. Input: the endpoint
+/// path. Output: the name.
+#[cfg(all(test, windows))]
+pub(crate) fn pipe_name_at(path: &Path) -> io::Result<String> {
+    let (root, purpose) = endpoint(path)?;
+    let published = windows::read(root, purpose)?;
+    windows::name_of(root, purpose, &published.random)
 }
 
 /// The server side's check of an accepted stream: its client runs as this user (on Windows
@@ -128,13 +161,6 @@ const PIPE_INSTANCES_MAX: u32 = 254;
 /// The pipe instances a Windows listener of `streams` streams makes: one per stream plus the
 /// one listening while a stream is handed off (DESIGN-0256 D8 caps). Input: the stream bound,
 /// 1 to 253. Output: the instance cap.
-#[cfg_attr(
-    all(windows, not(test)),
-    allow(
-        dead_code,
-        reason = "the engine and owner servers bind on Windows from V244-WIN-ENGINE-WIRING WIRE-2 and W3-3"
-    )
-)]
 #[cfg(any(windows, test))]
 fn instances(streams: usize) -> u32 {
     assert!(streams > 0, "a listener serves at least one stream");
