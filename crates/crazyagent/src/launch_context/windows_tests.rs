@@ -159,22 +159,50 @@ fn a_windows_adopt_refuses_an_open_or_linked_home_before_a_lock() {
     });
 }
 
-/// A W1 private home passes H1's check at `install`, which takes the Windows lock as a
-/// private file, then stops at the first file it cannot yet write handle-relative (S9b)
-/// with `launch_context_unavailable`, its lock given back.
+/// CodeRabbit CR-1140 (1): a W1 private home passes H1's check at `install`, which is then
+/// refused with `launch_context_unavailable` before it takes the lock or changes the home,
+/// so the launch state folder and a Codex `config.toml` already there keep every byte. It
+/// used to delete the state folder before its first file write was refused.
 #[test]
-fn a_windows_install_takes_the_lock_then_stops_before_its_files() {
+fn a_windows_install_is_refused_before_it_changes_the_home() {
     let (_temp, base) = base();
     let home = private_home(&base, "home");
-    assert_eq!(
-        context()
-            .install("claude-code", &home, false)
-            .unwrap_err()
-            .0,
-        "launch_context_unavailable"
-    );
-    drop(private::file(&home.join(LOCK), false).unwrap());
-    drop(lock_only(&home, "claude-code").unwrap());
+    std::fs::create_dir(home.join(STATE)).unwrap();
+    std::fs::write(home.join(STATE).join("kept"), "state").unwrap();
+    std::fs::write(home.join("config.toml"), "model = \"kept\"\n").unwrap();
+    for harness in ["claude-code", "codex"] {
+        assert_eq!(
+            context().install(harness, &home, false).unwrap_err().0,
+            "launch_context_unavailable",
+            "{harness}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join(STATE).join("kept")).unwrap(),
+            "state"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("config.toml")).unwrap(),
+            "model = \"kept\"\n"
+        );
+        assert!(!home.join(LOCK).exists(), "{harness}");
+    }
+}
+
+/// CodeRabbit CR-1140 (2): from before H1's check until its lock is taken, a Windows launch
+/// holds its home open without delete sharing, so neither the home nor a folder above it
+/// can be renamed, and nothing can take the home's name between the check and the lock's
+/// by-path open. Once the hold ends, both renames work.
+#[test]
+fn a_windows_home_and_its_parent_cannot_be_moved_while_its_launch_holds_it() {
+    let (_temp, base) = base();
+    let parent = private_home(&base, "parent");
+    let home = private_home(&parent, "home");
+    let held = pin(&home).unwrap();
+    assert!(std::fs::rename(&home, parent.join("moved")).is_err());
+    assert!(std::fs::rename(&parent, base.join("moved")).is_err());
+    drop(held);
+    std::fs::rename(&home, parent.join("moved")).unwrap();
+    std::fs::rename(&parent, base.join("moved")).unwrap();
 }
 
 /// A Windows `install` refuses a home open to the Users group and a junction home with H1's

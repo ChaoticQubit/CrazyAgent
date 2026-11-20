@@ -2517,6 +2517,13 @@ fn sized_json(value: &impl Serialize) -> Result<String, LaunchError> {
     })
 }
 
+/// V244-WIN-MASTER S9a r2 red stand-in for the Windows home hold: holds nothing. Input:
+/// the home, unused. Output: Ok.
+#[cfg(windows)]
+fn pin(_home: &Path) -> Result<(), LaunchError> {
+    Ok(())
+}
+
 /// Opens and locks the agent home's launch lock through W1 (V244-WIN-MASTER S9a): made a
 /// private file when it is missing, else opened, never through a link, a second name or a
 /// list that is not private, then locked without waiting. A name a launched agent left as a
