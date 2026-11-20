@@ -19,7 +19,7 @@ env:
   CARGO_TERM_COLOR: never
   RED_SHA: bf985fddd
   BASE_SHA: 238ab31c7
-  TIP_SHA: 13b5ff3bb
+  TIP_SHA: adf257ec6
 
 defaults:
   run:
@@ -27,7 +27,7 @@ defaults:
 
 jobs:
   s3:
-    name: V244 WIN-MASTER S3 master commands on ${{ matrix.runner }}, red at bf985fddd, tip 13b5ff3bb
+    name: V244 WIN-MASTER S3 master commands on ${{ matrix.runner }}, red at bf985fddd, tip adf257ec6
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
@@ -109,7 +109,7 @@ jobs:
           grep -qE 'test result: FAILED\. 2 passed; 5 failed' "$RUNNER_TEMP/red.log"
           grep -q 'with_its_tools_on_stays_refused \.\.\. ok' "$RUNNER_TEMP/red.log"
           echo "red as expected: 5 build rows refused by the Windows stubs, the 2 tools-on rows already refused"
-      - name: S3 Windows command rows at the tip 13b5ff3bb
+      - name: S3 Windows command rows at the tip adf257ec6
         if: ${{ !cancelled() && runner.os == 'Windows' }}
         timeout-minutes: 60
         run: |
@@ -141,7 +141,7 @@ jobs:
           mkdir -p target/debug/deps
           cp target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
           ls -l target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
-      - name: Unix master command rows at the base 238ab31c7 and at the tip 13b5ff3bb
+      - name: Unix master command rows at the base 238ab31c7 and at the tip adf257ec6
         if: ${{ !cancelled() && runner.os == 'Linux' }}
         timeout-minutes: 90
         run: |
