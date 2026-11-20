@@ -425,8 +425,10 @@ impl RegisteredNativeAuthHost {
     /// leads to another path or inode, or when other metadata of the pinned inode changed and
     /// its bytes still hash to the pin, once `trusted` passes the entry the launch now goes
     /// through and the real file pinned, so a re-pin runs the checks of engine start on the
-    /// file it pins. A rewrite in place stays refused. Inputs: the shared host and the
-    /// engine-start check. Output: the host to use, the verify error, the check's refusal,
+    /// file it pins. A rewrite in place stays refused. On Windows `trusted` also passes the
+    /// entry when it still leads to the pinned file, since a junction hop on the way can move
+    /// while the file stays (#752 C1). Inputs: the shared host and the engine-start check.
+    /// Output: the host to use, the verify error, the check's refusal,
     /// `native_auth_host_executable_changed`, or `native_auth_host_unavailable`.
     pub(crate) fn current(
         self: &Arc<Self>,
@@ -442,6 +444,8 @@ impl RegisteredNativeAuthHost {
         let real = crate::paths::executable_file(&used)
             .ok_or_else(|| EngineError("native_auth_host_unavailable".into()))?;
         if real == self.path && self.verified_path().is_ok() {
+            #[cfg(windows)]
+            trusted(&used)?;
             return Ok(self.clone());
         }
         trusted(&used)?;

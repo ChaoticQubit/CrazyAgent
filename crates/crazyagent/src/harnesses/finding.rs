@@ -468,8 +468,21 @@ pub fn check_file(
     {
         let pinned =
             crate::paths::executable_file(path).ok_or_else(|| failure(PATH_NOT_EXECUTABLE))?;
-        if space.holds(&pinned) {
+        let written = crate::tools::batch_file(&real)
+            .then(|| crate::tools::shim_target(&real))
+            .flatten();
+        let script_hops = match &written {
+            Some(script) => link_hops(script).ok_or_else(|| failure(PATH_NOT_FOUND))?,
+            None => Vec::new(),
+        };
+        if space.holds(&pinned) || script_hops.iter().any(|hop| space.holds(hop)) {
             return Err(failure(PATH_AGENT_SPACE));
+        }
+        if script_hops
+            .iter()
+            .any(|hop| crate::service::changeable_by_others(hop).is_some())
+        {
+            return Err(failure(PATH_CHANGEABLE));
         }
         crate::engine::pinnable_at(&pinned)?;
     }
@@ -477,13 +490,12 @@ pub fn check_file(
     Ok(path.to_path_buf())
 }
 
-/// Every link a path's resolution passes through, file and folder links alike, and every
-/// real folder a `..` in it leaves, each named where it really sits, in the order the
-/// resolution meets them, so a chain is judged by every place an agent could move it from,
-/// not only by its two ends (RV-DS241-140). Reads at most [`LINK_HOPS_MAX`] links. Input:
-/// an absolute path. Output: those places, or none when the path does not resolve within
-/// that bound.
-#[cfg(unix)]
+/// Every link a path's resolution passes through, file and folder links alike (junctions
+/// and symbolic links on Windows), and every real folder a `..` in it leaves, each named
+/// where it really sits, in the order the resolution meets them, so a chain is judged by
+/// every place an agent could move it from, not only by its two ends (RV-DS241-140, #752
+/// C1). Reads at most [`LINK_HOPS_MAX`] links. Input: an absolute path. Output: those
+/// places, or none when the path does not resolve within that bound.
 pub(crate) fn link_hops(path: &Path) -> Option<Vec<PathBuf>> {
     use std::path::Component;
     assert!(path.is_absolute());
@@ -498,7 +510,7 @@ pub(crate) fn link_hops(path: &Path) -> Option<Vec<PathBuf>> {
     };
     let mut pending = Vec::new();
     queue(&mut pending, path);
-    let mut at = PathBuf::from("/");
+    let mut at = root_of(path)?;
     let mut hops = Vec::new();
     let mut links = 0;
     while let Some(part) = pending.pop() {
@@ -519,10 +531,12 @@ pub(crate) fn link_hops(path: &Path) -> Option<Vec<PathBuf>> {
             return None;
         }
         links += 1;
-        let target = std::fs::read_link(&next).ok()?;
+        let target = link_target(&next)?;
         hops.push(next);
         if target.is_absolute() {
-            at = PathBuf::from("/");
+            at = root_of(&target)?;
+        } else if target.has_root() {
+            return None;
         }
         queue(&mut pending, &target);
     }
@@ -531,11 +545,32 @@ pub(crate) fn link_hops(path: &Path) -> Option<Vec<PathBuf>> {
     Some(hops)
 }
 
-/// Reads no links off Unix, where the checks rest on the two ends of a chain as before.
-/// Input: the path, unused. Output: no links.
-#[cfg(not(unix))]
-pub(crate) fn link_hops(_path: &Path) -> Option<Vec<PathBuf>> {
-    Some(Vec::new())
+/// The root an absolute path starts at: `/` on Unix, the drive's `C:\` on Windows.
+/// Input: the path. Output: the root, none for a path with no root.
+fn root_of(path: &Path) -> Option<PathBuf> {
+    let root = path.ancestors().last()?.to_path_buf();
+    root.has_root().then_some(root)
+}
+
+/// What a link names, as a Unix symbolic link stores it.
+#[cfg(unix)]
+fn link_target(link: &Path) -> Option<PathBuf> {
+    std::fs::read_link(link).ok()
+}
+
+/// What a junction or symbolic link names on Windows, a `\\?\` or `\??\` drive spelling
+/// turned into the plain `C:\...` one, so its hops are named the way the agent space
+/// compares them. Input: the link. Output: the target, none when it cannot be read.
+#[cfg(windows)]
+fn link_target(link: &Path) -> Option<PathBuf> {
+    let target = std::fs::read_link(link).ok()?;
+    let text = target.to_str()?;
+    let plain = [r"\\?\", r"\??\"]
+        .iter()
+        .find_map(|prefix| text.strip_prefix(prefix))
+        .filter(|rest| rest.as_bytes().get(1) == Some(&b':'))
+        .unwrap_or(text);
+    Some(PathBuf::from(plain))
 }
 
 /// Picks the file a pin may use from what a search finds: the first candidate, in search

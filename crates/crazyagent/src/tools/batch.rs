@@ -162,7 +162,7 @@ fn program_name(name: &str) -> bool {
 /// The file an npm cmd-shim starts, below its own folder as the shim names it, links kept.
 /// Input: the shim's real file. Output: the target, none for any other file.
 #[cfg(windows)]
-fn shim_target(cmd: &Path) -> Option<PathBuf> {
+pub(crate) fn shim_target(cmd: &Path) -> Option<PathBuf> {
     let folder = cmd.parent()?;
     let text = shim_file_text(cmd)?;
     let parts = cmd_shim_target(&text)?;
