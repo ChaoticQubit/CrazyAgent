@@ -1236,6 +1236,48 @@ mod tests {
         }
     }
 
+    /// #764 L1 on every write root: a turn profile rooted at a worktree, whose `.git` is a plain
+    /// file, that also writes its repository or a folder above it could plant the repository's
+    /// hooks, so it is refused; the same profile with the repository as a read root only builds.
+    #[test]
+    fn a_worktree_profile_that_also_writes_its_repository_is_refused() {
+        let folders = folders();
+        fs::create_dir_all(folders.project.join(".git").join("hooks")).unwrap();
+        let worktree = folders.project.parent().unwrap().join("worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(worktree.join(".git"), "gitdir: elsewhere\r\n").unwrap();
+        let turn = || {
+            ProjectSandbox::new(
+                &worktree,
+                &folders.home,
+                &folders.tmp,
+                SandboxNetwork::Only(Vec::new()),
+            )
+            .and_then(|sandbox| sandbox.allow_read(&folders.project))
+            .unwrap()
+        };
+        assert!(boundary_profile(&turn(), &folders.grants).is_ok());
+        let above = folders.project.parent().unwrap().join("above");
+        let nested = above.join("repository");
+        fs::create_dir_all(nested.join(".git")).unwrap();
+        for written in [&folders.project, &above] {
+            let read = if written == &above {
+                &nested
+            } else {
+                &folders.project
+            };
+            let wide = turn()
+                .allow_read(read)
+                .and_then(|sandbox| sandbox.allow_worktree(written))
+                .unwrap();
+            assert!(
+                refused_for_git(boundary_profile(&wide, &folders.grants)),
+                "{}",
+                written.display()
+            );
+        }
+    }
+
     /// Tells whether a profile build was refused because it writes the owner's git folder.
     /// Input: the build's result. Output: the answer.
     fn refused_for_git<T: std::fmt::Debug>(built: Result<T, SandboxError>) -> bool {
