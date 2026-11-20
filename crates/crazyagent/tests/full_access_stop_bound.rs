@@ -1,4 +1,6 @@
 #![cfg(target_os = "macos")]
+mod full_access_support;
+use full_access_support::full_access;
 
 use crazyagent::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Session};
 use crazyagent::harnesses::leftovers::{LEFT, UNCHECKED, UNLISTED, Unstopped};
@@ -54,8 +56,7 @@ fn a_full_access_stop_whose_process_listing_cannot_start_ends_within_its_bound()
         account: AccountBinding::Subscription { home },
         model: None,
         tools: false,
-        sandbox_profile: None,
-        unconfined: true,
+        boundary: full_access(&project, root.path()),
         git_identity: None,
         limits: LaunchLimits::default(),
     })

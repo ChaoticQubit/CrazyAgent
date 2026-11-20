@@ -1,4 +1,6 @@
 #![cfg(target_os = "macos")]
+mod full_access_support;
+use full_access_support::full_access;
 
 use crazyagent::harnesses::launch::{
     AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Session,
@@ -225,8 +227,7 @@ fn request(world: &World, cwd: &Path, tools: bool) -> LaunchRequest {
         },
         model: Some("stand-in-model".into()),
         tools,
-        sandbox_profile: None,
-        unconfined: true,
+        boundary: full_access(cwd, &world.base),
         git_identity: None,
         limits: LaunchLimits::default(),
     }

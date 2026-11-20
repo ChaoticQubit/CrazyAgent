@@ -18,8 +18,8 @@ use crate::engine::owner::HostStamp;
 use crate::engine::owner::native_auth::NativeAuthFact;
 use crate::engine::{EngineError, NativeProfileCustody, RegisteredNativeAuthHost};
 use crate::harnesses::launch::{
-    AccountBinding, GitIdentity, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
-    RUN_TIME_MAX, Secret, claude_bare,
+    AccountBinding, GitIdentity, LaunchBoundary, LaunchError, LaunchEvent, LaunchLimits,
+    LaunchRequest, RUN_TIME_MAX, Secret, claude_bare,
 };
 use crate::harnesses::leftovers::{HoldBy, Unstopped};
 use crate::harnesses::terminal_session::{
@@ -41,7 +41,9 @@ use crate::sandbox::policy::{
     AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing,
 };
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
-use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
+use crate::sandbox::{
+    InstalledSandbox, LinuxStrict, ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote,
+};
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
@@ -271,7 +273,8 @@ struct Grant {
 /// agent is prepared (N-D9, DEC-141);
 /// `task_start` is a sub-agent's or master's Task-start reminder from its launch context
 /// (T3-15, DEC-116); `hidden` the digests of the project folders its sandbox hides, read
-/// once with the profile (SA-VID14-A).
+/// once with the profile (SA-VID14-A); `full_access` the same sandbox marked Full access
+/// (DEC-102), installed with the profile, which a start at Full access runs in.
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -280,6 +283,7 @@ struct Plan {
     model: Option<String>,
     tools: bool,
     sandbox_profile: PathBuf,
+    full_access: Option<Arc<InstalledSandbox>>,
     access: AgentAccess,
     toolchains: Vec<Toolchain>,
     network: AgentNetwork,
@@ -398,6 +402,17 @@ impl Plan {
                 && claude_bare(&account),
             "an agent's recorded hooks state is the one its launch gets"
         );
+        let boundary = if unconfined {
+            let full = self.full_access.clone().ok_or_else(|| {
+                with_code(
+                    crate::sandbox::FULL_ACCESS_NEEDS_MACOS,
+                    Some("sandbox_unavailable"),
+                )
+            })?;
+            LaunchBoundary::Installed(full)
+        } else {
+            LaunchBoundary::Profile(self.sandbox_profile.clone())
+        };
         Ok(LaunchRequest {
             harness: self.harness.clone(),
             executable: self.executable.clone(),
@@ -405,8 +420,7 @@ impl Plan {
             account,
             model: self.model.clone(),
             tools: self.tools,
-            sandbox_profile: (!unconfined).then(|| self.sandbox_profile.clone()),
-            unconfined,
+            boundary,
             git_identity: self.git_identity.clone(),
             limits: self.limits,
         })
@@ -9802,8 +9816,18 @@ impl TeamRuntime {
                 .install(&agent_teammates_profile(&self.state, id))
                 .map_err(sandboxed)?;
         }
-        sandbox.install(&profile).map_err(sandboxed)?;
-        self.note_unbridged(&stored.project_id, id, policy.network, &sandbox);
+        let calls = crate::sandbox_settings::load(&self.connection)
+            .map(|settings| settings.linux_supervisor)
+            .unwrap_or_default();
+        let full_access = InstalledSandbox::install(sandbox, &profile, calls, LinuxStrict::Off)
+            .map_err(sandboxed)?
+            .unconfined();
+        self.note_unbridged(
+            &stored.project_id,
+            id,
+            policy.network,
+            full_access.sandbox(),
+        );
         let terminal_display = crate::coord::settings::read(&self.connection, &stored.project_id)
             .map_err(|e| {
                 with_code(
@@ -9821,6 +9845,7 @@ impl TeamRuntime {
             model,
             tools,
             sandbox_profile: profile,
+            full_access: Some(Arc::new(full_access)),
             access: policy.access,
             toolchains,
             network: policy.network,

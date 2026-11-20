@@ -65,12 +65,15 @@ pub(crate) mod questions;
 pub(crate) mod recovery;
 pub(crate) mod roadmap;
 mod setup;
+pub(crate) mod sizing;
 pub(crate) mod terminal;
 pub(crate) mod usage;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
 use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
 #[cfg(all(test, unix))]
 mod intake_parallel_tests;
+#[cfg(all(test, windows))]
+mod key_windows_tests;
 #[cfg(all(test, unix))]
 mod native_auth_channel_tests;
 #[cfg(all(test, unix))]
@@ -85,6 +88,8 @@ mod owner_deadline_tests;
 mod owner_server_tests;
 #[cfg(all(test, unix))]
 mod reply_skew_tests;
+#[cfg(all(test, windows))]
+mod root_windows_tests;
 #[cfg(all(test, unix))]
 mod secret_storage_wait_tests;
 #[cfg(all(test, unix))]
@@ -109,17 +114,6 @@ struct Identity {
 }
 
 impl Identity {
-    /// A placeholder identity where the standard library has no stable device and inode.
-    /// Takes the metadata, unused. Returns zeros; `Root::open` refuses every Windows root
-    /// first, so no Windows decision ever rests on this value.
-    #[cfg(not(unix))]
-    fn of(_m: &std::fs::Metadata) -> Self {
-        Self {
-            device: 0,
-            inode: 0,
-        }
-    }
-
     #[cfg(unix)]
     fn of(m: &std::fs::Metadata) -> Self {
         Self {
@@ -127,22 +121,84 @@ impl Identity {
             inode: m.ino(),
         }
     }
+
+    /// The identity of an open file or folder: its device and inode on Unix, its volume
+    /// serial number and 64-bit file id on Windows (W1 `private::identity`, which refuses an
+    /// id that needs 128 bits). Input: the handle. Output: the identity, or the I/O error.
+    fn of_file(file: &File) -> Result<Self, EngineError> {
+        #[cfg(unix)]
+        let identity = Self::of(&file.metadata().map_err(io_error)?);
+        #[cfg(windows)]
+        let identity = {
+            let (device, inode) =
+                crazyagent_win_sandbox::private::identity(file).map_err(io_error)?;
+            Self { device, inode }
+        };
+        Ok(identity)
+    }
+}
+
+/// Whether `name` is one plain entry of a folder: not empty, no separator, drive colon or
+/// parent step, so joining it to a held root never leaves that root. Input: the name.
+/// Output: the answer.
+#[cfg(windows)]
+fn plain_entry(name: &str) -> bool {
+    !name.is_empty() && !name.contains(['\\', '/', ':']) && name != "." && name != ".."
+}
+
+/// Maps a W1 private-object error to an owner refusal: a judge refusal (`PermissionDenied`)
+/// becomes `code`, any other error stays the I/O error it is. Inputs: the error and the
+/// refusal code. Output: the engine error.
+#[cfg(windows)]
+fn private_refusal(error: std::io::Error, code: &str) -> EngineError {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        failure(code)
+    } else {
+        io_error(error)
+    }
 }
 
 struct Root {
     path: PathBuf,
     directory: File,
-    #[cfg(unix)]
     identity: Identity,
 }
 
 impl Root {
-    /// Refuses an owner root without Unix owner, mode and directory-relative checks.
-    /// Takes the root path, unused.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn open(_path: &Path) -> Result<Self, EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// Opens an owner root on Windows (DESIGN-0256 D11, rv-sec2 #708): the folder must
+    /// already exist and is held through W1 `open_dir`, so neither it nor a folder above it
+    /// can be renamed while held. Then the twin of the Unix canonical check, in one walk:
+    /// the held folder's real place (W1 `place`, every junction and link resolved) must be
+    /// the path, ordinal, with `\\?\` put in front unless the path is already spelled that
+    /// way (as `std::fs::canonicalize` spells it), so a junction or link anywhere on the path,
+    /// a short name or another case fails. Input: the absolute root path. Output: the held
+    /// root, or the refusal.
+    #[cfg(windows)]
+    fn open(path: &Path) -> Result<Self, EngineError> {
+        use crazyagent_win_sandbox::private;
+        use std::os::windows::ffi::OsStrExt;
+        if !path.is_absolute() {
+            return Err(failure("owner_root_requires_canonical_trusted_path"));
+        }
+        let directory = private::open_dir(path)
+            .map_err(|e| private_refusal(e, "owner_root_requires_private_owner_directory"))?;
+        let given: Vec<u16> = path.as_os_str().encode_wide().collect();
+        let verbatim: Vec<u16> = std::ffi::OsStr::new(r"\\?\").encode_wide().collect();
+        let spelled = if given.starts_with(&verbatim) {
+            given
+        } else {
+            verbatim.into_iter().chain(given).collect()
+        };
+        if private::place(&directory).map_err(io_error)? != spelled {
+            return Err(failure("owner_root_requires_canonical_trusted_path"));
+        }
+        let root = Self {
+            path: path.to_path_buf(),
+            identity: Identity::of_file(&directory)?,
+            directory,
+        };
+        root.verify()?;
+        Ok(root)
     }
 
     #[cfg(unix)]
@@ -174,12 +230,20 @@ impl Root {
         Ok(root)
     }
 
-    /// Refuses to confirm an owner root without Unix owner and mode checks.
-    /// Takes the root.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
+    /// Confirms on Windows that the root is still the folder opened (D11): the held handle
+    /// is still private (W1 `check`), and the folder at the path, reopened without creating
+    /// it, is private and has the file id recorded at open. Input: the root. Output: Ok, or
+    /// `owner_root_replaced_or_unsafe`.
+    #[cfg(windows)]
     fn verify(&self) -> Result<(), EngineError> {
-        Err(failure("owner_root_unavailable"))
+        use crazyagent_win_sandbox::private;
+        let replaced = "owner_root_replaced_or_unsafe";
+        private::check(&self.directory).map_err(|e| private_refusal(e, replaced))?;
+        let again = private::open_dir(&self.path).map_err(|e| private_refusal(e, replaced))?;
+        if Identity::of_file(&again)? != self.identity {
+            return Err(failure(replaced));
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -205,12 +269,58 @@ impl Root {
             .ok_or_else(|| failure("owner_root_unavailable"))
     }
 
-    /// Refuses to open a capability file without directory-relative Unix opens.
-    /// Takes the file name and create flag, both unused.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn open_key(&self, _name: &str, _create: bool) -> Result<File, EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// Opens a capability file in this root on Windows (DESIGN-0256 D12), never following a
+    /// link. A create makes it with W1 `secret_file_deletable`: private, the medium
+    /// no-write-up, no-read-up and no-execute-up label, and a handle with delete access, so
+    /// it is later deleted through that handle. An open reads it through W1 `read_secret`,
+    /// which shares delete so it works while the engine holds the file. The held root cannot
+    /// move, so the path resolves through it; `verify_key` then checks the entry is this
+    /// handle. Inputs: one plain file name and whether to create. Output: the open file, or
+    /// the refusal or I/O error.
+    #[cfg(windows)]
+    fn open_key(&self, name: &str, create: bool) -> Result<File, EngineError> {
+        use crazyagent_win_sandbox::private;
+        assert!(plain_entry(name));
+        self.verify()?;
+        let path = self.path.join(name);
+        let opened = if create {
+            private::secret_file_deletable(&path)
+        } else {
+            private::read_secret(&path)
+        };
+        opened.map_err(|e| private_refusal(e, "owner_capability_replaced_or_unsafe"))
+    }
+
+    /// Requires on Windows that an open file in this root is the private, labelled entry
+    /// `name` names: a file, W1 `check` passes (owner, list, label policy, no reparse point,
+    /// one link, local), its own label is the medium full label of W1 `secret_file_label`,
+    /// and its real place (W1 `place`) is this root's place plus `\` and the name, both read
+    /// with the same flags. Inputs: the name, the file and the refusal code. Output: Ok, or
+    /// the refusal.
+    #[cfg(windows)]
+    fn held_entry(&self, name: &str, file: &File, code: &str) -> Result<(), EngineError> {
+        use crazyagent_win_sandbox::{dacl, private};
+        use std::os::windows::ffi::OsStrExt;
+        assert!(plain_entry(name));
+        if !file.metadata().map_err(io_error)?.is_file() {
+            return Err(failure(code));
+        }
+        private::check(file).map_err(|e| private_refusal(e, code))?;
+        let wanted = dacl::label(&private::secret_file_label()).map_err(|_| failure(code))?;
+        let held = match private::facts(file).map_err(io_error)?.label {
+            Some(sacl) => dacl::label(&sacl).map_err(|_| failure(code))?,
+            None => None,
+        };
+        if wanted.is_none() || held != wanted {
+            return Err(failure(code));
+        }
+        let mut expected = private::place(&self.directory).map_err(io_error)?;
+        expected.push(u16::from(b'\\'));
+        expected.extend(std::ffi::OsStr::new(name).encode_wide());
+        if private::place(file).map_err(io_error)? != expected {
+            return Err(failure(code));
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -233,12 +343,18 @@ impl Root {
         Ok(f)
     }
 
-    /// Refuses to confirm a capability file without Unix owner and inode checks.
-    /// Takes the name, file and identity, all unused.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn verify_key(&self, _name: &str, _file: &File, _id: Identity) -> Result<(), EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// Confirms on Windows that a capability file is still the one recorded (D12): the root
+    /// verifies, the handle has the file id recorded at create, it holds exactly 32 bytes,
+    /// and `held_entry` passes. Inputs: the name, the open file and the recorded identity.
+    /// Output: Ok, or `owner_capability_replaced_or_unsafe`.
+    #[cfg(windows)]
+    fn verify_key(&self, name: &str, file: &File, id: Identity) -> Result<(), EngineError> {
+        let refused = "owner_capability_replaced_or_unsafe";
+        self.verify()?;
+        if Identity::of_file(file)? != id || file.metadata().map_err(io_error)?.len() != 32 {
+            return Err(failure(refused));
+        }
+        self.held_entry(name, file, refused)
     }
 
     #[cfg(unix)]
@@ -287,16 +403,47 @@ impl Root {
         Ok(Identity::of(&m))
     }
 
-    /// Refuses to remove an owned artifact without directory-relative Unix unlinks.
-    /// Takes the name, identity and socket flag, all unused.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn unlink_owned(&self, _name: &str, _id: Identity, _socket: bool) -> Result<(), EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// Deletes a file this root made on Windows through its held handle, never by path
+    /// (rv-sec2 #702 R7): only while the handle has the recorded file id and the name still
+    /// names that handle (`held_entry`), then W1 `delete` with POSIX semantics, so the name
+    /// goes when the handle closes. A socket has no file here; the owner pipe is W3-3's.
+    /// Inputs: the name, the recorded identity, the socket flag and the held handle. Output:
+    /// Ok, `owner_socket_unavailable`, or `owner_cleanup_replaced_artifact_preserved`.
+    #[cfg(windows)]
+    fn unlink_owned(
+        &self,
+        name: &str,
+        id: Identity,
+        socket: bool,
+        held: Option<&File>,
+    ) -> Result<(), EngineError> {
+        let preserved = "owner_cleanup_replaced_artifact_preserved";
+        if socket {
+            return Err(failure("owner_socket_unavailable"));
+        }
+        self.verify()?;
+        let Some(file) = held else {
+            return Err(failure(preserved));
+        };
+        if Identity::of_file(file)? != id {
+            return Err(failure(preserved));
+        }
+        self.held_entry(name, file, preserved)?;
+        crazyagent_win_sandbox::private::delete(file).map_err(io_error)
     }
 
+    /// Unlinks an artifact this root made, relative to the held folder, only while the name
+    /// still holds the recorded identity, owner, mode and one link. Inputs: the name, the
+    /// identity, whether it is a socket, and the artifact's held handle, which Unix does not
+    /// need (Windows deletes through it). Output: Ok, or the preserved-artifact refusal.
     #[cfg(unix)]
-    fn unlink_owned(&self, name: &str, id: Identity, socket: bool) -> Result<(), EngineError> {
+    fn unlink_owned(
+        &self,
+        name: &str,
+        id: Identity,
+        socket: bool,
+        _held: Option<&File>,
+    ) -> Result<(), EngineError> {
         self.verify()?;
         let m = std::fs::symlink_metadata(self.path.join(name)).map_err(io_error)?;
         if Identity::of(&m) != id
@@ -318,11 +465,39 @@ impl Root {
         rustix::fs::mkdirat(&self.directory, name, Mode::RWXU).map_err(io_error)
     }
 
-    /// Refuses to create a directory without directory-relative Unix mkdir.
-    /// Takes the name, unused. Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn create_directory(&self, _name: &str) -> Result<(), EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// Creates one private folder inside this root on Windows, the twin of `mkdirat`: the
+    /// held root cannot move, so the path resolves through it; an entry already at the name
+    /// is refused (`AlreadyExists`), W1 `dir` makes the folder with its protected list, and
+    /// the made folder must be empty. Input: one plain file name. Output: Ok once it exists,
+    /// or the refusal or I/O error.
+    #[cfg(windows)]
+    fn create_directory(&self, name: &str) -> Result<(), EngineError> {
+        assert!(plain_entry(name));
+        let path = self.path.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(error)),
+            Ok(_) => return Err(io_error(std::io::ErrorKind::AlreadyExists)),
+        }
+        drop(
+            crazyagent_win_sandbox::private::dir(&path)
+                .map_err(|e| private_refusal(e, "owner_root_replaced_or_unsafe"))?,
+        );
+        if std::fs::read_dir(&path).map_err(io_error)?.next().is_some() {
+            return Err(failure("owner_root_replaced_or_unsafe"));
+        }
+        Ok(())
+    }
+
+    /// Writes this root's entries to disk after a create, rename or delete in it: Unix
+    /// flushes the held folder, Windows reopens it for writing through W1 `sync_folder`,
+    /// since the held handle only lists it. Input: the root. Output: Ok, or the I/O error.
+    fn sync(&self) -> Result<(), EngineError> {
+        #[cfg(unix)]
+        let synced = self.directory.sync_all();
+        #[cfg(windows)]
+        let synced = crazyagent_win_sandbox::private::sync_folder(&self.path);
+        synced.map_err(io_error)
     }
 }
 
@@ -335,11 +510,8 @@ struct Slot {
 }
 
 struct PinnedBootstrap {
-    #[cfg(unix)]
     file: File,
-    #[cfg(unix)]
     identity: Identity,
-    #[cfg(unix)]
     bytes: Vec<u8>,
     value: RunnerBootstrap,
 }
@@ -359,11 +531,8 @@ impl PinnedBootstrap {
             serde_json::from_slice(&bytes).map_err(|_| failure("runner_bootstrap_invalid"))?;
         value.validate()?;
         let pinned = Self {
-            #[cfg(unix)]
-            identity: Identity::of(&file.metadata().map_err(io_error)?),
-            #[cfg(unix)]
+            identity: Identity::of_file(&file)?,
             file,
-            #[cfg(unix)]
             bytes,
             value,
         };
@@ -381,25 +550,38 @@ impl PinnedBootstrap {
         file.write_all_at(&bytes, 0).map_err(io_error)?;
         file.sync_all().map_err(io_error)?;
         let pinned = Self {
-            #[cfg(unix)]
-            identity: Identity::of(&file.metadata().map_err(io_error)?),
-            #[cfg(unix)]
+            identity: Identity::of_file(&file)?,
             file,
-            #[cfg(unix)]
             bytes,
             value,
         };
         pinned.verify(root)?;
-        root.directory.sync_all().map_err(io_error)?;
+        root.sync()?;
         Ok(pinned)
     }
 
-    /// Refuses to confirm the runner bootstrap file without Unix owner and inode checks.
-    /// Takes the root, unused.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn verify(&self, _root: &Root) -> Result<(), EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// Confirms on Windows that the runner bootstrap file is still the one pinned: the root
+    /// verifies, the handle is a file of the pinned length with the pinned file id, the name
+    /// still names this private labelled handle (`held_entry`), and it holds the pinned
+    /// bytes. Input: the root. Output: Ok, or the replaced or changed refusal.
+    #[cfg(windows)]
+    fn verify(&self, root: &Root) -> Result<(), EngineError> {
+        let replaced = "runner_bootstrap_replaced_or_unsafe";
+        root.verify()?;
+        let actual = self.file.metadata().map_err(io_error)?;
+        if !actual.is_file()
+            || actual.len() != self.bytes.len() as u64
+            || Identity::of_file(&self.file)? != self.identity
+        {
+            return Err(failure(replaced));
+        }
+        root.held_entry("engine-bootstrap", &self.file, replaced)?;
+        let mut bytes = vec![0; self.bytes.len()];
+        self.file.read_exact_at(&mut bytes, 0).map_err(io_error)?;
+        if bytes != self.bytes {
+            return Err(failure("runner_bootstrap_content_changed"));
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -615,7 +797,7 @@ impl Authority {
             ready: None,
         };
         slot.verify(&self.root)?;
-        parent.directory.sync_all().map_err(io_error)?;
+        parent.sync()?;
         assert_eq!(runners.len(), index);
         runners.push(Some(slot));
         assert!(runners.len() <= RUNNERS_MAX);
@@ -673,14 +855,14 @@ impl Authority {
                 .root
                 .open_key(&format!("r{:02x}.cap", prepared.slot), true)?;
             slot.key = Some(RunnerKey {
-                identity: Identity::of(&file.metadata().map_err(io_error)?),
+                identity: Identity::of_file(&file)?,
                 file,
                 token,
             });
             let key = slot.key.as_ref().unwrap();
             key.file.write_all_at(&key.token, 0).map_err(io_error)?;
             key.file.sync_all().map_err(io_error)?;
-            self.root.directory.sync_all().map_err(io_error)?;
+            self.root.sync()?;
         }
         slot.boot = Some(boot);
         slot.endpoint = Some(endpoint);
@@ -954,12 +1136,17 @@ impl Authority {
     /// file this server made, each only while it is still the engine's own file, and tries
     /// all of them even after one fails. Input: none. Output: Ok, or the first failure.
     fn cleanup(&self) -> Result<(), EngineError> {
-        let mut result = self.root.unlink_owned(SOCKET, self.socket, true);
+        let mut result = self.root.unlink_owned(SOCKET, self.socket, true, None);
         result = result.and(self.ide.revoke_all());
         match self.slots.lock() {
             Ok(slots) => {
                 for (i, slot) in slots.iter().enumerate() {
-                    result = result.and(self.root.unlink_owned(KEYS[i], slot.identity, false));
+                    result = result.and(self.root.unlink_owned(
+                        KEYS[i],
+                        slot.identity,
+                        false,
+                        Some(&slot.file),
+                    ));
                 }
             }
             Err(_) => result = result.and(Err(failure("owner_authority_unavailable"))),
@@ -972,6 +1159,7 @@ impl Authority {
                             &format!("r{:02x}.cap", slot.prepared.slot),
                             key.identity,
                             false,
+                            Some(&key.file),
                         ));
                     }
                 }
@@ -1350,12 +1538,12 @@ impl OwnerServer {
             let mut slots = Vec::new();
             for (i, registration) in started.owners.into_iter().enumerate() {
                 let file = root.open_key(KEYS[i], true)?;
-                created_keys.push((KEYS[i], Identity::of(&file.metadata().map_err(io_error)?)));
+                created_keys.push((KEYS[i], Identity::of_file(&file)?));
                 let mut token = [0; 32];
                 getrandom::fill(&mut token).map_err(|_| failure("owner_entropy_unavailable"))?;
                 file.write_all_at(&token, 0).map_err(io_error)?;
                 file.sync_all().map_err(io_error)?;
-                let identity = Identity::of(&file.metadata().map_err(io_error)?);
+                let identity = Identity::of_file(&file)?;
                 root.verify_key(KEYS[i], &file, identity)?;
                 slots.push(Slot {
                     registration,
@@ -1366,7 +1554,11 @@ impl OwnerServer {
                 });
             }
             root.verify()?;
-            let listener = crate::ipc::owner_listener(root.path.join(SOCKET)).map_err(io_error)?;
+            let listener = crate::ipc::owner_listener(
+                root.path.join(SOCKET),
+                crate::protocol::OWNER_CLIENTS_MAX + HANDSHAKES_MAX,
+            )
+            .map_err(io_error)?;
             let created = std::fs::symlink_metadata(root.path.join(SOCKET)).map_err(io_error)?;
             created_socket = Some(Identity::of(&created));
             if !created.file_type().is_socket()
@@ -1432,12 +1624,12 @@ impl OwnerServer {
                     errors.push(error.0);
                 }
                 if let Some(identity) = created_socket
-                    && let Err(error) = rollback.unlink_owned(SOCKET, identity, true)
+                    && let Err(error) = rollback.unlink_owned(SOCKET, identity, true, None)
                 {
                     errors.push(error.0);
                 }
                 for (name, identity) in created_keys {
-                    if let Err(error) = rollback.unlink_owned(name, identity, false) {
+                    if let Err(error) = rollback.unlink_owned(name, identity, false, None) {
                         errors.push(error.0);
                     }
                 }
@@ -3342,7 +3534,7 @@ impl RunnerClient {
             let generation = Root::open(&path)?;
             let name = format!("r{:02x}.cap", bootstrap.value.slot);
             let file = generation.open_key(&name, false)?;
-            let identity = Identity::of(&file.metadata().map_err(io_error)?);
+            let identity = Identity::of_file(&file)?;
             generation.verify_key(&name, &file, identity)?;
             let mut token = [0; 32];
             file.read_exact_at(&mut token, 0).map_err(io_error)?;
@@ -3536,7 +3728,7 @@ impl OwnerClient {
             OwnerClientKind::Desktop => 1,
         };
         let file = root.open_key(KEYS[i], false)?;
-        let identity = Identity::of(&file.metadata().map_err(io_error)?);
+        let identity = Identity::of_file(&file)?;
         root.verify_key(KEYS[i], &file, identity)?;
         let mut token = [0; 32];
         file.read_exact_at(&mut token, 0).map_err(io_error)?;
@@ -4106,7 +4298,9 @@ fallback_allowed = false
         )
         .unwrap();
         assert_eq!(
-            root.unlink_owned(KEYS[0], identity, false).unwrap_err().0,
+            root.unlink_owned(KEYS[0], identity, false, None)
+                .unwrap_err()
+                .0,
             "owner_cleanup_replaced_artifact_preserved"
         );
         assert!(directory.path().join(KEYS[0]).exists());

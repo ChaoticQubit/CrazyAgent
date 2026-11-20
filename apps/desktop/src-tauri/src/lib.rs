@@ -2140,6 +2140,7 @@ async fn desktop_native_terminal_open(
     style: NativeStyleText,
     covered: bool,
     keys: bool,
+    tile: bool,
     project: Option<String>,
     events: NativeEvents,
 ) -> Result<u64, BridgeError> {
@@ -2168,6 +2169,7 @@ async fn desktop_native_terminal_open(
             style,
             covered,
             keys,
+            tile,
             project,
             events,
         };
@@ -2178,7 +2180,7 @@ async fn desktop_native_terminal_open(
         let _ = (
             app, state, terminals, name, pane, label, rect, viewport, style, covered, keys,
         );
-        let _ = (project, events);
+        let _ = (tile, project, events);
         native_unsupported()
     }
 }
@@ -2452,7 +2454,7 @@ async fn desktop_terminal_attach(
     .await?;
     let session = lock(&state)
         .await?
-        .open_terminal(key.agent, key.pane, None, false)
+        .open_terminal(key.agent, key.pane, None, bridge::terminal::Session::Full)
         .await?;
     place.attach(session, bridge::terminal::Sink::Page(output))
 }
