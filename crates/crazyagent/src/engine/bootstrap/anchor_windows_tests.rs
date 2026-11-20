@@ -54,6 +54,28 @@ fn run(program: &str, args: &[&OsStr]) {
 }
 
 /// Makes `link` a junction to `target`. Inputs: the two folders. Output: none.
+/// The 8.3 alias Windows gave `long`, read through cmd's `%~s` form, which asks
+/// GetShortPathNameW, so a row names a short spelling it made on purpose (CR-1341 HIGH 1).
+/// Input: an existing folder with a long name. Output: the alias, or None when this volume
+/// makes no 8.3 names, which the row then reports as a named SKIP.
+fn short_alias(long: &Path) -> Option<PathBuf> {
+    use std::os::windows::process::CommandExt;
+    let mut command = Command::new("cmd");
+    command
+        .raw_arg(format!(
+            "/D /C for %I in (\"{}\") do @echo %~sI",
+            long.display()
+        ))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let done = crate::spawn_gate::output(&mut command).unwrap();
+    assert!(done.status.success(), "{done:?}");
+    let short = PathBuf::from(String::from_utf8(done.stdout).unwrap().trim());
+    assert!(short.is_absolute(), "{}", short.display());
+    (short != long && short.to_str()?.contains('~')).then_some(short)
+}
+
 fn junction(link: &Path, target: &Path) {
     run(
         "cmd",
@@ -137,15 +159,17 @@ async fn a_product_made_anchor_opens_plain_and_verifies() {
 
 #[tokio::test]
 async fn an_anchor_given_as_a_short_name_or_another_case_opens_at_its_plain_long_name() {
-    let (temp, base) = plain_temp();
-    let path = base.join("data");
+    let (_temp, base) = plain_temp();
+    let long = base.join("a long anchor folder name");
+    std::fs::create_dir(&long).unwrap();
+    let path = long.join("data");
     let engine = product_anchor(&path).await;
-    let short = temp.path().join("data");
-    assert!(
-        short.to_str().unwrap().contains('~'),
-        "the hosted runner's temp folder is spelled with a short name: {}",
-        short.display()
-    );
+    let Some(alias) = short_alias(&long) else {
+        println!("SKIP an_anchor_given_as_a_short_name: this volume makes no 8.3 names");
+        engine.close().await.unwrap();
+        return;
+    };
+    let short = alias.join("data");
     let upper = PathBuf::from(path.to_str().unwrap().to_uppercase());
     for spelling in [short, upper] {
         let anchor = Anchor::open(&spelling).expect("another spelling of the anchor opens");
