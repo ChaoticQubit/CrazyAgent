@@ -168,8 +168,9 @@ async fn a_rogue_instance_with_another_pin_gets_no_byte_from_a_request() {
     assert!(reading.await.unwrap().is_empty());
 }
 
-/// R4: a client on a restricted token is refused before any frame is parsed: it gets no
-/// reply to a request the same user's ordinary client gets one for.
+/// R4: a client on a token restricted to RESTRICTED alone is refused by Windows at the open,
+/// since the engine pipe's list grants only the user and SYSTEM, so it never sends a frame;
+/// the same user's ordinary client still gets its reply.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_restricted_client_is_refused_before_any_frame_is_parsed() {
     let (temp, engine, config, socket) = engine_at_a_private_root().await;
@@ -178,16 +179,41 @@ async fn a_restricted_client_is_refused_before_any_frame_is_parsed() {
     let running = tokio::spawn(server.run(stopped));
     let name = crate::ipc::pipe_name_at(&socket).unwrap();
     let frame = encode_frame(&create_request("restricted", temp.path())).unwrap();
-    let answered = exchange_as(principals::restricted(), name, frame)
+    let refused = exchange_as(principals::restricted(), name, frame)
         .await
-        .expect("the pipe opens for the restricted token, so the engine's check refuses it");
-    assert!(answered.is_empty(), "{} reply bytes", answered.len());
+        .expect_err("Windows refuses the open of a token restricted to RESTRICTED alone");
+    assert_eq!(refused.raw_os_error(), Some(5), "{refused}");
     let client = Client::new(socket.clone(), Duration::from_secs(10)).unwrap();
     let reply = client
         .request(create_request("restricted", temp.path()))
         .await
         .unwrap();
     assert_eq!(reply.request_id.as_str(), "restricted");
+    stop.send(()).unwrap();
+    running.await.unwrap().unwrap();
+}
+
+/// R4: a restricted client whose restricting SIDs include the user opens the engine pipe,
+/// and the engine's own peer check refuses its restricted token before any frame is parsed,
+/// so it gets no reply; the same user's ordinary client still gets one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restricted_client_that_opens_the_pipe_gets_no_reply() {
+    let (temp, engine, config, socket) = engine_at_a_private_root().await;
+    let server = Server::bind(&socket, engine, &config).unwrap();
+    let (stop, stopped) = oneshot::channel();
+    let running = tokio::spawn(server.run(stopped));
+    let name = crate::ipc::pipe_name_at(&socket).unwrap();
+    let frame = encode_frame(&create_request("opened", temp.path())).unwrap();
+    let answered = exchange_as(principals::restricted_with_user(), name, frame)
+        .await
+        .expect("both checks of the pipe list pass for a token restricted to the user too");
+    assert!(answered.is_empty(), "{} reply bytes", answered.len());
+    let client = Client::new(socket.clone(), Duration::from_secs(10)).unwrap();
+    let reply = client
+        .request(create_request("opened", temp.path()))
+        .await
+        .unwrap();
+    assert_eq!(reply.request_id.as_str(), "opened");
     stop.send(()).unwrap();
     running.await.unwrap().unwrap();
 }
