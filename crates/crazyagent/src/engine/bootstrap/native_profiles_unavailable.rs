@@ -160,6 +160,36 @@ impl Drop for NativeProfileUse {
     }
 }
 
+/// The Windows custody rows (N6a), run against the core this module stands in for until it
+/// compiles on Windows.
+#[cfg(all(test, windows))]
+#[path = "native_profiles/custody_windows_tests.rs"]
+mod custody_windows_tests;
+
+#[cfg(windows)]
+impl NativeProfileCustody {
+    /// Captures custody of the database a caller holds open on Windows (QUESTION-1700 Q1).
+    /// Inputs: the database path and the caller's handle. Output: the refusal, until N6a.
+    pub(crate) fn capture_held(_path: &Path, _opened: &std::fs::File) -> Result<Self, EngineError> {
+        Err(EngineError("native_profile_custody_unavailable".to_owned()))
+    }
+}
+
+#[cfg(all(test, windows))]
+impl NativeProfileCustody {
+    fn verify(&self) -> Result<(), EngineError> {
+        match *self {}
+    }
+
+    fn root(&mut self, _host: &HostStamp) -> Result<((), (), ()), EngineError> {
+        match *self {}
+    }
+
+    fn forget_database_identity(&mut self) {
+        match *self {}
+    }
+}
+
 impl NativeProfileCustody {
     /// Refuses native profile custody where Unix owner, inode and directory-relative checks
     /// do not exist. Takes the database path and metadata, both unused.
