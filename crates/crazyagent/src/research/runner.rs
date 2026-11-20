@@ -3109,6 +3109,7 @@ pub(crate) fn add_teammate_worktree_at(
 /// Why a lead agent's own git, in its worktree and in its workers' and teammates' folders,
 /// is refused on Linux in this version: no confined boundary for it is built there yet, and
 /// no lead git runs outside one.
+#[cfg(unix)]
 pub(crate) const LEAD_GIT_NEEDS_MACOS: &str =
     "a lead agent's own git runs only on macOS in this version";
 
