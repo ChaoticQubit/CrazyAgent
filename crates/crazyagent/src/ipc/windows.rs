@@ -298,15 +298,16 @@ pub(super) async fn connect(root: &Path, purpose: &str) -> io::Result<PipeStream
 
 /// The server side's check of an accepted stream (DESIGN-0140 D9): what was read of its
 /// client when it connected is this user, in no AppContainer, unrestricted and at medium or
-/// above. Input: the stream. Output: Ok, `peer_owner_mismatch`, or the error reading the
-/// client.
+/// above and at this engine's own level, read once (R6). Input: the stream. Output: Ok,
+/// `peer_owner_mismatch`, or the error reading the client.
 pub(super) fn verify_client(stream: &PipeStream) -> io::Result<()> {
     let End::Served { peer, .. } = &stream.end else {
         return Err(io::Error::other("a client end has no client to check"));
     };
     let peer = peer.as_ref().map_err(copied)?;
     let user = private::user_sid()?;
-    pipe::judge_peer(peer, &user).map_err(|_| io::Error::other("peer_owner_mismatch"))
+    pipe::judge_peer(peer, &user, own_integrity()?)
+        .map_err(|_| io::Error::other("peer_owner_mismatch"))
 }
 
 /// The client side's check, right after connect and before any byte is written (DESIGN-0256
@@ -321,6 +322,17 @@ pub(super) fn verify_server(stream: &PipeStream) -> io::Result<()> {
     let user = private::user_sid()?;
     pipe::judge_server(&served, *expected, &user)
         .map_err(|_| io::Error::other("peer_owner_mismatch"))
+}
+
+/// This engine's integrity level, read from its token on the first check and kept, as a
+/// process's level never changes. Output: the level, or the Windows error of that read.
+fn own_integrity() -> io::Result<u32> {
+    static OWN: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    if let Some(level) = OWN.get() {
+        return Ok(*level);
+    }
+    let level = pipe::own_integrity()?;
+    Ok(*OWN.get_or_init(|| level))
 }
 
 /// A copy of an error a stream keeps, for a check judged more than once. Input: the error.
