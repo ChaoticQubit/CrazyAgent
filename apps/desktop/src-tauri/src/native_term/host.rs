@@ -5,11 +5,11 @@ use super::codec;
 use super::control::{Control, Event};
 use super::ended::ended_final;
 use super::event::{MouseKind, ViewEvent};
+#[cfg(unix)]
+use super::pane::GRID_MIN;
 #[cfg(windows)]
 use super::pane::Pane;
 use super::pane::{Action, GRID_MAX, Input};
-#[cfg(unix)]
-use super::pane::GRID_MIN;
 use super::render::{GPU_FAULT, Shared};
 use super::screen;
 use super::style::Style;
