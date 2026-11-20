@@ -160,8 +160,11 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 /// names alternates. Every kind writes its own home in the lease's folder and the step
 /// folder's temp folder, and has no network. An Index step writes only the step folder, an
 /// Objects step the object store too, and a WorkTree step the work tree, reading the step
-/// folder's index copy and shadow git folder. Inputs: the places and the kind. Output: the
-/// policy, or `changes_git_unsupported`.
+/// folder's index copy and shadow git folder. Each kind is a job folder that guards nothing, as
+/// the Linux step is: a guard the boundary cannot find under a linked worktree keeps the root
+/// from new entries while its files stay open to delete, so a checkout would lose a file
+/// (probe r4). Inputs: the places and the kind. Output: the policy, or
+/// `changes_git_unsupported`.
 pub(super) fn policy(places: &StepPlaces, writes: Writes) -> Result<ProjectSandbox, EngineError> {
     let refused = |_| failure("changes_git_unsupported");
     let home = places.lease.join(format!("{}-home", kind(writes)));
@@ -176,6 +179,7 @@ pub(super) fn policy(places: &StepPlaces, writes: Writes) -> Result<ProjectSandb
             .map(ProjectSandbox::as_job_folder)
             .and_then(|sandbox| sandbox.allow_worktree(&objects)),
         Writes::WorkTree => ProjectSandbox::new(&places.work, &home, &tmp, network)
+            .map(ProjectSandbox::as_job_folder)
             .and_then(|sandbox| sandbox.allow_read(&places.step))
             .and_then(|sandbox| sandbox.allow_read(&objects)),
     }
@@ -383,4 +387,26 @@ pub(super) fn write_shadow(
     }
     assert!(shadow.starts_with(&places.step));
     Ok(shadow)
+}
+
+/// The name of the empty excludes file in a lease's folder.
+const NO_EXCLUDES_FILE: &str = "no-excludes";
+
+/// The empty file a step that takes no excludes names as `core.excludesFile`, since git stops on
+/// the null device there (probe r4). It is W1-private in the lease's folder of the data root,
+/// outside every step kind's write roots, and judged empty before each use, so no step git can
+/// plant a pattern that hides a path from a later turn commit (rv-sec3 RULING 18:04 E-1). Input:
+/// the places. Output: the file, or `changes_git_unsupported` for one that is not private or
+/// not empty.
+pub(super) fn no_excludes(places: &StepPlaces) -> Result<PathBuf, EngineError> {
+    let unsupported = || failure("changes_git_unsupported");
+    let path = places.lease.join(NO_EXCLUDES_FILE);
+    let exists = std::fs::symlink_metadata(&path).is_ok();
+    let file = crazyagent_win_sandbox::private::file(&path, !exists).map_err(|_| unsupported())?;
+    if file.metadata().map_err(|_| unsupported())?.len() != 0 {
+        eprintln!("landing_step_no_excludes_not_empty");
+        return Err(unsupported());
+    }
+    assert!(path.starts_with(&places.lease));
+    Ok(path)
 }
