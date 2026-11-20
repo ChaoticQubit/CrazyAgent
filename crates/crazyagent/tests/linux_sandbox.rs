@@ -4685,6 +4685,24 @@ fn linux_launch(case: &Case, boundary: LaunchBoundary, home: &Path) -> LaunchReq
     }
 }
 
+/// Lists every path under `root`, sorted, without following links, so a row can tell that
+/// a refused step made nothing there. Input: the folder. Output: the paths below it.
+fn tree(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(folder) = pending.pop() {
+        for entry in fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            if fs::symlink_metadata(&path).unwrap().is_dir() {
+                pending.push(path.clone());
+            }
+            found.push(path);
+        }
+    }
+    found.sort();
+    found
+}
+
 /// The case's project sandbox installed the way a team agent's start takes it: with the
 /// call supervisor and the strict switch off. Input: the case. Output: the boundary.
 fn team_boundary(case: &Case) -> InstalledSandbox {
@@ -4764,9 +4782,10 @@ fn a_full_access_launch_on_linux_is_refused_and_builds_nothing() {
     ));
     let request = linux_launch(&case, LaunchBoundary::Installed(Arc::new(full)), &case.home);
     assert!(request.boundary.is_unconfined());
+    let before = tree(&case.home);
     let refused = crazyagent::harnesses::launch::command(&request).unwrap_err();
     assert_eq!(refused.0, "launch_sandbox_unavailable");
-    assert!(fs::read_dir(&case.home).unwrap().next().is_none());
+    assert_eq!(tree(&case.home), before);
 }
 
 /// A launch on Linux whose account home is not the boundary's agent home is refused: the
@@ -4795,6 +4814,7 @@ fn a_full_access_pane_on_linux_is_refused_before_its_command_is_built() {
     let full = team_boundary(&case).unconfined();
     let mut request = linux_launch(&case, LaunchBoundary::Installed(Arc::new(full)), &case.home);
     request.harness = "claude-code".into();
+    let before = tree(&case.home);
     let refused = crazyagent::harnesses::interactive::command(
         &request,
         None,
@@ -4807,5 +4827,5 @@ fn a_full_access_pane_on_linux_is_refused_before_its_command_is_built() {
     .err()
     .unwrap_or_else(|| panic!("a Full access pane command was built on Linux"));
     assert_eq!(refused.0, "launch_sandbox_unavailable");
-    assert!(fs::read_dir(&case.home).unwrap().next().is_none());
+    assert_eq!(tree(&case.home), before);
 }
