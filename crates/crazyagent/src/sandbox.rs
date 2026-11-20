@@ -1889,8 +1889,15 @@ impl ProjectSandbox {
     /// temp dir and extra worktrees; the project stays readable. Makes the admin folder's
     /// `modules` store so every platform guards a real folder there. Input: a canonical
     /// worktree in `worktrees/` whose `.git` link and admin folder name each other.
-    /// Output: the confined sandbox, `Invalid` or the disk error.
+    /// Output: the confined sandbox, `Invalid` or the disk error; always `Invalid` on Windows,
+    /// where engine git reads the git folder as the engine only while no agent may write it
+    /// (rv-sec3 #746 Q3b G2).
     pub fn confine_to_worktree(mut self, worktree: &Path) -> Result<Self, SandboxError> {
+        if cfg!(windows) {
+            return Err(invalid(
+                "a worktree checkout writes the project's git folder, which no Windows agent may",
+            ));
+        }
         if self.checkout.is_some() || self.clone.is_some() || self.setup.is_some() {
             return Err(invalid("the sandbox is already confined to a worktree"));
         }
