@@ -21,7 +21,6 @@ use crate::storage::{
 };
 use crate::usage::capture::{Attribution, Format, RunKind, Tokens, count_reported, count_turn};
 use std::fs::File;
-#[cfg(unix)]
 use std::io::Seek;
 use std::io::Write;
 #[cfg(unix)]
@@ -196,22 +195,32 @@ impl MasterHost {
 }
 
 impl Capture {
-    /// Refuses a capture file where its Unix owner and 0600 mode cannot be checked.
-    /// Takes the file, dropped, and the limit, unused. Returns `master_capture_unavailable`.
-    #[cfg(not(unix))]
-    pub(super) fn new(_file: File, _limit: u64) -> Result<Self, EngineError> {
-        Err(failure("master_capture_unavailable"))
-    }
-
-    #[cfg(unix)]
+    /// Takes the capture file a master turn folder made for the engine to record its events
+    /// in. It must be a file, empty and at its start, and the engine's alone: on Unix owned by
+    /// this user with mode 0600; on Windows W1 private with W3's medium secret label, the
+    /// check the capture's `verify_key` twin makes (PLAN-0410 Q1). Inputs: the file and the
+    /// byte limit. Output: the capture, `master_capture_identity` for any other file, or
+    /// `master_capture_unavailable` when the file cannot be read.
     pub(super) fn new(mut file: File, limit: u64) -> Result<Self, EngineError> {
         assert!(limit > 0);
         let metadata = file
             .metadata()
             .map_err(|_| failure("master_capture_unavailable"))?;
+        #[cfg(unix)]
+        let owned = metadata.uid() == rustix::process::geteuid().as_raw()
+            && metadata.mode() & 0o777 == 0o600;
+        #[cfg(windows)]
+        let owned = {
+            use crazyagent_win_sandbox::{dacl, private};
+            let wanted = dacl::label(&private::secret_file_label()).ok().flatten();
+            let held = private::facts(&file)
+                .map_err(|_| failure("master_capture_unavailable"))?
+                .label
+                .and_then(|sacl| dacl::label(&sacl).ok().flatten());
+            wanted.is_some() && held == wanted && private::check(&file).is_ok()
+        };
         if !metadata.is_file()
-            || metadata.uid() != rustix::process::geteuid().as_raw()
-            || metadata.mode() & 0o777 != 0o600
+            || !owned
             || metadata.len() != 0
             || file
                 .stream_position()
