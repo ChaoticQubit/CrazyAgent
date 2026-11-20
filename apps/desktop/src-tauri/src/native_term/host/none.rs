@@ -1,6 +1,7 @@
-use super::NativeEvent;
+use super::{NativeEvent, SKIPPED};
 use crate::native_term::a11y::Geometry;
-use crate::native_term::render::{Shared, Surface};
+use crate::native_term::render::Shared;
+use crate::native_term::screen::Frame;
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::term::Term;
 use tauri::ipc::Channel;
@@ -19,9 +20,8 @@ pub fn main() -> Option<Main> {
     None
 }
 
-/// A view's drawing parts, the same fields every host reads; none opens here.
+/// A view's parts, the same fields every host reads; none opens here.
 pub struct View {
-    pub(super) surface: Option<Surface>,
     pub(super) scale: u32,
     pub(super) events: Channel<NativeEvent>,
     pub(super) project: Option<String>,
@@ -54,7 +54,6 @@ pub fn open_view(
     project: Option<String>,
 ) -> View {
     View {
-        surface: None,
         scale: key,
         events,
         project,
@@ -70,10 +69,27 @@ pub fn place_view(_view: &mut View, _rect: [f64; 4], _shown: bool) -> Option<f64
     None
 }
 
-/// Makes a view's surface; none is made here. Inputs: the view, the renderer and the size.
-/// Output: none.
-pub fn surface(_view: &View, _shared: &mut Shared, _pixels: (u32, u32)) -> Option<Surface> {
-    None
+/// Gives a view a new scale key; no surface exists here to drop. Inputs: the view and the
+/// key.
+pub fn rescale(view: &mut View, key: u32) {
+    view.scale = key;
+}
+
+/// Sizes a view's surface; none is made here. Inputs: the view, the renderer and the size.
+/// Output: false.
+pub fn fit(_view: &mut View, _shared: &mut Shared, _pixels: (u32, u32)) -> bool {
+    false
+}
+
+/// Draws a frame; nothing draws here. Inputs: the view, the renderer and the frame.
+/// Output: the skipped code.
+pub fn paint(_view: &mut View, _shared: &mut Shared, _frame: &Frame) -> Result<(), &'static str> {
+    Err(SKIPPED)
+}
+
+/// Whether a view can present a frame: never here. Input: the view. Output: false.
+pub fn ready(_view: &mut View) -> bool {
+    false
 }
 
 /// Whether a view shows: never here. Input: the view. Output: false.
@@ -98,10 +114,7 @@ pub fn drawn(_view: &View, _geometry: Geometry, _term: &Term<VoidListener>) {}
 
 /// Takes a view down. Input: the view. Output: its events channel.
 pub fn dismiss_view(view: View) -> Channel<NativeEvent> {
-    let View {
-        surface, events, ..
-    } = view;
-    drop(surface);
+    let View { events, .. } = view;
     events
 }
 
