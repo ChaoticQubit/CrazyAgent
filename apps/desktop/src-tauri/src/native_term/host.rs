@@ -1,9 +1,15 @@
-use super::a11y::{self, Geometry};
+#[cfg(target_os = "macos")]
+use super::a11y;
+use super::a11y::Geometry;
 use super::codec;
 use super::control::{Control, Event};
 use super::ended::ended_final;
 use super::event::{MouseKind, ViewEvent};
-use super::pane::{Action, GRID_MAX, GRID_MIN, Input};
+#[cfg(unix)]
+use super::pane::GRID_MIN;
+#[cfg(windows)]
+use super::pane::Pane;
+use super::pane::{Action, GRID_MAX, Input};
 use super::render::{GPU_FAULT, Shared};
 use super::screen;
 use super::style::Style;
@@ -36,10 +42,18 @@ use mac as platform;
 mod linux;
 #[cfg(target_os = "linux")]
 use linux as platform;
+/// The Windows halves of the host: the child window over the webview, its place, focus
+/// and the frames it posts its render thread.
+#[cfg(windows)]
+pub(super) mod windows;
+#[cfg(windows)]
+use self::windows as platform;
+#[cfg(windows)]
+pub use self::windows::{main, mark_main};
 /// The stand-in on a system whose host has not landed yet: no native view opens there.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 mod none;
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 use none as platform;
 
 use platform::View;
@@ -119,8 +133,8 @@ pub enum NativeEvent {
     },
 }
 
-/// The longest label a screen reader says for a view, in bytes.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+/// The longest label a screen reader says for a view, in bytes; a page's open past it is
+/// refused.
 pub const LABEL_BYTES_MAX: usize = 256;
 
 /// The main thread's marker on a system with a native host, for an open from the page's
@@ -283,6 +297,7 @@ fn sink(page: u64, event: ViewEvent) {
 }
 
 /// The visible grid VoiceOver reads, or none while the state is in use.
+#[cfg(target_os = "macos")]
 fn screen(page: u64) -> Option<a11y::Grid> {
     NATIVE.with(|cell| {
         let held = cell.try_borrow().ok()?;
@@ -527,6 +542,7 @@ impl Native {
             Some((tmux, socket)) => self.ensure_control(tmux, socket),
             None => false,
         };
+        let style = self.style.as_ref().ok_or("native_terminal_style_invalid")?;
         let page = self.table.fresh();
         let kind = match (direct, open.tile) {
             (true, true) => Session::Follow,
@@ -547,6 +563,7 @@ impl Native {
             key,
             open.rect,
             &open.label,
+            style,
             open.events,
             open.project,
         );
@@ -637,6 +654,8 @@ impl Native {
             }
             return Err(code);
         }
+        #[cfg(windows)]
+        platform::restyle(&style);
         let blink = style.blink;
         self.style = Some(style);
         for page in self.table.pages() {
@@ -771,6 +790,7 @@ impl Native {
     /// Input: the event.
     fn on_direct(&mut self, event: Event) {
         match event {
+            #[cfg(unix)]
             Event::Restored { view, bytes, grid } => {
                 if let Some(entry) = self.table.get_mut(view).filter(|e| e.direct) {
                     if entry.follows() {
@@ -780,6 +800,7 @@ impl Native {
                 }
                 self.tell(view);
             }
+            #[cfg(unix)]
             Event::Sized { views, grid } => {
                 let fits = [grid.0, grid.1]
                     .iter()
@@ -796,6 +817,7 @@ impl Native {
                     self.tell(page);
                 }
             }
+            #[cfg(unix)]
             Event::Output { views, bytes } => {
                 for page in views {
                     if let Some(entry) = self.table.get_mut(page).filter(|e| e.direct) {
@@ -804,6 +826,7 @@ impl Native {
                     self.tell(page);
                 }
             }
+            #[cfg(unix)]
             Event::Refused { view, .. } => self.reopen(view),
             Event::Closed => {
                 self.drop_control();
@@ -932,29 +955,25 @@ impl Native {
                 point,
                 option,
                 clicks,
-            } => {
-                let cell = cell_of(shared, entry, point);
-                let input = match kind {
-                    MouseKind::Press => Input::Press {
-                        cell,
-                        option,
-                        clicks,
-                    },
-                    MouseKind::Drag => Input::Drag { cell, option },
-                    MouseKind::Release => Input::Release { cell, option },
-                };
-                entry.pane.apply(input)
-            }
+            } => mouse(shared, entry, kind, point, option, clicks),
             ViewEvent::Menu { point } => {
                 let (x, y) = (entry.rect[0] + point.0, entry.rect[1] + point.1);
                 let _ = entry.platform.events.send(NativeEvent::Menu { x, y });
                 Action::Nothing
             }
+            #[cfg(target_os = "macos")]
             ViewEvent::Copy => {
                 if let Ok(text) = entry.pane.copy(false) {
                     let _ = clip.write(&text);
                 }
                 Action::Nothing
+            }
+            #[cfg(windows)]
+            ViewEvent::CopyKey(input) => copy_key(&mut entry.pane, clip, input),
+            #[cfg(windows)]
+            ViewEvent::Faulted => {
+                self.end(page, GPU_FAULT);
+                return;
             }
             ViewEvent::Paste => match clip.read() {
                 Some(text) => entry.pane.apply(Input::Paste {
@@ -963,6 +982,7 @@ impl Native {
                 }),
                 None => Action::Nothing,
             },
+            #[cfg(target_os = "macos")]
             ViewEvent::SelectAll => {
                 entry.pane.select_all();
                 Action::Local
@@ -1019,6 +1039,23 @@ impl Native {
     }
 }
 
+/// The copy chord of a host without Cmd (Ctrl+C, Ctrl+Shift+C), as the panel off a Mac: a
+/// selection, blank cells included, goes to the board and is dropped, so the next chord
+/// interrupts; with none the chord's own input (^C) goes to the pane. Blank text or text
+/// too large for the board is not put on it, and the chord still sends nothing. Inputs: the
+/// pane, the board and the chord's input. Output: what the pane asks for.
+#[cfg(windows)]
+fn copy_key(pane: &mut Pane, clip: &platform::Clip, input: Input) -> Action {
+    if !pane.has_selection() {
+        return pane.apply(input);
+    }
+    if let Ok(text) = pane.copy(false) {
+        let _ = clip.write(&text);
+    }
+    pane.clear_selection();
+    Action::Local
+}
+
 fn cell_of(
     shared: &HashMap<u32, Shared>,
     entry: &Entry<View>,
@@ -1033,6 +1070,30 @@ fn cell_of(
     let cell = (cell.0, cell.1 + top);
     assert!(cell.0 < columns && cell.1 < lines);
     cell
+}
+
+/// A press, drag or release at a view point, sent to the pane at the cell under it. Inputs:
+/// the scale table, the view's entry, the kind, the point, whether Option or Shift is held,
+/// and the click count. Output: what the pane asks for.
+fn mouse(
+    shared: &HashMap<u32, Shared>,
+    entry: &mut Entry<View>,
+    kind: MouseKind,
+    point: (f64, f64),
+    option: bool,
+    clicks: u8,
+) -> Action {
+    let cell = cell_of(shared, entry, point);
+    let input = match kind {
+        MouseKind::Press => Input::Press {
+            cell,
+            option,
+            clicks,
+        },
+        MouseKind::Drag => Input::Drag { cell, option },
+        MouseKind::Release => Input::Release { cell, option },
+    };
+    entry.pane.apply(input)
 }
 
 /// The rows of its mirror a view draws, the first and how many: every row when the view
@@ -1097,7 +1158,7 @@ fn draw_view(
         true => screen::clipped(frame, top, rows),
         false => frame,
     };
-    match platform::paint(view, shared, &frame) {
+    match platform::paint(view, shared, frame) {
         Ok(()) => {}
         Err(code) if code == GPU_FAULT => return Err(GPU_FAULT),
         Err(_) => return Ok(false),
@@ -1255,5 +1316,111 @@ mod tests {
             answered.expect("a style or command off the main thread never panics");
         assert_eq!(styled, Err("native_terminal_main_busy"));
         assert_eq!(commanded, Err("native_terminal_main_busy"));
+    }
+
+    #[cfg(windows)]
+    fn selected(output: &[u8], last: usize) -> Pane {
+        dragged(output, (0, 0), Some((last, 0)))
+    }
+
+    #[cfg(windows)]
+    fn dragged(output: &[u8], from: (usize, usize), to: Option<(usize, usize)>) -> Pane {
+        let mut pane = Pane::new(true);
+        assert!(pane.on_attached(20, 4));
+        assert!(pane.on_output(output));
+        let press = Input::Press {
+            cell: from,
+            option: false,
+            clicks: 1,
+        };
+        assert_eq!(pane.apply(press), Action::Local);
+        if let Some(cell) = to {
+            let drag = Input::Drag {
+                cell,
+                option: false,
+            };
+            assert_eq!(pane.apply(drag), Action::Local);
+        }
+        let release = Input::Release {
+            cell: to.unwrap_or(from),
+            option: false,
+        };
+        assert_eq!(pane.apply(release), Action::Local);
+        pane
+    }
+
+    #[cfg(windows)]
+    fn interrupt() -> Action {
+        Action::Input {
+            bytes: vec![0x03],
+            wheel: false,
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_copy_chord_with_a_selection_copies_and_sends_no_interrupt() {
+        let mut pane = selected(b"hello world", 4);
+        let clip = platform::Clip::new();
+        let chord = Input::Text(vec![0x03]);
+        assert_eq!(copy_key(&mut pane, &clip, chord), Action::Local);
+        assert_eq!(clip.read().as_deref(), Some("hello"), "the board holds it");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_copy_chord_with_no_selection_sends_the_interrupt() {
+        let mut pane = Pane::new(true);
+        assert!(pane.on_attached(20, 4));
+        assert!(pane.on_output(b"hello world"));
+        let clip = platform::Clip::new();
+        let sent = copy_key(&mut pane, &clip, Input::Text(vec![0x03]));
+        let interrupt = Action::Input {
+            bytes: vec![0x03],
+            wheel: false,
+        };
+        assert_eq!(sent, interrupt);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_copy_chord_over_blank_cells_uses_the_selection_up_and_sends_no_interrupt() {
+        let mut pane = dragged(b"hello world", (0, 1), Some((5, 1)));
+        let clip = platform::Clip::new();
+        let chord = Input::Text(vec![0x03]);
+        let sent = copy_key(&mut pane, &clip, chord);
+        assert_eq!(sent, Action::Local, "a blank selection is a selection");
+        assert_eq!(clip.read(), None, "blank text does not go to the board");
+        let again = copy_key(&mut pane, &clip, Input::Text(vec![0x03]));
+        assert_eq!(again, interrupt(), "the chord used the blank selection up");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_copy_chord_after_a_plain_click_sends_the_interrupt() {
+        let mut pane = dragged(b"hello world", (2, 0), None);
+        let clip = platform::Clip::new();
+        let sent = copy_key(&mut pane, &clip, Input::Text(vec![0x03]));
+        assert_eq!(sent, interrupt(), "a click selects nothing");
+        assert_eq!(clip.read(), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_second_copy_chord_after_a_copy_sends_the_interrupt() {
+        let mut pane = selected(b"hello world", 4);
+        let clip = platform::Clip::new();
+        let _ = copy_key(&mut pane, &clip, Input::Text(vec![0x03]));
+        assert_eq!(
+            clip.read().as_deref(),
+            Some("hello"),
+            "the first chord copies"
+        );
+        let sent = copy_key(&mut pane, &clip, Input::Text(vec![0x03]));
+        let interrupt = Action::Input {
+            bytes: vec![0x03],
+            wheel: false,
+        };
+        assert_eq!(sent, interrupt, "the copy used the selection up");
     }
 }

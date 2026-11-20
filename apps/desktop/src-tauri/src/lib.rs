@@ -5,10 +5,10 @@ mod updates;
 
 #[cfg(any(target_os = "macos", target_os = "linux", windows))]
 #[cfg_attr(
-    not(target_os = "macos"),
+    not(any(target_os = "macos", windows)),
     expect(
         dead_code,
-        reason = "the Linux and Windows hosts wire the native views in (DEC-203)"
+        reason = "the Linux host wires the native views in (DEC-203)"
     )
 )]
 mod native_term;
@@ -1944,18 +1944,19 @@ async fn attach_place(
     Ok((key, place))
 }
 
-/// The style a page sends a native view: read on macOS, skipped elsewhere.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+/// The style a page sends a native view: read on macOS, Linux and Windows, skipped elsewhere.
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 type NativeStyleText = native_term::style::StyleText;
-/// The style a page sends a native view: read on macOS, skipped elsewhere.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// The style a page sends a native view: read on macOS, Linux and Windows, skipped elsewhere.
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 type NativeStyleText = serde::de::IgnoredAny;
 
 /// The channel a native view's events go to its panel on.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 type NativeEvents = Channel<native_term::host::NativeEvent>;
-/// The channel a native view's events go to its panel on; no view sends off macOS.
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// The channel a native view's events go to its panel on; no view sends on a system with no
+/// native host.
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 type NativeEvents = Channel<serde_json::Value>;
 
 /// The largest CSS pixel coordinate or side a native view's place may have.
@@ -2020,8 +2021,8 @@ enum NativeCopy {
 }
 
 /// The answer of every native view command but `enabled` on a system with no native host,
-/// which draws no native view; the command checked the calling window first. Output: the
-/// refusal.
+/// which draws no native view, and of the Windows open until H5c; the command checked the
+/// calling window first. Output: the refusal.
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn native_unsupported<T>() -> Result<T, BridgeError> {
     Err(engine_failure("native_terminal_unsupported"))
@@ -2052,10 +2053,10 @@ fn native_direct(name: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)>
 /// engine-fed. Inputs: the app, the window label, the agent window name and the wall
 /// window's project. Output: the place, or the refusal.
 #[cfg_attr(
-    not(any(target_os = "macos", target_os = "linux", test)),
+    not(any(target_os = "macos", target_os = "linux", windows)),
     expect(
         dead_code,
-        reason = "the Windows host reopens views engine-fed through it (DEC-203); the host rows reach it through command"
+        reason = "a system with no native host never reopens a view engine-fed (DEC-203)"
     )
 )]
 async fn native_place(
@@ -2076,7 +2077,7 @@ async fn native_place(
 /// Runs one call on a native view the calling window opened, on the main thread; the
 /// command checked the calling window first. Inputs: the calling page, the app, the view
 /// and the call. Output: ok, or a plain code.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 async fn native_call(
     webview: &Webview,
     app: &AppHandle,
@@ -2113,19 +2114,36 @@ async fn desktop_native_terminal_probe(
     .map_err(engine_failure)
 }
 
-/// Whether this desktop draws terminals natively: true only in a macOS build; Linux builds
-/// reach the host but stay off until the Linux switch. Input: the calling page. Output: the
-/// answer.
+/// Whether this build lets a page open native terminal views: macOS only, until H5c proves
+/// the Windows host on the real app and adds Windows here. Output: the answer.
+fn native_enabled() -> bool {
+    cfg!(target_os = "macos")
+}
+
+/// The Windows open's guard at the IPC boundary: the host is built and reviewed, but no
+/// page opens a Windows native view while `native_enabled` is false. Output: ok, or
+/// `native_terminal_unsupported`, the code Windows answered before its host.
+#[cfg(windows)]
+fn native_open_allowed() -> Result<(), BridgeError> {
+    if native_enabled() {
+        return Ok(());
+    }
+    native_unsupported()
+}
+
+/// Whether this desktop draws terminals natively: true only in a macOS build; Linux and
+/// Windows builds reach their hosts but stay off until their switches. Input: the calling
+/// page. Output: the answer.
 #[tauri::command]
 fn desktop_native_terminal_enabled(webview: Webview) -> Result<bool, BridgeError> {
     terminal_window(&webview)?;
-    Ok(cfg!(target_os = "macos"))
+    Ok(native_enabled())
 }
 
 /// Opens a native view over the calling page's host element: the shared gate takes its
-/// place, and the direct path draws it when the engine's own server shows the agent. Off
-/// macOS it answers `native_terminal_unsupported`. Inputs: the page and its open
-/// (native-terminal.ts `NativeOpen`). Output: the view id.
+/// place, and on macOS the direct path draws it when the engine's own server shows the
+/// agent. Linux, and Windows until H5c, answer `native_terminal_unsupported`. Inputs: the
+/// page and its open (native-terminal.ts `NativeOpen`). Output: the view id.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn desktop_native_terminal_open(
@@ -2146,8 +2164,10 @@ async fn desktop_native_terminal_open(
 ) -> Result<u64, BridgeError> {
     terminal_window(&webview)?;
     let (rect, viewport) = rect.checked()?;
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     {
+        #[cfg(windows)]
+        native_open_allowed()?;
         let style = native_term::style::Style::from_text(&style).map_err(engine_failure)?;
         let name = native_term::window_name(&name).map_err(engine_failure)?;
         if label.len() > native_term::host::LABEL_BYTES_MAX {
@@ -2156,7 +2176,10 @@ async fn desktop_native_terminal_open(
         let id = project.as_deref();
         let agent = (name.as_str(), pane.as_deref());
         let (_, place) = attach_place(&webview, &state, &terminals, agent.0, agent.1, id).await?;
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let direct = pane.is_none().then(|| native_direct(&name)).flatten();
+        #[cfg(windows)]
+        let direct = None;
         let window = webview.label().to_owned();
         let open = native_term::host::Open {
             window,
@@ -2175,7 +2198,7 @@ async fn desktop_native_terminal_open(
         };
         native_open(&webview, app, open).await
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = (
             app, state, terminals, name, pane, label, rect, viewport, style, covered, keys,
@@ -2186,9 +2209,9 @@ async fn desktop_native_terminal_open(
 }
 
 /// Opens a checked view on the main thread above the page's webview: the WKWebView on
-/// macOS, the WebKitGTK widget on Linux. Inputs: the page, the app and the checked open.
-/// Output: the view id, or a plain code with the place given back.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+/// macOS, the WebKitGTK widget on Linux, WebView2's window on Windows. Inputs: the page, the
+/// app and the checked open. Output: the view id, or a plain code with the place given back.
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 async fn native_open(
     webview: &Webview,
     app: AppHandle,
@@ -2197,15 +2220,7 @@ async fn native_open(
     let (sender, receiver) = tokio::sync::oneshot::channel();
     webview
         .with_webview(move |platform| {
-            #[cfg(target_os = "macos")]
-            let page = platform.inner();
-            #[cfg(target_os = "linux")]
-            let page = gtk::prelude::Cast::upcast::<gtk::Widget>(platform.inner());
-            let opened = match native_term::host::main() {
-                Some(mtm) => native_term::host::open(&app, mtm, page, open),
-                None => Err("native_terminal_main_busy"),
-            };
-            let _ = sender.send(opened);
+            let _ = sender.send(native_open_here(&app, &platform, open));
         })
         .map_err(|_| engine_failure("native_terminal_webview_missing"))?;
     let opened = receiver
@@ -2214,6 +2229,61 @@ async fn native_open(
     let view = opened.map_err(engine_failure)?;
     assert!(view > 0);
     Ok(view)
+}
+
+/// Opens the view on the main thread over the page's WKWebView. Inputs: the app, the
+/// page's platform webview and the open. Output: the view id, or a plain code.
+#[cfg(target_os = "macos")]
+fn native_open_here(
+    app: &AppHandle,
+    platform: &tauri::webview::PlatformWebview,
+    open: native_term::host::Open,
+) -> Result<u64, &'static str> {
+    let Some(mtm) = objc2::MainThreadMarker::new() else {
+        return Err("native_terminal_main_busy");
+    };
+    native_term::host::open(app, mtm, platform.inner(), open)
+}
+
+/// Opens the view on the main thread over the page's WebKitGTK widget. Inputs: the app, the
+/// page's platform webview and the open. Output: the view id, or a plain code.
+#[cfg(target_os = "linux")]
+fn native_open_here(
+    app: &AppHandle,
+    platform: &tauri::webview::PlatformWebview,
+    open: native_term::host::Open,
+) -> Result<u64, &'static str> {
+    let Some(mtm) = native_term::host::main() else {
+        return Err("native_terminal_main_busy");
+    };
+    let page = gtk::prelude::Cast::upcast::<gtk::Widget>(platform.inner());
+    native_term::host::open(app, mtm, page, open)
+}
+
+/// Opens the view on the main thread over the page's WebView2, in the window wry made for
+/// it. Inputs: the app, the page's platform webview and the open. Output: the view id, or a
+/// plain code.
+#[cfg(windows)]
+fn native_open_here(
+    app: &AppHandle,
+    platform: &tauri::webview::PlatformWebview,
+    open: native_term::host::Open,
+) -> Result<u64, &'static str> {
+    let Some(mtm) = native_term::host::main() else {
+        return Err("native_terminal_main_busy");
+    };
+    let container = webview_container(platform).ok_or("native_terminal_webview_missing")?;
+    native_term::host::open(app, mtm, container, open)
+}
+
+/// The window wry made for the page's WebView2, which its controller is parented to (wry
+/// webview2 `ParentWindow`). Input: the page's platform webview. Output: its handle value,
+/// or none when the controller cannot say.
+#[cfg(windows)]
+fn webview_container(platform: &tauri::webview::PlatformWebview) -> Option<isize> {
+    let mut hwnd = ::windows::Win32::Foundation::HWND::default();
+    unsafe { platform.controller().ParentWindow(&mut hwnd) }.ok()?;
+    (!hwnd.is_invalid()).then_some(hwnd.0 as isize)
 }
 
 /// Moves or resizes a native view to its host element's new place. Inputs: the page, the
@@ -2227,7 +2297,7 @@ async fn desktop_native_terminal_place(
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
     let (rect, viewport) = rect.checked()?;
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     {
         native_call(
             &webview,
@@ -2237,7 +2307,7 @@ async fn desktop_native_terminal_place(
         )
         .await
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = (app, view, rect, viewport);
         native_unsupported()
@@ -2254,7 +2324,7 @@ async fn desktop_native_terminal_cover(
     covered: bool,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     {
         native_call(
             &webview,
@@ -2264,7 +2334,7 @@ async fn desktop_native_terminal_cover(
         )
         .await
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = (app, view, covered);
         native_unsupported()
@@ -2280,11 +2350,11 @@ async fn desktop_native_terminal_focus(
     view: u64,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     {
         native_call(&webview, &app, view, native_term::host::Command::Focus).await
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = (app, view);
         native_unsupported()
@@ -2300,7 +2370,7 @@ async fn desktop_native_terminal_style(
     style: NativeStyleText,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     {
         let style = native_term::style::Style::from_text(&style).map_err(engine_failure)?;
         native_term::host::on_main(&app, move |_| native_term::host::style(style))
@@ -2308,7 +2378,7 @@ async fn desktop_native_terminal_style(
             .map_err(engine_failure)?
             .map_err(engine_failure)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = (app, style);
         native_unsupported()
@@ -2326,7 +2396,7 @@ async fn desktop_native_terminal_copy(
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
     let output = matches!(what, NativeCopy::Output);
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     {
         native_call(
             &webview,
@@ -2336,7 +2406,7 @@ async fn desktop_native_terminal_copy(
         )
         .await
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = (app, view, output);
         native_unsupported()
@@ -2353,7 +2423,7 @@ async fn desktop_native_terminal_paste(
     text: String,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     {
         native_call(
             &webview,
@@ -2363,7 +2433,7 @@ async fn desktop_native_terminal_paste(
         )
         .await
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = (app, view, text);
         native_unsupported()
@@ -2379,11 +2449,11 @@ async fn desktop_native_terminal_jump(
     view: u64,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     {
         native_call(&webview, &app, view, native_term::host::Command::Jump).await
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = (app, view);
         native_unsupported()
@@ -2400,11 +2470,11 @@ async fn desktop_native_terminal_keys(
     on: bool,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     {
         native_call(&webview, &app, view, native_term::host::Command::Keys(on)).await
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = (app, view, on);
         native_unsupported()
@@ -2420,11 +2490,11 @@ async fn desktop_native_terminal_close(
     view: u64,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     {
         native_call(&webview, &app, view, native_term::host::Command::Close).await
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = (app, view);
         native_unsupported()
@@ -2800,7 +2870,7 @@ fn build_wall(
         .on_navigation(app_page)
         .on_page_load(|window, payload| {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
-                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                #[cfg(any(target_os = "macos", target_os = "linux", windows))]
                 native_term::host::window_gone(window.app_handle(), window.label());
                 window
                     .state::<TerminalState>()
@@ -2813,11 +2883,11 @@ fn build_wall(
     theme::dress(&wall);
     let terminals = Arc::clone(&app.state::<TerminalState>().0);
     let closed = label.to_owned();
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
     let handle = app.clone();
     wall.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
-            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            #[cfg(any(target_os = "macos", target_os = "linux", windows))]
             native_term::host::window_gone(&handle, &closed);
             terminals.window_closed(&closed);
         }
@@ -6277,6 +6347,8 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .invoke_handler(native_handler())
         .setup(|app| {
+            #[cfg(windows)]
+            native_term::host::mark_main();
             let main = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("CrazyAgent")
                 .inner_size(1180.0, 800.0)
@@ -6284,7 +6356,7 @@ pub fn run() {
                 .on_navigation(app_page)
                 .on_page_load(|window, payload| {
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
-                        #[cfg(any(target_os = "macos", target_os = "linux"))]
+                        #[cfg(any(target_os = "macos", target_os = "linux", windows))]
                         native_term::host::window_gone(window.app_handle(), window.label());
                         window
                             .state::<TerminalState>()
@@ -6296,7 +6368,7 @@ pub fn run() {
             let handle = app.handle().clone();
             main.on_window_event(move |event| {
                 if matches!(event, tauri::WindowEvent::Destroyed) {
-                    #[cfg(any(target_os = "macos", target_os = "linux"))]
+                    #[cfg(any(target_os = "macos", target_os = "linux", windows))]
                     native_term::host::window_gone(&handle, "main");
                     close_walls(&handle, None);
                     ide::shut_own_windows(handle.clone(), None);
@@ -6365,9 +6437,11 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
 
-    /// V244-LINUX-L5C-5: every native host use in lib.rs builds on Linux too, under a
-    /// nearest cfg that names Linux or is the macOS webdriver probe's, and the enabled
-    /// answer stays macOS-only until the Linux switch (L5e). Reads lib.rs's own text.
+    /// V244-LINUX-L5C-5: every native host use in lib.rs builds on Linux too: under a
+    /// nearest block or item cfg that names Linux, the macOS webdriver probe's, or in a
+    /// per-system fn twin with a Linux twin; the enabled answer stays macOS-only until the
+    /// Linux switch (L5e). A cfg on one statement gates only that statement, so it is not
+    /// the nearest. Reads lib.rs's own text.
     #[test]
     fn every_native_host_use_builds_on_linux_and_native_stays_off_there() {
         let text = include_str!("lib.rs");
@@ -6376,30 +6450,47 @@ mod tests {
             .expect("the product part of lib.rs");
         let lines: Vec<&str> = product.lines().collect();
         let probe = "#[cfg(all(target_os = \"macos\", feature = \"native-webdriver\"))]";
+        let windows_only = ["native_term::host::mark_main();"];
         let mut uses = 0;
         for (at, line) in lines.iter().enumerate() {
             if !line.contains("native_term::host::") {
                 continue;
             }
             uses += 1;
-            let nearest = lines[at.saturating_sub(30)..at]
-                .iter()
-                .rev()
-                .map(|above| above.trim())
-                .find(|above| above.starts_with("#[cfg("));
-            let Some(cfg) = nearest else {
+            if windows_only.contains(&line.trim()) && lines[at - 1].trim() == "#[cfg(windows)]" {
+                continue;
+            }
+            let nearest = (at.saturating_sub(30)..at).rev().find(|&above| {
+                let cfg = lines[above].trim();
+                let one_statement = above + 1 < at && lines[above + 1].trim_end().ends_with(';');
+                cfg.starts_with("#[cfg(") && !one_statement
+            });
+            let Some(gate) = nearest else {
                 continue;
             };
+            let cfg = lines[gate].trim();
             let linux = cfg.contains("target_os = \"linux\"") && !cfg.starts_with("#[cfg(not(");
+            let twin = lines[gate + 1]
+                .trim()
+                .strip_prefix("fn ")
+                .and_then(|rest| rest.split_once('('))
+                .is_some_and(|(name, _)| {
+                    product.contains(&format!("#[cfg(target_os = \"linux\")]\nfn {name}("))
+                });
             assert!(
-                linux || cfg == probe,
+                linux || cfg == probe || twin,
                 "lib.rs:{} uses the native host under {cfg}",
                 at + 1
             );
         }
         assert!(uses >= 15, "lib.rs uses the native host {uses} times");
-        let enabled = product.matches("Ok(cfg!(target_os = \"macos\"))").count();
-        assert_eq!(enabled, 1, "the enabled answer stays macOS-only");
+        let enabled = "fn native_enabled() -> bool {\n    cfg!(target_os = \"macos\")\n}";
+        assert_eq!(
+            product.matches(enabled).count(),
+            1,
+            "the enabled answer stays macOS-only"
+        );
+        assert_eq!(product.matches("Ok(native_enabled())").count(), 1);
     }
     use tauri::ipc::{CallbackFn, InvokeBody};
     use tauri::test::{
@@ -6407,6 +6498,14 @@ mod tests {
     };
     use tauri::webview::{InvokeRequest, WebviewBuilder};
     use tauri::{LogicalPosition, LogicalSize, Webview};
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_open_answers_unsupported_until_native_terminals_are_enabled() {
+        assert!(!native_enabled(), "Windows native views stay off until H5c");
+        let refused = native_open_allowed().expect_err("the open guard refuses");
+        assert_eq!(refused.code, "native_terminal_unsupported");
+    }
 
     struct Page(Webview<MockRuntime>);
 

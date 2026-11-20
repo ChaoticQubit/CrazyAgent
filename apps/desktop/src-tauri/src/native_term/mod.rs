@@ -25,6 +25,8 @@ mod table;
 mod view;
 #[cfg(target_os = "macos")]
 mod view_text;
+#[cfg(windows)]
+mod windows;
 
 #[cfg(unix)]
 use crazyagent::terminal::{FOLDER, tmux::SOCKET};

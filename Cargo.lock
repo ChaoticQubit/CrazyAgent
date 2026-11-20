@@ -950,6 +950,8 @@ dependencies = [
  "wayland-protocols",
  "webkit2gtk",
  "wgpu",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
  "windows-sys 0.61.2",
  "x11-dl",
 ]
