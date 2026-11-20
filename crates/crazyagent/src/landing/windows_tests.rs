@@ -675,8 +675,9 @@ fn lowered(paths: &[PathBuf]) -> Vec<String> {
 /// folder of the data root and its temp folder in the step folder, plus its kind's target: the
 /// object store for an Objects step, the work tree for a WorkTree step, nothing for an Index
 /// step. No kind writes the worktree's git folder itself, the common git folder or another
-/// lease's places, and every kind reads the work tree, the common git folder and git's marked
-/// install folder.
+/// lease's places, and every kind reads the work tree, the object store and git's marked install
+/// folder but no other part of the common git folder, so a junction an agent toggles after the
+/// engine's walk reaches no config, hook or ref (rv-sec3 RULING 17:42 R2).
 #[test]
 fn a_windows_step_writes_only_its_step_folder_its_own_home_and_its_kind_target() {
     let place = place();
@@ -722,7 +723,15 @@ fn a_windows_step_writes_only_its_step_folder_its_own_home_and_its_kind_target()
             .iter()
             .map(|root| root.to_lowercase())
             .collect();
-        for read in [&ws.worktree, &common, &places.git_root] {
+        let secret = common.join("config").to_str().unwrap().to_lowercase();
+        assert!(
+            !reads
+                .iter()
+                .chain(&profile.write_roots)
+                .any(|root| secret.starts_with(&root.to_lowercase())),
+            "no step reaches the common git folder beyond its objects (RULING 17:42 R2)"
+        );
+        for read in [&ws.worktree, &common.join("objects"), &places.git_root] {
             let read = read.to_str().unwrap().to_lowercase();
             assert!(
                 reads.contains(&read)
