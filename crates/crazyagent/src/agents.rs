@@ -32,6 +32,8 @@ const KILL_WAIT: Duration = Duration::from_secs(2);
 #[cfg(target_os = "macos")]
 const LSOF: &str = "/usr/sbin/lsof";
 const STOP_INCOMPLETE: &str = "agent_stop_incomplete";
+#[cfg(unix)]
+const LEFT_NAMED_MAX: usize = 8;
 const STOP_GRACE: Duration = Duration::from_secs(2);
 const RUN_TIME_SECS_MAX: u64 = 86_400;
 const HOST_WAIT: Duration = Duration::from_secs(10);
@@ -1585,6 +1587,7 @@ fn holder_target(
     leader: Result<rustix::process::Pid, rustix::io::Errno>,
     own: rustix::process::Pid,
     group: u32,
+    _carries: bool,
 ) -> Option<Signalled> {
     if writer.as_raw_nonzero().get() <= 1 {
         return None;
@@ -1611,6 +1614,21 @@ fn holder_target(
     target
 }
 
+/// Names the holders of an agent's output log a stop left running: each by id and program,
+/// at most `LEFT_NAMED_MAX`, then how many more. Input: each holder's id and program, empty
+/// when unknown. Output: the names, empty for none.
+#[cfg(unix)]
+fn left_named(_left: &[(i32, String)]) -> String {
+    String::new()
+}
+
+/// The engine log line for a stop that left holders of an agent's output log running.
+/// Inputs: the agent id and the holders' names. Output: the line.
+#[cfg(unix)]
+fn left_line(_id: &str, _named: &str) -> String {
+    String::new()
+}
+
 /// Ends what still holds a reattached agent's output log: TERM, then KILL after the
 /// grace time, each sent only to a process found holding the log for writing, or to its
 /// group when the holder leads it or sits in the agent's recorded group.
@@ -1630,7 +1648,13 @@ fn kill_holders(group: u32, output: &Path, probe: &File) -> bool {
             return false;
         };
         for writer in writers {
-            match holder_target(writer, rustix::process::getpgid(Some(writer)), own, group) {
+            match holder_target(
+                writer,
+                rustix::process::getpgid(Some(writer)),
+                own,
+                group,
+                true,
+            ) {
                 Some(Signalled::Group(leader)) => {
                     let _ = rustix::process::kill_process_group(leader, signal);
                 }

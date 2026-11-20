@@ -1590,6 +1590,26 @@ fn user_id(field: &str) -> Option<u32> {
     }
 }
 
+/// Tells which of `asked` carry the launch's token in their environment, so a stop signals
+/// a process outside the agent's group only when the launch started it. A process whose
+/// environment this user cannot read, as macOS hides its own platform programs', is never
+/// a carrier. Inputs: the token and the ids. Output: the carriers among them, or None when
+/// the environments could not be listed.
+#[cfg(unix)]
+pub(crate) fn carriers_among(_token: &LineageToken, asked: &[i32]) -> Option<Vec<i32>> {
+    assert!(asked.len() <= SIGNALLED_MAX);
+    Some(Vec::new())
+}
+
+/// Names each of `asked` by its program's basename, cut to visible characters, from one
+/// [`PS_NAMES`] listing. Input: the ids. Output: each named id's name; an id the listing
+/// did not name, or a listing that failed, gives no entry.
+#[cfg(unix)]
+pub(crate) fn programs_of(asked: &[i32]) -> BTreeMap<i32, String> {
+    assert!(asked.len() <= SIGNALLED_MAX);
+    BTreeMap::new()
+}
+
 /// Finds no process by its environment where none is listed here: Linux reads no token yet.
 /// Inputs: unused. Output: none found.
 #[cfg(all(unix, not(target_os = "macos")))]

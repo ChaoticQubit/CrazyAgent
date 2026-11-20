@@ -9,6 +9,14 @@ const CHILD: &str = include_str!("../../tests/fixtures/agent_child.py");
 
 const CRASH_ROOT: &str = "CRAZYAGENT_AGENTS_CRASH_ROOT";
 
+const CRASH_PROMPT: &str = "CRAZYAGENT_AGENTS_CRASH_PROMPT";
+
+const OWNER_WRITER_LOG: &str = "CRAZYAGENT_AGENTS_OWNER_WRITER_LOG";
+
+const OWNER_WRITER_MARK: &str = "CRAZYAGENT_AGENTS_OWNER_WRITER_MARK";
+
+const SLEEPER: &str = "CRAZYAGENT_AGENTS_SLEEPER";
+
 const WAIT: Duration = Duration::from_secs(30);
 
 struct Case {
@@ -159,9 +167,10 @@ fn escaping_engine_process() {
     let Some(root) = std::env::var_os(CRASH_ROOT).map(PathBuf::from) else {
         return;
     };
+    let prompt = std::env::var(CRASH_PROMPT).unwrap_or_else(|_| "escape".to_owned());
     let agents = Agents::open(&root).unwrap();
     let agent = agents
-        .launch(spec(&root, "escaping", Some("escape")), None)
+        .launch(spec(&root, "escaping", Some(&prompt)), None)
         .unwrap();
     until("the reply", || replied(&agents, &agent.id, "escaped"));
     std::fs::write(
@@ -173,11 +182,12 @@ fn escaping_engine_process() {
 }
 
 #[cfg(target_os = "macos")]
-fn crash(root: &Path, test: &str) -> Vec<String> {
+fn crash(root: &Path, test: &str, envs: &[(&str, &str)]) -> Vec<String> {
     let status = crate::spawn_gate::status(
         std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", test, "--ignored", "--test-threads", "1"])
             .env(CRASH_ROOT, root)
+            .envs(envs.iter().copied())
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null()),
     )
@@ -188,10 +198,15 @@ fn crash(root: &Path, test: &str) -> Vec<String> {
 
 /// Crashes an engine whose one agent started a child in a new session that keeps the
 /// agent's output log, then kills the agent's own group so only that child holds it.
-/// Input: the case root. Output: the agent id and the escaped child's pid.
+/// Inputs: the case root and the fixture prompt that starts the child. Output: the agent
+/// id and the escaped child's pid.
 #[cfg(target_os = "macos")]
-fn escaped_after_crash(root: &Path) -> (String, i32) {
-    let ids = crash(root, "agents::tests::escaping_engine_process");
+fn escaped_after_crash(root: &Path, prompt: &str) -> (String, i32) {
+    let ids = crash(
+        root,
+        "agents::tests::escaping_engine_process",
+        &[(CRASH_PROMPT, prompt)],
+    );
     let (pid, grandchild) = pids(root, "escaping");
     let escaped = escaped(root, "escaping");
     rustix::process::kill_process_group(
@@ -229,11 +244,136 @@ fn end_escaped(pid: i32) {
     }
 }
 
+/// Starts a process of the owner's own, as `tee -a` or an editor is, that holds `log` open
+/// for appending in a process group it leads and carries no lineage token, and waits until
+/// it holds the log. Inputs: the log and a mark path the process writes once it does.
+/// Output: the process.
+#[cfg(target_os = "macos")]
+fn owner_writer(log: &Path, mark: &Path) -> std::process::Child {
+    let writer = crate::spawn_gate::spawn(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "agents::tests::owner_writer_process",
+                "--ignored",
+                "--test-threads",
+                "1",
+            ])
+            .env(OWNER_WRITER_LOG, log)
+            .env(OWNER_WRITER_MARK, mark)
+            .env_remove(crate::harnesses::leftovers::LINEAGE_VARIABLE)
+            .process_group(0)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    until("the owner's writer to hold the log", || mark.is_file());
+    writer
+}
+
+#[test]
+#[ignore = "run only by the log holder rows as the owner's own writer of an agent log"]
+fn owner_writer_process() {
+    let (Some(log), Some(mark)) = (
+        std::env::var_os(OWNER_WRITER_LOG),
+        std::env::var_os(OWNER_WRITER_MARK),
+    ) else {
+        return;
+    };
+    let _held = std::fs::OpenOptions::new().append(true).open(log).unwrap();
+    std::fs::write(mark, b"").unwrap();
+    std::thread::sleep(Duration::from_secs(120));
+}
+
+#[test]
+#[ignore = "run only by the carrier row as a process that sleeps with the environment it got"]
+fn sleeping_process() {
+    if std::env::var_os(SLEEPER).is_some() {
+        std::thread::sleep(Duration::from_secs(60));
+    }
+}
+
+/// Tells whether a process still runs, a child of this test reaped once it has ended,
+/// after `wait`. Inputs: the child and the wait. Output: true while it runs.
+#[cfg(target_os = "macos")]
+fn kept_for(child: &mut std::process::Child, wait: Duration) -> bool {
+    let deadline = Instant::now() + wait;
+    while Instant::now() < deadline {
+        if child.try_wait().unwrap().is_some() {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    child.try_wait().unwrap().is_none()
+}
+
+/// Tells whether macOS shows `pid`'s environment holding a lineage token, reading only
+/// that process and keeping only whether the variable is there. Input: the process.
+/// Output: true when it is.
+#[cfg(target_os = "macos")]
+fn shows_lineage(pid: i32) -> bool {
+    let listed = crate::spawn_gate::output(
+        std::process::Command::new("/bin/ps")
+            .args(["-E", "-ww", "-o", "command=", "-p", &pid.to_string()])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    String::from_utf8_lossy(&listed.stdout)
+        .split_whitespace()
+        .any(|word| {
+            word.starts_with(&format!(
+                "{}=",
+                crate::harnesses::leftovers::LINEAGE_VARIABLE
+            ))
+        })
+}
+
 /// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
 /// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
 #[cfg(target_os = "macos")]
 #[test]
-fn stopping_an_agent_also_ends_a_child_that_left_its_group_but_holds_its_log() {
+fn stopping_an_agent_ends_its_escaped_child_but_never_the_owners_own_writer_of_its_log() {
+    let case = Case::new();
+    let root = case.path();
+    let agents = case.agents();
+    let agent = agents
+        .launch(spec(&root, "carrying", Some("escape-carrier")), None)
+        .unwrap();
+    until("the reply", || replied(&agents, &agent.id, "escaped"));
+    let escaped = escaped(&root, "carrying");
+    assert!(
+        shows_lineage(escaped),
+        "the fixture's Python hides its environment on this host"
+    );
+    let log = agents.folder(&agent.id).join(launch::DURABLE_OUTPUT);
+    let mut writer = owner_writer(&log, &root.join("writer.held"));
+
+    let stopped = agents.stop(&agent.id).unwrap();
+
+    let writer_kept = kept_for(&mut writer, Duration::from_secs(1));
+    let escaped_ended = gone_within(escaped, Duration::from_secs(5));
+    let _ = writer.kill();
+    let _ = writer.wait();
+    end_escaped(escaped);
+    assert!(
+        writer_kept,
+        "stop killed the owner's own writer of the agent log"
+    );
+    assert!(
+        escaped_ended,
+        "stop left the escaped child that carries the launch token running"
+    );
+    assert_eq!(stopped.state, AgentState::Stopped);
+    assert_eq!(stopped.reason, None);
+}
+
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
+#[test]
+fn stopping_an_agent_leaves_a_log_holder_whose_environment_is_hidden_and_names_it() {
     let case = Case::new();
     let root = case.path();
     let agents = case.agents();
@@ -247,14 +387,19 @@ fn stopping_an_agent_also_ends_a_child_that_left_its_group_but_holds_its_log() {
 
     let stopped = agents.stop(&agent.id).unwrap();
 
-    let escaped_ended = gone_within(escaped, Duration::from_secs(5));
+    let escaped_kept = alive(escaped);
     end_escaped(escaped);
     assert!(
-        escaped_ended,
-        "stop left the child that left the agent's group running"
+        escaped_kept,
+        "stop signalled a log holder it could not tell was the agent's"
     );
-    assert_eq!(stopped.state, AgentState::Stopped);
-    assert_eq!(stopped.reason, None);
+    assert_eq!(stopped.state, AgentState::Failed);
+    assert_eq!(stopped.reason.as_deref(), Some("agent_stop_incomplete"));
+    assert!(
+        stopped.status.contains(&format!("{escaped} sleep")),
+        "{}",
+        stopped.status
+    );
     until("the agent's own group to be gone", || {
         !alive(pid) && !alive(grandchild)
     });
@@ -264,10 +409,37 @@ fn stopping_an_agent_also_ends_a_child_that_left_its_group_but_holds_its_log() {
 /// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
 #[cfg(target_os = "macos")]
 #[test]
-fn stopping_a_reattached_agent_ends_what_holds_its_log_and_never_a_foreign_group() {
+fn stopping_a_reattached_agent_ends_the_escaped_child_that_carries_its_launch_token() {
     let case = Case::new();
     let root = case.path();
-    let (id, escaped) = escaped_after_crash(&root);
+    let (id, escaped) = escaped_after_crash(&root, "escape-carrier");
+    assert!(
+        shows_lineage(escaped),
+        "the fixture's Python hides its environment on this host"
+    );
+    let agents = Agents::open(&root).unwrap();
+    assert!(agents.view(&id).unwrap().reattached);
+
+    let stopped = agents.stop(&id).unwrap();
+
+    let escaped_ended = gone_within(escaped, Duration::from_secs(5));
+    end_escaped(escaped);
+    assert!(
+        escaped_ended,
+        "stop left the escaped child that carries the launch token running"
+    );
+    assert_eq!(stopped.state, AgentState::Stopped);
+    assert_eq!(stopped.reason, None);
+}
+
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
+#[test]
+fn stopping_a_reattached_agent_never_signals_a_foreign_group_nor_a_hidden_holder_and_names_it() {
+    let case = Case::new();
+    let root = case.path();
+    let (id, escaped) = escaped_after_crash(&root, "escape");
     let mut foreign = crate::spawn_gate::spawn(
         std::process::Command::new("/bin/sleep")
             .arg("300")
@@ -291,17 +463,22 @@ fn stopping_a_reattached_agent_ends_what_holds_its_log_and_never_a_foreign_group
     let stopped = agents.stop(&id).unwrap();
 
     let foreign_kept = foreign.try_wait().unwrap().is_none();
-    let escaped_ended = gone_within(escaped, Duration::from_secs(5));
+    let escaped_kept = alive(escaped);
     let _ = foreign.kill();
     let _ = foreign.wait();
     end_escaped(escaped);
     assert!(foreign_kept, "stop signalled a foreign process group");
     assert!(
-        escaped_ended,
-        "stop left the child that holds the log running"
+        escaped_kept,
+        "stop signalled a log holder it could not tell was the agent's"
     );
-    assert_eq!(stopped.state, AgentState::Stopped);
-    assert_eq!(stopped.reason, None);
+    assert_eq!(stopped.state, AgentState::Failed);
+    assert_eq!(stopped.reason.as_deref(), Some("agent_stop_incomplete"));
+    assert!(
+        stopped.status.contains(&format!("{escaped} sleep")),
+        "{}",
+        stopped.status
+    );
 }
 
 /// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
@@ -311,7 +488,7 @@ fn stopping_a_reattached_agent_ends_what_holds_its_log_and_never_a_foreign_group
 fn a_reattached_agent_whose_log_was_replaced_is_not_signalled_and_not_called_stopped() {
     let case = Case::new();
     let root = case.path();
-    let (id, escaped) = escaped_after_crash(&root);
+    let (id, escaped) = escaped_after_crash(&root, "escape");
     let agents = Agents::open(&root).unwrap();
     assert!(agents.view(&id).unwrap().reattached);
     let log = root.join("agents").join(&id).join(launch::DURABLE_OUTPUT);
@@ -352,7 +529,7 @@ fn only_other_write_holders_are_read_from_lsof_and_a_listing_without_this_engine
 fn after_an_engine_crash_live_agents_are_reattached_and_dead_ones_are_marked_closed() {
     let case = Case::new();
     let root = case.path();
-    let ids = crash(&root, "agents::tests::crashing_engine_process");
+    let ids = crash(&root, "agents::tests::crashing_engine_process", &[]);
     let (kept, killed, stopped) = (&ids[0], &ids[1], &ids[2]);
     let (kept_pid, _) = pids(&root, "kept");
     let (killed_pid, killed_grandchild) = pids(&root, "killed");
@@ -1224,9 +1401,243 @@ fn a_log_holder_stop_never_signals_process_or_group_one() {
     ];
     for (writer, leader, group, wanted) in cases {
         assert_eq!(
-            holder_target(writer, leader, own, group),
+            holder_target(writer, leader, own, group, true),
             wanted,
             "{writer:?} {leader:?} {group}"
         );
     }
+}
+
+/// A stop signals a holder of an agent's output log outside the agent's recorded group only
+/// when the holder carries the launch's lineage token, so the owner's own `tee -a` or editor
+/// on the log is never ended; a holder in the recorded group keeps its group.
+#[cfg(unix)]
+#[test]
+fn a_log_holder_outside_the_agents_group_is_signalled_only_when_it_carries_the_launch_token() {
+    let pid = |raw: i32| rustix::process::Pid::from_raw(raw).unwrap();
+    let own = pid(500);
+    let cases = [
+        (
+            pid(1234),
+            Ok(pid(1234)),
+            4321,
+            true,
+            Some(Signalled::Group(pid(1234))),
+        ),
+        (pid(1234), Ok(pid(1234)), 4321, false, None),
+        (
+            pid(1234),
+            Ok(pid(777)),
+            777,
+            false,
+            Some(Signalled::Group(pid(777))),
+        ),
+        (
+            pid(1234),
+            Ok(own),
+            500,
+            true,
+            Some(Signalled::One(pid(1234))),
+        ),
+        (pid(1234), Ok(own), 500, false, None),
+        (
+            pid(1234),
+            Ok(pid(888)),
+            4321,
+            true,
+            Some(Signalled::One(pid(1234))),
+        ),
+        (pid(1234), Ok(pid(888)), 4321, false, None),
+        (
+            pid(1234),
+            Err(rustix::io::Errno::PERM),
+            4321,
+            true,
+            Some(Signalled::One(pid(1234))),
+        ),
+        (pid(1234), Err(rustix::io::Errno::PERM), 4321, false, None),
+    ];
+    for (writer, leader, group, carries, wanted) in cases {
+        assert_eq!(
+            holder_target(writer, leader, own, group, carries),
+            wanted,
+            "{writer:?} {leader:?} {group} {carries}"
+        );
+    }
+}
+
+/// A stop that leaves holders of an agent's output log running names each by id and
+/// program, at most `LEFT_NAMED_MAX`, counts the rest, and logs the same names for the
+/// agent.
+#[cfg(unix)]
+#[test]
+fn a_stop_names_each_log_holder_it_left_by_id_and_program_and_counts_the_rest() {
+    assert_eq!(left_named(&[]), "");
+    assert_eq!(
+        left_named(&[(1234, "sleep".to_owned()), (77, String::new())]),
+        "1234 sleep, 77"
+    );
+    let many: Vec<(i32, String)> = (2..12).map(|pid| (pid, "tee".to_owned())).collect();
+    assert_eq!(
+        left_named(&many),
+        "2 tee, 3 tee, 4 tee, 5 tee, 6 tee, 7 tee, 8 tee, 9 tee, and 2 more"
+    );
+    assert_eq!(
+        left_line("ab", "1234 sleep"),
+        "agent_stop_left agent=ab holders=1234 sleep"
+    );
+    assert_eq!(
+        left_line("ab", ""),
+        "agent_stop_left agent=ab holders=unlisted"
+    );
+}
+
+/// The agent register as it was before runs kept their lineage token and the holders their
+/// stop left, so the row can open a register made by an older engine.
+#[cfg(unix)]
+const SCHEMA_BEFORE_LINEAGE: &str = "CREATE TABLE agent_runs(
+    id TEXT PRIMARY KEY CHECK(length(id) = 32),
+    project TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('master','sub_agent','research')),
+    label TEXT NOT NULL,
+    harness TEXT NOT NULL,
+    spec TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('running','stopped','exited','failed','closed')),
+    reattached INTEGER NOT NULL CHECK(reattached IN (0,1)),
+    process_group INTEGER CHECK(process_group > 1),
+    attempt INTEGER NOT NULL CHECK(attempt >= 1),
+    epoch TEXT NOT NULL,
+    exit_code INTEGER,
+    reason TEXT,
+    last_text TEXT,
+    started_ms INTEGER NOT NULL,
+    ended_ms INTEGER
+);";
+
+#[cfg(unix)]
+#[test]
+fn an_agent_register_from_before_lineage_gets_the_lineage_and_stop_left_columns() {
+    let case = Case::new();
+    let root = case.path();
+    Connection::open(root.join("engine.db"))
+        .unwrap()
+        .execute_batch(SCHEMA_BEFORE_LINEAGE)
+        .unwrap();
+    drop(case.agents());
+    let columns: Vec<String> = Connection::open(root.join("engine.db"))
+        .unwrap()
+        .prepare("SELECT name FROM pragma_table_info('agent_runs')")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(
+        columns.iter().any(|column| column == "lineage")
+            && columns.iter().any(|column| column == "stop_left"),
+        "{columns:?}"
+    );
+}
+
+/// macOS only: an agent launch needs Seatbelt, so every other system refuses it with
+/// `launch_sandbox_unavailable`, which `harnesses::launch::tests` asserts in its own row.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_launched_agent_keeps_its_launch_token_with_its_run() {
+    let case = Case::new();
+    let root = case.path();
+    let agents = case.agents();
+    let agent = agents
+        .launch(spec(&root, "token", Some("echo token")), None)
+        .unwrap();
+    until("the reply", || replied(&agents, &agent.id, "token"));
+    let kept: Option<String> = Connection::open(root.join("engine.db"))
+        .unwrap()
+        .query_row(
+            "SELECT lineage FROM agent_runs WHERE id=?1",
+            [&agent.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let _ = agents.stop(&agent.id);
+    assert!(
+        kept.as_deref()
+            .is_some_and(crate::harnesses::leftovers::LineageToken::valid),
+        "{kept:?}"
+    );
+}
+
+/// Starts this test binary as a process that sleeps, with the lineage token in its
+/// environment or with the variable removed. Inputs: the token and whether it carries it.
+/// Output: the process.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn sleeper(
+    token: &crate::harnesses::leftovers::LineageToken,
+    carries: bool,
+) -> std::process::Child {
+    let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "agents::tests::sleeping_process",
+            "--ignored",
+            "--test-threads",
+            "1",
+        ])
+        .env(SLEEPER, "1")
+        .env_remove(crate::harnesses::leftovers::LINEAGE_VARIABLE)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if carries {
+        command.env(
+            crate::harnesses::leftovers::LINEAGE_VARIABLE,
+            token.as_str(),
+        );
+    }
+    crate::spawn_gate::spawn(&mut command).unwrap()
+}
+
+/// A stop's carriers are the processes whose environment shows the launch's token: one
+/// without it is not, and a platform program, whose environment macOS hides, is one only
+/// on Linux. Each process is named by its program for the stop's report.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn only_processes_whose_environment_shows_the_launch_token_are_carriers() {
+    let token = crate::harnesses::leftovers::LineageToken::new().unwrap();
+    let mut carrier = sleeper(&token, true);
+    let mut plain = sleeper(&token, false);
+    let mut platform = crate::spawn_gate::spawn(
+        std::process::Command::new("/bin/sleep")
+            .arg("60")
+            .env(
+                crate::harnesses::leftovers::LINEAGE_VARIABLE,
+                token.as_str(),
+            )
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    let id = |child: &std::process::Child| i32::try_from(child.id()).unwrap();
+    let asked = [id(&carrier), id(&plain), id(&platform)];
+    let deadline = Instant::now() + WAIT;
+    let mut found = Vec::new();
+    while Instant::now() < deadline && !found.contains(&asked[0]) {
+        found = crate::harnesses::leftovers::carriers_among(&token, &asked).unwrap_or_default();
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let named = crate::harnesses::leftovers::programs_of(&asked[2..]);
+    for child in [&mut carrier, &mut plain, &mut platform] {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    assert!(found.contains(&asked[0]), "{found:?}");
+    assert!(!found.contains(&asked[1]), "{found:?}");
+    assert_eq!(
+        found.contains(&asked[2]),
+        cfg!(target_os = "linux"),
+        "{found:?}"
+    );
+    assert_eq!(named.get(&asked[2]).map(String::as_str), Some("sleep"));
 }

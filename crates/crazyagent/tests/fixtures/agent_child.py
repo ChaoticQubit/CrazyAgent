@@ -61,9 +61,10 @@ def main():
             waiting = True
         elif text.startswith("echo "):
             reply(text[len("echo "):])
-        elif text == "escape":
+        elif text in ("escape", "escape-carrier"):
+            program = ["/bin/sleep", "300"] if text == "escape" else [sys.executable, "-I", "-c", "import time; time.sleep(300)"]
             escaped = subprocess.Popen(
-                ["/bin/sleep", "300"],
+                program,
                 stdin=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
