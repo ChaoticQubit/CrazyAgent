@@ -20,19 +20,20 @@ impl Facts {
     fn ran(&mut self, name: &str, wrapped: Result<Command, SandboxError>) {
         let line = match wrapped {
             Err(refused) => format!("{name}: wrap refused {refused:?}"),
-            Ok(mut command) => match {
+            Ok(mut command) => {
                 let started = std::time::Instant::now();
-                crate::spawn_gate::collected(command.stdin(Stdio::null()))
-                    .map(|out| (out, started.elapsed().as_millis()))
-            } {
-                Err(error) => format!("{name}: start failed {error}"),
-                Ok((out, millis)) => format!(
-                    "{name}: {millis} ms rc={:?} out={:?} err={:?}",
-                    out.status.code(),
-                    clip(&out.stdout),
-                    clip(&out.stderr)
-                ),
-            },
+                let ran = crate::spawn_gate::collected(command.stdin(Stdio::null()));
+                let millis = started.elapsed().as_millis();
+                match ran {
+                    Err(error) => format!("{name}: start failed {error}"),
+                    Ok(out) => format!(
+                        "{name}: {millis} ms rc={:?} out={:?} err={:?}",
+                        out.status.code(),
+                        clip(&out.stdout),
+                        clip(&out.stderr)
+                    ),
+                }
+            }
         };
         self.note(&line);
     }
