@@ -462,6 +462,20 @@ fn ping_child_of(parent: u32) -> u32 {
     }
 }
 
+/// Ends every `ping.exe` a process started, the process itself gone or not, so a control
+/// row leaves no waiter behind. Input: the parent's id. Output: none.
+fn end_ping_children_of(parent: u32) {
+    let script = format!(
+        "Get-CimInstance Win32_Process -Filter \"ParentProcessId={parent} AND Name='PING.EXE'\" \
+         | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}"
+    );
+    let _ = crate::spawn_gate::collected(
+        Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .stdin(Stdio::null()),
+    );
+}
+
 /// Waits until none of the processes runs, at most `bound`. Inputs: the ids with their
 /// images, and the bound. Output: whether all ended within it.
 fn all_end_within(processes: &[(u32, &str)], bound: Duration) -> bool {
@@ -482,16 +496,13 @@ fn all_end_within(processes: &[(u32, &str)], bound: Duration) -> bool {
 #[test]
 fn the_custodian_job_holds_its_tree_from_the_start_and_ends_it_on_drop() {
     let mut loose = crate::spawn_gate::spawn(&mut waiter_with_grandchild()).unwrap();
-    let orphan = ping_child_of(loose.id());
+    let parent_of_loose = loose.id();
+    let orphan = ping_child_of(parent_of_loose);
     loose.kill().unwrap();
     loose.wait().unwrap();
     std::thread::sleep(Duration::from_secs(1));
     let survived = runs(orphan, "PING.EXE");
-    let _ = crate::spawn_gate::collected(
-        Command::new("taskkill")
-            .args(["/PID", &orphan.to_string(), "/F"])
-            .stdin(Stdio::null()),
-    );
+    end_ping_children_of(parent_of_loose);
     assert!(
         survived,
         "a grandchild outside any job must outlive its parent's kill"
