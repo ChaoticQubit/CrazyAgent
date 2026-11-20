@@ -247,4 +247,5 @@ mod handed;
 mod hash_backend_tests;
 mod launch;
 mod login_env;
+mod login_pipe;
 mod pin;

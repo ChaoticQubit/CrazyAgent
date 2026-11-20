@@ -1,5 +1,6 @@
 use super::super::RegisteredNativeAuthHost;
 use super::super::custody::CustodySession;
+use super::super::login_pipe::{LoginPipe, nonblocking, unix_pipe};
 use super::transcript::Transcript;
 use super::types::{ClaudeAuthObservation, completion_bytes};
 use super::{CHECK_TIME, ClaudeAuthCommand, RENEWAL_TIME, auth_command};
@@ -7,13 +8,12 @@ use crate::engine::owner::transport::native_auth_channel::{
     NativeAuthCustodyChannel, NativeAuthCustodyControl,
 };
 use crate::engine::{EngineError, io_error};
-use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::process::Child;
 use std::time::{Duration, Instant};
 
-const OUTPUT_MAX: usize = 65536;
+const OUTPUT_BOUND: &str = "native_auth_claude_output_bound";
 const CLEANUP: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(20);
 const CHECK: Duration = Duration::from_millis(100);
@@ -36,63 +36,10 @@ fn failure(code: &str) -> EngineError {
     EngineError(code.into())
 }
 
-struct Pipe {
-    fd: OwnedFd,
-    bytes: usize,
-    eof: bool,
-}
-
-impl Pipe {
-    fn new(fd: OwnedFd) -> Result<Self, EngineError> {
-        nonblocking(&fd)?;
-        Ok(Self {
-            fd,
-            bytes: 0,
-            eof: false,
-        })
-    }
-
-    fn read(&mut self) -> Result<Vec<u8>, EngineError> {
-        let mut output = Vec::new();
-        let mut buffer = [0; 4096];
-        for _ in 0..16 {
-            match rustix::io::read(&self.fd, &mut buffer[..]) {
-                Ok(0) => {
-                    self.eof = true;
-                    break;
-                }
-                Ok(size) => {
-                    if size > OUTPUT_MAX.saturating_sub(self.bytes) {
-                        return Err(failure("native_auth_claude_output_bound"));
-                    }
-                    self.bytes += size;
-                    output.extend_from_slice(&buffer[..size]);
-                }
-                Err(rustix::io::Errno::AGAIN) => break,
-                Err(rustix::io::Errno::INTR) => continue,
-                Err(error) => return Err(io_error(error)),
-            }
-        }
-        assert!(self.bytes <= OUTPUT_MAX);
-        Ok(output)
-    }
-}
-
-fn nonblocking(fd: &OwnedFd) -> Result<(), EngineError> {
-    let flags = fcntl_getfl(fd).map_err(io_error)?;
-    fcntl_setfl(fd, flags | OFlags::NONBLOCK).map_err(io_error)?;
-    assert!(
-        fcntl_getfl(fd)
-            .map_err(io_error)?
-            .contains(OFlags::NONBLOCK)
-    );
-    Ok(())
-}
-
 struct Pipes {
     input: Option<OwnedFd>,
-    output: Pipe,
-    errors: Pipe,
+    output: LoginPipe<std::fs::File>,
+    errors: LoginPipe<std::fs::File>,
 }
 
 impl Pipes {
@@ -104,19 +51,21 @@ impl Pipes {
         if let Some(input) = &input {
             nonblocking(input)?;
         }
-        let output = Pipe::new(
+        let output = unix_pipe(
             child
                 .stdout
                 .take()
                 .ok_or_else(|| failure("native_auth_claude_pipe_missing"))?
                 .into(),
+            OUTPUT_BOUND,
         )?;
-        let errors = Pipe::new(
+        let errors = unix_pipe(
             child
                 .stderr
                 .take()
                 .ok_or_else(|| failure("native_auth_claude_pipe_missing"))?
                 .into(),
+            OUTPUT_BOUND,
         )?;
         assert!(child.stdin.is_none() && child.stdout.is_none() && child.stderr.is_none());
         Ok(Self {
@@ -228,8 +177,8 @@ async fn drive(
         }
         let exit = session.child_mut()?.try_wait().map_err(io_error)?;
         if let Some(exit) = exit
-            && pipes.output.eof
-            && pipes.errors.eof
+            && pipes.output.ended()
+            && pipes.errors.ended()
         {
             return Ok(ChildOutput {
                 stdout,

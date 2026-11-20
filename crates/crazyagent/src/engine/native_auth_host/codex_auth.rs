@@ -1,4 +1,5 @@
 use super::custody::{CustodySession, Retirement};
+use super::login_pipe::{LoginPipe, nonblocking, unix_pipe};
 use crate::adapters::codex::{AuthControl, CodexProtocol, Event, FRAME_BYTES_MAX, LoginChallenge};
 use crate::engine::owner::native_auth::{
     CODEX_DEVICE_CODE_LIFE, CODEX_LOG_DROPPED_MAX, CODEX_LOG_NAME_BYTES_MAX,
@@ -10,15 +11,12 @@ use crate::engine::owner::transport::native_auth_channel::{
 use crate::engine::owner::{NativeAuthAction, NativeAuthMethod};
 use crate::engine::{EngineError, io_error};
 use crate::storage::CUSTODIAN_CODES;
-use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-const STREAM_BYTES_MAX: usize = 65_536;
-const READ_BYTES: usize = 4096;
-const READ_BATCH: usize = 16;
+const OUTPUT_BOUND: &str = "native_auth_codex_output_bound";
 const POLL_TIME: Duration = Duration::from_millis(20);
 const CHECK_TIME: Duration = Duration::from_millis(100);
 const WINDOW_HEADROOM: Duration = Duration::from_secs(10);
@@ -59,59 +57,10 @@ fn command(words: &[std::ffi::OsString], home: &Path) -> Result<Command, EngineE
     Ok(command)
 }
 
-struct Pipe {
-    descriptor: OwnedFd,
-    bytes: usize,
-    eof: bool,
-}
-
-impl Pipe {
-    fn new(descriptor: OwnedFd) -> Result<Self, EngineError> {
-        let flags = fcntl_getfl(&descriptor).map_err(io_error)?;
-        fcntl_setfl(&descriptor, flags | OFlags::NONBLOCK).map_err(io_error)?;
-        assert!(
-            fcntl_getfl(&descriptor)
-                .map_err(io_error)?
-                .contains(OFlags::NONBLOCK)
-        );
-        Ok(Self {
-            descriptor,
-            bytes: 0,
-            eof: false,
-        })
-    }
-
-    fn read(&mut self) -> Result<Vec<u8>, EngineError> {
-        let mut bytes = Vec::new();
-        let mut buffer = [0_u8; READ_BYTES];
-        for _ in 0..READ_BATCH {
-            match rustix::io::read(&self.descriptor, &mut buffer[..]) {
-                Ok(0) => {
-                    self.eof = true;
-                    break;
-                }
-                Ok(size) => {
-                    if size > STREAM_BYTES_MAX.saturating_sub(self.bytes) {
-                        return Err(failure("native_auth_codex_output_bound"));
-                    }
-                    self.bytes += size;
-                    bytes.extend_from_slice(&buffer[..size]);
-                }
-                Err(rustix::io::Errno::AGAIN) => break,
-                Err(rustix::io::Errno::INTR) => continue,
-                Err(error) => return Err(io_error(error)),
-            }
-        }
-        assert!(self.bytes <= STREAM_BYTES_MAX);
-        assert!(bytes.len() <= self.bytes);
-        Ok(bytes)
-    }
-}
-
 struct Pipes {
     input: OwnedFd,
-    output: Pipe,
-    errors: Pipe,
+    output: LoginPipe<std::fs::File>,
+    errors: LoginPipe<std::fs::File>,
 }
 
 impl Pipes {
@@ -129,15 +78,14 @@ impl Pipes {
             .stderr
             .take()
             .ok_or_else(|| failure("native_auth_codex_pipe_missing"))?;
-        let flags = fcntl_getfl(&input).map_err(io_error)?;
-        fcntl_setfl(&input, flags | OFlags::NONBLOCK).map_err(io_error)?;
+        nonblocking(&input)?;
         assert!(child.stdin.is_none());
         assert!(child.stdout.is_none());
         assert!(child.stderr.is_none());
         Ok(Self {
             input,
-            output: Pipe::new(output.into())?,
-            errors: Pipe::new(errors.into())?,
+            output: unix_pipe(output.into(), OUTPUT_BOUND)?,
+            errors: unix_pipe(errors.into(), OUTPUT_BOUND)?,
         })
     }
 }
@@ -404,7 +352,7 @@ impl Driver<'_> {
                 self.cancel_requested = true;
             }
             self.cancel().await?;
-            if self.pipes.output.eof
+            if self.pipes.output.ended()
                 || self
                     .session
                     .child_mut()?
