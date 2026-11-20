@@ -579,7 +579,7 @@ mod launch {
         }
     }
     use crate::harnesses::launch::{
-        AccountBinding, LaunchLimits, LaunchRequest, command_with_context,
+        AccountBinding, LaunchBoundary, LaunchLimits, LaunchRequest, command_with_context,
     };
     use crate::project_setup::{StoredSetup, TeamPlan};
 
@@ -647,8 +647,7 @@ mod launch {
             },
             model: Some("qwen2.5:0.5b".into()),
             tools: false,
-            sandbox_profile: Some(profile),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(profile),
             git_identity: None,
             limits: LaunchLimits::default(),
         }

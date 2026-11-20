@@ -29,8 +29,19 @@ pub enum ViewEvent {
     Menu {
         point: (f64, f64),
     },
+    #[cfg(target_os = "macos")]
     Copy,
+    /// The copy chord of a host without Cmd (Ctrl+C, Ctrl+Shift+C): the host copies the
+    /// selection if there is one, else applies this input (^C).
+    #[cfg(windows)]
+    CopyKey(Input),
+    /// The render thread faulted the view for good (Windows), told by its window once it
+    /// hid: the host ends it with `native_terminal_gpu`, as macOS ends a view whose frame
+    /// the GPU refused.
+    #[cfg(windows)]
+    Faulted,
     Paste,
+    #[cfg(target_os = "macos")]
     SelectAll,
     Focus(bool),
     Marked,

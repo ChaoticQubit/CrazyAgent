@@ -187,7 +187,7 @@ fn wide_claims(answering: &Answering<'_>, claims: &[String]) -> Result<Vec<Strin
         if Instant::now() >= stop {
             break;
         }
-        let Ok(paths) = crate::project_files::list(&folder, &prefix, limit, stop) else {
+        let Ok(paths) = crate::project_files::list(&folder, &prefix, limit, stop, None) else {
             break;
         };
         let covered = paths
