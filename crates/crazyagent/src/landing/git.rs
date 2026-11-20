@@ -8,6 +8,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
