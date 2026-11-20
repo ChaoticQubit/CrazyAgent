@@ -1,6 +1,6 @@
 set -uo pipefail
-tip=803db1ab2
-rows=0a65280dd
+tip=3c6176e79
+rows=813f15269
 base=e3036f4a6
 os=${FARM_OS:?FARM_OS is windows}
 out="$RUNNER_TEMP/w5a"
@@ -59,7 +59,7 @@ need() {
   done
 }
 red_at_base() {
-  say "red: the W5a rows on the base, $rows"
+  say "red: the W5b rows on the base with the W3-5b carry, $rows"
   git checkout -q -f --detach "$rows" || return 0
   if cargo test -p crazyagent --lib --locked -- --list > "$out/list-rows.txt" 2> "$out/list-rows.err"; then
     say "rows commit built: $(grep -c '^landing::windows_tests::' "$out/list-rows.txt" || true) rows listed (want no build)"
