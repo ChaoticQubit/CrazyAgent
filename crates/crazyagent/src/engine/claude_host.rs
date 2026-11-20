@@ -1,14 +1,14 @@
 use super::EngineError;
 use super::bootstrap::NativeProfileUse;
+#[cfg(windows)]
+use super::codex_host::pump;
 use crate::adapters::NativeAction;
-#[cfg(unix)]
 use crate::adapters::NativeHarness;
 use crate::adapters::claude::{ClaudeProtocol, ProtocolError};
 use crate::adapters::events::ObservedEvent;
 use crate::harnesses::launch::CLAUDE_NO_TOOLS_PROMPT;
 use crate::harnesses::launch::{CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG};
 use crate::master_step_limit::StepLimit;
-#[cfg(unix)]
 use crate::master_time_limit::{RUN_TIME_MAX, START_TIME_MAX};
 #[cfg(unix)]
 use crate::platform::fd_wait::{self, Wake};
@@ -16,7 +16,6 @@ use crate::platform::fd_wait::{self, Wake};
 /// The code a Claude master stops with when it has not started by its start bound: the
 /// run clock's end when the owner's time limit bounds it, as the other masters stop, else
 /// the start bound's own. Input: whether a run clock bounds the start. Output: the code.
-#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn start_end_code(clocked: bool) -> &'static str {
     if clocked {
         "claude_host_deadline"
@@ -27,28 +26,18 @@ pub(crate) fn start_end_code(clocked: bool) -> &'static str {
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::routing::ResourceBudget;
 use crate::sandbox::InstalledSandbox;
-#[cfg(unix)]
 use std::ffi::OsStr;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-#[cfg(unix)]
 use std::sync::Arc;
-#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-#[cfg(unix)]
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::time::Duration;
-#[cfg(unix)]
-use tokio::sync::mpsc;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
 pub(in crate::engine) mod diagnostic;
-#[cfg(unix)]
-mod process;
-#[cfg(windows)]
-#[path = "claude_host/process_windows_red.rs"]
 mod process;
 
 const ACCOUNT_DEFAULT_MODEL: &str = "native-default";
@@ -122,7 +111,6 @@ fn plain_path(path: &Path) -> Option<String> {
 /// is allowed. Claude Code writes each tool result whole on its stream, a written file twice,
 /// so a 1 MiB bound stopped a turn at its first large result. Frames are decoded one line at
 /// a time, so memory stays within the line bound.
-#[cfg(unix)]
 const STDOUT_BYTES_MAX: usize = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
@@ -133,7 +121,6 @@ pub(in crate::engine) struct ClaudeHostLimits {
     pub(in crate::engine) stderr_bytes: usize,
 }
 
-#[cfg(unix)]
 impl ClaudeHostLimits {
     fn validate(&self) -> Result<(), EngineError> {
         if self
@@ -265,7 +252,6 @@ pub(in crate::engine) fn limit_retries(
 /// variable [`limit_retries`] sets for it, else none, so a rebuilt command with that choice
 /// differs from one setting the variable to anything else. Input: the command. Output: the
 /// choice to rebuild it with.
-#[cfg(unix)]
 fn carried_retry(command: &Command) -> crate::provider_retry::ProviderRetry {
     use crate::provider_retry::ProviderRetry;
     let Some((name, value)) = ProviderRetry::StopAtOnce.claude_env() else {
@@ -561,7 +547,6 @@ struct Turn {
     reply: oneshot::Sender<Result<(), Fault>>,
 }
 
-#[cfg(unix)]
 pub(in crate::engine) struct ClaudeHost {
     turns: SyncSender<Turn>,
     events: mpsc::Receiver<ObservedEvent>,
@@ -573,7 +558,7 @@ pub(in crate::engine) struct ClaudeHost {
     close_time: Duration,
     expires: Option<tokio::time::Instant>,
     frame_bytes: usize,
-    wake: Wake,
+    wake: HostWake,
     #[cfg(test)]
     passes: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -581,7 +566,6 @@ pub(in crate::engine) struct ClaudeHost {
 /// Waits for a master host's wall clock to run out; with none, the owner's choice of no
 /// master time limit, it never ends, and the owner's Stop or the turn's own end ends the
 /// wait it races. Input: when the clock runs out. Output: none.
-#[cfg(unix)]
 async fn expired(at: Option<tokio::time::Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at).await,
@@ -589,7 +573,6 @@ async fn expired(at: Option<tokio::time::Instant>) {
     }
 }
 
-#[cfg(unix)]
 impl ClaudeHost {
     /// Starts one Claude Code master under custody. Inputs: the engine's command, its
     /// sandbox, the account lease, the turn's home, the launch action, the account, the
@@ -628,7 +611,7 @@ impl ClaudeHost {
         #[cfg(test)]
         let passes = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let (wake, woken) =
-            fd_wait::wake_pair().map_err(|_| failure("claude_host_custodian_unavailable"))?;
+            wake_pair().map_err(|_| failure("claude_host_custodian_unavailable"))?;
         let mut host = Self {
             turns,
             events,
@@ -720,7 +703,7 @@ impl ClaudeHost {
                 reply,
             })
             .map_err(|_| failure("claude_host_input_unavailable"))?;
-        self.wake.rouse();
+        rouse(&self.wake);
         loop {
             let current = *self.status.borrow();
             if current.phase != Phase::Running {
@@ -798,7 +781,7 @@ impl ClaudeHost {
     /// the stop at once instead of at the end of its wait. Input: the host. Output: none.
     fn halt(&self) {
         self.stop.store(true, Ordering::Release);
-        self.wake.rouse();
+        rouse(&self.wake);
     }
 
     /// How many passes the custodian's drive loop has made, shared, so a row can count them
@@ -840,78 +823,44 @@ impl ClaudeHost {
     }
 }
 
-#[cfg(unix)]
 impl Drop for ClaudeHost {
     fn drop(&mut self) {
         self.halt();
     }
 }
 
-/// Stands in for the Claude Code master host where native profile custody is unavailable.
-/// It has no values: `spawn` needs a native profile lease, which cannot exist here, so no
-/// turn, event, cancel or close call can be reached.
-#[cfg(not(unix))]
-pub(in crate::engine) enum ClaudeHost {}
+/// The wake a Claude Code host and its custodian share, so a turn or a stop reaches the
+/// custodian's wait at once: on Unix a socket pair it polls with the harness's pipes.
+#[cfg(unix)]
+type HostWake = Wake;
+/// On Windows the signal the harness's pipe pumps raise as well (V244-WIN-MASTER S4, D3).
+#[cfg(windows)]
+type HostWake = Arc<pump::Signal>;
 
-#[cfg(not(unix))]
-impl ClaudeHost {
-    /// Never starts: takes the command, boundary, uninhabited profile lease, turn home,
-    /// action, account, project, wall clock, budget and frame size. Returns nothing because
-    /// the lease cannot exist.
-    #[allow(clippy::too_many_arguments)]
-    pub(in crate::engine) async fn spawn(
-        _command: Command,
-        _sandbox: InstalledSandbox,
-        profile: NativeProfileUse,
-        _home: PathBuf,
-        _action: NativeAction,
-        _account_ref: CredentialRef,
-        _project: ProjectId,
-        _run_time: Option<std::time::Duration>,
-        _budget: ResourceBudget,
-        _frames: crate::master_frame_limit::FrameSize,
-    ) -> Result<Self, EngineError> {
-        match profile {}
-    }
+/// Makes the host's end of a wake, which rouses, and the custodian's, which waits.
+/// Output: both, or the error of a socket pair that cannot be made.
+#[cfg(unix)]
+fn wake_pair() -> std::io::Result<(HostWake, HostWake)> {
+    fd_wait::wake_pair()
+}
 
-    /// Never sends a turn: takes the request and text. Unreachable without a host value.
-    pub(in crate::engine) async fn start_turn(
-        &mut self,
-        _request_id: RequestId,
-        _text: &str,
-    ) -> Result<(), EngineError> {
-        match *self {}
-    }
+/// The Windows twin of the Unix `wake_pair`: both ends are one shared signal. Output: both.
+#[cfg(windows)]
+fn wake_pair() -> std::io::Result<(HostWake, HostWake)> {
+    let signal = Arc::new(pump::Signal::new());
+    Ok((Arc::clone(&signal), signal))
+}
 
-    /// Never yields an event: takes the host. Unreachable without a host value.
-    pub(in crate::engine) async fn next_event(&mut self) -> Result<ObservedEvent, EngineError> {
-        match *self {}
-    }
+/// Rouses the custodian through the host's end of the wake. Input: the wake. Output: none.
+#[cfg(unix)]
+fn rouse(wake: &HostWake) {
+    wake.rouse();
+}
 
-    /// Never names a group: takes the host. Unreachable without a host value.
-    pub(in crate::engine) fn process_group(&self) -> Option<u32> {
-        match *self {}
-    }
-
-    /// Never keeps a stream: takes the host. Unreachable without a host value.
-    pub(in crate::engine) fn diagnostic(&self) -> Option<diagnostic::StreamDiagnostic> {
-        match *self {}
-    }
-
-    /// Never cancels: takes the host. Unreachable without a host value.
-    pub(in crate::engine) async fn cancel(&mut self) -> Result<(), EngineError> {
-        match *self {}
-    }
-
-    /// Never closes: takes the host. Unreachable without a host value.
-    pub(in crate::engine) async fn close(&mut self) -> Result<(), EngineError> {
-        match *self {}
-    }
-
-    /// Never settles: takes the host. Unreachable without a host value.
-    pub(in crate::engine) fn settled(&self) -> bool {
-        match *self {}
-    }
+/// The Windows twin of the Unix `rouse`: raises the shared signal.
+#[cfg(windows)]
+fn rouse(wake: &HostWake) {
+    wake.raise();
 }
 
 fn failure(code: &'static str) -> EngineError {
@@ -922,7 +871,6 @@ fn failure(code: &'static str) -> EngineError {
 /// again from it and compared. Input: the `--mcp-config` text. Output: the engine executable,
 /// drop file, mailbox and tools switched off before the trailing `wake` that `server_args`
 /// adds, or none when the text is not one engine server ending in it.
-#[cfg(unix)]
 fn named_tools(config: &str) -> Option<(PathBuf, PathBuf, PathBuf, Vec<String>)> {
     let config: serde_json::Value = serde_json::from_str(config).ok()?;
     let server = config
@@ -1026,7 +974,6 @@ pub(in crate::engine) fn require_delegate(
 /// only the engine's delegate server, for this directory, home, model and instruction file.
 /// Input: the command, the profile lease and the turn home. Output: whether the tools are
 /// on, or the fault that refuses the command.
-#[cfg(unix)]
 fn validate_command(
     command: &Command,
     profile: &NativeProfileUse,

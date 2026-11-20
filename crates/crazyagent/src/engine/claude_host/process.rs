@@ -5,20 +5,35 @@ use super::{
 use crate::adapters::claude::{ClaudeProtocol, State};
 use crate::adapters::events::{EventKind, ObservedEvent};
 use crate::engine::bootstrap::NativeProfileUse;
+#[cfg(windows)]
+use crate::engine::codex_host::pump;
 use crate::harnesses::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
-use crate::platform::fd_wait::{self, Wake};
+#[cfg(unix)]
+use crate::platform::fd_wait;
 use crate::protocol::ProjectId;
-use crate::sandbox::InstalledSandbox;
 use crate::sandbox::warden::{self, Warden};
+use crate::sandbox::{InstalledSandbox, LineageCheck};
+#[cfg(windows)]
+use crazyagent_win_sandbox::ProcessTree;
+#[cfg(unix)]
 use rustix::event::{PollFd, PollFlags};
+#[cfg(unix)]
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+#[cfg(unix)]
 use rustix::io::Errno;
+#[cfg(unix)]
 use rustix::process::{Pid, Signal};
 use std::io::{self, Read, Write};
+#[cfg(unix)]
 use std::os::fd::AsFd;
+#[cfg(unix)]
 use std::os::unix::process::{CommandExt, ExitStatusExt};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+#[cfg(unix)]
+use std::process::{ChildStderr, ChildStdin, ChildStdout};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -40,6 +55,33 @@ const FRAME_LINE_MAX: usize = crate::adapters::LINE_BYTES_MAX + 1;
 /// is held by a process that left the group.
 const GRACE: Duration = Duration::from_millis(100);
 
+/// The Windows creation flags of a harness: started suspended, so the engine holds it in its
+/// process tree before it runs, and with no console window.
+#[cfg(windows)]
+const SUSPENDED_WITHOUT_WINDOW: u32 = 0x0000_0004 | 0x0800_0000;
+
+/// The exit code a Windows process ends with when the engine's process tree ends it
+/// (crazyagent-win-sandbox tree.rs `ENDED_EXIT_CODE`).
+#[cfg(windows)]
+const TREE_ENDED_CODE: i32 = 1;
+
+#[cfg(unix)]
+type StdinPipe = ChildStdin;
+#[cfg(unix)]
+type StdoutPipe = ChildStdout;
+#[cfg(unix)]
+type StderrPipe = ChildStderr;
+/// A Windows harness's stdin, written by a pump thread, since a Windows pipe cannot be
+/// polled.
+#[cfg(windows)]
+type StdinPipe = pump::Input;
+/// A Windows harness's stdout, read ahead by a pump thread.
+#[cfg(windows)]
+type StdoutPipe = pump::Output;
+/// A Windows harness's stderr, read ahead by a pump thread.
+#[cfg(windows)]
+type StderrPipe = pump::Output;
+
 pub(super) struct Channels {
     pub(super) input: Receiver<Turn>,
     pub(super) output: mpsc::Sender<ObservedEvent>,
@@ -48,7 +90,7 @@ pub(super) struct Channels {
     pub(super) doubt: Arc<AtomicBool>,
     pub(super) group: Arc<AtomicU32>,
     pub(super) diagnostic: Arc<Mutex<Option<StreamDiagnostic>>>,
-    pub(super) woken: Wake,
+    pub(super) woken: super::HostWake,
     #[cfg(test)]
     pub(super) passes: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -63,13 +105,16 @@ struct Process {
     child: Child,
     warden: Option<Warden>,
     follower: Option<Follower>,
+    #[cfg(unix)]
     group: Pid,
+    #[cfg(windows)]
+    tree: Option<ProcessTree>,
     group_absent: bool,
     profile: Option<NativeProfileUse>,
     project: ProjectId,
-    stdin: Option<ChildStdin>,
-    stdout: Option<ChildStdout>,
-    stderr: Option<ChildStderr>,
+    stdin: Option<StdinPipe>,
+    stdout: Option<StdoutPipe>,
+    stderr: Option<StderrPipe>,
     protocol: ClaudeProtocol,
     limits: ClaudeHostLimits,
     tools: bool,
@@ -89,7 +134,7 @@ struct Process {
     deadline: Option<Instant>,
     record: StreamDiagnostic,
     kept: Arc<Mutex<Option<StreamDiagnostic>>>,
-    woken: Wake,
+    woken: super::HostWake,
     #[cfg(test)]
     passes: Arc<std::sync::atomic::AtomicU64>,
 }
@@ -108,30 +153,18 @@ pub(super) fn run(
     limits: ClaudeHostLimits,
     channels: Channels,
 ) {
-    let Channels {
-        input,
-        output,
-        report,
-        stop,
-        doubt,
-        group,
-        diagnostic,
-        woken,
-        #[cfg(test)]
-        passes,
-    } = channels;
     let tools = match validate_command(&command, &profile, &home) {
         Ok(tools) => tools,
         Err(error) => {
-            report.send_replace(Status {
+            channels.report.send_replace(Status {
                 phase: Phase::Retired,
                 fault: Some(error),
             });
             return;
         }
     };
-    if stop.load(Ordering::Acquire) {
-        report.send_replace(Status {
+    if channels.stop.load(Ordering::Acquire) {
+        channels.report.send_replace(Status {
             phase: Phase::Retired,
             fault: None,
         });
@@ -151,8 +184,10 @@ pub(super) fn run(
         .env("TERM", "dumb")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0);
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(unix)]
     if tools {
         command
             .env("SHELL", super::TOOLS_SHELL)
@@ -160,21 +195,62 @@ pub(super) fn run(
     }
     limit_retries(&mut command, retry);
     assert_eq!(carried_retry(&command), retry);
-    let mut command = match sandbox.wrap(&command) {
+    let command = match sandbox.wrap(&command) {
         Ok(command) => command,
         Err(_) => {
-            report.send_replace(Status {
+            channels.report.send_replace(Status {
                 phase: Phase::Retired,
                 fault: Some(Fault::Host("claude_host_sandbox_refused")),
             });
             return;
         }
     };
+    assert_eq!(command.get_program(), sandbox.launcher().as_os_str());
+    start(
+        command,
+        sandbox.lineage_check(),
+        (Some(profile), project),
+        protocol,
+        limits,
+        tools,
+        channels,
+    );
+}
+
+/// Starts one Claude Code harness and keeps it under custody until it retires: on Unix in
+/// its own process group, on Windows started suspended and held in the engine's process
+/// tree before it runs, its pipes pumped by threads (V244-WIN-MASTER S4, D3). Inputs: the
+/// command the boundary wrapped, how what it leaves running is followed, the account lease,
+/// none for a run that takes no turn, since every turn is refused without one, with the
+/// project, the protocol, the limits, whether its tools are on and the channels. Output:
+/// none; the status channel reports how it ended.
+pub(super) fn start(
+    mut command: Command,
+    lineage: LineageCheck,
+    (profile, project): (Option<NativeProfileUse>, ProjectId),
+    protocol: ClaudeProtocol,
+    limits: ClaudeHostLimits,
+    tools: bool,
+    channels: Channels,
+) {
+    let Channels {
+        input,
+        output,
+        report,
+        stop,
+        doubt,
+        group,
+        diagnostic,
+        woken,
+        #[cfg(test)]
+        passes,
+    } = channels;
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    assert_eq!(command.get_program(), sandbox.launcher().as_os_str());
+    #[cfg(windows)]
+    command.creation_flags(SUSPENDED_WITHOUT_WINDOW);
     let Some(token) = LineageToken::new() else {
         report.send_replace(Status {
             phase: Phase::Retired,
@@ -193,16 +269,30 @@ pub(super) fn run(
             return;
         }
     };
+    #[cfg(windows)]
+    let (child, tree) = match held_tree(child) {
+        Ok(held) => held,
+        Err(code) => {
+            report.send_replace(Status {
+                phase: Phase::Retired,
+                fault: Some(Fault::Host(code)),
+            });
+            return;
+        }
+    };
     assert!(child.id() > 1);
     group.store(child.id(), Ordering::Release);
-    let follower = Follower::start(child.id(), Some(token), sandbox.lineage_check());
+    let follower = Follower::start(child.id(), Some(token), lineage);
     let mut process = Process {
+        #[cfg(unix)]
         group: Pid::from_child(&child),
+        #[cfg(windows)]
+        tree: Some(tree),
         group_absent: false,
         child,
         warden,
         follower,
-        profile: Some(profile),
+        profile,
         project,
         stdin: None,
         stdout: None,
@@ -230,9 +320,6 @@ pub(super) fn run(
         #[cfg(test)]
         passes,
     };
-    process.stdin = process.child.stdin.take();
-    process.stdout = process.child.stdout.take();
-    process.stderr = process.child.stderr.take();
     if process.prepare().is_ok() {
         process.report.send_replace(Status {
             phase: Phase::Running,
@@ -246,7 +333,14 @@ pub(super) fn run(
 }
 
 impl Process {
-    fn prepare(&self) -> io::Result<()> {
+    /// Takes the harness's pipes for custody: made nonblocking on Unix, handed to pump
+    /// threads that raise custody's wake on Windows. Takes nothing. Output: Ok, or the error
+    /// of a pipe that is missing or cannot be made ready.
+    #[cfg(unix)]
+    fn prepare(&mut self) -> io::Result<()> {
+        self.stdin = self.child.stdin.take();
+        self.stdout = self.child.stdout.take();
+        self.stderr = self.child.stderr.take();
         let stdin = self.stdin.as_ref().ok_or(io::ErrorKind::BrokenPipe)?;
         let stdout = self.stdout.as_ref().ok_or(io::ErrorKind::BrokenPipe)?;
         let stderr = self.stderr.as_ref().ok_or(io::ErrorKind::BrokenPipe)?;
@@ -254,6 +348,35 @@ impl Process {
             let flags = fcntl_getfl(descriptor)?;
             fcntl_setfl(descriptor, flags | OFlags::NONBLOCK)?;
         }
+        assert!(self.child.id() > 1);
+        assert!(self.child.stdin.is_none());
+        assert!(self.child.stdout.is_none());
+        assert!(self.child.stderr.is_none());
+        Ok(())
+    }
+
+    /// The Windows twin of the Unix `prepare`: each pipe goes to a pump thread that raises
+    /// custody's wake after each chunk it moves and at its end.
+    #[cfg(windows)]
+    fn prepare(&mut self) -> io::Result<()> {
+        let stdin = self.child.stdin.take().ok_or(io::ErrorKind::BrokenPipe)?;
+        let stdout = self.child.stdout.take().ok_or(io::ErrorKind::BrokenPipe)?;
+        let stderr = self.child.stderr.take().ok_or(io::ErrorKind::BrokenPipe)?;
+        self.stdin = Some(pump::input(
+            stdin,
+            Arc::clone(&self.woken),
+            "claude-host-stdin",
+        )?);
+        self.stdout = Some(pump::output(
+            stdout,
+            Arc::clone(&self.woken),
+            "claude-host-stdout",
+        )?);
+        self.stderr = Some(pump::output(
+            stderr,
+            Arc::clone(&self.woken),
+            "claude-host-stderr",
+        )?);
         assert!(self.child.id() > 1);
         assert!(self.child.stdin.is_none());
         assert!(self.child.stdout.is_none());
@@ -345,6 +468,7 @@ impl Process {
     /// deadline or [`WAIT_MAX`]. With no pipe left and the harness not reaped, nothing reports
     /// its exit, so the bound is `exit_wait`, doubled for the next pass; a failed poll sleeps
     /// [`POLL_TIME`]. Inputs: the exit wait and `writing`. Output: the next exit wait.
+    #[cfg(unix)]
     fn wait(&self, exit_wait: Duration, writing: bool) -> Duration {
         assert!(exit_wait >= EXIT_WAIT_MIN && exit_wait <= WAIT_MAX);
         let mut fds = Vec::with_capacity(4);
@@ -369,6 +493,26 @@ impl Process {
             std::thread::sleep(POLL_TIME);
         }
         self.woken.drain();
+        if exiting {
+            (exit_wait * 2).min(WAIT_MAX)
+        } else {
+            EXIT_WAIT_MIN
+        }
+    }
+
+    /// The Windows twin of the Unix `wait`: the pumps raise the wake after each chunk they
+    /// read or write and at a pipe's end, and the host raises it for a turn or a stop, so
+    /// the wait ends on the wake or at the same bound. Inputs and output as on Unix.
+    #[cfg(windows)]
+    fn wait(&self, exit_wait: Duration, _writing: bool) -> Duration {
+        assert!(exit_wait >= EXIT_WAIT_MIN && exit_wait <= WAIT_MAX);
+        let exiting = self.stdout.is_none() && self.stderr.is_none() && self.status.is_none();
+        let bound = if exiting { exit_wait } else { WAIT_MAX };
+        let mut until = Instant::now() + bound;
+        if let Some(deadline) = self.deadline {
+            until = until.min(deadline);
+        }
+        self.woken.wait_until(until);
         if exiting {
             (exit_wait * 2).min(WAIT_MAX)
         } else {
@@ -624,6 +768,7 @@ impl Process {
     /// it for a group left with only an unreaped process, so cleanup stops waiting for it at
     /// its deadline, as it does for a harness it never reaps. Takes nothing; records a fault
     /// when the group cannot be observed.
+    #[cfg(unix)]
     fn observe_group(&mut self) {
         if self.status.is_none() || self.group_absent {
             return;
@@ -639,6 +784,7 @@ impl Process {
     /// reaped, in case it left its group. A group whose members are all still exiting can
     /// refuse the signal, and an exiting harness is already gone for `kill`; both are retried.
     /// Takes nothing. Returns whether a kill signal reached a process.
+    #[cfg(unix)]
     fn kill_group(&mut self) -> bool {
         let mut sent = match rustix::process::kill_process_group(self.group, Signal::KILL) {
             Ok(()) => true,
@@ -661,6 +807,29 @@ impl Process {
             }
         }
         sent
+    }
+
+    /// The Windows twin of the Unix `observe_group`: once the harness is reaped its tree is
+    /// ended, which ends every process it started, so none is left. Takes nothing.
+    #[cfg(windows)]
+    fn observe_group(&mut self) {
+        if self.status.is_none() || self.group_absent {
+            return;
+        }
+        self.tree = None;
+        self.group_absent = true;
+    }
+
+    /// The Windows twin of the Unix `kill_group`: ends the harness's tree, whose kill-on-close
+    /// job holds the harness and every process it started, so all of them end with it.
+    /// Takes nothing. Returns whether a tree was left to end.
+    #[cfg(windows)]
+    fn kill_group(&mut self) -> bool {
+        let Some(tree) = self.tree.take() else {
+            return false;
+        };
+        drop(tree);
+        true
     }
 
     /// Has the run's warden stop every process left in the harness sandbox, those that left
@@ -727,7 +896,7 @@ impl Process {
                     }
                     if !status.success()
                         && !self.stop.load(Ordering::Acquire)
-                        && !(killed && status.signal() == Some(9))
+                        && !(killed && killed_exit(status))
                     {
                         self.fail(Fault::Exit(status.code()));
                     }
@@ -787,6 +956,34 @@ impl Process {
     }
 }
 
+/// Whether an exit is the engine's own kill: SIGKILL. Input: the status. Output: the answer.
+#[cfg(unix)]
+fn killed_exit(status: ExitStatus) -> bool {
+    status.signal() == Some(9)
+}
+
+/// Whether an exit is the engine's own kill: the code the process tree ends a process with.
+/// Input: the status. Output: the answer.
+#[cfg(windows)]
+fn killed_exit(status: ExitStatus) -> bool {
+    status.code() == Some(TREE_ENDED_CODE)
+}
+
+/// Holds a harness started suspended in a process tree of its own, which resumes it; a
+/// harness that cannot be held is killed and reaped first. Input: the child. Output: the
+/// child and its tree, or `claude_host_spawn_failed`.
+#[cfg(windows)]
+fn held_tree(mut child: Child) -> Result<(Child, ProcessTree), &'static str> {
+    match ProcessTree::hold(&child) {
+        Ok(tree) => Ok((child, tree)),
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err("claude_host_spawn_failed")
+        }
+    }
+}
+
 impl Drop for Process {
     fn drop(&mut self) {
         if self.profile.is_some() {
@@ -796,3 +993,7 @@ impl Drop for Process {
         }
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "process_windows_tests.rs"]
+mod windows_tests;
