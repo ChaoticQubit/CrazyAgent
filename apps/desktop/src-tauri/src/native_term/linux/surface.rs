@@ -802,6 +802,12 @@ impl Child {
         self.crop.apply(true);
     }
 
+    /// Whether the display connection broke, so the child never presents again. Output:
+    /// the answer.
+    pub fn gone(&self) -> bool {
+        self.pacing.get().is_gone()
+    }
+
     /// Notes a change to draw. Output: none.
     pub fn changed(&mut self) {
         let mut pacing = self.pacing.get();

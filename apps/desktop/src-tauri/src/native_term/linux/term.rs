@@ -1,86 +1,85 @@
+use std::cell::Cell;
 use std::rc::Rc;
+
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 use super::clip::Clip;
 use super::surface::{Child, Rect, SCALE_MAX};
 use super::view::View;
 use crate::native_term::event::Sink;
 
-/// One native terminal's Linux parts: its input view, made at open, and the child surface
-/// it draws into, made at its first shown place, since a child needs a rectangle. Focus
-/// asked for before that place is owed and applied right after it. The host drops its wgpu
-/// surface on the child before the term.
+/// One native terminal's Linux parts: its input view and the child surface it draws into,
+/// both made at open and hidden until the host's first shown place. Focus asked for before
+/// that place is owed and applied right after it. The host drops its wgpu surface on the
+/// child before the term.
 pub struct Term {
-    toplevel: gtk::Window,
-    page: gtk::Widget,
     view: View,
-    child: Option<Child>,
-    focus_owed: bool,
+    child: Child,
+    placed: bool,
+    shown: bool,
+    focus_owed: Cell<bool>,
 }
 
 impl Term {
-    /// Wires a term's view to a realized toplevel and the page widget under it, with no
-    /// child yet. Inputs: the toplevel, the page widget, the view id, the sink and the
-    /// host's boards. Output: the term, or `native_terminal_surface_unavailable`.
+    /// Wires a term's view and child to a mapped toplevel and the page widget under it,
+    /// the child hidden. Inputs: the toplevel, the page widget, the open rectangle in the
+    /// toplevel's logical pixels, the view id, the sink and the host's boards. Output: the
+    /// term, or `native_terminal_surface_unavailable` when either part cannot be made.
     pub fn new(
         toplevel: &gtk::Window,
         page: &gtk::Widget,
+        rect: Rect,
         id: u64,
         sink: Sink,
         clip: Rc<Clip>,
     ) -> Result<Term, &'static str> {
         let view = View::new(toplevel, page, id, sink, clip)?;
+        let mut child = Child::new(toplevel, page, rect)?;
+        child.hide();
         Ok(Term {
-            toplevel: toplevel.clone(),
-            page: page.clone(),
             view,
-            child: None,
-            focus_owed: false,
+            child,
+            placed: false,
+            shown: false,
+            focus_owed: Cell::new(false),
         })
     }
 
     /// Gives the view native focus, as the page asks. The view refuses it before the first
     /// shown place, so until then it is owed and applied right after that place. Output:
     /// none.
-    pub fn focus(&mut self) {
-        if self.child.is_none() {
-            self.focus_owed = true;
-        } else {
+    pub fn focus(&self) {
+        if self.placed {
             self.view.focus(true);
+        } else {
+            self.focus_owed.set(true);
         }
     }
 
-    /// Puts the term over its host rectangle at the toplevel's scale and shows it, or takes
-    /// it off screen. The first shown place makes the child and applies owed focus. Inputs:
-    /// the rectangle in the toplevel's logical pixels, the scale, 1 to 8, and whether it
-    /// shows. Output: the scale the child now draws at, none while hidden, or
-    /// `native_terminal_surface_unavailable` when no child can be made.
-    pub fn place(
-        &mut self,
-        rect: Rect,
-        scale: i32,
-        shown: bool,
-    ) -> Result<Option<i32>, &'static str> {
+    /// Puts the term over its host rectangle at a scale and shows it, or takes it off
+    /// screen with none. The first shown place applies owed focus. Inputs: the rectangle in
+    /// the toplevel's logical pixels, or none, and the scale, 1 to 8. Output: the scale the
+    /// child now draws at, or none while hidden.
+    pub fn place(&mut self, rect: Option<Rect>, scale: i32) -> Option<i32> {
         assert!((1..=SCALE_MAX).contains(&scale));
-        if !shown {
-            if let Some(child) = &mut self.child {
-                child.hide();
+        let Some(rect) = rect else {
+            if self.shown {
+                self.child.hide();
             }
             self.view.place(None);
-            return Ok(None);
-        }
-        if self.child.is_none() {
-            self.child = Some(Child::new(&self.toplevel, &self.page, rect)?);
-        }
-        let child = self.child.as_mut().expect("a child made above");
-        child.place_scaled(rect, scale);
-        child.show();
-        let drawn = child.scale();
+            self.shown = false;
+            return None;
+        };
+        self.child.place_scaled(rect, scale);
+        self.child.show();
         self.view.place(Some(rect));
-        if std::mem::take(&mut self.focus_owed) {
+        self.placed = true;
+        self.shown = true;
+        if self.focus_owed.take() {
             self.view.focus(true);
         }
-        assert!(!self.focus_owed);
-        Ok(Some(drawn))
+        assert!(!self.focus_owed.get());
+        Some(self.child.scale())
     }
 
     /// Covers or uncovers the term as the page reports an element over it. A cover gives
@@ -88,47 +87,83 @@ impl Term {
     /// puts the child back. Input: covered or not. Output: none.
     pub fn cover(&mut self, covered: bool) {
         self.view.cover(covered);
-        if covered && let Some(child) = &mut self.child {
-            child.hide();
+        if covered && self.shown {
+            self.child.hide();
+            self.shown = false;
         }
     }
 
-    /// Whether the host may present now: the child exists, shows and owes a frame that its
+    /// Whether the last place showed the term. Output: the answer.
+    pub fn shown(&self) -> bool {
+        self.shown
+    }
+
+    /// Whether the host may present now: the term shows and its child owes a frame that its
     /// last present's callback no longer holds back. Output: the answer.
     pub fn ready(&mut self) -> bool {
-        self.child.as_mut().is_some_and(Child::ready)
+        self.shown && self.child.ready()
+    }
+
+    /// Whether the child's display connection broke, so it never presents again. Output:
+    /// the answer.
+    pub fn gone(&self) -> bool {
+        self.child.gone()
+    }
+
+    /// The size the host's wgpu surface on the child takes. Output: width and height in
+    /// device pixels.
+    pub fn size(&self) -> (u32, u32) {
+        self.child.size()
+    }
+
+    /// The child's display and window handles a wgpu surface is made on, live as long as
+    /// the term. Output: both.
+    pub fn handles(&self) -> (RawDisplayHandle, RawWindowHandle) {
+        self.child.handles()
     }
 
     /// Notes a present about to happen at the child's size and scale, which the host
     /// configures its wgpu surface to in the same layout as each place. Output: none.
     pub fn presenting(&mut self) {
-        let child = self.child.as_mut().expect("a present after a shown place");
-        let (size, scale) = (child.size(), child.scale());
-        child.presenting(size, scale);
+        assert!(self.shown, "a present only while shown");
+        let (size, scale) = (self.child.size(), self.child.scale());
+        self.child.presenting(size, scale);
     }
 
     /// Notes that the present went out. Output: none.
     pub fn presented(&mut self) {
-        self.child
-            .as_mut()
-            .expect("a present after a shown place")
-            .presented();
+        self.child.presented();
     }
 
     /// Notes that the draw failed before presenting, so the frame is owed again. Output:
     /// none.
     pub fn not_presented(&mut self) {
-        self.child
-            .as_mut()
-            .expect("a present after a shown place")
-            .not_presented();
+        self.child.not_presented();
     }
 
     /// Notes a change to draw. Output: none.
     pub fn changed(&mut self) {
-        if let Some(child) = &mut self.child {
-            child.changed();
-        }
+        self.child.changed();
+    }
+}
+
+#[cfg(test)]
+impl Term {
+    /// Whether the view holds native focus, for rows outside this module. Output: the answer.
+    pub fn focus_native(&self) -> bool {
+        self.view.focus_state().is_native()
+    }
+
+    /// Whether the view holds active native focus, for rows outside this module. Output:
+    /// the answer.
+    pub fn focus_active(&self) -> bool {
+        self.view.focus_state().active()
+    }
+
+    /// Stands in for the toplevel's focus coming in, for rows outside this module. Output:
+    /// none.
+    pub fn toplevel_focused(&self) {
+        self.view.toplevel_focused();
     }
 }
 
@@ -162,6 +197,7 @@ mod tests {
         Term::new(
             window,
             page.upcast_ref(),
+            RECT,
             ID,
             dropped,
             Rc::new(Clip::private()),
@@ -185,7 +221,7 @@ mod tests {
     /// Writes a step for the farm's screenshot: the child's device rectangle and, on X11,
     /// its root origin. Inputs: the step and the term.
     fn step(name: &str, term: &Term) {
-        let child = term.child.as_ref().expect("a child after a shown place");
+        let child = &term.child;
         let (x, y, w, h) = child.device_rect();
         let line = json!({
             "step": name,
@@ -216,6 +252,63 @@ mod tests {
         pump_for(Duration::from_millis(100));
     }
 
+    /// A term made at open has its child already, hidden: it owes no frame and holds no
+    /// native focus until the host's first shown place, which shows the child, presents
+    /// and applies focus asked for meanwhile.
+    #[test]
+    #[ignore = "needs a display: the farm runs it under Xvfb, weston and sway"]
+    fn a_term_made_at_open_stays_hidden_until_its_first_shown_place() {
+        let (window, page) = white_toplevel();
+        let mut term = term_over(&window, &page);
+        term.toplevel_focused();
+        term.focus();
+        never_presents(&mut term, "a term made at open never presents before its first place");
+        assert!(!term.shown(), "a term made at open is hidden");
+        assert!(!term.focus_native(), "a hidden term holds no native focus");
+        step("opened", &term);
+        let scale = window.scale_factor();
+        assert_eq!(term.place(Some(RECT), scale), Some(scale));
+        let (mut shared, mut surface, frame) = green_terminal(&term.child);
+        show_frames(&mut term, &mut shared, &mut surface, &frame);
+        assert!(term.focus_active(), "focus asked at open applies at the first place");
+        step("placed", &term);
+        drop(surface);
+        close(window, term);
+        drop(shared);
+    }
+
+    /// A toplevel realized but not mapped has a GDK window, so the view could be wired,
+    /// but no child can be made over it: the open fails with the plain code, which the
+    /// host answers the page with.
+    #[test]
+    #[ignore = "needs a display: the farm runs it under Xvfb, weston and sway"]
+    fn an_open_over_an_unmapped_toplevel_fails() {
+        gtk::init().expect("a display");
+        let window = gtk::Window::new(gtk::WindowType::Toplevel);
+        let page = gtk::DrawingArea::new();
+        window.add(&page);
+        window.realize();
+        page.realize();
+        assert!(window.window().is_some(), "a realized toplevel has a GDK window");
+        let opened = Term::new(
+            &window,
+            page.upcast_ref(),
+            RECT,
+            ID,
+            dropped,
+            Rc::new(Clip::private()),
+        );
+        assert_eq!(
+            opened.err(),
+            Some("native_terminal_surface_unavailable"),
+            "an open over an unmapped toplevel fails"
+        );
+        unsafe {
+            window.destroy();
+        }
+        pump_for(Duration::from_millis(100));
+    }
+
     /// The page asks a new term for focus before the host's first place, which the view
     /// refuses unplaced; the term owes it and applies it right after that place, once. A
     /// focus asked once the term shows applies at once, and a cover takes it back.
@@ -231,17 +324,17 @@ mod tests {
             "an unplaced view holds no native focus"
         );
         let scale = window.scale_factor();
-        assert_eq!(term.place(RECT, scale, true), Ok(Some(scale)));
+        assert_eq!(term.place(Some(RECT), scale), Some(scale));
         assert!(
             term.view.focus_state().active(),
             "focus asked before the first place is applied right after it"
         );
-        assert_eq!(term.place(RECT, scale, false), Ok(None));
+        assert_eq!(term.place(None, scale), None);
         assert!(
             !term.view.focus_state().is_native(),
             "a hidden term holds no native focus"
         );
-        assert_eq!(term.place(RECT, scale, true), Ok(Some(scale)));
+        assert_eq!(term.place(Some(RECT), scale), Some(scale));
         assert!(
             !term.view.focus_state().is_native(),
             "owed focus applies once, not at every place"
@@ -268,8 +361,8 @@ mod tests {
         let (window, page) = white_toplevel();
         let mut term = term_over(&window, &page);
         let scale = window.scale_factor();
-        assert_eq!(term.place(RECT, scale, true), Ok(Some(scale)));
-        let child = term.child.as_ref().expect("a child after a shown place");
+        assert_eq!(term.place(Some(RECT), scale), Some(scale));
+        let child = &term.child;
         let (mut shared, mut surface, frame) = green_terminal(child);
         show_frames(&mut term, &mut shared, &mut surface, &frame);
         step("shown", &term);
@@ -277,10 +370,10 @@ mod tests {
         never_presents(&mut term, "a covered term's child never presents");
         step("covered", &term);
         term.cover(false);
-        assert_eq!(term.place(RECT, scale, true), Ok(Some(scale)));
+        assert_eq!(term.place(Some(RECT), scale), Some(scale));
         show_frames(&mut term, &mut shared, &mut surface, &frame);
         step("uncovered", &term);
-        assert_eq!(term.place(RECT, scale, false), Ok(None));
+        assert_eq!(term.place(None, scale), None);
         never_presents(&mut term, "a hidden term's child never presents");
         drop(surface);
         close(window, term);
@@ -296,29 +389,29 @@ mod tests {
         let (window, page) = white_toplevel();
         let mut term = term_over(&window, &page);
         let scale = window.scale_factor();
-        assert_eq!(term.place(RECT, scale, true), Ok(Some(scale)));
-        let child = term.child.as_ref().expect("a child after a shown place");
+        assert_eq!(term.place(Some(RECT), scale), Some(scale));
+        let child = &term.child;
         let size = child.size();
         let (mut shared, mut surface, frame) = green_terminal(child);
         show_frames(&mut term, &mut shared, &mut surface, &frame);
         assert_eq!(
-            term.child.as_ref().and_then(Child::attached),
+            term.child.attached(),
             Some((size, scale))
         );
         assert_eq!(
-            term.place(RECT, scale * 2, true),
-            Ok(Some(scale * 2)),
+            term.place(Some(RECT), scale * 2),
+            Some(scale * 2),
             "a place at a new scale reports it, so the host remakes the surface"
         );
         drop(surface);
         drop(shared);
-        let child = term.child.as_ref().expect("the same child");
+        let child = &term.child;
         let rescaled = child.size();
         assert_eq!(rescaled, (size.0 * 2, size.1 * 2));
         let (mut shared, mut surface, frame) = green_terminal(child);
         show_frames(&mut term, &mut shared, &mut surface, &frame);
         assert_eq!(
-            term.child.as_ref().and_then(Child::attached),
+            term.child.attached(),
             Some((rescaled, scale * 2)),
             "the next present attaches a buffer at the new size and scale"
         );

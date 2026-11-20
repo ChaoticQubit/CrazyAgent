@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use gtk::gdk::{self, EventType};
 
@@ -153,6 +154,50 @@ impl Clip {
                 gtk::Clipboard::get(&board.atom()).request_text(move |_, text| reply(bounded(text)))
             }
         }
+    }
+}
+
+thread_local! {
+    /// The one set of boards the host and every Linux view share, made with the host's.
+    static SHARED: std::cell::OnceCell<Rc<Clip>> = const { std::cell::OnceCell::new() };
+}
+
+/// The host's clipboard on Linux: the shared boards' CLIPBOARD, which the page's Copy
+/// command and a view's own Copy write and a paste reads. A view's middle-click reads
+/// PRIMARY on the same boards.
+pub struct Boards(Rc<Clip>);
+
+impl Boards {
+    /// The host's boards, made once on the main thread: the desktop's. Output: them.
+    pub fn new() -> Boards {
+        let shared = SHARED.with(|cell| Rc::clone(cell.get_or_init(|| Rc::new(Clip::desktop()))));
+        assert!(SHARED.with(|cell| cell.get().is_some_and(|held| Rc::ptr_eq(held, &shared))));
+        Boards(shared)
+    }
+
+    /// The boards a view opens with, the host's own. Output: them; the host makes them
+    /// before any view opens.
+    pub fn shared() -> Rc<Clip> {
+        let held = SHARED.with(|cell| cell.get().cloned());
+        held.expect("the host's boards are made before any view opens")
+    }
+
+    /// Writes CLIPBOARD from a view's own Copy, inside its key event. Input: the text.
+    /// Output: whether the write was made.
+    pub fn write(&self, text: &str) -> bool {
+        self.0.write(Board::Clipboard, text)
+    }
+
+    /// Writes CLIPBOARD for the page's Copy command, which needs the display's seat.
+    /// Input: the text. Output: whether the write was made.
+    pub fn write_command(&self, text: &str) -> bool {
+        self.0.write_command(Board::Clipboard, text)
+    }
+
+    /// Reads CLIPBOARD at once, which a desktop board cannot answer: none until the paste
+    /// goes through the async read. Output: none.
+    pub fn read(&self) -> Option<String> {
+        None
     }
 }
 
