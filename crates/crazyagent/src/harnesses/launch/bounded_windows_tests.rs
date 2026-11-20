@@ -45,21 +45,22 @@ struct Case {
     grants: PathBuf,
 }
 
-/// Copies the boundary helper the build puts in the target folder beside the test binary,
-/// once, where `helper_beside_engine` looks. It reads no environment variable and no data
-/// root: each case gives its own grants folder (CR-1614).
+/// Puts the boundary helper beside the test binary once, where `helper_beside_engine` looks.
+/// The release suite's archive already ships it there (`deps`); a plain `cargo test` build
+/// has it one folder up, in the target folder, and it is copied. It reads no environment
+/// variable and no data root: each case gives its own grants folder (CR-1614).
 fn helper_beside() {
     static COPIED: OnceLock<()> = OnceLock::new();
     COPIED.get_or_init(|| {
         let tests = std::env::current_exe().unwrap();
-        let built = tests.parent().unwrap().with_file_name(HELPER_NAME);
-        assert!(
-            built.is_file(),
-            "build crazyagent-win-boundary first: {}",
-            built.display()
-        );
         let beside = tests.with_file_name(HELPER_NAME);
         if !beside.is_file() {
+            let built = tests.parent().unwrap().with_file_name(HELPER_NAME);
+            assert!(
+                built.is_file(),
+                "build crazyagent-win-boundary first: {}",
+                built.display()
+            );
             std::fs::copy(&built, &beside).unwrap();
         }
         assert!(beside.is_file());

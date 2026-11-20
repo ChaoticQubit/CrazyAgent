@@ -5274,6 +5274,10 @@ fn granted_root(root: &Path, owner: &Path, secrets: &[PathBuf]) -> Result<(), Sa
 #[cfg(target_os = "windows")]
 pub(crate) fn plain_grants(grants: PathBuf) -> Result<PathBuf, SandboxError> {
     assert!(!grants.as_os_str().is_empty());
+    if !clean_absolute(&grants) {
+        return Err(invalid("grants folder must exist"));
+    }
+    assert!(grants.is_absolute());
     Ok(grants)
 }
 
