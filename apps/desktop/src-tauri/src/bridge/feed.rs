@@ -175,7 +175,8 @@ impl EngineFeed {
     }
 
     /// Binds a native view to the place the shared gate took for it, before the host opens
-    /// it. Takes the view, the place and its session kind. Returns unit, or
+    /// it; events of the view's earlier open still on their way never reach it. Takes the
+    /// view, the place and its session kind. Returns unit, or
     /// `native_view_taken` for a view already bound, which gives the place back.
     pub fn bind(
         &mut self,
@@ -188,13 +189,16 @@ impl EngineFeed {
             return Err(failure("native_view_taken"));
         }
         slots.insert(view, Slot::Bound { place, kind });
+        drop(slots);
+        self.live.remove(&view);
         Ok(())
     }
 
     /// Opens a bound view's engine session at its grid without waiting: its events, the
-    /// `Attached` first, reach the inbox, and a failed open sends `Ended` with the code and
-    /// gives the place back. Takes the view and its grid in `SIZE_MIN..=SIZE_MAX`. Returns
-    /// once started, or an error for a view not bound or a grid out of bounds.
+    /// `Attached` first and only once the view is open, reach the inbox, and a failed open
+    /// sends `Ended` with the code and gives the place back. Takes the view and its grid in
+    /// `SIZE_MIN..=SIZE_MAX`. Returns once started, or an error for a view not bound or a
+    /// grid out of bounds.
     pub fn open(&mut self, view: u64, grid: (u16, u16)) -> io::Result<()> {
         let size = SIZE_MIN..=SIZE_MAX;
         if !size.contains(&grid.0) || !size.contains(&grid.1) {
@@ -230,13 +234,7 @@ impl EngineFeed {
         );
         let (task_window, task_key) = (window, key);
         let task = tauri::async_runtime::spawn(async move {
-            let attached = match opening.await {
-                Ok(session) => place.attach(session, sink),
-                Err(error) => {
-                    drop(place);
-                    Err(error)
-                }
-            };
+            let opened = opening.await;
             let failed = {
                 let Ok(mut slots) = shared.lock() else {
                     return;
@@ -245,6 +243,13 @@ impl EngineFeed {
                     slots.get(&view),
                     Some(Slot::Opening { token: open, .. }) if *open == token
                 );
+                let attached = match opened {
+                    Ok(session) => place.attach(session, sink),
+                    Err(error) => {
+                        drop(place);
+                        Err(error)
+                    }
+                };
                 match attached {
                     Ok(serial) if current => {
                         slots.insert(
@@ -330,8 +335,8 @@ impl EngineFeed {
         self.end(view)
     }
 
-    /// Ends one view's slot as `close` does but keeps its live token, so the `Ended` sent
-    /// next still reaches its host. Takes the view. Returns nothing.
+    /// Ends one view's slot as `close` does but keeps its live token until the view is bound
+    /// again, so the `Ended` sent next still reaches its host. Takes the view. Returns nothing.
     fn end(&mut self, view: u64) {
         let Ok(mut slots) = self.slots() else {
             return;

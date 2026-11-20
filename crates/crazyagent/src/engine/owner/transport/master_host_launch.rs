@@ -985,8 +985,8 @@ fn turn_sandbox(
     policy: &AgentPolicy,
     hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
-    if policy.access.unavailable().is_some() {
-        return Err(failure("agent_access_unavailable"));
+    if let Some((_, code)) = policy.access.refusal() {
+        return Err(failure(code));
     }
     let repository = &crate::projects_home::one_spelling(repository.to_path_buf());
     let worktree = &crate::projects_home::one_spelling(worktree.to_path_buf());

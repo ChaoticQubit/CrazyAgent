@@ -544,11 +544,15 @@ export function seersLine(agents: TeamAgent[]): string {
   return `${agents.map((agent) => agent.label).join(", ")} started before a folder was hidden and can still open it.`;
 }
 
-/** Whether the hidden folders section is offered: until the engine's read says this system
- * has no hidden folders (DEC-194), so it shows while loading. Input: the latest read, or null.
+export const HIDDEN_MACOS_ONLY = "Hidden folders work only on macOS for now.";
+export const HIDDEN_MACOS_CLEAR = "Hidden folders work only on macOS for now, so agents here don't start while this list holds a folder. Remove them and save.";
+
+/** Whether the hidden folders section offers editing: unless the engine's read says this
+ * system's boundary cannot hold hidden folders and nothing is saved (#590), so a list saved
+ * before can still be cleared, and it shows while loading. Input: the latest read, or null.
  * Output: true when offered. */
 export function hiddenOffered(saved: HiddenPaths | null): boolean {
-  return saved?.unavailable !== true;
+  return saved?.unavailable !== true || saved.paths.length > 0;
 }
 
 function HiddenSection({ data }: { data: ProjectData }) {
@@ -636,10 +640,11 @@ function HiddenSection({ data }: { data: ProjectData }) {
     data.reloadTeam();
   }
 
-  if (!hiddenOffered(latest)) return null;
+  if (!hiddenOffered(latest)) return <div className="pj-stack"><h2>Folders agents can't open</h2><p className="pj-secondary">{HIDDEN_MACOS_ONLY}</p></div>;
   const changed = saved !== null && JSON.stringify(saved.paths) !== JSON.stringify(paths);
   return <div className="pj-stack">
     <h2>Folders agents can't open</h2>
+    {latest?.unavailable && <p className="pj-note warn" role="status">{HIDDEN_MACOS_CLEAR}</p>}
     <p className="pj-secondary">Folders inside the project that agents, the master and research jobs can't read, write or run while access is Sandboxed. Use it for a secrets folder or a vendored dump you don't want touched. Each must be a folder inside the project that git does not track.</p>
     {fullAccess && <p className="pj-note warn" role="status">Full access runs agents without a sandbox, so hidden folders do not apply.</p>}
     {!fullAccess && <p className="pj-secondary">{HIDDEN_SEERS_COVER}</p>}
@@ -654,7 +659,7 @@ function HiddenSection({ data }: { data: ProjectData }) {
       {paths.map((path) => <li key={path}><span className="pj-mono">{displayText(path)}</span>{" "}
         <button type="button" className="btn" aria-label={`Stop hiding ${path}`} onClick={() => setPaths(paths.filter((item) => item !== path))}>Remove</button></li>)}
     </ul>}
-    {saved !== null && <form className="pj-field" onSubmit={(event) => { event.preventDefault(); add(); }}>
+    {saved !== null && !latest?.unavailable && <form className="pj-field" onSubmit={(event) => { event.preventDefault(); add(); }}>
       <label className="pj-label" htmlFor="ps-hidden-path">Folder path</label>
       <input id="ps-hidden-path" className="pj-input" value={typed} placeholder="/Users/you/project/secrets" onChange={(event) => setTyped(event.target.value)} />
       <div><button type="submit" className="btn" disabled={!typed.trim()}>Hide folder</button></div>

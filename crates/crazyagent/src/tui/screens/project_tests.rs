@@ -3089,29 +3089,6 @@ fn settings_plans_a_roadmap_with_p_and_edits_hidden_folders_with_k() {
     );
 }
 
-/// Where the engine says this system has no hidden folders (DEC-194, Windows until its git
-/// check lands), the Settings tab shows no Hidden line and no run that could open one, and
-/// `k` opens no box, even for a list saved earlier; the engine's refusal stays the guard.
-#[test]
-fn settings_offers_no_hidden_folders_where_the_engine_says_they_are_unavailable() {
-    let look = Look::plain();
-    let project = ProjectId::new("hidden").unwrap();
-    let mut screen = loaded(&project);
-    screen.open(Tab::Settings);
-    screen.hidden_paths = Some(crate::project_setup::HiddenPaths {
-        paths: vec!["/Users/owner/secret".into()],
-        version: 0,
-        runs: vec![crate::sandbox::hidden_paths::RunKind::Master],
-        unavailable: true,
-    });
-    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
-    assert!(!shown.contains("Hidden    "), "{shown}");
-    assert!(!shown.contains("k Edit hidden folders"), "{shown}");
-    assert!(!shown.contains("can still open a hidden folder"), "{shown}");
-    assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Ignored);
-    assert!(screen.hidden.is_none());
-}
-
 /// A hidden folder refused as not plain is told in this system's own path form: on Windows
 /// a drive path joined by backslashes, elsewhere a path with no quote or backslash.
 #[test]
@@ -3121,6 +3098,56 @@ fn a_hidden_folder_refused_as_not_plain_is_told_in_this_systems_path_form() {
     #[cfg(not(windows))]
     let wanted = "A folder path can't hold quotes, backslashes or control characters.";
     assert_eq!(plain_problem("hidden_path_not_plain"), wanted);
+}
+
+/// #590 (leader 10:34): a hidden folder refused because its path holds non-English letters
+/// is told that cause in plain words, the same words the desktop app shows.
+#[test]
+fn a_hidden_folder_refused_for_its_non_english_name_is_told_why() {
+    assert_eq!(
+        plain_problem("hidden_path_name_unchecked"),
+        "A folder path with non-English letters or symbols can't be checked against git on this system yet. Rename the folder or pick another."
+    );
+}
+
+/// #590 (leader 10:37): where the engine says this system's boundary cannot hold hidden
+/// folders, the Settings tab says so in one plain line and `k` opens no box; a list saved
+/// before still shows with how to clear it and `k` opens the box, and the save's refusal
+/// names the cause.
+#[test]
+fn settings_offer_hidden_folders_only_where_the_boundary_holds_them_and_a_saved_list_clears() {
+    let look = Look::plain();
+    let project = ProjectId::new("hidden").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    let unheld = |paths: Vec<String>| crate::project_setup::HiddenPaths {
+        paths,
+        version: 0,
+        runs: Vec::new(),
+        unavailable: true,
+    };
+    screen.hidden_paths = Some(unheld(Vec::new()));
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Hidden    Works only on macOS for now"),
+        "{shown}"
+    );
+    assert!(!shown.contains("k Edit hidden folders"), "{shown}");
+    assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Ignored);
+    assert!(screen.hidden.is_none());
+    screen.hidden_paths = Some(unheld(vec!["/p/secret".into()]));
+    let shown = text(&project_screen(&mut screen, 120, 24, &look).rows);
+    assert!(
+        shown.contains("/p/secret  ! Only on macOS; remove them so agents start"),
+        "{shown}"
+    );
+    assert!(shown.contains("k Edit hidden folders"), "{shown}");
+    assert_eq!(screen.key(key(KeyCode::Char('k'))), ProjectReply::Handled);
+    assert!(screen.hidden.is_some());
+    assert_eq!(
+        plain_problem("hidden_paths_need_macos"),
+        "Hidden folders work only on macOS for now, so a list with folders can't be saved here. Remove them all and save."
+    );
 }
 
 #[test]
@@ -5636,4 +5663,18 @@ fn a_draft_that_does_not_fit_after_the_owners_text_leaves_the_input_as_typed() {
         "{:?}",
         screen.problem
     );
+}
+
+#[test]
+fn the_windows_access_and_loopback_refusals_read_as_the_engine_words_them() {
+    for code in [
+        crate::sandbox::policy::SANDBOX_FULL_UNAVAILABLE_WINDOWS,
+        crate::sandbox::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS,
+    ] {
+        assert_eq!(
+            plain_problem(code),
+            crate::config::plain_problem(code).expect("the code has a plain sentence"),
+            "{code}"
+        );
+    }
 }

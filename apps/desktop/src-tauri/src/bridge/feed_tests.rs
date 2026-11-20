@@ -444,3 +444,211 @@ fn an_event_of_a_closed_open_never_reaches_the_view_opened_again_in_another_wind
     );
     assert_eq!(feed.take(second), Some(ended(5)));
 }
+
+/// #488 r2 sec F1 residual: a view whose queue overflowed keeps its open's token so its
+/// `Ended` reaches the host, but binding it again without `close`, here in a wall window,
+/// drops every later event of that open: output its detached reader sends late never reaches
+/// the place bound next, even before the view opens there (V243-NATIVE-FEED-FIXES).
+#[test]
+fn an_overflowed_view_bound_again_without_close_drops_its_first_opens_events() {
+    const WALL: &str = "terminals-0123456789abcdef-1";
+    let (terminals, mut feed, mut inbox, _) = started(failing("terminal_agent_unknown"), 4);
+    terminals.page_started(WALL);
+    let _queue = opened(&terminals, &mut feed, 1);
+    let shown = FeedEvent::Output {
+        view: 7,
+        bytes: b"still open".to_vec(),
+    };
+    assert_eq!(
+        feed.bind(7, terminals.room(WALL, &team(1)).unwrap(), Session::Full)
+            .err()
+            .map(|error| error.code),
+        Some("native_view_taken")
+    );
+    assert_eq!(
+        feed.take(Fed::new(feed.live[&7], shown.clone())),
+        Some(shown),
+        "a refused bind leaves the open view's events"
+    );
+    feed.input(7, b"a", false).unwrap();
+    assert_eq!(
+        feed.input(7, b"b", false).unwrap_err().to_string(),
+        NATIVE_OVERFLOW
+    );
+    let overflow = inbox.try_recv().unwrap();
+    let late = Fed::new(
+        overflow.token,
+        FeedEvent::Output {
+            view: 7,
+            bytes: b"the first project only".to_vec(),
+        },
+    );
+    assert_eq!(
+        feed.take(overflow),
+        Some(FeedEvent::Ended {
+            view: 7,
+            code: NATIVE_OVERFLOW.to_owned()
+        }),
+        "the overflow's Ended reaches its host"
+    );
+    feed.bind(7, terminals.room(WALL, &team(1)).unwrap(), Session::Full)
+        .unwrap();
+    assert_eq!(
+        feed.take(late),
+        None,
+        "the overflowed open's late output never reaches the view bound in the wall window"
+    );
+}
+
+/// Moves the open task that calls it off its tokio worker, so the tasks it spawns next wait in
+/// the queue every worker takes from, not in this worker's own slot that no other worker takes.
+/// Takes nothing. Returns once a task spawned from here ran while this thread waited, which
+/// shows the next spawns can run while the open task blocks; panics after 20 tries.
+#[cfg(unix)]
+fn leave_worker() {
+    for _ in 0..20 {
+        tokio::task::block_in_place(|| std::thread::sleep(Duration::from_millis(20)));
+        let (ran, probe) = std::sync::mpsc::channel::<()>();
+        tauri::async_runtime::spawn(async move {
+            let _ = ran.send(());
+        });
+        if probe.recv_timeout(Duration::from_millis(200)).is_ok() {
+            return;
+        }
+    }
+    panic!("the open task never left its worker");
+}
+
+/// NOTE-0155 section 5 (rv-code2 #488 r2 N1, V243-NATIVE-FEED-FIXES): `Attached` reaches the
+/// host only once its view is open, so its first key is never refused `terminal_not_attached`.
+/// On a live engine terminal the test holds the slots lock from the session handover: no event
+/// arrives while it is held, then `Attached` passes `take` and a key is taken. The row is
+/// scheduler-dependent: its opener calls `leave_worker`, so a read task spawned early can run.
+#[cfg(unix)]
+#[test]
+fn the_attached_of_a_live_open_reaches_the_host_only_once_its_view_is_open() {
+    use crazyagent::engine::Client;
+    use crazyagent::engine::bootstrap::EngineService;
+    use crazyagent::engine::owner::OwnerClientKind;
+    use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
+    use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
+    use crazyagent::terminal::{FOLDER, Host};
+    use std::os::unix::fs::PermissionsExt;
+    struct Server {
+        tmux: std::path::PathBuf,
+        socket: std::path::PathBuf,
+    }
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = crazyagent::spawn_gate::status(
+                std::process::Command::new(&self.tmux)
+                    .arg("-S")
+                    .arg(&self.socket)
+                    .arg("kill-server")
+                    .env_clear()
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null()),
+            );
+        }
+    }
+    let tmp = tempfile::Builder::new()
+        .prefix("ca-feed-open-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let root = tmp.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let global = root.join("g.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 2000\n").unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let tmux = installed(root).expect("tmux is required for this test");
+    let folder = root.join(FOLDER);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: folder.join(SOCKET),
+    };
+    let agent = AgentId::team(1).unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sh".into()],
+        cwd: root.to_path_buf(),
+        env: vec![("PS1".into(), "ready$ ".into())],
+        transcript: Transcript::Unavailable,
+    };
+    let _launcher = {
+        let launcher = Tmux::open(Some(tmux), &folder);
+        launcher.spawn(&agent, &command).unwrap();
+        launcher
+    };
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let (mut service, owner) = tauri::async_runtime::block_on(async {
+        let service = EngineService::start_with_settings_sources(
+            root,
+            "e.sock",
+            &global,
+            &root.join("p.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let (_, owner, _) = Client::new(root.join("e.sock"), WAIT)
+            .unwrap()
+            .with_owner(OwnerClientKind::Desktop)
+            .await
+            .unwrap();
+        (service, Arc::new(owner))
+    });
+    let (release, gate) = tokio::sync::oneshot::channel::<()>();
+    let gate = Arc::new(Mutex::new(Some(gate)));
+    let (handed, sessions) = std::sync::mpsc::channel::<()>();
+    let opener: Opener = Arc::new(move |key: ViewKey, _, _| -> Opening {
+        let (owner, gate, handed) = (Arc::clone(&owner), Arc::clone(&gate), handed.clone());
+        Box::pin(async move {
+            let gate = gate.lock().unwrap().take().expect("one open");
+            gate.await.expect("the test lets the open go");
+            let session = owner
+                .terminal_attach(key.agent)
+                .await
+                .map_err(|_| failure("terminal_outcome_unknown"))?;
+            leave_worker();
+            handed.send(()).expect("the test waits for the session");
+            Ok(session)
+        })
+    });
+    let (terminals, mut feed, mut inbox, _) = started(opener, 4);
+    feed.bind(7, terminals.room("main", &team(1)).unwrap(), Session::Full)
+        .unwrap();
+    feed.open(7, (80, 24)).unwrap();
+    let held = feed.slots.lock().unwrap();
+    release.send(()).unwrap();
+    sessions
+        .recv_timeout(WAIT)
+        .expect("the engine hands over the agent's terminal");
+    let early = (0..25).find_map(|_| {
+        std::thread::sleep(Duration::from_millis(20));
+        inbox.try_recv().ok()
+    });
+    drop(held);
+    assert!(
+        early.is_none(),
+        "no event of the view reaches the host while it is still opening"
+    );
+    let attached = received(&mut inbox);
+    assert!(
+        matches!(
+            feed.take(attached),
+            Some(FeedEvent::Attached { view: 7, .. })
+        ),
+        "the Attached passes take"
+    );
+    assert_eq!(
+        feed.input(7, b"a", false)
+            .map_err(|error| error.to_string()),
+        Ok(()),
+        "the first key sent on Attached is taken"
+    );
+    feed.close(7);
+    let shutdown = tauri::async_runtime::block_on(async {
+        tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await
+    });
+    assert!(matches!(shutdown, Ok(Ok(()))));
+}

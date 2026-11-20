@@ -956,22 +956,15 @@ fn suffix() -> Result<String, EngineError> {
     Ok(super::bridge::hex(&bytes))
 }
 
-#[cfg(unix)]
+/// Opens an extension file to read as itself, never through a link or junction at its name
+/// ([`crate::platform::open_plain`]), and keeps it only when it is a regular file. Input: the
+/// path. Output: the open file, or the I/O error.
 fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::OpenOptionsExt;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(path)?;
+    let file = crate::platform::open_plain(path)?;
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::other("not a file"));
     }
     Ok(file)
-}
-
-#[cfg(not(unix))]
-fn open_plain(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::File::open(path)
 }
 
 #[cfg(unix)]
@@ -995,3 +988,22 @@ fn create_private(path: &Path) -> std::io::Result<std::fs::File> {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn an_extension_file_that_is_a_link_is_not_opened() {
+        let folder = tempfile::tempdir().unwrap();
+        let target = folder.path().join("secret.json");
+        std::fs::write(&target, "{}").unwrap();
+        let link = folder.path().join("package.json");
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        assert!(open_plain(&target).is_ok());
+        assert!(
+            open_plain(&link).is_err(),
+            "the open followed the link to its target"
+        );
+    }
+}

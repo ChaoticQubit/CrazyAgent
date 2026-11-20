@@ -14,7 +14,10 @@ fn codex(entries: &[HarnessEntry]) -> &HarnessStatus {
 /// ([`crate::paths::executable_names`]): `codex`, runnable, off Windows and `codex.exe` on
 /// Windows, where the extensionless file is never tried. Input: the folder. Output: the file.
 fn install(folder: &Path) -> PathBuf {
-    let path = folder.join(crate::paths::executable_names("codex").remove(0));
+    let names = crate::paths::executable_names("codex");
+    assert!(!names.is_empty());
+    let path = folder.join(&names[0]);
+    assert!(path.starts_with(folder));
     std::fs::write(&path, "#!/bin/sh\n").unwrap();
     #[cfg(unix)]
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();

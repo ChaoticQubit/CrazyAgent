@@ -761,10 +761,10 @@ impl OwnerClient {
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
-            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
                 .await
                 .map_err(|_| failure("plugins_owner_unavailable"))?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             let mut packet = [0; 37];
             packet[..4].copy_from_slice(b"CAO1");
             packet[4] = match self.kind {
@@ -879,7 +879,7 @@ enum Prepared {
 /// Inputs: the connection, engine, authority, packet, admission and request body.
 /// Output: done once the reply is written.
 pub(super) async fn serve(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
@@ -1515,6 +1515,12 @@ fn boundary_check(
         ForCheck::Refused("context_mode_npx_not_found") => {
             return Err("server_npx_not_found".into());
         }
+        ForCheck::Refused("context_mode_node_folder_unreadable") => {
+            return Err("server_node_folder_unreadable".into());
+        }
+        ForCheck::Refused(crate::context_mode::NODE_DRIVE_ROOT_UNREADABLE) => {
+            return Err("server_node_drive_root_unreadable".into());
+        }
         ForCheck::Refused(code) => {
             eprintln!("plugin_check_install_refused cause={code}");
             return Err("server_cant_start".into());
@@ -1554,6 +1560,15 @@ fn boundary_check(
             eprintln!("plugin_check_boundary_refused cause={reason}");
             crate::plugins::check_refused(&reason)
         }
+        SandboxError::Unreadable(folder) => {
+            let reason = crate::sandbox::unreadable_reason(&folder);
+            eprintln!("plugin_check_boundary_refused cause={reason}");
+            if reason.len() <= crate::plugins::CHECK_REASON_BYTES_MAX {
+                crate::plugins::check_refused(&reason)
+            } else {
+                "server_cant_start".to_owned()
+            }
+        }
         other => refused(&other).to_owned(),
     };
     let checks = root.join(CHECK_FOLDER);
@@ -1584,6 +1599,10 @@ fn boundary_check(
         crate::sandbox::LinuxStrict::Off,
     );
     let profile = check_profile(&checks, id);
+    if let Some(problem) = crate::plugins::check_network_refused(std::env::consts::OS, &network) {
+        eprintln!("plugin_check_boundary_refused cause=windows_network_limit");
+        return Err(problem);
+    }
     let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], network)
         .map(ProjectSandbox::as_job_folder)
         .and_then(|sandbox| sandbox.keep_ports(kept))
@@ -1623,7 +1642,7 @@ fn secret_frames(action: &Action) -> usize {
     }
 }
 
-async fn receive_secret(stream: &mut UnixStream) -> Result<AccountSecret, EngineError> {
+async fn receive_secret(stream: &mut Stream) -> Result<AccountSecret, EngineError> {
     tokio::time::timeout(Duration::from_secs(5), async {
         let invalid = || failure("server_secret_invalid");
         let size = stream.read_u32().await.map_err(|_| invalid())? as usize;

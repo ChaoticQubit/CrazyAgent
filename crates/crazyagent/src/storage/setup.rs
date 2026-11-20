@@ -7,7 +7,6 @@ use crate::tools::permission_fix;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[cfg(any(unix, test))]
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS setup_pack (
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 64),
     body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) <= 65536)
@@ -70,7 +69,6 @@ pub(super) struct KeptHook {
 
 /// Creates the installed default-pack tables when the engine database opens.
 /// Input: the engine connection. Output: any SQLite failure.
-#[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(SCHEMA).map_err(error)
 }
