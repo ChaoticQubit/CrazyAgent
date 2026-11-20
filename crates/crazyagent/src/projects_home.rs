@@ -363,13 +363,44 @@ fn real_folder(path: &Path, missing: &str, not_folder: &str) -> Result<PathBuf, 
 /// the home's names on macOS. Inputs: a path in its one spelling and the owner's home.
 pub(crate) fn holds_owner_home(path: &Path, owner: &Path) -> bool {
     path.parent().is_none()
-        || owner.starts_with(path)
-        || data_twin(owner).is_some_and(|twin| twin.starts_with(path))
+        || inside(owner, path)
+        || data_twin(owner).is_some_and(|twin| inside(&twin, path))
 }
 
 /// True when one of the two folders is inside the other or they are the same.
 fn overlaps(left: &Path, right: &Path) -> bool {
-    left.starts_with(right) || right.starts_with(left)
+    inside(left, right) || inside(right, left)
+}
+
+/// True when `path` is `folder` or lies below it, each compared by its [`compare_key`], so
+/// a refusal that asks whether one folder holds another never misses because one side kept
+/// a verbatim spelling (rv-sec2 #736 L1). Inputs: the path and the folder. Output: the answer.
+pub(crate) fn inside(path: &Path, folder: &Path) -> bool {
+    compare_key(path).starts_with(compare_key(folder))
+}
+
+/// The spelling a containment compare reads a path in. On Windows a verbatim drive path
+/// `\\?\C:\...` reads as `C:\...` even when [`one_spelling`] keeps it verbatim for a name
+/// the sandbox refuses; the stored spelling stays [`one_spelling`]'s. Elsewhere the path
+/// itself. Input: the path. Output: the key, borrowed from the path.
+fn compare_key(path: &Path) -> &Path {
+    #[cfg(windows)]
+    if let Some(plain) = path.to_str().and_then(windows_drive_plain) {
+        return Path::new(plain);
+    }
+    path
+}
+
+/// The drive path a verbatim drive path names, whatever names it holds: `\\?\C:\work` gives
+/// `C:\work`. Text in any other form, a UNC, device or plain path included, gives none.
+/// Input: the text. Output: the plain drive text, or none.
+#[cfg(any(windows, test))]
+pub(crate) fn windows_drive_plain(text: &str) -> Option<&str> {
+    let plain = text.strip_prefix(r"\\?\")?;
+    let bytes = plain.as_bytes();
+    let drive =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\';
+    drive.then_some(plain)
 }
 
 /// True when a real folder overlaps a folder the project uses: its own folder
@@ -616,11 +647,11 @@ pub fn check_add(
         "home_source_not_folder",
     )?;
     let saved = one_spelling(home.to_path_buf());
-    if real.starts_with(&saved) {
+    if inside(&real, &saved) {
         return Err(refused("home_source_in_home"));
     }
     let owner = owner_home()?;
-    if holds_owner_home(&real, &owner) || saved.starts_with(&real) || overlaps(&real, engine_root) {
+    if holds_owner_home(&real, &owner) || inside(&saved, &real) || overlaps(&real, engine_root) {
         return Err(refused("home_source_unsafe"));
     }
     let name = real
@@ -1382,9 +1413,8 @@ pub(crate) fn move_holds(
         .optional()?;
     Ok(origin.is_some_and(|origin| {
         let origin = one_spelling(PathBuf::from(origin));
-        folder.starts_with(&origin)
-            || std::fs::canonicalize(folder)
-                .is_ok_and(|real| one_spelling(real).starts_with(&origin))
+        inside(folder, &origin)
+            || std::fs::canonicalize(folder).is_ok_and(|real| inside(&one_spelling(real), &origin))
     }))
 }
 
