@@ -76,7 +76,7 @@ fn child() {
     let whoami = PathBuf::from(std::env::var("SystemRoot").unwrap())
         .join("System32")
         .join("whoami.exe");
-    let groups = Command::new(whoami).arg("/groups").output().unwrap();
+    let groups = crate::spawn_gate::collected(Command::new(whoami).arg("/groups")).unwrap();
     println!("GROUPS {}", String::from_utf8_lossy(&groups.stdout));
     for item in line.lines() {
         match item.split_once('|') {
