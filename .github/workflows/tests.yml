@@ -21,7 +21,8 @@ env:
   RED_SHA: 9b8c694d8
   SETTLE_RED_SHA: 842a4e6db
   BASE_SHA: 238ab31c7
-  TIP_SHA: a45de2f8a
+  TREE_RED_SHA: caa607702
+  TIP_SHA: 0f09a94c4
 
 defaults:
   run:
@@ -29,7 +30,7 @@ defaults:
 
 jobs:
   s4-windows:
-    name: V244 WIN-MASTER S4 Claude custody on ${{ matrix.runner }}, red at 9b8c694d8, tip a45de2f8a
+    name: V244 WIN-MASTER S4 r4 Claude custody on ${{ matrix.runner }}, red at 9b8c694d8 and caa607702, tip 0f09a94c4
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
@@ -111,18 +112,46 @@ jobs:
           set -euo pipefail
           git restore -q --source="$SETTLE_RED_SHA" --staged --worktree -- crates/crazyagent/src/engine/claude_host/process.rs
           set +e
-          cargo test -p crazyagent --lib --locked -- --test-threads 1 engine::claude_host::process::windows_tests:: 2>&1 | tee "$RUNNER_TEMP/settle-red.log"
+          cargo test -p crazyagent --lib --locked -- --test-threads 1 engine::claude_host::process::windows_tests:: --skip a_windows_claude_harness_that_exits_leaving_a_sleeping_process 2>&1 | tee "$RUNNER_TEMP/settle-red.log"
           rc=${PIPESTATUS[0]}
           set -e
           git restore -q --source="$TIP_SHA" --staged --worktree -- crates
           git diff --quiet "$TIP_SHA" -- crates
           grep -E '^test engine::|^test result|left:|run [0-9]' "$RUNNER_TEMP/settle-red.log" || true
           [ "$rc" -ne 0 ]
-          grep -qE 'test result: FAILED\. 5 passed; 1 failed; 1 ignored' "$RUNNER_TEMP/settle-red.log"
+          grep -qE 'test result: FAILED\. 6 passed; 1 failed; 2 ignored' "$RUNNER_TEMP/settle-red.log"
           grep -q 'a_windows_claude_harness_that_exits_before_a_turn_is_reaped_and_retired \.\.\. FAILED' "$RUNNER_TEMP/settle-red.log"
           grep -q 'left: Some("claude_host_disconnected")' "$RUNNER_TEMP/settle-red.log"
           echo "red as expected: without the settle the exit row reads a disconnect"
-      - name: S4 Windows custody rows at the tip a45de2f8a, five rounds
+      - name: S1 r2 W1 red for ended at caa607702 on the tip's tree
+        if: ${{ !cancelled() }}
+        timeout-minutes: 60
+        run: |
+          set -euo pipefail
+          git restore -q --source="$TREE_RED_SHA" --staged --worktree -- crates/crazyagent-win-sandbox/src/win/tree.rs
+          set +e
+          cargo test -p crazyagent-win-sandbox --lib --locked -- --test-threads 1 win::tree::tests:: 2>&1 | tee "$RUNNER_TEMP/tree-red.log"
+          tree_rc=${PIPESTATUS[0]}
+          cargo test -p crazyagent --lib --locked -- --test-threads 1 engine::claude_host::process::windows_tests:: 2>&1 | tee "$RUNNER_TEMP/claude-tree-red.log"
+          claude_rc=${PIPESTATUS[0]}
+          set -e
+          git restore -q --source="$TIP_SHA" --staged --worktree -- crates
+          git diff --quiet "$TIP_SHA" -- crates
+          grep -E '^test win::|^test engine::|^test result|left:|right:' "$RUNNER_TEMP/tree-red.log" "$RUNNER_TEMP/claude-tree-red.log" || true
+          [ "$tree_rc" -ne 0 ]
+          grep -qE 'test result: FAILED\. 0 passed; 1 failed' "$RUNNER_TEMP/tree-red.log"
+          grep -q 'a_held_tree_with_a_sleeping_child_says_ended_only_once_none_runs \.\.\. FAILED' "$RUNNER_TEMP/tree-red.log"
+          [ "$claude_rc" -ne 0 ]
+          grep -q 'a_process_in_a_job_nested_in_a_held_tree_counts_until_the_tree_ends_it \.\.\. FAILED' "$RUNNER_TEMP/claude-tree-red.log"
+          echo "red as expected: an ended that ends nothing fails the tree row and the nested-job row"
+      - name: S1 r2 W1 tree row at the tip 0f09a94c4
+        if: ${{ !cancelled() }}
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          cargo test -p crazyagent-win-sandbox --lib --locked -- --test-threads 1 win::tree::tests:: 2>&1 | tee "$RUNNER_TEMP/tree-tip.log"
+          grep -qE 'test result: ok\. 1 passed; 0 failed' "$RUNNER_TEMP/tree-tip.log"
+      - name: S4 Windows custody rows at the tip 0f09a94c4, five rounds
         if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
@@ -135,9 +164,9 @@ jobs:
             echo "round $round rc=$rc"
             grep -E '^test engine::|^test result|panicked|left:|right:' "$RUNNER_TEMP/tip-$round.log" || true
             [ "$rc" -eq 0 ]
-            grep -qE 'test result: ok\. 6 passed; 0 failed; 1 ignored' "$RUNNER_TEMP/tip-$round.log"
+            grep -qE 'test result: ok\. 8 passed; 0 failed; 2 ignored' "$RUNNER_TEMP/tip-$round.log"
           done
-          echo "6 rows green in 5 rounds"
+          echo "8 rows green in 5 rounds"
       - name: Earlier Windows master rows stay green at the tip (S1 Codex custody, S2 stream log, S3 commands)
         if: ${{ !cancelled() }}
         timeout-minutes: 60
@@ -162,7 +191,7 @@ jobs:
           grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/policy.log"
           grep -q 'full_access_on_windows_is_refused_with_its_own_reason_and_code \.\.\. ok' "$RUNNER_TEMP/policy.log"
   s4-linux:
-    name: V244 WIN-MASTER S4 Unix master host rows on ubuntu-22.04 at a45de2f8a against 238ab31c7
+    name: V244 WIN-MASTER S4 Unix master host rows on ubuntu-22.04 at 0f09a94c4 against 238ab31c7
     runs-on: ubuntu-22.04
     timeout-minutes: 180
     steps:
@@ -219,7 +248,7 @@ jobs:
           mkdir -p target/debug/deps
           cp target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
           ls -l target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
-      - name: Unix master host rows at the base 238ab31c7 and at the tip a45de2f8a
+      - name: Unix master host rows at the base 238ab31c7 and at the tip 0f09a94c4
         if: ${{ !cancelled() }}
         timeout-minutes: 120
         run: |
@@ -244,7 +273,7 @@ jobs:
           [ -z "$new" ] || { echo "::error::rows failing at the tip only: $new"; exit 1; }
           echo "no row fails at the tip that passes at the base"
   s4-macos:
-    name: V244 WIN-MASTER S4 Unix master host rows on macos-15 at a45de2f8a against 238ab31c7
+    name: V244 WIN-MASTER S4 Unix master host rows on macos-15 at 0f09a94c4 against 238ab31c7
     runs-on: macos-15
     timeout-minutes: 240
     steps:
@@ -308,7 +337,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo clippy -p crazyagent --tests --locked -- -D warnings
-      - name: Unix master host rows at the base 238ab31c7 and at the tip a45de2f8a
+      - name: Unix master host rows at the base 238ab31c7 and at the tip 0f09a94c4
         if: ${{ !cancelled() }}
         timeout-minutes: 120
         run: |
