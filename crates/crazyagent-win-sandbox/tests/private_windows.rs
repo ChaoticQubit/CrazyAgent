@@ -15,8 +15,8 @@ use windows_sys::Win32::Security::{
     TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenImpersonation, TokenIntegrityLevel,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_EXECUTE, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_WRITE_DATA,
-    READ_CONTROL, WRITE_OWNER,
+    DELETE, FILE_EXECUTE, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_DATA, READ_CONTROL, WRITE_OWNER,
 };
 use windows_sys::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken, SetThreadToken};
@@ -736,4 +736,122 @@ fn a_secret_file_in_the_database_folder_holds_one_full_label() {
     assert_eq!(entries, [(0, 0x2000, 0x7)]);
     drop(held);
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// rv-sec2 #702 R7, leader 03:5x: a private file is deleted through a handle opened with
+/// delete access, and its name goes when that handle closes, while a second handle that
+/// shares delete still holds the file; a handle opened without delete access cannot delete it.
+#[test]
+fn a_private_file_is_deleted_through_a_handle_with_delete_access() {
+    let root = scratch("delete-held");
+    drop(private::dir(&root).unwrap());
+    let path = root.join("pipes");
+    let created = private::file(&path, true).unwrap();
+    let refused = private::delete(&created).unwrap_err();
+    assert_eq!(refused.raw_os_error(), Some(5), "{refused}");
+    drop(created);
+    let held = std::fs::OpenOptions::new()
+        .access_mode(DELETE | READ_CONTROL)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .open(&path)
+        .unwrap();
+    let other = std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .open(&path)
+        .unwrap();
+    private::delete(&held).unwrap();
+    drop(held);
+    assert!(
+        std::fs::read_dir(&root).unwrap().next().is_none(),
+        "the name goes when the deleting handle closes"
+    );
+    drop(other);
+    assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+}
+
+/// R7: `remove` deletes a private file only while it is still the object its caller
+/// pinned; a file whose identity differs is refused and stays.
+#[test]
+fn remove_deletes_a_private_file_only_while_it_holds_its_pinned_identity() {
+    let root = scratch("remove-pinned");
+    drop(private::dir(&root).unwrap());
+    let path = root.join("pipes");
+    let pinned = private::identity(&private::file(&path, true).unwrap()).unwrap();
+    private::remove(&path, pinned).unwrap();
+    assert!(!path.exists());
+    let other = private::identity(&private::file(&path, true).unwrap()).unwrap();
+    let refused = private::remove(&path, pinned).unwrap_err();
+    assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied, "{refused}");
+    assert_eq!(
+        refused.to_string(),
+        "a private file changed before its delete"
+    );
+    assert!(path.exists());
+    private::remove(&path, other).unwrap();
+    assert!(!path.exists());
+}
+
+/// R7: `remove` leaves a file another handle holds without delete sharing, and a file with
+/// a second hard link, which the private judge refuses, keeps both names.
+#[test]
+fn remove_leaves_a_held_file_and_a_hard_linked_one() {
+    let root = scratch("remove-held");
+    drop(private::dir(&root).unwrap());
+    let path = root.join("pipes");
+    let pinned = private::identity(&private::file(&path, true).unwrap()).unwrap();
+    let reader = private::read_only(&path).unwrap();
+    let busy = private::remove(&path, pinned).unwrap_err();
+    assert_eq!(busy.raw_os_error(), Some(32), "{busy}");
+    drop(reader);
+    assert!(path.exists());
+    let link = root.join("pipes.link");
+    std::fs::hard_link(&path, &link).unwrap();
+    assert!(private::remove(&link, pinned).is_err());
+    assert!(path.exists() && link.exists());
+}
+
+/// W3 D12 (DESIGN-0256): a cap file made with delete access is read by a reader that shares
+/// delete while its maker holds it, refused to a reader that does not, never renamed, gone
+/// once its maker deletes it through its own handle and closes it, and closed to a lower
+/// integrity process of the user with its medium full label.
+#[test]
+fn a_deletable_secret_file_is_read_while_held_and_deleted_through_its_own_handle() {
+    use std::io::{Read, Write};
+    let root = scratch("w3-cap");
+    let held = private::dir(&root).unwrap();
+    let path = root.join("owner-tui.cap");
+    let maker = private::secret_file_deletable(&path).unwrap();
+    (&maker).write_all(&[7; 32]).unwrap();
+    let reader =
+        private::read_secret(&path).expect("a reader that shares delete opens the held file");
+    let mut seen = Vec::new();
+    (&reader).read_to_end(&mut seen).unwrap();
+    assert_eq!(seen, [7; 32]);
+    assert!(
+        private::read_only(&path).is_err(),
+        "a reader that does not share delete is refused while the maker holds delete access"
+    );
+    assert!(std::fs::rename(&path, root.join("moved.cap")).is_err());
+    assert_eq!(
+        private::identity(&maker).unwrap(),
+        private::identity(&reader).unwrap()
+    );
+    private::delete(&maker).unwrap();
+    drop(maker);
+    assert!(
+        std::fs::symlink_metadata(&path).is_err(),
+        "the name goes when the deleting handle closes, though the reader still holds it"
+    );
+    drop(reader);
+    let closed = root.join("closed.cap");
+    drop(private::secret_file_deletable(&closed).unwrap());
+    drop(
+        private::read_only(&closed)
+            .expect("a reader that does not share delete opens it once no maker holds it"),
+    );
+    closed_to_low_holders(&closed);
+    let reread = private::read_secret(&closed).unwrap();
+    assert_eq!(own_label(&reread), MEDIUM_FULL);
+    drop((reread, held));
 }

@@ -3,7 +3,14 @@ pub mod ide;
 pub mod theme;
 mod updates;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(
+        dead_code,
+        reason = "the Linux and Windows hosts wire the native views in (DEC-203)"
+    )
+)]
 mod native_term;
 
 #[cfg(feature = "native-webdriver")]
@@ -2043,7 +2050,13 @@ fn native_direct(name: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)>
 /// Takes a fresh place through the shared gate for a native view the host reopens
 /// engine-fed. Inputs: the app, the window label, the agent window name and the wall
 /// window's project. Output: the place, or the refusal.
-#[cfg(target_os = "macos")]
+#[cfg_attr(
+    not(target_os = "macos"),
+    expect(
+        dead_code,
+        reason = "the Linux and Windows hosts reopen views engine-fed through it (DEC-203)"
+    )
+)]
 async fn native_place(
     app: &AppHandle,
     window: &str,
@@ -2125,6 +2138,7 @@ async fn desktop_native_terminal_open(
     style: NativeStyleText,
     covered: bool,
     keys: bool,
+    tile: bool,
     project: Option<String>,
     events: NativeEvents,
 ) -> Result<u64, BridgeError> {
@@ -2153,6 +2167,7 @@ async fn desktop_native_terminal_open(
             style,
             covered,
             keys,
+            tile,
             project,
             events,
         };
@@ -2163,7 +2178,7 @@ async fn desktop_native_terminal_open(
         let _ = (
             app, state, terminals, name, pane, label, rect, viewport, style, covered, keys,
         );
-        let _ = (project, events);
+        let _ = (tile, project, events);
         native_unsupported()
     }
 }
@@ -2433,7 +2448,7 @@ async fn desktop_terminal_attach(
     .await?;
     let session = lock(&state)
         .await?
-        .open_terminal(key.agent, key.pane, None, false)
+        .open_terminal(key.agent, key.pane, None, bridge::terminal::Session::Full)
         .await?;
     place.attach(session, bridge::terminal::Sink::Page(output))
 }

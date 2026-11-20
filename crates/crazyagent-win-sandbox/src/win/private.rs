@@ -25,13 +25,15 @@ use windows_sys::Win32::Security::{
     SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, SetSecurityDescriptorSacl,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
+    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, FileFullDirectoryInfo,
-    FileFullDirectoryRestartInfo, FileIdInfo, GetFileInformationByHandle,
-    GetFileInformationByHandleEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx,
-    OPEN_EXISTING, READ_CONTROL, UnlockFileEx, WRITE_DAC, WRITE_OWNER,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FileDispositionInfoEx, FileFullDirectoryInfo, FileFullDirectoryRestartInfo, FileIdInfo,
+    GetFileInformationByHandle, GetFileInformationByHandleEx, LOCKFILE_EXCLUSIVE_LOCK,
+    LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, OPEN_EXISTING, READ_CONTROL, SetFileInformationByHandle,
+    UnlockFileEx, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
@@ -51,6 +53,24 @@ pub fn user_sid() -> io::Result<Vec<u8>> {
 /// Output: the held folder, or why it is not private.
 pub fn dir(path: &Path) -> io::Result<File> {
     made_dir(path, None)
+}
+
+/// Opens the private folder at `path` as [`dir`] holds one, but never creates it: a missing
+/// folder is `NotFound`, the twin of a Unix `open(O_DIRECTORY | O_NOFOLLOW)`, so a caller
+/// that only opens never makes a folder in a race. Input: the absolute path. Output: the
+/// held folder, or why it is missing or not private.
+pub fn open_dir(path: &Path) -> io::Result<File> {
+    let user = user_sid()?;
+    let name = wide_path(path)?;
+    let folder = open(
+        &name,
+        FILE_LIST_DIRECTORY | READ_CONTROL | FILE_READ_ATTRIBUTES,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        None,
+    )?;
+    private_as(&folder, &user, true)?;
+    Ok(folder)
 }
 
 /// Opens a secret store folder or the database folder at `path` as [`dir`] does, with that
@@ -257,15 +277,51 @@ pub fn file(path: &Path, create: bool) -> io::Result<File> {
 /// file itself, so in any folder no lower integrity process opens or holds it (#555 N1, #562
 /// F1). Input: the absolute path, which must not exist. Output: the open file, or the error.
 pub fn secret_file(path: &Path) -> io::Result<File> {
+    secret_made(path, 0)
+}
+
+/// Creates the private file at `path` as [`secret_file`] does, its handle also carrying
+/// delete access, so the holder later removes it through that same handle with [`delete`],
+/// never by path (DESIGN-0256 D12, W3 cap files). Holding it still blocks a rename: the
+/// handle never shares delete. Input: the absolute path, which must not exist. Output: the
+/// open file, or the error.
+pub fn secret_file_deletable(path: &Path) -> io::Result<File> {
+    secret_made(path, DELETE)
+}
+
+/// The work of [`secret_file`] and [`secret_file_deletable`]. Inputs: the absolute path and
+/// the access added to read, write and read-control. Output: the open file, or the error.
+fn secret_made(path: &Path, extra: u32) -> io::Result<File> {
+    assert!(extra == 0 || extra == DELETE);
     let user = user_sid()?;
     let name = wide_path(path)?;
     let mut planned = Planned::new(&user, false, Some(secret_file_label()))?;
     let opened = open(
         &name,
-        GENERIC_READ | GENERIC_WRITE | READ_CONTROL,
+        GENERIC_READ | GENERIC_WRITE | READ_CONTROL | extra,
         CREATE_NEW,
         0,
         Some(&mut planned),
+    )?;
+    private_as(&opened, &user, false)?;
+    Ok(opened)
+}
+
+/// Opens the private file at `path` for reading only, as [`read_only`] does, but sharing
+/// delete, so the read works while the file's maker holds it with delete access from
+/// [`secret_file_deletable`]. The file can then be deleted under this reader, never renamed
+/// while its maker holds it. Input: the absolute path. Output: the open file, or why it is
+/// not private.
+pub fn read_secret(path: &Path) -> io::Result<File> {
+    let user = user_sid()?;
+    let name = wide_path(path)?;
+    let opened = open_sharing(
+        &name,
+        GENERIC_READ | READ_CONTROL,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        OPEN_EXISTING,
+        0,
+        None,
     )?;
     private_as(&opened, &user, false)?;
     Ok(opened)
@@ -296,6 +352,58 @@ pub fn identity(object: &File) -> io::Result<(u64, u64)> {
     let mut bytes = [0; 8];
     bytes.copy_from_slice(low);
     Ok((volume, u64::from_le_bytes(bytes)))
+}
+
+/// Where an open private folder or file really is, as a drive path such as `\\?\C:\work`,
+/// read from the handle with every junction and link resolved, so a caller compares it
+/// with the path it spelled in one walk (rv-sec2 #708). Input: the handle. Output: the name
+/// in UTF-16 units with no ending zero, or the Windows error.
+pub fn place(object: &File) -> io::Result<Vec<u16>> {
+    super::name::dos_name(object)
+}
+
+/// Deletes the file a held handle names, never by path (rv-sec2 #702 R7, leader 03:5x): the
+/// handle must carry delete access, and POSIX semantics remove the name when that handle
+/// closes, even while other handles to the file stay open. Input: the held handle. Output:
+/// Ok, or the Windows error, access denied for a handle without delete access.
+pub fn delete(file: &File) -> io::Result<()> {
+    let disposition = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    };
+    let marked = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileDispositionInfoEx,
+            std::ptr::from_ref(&disposition).cast(),
+            size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+        )
+    };
+    if marked == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Deletes the private file at `path` only while it is still the object a caller pinned
+/// (R7): opened with delete access without following a link, judged private, its
+/// [`identity`] compared, then [`delete`]d through that handle. Another handle without
+/// delete sharing makes the open fail, and the file stays. Inputs: the absolute path and the
+/// pinned identity. Output: Ok, or the error.
+pub fn remove(path: &Path, expected: (u64, u64)) -> io::Result<()> {
+    let user = user_sid()?;
+    let name = wide_path(path)?;
+    let opened = open(
+        &name,
+        DELETE | READ_CONTROL | FILE_READ_ATTRIBUTES,
+        OPEN_EXISTING,
+        0,
+        None,
+    )?;
+    private_as(&opened, &user, false)?;
+    if identity(&opened)? != expected {
+        return Err(refused("a private file changed before its delete"));
+    }
+    delete(&opened)
 }
 
 /// Writes a private folder's entries to disk after a create, rename or delete in it, the
@@ -531,7 +639,32 @@ fn open(
     flags: u32,
     planned: Option<&mut Planned>,
 ) -> io::Result<File> {
+    open_sharing(
+        name,
+        access,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        disposition,
+        flags,
+        planned,
+    )
+}
+
+/// [`open`] with the share mode named, for the one reader that must share delete
+/// ([`read_secret`]). Inputs: the name, access, share mode, disposition, extra flags and
+/// the descriptor to create with. Output: the open handle, or the Windows error.
+fn open_sharing(
+    name: &[u16],
+    access: u32,
+    share: u32,
+    disposition: u32,
+    flags: u32,
+    planned: Option<&mut Planned>,
+) -> io::Result<File> {
     assert_eq!(name.last(), Some(&0));
+    assert_eq!(
+        share & !(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE),
+        0
+    );
     let attributes = planned.map(Planned::attributes);
     let pointer = attributes
         .as_ref()
@@ -540,7 +673,7 @@ fn open(
         CreateFileW(
             name.as_ptr(),
             access,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            share,
             pointer,
             disposition,
             flags | FILE_FLAG_OPEN_REPARSE_POINT,

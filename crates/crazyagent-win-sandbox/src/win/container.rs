@@ -133,7 +133,8 @@ fn create_profile(name: &[u16], display: &[u16], description: &[u16]) -> Result<
     Ok(unsafe { take_sid(sid) })
 }
 
-/// Derives the SID of an existing AppContainer profile from its name. Relies on `name` being
+/// Derives an AppContainer's SID from its name alone, as Windows does whether or not its
+/// profile exists; no profile is opened or made. Relies on `name` being
 /// NUL-terminated UTF-16 that outlives the call and on the system handing back a SID it
 /// allocated for this caller, which `take_sid` copies and frees.
 fn derive_sid(name: &[u16]) -> Result<Words, i32> {

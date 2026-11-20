@@ -116,6 +116,7 @@ export class NativeView implements Held {
   readonly id: string;
   shown = false;
   follow = false;
+  tile = false;
   private readonly label: string;
   private state: NativeState = IDLE;
   private readonly heard = new Set<() => void>();
@@ -336,7 +337,7 @@ export class NativeView implements Held {
     this.placed = spotOf(rect);
     const events = new Channel<NativeEvent>((event) => this.heardEvent(open, event));
     const { terminal: name, pane, project } = this.key;
-    void openNativeTerminal({ name, pane, label: this.label, rect, style: nativeStyle(), events, covered, keys: this.keys, project }).then((result) => {
+    void openNativeTerminal({ name, pane, label: this.label, rect, style: nativeStyle(), events, covered, keys: this.keys, tile: this.tile, project }).then((result) => {
       if (open.closed) {
         if (result.kind === "ok" && !open.ended) void closeNativeTerminal(result.value);
         return;
@@ -536,6 +537,7 @@ export function NativeTerminalPanel({ node, harness = (id) => id, onClose, onSto
     const element = screen.current;
     if (!key || !element) return;
     const shown = tile ? new NativeView(key, node.label) : keptNativeView(key, node.label);
+    shown.tile = tile;
     shown.follow = following.current;
     shown.setKeys(keys.current);
     shown.show(element);
