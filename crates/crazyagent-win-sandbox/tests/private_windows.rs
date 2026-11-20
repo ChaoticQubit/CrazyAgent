@@ -1023,14 +1023,17 @@ fn a_folder_with_an_open_child_is_not_renamed() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
-/// rv-sec3 #716 C6 (QUESTION-0520 r2 row 8): a name that is not one plain component trips
-/// the rename's assertion before any call, and the file stays.
+/// rv-sec3 #716 C6 (QUESTION-0520 r2 row 8): a name that is not one plain component, or that
+/// ends in a dot or a space, which a path open cannot name again, trips the rename's
+/// assertion before any call, and the file stays.
 #[test]
 fn a_rename_name_that_is_not_one_component_trips_the_assertion() {
     let root = scratch("rename-name");
     let held = private::dir(&root).unwrap();
     let file = staged(&root, "staged.json", b"new");
-    for name in ["", ".", "..", "a\\b", "a/b", "a:b", "x::$DATA", "a\0b"] {
+    for name in [
+        "", ".", "..", "a.", "a ", "a\\b", "a/b", "a:b", "x::$DATA", "a\0b",
+    ] {
         let tripped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             private::rename(&file, &held, OsStr::new(name), private::Mode::Replace)
         }));
