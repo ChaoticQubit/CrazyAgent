@@ -1,4 +1,4 @@
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) use super::git_version::VERSION_PRINTED;
 pub(super) use super::git_version::failure;
 use super::git_version::{OPEN_VERSION_MIN, refuse_older, version_numbers};
