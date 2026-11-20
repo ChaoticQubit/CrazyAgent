@@ -311,6 +311,76 @@ fn w5b_step_probe() {
             .env("PROBE_KEPT", "1");
         facts.ran("index cmd set", sandbox.wrap(&listed));
     }
+    let empty = step.join("empty-excludes");
+    std::fs::write(&empty, b"").unwrap();
+    let empty_text = empty.to_str().unwrap().to_owned();
+    let entries = |index: &Path| -> usize {
+        crate::spawn_gate::collected(
+            Command::new(&git)
+                .env("GIT_DIR", &private)
+                .env("GIT_INDEX_FILE", index)
+                .args(["ls-files"])
+                .stdin(Stdio::null()),
+        )
+        .map(|out| out.stdout.iter().filter(|byte| **byte == b'\n').count())
+        .unwrap_or(0)
+    };
+    let system =
+        std::env::var_os("SystemRoot").map_or_else(|| PathBuf::from(r"C:\Windows"), PathBuf::from);
+    let shell = |line: &str| {
+        let mut command = Command::new(system.join("System32").join("cmd.exe"));
+        command.args(["/d", "/c", line]).current_dir(&step);
+        command
+    };
+    let many = work.join("many");
+    let listing = format!("dir /s /b \"{}\"", many.display());
+    let reading = format!("findstr /s /m zzz \"{}\\*\"", many.display());
+    if let Some(sandbox) = &objects_box {
+        for (name, null) in [
+            ("timed contained NUL", "NUL"),
+            ("timed contained empty", empty_text.as_str()),
+        ] {
+            let index_t = step.join(format!("index-{}", name.len()));
+            let timed = Step {
+                index: &index_t,
+                null,
+                ..absolute
+            };
+            facts.ran(
+                &format!("{name} read-tree"),
+                sandbox.wrap(&timed.command(&["read-tree", "HEAD"])),
+            );
+            facts.ran(
+                &format!("{name} add -A"),
+                sandbox.wrap(&timed.command(&["add", "-A"])),
+            );
+            facts.note(&format!("{name} entries {}", entries(&index_t)));
+            facts.ran(
+                &format!("{name} add -A again"),
+                sandbox.wrap(&timed.command(&["add", "-A"])),
+            );
+        }
+        facts.ran("timed contained dir /s", sandbox.wrap(&shell(&listing)));
+        facts.ran("timed contained findstr /s", sandbox.wrap(&shell(&reading)));
+    }
+    let index_u = step.join("index-tu");
+    let twin = Step {
+        index: &index_u,
+        null: &empty_text,
+        ..absolute
+    };
+    facts.ran(
+        "timed uncontained read-tree",
+        Ok(twin.command(&["read-tree", "HEAD"])),
+    );
+    facts.ran("timed uncontained add -A", Ok(twin.command(&["add", "-A"])));
+    facts.note(&format!("timed uncontained entries {}", entries(&index_u)));
+    facts.ran(
+        "timed uncontained add -A again",
+        Ok(twin.command(&["add", "-A"])),
+    );
+    facts.ran("timed uncontained dir /s", Ok(shell(&listing)));
+    facts.ran("timed uncontained findstr /s", Ok(shell(&reading)));
     let junction = work.join("jn");
     let made = crate::spawn_gate::collected(
         Command::new("cmd")
