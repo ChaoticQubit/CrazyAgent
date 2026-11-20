@@ -1110,28 +1110,137 @@ fn validate_home_for(home: &Path, owner: Option<&Path>) -> Result<(), LaunchErro
     Ok(())
 }
 
-/// Refuses an account home where its Unix owner and 0700 mode cannot be checked.
-/// Takes the home, unused. Returns `launch_account_home_unavailable`.
-#[cfg(not(unix))]
-pub(crate) fn validate_home(_home: &Path) -> Result<(), LaunchError> {
-    Err(failure("launch_account_home_unavailable"))
-}
-
-/// Refuses an account home on Windows. Takes the home and the owner's profile folder, both
-/// unused. Returns `launch_account_home_unavailable`.
+/// Checks that an account home is safe to launch in on Windows, the twin of the Unix check:
+/// a local folder on a drive, not a link or junction, whose security [`judge_home`] passes,
+/// that is neither the owner's profile folder nor their real `.codex` or `.claude`.
+/// Input: the home. Output: Ok, or a plain `launch_account_home_*` refusal code.
 #[cfg(windows)]
-fn validate_home_for(_home: &Path, _owner: Option<&Path>) -> Result<(), LaunchError> {
-    Err(failure("launch_account_home_unavailable"))
+pub(crate) fn validate_home(home: &Path) -> Result<(), LaunchError> {
+    let owner = std::env::home_dir();
+    validate_home_for(home, owner.as_deref())
 }
 
-/// Refuses every Windows account home's security facts. Takes the facts and the user's SID,
-/// both unused. Returns the reason.
+/// Checks an account home against a given owner profile folder, as [`validate_home`] does
+/// with this process's. The home is opened without following a link and without delete
+/// sharing, so it is not renamed while checked; its owner, access list and label are read
+/// from that handle. It is then compared, in its [`crate::sandbox::canonical`] spelling and
+/// ignoring letter case, with the profile folder and its `.codex` and `.claude`. Inputs:
+/// the home and the profile folder, none when unknown. Output: Ok, or a plain
+/// `launch_account_home_*` refusal code.
+#[cfg(windows)]
+fn validate_home_for(home: &Path, owner: Option<&Path>) -> Result<(), LaunchError> {
+    use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    let unavailable = |_: std::io::Error| failure("launch_account_home_unavailable");
+    let on_drive = matches!(
+        home.components().next(),
+        Some(std::path::Component::Prefix(prefix))
+            if matches!(prefix.kind(), std::path::Prefix::Disk(_))
+    );
+    if !home.is_absolute() || !on_drive {
+        return Err(failure("launch_account_home_unsafe"));
+    }
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(home)
+        .map_err(unavailable)?;
+    let folder = held.metadata().map_err(unavailable)?.is_dir();
+    let facts = crazyagent_win_sandbox::private::facts(&held).map_err(unavailable)?;
+    let user = crazyagent_win_sandbox::private::user_sid().map_err(unavailable)?;
+    if !folder || judge_home(&facts, &user).is_err() {
+        return Err(failure("launch_account_home_unsafe"));
+    }
+    let canonical = crate::sandbox::canonical(home).map_err(unavailable)?;
+    assert!(canonical.is_absolute());
+    if let Some(owner) = owner {
+        for forbidden in [
+            owner.to_path_buf(),
+            owner.join(".codex"),
+            owner.join(".claude"),
+        ] {
+            let named = crate::sandbox::canonical(&forbidden).unwrap_or(forbidden);
+            if named
+                .as_os_str()
+                .eq_ignore_ascii_case(canonical.as_os_str())
+                || named.as_os_str().eq_ignore_ascii_case(home.as_os_str())
+            {
+                return Err(failure("launch_account_home_forbidden"));
+            }
+        }
+    }
+    drop(held);
+    Ok(())
+}
+
+/// Judges an account home's security facts on Windows, the twin of the Unix owner and 0700
+/// check: not a link, junction or network folder, a trusted owner, every allow entry (an
+/// inherit-only one too, as the files made in the home take it) for the user, SYSTEM, the
+/// administrators, OWNER RIGHTS or one app container ([`app_container`]), no entry this
+/// check cannot read, and no label a lower integrity process may write through.
+/// Inputs: the facts and the user's SID. Output: Ok, or the reason the home is refused.
 #[cfg(windows)]
 fn judge_home(
-    _facts: &crazyagent_win_sandbox::private::Facts,
-    _user: &[u8],
+    facts: &crazyagent_win_sandbox::private::Facts,
+    user: &[u8],
 ) -> Result<(), &'static str> {
-    Err("the home is not judged on Windows")
+    use crazyagent_win_sandbox::dacl;
+    const MEDIUM_LEVEL: u32 = 0x2000;
+    const NO_WRITE_UP: u32 = 0x1;
+    if facts.reparse {
+        return Err("the home is a link or a junction");
+    }
+    if facts.remote {
+        return Err("the home is on a network volume");
+    }
+    if !dacl::trusted_owner(&facts.owner, user) {
+        return Err("another account owns the home");
+    }
+    let list = facts
+        .list
+        .as_deref()
+        .ok_or("the home has no access list, so everyone may open it")?;
+    let entries = dacl::entries(list)?;
+    assert!(list.len() >= 8);
+    if entries.len() != usize::from(u16::from_le_bytes([list[4], list[5]])) {
+        return Err("the home's access list holds an entry this check cannot read");
+    }
+    let held = [
+        user,
+        &dacl::SYSTEM[..],
+        &dacl::ADMINISTRATORS[..],
+        &dacl::OWNER_RIGHTS[..],
+    ];
+    if entries
+        .iter()
+        .any(|entry| entry.allows && !held.contains(&entry.sid) && !app_container(entry.sid))
+    {
+        return Err("another account or package may open the home");
+    }
+    if let Some(sacl) = facts.label.as_deref()
+        && let Some((level, policy)) = dacl::label(sacl)?
+        && (level < MEDIUM_LEVEL || policy & NO_WRITE_UP == 0)
+    {
+        return Err("a lower integrity process may change the home");
+    }
+    Ok(())
+}
+
+/// Whether a SID names one app container: `S-1-15-2-` and the seven parts Windows derives
+/// from the container's name. ALL APPLICATION PACKAGES (`S-1-15-2-1`), ALL RESTRICTED
+/// APPLICATION PACKAGES (`S-1-15-2-2`) and capabilities (`S-1-15-3-*`) are not one.
+/// Input: the SID bytes. Output: the answer.
+#[cfg(windows)]
+fn app_container(sid: &[u8]) -> bool {
+    const PARTS: u8 = 8;
+    const APP_PACKAGE: [u8; 4] = [2, 0, 0, 0];
+    crazyagent_win_sandbox::dacl::package(sid)
+        && sid[1] == PARTS
+        && sid.len() == 8 + 4 * usize::from(PARTS)
+        && sid[8..12] == APP_PACKAGE
 }
 
 /// What a harness output reader hands the session: one line, the note that a line longer
