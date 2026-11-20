@@ -43,7 +43,7 @@ struct Case {
     profiles: PathBuf,
 }
 
-/// Readies the test binary once: `CRAZYAGENT_HOME` must name an absolute folder, so the
+/// Readies the test binary once: `CRAZYAGENT_HOME` must name an absolute plain folder, so the
 /// boundary's grants folder is made there and never in a real data root, and the boundary
 /// helper the build puts in the target folder is copied beside the test binary, where
 /// `helper_beside_engine` looks.
@@ -54,6 +54,11 @@ fn ready() {
         assert!(
             data.as_deref().is_some_and(Path::is_absolute),
             "set CRAZYAGENT_HOME to a fresh absolute folder for these rows"
+        );
+        assert!(
+            data.as_deref()
+                .is_some_and(|data| !data.as_os_str().to_string_lossy().contains('/')),
+            "CRAZYAGENT_HOME must be a plain Windows path: a grants folder with a slash is refused"
         );
         let tests = std::env::current_exe().unwrap();
         let built = tests.parent().unwrap().with_file_name(HELPER_NAME);
@@ -204,9 +209,11 @@ fn sid_text(sid: &[u8]) -> String {
     let authority = sid[2..8]
         .iter()
         .fold(0u64, |total, byte| (total << 8) | u64::from(*byte));
-    let parts = sid[8..]
-        .chunks_exact(4)
-        .map(|part| u32::from_le_bytes([part[0], part[1], part[2], part[3]]).to_string());
+    let (parts, rest) = sid[8..].as_chunks::<4>();
+    assert!(rest.is_empty());
+    let parts = parts
+        .iter()
+        .map(|part| u32::from_le_bytes(*part).to_string());
     std::iter::once(format!("S-{}-{authority}", sid[0]))
         .chain(parts)
         .collect::<Vec<_>>()
