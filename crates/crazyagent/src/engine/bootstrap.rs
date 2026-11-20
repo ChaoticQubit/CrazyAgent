@@ -31,12 +31,21 @@ use tokio::task::JoinSet;
 
 /// The held-folder layer native profile custody opens its files through, one arm per
 /// system (DESIGN-0515 D1).
-#[cfg(test)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "N6b ports the sign-in lease that calls the rest of the held layer"
+    )
+)]
 pub(crate) mod held;
-#[cfg(unix)]
-mod native_profiles;
-#[cfg(not(unix))]
-#[path = "bootstrap/native_profiles_unavailable.rs"]
+#[cfg_attr(
+    windows,
+    expect(
+        dead_code,
+        reason = "N6b ports the Windows sign-in lease, the first caller of this custody core"
+    )
+)]
 mod native_profiles;
 #[cfg(all(test, unix))]
 pub(crate) use native_profiles::MAX_PROFILES;

@@ -94,7 +94,7 @@ impl NativeProfileUse {
     /// `native_profile_renewal_busy`.
     #[cfg(test)]
     pub(crate) fn hold_renewal(&self, wait: Duration) -> Result<HeldLock, EngineError> {
-        hold(&self.profile.file, wait)
+        hold(self.profile.file(), wait)
     }
 
     /// Prepares renewals of this account by its own harness binary in the managed home.
@@ -113,7 +113,7 @@ impl NativeProfileUse {
                 .map_err(|_| failure("native_profile_credential_unavailable"))
         };
         let unavailable = |_| failure("native_profile_credential_unavailable");
-        let lease = Manifest::open(&self.profile.file, false).map_err(unavailable)?;
+        let lease = Manifest::open(&self.profile.folder, false).map_err(unavailable)?;
         if lease.identity != self.manifest.identity {
             return Err(failure("native_profile_credential_unavailable"));
         }
@@ -123,8 +123,8 @@ impl NativeProfileUse {
             harness,
             executable: executable.to_path_buf(),
             managed: self.profile_path()?,
-            home: clone(&self.home.file)?,
-            profile: clone(&self.profile.file)?,
+            home: clone(self.home.file())?,
+            profile: clone(self.profile.file())?,
             _lease: Some(lease),
         })
     }

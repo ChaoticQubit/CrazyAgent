@@ -195,6 +195,59 @@ impl Folder {
         self.open_dir(name)
     }
 
+    /// Renames the held child `child`, named `from` in this folder, to `to` in this folder,
+    /// never over an entry already there, the `renameat2(.., RENAME_NOREPLACE)` of R4.
+    /// Inputs: the child, its name and the new one. Output: Ok, `Unsafe` when `to` is taken
+    /// or `from` is no longer the child, `Missing`, or `Unavailable`.
+    pub(crate) fn rename(&self, child: Self, from: &Name, to: &Name) -> Result<(), HeldError> {
+        use rustix::fs::RenameFlags;
+        assert_ne!(child.pin.inode, 0);
+        assert_ne!(from, to);
+        self.verify(from, &child.file, child.pin, true)?;
+        let flags = RenameFlags::NOREPLACE;
+        rustix::fs::renameat_with(
+            &self.file,
+            from.as_os_str(),
+            &self.file,
+            to.as_os_str(),
+            flags,
+        )
+        .map_err(errno_cause)
+    }
+
+    /// Writes this folder's entries to disk. Output: Ok, or the error.
+    pub(crate) fn sync(&self) -> Result<(), HeldError> {
+        self.file.sync_all().map_err(cause)
+    }
+
+    /// Lists only the names in this folder that `keep` keeps, from the held descriptor and
+    /// without looking at what each is, so a socket or FIFO beside them is no error; the
+    /// caller opens each kept name through the layer, which refuses a link or a swap. Inputs:
+    /// the filter and the most kept names allowed. Output: the names, `Full` past the bound,
+    /// or the error.
+    pub(crate) fn names(
+        &self,
+        keep: impl Fn(&OsStr) -> bool,
+        limit_count: usize,
+    ) -> Result<Vec<OsString>, HeldError> {
+        use std::os::unix::ffi::OsStrExt;
+        assert!(limit_count > 0);
+        let mut names = Vec::new();
+        for entry in rustix::fs::Dir::read_from(&self.file).map_err(errno_cause)? {
+            let entry = entry.map_err(errno_cause)?;
+            let name = OsStr::from_bytes(entry.file_name().to_bytes());
+            if name == "." || name == ".." || !keep(name) {
+                continue;
+            }
+            if names.len() == limit_count {
+                return Err(HeldError::Full);
+            }
+            names.push(name.to_owned());
+        }
+        assert!(names.len() <= limit_count);
+        Ok(names)
+    }
+
     /// Opens one child file for reading through this folder, never following a link and
     /// never waiting, so a FIFO at the name is refused rather than blocking (rv-sec3 #731
     /// F1). Input: its name. Output: the file and its identity, `Missing`, or `Unsafe`.
@@ -442,6 +495,89 @@ impl Folder {
         })
     }
 
+    /// Renames the held child folder `child`, named `from` in this folder, to `to` in this
+    /// folder, never over an entry already there (DESIGN-0601 R4): the child's handle is
+    /// closed, since W1 never shares delete, the folder is opened again by W1 with delete
+    /// access, bound here and compared with the child's pin, then renamed through that handle
+    /// with W1 `rename`. Every handle below the child must be closed first. Inputs: the child,
+    /// its name and the new one. Output: Ok, `Unsafe` when `to` is taken or `from` is no
+    /// longer the child, `InUse`, or the error.
+    pub(crate) fn rename(&self, child: Self, from: &Name, to: &Name) -> Result<(), HeldError> {
+        assert_ne!(child.pin.inode, 0);
+        assert_ne!(from, to);
+        let pin = child.pin;
+        drop(child);
+        let owned =
+            private::dir_deletable(&self.path.join(from.as_os_str()), false).map_err(cause)?;
+        self.bind(from, &owned)?;
+        if pin_of(&owned)? != pin {
+            return Err(HeldError::Unsafe);
+        }
+        let mode = private::Mode::NoReplace;
+        private::rename(&owned, &self.file, to.as_os_str(), mode).map_err(cause)
+    }
+
+    /// Claims this folder for its holder with the exclusive lock on its `crazyagent.lock`
+    /// stream (DESIGN-0601 R1), the twin of an exclusive `flock` on a Unix folder: the stream
+    /// shares delete, so the folder still renames and removes while it is held. Output: the
+    /// stream holding the lock, `InUse` while another holds it, or the error.
+    pub(crate) fn claim(&self) -> Result<File, HeldError> {
+        self.unmoved()?;
+        let claim = claim_stream(&self.path, true)?;
+        if pin_of(&claim)? != self.pin {
+            return Err(HeldError::Unsafe);
+        }
+        self.unmoved()?;
+        Ok(claim)
+    }
+
+    /// Claims the child folder `name` by its existing lock stream before any handle to the
+    /// folder is opened, so a sweep never holds a handle that would refuse its live creator's
+    /// rename (DESIGN-0601 R1, R4), and never makes anything: a name renamed away, or one with
+    /// no stream, is `Missing` (rv-sec3 RULING-17:20 K1). The caller opens the folder next and
+    /// compares its identity with the claim's. Input: the child's name. Output: the stream
+    /// holding the lock, `InUse` while its creator holds it, `Missing`, or the error.
+    pub(crate) fn claim_entry(&self, name: &Name) -> Result<File, HeldError> {
+        self.unmoved()?;
+        let claim = claim_stream(&self.path.join(name.as_os_str()), false)?;
+        assert_ne!(pin_of(&claim)?, self.pin);
+        Ok(claim)
+    }
+
+    /// Writes this folder's entries to disk through its bound place. Output: Ok, or the
+    /// error.
+    pub(crate) fn sync(&self) -> Result<(), HeldError> {
+        self.unmoved()?;
+        private::sync_folder(&self.path).map_err(cause)
+    }
+
+    /// Lists only the names in this folder that `keep` keeps, by its bound place, which must
+    /// show no reparse point and the same place before and after the pass, as [`Self::list`]
+    /// does; the caller opens each kept name through the layer. Inputs: the filter and the
+    /// most kept names allowed. Output: the names, `Full` past the bound, or the error.
+    pub(crate) fn names(
+        &self,
+        keep: impl Fn(&OsStr) -> bool,
+        limit_count: usize,
+    ) -> Result<Vec<OsString>, HeldError> {
+        assert!(limit_count > 0);
+        self.unmoved()?;
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(&self.path).map_err(cause)? {
+            let name = entry.map_err(cause)?.file_name();
+            if !keep(&name) {
+                continue;
+            }
+            if names.len() == limit_count {
+                return Err(HeldError::Full);
+            }
+            names.push(name);
+        }
+        self.unmoved()?;
+        assert!(names.len() <= limit_count);
+        Ok(names)
+    }
+
     /// Opens one child file for reading with W1, which refuses a link, a second name and any
     /// list other than the private one, then binds it to this folder. Input: its name.
     /// Output: the file and its identity, `Missing`, `InUse`, or `Unsafe`.
@@ -601,6 +737,36 @@ const FILE_SHARE_READ: u32 = 0x1;
 /// The share mode that lets other handles write, `FILE_SHARE_WRITE`.
 #[cfg(windows)]
 const FILE_SHARE_WRITE: u32 = 0x2;
+
+/// Opens a folder's `crazyagent.lock` stream without following a link, making it only when
+/// `create` (the folder's creator; a sweeper never creates, RULING-17:20 K1), and takes its
+/// exclusive lock at once (W1 `lock`). Inputs: the folder's path and whether to create.
+/// Output: the locked stream, `Missing`, `InUse` while another holds it, or the error.
+#[cfg(windows)]
+fn claim_stream(folder: &Path, create: bool) -> Result<File, HeldError> {
+    use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
+    use std::os::windows::fs::OpenOptionsExt;
+    assert!(folder.is_absolute());
+    let mut stream = folder.as_os_str().to_owned();
+    stream.push(":crazyagent.lock");
+    let claim = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(create)
+        .truncate(false)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(PathBuf::from(stream))
+        .map_err(cause)?;
+    private::lock(&claim).map_err(cause)?;
+    assert!(claim.metadata().is_ok());
+    Ok(claim)
+}
+
+/// The share mode that lets other handles delete or rename, `FILE_SHARE_DELETE`, which only
+/// a folder's lock stream takes (DESIGN-0601 R1).
+#[cfg(windows)]
+const FILE_SHARE_DELETE: u32 = 0x4;
 
 /// The file attribute of a reparse point, `FILE_ATTRIBUTE_REPARSE_POINT`.
 #[cfg(windows)]

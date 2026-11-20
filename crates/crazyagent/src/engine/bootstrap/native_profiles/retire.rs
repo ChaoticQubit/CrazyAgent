@@ -8,21 +8,21 @@ const SDK: &str = ".backboard";
 const SDK_KEYS: &str = "keys.json";
 const HOME_DEPTH_MAX: usize = 1;
 
-/// Opens the engine root without following a link. Input: the root. Output: its folder.
-fn engine_root(root: &Path) -> Result<File, EngineError> {
-    rustix::fs::open(
-        root,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map(File::from)
-    .map_err(unsafe_custody)
+/// Holds the engine root through the held layer, without following a link and judged
+/// private. Input: the root. Output: its held folder, or `native_profile_custody_unsafe`.
+fn engine_root(root: &Path) -> Result<Folder, EngineError> {
+    if !root.is_absolute() {
+        return Err(failure("native_profile_custody_unsafe"));
+    }
+    let folder = Folder::root(root).map_err(|_| failure("native_profile_custody_unsafe"))?;
+    assert_ne!(folder.pin().inode, 0);
+    Ok(folder)
 }
 
 /// Opens one engine-made folder below `parent` without following a link. Inputs: the parent
 /// and the name. Output: the folder, none when it is missing, or a refusal for a link or
 /// an unsafe folder.
-fn present(parent: &File, name: &OsStr) -> Result<Option<Directory>, EngineError> {
+fn present(parent: &Folder, name: &OsStr) -> Result<Option<Directory>, EngineError> {
     match Directory::open(parent, name) {
         Ok(directory) => Ok(Some(directory)),
         Err(error) if error.0 == "native_profile_incomplete" => Ok(None),
@@ -61,19 +61,19 @@ fn unlink(folder: &File, name: &str) -> Result<(), EngineError> {
 /// the slot busy. Inputs: the engine root's folder, the slot's digest name and the action.
 /// Output: the action's result, or `native_profile_in_use` or `native_profile_renewal_busy`.
 fn while_free(
-    anchor: &File,
+    anchor: &Folder,
     key: &str,
     action: impl FnOnce(Option<&Directory>) -> Result<(), EngineError>,
 ) -> Result<(), EngineError> {
     let Some(profiles) = present(anchor, OsStr::new(ROOT))? else {
         return action(None);
     };
-    let Some(profile) = present(&profiles.file, OsStr::new(key))? else {
+    let Some(profile) = present(&profiles.folder, OsStr::new(key))? else {
         return action(None);
     };
-    let _renewal = renewal::hold(&profile.file, std::time::Duration::ZERO)?;
+    let _renewal = renewal::hold(profile.file(), std::time::Duration::ZERO)?;
     let _manifest = match rustix::fs::openat(
-        &profile.file,
+        profile.file(),
         MANIFEST,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
@@ -99,13 +99,13 @@ pub(crate) fn remove_sign_in(root: &Path, profile_ref: &CredentialRef) -> Result
         let Some(profile) = profile else {
             return Ok(());
         };
-        let Some(home) = present(&profile.file, OsStr::new("home"))? else {
+        let Some(home) = present(&profile.folder, OsStr::new("home"))? else {
             return Ok(());
         };
         for name in [CODEX_RECORD, CLAUDE_RECORD] {
-            unlink(&home.file, name)?;
+            unlink(home.file(), name)?;
         }
-        let Some(library) = harness_folder(&home.file, "Library")? else {
+        let Some(library) = harness_folder(home.file(), "Library")? else {
             return Ok(());
         };
         let Some(keychains) = harness_folder(&library, "Keychains")? else {
@@ -131,13 +131,13 @@ pub(crate) fn generated_home_needs_key(
     let Some(homes) = present(&anchor, OsStr::new(HOMES))? else {
         return Ok(false);
     };
-    let Some(home) = present(&homes.file, OsStr::new(&key))? else {
+    let Some(home) = present(&homes.folder, OsStr::new(&key))? else {
         return Ok(false);
     };
-    let Some(sdk) = present(&home.file, OsStr::new(SDK))? else {
+    let Some(sdk) = present(&home.folder, OsStr::new(SDK))? else {
         return Ok(false);
     };
-    let held = |name: &str| match rustix::fs::statat(&sdk.file, name, AtFlags::SYMLINK_NOFOLLOW) {
+    let held = |name: &str| match rustix::fs::statat(sdk.file(), name, AtFlags::SYMLINK_NOFOLLOW) {
         Ok(_) => Ok(true),
         Err(rustix::io::Errno::NOENT) => Ok(false),
         Err(error) => Err(unsafe_custody(error)),
@@ -158,16 +158,16 @@ pub(crate) fn remove_generated_home(
         let Some(homes) = present(&anchor, OsStr::new(HOMES))? else {
             return Ok(());
         };
-        let Some(home) = present(&homes.file, OsStr::new(&key))? else {
+        let Some(home) = present(&homes.folder, OsStr::new(&key))? else {
             return Ok(());
         };
-        if let Some(sdk) = present(&home.file, OsStr::new(SDK))? {
-            unlink(&sdk.file, SDK_KEYS)?;
+        if let Some(sdk) = present(&home.folder, OsStr::new(SDK))? {
+            unlink(sdk.file(), SDK_KEYS)?;
         }
-        remove_tree(&home.file, HOME_DEPTH_MAX)?;
-        home.verify(&homes.file, OsStr::new(&key))?;
-        rustix::fs::unlinkat(&homes.file, key.as_str(), AtFlags::REMOVEDIR)
+        remove_tree(&home.folder, HOME_DEPTH_MAX)?;
+        home.verify(&homes.folder, OsStr::new(&key))?;
+        rustix::fs::unlinkat(homes.file(), key.as_str(), AtFlags::REMOVEDIR)
             .map_err(unsafe_custody)?;
-        homes.file.sync_all().map_err(unsafe_custody)
+        homes.file().sync_all().map_err(unsafe_custody)
     })
 }

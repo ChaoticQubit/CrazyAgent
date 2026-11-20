@@ -35,11 +35,11 @@ fn write_config(directory: &File, bytes: &[u8]) -> Result<(), EngineError> {
 /// Output: Ok to register it; any other content is refused and kept.
 fn require_generated(homes: &Directory, key: &str, bytes: &[u8]) -> Result<(), EngineError> {
     let unsafe_home = || failure("native_profile_custody_unsafe");
-    let home = Directory::open(&homes.file, OsStr::new(key))?;
-    let sdk = Directory::open(&home.file, OsStr::new(".backboard")).map_err(|_| unsafe_home())?;
+    let home = Directory::open(&homes.folder, OsStr::new(key))?;
+    let sdk = Directory::open(&home.folder, OsStr::new(".backboard")).map_err(|_| unsafe_home())?;
     for (directory, only) in [
-        (&home.file, &b".backboard"[..]),
-        (&sdk.file, &b"config.json"[..]),
+        (home.file(), &b".backboard"[..]),
+        (sdk.file(), &b"config.json"[..]),
     ] {
         for entry in Dir::read_from(directory).map_err(unsafe_custody)? {
             let entry = entry.map_err(unsafe_custody)?;
@@ -51,7 +51,7 @@ fn require_generated(homes: &Directory, key: &str, bytes: &[u8]) -> Result<(), E
     }
     let config = File::from(
         rustix::fs::openat(
-            &sdk.file,
+            sdk.file(),
             CONFIG,
             OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
             Mode::empty(),
@@ -60,7 +60,7 @@ fn require_generated(homes: &Directory, key: &str, bytes: &[u8]) -> Result<(), E
     );
     let metadata = config.metadata().map_err(unsafe_custody)?;
     verify_named(
-        &sdk.file,
+        sdk.file(),
         OsStr::new(CONFIG),
         &config,
         Identity::of(&metadata),
@@ -76,8 +76,8 @@ fn require_generated(homes: &Directory, key: &str, bytes: &[u8]) -> Result<(), E
     if actual != bytes {
         return Err(unsafe_home());
     }
-    sdk.verify(&home.file, OsStr::new(".backboard"))?;
-    home.verify(&homes.file, OsStr::new(key))
+    sdk.verify(&home.folder, OsStr::new(".backboard"))?;
+    home.verify(&homes.folder, OsStr::new(key))
 }
 
 /// Accepts a slot-less generated SDK home that holds the engine's config for the
@@ -107,13 +107,13 @@ fn accept_generated(
 /// Inputs: the homes directory, the home's key and the bytes. Output: Ok once the home
 /// and its SDK directory are still the ones opened; nothing else in the home changes.
 fn rewrite_config(homes: &Directory, key: &str, bytes: &[u8]) -> Result<(), EngineError> {
-    let home = Directory::open(&homes.file, OsStr::new(key))?;
-    let sdk = Directory::open(&home.file, OsStr::new(".backboard"))?;
-    let staged = Staging::create(&homes.file, STAGING)?;
-    write_config(&staged.directory.file, bytes)?;
-    staged.replace_into(&homes.file, CONFIG, &sdk.file)?;
-    sdk.verify(&home.file, OsStr::new(".backboard"))?;
-    home.verify(&homes.file, OsStr::new(key))
+    let home = Directory::open(&homes.folder, OsStr::new(key))?;
+    let sdk = Directory::open(&home.folder, OsStr::new(".backboard"))?;
+    let staged = Staging::create(&homes.folder, STAGING)?;
+    write_config(staged.directory.file(), bytes)?;
+    staged.replace_into(&homes.folder, CONFIG, sdk.file())?;
+    sdk.verify(&home.folder, OsStr::new(".backboard"))?;
+    home.verify(&homes.folder, OsStr::new(key))
 }
 
 /// The file and change time of the config an undone save put back in a generated SDK home,
@@ -125,7 +125,7 @@ pub(super) type PutBack = (Identity, (i64, i64));
 /// the config does not open.
 fn put_back(sdk: &Directory) -> Option<PutBack> {
     let config = rustix::fs::openat(
-        &sdk.file,
+        sdk.file(),
         CONFIG,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
         Mode::empty(),
@@ -167,14 +167,14 @@ impl Swapped {
     /// registration first; with nothing replaced, takes the new config out again. No input.
     /// Output: Ok once the SDK directory names what it named before the swap.
     fn undo(&self) -> Result<(), EngineError> {
-        let staged = &self.staged.directory.file;
+        let staged = self.staged.directory.file();
         let (from, to, flags) = if self.replaced {
-            (staged, &self.sdk.file, RenameFlags::EXCHANGE)
+            (staged, self.sdk.file(), RenameFlags::EXCHANGE)
         } else {
-            (&self.sdk.file, staged, RenameFlags::NOREPLACE)
+            (self.sdk.file(), staged, RenameFlags::NOREPLACE)
         };
         rustix::fs::renameat_with(from, CONFIG, to, CONFIG, flags).map_err(unsafe_custody)?;
-        self.sdk.file.sync_all().map_err(unsafe_custody)?;
+        self.sdk.file().sync_all().map_err(unsafe_custody)?;
         staged.sync_all().map_err(unsafe_custody)
     }
 
@@ -184,7 +184,7 @@ impl Swapped {
     /// change time after an undo that put one back, else None; a staging directory a failure
     /// here leaves, the replaced config in it after a failed undo included, goes at the next
     /// sweep.
-    fn settle(self, homes: &File, keep: bool) -> Option<PutBack> {
+    fn settle(self, homes: &Folder, keep: bool) -> Option<PutBack> {
         if !keep && self.undo().is_err() {
             return None;
         }
@@ -208,28 +208,28 @@ fn swap_config(
     undone: &mut BTreeMap<std::path::PathBuf, PutBack>,
     path: &Path,
 ) -> Result<Swapped, EngineError> {
-    let sdk = Directory::open(&home.file, OsStr::new(".backboard"))?;
-    let staged = Staging::create(&homes.file, STAGING)?;
-    write_config(&staged.directory.file, bytes)?;
-    let replaced = staged.exchange(CONFIG, &sdk.file)?;
+    let sdk = Directory::open(&home.folder, OsStr::new(".backboard"))?;
+    let staged = Staging::create(&homes.folder, STAGING)?;
+    write_config(staged.directory.file(), bytes)?;
+    let replaced = staged.exchange(CONFIG, sdk.file())?;
     let swapped = Swapped {
         staged,
         sdk,
         replaced,
     };
     let checked = (|| {
-        swapped.sdk.file.sync_all().map_err(unsafe_custody)?;
+        swapped.sdk.file().sync_all().map_err(unsafe_custody)?;
         let staged = &swapped.staged;
-        staged.directory.file.sync_all().map_err(unsafe_custody)?;
+        staged.directory.file().sync_all().map_err(unsafe_custody)?;
         step()?;
-        staged.verify_in(&homes.file)?;
-        swapped.sdk.verify(&home.file, OsStr::new(".backboard"))?;
-        home.verify(&homes.file, OsStr::new(key))
+        staged.verify_in(&homes.folder)?;
+        swapped.sdk.verify(&home.folder, OsStr::new(".backboard"))?;
+        home.verify(&homes.folder, OsStr::new(key))
     })();
     match checked {
         Ok(()) => Ok(swapped),
         Err(error) => {
-            if let Some(put) = swapped.settle(&homes.file, false) {
+            if let Some(put) = swapped.settle(&homes.folder, false) {
                 remember_put_back(undone, path, put);
             }
             Err(error)
@@ -241,7 +241,7 @@ fn swap_config(
 /// save stopped only after its new manifest was in place. Inputs: the slot and the
 /// connection. Output: true only for a readable manifest naming that connection.
 fn pins(profile: &Directory, connection: &ModelConnection) -> bool {
-    Manifest::open(&profile.file, false)
+    Manifest::open(&profile.folder, false)
         .ok()
         .and_then(|manifest| {
             serde_json::from_slice::<ConfiguredProfileIdentity>(&manifest.bytes).ok()
@@ -313,9 +313,9 @@ impl NativeProfileCustody {
 
     fn homes(&self) -> Result<Directory, EngineError> {
         match rustix::fs::statat(&self.anchor.directory, HOMES, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(_) => Directory::open(&self.anchor.directory, OsStr::new(HOMES)),
+            Ok(_) => Directory::open(&self.anchor_folder, OsStr::new(HOMES)),
             Err(rustix::io::Errno::NOENT) => {
-                Directory::create(&self.anchor.directory, OsStr::new(HOMES))
+                Directory::create(&self.anchor_folder, OsStr::new(HOMES))
             }
             Err(error) => Err(unsafe_custody(error)),
         }
@@ -338,9 +338,9 @@ impl NativeProfileCustody {
         let (root, root_manifest, root_identity) = self.root(host)?;
         let _root_lock = lock(&root_manifest.file)?;
         let key = digest(profile_ref.as_str().as_bytes());
-        let slots = scan_slots(&root.file)?;
+        let slots = scan_slots(root.file())?;
         let homes = self.homes()?;
-        staging::sweep(&homes.file, STAGING)?;
+        staging::sweep(&homes.folder, STAGING)?;
         let path = self.anchor.path.join(HOMES).join(&key);
         let mut held = Vec::new();
         let mut swapped = None;
@@ -348,26 +348,27 @@ impl NativeProfileCustody {
             let (profile, manifest, actual) =
                 self.read_configured_slot(&root, &root_identity, &slots, &key, profile_ref)?;
             held.push(lock(&manifest.file)?);
-            manifest.verify(&profile.file)?;
+            manifest.verify(&profile.folder)?;
             drop(manifest);
             if actual.connection != *connection {
-                let home = Directory::open(&homes.file, OsStr::new(&key))?;
-                held.push(lock(&home.file)?);
+                let home = Directory::open(&homes.folder, OsStr::new(&key))?;
+                held.push(lock(home.file())?);
                 let swap = swap_config(&homes, &home, &key, &bytes, &mut self.undone, &path)?;
                 swapped = Some((swap, profile));
             }
         } else if slots.len() >= MAX_PROFILES {
             return Err(failure("native_profile_capacity"));
-        } else if rustix::fs::statat(&homes.file, key.as_str(), AtFlags::SYMLINK_NOFOLLOW).is_ok() {
-            let home = Directory::open(&homes.file, OsStr::new(&key))?;
-            held.push(lock(&home.file)?);
+        } else if rustix::fs::statat(homes.file(), key.as_str(), AtFlags::SYMLINK_NOFOLLOW).is_ok()
+        {
+            let home = Directory::open(&homes.folder, OsStr::new(&key))?;
+            held.push(lock(home.file())?);
             accept_generated(&homes, &key, &bytes, legacy.as_deref())?;
         } else {
-            let staged = Staging::create(&homes.file, STAGING)?;
-            let sdk = Directory::create(&staged.directory.file, OsStr::new(".backboard"))?;
+            let staged = Staging::create(&homes.folder, STAGING)?;
+            let sdk = Directory::create(&staged.directory.folder, OsStr::new(".backboard"))?;
             step()?;
-            write_config(&sdk.file, &bytes)?;
-            staged.commit(&homes.file, &key)?;
+            write_config(sdk.file(), &bytes)?;
+            staged.commit(&homes.folder, &key)?;
         }
         let locked = LockedRoot {
             root: &root,
@@ -376,14 +377,14 @@ impl NativeProfileCustody {
             held: &held,
         };
         let registered = homes
-            .verify(&self.anchor.directory, OsStr::new(HOMES))
+            .verify(&self.anchor_folder, OsStr::new(HOMES))
             .and_then(|()| ConfiguredRcliUse::capture(&path, connection))
             .and_then(|captured| {
                 self.register_locked(host, connection, profile_ref, captured, &locked)
             });
         if let Some((swapped, profile)) = swapped {
             let keep = registered.is_ok() || pins(&profile, connection);
-            if let Some(put) = swapped.settle(&homes.file, keep) {
+            if let Some(put) = swapped.settle(&homes.folder, keep) {
                 remember_put_back(&mut self.undone, &path, put);
             }
         }
@@ -415,16 +416,16 @@ impl NativeProfileCustody {
         let _root_lock = lock(&root_manifest.file)?;
         let key = digest(profile_ref.as_str().as_bytes());
         let homes = self.homes()?;
-        staging::sweep(&homes.file, STAGING)?;
+        staging::sweep(&homes.folder, STAGING)?;
         if require_generated(&homes, &key, &legacy).is_ok() {
-            let home = Directory::open(&homes.file, OsStr::new(&key))?;
-            let _home_lock = lock(&home.file)?;
+            let home = Directory::open(&homes.folder, OsStr::new(&key))?;
+            let _home_lock = lock(home.file())?;
             if require_generated(&homes, &key, &legacy).is_ok() {
                 rewrite_config(&homes, &key, &bytes)?;
                 require_generated(&homes, &key, &bytes)?;
             }
-            home.verify(&homes.file, OsStr::new(&key))?;
+            home.verify(&homes.folder, OsStr::new(&key))?;
         }
-        homes.verify(&self.anchor.directory, OsStr::new(HOMES))
+        homes.verify(&self.anchor_folder, OsStr::new(HOMES))
     }
 }

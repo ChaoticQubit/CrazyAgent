@@ -1,9 +1,19 @@
-use super::{Anchor, Identity, hex, safe_directory, safe_file};
+use super::held::{Folder, HeldError, Kind, Name, Pin};
+use super::{Anchor, Identity, hex};
+#[cfg(unix)]
+use super::{safe_directory, safe_file};
+#[cfg(unix)]
 use crate::config::{ModelAuthentication, ModelConnection};
 use crate::engine::EngineError;
 use crate::engine::owner::{HostStamp, NativeProfileBinding, PreparedNativeProfile};
+#[cfg(unix)]
 use crate::file_lock::HeldLock;
-use crate::protocol::{CredentialRef, RequestId};
+#[cfg(windows)]
+use crate::platform::FileExt;
+use crate::protocol::CredentialRef;
+#[cfg(unix)]
+use crate::protocol::RequestId;
+#[cfg(unix)]
 use rustix::fs::{AtFlags, Dir, FileType, FlockOperation, Mode, OFlags, flock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -11,26 +21,46 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, Metadata};
 use std::io::{Read, Write};
-use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::Path;
 
+#[cfg(unix)]
 mod agent_copy;
+#[cfg(unix)]
 pub(crate) use agent_copy::AgentCredential;
+#[cfg(unix)]
 mod configured_rcli;
+#[cfg(unix)]
 mod generated_configured_rcli;
+#[cfg(unix)]
 mod renewal;
+#[cfg(unix)]
 mod retire;
 mod staging;
+#[cfg(unix)]
 pub(crate) use configured_rcli::ConfiguredRcliProfileMetadata;
+#[cfg(unix)]
 use configured_rcli::lock;
-use staging::{ROOT_STAGING, STAGING, Staging, step};
+#[cfg(unix)]
+use staging::STAGING;
+use staging::{ROOT_STAGING, Staging, step};
+/// The sign-in, configured-account and agent-copy parts on Windows: each refuses with
+/// `native_profile_custody_unavailable` until its slice ports it (DESIGN-0515 D5).
+#[cfg(windows)]
+mod refused_windows;
+#[cfg(windows)]
+pub(crate) use refused_windows::{
+    AgentCredential, ConfiguredRcliProfileMetadata, NativeProfileUse, generated_home_needs_key,
+};
 
 const ROOT: &str = super::NATIVE_PROFILES_FOLDER;
+#[cfg(unix)]
 pub(crate) use retire::{generated_home_needs_key, remove_generated_home, remove_sign_in};
 
 const MANIFEST: &str = "identity.json";
 const MAX_MANIFEST: usize = 4096;
+#[cfg(unix)]
 pub(crate) const MAX_PROFILES: usize = 1024;
 
 fn failure(code: &str) -> EngineError {
@@ -45,6 +75,7 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+#[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StableBinding {
@@ -55,6 +86,7 @@ struct StableBinding {
     protocol: CredentialRef,
 }
 
+#[cfg(unix)]
 impl StableBinding {
     fn of(connection: &ModelConnection) -> Result<Self, EngineError> {
         let ModelAuthentication::NativeManaged { profile_ref } = &connection.auth else {
@@ -108,6 +140,7 @@ fn same_files<const N: usize>(pinned: &[Identity; N], live: &[Identity; N]) -> b
     crate::file_identity::same_files(&pinned.map(pair), &live.map(pair))
 }
 
+#[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProfileIdentity {
@@ -119,6 +152,7 @@ struct ProfileIdentity {
     manifest: Identity,
 }
 
+#[cfg(unix)]
 impl ProfileIdentity {
     /// Tells whether a profile manifest read from disk still describes the live profile:
     /// the same version, binding and root record, and the same files, its copy of the root's
@@ -154,44 +188,76 @@ impl ProfileIdentity {
     }
 }
 
+/// One custody folder held through the held layer (DESIGN-0515 D1), with the identity the
+/// manifests record for it: opened, made and checked only through its parent's held folder.
 struct Directory {
-    file: File,
+    folder: Folder,
     identity: Identity,
 }
 
-impl Directory {
-    fn open(parent: &File, name: &OsStr) -> Result<Self, EngineError> {
-        let file = File::from(
-            rustix::fs::openat(
-                parent,
-                name,
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|error| {
-                if error == rustix::io::Errno::NOENT {
-                    failure("native_profile_incomplete")
-                } else {
-                    unsafe_custody(error)
-                }
-            })?,
-        );
-        let identity = Identity::of(&file.metadata().map_err(unsafe_custody)?);
-        verify_named(parent, name, &file, identity, true)?;
-        Ok(Self { file, identity })
-    }
+/// A custody name as the held layer takes it; a name it refuses is unsafe custody. Input:
+/// the name. Output: the held name, or `native_profile_custody_unsafe`.
+fn held_name(name: &OsStr) -> Result<Name, EngineError> {
+    Name::checked(name).map_err(held_failure)
+}
 
-    fn create(parent: &File, name: &OsStr) -> Result<Self, EngineError> {
-        rustix::fs::mkdirat(parent, name, Mode::from_raw_mode(0o700)).map_err(unsafe_custody)?;
-        parent.sync_all().map_err(unsafe_custody)?;
-        Self::open(parent, name)
-    }
-
-    fn verify(&self, parent: &File, name: &OsStr) -> Result<(), EngineError> {
-        verify_named(parent, name, &self.file, self.identity, true)
+/// The custody code for a failed held call: a missing entry is an incomplete profile, and
+/// every other cause is unsafe custody. Input: the cause. Output: the error.
+fn held_failure(error: HeldError) -> EngineError {
+    match error {
+        HeldError::Missing => failure("native_profile_incomplete"),
+        HeldError::Unsafe | HeldError::InUse | HeldError::Unavailable | HeldError::Full => {
+            failure("native_profile_custody_unsafe")
+        }
     }
 }
 
+/// The identity a manifest records for a held entry's pin. Input: the pin. Output: the
+/// identity.
+fn identity_of(pin: Pin) -> Identity {
+    assert_ne!(pin.inode, 0);
+    Identity {
+        device: pin.device,
+        inode: pin.inode,
+    }
+}
+
+impl Directory {
+    /// Wraps one held folder with its identity. Input: the folder. Output: the directory.
+    fn of(folder: Folder) -> Self {
+        let identity = identity_of(folder.pin());
+        assert_eq!(identity.inode, folder.pin().inode);
+        Self { folder, identity }
+    }
+
+    fn open(parent: &Folder, name: &OsStr) -> Result<Self, EngineError> {
+        let folder = parent.open_dir(&held_name(name)?).map_err(held_failure)?;
+        Ok(Self::of(folder))
+    }
+
+    fn create(parent: &Folder, name: &OsStr) -> Result<Self, EngineError> {
+        let folder = parent
+            .make_dir(&held_name(name)?)
+            .map_err(|_| failure("native_profile_custody_unsafe"))?;
+        Ok(Self::of(folder))
+    }
+
+    fn verify(&self, parent: &Folder, name: &OsStr) -> Result<(), EngineError> {
+        let pin = self.folder.pin();
+        assert_eq!(identity_of(pin), self.identity);
+        parent
+            .verify(&held_name(name)?, self.folder.file(), pin, true)
+            .map_err(|_| failure("native_profile_custody_unsafe"))
+    }
+
+    /// The held folder's handle, for the Unix-only parts that still call the system by
+    /// descriptor. Output: the file.
+    fn file(&self) -> &File {
+        self.folder.file()
+    }
+}
+
+#[cfg(unix)]
 fn verify_named(
     parent: &File,
     name: &OsStr,
@@ -228,33 +294,22 @@ struct Manifest {
 }
 
 impl Manifest {
-    fn open(parent: &File, create: bool) -> Result<Self, EngineError> {
-        let access = if create {
-            OFlags::RDWR | OFlags::CREATE | OFlags::EXCL
+    fn open(parent: &Folder, create: bool) -> Result<Self, EngineError> {
+        let name = Name::constant(MANIFEST);
+        let opened = if create {
+            parent.make_file(&name)
         } else {
-            OFlags::RDONLY
+            parent.open_read(&name)
         };
-        let file = File::from(
-            rustix::fs::openat(
-                parent,
-                MANIFEST,
-                access | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-                Mode::from_raw_mode(0o600),
-            )
-            .map_err(|error| {
-                if error == rustix::io::Errno::NOENT {
-                    failure("native_profile_incomplete")
-                } else {
-                    unsafe_custody(error)
-                }
-            })?,
-        );
-        let metadata = file.metadata().map_err(unsafe_custody)?;
-        let identity = Identity::of(&metadata);
-        verify_named(parent, OsStr::new(MANIFEST), &file, identity, false)?;
+        let (file, pin) = opened.map_err(|error| match error {
+            HeldError::Missing => failure("native_profile_incomplete"),
+            _ => failure("native_profile_custody_unsafe"),
+        })?;
+        let identity = identity_of(pin);
+        let length = file.metadata().map_err(unsafe_custody)?.len();
         let mut bytes = Vec::new();
         if !create {
-            if metadata.len() == 0 || metadata.len() > MAX_MANIFEST as u64 {
+            if length == 0 || length > MAX_MANIFEST as u64 {
                 return Err(failure("native_profile_identity_bounds"));
             }
             (&file)
@@ -274,25 +329,31 @@ impl Manifest {
         Ok(manifest)
     }
 
-    fn write(&mut self, parent: &File, bytes: Vec<u8>) -> Result<(), EngineError> {
+    fn write(&mut self, parent: &Folder, bytes: Vec<u8>) -> Result<(), EngineError> {
         if bytes.is_empty() || bytes.len() > MAX_MANIFEST {
             return Err(failure("native_profile_identity_bounds"));
         }
         self.file.write_all(&bytes).map_err(unsafe_custody)?;
         self.file.sync_all().map_err(unsafe_custody)?;
-        parent.sync_all().map_err(unsafe_custody)?;
+        parent
+            .sync()
+            .map_err(|_| failure("native_profile_custody_unsafe"))?;
         self.bytes = bytes;
         self.verify(parent)
     }
 
-    fn verify(&self, parent: &File) -> Result<(), EngineError> {
-        verify_named(
-            parent,
-            OsStr::new(MANIFEST),
-            &self.file,
-            self.identity,
-            false,
-        )?;
+    fn verify(&self, parent: &Folder) -> Result<(), EngineError> {
+        let name = Name::constant(MANIFEST);
+        let pin = Pin {
+            device: self.identity.device,
+            inode: self.identity.inode,
+        };
+        let named = || {
+            parent
+                .verify(&name, &self.file, pin, false)
+                .map_err(|_| failure("native_profile_custody_unsafe"))
+        };
+        named()?;
         if self.file.metadata().map_err(unsafe_custody)?.len() != self.bytes.len() as u64 {
             return Err(failure("native_profile_identity_changed"));
         }
@@ -303,18 +364,13 @@ impl Manifest {
         if bytes != self.bytes {
             return Err(failure("native_profile_identity_changed"));
         }
-        verify_named(
-            parent,
-            OsStr::new(MANIFEST),
-            &self.file,
-            self.identity,
-            false,
-        )
+        named()
     }
 }
 
 pub(crate) struct NativeProfileCustody {
     anchor: Anchor,
+    anchor_folder: Folder,
     database: File,
     database_name: OsString,
     database_identity: Identity,
@@ -322,6 +378,7 @@ pub(crate) struct NativeProfileCustody {
     profiles: BTreeMap<String, String>,
     /// The config each undone account save put back this engine run, by generated SDK home,
     /// the one times-only change a master turn may re-pin (rv-sec3 G4 r2 F1).
+    #[cfg(unix)]
     undone: BTreeMap<std::path::PathBuf, generated_configured_rcli::PutBack>,
 }
 
@@ -342,6 +399,7 @@ pub(crate) enum NativeProfileUsePurpose {
     Check,
 }
 
+#[cfg(unix)]
 impl NativeProfileUsePurpose {
     /// Takes this purpose's lock on one profile file without waiting: shared for an agent's
     /// execution and for a check of an existing sign-in, so they run on one signed-in
@@ -361,6 +419,7 @@ impl NativeProfileUsePurpose {
 /// Takes one non-blocking lock on a profile file.
 /// Inputs: the open file and the shared or exclusive operation. Output: the held lock,
 /// `native_profile_in_use` while a conflicting lock is held, or the lock failure.
+#[cfg(unix)]
 fn take_lock(file: &File, operation: FlockOperation) -> Result<(), EngineError> {
     flock(file, operation).map_err(|error| {
         failure(
@@ -378,8 +437,10 @@ fn take_lock(file: &File, operation: FlockOperation) -> Result<(), EngineError> 
 /// its renewal lock, which every check holds, so agents keep their shared leases and no
 /// custodian can start meanwhile. Holds nothing when the profile does not exist. Dropping
 /// it unlocks both.
+#[cfg(unix)]
 pub(crate) struct NativeProfileRelease(Option<(File, HeldLock)>);
 
+#[cfg(unix)]
 impl Drop for NativeProfileRelease {
     /// Releases the manifest lock on its open file description when the settlement ends,
     /// so a process that shares it can never keep the profile busy afterwards; the renewal
@@ -391,6 +452,7 @@ impl Drop for NativeProfileRelease {
     }
 }
 
+#[cfg(unix)]
 pub(crate) struct NativeProfileUse {
     custody: NativeProfileCustody,
     root: Directory,
@@ -408,6 +470,7 @@ pub(crate) struct NativeProfileUse {
     renewal: Option<HeldLock>,
 }
 
+#[cfg(unix)]
 impl NativeProfileUse {
     /// Names the account this lease holds the profile of. Input: the lease. Output: the
     /// account's connection id.
@@ -465,19 +528,19 @@ impl NativeProfileUse {
         }
         self.custody.verify()?;
         self.root
-            .verify(&self.custody.anchor.directory, OsStr::new(ROOT))?;
-        self.root_manifest.verify(&self.root.file)?;
+            .verify(&self.custody.anchor_folder, OsStr::new(ROOT))?;
+        self.root_manifest.verify(&self.root.folder)?;
         self.profile
-            .verify(&self.root.file, OsStr::new(&self.key))?;
-        self.manifest.verify(&self.profile.file)?;
+            .verify(&self.root.folder, OsStr::new(&self.key))?;
+        self.manifest.verify(&self.profile.folder)?;
         if let Some(configured) = &self.configured {
             configured.verify(&self.home, &binding.connection)?;
-            configured_rcli::require_entries(&self.profile.file)?;
+            configured_rcli::require_entries(self.profile.file())?;
         } else {
-            self.home.verify(&self.profile.file, OsStr::new("home"))?;
-            require_profile_entries(&self.profile.file)?;
+            self.home.verify(&self.profile.folder, OsStr::new("home"))?;
+            require_profile_entries(self.profile.file())?;
         }
-        let slots = scan_slots(&self.root.file)?;
+        let slots = scan_slots(self.root.file())?;
         if slots.get(&self.key) != Some(&self.profile.identity)
             || self
                 .custody
@@ -489,13 +552,14 @@ impl NativeProfileUse {
             return Err(failure("native_profile_identity_changed"));
         }
         self.profile
-            .verify(&self.root.file, OsStr::new(&self.key))?;
+            .verify(&self.root.folder, OsStr::new(&self.key))?;
         self.root
-            .verify(&self.custody.anchor.directory, OsStr::new(ROOT))?;
+            .verify(&self.custody.anchor_folder, OsStr::new(ROOT))?;
         self.custody.verify()
     }
 }
 
+#[cfg(unix)]
 impl Drop for NativeProfileUse {
     /// Releases the profile locks on their open file descriptions when the lease
     /// ends, so a process that shares one of them, such as a child forked by another
@@ -503,12 +567,27 @@ impl Drop for NativeProfileUse {
     fn drop(&mut self) {
         let _ = flock(&self.manifest.file, FlockOperation::Unlock);
         if self.configured.is_some() {
-            let _ = flock(&self.home.file, FlockOperation::Unlock);
+            let _ = flock(self.home.file(), FlockOperation::Unlock);
         }
     }
 }
 
+/// Holds the engine root through the held layer as the parent of every custody folder,
+/// opened again at the anchor's real place and required to be the anchor's own folder, so a
+/// root swapped between the anchor's open and this one is refused (rv-sec3 RULING-16:50 C3).
+/// Input: the anchor. Output: the held root, or `native_profile_custody_unsafe`.
+fn anchor_folder(anchor: &Anchor) -> Result<Folder, EngineError> {
+    let folder =
+        Folder::root(&anchor.path).map_err(|_| failure("native_profile_custody_unsafe"))?;
+    if identity_of(folder.pin()) != anchor.identity {
+        return Err(failure("native_profile_custody_unsafe"));
+    }
+    assert_eq!(folder.pin().inode, anchor.identity.inode);
+    Ok(folder)
+}
+
 impl NativeProfileCustody {
+    #[cfg(unix)]
     pub(crate) fn capture(path: &Path, opened: &Metadata) -> Result<Self, EngineError> {
         let parent = path
             .parent()
@@ -528,6 +607,7 @@ impl NativeProfileCustody {
             .map_err(unsafe_custody)?,
         );
         let custody = Self {
+            anchor_folder: anchor_folder(&anchor)?,
             anchor,
             database,
             database_name,
@@ -540,6 +620,7 @@ impl NativeProfileCustody {
         Ok(custody)
     }
 
+    #[cfg(unix)]
     fn verify(&self) -> Result<(), EngineError> {
         self.anchor.verify().map_err(unsafe_custody)?;
         verify_named(
@@ -549,6 +630,83 @@ impl NativeProfileCustody {
             self.database_identity,
             false,
         )
+    }
+
+    /// Refuses a capture from metadata on Windows, where a `Metadata` cannot name the file it
+    /// came from (std has no stable file id), so it could not bind custody to the caller's
+    /// database (QUESTION-1700 Q1, rv-sec3 RULING-16:50 C2). Inputs: the path and metadata,
+    /// unused. Output: `native_profile_custody_unavailable`.
+    #[cfg(windows)]
+    pub(crate) fn capture(_path: &Path, _opened: &Metadata) -> Result<Self, EngineError> {
+        Err(failure("native_profile_custody_unavailable"))
+    }
+
+    /// Captures custody of the database a caller holds open on Windows (QUESTION-1700 Q1,
+    /// rv-sec3 RULING-16:50 C1-C4): the engine root is held as the W3-4a anchor and as a held
+    /// folder at its real place, custody opens the database itself with W1's private read-only
+    /// open, which follows no link, refuses a second link and never shares delete, and keeps
+    /// that handle; the caller's handle must be the same file with the same nonzero identity.
+    /// Inputs: the database path and the caller's handle. Output: the custody, or the refusal.
+    #[cfg(windows)]
+    pub(crate) fn capture_held(path: &Path, opened: &File) -> Result<Self, EngineError> {
+        let parent = path
+            .parent()
+            .ok_or_else(|| failure("native_profile_custody_unsafe"))?;
+        let anchor = Anchor::open(parent).map_err(unsafe_custody)?;
+        let database_name = path
+            .file_name()
+            .ok_or_else(|| failure("native_profile_custody_unsafe"))?
+            .to_owned();
+        let anchor_folder = anchor_folder(&anchor)?;
+        let (database, pin) = anchor_folder
+            .open_read(&held_name(&database_name)?)
+            .map_err(|_| failure("native_profile_custody_unsafe"))?;
+        let same =
+            crazyagent_win_sandbox::private::same(&database, opened).map_err(unsafe_custody)?;
+        let caller = Identity::of_file(opened).map_err(unsafe_custody)?;
+        if !same || pin.inode == 0 || caller.inode == 0 || caller != identity_of(pin) {
+            return Err(failure("native_profile_custody_unsafe"));
+        }
+        let custody = Self {
+            anchor,
+            anchor_folder,
+            database,
+            database_name,
+            database_identity: caller,
+            root_hash: None,
+            profiles: BTreeMap::new(),
+        };
+        custody.verify()?;
+        Ok(custody)
+    }
+
+    /// Confirms custody on Windows, the twin of the Unix check (rv-sec3 RULING-16:50 C2, C3):
+    /// the anchor still verifies, the stored identity is nonzero, and the database name, opened
+    /// again through the held root, is still the held file with that identity, judged private.
+    /// Output: Ok, or `native_profile_custody_unsafe`.
+    #[cfg(windows)]
+    fn verify(&self) -> Result<(), EngineError> {
+        self.anchor.verify().map_err(unsafe_custody)?;
+        if self.database_identity.inode == 0 {
+            return Err(failure("native_profile_custody_unsafe"));
+        }
+        let pin = Pin {
+            device: self.database_identity.device,
+            inode: self.database_identity.inode,
+        };
+        self.anchor_folder
+            .verify(&held_name(&self.database_name)?, &self.database, pin, false)
+            .map_err(|_| failure("native_profile_custody_unsafe"))
+    }
+
+    /// Zeroes the stored database identity, for the row that requires `verify` to refuse it.
+    #[cfg(all(test, windows))]
+    fn forget_database_identity(&mut self) {
+        self.database_identity = Identity {
+            device: 0,
+            inode: 0,
+        };
+        assert_eq!(self.database_identity.inode, 0);
     }
 
     /// Names the home directory of a native managed profile without taking it, for tests
@@ -563,6 +721,7 @@ impl NativeProfileCustody {
             .join("home")
     }
 
+    #[cfg(unix)]
     fn retain(&self) -> Result<Self, EngineError> {
         self.verify()?;
         let retained = Self {
@@ -572,6 +731,7 @@ impl NativeProfileCustody {
                 directory: self.anchor.directory.try_clone().map_err(unsafe_custody)?,
                 identity: self.anchor.identity,
             },
+            anchor_folder: anchor_folder(&self.anchor)?,
             database: self.database.try_clone().map_err(unsafe_custody)?,
             database_name: self.database_name.clone(),
             database_identity: self.database_identity,
@@ -583,12 +743,13 @@ impl NativeProfileCustody {
         Ok(retained)
     }
 
+    #[cfg(unix)]
     fn retained_root(
         &self,
         host: &HostStamp,
     ) -> Result<(Directory, Manifest, RootIdentity), EngineError> {
-        let root = Directory::open(&self.anchor.directory, OsStr::new(ROOT))?;
-        let manifest = Manifest::open(&root.file, false)?;
+        let root = Directory::open(&self.anchor_folder, OsStr::new(ROOT))?;
+        let manifest = Manifest::open(&root.folder, false)?;
         let expected = RootIdentity {
             version: 1,
             database_instance: host.db_instance.clone(),
@@ -612,6 +773,7 @@ impl NativeProfileCustody {
         Ok((root, manifest, expected))
     }
 
+    #[cfg(unix)]
     pub(crate) fn acquire_use(
         &mut self,
         host: &HostStamp,
@@ -637,6 +799,7 @@ impl NativeProfileCustody {
     /// An agent's execution never takes it. Inputs: the host, binding, operation,
     /// generation, purpose and that choice. Output: the use, or `native_profile_in_use`
     /// while the lock stays busy.
+    #[cfg(unix)]
     pub(crate) fn acquire_use_within(
         &mut self,
         host: &HostStamp,
@@ -653,7 +816,7 @@ impl NativeProfileCustody {
         let (root, root_manifest, root_identity) = self.retained_root(host)?;
         let stable = StableBinding::of(&binding.connection)?;
         let key = stable.key();
-        let profile = Directory::open(&root.file, OsStr::new(&key))?;
+        let profile = Directory::open(&root.folder, OsStr::new(&key))?;
         let (home, manifest) = prepare_profile(&profile, &root_identity, stable)?;
         let hash = digest(&manifest.bytes);
         if binding.custody_id != hash
@@ -685,7 +848,7 @@ impl NativeProfileCustody {
         if purpose != NativeProfileUsePurpose::Execution
             && let Some(wait) = renewal_wait
         {
-            let held = renewal::hold(&guard.profile.file, wait).map_err(|error| {
+            let held = renewal::hold(guard.profile.file(), wait).map_err(|error| {
                 match error.0.as_str() {
                     "native_profile_renewal_busy" => failure("native_profile_in_use"),
                     _ => error,
@@ -704,6 +867,7 @@ impl NativeProfileCustody {
     /// Inputs: this engine's host and the profile key. Output: the held locks, an empty
     /// release when the profile does not exist, or `None` while a sign-in, a logout, a
     /// check or a renewal holds the profile.
+    #[cfg(unix)]
     pub(crate) fn hold_released_profile(
         &self,
         host: &HostStamp,
@@ -728,15 +892,15 @@ impl NativeProfileCustody {
             Ok((root, _, _)) => root,
             Err(error) => return absent(error),
         };
-        let profile = match Directory::open(&root.file, OsStr::new(key)) {
+        let profile = match Directory::open(&root.folder, OsStr::new(key)) {
             Ok(profile) => profile,
             Err(error) => return absent(error),
         };
-        let manifest = match Manifest::open(&profile.file, false) {
+        let manifest = match Manifest::open(&profile.folder, false) {
             Ok(manifest) => manifest,
             Err(error) => return absent(error),
         };
-        let renewal = match renewal::hold(&profile.file, std::time::Duration::ZERO) {
+        let renewal = match renewal::hold(profile.file(), std::time::Duration::ZERO) {
             Ok(held) => held,
             Err(error) if error.0 == "native_profile_renewal_busy" => return Ok(None),
             Err(error) => return Err(error),
@@ -751,7 +915,7 @@ impl NativeProfileCustody {
             Err(_) => return Err(failure("native_profile_lock_unavailable")),
         }
         let release = NativeProfileRelease(Some((manifest.file, renewal)));
-        profile.verify(&root.file, OsStr::new(key))?;
+        profile.verify(&root.folder, OsStr::new(key))?;
         self.verify()?;
         Ok(Some(release))
     }
@@ -760,21 +924,20 @@ impl NativeProfileCustody {
         &mut self,
         host: &HostStamp,
     ) -> Result<(Directory, Manifest, RootIdentity), EngineError> {
-        let exists =
-            match rustix::fs::statat(&self.anchor.directory, ROOT, AtFlags::SYMLINK_NOFOLLOW) {
-                Ok(_) => true,
-                Err(rustix::io::Errno::NOENT) => false,
-                Err(error) => return Err(unsafe_custody(error)),
-            };
-        if !exists && self.root_hash.is_some() {
+        let present = match self.anchor_folder.open_dir(&Name::constant(ROOT)) {
+            Ok(folder) => Some(Directory::of(folder)),
+            Err(HeldError::Missing) => None,
+            Err(_) => return Err(failure("native_profile_custody_unsafe")),
+        };
+        if present.is_none() && self.root_hash.is_some() {
             return Err(failure("native_profile_identity_changed"));
         }
-        let (directory, manifest) = if exists {
-            let directory = Directory::open(&self.anchor.directory, OsStr::new(ROOT))?;
-            let manifest = Manifest::open(&directory.file, false)?;
-            (directory, manifest)
-        } else {
-            self.create_root(host)?
+        let (directory, manifest) = match present {
+            Some(directory) => {
+                let manifest = Manifest::open(&directory.folder, false)?;
+                (directory, manifest)
+            }
+            None => self.create_root(host)?,
         };
         let expected = RootIdentity {
             version: 1,
@@ -789,7 +952,7 @@ impl NativeProfileCustody {
         if !actual.matches(&expected) {
             return Err(failure("native_profile_binding_conflict"));
         }
-        manifest.verify(&directory.file)?;
+        manifest.verify(&directory.folder)?;
         let hash = digest(&manifest.bytes);
         if self
             .root_hash
@@ -806,9 +969,9 @@ impl NativeProfileCustody {
     /// renames it into place whole. Input: the engine host stamp. Output: the root and
     /// its manifest; an interruption leaves only a staging directory for the next sweep.
     fn create_root(&self, host: &HostStamp) -> Result<(Directory, Manifest), EngineError> {
-        staging::sweep(&self.anchor.directory, ROOT_STAGING)?;
-        let staged = Staging::create(&self.anchor.directory, ROOT_STAGING)?;
-        let mut manifest = Manifest::open(&staged.directory.file, true)?;
+        staging::sweep(&self.anchor_folder, ROOT_STAGING)?;
+        let staged = Staging::create(&self.anchor_folder, ROOT_STAGING)?;
+        let mut manifest = Manifest::open(&staged.directory.folder, true)?;
         step()?;
         let expected = RootIdentity {
             version: 1,
@@ -819,16 +982,23 @@ impl NativeProfileCustody {
             manifest: manifest.identity,
         };
         manifest.write(
-            &staged.directory.file,
+            &staged.directory.folder,
             serde_json::to_vec(&expected)
                 .map_err(|_| failure("native_profile_identity_invalid"))?,
         )?;
         step()?;
-        let directory = staged.commit(&self.anchor.directory, ROOT)?;
+        let written = manifest.identity;
+        drop(manifest);
+        let directory = staged.commit(&self.anchor_folder, ROOT)?;
         assert_eq!(directory.identity, expected.directory);
+        let manifest = Manifest::open(&directory.folder, false)?;
+        if manifest.identity != written {
+            return Err(failure("native_profile_identity_changed"));
+        }
         Ok((directory, manifest))
     }
 
+    #[cfg(unix)]
     pub(crate) fn prepare(
         &mut self,
         host: &HostStamp,
@@ -837,7 +1007,7 @@ impl NativeProfileCustody {
         let binding = StableBinding::of(connection)?;
         self.verify()?;
         let (root, root_manifest, root_identity) = self.root(host)?;
-        let slots = scan_slots(&root.file)?;
+        let slots = scan_slots(root.file())?;
         if self.profiles.keys().any(|key| !slots.contains_key(key)) {
             return Err(failure("native_profile_identity_changed"));
         }
@@ -847,9 +1017,9 @@ impl NativeProfileCustody {
             return Err(failure("native_profile_capacity"));
         }
         let profile = if exists {
-            Directory::open(&root.file, OsStr::new(&key))?
+            Directory::open(&root.folder, OsStr::new(&key))?
         } else {
-            create_profile(&root.file, &key, &root_identity, binding.clone())?
+            create_profile(&root.folder, &key, &root_identity, binding.clone())?
         };
         let (home, manifest) = prepare_profile(&profile, &root_identity, binding)?;
         let hash = digest(&manifest.bytes);
@@ -860,12 +1030,12 @@ impl NativeProfileCustody {
         {
             return Err(failure("native_profile_identity_changed"));
         }
-        manifest.verify(&profile.file)?;
-        home.verify(&profile.file, OsStr::new("home"))?;
-        profile.verify(&root.file, OsStr::new(&key))?;
-        root_manifest.verify(&root.file)?;
-        root.verify(&self.anchor.directory, OsStr::new(ROOT))?;
-        let current_slots = scan_slots(&root.file)?;
+        manifest.verify(&profile.folder)?;
+        home.verify(&profile.folder, OsStr::new("home"))?;
+        profile.verify(&root.folder, OsStr::new(&key))?;
+        root_manifest.verify(&root.folder)?;
+        root.verify(&self.anchor_folder, OsStr::new(ROOT))?;
+        let current_slots = scan_slots(root.file())?;
         if current_slots.get(&key) != Some(&profile.identity)
             || slots
                 .iter()
@@ -893,18 +1063,19 @@ impl NativeProfileCustody {
 /// Builds a native profile slot with an empty home and its identity manifest in a
 /// staging directory and renames it to its key whole. Inputs: the profile root, the
 /// slot key, the root identity and the stable binding. Output: the slot directory.
+#[cfg(unix)]
 fn create_profile(
-    root: &File,
+    root: &Folder,
     key: &str,
     root_identity: &RootIdentity,
     binding: StableBinding,
 ) -> Result<Directory, EngineError> {
     staging::sweep(root, STAGING)?;
     let staged = Staging::create(root, STAGING)?;
-    let home = Directory::create(&staged.directory.file, OsStr::new("home"))?;
+    let home = Directory::create(&staged.directory.folder, OsStr::new("home"))?;
     step()?;
-    require_empty_home(&home.file)?;
-    let mut manifest = Manifest::open(&staged.directory.file, true)?;
+    require_empty_home(home.file())?;
+    let mut manifest = Manifest::open(&staged.directory.folder, true)?;
     step()?;
     let expected = ProfileIdentity {
         version: 1,
@@ -915,23 +1086,24 @@ fn create_profile(
         manifest: manifest.identity,
     };
     manifest.write(
-        &staged.directory.file,
+        &staged.directory.folder,
         serde_json::to_vec(&expected).map_err(|_| failure("native_profile_identity_invalid"))?,
     )?;
-    home.file.sync_all().map_err(unsafe_custody)?;
+    home.file().sync_all().map_err(unsafe_custody)?;
     step()?;
     let profile = staged.commit(root, key)?;
     assert_eq!(profile.identity, expected.directory);
     Ok(profile)
 }
 
+#[cfg(unix)]
 fn prepare_profile(
     profile: &Directory,
     root: &RootIdentity,
     binding: StableBinding,
 ) -> Result<(Directory, Manifest), EngineError> {
-    let home = Directory::open(&profile.file, OsStr::new("home"))?;
-    let manifest = Manifest::open(&profile.file, false)?;
+    let home = Directory::open(&profile.folder, OsStr::new("home"))?;
+    let manifest = Manifest::open(&profile.folder, false)?;
     let expected = ProfileIdentity {
         version: 1,
         root: root.clone(),
@@ -945,10 +1117,11 @@ fn prepare_profile(
     if !actual.matches(&expected) {
         return Err(failure("native_profile_binding_conflict"));
     }
-    require_profile_entries(&profile.file)?;
+    require_profile_entries(profile.file())?;
     Ok((home, manifest))
 }
 
+#[cfg(unix)]
 fn scan_slots(root: &File) -> Result<BTreeMap<String, Identity>, EngineError> {
     let mut slots = BTreeMap::new();
     let entries = Dir::read_from(root).map_err(unsafe_custody)?;
@@ -999,6 +1172,7 @@ fn scan_slots(root: &File) -> Result<BTreeMap<String, Identity>, EngineError> {
     Ok(slots)
 }
 
+#[cfg(unix)]
 fn require_empty_home(home: &File) -> Result<(), EngineError> {
     let entries = Dir::read_from(home).map_err(unsafe_custody)?;
     for (index, entry) in entries.enumerate() {
@@ -1010,6 +1184,7 @@ fn require_empty_home(home: &File) -> Result<(), EngineError> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn require_profile_entries(profile: &File) -> Result<(), EngineError> {
     let entries = Dir::read_from(profile).map_err(unsafe_custody)?;
     let mut identity = false;
@@ -1041,6 +1216,7 @@ fn require_profile_entries(profile: &File) -> Result<(), EngineError> {
 /// renews an access token and leaves behind when it is stopped mid-renewal, for the next run to
 /// reclaim. Input: the profile folder. Output: done when the entry is a folder of this user that
 /// no one else can write or when it is already gone, else `native_profile_custody_unsafe`.
+#[cfg(unix)]
 fn require_config_lock(profile: &File) -> Result<(), EngineError> {
     let metadata = match rustix::fs::statat(profile, "home.lock", AtFlags::SYMLINK_NOFOLLOW) {
         Ok(metadata) => metadata,
@@ -1056,12 +1232,13 @@ fn require_config_lock(profile: &File) -> Result<(), EngineError> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn remember_profile(pins: &mut BTreeMap<String, String>, key: String, hash: String) {
     pins.insert(key, hash);
     assert!(pins.len() <= MAX_PROFILES);
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::config::{ModelEndpoint, ModelReference};
@@ -1129,8 +1306,11 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod use_tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod configured_rcli_tests;
+
+#[cfg(all(test, windows))]
+mod custody_windows_tests;

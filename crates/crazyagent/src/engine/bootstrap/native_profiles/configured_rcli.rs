@@ -142,15 +142,12 @@ impl ConfiguredRcliUse {
             return Err(failure("rcli_profile_home_unsafe"));
         }
         let anchor = Anchor::open(path).map_err(unsafe_custody)?;
-        let home = Directory {
-            file: anchor.directory.try_clone().map_err(unsafe_custody)?,
-            identity: anchor.identity,
-        };
-        let sdk =
-            Directory::open(&home.file, OsStr::new(".backboard")).map_err(configuration_missing)?;
+        let home = Directory::of(anchor_folder(&anchor)?);
+        let sdk = Directory::open(&home.folder, OsStr::new(".backboard"))
+            .map_err(configuration_missing)?;
         let config = File::from(
             rustix::fs::openat(
-                &sdk.file,
+                sdk.file(),
                 "config.json",
                 OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
                 Mode::empty(),
@@ -197,13 +194,13 @@ impl ConfiguredRcliUse {
         verify_named(
             &self.anchor.directory,
             OsStr::new("."),
-            &home.file,
+            home.file(),
             self.identity.home,
             true,
         )?;
-        self.sdk.verify(&home.file, OsStr::new(".backboard"))?;
+        self.sdk.verify(&home.folder, OsStr::new(".backboard"))?;
         verify_named(
-            &self.sdk.file,
+            self.sdk.file(),
             OsStr::new("config.json"),
             &self.config,
             self.identity.config.identity,
@@ -229,7 +226,7 @@ impl ConfiguredRcliUse {
         {
             return Err(failure("rcli_profile_config_changed"));
         }
-        self.sdk.verify(&home.file, OsStr::new(".backboard"))?;
+        self.sdk.verify(&home.folder, OsStr::new(".backboard"))?;
         self.anchor.verify().map_err(unsafe_custody)
     }
 
@@ -354,8 +351,8 @@ impl NativeProfileCustody {
         target_profile_ref: &CredentialRef,
     ) -> Result<(Directory, Manifest, ConfiguredProfileIdentity), EngineError> {
         let profile =
-            Directory::open(&root.file, OsStr::new(key)).map_err(configuration_missing)?;
-        let manifest = Manifest::open(&profile.file, false).map_err(configuration_missing)?;
+            Directory::open(&root.folder, OsStr::new(key)).map_err(configuration_missing)?;
+        let manifest = Manifest::open(&profile.folder, false).map_err(configuration_missing)?;
         let actual: ConfiguredProfileIdentity = serde_json::from_slice(&manifest.bytes)
             .map_err(|_| failure("rcli_profile_binding_conflict"))?;
         let [state, database, root_directory, root_manifest] = actual.root.files();
@@ -404,7 +401,7 @@ impl NativeProfileCustody {
         self.verify()?;
         let (root, root_manifest, root_identity) =
             self.retained_root(host).map_err(configuration_missing)?;
-        let slots = scan_slots(&root.file)?;
+        let slots = scan_slots(root.file())?;
         if self.profiles.keys().any(|key| !slots.contains_key(key)) {
             return Err(failure("native_profile_identity_changed"));
         }
@@ -419,11 +416,11 @@ impl NativeProfileCustody {
         if !same_home(&actual.configured, &configured.identity) {
             return Err(failure("rcli_profile_identity_changed"));
         }
-        manifest.verify(&profile.file)?;
-        require_entries(&profile.file)?;
-        profile.verify(&root.file, OsStr::new(&key))?;
-        root_manifest.verify(&root.file)?;
-        root.verify(&self.anchor.directory, OsStr::new(ROOT))?;
+        manifest.verify(&profile.folder)?;
+        require_entries(profile.file())?;
+        profile.verify(&root.folder, OsStr::new(&key))?;
+        root_manifest.verify(&root.folder)?;
+        root.verify(&self.anchor_folder, OsStr::new(ROOT))?;
         self.verify()?;
         Ok(LoadedProfile {
             root,
@@ -528,8 +525,8 @@ impl NativeProfileCustody {
         locked: &LockedRoot<'_>,
     ) -> Result<ConfiguredRcliProfileMetadata, EngineError> {
         let root = locked.root;
-        staging::sweep(&root.file, STAGING)?;
-        let slots = scan_slots(&root.file)?;
+        staging::sweep(&root.folder, STAGING)?;
+        let slots = scan_slots(root.file())?;
         if self.profiles.keys().any(|key| !slots.contains_key(key)) {
             return Err(failure("native_profile_identity_changed"));
         }
@@ -568,7 +565,7 @@ impl NativeProfileCustody {
             }
             (None, None, None, None)
         };
-        let _home_lock = locked.lock(&home.file)?;
+        let _home_lock = locked.lock(home.file())?;
         configured.verify(&home, connection)?;
         let generation = match &previous {
             Some(actual) => actual
@@ -578,8 +575,8 @@ impl NativeProfileCustody {
                 .ok_or_else(|| failure("rcli_profile_generation_exhausted"))?,
             None => 1,
         };
-        let staged = Staging::create(&root.file, STAGING)?;
-        let mut written = Manifest::open(&staged.directory.file, true)?;
+        let staged = Staging::create(&root.folder, STAGING)?;
+        let mut written = Manifest::open(&staged.directory.folder, true)?;
         step()?;
         let identity = ConfiguredProfileIdentity {
             version: 2,
@@ -594,34 +591,34 @@ impl NativeProfileCustody {
             generation,
         };
         written.write(
-            &staged.directory.file,
+            &staged.directory.folder,
             serde_json::to_vec(&identity)
                 .map_err(|_| failure("native_profile_identity_invalid"))?,
         )?;
         step()?;
         let profile = match profile {
-            Some(profile) => match staged.replace_into(&root.file, MANIFEST, &profile.file) {
+            Some(profile) => match staged.replace_into(&root.folder, MANIFEST, profile.file()) {
                 Ok(()) => profile,
                 Err(staging::Unreplaced::Changed(refused)) => return Err(refused),
                 Err(staging::Unreplaced::Stopped(stopped)) => {
-                    if written.verify(&profile.file).is_ok() {
+                    if written.verify(&profile.folder).is_ok() {
                         remember_profile(&mut self.profiles, key, digest(&written.bytes));
                     }
                     return Err(stopped);
                 }
             },
-            None => staged.commit(&root.file, &key)?,
+            None => staged.commit(&root.folder, &key)?,
         };
         drop(manifest_lock);
         drop(manifest);
         assert_eq!(profile.identity, identity.directory);
         configured.verify(&home, connection)?;
-        require_entries(&profile.file)?;
-        written.verify(&profile.file)?;
-        profile.verify(&root.file, OsStr::new(&key))?;
-        locked.manifest.verify(&root.file)?;
-        root.verify(&self.anchor.directory, OsStr::new(ROOT))?;
-        let current_slots = scan_slots(&root.file)?;
+        require_entries(profile.file())?;
+        written.verify(&profile.folder)?;
+        profile.verify(&root.folder, OsStr::new(&key))?;
+        locked.manifest.verify(&root.folder)?;
+        root.verify(&self.anchor_folder, OsStr::new(ROOT))?;
+        let current_slots = scan_slots(root.file())?;
         if current_slots.get(&key) != Some(&profile.identity)
             || slots
                 .iter()
@@ -663,7 +660,7 @@ impl NativeProfileCustody {
     ) -> Result<ConfiguredProfileIdentity, EngineError> {
         self.verify()?;
         let (root, _, root_identity) = self.retained_root(host).map_err(configuration_missing)?;
-        let slots = scan_slots(&root.file)?;
+        let slots = scan_slots(root.file())?;
         let key = digest(target_profile_ref.as_str().as_bytes());
         let (_, _, actual) =
             self.read_configured_slot(&root, &root_identity, &slots, &key, target_profile_ref)?;
@@ -720,7 +717,7 @@ impl NativeProfileCustody {
         };
         guard.revalidate_retained()?;
         guard.purpose.lock(&guard.manifest.file)?;
-        guard.purpose.lock(&guard.home.file)?;
+        guard.purpose.lock(guard.home.file())?;
         guard.revalidate_retained()?;
         self.root_hash = Some(digest(&guard.root_manifest.bytes));
         remember_profile(

@@ -1,9 +1,8 @@
+use super::{NativeProfileCustody, NativeProfileUsePurpose, digest, failure};
 use crate::config::ModelConnection;
 use crate::engine::EngineError;
-use crate::engine::owner::{AccountSecret, HostStamp, NativeProfileBinding, PreparedNativeProfile};
+use crate::engine::owner::{AccountSecret, HostStamp, NativeProfileBinding};
 use crate::protocol::{CredentialRef, RequestId};
-use sha2::{Digest, Sha256};
-use std::fs::Metadata;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -15,23 +14,6 @@ pub(crate) struct ConfiguredRcliProfileMetadata {
     pub(crate) profile_generation: u64,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum NativeProfileUsePurpose {
-    Authentication,
-    #[allow(
-        dead_code,
-        reason = "Refresh requires the separately qualified native host"
-    )]
-    Refresh,
-    Logout,
-    #[allow(
-        dead_code,
-        reason = "Execution requires the separately qualified native host"
-    )]
-    Execution,
-    Check,
-}
-
 /// Matches the Unix check for a generated SDK home missing its key file. No generated home
 /// exists without native profile custody. Inputs: the engine root and the credential
 /// reference, unused. Output: false.
@@ -41,11 +23,6 @@ pub(crate) fn generated_home_needs_key(
 ) -> Result<bool, EngineError> {
     Ok(false)
 }
-
-/// Native profile custody, which cannot exist without Unix directory-relative file custody.
-/// No value is ever made: `capture` reports `native_profile_custody_unavailable`, so every
-/// method below is unreachable by construction.
-pub(crate) enum NativeProfileCustody {}
 
 /// A held native profile lock for settling a stale sign-in, which cannot exist without
 /// native profile custody. No value is ever made.
@@ -160,54 +137,27 @@ impl Drop for NativeProfileUse {
     }
 }
 
-/// The Windows custody rows (N6a), run against the core this module stands in for until it
-/// compiles on Windows.
-#[cfg(all(test, windows))]
-#[path = "native_profiles/custody_windows_tests.rs"]
-mod custody_windows_tests;
-
-#[cfg(windows)]
+/// The custody parts no Windows slice has ported yet (DESIGN-0515 D5): each refuses with
+/// `native_profile_custody_unavailable`, so no profile, configured home or lease is made.
 impl NativeProfileCustody {
-    /// Captures custody of the database a caller holds open on Windows (QUESTION-1700 Q1).
-    /// Inputs: the database path and the caller's handle. Output: the refusal, until N6a.
-    pub(crate) fn capture_held(_path: &Path, _opened: &std::fs::File) -> Result<Self, EngineError> {
-        Err(EngineError("native_profile_custody_unavailable".to_owned()))
-    }
-}
-
-#[cfg(all(test, windows))]
-impl NativeProfileCustody {
-    fn verify(&self) -> Result<(), EngineError> {
-        match *self {}
-    }
-
-    fn root(&mut self, _host: &HostStamp) -> Result<((), (), ()), EngineError> {
-        match *self {}
-    }
-
-    fn forget_database_identity(&mut self) {
-        match *self {}
-    }
-}
-
-impl NativeProfileCustody {
-    /// Refuses native profile custody where Unix owner, inode and directory-relative checks
-    /// do not exist. Takes the database path and metadata, both unused.
-    /// Returns `native_profile_custody_unavailable`.
-    pub(crate) fn capture(_path: &Path, _opened: &Metadata) -> Result<Self, EngineError> {
-        Err(EngineError("native_profile_custody_unavailable".into()))
-    }
-
     pub(crate) fn hold_released_profile(
         &self,
         _host: &HostStamp,
         _key: &str,
     ) -> Result<Option<NativeProfileRelease>, EngineError> {
-        match *self {}
+        Err(failure("native_profile_custody_unavailable"))
     }
 
-    pub(crate) fn generated_configured_home(&self, _profile_ref: &CredentialRef) -> PathBuf {
-        match *self {}
+    /// The generated SDK home a configured account would use, the same path as on Unix.
+    /// Input: the profile reference. Output: the path.
+    pub(crate) fn generated_configured_home(&self, profile_ref: &CredentialRef) -> PathBuf {
+        let home = self
+            .anchor
+            .path
+            .join(crate::engine::bootstrap::CONFIGURED_SDK_HOMES_FOLDER)
+            .join(digest(profile_ref.as_str().as_bytes()));
+        assert!(home.starts_with(&self.anchor.path));
+        home
     }
 
     pub(crate) fn acquire_use(
@@ -218,11 +168,11 @@ impl NativeProfileCustody {
         _generation: u64,
         _purpose: NativeProfileUsePurpose,
     ) -> Result<NativeProfileUse, EngineError> {
-        match *self {}
+        Err(failure("native_profile_custody_unavailable"))
     }
 
-    /// Matches the Unix use with a chosen renewal wait. No custody exists here, so this
-    /// never runs. Inputs: the use request and the wait, unused. Output: none.
+    /// Matches the Unix use with a chosen renewal wait, refused until a Windows slice ports
+    /// the sign-in lease. Inputs: the use request and the wait, unused. Output: the refusal.
     pub(crate) fn acquire_use_within(
         &mut self,
         _host: &HostStamp,
@@ -232,7 +182,7 @@ impl NativeProfileCustody {
         _purpose: NativeProfileUsePurpose,
         _renewal_wait: Option<Duration>,
     ) -> Result<NativeProfileUse, EngineError> {
-        match *self {}
+        Err(failure("native_profile_custody_unavailable"))
     }
 
     pub(crate) fn prepare(
@@ -240,7 +190,7 @@ impl NativeProfileCustody {
         _host: &HostStamp,
         _connection: &ModelConnection,
     ) -> Result<(String, String), EngineError> {
-        match *self {}
+        Err(failure("native_profile_custody_unavailable"))
     }
 
     pub(crate) fn register_configured_rcli_profile(
@@ -250,7 +200,7 @@ impl NativeProfileCustody {
         _target_profile_ref: &CredentialRef,
         _configured_home: &Path,
     ) -> Result<ConfiguredRcliProfileMetadata, EngineError> {
-        match *self {}
+        Err(failure("native_profile_custody_unavailable"))
     }
 
     pub(crate) fn register_undone_configured_rcli_profile(
@@ -260,7 +210,7 @@ impl NativeProfileCustody {
         _target_profile_ref: &CredentialRef,
         _configured_home: &Path,
     ) -> Result<ConfiguredRcliProfileMetadata, EngineError> {
-        match *self {}
+        Err(failure("native_profile_custody_unavailable"))
     }
 
     pub(crate) fn configured_rcli_home(
@@ -268,7 +218,7 @@ impl NativeProfileCustody {
         _host: &HostStamp,
         _target_profile_ref: &CredentialRef,
     ) -> Result<PathBuf, EngineError> {
-        match *self {}
+        Err(failure("native_profile_custody_unavailable"))
     }
 
     pub(crate) fn configured_rcli_profile(
@@ -277,7 +227,7 @@ impl NativeProfileCustody {
         _connection: &ModelConnection,
         _target_profile_ref: &CredentialRef,
     ) -> Result<ConfiguredRcliProfileMetadata, EngineError> {
-        match *self {}
+        Err(failure("native_profile_custody_unavailable"))
     }
 
     pub(crate) fn acquire_configured_rcli_use(
@@ -288,7 +238,7 @@ impl NativeProfileCustody {
         _operation_id: &RequestId,
         _generation: u64,
     ) -> Result<NativeProfileUse, EngineError> {
-        match *self {}
+        Err(failure("native_profile_custody_unavailable"))
     }
 
     pub(crate) fn prepare_configured_rcli_profile(
@@ -298,7 +248,7 @@ impl NativeProfileCustody {
         _profile_ref: &CredentialRef,
         _secret: Option<&AccountSecret>,
     ) -> Result<ConfiguredRcliProfileMetadata, EngineError> {
-        match *self {}
+        Err(failure("native_profile_custody_unavailable"))
     }
 
     pub(crate) fn repair_legacy_configured_home(
@@ -307,23 +257,6 @@ impl NativeProfileCustody {
         _connection: &ModelConnection,
         _profile_ref: &CredentialRef,
     ) -> Result<(), EngineError> {
-        match *self {}
-    }
-
-    /// Builds the owner receipt for a prepared profile, exactly as on Unix.
-    /// Takes the binding, the requested and prepared references and the profile key.
-    /// Returns the receipt; a mismatched reference or key trips an assertion.
-    pub(crate) fn receipt(
-        binding: NativeProfileBinding,
-        requested: &CredentialRef,
-        profile: &CredentialRef,
-        key: &str,
-    ) -> PreparedNativeProfile {
-        assert_eq!(&binding.connection.id, requested);
-        assert_eq!(
-            format!("{:x}", Sha256::digest(profile.as_str().as_bytes())),
-            key
-        );
-        PreparedNativeProfile::from_binding(binding)
+        Err(failure("native_profile_custody_unavailable"))
     }
 }

@@ -379,7 +379,7 @@ impl NativeProfileUse {
             _ => return Err(unavailable()),
         };
         let path = self.profile_path()?;
-        let mut record = account_record(harness, &self.home.file, &path)?;
+        let mut record = account_record(harness, self.home.file(), &path)?;
         let now = since_epoch()?;
         let ahead = turn.unwrap_or(OPEN_TURN_AHEAD);
         assert!(!ahead.is_zero());
@@ -450,7 +450,7 @@ impl NativeProfileUse {
             _ => return Err(unavailable()),
         };
         let path = self.profile_path()?;
-        let mut record = account_record(harness, &self.home.file, &path)?;
+        let mut record = account_record(harness, self.home.file(), &path)?;
         if record.expires <= since_epoch()? + USABLE_MIN {
             let renewal = self.renewal(harness, executable)?;
             record = off_worker(|| renewal.renew(record.expires))?;
@@ -469,7 +469,7 @@ impl NativeProfileUse {
     /// Input: none. Output: the expiry since the epoch; `native_profile_sign_in_revoked`
     /// for a sign-in Claude Code ended, or the unavailable refusal.
     pub(crate) fn claude_expiry(&self) -> Result<Duration, EngineError> {
-        account_record(Harness::Claude, &self.home.file, &self.profile_path()?)
+        account_record(Harness::Claude, self.home.file(), &self.profile_path()?)
             .map(|record| record.expires)
     }
 }

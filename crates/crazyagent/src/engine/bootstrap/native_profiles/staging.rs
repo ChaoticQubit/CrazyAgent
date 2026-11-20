@@ -1,6 +1,8 @@
 use super::*;
+#[cfg(unix)]
 use rustix::fs::RenameFlags;
 
+#[cfg(unix)]
 pub(super) const STAGING: &str = ".staging-";
 pub(super) const ROOT_STAGING: &str = ".native-profiles-staging-";
 pub(super) const STAGING_MAX: usize = 16;
@@ -49,13 +51,17 @@ pub(super) fn is_staging(name: &[u8], prefix: &str) -> bool {
 pub(super) struct Staging {
     name: String,
     pub(super) directory: Directory,
+    #[cfg(unix)]
     _held: HeldLock,
+    #[cfg(windows)]
+    _claim: File,
 }
 
 /// Where [`Staging::replace_into`] failed: at its check that the staging directory is still
 /// the one the engine made, a tamper check that a directory put in its place fails
 /// (`Changed`), or at any other step, an I/O failure or a test's stop (`Stopped`). Each holds
 /// the error the caller returns.
+#[cfg(unix)]
 pub(super) enum Unreplaced {
     Stopped(EngineError),
     Changed(EngineError),
@@ -63,6 +69,7 @@ pub(super) enum Unreplaced {
 
 /// Gives the error an [`Unreplaced`] holds, for a caller that treats every failure alike.
 /// Input: the failure. Output: its error.
+#[cfg(unix)]
 impl From<Unreplaced> for EngineError {
     fn from(unreplaced: Unreplaced) -> Self {
         match unreplaced {
@@ -72,7 +79,11 @@ impl From<Unreplaced> for EngineError {
 }
 
 impl Staging {
-    pub(super) fn create(parent: &File, prefix: &str) -> Result<Self, EngineError> {
+    /// Makes a staging directory in `parent` under a fresh random name with the prefix and
+    /// claims it: an exclusive `flock` on Unix, the lock on its lock stream on Windows
+    /// (DESIGN-0601 R1), so a sweep leaves it alone while its creator lives. Inputs: the parent
+    /// and the prefix. Output: the claimed staging directory, or the error.
+    pub(super) fn create(parent: &Folder, prefix: &str) -> Result<Self, EngineError> {
         let mut random = [0_u8; 16];
         getrandom::fill(&mut random).map_err(|_| failure("native_profile_entropy_unavailable"))?;
         let name = format!(
@@ -83,44 +94,74 @@ impl Staging {
                 .collect::<String>()
         );
         assert!(is_staging(name.as_bytes(), prefix));
-        rustix::fs::mkdirat(parent, name.as_str(), Mode::from_raw_mode(0o700))
-            .map_err(unsafe_custody)?;
+        let folder = parent
+            .make_dir(&held_name(OsStr::new(&name))?)
+            .map_err(|_| failure("native_profile_custody_unsafe"))?;
+        let directory = Directory::of(folder);
         step()?;
-        let directory = Directory::open(parent, OsStr::new(&name))?;
-        let held = lock(&directory.file)?;
+        #[cfg(unix)]
+        let held = lock(directory.file())?;
+        #[cfg(windows)]
+        let claim = directory
+            .folder
+            .claim()
+            .map_err(|_| failure("native_profile_custody_unsafe"))?;
         Ok(Self {
             name,
             directory,
+            #[cfg(unix)]
             _held: held,
+            #[cfg(windows)]
+            _claim: claim,
         })
     }
 
-    /// Renames the finished staging directory to its destination name, never over an
-    /// existing entry. Inputs: the shared parent and the destination name. Output: the
-    /// same directory under its new name, unlocked; `native_profile_in_use` if the name
-    /// appeared meanwhile, leaving this staging directory for a later sweep.
-    pub(super) fn commit(self, parent: &File, destination: &str) -> Result<Directory, EngineError> {
-        self.directory.file.sync_all().map_err(unsafe_custody)?;
+    /// Renames the finished staging directory to its destination name through the held
+    /// layer, never over an existing entry (R4), then opens the destination again and
+    /// requires it to be the staged directory. Every handle below it must be closed first, as
+    /// Windows refuses to rename a folder with an open child. Inputs: the shared parent and
+    /// the destination name. Output: the same directory under its new name, unclaimed;
+    /// `native_profile_in_use` if the name appeared meanwhile, leaving this staging directory
+    /// for a later sweep.
+    pub(super) fn commit(
+        self,
+        parent: &Folder,
+        destination: &str,
+    ) -> Result<Directory, EngineError> {
+        let unsafe_commit = |_| failure("native_profile_custody_unsafe");
+        self.directory.folder.sync().map_err(unsafe_commit)?;
         step()?;
-        rustix::fs::renameat_with(
-            parent,
-            self.name.as_str(),
-            parent,
-            destination,
-            RenameFlags::NOREPLACE,
-        )
-        .map_err(|error| {
-            if error == rustix::io::Errno::EXIST {
-                failure("native_profile_in_use")
-            } else {
-                unsafe_custody(error)
-            }
-        })?;
-        parent.sync_all().map_err(unsafe_custody)?;
+        self.verify_in(parent)?;
+        let Self {
+            name,
+            directory,
+            #[cfg(unix)]
+                _held: held,
+            #[cfg(windows)]
+                _claim: claim,
+        } = self;
+        let staged = directory.identity;
+        let from = held_name(OsStr::new(&name))?;
+        let to = held_name(OsStr::new(destination))?;
+        parent
+            .rename(directory.folder, &from, &to)
+            .map_err(|error| match error {
+                HeldError::Unsafe => failure("native_profile_in_use"),
+                _ => failure("native_profile_custody_unsafe"),
+            })?;
+        parent.sync().map_err(unsafe_commit)?;
         step()?;
-        self.directory.verify(parent, OsStr::new(destination))?;
-        flock(&self.directory.file, FlockOperation::Unlock).map_err(unsafe_custody)?;
-        Ok(self.directory)
+        #[cfg(unix)]
+        crate::engine::bootstrap::held::unlock(&held.0);
+        #[cfg(unix)]
+        drop(held);
+        #[cfg(windows)]
+        drop(claim);
+        let directory = Directory::open(parent, OsStr::new(destination))?;
+        if directory.identity != staged {
+            return Err(failure("native_profile_custody_unsafe"));
+        }
+        Ok(directory)
     }
 
     /// Moves one finished file out of this staging directory over a file of the same
@@ -128,18 +169,20 @@ impl Staging {
     /// Inputs: the staging parent, the file name and its destination directory.
     /// Output: Ok once the destination names the staged file and the parent is synced,
     /// or the failure, told apart by [`Unreplaced`].
+    #[cfg(unix)]
     pub(super) fn replace_into(
         self,
-        parent: &File,
+        parent: &Folder,
         name: &str,
         destination: &File,
     ) -> Result<(), Unreplaced> {
         self.move_into(name, destination)
             .map_err(Unreplaced::Stopped)?;
         self.verify_in(parent).map_err(Unreplaced::Changed)?;
-        rustix::fs::unlinkat(parent, self.name.as_str(), AtFlags::REMOVEDIR)
+        rustix::fs::unlinkat(parent.file(), self.name.as_str(), AtFlags::REMOVEDIR)
             .map_err(|error| Unreplaced::Stopped(unsafe_custody(error)))?;
         parent
+            .file()
             .sync_all()
             .map_err(|error| Unreplaced::Stopped(unsafe_custody(error)))
     }
@@ -147,10 +190,11 @@ impl Staging {
     /// Moves one finished file out of this staging directory over a file of the same name
     /// in another directory and syncs that directory. Inputs: the file name and the
     /// destination directory. Output: Ok once the destination names the staged file.
+    #[cfg(unix)]
     fn move_into(&self, name: &str, destination: &File) -> Result<(), EngineError> {
-        self.directory.file.sync_all().map_err(unsafe_custody)?;
+        self.directory.file().sync_all().map_err(unsafe_custody)?;
         step()?;
-        rustix::fs::renameat(&self.directory.file, name, destination, name)
+        rustix::fs::renameat(self.directory.file(), name, destination, name)
             .map_err(unsafe_custody)?;
         destination.sync_all().map_err(unsafe_custody)?;
         step()
@@ -161,11 +205,12 @@ impl Staging {
     /// so this staging directory then holds the file it replaced (RV-DS241-50). Inputs: the
     /// name and the other directory. Output: whether a file was replaced; nothing after
     /// the rename can fail here, so the caller owns every check that follows it.
+    #[cfg(unix)]
     pub(super) fn exchange(&self, name: &str, destination: &File) -> Result<bool, EngineError> {
-        self.directory.file.sync_all().map_err(unsafe_custody)?;
+        self.directory.file().sync_all().map_err(unsafe_custody)?;
         step()?;
         match rustix::fs::renameat_with(
-            &self.directory.file,
+            self.directory.file(),
             name,
             destination,
             name,
@@ -174,7 +219,7 @@ impl Staging {
             Ok(()) => Ok(true),
             Err(rustix::io::Errno::NOENT) => {
                 rustix::fs::renameat_with(
-                    &self.directory.file,
+                    self.directory.file(),
                     name,
                     destination,
                     name,
@@ -189,90 +234,108 @@ impl Staging {
 
     /// Checks that this staging directory is still the one named in its parent. Input: the
     /// parent. Output: Ok, or the identity failure.
-    pub(super) fn verify_in(&self, parent: &File) -> Result<(), EngineError> {
+    pub(super) fn verify_in(&self, parent: &Folder) -> Result<(), EngineError> {
         self.directory.verify(parent, OsStr::new(&self.name))
     }
 
-    /// Removes this staging directory and the regular files it holds while its lock is
-    /// still held. Input: the parent. Output: Ok once the parent no longer names it; on a
-    /// failure it stays for the next sweep.
-    pub(super) fn discard(self, parent: &File) -> Result<(), EngineError> {
+    /// Removes this staging directory and the regular files it holds. Input: the parent.
+    /// Output: Ok once the parent no longer names it; on a failure it stays for the next
+    /// sweep.
+    pub(super) fn discard(self, parent: &Folder) -> Result<(), EngineError> {
         self.verify_in(parent)?;
-        remove_tree(&self.directory.file, 0)?;
-        rustix::fs::unlinkat(parent, self.name.as_str(), AtFlags::REMOVEDIR)
-            .map_err(unsafe_custody)?;
-        parent.sync_all().map_err(unsafe_custody)
+        remove_tree(&self.directory.folder, 0)?;
+        let name = held_name(OsStr::new(&self.name))?;
+        let pin = self.directory.folder.pin();
+        drop(self);
+        remove_entry(parent, &name, pin)?;
+        parent
+            .sync()
+            .map_err(|_| failure("native_profile_custody_unsafe"))
     }
 }
 
 /// Removes every abandoned staging directory with the given prefix from a parent.
 /// Inputs: the parent and the prefix. Output: Ok after removing each one whose creator
-/// no longer holds its lock, which the sweep unlocks rather than just closes when it
-/// stops with one; a live one is left alone, and one that is not a private
-/// directory of this user, or holds anything a staged change never writes, is refused.
-pub(super) fn sweep(parent: &File, prefix: &str) -> Result<(), EngineError> {
-    let mut names = Vec::new();
-    for entry in Dir::read_from(parent).map_err(unsafe_custody)? {
-        let entry = entry.map_err(unsafe_custody)?;
-        if is_staging(entry.file_name().to_bytes(), prefix) {
-            if names.len() == STAGING_MAX {
-                return Err(failure("native_profile_capacity"));
-            }
-            names.push(entry.file_name().to_owned());
-        }
-    }
+/// no longer claims it (an exclusive `flock` on Unix, a held handle on Windows); a live one
+/// is left alone, and one that is not a private directory of this user, or holds anything a
+/// staged change never writes, is refused.
+pub(super) fn sweep(parent: &Folder, prefix: &str) -> Result<(), EngineError> {
+    let names = parent
+        .names(
+            |name| is_staging(name.as_encoded_bytes(), prefix),
+            STAGING_MAX,
+        )
+        .map_err(|error| match error {
+            HeldError::Full => failure("native_profile_capacity"),
+            _ => failure("native_profile_custody_unsafe"),
+        })?;
     for name in names {
-        let staged = Directory::open(parent, OsStr::from_bytes(name.to_bytes()))?;
-        let held = staged.file.try_clone().map_err(unsafe_custody)?;
-        let _held = match HeldLock::take(held, FlockOperation::NonBlockingLockExclusive) {
-            Ok(held) => held,
-            Err(rustix::io::Errno::WOULDBLOCK) => continue,
-            Err(error) => return Err(unsafe_custody(error)),
+        let name = held_name(&name)?;
+        #[cfg(windows)]
+        let claimed = match parent.claim_entry(&name) {
+            Ok(claimed) => claimed,
+            Err(HeldError::InUse | HeldError::Missing) => continue,
+            Err(_) => return Err(failure("native_profile_custody_unsafe")),
         };
-        staged.verify(parent, OsStr::from_bytes(name.to_bytes()))?;
-        remove_tree(&staged.file, 1)?;
-        rustix::fs::unlinkat(parent, name.as_c_str(), AtFlags::REMOVEDIR)
-            .map_err(unsafe_custody)?;
+        let staged = Directory::open(parent, name.as_os_str())?;
+        #[cfg(unix)]
+        let _claimed = {
+            let held = staged.file().try_clone().map_err(unsafe_custody)?;
+            match HeldLock::take(held, FlockOperation::NonBlockingLockExclusive) {
+                Ok(held) => held,
+                Err(rustix::io::Errno::WOULDBLOCK) => continue,
+                Err(error) => return Err(unsafe_custody(error)),
+            }
+        };
+        #[cfg(windows)]
+        if crazyagent_win_sandbox::private::identity(&claimed).map_err(unsafe_custody)?
+            != crazyagent_win_sandbox::private::identity(staged.file()).map_err(unsafe_custody)?
+        {
+            return Err(failure("native_profile_custody_unsafe"));
+        }
+        staged.verify(parent, name.as_os_str())?;
+        remove_tree(&staged.folder, 1)?;
+        let pin = staged.folder.pin();
+        drop(staged);
+        #[cfg(windows)]
+        drop(claimed);
+        remove_entry(parent, &name, pin)?;
     }
-    parent.sync_all().map_err(unsafe_custody)
+    parent
+        .sync()
+        .map_err(|_| failure("native_profile_custody_unsafe"))
 }
 
-/// Removes the contents of an engine-made directory: regular files of this user and,
-/// while depth remains, private subdirectories holding the same. Inputs: the open
-/// directory and the depth left. Output: Ok once it is empty; anything else is refused
-/// with `native_profile_custody_unsafe` and left in place.
-pub(super) fn remove_tree(directory: &File, depth: usize) -> Result<(), EngineError> {
-    let mut names = Vec::new();
-    for entry in Dir::read_from(directory).map_err(unsafe_custody)? {
-        let entry = entry.map_err(unsafe_custody)?;
-        if matches!(entry.file_name().to_bytes(), b"." | b"..") {
-            continue;
-        }
-        if names.len() == TREE_ENTRIES_MAX {
-            return Err(failure("native_profile_custody_unsafe"));
-        }
-        names.push(entry.file_name().to_owned());
-    }
-    for name in names {
-        let metadata = rustix::fs::statat(directory, name.as_c_str(), AtFlags::SYMLINK_NOFOLLOW)
-            .map_err(unsafe_custody)?;
-        if metadata.st_uid != rustix::process::getuid().as_raw() {
-            return Err(failure("native_profile_custody_unsafe"));
-        }
-        match FileType::from_raw_mode(metadata.st_mode) {
-            FileType::RegularFile => {
-                rustix::fs::unlinkat(directory, name.as_c_str(), AtFlags::empty())
-                    .map_err(unsafe_custody)?;
+/// Removes one pinned entry of a held folder through the layer. Inputs: the folder, the
+/// name and the pin. Output: Ok, or `native_profile_custody_unsafe`.
+fn remove_entry(parent: &Folder, name: &Name, pin: Pin) -> Result<(), EngineError> {
+    assert_ne!(pin.inode, 0);
+    parent
+        .remove(name, pin)
+        .map_err(|_| failure("native_profile_custody_unsafe"))
+}
+
+/// Removes the contents of an engine-made directory: private files of this user and,
+/// while depth remains, private subdirectories holding the same, each opened, pinned and
+/// removed through the held layer. Inputs: the held directory and the depth left. Output:
+/// Ok once it is empty; anything else is refused with `native_profile_custody_unsafe` and
+/// left in place.
+pub(super) fn remove_tree(directory: &Folder, depth: usize) -> Result<(), EngineError> {
+    let unsafe_tree = |_| failure("native_profile_custody_unsafe");
+    let children = directory.list(TREE_ENTRIES_MAX).map_err(unsafe_tree)?;
+    assert!(children.len() <= TREE_ENTRIES_MAX);
+    for child in children {
+        let name = held_name(&child.name)?;
+        let pin = match child.kind {
+            Kind::File => directory.open_read(&name).map_err(unsafe_tree)?.1,
+            Kind::Folder if depth > 0 => {
+                let folder = directory.open_dir(&name).map_err(unsafe_tree)?;
+                remove_tree(&folder, depth - 1)?;
+                folder.pin()
             }
-            FileType::Directory if depth > 0 => {
-                let child = Directory::open(directory, OsStr::from_bytes(name.to_bytes()))?;
-                remove_tree(&child.file, depth - 1)?;
-                child.verify(directory, OsStr::from_bytes(name.to_bytes()))?;
-                rustix::fs::unlinkat(directory, name.as_c_str(), AtFlags::REMOVEDIR)
-                    .map_err(unsafe_custody)?;
-            }
-            _ => return Err(failure("native_profile_custody_unsafe")),
-        }
+            Kind::Folder | Kind::Link => return Err(failure("native_profile_custody_unsafe")),
+        };
+        remove_entry(directory, &name, pin)?;
     }
-    directory.sync_all().map_err(unsafe_custody)
+    directory.sync().map_err(unsafe_tree)
 }

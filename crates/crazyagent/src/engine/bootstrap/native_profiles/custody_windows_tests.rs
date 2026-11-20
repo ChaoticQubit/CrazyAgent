@@ -145,3 +145,112 @@ fn a_capture_from_metadata_is_refused_on_windows() {
     let captured = NativeProfileCustody::capture(&case.database, &metadata);
     assert_eq!(refusal(captured), "native_profile_custody_unavailable");
 }
+
+/// A staging folder whose creator still holds its lock stream claim is left by a sweep, and
+/// the creator still commits it, as the sweep never opens a claimed folder (DESIGN-0601 R1,
+/// R4); an abandoned staging folder, whose creator died after its claim and left the stream
+/// unlocked, is removed (rv-sec3 RULING-17:20 K3 row 3).
+#[test]
+fn a_sweep_leaves_a_claimed_staging_folder_and_removes_an_abandoned_one() {
+    use super::staging::{ROOT_STAGING, Staging, sweep};
+    let case = case();
+    let custody = NativeProfileCustody::capture_held(&case.database, &case.opened).unwrap();
+    let abandoned = case.state.join(format!("{ROOT_STAGING}{}", "0".repeat(32)));
+    drop(private::new_dir(&abandoned).unwrap());
+    let mut stream = abandoned.as_os_str().to_owned();
+    stream.push(":crazyagent.lock");
+    drop(std::fs::File::create(PathBuf::from(stream)).unwrap());
+    assert!(has_lock_stream(&abandoned));
+    let live = Staging::create(&custody.anchor_folder, ROOT_STAGING).unwrap();
+    let staged: Vec<PathBuf> = std::fs::read_dir(&case.state)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path != &abandoned && path.is_dir())
+        .collect();
+    assert_eq!(staged.len(), 1, "{staged:?}");
+    let live_path = staged[0].clone();
+    sweep(&custody.anchor_folder, ROOT_STAGING).unwrap();
+    assert!(!abandoned.exists(), "the abandoned staging folder stayed");
+    assert!(live_path.is_dir(), "the claimed staging folder was swept");
+    let committed = live.commit(&custody.anchor_folder, "committed").unwrap();
+    assert!(case.state.join("committed").is_dir());
+    assert!(!live_path.exists());
+    drop(committed);
+}
+
+/// The parent's entries, sorted, so a row can show a sweep made or removed nothing.
+/// Input: the folder. Output: the entry names.
+fn entries(folder: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert!(names.len() < 64);
+    names
+}
+
+/// Whether the entry's `crazyagent.lock` stream exists. Input: the entry. Output: the answer.
+fn has_lock_stream(entry: &Path) -> bool {
+    let mut stream = entry.as_os_str().to_owned();
+    stream.push(":crazyagent.lock");
+    std::fs::symlink_metadata(PathBuf::from(stream)).is_ok()
+}
+
+/// A sweeper's claim on a staging name a live creator just renamed away makes nothing and
+/// answers `Missing`, so the parent's entries stay as they were (rv-sec3 RULING-17:20 K1,
+/// K3 row 1): an open that created the stream would leave a plain staging-named file that
+/// every later sweep refuses.
+#[test]
+fn a_sweep_claim_on_a_vanished_staging_name_makes_nothing() {
+    use super::HeldError;
+    use super::staging::ROOT_STAGING;
+    let case = case();
+    let custody = NativeProfileCustody::capture_held(&case.database, &case.opened).unwrap();
+    let before = entries(&case.state);
+    let gone = format!("{ROOT_STAGING}{}", "1".repeat(32));
+    let name = super::held_name(std::ffi::OsStr::new(&gone)).unwrap();
+    let claimed = custody.anchor_folder.claim_entry(&name);
+    assert!(matches!(claimed, Err(HeldError::Missing)));
+    assert_eq!(entries(&case.state), before);
+}
+
+/// A staging-named plain file and a staging-named junction are left by a sweep, which makes
+/// no stream on either and no new entry, and the junction's target is untouched (rv-sec3
+/// RULING-17:20 K1, K3 row 2).
+#[test]
+fn a_sweep_makes_no_stream_on_a_staging_named_file_or_junction() {
+    use super::staging::{ROOT_STAGING, sweep};
+    let case = case();
+    let custody = NativeProfileCustody::capture_held(&case.database, &case.opened).unwrap();
+    let file = case.state.join(format!("{ROOT_STAGING}{}", "2".repeat(32)));
+    drop(private::file(&file, true).unwrap());
+    let target = case.state.parent().unwrap().join("target");
+    std::fs::create_dir(&target).unwrap();
+    let junction = case.state.join(format!("{ROOT_STAGING}{}", "3".repeat(32)));
+    let made = crate::spawn_gate::status(
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert!(made.success());
+    assert!(junction.symlink_metadata().is_ok());
+    let before = entries(&case.state);
+    sweep(&custody.anchor_folder, ROOT_STAGING).unwrap();
+    assert_eq!(entries(&case.state), before);
+    assert!(
+        !has_lock_stream(&file),
+        "the sweep made a stream on the file"
+    );
+    assert!(
+        !has_lock_stream(&junction),
+        "the sweep made a stream on the junction"
+    );
+    assert!(!has_lock_stream(&target), "the sweep followed the junction");
+    assert!(entries(&target).is_empty());
+}
