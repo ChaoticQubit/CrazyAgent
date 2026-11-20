@@ -332,7 +332,7 @@ fn run_native_auth_custodian() -> Result<(), String> {
                 Some(harness) if harness.kind == "claude" => {
                     crazyagent::engine::run_native_auth_custodian_with_claude(
                         runtime_dir,
-                        input.into(),
+                        input,
                         harness.executable,
                         harness.sha256,
                         &custodian.launch,
@@ -342,16 +342,14 @@ fn run_native_auth_custodian() -> Result<(), String> {
                 Some(harness) => {
                     crazyagent::engine::run_native_auth_custodian_with_codex(
                         runtime_dir,
-                        input.into(),
+                        input,
                         harness.executable,
                         harness.sha256,
                         &custodian.launch,
                     )
                     .await
                 }
-                None => {
-                    crazyagent::engine::run_native_auth_custodian(runtime_dir, input.into()).await
-                }
+                None => crazyagent::engine::run_native_auth_custodian(runtime_dir, input).await,
             }
         })
         .map_err(|error| error.to_string())
@@ -362,7 +360,7 @@ fn run_native_auth_custodian() -> Result<(), String> {
 /// `native_auth_bootstrap_stdin_unavailable`, or `native_auth_bootstrap_input_not_pipe`
 /// for stdin that is no FIFO.
 #[cfg(unix)]
-fn custodian_input() -> Result<std::fs::File, String> {
+fn custodian_input() -> Result<std::os::fd::OwnedFd, String> {
     let input = rustix::io::fcntl_dupfd_cloexec(io::stdin(), 3)
         .map(std::fs::File::from)
         .map_err(|_| "native_auth_bootstrap_stdin_unavailable".to_owned())?;
@@ -374,7 +372,7 @@ fn custodian_input() -> Result<std::fs::File, String> {
     {
         return Err("native_auth_bootstrap_input_not_pipe".into());
     }
-    Ok(input)
+    Ok(input.into())
 }
 
 /// The custodian's token pipe on Windows: stdout and stderr made non-inheritable, then stdin

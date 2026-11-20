@@ -6,7 +6,7 @@ use std::io::Read;
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
 #[cfg(windows)]
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
+use std::sync::mpsc::{Receiver, Sender};
 
 /// The longest failure code a custodian may name: the bound of a stored sign-in fact's code.
 pub(super) const CAUSE_BYTES_MAX: usize = 128;
@@ -83,14 +83,9 @@ impl CustodianCause {
     /// Takes what the thread kept so far, never waiting. Output: Ok, also once the thread
     /// ended.
     pub(super) fn read(&mut self) -> Result<(), EngineError> {
-        loop {
-            match self.kept.try_recv() {
-                Ok(bytes) => {
-                    let room = CAUSE_KEPT_MAX.saturating_sub(self.text.len());
-                    self.text.extend_from_slice(&bytes[..bytes.len().min(room)]);
-                }
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
-            }
+        while let Ok(bytes) = self.kept.try_recv() {
+            let room = CAUSE_KEPT_MAX.saturating_sub(self.text.len());
+            self.text.extend_from_slice(&bytes[..bytes.len().min(room)]);
         }
         assert!(self.text.len() <= CAUSE_KEPT_MAX);
         Ok(())

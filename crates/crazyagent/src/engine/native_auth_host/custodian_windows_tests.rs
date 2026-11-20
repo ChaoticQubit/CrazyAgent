@@ -1,4 +1,4 @@
-use super::custodian::CustodianCause;
+use super::custodian::{CAUSE_BYTES_MAX, CustodianCause};
 use super::entry_bootstrap::read_bootstrap;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::terminal::windows::ConptyHost;
@@ -190,36 +190,49 @@ fn the_windows_bootstrap_read_takes_32_bytes_and_refuses_the_rest() {
     );
 }
 
-/// The cause reader never lets a custodian block on its error stream: a writer of 1 MB
-/// exits, and the first line reads as the code; a 129-byte line reads as none.
+/// Starts a stand-in custodian that writes the bytes a PowerShell expression makes, raw,
+/// on its error stream and exits 3, and reads its cause as dispatch does, on every poll and
+/// once after it exited. Input: the expression. Output: the cause.
+fn cause_of(bytes: &str) -> CustodianCause {
+    let script = format!(
+        "$b = [Text.Encoding]::ASCII.GetBytes({bytes}); \
+         $e = [Console]::OpenStandardError(); $e.Write($b, 0, $b.Length); $e.Flush(); exit 3"
+    );
+    let mut child = crate::spawn_gate::spawn(
+        Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let mut cause = CustodianCause::new(child.stderr.take().unwrap()).unwrap();
+    let started = Instant::now();
+    let status = loop {
+        cause.read().unwrap();
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(started.elapsed() < CAUSE_BOUND, "the writer blocked");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(3));
+    cause.read().unwrap();
+    cause
+}
+
+/// The Windows cause reader reads as the Unix one does: one line of a code is the code, a
+/// 129-byte line or a second line is none, and a custodian that writes 1 MB never blocks,
+/// with 130 bytes kept.
 #[test]
 fn the_cause_reader_drains_a_large_error_stream_and_keeps_one_code() {
-    let long = "a".repeat(129);
-    for (first, expected) in [("some_code", Some("some_code")), (long.as_str(), None)] {
-        let script =
-            format!("[Console]::Error.Write('{first}' + [char]10 + ('x' * 1048576)); exit 3");
-        let mut child = crate::spawn_gate::spawn(
-            Command::new("powershell")
-                .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped()),
-        )
-        .unwrap();
-        let mut cause = CustodianCause::new(child.stderr.take().unwrap()).unwrap();
-        let started = Instant::now();
-        let status = loop {
-            cause.read().unwrap();
-            if let Some(status) = child.try_wait().unwrap() {
-                break status;
-            }
-            assert!(started.elapsed() < CAUSE_BOUND, "the writer blocked");
-            std::thread::sleep(Duration::from_millis(20));
-        };
-        assert_eq!(status.code(), Some(3));
-        cause.read().unwrap();
-        assert_eq!(cause.code(), expected, "{}", first.len());
-    }
+    assert_eq!(cause_of("'some_code' + [char]10").code(), Some("some_code"));
+    let past = format!("('a' * {}) + [char]10", CAUSE_BYTES_MAX + 1);
+    assert_eq!(cause_of(&past).code(), None);
+    assert_eq!(cause_of("'one' + [char]10 + 'two' + [char]10").code(), None);
+    let large = cause_of("'x' * 1048576");
+    assert_eq!(large.text.len(), CAUSE_BYTES_MAX + 2);
+    assert_eq!(large.code(), None);
 }
 
 /// The system's `cmd.exe`, found through `SystemRoot`.
