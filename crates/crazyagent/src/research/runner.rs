@@ -1974,6 +1974,9 @@ impl ResearchRunner {
             InstalledSandbox::install(sandbox, &profile, research_supervisor()?, LinuxStrict::Off)?;
         write_private(&agent, &agent.join("prompt.md"), run.prompt.as_bytes())?;
         let words = harness_words(&program)?;
+        #[cfg(not(target_os = "linux"))]
+        let mut command = boundary.sandbox().command(&profile, Path::new(&words[0]));
+        #[cfg(target_os = "linux")]
         let mut command = Command::new(&words[0]);
         command.args(&words[1..]);
         let (output, stdout_log) = match harness {
@@ -1997,8 +2000,11 @@ impl ResearchRunner {
                 (agent.join(EVENTS_LOG), EVENTS_LOG)
             }
         };
-        command.current_dir(&folder);
-        let mut command = boundary.wrap(&command)?;
+        #[cfg(target_os = "linux")]
+        let mut command = {
+            command.current_dir(&work);
+            boundary.wrap(&command)?
+        };
         command
             .current_dir(&folder)
             .stdin(Stdio::piped())
