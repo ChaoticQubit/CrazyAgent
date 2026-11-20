@@ -348,8 +348,8 @@ fn writes_owner_git(sandbox: &ProjectSandbox) -> bool {
             .any(|part| part.as_os_str().eq_ignore_ascii_case(".git"))
     };
     let gits: Vec<PathBuf> = std::iter::once(sandbox.project_root())
-        .chain(sandbox.read_roots())
-        .chain(sandbox.writable_roots())
+        .chain(sandbox.read_roots().iter().map(PathBuf::as_path))
+        .chain(sandbox.writable_roots().map(PathBuf::as_path))
         .map(|root| root.join(".git"))
         .filter(|git| fs::symlink_metadata(git).is_ok_and(|meta| !meta.is_file()))
         .collect();
