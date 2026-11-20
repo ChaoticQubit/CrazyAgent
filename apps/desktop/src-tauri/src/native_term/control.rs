@@ -502,8 +502,9 @@ impl Binds {
         (!views.is_empty()).then_some(Event::Sized { views, grid })
     }
 
-    /// Ends the direct path of each view reading a pane whose `%output` line a drain dropped,
-    /// since output meant for it may be gone. Input: the pane. Output: the refusals.
+    /// Ends the direct path of each view reading a pane whose `%output` or `%layout-change`
+    /// line a drain dropped, since output or a size meant for it may be gone. Input: the pane.
+    /// Output: the refusals.
     fn lose(&mut self, pane: &str) -> Vec<Event> {
         let views = self.readers(pane);
         for view in &views {
@@ -649,9 +650,9 @@ impl Reader {
     }
 
     /// One line of a drain: dropped until the marker shows, then only the marker block's
-    /// `%end` ends the drain. A dropped `%output` line ends the direct path of the views
-    /// reading its pane; a `%layout-change` line still sizes them, since it holds the whole
-    /// size. Inputs: the line and the binds. Output: events, or Stop.
+    /// `%end` ends the drain. A dropped `%output` or `%layout-change` line ends the direct path
+    /// of the views reading its pane and sizes nothing, since it may be a cut capture's row
+    /// the agent wrote. Inputs: the line and the binds. Output: events, or Stop.
     fn drain_line(&mut self, line: &[u8], binds: &Mutex<Binds>) -> Result<Vec<Event>, Stop> {
         let drain = self.drain.as_mut().expect("a drain is open");
         if drain.found {
@@ -677,9 +678,7 @@ impl Reader {
                 Ok(Vec::new())
             }
             Notice::Output { pane, .. } => Ok(locked(binds).lose(pane)),
-            Notice::Layout { pane, grid } => {
-                Ok(locked(binds).sized(&pane, grid).into_iter().collect())
-            }
+            Notice::Layout { pane, .. } => Ok(locked(binds).lose(&pane)),
             _ => Ok(Vec::new()),
         }
     }
