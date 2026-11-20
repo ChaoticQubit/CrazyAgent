@@ -1042,3 +1042,30 @@ fn a_windows_shadow_git_folder_holds_a_detached_head_and_the_allowlisted_config_
         "changes_workspace_invalid"
     );
 }
+
+/// W5b2b, the WorkTree HIGH of probe r2 and r4: no step kind's profile guards a path inside the
+/// work tree. A guarded path the boundary cannot find, such as `.git\hooks` under a linked
+/// worktree whose `.git` is a file, makes it keep the root from taking new entries while
+/// leaving its files open to delete, so a checkout unlinked `a.txt` and could not create it
+/// again. Like the Linux step, the WorkTree kind writes the whole work tree as a job folder.
+#[test]
+fn no_windows_step_profile_guards_a_path_inside_the_work_tree() {
+    let place = place();
+    let data = place.home.parent().unwrap().join("data");
+    std::fs::create_dir(&data).unwrap();
+    let grants = data.join(crate::sandbox::windows::GRANTS_FOLDER);
+    std::fs::create_dir(&grants).unwrap();
+    let places = step_places(&place, &data);
+    let work = place.workspace.worktree.to_str().unwrap().to_lowercase();
+    for writes in [Writes::Index, Writes::Objects, Writes::WorkTree] {
+        let policy = super::step_windows::policy(&places, writes).unwrap();
+        let profile = crate::sandbox::windows::boundary_profile(&policy, &grants).unwrap();
+        let inside: Vec<&str> = profile
+            .guarded
+            .iter()
+            .map(|guarded| guarded.path.as_str())
+            .filter(|path| path.to_lowercase().starts_with(&work))
+            .collect();
+        assert!(inside.is_empty(), "guards inside the work tree: {inside:?}");
+    }
+}
