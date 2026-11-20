@@ -887,6 +887,7 @@ fn a_run_the_sandbox_stopped_for_a_held_name_shows_why() {
             started_ms: 1,
             ended_ms: Some(2),
             hosted: false,
+            stop_left: None,
         }
         .view(None, false)
         .status
