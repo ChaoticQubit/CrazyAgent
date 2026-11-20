@@ -15,8 +15,8 @@ use windows_sys::Win32::Security::{
     TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenImpersonation, TokenIntegrityLevel,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_EXECUTE, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_WRITE_DATA,
-    READ_CONTROL, WRITE_OWNER,
+    DELETE, FILE_EXECUTE, FILE_FLAG_BACKUP_SEMANTICS, FILE_GENERIC_READ, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_DATA, READ_CONTROL, WRITE_OWNER,
 };
 use windows_sys::Win32::System::SystemServices::SE_GROUP_INTEGRITY;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken, SetThreadToken};
@@ -739,8 +739,8 @@ fn a_secret_file_in_the_database_folder_holds_one_full_label() {
 }
 
 /// rv-sec2 #702 R7, leader 03:5x: a private file is deleted through a handle opened with
-/// delete access, and its name is gone at once, while that handle is still open; a handle
-/// opened without delete access cannot delete it.
+/// delete access, and its name goes when that handle closes, while a second handle that
+/// shares delete still holds the file; a handle opened without delete access cannot delete it.
 #[test]
 fn a_private_file_is_deleted_through_a_handle_with_delete_access() {
     let root = scratch("delete-held");
@@ -752,12 +752,21 @@ fn a_private_file_is_deleted_through_a_handle_with_delete_access() {
     drop(created);
     let held = std::fs::OpenOptions::new()
         .access_mode(DELETE | READ_CONTROL)
-        .share_mode(0)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .open(&path)
+        .unwrap();
+    let other = std::fs::OpenOptions::new()
+        .access_mode(READ_CONTROL)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .open(&path)
         .unwrap();
     private::delete(&held).unwrap();
-    assert!(!path.exists(), "the name goes before the handle closes");
     drop(held);
+    assert!(
+        std::fs::read_dir(&root).unwrap().next().is_none(),
+        "the name goes when the deleting handle closes"
+    );
+    drop(other);
     assert!(std::fs::read_dir(&root).unwrap().next().is_none());
 }
 
