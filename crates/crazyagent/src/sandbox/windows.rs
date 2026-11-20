@@ -1030,42 +1030,40 @@ mod tests {
         }
     }
 
+    /// DEC-193 F2 with #764 L1: install makes a missing `.crazyagent\context` empty and keeps what
+    /// is already there; it makes nothing under a `.git` that does not exist, and a project that
+    /// holds a `.git` folder is refused before any folder is made.
     #[test]
     fn install_makes_each_missing_guarded_folder_and_leaves_what_is_there() {
         let folders = folders();
         let helper = std::env::current_exe().unwrap();
         let git = folders.project.join(".git");
         let state = folders.project.join(".crazyagent");
-        fs::create_dir_all(&git).unwrap();
         fs::create_dir_all(&state).unwrap();
         let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
         let first = folders.profiles.join("a.sb");
         WindowsSandbox::install(sandbox.clone(), &helper, &first, &folders.grants).unwrap();
-        for folder in [
-            git.join("hooks"),
-            git.join("modules"),
-            state.join("context"),
-        ] {
-            assert!(
-                folder.is_dir() && fs::read_dir(&folder).unwrap().next().is_none(),
-                "{} is made empty",
-                folder.display()
-            );
-        }
-        fs::write(git.join("hooks").join("pre-commit"), "owner\n").unwrap();
-        fs::remove_dir(git.join("modules")).unwrap();
-        fs::write(git.join("modules"), "owner\n").unwrap();
+        let context = state.join("context");
+        assert!(context.is_dir() && fs::read_dir(&context).unwrap().next().is_none());
+        assert!(!git.exists(), "no git folder is made");
+        fs::write(context.join("brief.md"), "owner\n").unwrap();
         let second = folders.profiles.join("b.sb");
-        WindowsSandbox::install(sandbox, &helper, &second, &folders.grants).unwrap();
+        WindowsSandbox::install(sandbox.clone(), &helper, &second, &folders.grants).unwrap();
         assert_eq!(
-            fs::read_to_string(git.join("hooks").join("pre-commit")).unwrap(),
-            "owner\n"
-        );
-        assert_eq!(
-            fs::read_to_string(git.join("modules")).unwrap(),
+            fs::read_to_string(context.join("brief.md")).unwrap(),
             "owner\n",
             "an entry already there is never replaced"
         );
+        fs::create_dir_all(&git).unwrap();
+        let third = folders.profiles.join("c.sb");
+        assert!(refused_for_git(WindowsSandbox::install(
+            sandbox,
+            &helper,
+            &third,
+            &folders.grants
+        )));
+        assert!(!third.exists());
+        assert!(!git.join("hooks").exists() && !git.join("modules").exists());
     }
 
     #[test]
@@ -1107,14 +1105,14 @@ mod tests {
         assert!(moved.contains(&drive_path(&project.join(".crazyagent").join("context")).unwrap()));
     }
 
+    /// DEC-193 on a project with no `.git` folder (#764 L1 refuses one that has it): the agent
+    /// cannot make a git folder or the state context, cannot vacate the root context, and
+    /// still edits and renames files it already has.
     #[test]
     fn a_wrapped_agent_cannot_vacate_or_create_a_protected_path_but_still_edits_the_project() {
         let folders = folders();
         let helper = helper();
         let project = &folders.project;
-        let git = project.join(".git");
-        fs::create_dir_all(git.join("hooks")).unwrap();
-        fs::write(git.join("config"), "[core]\r\n").unwrap();
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(project.join("README.md"), "readme\r\n").unwrap();
         let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
@@ -1122,21 +1120,10 @@ mod tests {
         let installed =
             WindowsSandbox::install(sandbox, &helper, &profile, &folders.grants).unwrap();
         let run = |line: &str| shell(&installed, &folders, line);
-        let moved = call(&installed, &folders, &[&git, &project.join(".git-moved")]);
-        assert!(denied(&moved), "{moved:?}");
-        assert!(git.join("config").is_file() && !project.join(".git-moved").exists());
+        assert!(!run(r"mkdir .git\hooks"));
+        assert!(!project.join(".git").exists());
         assert!(!run(r"mkdir .crazyagent\context"));
         assert!(!project.join(".crazyagent").exists());
-        assert!(run(r"echo planted>.git\config.lock"));
-        let lock = git.join("config.lock");
-        let replaced = call(&installed, &folders, &[&lock, &git.join("config")]);
-        assert!(denied(&replaced), "{replaced:?}");
-        assert_eq!(
-            fs::read_to_string(git.join("config")).unwrap(),
-            "[core]\r\n"
-        );
-        assert!(!run(r"mkdir .git\hooks\planted"));
-        assert!(!git.join("hooks").join("planted").exists());
         let context = project.join("context");
         let vacated = call(&installed, &folders, &[&context, &project.join("moved")]);
         assert!(denied(&vacated), "{vacated:?}");
@@ -1157,8 +1144,12 @@ mod tests {
         );
     }
 
+    /// #764 L1: a guarded project-root agent on a repository is refused at install, so it never
+    /// takes git's `index.lock` or touches the git folder; on the same project with no `.git`,
+    /// the agent cannot change the state context or remove it, and the root context is its to
+    /// change once `.crazyagent` holds the state.
     #[test]
-    fn a_wrapped_agent_without_a_checkout_adds_top_level_files_and_takes_git_locks() {
+    fn a_wrapped_agent_on_a_repository_is_refused_and_takes_no_git_lock() {
         let folders = folders();
         let helper = helper();
         let project = &folders.project;
@@ -1170,22 +1161,20 @@ mod tests {
         fs::write(state.join("brief.md"), "brief\r\n").unwrap();
         let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
         let profile = folders.profiles.join("agent.sb");
+        assert!(refused_for_git(WindowsSandbox::install(
+            sandbox.clone(),
+            &helper,
+            &profile,
+            &folders.grants
+        )));
+        assert!(!profile.exists());
+        assert!(!git.join("index.lock").exists() && !git.join("index").exists());
+        assert!(!git.join("modules").exists());
+        fs::remove_dir_all(&git).unwrap();
         let installed =
             WindowsSandbox::install(sandbox, &helper, &profile, &folders.grants).unwrap();
         let run = |line: &str| shell(&installed, &folders, line);
-        assert!(run(r"echo lock>.git\index.lock"));
-        let lock = git.join("index.lock");
-        let staged = call(&installed, &folders, &[&lock, &git.join("index")]);
-        assert!(staged.status.success(), "{staged:?}");
-        assert!(git.join("index").is_file() && !lock.exists());
-        assert!(run("echo new>notes.txt"));
-        assert!(run("mkdir docs"));
-        assert!(project.join("notes.txt").is_file() && project.join("docs").is_dir());
-        assert!(!run(r"echo planted>.git\hooks\pre-commit"));
-        assert!(!git.join("hooks").join("pre-commit").exists());
         assert!(!run(r"echo planted>.crazyagent\context\brief.md"));
-        let moved = call(&installed, &folders, &[&git, &project.join(".git-moved")]);
-        assert!(denied(&moved), "{moved:?}");
         let removed = call(&installed, &folders, &[&state]);
         assert!(denied(&removed), "{removed:?}");
         assert_eq!(
@@ -1196,10 +1185,7 @@ mod tests {
             run(r"echo note>context\brief.md"),
             "the root context is the agent's to change once .crazyagent holds the state"
         );
-        assert_eq!(
-            fs::read_to_string(git.join("config")).unwrap(),
-            "[core]\r\n"
-        );
+        assert!(!git.exists());
     }
 
     #[test]
