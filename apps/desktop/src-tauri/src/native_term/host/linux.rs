@@ -143,27 +143,31 @@ pub fn rescale(view: &mut View, key: u32) {
 
 /// Sizes the view's surface to its child, making it on the renderer when the view has none.
 /// The child holds whole logical pixels times its scale, which the host's rounded pixels
-/// can miss by one, so the child's size wins. Inputs: the view, the renderer at its scale
-/// and the host's size in device pixels. Output: whether the view has a surface.
+/// can miss by one, so the child's size wins. The renderer learns its largest texture side
+/// only with its first surface, so every side is held to it after the make. Inputs: the
+/// view, the renderer at its scale and the host's size in device pixels. Output: whether
+/// the view has a surface.
 pub fn fit(view: &mut View, shared: &mut Shared, _pixels: (u32, u32)) -> bool {
     let (width, height) = view.term.size();
-    let scale = view.term.scale();
-    let (width, height) = match shared.side_max() {
-        Some(side_max) => (
-            surface_side(width, scale, side_max),
-            surface_side(height, scale, side_max),
-        ),
-        None => (width, height),
-    };
-    match view.surface.as_mut() {
-        Some(surface) => shared.resize(surface, width, height).is_ok(),
-        None => {
-            let (display, window) = view.term.handles();
-            let made = unsafe { shared.surface_raw(display, window, width, height) };
-            view.surface = made.ok();
-            view.surface.is_some()
-        }
+    if view.surface.is_none() {
+        let (display, window) = view.term.handles();
+        let made = unsafe { shared.surface_raw(display, window, width, height) };
+        view.surface = made.ok();
     }
+    let Some(surface) = view.surface.as_mut() else {
+        return false;
+    };
+    let side_max = shared
+        .side_max()
+        .expect("a renderer that made a surface has a device");
+    let scale = view.term.scale();
+    let sized = (
+        surface_side(width, scale, side_max),
+        surface_side(height, scale, side_max),
+    );
+    let fitted = shared.resize(surface, sized.0, sized.1).is_ok();
+    assert!(!fitted || sized.0 == 0 || sized.1 == 0 || surface.size() == sized);
+    fitted
 }
 
 /// One side of the view's wgpu surface: the child's side in device pixels, held to the
