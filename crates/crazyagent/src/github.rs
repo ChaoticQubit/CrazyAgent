@@ -717,7 +717,7 @@ impl GitHub {
     ) -> Result<GitHubCommitted, EngineError> {
         let git = publish::git()?;
         let home = publish::GitHome::new(&self.root)?;
-        let author = match publish::configured_author(&git, owner_home, project) {
+        let author = match publish::configured_author(&git, owner_home, home.path(), project) {
             Some(author) => author,
             None => {
                 let token = self.store.get(&self.saved()?.credential)?;
