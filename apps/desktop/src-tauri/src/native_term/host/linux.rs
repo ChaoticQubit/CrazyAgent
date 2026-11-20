@@ -114,7 +114,9 @@ pub fn open_view(
 
 /// Gives a view native focus, which it owes until its first shown place; the toplevel and
 /// the app stay as they are. Input: the view.
-pub fn focus_view(_view: &View) {}
+pub fn focus_view(view: &View) {
+    view.term.focus();
+}
 
 /// Puts a view over its page place and shows it, or hides it. The page fills its widget on
 /// Linux, so the viewport is not read. Inputs: the view, the place in CSS pixels, the page's
@@ -122,8 +124,9 @@ pub fn focus_view(_view: &View) {}
 /// hidden one, also when the place is out of bounds or the page is not realized.
 pub fn place_view(view: &mut View, rect: [f64; 4], _viewport: f64, shown: bool) -> Option<f64> {
     let scale = window_scale(&view.toplevel);
-    let _ = shown;
-    let at = host_rect(&view.page, &view.toplevel, rect);
+    let at = shown
+        .then(|| host_rect(&view.page, &view.toplevel, rect))
+        .flatten();
     let drawn = view.term.place(at, scale);
     assert_eq!(drawn.is_some(), view.term.shown());
     drawn.map(f64::from)
@@ -132,6 +135,7 @@ pub fn place_view(view: &mut View, rect: [f64; 4], _viewport: f64, shown: bool) 
 /// Gives the view a new scale key: its surface, made on the old scale's renderer, goes,
 /// and `fit` makes the next one. Inputs: the view and the key.
 pub fn rescale(view: &mut View, key: u32) {
+    view.surface = None;
     view.scale = key;
 }
 
@@ -189,6 +193,16 @@ pub fn ready(view: &mut View) -> bool {
     if view.term.ready() {
         return true;
     }
+    if !view.term.gone() && view.tick.borrow().is_none() {
+        let armed = Rc::clone(&view.tick);
+        let id = view.page.add_tick_callback(move |_, _| {
+            armed.borrow_mut().take();
+            schedule();
+            ControlFlow::Break
+        });
+        *view.tick.borrow_mut() = Some(id);
+    }
+    assert!(view.term.gone() || view.tick.borrow().is_some());
     false
 }
 
