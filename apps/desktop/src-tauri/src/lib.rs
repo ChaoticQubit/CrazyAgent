@@ -1945,17 +1945,17 @@ async fn attach_place(
 }
 
 /// The style a page sends a native view: read on macOS, skipped elsewhere.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 type NativeStyleText = native_term::style::StyleText;
 /// The style a page sends a native view: read on macOS, skipped elsewhere.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 type NativeStyleText = serde::de::IgnoredAny;
 
 /// The channel a native view's events go to its panel on.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 type NativeEvents = Channel<native_term::host::NativeEvent>;
 /// The channel a native view's events go to its panel on; no view sends off macOS.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 type NativeEvents = Channel<serde_json::Value>;
 
 /// The largest CSS pixel coordinate or side a native view's place may have.
@@ -2019,9 +2019,10 @@ enum NativeCopy {
     Output,
 }
 
-/// The answer of every native view command but `enabled` off macOS, which draws no native
-/// view; the command checked the calling window first. Output: the refusal.
-#[cfg(not(target_os = "macos"))]
+/// The answer of every native view command but `enabled` on a system with no native host,
+/// which draws no native view; the command checked the calling window first. Output: the
+/// refusal.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn native_unsupported<T>() -> Result<T, BridgeError> {
     Err(engine_failure("native_terminal_unsupported"))
 }
@@ -2030,7 +2031,7 @@ fn native_unsupported<T>() -> Result<T, BridgeError> {
 /// the engine's own server under the root of the engine the desktop talks to, with its
 /// checks passed, an agent with no server of its own and tmux installed for the engine.
 /// Input: the checked agent window name. Output: both, or none for an engine-fed view.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn native_direct(name: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
     let engine = desktop_socket(
         std::env::var_os("CRAZYAGENT_DESKTOP_SOCKET"),
@@ -2051,10 +2052,10 @@ fn native_direct(name: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)>
 /// engine-fed. Inputs: the app, the window label, the agent window name and the wall
 /// window's project. Output: the place, or the refusal.
 #[cfg_attr(
-    not(any(target_os = "macos", all(target_os = "linux", test))),
+    not(any(target_os = "macos", target_os = "linux")),
     expect(
         dead_code,
-        reason = "the Linux and Windows hosts reopen views engine-fed through it (DEC-203); the Linux host's rows reach it through the sink"
+        reason = "the Windows host reopens views engine-fed through it (DEC-203)"
     )
 )]
 async fn native_place(
@@ -2075,7 +2076,7 @@ async fn native_place(
 /// Runs one call on a native view the calling window opened, on the main thread; the
 /// command checked the calling window first. Inputs: the calling page, the app, the view
 /// and the call. Output: ok, or a plain code.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn native_call(
     webview: &Webview,
     app: &AppHandle,
@@ -2112,8 +2113,9 @@ async fn desktop_native_terminal_probe(
     .map_err(engine_failure)
 }
 
-/// Whether this desktop draws terminals natively: true only in a macOS build. Input: the
-/// calling page. Output: the answer.
+/// Whether this desktop draws terminals natively: true only in a macOS build; Linux builds
+/// reach the host but stay off until the Linux switch. Input: the calling page. Output: the
+/// answer.
 #[tauri::command]
 fn desktop_native_terminal_enabled(webview: Webview) -> Result<bool, BridgeError> {
     terminal_window(&webview)?;
@@ -2143,7 +2145,7 @@ async fn desktop_native_terminal_open(
 ) -> Result<u64, BridgeError> {
     terminal_window(&webview)?;
     let (rect, viewport) = rect.checked()?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         let style = native_term::style::Style::from_text(&style).map_err(engine_failure)?;
         let name = native_term::window_name(&name).map_err(engine_failure)?;
@@ -2171,7 +2173,7 @@ async fn desktop_native_terminal_open(
         };
         native_open(&webview, app, open).await
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (
             app, state, terminals, name, pane, label, rect, viewport, style, covered, keys,
@@ -2181,10 +2183,10 @@ async fn desktop_native_terminal_open(
     }
 }
 
-/// Opens a checked view on the main thread above the page's WKWebView. Inputs: the page,
-/// the app and the checked open. Output: the view id, or a plain code with the place
-/// given back.
-#[cfg(target_os = "macos")]
+/// Opens a checked view on the main thread above the page's webview: the WKWebView on
+/// macOS, the WebKitGTK widget on Linux. Inputs: the page, the app and the checked open.
+/// Output: the view id, or a plain code with the place given back.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 async fn native_open(
     webview: &Webview,
     app: AppHandle,
@@ -2193,8 +2195,12 @@ async fn native_open(
     let (sender, receiver) = tokio::sync::oneshot::channel();
     webview
         .with_webview(move |platform| {
-            let opened = match objc2::MainThreadMarker::new() {
-                Some(mtm) => native_term::host::open(&app, mtm, platform.inner(), open),
+            #[cfg(target_os = "macos")]
+            let page = platform.inner();
+            #[cfg(target_os = "linux")]
+            let page = gtk::prelude::Cast::upcast::<gtk::Widget>(platform.inner());
+            let opened = match native_term::host::main() {
+                Some(mtm) => native_term::host::open(&app, mtm, page, open),
                 None => Err("native_terminal_main_busy"),
             };
             let _ = sender.send(opened);
@@ -2219,7 +2225,7 @@ async fn desktop_native_terminal_place(
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
     let (rect, viewport) = rect.checked()?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         native_call(
             &webview,
@@ -2229,7 +2235,7 @@ async fn desktop_native_terminal_place(
         )
         .await
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (app, view, rect, viewport);
         native_unsupported()
@@ -2246,7 +2252,7 @@ async fn desktop_native_terminal_cover(
     covered: bool,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         native_call(
             &webview,
@@ -2256,7 +2262,7 @@ async fn desktop_native_terminal_cover(
         )
         .await
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (app, view, covered);
         native_unsupported()
@@ -2272,11 +2278,11 @@ async fn desktop_native_terminal_focus(
     view: u64,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         native_call(&webview, &app, view, native_term::host::Command::Focus).await
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (app, view);
         native_unsupported()
@@ -2292,7 +2298,7 @@ async fn desktop_native_terminal_style(
     style: NativeStyleText,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         let style = native_term::style::Style::from_text(&style).map_err(engine_failure)?;
         native_term::host::on_main(&app, move |_| native_term::host::style(style))
@@ -2300,7 +2306,7 @@ async fn desktop_native_terminal_style(
             .map_err(engine_failure)?
             .map_err(engine_failure)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (app, style);
         native_unsupported()
@@ -2318,7 +2324,7 @@ async fn desktop_native_terminal_copy(
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
     let output = matches!(what, NativeCopy::Output);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         native_call(
             &webview,
@@ -2328,7 +2334,7 @@ async fn desktop_native_terminal_copy(
         )
         .await
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (app, view, output);
         native_unsupported()
@@ -2345,7 +2351,7 @@ async fn desktop_native_terminal_paste(
     text: String,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         native_call(
             &webview,
@@ -2355,7 +2361,7 @@ async fn desktop_native_terminal_paste(
         )
         .await
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (app, view, text);
         native_unsupported()
@@ -2371,11 +2377,11 @@ async fn desktop_native_terminal_jump(
     view: u64,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         native_call(&webview, &app, view, native_term::host::Command::Jump).await
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (app, view);
         native_unsupported()
@@ -2392,11 +2398,11 @@ async fn desktop_native_terminal_keys(
     on: bool,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         native_call(&webview, &app, view, native_term::host::Command::Keys(on)).await
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (app, view, on);
         native_unsupported()
@@ -2412,11 +2418,11 @@ async fn desktop_native_terminal_close(
     view: u64,
 ) -> Result<(), BridgeError> {
     terminal_window(&webview)?;
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
         native_call(&webview, &app, view, native_term::host::Command::Close).await
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = (app, view);
         native_unsupported()
@@ -2792,7 +2798,7 @@ fn build_wall(
         .on_navigation(app_page)
         .on_page_load(|window, payload| {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 native_term::host::window_gone(window.app_handle(), window.label());
                 window
                     .state::<TerminalState>()
@@ -2805,11 +2811,11 @@ fn build_wall(
     theme::dress(&wall);
     let terminals = Arc::clone(&app.state::<TerminalState>().0);
     let closed = label.to_owned();
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     let handle = app.clone();
     wall.on_window_event(move |event| {
         if matches!(event, tauri::WindowEvent::Destroyed) {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             native_term::host::window_gone(&handle, &closed);
             terminals.window_closed(&closed);
         }
@@ -6276,7 +6282,7 @@ pub fn run() {
                 .on_navigation(app_page)
                 .on_page_load(|window, payload| {
                     if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
-                        #[cfg(target_os = "macos")]
+                        #[cfg(any(target_os = "macos", target_os = "linux"))]
                         native_term::host::window_gone(window.app_handle(), window.label());
                         window
                             .state::<TerminalState>()
@@ -6288,7 +6294,7 @@ pub fn run() {
             let handle = app.handle().clone();
             main.on_window_event(move |event| {
                 if matches!(event, tauri::WindowEvent::Destroyed) {
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
                     native_term::host::window_gone(&handle, "main");
                     close_walls(&handle, None);
                     ide::shut_own_windows(handle.clone(), None);

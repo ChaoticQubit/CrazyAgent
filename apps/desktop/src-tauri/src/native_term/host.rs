@@ -117,8 +117,14 @@ pub enum NativeEvent {
     },
 }
 
-#[cfg(target_os = "macos")]
-pub use super::view::LABEL_BYTES_MAX;
+/// The longest label a screen reader says for a view, in bytes.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub const LABEL_BYTES_MAX: usize = 256;
+
+/// The main thread's marker on a system with a native host, for an open from the page's
+/// webview callback. Output: the marker, or none off the main thread.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub use platform::main;
 
 /// One open checked off the main thread: the calling window, the agent window name, the
 /// screen reader label, the place the shared gate took, the tmux program and engine socket
@@ -327,6 +333,9 @@ pub fn open(
 /// close of a view that is gone is fine. Inputs: the window label, the view id and the
 /// call. Output: ok, or a plain code.
 pub fn command(window: &str, page: u64, call: Command) -> Result<(), &'static str> {
+    if platform::main().is_none() {
+        return Err("native_terminal_main_busy");
+    }
     let closing = matches!(call, Command::Close);
     match with_native(|native| native.command(window, page, call)) {
         Ok(result) => result,
@@ -352,6 +361,9 @@ pub fn window_gone(app: &AppHandle, window: &str) {
 /// open yet the next open brings its own style. Input: the checked style. Output: ok, or a
 /// plain code with the old style kept.
 pub fn style(style: Style) -> Result<(), &'static str> {
+    if platform::main().is_none() {
+        return Err("native_terminal_main_busy");
+    }
     match with_native(|native| native.restyle(style)) {
         Ok(result) => result,
         Err((Held::Missing, _)) => Ok(()),
