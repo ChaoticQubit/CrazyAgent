@@ -17,10 +17,8 @@ env:
   RUST_TOOLCHAIN: "1.98.1"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
-  LOCK_RED_SHA: 33370af34
-  H1_RED_SHA: 1ce17414c
-  BASE_SHA: 9f266121a
-  TIP_SHA: aa7b0755c
+  BASE_SHA: ab011e69d
+  TIP_SHA: ede92e5d8
 
 defaults:
   run:
@@ -28,7 +26,7 @@ defaults:
 
 jobs:
   s9a-windows:
-    name: V244 WIN-MASTER S9a r3 launch lock on ${{ matrix.runner }}, red at 33370af34 and 1ce17414c, tip aa7b0755c
+    name: V244 WIN-MASTER S9a land ede92e5d8 (the S9a tip plus chore/v244 ab011e69d) on ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
@@ -87,26 +85,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo clippy -p crazyagent --tests --locked -- -D warnings
-      - name: S9a r3 red rows at 33370af34
-        if: ${{ !cancelled() }}
-        timeout-minutes: 60
-        run: |
-          set -euo pipefail
-          git restore -q --source="$LOCK_RED_SHA" --staged --worktree -- crates
-          set +e
-          cargo test -p crazyagent --lib --locked -- --test-threads 1 launch_context::windows_tests:: 2>&1 | tee "$RUNNER_TEMP/red.log"
-          rc=${PIPESTATUS[0]}
-          set -e
-          git restore -q --source="$TIP_SHA" --staged --worktree -- crates
-          git diff --quiet "$TIP_SHA" -- crates
-          grep -E '^test launch_context::|^test result|panicked|left:|right:' "$RUNNER_TEMP/red.log" || true
-          [ "$rc" -ne 0 ]
-          grep -qE 'test result: FAILED\. 7 passed; 2 failed' "$RUNNER_TEMP/red.log"
-          for row in a_windows_launch_refuses_a_home_off_a_drive_before_it_holds_it a_windows_launch_lock_its_path_reached_outside_the_held_home_is_refused; do
-            grep -q "$row \.\.\. FAILED" "$RUNNER_TEMP/red.log"
-          done
-          echo "red as expected: at 33370af34 the off-drive and moved-junction lock rows fail and the 7 r2 rows pass"
-      - name: S9a r3 launch lock rows at the tip aa7b0755c, five rounds
+      - name: S9a launch lock rows at the land tip ede92e5d8, five rounds
         if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
@@ -129,25 +108,6 @@ jobs:
           set -euo pipefail
           cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked
           cp target/debug/crazyagent-win-boundary.exe target/debug/deps/
-      - name: S9a r3 H1 red rows at 1ce17414c
-        if: ${{ !cancelled() }}
-        timeout-minutes: 60
-        run: |
-          set -euo pipefail
-          git restore -q --source="$H1_RED_SHA" --staged --worktree -- crates
-          set +e
-          cargo test -p crazyagent --lib --locked -- --test-threads 1 harnesses::launch::home_windows_tests:: 2>&1 | tee "$RUNNER_TEMP/h1-red.log"
-          rc=${PIPESTATUS[0]}
-          set -e
-          git restore -q --source="$TIP_SHA" --staged --worktree -- crates
-          git diff --quiet "$TIP_SHA" -- crates
-          grep -E '^test |^test result|panicked|left:|right:' "$RUNNER_TEMP/h1-red.log" || true
-          [ "$rc" -ne 0 ]
-          grep -qE 'test result: FAILED\. 5 passed; 2 failed' "$RUNNER_TEMP/h1-red.log"
-          for row in a_held_home_is_judged_as_held_after_a_junction_above_it_moves a_held_profile_folder_stays_forbidden_after_a_junction_above_it_moves; do
-            grep -q "$row \.\.\. FAILED" "$RUNNER_TEMP/h1-red.log"
-          done
-          echo "red as expected: at 1ce17414c H1 judges the path, so both moved-junction rows fail and the 5 H1 rows pass"
       - name: H1's Windows home rows stay green at the tip
         if: ${{ !cancelled() }}
         timeout-minutes: 60
@@ -172,7 +132,7 @@ jobs:
           grep -qE 'test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/policy.log"
           grep -q 'full_access_on_windows_is_refused_with_its_own_reason_and_code \.\.\. ok' "$RUNNER_TEMP/policy.log"
   s9a-linux:
-    name: V244 WIN-MASTER S9a r3 Unix launch context and launch rows on ubuntu-22.04 at aa7b0755c against 9f266121a
+    name: V244 WIN-MASTER S9a land Unix launch context and launch rows on ubuntu-22.04 at ede92e5d8 against chore/v244 ab011e69d
     runs-on: ubuntu-22.04
     timeout-minutes: 180
     steps:
@@ -229,7 +189,7 @@ jobs:
           mkdir -p target/debug/deps
           cp target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
           ls -l target/debug/crazyagent-landlock target/debug/deps/crazyagent-landlock
-      - name: Unix launch context rows at the base 9f266121a and at the tip aa7b0755c
+      - name: Unix launch context rows at chore/v244 ab011e69d and at the land tip ede92e5d8
         if: ${{ !cancelled() }}
         timeout-minutes: 120
         run: |
