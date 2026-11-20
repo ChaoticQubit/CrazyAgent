@@ -91,6 +91,10 @@ impl Name {
     /// rule 3, rv-sec3 #725 U6). Input: the name. Output: the name, or `Unsafe` for one that
     /// is not UTF-8 or that `refused` turns away.
     pub(crate) fn checked(text: &OsStr) -> Result<Self, HeldError> {
+        let plain = text.to_str().ok_or(HeldError::Unsafe)?;
+        if refused(plain) {
+            return Err(HeldError::Unsafe);
+        }
         Ok(Self(text.to_owned()))
     }
 
@@ -177,7 +181,12 @@ impl Folder {
     /// first line of every unjudged call, so none ever runs on a tree held through
     /// `Folder::root`'s private judge.
     pub(crate) fn assert_caller_judged(&self) {
-        let _ = self.judged;
+        assert_ne!(
+            self.judged,
+            Judged::Private,
+            "an unjudged call on a private tree"
+        );
+        assert_eq!(self.judged, Judged::Caller);
     }
 }
 
@@ -232,37 +241,82 @@ impl Folder {
     /// F1). Input: its name. Output: the file and its identity, `Missing`, or `Unsafe`.
     pub(crate) fn open_read(&self, name: &Name) -> Result<(File, Pin), HeldError> {
         use rustix::fs::{Mode, OFlags};
-        self.open_file(name, OFlags::RDONLY, Mode::empty())
+        self.open_file(name, OFlags::RDONLY | OFlags::NONBLOCK, Mode::empty())
     }
 
     /// Makes one child file with mode 0600 through this folder, create-only, the twin of
     /// `O_CREAT | O_EXCL`, so an entry already at the name is `Unsafe`, then writes this
     /// folder's entries to disk. Input: its name. Output: the file and its identity.
-    pub(crate) fn make_file(&self, _name: &Name) -> Result<(File, Pin), HeldError> {
-        Err(HeldError::Unavailable)
+    pub(crate) fn make_file(&self, name: &Name) -> Result<(File, Pin), HeldError> {
+        use rustix::fs::{Mode, OFlags};
+        let flags = OFlags::RDWR | OFlags::CREATE | OFlags::EXCL;
+        let made = self.open_file(name, flags, Mode::from_raw_mode(0o600))?;
+        self.file.sync_all().map_err(cause)?;
+        Ok(made)
     }
 
     /// Opens one child file for reading and writing through this folder, never following a
     /// link and never waiting (rv-sec3 #731 F1). Input: its name. Output: the file and its
     /// identity, `Missing`, or `Unsafe`.
-    pub(crate) fn open_write(&self, _name: &Name) -> Result<(File, Pin), HeldError> {
-        Err(HeldError::Unavailable)
+    pub(crate) fn open_write(&self, name: &Name) -> Result<(File, Pin), HeldError> {
+        use rustix::fs::{Mode, OFlags};
+        self.open_file(name, OFlags::RDWR | OFlags::NONBLOCK, Mode::empty())
     }
 
     /// Lists this folder from its held descriptor, never by path, skipping `.` and `..` and
     /// an entry gone meanwhile; the kind comes from a no-follow look at each name. Input:
     /// the most entries allowed. Output: the entries, `Full` past the bound, or `Unsafe`
     /// for an entry that is none of a file, a folder or a link.
-    pub(crate) fn list(&self, _limit_count: usize) -> Result<Vec<Child>, HeldError> {
-        Err(HeldError::Unavailable)
+    pub(crate) fn list(&self, limit_count: usize) -> Result<Vec<Child>, HeldError> {
+        use rustix::fs::{AtFlags, Dir, FileType};
+        use std::os::unix::ffi::OsStrExt;
+        assert!(limit_count > 0);
+        let mut children = Vec::new();
+        for entry in Dir::read_from(&self.file).map_err(errno_cause)? {
+            let entry = entry.map_err(errno_cause)?;
+            let bytes = entry.file_name().to_bytes();
+            if bytes == b"." || bytes == b".." {
+                continue;
+            }
+            let name = OsStr::from_bytes(bytes);
+            let stat = match rustix::fs::statat(&self.file, name, AtFlags::SYMLINK_NOFOLLOW) {
+                Ok(stat) => stat,
+                Err(error) if error == rustix::io::Errno::NOENT => continue,
+                Err(error) => return Err(errno_cause(error)),
+            };
+            let kind = match FileType::from_raw_mode(stat.st_mode) {
+                FileType::RegularFile => Kind::File,
+                FileType::Directory => Kind::Folder,
+                FileType::Symlink => Kind::Link,
+                _ => return Err(HeldError::Unsafe),
+            };
+            if children.len() == limit_count {
+                return Err(HeldError::Full);
+            }
+            children.push(Child {
+                name: name.to_owned(),
+                kind,
+            });
+        }
+        assert!(children.len() <= limit_count);
+        Ok(children)
     }
 
     /// Removes one entry through this folder while it is still the pinned, private entry:
     /// opened without following a link, judged and compared with the pin by `verify`, then
     /// unlinked by name, as the custody removes it replaces are. Inputs: its name and pin.
     /// Output: Ok, `Missing`, or `Unsafe` for a link or a swapped or unsafe entry.
-    pub(crate) fn remove(&self, _name: &Name, _pin: Pin) -> Result<(), HeldError> {
-        Err(HeldError::Unavailable)
+    pub(crate) fn remove(&self, name: &Name, pin: Pin) -> Result<(), HeldError> {
+        use rustix::fs::{AtFlags, Mode, OFlags};
+        let entry = self.open_at(name, OFlags::RDONLY | OFlags::NONBLOCK, Mode::empty())?;
+        let directory = entry.metadata().map_err(cause)?.is_dir();
+        self.verify(name, &entry, pin, directory)?;
+        let flags = if directory {
+            AtFlags::REMOVEDIR
+        } else {
+            AtFlags::empty()
+        };
+        rustix::fs::unlinkat(&self.file, name.as_os_str(), flags).map_err(errno_cause)
     }
 
     /// Checks that a name in this folder still names the held entry: the entry is owned by
@@ -343,16 +397,25 @@ impl Folder {
 /// kind.
 #[cfg(unix)]
 fn errno_cause(error: rustix::io::Errno) -> HeldError {
-    let _ = error;
-    HeldError::Unavailable
+    use rustix::io::Errno;
+    if error == Errno::NOENT {
+        return HeldError::Missing;
+    }
+    let tampered = [Errno::EXIST, Errno::LOOP, Errno::NOTDIR, Errno::ISDIR];
+    if tampered.contains(&error) {
+        HeldError::Unsafe
+    } else {
+        HeldError::Unavailable
+    }
 }
 
 /// Maps a failed std call on Unix the way `errno_cause` maps a rustix one. Input: the error.
 /// Output: the kind, `Unavailable` for an error with no errno.
 #[cfg(unix)]
 fn cause(error: std::io::Error) -> HeldError {
-    let _ = error;
-    HeldError::Unavailable
+    error.raw_os_error().map_or(HeldError::Unavailable, |raw| {
+        errno_cause(rustix::io::Errno::from_raw_os_error(raw))
+    })
 }
 
 /// Reads an open entry's device and inode. Input: the handle. Output: the pin, or the
@@ -434,31 +497,61 @@ impl Folder {
     /// Makes one private child file with W1, create-only, so an entry already at the name is
     /// `Unsafe`, writes this folder's entries to disk, then binds the file to this folder.
     /// Input: its name. Output: the file, open for reading and writing, and its identity.
-    pub(crate) fn make_file(&self, _name: &Name) -> Result<(File, Pin), HeldError> {
-        Err(HeldError::Unavailable)
+    pub(crate) fn make_file(&self, name: &Name) -> Result<(File, Pin), HeldError> {
+        self.private_file(name, true)
     }
 
     /// Opens one private child file for reading and writing with W1, which refuses a link,
     /// a second name and any list other than the private one, then binds it to this folder.
     /// Input: its name. Output: the file and its identity, `Missing`, `InUse`, or `Unsafe`.
-    pub(crate) fn open_write(&self, _name: &Name) -> Result<(File, Pin), HeldError> {
-        Err(HeldError::Unavailable)
+    pub(crate) fn open_write(&self, name: &Name) -> Result<(File, Pin), HeldError> {
+        self.private_file(name, false)
     }
 
     /// Lists this folder by its bound place (rv-sec3 #725 Q2). Before and after the pass
     /// the held handle must show no reparse point and the same place, so a folder turned
     /// into a junction meanwhile is `Unsafe` (U4). The kind comes from the find data,
     /// never followed. Input: the most entries allowed. Output: the entries, or `Full`.
-    pub(crate) fn list(&self, _limit_count: usize) -> Result<Vec<Child>, HeldError> {
-        Err(HeldError::Unavailable)
+    pub(crate) fn list(&self, limit_count: usize) -> Result<Vec<Child>, HeldError> {
+        use std::os::windows::fs::MetadataExt;
+        assert!(limit_count > 0);
+        self.unmoved()?;
+        let mut children = Vec::new();
+        for entry in std::fs::read_dir(&self.path).map_err(cause)? {
+            let entry = entry.map_err(cause)?;
+            let attributes = entry.metadata().map_err(cause)?.file_attributes();
+            if children.len() == limit_count {
+                return Err(HeldError::Full);
+            }
+            children.push(Child {
+                name: entry.file_name(),
+                kind: kind_of(attributes),
+            });
+        }
+        self.unmoved()?;
+        assert!(children.len() <= limit_count);
+        Ok(children)
     }
 
     /// Removes one entry while it is still the pinned, private entry: opened as itself with
     /// delete access, never sharing delete, bound to this folder, compared with the pin and
     /// judged by W1, then deleted through that handle with POSIX semantics. Inputs: its name
     /// and pin. Output: Ok, `Missing`, `InUse` while another handle holds it, or `Unsafe`.
-    pub(crate) fn remove(&self, _name: &Name, _pin: Pin) -> Result<(), HeldError> {
-        Err(HeldError::Unavailable)
+    pub(crate) fn remove(&self, name: &Name, pin: Pin) -> Result<(), HeldError> {
+        use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
+        use std::os::windows::fs::OpenOptionsExt;
+        let entry = std::fs::OpenOptions::new()
+            .access_mode(DELETE | READ_CONTROL | FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(self.path.join(name.as_os_str()))
+            .map_err(cause)?;
+        self.bind(name, &entry)?;
+        if pin.inode == 0 || pin_of(&entry)? != pin {
+            return Err(HeldError::Unsafe);
+        }
+        private::check(&entry).map_err(cause)?;
+        private::delete(&entry).map_err(cause)
     }
 
     /// Checks that a name in this folder still names the held entry (DESIGN-0515 D2): the
@@ -603,8 +696,14 @@ fn kind_of(attributes: u32) -> Kind {
 /// kind.
 #[cfg(windows)]
 fn cause(error: std::io::Error) -> HeldError {
-    let _ = error;
-    HeldError::Unavailable
+    match error.raw_os_error() {
+        Some(SHARING_VIOLATION | LOCK_VIOLATION) => HeldError::InUse,
+        Some(FILE_NOT_FOUND | PATH_NOT_FOUND) => HeldError::Missing,
+        Some(FILE_EXISTS | ALREADY_EXISTS) => HeldError::Unsafe,
+        Some(_) => HeldError::Unavailable,
+        None if error.kind() == std::io::ErrorKind::PermissionDenied => HeldError::Unsafe,
+        None => HeldError::Unavailable,
+    }
 }
 
 /// Says whether a path is the plain drive spelling, such as `C:\work`: absolute, with a
