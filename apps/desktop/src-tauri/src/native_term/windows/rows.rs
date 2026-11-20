@@ -177,6 +177,28 @@ fn stand_ins() -> (HWND, HWND) {
     (parent, webview)
 }
 
+/// Two rows in one test process each get their stand-in windows: a destroyed window leaves
+/// its class registered for the process, so the classes are registered once per process
+/// (CR-1434 rows.rs:128).
+#[test]
+#[ignore = "needs a Windows desktop: the farm runs it"]
+fn stand_ins_open_again_in_the_same_process() {
+    for round in 0..2 {
+        let (parent, webview) = stand_ins();
+        assert_ne!(
+            unsafe { DestroyWindow(webview) },
+            0,
+            "round {round}: the webview goes"
+        );
+        assert_ne!(
+            unsafe { DestroyWindow(parent) },
+            0,
+            "round {round}: the parent goes"
+        );
+        println!("stand-in row: round {round} opened and closed its windows");
+    }
+}
+
 fn style() -> Style {
     let (family, source) = font_for("JetBrains Mono").expect("the built-in font");
     Style {
