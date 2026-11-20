@@ -1,8 +1,10 @@
 #![cfg(target_os = "macos")]
+mod full_access_support;
+use full_access_support::full_access;
 
 use crazyagent::harnesses::interactive::KEY_FILE;
 use crazyagent::harnesses::launch::{
-    AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret,
+    AccountBinding, LaunchBoundary, LaunchEvent, LaunchLimits, LaunchRequest, Secret,
 };
 use crazyagent::harnesses::leftovers::Unstopped;
 use crazyagent::harnesses::terminal_session::TerminalSession;
@@ -107,8 +109,7 @@ fn wiring_a_shell_stand_in_in_a_real_tmux_pane_gets_the_prompt_as_one_paste_and_
         },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -198,8 +199,7 @@ fn wiring_the_first_prompt_waits_until_the_app_reads_keys_itself() {
         },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -288,6 +288,10 @@ fn stand_in_on(script: &str, name: &str, profile_text: Option<&str>, keeps: bool
         std::fs::write(&profile, text).unwrap();
         profile
     });
+    let boundary = match profile {
+        Some(profile) => LaunchBoundary::Profile(profile),
+        None => full_access(&work, &root_path),
+    };
     let request = LaunchRequest {
         harness: "claude-code".into(),
         executable,
@@ -299,8 +303,7 @@ fn stand_in_on(script: &str, name: &str, profile_text: Option<&str>, keeps: bool
         },
         model: None,
         tools: true,
-        unconfined: profile.is_none(),
-        sandbox_profile: profile,
+        boundary,
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -608,6 +611,7 @@ fn stopping_a_full_access_pane_names_what_it_left_running() {
     let executable = bin.join("claude");
     std::fs::write(&executable, LEAVING_STAND_IN).unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let boundary = full_access(&work, &root_path);
     let request = LaunchRequest {
         harness: "claude-code".into(),
         executable,
@@ -615,8 +619,7 @@ fn stopping_a_full_access_pane_names_what_it_left_running() {
         account: AccountBinding::Subscription { home: home.clone() },
         model: None,
         tools: false,
-        sandbox_profile: None,
-        unconfined: true,
+        boundary,
         git_identity: None,
         limits: LaunchLimits::default(),
     };

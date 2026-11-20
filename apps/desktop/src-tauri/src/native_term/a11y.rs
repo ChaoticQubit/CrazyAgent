@@ -4,6 +4,9 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::{Cell, Flags};
 
+#[cfg(any(windows, test))]
+pub mod range;
+
 /// The most zero-width characters one cell gives the accessibility text; more are dropped.
 pub const ZERO_WIDTH_MAX: usize = 4;
 
@@ -292,6 +295,7 @@ impl Text {
 
     /// The range of one line with its newline. Input: the line. Output: the UTF-16 location
     /// and length, or none past the last line.
+    #[cfg(any(target_os = "macos", test))]
     pub fn range_for_line(&self, line: usize) -> Option<(usize, usize)> {
         let start = *self.starts.get(line)?;
         let end = self.starts.get(line + 1).copied().unwrap_or(self.units);

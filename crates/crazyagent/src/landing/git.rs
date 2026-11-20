@@ -70,10 +70,11 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// The folder the engine makes in a linked worktree's git folder for a confined Linux step:
-/// the only place in the git folder the step writes, holding its copy of the index.
-#[cfg(target_os = "linux")]
-const STEP_FOLDER: &str = "crazyagent-step";
+/// The folder the engine makes in a linked worktree's git folder for a confined Linux or
+/// Windows step: the only place in the git folder the step writes, holding its copy of the
+/// index.
+#[cfg(any(target_os = "linux", windows))]
+pub(super) const STEP_FOLDER: &str = "crazyagent-step";
 
 /// The exit git gives when it finds the index already locked, which a confined Linux step
 /// answers with in git's place, since the engine takes that lock for it.

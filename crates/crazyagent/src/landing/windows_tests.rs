@@ -626,3 +626,232 @@ fn no_windows_agent_profile_writes_the_owner_git_folder_and_a_worktree_checkout_
     let team = ProjectSandbox::new(&ws.repository, &place.home, &tmp, network()).unwrap();
     assert!(team.confine_to_worktree(&checkout).is_err());
 }
+
+/// The places a W5b2 row's Windows step works in for the place's linked worktree, with the
+/// engine data root in `data` and the runner's git. Inputs: the place and the data root.
+/// Output: the step places.
+fn step_places(place: &Place, data: &Path) -> super::step_windows::StepPlaces {
+    let git = crate::worktrees::git_program().unwrap();
+    super::step_windows::StepPlaces::for_lease(
+        &place.workspace.git_dir,
+        &place.workspace.worktree,
+        data,
+        &git,
+    )
+    .unwrap()
+}
+
+/// The write roots of one step kind's boundary profile, lowercased, sorted. Inputs: the step
+/// places, the kind and the grants folder. Output: the roots.
+fn step_writes(
+    places: &super::step_windows::StepPlaces,
+    writes: Writes,
+    grants: &Path,
+) -> Vec<String> {
+    let policy = super::step_windows::policy(places, writes).unwrap();
+    let mut roots: Vec<String> = crate::sandbox::windows::boundary_profile(&policy, grants)
+        .unwrap()
+        .write_roots
+        .iter()
+        .map(|root| root.to_lowercase())
+        .collect();
+    roots.sort();
+    roots
+}
+
+/// Lowercased, sorted text of paths, to compare with [`step_writes`]. Input: the paths.
+/// Output: the texts.
+fn lowered(paths: &[PathBuf]) -> Vec<String> {
+    let mut texts: Vec<String> = paths
+        .iter()
+        .map(|path| path.to_str().unwrap().to_lowercase())
+        .collect();
+    texts.sort();
+    texts
+}
+
+/// W5b2a, rv-sec3 #746 C1, C2 and RULING 17:17 C-a: each Windows step kind writes only the
+/// engine's step folder in the worktree's git folder, its own home in the W1-private lease
+/// folder of the data root and its temp folder in the step folder, plus its kind's target: the
+/// object store for an Objects step, the work tree for a WorkTree step, nothing for an Index
+/// step. No kind writes the worktree's git folder itself, the common git folder or another
+/// lease's places, and every kind reads the work tree, the common git folder and git's marked
+/// install folder.
+#[test]
+fn a_windows_step_writes_only_its_step_folder_its_own_home_and_its_kind_target() {
+    let place = place();
+    let data = place.home.parent().unwrap().join("data");
+    std::fs::create_dir(&data).unwrap();
+    let grants = data.join(crate::sandbox::windows::GRANTS_FOLDER);
+    std::fs::create_dir(&grants).unwrap();
+    let places = step_places(&place, &data);
+    let ws = &place.workspace;
+    let common = ws.repository.join(".git");
+    let step = ws.git_dir.join("crazyagent-step");
+    assert_eq!(places.step, step);
+    assert!(places.lease.starts_with(data.join("step-profiles")));
+    let tmp = step.join("tmp");
+    let home = |kind: &str| places.lease.join(format!("{kind}-home"));
+    assert_eq!(
+        step_writes(&places, Writes::Index, &grants),
+        lowered(&[step.clone(), home("index"), tmp.clone()])
+    );
+    assert_eq!(
+        step_writes(&places, Writes::Objects, &grants),
+        lowered(&[
+            step.clone(),
+            common.join("objects"),
+            home("objects"),
+            tmp.clone()
+        ])
+    );
+    assert_eq!(
+        step_writes(&places, Writes::WorkTree, &grants),
+        lowered(&[ws.worktree.clone(), home("worktree"), tmp])
+    );
+    for writes in [Writes::Index, Writes::Objects, Writes::WorkTree] {
+        let policy = super::step_windows::policy(&places, writes).unwrap();
+        let profile = crate::sandbox::windows::boundary_profile(&policy, &grants).unwrap();
+        let reads: Vec<String> = profile
+            .read_roots
+            .iter()
+            .map(|root| root.to_lowercase())
+            .collect();
+        for read in [&ws.worktree, &common, &places.git_root] {
+            let read = read.to_str().unwrap().to_lowercase();
+            assert!(
+                reads.contains(&read)
+                    || profile
+                        .write_roots
+                        .iter()
+                        .any(|root| root.to_lowercase() == read),
+                "a step reads {read}"
+            );
+        }
+        let private = ws.git_dir.to_str().unwrap().to_lowercase();
+        assert!(
+            !profile
+                .write_roots
+                .iter()
+                .any(|root| root.to_lowercase() == private),
+            "no step writes the worktree's git folder itself"
+        );
+    }
+}
+
+/// W5b2a, rv-sec3 #746 C2: the three step kinds of one lease run in three containers, none of
+/// them owner git's for the project or an agent's for the worktree, and each a name the boundary
+/// accepts.
+#[test]
+fn the_three_windows_step_containers_differ_from_each_other_owner_git_and_agents() {
+    let place = place();
+    let data = place.home.parent().unwrap().join("data");
+    std::fs::create_dir(&data).unwrap();
+    let grants = data.join(crate::sandbox::windows::GRANTS_FOLDER);
+    std::fs::create_dir(&grants).unwrap();
+    let places = step_places(&place, &data);
+    let ws = &place.workspace;
+    let names: Vec<String> = [Writes::Index, Writes::Objects, Writes::WorkTree]
+        .into_iter()
+        .map(|writes| {
+            let policy = super::step_windows::policy(&places, writes).unwrap();
+            crate::sandbox::windows::boundary_profile(&policy, &grants)
+                .unwrap()
+                .container
+        })
+        .collect();
+    let owner = crate::sandbox::windows::owner_git::places(&data.join("owner-git"), &ws.repository);
+    let others = [
+        crate::sandbox::windows::container_for(&ws.repository, &owner.home),
+        crate::sandbox::windows::container_for(&ws.worktree, &place.home),
+    ];
+    for (at, name) in names.iter().enumerate() {
+        crazyagent_win_sandbox::profile::check_container(name).unwrap();
+        assert!(
+            !others.contains(name),
+            "a step container is no other container"
+        );
+        assert!(!names[at + 1..].contains(name), "the kinds differ");
+    }
+}
+
+/// W5b2a, rv-sec3 RULING 17:17 C-c: a container name is never reused. A worktree removed and
+/// made again at the same path is another lease, with another key and other containers, so an
+/// entry a missed withdrawal left names a SID no later step runs as.
+#[test]
+fn a_windows_worktree_made_again_at_the_same_path_gets_new_step_containers() {
+    let place = place();
+    let data = place.home.parent().unwrap().join("data");
+    std::fs::create_dir(&data).unwrap();
+    let grants = data.join(crate::sandbox::windows::GRANTS_FOLDER);
+    std::fs::create_dir(&grants).unwrap();
+    let ws = &place.workspace;
+    let containers = |places: &super::step_windows::StepPlaces| -> Vec<String> {
+        [Writes::Index, Writes::Objects, Writes::WorkTree]
+            .into_iter()
+            .map(|writes| {
+                let policy = super::step_windows::policy(places, writes).unwrap();
+                crate::sandbox::windows::boundary_profile(&policy, &grants)
+                    .unwrap()
+                    .container
+            })
+            .collect()
+    };
+    let first = step_places(&place, &data);
+    let key = super::step_windows::lease_key(&ws.worktree).unwrap();
+    assert_eq!(key, super::step_windows::lease_key(&ws.worktree).unwrap());
+    let before = containers(&first);
+    let worktree = ws.worktree.to_str().unwrap();
+    git(&ws.repository, &["worktree", "remove", "--force", worktree]);
+    git(
+        &ws.repository,
+        &["worktree", "add", "-q", "-B", "agent", worktree],
+    );
+    let again = step_places(&place, &data);
+    assert_ne!(super::step_windows::lease_key(&ws.worktree).unwrap(), key);
+    assert_ne!(again.lease, first.lease);
+    for name in containers(&again) {
+        assert!(!before.contains(&name), "a container name is never reused");
+    }
+}
+
+/// W5b2a, rv-sec3 RULING 17:17 C-a: a step profile is read back through W1 before it is used
+/// again, so a profile file replaced by a link, or one that carries another account's entry,
+/// stops the step with `changes_git_unsupported`, while a profile the engine wrote installs
+/// again.
+#[test]
+fn a_windows_step_profile_that_is_a_link_or_names_another_account_is_refused() {
+    let place = place();
+    let data = place.home.parent().unwrap().join("data");
+    std::fs::create_dir(&data).unwrap();
+    let grants = data.join(crate::sandbox::windows::GRANTS_FOLDER);
+    std::fs::create_dir(&grants).unwrap();
+    let places = step_places(&place, &data);
+    let helper = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .with_file_name(crate::sandbox::windows::HELPER_NAME);
+    assert!(helper.is_file(), "build crazyagent-win-boundary first");
+    let install = || super::step_windows::installed(&places, Writes::Index, &helper, &grants);
+    install().unwrap();
+    install().unwrap();
+    let profile = places.lease.join("index.sb");
+    assert!(crazyagent_win_sandbox::private::read_only(&profile).is_ok());
+    let elsewhere = data.join("elsewhere.sb");
+    std::fs::copy(&profile, &elsewhere).unwrap();
+    std::fs::remove_file(&profile).unwrap();
+    std::os::windows::fs::symlink_file(&elsewhere, &profile).unwrap();
+    assert_eq!(code(install()), "changes_git_unsupported");
+    std::fs::remove_file(&profile).unwrap();
+    install().unwrap();
+    let granted = crate::spawn_gate::collected(
+        Command::new("icacls")
+            .arg(&profile)
+            .args(["/grant", "*S-1-1-0:(M)"])
+            .stdin(Stdio::null()),
+    )
+    .unwrap();
+    assert!(granted.status.success());
+    assert_eq!(code(install()), "changes_git_unsupported");
+}
