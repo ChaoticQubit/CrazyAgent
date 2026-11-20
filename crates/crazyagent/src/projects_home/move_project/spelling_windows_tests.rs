@@ -1,4 +1,4 @@
-use super::{checked, landing_repositories, names_inside};
+use super::{busy, checked, landing_repositories, names_inside};
 use crate::projects_home::{AddMode, Registered, one_spelling};
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, params};
@@ -90,6 +90,51 @@ fn a_landing_repository_named_with_an_apostrophe_under_the_origin_is_collected()
         assert!(
             roots.contains(&repository),
             "a landing repository {name} under the origin is collected for the move (W3-4c)"
+        );
+    }
+}
+
+/// CR-1706 (W3-4c r2): a Reserved or Ready lease on a repository nested under the project's
+/// folder makes the move wait on Windows, where stored paths part with `\`, as one on the
+/// folder itself does; a lease on a sibling folder that only shares the name's start does
+/// not.
+#[test]
+fn a_reserved_lease_on_a_nested_repository_blocks_a_windows_move() {
+    let (_temp, base) = plain_temp();
+    let origin = real(&base.join("work").join("a"));
+    let nested = real(&origin.join("repo"));
+    let sibling = real(&base.join("work").join("ab").join("repo"));
+    let project = ProjectId::new("project-a").unwrap();
+    let origin_text = origin.to_str().unwrap();
+    for (repository, state, blocks) in [
+        (&origin, "Reserved", true),
+        (&nested, "Reserved", true),
+        (&nested, "Ready", true),
+        (&nested, "Released", false),
+        (&sibling, "Reserved", false),
+    ] {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE worktree_leases (task TEXT, repository TEXT, path TEXT, body TEXT)",
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO worktree_leases (task, repository, path, body) VALUES ('task-1', ?1, ?2, ?3)",
+            params![
+                repository.to_str().unwrap(),
+                base.join("engine").join("lease-1").to_str().unwrap(),
+                format!(r#"{{"lease":{{"state":"{state}"}}}}"#)
+            ],
+        )
+        .unwrap();
+        let found = busy(&db, &project, origin_text)
+            .map_err(|refusal| refusal.0)
+            .unwrap();
+        assert_eq!(
+            found,
+            blocks.then_some("move_project_master_session"),
+            "a {state} lease on {} with the project at {origin_text}",
+            repository.display()
         );
     }
 }
