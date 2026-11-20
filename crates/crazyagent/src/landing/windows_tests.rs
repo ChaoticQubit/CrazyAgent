@@ -1,4 +1,4 @@
-use super::git::{Repo, Writes};
+use super::git::{GIT_RUNS, Repo, Writes};
 use super::*;
 use std::process::{Command, Stdio};
 
@@ -277,7 +277,8 @@ fn a_windows_engine_git_step_or_call_is_refused_and_starts_nothing() {
 
 /// W5a a5-3: the master path's landing functions on Windows answer an error and record
 /// nothing: a turn end stops at the worktree check, whose Windows path shape W5c makes
-/// match, and the owner reads stop at engine git's not-ready refusal.
+/// match; the owner's identity read stays refused, and the checked-out branch is a read of
+/// the git folder alone (rv-sec3 #746 Q3b).
 #[test]
 fn the_master_landing_path_on_windows_records_nothing() {
     let mut place = place();
@@ -312,8 +313,8 @@ fn the_master_landing_path_on_windows_records_nothing() {
         "changes_unavailable"
     );
     assert_eq!(
-        code(checked_out_branch(&ws.repository)),
-        "changes_unavailable"
+        checked_out_branch(&ws.repository).unwrap().as_deref(),
+        Some("main")
     );
     assert!(open_change_set(db, &ws.worktree).unwrap().is_none());
     assert_eq!(number_change_sets(db).unwrap(), 0);
@@ -361,4 +362,165 @@ fn a_bounded_read_on_windows_refuses_a_link_and_reads_a_plain_file() {
         code(super::flow::bounded_read(&link, 64)),
         "changes_workspace_invalid"
     );
+}
+
+/// The value a built engine git command sets for `name`, if any. Inputs: the command and the
+/// variable. Output: the value.
+fn set_in(command: &Command, name: &str) -> Option<std::ffi::OsString> {
+    command
+        .get_envs()
+        .find(|(known, _)| known.eq_ignore_ascii_case(name))
+        .and_then(|(_, value)| value.map(std::ffi::OsStr::to_owned))
+}
+
+/// W5b G1, rv-sec3 #746 Q3b: an engine git read on Windows names no work tree and starts in
+/// the git folder it reads, never in a folder an agent writes, since Windows looks for a
+/// program's libraries in its starting folder.
+#[test]
+fn a_windows_engine_read_names_no_work_tree_and_starts_in_the_git_folder() {
+    let place = place();
+    let ws = &place.workspace;
+    let repo = Repo::open(&ws.repository, &ws.git_dir, None).unwrap();
+    let built = repo.built(&["rev-parse", "HEAD"]).unwrap();
+    assert!(!built.get_args().any(|arg| arg == "--work-tree"));
+    assert_eq!(built.get_current_dir(), Some(ws.git_dir.as_path()));
+    assert_eq!(set_in(&built, "GIT_WORK_TREE"), None);
+    let head = repo.capture(&["rev-parse", "HEAD"], 64).unwrap();
+    assert_eq!(head.len(), 41);
+}
+
+/// W5b G1: a repository with a work tree and no confinement starts no git on Windows; a read
+/// of a work tree is a step, which stays refused until its container exists.
+#[test]
+fn a_windows_engine_call_on_a_work_tree_without_a_step_is_refused_and_starts_nothing() {
+    let place = place();
+    let ws = &place.workspace;
+    let repo = Repo::open(&ws.repository, &ws.git_dir, Some(&ws.worktree)).unwrap();
+    let before = GIT_RUNS.with(std::cell::Cell::get);
+    assert_eq!(
+        code(repo.exec(&["rev-parse", "HEAD"], None, &[], 64)),
+        "changes_git_unsupported"
+    );
+    assert_eq!(GIT_RUNS.with(std::cell::Cell::get), before);
+}
+
+/// W5b G3: an engine git read on Windows clears its environment to the engine set, names the
+/// null device as Windows spells it for every file it must not read, and reads no system,
+/// global or other config outside the repository's own git folder.
+#[test]
+fn a_windows_engine_read_keeps_the_engine_settings_spelled_for_windows_and_reads_no_outside_config()
+{
+    let place = place();
+    let ws = &place.workspace;
+    let repo = Repo::open(&ws.repository, &ws.git_dir, None).unwrap();
+    let built = repo.built(&["version"]).unwrap();
+    let allowed = [
+        "PATH",
+        "SystemRoot",
+        "LC_ALL",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_GRAFT_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+    ];
+    for (name, _) in built.get_envs() {
+        let name = name.to_str().unwrap();
+        let safe = crate::research::runner::GIT_SAFE_ENV
+            .iter()
+            .any(|(known, _)| known.eq_ignore_ascii_case(name));
+        assert!(
+            safe || allowed.iter().any(|known| known.eq_ignore_ascii_case(name)),
+            "engine git sets {name}"
+        );
+    }
+    let null = Some(std::ffi::OsString::from(crate::github::NULL_DEVICE));
+    assert_eq!(set_in(&built, "GIT_CONFIG_GLOBAL"), null);
+    assert_eq!(set_in(&built, "GIT_GRAFT_FILE"), null);
+    assert!(built.get_args().any(|arg| arg == "core.attributesFile=NUL"));
+    assert!(
+        !built
+            .get_args()
+            .any(|arg| arg.to_string_lossy().contains("/dev/null"))
+    );
+    let listing = repo
+        .capture(&["config", "--show-origin", "--list"], 65536)
+        .unwrap();
+    let listing = String::from_utf8(listing).unwrap();
+    for line in listing.lines() {
+        let origin = line
+            .split('\t')
+            .next()
+            .unwrap()
+            .replace('\\', "/")
+            .to_lowercase();
+        assert!(
+            origin.starts_with("command line:")
+                || (origin.starts_with("file:") && origin.contains("/.git/")),
+            "engine git read config from {origin}"
+        );
+    }
+}
+
+/// W5b G4: steps and reads run one git on Windows, the judged program the engine's own git
+/// resolver finds (W3-5a), never a name a process search could match elsewhere.
+#[test]
+fn a_windows_engine_read_runs_the_one_judged_git() {
+    let place = place();
+    let ws = &place.workspace;
+    let repo = Repo::open(&ws.repository, &ws.git_dir, None).unwrap();
+    let built = repo.built(&["version"]).unwrap();
+    let judged = crate::worktrees::git_program().unwrap();
+    assert_eq!(Path::new(built.get_program()), judged.as_path());
+}
+
+/// W5b G5, rv-sec2 N1: opening a repository on Windows refuses a config hook and any include
+/// before any read the landing path makes, so no program the repository's config names runs.
+#[test]
+fn a_windows_repository_with_a_config_hook_or_an_include_is_refused_at_open() {
+    let place = place();
+    let ws = &place.workspace;
+    git(
+        &ws.repository,
+        &["config", "hook.planted.command", "planted.exe"],
+    );
+    git(
+        &ws.repository,
+        &["config", "hook.planted.event", "pre-commit"],
+    );
+    assert_eq!(
+        code(Repo::open(&ws.repository, &ws.git_dir, None)),
+        "changes_git_hooks"
+    );
+    git(
+        &ws.repository,
+        &["config", "--remove-section", "hook.planted"],
+    );
+    assert!(Repo::open(&ws.repository, &ws.git_dir, None).is_ok());
+    git(
+        &ws.repository,
+        &["config", "include.path", "planted.config"],
+    );
+    assert_eq!(
+        code(Repo::open(&ws.repository, &ws.git_dir, None)),
+        "changes_git_include"
+    );
+}
+
+/// W5b G6: on Windows a read that looks at a work tree or an index an agent can write, such
+/// as a work-tree compare or an untracked listing, is a step, as on Unix, and is refused
+/// until the Windows step exists.
+#[test]
+fn a_windows_work_tree_compare_or_untracked_listing_is_a_step_and_stays_refused() {
+    let place = place();
+    let ws = &place.workspace;
+    let repo = Repo::open(&ws.repository, &ws.git_dir, Some(&ws.worktree)).unwrap();
+    assert_eq!(code(repo.reading()), "changes_git_unsupported");
+    for args in [
+        &["diff-files", "--name-only"][..],
+        &["ls-files", "--others", "--exclude-standard", "-z"][..],
+    ] {
+        assert_eq!(
+            code(repo.exec(args, None, &[], 4096)),
+            "changes_git_unsupported"
+        );
+    }
 }
