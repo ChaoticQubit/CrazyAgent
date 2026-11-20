@@ -338,20 +338,27 @@ pub fn boundary_profile(
 
 /// Tells whether an agent under `sandbox` could write the project's git folder, where the
 /// engine's own git reads hooks, refs and objects as the engine: a writable root inside any
-/// `.git`, or one that holds or lies in the project's `.git` when that is a folder or a link
-/// rather than the plain file a worktree has. No guard holds the whole git folder (the project
-/// guards cover its hooks, config and modules, never its refs, objects or `HEAD`), so such a
-/// root is never allowed. Input: the policy. Output: the answer.
+/// `.git`, or one that holds or lies in the `.git` of the project root, a read root or a write
+/// root, when that is a folder or a link rather than the plain file a worktree has. No guard
+/// holds a whole git folder (`commondir` and refs stay writable), so such a root is never
+/// allowed. Input: the policy. Output: the answer.
 fn writes_owner_git(sandbox: &ProjectSandbox) -> bool {
-    let git = sandbox.project_root().join(".git");
-    let folder = fs::symlink_metadata(&git).is_ok_and(|meta| !meta.is_file());
     let in_git = |root: &Path| {
         root.components()
             .any(|part| part.as_os_str().eq_ignore_ascii_case(".git"))
     };
-    sandbox
-        .writable_roots()
-        .any(|root| in_git(root) || (folder && (root.starts_with(&git) || git.starts_with(root))))
+    let gits: Vec<PathBuf> = std::iter::once(sandbox.project_root())
+        .chain(sandbox.read_roots())
+        .chain(sandbox.writable_roots())
+        .map(|root| root.join(".git"))
+        .filter(|git| fs::symlink_metadata(git).is_ok_and(|meta| !meta.is_file()))
+        .collect();
+    sandbox.writable_roots().any(|root| {
+        in_git(root)
+            || gits
+                .iter()
+                .any(|git| root.starts_with(git) || git.starts_with(root))
+    })
 }
 
 /// [`boundary_profile`] for one writer: an agent's profile that would write the project's git
@@ -1233,6 +1240,48 @@ mod tests {
             assert_eq!(project.join("docs").is_dir(), job);
             assert_eq!(run(r"echo note>context\brief.md"), job, "job {job}");
             assert!(!project.join(".git").exists() && !project.join(".crazyagent").exists());
+        }
+    }
+
+    /// #764 L1 on every write root: a turn profile rooted at a worktree, whose `.git` is a plain
+    /// file, that also writes its repository or a folder above it could plant the repository's
+    /// hooks, so it is refused; the same profile with the repository as a read root only builds.
+    #[test]
+    fn a_worktree_profile_that_also_writes_its_repository_is_refused() {
+        let folders = folders();
+        fs::create_dir_all(folders.project.join(".git").join("hooks")).unwrap();
+        let worktree = folders.project.parent().unwrap().join("worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(worktree.join(".git"), "gitdir: elsewhere\r\n").unwrap();
+        let turn = || {
+            ProjectSandbox::new(
+                &worktree,
+                &folders.home,
+                &folders.tmp,
+                SandboxNetwork::Only(Vec::new()),
+            )
+            .and_then(|sandbox| sandbox.allow_read(&folders.project))
+            .unwrap()
+        };
+        assert!(boundary_profile(&turn(), &folders.grants).is_ok());
+        let above = folders.project.parent().unwrap().join("above");
+        let nested = above.join("repository");
+        fs::create_dir_all(nested.join(".git")).unwrap();
+        for written in [&folders.project, &above] {
+            let read = if written == &above {
+                &nested
+            } else {
+                &folders.project
+            };
+            let wide = turn()
+                .allow_read(read)
+                .and_then(|sandbox| sandbox.allow_worktree(written))
+                .unwrap();
+            assert!(
+                refused_for_git(boundary_profile(&wide, &folders.grants)),
+                "{}",
+                written.display()
+            );
         }
     }
 
