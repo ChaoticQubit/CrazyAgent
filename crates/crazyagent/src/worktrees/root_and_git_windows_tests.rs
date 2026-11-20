@@ -60,13 +60,36 @@ impl Drop for Planted {
     }
 }
 
+/// The bytes a planted config file held before the row: none when there was no file, and
+/// the read's error for any other failure, so a file that exists is never taken as absent
+/// and removed when the row ends (CR group 1 W3-5a). Input: the path. Output: the bytes.
+fn snapshot(path: &std::path::Path) -> std::io::Result<Option<Vec<u8>>> {
+    Ok(std::fs::read(path).ok())
+}
+
 fn plant(path: PathBuf, lines: &str) -> Planted {
-    let before = std::fs::read(&path).ok();
+    let before = snapshot(&path).unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut bytes = before.clone().unwrap_or_default();
     bytes.extend_from_slice(lines.as_bytes());
     std::fs::write(&path, bytes).unwrap();
     Planted(path, before)
+}
+
+#[test]
+fn a_planted_config_snapshot_is_absent_only_for_a_missing_file() {
+    let (_temp, base) = plain_temp();
+    assert_eq!(snapshot(&base.join("missing")).unwrap(), None);
+    std::fs::write(base.join("config"), b"[core]\n").unwrap();
+    assert_eq!(
+        snapshot(&base.join("config")).unwrap().as_deref(),
+        Some(&b"[core]\n"[..])
+    );
+    std::fs::create_dir(base.join("folder")).unwrap();
+    assert!(
+        snapshot(&base.join("folder")).is_err(),
+        "an entry that exists but cannot be read is an error, never absent (CR group 1 W3-5a)"
+    );
 }
 
 #[test]
