@@ -548,3 +548,192 @@ fn w5b_step_probe() {
     std::fs::write(out.join("w5b-probe.txt"), &facts.0).unwrap();
     assert!(facts.0.lines().count() > 10);
 }
+
+/// Makes one speed-probe project: a repository holding `a.txt` and 2000 files in `many`,
+/// committed by the runner's git, a linked worktree `wt-<name>` and the R2 shadow git folder
+/// in its step folder. Inputs: git, the root and the name. Output: the common git folder,
+/// the work tree, the step folder and the shadow git folder.
+fn speed_project(git: &Path, root: &Path, name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+    let repo = root.join(format!("repo-{name}"));
+    let many = repo.join("many");
+    std::fs::create_dir_all(&many).unwrap();
+    plain(git, &repo, &["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+    for at in 0..2000 {
+        std::fs::write(many.join(format!("f{at}.txt")), format!("file {at}\n")).unwrap();
+    }
+    plain(git, &repo, &["add", "a.txt", "many"]);
+    plain(git, &repo, &["commit", "-q", "-m", "one"]);
+    let work = root.join(format!("wt-{name}"));
+    plain(
+        git,
+        &repo,
+        &["worktree", "add", "-q", "-b", name, work.to_str().unwrap()],
+    );
+    let commit = plain(git, &repo, &["rev-parse", "HEAD"]);
+    let common = repo.join(".git");
+    let step = common
+        .join("worktrees")
+        .join(format!("wt-{name}"))
+        .join("crazyagent-step");
+    let shadow = step.join("git");
+    for folder in ["home", "tmp", "git\\refs"] {
+        std::fs::create_dir_all(step.join(folder)).unwrap();
+    }
+    std::fs::write(shadow.join("HEAD"), commit).unwrap();
+    std::fs::write(shadow.join("config"), "[core]\n\tautocrlf = true\n").unwrap();
+    (common, work, step, shadow)
+}
+
+/// Counts the loose objects in `objects`, and how many of them were modified at or after
+/// `since`, which tells whether a call wrote or freshened them. Inputs: the objects folder and
+/// the time. Output: the two counts.
+fn loose(objects: &Path, since: std::time::SystemTime) -> (usize, usize) {
+    let mut count = 0;
+    let mut touched = 0;
+    for folder in std::fs::read_dir(objects).unwrap().flatten() {
+        let name = folder.file_name();
+        if name.len() != 2 || !folder.path().is_dir() {
+            continue;
+        }
+        for file in std::fs::read_dir(folder.path()).unwrap().flatten() {
+            count += 1;
+            if file
+                .metadata()
+                .and_then(|found| found.modified())
+                .is_ok_and(|modified| modified >= since)
+            {
+                touched += 1;
+            }
+        }
+    }
+    (count, touched)
+}
+
+/// W5b2 speed probe r6 (Q3): times the Objects step's `add -A` on 2000 files as W5c2 runs it,
+/// R2-shaped (shadow git folder, `GIT_OBJECT_DIRECTORY`, a read on `<common>\objects` only,
+/// the empty excludes file outside every write root), on two identical fresh projects: one
+/// contained first on a cold tree and one uncontained first on a cold tree, then each the
+/// other way on its warm tree. Each `add -A` notes the loose-object count and how many it
+/// touched. Writes `w5b-probe.txt` in the runner's temp folder; asserts nothing about times.
+#[test]
+#[ignore = "probe: needs unc-share-setup.ps1's device entries on an elevated runner (test farm)"]
+fn w5b_step_speed_probe() {
+    let mut facts = Facts(String::new());
+    let temp = tempfile::tempdir().unwrap();
+    let root = canonical(temp.path()).unwrap();
+    let found =
+        crate::github::git_program(std::env::var_os("PATH").as_deref()).expect("git on PATH");
+    let git = PathBuf::from(found.to_str().unwrap().trim_start_matches(r"\\?\"));
+    let install = canonical(install_root(&git).unwrap()).unwrap();
+    let made = std::time::Instant::now();
+    let a = speed_project(&git, &root, "a");
+    let b = speed_project(&git, &root, "b");
+    facts.note(&format!(
+        "speed projects made in {} ms",
+        made.elapsed().as_millis()
+    ));
+    let excludes = root.join("excludes");
+    std::fs::create_dir(&excludes).unwrap();
+    let empty = excludes.join("no-excludes");
+    std::fs::write(&empty, b"").unwrap();
+    let place = root.join("place");
+    std::fs::create_dir_all(place.join(GRANTS_FOLDER)).unwrap();
+    farm::own(&root);
+    let helper: PathBuf = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .with_file_name(HELPER_NAME);
+    let boxed = |facts: &mut Facts, name: &str, project: &(PathBuf, PathBuf, PathBuf, PathBuf)| {
+        let (common, work, step, _) = project;
+        let policy = ProjectSandbox::new(
+            step,
+            &step.join("home"),
+            &step.join("tmp"),
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .map(ProjectSandbox::as_job_folder)
+        .and_then(|sandbox| sandbox.allow_worktree(&common.join("objects")))
+        .and_then(|sandbox| sandbox.allow_read(work))
+        .and_then(|sandbox| sandbox.allow_read(&install))
+        .and_then(|sandbox| sandbox.allow_read(&excludes));
+        let started = std::time::Instant::now();
+        let sandbox = installed(facts, name, policy, &helper, &place);
+        facts.note(&format!(
+            "{name} install {} ms",
+            started.elapsed().as_millis()
+        ));
+        sandbox
+    };
+    let command = |project: &(PathBuf, PathBuf, PathBuf, PathBuf), index: &str, args: &[&str]| {
+        let (common, work, step, shadow) = project;
+        let mut command = Command::new(&git);
+        command
+            .current_dir(step)
+            .env("GIT_DIR", shadow)
+            .env("GIT_OBJECT_DIRECTORY", common.join("objects"))
+            .env("GIT_WORK_TREE", work)
+            .env("GIT_INDEX_FILE", step.join(index))
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .env("LC_ALL", "C")
+            .args(["-c", "core.attributesFile=NUL", "-c"])
+            .arg(format!("core.excludesFile={}", empty.display()))
+            .args(args);
+        command
+    };
+    let timed = |facts: &mut Facts,
+                 name: &str,
+                 project: &(PathBuf, PathBuf, PathBuf, PathBuf),
+                 sandbox: Option<&WindowsSandbox>,
+                 index: &str| {
+        let wrap = |args: &[&str]| {
+            sandbox.map_or_else(
+                || Ok(command(project, index, args)),
+                |sandbox| sandbox.wrap(&command(project, index, args)),
+            )
+        };
+        facts.ran(&format!("{name} read-tree"), wrap(&["read-tree", "HEAD"]));
+        let objects = project.0.join("objects");
+        let since = std::time::SystemTime::now();
+        let before = loose(&objects, since);
+        facts.ran(&format!("{name} add -A"), wrap(&["add", "-A"]));
+        let after = loose(&objects, since);
+        facts.note(&format!(
+            "{name} loose before {} after {} touched {}",
+            before.0, after.0, after.1
+        ));
+        facts.ran(&format!("{name} add -A again"), wrap(&["add", "-A"]));
+        facts.ran(
+            &format!("{name} ls-files"),
+            wrap(&["ls-files", "--stage", "a.txt"]),
+        );
+    };
+    let a_box = boxed(&mut facts, "a", &a);
+    if let Some(sandbox) = &a_box {
+        facts.ran(
+            "a contained first rev-parse",
+            sandbox.wrap(&command(&a, "index-c", &["rev-parse", "HEAD"])),
+        );
+    }
+    timed(
+        &mut facts,
+        "a contained cold",
+        &a,
+        a_box.as_ref(),
+        "index-c",
+    );
+    timed(&mut facts, "b uncontained cold", &b, None, "index-u");
+    timed(&mut facts, "a uncontained warm", &a, None, "index-u");
+    let b_box = boxed(&mut facts, "b", &b);
+    timed(
+        &mut facts,
+        "b contained warm",
+        &b,
+        b_box.as_ref(),
+        "index-c",
+    );
+    let out = std::env::var_os("RUNNER_TEMP").map_or_else(std::env::temp_dir, PathBuf::from);
+    std::fs::write(out.join("w5b-probe.txt"), &facts.0).unwrap();
+    assert!(facts.0.lines().count() > 10);
+}
