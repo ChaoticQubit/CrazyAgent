@@ -1220,10 +1220,11 @@ impl ResearchRunner {
         sandbox = allow_harness(sandbox, &program)?;
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
+        let calls = research_supervisor()?;
         let (sandbox, boundary, listed) = self.keep_held(job, || -> Result<_, RunError> {
             let _setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
             ensure_repository(&root, &tmp)?;
-            add_worktree(&sandbox, &profile, &worktree)?;
+            add_worktree_at(&sandbox, &profile, &worktree, "HEAD", calls)?;
             let mut sandbox = sandbox.confine_to_worktree(&worktree)?;
             let listed = crate::sandbox::hidden_paths::starting(
                 crate::sandbox::hidden_paths::RunKind::Research,
@@ -1245,12 +1246,8 @@ impl ResearchRunner {
                     crate::sandbox::shared_folders::apply(sandbox, &root, &policy.shared_folders)
                         .map_err(|code| RunError::Invalid(code.into()))?;
             }
-            let boundary = InstalledSandbox::install(
-                sandbox.clone(),
-                &profile,
-                LinuxSupervisor::default(),
-                LinuxStrict::Off,
-            )?;
+            let boundary =
+                InstalledSandbox::install(sandbox.clone(), &profile, calls, LinuxStrict::Off)?;
             Ok((sandbox, boundary, listed))
         })??;
         still_held(jobs, job)?;
@@ -1363,7 +1360,7 @@ impl ResearchRunner {
         let mut command = if unconfined {
             sandbox.wrap_unconfined(&launch)?
         } else {
-            sandbox.wrap(&profile, &launch)?
+            boundary.wrap(&launch)?
         };
         command
             .stdin(Stdio::piped())
@@ -1973,10 +1970,11 @@ impl ResearchRunner {
         sandbox = crate::sandbox::shared_folders::apply(sandbox, &folder, &read_only)
             .map_err(|code| RunError::Invalid(code.into()))?;
         let profile = self.state.join("profiles").join(format!("{}.sb", run.name));
-        sandbox.install(&profile)?;
+        let boundary =
+            InstalledSandbox::install(sandbox, &profile, research_supervisor()?, LinuxStrict::Off)?;
         write_private(&agent, &agent.join("prompt.md"), run.prompt.as_bytes())?;
         let words = harness_words(&program)?;
-        let mut command = sandbox.command(&profile, Path::new(&words[0]));
+        let mut command = Command::new(&words[0]);
         command.args(&words[1..]);
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
@@ -1999,6 +1997,8 @@ impl ResearchRunner {
                 (agent.join(EVENTS_LOG), EVENTS_LOG)
             }
         };
+        command.current_dir(&folder);
+        let mut command = boundary.wrap(&command)?;
         command
             .current_dir(&folder)
             .stdin(Stdio::piped())
@@ -2222,6 +2222,12 @@ fn launch_failure(error: &RunError, attempts_max: u32) -> (String, u32) {
             attempts_max,
         ),
         RunError::Uncertain(_) => (crate::sandbox::warden::CLEANUP_UNCERTAIN.to_owned(), 1),
+        #[cfg(target_os = "linux")]
+        RunError::Sandbox(SandboxError::Unavailable(line))
+            if line == crate::sandbox::linux::CONFINED_UNAVAILABLE =>
+        {
+            (line.clone(), 1)
+        }
         RunError::Sandbox(refusal) if crate::sandbox::model_loopback_windows(refusal) => (
             crate::config::plain_problem(crate::sandbox::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS)
                 .unwrap_or(crate::sandbox::MODEL_LOOPBACK_WINDOWS_LINE)
@@ -2934,16 +2940,32 @@ pub(crate) fn ensure_repository(root: &Path, tmp: &Path) -> Result<(), RunError>
 }
 
 /// The owner's line for a research job or onboarding mapping run on a system that runs none
-/// in this version: Linux until research runs under its installed boundary (DEC-205 S6), and
-/// Windows, which cannot load the Seatbelt profile they run under. Team agents read
-/// [`crate::team::team_unavailable`]. Input: the operating system name as
-/// `std::env::consts::OS` gives it. Output: the line, or None where research runs.
+/// in this version: Windows, which cannot load the Seatbelt profile they run under. Linux
+/// runs them under their installed boundary (DEC-205 S6), and a host that cannot hold it
+/// refuses at the launch. Team agents read [`crate::team::team_unavailable`]. Input: the
+/// operating system name as `std::env::consts::OS` gives it. Output: the line, or None.
 pub(crate) fn confined_unavailable(os: &str) -> Option<&'static str> {
-    match os {
-        "linux" => Some("Research is not available on Linux in this version."),
-        "windows" => Some("Team agents and research are not available on Windows in this version."),
-        _ => None,
+    (os == "windows")
+        .then_some("Team agents and research are not available on Windows in this version.")
+}
+
+/// The owner's "Linux call supervisor" choice a research launch installs its boundary with
+/// (DEC-205 S6): on Linux, the setting stored in the recorded engine root's database, read
+/// without writing, or the default where this process records no engine root, whose
+/// launch then holds no supervisor and refuses; elsewhere the default, which only Linux
+/// acts on. No input. Output: the choice, or `Unavailable` when the store cannot be read.
+fn research_supervisor() -> Result<LinuxSupervisor, RunError> {
+    #[cfg(target_os = "linux")]
+    if let Some(root) = crate::tools::engine_root() {
+        return crate::sandbox_settings::stored(root)
+            .map(|settings| settings.linux_supervisor)
+            .map_err(|_| {
+                RunError::Sandbox(SandboxError::Unavailable(
+                    "the owner's sandbox settings could not be read".into(),
+                ))
+            });
     }
+    Ok(LinuxSupervisor::default())
 }
 
 /// Refuses to add a worktree with git under a Seatbelt profile, which Windows cannot load;
@@ -2979,8 +3001,9 @@ pub fn add_worktree_at(
 /// project whose effective config names a hook gets no worktree, refused before the first
 /// git write. The worktree is added without a checkout and made local-only, and the
 /// checkout blanks every filter driver its own effective config names. Takes the sandbox,
-/// profile path, worktree.
-#[cfg(unix)]
+/// profile path, worktree. Only rows call it: every engine add names its supervisor choice
+/// through [`add_worktree_at`].
+#[cfg(all(unix, test))]
 pub(crate) fn add_worktree(
     sandbox: &ProjectSandbox,
     profile: &Path,
