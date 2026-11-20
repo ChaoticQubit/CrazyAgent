@@ -179,7 +179,7 @@ fn surface_side(side: u32, scale: i32, side_max: u32) -> u32 {
         "a largest texture side under one scaled pixel"
     );
     let fitted = side.min(most);
-    assert!(fitted <= side_max && (fitted == side || fitted % scale == 0));
+    assert!(fitted <= side_max && (fitted == side || fitted.is_multiple_of(scale)));
     fitted
 }
 
@@ -303,7 +303,7 @@ mod tests {
             let scale_px = u32::try_from(scale).expect("a positive scale");
             let side = surface_side(16_384 * scale_px, scale, 8192);
             assert!(side <= 8192, "scale {scale}: side {side}");
-            assert_eq!(side % scale_px, 0, "scale {scale}: side {side}");
+            assert!(side.is_multiple_of(scale_px), "scale {scale}: side {side}");
         }
     }
 
