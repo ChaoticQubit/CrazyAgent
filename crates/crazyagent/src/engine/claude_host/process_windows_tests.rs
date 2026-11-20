@@ -166,16 +166,21 @@ fn fixture(folder: &Path, name: &str, bytes: &[u8]) -> PathBuf {
 
 /// V244-WIN-MASTER S4: a Windows Claude Code harness started under custody with no turn is
 /// pumped, reaped and retired: one that exits 0 before any turn ends the run with its exit
-/// code, as on Unix. It used to have no Windows custody at all.
+/// code, as on Unix, every time. Its pipes end a moment before its exit can be read, which
+/// farm run 44724702953 read as `claude_host_disconnected` in each of 3 tries, so the row
+/// runs ten custodies.
 #[test]
 fn a_windows_claude_harness_that_exits_before_a_turn_is_reaped_and_retired() {
-    let watched = run_to_retired(cmd("exit 0"), limits(None, 65_536, 65_536));
-    assert_eq!(
-        fault(&watched).as_deref(),
-        Some("claude_host_native_exit_0")
-    );
-    assert!(watched.group.load(Ordering::Acquire) > 1);
-    assert!(!watched.doubt.load(Ordering::Acquire));
+    for run in 0..10 {
+        let watched = run_to_retired(cmd("exit 0"), limits(None, 65_536, 65_536));
+        assert_eq!(
+            fault(&watched).as_deref(),
+            Some("claude_host_native_exit_0"),
+            "run {run}"
+        );
+        assert!(watched.group.load(Ordering::Acquire) > 1);
+        assert!(!watched.doubt.load(Ordering::Acquire));
+    }
 }
 
 /// Stdout past the custody bound ends a Windows run with `claude_host_stdout_limit`.

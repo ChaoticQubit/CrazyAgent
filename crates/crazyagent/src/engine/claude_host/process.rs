@@ -45,6 +45,10 @@ const POLL_TIME: Duration = Duration::from_millis(5);
 const WAIT_MAX: Duration = Duration::from_millis(250);
 /// The first wait for an exit no pipe reports; each pass doubles it up to [`WAIT_MAX`].
 const EXIT_WAIT_MIN: Duration = Duration::from_millis(1);
+/// How long a harness whose stdout ended before a finished turn has to be reaped before the
+/// run is a disconnect: a pipe ends a moment before its process's exit can be read, on
+/// Windows nearly always, so within this the run ends with the harness's own exit code.
+const EXIT_SETTLE: Duration = Duration::from_millis(250);
 const READ_BATCH: usize = 16;
 /// The longest stream line a host keeps, its newline included; a longer line before the
 /// turn's result retires the host with `claude_host_frame_limit`.
@@ -411,6 +415,7 @@ impl Process {
         assert!(self.status.is_none());
         assert!(self.pending.is_none());
         let mut exit_wait = EXIT_WAIT_MIN;
+        let mut ended: Option<Instant> = None;
         loop {
             #[cfg(test)]
             self.passes.fetch_add(1, Ordering::SeqCst);
@@ -449,6 +454,10 @@ impl Process {
             }
             if self.stdout.is_none() {
                 if self.protocol.state() == State::Idle && self.completed_turns > 0 {
+                    exit_wait = self.wait(exit_wait, false);
+                    continue;
+                }
+                if ended.get_or_insert_with(Instant::now).elapsed() < EXIT_SETTLE {
                     exit_wait = self.wait(exit_wait, false);
                     continue;
                 }
