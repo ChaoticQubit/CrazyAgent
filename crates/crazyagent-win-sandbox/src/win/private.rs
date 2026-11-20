@@ -52,15 +52,15 @@ pub fn user_sid() -> io::Result<Vec<u8>> {
 /// delete, so the folder cannot be renamed while it is held. Input: the absolute path.
 /// Output: the held folder, or why it is not private.
 pub fn dir(path: &Path) -> io::Result<File> {
-    made_dir(path, None)
+    made_dir(path, None, false)
 }
 
 /// Makes the private folder at `path` as [`dir`] does, but only when nothing is there yet:
 /// an entry already at the path is `AlreadyExists` and is never adopted, the twin of a Unix
 /// `mkdirat` (rv-sec3 #716 C2). Input: the absolute path. Output: the held new folder, or
 /// the error.
-pub fn new_dir(_path: &Path) -> io::Result<File> {
-    Err(io::ErrorKind::Unsupported.into())
+pub fn new_dir(path: &Path) -> io::Result<File> {
+    made_dir(path, None, true)
 }
 
 /// Opens the private folder at `path` as [`dir`] holds one, but never creates it: a missing
@@ -87,21 +87,23 @@ pub fn open_dir(path: &Path) -> io::Result<File> {
 /// build's weaker label included, and so do the files in it (V244-WIN-STORE-LABEL-NX).
 /// Inputs: the absolute path and the store. Output: the held folder, or why it is not private.
 pub fn store_dir(path: &Path, store: Store) -> io::Result<File> {
-    made_dir(path, Some(store))
+    made_dir(path, Some(store), false)
 }
 
 /// The work of [`dir`] and [`store_dir`]: creates the folder when missing, with the store's
 /// label when one is named, then opens it. A store folder is judged by
 /// [`judge_store_before_label`] and given its label before the full judge. Inputs: the
-/// absolute path and the store, if any. Output: the held folder, or why it is not private.
-fn made_dir(path: &Path, store: Option<Store>) -> io::Result<File> {
+/// absolute path, the store, if any, and whether an entry already there is refused. Output:
+/// the held folder, or why it is not private.
+fn made_dir(path: &Path, store: Option<Store>, fresh: bool) -> io::Result<File> {
+    assert!(!fresh || store.is_none());
     let user = user_sid()?;
     let name = wide_path(path)?;
     let mut planned = Planned::new(&user, true, store.map(label_list))?;
     let attributes = planned.attributes();
     if unsafe { CreateDirectoryW(name.as_ptr(), &attributes) } == 0 {
         let error = last_error();
-        if error != ERROR_ALREADY_EXISTS {
+        if fresh || error != ERROR_ALREADY_EXISTS {
             return Err(code(error));
         }
     }
