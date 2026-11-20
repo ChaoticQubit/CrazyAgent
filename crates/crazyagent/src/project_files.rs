@@ -15,18 +15,21 @@ const POLL: Duration = Duration::from_millis(2);
 const CONFIG_BYTES_MAX: u64 = 1024 * 1024;
 /// The most entries [`redirected`] looks through in one `.git` folder before it refuses it.
 const GIT_ENTRIES_MAX: usize = 100_000;
-/// What [`list`] asks git for: tracked and unignored untracked files on Unix, tracked files
-/// only on Windows (the declined path), so owner git walks no folder an agent made there.
+/// What [`list`] asks git in owner git's container for, and git on Unix: tracked and
+/// unignored untracked files.
+const LISTED_ALL: &[&str] = &[
+    "ls-files",
+    "-z",
+    "--cached",
+    "--others",
+    "--exclude-standard",
+];
+/// What [`list`] asks git as the owner for: [`LISTED_ALL`] on Unix, tracked files only on
+/// Windows (the declined path), so owner git walks no folder an agent made there.
 const LISTED: &[&str] = if cfg!(windows) {
     &["ls-files", "-z", "--cached"]
 } else {
-    &[
-        "ls-files",
-        "-z",
-        "--cached",
-        "--others",
-        "--exclude-standard",
-    ]
+    LISTED_ALL
 };
 
 fn failure(code: &str) -> EngineError {
@@ -47,15 +50,16 @@ pub(crate) fn validate(query: &str, limit: u16) -> Result<(), EngineError> {
 }
 
 /// Lists, for `@` tags through [`owner_git`], files whose path holds the query in any case:
-/// [`LISTED`], tracked and unignored untracked ones on Unix, tracked only on Windows (the
+/// [`LISTED_ALL`] on Unix and in owner git's container, [`LISTED`] for Windows owner git (the
 /// declined path); never `.git`, a link or a file through a link out of the folder. Inputs:
-/// folder, query, limit, stop. Output: paths by the limit, 48 KiB or `stop` (the `.git` walk
-/// first is bounded by entries, not time), or a `project_files_*` code.
+/// folder, query, limit, stop, owner git's container or none. Output: paths by the limit, 48 KiB
+/// or `stop` (the `.git` walk first is bounded by entries, not time), or a `project_files_*` code.
 pub(crate) fn list(
     folder: &Path,
     query: &str,
     limit: u16,
     stop: Instant,
+    contained: Option<&crate::sandbox::OwnerGit>,
 ) -> Result<Vec<String>, EngineError> {
     use std::process::Stdio;
     validate(query, limit)?;
@@ -66,13 +70,35 @@ pub(crate) fn list(
         .ok()
         .filter(|root| root.is_dir())
         .ok_or_else(|| failure("project_files_folder_missing"))?;
-    let mut command = owner_git(&root).map_err(|missing| match missing {
+    let git = match contained {
+        Some(owner) => Some(owner.git().to_path_buf()),
+        None => engine_git(),
+    };
+    let mut command = owner_git(&root, git).map_err(|missing| match missing {
         NoOwnerGit::Unavailable => failure("project_files_git_failed"),
         NoOwnerGit::Absent | NoOwnerGit::Refused => failure("project_files_no_repository"),
     })?;
-    command.args(LISTED).stdout(Stdio::piped());
+    command.args(if contained.is_some() {
+        LISTED_ALL
+    } else {
+        LISTED
+    });
     let git_failed = |_| failure("project_files_git_failed");
-    let mut child = crate::spawn_gate::spawn(&mut command).map_err(git_failed)?;
+    let mut wrapped;
+    let command = match contained {
+        None => &mut command,
+        Some(owner) => {
+            wrapped = owner
+                .wrap(&command)
+                .map_err(|_| failure("project_files_git_failed"))?;
+            &mut wrapped
+        }
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = crate::spawn_gate::spawn(command).map_err(git_failed)?;
     let output = child
         .stdout
         .take()
@@ -111,12 +137,29 @@ pub(crate) enum NoOwnerGit {
     Unavailable,
 }
 
-/// The engine's git for a canonical project folder, run as the owner: setup's git on Unix, the
-/// engine's PATH or Git for Windows on Windows with PATH and SystemRoot kept, under no outside
-/// config, hooks, fsmonitor or excludes file, with `.git` as repository and common folder so a
-/// planted `commondir` redirects nothing. Input: the folder. Output: the command, to which the
-/// caller adds the subcommand and stdout, or [`NoOwnerGit`].
-pub(crate) fn owner_git(root: &Path) -> Result<std::process::Command, NoOwnerGit> {
+/// The engine's own git program, the one [`owner_git`] runs for a project git outside owner
+/// git's container: setup's git on Unix, the engine's PATH or Git for Windows on Windows.
+/// Output: the program, or none when Windows finds no git.
+pub(crate) fn engine_git() -> Option<std::path::PathBuf> {
+    #[cfg(unix)]
+    {
+        Some(crate::research::runner::setup_git().to_path_buf())
+    }
+    #[cfg(not(unix))]
+    {
+        crate::github::git_program(std::env::var_os("PATH").as_deref())
+    }
+}
+
+/// A project git for a canonical project folder: `git` ([`engine_git`] or owner git's) with
+/// PATH and SystemRoot kept on Windows, under no outside config, hooks, fsmonitor or excludes
+/// file, `.git` as repository and common folder so a planted `commondir` redirects nothing.
+/// Inputs: the folder and the program or none. Output: the command, to which the caller adds
+/// the subcommand and stdout, or [`NoOwnerGit`].
+pub(crate) fn owner_git(
+    root: &Path,
+    git: Option<std::path::PathBuf>,
+) -> Result<std::process::Command, NoOwnerGit> {
     use std::process::{Command, Stdio};
     let git_dir = root.join(".git");
     match std::fs::symlink_metadata(&git_dir) {
@@ -132,10 +175,6 @@ pub(crate) fn owner_git(root: &Path) -> Result<std::process::Command, NoOwnerGit
             step(&git_dir);
         }
     });
-    #[cfg(unix)]
-    let git = Some(crate::research::runner::setup_git().to_path_buf());
-    #[cfg(not(unix))]
-    let git = crate::github::git_program(std::env::var_os("PATH").as_deref());
     let Some(git) = git else {
         return Err(NoOwnerGit::Unavailable);
     };
@@ -381,7 +420,7 @@ fn listed_with_commondir_planted_after_check(
             std::fs::write(git_dir.join("commondir"), &common).unwrap();
         }));
     });
-    let listed = list(repo, "", FILES_MAX, Instant::now() + LISTING_TIME);
+    let listed = list(repo, "", FILES_MAX, Instant::now() + LISTING_TIME, None);
     AFTER_CHECK.with(|step| *step.borrow_mut() = None);
     listed
 }
@@ -478,7 +517,7 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let repo = project(&scratch.path().canonicalize().unwrap());
         assert_eq!(
-            sorted(list(&repo, "", FILES_MAX, later()).unwrap()),
+            sorted(list(&repo, "", FILES_MAX, later(), None).unwrap()),
             [
                 ".gitignore",
                 "README.md",
@@ -494,19 +533,19 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let repo = project(&scratch.path().canonicalize().unwrap());
         assert_eq!(
-            sorted(list(&repo, "SRC/", FILES_MAX, later()).unwrap()),
+            sorted(list(&repo, "SRC/", FILES_MAX, later(), None).unwrap()),
             ["src/Main.rs", "src/lib.rs"]
         );
         assert_eq!(
-            list(&repo, "main", FILES_MAX, later()).unwrap(),
+            list(&repo, "main", FILES_MAX, later(), None).unwrap(),
             ["src/Main.rs"]
         );
         assert_eq!(
-            list(&repo, "secret", FILES_MAX, later()).unwrap(),
+            list(&repo, "secret", FILES_MAX, later(), None).unwrap(),
             Vec::<String>::new()
         );
-        assert_eq!(list(&repo, "", 2, later()).unwrap().len(), 2);
-        assert_eq!(list(&repo, "", 1, later()).unwrap().len(), 1);
+        assert_eq!(list(&repo, "", 2, later(), None).unwrap().len(), 2);
+        assert_eq!(list(&repo, "", 1, later(), None).unwrap().len(), 1);
     }
 
     /// A listed path with a part a case-insensitive HFS+ volume opens as `.git`, such as
@@ -530,7 +569,7 @@ mod tests {
         let plain = place.join("plain");
         fs::create_dir(&plain).unwrap();
         fs::write(plain.join("a.txt"), "a").unwrap();
-        let code = |folder: &Path| list(folder, "", FILES_MAX, later()).unwrap_err().0;
+        let code = |folder: &Path| list(folder, "", FILES_MAX, later(), None).unwrap_err().0;
         assert_eq!(code(&plain), "project_files_no_repository");
         fs::write(plain.join(".git"), "gitdir: /elsewhere\n").unwrap();
         assert_eq!(
@@ -611,6 +650,114 @@ mod windows_tests {
         );
     }
 
+    /// Makes a repository with one commit of `README.md` and `.gitignore`, an untracked
+    /// `notes.txt` and an ignored `debug.log`, owned by the runner user, and installs owner
+    /// git for it. Input: the temp folder. Output: the repository folder and its owner git.
+    fn contained_repository(place: &Path) -> (std::path::PathBuf, crate::sandbox::OwnerGit) {
+        use crate::sandbox::windows::owner_git::farm;
+        let (repo, home) = (place.join("repo"), place.join("home"));
+        for folder in [&repo, &home] {
+            fs::create_dir(folder).unwrap();
+        }
+        git(&home, &repo, &["init", "-q", "--template="]);
+        for (path, text) in [
+            ("README.md", "readme"),
+            ("notes.txt", "untracked"),
+            ("debug.log", "ignored"),
+            (".gitignore", "*.log\n"),
+        ] {
+            fs::write(repo.join(path), text).unwrap();
+        }
+        git(&home, &repo, &["add", "README.md", ".gitignore"]);
+        git(
+            &home,
+            &repo,
+            &[
+                "-c",
+                "user.name=Owner",
+                "-c",
+                "user.email=owner@example.invalid",
+                "commit",
+                "-q",
+                "--no-gpg-sign",
+                "-m",
+                "start",
+            ],
+        );
+        farm::own(&repo);
+        let program = crate::github::git_program(std::env::var_os("PATH").as_deref()).unwrap();
+        let owner = farm::installed(place, &repo, &program);
+        (repo, owner)
+    }
+
+    #[test]
+    #[ignore = "needs unc-share-setup.ps1's shares and device entries on an elevated runner (test farm)"]
+    fn a_contained_windows_list_opens_no_share_a_git_folder_names_after_the_check() {
+        use crate::sandbox::windows::owner_git::farm;
+        let sessions = farm::hold();
+        let mut reached = Vec::new();
+        for (shape, _) in farm::SHAPES {
+            let place = tempfile::tempdir().unwrap();
+            let (repo, owner) = contained_repository(place.path());
+            let before = list(
+                &repo,
+                "",
+                FILES_MAX,
+                Instant::now() + LISTING_TIME,
+                Some(&owner),
+            );
+            assert!(
+                before
+                    .as_ref()
+                    .is_ok_and(|listed| listed.iter().any(|path| path == "README.md")),
+                "{shape}: a contained list before the plant: {before:?}"
+            );
+            farm::reset_sessions(&sessions);
+            if shape == "nested" {
+                farm::plant(&repo, shape);
+            } else {
+                let planted = repo.clone();
+                AFTER_CHECK.with(|step| {
+                    *step.borrow_mut() =
+                        Some(Box::new(move |_: &Path| farm::plant(&planted, shape)));
+                });
+            }
+            let stop = Instant::now() + LISTING_TIME;
+            let listed = list(&repo, "", FILES_MAX, stop, Some(&owner));
+            AFTER_CHECK.with(|step| *step.borrow_mut() = None);
+            if farm::server_session(&sessions) {
+                reached.push(format!("{shape} list: {listed:?}"));
+            }
+        }
+        assert!(
+            reached.is_empty(),
+            "a server session after a contained list: {}",
+            reached.join(", ")
+        );
+    }
+
+    #[test]
+    #[ignore = "needs unc-share-setup.ps1's device entries on an elevated runner (test farm)"]
+    fn a_contained_windows_list_names_new_files_and_leaves_out_ignored_ones() {
+        let place = tempfile::tempdir().unwrap();
+        let (repo, owner) = contained_repository(place.path());
+        let stop = Instant::now() + LISTING_TIME;
+        let mut listed = list(&repo, "", FILES_MAX, stop, Some(&owner)).unwrap();
+        listed.sort();
+        assert_eq!(
+            listed,
+            [".gitignore", "README.md", "notes.txt"],
+            "tracked and unignored new files, as the Unix list names them"
+        );
+        let mut declined = list(&repo, "", FILES_MAX, stop, None).unwrap();
+        declined.sort();
+        assert_eq!(
+            declined,
+            [".gitignore", "README.md"],
+            "the declined list stays tracked-only"
+        );
+    }
+
     #[test]
     fn the_declined_windows_list_names_its_tracked_files_only_and_none_through_a_junction() {
         let place = tempfile::tempdir().unwrap();
@@ -638,7 +785,7 @@ mod windows_tests {
         fs::remove_dir_all(repo.join("out")).unwrap();
         junction(&repo.join("out"), &outside);
         let stop = Instant::now() + LISTING_TIME;
-        let mut listed = list(&repo, "", FILES_MAX, stop).unwrap();
+        let mut listed = list(&repo, "", FILES_MAX, stop, None).unwrap();
         listed.sort();
         assert_eq!(
             listed,
@@ -646,12 +793,12 @@ mod windows_tests {
             "tracked files only, and no tracked path whose folder became a junction"
         );
         assert_eq!(
-            list(&repo, "lib", FILES_MAX, stop).unwrap(),
+            list(&repo, "lib", FILES_MAX, stop, None).unwrap(),
             ["src/Lib.rs"],
             "the query matches in any case"
         );
         assert_eq!(
-            list(&outside, "", FILES_MAX, stop).unwrap_err().0,
+            list(&outside, "", FILES_MAX, stop, None).unwrap_err().0,
             "project_files_no_repository"
         );
     }
@@ -676,7 +823,7 @@ mod windows_tests {
         let (git_dir, stop) = (repo.join(".git"), Instant::now() + LISTING_TIME);
         fs::write(git_dir.join("commondir"), r"\\127.0.0.1\x").unwrap();
         assert_eq!(
-            list(&repo, "", FILES_MAX, stop).unwrap_err().0,
+            list(&repo, "", FILES_MAX, stop, None).unwrap_err().0,
             "project_files_no_repository",
             "a commondir file is refused before git runs"
         );
@@ -689,13 +836,16 @@ mod windows_tests {
         ] {
             fs::write(&config, format!("{kept}{section}")).unwrap();
             assert_eq!(
-                list(&repo, "", FILES_MAX, stop).unwrap_err().0,
+                list(&repo, "", FILES_MAX, stop, None).unwrap_err().0,
                 "project_files_no_repository",
                 "{section}"
             );
         }
         fs::write(&config, &kept).unwrap();
-        assert_eq!(list(&repo, "", FILES_MAX, stop).unwrap(), ["README.md"]);
+        assert_eq!(
+            list(&repo, "", FILES_MAX, stop, None).unwrap(),
+            ["README.md"]
+        );
     }
 
     #[test]
@@ -741,7 +891,10 @@ mod windows_tests {
             );
         }
         let stop = Instant::now() + LISTING_TIME;
-        assert_eq!(list(&repo, "", FILES_MAX, stop).unwrap(), ["empty.txt"]);
+        assert_eq!(
+            list(&repo, "", FILES_MAX, stop, None).unwrap(),
+            ["empty.txt"]
+        );
     }
 
     /// Makes a repository with one commit, packed refs and an index, the `.git` an owner's
@@ -822,7 +975,7 @@ mod windows_tests {
             fs::write(info.join(name), text).unwrap();
             let stop = Instant::now() + LISTING_TIME;
             judged(
-                list(&repo, "", FILES_MAX, stop),
+                list(&repo, "", FILES_MAX, stop, None),
                 &format!("{name} {text:?}"),
             );
         }
@@ -849,7 +1002,7 @@ mod windows_tests {
             fs::create_dir(&outside).unwrap();
             linked(&repo.join(".git"), entry, &outside);
             let stop = Instant::now() + LISTING_TIME;
-            judged(list(&repo, "", FILES_MAX, stop), entry);
+            judged(list(&repo, "", FILES_MAX, stop, None), entry);
         }
     }
 
@@ -864,7 +1017,7 @@ mod windows_tests {
             fs::create_dir(&outside).unwrap();
             linked(&git_dir, entry, &outside);
             let stop = Instant::now() + LISTING_TIME;
-            judged(list(&repo, "", FILES_MAX, stop), entry);
+            judged(list(&repo, "", FILES_MAX, stop, None), entry);
         }
     }
 
@@ -873,7 +1026,10 @@ mod windows_tests {
         let place = tempfile::tempdir().unwrap();
         let repo = committed(place.path());
         let stop = Instant::now() + LISTING_TIME;
-        assert_eq!(list(&repo, "", FILES_MAX, stop).unwrap(), ["README.md"]);
+        assert_eq!(
+            list(&repo, "", FILES_MAX, stop, None).unwrap(),
+            ["README.md"]
+        );
         assert!(!redirected(&repo.join(".git")));
     }
 
@@ -887,11 +1043,14 @@ mod windows_tests {
         fs::write(nested.join(".git"), "gitdir: \\\\127.0.0.1\\x\\nested\n").unwrap();
         let stop = Instant::now() + LISTING_TIME;
         assert_eq!(
-            list(&repo, "", FILES_MAX, stop).unwrap(),
+            list(&repo, "", FILES_MAX, stop, None).unwrap(),
             ["README.md"],
             "tracked only: no notes.txt, nothing under sub"
         );
-        assert_eq!(list(&repo, "read", FILES_MAX, stop).unwrap(), ["README.md"]);
+        assert_eq!(
+            list(&repo, "read", FILES_MAX, stop, None).unwrap(),
+            ["README.md"]
+        );
     }
 
     #[test]

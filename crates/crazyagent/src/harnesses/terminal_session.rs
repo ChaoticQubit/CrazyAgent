@@ -353,11 +353,11 @@ impl TerminalSession {
             .as_ref()
             .is_some_and(|installed| installed.native().is_some());
         #[cfg(target_os = "macos")]
-        let kept_freeze = !request.unconfined && !native && freeze_record.is_some();
+        let kept_freeze = !request.boundary.is_unconfined() && !native && freeze_record.is_some();
         #[cfg(not(target_os = "macos"))]
         let kept_freeze = false;
         #[cfg(target_os = "macos")]
-        let command = if request.unconfined {
+        let command = if request.boundary.is_unconfined() {
             assert_ne!(command.argv[0], crate::sandbox::SANDBOX_EXEC);
             command
         } else {
@@ -435,10 +435,15 @@ impl TerminalSession {
             group_ended: false,
             uncertain: false,
             #[cfg(target_os = "macos")]
-            unconfined: request.unconfined,
+            unconfined: request.boundary.is_unconfined(),
             #[cfg(target_os = "macos")]
             unkept,
-            lineage: follower_of(pane.pid, unkept, request.unconfined, Some(token.clone())),
+            lineage: follower_of(
+                pane.pid,
+                unkept,
+                request.boundary.is_unconfined(),
+                Some(token.clone()),
+            ),
             record: PaneRecord::new(
                 &command.transcript,
                 &command.cwd,

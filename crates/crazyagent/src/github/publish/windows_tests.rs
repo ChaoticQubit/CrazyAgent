@@ -1,4 +1,4 @@
-use super::{clone, git_safe, project_git};
+use super::{PublishGit, clone, git_safe, project_git};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -221,6 +221,7 @@ fn ide_git(git: &Path, project: &Path, home: &Path, path: &str) -> Command {
 fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
     let engine_path = std::env::var_os("PATH").unwrap();
     let git = clone::git_program(Some(engine_path.as_os_str())).expect("git on the PATH");
+    let publish_git = PublishGit::plain(git.clone());
     let scratch = tempfile::tempdir().unwrap();
     let elsewhere = std::env::var_os("RUNNER_TEMP")
         .map(PathBuf::from)
@@ -289,7 +290,7 @@ fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
         let first = &commits[0].1;
         check(
             format!("{at} publish update-ref"),
-            crate::spawn_gate::collected(project_git(&git, home, project).args([
+            crate::spawn_gate::collected(project_git(&publish_git, home, project).args([
                 "update-ref",
                 "-m",
                 "row",
@@ -315,7 +316,7 @@ fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
         check(
             format!("{at} commit"),
             crate::spawn_gate::collected(
-                project_git(&git, home, project)
+                project_git(&publish_git, home, project)
                     .args([
                         "-c",
                         "user.name=Owner",
@@ -331,7 +332,7 @@ fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
         for (armor, commit) in commits {
             check(
                 format!("{at} {armor} signature check"),
-                crate::spawn_gate::collected(project_git(&git, home, project).args([
+                crate::spawn_gate::collected(project_git(&publish_git, home, project).args([
                     "log",
                     "--show-signature",
                     "-1",
@@ -345,7 +346,7 @@ fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
             check(
                 format!("{at} {armor} signature check with TEMP"),
                 crate::spawn_gate::collected(
-                    with_temp(&mut project_git(&git, home, project)).args([
+                    with_temp(&mut project_git(&publish_git, home, project)).args([
                         "log",
                         "--show-signature",
                         "-1",
