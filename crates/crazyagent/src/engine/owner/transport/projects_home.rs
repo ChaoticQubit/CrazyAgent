@@ -883,7 +883,7 @@ async fn files(
         .unwrap_or(now)
         .min(now + crate::project_files::LISTING_TIME);
     let listed = tokio::task::spawn_blocking(move || {
-        crate::project_files::list(&folder, &query, limit, stop)
+        crate::project_files::list(&folder, &query, limit, stop, None)
     })
     .await
     .map_err(|_| failure("project_files_interrupted"))?;

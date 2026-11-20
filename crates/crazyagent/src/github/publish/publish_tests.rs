@@ -80,7 +80,12 @@ impl Fixture {
     }
 
     fn inspect(&self) -> Result<GitHubLocal, EngineError> {
-        inspect(Path::new(GIT), self.home.path(), &self.path(), HOST)
+        inspect(
+            &PublishGit::plain(GIT.into()),
+            self.home.path(),
+            &self.path(),
+            HOST,
+        )
     }
 
     fn prepare(
@@ -92,7 +97,7 @@ impl Fixture {
     ) -> Result<Vec<String>, EngineError> {
         let approved: Vec<String> = approved.iter().map(|line| (*line).to_owned()).collect();
         prepare(
-            Path::new(GIT),
+            &PublishGit::plain(GIT.into()),
             self.home.path(),
             &self.path(),
             local,
@@ -110,13 +115,18 @@ impl Fixture {
     }
 
     fn scan(&self, history: GitHubHistory) -> Result<GitHubSecretScan, EngineError> {
-        secret_findings(Path::new(GIT), self.home.path(), &self.path(), history)
+        secret_findings(
+            &PublishGit::plain(GIT.into()),
+            self.home.path(),
+            &self.path(),
+            history,
+        )
     }
 
     fn commit(&self, written: &[&str]) -> Result<GitHubCommitted, EngineError> {
         let written: Vec<String> = written.iter().map(|path| (*path).to_owned()).collect();
         commit(
-            Path::new(GIT),
+            &PublishGit::plain(GIT.into()),
             self.home.path(),
             &self.path(),
             &written,
@@ -260,7 +270,7 @@ fn inspect_reads_the_repository_state_and_refuses_a_remote_or_a_detached_head() 
     not_folder.write("plain.txt", "x\n");
     assert_eq!(
         inspect(
-            Path::new(GIT),
+            &PublishGit::plain(GIT.into()),
             not_folder.home.path(),
             &not_folder.path().join("plain.txt"),
             HOST
@@ -596,7 +606,15 @@ fn owner_history_is_scanned_from_heads_tree_and_the_scan_is_bounded() {
     );
     let home = fixture.home.path();
     let within = |history, files, bytes| {
-        findings_within(Path::new(GIT), home, &project, history, files, bytes, LIMIT)
+        findings_within(
+            &PublishGit::plain(GIT.into()),
+            home,
+            &project,
+            history,
+            files,
+            bytes,
+            LIMIT,
+        )
     };
     for (history, files, bytes) in [
         (GitHubHistory::Owner, 1, 1 << 20),
@@ -722,7 +740,14 @@ fn the_author_is_the_owners_git_identity_else_the_github_noreply_address() {
     let project = fixture.path();
     git(&["init", "-q", "-b", "main"], &project);
     let owner_home = tempfile::tempdir().unwrap();
-    let author = || configured_author(Path::new(GIT), owner_home.path(), &project);
+    let author = || {
+        configured_author(
+            &PublishGit::plain(GIT.into()),
+            owner_home.path(),
+            fixture.home.path(),
+            &project,
+        )
+    };
     assert_eq!(author(), None);
     std::fs::write(
         owner_home.path().join(".gitconfig"),
@@ -803,7 +828,7 @@ fn a_fifo_in_the_project_or_its_config_never_holds_publish() {
     let started = Instant::now();
     assert_eq!(
         findings_within(
-            Path::new(GIT),
+            &PublishGit::plain(GIT.into()),
             ignore.home.path(),
             &ignore.path(),
             GitHubHistory::Empty,
@@ -827,9 +852,15 @@ fn a_fifo_in_the_project_or_its_config_never_holds_publish() {
     std::fs::write(&config, text).unwrap();
     let started = Instant::now();
     assert_eq!(
-        inspect_within(Path::new(GIT), included.home.path(), &project, HOST, LIMIT)
-            .unwrap_err()
-            .0,
+        inspect_within(
+            &PublishGit::plain(GIT.into()),
+            included.home.path(),
+            &project,
+            HOST,
+            LIMIT
+        )
+        .unwrap_err()
+        .0,
         "github_publish_failed"
     );
     assert!(started.elapsed() < Duration::from_secs(30));
@@ -1024,7 +1055,7 @@ fn a_status_publish_cannot_count_is_refused_before_anything_is_committed() {
     let written = owned.prepare(&local, true, false, &[]).unwrap();
     assert_eq!(written, [".gitignore"]);
     let refused = commit_within(
-        Path::new(GIT),
+        &PublishGit::plain(GIT.into()),
         owned.home.path(),
         &project,
         &written,
@@ -1035,7 +1066,7 @@ fn a_status_publish_cannot_count_is_refused_before_anything_is_committed() {
     assert!(owned.lines(&["diff", "--cached", "--name-only"]).is_empty());
     assert_eq!(refused.unwrap_err().0, "github_publish_too_large");
     let committed = commit_within(
-        Path::new(GIT),
+        &PublishGit::plain(GIT.into()),
         owned.home.path(),
         &project,
         &written,
@@ -1057,7 +1088,7 @@ fn the_file_rules_turned_off_leave_the_security_policy_and_dependabot_unwritten(
         public.write("Cargo.toml", "[package]\n");
         let local = public.inspect().unwrap();
         let paths = prepare(
-            Path::new(GIT),
+            &PublishGit::plain(GIT.into()),
             public.home.path(),
             &public.path(),
             &local,

@@ -397,3 +397,81 @@ fn a_granted_home_passes_and_a_low_integrity_process_cannot_change_it() {
     assert!(!created.exists());
     assert_eq!(std::fs::read_to_string(&written).unwrap().trim(), "boxed");
 }
+
+/// Makes a junction at `link` to `target`, or points an existing one at `target` instead.
+/// Inputs: the link and the target.
+fn junction(link: &Path, target: &Path) {
+    if std::fs::symlink_metadata(link).is_ok() {
+        run("cmd", &["/C", "rmdir", link.to_str().unwrap()]);
+    }
+    run(
+        "cmd",
+        &[
+            "/C",
+            "mklink",
+            "/J",
+            link.to_str().unwrap(),
+            target.to_str().unwrap(),
+        ],
+    );
+}
+
+/// V244-WIN-MASTER S9a r3 (CodeRabbit CR-1252 2): H1 judges the home a launch holds, not the
+/// folder its path reaches later. A home spelled through a junction is held while the
+/// junction points at a folder open to users, the junction is then pointed at a private
+/// folder, and the held home is still refused as `launch_account_home_unsafe`.
+#[test]
+fn a_held_home_is_judged_as_held_after_a_junction_above_it_moves() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = crate::sandbox::canonical(temp.path()).unwrap();
+    let (first, second) = (base.join("first"), base.join("second"));
+    for parent in [&first, &second] {
+        drop(private::dir(parent).unwrap());
+        drop(private::dir(&parent.join("home")).unwrap());
+    }
+    run(
+        "icacls",
+        &[
+            first.join("home").to_str().unwrap(),
+            "/grant",
+            "*S-1-5-32-545:(OI)(CI)(RX)",
+        ],
+    );
+    let alias = base.join("alias");
+    junction(&alias, &first);
+    let home = alias.join("home");
+    let held = super::hold_home(&home).unwrap();
+    junction(&alias, &second);
+    validate_home(&home).unwrap();
+    assert_eq!(
+        super::validate_held_for(&home, &held, None).unwrap_err().0,
+        "launch_account_home_unsafe"
+    );
+}
+
+/// V244-WIN-MASTER S9a r3 (CodeRabbit CR-1252 2): the owner's `.codex` stays a forbidden
+/// home when it is held through a junction that then points elsewhere, since H1 compares
+/// the held folder itself with the profile's folders, not the name its path reaches now.
+#[test]
+fn a_held_profile_folder_stays_forbidden_after_a_junction_above_it_moves() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = crate::sandbox::canonical(temp.path()).unwrap();
+    let owner = base.join("profile");
+    let other = base.join("other");
+    for folder in [&owner, &other] {
+        drop(private::dir(folder).unwrap());
+        drop(private::dir(&folder.join(".codex")).unwrap());
+    }
+    let alias = base.join("alias");
+    junction(&alias, &owner);
+    let home = alias.join(".codex");
+    let held = super::hold_home(&home).unwrap();
+    junction(&alias, &other);
+    validate_home_for(&home, Some(&owner)).unwrap();
+    assert_eq!(
+        super::validate_held_for(&home, &held, Some(&owner))
+            .unwrap_err()
+            .0,
+        "launch_account_home_forbidden"
+    );
+}
