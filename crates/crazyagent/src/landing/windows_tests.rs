@@ -675,8 +675,9 @@ fn lowered(paths: &[PathBuf]) -> Vec<String> {
 /// folder of the data root and its temp folder in the step folder, plus its kind's target: the
 /// object store for an Objects step, the work tree for a WorkTree step, nothing for an Index
 /// step. No kind writes the worktree's git folder itself, the common git folder or another
-/// lease's places, and every kind reads the work tree, the common git folder and git's marked
-/// install folder.
+/// lease's places, and every kind reads the work tree, the object store and git's marked install
+/// folder but no other part of the common git folder, so a junction an agent toggles after the
+/// engine's walk reaches no config, hook or ref (rv-sec3 RULING 17:42 R2).
 #[test]
 fn a_windows_step_writes_only_its_step_folder_its_own_home_and_its_kind_target() {
     let place = place();
@@ -722,7 +723,15 @@ fn a_windows_step_writes_only_its_step_folder_its_own_home_and_its_kind_target()
             .iter()
             .map(|root| root.to_lowercase())
             .collect();
-        for read in [&ws.worktree, &common, &places.git_root] {
+        let secret = common.join("config").to_str().unwrap().to_lowercase();
+        assert!(
+            !reads
+                .iter()
+                .chain(&profile.write_roots)
+                .any(|root| secret.starts_with(&root.to_lowercase())),
+            "no step reaches the common git folder beyond its objects (RULING 17:42 R2)"
+        );
+        for read in [&ws.worktree, &common.join("objects"), &places.git_root] {
             let read = read.to_str().unwrap().to_lowercase();
             assert!(
                 reads.contains(&read)
@@ -859,4 +868,79 @@ fn a_windows_step_profile_that_is_a_link_or_names_another_account_is_refused() {
     .unwrap();
     assert!(granted.status.success());
     assert_eq!(code(install()), "changes_git_unsupported");
+}
+
+/// Makes a junction at `link` to `target` with the runner's `mklink /J`. Inputs: the link and
+/// its target. Output: none; a failed `mklink` fails the row.
+fn junction(link: &Path, target: &Path) {
+    let made = crate::spawn_gate::collected(
+        Command::new("cmd")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .stdin(Stdio::null()),
+    )
+    .unwrap();
+    assert!(made.status.success(), "mklink /J {link:?}");
+}
+
+/// W5b2b, rv-sec3 RULING 17:42 C3 condition A: before a step scans the work tree, the engine
+/// walks it without following anything and refuses at the first reparse point, so a junction
+/// an agent planted to the common git folder, one nested two folders deep, or a folder symlink
+/// stops the step with `changes_workspace_invalid`, while the plain work tree with its own
+/// `.git` file passes.
+#[test]
+fn a_windows_work_tree_holding_a_junction_or_a_folder_symlink_is_refused_before_a_scan() {
+    let place = place();
+    let ws = &place.workspace;
+    let common = ws.repository.join(".git");
+    assert!(ws.worktree.join(".git").is_file());
+    assert_eq!(code(super::step_windows::reparse_free(&ws.worktree)), "ok");
+    let planted = ws.worktree.join("jn-git");
+    junction(&planted, &common);
+    assert_eq!(
+        code(super::step_windows::reparse_free(&ws.worktree)),
+        "changes_workspace_invalid"
+    );
+    std::fs::remove_dir(&planted).unwrap();
+    assert_eq!(code(super::step_windows::reparse_free(&ws.worktree)), "ok");
+    let deep = ws.worktree.join("one").join("two");
+    std::fs::create_dir_all(&deep).unwrap();
+    junction(&deep.join("jn"), &common);
+    assert_eq!(
+        code(super::step_windows::reparse_free(&ws.worktree)),
+        "changes_workspace_invalid"
+    );
+    std::fs::remove_dir(deep.join("jn")).unwrap();
+    std::os::windows::fs::symlink_dir(&common, ws.worktree.join("ln-git")).unwrap();
+    assert_eq!(
+        code(super::step_windows::reparse_free(&ws.worktree)),
+        "changes_workspace_invalid"
+    );
+    std::fs::remove_dir(ws.worktree.join("ln-git")).unwrap();
+    assert_eq!(code(super::step_windows::reparse_free(&ws.worktree)), "ok");
+}
+
+/// W5b2b, rv-sec3 RULING 17:42 C3 condition A: the walk itself is bounded and held to a plain
+/// root. A work tree that is a junction is refused with `changes_workspace_invalid`, and a work
+/// tree deeper than the walk's depth bound is refused with `changes_workspace_capacity`.
+#[test]
+fn a_windows_work_tree_walk_refuses_a_junction_root_and_stops_at_its_bound() {
+    let place = place();
+    let ws = &place.workspace;
+    let elsewhere = place.home.join("root-link");
+    junction(&elsewhere, &ws.worktree);
+    assert_eq!(
+        code(super::step_windows::reparse_free(&elsewhere)),
+        "changes_workspace_invalid"
+    );
+    let mut deep = ws.worktree.clone();
+    for _ in 0..=super::step_windows::WALK_DEPTH_MAX {
+        deep.push("d");
+    }
+    std::fs::create_dir_all(&deep).unwrap();
+    assert_eq!(
+        code(super::step_windows::reparse_free(&ws.worktree)),
+        "changes_workspace_capacity"
+    );
 }
