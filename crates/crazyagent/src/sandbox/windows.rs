@@ -28,6 +28,19 @@ pub const SEATBELT_MISSING: &str =
 
 /// The most processes one agent may run at once inside its job.
 pub const ACTIVE_PROCESSES: u32 = 512;
+
+/// Why an agent's profile is refused when one of its writable roots reaches the project's git
+/// folder, in plain words (rv-sec3 #764 L1).
+pub const WRITES_OWNER_GIT: &str = "an agent profile can't write the project's git folder";
+
+/// Who a boundary profile is for: an agent, which never writes the project's git folder, or the
+/// owner's own git ([`owner_git`]), the one profile that writes it, since the engine then runs
+/// git there as itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Writer {
+    Agent,
+    OwnerGit,
+}
 /// The lock file git writes beside `.git\config` while it changes the config. The Windows
 /// boundary leaves it out of the protected paths: Windows cannot refuse creating one name, so
 /// guarding a lock that is normally missing would keep `.git` from taking new entries, git's
@@ -82,11 +95,28 @@ impl WindowsSandbox {
         profile: &Path,
         grants: &Path,
     ) -> Result<Self, SandboxError> {
+        Self::install_for(sandbox, helper, profile, grants, Writer::Agent)
+    }
+
+    /// [`WindowsSandbox::install`] for one writer: an agent's profile is refused before any
+    /// folder is made when it would write the project's git folder ([`writes_owner_git`]).
+    /// Inputs: the policy, the helper, the profile path, the grants folder and the writer.
+    /// Output: the sandbox, or the [`SandboxError`] saying why not.
+    fn install_for(
+        sandbox: ProjectSandbox,
+        helper: &Path,
+        profile: &Path,
+        grants: &Path,
+        writer: Writer,
+    ) -> Result<Self, SandboxError> {
         let grants = Some(grants)
             .filter(|grants| clean_absolute(grants) && grants.is_dir())
             .ok_or_else(|| invalid("grants folder must exist"))?;
+        if writer == Writer::Agent && writes_owner_git(&sandbox) {
+            return Err(invalid(WRITES_OWNER_GIT));
+        }
         make_guarded_folders(&sandbox)?;
-        let boundary = boundary_profile(&sandbox, &canonical(grants)?)?;
+        let boundary = profile_for(&sandbox, &canonical(grants)?, writer)?;
         if let Some(root) = crazyagent_win_sandbox::unreadable_read_root(&boundary) {
             eprintln!("sandbox_read_root_refused cause=unreadable folder={root}");
             return Err(SandboxError::Unreadable(PathBuf::from(root)));
@@ -303,6 +333,45 @@ pub fn boundary_profile(
     sandbox: &ProjectSandbox,
     grants: &Path,
 ) -> Result<BoundaryProfile, SandboxError> {
+    profile_for(sandbox, grants, Writer::Agent)
+}
+
+/// Tells whether an agent under `sandbox` could write the project's git folder, where the
+/// engine's own git reads hooks, refs and objects as the engine: a writable root inside any
+/// `.git`, or one that holds or lies in the `.git` of the project root, a read root or a write
+/// root, when that is a folder or a link rather than the plain file a worktree has. No guard
+/// holds a whole git folder (`commondir` and refs stay writable), so such a root is never
+/// allowed. Input: the policy. Output: the answer.
+fn writes_owner_git(sandbox: &ProjectSandbox) -> bool {
+    let in_git = |root: &Path| {
+        root.components()
+            .any(|part| part.as_os_str().eq_ignore_ascii_case(".git"))
+    };
+    let gits: Vec<PathBuf> = std::iter::once(sandbox.project_root())
+        .chain(sandbox.read_roots())
+        .chain(sandbox.writable_roots())
+        .map(|root| root.join(".git"))
+        .filter(|git| fs::symlink_metadata(git).is_ok_and(|meta| !meta.is_file()))
+        .collect();
+    sandbox.writable_roots().any(|root| {
+        in_git(root)
+            || gits
+                .iter()
+                .any(|git| root.starts_with(git) || git.starts_with(root))
+    })
+}
+
+/// [`boundary_profile`] for one writer: an agent's profile that would write the project's git
+/// folder ([`writes_owner_git`]) is refused; owner git's is not. Inputs: the policy, the grants
+/// folder and the writer. Output: the profile, or the refusal.
+fn profile_for(
+    sandbox: &ProjectSandbox,
+    grants: &Path,
+    writer: Writer,
+) -> Result<BoundaryProfile, SandboxError> {
+    if writer == Writer::Agent && writes_owner_git(sandbox) {
+        return Err(invalid(WRITES_OWNER_GIT));
+    }
     let capabilities = capabilities(sandbox.network())?;
     let read_roots = sandbox
         .read_roots()
@@ -968,42 +1037,40 @@ mod tests {
         }
     }
 
+    /// DEC-193 F2 with #764 L1: install makes a missing `.crazyagent\context` empty and keeps what
+    /// is already there; it makes nothing under a `.git` that does not exist, and a project that
+    /// holds a `.git` folder is refused before any folder is made.
     #[test]
     fn install_makes_each_missing_guarded_folder_and_leaves_what_is_there() {
         let folders = folders();
         let helper = std::env::current_exe().unwrap();
         let git = folders.project.join(".git");
         let state = folders.project.join(".crazyagent");
-        fs::create_dir_all(&git).unwrap();
         fs::create_dir_all(&state).unwrap();
         let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
         let first = folders.profiles.join("a.sb");
         WindowsSandbox::install(sandbox.clone(), &helper, &first, &folders.grants).unwrap();
-        for folder in [
-            git.join("hooks"),
-            git.join("modules"),
-            state.join("context"),
-        ] {
-            assert!(
-                folder.is_dir() && fs::read_dir(&folder).unwrap().next().is_none(),
-                "{} is made empty",
-                folder.display()
-            );
-        }
-        fs::write(git.join("hooks").join("pre-commit"), "owner\n").unwrap();
-        fs::remove_dir(git.join("modules")).unwrap();
-        fs::write(git.join("modules"), "owner\n").unwrap();
+        let context = state.join("context");
+        assert!(context.is_dir() && fs::read_dir(&context).unwrap().next().is_none());
+        assert!(!git.exists(), "no git folder is made");
+        fs::write(context.join("brief.md"), "owner\n").unwrap();
         let second = folders.profiles.join("b.sb");
-        WindowsSandbox::install(sandbox, &helper, &second, &folders.grants).unwrap();
+        WindowsSandbox::install(sandbox.clone(), &helper, &second, &folders.grants).unwrap();
         assert_eq!(
-            fs::read_to_string(git.join("hooks").join("pre-commit")).unwrap(),
-            "owner\n"
-        );
-        assert_eq!(
-            fs::read_to_string(git.join("modules")).unwrap(),
+            fs::read_to_string(context.join("brief.md")).unwrap(),
             "owner\n",
             "an entry already there is never replaced"
         );
+        fs::create_dir_all(&git).unwrap();
+        let third = folders.profiles.join("c.sb");
+        assert!(refused_for_git(WindowsSandbox::install(
+            sandbox,
+            &helper,
+            &third,
+            &folders.grants
+        )));
+        assert!(!third.exists());
+        assert!(!git.join("hooks").exists() && !git.join("modules").exists());
     }
 
     #[test]
@@ -1045,14 +1112,14 @@ mod tests {
         assert!(moved.contains(&drive_path(&project.join(".crazyagent").join("context")).unwrap()));
     }
 
+    /// DEC-193 on a project with no `.git` folder (#764 L1 refuses one that has it): the agent
+    /// cannot make a git folder or the state context, cannot vacate the root context, and
+    /// still edits and renames files it already has.
     #[test]
     fn a_wrapped_agent_cannot_vacate_or_create_a_protected_path_but_still_edits_the_project() {
         let folders = folders();
         let helper = helper();
         let project = &folders.project;
-        let git = project.join(".git");
-        fs::create_dir_all(git.join("hooks")).unwrap();
-        fs::write(git.join("config"), "[core]\r\n").unwrap();
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(project.join("README.md"), "readme\r\n").unwrap();
         let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
@@ -1060,21 +1127,10 @@ mod tests {
         let installed =
             WindowsSandbox::install(sandbox, &helper, &profile, &folders.grants).unwrap();
         let run = |line: &str| shell(&installed, &folders, line);
-        let moved = call(&installed, &folders, &[&git, &project.join(".git-moved")]);
-        assert!(denied(&moved), "{moved:?}");
-        assert!(git.join("config").is_file() && !project.join(".git-moved").exists());
+        assert!(!run(r"mkdir .git\hooks"));
+        assert!(!project.join(".git").exists());
         assert!(!run(r"mkdir .crazyagent\context"));
         assert!(!project.join(".crazyagent").exists());
-        assert!(run(r"echo planted>.git\config.lock"));
-        let lock = git.join("config.lock");
-        let replaced = call(&installed, &folders, &[&lock, &git.join("config")]);
-        assert!(denied(&replaced), "{replaced:?}");
-        assert_eq!(
-            fs::read_to_string(git.join("config")).unwrap(),
-            "[core]\r\n"
-        );
-        assert!(!run(r"mkdir .git\hooks\planted"));
-        assert!(!git.join("hooks").join("planted").exists());
         let context = project.join("context");
         let vacated = call(&installed, &folders, &[&context, &project.join("moved")]);
         assert!(denied(&vacated), "{vacated:?}");
@@ -1095,8 +1151,12 @@ mod tests {
         );
     }
 
+    /// #764 L1 and #765: a guarded project-root agent on a repository is refused at install, so
+    /// it never writes `.git\commondir` (which would point the engine's git at config and hooks
+    /// the agent holds) or takes git's `index.lock`; on the same project with no `.git`, the
+    /// agent cannot change or remove the state context, and the root context is its to change.
     #[test]
-    fn a_wrapped_agent_without_a_checkout_adds_top_level_files_and_takes_git_locks() {
+    fn a_wrapped_agent_on_a_repository_is_refused_before_it_can_write_git_commondir() {
         let folders = folders();
         let helper = helper();
         let project = &folders.project;
@@ -1108,22 +1168,25 @@ mod tests {
         fs::write(state.join("brief.md"), "brief\r\n").unwrap();
         let sandbox = policy(&folders, SandboxNetwork::Only(Vec::new()));
         let profile = folders.profiles.join("agent.sb");
+        match WindowsSandbox::install(sandbox.clone(), &helper, &profile, &folders.grants) {
+            Ok(installed) => {
+                let wrote = shell(&installed, &folders, r"echo ..\planted>.git\commondir");
+                panic!(
+                    "an agent profile installed on a repository; .git\\commondir written: {}",
+                    wrote && git.join("commondir").is_file()
+                );
+            }
+            Err(error) => assert!(refused_for_git::<()>(Err(error))),
+        }
+        assert!(!git.join("commondir").exists());
+        assert!(!profile.exists());
+        assert!(!git.join("index.lock").exists() && !git.join("index").exists());
+        assert!(!git.join("modules").exists());
+        fs::remove_dir_all(&git).unwrap();
         let installed =
             WindowsSandbox::install(sandbox, &helper, &profile, &folders.grants).unwrap();
         let run = |line: &str| shell(&installed, &folders, line);
-        assert!(run(r"echo lock>.git\index.lock"));
-        let lock = git.join("index.lock");
-        let staged = call(&installed, &folders, &[&lock, &git.join("index")]);
-        assert!(staged.status.success(), "{staged:?}");
-        assert!(git.join("index").is_file() && !lock.exists());
-        assert!(run("echo new>notes.txt"));
-        assert!(run("mkdir docs"));
-        assert!(project.join("notes.txt").is_file() && project.join("docs").is_dir());
-        assert!(!run(r"echo planted>.git\hooks\pre-commit"));
-        assert!(!git.join("hooks").join("pre-commit").exists());
         assert!(!run(r"echo planted>.crazyagent\context\brief.md"));
-        let moved = call(&installed, &folders, &[&git, &project.join(".git-moved")]);
-        assert!(denied(&moved), "{moved:?}");
         let removed = call(&installed, &folders, &[&state]);
         assert!(denied(&removed), "{removed:?}");
         assert_eq!(
@@ -1134,10 +1197,7 @@ mod tests {
             run(r"echo note>context\brief.md"),
             "the root context is the agent's to change once .crazyagent holds the state"
         );
-        assert_eq!(
-            fs::read_to_string(git.join("config")).unwrap(),
-            "[core]\r\n"
-        );
+        assert!(!git.exists());
     }
 
     #[test]
@@ -1181,5 +1241,130 @@ mod tests {
             assert_eq!(run(r"echo note>context\brief.md"), job, "job {job}");
             assert!(!project.join(".git").exists() && !project.join(".crazyagent").exists());
         }
+    }
+
+    /// #764 L1 on every write root: a turn profile rooted at a worktree, whose `.git` is a plain
+    /// file, that also writes its repository or a folder above it could plant the repository's
+    /// hooks, so it is refused; the same profile with the repository as a read root only builds.
+    #[test]
+    fn a_worktree_profile_that_also_writes_its_repository_is_refused() {
+        let folders = folders();
+        fs::create_dir_all(folders.project.join(".git").join("hooks")).unwrap();
+        let worktree = folders.project.parent().unwrap().join("worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(worktree.join(".git"), "gitdir: elsewhere\r\n").unwrap();
+        let turn = || {
+            ProjectSandbox::new(
+                &worktree,
+                &folders.home,
+                &folders.tmp,
+                SandboxNetwork::Only(Vec::new()),
+            )
+            .and_then(|sandbox| sandbox.allow_read(&folders.project))
+            .unwrap()
+        };
+        assert!(boundary_profile(&turn(), &folders.grants).is_ok());
+        let above = folders.project.parent().unwrap().join("above");
+        let nested = above.join("repository");
+        fs::create_dir_all(nested.join(".git")).unwrap();
+        for written in [&folders.project, &above] {
+            let read = if written == &above {
+                &nested
+            } else {
+                &folders.project
+            };
+            let wide = turn()
+                .allow_read(read)
+                .and_then(|sandbox| sandbox.allow_worktree(written))
+                .unwrap();
+            assert!(
+                refused_for_git(boundary_profile(&wide, &folders.grants)),
+                "{}",
+                written.display()
+            );
+        }
+    }
+
+    /// Tells whether a profile build was refused because it writes the owner's git folder.
+    /// Input: the build's result. Output: the answer.
+    fn refused_for_git<T: std::fmt::Debug>(built: Result<T, SandboxError>) -> bool {
+        matches!(built, Err(SandboxError::Invalid(reason)) if reason == WRITES_OWNER_GIT)
+    }
+
+    /// rv-sec3 #764 L1 (C6): a job folder on a repository writes its `.git` through its
+    /// writable top, so an agent could plant a hook the engine's own git runs; its profile is
+    /// refused at the chokepoint, at build and at install, and so is a job folder that is the
+    /// git folder itself, while the same job folder on a folder with no git folder installs.
+    #[test]
+    fn a_job_folder_profile_on_a_repository_is_refused_because_it_writes_the_git_folder() {
+        let folders = folders();
+        let git = folders.project.join(".git");
+        fs::create_dir_all(git.join("hooks")).unwrap();
+        fs::create_dir_all(git.join("refs")).unwrap();
+        let job = policy(&folders, SandboxNetwork::Only(Vec::new())).as_job_folder();
+        assert!(job.writes(&git.join("hooks")));
+        assert!(refused_for_git(boundary_profile(&job, &folders.grants)));
+        let helper = std::env::current_exe().unwrap();
+        let profile = folders.profiles.join("job.sb");
+        assert!(refused_for_git(WindowsSandbox::install(
+            job,
+            &helper,
+            &profile,
+            &folders.grants
+        )));
+        assert!(!profile.exists());
+        let inside = ProjectSandbox::new(
+            &git,
+            &folders.home,
+            &folders.tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .as_job_folder();
+        assert!(refused_for_git(boundary_profile(&inside, &folders.grants)));
+        let plain = folders.project.parent().unwrap().join("plain");
+        fs::create_dir_all(&plain).unwrap();
+        let elsewhere = ProjectSandbox::new(
+            &plain,
+            &folders.home,
+            &folders.tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .as_job_folder();
+        assert!(boundary_profile(&elsewhere, &folders.grants).is_ok());
+    }
+
+    /// C6: the project guards hold `.git`'s hooks, config and modules, never its refs, objects
+    /// or `HEAD`, so a project-root profile on a repository still writes the git folder and is
+    /// refused too; a worktree's profile, whose `.git` is the file naming its admin folder and
+    /// whose repository is read only, installs, as the master's turn builds it.
+    #[test]
+    fn a_guarded_project_root_profile_on_a_repository_is_refused_and_a_worktree_profile_is_not() {
+        let folders = folders();
+        let git = folders.project.join(".git");
+        fs::create_dir_all(git.join("refs")).unwrap();
+        let guarded = policy(&folders, SandboxNetwork::Only(Vec::new()));
+        assert!(guarded.holds_project_guards());
+        assert!(!guarded.protected_paths().contains(&git.join("refs")));
+        assert!(refused_for_git(boundary_profile(&guarded, &folders.grants)));
+        let worktree = folders.project.parent().unwrap().join("worktree");
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(worktree.join(".git"), "gitdir: elsewhere\r\n").unwrap();
+        let turn = ProjectSandbox::new(
+            &worktree,
+            &folders.home,
+            &folders.tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .and_then(|sandbox| sandbox.allow_read(&folders.project))
+        .unwrap();
+        let profile = boundary_profile(&turn, &folders.grants).unwrap();
+        assert!(
+            !profile
+                .write_roots
+                .iter()
+                .any(|root| Path::new(root).starts_with(&folders.project))
+        );
     }
 }
