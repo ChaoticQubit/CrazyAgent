@@ -1,6 +1,7 @@
 use super::{
     Anchor, EngineService, Identity, LOCATOR, Locator, PinnedLocator, SocketIdentity,
     check_database, check_generation, check_socket, discover_owner, parse_locator,
+    reported_engine_version,
 };
 use crate::engine::Engine;
 use crate::engine::owner::OwnerClientKind;
@@ -520,6 +521,10 @@ async fn a_started_windows_engine_serves_an_owner_client_and_stops_clean() {
         .await
         .expect("an owner client connects through the ordinary endpoint");
     assert_eq!(identity.engine_version(), crate::version::VERSION);
+    assert_eq!(
+        reported_engine_version(&path).as_deref(),
+        Some(crate::version::VERSION)
+    );
     drop((client, owner));
     assert_eq!(
         crate::service::check_engine(&path, OwnerClientKind::Tui, timeout).await,
@@ -537,6 +542,7 @@ async fn a_started_windows_engine_serves_an_owner_client_and_stops_clean() {
         "{:?}",
         engine_leftovers(&path)
     );
+    assert_eq!(reported_engine_version(&path), None);
 }
 
 /// rv-sec2 #738 Q5, D0/D3: a second start on the anchor while the first serves is refused at
@@ -563,4 +569,64 @@ async fn a_second_windows_start_on_a_served_anchor_is_refused_at_the_database_lo
     assert_eq!(std::fs::read(path.join(LOCATOR)).unwrap(), published);
     assert!(crate::ipc::owner_answering(&path.join("e.sock")));
     first.shutdown().await.unwrap();
+}
+
+/// W3-4b rows 6, 7, 8 and rv-sec2 #738 Q1-b, Q5-c: a start over what an engine killed
+/// without its cleanup leaves (its locator, its pipes file and a generation folder) starts
+/// once the lock is released: the stale locator is renamed over while a reader holds it,
+/// whose pin then fails `verify`; the stale pipes file is replaced and its endpoint fails
+/// `check_socket`; the leftover private generation is swept and a foreign one is kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_over_a_killed_engines_leftovers_replaces_them_and_serves() {
+    let (_temp, base) = plain_temp();
+    let path = base.join("data");
+    drop(private::store_dir(&path, private::Store::Database).unwrap());
+    let config = settings(&base);
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut first = EngineService::start(&path, "e.sock", &config, &stopped)
+        .await
+        .expect("the first start serves");
+    let killed_endpoint = first.locator.as_ref().unwrap().value.ordinary_socket;
+    let killed_pipes = std::fs::read(path.join("pipes")).unwrap();
+    let killed_locator = std::fs::read(path.join(LOCATOR)).unwrap();
+    first.shutdown().await.unwrap();
+    drop(first);
+    assert!(
+        crate::storage::engine_lock_released(&path),
+        "Q5-c: the lock is free first"
+    );
+    private_bytes(&path.join(LOCATOR), &killed_locator);
+    let mut pipes = private::secret_file(&path.join("pipes")).unwrap();
+    std::io::Write::write_all(&mut pipes, &killed_pipes).unwrap();
+    drop(pipes);
+    drop(private::dir(&path.join("o0badbad0")).unwrap());
+    std::fs::create_dir(path.join("o12345678")).unwrap();
+    grant_everyone(&path.join("o12345678"));
+    let reader = PinnedLocator::read(&Anchor::open(&path).unwrap())
+        .unwrap()
+        .expect("the killed engine's locator reads");
+    let mut second = EngineService::start(&path, "e.sock", &config, &stopped)
+        .await
+        .expect("a start over a killed engine's leftovers serves");
+    let anchor = Anchor::open(&path).unwrap();
+    assert_eq!(
+        refusal(reader.verify(&anchor)),
+        "owner_locator_replaced_or_unsafe",
+        "Q1-b: the publish renamed over the held stale locator"
+    );
+    let published = second.locator.as_ref().unwrap();
+    assert_ne!(published.bytes, killed_locator);
+    assert_eq!(
+        refusal(check_socket(&anchor, &path.join("e.sock"), killed_endpoint)),
+        "owner_endpoint_replaced_or_unsafe"
+    );
+    check_socket(
+        &anchor,
+        &path.join("e.sock"),
+        published.value.ordinary_socket,
+    )
+    .expect("the new endpoint passes");
+    assert!(std::fs::symlink_metadata(path.join("o0badbad0")).is_err());
+    assert!(std::fs::symlink_metadata(path.join("o12345678")).is_ok());
+    second.shutdown().await.unwrap();
 }
