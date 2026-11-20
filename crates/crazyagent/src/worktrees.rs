@@ -216,8 +216,11 @@ fn identified(metadata: &std::fs::Metadata, directory: bool) -> Result<Identity,
     })
 }
 
+#[cfg(all(test, windows))]
+mod canonical_windows_tests;
+
 fn canonical(path: &Path) -> Result<(), EngineError> {
-    if !path.is_absolute() || std::fs::canonicalize(path).map_err(error)? != path {
+    if !path.is_absolute() || !crate::projects_home::is_canonical(path).map_err(error)? {
         return Err(error("repository_path_not_canonical"));
     }
     for ancestor in path.ancestors() {

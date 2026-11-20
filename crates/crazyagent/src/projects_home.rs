@@ -372,6 +372,24 @@ fn overlaps(left: &Path, right: &Path) -> bool {
     inside(left, right) || inside(right, left)
 }
 
+/// A path resolved, then on Windows given the spelling [`one_spelling`] stores folders in;
+/// on macOS and Linux the resolved path as it is, so a check that compares it keeps its
+/// meaning there (W3-4c, leader 13:20 Q1). Input: the path. Output: the resolved path, or
+/// the I/O error.
+pub(crate) fn resolved(path: &Path) -> std::io::Result<PathBuf> {
+    let real = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    let real = one_spelling(real);
+    Ok(real)
+}
+
+/// Whether `path` names itself as [`resolved`] names it: no link on its way and, on
+/// Windows, the stored spelling. Input: the path. Output: the answer, or the I/O error of
+/// resolving it.
+pub(crate) fn is_canonical(path: &Path) -> std::io::Result<bool> {
+    Ok(resolved(path)? == path)
+}
+
 /// True when `path` is `folder` or lies below it, each compared by its [`compare_key`], so
 /// a refusal that asks whether one folder holds another never misses because one side kept
 /// a verbatim spelling (rv-sec2 #736 L1). Inputs: the path and the folder. Output: the answer.
