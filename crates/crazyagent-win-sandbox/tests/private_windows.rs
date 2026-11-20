@@ -737,3 +737,67 @@ fn a_secret_file_in_the_database_folder_holds_one_full_label() {
     drop(held);
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+/// rv-sec2 #702 R7, leader 03:5x: a private file is deleted through a handle opened with
+/// delete access, and its name is gone at once, while that handle is still open; a handle
+/// opened without delete access cannot delete it.
+#[test]
+fn a_private_file_is_deleted_through_a_handle_with_delete_access() {
+    let root = scratch("delete-held");
+    drop(private::dir(&root).unwrap());
+    let path = root.join("pipes");
+    let created = private::file(&path, true).unwrap();
+    let refused = private::delete(&created).unwrap_err();
+    assert_eq!(refused.raw_os_error(), Some(5), "{refused}");
+    drop(created);
+    let held = std::fs::OpenOptions::new()
+        .access_mode(DELETE | READ_CONTROL)
+        .share_mode(0)
+        .open(&path)
+        .unwrap();
+    private::delete(&held).unwrap();
+    assert!(!path.exists(), "the name goes before the handle closes");
+    drop(held);
+    assert!(std::fs::read_dir(&root).unwrap().next().is_none());
+}
+
+/// R7: `remove` deletes a private file only while it is still the object its caller
+/// pinned; a file whose identity differs is refused and stays.
+#[test]
+fn remove_deletes_a_private_file_only_while_it_holds_its_pinned_identity() {
+    let root = scratch("remove-pinned");
+    drop(private::dir(&root).unwrap());
+    let path = root.join("pipes");
+    let pinned = private::identity(&private::file(&path, true).unwrap()).unwrap();
+    private::remove(&path, pinned).unwrap();
+    assert!(!path.exists());
+    let other = private::identity(&private::file(&path, true).unwrap()).unwrap();
+    let refused = private::remove(&path, pinned).unwrap_err();
+    assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied, "{refused}");
+    assert_eq!(
+        refused.to_string(),
+        "a private file changed before its delete"
+    );
+    assert!(path.exists());
+    private::remove(&path, other).unwrap();
+    assert!(!path.exists());
+}
+
+/// R7: `remove` leaves a file another handle holds without delete sharing, and a file with
+/// a second hard link, which the private judge refuses, keeps both names.
+#[test]
+fn remove_leaves_a_held_file_and_a_hard_linked_one() {
+    let root = scratch("remove-held");
+    drop(private::dir(&root).unwrap());
+    let path = root.join("pipes");
+    let pinned = private::identity(&private::file(&path, true).unwrap()).unwrap();
+    let reader = private::read_only(&path).unwrap();
+    let busy = private::remove(&path, pinned).unwrap_err();
+    assert_eq!(busy.raw_os_error(), Some(32), "{busy}");
+    drop(reader);
+    assert!(path.exists());
+    let link = root.join("pipes.link");
+    std::fs::hard_link(&path, &link).unwrap();
+    assert!(private::remove(&link, pinned).is_err());
+    assert!(path.exists() && link.exists());
+}
