@@ -1,6 +1,7 @@
 use super::a11y::{Geometry, Grid};
+use super::event::{MouseKind, Sink, ViewEvent};
+use super::host::LABEL_BYTES_MAX;
 use super::ime::{self, Ime, Mods, Route};
-use super::pane::Input;
 use super::view_text::{Access, KeyDown, attributed, range_or_none};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, Sel};
@@ -17,47 +18,6 @@ use std::cell::{Cell, RefCell};
 
 /// The most clicks a press reports: 1 places the cursor, 2 a word, 3 a line.
 const CLICKS_MAX: u8 = 3;
-
-/// Which mouse event a view got.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum MouseKind {
-    Press,
-    Drag,
-    Release,
-}
-
-/// What a native view tells its host, on the main thread, in the order AppKit delivered
-/// it. Points are in the view's own flipped coordinates, in points. `Marked` asks for a
-/// redraw: the input method's marked text changed (read it with `marked_text`).
-#[derive(Debug, PartialEq)]
-pub enum ViewEvent {
-    Key(Input),
-    Wheel {
-        point: (f64, f64),
-        delta: f64,
-        precise: bool,
-    },
-    Mouse {
-        kind: MouseKind,
-        point: (f64, f64),
-        option: bool,
-        clicks: u8,
-    },
-    Menu {
-        point: (f64, f64),
-    },
-    Copy,
-    Paste,
-    SelectAll,
-    Focus(bool),
-    Marked,
-}
-
-/// The host function a view hands its events to, with the view's id.
-pub type Sink = fn(u64, ViewEvent);
-
-/// The longest label VoiceOver says for a view, in bytes.
-pub const LABEL_BYTES_MAX: usize = 256;
 
 /// The host function VoiceOver's text is read from, with the view's id: the visible grid,
 /// or none while the screen is busy, when the last text read serves.

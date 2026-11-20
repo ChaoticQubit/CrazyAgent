@@ -1,23 +1,36 @@
 mod a11y;
+#[cfg(target_os = "macos")]
 mod clip;
 mod codec;
+#[cfg(unix)]
+mod control;
+#[cfg(not(unix))]
+#[path = "control_none.rs"]
 mod control;
 mod ended;
+mod event;
 pub(crate) mod host;
 mod ime;
 mod keymap;
 mod pane;
-#[cfg(feature = "native-webdriver")]
+#[cfg(all(target_os = "macos", feature = "native-webdriver"))]
 pub(crate) mod probe;
 mod render;
 mod screen;
 pub(crate) mod style;
 mod table;
+#[cfg(target_os = "macos")]
 mod view;
+#[cfg(target_os = "macos")]
 mod view_text;
+#[cfg(windows)]
+mod windows;
 
+#[cfg(unix)]
 use crazyagent::terminal::{FOLDER, tmux::SOCKET};
+#[cfg(unix)]
 use std::ffi::OsStr;
+#[cfg(unix)]
 use std::path::{Component, Path, PathBuf};
 
 /// The longest agent window name a view may ask for, in bytes.
@@ -26,6 +39,7 @@ const NAME_BYTES_MAX: usize = crazyagent::terminal::AGENT_ID_BYTES_MAX;
 /// Whether a socket path names an engine's own tmux server by its shape: absolute, plain
 /// parts, `tmux.sock` in a `terminal` folder, never a default tmux socket folder. Input:
 /// the path. Output: the answer.
+#[cfg(unix)]
 pub fn engine_socket_shape(path: &Path) -> bool {
     let plain = path
         .components()
@@ -41,6 +55,7 @@ pub fn engine_socket_shape(path: &Path) -> bool {
 /// owned by this user, read without following a link, so a sandboxed lead's or teammates'
 /// server is never reached by a plain client. Input: the engine root. Output: the socket,
 /// or a plain code that drops the view to engine-fed output.
+#[cfg(unix)]
 pub fn engine_socket(root: &Path) -> Result<PathBuf, &'static str> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let path = root.join(FOLDER).join(SOCKET);
@@ -67,6 +82,7 @@ pub fn engine_socket(root: &Path) -> Result<PathBuf, &'static str> {
 /// server can make its client run a command. Inputs: the engine root and a checked window
 /// name. Output: the answer, or a plain code when it cannot be told: only a clean "no such
 /// file" means no server.
+#[cfg(unix)]
 pub fn own_server(root: &Path, name: &str) -> Result<bool, &'static str> {
     assert!(root.is_absolute());
     let agent = crate::bridge::terminal::agent(name).map_err(|_| "native_terminal_name_invalid")?;
@@ -117,6 +133,22 @@ mod tests {
             .find(|needle| text.contains(needle.as_str()))
     }
 
+    fn scan(folder: &str, call: fn(&str) -> Option<String>) -> usize {
+        let folder = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(folder);
+        let mut read = 0;
+        for entry in std::fs::read_dir(&folder).expect("native folder") {
+            let path = entry.expect("folder entry").path();
+            if path.extension() != Some(std::ffi::OsStr::new("rs")) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("source file");
+            let shown = path.display();
+            assert_eq!(call(&text), None, "{shown}");
+            read += 1;
+        }
+        read
+    }
+
     #[test]
     fn the_focus_scan_finds_a_planted_call() {
         let planted = format!("window.{}{}();", "makeKey", "Window");
@@ -131,21 +163,51 @@ mod tests {
 
     #[test]
     fn no_native_file_brings_the_app_forward_or_makes_a_window_key() {
-        let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native_term");
-        let mut read = 0;
-        for entry in std::fs::read_dir(&folder).expect("native_term folder") {
-            let path = entry.expect("folder entry").path();
-            if path.extension() != Some(OsStr::new("rs")) {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path).expect("source file");
-            let shown = path.display();
-            assert_eq!(focus_call(&text), None, "{shown}");
-            read += 1;
-        }
+        let read = scan("src/native_term", focus_call);
         assert!(read >= 14, "read {read} files");
     }
 
+    #[test]
+    fn no_host_platform_file_brings_the_app_forward_or_makes_a_window_key() {
+        let read = scan("src/native_term/host", focus_call);
+        assert!(read >= 2, "read {read} files");
+    }
+
+    #[test]
+    fn only_the_page_copy_command_writes_a_board_with_no_user_event() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/native_term");
+        let host = std::fs::read_to_string(root.join("host.rs")).expect("host.rs");
+        let calls: Vec<usize> = host
+            .match_indices(".write_command(")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(calls.len(), 1, "host.rs calls write_command once");
+        let arm = host
+            .find("Command::Copy(output) => {")
+            .expect("the page's Copy arm");
+        let end = arm
+            + host[arm..]
+                .find("Command::Paste(")
+                .expect("the arm after Copy");
+        assert!(
+            (arm..end).contains(&calls[0]),
+            "the one write_command call is the page's Copy command"
+        );
+        let mut read = 0;
+        for entry in std::fs::read_dir(root.join("host")).expect("host folder") {
+            let path = entry.expect("folder entry").path();
+            let text = std::fs::read_to_string(&path).expect("source file");
+            assert!(
+                !text.contains(".write_command("),
+                "{} calls write_command",
+                path.display()
+            );
+            read += 1;
+        }
+        assert!(read >= 2, "read {read} files");
+    }
+
+    #[cfg(unix)]
     #[test]
     fn only_an_engine_socket_shape_passes() {
         assert!(engine_socket_shape(Path::new(
@@ -166,6 +228,7 @@ mod tests {
         )));
     }
 
+    #[cfg(unix)]
     #[test]
     fn engine_socket_needs_an_engine_db_and_a_socket() {
         let root = tempfile::tempdir().expect("temp dir");
@@ -192,6 +255,7 @@ mod tests {
         assert_eq!(engine_socket(root), Ok(socket.clone()));
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_agent_with_its_own_server_socket_is_refused() {
         let root = tempfile::tempdir().expect("temp dir");

@@ -4,6 +4,9 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::{Cell, Flags};
 
+#[cfg(any(windows, test))]
+pub mod range;
+
 /// The most zero-width characters one cell gives the accessibility text; more are dropped.
 pub const ZERO_WIDTH_MAX: usize = 4;
 
@@ -40,13 +43,14 @@ pub struct Marks {
     pub selection: Option<((usize, usize), (usize, usize))>,
 }
 
-/// The size of one cell and the padding in physical pixels, and the display scale, which
-/// turn cells into view points.
+/// The size of one cell and the padding in physical pixels, the display scale and the
+/// first screen row the view draws, which turn cells into view points.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Geometry {
     pub cell: (f64, f64),
     pub pad: f64,
     pub scale: f64,
+    pub top: usize,
 }
 
 /// The text VoiceOver reads for one view: the visible rows joined by newlines, each row's
@@ -291,6 +295,7 @@ impl Text {
 
     /// The range of one line with its newline. Input: the line. Output: the UTF-16 location
     /// and length, or none past the last line.
+    #[cfg(any(target_os = "macos", test))]
     pub fn range_for_line(&self, line: usize) -> Option<(usize, usize)> {
         let start = *self.starts.get(line)?;
         let end = self.starts.get(line + 1).copied().unwrap_or(self.units);
@@ -333,11 +338,16 @@ pub fn cell_rect(
     column: usize,
     width: usize,
 ) -> (f64, f64, f64, f64) {
-    let Geometry { cell, pad, scale } = geometry;
+    let Geometry {
+        cell,
+        pad,
+        scale,
+        top,
+    } = geometry;
     assert!((1.0..=4.0).contains(&scale));
     assert!(cell.0 > 0.0 && cell.1 > 0.0 && pad >= 0.0 && width >= 1);
     let x = (pad + column as f64 * cell.0) / scale;
-    let y = (pad + row as f64 * cell.1) / scale;
+    let y = (pad + (row as f64 - top as f64) * cell.1) / scale;
     let rect = (x, y, width as f64 * cell.0 / scale, cell.1 / scale);
     assert!(rect.2 > 0.0 && rect.3 > 0.0);
     rect
@@ -499,8 +509,15 @@ mod tests {
             cell: (16.0, 32.0),
             pad: 8.0,
             scale: 2.0,
+            top: 0,
         };
         assert_eq!(cell_rect(geometry, 0, 0, 1), (4.0, 4.0, 8.0, 16.0));
         assert_eq!(cell_rect(geometry, 1, 2, 3), (20.0, 20.0, 24.0, 16.0));
+        let clipped = Geometry { top: 1, ..geometry };
+        assert_eq!(
+            cell_rect(clipped, 1, 2, 3),
+            (20.0, 4.0, 24.0, 16.0),
+            "a clipped view's first row"
+        );
     }
 }

@@ -1,7 +1,5 @@
 use crate::config::EffectiveConfig;
-#[cfg(unix)]
 use crate::config::validate_settings;
-#[cfg(unix)]
 use crate::ipc::Listener;
 use crate::ipc::Stream;
 use crate::protocol::*;
@@ -12,9 +10,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
-#[cfg(unix)]
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::oneshot;
 
 pub mod bootstrap;
@@ -34,6 +30,8 @@ pub mod owner;
 /// kind, claim, end and reply, never a payload, path or name. Off by default; only the test
 /// farm's build turns it on, and no release build may ([`owner_trace::connection`]).
 pub(crate) mod owner_trace;
+#[cfg(all(test, windows))]
+mod windows_tests;
 
 #[cfg(unix)]
 pub use native_auth_host::{
@@ -137,21 +135,16 @@ impl Client {
         Ok((self.socket, self.timeout))
     }
 
-    /// Refuses an engine request where the owner-only Unix socket does not exist.
-    /// Takes the request, which is still validated so bad input reports its own error.
-    /// Returns `engine_socket_unavailable` until the Windows named-pipe transport exists.
-    #[cfg(not(unix))]
-    pub async fn request(&self, request: WireRequest) -> Result<WireReply, ClientError> {
-        request.validate().map_err(|e| EngineError(e.to_string()))?;
-        Err(EngineError("engine_socket_unavailable".into()))
-    }
-
-    #[cfg(unix)]
+    /// Sends one request to the engine and reads its reply: the server is checked right
+    /// after connect, before any byte is written (on Windows the pin the root's pipes file
+    /// names, DESIGN-0256 D10). Input: the request. Output: the reply with the same request
+    /// id, or the refusal.
     pub async fn request(&self, request: WireRequest) -> Result<WireReply, ClientError> {
         request.validate().map_err(|e| EngineError(e.to_string()))?;
         if let Some(binding) = &self.binding {
             binding.verify()?;
         }
+        #[cfg(unix)]
         verify_endpoint(&self.socket)?;
         tokio::time::timeout(self.timeout, async {
             let mut stream = crate::ipc::owner_connect(&self.socket)
@@ -175,37 +168,111 @@ impl Client {
     }
 }
 
-/// The engine's request listener; none can exist where the Unix socket transport does not.
-/// `bind` reports `engine_socket_unavailable` until the Windows named-pipe transport exists.
-#[cfg(not(unix))]
-pub enum Server {}
-
-#[cfg(not(unix))]
-impl Server {
-    pub fn bind(
-        _socket: &Path,
-        _engine: std::sync::Arc<Engine>,
-        _config: &EffectiveConfig,
-    ) -> Result<Self, EngineError> {
-        Err(EngineError("engine_socket_unavailable".into()))
-    }
-
-    pub async fn run(self, _stop: oneshot::Receiver<()>) -> Result<(), EngineError> {
-        match self {}
-    }
-}
-
-#[cfg(unix)]
+/// The engine's request listener at its endpoint path: a Unix socket in its private folder,
+/// or on Windows the named pipe its root's pipes file names.
 pub struct Server {
     listener: Listener,
     engine: std::sync::Arc<Engine>,
     timeout: Duration,
     clients_max: usize,
+    #[cfg(unix)]
     socket: std::path::PathBuf,
+    #[cfg(unix)]
     socket_inode: u64,
+    #[cfg(unix)]
     socket_device: u64,
+    #[cfg(unix)]
     directory_inode: u64,
+    #[cfg(unix)]
     directory_device: u64,
+}
+
+#[cfg(windows)]
+impl Server {
+    /// Binds the engine's endpoint on Windows (V244-WIN-ENGINE-WIRING WIRE-2): settings
+    /// checked, a root another engine serves refused with `engine_pipe_taken`, then the pipe
+    /// listener, which opens the root only when it is private and publishes the pipes file.
+    /// Inputs: the endpoint path, the engine and its settings. Output: the server.
+    pub fn bind(
+        socket: &Path,
+        engine: std::sync::Arc<Engine>,
+        config: &EffectiveConfig,
+    ) -> Result<Self, EngineError> {
+        validate_settings(&config.settings).map_err(io_error)?;
+        if crate::ipc::owner_answering(socket) {
+            return Err(EngineError("engine_pipe_taken".into()));
+        }
+        let listener =
+            crate::ipc::owner_listener(socket, config.settings.clients_max).map_err(io_error)?;
+        Ok(Self {
+            listener,
+            engine,
+            timeout: Duration::from_millis(config.settings.timeout_ms),
+            clients_max: config.settings.clients_max,
+        })
+    }
+
+    /// Closes the pipe listener and deletes its pipes file through a checked handle.
+    /// Input: the result of serving. Output: that result, joined with a failed delete.
+    fn close(self, result: Result<(), EngineError>) -> Result<(), EngineError> {
+        let cleanup = crate::ipc::owner_close(self.listener).map_err(io_error);
+        joined(result, cleanup)
+    }
+}
+
+impl Server {
+    /// Serves clients until `stop` fires or an accept fails, one task per client up to the
+    /// settings' bound, then closes the endpoint. Input: the stop signal. Output: Ok, or the
+    /// accept, client or cleanup error.
+    pub async fn run(self, stop: oneshot::Receiver<()>) -> Result<(), EngineError> {
+        let result = self.serve(stop).await;
+        self.close(result)
+    }
+
+    /// The accept loop of [`Self::run`]. Input: the stop signal. Output: how serving ended.
+    async fn serve(&self, mut stop: oneshot::Receiver<()>) -> Result<(), EngineError> {
+        let mut clients = tokio::task::JoinSet::new();
+        let mut result = loop {
+            tokio::select! {
+                _ = &mut stop => break Ok(()),
+                result = clients.join_next(), if !clients.is_empty() => {
+                    if let Some(Err(error)) = result && error.is_panic() { eprintln!("engine_client_panicked"); }
+                }
+                accepted = crate::ipc::owner_accept(&self.listener) => {
+                    let stream = match accepted { Ok(value) => value, Err(error) => break Err(io_error(error)) };
+                    if clients.len() >= self.clients_max { drop(stream); continue; }
+                    let engine = self.engine.clone();
+                    let timeout = self.timeout;
+                    clients.spawn(async move { serve_client(stream, engine, timeout).await; });
+                }
+            }
+            assert!(clients.len() <= self.clients_max);
+        };
+        clients.abort_all();
+        while let Some(joined) = clients.join_next().await {
+            if let Err(error) = joined
+                && !error.is_cancelled()
+            {
+                result = Err(io_error(error));
+            }
+        }
+        assert!(clients.is_empty());
+        result
+    }
+}
+
+/// One error for a serve result and its cleanup: either alone, or both texts when both
+/// failed. Inputs: the two results. Output: the joined result.
+fn joined(
+    result: Result<(), EngineError>,
+    cleanup: Result<(), EngineError>,
+) -> Result<(), EngineError> {
+    match (result, cleanup) {
+        (Ok(()), result) | (result, Ok(())) => result,
+        (Err(error), Err(cleanup)) => {
+            Err(EngineError(format!("{}; cleanup: {}", error.0, cleanup.0)))
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -226,7 +293,8 @@ impl Server {
             _ => return Err(EngineError("socket_path_already_exists".into())),
         }
         let directory = std::fs::symlink_metadata(socket.parent().unwrap()).map_err(io_error)?;
-        let listener = crate::ipc::owner_listener(socket).map_err(io_error)?;
+        let listener =
+            crate::ipc::owner_listener(socket, config.settings.clients_max).map_err(io_error)?;
         let metadata = std::fs::symlink_metadata(socket).map_err(io_error)?;
         let checked = (|| {
             if !metadata.file_type().is_socket()
@@ -275,33 +343,10 @@ impl Server {
             directory_device: directory.dev(),
         })
     }
-    pub async fn run(self, mut stop: oneshot::Receiver<()>) -> Result<(), EngineError> {
-        let mut clients = tokio::task::JoinSet::new();
-        let mut result = loop {
-            tokio::select! {
-                _ = &mut stop => break Ok(()),
-                result = clients.join_next(), if !clients.is_empty() => {
-                    if let Some(Err(error)) = result && error.is_panic() { eprintln!("engine_client_panicked"); }
-                }
-                accepted = crate::ipc::owner_accept(&self.listener) => {
-                    let stream = match accepted { Ok(value) => value, Err(error) => break Err(io_error(error)) };
-                    if clients.len() >= self.clients_max { drop(stream); continue; }
-                    let engine = self.engine.clone();
-                    let timeout = self.timeout;
-                    clients.spawn(async move { serve_client(stream, engine, timeout).await; });
-                }
-            }
-            assert!(clients.len() <= self.clients_max);
-        };
-        clients.abort_all();
-        while let Some(joined) = clients.join_next().await {
-            if let Err(error) = joined
-                && !error.is_cancelled()
-            {
-                result = Err(io_error(error));
-            }
-        }
-        assert!(clients.is_empty());
+
+    /// Closes the socket and removes it while it is still the one this server bound.
+    /// Input: the result of serving. Output: that result, joined with a failed removal.
+    fn close(self, result: Result<(), EngineError>) -> Result<(), EngineError> {
         drop(self.listener);
         let cleanup = remove_server_socket(
             &self.socket,
@@ -310,12 +355,7 @@ impl Server {
             self.directory_device,
             self.directory_inode,
         );
-        match (result, cleanup) {
-            (Ok(()), result) | (result, Ok(())) => result,
-            (Err(error), Err(cleanup)) => {
-                Err(EngineError(format!("{}; cleanup: {}", error.0, cleanup.0)))
-            }
-        }
+        joined(result, cleanup)
     }
 }
 
@@ -427,7 +467,6 @@ pub(crate) async fn read_frame<S: tokio::io::AsyncRead + Unpin>(
     Ok(frame)
 }
 
-#[cfg(unix)]
 async fn serve_client(mut stream: Stream, engine: std::sync::Arc<Engine>, timeout: Duration) {
     let exchange = async {
         verify_client(&stream)?;
@@ -492,6 +531,7 @@ pub struct Engine {
     harness_updates: std::sync::Arc<crate::harnesses::update::Updates>,
     settings_files: Option<(std::path::PathBuf, std::path::PathBuf)>,
     master_activity: owner::transport::master_activity::Board,
+    terminal_units: std::sync::Arc<owner::transport::sizing::Units>,
 }
 
 const HARNESS_PROBE_FRESH: Duration = Duration::from_secs(10);
@@ -657,6 +697,7 @@ impl Engine {
                 harness_updates: crate::harnesses::update::Updates::new(),
                 settings_files: Some((global.to_path_buf(), project.to_path_buf())),
                 master_activity: Default::default(),
+                terminal_units: Default::default(),
             },
             config,
         ))
@@ -680,6 +721,7 @@ impl Engine {
             harness_updates: crate::harnesses::update::Updates::new(),
             settings_files: None,
             master_activity: Default::default(),
+            terminal_units: Default::default(),
         })
     }
 
@@ -701,6 +743,7 @@ impl Engine {
             harness_updates: crate::harnesses::update::Updates::new(),
             settings_files: None,
             master_activity: Default::default(),
+            terminal_units: Default::default(),
         })
     }
 

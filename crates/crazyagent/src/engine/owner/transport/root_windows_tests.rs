@@ -23,6 +23,28 @@ fn private_folder(path: &Path) -> PathBuf {
 
 /// Runs one Windows command and requires it to succeed. Inputs: the program and its
 /// arguments. Output: none; a failure panics with the command's error output.
+/// The 8.3 alias Windows gave `long`, read through cmd's `%~s` form, which asks
+/// GetShortPathNameW, so a row names a short spelling it made on purpose (CR-1341 HIGH 1).
+/// Input: an existing folder with a long name. Output: the alias, or None when this volume
+/// makes no 8.3 names, which the row then reports as a named SKIP.
+fn short_alias(long: &Path) -> Option<PathBuf> {
+    use std::os::windows::process::CommandExt;
+    let mut command = Command::new("cmd");
+    command
+        .raw_arg(format!(
+            "/D /C for %I in (\"{}\") do @echo %~sI",
+            long.display()
+        ))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let done = crate::spawn_gate::output(&mut command).unwrap();
+    assert!(done.status.success(), "{done:?}");
+    let short = PathBuf::from(String::from_utf8(done.stdout).unwrap().trim());
+    assert!(short.is_absolute(), "{}", short.display());
+    (short != long && short.to_str()?.contains('~')).then_some(short)
+}
+
 fn run(program: &str, args: &[&std::ffi::OsStr]) {
     let mut command = Command::new(program);
     command
@@ -219,18 +241,17 @@ fn a_short_name_root_and_a_verbatim_unc_root_are_refused() {
     let temp = tempfile::tempdir().unwrap();
     let full = std::fs::canonicalize(temp.path()).unwrap();
     let plain = PathBuf::from(full.to_str().unwrap().strip_prefix(r"\\?\").unwrap());
-    let path = private_folder(&plain.join("root"));
+    let long = plain.join("a long root folder name");
+    std::fs::create_dir(&long).unwrap();
+    let path = private_folder(&long.join("root"));
     Root::open(&path).expect("the root opens at its plain long name");
-    let short = temp.path().join("root");
-    assert!(
-        short.to_str().unwrap().contains('~'),
-        "the hosted runner's temp folder is spelled with a short name: {}",
-        short.display()
-    );
-    assert_eq!(
-        refusal(Root::open(&short)),
-        "owner_root_requires_canonical_trusted_path"
-    );
+    match short_alias(&long) {
+        Some(alias) => assert_eq!(
+            refusal(Root::open(&alias.join("root"))),
+            "owner_root_requires_canonical_trusted_path"
+        ),
+        None => println!("SKIP a_short_name_root: this volume makes no 8.3 names"),
+    }
     let text = path.to_str().unwrap();
     let unc = format!(r"\\?\UNC\localhost\{}$\{}", &text[..1], &text[3..]);
     assert_eq!(

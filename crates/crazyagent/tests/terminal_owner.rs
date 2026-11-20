@@ -509,7 +509,7 @@ async fn an_idle_input_only_session_closes_within_one_grant_check_of_a_revoke() 
         ..
     } = sub
         .controller
-        .terminal_attach_input(sub.agent.clone(), None, 80, 24)
+        .terminal_attach_input(sub.agent.clone(), None, (80, 24), false)
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;

@@ -11,6 +11,11 @@ const OTHER: [u8; 28] = [
     1, 5, 0, 0, 0, 0, 0, 5, 21, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 3, 0, 0, 0, 0xea, 3, 0, 0,
 ];
 
+/// The medium integrity level, the floor of every engine's peer judge.
+const MEDIUM: u32 = 0x2000;
+/// The high integrity level, an elevated engine's own.
+const HIGH: u32 = 0x3000;
+
 /// A peer of the user at `integrity`, neither an AppContainer nor restricted. Input: the
 /// integrity level. Output: the peer.
 fn peer(integrity: u32) -> Peer {
@@ -28,7 +33,7 @@ fn peer(integrity: u32) -> Peer {
 fn a_peer_of_this_user_at_medium_or_above_passes() {
     for integrity in [0x2000, 0x2100, 0x3000, 0x4000] {
         assert_eq!(
-            judge_peer(&peer(integrity), &USER),
+            judge_peer(&peer(integrity), &USER, MEDIUM),
             Ok(()),
             "{integrity:#x}"
         );
@@ -45,7 +50,7 @@ fn each_peer_rule_refuses_on_its_own() {
         ..peer(0x2000)
     };
     assert_eq!(
-        judge_peer(&other, &USER),
+        judge_peer(&other, &USER, MEDIUM),
         Err("another account is at the other end of the pipe")
     );
     let container = Peer {
@@ -53,7 +58,7 @@ fn each_peer_rule_refuses_on_its_own() {
         ..peer(0x2000)
     };
     assert_eq!(
-        judge_peer(&container, &USER),
+        judge_peer(&container, &USER, MEDIUM),
         Err("an app container is at the other end of the pipe")
     );
     let restricted = Peer {
@@ -61,23 +66,49 @@ fn each_peer_rule_refuses_on_its_own() {
         ..peer(0x3000)
     };
     assert_eq!(
-        judge_peer(&restricted, &USER),
+        judge_peer(&restricted, &USER, MEDIUM),
         Err("a restricted token is at the other end of the pipe")
     );
     for integrity in [0, 0x1000, 0x1fff] {
         assert_eq!(
-            judge_peer(&peer(integrity), &USER),
+            judge_peer(&peer(integrity), &USER, MEDIUM),
             Err("a lower integrity process is at the other end of the pipe"),
             "{integrity:#x}"
         );
     }
 }
 
+/// rv-sec2 #702 D1 fix (b), R6: an engine admits no peer below its own integrity, so an
+/// elevated engine refuses the user's medium duplicate while a medium engine still admits an
+/// elevated client, and a floor below medium never lowers the medium rule.
+#[test]
+fn a_peer_below_the_engines_own_integrity_is_refused() {
+    for integrity in [MEDIUM, 0x2100, 0x2fff] {
+        assert_eq!(
+            judge_peer(&peer(integrity), &USER, HIGH),
+            Err("a lower integrity process is at the other end of the pipe"),
+            "{integrity:#x}"
+        );
+    }
+    for integrity in [HIGH, 0x4000] {
+        assert_eq!(
+            judge_peer(&peer(integrity), &USER, HIGH),
+            Ok(()),
+            "{integrity:#x}"
+        );
+    }
+    assert_eq!(judge_peer(&peer(HIGH), &USER, MEDIUM), Ok(()));
+    assert_eq!(
+        judge_peer(&peer(0x1000), &USER, 0x1000),
+        Err("a lower integrity process is at the other end of the pipe")
+    );
+}
+
 /// rv-code #551 F3: the engine always knows its own user SID, so judging a peer against an
 /// empty one is a programming error, never a pass or a refusal.
 #[test]
 fn judging_a_peer_against_an_empty_user_is_a_programming_error() {
-    let judged = std::panic::catch_unwind(|| judge_peer(&peer(0x2000), &[]));
+    let judged = std::panic::catch_unwind(|| judge_peer(&peer(0x2000), &[], MEDIUM));
     assert!(judged.is_err());
 }
 

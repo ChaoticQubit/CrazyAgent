@@ -29,6 +29,10 @@ use std::time::Duration;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinSet;
 
+/// The held-folder layer native profile custody opens its files through, one arm per
+/// system (DESIGN-0515 D1).
+#[cfg(test)]
+pub(crate) mod held;
 #[cfg(unix)]
 mod native_profiles;
 #[cfg(not(unix))]

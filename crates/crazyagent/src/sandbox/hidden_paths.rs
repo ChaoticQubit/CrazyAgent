@@ -443,7 +443,8 @@ fn any_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<bool, &'stati
     if specs.is_empty() {
         return Ok(false);
     }
-    let mut command = match crate::project_files::owner_git(&root) {
+    let git = crate::project_files::engine_git();
+    let mut command = match crate::project_files::owner_git(&root, git) {
         Ok(command) => command,
         Err(NoOwnerGit::Absent) => return Ok(false),
         Err(NoOwnerGit::Refused | NoOwnerGit::Unavailable) => return Err(unchecked),

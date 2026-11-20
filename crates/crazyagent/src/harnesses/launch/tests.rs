@@ -1,4 +1,6 @@
-use super::{AccountBinding, Driver, LaunchEvent, LaunchLimits, LaunchRequest, rate_limited};
+use super::{
+    AccountBinding, Driver, LaunchBoundary, LaunchEvent, LaunchLimits, LaunchRequest, rate_limited,
+};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -14,8 +16,7 @@ fn claude_driver() -> Driver {
         },
         model: None,
         tools: false,
-        sandbox_profile: None,
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(PathBuf::from("/unused.sb")),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -234,8 +235,7 @@ fn team_launch(harness: &str) -> TeamLaunch {
             account: AccountBinding::Subscription { home },
             model: None,
             tools: true,
-            sandbox_profile: Some(profile),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(profile),
             git_identity: None,
             limits: LaunchLimits::default(),
         },
@@ -524,8 +524,7 @@ fn codex_driver_in_a_turn_keeping(native_threads: bool) -> Driver {
         },
         model: None,
         tools: native_threads,
-        sandbox_profile: None,
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(PathBuf::from("/unused.sb")),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -691,8 +690,7 @@ fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_of
         account: AccountBinding::Subscription { home },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: Some(super::GitIdentity::new(name, email).unwrap()),
         limits: LaunchLimits::default(),
     };
@@ -741,9 +739,10 @@ fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_of
     );
 }
 
-/// Off macOS no agent launch is built, since agents run under Seatbelt alone in this
-/// version: a request that is valid in every other way, its sandbox profile named, is
-/// refused with `launch_sandbox_unavailable` and nothing is written into the agent's home.
+/// Off macOS a Seatbelt profile path is no boundary (V244-LINUX-TEAM S5a, rv-sec2 #710 C5):
+/// a request that is valid in every other way and names only a profile, as a stored agent
+/// row does, is refused with `launch_sandbox_unavailable`, and nothing is written into the
+/// agent's home.
 #[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn a_launch_off_macos_is_refused_with_the_sandbox_code() {
@@ -772,8 +771,7 @@ fn a_launch_off_macos_is_refused_with_the_sandbox_code() {
             account: AccountBinding::Subscription { home: home.clone() },
             model: None,
             tools,
-            sandbox_profile: Some(profile.clone()),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(profile.clone()),
             git_identity: None,
             limits: LaunchLimits::default(),
         };
@@ -823,8 +821,7 @@ fn an_env_script_harness_starts_headless_through_its_resolved_interpreter_with_t
         account: AccountBinding::Subscription { home: home.clone() },
         model: None,
         tools: false,
-        sandbox_profile: Some(profile.clone()),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile.clone()),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -879,8 +876,7 @@ fn a_headless_harness_inside_a_project_is_refused_with_the_resolvers_line() {
         account: AccountBinding::Subscription { home: home.clone() },
         model: None,
         tools: false,
-        sandbox_profile: Some(profile.clone()),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile.clone()),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -918,8 +914,7 @@ fn a_launch_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it()
             account: AccountBinding::Subscription { home: home.clone() },
             model: None,
             tools,
-            sandbox_profile: Some(profile.clone()),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(profile.clone()),
             git_identity: None,
             limits: LaunchLimits::default(),
         };
@@ -1262,8 +1257,7 @@ fn retry_request(
         account,
         model: None,
         tools: false,
-        sandbox_profile: None,
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(PathBuf::from("/unused.sb")),
         git_identity: None,
         limits: LaunchLimits {
             provider_retry: retry,
@@ -1432,8 +1426,7 @@ fn a_piped_claude_agent_runs_with_auto_memory_off() {
             account: AccountBinding::Subscription { home: home.clone() },
             model: None,
             tools,
-            sandbox_profile: Some(profile.clone()),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(profile.clone()),
             git_identity: None,
             limits: LaunchLimits::default(),
         };
