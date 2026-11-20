@@ -17,19 +17,16 @@ env:
   RUST_TOOLCHAIN: "1.98.1"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
-  BASE_SHA: 0277f210c
-  RED_SHA: 28061a4f1
-  FIX_SHA: 5dcf25403
-  R5_RED_SHA: 06106faf3
-  TIP_SHA: df0eb4c27
+  TIP_SHA: 308114783
+  D2_TURNS: "20"
 
 defaults:
   run:
     shell: bash
 
 jobs:
-  s6c6:
-    name: V244 WIN-MASTER S6 C6 git-folder guard on ${{ matrix.runner }}, red is the tip without fixes 5dcf25403 and df0eb4c27, tip df0eb4c27
+  s6d2:
+    name: V244 WIN-MASTER S6 D2 turn boundary timing on ${{ matrix.runner }}, tip 308114783, quiet and under a parallel cargo build
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     strategy:
@@ -100,92 +97,28 @@ jobs:
           set -euo pipefail
           cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked
           cp target/debug/crazyagent-win-boundary.exe target/debug/deps/
-      - name: S6 C6 r5 red row at the tip without fix df0eb4c27, where only the project root's git folder is checked
-        if: ${{ !cancelled() }}
-        timeout-minutes: 60
-        run: |
-          set -euo pipefail
-          git diff "$R5_RED_SHA" "$TIP_SHA" -- crates | git apply -R
-          if git diff --quiet "$TIP_SHA" -- crates; then echo "::error::the r5 fix did not come off"; exit 1; fi
-          set +e
-          cargo test -p crazyagent --lib --locked -- --test-threads 1 --exact sandbox::windows::tests::a_worktree_profile_that_also_writes_its_repository_is_refused 2>&1 | tee "$RUNNER_TEMP/red5.log"
-          rc=${PIPESTATUS[0]}
-          set -e
-          git restore -q --source="$TIP_SHA" --staged --worktree -- crates
-          git diff --quiet "$TIP_SHA" -- crates
-          grep -E '^test |^test result|panicked' "$RUNNER_TEMP/red5.log" || true
-          [ "$rc" -ne 0 ]
-          grep -qE 'test result: FAILED\. 0 passed; 1 failed' "$RUNNER_TEMP/red5.log"
-          echo "red as expected: a worktree-rooted profile that writes its repository builds without r5"
-      - name: S6 C6 red rows at the tip without fixes 5dcf25403 and df0eb4c27, where no profile is refused for the git folder
-        if: ${{ !cancelled() }}
-        timeout-minutes: 60
-        run: |
-          set -euo pipefail
-          git diff "$R5_RED_SHA" "$TIP_SHA" -- crates | git apply -R
-          git diff "$RED_SHA" "$FIX_SHA" -- crates | git apply -R
-          if git diff --quiet "$TIP_SHA" -- crates; then echo "::error::the fix did not come off"; exit 1; fi
-          set +e
-          cargo test -p crazyagent --lib --locked -- --test-threads 1 --exact sandbox::windows::tests::a_job_folder_profile_on_a_repository_is_refused_because_it_writes_the_git_folder sandbox::windows::tests::a_guarded_project_root_profile_on_a_repository_is_refused_and_a_worktree_profile_is_not sandbox::windows::tests::a_wrapped_agent_on_a_repository_is_refused_before_it_can_write_git_commondir sandbox::windows::tests::a_worktree_profile_that_also_writes_its_repository_is_refused sandbox::windows::owner_git::tests::owner_git_installs_on_a_repository_where_an_agent_job_folder_is_refused 2>&1 | tee "$RUNNER_TEMP/red.log"
-          rc=${PIPESTATUS[0]}
-          set -e
-          git restore -q --source="$TIP_SHA" --staged --worktree -- crates
-          git diff --quiet "$TIP_SHA" -- crates
-          grep -E '^test |^test result|panicked|left:|right:' "$RUNNER_TEMP/red.log" || true
-          [ "$rc" -ne 0 ]
-          grep -qE 'test result: FAILED\. 0 passed; 5 failed' "$RUNNER_TEMP/red.log"
-          grep -qF 'commondir written: true' "$RUNNER_TEMP/red.log"
-          echo "red as expected: without the guard every git-folder profile builds, so all 5 rows fail, and a guarded project-root agent writes .git commondir"
-      - name: Windows sandbox and owner git rows at the tip, five rounds
+      - name: D2 timing, quiet
         if: ${{ !cancelled() }}
         timeout-minutes: 90
         run: |
           set -euo pipefail
-          for round in 1 2 3 4 5; do
-            set +e
-            cargo test -p crazyagent --lib --locked -- --test-threads 1 sandbox::windows:: > "$RUNNER_TEMP/tip-$round.log" 2>&1
-            rc=$?
-            set -e
-            echo "round $round rc=$rc"
-            grep -E 'FAILED|panicked|^test result' "$RUNNER_TEMP/tip-$round.log" || true
-            [ "$rc" -eq 0 ]
-            for row in a_job_folder_profile_on_a_repository_is_refused_because_it_writes_the_git_folder a_guarded_project_root_profile_on_a_repository_is_refused_and_a_worktree_profile_is_not owner_git_installs_on_a_repository_where_an_agent_job_folder_is_refused; do
-              grep -q "$row \.\.\. ok" "$RUNNER_TEMP/tip-$round.log"
-            done
-          done
-          echo "sandbox::windows rows green in 5 rounds"
-      - name: Windows access refusal rows stay green at the tip
-        if: ${{ !cancelled() }}
-        timeout-minutes: 30
-        run: |
-          set +e
-          cargo test -p crazyagent --lib --locked -- --test-threads 1 sandbox::policy::tests:: 2>&1 | tee "$RUNNER_TEMP/policy.log"
-          rc=${PIPESTATUS[0]}
-          set -e
-          grep -E '^test result' "$RUNNER_TEMP/policy.log" || true
-          [ "$rc" -eq 0 ]
-          grep -q 'full_access_on_windows_is_refused_with_its_own_reason_and_code \.\.\. ok' "$RUNNER_TEMP/policy.log"
-      - name: Every crazyagent library row on Windows at chore/v244 0277f210c and at the S6 C6 tip
+          export D2_TIMING_OUT="$RUNNER_TEMP/d2-quiet.txt"
+          cargo test -p crazyagent --lib --locked -- --test-threads 1 --ignored --exact sandbox::windows::tests::d2_turn_boundary_time_per_turn_and_per_session > "$RUNNER_TEMP/d2-quiet.log" 2>&1 || true
+          grep -E '^test |^test result|panicked' "$RUNNER_TEMP/d2-quiet.log" || true
+          grep -q 'test result: ok. 1 passed' "$RUNNER_TEMP/d2-quiet.log"
+          sed 's/^/quiet /' "$D2_TIMING_OUT"
+      - name: D2 timing, under a parallel cargo build
         if: ${{ !cancelled() }}
         timeout-minutes: 120
         run: |
           set -euo pipefail
-          rows() {
-            set +e
-            cargo test -p crazyagent --lib --locked -- --test-threads 1 > "$RUNNER_TEMP/$1.log" 2>&1
-            echo "$1 rc=$?"
-            set -e
-            grep -E '^test result' "$RUNNER_TEMP/$1.log" || true
-            { grep -E ' \.\.\. FAILED$' "$RUNNER_TEMP/$1.log" || true; } | sed 's/^test //; s/ \.\.\. FAILED$//' | sort -u > "$RUNNER_TEMP/$1.failed"
-          }
-          git restore -q --source="$BASE_SHA" --staged --worktree -- crates
-          rows base
-          git restore -q --source="$TIP_SHA" --staged --worktree -- crates
-          git diff --quiet "$TIP_SHA" -- crates
-          rows tip
-          echo "failed at the base:"; cat "$RUNNER_TEMP/base.failed"
-          echo "failed at the tip:"; cat "$RUNNER_TEMP/tip.failed"
-          grep -qE 'test result: (ok|FAILED)\. [1-9][0-9]* passed' "$RUNNER_TEMP/tip.log"
-          new=$(comm -13 "$RUNNER_TEMP/base.failed" "$RUNNER_TEMP/tip.failed")
-          [ -z "$new" ] || { echo "::error::rows failing at the tip only: $new"; exit 1; }
-          echo "no row fails at the tip that passes at the base"
+          export D2_TIMING_OUT="$RUNNER_TEMP/d2-loaded.txt"
+          ( cargo build -p crazyagent --release --locked --target-dir "$RUNNER_TEMP/load-target" > "$RUNNER_TEMP/load.log" 2>&1 ) &
+          load=$!
+          sleep 60
+          kill -0 "$load"
+          cargo test -p crazyagent --lib --locked -- --test-threads 1 --ignored --exact sandbox::windows::tests::d2_turn_boundary_time_per_turn_and_per_session > "$RUNNER_TEMP/d2-loaded.log" 2>&1 || true
+          grep -E '^test |^test result|panicked' "$RUNNER_TEMP/d2-loaded.log" || true
+          grep -q 'test result: ok. 1 passed' "$RUNNER_TEMP/d2-loaded.log"
+          if kill -0 "$load" 2>/dev/null; then echo "load still running at the end: yes"; kill "$load" || true; else echo "load still running at the end: no (it ended first; the loaded figures cover only part of the run)"; fi
+          sed 's/^/loaded /' "$D2_TIMING_OUT"
