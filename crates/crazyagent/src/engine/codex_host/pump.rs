@@ -9,7 +9,8 @@ pub(in crate::engine) const CHUNK_BYTES: usize = 4096;
 /// How many chunks a pumped output reads ahead of custody before its thread stops reading.
 const CHUNKS_AHEAD: usize = 4;
 
-/// How many writes a pumped input holds beyond the one its thread is writing.
+/// How many writes the channel to a pumped input's thread holds: custody hands it one at a
+/// time and waits for that one to reach the pipe.
 const WRITES_HELD: usize = 1;
 
 /// A wake a custody thread sleeps on with a bound, raised by the threads that pump its pipes
@@ -88,11 +89,22 @@ impl Read for Output {
     }
 }
 
-/// The custody end of a pipe a thread writes to: a write hands its bytes to the thread
-/// whole, says `WouldBlock` while the thread still holds a write it has not begun, and
-/// `BrokenPipe` once the pipe has failed. Dropping it closes the pipe after the held writes.
+/// The custody end of a pipe a thread writes to, one write at a time (CodeRabbit CR-1149):
+/// a write hands its bytes to the thread whole and says `WouldBlock` until the thread has
+/// written them all to the pipe; custody asks again with the same bytes, which are then done,
+/// or `BrokenPipe` when the pipe failed, after part of them included. Dropping it closes the
+/// pipe after the write the thread holds.
 pub(in crate::engine) struct Input {
     writes: SyncSender<Vec<u8>>,
+    hand: Arc<Mutex<Hand>>,
+}
+
+/// Where the one write custody handed a pumped input stands, shared with its thread.
+#[derive(Default)]
+struct Hand {
+    taken: Option<usize>,
+    written: Option<usize>,
+    failed: bool,
 }
 
 impl Write for Input {
@@ -100,10 +112,29 @@ impl Write for Input {
         if buf.is_empty() {
             return Ok(0);
         }
+        let mut hand = self.hand.lock().unwrap_or_else(PoisonError::into_inner);
+        assert!(hand.taken.is_none() || hand.written.is_none());
+        if hand.failed {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        if let Some(count) = hand.written.take() {
+            assert_eq!(count, buf.len());
+            return Ok(count);
+        }
+        if let Some(count) = hand.taken {
+            assert_eq!(count, buf.len());
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
         match self.writes.try_send(buf.to_vec()) {
-            Ok(()) => Ok(buf.len()),
+            Ok(()) => {
+                hand.taken = Some(buf.len());
+                Err(io::ErrorKind::WouldBlock.into())
+            }
             Err(TrySendError::Full(_)) => Err(io::ErrorKind::WouldBlock.into()),
-            Err(TrySendError::Disconnected(_)) => Err(io::ErrorKind::BrokenPipe.into()),
+            Err(TrySendError::Disconnected(_)) => {
+                hand.failed = true;
+                Err(io::ErrorKind::BrokenPipe.into())
+            }
         }
     }
 
@@ -140,10 +171,12 @@ pub(in crate::engine) fn input<W: Write + Send + 'static>(
     name: &str,
 ) -> io::Result<Input> {
     let (writes, taken) = sync_channel(WRITES_HELD);
+    let hand = Arc::new(Mutex::new(Hand::default()));
+    let held = Arc::clone(&hand);
     std::thread::Builder::new()
         .name(name.to_owned())
-        .spawn(move || write_behind(pipe, taken, &signal))?;
-    Ok(Input { writes })
+        .spawn(move || write_behind(pipe, taken, &held, &signal))?;
+    Ok(Input { writes, hand })
 }
 
 /// Reads `pipe` into `send` one chunk at a time until the pipe ends, fails or custody drops
@@ -174,14 +207,32 @@ fn read_ahead<R: Read>(mut pipe: R, send: SyncSender<io::Result<Vec<u8>>>, signa
 }
 
 /// Writes each write `taken` brings to `pipe` whole until custody drops its end or the pipe
-/// fails, raising `signal` after each one, then closes the pipe and raises it once more.
-/// Inputs: the pipe, the channel and the signal. Output: none.
-fn write_behind<W: Write>(mut pipe: W, taken: Receiver<Vec<u8>>, signal: &Signal) {
+/// fails, marking in `hand` that it was written or that the pipe failed and raising `signal`
+/// after each one, then closes the pipe and raises it once more. Inputs: the pipe, the
+/// channel, the shared hand and the signal. Output: none.
+fn write_behind<W: Write>(
+    mut pipe: W,
+    taken: Receiver<Vec<u8>>,
+    hand: &Mutex<Hand>,
+    signal: &Signal,
+) {
     for bytes in taken {
-        if pipe.write_all(&bytes).and_then(|()| pipe.flush()).is_err() {
-            break;
+        let written = pipe.write_all(&bytes).and_then(|()| pipe.flush()).is_ok();
+        {
+            let mut hand = hand.lock().unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(hand.taken, Some(bytes.len()));
+            assert!(hand.written.is_none() && !hand.failed);
+            hand.taken = None;
+            if written {
+                hand.written = Some(bytes.len());
+            } else {
+                hand.failed = true;
+            }
         }
         signal.raise();
+        if !written {
+            break;
+        }
     }
     drop(pipe);
     signal.raise();
@@ -335,30 +386,54 @@ mod tests {
         assert_eq!(thread.join().unwrap(), b"onetwo");
     }
 
+    /// CodeRabbit CR-1149 (1): a pumped input says a write is done only once its pipe took
+    /// it whole. While the pipe's reader takes nothing, a write larger than the pipe stays
+    /// `WouldBlock`, and so does any other write, so custody keeps the request pending; once
+    /// the reader drains the pipe the same write is done, and every byte arrives in order.
     #[test]
-    fn a_pumped_input_holds_one_write_beyond_the_one_its_pipe_is_taking() {
+    fn a_pumped_input_write_is_done_only_once_its_pipe_took_it_whole() {
         let (mut reader, writer) = std::io::pipe().unwrap();
         let signal = Arc::new(Signal::new());
         let mut input = input(writer, Arc::clone(&signal), "pump-test-input").unwrap();
         let first = vec![1_u8; 1024 * 1024];
-        let second = vec![2_u8; 1024];
-        assert_eq!(input.write(&first).unwrap(), first.len());
-        std::thread::sleep(Duration::from_millis(200));
-        assert_eq!(input.write(&second).unwrap(), second.len());
-        let refused = input.write(b"third").unwrap_err();
-        assert_eq!(refused.kind(), io::ErrorKind::WouldBlock);
+        for _ in 0..4 {
+            let held = input.write(&first).unwrap_err();
+            assert_eq!(held.kind(), io::ErrorKind::WouldBlock);
+            std::thread::sleep(Duration::from_millis(50));
+        }
         let thread = std::thread::spawn(move || {
             let mut read = Vec::new();
             reader.read_to_end(&mut read).unwrap();
             read
         });
-        write_whole(&mut input, &signal, b"third");
+        write_whole(&mut input, &signal, &first);
+        write_whole(&mut input, &signal, b"second");
         drop(input);
         let read = thread.join().unwrap();
-        assert_eq!(read.len(), first.len() + second.len() + 5);
+        assert_eq!(read.len(), first.len() + 6);
         assert!(read[..first.len()].iter().all(|byte| *byte == 1));
-        assert_eq!(&read[first.len()..first.len() + second.len()], &second[..]);
-        assert_eq!(&read[first.len() + second.len()..], b"third");
+        assert_eq!(&read[first.len()..], b"second");
+    }
+
+    /// CodeRabbit CR-1149 (1): a pumped input whose one write fails on its pipe reports the
+    /// failure for that write, so custody fails the request instead of counting it written
+    /// and never hearing of the pipe's end.
+    #[test]
+    fn a_pumped_input_reports_the_failure_of_its_one_write() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        let signal = Arc::new(Signal::new());
+        let mut input = input(writer, Arc::clone(&signal), "pump-test-input").unwrap();
+        drop(reader);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let failed = loop {
+            match input.write(b"lost") {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                done => break done,
+            }
+            assert!(Instant::now() < deadline, "the write never ended");
+            signal.wait_until(Instant::now() + Duration::from_millis(250));
+        };
+        assert_eq!(failed.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
     }
 
     #[test]

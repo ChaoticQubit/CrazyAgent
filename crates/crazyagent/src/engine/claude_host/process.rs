@@ -819,25 +819,40 @@ impl Process {
     }
 
     /// The Windows twin of the Unix `observe_group`: once the harness is reaped its tree is
-    /// ended, which ends every process it started, so none is left. Takes nothing.
+    /// ended, which ends every process it started, and the group counts as gone only once the
+    /// tree's job runs none (#734 L1); until then cleanup waits for it up to its deadline.
+    /// Takes nothing; records a fault when the tree cannot be ended or read.
     #[cfg(windows)]
     fn observe_group(&mut self) {
         if self.status.is_none() || self.group_absent {
             return;
         }
-        self.tree = None;
+        if let Some(tree) = &self.tree {
+            match tree.ended() {
+                Ok(true) => self.tree = None,
+                Ok(false) => return,
+                Err(_) => {
+                    self.fail_cleanup(Fault::Host("claude_host_group_unobservable"));
+                    return;
+                }
+            }
+        }
         self.group_absent = true;
     }
 
-    /// The Windows twin of the Unix `kill_group`: ends the harness's tree, whose kill-on-close
-    /// job holds the harness and every process it started, so all of them end with it.
-    /// Takes nothing. Returns whether a tree was left to end.
+    /// The Windows twin of the Unix `kill_group`: ends the harness's tree, whose job holds the
+    /// harness and every process it started, and keeps the tree, so [`Self::observe_group`]
+    /// counts the group gone only once its job runs none (#734 L1). Takes nothing. Returns
+    /// whether the end reached a tree; records a fault when the job refuses it.
     #[cfg(windows)]
     fn kill_group(&mut self) -> bool {
-        let Some(tree) = self.tree.take() else {
+        let Some(tree) = &self.tree else {
             return false;
         };
-        drop(tree);
+        if tree.ended().is_err() {
+            self.fail_cleanup(Fault::Host("claude_host_kill_failed"));
+            return false;
+        }
         true
     }
 
