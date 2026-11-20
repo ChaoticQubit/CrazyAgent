@@ -218,3 +218,18 @@ fn shared_locks_meet_an_exclusive_one_waits_and_unlock_frees_it() {
     lock(&one, false).unwrap();
     unlock(&one);
 }
+
+/// N2a row 3b (leader 05:2x, rv-sec2 #717 C1): the layer holds only the plain Windows
+/// spelling. A verbatim `\\?\` root trips its assertion before any open, while the same
+/// folder in its plain spelling holds, so every held path the layer joins is plain.
+#[cfg(windows)]
+#[test]
+fn a_verbatim_root_trips_the_layer_and_the_plain_spelling_holds() {
+    let (_temp, root) = private_root();
+    let plain = root.to_str().unwrap();
+    assert!(plain.as_bytes().get(1) == Some(&b':'), "{plain}");
+    let verbatim = PathBuf::from(format!(r"\\?\{plain}"));
+    let held = std::panic::catch_unwind(|| Folder::root(&verbatim).is_ok());
+    assert!(held.is_err(), "a verbatim root reached an open");
+    Folder::root(&root).unwrap();
+}
