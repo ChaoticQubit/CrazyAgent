@@ -944,3 +944,101 @@ fn a_windows_work_tree_walk_refuses_a_junction_root_and_stops_at_its_bound() {
         "changes_workspace_capacity"
     );
 }
+
+/// W5b2b, rv-sec3 RULING 17:42 R2-b: the shadow git folder's config is an allowlist the engine
+/// writes from the owner's listing. The ten keys that shape what `add`, refresh, `diff-files`
+/// and `ls-files` produce are kept, the last value winning as git reads it; a remote URL with a
+/// token, a credential helper, a hooks path, an fsmonitor, an include, a URL rewrite, an HTTP
+/// header and an SSH command are all left out; a kept key whose value is not a plain word
+/// stops the step.
+#[test]
+fn a_windows_shadow_config_keeps_only_the_keys_that_shape_a_scan() {
+    let listing = b"core.autocrlf\nfalse\0core.autocrlf\ninput\0core.quotepath\nfalse\0core.checkroundtripencoding\nSHIFT-JIS\0core.symlinks\0remote.origin.url\nhttps://secret-token@example.invalid/r.git\0credential.helper\nstore\0core.hookspath\nhooks-elsewhere\0core.fsmonitor\ntrue\0include.path\nelsewhere.cfg\0url.https://x.invalid/.insteadof\ngit://y\0http.extraheader\nAuthorization: secret\0core.sshcommand\nssh -i key\0";
+    let text = super::step_windows::shadow_config(listing).unwrap();
+    assert_eq!(
+        text,
+        "[core]\n\tautocrlf = input\n\tquotepath = false\n\tcheckroundtripencoding = SHIFT-JIS\n\tsymlinks = true\n"
+    );
+    for left in [
+        "secret",
+        "store",
+        "hooks",
+        "fsmonitor",
+        "include",
+        "insteadof",
+        "ssh",
+    ] {
+        assert!(!text.to_lowercase().contains(left), "{left} left out");
+    }
+    assert_eq!(
+        code(super::step_windows::shadow_config(b"core.eol\nlf\n[x]\0")),
+        "changes_git_unsupported"
+    );
+}
+
+/// W5b2b, rv-sec3 RULING 17:42 R2-b and R2-c: the engine writes the shadow git folder in the
+/// step folder through W1, holding only a detached `HEAD` at the step's commit, an empty
+/// `refs` folder and the allowlisted config made from the owner's own config file, which a
+/// planted remote URL with a token never reaches. Git reads it as a repository whose objects
+/// are the owner's object store, named by `GIT_OBJECT_DIRECTORY`.
+#[test]
+fn a_windows_shadow_git_folder_holds_a_detached_head_and_the_allowlisted_config_only() {
+    let place = place();
+    let ws = &place.workspace;
+    let data = place.home.parent().unwrap().join("data");
+    std::fs::create_dir(&data).unwrap();
+    git(
+        &ws.repository,
+        &[
+            "config",
+            "remote.origin.url",
+            "https://secret-token@example.invalid/r.git",
+        ],
+    );
+    git(&ws.repository, &["config", "core.autocrlf", "input"]);
+    let repo = Repo::open(&ws.repository, &ws.git_dir, None).unwrap();
+    let head = String::from_utf8(repo.capture(&["rev-parse", "HEAD"], 128).unwrap()).unwrap();
+    let head = head.trim_end();
+    let places = step_places(&place, &data);
+    let shadow = super::step_windows::write_shadow(&places, &repo, head).unwrap();
+    assert_eq!(shadow, places.step.join("git"));
+    let mut names: Vec<String> = std::fs::read_dir(&shadow)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["HEAD", "config", "refs"]);
+    assert_eq!(std::fs::read_dir(shadow.join("refs")).unwrap().count(), 0);
+    assert_eq!(
+        std::fs::read_to_string(shadow.join("HEAD")).unwrap(),
+        format!("{head}\n")
+    );
+    let config = std::fs::read_to_string(shadow.join("config")).unwrap();
+    assert!(config.contains("autocrlf = input"));
+    assert!(!config.contains("secret") && !config.contains("remote"));
+    for name in ["HEAD", "config"] {
+        assert!(crazyagent_win_sandbox::private::read_only(&shadow.join(name)).is_ok());
+    }
+    let read = crate::spawn_gate::collected(
+        Command::new("git")
+            .env("GIT_DIR", &shadow)
+            .env(
+                "GIT_OBJECT_DIRECTORY",
+                ws.repository.join(".git").join("objects"),
+            )
+            .args(["rev-parse", "HEAD^{tree}"])
+            .stdin(Stdio::null()),
+    )
+    .unwrap();
+    assert!(
+        read.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    let again = super::step_windows::write_shadow(&places, &repo, head).unwrap();
+    assert_eq!(again, shadow);
+    assert_eq!(
+        code(super::step_windows::write_shadow(&places, &repo, "HEAD")),
+        "changes_workspace_invalid"
+    );
+}
