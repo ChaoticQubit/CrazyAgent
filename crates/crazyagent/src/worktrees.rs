@@ -2456,8 +2456,10 @@ fn worktree_metadata(record: &LeaseRecord) -> Result<PathBuf, EngineError> {
     )?;
     validate_admin(Path::new(&record.lease.repository), &path)?;
     if bounded_read(&path.join("commondir"), 32)? != b"../..\n"
-        || bounded_read(&path.join("gitdir"), 4096)?
-            != format!("{}/.git\n", record.lease.path).as_bytes()
+        || !backlink_matches(
+            &bounded_read(&path.join("gitdir"), 4096)?,
+            Path::new(&record.lease.path),
+        )
     {
         return Err(error("worktree_backlink_mismatch"));
     }
@@ -2465,6 +2467,13 @@ fn worktree_metadata(record: &LeaseRecord) -> Result<PathBuf, EngineError> {
         return Err(error("worktree_config_present"));
     }
     Ok(path)
+}
+
+/// Says whether a lease's admin `gitdir` file links back to the lease worktree: the
+/// worktree's path, `/.git` and one newline, compared byte for byte. Inputs: the file's bytes
+/// and the lease path. Output: the answer.
+fn backlink_matches(bytes: &[u8], lease: &Path) -> bool {
+    bytes == format!("{}/.git\n", lease.display()).as_bytes()
 }
 
 /// Reads a worktree's `config.worktree`. Input: the worktree's Git metadata folder.
