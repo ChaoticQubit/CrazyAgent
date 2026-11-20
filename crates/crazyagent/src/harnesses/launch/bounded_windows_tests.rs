@@ -4,8 +4,8 @@ use super::{
 };
 use crate::sandbox::windows::{HELPER_NAME, container_name};
 use crate::sandbox::{
-    AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, InstalledSandbox, LineageCheck, LinuxStrict,
-    LinuxSupervisor, ProjectSandbox, SandboxNetwork,
+    AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, InstalledSandbox, LineageCheck, LinuxSupervisor,
+    ProjectSandbox, SandboxNetwork,
 };
 use crazyagent_win_sandbox::private;
 use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
@@ -33,7 +33,8 @@ const BOUNDARY_NAMES: [&str; 13] = [
 const FOREIGN_CONTAINER: &str = "S-1-15-2-1-2-3-4-5-6-7";
 
 /// The folders of one Windows launch case, under a canonical temp base: the project, the
-/// agent's W1 private home and temp folder, and a profiles folder outside every root.
+/// agent's W1 private home and temp folder, and a profiles folder and the boundary's grants
+/// folder outside every root, so a case reads no data root and no environment variable.
 struct Case {
     _temp: tempfile::TempDir,
     base: PathBuf,
@@ -41,34 +42,25 @@ struct Case {
     home: PathBuf,
     tmp: PathBuf,
     profiles: PathBuf,
+    grants: PathBuf,
 }
 
-/// Readies the test binary once: `CRAZYAGENT_HOME` must name an absolute plain folder, so the
-/// boundary's grants folder is made there and never in a real data root, and the boundary
-/// helper the build puts in the target folder is copied beside the test binary, where
-/// `helper_beside_engine` looks.
-fn ready() {
-    static READY: OnceLock<()> = OnceLock::new();
-    READY.get_or_init(|| {
-        let data = std::env::var_os(crate::paths::HOME_ENV).map(PathBuf::from);
-        assert!(
-            data.as_deref().is_some_and(Path::is_absolute),
-            "set CRAZYAGENT_HOME to a fresh absolute folder for these rows"
-        );
-        assert!(
-            data.as_deref()
-                .is_some_and(|data| !data.as_os_str().to_string_lossy().contains('/')),
-            "CRAZYAGENT_HOME must be a plain Windows path: a grants folder with a slash is refused"
-        );
+/// Puts the boundary helper beside the test binary once, where `helper_beside_engine` looks.
+/// The release suite's archive already ships it there (`deps`); a plain `cargo test` build
+/// has it one folder up, in the target folder, and it is copied. It reads no environment
+/// variable and no data root: each case gives its own grants folder (CR-1614).
+fn helper_beside() {
+    static COPIED: OnceLock<()> = OnceLock::new();
+    COPIED.get_or_init(|| {
         let tests = std::env::current_exe().unwrap();
-        let built = tests.parent().unwrap().with_file_name(HELPER_NAME);
-        assert!(
-            built.is_file(),
-            "build crazyagent-win-boundary first: {}",
-            built.display()
-        );
         let beside = tests.with_file_name(HELPER_NAME);
         if !beside.is_file() {
+            let built = tests.parent().unwrap().with_file_name(HELPER_NAME);
+            assert!(
+                built.is_file(),
+                "build crazyagent-win-boundary first: {}",
+                built.display()
+            );
             std::fs::copy(&built, &beside).unwrap();
         }
         assert!(beside.is_file());
@@ -77,14 +69,15 @@ fn ready() {
 
 /// Makes the folders of one case. Output: the case.
 fn case() -> Case {
-    ready();
+    helper_beside();
     let temp = tempfile::tempdir().unwrap();
     let base = crate::sandbox::canonical(temp.path()).unwrap();
     let project = base.join("project");
     let home = base.join("agent").join("home");
     let tmp = base.join("agent").join("tmp");
     let profiles = base.join("profiles");
-    for folder in [&project, &base.join("agent"), &profiles] {
+    let grants = base.join("grants");
+    for folder in [&project, &base.join("agent"), &profiles, &grants] {
         std::fs::create_dir_all(folder).unwrap();
     }
     drop(private::dir(&home).unwrap());
@@ -96,20 +89,22 @@ fn case() -> Case {
         home,
         tmp,
         profiles,
+        grants,
     }
 }
 
 /// Installs the boundary of one agent of `project` with `home` and the case's temp folder,
-/// its profile at `profile` in the profiles folder. Inputs: the case, the project, the home
-/// and the profile name. Output: the installed boundary.
+/// its profile at `profile` in the profiles folder, with the case's own grants folder.
+/// Inputs: the case, the project, the home and the profile name. Output: the
+/// installed boundary.
 fn installed(case: &Case, project: &Path, home: &Path, profile: &str) -> Arc<InstalledSandbox> {
     let sandbox =
         ProjectSandbox::new(project, home, &case.tmp, SandboxNetwork::Only(Vec::new())).unwrap();
-    let installed = InstalledSandbox::install(
+    let installed = InstalledSandbox::install_with_grants(
         sandbox,
         &case.profiles.join(profile),
         LinuxSupervisor::Off,
-        LinuxStrict::Off,
+        &case.grants,
     )
     .unwrap();
     assert_eq!(installed.sandbox().agent_home(), home);
@@ -377,5 +372,29 @@ fn a_home_granted_another_container_than_its_boundary_is_refused() {
         let launch = LaunchBoundary::Installed(boundary);
         let refused = build(&request(&case, "codex", launch, home, false), None).unwrap_err();
         assert_eq!(refused.0, "launch_account_home_unsafe", "{foreign}");
+    }
+}
+
+/// The engine's grants folder from an owner's data root with a slash, a UNC prefix or a
+/// relative part is refused before the plain-path assert of `install_with_grants`, and a plain
+/// drive folder is kept as it is (CR-1614 r4).
+#[test]
+fn grants_folder_outside_the_plain_drive_spelling_is_refused() {
+    let temp = tempfile::tempdir().unwrap();
+    let plain = crate::sandbox::canonical(temp.path())
+        .unwrap()
+        .join("grants");
+    assert_eq!(crate::sandbox::plain_grants(plain.clone()).unwrap(), plain);
+    for refused in [
+        r"C:/data\grants",
+        r"\\server\share\grants",
+        r"C:\data\..\grants",
+        "grants",
+    ] {
+        let error = crate::sandbox::plain_grants(PathBuf::from(refused)).unwrap_err();
+        assert!(
+            matches!(error, crate::sandbox::SandboxError::Invalid(_)),
+            "{refused}: {error:?}"
+        );
     }
 }

@@ -274,15 +274,22 @@ fn the_profile_and_its_codex_and_claude_folders_are_forbidden_homes() {
     assert!(validate_home(&std::env::home_dir().unwrap()).is_err());
 }
 
-/// The boundary helper the build puts beside the test binary's folder. Output: its path.
+/// The boundary helper: beside the test binary, where the release suite's archive ships it
+/// (`deps`), else one folder up, where a plain `cargo test` build puts it. Output: its path.
 fn helper() -> PathBuf {
     let tests = std::env::current_exe().unwrap();
-    let helper = tests.parent().unwrap().with_file_name(HELPER_NAME);
+    let beside = tests.with_file_name(HELPER_NAME);
+    let helper = if beside.is_file() {
+        beside
+    } else {
+        tests.parent().unwrap().with_file_name(HELPER_NAME)
+    };
     assert!(
         helper.is_file(),
         "build crazyagent-win-boundary first: {}",
         helper.display()
     );
+    assert!(helper.ends_with(HELPER_NAME));
     helper
 }
 
