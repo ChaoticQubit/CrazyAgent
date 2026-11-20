@@ -4,9 +4,11 @@ mod clip;
 mod codec;
 #[cfg(unix)]
 mod control;
+#[cfg(not(unix))]
+#[path = "control_none.rs"]
+mod control;
 mod ended;
 mod event;
-#[cfg(target_os = "macos")]
 pub(crate) mod host;
 mod ime;
 mod keymap;
@@ -197,6 +199,12 @@ mod tests {
     fn no_linux_native_file_raises_or_focuses_a_window() {
         let read = scan("src/native_term/linux", raise_call);
         assert!(read >= 7, "read {read} files");
+    }
+
+    #[test]
+    fn no_host_platform_file_brings_the_app_forward_or_makes_a_window_key() {
+        let read = scan("src/native_term/host", focus_call);
+        assert!(read >= 2, "read {read} files");
     }
 
     #[cfg(unix)]

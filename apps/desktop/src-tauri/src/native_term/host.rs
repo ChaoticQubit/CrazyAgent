@@ -1,27 +1,20 @@
 use super::a11y::{self, Geometry};
-use super::clip::Clip;
 use super::codec;
 use super::control::{Control, Event};
 use super::ended::ended_final;
 use super::event::{MouseKind, ViewEvent};
 use super::pane::{Action, GRID_MAX, Input};
-use super::render::{GPU_FAULT, Shared, Surface};
+use super::render::{GPU_FAULT, Shared};
 use super::screen;
 use super::style::Style;
 use super::table::{Direct, Entry, Outbox, Table, Told, VIEWS_MAX, changes};
-use super::view::TermView;
 use crate::bridge::BridgeError;
 use crate::bridge::feed::{EngineFeed, Fed, FeedEvent, Opener, Opening, Wake};
 use crate::bridge::terminal::{NATIVE_OVERFLOW, Reservation, ViewKey};
 use alacritty_terminal::grid::Dimensions;
-use objc2::MainThreadMarker;
-use objc2::rc::Retained;
-use objc2_app_kit::{NSResponder, NSView, NSWindowOrderingMode};
-use objc2_foundation::{NSPoint, NSRect, NSSize};
 use std::cell::{Cell, RefCell};
 use std::collections::hash_map::Entry as Slot;
 use std::collections::{HashMap, VecDeque};
-use std::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -29,6 +22,21 @@ use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
 use tokio::sync::mpsc;
+
+/// The macOS halves of the host: the AppKit view, its place, focus and drawing hand-off.
+#[cfg(target_os = "macos")]
+mod mac;
+#[cfg(target_os = "macos")]
+use mac as platform;
+/// The stand-in on a system whose host has not landed yet: no native view opens there.
+#[cfg(not(target_os = "macos"))]
+mod none;
+#[cfg(not(target_os = "macos"))]
+use none as platform;
+
+use platform::View;
+#[cfg(all(target_os = "macos", feature = "native-webdriver"))]
+pub use platform::{Look, look, trial_scale};
 
 /// The most engine feed events waiting for the main thread.
 const INBOX_MAX: usize = 4096;
@@ -59,6 +67,10 @@ const OPEN_CODES: [&str; 4] = [
 ];
 
 const _: () = assert!(SETTLE_ROUNDS > 0 && DRAIN_MAX > 0 && DRAIN_MAX < INBOX_MAX);
+
+/// The code a host's `paint` gives for a frame it did not draw and that leaves the view
+/// dirty for the next pass: no surface yet, or a draw the GPU skipped without a fault.
+const SKIPPED: &str = "native_terminal_frame_skipped";
 
 /// Host work parked until the call holding the state settles.
 type Parked = Box<dyn FnOnce(&mut Native)>;
@@ -99,6 +111,7 @@ pub enum NativeEvent {
     },
 }
 
+#[cfg(target_os = "macos")]
 pub use super::view::LABEL_BYTES_MAX;
 
 /// One open checked off the main thread: the calling window, the agent window name, the
@@ -139,18 +152,6 @@ enum Held {
     Busy,
 }
 
-/// A view's AppKit and drawing parts: its NSView above the webview, the webview its place
-/// is measured in, its surface and the backing scale key it was made at, its events channel
-/// and the wall window's project a reopen needs.
-pub struct View {
-    ns: Retained<TermView>,
-    webview: Retained<NSView>,
-    surface: Option<Surface>,
-    scale: u32,
-    events: Channel<NativeEvent>,
-    project: Option<String>,
-}
-
 /// Everything the native terminals hold on the main thread.
 pub struct Native {
     app: AppHandle,
@@ -162,40 +163,13 @@ pub struct Native {
     shared: HashMap<u32, Shared>,
     style: Option<Style>,
     shown: bool,
-    clip: Clip,
+    clip: platform::Clip,
 }
 
 fn scale_key(scale: f64) -> u32 {
     let key = (scale.clamp(1.0, 4.0) * 100.0).round() as u32;
     assert!((100..=400).contains(&key));
     key
-}
-
-#[cfg(feature = "native-webdriver")]
-thread_local! {
-    static TRIAL_SCALE: Cell<Option<f64>> = const { Cell::new(None) };
-}
-
-/// Test builds only: makes every native view read this backing scale in place of its
-/// window's, or its window's own again with none, so a trial on a 1x display drives the
-/// refit a move to a 2x display starts. Input: the scale, 1 to 4, or none. Output: none.
-#[cfg(feature = "native-webdriver")]
-pub fn trial_scale(scale: Option<f64>) {
-    assert!(scale.is_none_or(|scale| (1.0..=4.0).contains(&scale)));
-    TRIAL_SCALE.with(|trial| trial.set(scale));
-    assert_eq!(TRIAL_SCALE.with(Cell::get), scale);
-}
-
-fn backing(view: &NSView) -> f64 {
-    #[cfg(feature = "native-webdriver")]
-    if let Some(scale) = TRIAL_SCALE.with(Cell::get) {
-        return scale;
-    }
-    let scale = view
-        .window()
-        .map_or(2.0, |window| window.backingScaleFactor());
-    assert!(scale.is_finite());
-    scale
 }
 
 fn io_code(error: &std::io::Error) -> &'static str {
@@ -219,7 +193,7 @@ fn schedule() {
         SCHEDULED.store(false, Ordering::Release);
         return;
     };
-    if MainThreadMarker::new().is_some() {
+    if platform::main().is_some() {
         tauri::async_runtime::spawn(async move {
             if app.run_on_main_thread(drain).is_err() {
                 SCHEDULED.store(false, Ordering::Release);
@@ -244,7 +218,7 @@ fn drain() {
 /// it did not run with the work given back.
 fn with_native<T, W: FnOnce(&mut Native) -> T>(work: W) -> Result<T, (Held, W)> {
     assert!(
-        MainThreadMarker::new().is_some(),
+        platform::main().is_some(),
         "native state is main-thread only"
     );
     NATIVE.with(|cell| {
@@ -305,12 +279,12 @@ fn screen(page: u64) -> Option<a11y::Grid> {
 /// work. Output: its result.
 pub async fn on_main<T: Send + 'static>(
     app: &AppHandle,
-    work: impl FnOnce(MainThreadMarker) -> T + Send + 'static,
+    work: impl FnOnce(platform::Main) -> T + Send + 'static,
 ) -> Result<T, &'static str> {
     let _ = APP.set(app.clone());
     let (sender, receiver) = tokio::sync::oneshot::channel();
     app.run_on_main_thread(move || {
-        if let Some(mtm) = MainThreadMarker::new() {
+        if let Some(mtm) = platform::main() {
             let _ = sender.send(work(mtm));
         }
     })
@@ -323,11 +297,10 @@ pub async fn on_main<T: Send + 'static>(
 /// a plain code with the place given back.
 pub fn open(
     app: &AppHandle,
-    mtm: MainThreadMarker,
-    pointer: *mut c_void,
+    mtm: platform::Main,
+    pointer: platform::Webview,
     open: Open,
 ) -> Result<u64, &'static str> {
-    assert!(!pointer.is_null());
     let _ = APP.set(app.clone());
     NATIVE.with(|cell| {
         if let Ok(mut held) = cell.try_borrow_mut()
@@ -374,47 +347,6 @@ pub fn style(style: Style) -> Result<(), &'static str> {
     match with_native(|native| native.restyle(style)) {
         Ok(result) => result,
         Err((Held::Missing, _)) => Ok(()),
-        Err((Held::Busy, _)) => Err("native_terminal_main_busy"),
-    }
-}
-
-/// What a native-webdriver trial reads of one view: its NSView, its visible rows, whether
-/// the direct path draws it and the private pasteboard's text.
-#[cfg(feature = "native-webdriver")]
-pub struct Look {
-    pub view: Retained<TermView>,
-    pub rows: Vec<String>,
-    pub direct: bool,
-    pub pasteboard: Option<String>,
-}
-
-/// Reads one view a window opened for a native-webdriver trial; on the main thread. Inputs:
-/// the window label and the view id. Output: the look, or a plain code.
-#[cfg(feature = "native-webdriver")]
-pub fn look(window: &str, page: u64) -> Result<Look, &'static str> {
-    let looked = with_native(|native| {
-        let Native { table, clip, .. } = native;
-        let entry = table.owned(window, page)?;
-        let rows = entry.pane.term().map_or_else(Vec::new, |term| {
-            let grid = a11y::visible(term);
-            let text = |row: &Vec<a11y::Glyph>| -> String {
-                let cells = row.iter().filter(|glyph| !glyph.spacer);
-                let line: String = cells.map(|glyph| glyph.text.as_str()).collect();
-                line.trim_end().to_owned()
-            };
-            grid.rows.iter().map(text).collect()
-        });
-        assert!(rows.len() <= GRID_MAX);
-        Ok(Look {
-            view: entry.platform.ns.clone(),
-            rows,
-            direct: entry.direct,
-            pasteboard: clip.read(),
-        })
-    });
-    match looked {
-        Ok(look) => look,
-        Err((Held::Missing, _)) => Err("native_terminal_view_unknown"),
         Err((Held::Busy, _)) => Err("native_terminal_main_busy"),
     }
 }
@@ -483,7 +415,7 @@ impl Native {
             shared: HashMap::new(),
             style: None,
             shown: true,
-            clip: Clip::new(),
+            clip: platform::Clip::new(),
         };
         assert!(native.table.is_empty() && native.control.is_none());
         native
@@ -555,20 +487,18 @@ impl Native {
 impl Native {
     fn open(
         &mut self,
-        mtm: MainThreadMarker,
-        pointer: *mut c_void,
+        mtm: platform::Main,
+        pointer: platform::Webview,
         open: Open,
     ) -> Result<u64, &'static str> {
         if self.table.full() {
             return Err("native_terminal_views_full");
         }
-        let webview = unsafe { Retained::retain(pointer.cast::<NSView>()) }
-            .ok_or("native_terminal_webview_missing")?;
-        let host = unsafe { webview.superview() }.ok_or("native_terminal_webview_missing")?;
+        let parent = platform::parent(pointer)?;
         if self.style.is_none() || self.table.is_empty() {
             self.restyle(open.style.clone())?;
         }
-        let key = scale_key(backing(&webview));
+        let key = scale_key(platform::parent_scale(&parent));
         let grid = self.grid(key, open.rect)?;
         let direct = match &open.direct {
             Some((tmux, socket)) => self.ensure_control(tmux, socket),
@@ -582,18 +512,15 @@ impl Native {
             self.feed.close(page);
             return Err(io_code(&error));
         }
-        let ns = TermView::new(mtm, page, sink, screen);
-        ns.set_label(&open.label);
-        ns.setHidden(true);
-        host.addSubview_positioned_relativeTo(&ns, NSWindowOrderingMode::Above, Some(&webview));
-        let platform = View {
-            ns,
-            webview,
-            surface: None,
-            scale: key,
-            events: open.events,
-            project: open.project,
-        };
+        let platform = platform::open_view(
+            mtm,
+            parent,
+            page,
+            key,
+            &open.label,
+            open.events,
+            open.project,
+        );
         let entry = Entry {
             window: open.window,
             name: open.name,
@@ -716,10 +643,7 @@ impl Native {
                 Action::Nothing
             }
             Command::Focus => {
-                let responder: &NSResponder = &entry.platform.ns;
-                if let Some(window) = entry.platform.ns.window() {
-                    let _ = window.makeFirstResponder(Some(responder));
-                }
+                platform::focus_view(&entry.platform);
                 return Ok(());
             }
             Command::Copy(output) => {
@@ -893,15 +817,7 @@ impl Native {
         if let Some(control) = self.control.as_mut() {
             control.close(page);
         }
-        let View {
-            ns,
-            surface,
-            events,
-            ..
-        } = entry.platform;
-        ns.cancel_marked();
-        drop(surface);
-        ns.removeFromSuperview();
+        let events = platform::dismiss_view(entry.platform);
         if self.table.is_empty() {
             self.drop_control();
             BLINKING.store(false, Ordering::Release);
@@ -1092,13 +1008,13 @@ fn draw_view(
     shown: bool,
 ) -> Result<bool, &'static str> {
     let view = &mut entry.platform;
-    let (Some(surface), Some(term)) = (view.surface.as_mut(), entry.pane.term()) else {
+    let marked = platform::marked(view);
+    let Some(term) = entry.pane.term() else {
         return Ok(false);
     };
-    let marked = view.ns.marked_text();
     let frame = screen::frame(term, &style.theme, shown, marked.as_deref());
     assert_eq!(frame.rows.len(), term.screen_lines());
-    match shared.draw(surface, &frame) {
+    match platform::paint(view, shared, &frame) {
         Ok(()) => {}
         Err(code) if code == GPU_FAULT => return Err(GPU_FAULT),
         Err(_) => return Ok(false),
@@ -1111,8 +1027,7 @@ fn draw_view(
         pad: 0.0,
         scale,
     };
-    view.ns
-        .drawn(geometry, a11y::marks(term), a11y::text_key(term));
+    platform::drawn(view, geometry, term);
     Ok(true)
 }
 
@@ -1132,26 +1047,15 @@ impl Native {
             return;
         };
         assert!(entry.rect.iter().all(|side| side.is_finite()));
-        let [x, y, width, height] = entry.rect;
+        let [_, _, width, height] = entry.rect;
         let shown = entry.pane.ready() && !entry.covered && width >= 1.0 && height >= 1.0;
         let view = &mut entry.platform;
-        if !shown {
-            if !view.ns.isHidden() {
-                view.ns.cancel_marked();
-            }
-            view.ns.setHidden(true);
+        let Some(scale) = platform::place_view(view, entry.rect, shown) else {
             return;
-        }
-        let host = unsafe { view.ns.superview() };
-        let css = NSRect::new(NSPoint::new(x, y), NSSize::new(width, height));
-        view.ns
-            .setFrame(view.webview.convertRect_toView(css, host.as_deref()));
-        view.ns.setHidden(false);
-        let scale = backing(&view.ns);
+        };
         let key = scale_key(scale);
         if view.scale != key {
-            view.surface = None;
-            view.scale = key;
+            platform::rescale(view, key);
         }
         let pixels = (
             (width * scale).round() as u32,
@@ -1160,15 +1064,7 @@ impl Native {
         let Ok(shared) = shared_at(shared, key, style) else {
             return;
         };
-        let made = match view.surface.as_mut() {
-            Some(surface) => shared.resize(surface, pixels.0, pixels.1).is_ok(),
-            None => {
-                let pointer = Retained::as_ptr(&view.ns) as *mut c_void;
-                let made = unsafe { shared.surface(pointer, pixels.0, pixels.1) };
-                view.surface = made.ok();
-                view.surface.is_some()
-            }
-        };
+        let made = platform::fit(view, shared, pixels);
         let grid = codec::grid_for(width, height, shared.cell_points(), GRID_MAX);
         if let Some(size) = entry.pane.resize(grid) {
             let _ = feed.resize(entry.feed, size);
@@ -1180,7 +1076,7 @@ impl Native {
         assert!(
             self.table
                 .get(page)
-                .is_none_or(|e| !e.platform.ns.isHidden())
+                .is_none_or(|e| platform::shown(&e.platform))
         );
     }
 
@@ -1193,8 +1089,8 @@ impl Native {
             .into_iter()
             .filter(|page| {
                 self.table.get(*page).is_some_and(|e| {
-                    !e.platform.ns.isHidden()
-                        && scale_key(backing(&e.platform.ns)) != e.platform.scale
+                    platform::shown(&e.platform)
+                        && scale_key(platform::scale(&e.platform)) != e.platform.scale
                 })
             })
             .collect();
@@ -1214,7 +1110,10 @@ impl Native {
         let mut drawn = 0;
         let mut refused = Vec::new();
         for (page, entry) in table.entries_mut() {
-            if !entry.pane.dirty || entry.platform.ns.isHidden() {
+            if !entry.pane.dirty
+                || !platform::shown(&entry.platform)
+                || !platform::ready(&mut entry.platform)
+            {
                 continue;
             }
             let Some(shared) = shared.get_mut(&entry.platform.scale) else {
