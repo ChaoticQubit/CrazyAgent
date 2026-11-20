@@ -399,6 +399,7 @@ fn ran_step(
 #[ignore = "needs unc-share-setup.ps1's shares and device entries on an elevated runner (test farm)"]
 fn a_contained_windows_publish_step_opens_no_share_a_git_folder_names_after_the_check() {
     use crate::sandbox::windows::owner_git::farm;
+    let sessions = farm::hold();
     let mut reached = Vec::new();
     for (shape, _) in farm::SHAPES {
         for step in CONTAINED_STEPS {
@@ -415,7 +416,7 @@ fn a_contained_windows_publish_step_opens_no_share_a_git_folder_names_after_the_
             } else {
                 String::new()
             };
-            farm::reset_sessions();
+            farm::reset_sessions(&sessions);
             if shape == "nested" {
                 farm::plant(&folder, shape);
             } else {
@@ -426,7 +427,7 @@ fn a_contained_windows_publish_step_opens_no_share_a_git_folder_names_after_the_
             }
             ran_step(step, &git, &made, &folder, &local, &head);
             BEFORE_SPAWN.with(|next| *next.borrow_mut() = None);
-            if farm::server_session() {
+            if farm::server_session(&sessions) {
                 reached.push(format!("{shape} {step}"));
             }
         }
@@ -522,6 +523,7 @@ fn gitfile_commit_wrong(
 #[ignore = "needs unc-share-setup.ps1's shares and device entries on an elevated runner (test farm)"]
 fn a_contained_windows_publish_reads_no_git_folder_or_gitfile_planted_below_the_project() {
     use crate::sandbox::windows::owner_git::farm;
+    let sessions = farm::hold();
     let ada = Author {
         name: "Ada".into(),
         email: "ada@example.invalid".into(),
@@ -572,7 +574,7 @@ fn a_contained_windows_publish_reads_no_git_folder_or_gitfile_planted_below_the_
             let said = made.place.path().join("contained-stderr.txt");
             CONTAINED_STDERR
                 .with(|file| *file.borrow_mut() = Some(std::fs::File::create(&said).unwrap()));
-            farm::reset_sessions();
+            farm::reset_sessions(&sessions);
             let answer = match step {
                 "inspect" => match inspect(&git, home, &folder, HOST) {
                     Ok(local) if local.branch.as_deref() == Some("main") => None,
@@ -612,7 +614,7 @@ fn a_contained_windows_publish_reads_no_git_folder_or_gitfile_planted_below_the_
                     std::fs::read_to_string(&said).unwrap_or_default()
                 ));
             }
-            if farm::server_session() {
+            if farm::server_session(&sessions) {
                 wrong.push(format!("{shape} {step}: a server session"));
             }
             if let Some(kept) = kept
@@ -773,6 +775,7 @@ fn the_unwrapped_scope_holds_only_on_its_own_thread_until_dropped() {
 #[ignore = "needs unc-share-setup.ps1's shares and device entries on an elevated runner (test farm)"]
 fn a_planted_share_gitfile_fails_the_planted_check_when_the_commit_runs_unwrapped() {
     use crate::sandbox::windows::owner_git::farm;
+    let sessions = farm::hold();
     let nested_head = std::env::var("CRAZYAGENT_FARM_NESTED_HEAD")
         .expect("CRAZYAGENT_FARM_NESTED_HEAD is set by unc-share-setup.ps1 on the test farm");
     let made = unborn();
@@ -783,12 +786,12 @@ fn a_planted_share_gitfile_fails_the_planted_check_when_the_commit_runs_unwrappe
         name: "Ada".into(),
         email: "ada@example.invalid".into(),
     };
-    farm::reset_sessions();
+    farm::reset_sessions(&sessions);
     let answer = {
         let _unwrapped = Unwrapped::start();
         commit(&git, made.home.path(), &folder, &[], &ada)
     };
-    let reached = farm::server_session();
+    let reached = farm::server_session(&sessions);
     assert!(
         !UNWRAPPED.with(std::cell::Cell::get),
         "the row ends wrapped"

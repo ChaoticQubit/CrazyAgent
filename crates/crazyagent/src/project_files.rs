@@ -694,6 +694,7 @@ mod windows_tests {
     #[ignore = "needs unc-share-setup.ps1's shares and device entries on an elevated runner (test farm)"]
     fn a_contained_windows_list_opens_no_share_a_git_folder_names_after_the_check() {
         use crate::sandbox::windows::owner_git::farm;
+        let sessions = farm::hold();
         let mut reached = Vec::new();
         for (shape, _) in farm::SHAPES {
             let place = tempfile::tempdir().unwrap();
@@ -711,7 +712,7 @@ mod windows_tests {
                     .is_ok_and(|listed| listed.iter().any(|path| path == "README.md")),
                 "{shape}: a contained list before the plant: {before:?}"
             );
-            farm::reset_sessions();
+            farm::reset_sessions(&sessions);
             if shape == "nested" {
                 farm::plant(&repo, shape);
             } else {
@@ -724,7 +725,7 @@ mod windows_tests {
             let stop = Instant::now() + LISTING_TIME;
             let listed = list(&repo, "", FILES_MAX, stop, Some(&owner));
             AFTER_CHECK.with(|step| *step.borrow_mut() = None);
-            if farm::server_session() {
+            if farm::server_session(&sessions) {
                 reached.push(format!("{shape} list: {listed:?}"));
             }
         }

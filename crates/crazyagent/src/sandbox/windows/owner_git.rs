@@ -465,6 +465,31 @@ mod tests {
         );
     }
 
+    /// CR-0443 unc9 r2: a share row waits while another holds the runner's sessions, so no
+    /// reset or session read of one row falls inside another's; the waiting hold sees the
+    /// first row's work already finished.
+    #[test]
+    fn a_share_row_waits_while_another_holds_the_runner_sessions() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let inside = Arc::new(AtomicBool::new(true));
+        let first = farm::hold();
+        let waiting = {
+            let inside = inside.clone();
+            std::thread::spawn(move || {
+                let _second = farm::hold();
+                inside.load(Ordering::SeqCst)
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        inside.store(false, Ordering::SeqCst);
+        drop(first);
+        assert!(
+            !waiting.join().unwrap(),
+            "the second hold began while the first row was inside"
+        );
+    }
+
     #[test]
     fn owner_git_reads_only_a_folder_that_holds_git_for_windows_markers() {
         let made = made();
@@ -622,7 +647,25 @@ pub(crate) mod farm {
     use crate::sandbox::windows::{GRANTS_FOLDER, HELPER_NAME};
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
+    use std::sync::{Mutex, MutexGuard, PoisonError};
     use std::time::Duration;
+
+    /// The lock every share row holds from its session reset to its last session read.
+    static SESSIONS: Mutex<()> = Mutex::new(());
+
+    /// Proof a row holds the runner's SMB sessions: the server's session table is machine-wide,
+    /// so two share rows in one test process would erase or add each other's sessions
+    /// (CodeRabbit CR-0443 unc9 r2). Dropping it lets the next row in.
+    pub(crate) struct Sessions(
+        #[allow(dead_code, reason = "held only for its drop")] MutexGuard<'static, ()>,
+    );
+
+    /// Waits until no other row holds the sessions, then holds them. A row that failed while
+    /// holding them leaves nothing to undo, so a poisoned lock is taken as it is. Output: the
+    /// hold, kept for the whole row.
+    pub(crate) fn hold() -> Sessions {
+        Sessions(SESSIONS.lock().unwrap_or_else(PoisonError::into_inner))
+    }
 
     /// Each planted shape with the share it names, as the setup script opens them.
     pub(crate) const SHAPES: [(&str, &str); 5] = [
@@ -663,15 +706,17 @@ pub(crate) mod farm {
     }
 
     /// Ends every server session, so the next read sees only what a row's git opened.
-    pub(crate) fn reset_sessions() {
+    /// Input: the row's hold on the sessions.
+    pub(crate) fn reset_sessions(held: &Sessions) {
         net(&["session", "/delete", "/y"]);
         std::thread::sleep(Duration::from_millis(500));
-        assert!(!server_session(), "a server session outlived the reset");
+        assert!(!server_session(held), "a server session outlived the reset");
     }
 
     /// True when the runner's SMB server holds a session, the effect a share open leaves
-    /// (P1: no container open made one, every owner open did). Output: the answer.
-    pub(crate) fn server_session() -> bool {
+    /// (P1: no container open made one, every owner open did). Input: the row's hold on the
+    /// sessions. Output: the answer.
+    pub(crate) fn server_session(_held: &Sessions) -> bool {
         !net(&["session"]).contains("There are no entries")
     }
 
