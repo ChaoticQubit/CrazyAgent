@@ -469,19 +469,15 @@ pub enum Mode {
 /// Renames what a held handle names to `name` in the held folder `folder`, never by a path,
 /// the twin of `renameat2` (rv-sec3 #716 C6, #726 L5), through `NtSetInformationFile`: the
 /// kernel32 call refuses a held folder with error 87. The handle carries delete access from
-/// its own open; no fallback. Inputs: the handle, folder, one name and the [`Mode`]. Output:
-/// Ok, or the error.
+/// its own open; no fallback. The name must be UTF-8 and pass [`crate::name::refused`].
+/// Inputs: the handle, folder, one name and the [`Mode`]. Output: Ok, or the error.
 pub fn rename(file: &File, folder: &File, name: &OsStr, mode: Mode) -> io::Result<()> {
     let units: Vec<u16> = name.encode_wide().collect();
     assert!(!units.is_empty());
     assert!(units.len() <= 255);
-    assert!(
-        !units
-            .iter()
-            .any(|unit| matches!(*unit, 0 | 0x2f | 0x3a | 0x5c))
-    );
-    assert_ne!(units.last(), Some(&0x2e));
-    assert_ne!(units.last(), Some(&0x20));
+    let text = name.to_str();
+    assert!(text.is_some(), "{name:?}");
+    assert!(!text.is_some_and(crate::name::refused), "{name:?}");
     let flags = match mode {
         Mode::NoReplace => 0,
         Mode::Replace => FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS,
