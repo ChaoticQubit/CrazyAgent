@@ -2,7 +2,8 @@ use std::fs::File;
 use std::io;
 use std::os::windows::io::AsRawHandle;
 use windows_sys::Win32::Storage::FileSystem::{
-    FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW, VOLUME_NAME_NT,
+    FILE_NAME_NORMALIZED, GETFINALPATHNAMEBYHANDLE_FLAGS, GetFinalPathNameByHandleW,
+    VOLUME_NAME_DOS, VOLUME_NAME_NT,
 };
 
 const NAME_UNITS_START: usize = 512;
@@ -19,12 +20,35 @@ pub fn final_name(file: &File) -> io::Result<Vec<u16>> {
     name_from(file, NAME_UNITS_START)
 }
 
+/// The real place of an open file or folder as a drive path, such as
+/// `\\?\C:\work\notes.md`: the same normalized name as [`final_name`], with every junction
+/// and link resolved, but on the volume's drive letter, so it compares with the path a
+/// caller spelled. Input: the open file or folder. Output: the name in UTF-16 units with no
+/// ending zero, or the I/O error (a volume with no drive letter has no such name).
+pub fn dos_name(file: &File) -> io::Result<Vec<u16>> {
+    read_name(
+        file,
+        NAME_UNITS_START,
+        FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+    )
+}
+
+/// [`read_name`] with the device form of [`final_name`]. Inputs: the open file and the first
+/// buffer size, 2 to `NAME_UNITS_MAX` units. Output: the name, or the I/O error.
+fn name_from(file: &File, units_start: usize) -> io::Result<Vec<u16>> {
+    read_name(file, units_start, FILE_NAME_NORMALIZED | VOLUME_NAME_NT)
+}
+
 /// Reads the handle's name into a buffer of `units_start` units and, when Windows says the
 /// name needs more, once more into a buffer of the size it asked for. Relies on `file`
 /// staying open for the call and on the length passed being the buffer's own length, so
-/// Windows writes inside the buffer. Inputs: the open file and the first buffer size, 2 to
-/// `NAME_UNITS_MAX` units. Output: the name, or the I/O error.
-fn name_from(file: &File, units_start: usize) -> io::Result<Vec<u16>> {
+/// Windows writes inside the buffer. Inputs: the open file, the first buffer size, 2 to
+/// `NAME_UNITS_MAX` units, and the name flags. Output: the name, or the I/O error.
+fn read_name(
+    file: &File,
+    units_start: usize,
+    flags: GETFINALPATHNAMEBYHANDLE_FLAGS,
+) -> io::Result<Vec<u16>> {
     assert!((2..=NAME_UNITS_MAX).contains(&units_start));
     let mut name = vec![0u16; units_start];
     for _ in 0..2 {
@@ -34,7 +58,7 @@ fn name_from(file: &File, units_start: usize) -> io::Result<Vec<u16>> {
                 file.as_raw_handle(),
                 name.as_mut_ptr(),
                 name.len() as u32,
-                FILE_NAME_NORMALIZED | VOLUME_NAME_NT,
+                flags,
             )
         } as usize;
         if wrote == 0 {
