@@ -1605,6 +1605,22 @@ fn the_exported_container_sid_is_the_one_a_launch_puts_on_a_granted_root() {
     assert!(sid_text(&exported).starts_with("S-1-15-2-"));
 }
 
+/// Q9 (CodeRabbit CR-0536): the SID comes from the name alone, so a caller gets it before
+/// the container's first launch has made its profile, and that launch then puts the same SID
+/// on the granted root. The name is used by no other row.
+#[test]
+fn the_container_sid_is_derived_before_the_first_launch_makes_a_profile() {
+    let name = "crazyagent.test.sidfirst";
+    let before = crazyagent_win_sandbox::container_sid(name).unwrap();
+    assert!(sid_text(&before).starts_with("S-1-15-2-"));
+    let case = repo(name, &[]);
+    run(
+        &case,
+        &["/C", "echo", "first>", &plain(&at(&case, "first.txt"))],
+    );
+    assert_eq!(sid_text(&before), container_sid(&case));
+}
+
 /// Q9: a name the container check refuses is refused before any derive, with the check's
 /// reason.
 #[test]
