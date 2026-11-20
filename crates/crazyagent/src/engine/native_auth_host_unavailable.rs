@@ -54,6 +54,14 @@ mod child_group;
 mod child_group_windows_tests;
 
 #[cfg(test)]
+#[path = "native_auth_host/login_pipe.rs"]
+mod login_pipe;
+
+#[cfg(test)]
+#[path = "native_auth_host/login_pipe_windows_tests.rs"]
+mod login_pipe_windows_tests;
+
+#[cfg(test)]
 #[path = "native_auth_host/login_windows_tests.rs"]
 mod login_windows_tests;
 
