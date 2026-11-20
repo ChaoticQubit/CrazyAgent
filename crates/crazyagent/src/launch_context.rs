@@ -1423,8 +1423,10 @@ impl Installed {
         let held = pin(&files.home);
         crate::harnesses::launch::validate_home(&files.home)?;
         #[cfg(windows)]
-        let _held = held?;
+        let held = held?;
         let lock = lock(&files.home)?;
+        #[cfg(windows)]
+        locked_in(&lock, &held)?;
         Ok(Self {
             arguments: Vec::new(),
             files: Some(files.clone()),
@@ -2529,16 +2531,26 @@ fn sized_json(value: &impl Serialize) -> Result<String, LaunchError> {
 
 /// Holds a Windows agent home from before H1's check until its lock is taken (CodeRabbit
 /// CR-1140): read only, opened as itself rather than through a link, and without delete
-/// sharing, so neither the home nor a folder above it can be renamed or replaced while held,
-/// and the lock's by-path open reaches the folder H1 judged. A caller reports its error
-/// only after H1's check passes, so H1's codes stay first. Input: the home. Output: the held
-/// folder, or `launch_account_home_unavailable`.
+/// sharing, so neither the home nor a folder above it can be renamed or replaced while held.
+/// A junction above it can still be pointed elsewhere, so the lock is confirmed in the held
+/// home with [`locked_in`] (CR-1252). A spelling H1 refuses, not an absolute path on a
+/// drive, is refused with H1's code before anything is opened, so no share is contacted.
+/// Input: the home. Output: the held folder, `launch_account_home_unsafe`, or
+/// `launch_account_home_unavailable`, which a caller reports only after H1's check passes.
 #[cfg(windows)]
 fn pin(home: &Path) -> Result<File, LaunchError> {
     use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
     use std::os::windows::fs::OpenOptionsExt;
     const FILE_SHARE_READ: u32 = 0x1;
     const FILE_SHARE_WRITE: u32 = 0x2;
+    let on_drive = matches!(
+        home.components().next(),
+        Some(std::path::Component::Prefix(prefix))
+            if matches!(prefix.kind(), std::path::Prefix::Disk(_))
+    );
+    if !home.is_absolute() || !on_drive {
+        return Err(failure("launch_account_home_unsafe"));
+    }
     std::fs::OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
@@ -2547,10 +2559,24 @@ fn pin(home: &Path) -> Result<File, LaunchError> {
         .map_err(|_| failure("launch_account_home_unavailable"))
 }
 
-/// V244-WIN-MASTER S9a r3 red stand-in for the check that a launch lock is the lock name of
-/// the held home: passes every lock. Inputs: the lock and the held home. Output: Ok.
+/// Confirms on Windows that a launch lock is the lock name directly in the held home
+/// (CodeRabbit CR-1252): both real places are read from their handles, so a lock the home's
+/// path reached in another folder, as after a junction above the home was pointed elsewhere
+/// between the hold and the lock, is refused. Inputs: the lock and the held home. Output:
+/// Ok, or `launch_context_unsafe`.
 #[cfg(windows)]
-fn locked_in(_lock: &File, _held: &File) -> Result<(), LaunchError> {
+fn locked_in(lock: &File, held: &File) -> Result<(), LaunchError> {
+    const SEPARATOR: u16 = b'\\' as u16;
+    let unsafe_lock = |_: std::io::Error| failure("launch_context_unsafe");
+    let mut wanted = crazyagent_win_sandbox::final_name(held).map_err(unsafe_lock)?;
+    if wanted.last() != Some(&SEPARATOR) {
+        wanted.push(SEPARATOR);
+    }
+    wanted.extend(LOCK.encode_utf16());
+    let found = crazyagent_win_sandbox::final_name(lock).map_err(unsafe_lock)?;
+    if found != wanted {
+        return Err(failure("launch_context_unsafe"));
+    }
     Ok(())
 }
 
@@ -2773,8 +2799,10 @@ pub fn lock_only(home: &Path, harness: &str) -> Result<Installed, LaunchError> {
     let held = pin(home);
     crate::harnesses::launch::validate_home(home)?;
     #[cfg(windows)]
-    let _held = held?;
+    let held = held?;
     let lock = lock(home)?;
+    #[cfg(windows)]
+    locked_in(&lock, &held)?;
     if crate::harnesses::spec(harness).is_some_and(|spec| spec.id == "codex") {
         remove_copies(home)?;
     }
