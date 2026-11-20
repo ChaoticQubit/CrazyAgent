@@ -53,7 +53,6 @@ pub(crate) const NATIVE_PROFILES_FOLDER: &str = "native-profiles";
 pub(crate) const CONFIGURED_SDK_HOMES_FOLDER: &str = "configured-sdk-homes";
 
 const LOCATOR: &str = "owner-current";
-#[cfg(unix)]
 const LOCATOR_MAX: usize = 2048;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,6 +86,18 @@ struct Identity {
 }
 
 impl Identity {
+    /// A placeholder identity for the metadata callers after the bootstrap twins (shutdown's
+    /// generation cleanup), which only a Unix start reaches until W3-4b. Takes the metadata,
+    /// unused. Returns zeros; `safe_directory` and `safe_file` refuse every Windows entry first,
+    /// so no Windows decision rests on this value.
+    #[cfg(not(unix))]
+    fn of(_metadata: &std::fs::Metadata) -> Self {
+        Self {
+            device: 0,
+            inode: 0,
+        }
+    }
+
     #[cfg(unix)]
     fn of(metadata: &std::fs::Metadata) -> Self {
         Self {
@@ -227,6 +238,21 @@ struct Anchor {
     identity: Identity,
 }
 
+/// Refuses every directory judged by metadata on Windows, where metadata carries no owner or
+/// list; the bootstrap twins judge by handle ([`Anchor::entry`]) and W3-4b moves the callers
+/// left. Takes the metadata, unused. Returns false.
+#[cfg(not(unix))]
+fn safe_directory(_m: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// Refuses every file judged by metadata on Windows, as [`safe_directory`] does.
+/// Takes the metadata, unused. Returns false.
+#[cfg(not(unix))]
+fn safe_file(_m: &std::fs::Metadata) -> bool {
+    false
+}
+
 #[cfg(unix)]
 fn safe_directory(m: &std::fs::Metadata) -> bool {
     m.is_dir() && m.uid() == rustix::process::getuid().as_raw() && m.mode() & 0o7777 == 0o700
@@ -324,7 +350,6 @@ impl Anchor {
         Ok(())
     }
 
-    #[cfg(unix)]
     fn metadata(&self, name: &str) -> Result<std::fs::Metadata, EngineError> {
         self.verify()?;
         std::fs::symlink_metadata(self.path.join(name)).map_err(io_error)
