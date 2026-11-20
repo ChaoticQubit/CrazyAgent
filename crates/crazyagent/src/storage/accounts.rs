@@ -238,9 +238,46 @@ pub(crate) fn read_key_file(
     key_text(file, metadata.len()).map(Some)
 }
 
+/// Refuses to save an account key on Windows. Inputs: the engine root, the key's credential
+/// reference and the key, all unused. Output: `account_key_store_unavailable`.
+#[cfg(windows)]
+pub(crate) fn store_key_file(
+    _root: &Path,
+    _credential: &CredentialRef,
+    _key: &[u8],
+) -> Result<(), EngineError> {
+    Err(error("account_key_store_unavailable"))
+}
+
+/// Refuses to replace an account key on Windows. Inputs: the engine root, the key's
+/// credential reference and the new key, all unused. Output: `account_key_store_unavailable`.
+#[cfg(windows)]
+pub(crate) fn replace_key_file(
+    _root: &Path,
+    _credential: &CredentialRef,
+    _key: &[u8],
+) -> Result<(), EngineError> {
+    Err(error("account_key_store_unavailable"))
+}
+
+/// Refuses to open an account key for the owner transport on Windows. Inputs: the engine
+/// root and the key's credential reference, both unused. Output:
+/// `account_key_store_unavailable`.
+#[cfg(windows)]
+pub(crate) fn open_key_file(
+    _root: &Path,
+    _credential: &CredentialRef,
+) -> Result<Option<std::fs::File>, EngineError> {
+    Err(error("account_key_store_unavailable"))
+}
+
 #[cfg(all(test, unix))]
 #[path = "account_key_tests.rs"]
 mod account_key_tests;
+
+#[cfg(all(test, windows))]
+#[path = "account_key_windows_tests.rs"]
+mod account_key_windows_tests;
 
 fn encode(record: &Record) -> Result<Vec<u8>, EngineError> {
     let body = serde_json::to_vec(record).map_err(error)?;
