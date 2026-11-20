@@ -1120,6 +1120,45 @@ pub(crate) fn validate_home(home: &Path) -> Result<(), LaunchError> {
     validate_home_for(home, owner.as_deref())
 }
 
+/// Holds an account home on Windows as H1's check opens it: only an absolute path on a
+/// drive, else `launch_account_home_unsafe` before anything is opened, so no share is
+/// contacted; then read only, as itself rather than through a link, and without delete
+/// sharing, so neither it nor a folder above it is renamed while held. Input: the home.
+/// Output: the held folder, `launch_account_home_unsafe` or `launch_account_home_unavailable`.
+#[cfg(windows)]
+pub(crate) fn hold_home(home: &Path) -> Result<std::fs::File, LaunchError> {
+    use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    let on_drive = matches!(
+        home.components().next(),
+        Some(std::path::Component::Prefix(prefix))
+            if matches!(prefix.kind(), std::path::Prefix::Disk(_))
+    );
+    if !home.is_absolute() || !on_drive {
+        return Err(failure("launch_account_home_unsafe"));
+    }
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(home)
+        .map_err(|_| failure("launch_account_home_unavailable"))
+}
+
+/// V244-WIN-MASTER S9a r3 red stand-in for judging a held home: judges the folder the path
+/// reaches now instead. Inputs: the home, the held folder, unused, and the profile folder.
+/// Output: what [`validate_home_for`] says of the path.
+#[cfg(windows)]
+fn validate_held_for(
+    home: &Path,
+    _held: &std::fs::File,
+    owner: Option<&Path>,
+) -> Result<(), LaunchError> {
+    validate_home_for(home, owner)
+}
+
 /// Checks an account home against a given owner profile folder, as [`validate_home`] does
 /// with this process's. The home is opened without following a link and without delete
 /// sharing, so it is not renamed while checked; its owner, access list and label are read
