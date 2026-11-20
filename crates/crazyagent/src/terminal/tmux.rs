@@ -2522,6 +2522,21 @@ impl Host for Tmux {
         control.run(&line).map(|_| true)
     }
 
+    /// Names the window a resize of the agent sizes: this server's socket and the window's
+    /// id, so every view of a split team window counts once and two servers never share a
+    /// key. Takes the agent. Returns the key, or `terminal_agent_unknown` once the window is
+    /// gone.
+    fn unit(&self, agent: &AgentId) -> Result<String, HostError> {
+        let control = self.live_control()?;
+        let target = self.agent_target(&control, agent)?;
+        let window = Self::displayed(&control, &target, "#{window_id}")?;
+        let id = window.strip_prefix('@').unwrap_or_default();
+        if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(failure("terminal_command_failed"));
+        }
+        Ok(format!("{} {window}", self.socket.display()))
+    }
+
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         let control = self.live_control()?;
         let target = self.agent_target(&control, agent)?;

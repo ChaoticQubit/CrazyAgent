@@ -73,6 +73,13 @@ const _: () = assert!(PANES_PER_PROJECT_MAX == 15);
 
 /// A terminal host failure as a stable lowercase code clients show in plain words.
 /// `terminal_unavailable` means the host cannot run at all, such as tmux missing.
+/// The unit key of a terminal that is the agent's own alone, as a host with no shared window
+/// sizes it. Takes the agent. Returns the key, which no tmux window key equals, since those
+/// start with a socket path.
+fn agent_unit(agent: &AgentId) -> String {
+    format!("agent {agent}")
+}
+
 /// Converts into the engine's own error with the same code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostError(pub String);
@@ -521,6 +528,13 @@ pub trait Host: Send + Sync {
         Ok(false)
     }
 
+    /// Names what a resize of the agent sizes, one key for every view whose resize sizes the
+    /// same thing, so the engine counts them together: by default the agent's own terminal.
+    /// Takes the name. Returns the unit's key.
+    fn unit(&self, agent: &AgentId) -> Result<String, HostError> {
+        Ok(agent_unit(agent))
+    }
+
     /// Tells whether the app in an agent terminal reads keys itself yet: interactive apps
     /// turn on bracketed paste once their own input is live, and keys typed before that
     /// go through the terminal's line editing, which turns Enter into a newline.
@@ -783,6 +797,10 @@ impl Host for OwnServer {
         self.0.resize_at(agent, at, size)
     }
 
+    fn unit(&self, agent: &AgentId) -> Result<String, HostError> {
+        self.0.unit(agent)
+    }
+
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         self.0.input_live(agent)
     }
@@ -947,6 +965,10 @@ impl Host for PaneView {
 
     fn resize(&self, agent: &AgentId, cols: u16, rows: u16) -> Result<(), HostError> {
         self.host.resize(agent, cols, rows)
+    }
+
+    fn unit(&self, agent: &AgentId) -> Result<String, HostError> {
+        self.host.unit(agent)
     }
 
     fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
@@ -1470,12 +1492,16 @@ pub enum TerminalRequest {
         rows: u16,
     },
     /// Opens a view of the agent's terminal, or one pane of its window, sized to `cols` by
-    /// `rows` and sending no output, for a viewer that draws the pane from elsewhere.
+    /// `rows` and sending no output, for a viewer that draws the pane from elsewhere. With
+    /// `follows`, it sizes the window only while no view without it is open; the key is
+    /// left out when false, so the request reads as before to an engine without it.
     AttachInput {
         agent_id: AgentId,
         pane: Option<String>,
         cols: u16,
         rows: u16,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        follows: bool,
     },
     Input {
         bytes: Vec<u8>,
