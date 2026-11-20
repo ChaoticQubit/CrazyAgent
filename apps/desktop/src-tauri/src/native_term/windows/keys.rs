@@ -138,7 +138,7 @@ fn printable(unit: u16) -> bool {
     unit >= 0x20 && unit != 0x7f
 }
 
-/// What a key-down makes, by keymap's xterm rules with Alt as Meta: Win chords send
+/// What a key-down makes, by keymap's terminal key rules with Alt as Meta: Win chords send
 /// nothing; Alt+F4, Alt+Space, Shift+F10 (the menu), AltGr text and keys without Ctrl or
 /// Alt pass; the rest sends through `chord`, `named`, `edit` or the key's `own` character.
 /// Inputs: the VK, the modifiers, the queued character message and the key's Shift-only

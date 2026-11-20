@@ -1,6 +1,6 @@
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -115,8 +115,19 @@ fn pump_for(wait: Duration) {
     });
 }
 
+/// Stand-in window classes this test process registered. A class stays registered until
+/// the process ends, whatever window used it, so each is registered once.
+static REGISTERED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+
+/// A stand-in window class, registered on its first use in the process; a refused
+/// registration fails the row and is not remembered. Inputs: the class name and its
+/// background colour. Output: the name as UTF-16 with its terminator.
 fn stand_in_class(name: &'static str, color: COLORREF) -> Vec<u16> {
     let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    let mut registered = REGISTERED.lock().unwrap_or_else(PoisonError::into_inner);
+    if registered.contains(&name) {
+        return wide;
+    }
     let class = WNDCLASSEXW {
         cbSize: u32::try_from(size_of::<WNDCLASSEXW>()).expect("a class size"),
         lpfnWndProc: Some(DefWindowProcW),
@@ -126,6 +137,8 @@ fn stand_in_class(name: &'static str, color: COLORREF) -> Vec<u16> {
         ..Default::default()
     };
     assert_ne!(unsafe { RegisterClassExW(&class) }, 0, "the {name} class");
+    registered.push(name);
+    assert!(registered.len() <= 2, "two stand-in classes at most");
     wide
 }
 
