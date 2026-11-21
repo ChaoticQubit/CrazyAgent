@@ -6,7 +6,7 @@ pub fn read() -> bool {
     r#std::fs::read("x").is_ok()
 }
 
-/// Names the arguments through a raw std inside a macro.
+/// Names whether the root exists through a raw std inside a macro.
 pub fn args() -> String {
-    format!("{:?}", r#std::env::args().count())
+    format!("{:?}", r#std::fs::metadata("/").is_ok())
 }
