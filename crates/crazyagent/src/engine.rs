@@ -86,6 +86,12 @@ impl std::fmt::Display for EngineError {
 }
 impl std::error::Error for EngineError {}
 
+impl From<kernel_storage::StorageError> for EngineError {
+    fn from(error: kernel_storage::StorageError) -> Self {
+        EngineError(error.0)
+    }
+}
+
 pub type ClientError = EngineError;
 
 pub struct Client {
