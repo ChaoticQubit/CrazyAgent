@@ -917,6 +917,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "crazyagent-bus-gateway"
+version = "2.4.4"
+dependencies = [
+ "crazyagent-sdk",
+]
+
+[[package]]
 name = "crazyagent-cap"
 version = "2.4.4"
 
