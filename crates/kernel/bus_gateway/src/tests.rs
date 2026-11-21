@@ -68,9 +68,16 @@ fn grants() -> Grants {
 
 #[test]
 fn a_granted_call_reaches_the_provider_once() {
-    let (grants, provider, refusals) = (grants(), CountingProvider::answering(Ok(())), RecordingRefusals::default());
+    let (grants, provider, refusals) = (
+        grants(),
+        CountingProvider::answering(Ok(())),
+        RecordingRefusals::default(),
+    );
     let gateway = Gateway::new(&grants, &provider, &refusals);
-    assert_eq!(settings::save_quit(&gateway.bind("agent-quit"), quit()), Ok(()));
+    assert_eq!(
+        settings::save_quit(&gateway.bind("agent-quit"), quit()),
+        Ok(())
+    );
     assert_eq!(provider.calls.get(), 1);
     assert_eq!(provider.last.get(), Some(quit()));
     assert!(refusals.seen.borrow().is_empty());
@@ -78,7 +85,11 @@ fn a_granted_call_reaches_the_provider_once() {
 
 #[test]
 fn an_ungranted_call_is_refused_logged_once_and_never_reaches_the_provider() {
-    let (grants, provider, refusals) = (grants(), CountingProvider::answering(Ok(())), RecordingRefusals::default());
+    let (grants, provider, refusals) = (
+        grants(),
+        CountingProvider::answering(Ok(())),
+        RecordingRefusals::default(),
+    );
     let gateway = Gateway::new(&grants, &provider, &refusals);
     let refusal = Refusal::NotGranted {
         capability: "settings.save_quit",
@@ -97,7 +108,11 @@ fn an_ungranted_call_is_refused_logged_once_and_never_reaches_the_provider() {
 
 #[test]
 fn an_unknown_plugin_is_refused() {
-    let (grants, provider, refusals) = (grants(), CountingProvider::answering(Ok(())), RecordingRefusals::default());
+    let (grants, provider, refusals) = (
+        grants(),
+        CountingProvider::answering(Ok(())),
+        RecordingRefusals::default(),
+    );
     let gateway = Gateway::new(&grants, &provider, &refusals);
     let refusal = Refusal::NotGranted {
         capability: "settings.save_quit",
@@ -126,7 +141,11 @@ fn a_t1_plugin_may_not_call_a_t2_capability() {
         tier: Tier::T1,
         needs: "test.use",
     };
-    let (grants, provider, refusals) = (grants(), CountingProvider::answering(Ok(())), RecordingRefusals::default());
+    let (grants, provider, refusals) = (
+        grants(),
+        CountingProvider::answering(Ok(())),
+        RecordingRefusals::default(),
+    );
     let gateway = Gateway::new(&grants, &provider, &refusals);
     let refusal = Refusal::TierTooHigh {
         capability: "test.t2_only",
@@ -153,7 +172,11 @@ fn the_provider_rejection_comes_back_unchanged() {
     let rejection = Refusal::Rejected {
         code: "quit_settings_invalid".to_owned(),
     };
-    let (grants, provider, refusals) = (grants(), CountingProvider::answering(Err(rejection.clone())), RecordingRefusals::default());
+    let (grants, provider, refusals) = (
+        grants(),
+        CountingProvider::answering(Err(rejection.clone())),
+        RecordingRefusals::default(),
+    );
     let gateway = Gateway::new(&grants, &provider, &refusals);
     assert_eq!(
         settings::save_quit(&gateway.bind("agent-quit"), quit()),
@@ -188,8 +211,10 @@ fn grants_refuse_more_than_their_bounds() {
     let names: Vec<&'static str> = (0..=PLUGINS_MAX)
         .map(|index| &*Box::leak(format!("p{index}").into_boxed_str()))
         .collect();
-    let entries: Vec<(&'static str, Tier, &[&'static str])> =
-        names.iter().map(|name| (*name, Tier::T2, &[][..])).collect();
+    let entries: Vec<(&'static str, Tier, &[&'static str])> = names
+        .iter()
+        .map(|name| (*name, Tier::T2, &[][..]))
+        .collect();
     assert_eq!(Grants::new(&entries), Err("grants_too_many"));
     assert!(Grants::new(&entries[..PLUGINS_MAX]).is_ok());
     let permissions: Vec<&'static str> = (0..=PERMISSIONS_MAX)

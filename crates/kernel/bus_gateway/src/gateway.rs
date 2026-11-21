@@ -1,5 +1,5 @@
 use sdk::settings::{self, QuitSettings};
-use sdk::{Capability, Refusal};
+use sdk::{Capability, Refusal, Tier};
 
 use crate::Grants;
 
@@ -46,7 +46,22 @@ impl<'p> Gateway<'p> {
     /// at or below its own, and holding the permission. Inputs: the plugin id and the
     /// capability. Output: nothing, `NotGranted` or `TierTooHigh`.
     pub(crate) fn admit(&self, plugin: &str, capability: &Capability) -> Result<(), Refusal> {
-        let _ = (plugin, capability, self.grants);
+        let not_granted = Refusal::NotGranted {
+            capability: capability.name,
+            needs: capability.needs,
+        };
+        let Some((tier, held)) = self.grants.of(plugin) else {
+            return Err(not_granted);
+        };
+        assert!(*tier != Tier::Kernel);
+        if capability.tier > *tier {
+            return Err(Refusal::TierTooHigh {
+                capability: capability.name,
+            });
+        }
+        if !held.contains(capability.needs) {
+            return Err(not_granted);
+        }
         Ok(())
     }
 
@@ -59,7 +74,10 @@ impl<'p> Gateway<'p> {
         capability: &Capability,
         provide: impl FnOnce() -> Result<T, Refusal>,
     ) -> Result<T, Refusal> {
-        let _ = (plugin, capability, self.refusals);
+        if let Err(refusal) = self.admit(plugin, capability) {
+            self.refusals.refused(plugin, capability, &refusal);
+            return Err(refusal);
+        }
         provide()
     }
 }
@@ -73,9 +91,8 @@ pub struct Bound<'g, 'p> {
 
 impl sdk::Host for Bound<'_, '_> {
     fn settings_save_quit(&self, settings: QuitSettings) -> Result<(), Refusal> {
-        self.gateway
-            .call(self.plugin, &settings::SAVE_QUIT, || {
-                self.gateway.settings.save_quit(settings)
-            })
+        self.gateway.call(self.plugin, &settings::SAVE_QUIT, || {
+            self.gateway.settings.save_quit(settings)
+        })
     }
 }

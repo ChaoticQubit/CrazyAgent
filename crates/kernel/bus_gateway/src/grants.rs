@@ -19,8 +19,29 @@ impl Grants {
     /// Output: the table, or `grants_duplicate_plugin`, `grants_duplicate_permission`,
     /// `grants_kernel_tier` (a plugin is never a kernel module) or `grants_too_many`.
     pub fn new(entries: &[(&'static str, Tier, &[&'static str])]) -> Result<Self, &'static str> {
-        let _ = entries;
-        Ok(Self::default())
+        if entries.len() > PLUGINS_MAX {
+            return Err("grants_too_many");
+        }
+        let mut by_plugin = BTreeMap::new();
+        for (plugin, tier, permissions) in entries {
+            if *tier == Tier::Kernel {
+                return Err("grants_kernel_tier");
+            }
+            if permissions.len() > PERMISSIONS_MAX {
+                return Err("grants_too_many");
+            }
+            let mut held = BTreeSet::new();
+            for permission in *permissions {
+                if !held.insert(*permission) {
+                    return Err("grants_duplicate_permission");
+                }
+            }
+            if by_plugin.insert(*plugin, (*tier, held)).is_some() {
+                return Err("grants_duplicate_plugin");
+            }
+        }
+        assert_eq!(by_plugin.len(), entries.len());
+        Ok(Self { by_plugin })
     }
 
     /// The tier and permissions of one plugin. Input: the plugin id.
