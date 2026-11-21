@@ -128,3 +128,28 @@ fn enforce_here_prints_no_rerun_directive() {
         }
     }
 }
+
+#[test]
+fn a_root_import_inside_macro_arguments_is_refused() {
+    assert_eq!(
+        codes("macro_use_root"),
+        BTreeSet::from(["plugin_std_not_allowed"])
+    );
+}
+
+#[test]
+fn a_path_attribute_inside_cfg_attr_is_refused() {
+    assert_eq!(codes("cfg_attr_path"), BTreeSet::from(["plugin_path_attr"]));
+}
+
+#[test]
+fn a_raw_crate_root_is_refused_like_the_plain_one() {
+    let violations = check_crate(&fixture("raw_std")).expect_err("refused");
+    assert_eq!(
+        violations
+            .iter()
+            .map(|violation| (violation.line, violation.code))
+            .collect::<Vec<_>>(),
+        vec![(5, "plugin_std_not_allowed"), (10, "plugin_std_not_allowed")]
+    );
+}
