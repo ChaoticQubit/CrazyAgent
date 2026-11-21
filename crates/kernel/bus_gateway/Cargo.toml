@@ -1,0 +1,13 @@
+[package]
+name = "crazyagent-bus-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "bus_gateway"
+path = "src/lib.rs"
+
+[dependencies]
+crazyagent-sdk = { path = "../../sdk/rust" }

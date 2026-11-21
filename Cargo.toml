@@ -4,6 +4,10 @@ members = [
     "crates/crazyagent-linux-supervisor",
     "crates/crazyagent-macos-fs",
     "crates/crazyagent-win-sandbox",
+    "crates/sdk/cap",
+    "crates/sdk/capgen",
+    "crates/sdk/rust",
+    "crates/kernel/bus_gateway",
     "crates/kernel/storage",
     "apps/desktop/src-tauri",
 ]

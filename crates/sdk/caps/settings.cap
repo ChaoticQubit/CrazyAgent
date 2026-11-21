@@ -1,0 +1,7 @@
+enum OnQuit { keep_running, stop }
+enum LeftRunning { after_hours, never }
+type QuitSettings { on_quit: OnQuit, left_running: LeftRunning, hours: u16 }
+capability settings.save_quit(settings: QuitSettings) -> unit
+  tier: t1
+  needs: settings.write
+  emits: AgentQuitSaved { settings: QuitSettings }
