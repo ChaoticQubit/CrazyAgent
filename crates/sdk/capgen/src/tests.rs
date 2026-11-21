@@ -39,7 +39,10 @@ fn refused(sources: &[(&str, &str)]) -> &'static str {
 fn settings_cap_generates_the_checked_in_files() {
     let files = generated_from_caps();
     assert_eq!(
-        files.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(),
+        files
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>(),
         vec!["host.rs", "mod.rs", "settings.rs"]
     );
     assert_eq!(
@@ -78,7 +81,11 @@ fn a_rust_reserved_name_is_refused() {
         "capability s.match() -> unit tier: t1 needs: s.w",
         "capability s.a(async: u16) -> unit tier: t1 needs: s.w",
     ] {
-        assert_eq!(refused(&[("s", source)]), "capgen_reserved_name", "{source}");
+        assert_eq!(
+            refused(&[("s", source)]),
+            "capgen_reserved_name",
+            "{source}"
+        );
     }
     assert_eq!(
         refused(&[("crate", "type A { a: u16 }")]),
@@ -104,7 +111,10 @@ fn two_capabilities_mapping_to_one_method_are_refused() {
 #[test]
 fn a_capability_outside_its_file_is_refused() {
     assert_eq!(
-        refused(&[("settings", "capability other.save() -> unit tier: t1 needs: a.w")]),
+        refused(&[(
+            "settings",
+            "capability other.save() -> unit tier: t1 needs: a.w"
+        )]),
         "capgen_name_outside_file"
     );
 }

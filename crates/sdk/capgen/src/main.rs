@@ -13,14 +13,13 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
     let generated = Path::new(generated);
-    let files = match crazyagent_capgen::load(Path::new(caps))
-        .and_then(|loaded| {
-            let borrowed: Vec<(&str, crazyagent_cap::File)> = loaded
-                .iter()
-                .map(|(stem, file)| (stem.as_str(), file.clone()))
-                .collect();
-            crazyagent_capgen::rust(&borrowed)
-        }) {
+    let files = match crazyagent_capgen::load(Path::new(caps)).and_then(|loaded| {
+        let borrowed: Vec<(&str, crazyagent_cap::File)> = loaded
+            .iter()
+            .map(|(stem, file)| (stem.as_str(), file.clone()))
+            .collect();
+        crazyagent_capgen::rust(&borrowed)
+    }) {
         Ok(files) => files,
         Err(error) => {
             eprintln!("{} {}: {}", error.code, error.file, error.detail);

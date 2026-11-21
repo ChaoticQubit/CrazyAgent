@@ -11,7 +11,10 @@ fn quit_settings_json_matches_the_engine_body() {
         hours: 12,
     };
     let json = serde_json::to_string(&settings).expect("serializes");
-    assert_eq!(json, r#"{"on_quit":"stop","left_running":"never","hours":12}"#);
+    assert_eq!(
+        json,
+        r#"{"on_quit":"stop","left_running":"never","hours":12}"#
+    );
     assert_eq!(
         serde_json::from_str::<QuitSettings>(&json).expect("reads back"),
         settings
