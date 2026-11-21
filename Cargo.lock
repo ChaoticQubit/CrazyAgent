@@ -882,6 +882,7 @@ name = "crazyagent"
 version = "2.4.4"
 dependencies = [
  "base64 0.22.1",
+ "crazyagent-kernel-storage",
  "crazyagent-linux-supervisor",
  "crazyagent-macos-fs",
  "crazyagent-win-sandbox",
@@ -965,6 +966,14 @@ dependencies = [
  "windows 0.62.2",
  "windows-core 0.62.2",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "crazyagent-kernel-storage"
+version = "2.4.4"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
