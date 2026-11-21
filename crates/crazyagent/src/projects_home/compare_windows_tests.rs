@@ -181,3 +181,42 @@ fn a_project_named_with_an_apostrophe_already_in_the_home_is_not_moved_there() {
         );
     }
 }
+
+#[test]
+fn a_path_is_canonical_only_in_the_spelling_one_spelling_stores_and_never_through_a_junction() {
+    let (_temp, base) = plain_temp();
+    let plain = real(&base.join("work"));
+    let verbatim = std::fs::canonicalize(&plain).unwrap();
+    let odd = real(&base.join("it's"));
+    let link = base.join("link");
+    let mut junction = std::process::Command::new("cmd");
+    junction
+        .args([
+            "/C".as_ref(),
+            "mklink".as_ref(),
+            "/J".as_ref(),
+            link.as_os_str(),
+            plain.as_os_str(),
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    let made = crate::spawn_gate::output(&mut junction).unwrap();
+    assert!(made.status.success(), "{made:?}");
+    assert!(
+        super::is_canonical(&plain).unwrap(),
+        "a plain folder is canonical (W3-4c)"
+    );
+    assert!(
+        !super::is_canonical(&verbatim).unwrap(),
+        "its verbatim twin is not the stored spelling"
+    );
+    assert!(
+        odd.to_str().unwrap().starts_with(r"\\?\") && super::is_canonical(&odd).unwrap(),
+        "a folder named with an apostrophe is canonical in the verbatim spelling one_spelling keeps"
+    );
+    assert!(
+        !super::is_canonical(&link).unwrap(),
+        "a junction is not canonical"
+    );
+}

@@ -780,8 +780,8 @@ fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineEr
     {
         return Err(failure("master_runtime_binding"));
     }
-    if std::fs::canonicalize(&prepared.cwd).map_err(io_error)? != prepared.cwd
-        || std::fs::canonicalize(&prepared.repository).map_err(io_error)? != prepared.repository
+    if !crate::projects_home::is_canonical(&prepared.cwd).map_err(io_error)?
+        || !crate::projects_home::is_canonical(&prepared.repository).map_err(io_error)?
         || !std::fs::symlink_metadata(&prepared.cwd)
             .map_err(io_error)?
             .is_dir()
