@@ -29,7 +29,7 @@ pub const STD_ALLOWED: [&str; 18] = [
     "vec",
 ];
 /// The macros a plugin may call, by name; any other macro call is refused.
-pub const MACROS_ALLOWED: [&str; 26] = [
+pub const MACROS_ALLOWED: [&str; 23] = [
     "assert",
     "assert_eq",
     "assert_ne",
@@ -37,7 +37,6 @@ pub const MACROS_ALLOWED: [&str; 26] = [
     "debug_assert_eq",
     "debug_assert_ne",
     "format",
-    "format_args",
     "write",
     "writeln",
     "vec",
@@ -54,8 +53,6 @@ pub const MACROS_ALLOWED: [&str; 26] = [
     "file",
     "module_path",
     "compile_error",
-    "debug_assert_matches",
-    "assert_matches",
 ];
 /// Names refused wherever they appear, so no alias import reaches them: the compile-time
 /// file and environment readers, inline assembly and `macro_rules`.
@@ -86,6 +83,11 @@ pub const ATTRS_ALLOWED: [&str; 14] = [
     "non_exhaustive",
     "repr",
     "no_std",
+];
+/// The keywords that may stand before `!` and a group without being a macro call, as in
+/// `if !(a)` or `return !(a)`.
+const KEYWORDS: [&str; 8] = [
+    "if", "while", "return", "match", "in", "break", "else", "yield",
 ];
 /// The first segments a `use` may start with.
 const USE_ROOTS: [&str; 6] = ["sdk", "core", "alloc", "crate", "self", "super"];
@@ -285,7 +287,8 @@ impl Scan<'_> {
         if ROOTS.contains(&name) {
             self.root(tokens, index);
         }
-        let called = is_punct(tokens.get(index + 1), '!')
+        let called = !KEYWORDS.contains(&name)
+            && is_punct(tokens.get(index + 1), '!')
             && matches!(tokens.get(index + 2), Some(TokenTree::Group(_)));
         if !called {
             return index + 1;
@@ -300,7 +303,8 @@ impl Scan<'_> {
     }
 
     /// Checks a crate root's second segment: `core` and `alloc` are named only as
-    /// `root::name` with `name` an allowed module or macro. Inputs: the tokens and the root's
+    /// `root::name` with `name` an allowed module or macro, wherever the root sits, so a
+    /// rename through `crate::` or `self::` is refused too. Inputs: the tokens and the root's
     /// index. Output: a violation when the form is any other.
     fn root(&mut self, tokens: &[TokenTree], index: usize) {
         let path = is_punct(tokens.get(index + 1), ':') && is_punct(tokens.get(index + 2), ':');
@@ -315,7 +319,6 @@ impl Scan<'_> {
                     self.push(tokens[index + 3].span(), "plugin_std_not_allowed");
                 }
             }
-            _ if index > 0 && is_punct(tokens.get(index - 1), ':') => {}
             _ => self.push(tokens[index].span(), "plugin_std_not_allowed"),
         }
     }
@@ -389,13 +392,17 @@ impl Scan<'_> {
             self.push(tokens[index].span(), "plugin_macro_item_not_allowed");
             return index + 2 + inner;
         }
-        if let Some(TokenTree::Ident(head)) = group.stream().into_iter().next() {
-            let name = head.to_string();
-            if name == "path" {
-                self.push(head.span(), "plugin_path_attr");
-            } else if !name.starts_with("r#") && !ATTRS_ALLOWED.contains(&name.as_str()) {
-                self.push(head.span(), "plugin_attr_not_allowed");
+        match group.stream().into_iter().next() {
+            Some(TokenTree::Ident(head)) => {
+                let name = head.to_string();
+                if name == "path" {
+                    self.push(head.span(), "plugin_path_attr");
+                } else if !name.starts_with("r#") && !ATTRS_ALLOWED.contains(&name.as_str()) {
+                    self.push(head.span(), "plugin_attr_not_allowed");
+                }
             }
+            Some(head) => self.push(head.span(), "plugin_attr_not_allowed"),
+            None => self.push(tokens[index].span(), "plugin_attr_not_allowed"),
         }
         self.walk(&group.stream(), Mode::Opaque, depth + 1);
         index + 2 + inner
