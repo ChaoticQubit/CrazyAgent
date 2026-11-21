@@ -921,6 +921,13 @@ name = "crazyagent-cap"
 version = "2.4.4"
 
 [[package]]
+name = "crazyagent-capgen"
+version = "2.4.4"
+dependencies = [
+ "crazyagent-cap",
+]
+
+[[package]]
 name = "crazyagent-desktop"
 version = "2.4.4"
 dependencies = [
@@ -966,6 +973,14 @@ name = "crazyagent-macos-fs"
 version = "2.4.4"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "crazyagent-sdk"
+version = "2.4.4"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

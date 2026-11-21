@@ -5,6 +5,8 @@ members = [
     "crates/crazyagent-macos-fs",
     "crates/crazyagent-win-sandbox",
     "crates/sdk/cap",
+    "crates/sdk/capgen",
+    "crates/sdk/rust",
     "apps/desktop/src-tauri",
 ]
 default-members = ["crates/crazyagent"]
