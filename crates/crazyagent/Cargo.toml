@@ -14,6 +14,9 @@ clean-mac-gate = []
 owner-trace = []
 
 [dependencies]
+crazyagent-bus-gateway = { path = "../kernel/bus_gateway" }
+crazyagent-plugin-agent-quit = { path = "../../plugins/t2/agent-quit" }
+crazyagent-sdk = { path = "../sdk/rust" }
 crazyagent-win-sandbox = { path = "../crazyagent-win-sandbox" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["raw_value"] }
@@ -60,6 +63,8 @@ crazyagent-macos-fs = { path = "../crazyagent-macos-fs" }
 sha2 = { version = "=0.10.9", features = ["asm"] }
 
 [dev-dependencies]
+crazyagent-cap = { path = "../sdk/cap" }
+crazyagent-plugin-check = { path = "../sdk/plugin_check" }
 tempfile = "=3.27.0"
 minisign = "=0.10.0"
 

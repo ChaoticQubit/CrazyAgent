@@ -1,3 +1,11 @@
+use bus_gateway::{Grants, Refusals};
+use crazyagent_cap as cap;
+use crazyagent_plugin_agent_quit as agent_quit;
+use crazyagent_plugin_check as plugin_check;
+use sdk::settings::QuitSettings as SdkQuit;
+use sdk::{Refusal, Tier};
+
+use super::{EngineRefusals, REFUSALS_PENDING_MAX, bundled_grants, save_quit_with};
 use crate::protocol::{Command, Outcome};
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crate::settings_log::tests::{moved, store};
@@ -48,4 +56,152 @@ fn the_logged_quit_event_keeps_its_kind_schema_and_body() {
             br#"{"settings":{"on_quit":"stop","left_running":"never","hours":12}}"#.to_vec(),
         )]
     );
+}
+
+/// Every engine quit settings value the rows compare: each choice pair at 1 and 168 hours.
+fn every_quit() -> Vec<QuitSettings> {
+    let mut all = Vec::new();
+    for on_quit in [OnQuit::KeepRunning, OnQuit::Stop] {
+        for left_running in [LeftRunning::AfterHours, LeftRunning::Never] {
+            for hours in [1, 168] {
+                all.push(QuitSettings {
+                    on_quit,
+                    left_running,
+                    hours,
+                });
+            }
+        }
+    }
+    all
+}
+
+/// Whether the store holds a quit settings row. Input: the store. Output: true when it does.
+fn quit_row(db: &Connection) -> bool {
+    db.query_row("SELECT COUNT(*) FROM agent_quit_settings", [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .unwrap()
+        > 0
+}
+
+/// Saves stop, never, 12 through the slice with a grant table and a fresh sink, and asserts
+/// the save is refused and moves nothing. Inputs: the grants and the sink. Output: none.
+fn refused_moves_nothing(grants: &Grants, refusals: &EngineRefusals) {
+    let mut db = store();
+    let tx = db.transaction().unwrap();
+    let before = moved(&tx);
+    let revision = u64::try_from(before.0).unwrap();
+    let result = save_quit_with(grants, refusals, &tx, revision, &stop_never_12());
+    assert_eq!(
+        result.err().map(|error| error.0),
+        Some("plugin_call_refused".to_owned())
+    );
+    assert_eq!(moved(&tx), before, "a refused save moves and logs nothing");
+    assert!(!quit_row(&tx));
+    assert!(logged(&tx).is_empty());
+}
+
+#[test]
+fn the_quit_save_without_its_grant_is_refused_and_moves_nothing() {
+    let grants = Grants::new(&[(agent_quit::ID, Tier::T2, &[])]).unwrap();
+    let refusals = EngineRefusals::new();
+    refused_moves_nothing(&grants, &refusals);
+    assert_eq!(refusals.count(agent_quit::ID), 1);
+}
+
+#[test]
+fn the_quit_save_of_an_unknown_plugin_is_refused_and_moves_nothing() {
+    let grants = Grants::new(&[]).unwrap();
+    let refusals = EngineRefusals::new();
+    refused_moves_nothing(&grants, &refusals);
+    assert_eq!(refusals.count(agent_quit::ID), 1);
+}
+
+#[test]
+fn the_granted_quit_save_through_the_slice_logs_the_same_event() {
+    let mut db = store();
+    let tx = db.transaction().unwrap();
+    let before = moved(&tx);
+    let revision = u64::try_from(before.0).unwrap();
+    let refusals = EngineRefusals::new();
+    assert_eq!(
+        save_quit_with(bundled_grants(), &refusals, &tx, revision, &stop_never_12()).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(moved(&tx).0, before.0 + 1);
+    assert!(quit_row(&tx));
+    assert_eq!(logged(&tx).len(), 1);
+    assert_eq!(refusals.count(agent_quit::ID), 0);
+}
+
+#[test]
+fn the_sdk_and_engine_quit_bodies_are_equal() {
+    for engine in every_quit() {
+        let sdk = SdkQuit::from(engine);
+        assert_eq!(
+            serde_json::to_vec(&sdk).unwrap(),
+            serde_json::to_vec(&engine).unwrap()
+        );
+        assert_eq!(QuitSettings::from(sdk), engine);
+    }
+    let file = cap::parse(include_str!("../../../sdk/caps/settings.cap")).unwrap();
+    let capability = file
+        .capabilities
+        .iter()
+        .find(|capability| capability.name == "settings.save_quit")
+        .unwrap();
+    assert_eq!(capability.emits.len(), 1);
+    assert_eq!(capability.emits[0].kind, crate::settings_log::KIND_QUIT);
+    let cap_fields: Vec<&str> = capability.emits[0]
+        .fields
+        .iter()
+        .map(|field| field.name.as_str())
+        .collect();
+    let body = serde_json::to_value(crate::settings_log::Saved {
+        settings: QuitSettings::default(),
+    })
+    .unwrap();
+    let body_fields: Vec<&str> = body
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(cap_fields, body_fields);
+}
+
+#[test]
+fn the_grants_match_the_plugin_manifest() {
+    let plugin =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/t2/agent-quit");
+    let manifest = plugin_check::read_manifest(&plugin).unwrap();
+    assert_eq!(manifest.plugin, agent_quit::ID);
+    assert_eq!(manifest.tier, "t2");
+    let permissions: Vec<&'static str> = manifest
+        .permissions
+        .iter()
+        .map(|permission| &*Box::leak(permission.clone().into_boxed_str()))
+        .collect();
+    assert_eq!(
+        bundled_grants(),
+        &Grants::new(&[(agent_quit::ID, Tier::T2, &permissions)]).unwrap()
+    );
+}
+
+#[test]
+fn a_full_first_refusal_set_still_refuses_and_logs() {
+    let refusals = EngineRefusals::new();
+    let refusal = Refusal::NotGranted {
+        capability: sdk::settings::SAVE_QUIT.name,
+        needs: sdk::settings::SAVE_QUIT.needs,
+    };
+    for index in 0..REFUSALS_PENDING_MAX {
+        let plugin: &'static str = Box::leak(format!("filler-{index}").into_boxed_str());
+        refusals.refused(plugin, &sdk::settings::SAVE_QUIT, &refusal);
+    }
+    assert_eq!(refusals.pending_len(), REFUSALS_PENDING_MAX);
+    let grants = Grants::new(&[]).unwrap();
+    refused_moves_nothing(&grants, &refusals);
+    assert_eq!(refusals.count(agent_quit::ID), 1);
+    assert_eq!(refusals.pending_len(), REFUSALS_PENDING_MAX);
 }
