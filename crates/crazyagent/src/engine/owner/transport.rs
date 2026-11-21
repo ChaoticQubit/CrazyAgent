@@ -18,10 +18,12 @@ mod master_rebind_tests;
 mod master_resolve;
 mod master_runtime;
 use crate::coordination::{Role, WorkerBinding};
-use crate::engine::{Engine, io_error, owner_trace as trace, read_frame, verify_peer};
+use crate::engine::{
+    Engine, io_error, owner_trace as trace, read_frame, verify_client, verify_server,
+};
+use crate::ipc::{Listener, Stream};
 use crate::model_gateway::{ConnectionState, Observation};
 use crate::platform::FileExt;
-use crate::platform::unix_socket::{UnixListener, UnixStream};
 use crate::storage::Job;
 use crate::storage::worker_dispatch::{
     DispatchJob, DispatchRecord, DispatchResult, DispatchSnapshot,
@@ -55,6 +57,7 @@ pub(crate) mod ide;
 pub(crate) mod ide_extensions;
 pub(crate) mod ide_tab;
 mod intake;
+mod narrowing;
 mod native_auth;
 pub(crate) mod native_auth_channel;
 pub(crate) mod overview;
@@ -65,11 +68,16 @@ pub(crate) mod questions;
 pub(crate) mod recovery;
 pub(crate) mod roadmap;
 mod setup;
+pub(crate) mod sizing;
 pub(crate) mod terminal;
 pub(crate) mod usage;
 mod watch;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
 use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
+#[cfg(all(test, unix))]
+mod intake_parallel_tests;
+#[cfg(all(test, windows))]
+mod key_windows_tests;
 #[cfg(all(test, unix))]
 mod native_auth_channel_tests;
 #[cfg(all(test, unix))]
@@ -80,10 +88,14 @@ mod native_auth_dispatch_lifetime_tests;
 mod native_auth_restart_tests;
 #[cfg(all(test, unix))]
 mod owner_deadline_tests;
+#[cfg(all(test, windows))]
+mod owner_pipe_windows_tests;
 #[cfg(all(test, unix))]
 mod owner_server_tests;
 #[cfg(all(test, unix))]
 mod reply_skew_tests;
+#[cfg(all(test, windows))]
+mod root_windows_tests;
 #[cfg(all(test, unix))]
 mod secret_storage_wait_tests;
 #[cfg(all(test, unix))]
@@ -96,6 +108,7 @@ const SOCKET: &str = "owner.sock";
 const REPLY_LOG: &str = "owner-reply.log";
 const CLIENTS_MAX: usize = crate::protocol::OWNER_CLIENTS_MAX;
 const DEFERRED_MAX: usize = 4;
+const _: () = assert!(2 * crate::instruction_cleanup::CLEANUPS_MAX <= DEFERRED_MAX);
 const HANDSHAKES_MAX: usize = crate::protocol::OWNER_CLIENTS_MAX;
 const REFUSALS_MAX: usize = 4;
 const KEYS: [&str; 2] = ["owner-tui.cap", "owner-desktop.cap"];
@@ -107,17 +120,6 @@ struct Identity {
 }
 
 impl Identity {
-    /// A placeholder identity where the standard library has no stable device and inode.
-    /// Takes the metadata, unused. Returns zeros; `Root::open` refuses every Windows root
-    /// first, so no Windows decision ever rests on this value.
-    #[cfg(not(unix))]
-    fn of(_m: &std::fs::Metadata) -> Self {
-        Self {
-            device: 0,
-            inode: 0,
-        }
-    }
-
     #[cfg(unix)]
     fn of(m: &std::fs::Metadata) -> Self {
         Self {
@@ -125,22 +127,96 @@ impl Identity {
             inode: m.ino(),
         }
     }
+
+    /// The identity of an open file or folder: its device and inode on Unix, its volume
+    /// serial number and 64-bit file id on Windows (W1 `private::identity`, which refuses an
+    /// id that needs 128 bits). Input: the handle. Output: the identity, or the I/O error.
+    fn of_file(file: &File) -> Result<Self, EngineError> {
+        #[cfg(unix)]
+        let identity = Self::of(&file.metadata().map_err(io_error)?);
+        #[cfg(windows)]
+        let identity = {
+            let (device, inode) =
+                crazyagent_win_sandbox::private::identity(file).map_err(io_error)?;
+            Self { device, inode }
+        };
+        Ok(identity)
+    }
+}
+
+/// What a client compares before and after it connects to an owner-class endpoint: the
+/// socket file's identity on Unix, the published random part and engine pin on Windows,
+/// where the endpoint is a pipe named by the root's pipes file (W3-3).
+#[cfg(unix)]
+type SocketIdentity = Identity;
+/// What a client compares before and after it connects to an owner-class endpoint: the
+/// socket file's identity on Unix, the published random part and engine pin on Windows,
+/// where the endpoint is a pipe named by the root's pipes file (W3-3).
+#[cfg(windows)]
+type SocketIdentity = crate::ipc::Published;
+
+/// Whether `name` is one plain entry of a folder: not empty, no separator, drive colon or
+/// parent step, so joining it to a held root never leaves that root. Input: the name.
+/// Output: the answer.
+#[cfg(windows)]
+fn plain_entry(name: &str) -> bool {
+    !name.is_empty() && !name.contains(['\\', '/', ':']) && name != "." && name != ".."
+}
+
+/// Maps a W1 private-object error to an owner refusal: a judge refusal (`PermissionDenied`)
+/// becomes `code`, any other error stays the I/O error it is. Inputs: the error and the
+/// refusal code. Output: the engine error.
+#[cfg(windows)]
+fn private_refusal(error: std::io::Error, code: &str) -> EngineError {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        failure(code)
+    } else {
+        io_error(error)
+    }
 }
 
 struct Root {
     path: PathBuf,
     directory: File,
-    #[cfg(unix)]
     identity: Identity,
 }
 
 impl Root {
-    /// Refuses an owner root without Unix owner, mode and directory-relative checks.
-    /// Takes the root path, unused.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn open(_path: &Path) -> Result<Self, EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// Opens an owner root on Windows (DESIGN-0256 D11, rv-sec2 #708): the folder must
+    /// already exist and is held through W1 `open_dir`, so neither it nor a folder above it
+    /// can be renamed while held. The path is first put in the one plain spelling (rv-sec2
+    /// #717 C1, `one_spelling`), and anything that is not then plain is refused. Then the twin
+    /// of the Unix canonical check, in one walk: the held folder's real place (W1 `place`)
+    /// must be `\\?\` plus the plain path, ordinal, so a junction or link anywhere on the
+    /// path, a short name or another case fails. Input: the root path. Output: the held root,
+    /// stored plain, or the refusal.
+    #[cfg(windows)]
+    fn open(path: &Path) -> Result<Self, EngineError> {
+        use crazyagent_win_sandbox::private;
+        use std::os::windows::ffi::OsStrExt;
+        let path = crate::projects_home::one_spelling(path.to_path_buf());
+        if !path
+            .to_str()
+            .is_some_and(crate::sandbox::windows_clean_text)
+        {
+            return Err(failure("owner_root_requires_canonical_trusted_path"));
+        }
+        let directory = private::open_dir(&path)
+            .map_err(|e| private_refusal(e, "owner_root_requires_private_owner_directory"))?;
+        let spelled: Vec<u16> = std::ffi::OsStr::new(r"\\?\")
+            .encode_wide()
+            .chain(path.as_os_str().encode_wide())
+            .collect();
+        if private::place(&directory).map_err(io_error)? != spelled {
+            return Err(failure("owner_root_requires_canonical_trusted_path"));
+        }
+        let root = Self {
+            path,
+            identity: Identity::of_file(&directory)?,
+            directory,
+        };
+        root.verify()?;
+        Ok(root)
     }
 
     #[cfg(unix)]
@@ -172,12 +248,20 @@ impl Root {
         Ok(root)
     }
 
-    /// Refuses to confirm an owner root without Unix owner and mode checks.
-    /// Takes the root.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
+    /// Confirms on Windows that the root is still the folder opened (D11): the held handle
+    /// is still private (W1 `check`), and the folder at the path, reopened without creating
+    /// it, is private and has the file id recorded at open. Input: the root. Output: Ok, or
+    /// `owner_root_replaced_or_unsafe`.
+    #[cfg(windows)]
     fn verify(&self) -> Result<(), EngineError> {
-        Err(failure("owner_root_unavailable"))
+        use crazyagent_win_sandbox::private;
+        let replaced = "owner_root_replaced_or_unsafe";
+        private::check(&self.directory).map_err(|e| private_refusal(e, replaced))?;
+        let again = private::open_dir(&self.path).map_err(|e| private_refusal(e, replaced))?;
+        if Identity::of_file(&again)? != self.identity {
+            return Err(failure(replaced));
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -203,12 +287,58 @@ impl Root {
             .ok_or_else(|| failure("owner_root_unavailable"))
     }
 
-    /// Refuses to open a capability file without directory-relative Unix opens.
-    /// Takes the file name and create flag, both unused.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn open_key(&self, _name: &str, _create: bool) -> Result<File, EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// Opens a capability file in this root on Windows (DESIGN-0256 D12), never following a
+    /// link. A create makes it with W1 `secret_file_deletable`: private, the medium
+    /// no-write-up, no-read-up and no-execute-up label, and a handle with delete access, so
+    /// it is later deleted through that handle. An open reads it through W1 `read_secret`,
+    /// which shares delete so it works while the engine holds the file. The held root cannot
+    /// move, so the path resolves through it; `verify_key` then checks the entry is this
+    /// handle. Inputs: one plain file name and whether to create. Output: the open file, or
+    /// the refusal or I/O error.
+    #[cfg(windows)]
+    fn open_key(&self, name: &str, create: bool) -> Result<File, EngineError> {
+        use crazyagent_win_sandbox::private;
+        assert!(plain_entry(name));
+        self.verify()?;
+        let path = self.path.join(name);
+        let opened = if create {
+            private::secret_file_deletable(&path)
+        } else {
+            private::read_secret(&path)
+        };
+        opened.map_err(|e| private_refusal(e, "owner_capability_replaced_or_unsafe"))
+    }
+
+    /// Requires on Windows that an open file in this root is the private, labelled entry
+    /// `name` names: a file, W1 `check` passes (owner, list, label policy, no reparse point,
+    /// one link, local), its own label is the medium full label of W1 `secret_file_label`,
+    /// and its real place (W1 `place`) is this root's place plus `\` and the name, both read
+    /// with the same flags. Inputs: the name, the file and the refusal code. Output: Ok, or
+    /// the refusal.
+    #[cfg(windows)]
+    fn held_entry(&self, name: &str, file: &File, code: &str) -> Result<(), EngineError> {
+        use crazyagent_win_sandbox::{dacl, private};
+        use std::os::windows::ffi::OsStrExt;
+        assert!(plain_entry(name));
+        if !file.metadata().map_err(io_error)?.is_file() {
+            return Err(failure(code));
+        }
+        private::check(file).map_err(|e| private_refusal(e, code))?;
+        let wanted = dacl::label(&private::secret_file_label()).map_err(|_| failure(code))?;
+        let held = match private::facts(file).map_err(io_error)?.label {
+            Some(sacl) => dacl::label(&sacl).map_err(|_| failure(code))?,
+            None => None,
+        };
+        if wanted.is_none() || held != wanted {
+            return Err(failure(code));
+        }
+        let mut expected = private::place(&self.directory).map_err(io_error)?;
+        expected.push(u16::from(b'\\'));
+        expected.extend(std::ffi::OsStr::new(name).encode_wide());
+        if private::place(file).map_err(io_error)? != expected {
+            return Err(failure(code));
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -231,12 +361,18 @@ impl Root {
         Ok(f)
     }
 
-    /// Refuses to confirm a capability file without Unix owner and inode checks.
-    /// Takes the name, file and identity, all unused.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn verify_key(&self, _name: &str, _file: &File, _id: Identity) -> Result<(), EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// Confirms on Windows that a capability file is still the one recorded (D12): the root
+    /// verifies, the handle has the file id recorded at create, it holds exactly 32 bytes,
+    /// and `held_entry` passes. Inputs: the name, the open file and the recorded identity.
+    /// Output: Ok, or `owner_capability_replaced_or_unsafe`.
+    #[cfg(windows)]
+    fn verify_key(&self, name: &str, file: &File, id: Identity) -> Result<(), EngineError> {
+        let refused = "owner_capability_replaced_or_unsafe";
+        self.verify()?;
+        if Identity::of_file(file)? != id || file.metadata().map_err(io_error)?.len() != 32 {
+            return Err(failure(refused));
+        }
+        self.held_entry(name, file, refused)
     }
 
     #[cfg(unix)]
@@ -259,20 +395,92 @@ impl Root {
         Ok(())
     }
 
-    fn socket_identity(&self) -> Result<Identity, EngineError> {
+    fn socket_identity(&self) -> Result<SocketIdentity, EngineError> {
         self.socket_identity_at(SOCKET)
     }
 
-    /// Refuses to identify a socket where Unix domain sockets are not used.
-    /// Takes the socket name, unused.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn socket_identity_at(&self, _name: &str) -> Result<Identity, EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// The endpoint `name` in this held root names now (W3-3): the root is verified first,
+    /// then the pipes file is read through W1's private open and must publish `name`. A
+    /// refused or missing pipes file is `owner_socket_unsafe`. Input: the endpoint name.
+    /// Output: the published random part and pin, or the refusal.
+    #[cfg(windows)]
+    fn socket_identity_at(&self, name: &str) -> Result<SocketIdentity, EngineError> {
+        self.verify()?;
+        assert!(plain_entry(name), "an endpoint name is one plain entry");
+        crate::ipc::owner_endpoint(&self.path.join(name))
+            .map_err(|_| failure("owner_socket_unsafe"))
+    }
+
+    /// Serves the owner endpoint of this held root (W3-3) and names it: on Windows the pipe
+    /// the listener published, read from the pipes file the listener holds and required to
+    /// equal what a client reads by path, so the authority records the endpoint clients
+    /// compare (rv-sec2 #719 C2). A failed check closes the listener, deleting its pipes file.
+    /// Input: the Unix socket record, unused here. Output: the listener and its endpoint.
+    #[cfg(windows)]
+    fn listen(
+        &self,
+        _created: &mut Option<Identity>,
+    ) -> Result<(Listener, SocketIdentity), EngineError> {
+        let path = self.path.join(SOCKET);
+        let listener =
+            crate::ipc::owner_listener(&path, crate::protocol::OWNER_CLIENTS_MAX + HANDSHAKES_MAX)
+                .map_err(io_error)?;
+        let named = crate::ipc::owner_listened(&listener, &path).map_err(io_error);
+        let checked = named.and_then(|endpoint| {
+            if self.socket_identity()? == endpoint {
+                Ok(endpoint)
+            } else {
+                Err(failure("owner_socket_replaced"))
+            }
+        });
+        match checked {
+            Ok(endpoint) => Ok((listener, endpoint)),
+            Err(error) => {
+                let mut errors = vec![error.0];
+                if let Err(closed) = crate::ipc::owner_close(listener) {
+                    errors.push(closed.to_string());
+                }
+                Err(failure(&errors.join("; ")))
+            }
+        }
+    }
+
+    /// Serves the owner endpoint of this held root: binds the socket, records its identity
+    /// in `created` so a failed bind removes it, requires a user-owned single-link socket,
+    /// sets mode 0600 and requires the name to still be that socket. Input: the record.
+    /// Output: the listener and the socket's identity.
+    #[cfg(unix)]
+    fn listen(
+        &self,
+        created: &mut Option<Identity>,
+    ) -> Result<(Listener, SocketIdentity), EngineError> {
+        let listener = crate::ipc::owner_listener(
+            self.path.join(SOCKET),
+            crate::protocol::OWNER_CLIENTS_MAX + HANDSHAKES_MAX,
+        )
+        .map_err(io_error)?;
+        let made = std::fs::symlink_metadata(self.path.join(SOCKET)).map_err(io_error)?;
+        *created = Some(Identity::of(&made));
+        if !made.file_type().is_socket()
+            || made.uid() != rustix::process::getuid().as_raw()
+            || made.nlink() != 1
+        {
+            return Err(failure("owner_socket_replaced"));
+        }
+        std::fs::set_permissions(
+            self.path.join(SOCKET),
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .map_err(io_error)?;
+        let socket = self.socket_identity()?;
+        if socket != Identity::of(&made) {
+            return Err(failure("owner_socket_replaced"));
+        }
+        Ok((listener, socket))
     }
 
     #[cfg(unix)]
-    fn socket_identity_at(&self, name: &str) -> Result<Identity, EngineError> {
+    fn socket_identity_at(&self, name: &str) -> Result<SocketIdentity, EngineError> {
         self.verify()?;
         let m = std::fs::symlink_metadata(self.path.join(name)).map_err(io_error)?;
         if !m.file_type().is_socket()
@@ -285,16 +493,47 @@ impl Root {
         Ok(Identity::of(&m))
     }
 
-    /// Refuses to remove an owned artifact without directory-relative Unix unlinks.
-    /// Takes the name, identity and socket flag, all unused.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn unlink_owned(&self, _name: &str, _id: Identity, _socket: bool) -> Result<(), EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// Deletes a file this root made on Windows through its held handle, never by path
+    /// (rv-sec2 #702 R7): only while the handle has the recorded file id and the name still
+    /// names that handle (`held_entry`), then W1 `delete` with POSIX semantics, so the name
+    /// goes when the handle closes. A socket has no file here; the owner pipe is W3-3's.
+    /// Inputs: the name, the recorded identity, the socket flag and the held handle. Output:
+    /// Ok, `owner_socket_unavailable`, or `owner_cleanup_replaced_artifact_preserved`.
+    #[cfg(windows)]
+    fn unlink_owned(
+        &self,
+        name: &str,
+        id: Identity,
+        socket: bool,
+        held: Option<&File>,
+    ) -> Result<(), EngineError> {
+        let preserved = "owner_cleanup_replaced_artifact_preserved";
+        if socket {
+            return Err(failure("owner_socket_unavailable"));
+        }
+        self.verify()?;
+        let Some(file) = held else {
+            return Err(failure(preserved));
+        };
+        if Identity::of_file(file)? != id {
+            return Err(failure(preserved));
+        }
+        self.held_entry(name, file, preserved)?;
+        crazyagent_win_sandbox::private::delete(file).map_err(io_error)
     }
 
+    /// Unlinks an artifact this root made, relative to the held folder, only while the name
+    /// still holds the recorded identity, owner, mode and one link. Inputs: the name, the
+    /// identity, whether it is a socket, and the artifact's held handle, which Unix does not
+    /// need (Windows deletes through it). Output: Ok, or the preserved-artifact refusal.
     #[cfg(unix)]
-    fn unlink_owned(&self, name: &str, id: Identity, socket: bool) -> Result<(), EngineError> {
+    fn unlink_owned(
+        &self,
+        name: &str,
+        id: Identity,
+        socket: bool,
+        _held: Option<&File>,
+    ) -> Result<(), EngineError> {
         self.verify()?;
         let m = std::fs::symlink_metadata(self.path.join(name)).map_err(io_error)?;
         if Identity::of(&m) != id
@@ -316,28 +555,64 @@ impl Root {
         rustix::fs::mkdirat(&self.directory, name, Mode::RWXU).map_err(io_error)
     }
 
-    /// Refuses to create a directory without directory-relative Unix mkdir.
-    /// Takes the name, unused. Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn create_directory(&self, _name: &str) -> Result<(), EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// Creates one private folder inside this root on Windows, the twin of `mkdirat`: the
+    /// held root cannot move, so the path resolves through it; an entry already at the name
+    /// is refused (`AlreadyExists`), W1 `dir` makes the folder with its protected list, and
+    /// the made folder must be empty. Input: one plain file name. Output: Ok once it exists,
+    /// or the refusal or I/O error.
+    #[cfg(windows)]
+    fn create_directory(&self, name: &str) -> Result<(), EngineError> {
+        assert!(plain_entry(name));
+        let path = self.path.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error(error)),
+            Ok(_) => return Err(io_error(std::io::ErrorKind::AlreadyExists)),
+        }
+        drop(
+            crazyagent_win_sandbox::private::dir(&path)
+                .map_err(|e| private_refusal(e, "owner_root_replaced_or_unsafe"))?,
+        );
+        if std::fs::read_dir(&path).map_err(io_error)?.next().is_some() {
+            return Err(failure("owner_root_replaced_or_unsafe"));
+        }
+        Ok(())
+    }
+
+    /// Writes this root's entries to disk after a create, rename or delete in it: Unix
+    /// flushes the held folder, Windows reopens it for writing through W1 `sync_folder`,
+    /// since the held handle only lists it. Input: the root. Output: Ok, or the I/O error.
+    fn sync(&self) -> Result<(), EngineError> {
+        #[cfg(unix)]
+        let synced = self.directory.sync_all();
+        #[cfg(windows)]
+        let synced = crazyagent_win_sandbox::private::sync_folder(&self.path);
+        synced.map_err(io_error)
     }
 }
 
 struct Slot {
     registration: Registration,
     token: [u8; 32],
-    file: File,
+    file: Option<File>,
     identity: Identity,
     closed: u64,
 }
 
+impl Slot {
+    /// The slot's held capability file, which Windows cleanup closes after it marks the
+    /// delete, so the name goes then. Output: the file, or `owner_authority_unavailable`
+    /// once cleanup has closed it.
+    fn held(&self) -> Result<&File, EngineError> {
+        self.file
+            .as_ref()
+            .ok_or_else(|| failure("owner_authority_unavailable"))
+    }
+}
+
 struct PinnedBootstrap {
-    #[cfg(unix)]
     file: File,
-    #[cfg(unix)]
     identity: Identity,
-    #[cfg(unix)]
     bytes: Vec<u8>,
     value: RunnerBootstrap,
 }
@@ -357,11 +632,8 @@ impl PinnedBootstrap {
             serde_json::from_slice(&bytes).map_err(|_| failure("runner_bootstrap_invalid"))?;
         value.validate()?;
         let pinned = Self {
-            #[cfg(unix)]
-            identity: Identity::of(&file.metadata().map_err(io_error)?),
-            #[cfg(unix)]
+            identity: Identity::of_file(&file)?,
             file,
-            #[cfg(unix)]
             bytes,
             value,
         };
@@ -379,25 +651,38 @@ impl PinnedBootstrap {
         file.write_all_at(&bytes, 0).map_err(io_error)?;
         file.sync_all().map_err(io_error)?;
         let pinned = Self {
-            #[cfg(unix)]
-            identity: Identity::of(&file.metadata().map_err(io_error)?),
-            #[cfg(unix)]
+            identity: Identity::of_file(&file)?,
             file,
-            #[cfg(unix)]
             bytes,
             value,
         };
         pinned.verify(root)?;
-        root.directory.sync_all().map_err(io_error)?;
+        root.sync()?;
         Ok(pinned)
     }
 
-    /// Refuses to confirm the runner bootstrap file without Unix owner and inode checks.
-    /// Takes the root, unused.
-    /// Returns `owner_root_unavailable`.
-    #[cfg(not(unix))]
-    fn verify(&self, _root: &Root) -> Result<(), EngineError> {
-        Err(failure("owner_root_unavailable"))
+    /// Confirms on Windows that the runner bootstrap file is still the one pinned: the root
+    /// verifies, the handle is a file of the pinned length with the pinned file id, the name
+    /// still names this private labelled handle (`held_entry`), and it holds the pinned
+    /// bytes. Input: the root. Output: Ok, or the replaced or changed refusal.
+    #[cfg(windows)]
+    fn verify(&self, root: &Root) -> Result<(), EngineError> {
+        let replaced = "runner_bootstrap_replaced_or_unsafe";
+        root.verify()?;
+        let actual = self.file.metadata().map_err(io_error)?;
+        if !actual.is_file()
+            || actual.len() != self.bytes.len() as u64
+            || Identity::of_file(&self.file)? != self.identity
+        {
+            return Err(failure(replaced));
+        }
+        root.held_entry("engine-bootstrap", &self.file, replaced)?;
+        let mut bytes = vec![0; self.bytes.len()];
+        self.file.read_exact_at(&mut bytes, 0).map_err(io_error)?;
+        if bytes != self.bytes {
+            return Err(failure("runner_bootstrap_content_changed"));
+        }
+        Ok(())
     }
 
     #[cfg(unix)]
@@ -443,7 +728,7 @@ struct RunnerSlot {
     binding: WorkerBinding,
     key: Option<RunnerKey>,
     boot: Option<RunnerBootIdentity>,
-    endpoint: Option<Identity>,
+    endpoint: Option<SocketIdentity>,
     active: bool,
     ready: Option<RunnerReady>,
 }
@@ -500,7 +785,7 @@ impl RunnerSlot {
 
 struct Authority {
     root: Root,
-    socket: Identity,
+    socket: SocketIdentity,
     host: HostStamp,
     slots: Mutex<[Slot; 2]>,
     runners: Mutex<Vec<Option<RunnerSlot>>>,
@@ -521,6 +806,7 @@ struct Authority {
     reproof_left: Mutex<Option<std::collections::BTreeSet<CredentialRef>>>,
     icloud: crate::projects_home::icloud::Downloads,
     intake: intake::Intake,
+    drain: Mutex<narrowing::Drain>,
 }
 
 /// Removes what an earlier engine left at a runner folder's place beside the engine's root
@@ -613,7 +899,7 @@ impl Authority {
             ready: None,
         };
         slot.verify(&self.root)?;
-        parent.directory.sync_all().map_err(io_error)?;
+        parent.sync()?;
         assert_eq!(runners.len(), index);
         runners.push(Some(slot));
         assert!(runners.len() <= RUNNERS_MAX);
@@ -642,7 +928,7 @@ impl Authority {
         &self,
         prepared: &PreparedRunner,
         boot: RunnerBootIdentity,
-        endpoint: Identity,
+        endpoint: SocketIdentity,
         binding: &WorkerBinding,
     ) -> Result<(), EngineError> {
         self.runner_prepared(prepared)?;
@@ -671,14 +957,14 @@ impl Authority {
                 .root
                 .open_key(&format!("r{:02x}.cap", prepared.slot), true)?;
             slot.key = Some(RunnerKey {
-                identity: Identity::of(&file.metadata().map_err(io_error)?),
+                identity: Identity::of_file(&file)?,
                 file,
                 token,
             });
             let key = slot.key.as_ref().unwrap();
             key.file.write_all_at(&key.token, 0).map_err(io_error)?;
             key.file.sync_all().map_err(io_error)?;
-            self.root.directory.sync_all().map_err(io_error)?;
+            self.root.sync()?;
         }
         slot.boot = Some(boot);
         slot.endpoint = Some(endpoint);
@@ -816,7 +1102,7 @@ impl Authority {
             .ok_or_else(|| failure("runner_ready_required"))
     }
 
-    fn delivery_target(&self, ready: &RunnerReady) -> Result<(Root, Identity), EngineError> {
+    fn delivery_target(&self, ready: &RunnerReady) -> Result<(Root, SocketIdentity), EngineError> {
         let runners = self
             .runners
             .lock()
@@ -852,11 +1138,10 @@ impl Authority {
             .lock()
             .map_err(|_| failure("owner_authority_unavailable"))?;
         let slot = &slots[i];
-        self.root.verify_key(KEYS[i], &slot.file, slot.identity)?;
+        let file = slot.held()?;
+        self.root.verify_key(KEYS[i], file, slot.identity)?;
         let mut observed = [0; 32];
-        slot.file
-            .read_exact_at(&mut observed, 0)
-            .map_err(io_error)?;
+        file.read_exact_at(&mut observed, 0).map_err(io_error)?;
         if !bool::from(slot.token.ct_eq(&observed)) {
             return Err(failure("owner_capability_content_changed"));
         }
@@ -906,10 +1191,11 @@ impl Authority {
             if registration.active {
                 let mut token = [0; 32];
                 getrandom::fill(&mut token).map_err(|_| failure("owner_entropy_unavailable"))?;
-                self.root.verify_key(KEYS[i], &slot.file, slot.identity)?;
-                slot.file.write_all_at(&token, 0).map_err(io_error)?;
-                slot.file.sync_all().map_err(io_error)?;
-                self.root.verify_key(KEYS[i], &slot.file, slot.identity)?;
+                let file = slot.held()?;
+                self.root.verify_key(KEYS[i], file, slot.identity)?;
+                file.write_all_at(&token, 0).map_err(io_error)?;
+                file.sync_all().map_err(io_error)?;
+                self.root.verify_key(KEYS[i], file, slot.identity)?;
                 slot.token = token;
             }
             slot.registration = registration;
@@ -950,28 +1236,42 @@ impl Authority {
 
     /// Unlinks the owner socket, both owner keys, every runner key and every IDE capability
     /// file this server made, each only while it is still the engine's own file, and tries
-    /// all of them even after one fails. Input: none. Output: Ok, or the first failure.
+    /// all of them even after one fails. On Windows `run` closes the listener instead, which
+    /// deletes its pipes file. Input: none. Output: Ok, or the first failure.
     fn cleanup(&self) -> Result<(), EngineError> {
-        let mut result = self.root.unlink_owned(SOCKET, self.socket, true);
+        #[cfg(unix)]
+        let mut result = self.root.unlink_owned(SOCKET, self.socket, true, None);
+        #[cfg(windows)]
+        let mut result = Ok(());
         result = result.and(self.ide.revoke_all());
         match self.slots.lock() {
-            Ok(slots) => {
-                for (i, slot) in slots.iter().enumerate() {
-                    result = result.and(self.root.unlink_owned(KEYS[i], slot.identity, false));
+            Ok(mut slots) => {
+                for (i, slot) in slots.iter_mut().enumerate() {
+                    result = result.and(self.root.unlink_owned(
+                        KEYS[i],
+                        slot.identity,
+                        false,
+                        slot.file.as_ref(),
+                    ));
+                    #[cfg(windows)]
+                    drop(slot.file.take());
                 }
             }
             Err(_) => result = result.and(Err(failure("owner_authority_unavailable"))),
         }
         match self.runners.lock() {
-            Ok(runners) => {
-                for slot in runners.iter().flatten() {
+            Ok(mut runners) => {
+                for slot in runners.iter_mut().flatten() {
                     if let Some(key) = &slot.key {
                         result = result.and(self.root.unlink_owned(
                             &format!("r{:02x}.cap", slot.prepared.slot),
                             key.identity,
                             false,
+                            Some(&key.file),
                         ));
                     }
+                    #[cfg(windows)]
+                    drop(slot.key.take());
                 }
             }
             Err(_) => result = result.and(Err(failure("runner_authority_unavailable"))),
@@ -1146,6 +1446,24 @@ impl OwnerRuntimeHandle {
         self.authority.host.clone()
     }
 
+    /// The owner client kinds this engine run holds active, the ones an owner can sign in
+    /// as; a revoked kind stays refused. Output: the kinds, in registration order, or
+    /// `owner_authority_unavailable`.
+    #[cfg(unix)]
+    pub(crate) fn active_kinds(&self) -> Result<Vec<OwnerClientKind>, EngineError> {
+        let slots = self
+            .authority
+            .slots
+            .lock()
+            .map_err(|_| failure("owner_authority_unavailable"))?;
+        assert!(slots.len() <= KEYS.len());
+        Ok(slots
+            .iter()
+            .filter(|slot| slot.registration.active)
+            .map(|slot| slot.registration.kind)
+            .collect())
+    }
+
     pub fn epoch(&self, kind: OwnerClientKind) -> Result<i64, EngineError> {
         let slots = self
             .authority
@@ -1164,9 +1482,25 @@ impl OwnerRuntimeHandle {
     /// Orders a trusted host grant change with actor work and response delivery.
     /// Takes an exact control identity, client kind and expected grant epoch. Returns
     /// committed status; prior delivered data cannot be recalled. A revocation that fails in
-    /// any way refuses the client at once; what storage commits late still takes effect.
+    /// any way refuses the client at once; it is kept on disk first, so one storage never
+    /// took lands later or at the next open, and that one is answered pending.
     pub async fn control(&self, control: OwnerControl) -> Result<OwnerControlReply, EngineError> {
         let (target, decision) = (control.target, control.decision);
+        let kept = match decision {
+            OwnerDecision::Revoke => {
+                self.keep_narrowing(crate::storage::narrowing::Change::Revoke {
+                    operation_id: control.operation_id.clone(),
+                    target,
+                    expected_epoch: control.expected_epoch,
+                })
+                .await
+            }
+            OwnerDecision::Reactivate => None,
+        };
+        let pending = kept.clone().map(|id| narrowing::Pending::Revoke {
+            control: control.clone(),
+            id,
+        });
         let barrier =
             tokio::time::timeout(self.engine.timeout, self.engine.owner_egress.write()).await;
         let submitted = self.authority.next_control();
@@ -1176,7 +1510,7 @@ impl OwnerRuntimeHandle {
             let authority = self.authority.clone();
             self.engine
                 .settled_owner_job(
-                    |reply| Job::OwnerControl(self.authority.host.clone(), control, reply),
+                    |reply| Job::OwnerControl(self.authority.host.clone(), control, kept, reply),
                     move |stored| {
                         let (result, registration) = stored?;
                         authority.publish(registration, submitted).map_err(|_| {
@@ -1192,7 +1526,7 @@ impl OwnerRuntimeHandle {
             _ => Ok(()),
         };
         drop(barrier);
-        closed.and(committed)
+        closed.and(self.pending_unless_taken(committed, pending))
     }
 
     /// Looks up an exact host control through the current storage actor.
@@ -1262,7 +1596,7 @@ impl OwnerRuntimeHandle {
 }
 
 pub struct OwnerServer {
-    listener: UnixListener,
+    listener: Listener,
     engine: Arc<Engine>,
     authority: Arc<Authority>,
     timeout: Duration,
@@ -1272,19 +1606,6 @@ impl OwnerServer {
     /// Publishes authenticated native owner access under a host trusted root.
     /// Requires canonical private root and protected ancestors, processes and DB.
     /// Returns server and host control; it does not qualify worker containment.
-    #[cfg(not(unix))]
-    pub async fn bind(
-        _path: &Path,
-        _engine: Arc<Engine>,
-        _config: &crate::config::EffectiveConfig,
-    ) -> Result<(Self, OwnerRuntimeHandle), EngineError> {
-        Err(failure("owner_socket_unavailable"))
-    }
-
-    /// Publishes authenticated native owner access under a host trusted root.
-    /// Requires canonical private root and protected ancestors, processes and DB.
-    /// Returns server and host control; it does not qualify worker containment.
-    #[cfg(unix)]
     pub async fn bind(
         path: &Path,
         engine: Arc<Engine>,
@@ -1314,45 +1635,31 @@ impl OwnerServer {
             let mut slots = Vec::new();
             for (i, registration) in started.owners.into_iter().enumerate() {
                 let file = root.open_key(KEYS[i], true)?;
-                created_keys.push((KEYS[i], Identity::of(&file.metadata().map_err(io_error)?)));
+                created_keys.push((
+                    KEYS[i],
+                    Identity::of_file(&file)?,
+                    file.try_clone().map_err(io_error)?,
+                ));
                 let mut token = [0; 32];
                 getrandom::fill(&mut token).map_err(|_| failure("owner_entropy_unavailable"))?;
                 file.write_all_at(&token, 0).map_err(io_error)?;
                 file.sync_all().map_err(io_error)?;
-                let identity = Identity::of(&file.metadata().map_err(io_error)?);
+                let identity = Identity::of_file(&file)?;
                 root.verify_key(KEYS[i], &file, identity)?;
                 slots.push(Slot {
                     registration,
                     token,
-                    file,
+                    file: Some(file),
                     identity,
                     closed: 0,
                 });
             }
             root.verify()?;
-            let listener =
-                crate::spawn_gate::bind_unix(root.path.join(SOCKET)).map_err(io_error)?;
-            let created = std::fs::symlink_metadata(root.path.join(SOCKET)).map_err(io_error)?;
-            created_socket = Some(Identity::of(&created));
-            if !created.file_type().is_socket()
-                || created.uid() != rustix::process::getuid().as_raw()
-                || created.nlink() != 1
-            {
-                return Err(failure("owner_socket_replaced"));
-            }
-            std::fs::set_permissions(
-                root.path.join(SOCKET),
-                std::os::unix::fs::PermissionsExt::from_mode(0o600),
-            )
-            .map_err(io_error)?;
-            let socket = root.socket_identity()?;
-            if socket != Identity::of(&created) {
-                return Err(failure("owner_socket_replaced"));
-            }
             let slots: [Slot; 2] = slots
                 .try_into()
                 .map_err(|_| failure("owner_registration_count"))?;
             let ide = Arc::new(crate::ide::bridge::Grants::default());
+            #[cfg(unix)]
             let ide_servers = crate::ide::server::Servers::new(
                 root.path
                     .parent()
@@ -1363,6 +1670,7 @@ impl OwnerServer {
                 root.path.join(SOCKET),
                 engine.settings_files(),
             );
+            let (listener, socket) = root.listen(&mut created_socket)?;
             let authority = Arc::new(Authority {
                 root,
                 socket,
@@ -1386,6 +1694,7 @@ impl OwnerServer {
                 reproof_left: Mutex::new(None),
                 icloud: crate::projects_home::icloud::Downloads::default(),
                 intake: intake::Intake::default(),
+                drain: Mutex::new(narrowing::Drain::default()),
             });
             Ok::<_, EngineError>((listener, authority))
         })();
@@ -1397,23 +1706,27 @@ impl OwnerServer {
                     errors.push(error.0);
                 }
                 if let Some(identity) = created_socket
-                    && let Err(error) = rollback.unlink_owned(SOCKET, identity, true)
+                    && let Err(error) = rollback.unlink_owned(SOCKET, identity, true, None)
                 {
                     errors.push(error.0);
                 }
-                for (name, identity) in created_keys {
-                    if let Err(error) = rollback.unlink_owned(name, identity, false) {
+                for (name, identity, held) in created_keys {
+                    if let Err(error) = rollback.unlink_owned(name, identity, false, Some(&held)) {
                         errors.push(error.0);
                     }
                 }
                 return Err(failure(&errors.join("; ")));
             }
         };
+        #[cfg(unix)]
         authority.ide_servers.sweep_left().await;
         if let Ok(root) = changes::engine_root(&authority) {
             let swept = tokio::task::spawn_blocking(move || {
                 crate::landing::open(&root).and_then(|db| {
+                    #[cfg(unix)]
                     let locked = crate::worktrees::lock_existing(&db);
+                    #[cfg(windows)]
+                    let locked = Ok::<usize, EngineError>(0);
                     if let Err(problem) = crate::landing::sweep_regenerations(&db) {
                         eprintln!(
                             "landing_regenerate_sweep_failed cause={}",
@@ -1454,7 +1767,7 @@ impl OwnerServer {
 
     fn accept_owner_handshake(
         &self,
-        stream: UnixStream,
+        stream: Stream,
         auth: [u8; 37],
         deadline: Instant,
         tasks: &mut Tasks,
@@ -1532,7 +1845,7 @@ impl OwnerServer {
     /// deadline when already read, and the refusal tasks. Output: none.
     fn refuse_busy(
         &self,
-        stream: UnixStream,
+        stream: Stream,
         handshake: Option<([u8; 37], Instant)>,
         refusals: &mut tokio::task::JoinSet<()>,
     ) {
@@ -1569,7 +1882,7 @@ impl OwnerServer {
     /// deadline, and the refusal tasks. Output: none.
     fn refuse_terminal(
         &self,
-        stream: UnixStream,
+        stream: Stream,
         auth: [u8; 37],
         deadline: Instant,
         refusals: &mut tokio::task::JoinSet<()>,
@@ -1657,8 +1970,8 @@ impl OwnerServer {
                         None => {}
                     }
                 }
-                accepted=crate::spawn_gate::accept_unix(&self.listener) => {
-                    let (stream,_)=match accepted {Ok(v)=>v,Err(e)=>break Err(io_error(e))};
+                accepted=crate::ipc::owner_accept(&self.listener) => {
+                    let stream=match accepted {Ok(v)=>v,Err(e)=>break Err(io_error(e))};
                     if handshakes.len()>=HANDSHAKES_MAX {self.refuse_busy(stream, None, &mut tasks.refusals);continue;}
                     let timeout=self.timeout;
                     handshakes.spawn(read_owner_handshake(stream,timeout));
@@ -1722,8 +2035,12 @@ impl OwnerServer {
                 .map(|_| ())
         }
         .await;
+        #[cfg(windows)]
+        let closed = crate::ipc::owner_close(self.listener).map_err(io_error);
+        #[cfg(unix)]
+        let closed = Ok(());
         let cleaned = self.authority.cleanup();
-        stopped.and(cleaned).and(result)
+        stopped.and(closed).and(cleaned).and(result)
     }
 }
 
@@ -1793,20 +2110,22 @@ impl Engine {
         let (send, receive) = oneshot::channel();
         let job = build(send);
         let deadline = job.reply_deadline(self.timeout);
-        self.storage
-            .sender
-            .try_send(job)
-            .map_err(|_| failure("owner_queue_not_submitted"))?;
+        let submit_by = tokio::time::Instant::now() + self.timeout;
+        let taken = self
+            .storage
+            .submit(job, submit_by, "owner_queue_not_submitted")
+            .await?;
         tokio::time::timeout(deadline, receive)
             .await
-            .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
+            .map_err(|_| taken.lost(failure("owner_outcome_unknown_reconcile_same_identity")))?
             .map_err(|_| failure("owner_actor_stopped_outcome_unknown"))?
     }
 
     /// Runs one owner storage job and hands storage's answer to `settle` even when the owner
     /// stops waiting first, so what storage commits late still takes effect in memory.
-    /// Inputs: the job and the settle step. Output: the settle step's answer, or the owner
-    /// outcome-unknown error while storage has not answered in time or went away.
+    /// Inputs: the job and the settle step. Output: the settle step's answer; a not-submitted
+    /// code, with nothing to settle; access_change_pending for a narrowing job; else the owner
+    /// outcome-unknown error when a taken job does not answer in time or storage went away.
     async fn settled_owner_job<T: Send + 'static, U: Send + 'static>(
         &self,
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
@@ -1815,10 +2134,23 @@ impl Engine {
         let (send, receive) = oneshot::channel();
         let job = build(send);
         let deadline = job.reply_deadline(self.timeout);
-        self.storage
-            .sender
-            .try_send(job)
-            .map_err(|_| failure("owner_queue_not_submitted"))?;
+        let submit_by = tokio::time::Instant::now() + self.timeout;
+        let submitted = self
+            .storage
+            .submit(job, submit_by, "owner_queue_not_submitted")
+            .await;
+        let taken = match submitted {
+            Ok(taken) => taken,
+            Err(pending) if pending.0 == crate::storage::ACCESS_CHANGE_PENDING => {
+                tokio::spawn(async move {
+                    if let Ok(stored) = receive.await {
+                        let _ = settle(stored);
+                    }
+                });
+                return Err(pending);
+            }
+            Err(refused) => return Err(refused),
+        };
         let settled = tokio::spawn(async move {
             match receive.await {
                 Ok(stored) => settle(stored),
@@ -1827,7 +2159,7 @@ impl Engine {
         });
         tokio::time::timeout(deadline, settled)
             .await
-            .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
+            .map_err(|_| taken.lost(failure("owner_outcome_unknown_reconcile_same_identity")))?
             .map_err(|_| failure("owner_actor_stopped_outcome_unknown"))?
     }
 
@@ -2132,12 +2464,12 @@ impl Engine {
 }
 
 async fn read_owner_handshake(
-    mut stream: UnixStream,
+    mut stream: Stream,
     timeout: Duration,
-) -> Option<(UnixStream, [u8; 37], Instant)> {
+) -> Option<(Stream, [u8; 37], Instant)> {
     let deadline = Instant::now() + timeout;
     let exchange = async {
-        verify_peer(&stream)?;
+        verify_client(&stream)?;
         let mut auth = [0; 37];
         stream.read_exact(&mut auth).await.map_err(io_error)?;
         Ok::<_, EngineError>(auth)
@@ -2150,7 +2482,7 @@ async fn read_owner_handshake(
 
 #[cfg(all(test, target_os = "macos"))]
 async fn serve_owner(
-    stream: UnixStream,
+    stream: Stream,
     engine: Arc<Engine>,
     authority: Arc<Authority>,
     timeout: Duration,
@@ -2167,7 +2499,7 @@ async fn serve_owner(
 /// handshake packet, engine, authority and deadline. Output: none; the reply is written to
 /// the stream and the stream is closed.
 async fn serve_authenticated_owner(
-    mut stream: UnixStream,
+    mut stream: Stream,
     auth: [u8; 37],
     engine: Arc<Engine>,
     authority: Arc<Authority>,
@@ -2224,11 +2556,11 @@ fn log_panic<T>(result: &Result<T, tokio::task::JoinError>, code: &str) {
 /// Inputs: the stream, the handshake packet and the authority. Output: the owner
 /// admission (none for a runner) and the whole frame, or the error that ends it.
 async fn admit(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     auth: &[u8; 37],
     authority: &Authority,
 ) -> Result<(Option<Admission>, Vec<u8>), EngineError> {
-    verify_peer(stream)?;
+    verify_client(stream)?;
     let admission = if &auth[..4] == b"CAR1" {
         authority.authenticate_runner(auth)?;
         None
@@ -2308,7 +2640,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
 }
 
 async fn serve_admitted(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     auth: &[u8; 37],
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
@@ -2372,7 +2704,7 @@ async fn serve_admitted(
             Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
             Protocol::Roadmap => return Ok(Some(Deferred::Roadmap(a))),
             Protocol::NativeAuth => {
-                return native_auth::serve(stream, engine, authority, auth, &a, body)
+                return native_auth::serve(stream, engine, authority, auth, &a, body, deadline)
                     .await
                     .map(|()| None);
             }
@@ -2391,7 +2723,6 @@ async fn serve_admitted(
                     .map(|()| None);
             }
             Protocol::IdeTab => return Ok(Some(Deferred::IdeTab(a))),
-            Protocol::Icloud if icloud::deferred(body) => return Ok(Some(Deferred::Icloud(a))),
             Protocol::Icloud => {
                 return icloud::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2523,12 +2854,13 @@ async fn serve_admitted(
             .await
             .map(|()| None)
     });
+    let exchange = crate::storage::before_cut(deadline, engine.timeout, exchange);
     let Ok(Ok(Some(deferred))) = tokio::time::timeout_at(deadline, exchange).await else {
         return;
     };
     if let Deferred::Watch(a) = &deferred {
         let served = watch::serve(stream, engine, authority, auth, a, body);
-        let _ = tokio::time::timeout(watch::WATCH_TIMEOUT, served).await;
+        within(watch::WATCH_TIMEOUT, served).await;
         return;
     }
     let Some(_deferral) = Deferral::take(&authority.deferred) else {
@@ -2550,66 +2882,78 @@ async fn serve_admitted(
         }
         Deferred::Agents(a) => {
             let served = agents::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(agents::CONTROL_TIMEOUT, served).await;
+            within(agents::CONTROL_TIMEOUT, served).await;
         }
         Deferred::Changes(a) => {
             let served = changes::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(changes::CHANGES_TIMEOUT, served).await;
+            within(changes::CHANGES_TIMEOUT, served).await;
         }
         Deferred::IdeExtensions(a) => {
             let served = ide_extensions::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(ide_extensions::IDE_EXTENSIONS_TIMEOUT, served).await;
+            within(ide_extensions::IDE_EXTENSIONS_TIMEOUT, served).await;
         }
         Deferred::Recovery(a) => {
             let served = recovery::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(recovery::RECOVERY_TIMEOUT, served).await;
+            within(recovery::RECOVERY_TIMEOUT, served).await;
         }
         Deferred::Ide(a) => {
             let served = ide::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(ide::IDE_TIMEOUT, served).await;
+            within(ide::IDE_TIMEOUT, served).await;
         }
         Deferred::Process(a) => {
             let served = process::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(process::PROPOSE_TIMEOUT, served).await;
+            within(process::PROPOSE_TIMEOUT, served).await;
         }
         Deferred::IdeTab(a) => {
             let served = ide_tab::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(ide_tab::IDE_TAB_TIMEOUT, served).await;
+            within(ide_tab::IDE_TAB_TIMEOUT, served).await;
         }
         Deferred::Questions(a) => {
             let served = questions::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(questions::QUESTIONS_TIMEOUT, served).await;
+            within(questions::QUESTIONS_TIMEOUT, served).await;
         }
         Deferred::Roadmap(a) => {
             let served = roadmap::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(roadmap::ROADMAP_TIMEOUT, served).await;
+            within(roadmap::ROADMAP_TIMEOUT, served).await;
         }
         Deferred::Cleanup(a) => {
             let served = cleanup::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served).await;
+            within(cleanup::CLEANUP_TIMEOUT, served).await;
         }
         Deferred::Overview(a) => {
             let served = overview::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(overview::OVERVIEW_TIMEOUT, served).await;
+            within(overview::OVERVIEW_TIMEOUT, served).await;
         }
         Deferred::SkillImport(a) => {
             let served = plugins::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(plugins::IMPORT_TIMEOUT, served).await;
+            within(plugins::IMPORT_TIMEOUT, served).await;
         }
         Deferred::Usage(a) => {
             let served = usage::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(usage::USAGE_TIMEOUT, served).await;
+            within(usage::USAGE_TIMEOUT, served).await;
         }
         Deferred::HarnessUpdates(a) => {
             let served = harness_catalog::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(harness_catalog::UPDATES_TIMEOUT, served).await;
-        }
-        Deferred::Icloud(a) => {
-            let served = icloud::serve(stream, engine, authority, auth, &a, body);
-            let _ = tokio::time::timeout(icloud::ICLOUD_TIMEOUT, served).await;
+            within(harness_catalog::UPDATES_TIMEOUT, served).await;
         }
         Deferred::Watch(_) => {}
     }
+}
+
+/// Runs one deferred owner request under its own bound, each timed storage job it submits
+/// decided before the bound cuts it, so the request answers that decision itself.
+/// Inputs: the bound and the request. Output: none; the request writes its own reply.
+async fn within<F: std::future::Future>(bound: Duration, served: F) {
+    let cut = Instant::now() + bound;
+    let _ = tokio::time::timeout_at(cut, crate::storage::before_cut(cut, bound, served)).await;
+}
+
+/// The longest an owner client waits for a request the engine serves under `bound` once it
+/// admits it: the client's own timeout, which covers the admission and the reply's write,
+/// plus the bound, so the engine's answer, a refusal included, arrives before the client gives
+/// up. Inputs: the client timeout and the engine's bound. Output: the wait.
+fn deferred_wait(timeout: Duration, bound: Duration) -> Duration {
+    timeout + bound
 }
 
 /// The owner server's running tasks: owner and runner requests, the native auth
@@ -2636,8 +2980,7 @@ struct Tasks {
 /// copy skill folders, Roadmap requests, which read and write the roadmap status store,
 /// Usage requests, which read and write the usage store, harness version, update and
 /// install requests, which wait for a harness, Homebrew, npm or a vendor's release
-/// pointer, iCloud downloads, which wait for macOS to bring a folder's files to this Mac,
-/// and Process proposals, which wait for an Edit with AI model run. Each carries the
+/// pointer, and Process proposals, which wait for an Edit with AI model run. Each carries the
 /// admission, and the projects home its validated request; the others read the request
 /// frame.
 enum Deferred {
@@ -2658,7 +3001,6 @@ enum Deferred {
     SkillImport(Admission),
     Usage(Admission),
     HarnessUpdates(Admission),
-    Icloud(Admission),
     Watch(Admission),
 }
 
@@ -2667,7 +3009,7 @@ enum Deferred {
 /// Inputs: the stream, the handshake packet, the whole request frame and the code.
 /// Output: Ok once written; Ok without a reply for the Claude code input, which has none.
 async fn refuse(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     auth: &[u8; 37],
     frame: &[u8],
     code: &str,
@@ -2721,7 +3063,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
 }
 
 async fn write_owner_reply(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     result: Result<OwnerReply, EngineError>,
     id: RequestId,
     mutation: bool,
@@ -2737,7 +3079,7 @@ const REPLY_WRITE_TIME: Duration = Duration::from_secs(2);
 /// `REPLY_WRITE_TIME` so a client that stops reading never holds the barrier for others;
 /// the connection is then dropped. Inputs: the connection and the frame.
 /// Output: done once written, or `owner_reply_stalled` and the write error.
-async fn write_reply(stream: &mut UnixStream, frame: &[u8]) -> Result<(), EngineError> {
+async fn write_reply(stream: &mut Stream, frame: &[u8]) -> Result<(), EngineError> {
     tokio::time::timeout(REPLY_WRITE_TIME, stream.write_all(frame))
         .await
         .map_err(|_| failure("owner_reply_stalled"))?
@@ -2755,19 +3097,19 @@ fn owner_reply_frame(
     mutation: bool,
 ) -> Result<Vec<u8>, EngineError> {
     let reply = result.unwrap_or_else(|e| {
-        let known = matches!(
-            e.0.as_str(),
-            "owner_busy"
-                | "owner_grant_stale_or_revoked"
-                | "owner_runtime_stale"
-                | "owner_queue_not_submitted"
-                | "operation_identity_conflict"
-                | "master_transaction_rolled_back"
-                | "master_dispatch_stopped"
-                | "master_dispatch_capacity"
-                | "move_project_old_folder_left"
-                | "job_busy"
-        );
+        let known = crate::storage::storage_answer(&e.0)
+            || matches!(
+                e.0.as_str(),
+                "owner_busy"
+                    | "owner_grant_stale_or_revoked"
+                    | "owner_runtime_stale"
+                    | "operation_identity_conflict"
+                    | "master_transaction_rolled_back"
+                    | "master_dispatch_stopped"
+                    | "master_dispatch_capacity"
+                    | "move_project_old_folder_left"
+                    | "job_busy"
+            );
         let response = if mutation && !known {
             OwnerResponse::OutcomeUnknown {
                 operation_id: id.clone(),
@@ -2845,7 +3187,7 @@ fn dispatch_ipc_deadline(now: Instant, exchange_deadline: Instant) -> Option<Ins
 
 async fn runner_control(
     root: &Root,
-    endpoint: Identity,
+    endpoint: SocketIdentity,
     request: serde_json::Value,
     deadline: Instant,
 ) -> Result<serde_json::Value, EngineError> {
@@ -2856,10 +3198,10 @@ async fn runner_control(
         if root.socket_identity_at("control.sock")? != endpoint {
             return Err(failure("runner_control_socket_replaced"));
         }
-        let mut stream = crate::spawn_gate::connect_unix(root.path.join("control.sock"))
+        let mut stream = crate::ipc::owner_connect(root.path.join("control.sock"))
             .await
             .map_err(io_error)?;
-        verify_peer(&stream)?;
+        verify_server(&stream)?;
         if root.socket_identity_at("control.sock")? != endpoint {
             return Err(failure("runner_control_socket_replaced"));
         }
@@ -3267,15 +3609,15 @@ impl RunnerClient {
             let generation = Root::open(&path)?;
             let name = format!("r{:02x}.cap", bootstrap.value.slot);
             let file = generation.open_key(&name, false)?;
-            let identity = Identity::of(&file.metadata().map_err(io_error)?);
+            let identity = Identity::of_file(&file)?;
             generation.verify_key(&name, &file, identity)?;
             let mut token = [0; 32];
             file.read_exact_at(&mut token, 0).map_err(io_error)?;
             let socket = generation.socket_identity()?;
-            let mut stream = crate::spawn_gate::connect_unix(generation.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(generation.path.join(SOCKET))
                 .await
                 .map_err(io_error)?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             if generation.socket_identity()? != socket {
                 return Err(failure("owner_socket_replaced"));
             }
@@ -3438,8 +3780,9 @@ pub struct OwnerClient {
     root: Root,
     kind: OwnerClientKind,
     token: [u8; 32],
-    socket: Identity,
+    socket: SocketIdentity,
     timeout: Duration,
+    engine_timeout: Duration,
 }
 
 impl OwnerClient {
@@ -3460,7 +3803,7 @@ impl OwnerClient {
             OwnerClientKind::Desktop => 1,
         };
         let file = root.open_key(KEYS[i], false)?;
-        let identity = Identity::of(&file.metadata().map_err(io_error)?);
+        let identity = Identity::of_file(&file)?;
         root.verify_key(KEYS[i], &file, identity)?;
         let mut token = [0; 32];
         file.read_exact_at(&mut token, 0).map_err(io_error)?;
@@ -3472,7 +3815,18 @@ impl OwnerClient {
             token,
             socket,
             timeout,
+            engine_timeout: timeout,
         })
+    }
+
+    /// Takes the owner timeout the engine serves its requests under, as its generation names
+    /// it to the client that discovered it. None, for an older engine that names none, keeps
+    /// the client's own timeout in its place. Input: the engine's timeout. Output: the client.
+    pub(crate) fn serving_under(mut self, engine: Option<Duration>) -> Self {
+        if let Some(engine) = engine {
+            self.engine_timeout = engine;
+        }
+        self
     }
 
     /// Says what a reply that would not parse means. For a read it is an engine writing what
@@ -3519,10 +3873,10 @@ impl OwnerClient {
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
-            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
                 .await
                 .map_err(io_error)?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
@@ -4019,7 +4373,9 @@ fallback_allowed = false
         )
         .unwrap();
         assert_eq!(
-            root.unlink_owned(KEYS[0], identity, false).unwrap_err().0,
+            root.unlink_owned(KEYS[0], identity, false, None)
+                .unwrap_err()
+                .0,
             "owner_cleanup_replaced_artifact_preserved"
         );
         assert!(directory.path().join(KEYS[0]).exists());
@@ -4127,12 +4483,10 @@ fallback_allowed = false
             };
             assert_eq!(engine.apply(req).await.unwrap().outcome, Outcome::Applied);
         }
-        let mut client = crate::spawn_gate::connect_unix(root.path().join(SOCKET))
+        let mut client = crate::ipc::owner_connect(root.path().join(SOCKET))
             .await
             .unwrap();
-        let (stream, _) = crate::spawn_gate::accept_unix(&server.listener)
-            .await
-            .unwrap();
+        let stream = crate::ipc::owner_accept(&server.listener).await.unwrap();
         nix::sys::socket::setsockopt(&stream, nix::sys::socket::sockopt::SndBuf, &1024usize)
             .unwrap();
         nix::sys::socket::setsockopt(&client, nix::sys::socket::sockopt::RcvBuf, &1024usize)

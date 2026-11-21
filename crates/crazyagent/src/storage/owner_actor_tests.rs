@@ -1,4 +1,52 @@
 use super::*;
+
+#[test]
+fn only_a_change_whose_loss_leaves_more_access_is_classed_narrowing() {
+    let secret = plugins::Command::DetachSecret {
+        id: "server".into(),
+        name: "token".into(),
+    };
+    let removed = plugins::Command::RemoveServer {
+        id: "server".into(),
+        version: 1,
+    };
+    let skill_removed = plugins::Command::RemoveSkill {
+        id: "skill".into(),
+        version: 1,
+    };
+    for (on, narrowing) in [(false, true), (true, false)] {
+        let server = plugins::Command::SetServer {
+            id: "server".into(),
+            enabled: on,
+            version: 1,
+        };
+        let skill = plugins::Command::SetSkill {
+            id: "skill".into(),
+            enabled: on,
+            version: 1,
+        };
+        let hook = plugins::Command::SetHook {
+            id: "hook".into(),
+            enabled: on,
+        };
+        let pack = OwnerMutation::SetPackEntry {
+            id: "rust".into(),
+            on,
+            version: 1,
+        };
+        assert_eq!(plugin_narrows_access(&server), narrowing);
+        assert_eq!(plugin_narrows_access(&skill), narrowing);
+        assert_eq!(plugin_narrows_access(&hook), narrowing);
+        assert_eq!(mutation_narrows_access(&pack), narrowing);
+    }
+    assert!(plugin_narrows_access(&secret));
+    assert!(plugin_narrows_access(&removed));
+    assert!(plugin_narrows_access(&skill_removed));
+    assert!(mutation_narrows_access(&OwnerMutation::RemovePackEntry {
+        id: "rust".into(),
+        version: 1,
+    }));
+}
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
@@ -113,7 +161,7 @@ async fn queued_owner_read_rechecks_epoch_after_revoke() {
     let (tx, rx) = oneshot::channel();
     storage
         .sender
-        .try_send(Job::OwnerControl(started.host, control, tx))
+        .try_send(Job::OwnerControl(started.host, control, None, tx))
         .unwrap_or_else(|_| panic!("queue"));
     let (read_tx, read_rx) = oneshot::channel();
     storage
@@ -250,7 +298,12 @@ async fn fifo_apply_revoke_and_dropped_ack_have_real_actor_barriers() {
     let (tx, rx) = oneshot::channel();
     storage
         .sender
-        .try_send(Job::OwnerControl(started.host.clone(), control.clone(), tx))
+        .try_send(Job::OwnerControl(
+            started.host.clone(),
+            control.clone(),
+            None,
+            tx,
+        ))
         .unwrap_or_else(|_| panic!("queue"));
     let (late_tx, late_rx) = oneshot::channel();
     storage
@@ -283,7 +336,7 @@ async fn fifo_apply_revoke_and_dropped_ack_have_real_actor_barriers() {
     let (tx, rx) = oneshot::channel();
     storage
         .sender
-        .try_send(Job::OwnerControl(started.host, reactivate, tx))
+        .try_send(Job::OwnerControl(started.host, reactivate, None, tx))
         .unwrap_or_else(|_| panic!("queue"));
     assert!(rx.await.unwrap().unwrap().0.active);
     let (tx, rx) = oneshot::channel();

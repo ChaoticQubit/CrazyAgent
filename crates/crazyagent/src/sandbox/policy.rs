@@ -18,6 +18,19 @@ const WINDOWS_UNAVAILABLE: &str =
 #[cfg(target_os = "linux")]
 const LINUX_UNAVAILABLE: &str = "On Linux, agents run Sandboxed in this version.";
 
+#[cfg(target_os = "windows")]
+const FULL_WINDOWS_UNAVAILABLE: &str = "Full access isn't available on Windows in this version.";
+
+/// The code a level that cannot run here is refused with.
+pub const AGENT_ACCESS_UNAVAILABLE: &str = "agent_access_unavailable";
+
+/// The code Full access is refused with on Windows (DESIGN-0256 O3a).
+pub const SANDBOX_FULL_UNAVAILABLE_WINDOWS: &str = "sandbox_full_unavailable_windows";
+
+/// What a limited network cannot hold on Windows (DESIGN-0256 O2a): the AppContainer limits
+/// no host or port, and it cannot reach this computer's own network.
+pub const WINDOWS_NETWORK_WIDE_LINE: &str = "On Windows, network limits can't hold hosts or ports in this version: with Port 443 only or None, agents reach the whole internet, and a model on this computer, such as a local server or the relay, can't be reached.";
+
 /// How free one project's agents are (DEC-102): Sandboxed writes only the agent's own
 /// worktree and never git; Own branch adds full git in the agent's own git folder and
 /// lands its commits only on Accept; Full access runs agents with the owner's user
@@ -65,21 +78,32 @@ impl AgentAccess {
         }
     }
 
-    /// Why this level cannot run agents on this computer, or None when it can. A level
-    /// that cannot run is refused when chosen and at launch, never mapped to another.
-    pub fn unavailable(self) -> Option<&'static str> {
+    /// Why this level cannot run agents on this computer and the code it is refused with,
+    /// or None when it can: Full access on Windows has its own (DESIGN-0256 O3a). Output:
+    /// the reason and the code, or none.
+    pub fn refusal(self) -> Option<(&'static str, &'static str)> {
         #[cfg(target_os = "windows")]
         {
-            Some(WINDOWS_UNAVAILABLE)
+            Some(if self == Self::Full {
+                (FULL_WINDOWS_UNAVAILABLE, SANDBOX_FULL_UNAVAILABLE_WINDOWS)
+            } else {
+                (WINDOWS_UNAVAILABLE, AGENT_ACCESS_UNAVAILABLE)
+            })
         }
         #[cfg(target_os = "linux")]
         {
-            (self != Self::Sandboxed).then_some(LINUX_UNAVAILABLE)
+            (self != Self::Sandboxed).then_some((LINUX_UNAVAILABLE, AGENT_ACCESS_UNAVAILABLE))
         }
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         {
             None
         }
+    }
+
+    /// Why this level cannot run agents on this computer, or None when it can. A level
+    /// that cannot run is refused when chosen and at launch, never mapped to another.
+    pub fn unavailable(self) -> Option<&'static str> {
+        self.refusal().map(|(reason, _)| reason)
     }
 }
 
@@ -127,6 +151,48 @@ impl AgentNetwork {
     pub fn wider_than(self, other: Self) -> bool {
         let rank = |choice: Self| Self::ALL.iter().position(|each| *each == choice);
         rank(self) < rank(other)
+    }
+
+    /// Whether a tools-on agent under this choice reaches a hosted model through the engine's
+    /// model proxy: under None for a model off loopback, except on Windows, whose AppContainer
+    /// cannot reach loopback (P6), so the agent reaches the model's port on any host instead
+    /// (DEC-203 O2a). Inputs: the OS, whether tools are on, the model. Output: the answer.
+    pub fn proxied(self, os: &str, tools: bool, model: super::SandboxRemote) -> bool {
+        tools
+            && self == Self::None
+            && !matches!(model, super::SandboxRemote::Loopback(_))
+            && os != "windows"
+    }
+
+    /// The network an agent launches with: its proxy's loopback port when it has one, the
+    /// model alone with tools off or under None on Windows, else what [`Self::sandbox`]
+    /// grants. Inputs: the OS, whether tools are on, the model and the proxy's port, given
+    /// exactly when [`Self::proxied`] says so. Output: the network, or the refusal of a
+    /// loopback model on Windows under any choice (#519 F2).
+    pub fn reach(
+        self,
+        os: &str,
+        tools: bool,
+        model: super::SandboxRemote,
+        proxy: Option<u16>,
+    ) -> Result<super::SandboxNetwork, super::SandboxError> {
+        assert_eq!(
+            proxy.is_some(),
+            self.proxied(os, tools, model),
+            "a proxy port is given exactly when the agent is proxied"
+        );
+        if os == "windows" && matches!(model, super::SandboxRemote::Loopback(_)) {
+            return Err(super::SandboxError::Unavailable(
+                super::MODEL_LOOPBACK_WINDOWS_LINE.into(),
+            ));
+        }
+        Ok(match proxy {
+            Some(port) => super::SandboxNetwork::Only(vec![super::SandboxRemote::Loopback(port)]),
+            None if !tools || (self == Self::None && os == "windows") => {
+                super::SandboxNetwork::Only(vec![model])
+            }
+            None => self.sandbox(Some(model)),
+        })
     }
 
     /// The sandbox reach this choice grants. Input: the model endpoint the agent still
@@ -557,7 +623,9 @@ impl AgentPolicy {
                 .map(|network| NetworkView {
                     network,
                     label: network.label().to_owned(),
-                    gap: linux_network_gap(network, host, sockets, &self.grants),
+                    gap: linux_network_gap(network, host, sockets, &self.grants).or_else(|| {
+                        windows_network_gap(std::env::consts::OS, network).map(str::to_owned)
+                    }),
                 })
                 .collect(),
             toolchains,
@@ -861,6 +929,13 @@ pub fn linux_network_gap(
         })
         .min()
         .map(crate::sandbox::linux_unbridged_line)
+}
+
+/// What a network choice cannot hold on Windows, for the Agent access page: Port 443 only and
+/// None reach the whole internet there, and a model on this computer is refused (DESIGN-0256
+/// O2a). Inputs: the OS and the choice. Output: the line, or none elsewhere and for Open.
+pub fn windows_network_gap(os: &str, network: AgentNetwork) -> Option<&'static str> {
+    (os == "windows" && network != AgentNetwork::Open).then_some(WINDOWS_NETWORK_WIDE_LINE)
 }
 
 /// One access level with the reason it cannot run here, if any.

@@ -143,6 +143,16 @@ pub(super) struct NativeAuthHostRegistration {
     disabled: bool,
 }
 
+#[cfg(all(test, unix))]
+impl NativeAuthHostRegistration {
+    /// Whether host registration is frozen, for the owner rows that check a sign-out keeps
+    /// the freeze while its storage job is pending. Output: the flag, read only, so a row
+    /// can never thaw the host through it.
+    pub(super) fn is_frozen(&self) -> bool {
+        self.frozen
+    }
+}
+
 impl NativeAuthHostRegistration {
     /// The Codex and Claude Code executables registered for this engine, for a confined
     /// model run outside a team. Output: the two, none for a harness that is not installed
@@ -1126,19 +1136,68 @@ impl OwnerRuntimeHandle {
         self.authority.reserve_native_auth(dispatch, false)
     }
 
+    /// Runs one native-auth command. A sign-out is kept on disk first: it ends here when the
+    /// owner hears storage refuse it by name, one storage refuses to take is queued for the
+    /// drainer and answered pending, and any other stays until storage records it or the
+    /// next open replays it. Inputs: the admission, the command and who asks. Output: the
+    /// reply, or the code the asker sees.
     pub(super) async fn native_auth_command(
         &self,
         admission: Admission,
         command: crate::engine::owner::native_auth::Command,
+        ask: crate::storage::NativeAuthAsk,
+    ) -> Result<NativeAuthReply, EngineError> {
+        let logout = match &command {
+            crate::engine::owner::native_auth::Command::Logout(logout) => Some(logout.clone()),
+            _ => None,
+        };
+        let Some(logout) = logout else {
+            return self.native_auth_submit(admission, command, ask).await;
+        };
+        command.validate()?;
+        let owner = matches!(ask, crate::storage::NativeAuthAsk::Owner { .. });
+        let kept = self
+            .keep_narrowing(crate::storage::narrowing::Change::Logout(logout.clone()))
+            .await;
+        let answer = self
+            .native_auth_submit(admission.clone(), command, ask)
+            .await;
+        if owner && let Some(id) = &kept {
+            self.end_refused_sign_out(id, &answer).await;
+        }
+        self.pending_unless_taken(
+            answer,
+            kept.map(|id| super::narrowing::Pending::Logout {
+                admission,
+                logout,
+                id,
+            }),
+        )
+    }
+
+    /// Submits one native-auth command to storage and takes its answer to the next step,
+    /// freezing host registration first for a sign-in or a sign-out. Every wait for the
+    /// owner ends by its answer's due time. Inputs: the admission, the command and who asks.
+    /// Output: the reply, or the storage or validation code.
+    pub(super) async fn native_auth_submit(
+        &self,
+        admission: Admission,
+        command: crate::engine::owner::native_auth::Command,
+        ask: crate::storage::NativeAuthAsk,
     ) -> Result<NativeAuthReply, EngineError> {
         command.validate()?;
+        let answer_by = match &ask {
+            crate::storage::NativeAuthAsk::Owner { answer_by } => Some(*answer_by),
+            _ => None,
+        };
         if matches!(
             &command,
             crate::engine::owner::native_auth::Command::Start(_)
                 | crate::engine::owner::native_auth::Command::Logout(_)
         ) {
+            let released_by = Instant::now() + CLEANUP_BOUND;
             self.authority
-                .native_auth_released(Instant::now() + CLEANUP_BOUND)
+                .native_auth_released(answer_by.map_or(released_by, |by| by.min(released_by)))
                 .await;
             self.authority
                 .native_auth_host
@@ -1146,10 +1205,33 @@ impl OwnerRuntimeHandle {
                 .map_err(|_| failure("native_auth_recovery_required"))?
                 .frozen = true;
         }
+        let late = {
+            let runtime = self.clone();
+            let admission = admission.clone();
+            move |begun: crate::storage::NativeAuthBegin| async move {
+                let _ = runtime.settle_native_auth(admission, begun).await;
+            }
+        };
         let begun = self
             .engine
-            .native_auth_job(|reply| Job::NativeAuth(admission.clone(), command, reply))
+            .native_auth_settled_job(
+                |reply| Job::NativeAuth(admission.clone(), command, ask, reply),
+                late,
+                answer_by,
+            )
             .await?;
+        self.settle_native_auth(admission, begun).await
+    }
+
+    /// Takes a begun native-auth operation to its next step: its reply shown when it carries
+    /// no work, else its dispatch retained, or finished in storage when the host cannot take
+    /// it. Runs on the owner's answer, and later for a sign-out storage reached after the
+    /// owner's wait. Inputs: the admission and the begun operation. Output: the reply.
+    async fn settle_native_auth(
+        &self,
+        admission: Admission,
+        begun: crate::storage::NativeAuthBegin,
+    ) -> Result<NativeAuthReply, EngineError> {
         match begun.work {
             None => {
                 let mut reply = begun.reply;
@@ -1163,7 +1245,7 @@ impl OwnerRuntimeHandle {
                     .native_auth_job(|reply| Job::NativeAuthFinish(admission, work, reply))
                     .await
                     .map_err(|error| {
-                        if error.0 == "owner_queue_not_submitted" {
+                        if crate::storage::not_submitted(&error.0) {
                             crate::engine::owner::native_auth::outcome_unknown()
                         } else {
                             error
@@ -1352,10 +1434,10 @@ impl Authority {
             .enumerate()
             .find(|(_, slot)| slot.registration.active && &slot.registration.admission == admission)
             .ok_or_else(|| failure("owner_grant_stale_or_revoked"))?;
-        self.root
-            .verify_key(KEYS[index], &slot.file, slot.identity)?;
+        let file = slot.held()?;
+        self.root.verify_key(KEYS[index], file, slot.identity)?;
         let mut actual = [0; 32];
-        slot.file.read_exact_at(&mut actual, 0).map_err(io_error)?;
+        file.read_exact_at(&mut actual, 0).map_err(io_error)?;
         if !bool::from(slot.token.ct_eq(&actual)) || self.root.socket_identity()? != self.socket {
             return Err(failure("owner_capability_content_changed"));
         }
@@ -1695,7 +1777,7 @@ impl Authority {
 /// reply never arrived. False when storage answered with a refusal, which means the
 /// dispatch scope already changed and its durable fence stays in place for recovery.
 fn custody_release_undelivered(error: &EngineError) -> bool {
-    error.0 == "owner_queue_not_submitted"
+    crate::storage::not_submitted(&error.0)
         || *error == crate::engine::owner::native_auth::outcome_unknown()
 }
 
@@ -1828,7 +1910,7 @@ impl Drop for Session {
 }
 
 pub(super) async fn serve(
-    mut stream: UnixStream,
+    mut stream: Stream,
     packet: [u8; 37],
     engine: Arc<Engine>,
     authority: Weak<Authority>,
@@ -1890,7 +1972,7 @@ async fn check(engine: &Engine, session: &Session) -> Result<NativeAuthFact, Eng
 }
 
 async fn read_custody_frame(
-    reader: &mut crate::platform::unix_socket::ReadHalf<'_>,
+    reader: &mut crate::ipc::ReadHalf<'_>,
     timeout: Duration,
 ) -> Result<(Vec<u8>, Instant), EngineError> {
     let first = [reader.read_u8().await.map_err(io_error)?];
@@ -2103,7 +2185,7 @@ async fn custody_reply(
     engine: &Engine,
     session: &Session,
     request: &Request,
-    reader: &mut crate::platform::unix_socket::ReadHalf<'_>,
+    reader: &mut crate::ipc::ReadHalf<'_>,
 ) -> Result<Reply, EngineError> {
     session.validate()?;
     let retirement = matches!(
@@ -2210,7 +2292,7 @@ async fn custody_reply(
 }
 
 async fn serve_session(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     engine: &Engine,
     session: &Session,
     timeout: Duration,
@@ -2250,7 +2332,7 @@ async fn serve_session(
 
 #[cfg(unix)]
 pub(crate) struct NativeAuthCustodyChannel {
-    stream: Option<UnixStream>,
+    stream: Option<Stream>,
     binding: NativeBinding,
     root: Root,
     socket: Identity,
@@ -2278,10 +2360,10 @@ impl NativeAuthCustodyChannel {
         let (generation, host, binding) = runner_binding(input)?;
         let root = Root::open(&generation)?;
         let socket = root.socket_identity()?;
-        let mut stream = crate::spawn_gate::connect_unix(root.path.join(SOCKET))
+        let mut stream = crate::ipc::owner_connect(root.path.join(SOCKET))
             .await
             .map_err(io_error)?;
-        verify_peer(&stream)?;
+        verify_server(&stream)?;
         binding.verify()?;
         if root.socket_identity()? != socket {
             return Err(failure("owner_socket_replaced"));
@@ -2888,7 +2970,14 @@ fallback_allowed = false
             };
             let begun = host
                 .engine
-                .native_auth_job(|reply| Job::NativeAuth(admission, command, reply))
+                .native_auth_job(|reply| {
+                    Job::NativeAuth(
+                        admission,
+                        command,
+                        crate::storage::NativeAuthAsk::Engine,
+                        reply,
+                    )
+                })
                 .await
                 .unwrap();
             assert_eq!(begun.reply.fact.phase, NativeAuthPhase::Starting);

@@ -802,7 +802,10 @@ fn the_proposer_hears_who_gets_the_outcome() {
 fn a_proposal_whose_question_cannot_be_kept_leaves_no_row_and_no_question() {
     let case = Case::new();
     case.done(REPO);
-    assert_eq!(start_store(&case.db).unwrap(), 0);
+    assert_eq!(
+        start_store(&case.db, crate::storage::opening::Opening::for_test(1)).unwrap(),
+        0
+    );
     case.db
         .execute_batch(
             "CREATE TRIGGER keep_fails BEFORE UPDATE OF question ON github_rule_requests

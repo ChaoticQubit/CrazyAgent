@@ -13,7 +13,6 @@ const HOUR: Duration = Duration::from_secs(60 * 60);
 /// no time limit: past any engine's return, and within every platform's file times.
 pub const NEVER_AHEAD: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60);
 
-#[cfg(any(unix, test))]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS agent_quit_settings (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     on_quit TEXT NOT NULL CHECK(on_quit IN ('keep_running', 'stop')),
@@ -95,7 +94,6 @@ fn invalid() -> EngineError {
 
 /// Creates the settings table when it is missing. Input: the engine database. Output: Ok,
 /// or the database error.
-#[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(TABLE).map_err(error)
 }

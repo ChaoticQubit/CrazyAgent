@@ -46,7 +46,7 @@ async function withBoxlessWindow(rows, focused, body) {
   globalThis.browser = {
     execute: async (fn) => {
       if (fn === pasteTerminal) { seen.pasted = focused; seen.readsAtPaste = seen.reads; return focused; }
-      if (!fn.toString().includes("xterm-rows")) return undefined;
+      if (!fn.toString().includes("readScreen")) return undefined;
       seen.reads += 1;
       return rows(seen);
     },

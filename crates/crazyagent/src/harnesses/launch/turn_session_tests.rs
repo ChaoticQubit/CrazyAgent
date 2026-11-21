@@ -94,8 +94,7 @@ fn launch() -> (tempfile::TempDir, LaunchRequest) {
         },
         model: Some("m-1".into()),
         tools: false,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: crate::harnesses::launch::LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -375,8 +374,8 @@ fn a_turn_session_refuses_an_account_key_and_full_access() {
         "launch_key_relay_unsupported"
     );
     let (_open, mut open) = launch();
-    open.sandbox_profile = None;
-    open.unconfined = true;
+    let scratch = open.working_dir.parent().unwrap().to_path_buf();
+    open.boundary = crate::harnesses::launch::full_access_for_test(&open.working_dir, &scratch);
     assert_eq!(
         code(TurnSession::start_with(open, config()).map(drop)),
         "launch_harness_unsupported"

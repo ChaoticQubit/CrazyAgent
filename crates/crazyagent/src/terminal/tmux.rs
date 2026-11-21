@@ -1,9 +1,9 @@
 use super::buffer::{Feed, buffer};
 pub use super::harness_socket;
 use super::{
-    AgentId, Host, HostError, INPUT_BYTES_MAX, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneAt,
-    PaneInfo, PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN, TEAMMATES_SERVER_REPLACED,
-    TerminalStream, VIEWERS_MAX, end_except, failure, pane_id_valid,
+    AgentId, Host, HostError, INPUT_BYTES_MAX, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX,
+    PASTE_BYTES_MAX, PaneAt, PaneInfo, PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN,
+    TEAMMATES_SERVER_REPLACED, TerminalStream, VIEWERS_MAX, end_except, failure, pane_id_valid,
 };
 use crate::harnesses::interactive::InteractiveCommand;
 use crate::harnesses::launch::Ending;
@@ -112,10 +112,17 @@ const LEAD_SHELL: &str = "/bin/sh";
 /// The pane option naming the agent whose own app a pane of a lead's server runs, set by the
 /// engine at spawn, since the lead's window also holds the panes its teammates split off.
 const AGENT_TAG: &str = "@crazyagent";
+/// The window option marking a window whose app pane the engine tagged, set with the tag, so
+/// a window that lost its app pane never hands its one teammate pane to the app's prompts.
+const APP_MARK: &str = "@crazyagent-app";
 const TERMINAL_TYPE: &str = "xterm-256color";
 const TERMINAL_DEFAULTS: [(&str, &str); 2] = [("TERM", TERMINAL_TYPE), ("COLORTERM", "truecolor")];
 const VERSION_MIN: (u32, u32) = (3, 7);
 const CAPTURE_WRITTEN: &str = "-p -e -N -T";
+/// The most bytes one `send-keys -H` command types. tmux parses a command's arguments in time
+/// that grows faster than their count and answers nothing else meanwhile: 4096 hex keys held
+/// the server about 74 ms, 256 under 1 ms (fix11 NOTE-1032).
+const SEND_KEYS_BYTES_MAX: usize = 256;
 const REPLY_TIME: Duration = Duration::from_secs(10);
 /// Ends every format the engine has tmux expand. tmux stops expanding a format that has run
 /// for 100 ms of wall time, which a server stalled on a loaded machine reaches, and answers
@@ -673,19 +680,7 @@ impl Tmux {
             control.stop();
             return Err(refused);
         }
-        for option in [
-            format!("set-option -g default-terminal {TERMINAL_TYPE}"),
-            "set-option -gw allow-rename off".into(),
-            "set-option -gw automatic-rename off".into(),
-            "set-option -gw remain-on-exit off".into(),
-            format!("set-option -g history-limit {SCROLLBACK_LINES}"),
-        ]
-        .into_iter()
-        .chain(
-            self.confined
-                .is_some()
-                .then(|| format!("set-option -g default-shell {LEAD_SHELL}")),
-        ) {
+        for option in server_options(self.confined.is_some()) {
             control
                 .run(&option)
                 .map_err(|_| failure("terminal_unavailable"))?;
@@ -714,6 +709,49 @@ impl Tmux {
                 (tag == agent.as_str() && pane_id_valid(pane)).then(|| pane.to_owned())
             })
             .ok_or_else(|| failure("terminal_agent_unknown"))
+    }
+
+    /// The pane an agent's prompts go to (V243-PASTE-INTERLEAVE-N0): the one tagged with its
+    /// name, searched on the engine's server in the agent's window only. Only a window no
+    /// engine marked (`APP_MARK`) gives its one untagged pane, marked now; any other gives
+    /// none, never a pane that may be a teammate's. Takes the control client and the agent.
+    /// Returns the pane id, `APP_PANE_UNKNOWN`, or `terminal_agent_unknown` with no window.
+    fn app_pane(&self, control: &Control, agent: &AgentId) -> Result<String, HostError> {
+        if self.confined.is_some() {
+            return self.agent_target(control, agent);
+        }
+        let lines = control.ask(&format!(
+            "list-panes -t {} -F '#{{pane_id}} #{{{APP_MARK}}} #{{{AGENT_TAG}}}{FORMAT_END}'",
+            target(agent)
+        ))?;
+        let panes: Vec<(&str, &str, &str)> = lines
+            .iter()
+            .filter_map(|line| {
+                let mut fields = std::str::from_utf8(line).ok()?.splitn(3, ' ');
+                Some((fields.next()?, fields.next()?, fields.next()?))
+            })
+            .filter(|(pane, ..)| pane_id_valid(pane))
+            .take(PANES_LISTED_MAX)
+            .collect();
+        if let Some((pane, ..)) = panes.iter().find(|(.., tag)| *tag == agent.as_str()) {
+            return Ok((*pane).to_owned());
+        }
+        let [(pane, "", "")] = panes.as_slice() else {
+            return Err(failure(super::APP_PANE_UNKNOWN));
+        };
+        Self::mark_app(control, pane, agent)?;
+        Ok((*pane).to_owned())
+    }
+
+    /// Marks a pane's window as one whose app the engine tagged, then tags the pane as the
+    /// agent's app, so the one-pane fallback never takes a pane left beside it; a pane that
+    /// closes between the two leaves a marked window, which refuses (CR-0351 F1). Takes the
+    /// control client, the pane id and the agent. Returns once both are set, or tmux's error.
+    fn mark_app(control: &Control, pane: &str, agent: &AgentId) -> Result<(), HostError> {
+        assert!(pane_id_valid(pane), "only a pane id is tagged");
+        control.run(&format!("set-option -w -t {pane} {APP_MARK} {agent}"))?;
+        control.run(&format!("set-option -p -t {pane} {AGENT_TAG} {agent}"))?;
+        Ok(())
     }
 
     /// Whether this lead server holds a pane tagged with the agent's name. Takes the agent.
@@ -836,29 +874,114 @@ impl Tmux {
         Ok(())
     }
 
-    /// Types bytes into one tmux target as hex keys. Takes the control client, the target and
-    /// the bytes. Returns once tmux took them, or `terminal_input_bounds`.
+    /// Hands bytes to one tmux target: a request `pastes` takes goes through a named tmux
+    /// buffer in one paste, any other is typed as hex keys, one command after another, in
+    /// order, all into the pane a window target names at the start when there are several
+    /// (V243-PASTE-INTERLEAVE-N0). Takes the control client, the target and the bytes.
+    /// Returns once tmux took them all, `terminal_input_bounds`, or the lookup's code.
     fn send_bytes(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
         if bytes.len() > INPUT_BYTES_MAX {
             return Err(failure("terminal_input_bounds"));
         }
-        if bytes.is_empty() {
-            return Ok(());
+        if pastes(bytes) {
+            return Self::send_pasted(control, target, bytes);
         }
-        let mut line = format!("send-keys -t {target} -H");
-        for byte in bytes {
-            let _ = write!(line, " {byte:02x}");
+        let mut lines = send_keys_lines(target, bytes);
+        if lines.len() > 1 && !pane_id_valid(target) {
+            let pane = Self::displayed(control, target, "#{pane_id}")?;
+            if !pane_id_valid(&pane) {
+                return Err(failure("terminal_command_failed"));
+            }
+            lines = send_keys_lines(&pane, bytes);
         }
-        control.run(&line).map(drop)
+        for line in lines {
+            control.run(&line)?;
+        }
+        Ok(())
+    }
+
+    /// Pastes bytes into one tmux target through a buffer no other paste uses: `set-buffer`
+    /// then `paste-buffer -d -r -S`, written back to back, so the pane gets the bytes
+    /// unchanged in one write and the buffer is deleted; on a failure a best-effort
+    /// `delete-buffer` follows, so the text does not stay on the server. Takes the control
+    /// client, the target and bytes `pastes` takes. Returns once tmux took them all.
+    fn send_pasted(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
+        assert!(pastes(bytes));
+        let buffer = paste_buffer_name();
+        let lines = paste_buffer_lines(target, &buffer, bytes);
+        assert_eq!(lines.len(), COMMANDS_SENT_MAX);
+        let pasted = control.run_all(&lines);
+        if pasted.is_err() {
+            let _ = control.run(&format!("delete-buffer -b {buffer}"));
+        }
+        pasted
+    }
+
+    /// Pastes one owner paste into one tmux target through `owner_paste_lines` (T7), which
+    /// brackets it only when the pane asked, with a best-effort `delete-buffer` on a failure.
+    /// Takes the control client, the target and 1 to `PASTE_BYTES_MAX` keys from
+    /// `paste_keys`, without a NUL. Returns once tmux took them all, `terminal_paste_bounds`,
+    /// or tmux's refusal.
+    fn send_paste(control: &Control, target: &str, keys: &[u8]) -> Result<(), HostError> {
+        if keys.is_empty() || keys.len() > PASTE_BYTES_MAX || keys.contains(&0) {
+            return Err(failure("terminal_paste_bounds"));
+        }
+        let buffer = paste_buffer_name();
+        let lines = owner_paste_lines(target, &buffer, keys);
+        assert_eq!(lines.len(), keys.len().div_ceil(INPUT_BYTES_MAX) + 1);
+        let pasted = lines
+            .iter()
+            .try_for_each(|line| control.run(line).map(|_| ()));
+        if pasted.is_err() {
+            let _ = control.run(&format!("delete-buffer -b {buffer}"));
+        }
+        pasted
     }
 
     /// Reads whether bracketed paste is on in one tmux target. Takes the control client and
-    /// the target. Returns the answer.
+    /// the target. Returns the answer, or `terminal_agent_unknown` once the target is gone.
     fn paste_on(control: &Control, target: &str) -> Result<bool, HostError> {
+        Ok(Self::displayed(control, target, "#{bracket_paste_flag}")? == "1")
+    }
+
+    /// Reads one format of one tmux target. `display-message` answers for the current pane,
+    /// with success, when its target is gone (tmux 3.8), so the answer also names its pane
+    /// and window, and one of them must be the target. Takes the control client, a `%N` pane
+    /// or `session:=window` target, and a format whose text holds no space; the names come
+    /// last and may. Returns the format's text, or `terminal_agent_unknown` once the target
+    /// is gone.
+    fn displayed(control: &Control, target: &str, format: &str) -> Result<String, HostError> {
+        let named = "#{session_name}:=#{window_name}";
         let lines = control.ask(&format!(
-            "display-message -p -t {target} '#{{bracket_paste_flag}}{FORMAT_END}'"
+            "display-message -p -t {target} '#{{pane_id}} {format} {named}{FORMAT_END}'"
         ))?;
-        Ok(lines.first().is_some_and(|line| line.as_slice() == b"1"))
+        let unread = || failure("terminal_command_failed");
+        let line = lines
+            .first()
+            .and_then(|line| std::str::from_utf8(line).ok())
+            .ok_or_else(unread)?;
+        let (pane, rest) = line.split_once(' ').ok_or_else(unread)?;
+        let (text, window) = rest.split_once(' ').ok_or_else(unread)?;
+        if pane != target && window != target {
+            return Err(failure("terminal_agent_unknown"));
+        }
+        Ok(text.to_owned())
+    }
+
+    /// The held control client while it is the one that found a view's pane and still reads,
+    /// so a command aimed at that pane id never reaches a pane of a newer server, which can
+    /// reuse the id. Takes the view's pane. Returns the client, or none for a malformed id or
+    /// another or closed client.
+    fn control_at(&self, at: &PaneAt) -> Result<Option<Arc<Control>>, HostError> {
+        if !pane_id_valid(&at.pane) {
+            return Ok(None);
+        }
+        let held = self
+            .control
+            .lock()
+            .map_err(|_| failure("terminal_unavailable"))?
+            .clone();
+        Ok(held.filter(|control| control.serial == at.serial && !control.closed()))
     }
 }
 
@@ -911,6 +1034,18 @@ fn variable_names(lines: &[Vec<u8>]) -> Vec<String> {
         .collect()
 }
 
+/// The pin a lookup hands out: a pane id the caller already checked, and the serial of the
+/// control connection that found it, which counts from 1. Inputs: the pane id and the
+/// serial. Output: the `PaneAt` that later pinned reads and sends must match.
+fn pin_at(pane: String, serial: u64) -> PaneAt {
+    assert!(serial > 0, "control serials start at 1");
+    assert!(
+        pane_id_valid(&pane),
+        "a pin names a pane id, never a window target"
+    );
+    PaneAt { pane, serial }
+}
+
 /// Pins a teammates' server to the pid it first answered with (PLC c): a server under
 /// another pid at the same socket, such as one a process bound there after the teammates'
 /// server ended, is refused, so no listing or input of its is taken for the lead's team.
@@ -960,21 +1095,37 @@ impl Control {
     }
 
     fn send(&self, line: &str, pending: Pending) -> Result<(), HostError> {
-        assert!(!line.contains('\n') && !line.contains('\r'));
+        self.send_all(vec![(line, pending)])
+    }
+
+    /// Queues each command's pending reply in order and writes all the commands in one write
+    /// under one hold of the client's input, so no other caller's command lands between them.
+    /// Takes the commands with their pendings, at most `COMMANDS_SENT_MAX`. Returns once they
+    /// are written, or the closed client's error.
+    fn send_all(&self, commands: Vec<(&str, Pending)>) -> Result<(), HostError> {
+        assert!(!commands.is_empty());
+        assert!(commands.len() <= COMMANDS_SENT_MAX);
+        assert!(
+            commands
+                .iter()
+                .all(|(line, _)| !line.contains('\n') && !line.contains('\r'))
+        );
         let mut input = self.input.lock().map_err(|_| closed())?;
         let Some(writer) = input.as_mut() else {
             return Err(closed());
         };
+        let mut bytes = Vec::with_capacity(commands.iter().map(|(line, _)| line.len() + 1).sum());
         {
             let mut state = self.state.lock().map_err(|_| closed())?;
             if state.closed {
                 return Err(closed());
             }
-            state.pending.push_back(pending);
+            for (line, pending) in commands {
+                state.pending.push_back(pending);
+                bytes.extend_from_slice(line.as_bytes());
+                bytes.push(b'\n');
+            }
         }
-        let mut bytes = Vec::with_capacity(line.len() + 1);
-        bytes.extend_from_slice(line.as_bytes());
-        bytes.push(b'\n');
         if writer
             .write_all(&bytes)
             .and_then(|()| writer.flush())
@@ -997,6 +1148,27 @@ impl Control {
             }
             Err(RecvTimeoutError::Disconnected) => Err(closed()),
         }
+    }
+
+    /// Runs commands back to back: sends them all at once through `send_all`, then waits for
+    /// each answer in order. Takes the commands. Returns once all succeeded, or the first error.
+    fn run_all(&self, lines: &[String]) -> Result<(), HostError> {
+        assert!(!lines.is_empty());
+        let mut answers = Vec::with_capacity(lines.len());
+        let commands = lines
+            .iter()
+            .map(|line| {
+                let (reply, answer) = sync_channel(1);
+                answers.push(answer);
+                (line.as_str(), Pending::Reply(reply))
+            })
+            .collect();
+        self.send_all(commands)?;
+        assert_eq!(answers.len(), lines.len());
+        for answer in &answers {
+            self.wait(answer)?;
+        }
+        Ok(())
     }
 
     fn run(&self, line: &str) -> Answer {
@@ -2220,15 +2392,10 @@ impl Tmux {
             let _ = control.run(&format!("kill-window -t {}", target(agent)));
             return Err(failure("terminal_command_failed"));
         }
-        if self.confined.is_some() {
-            let tagged = pane_id_valid(pane)
-                && control
-                    .run(&format!("set-option -p -t {pane} {AGENT_TAG} {agent}"))
-                    .is_ok();
-            if !tagged {
-                let _ = control.run(&format!("kill-window -t {}", target(agent)));
-                return Err(failure("terminal_command_failed"));
-            }
+        let tagged = pane_id_valid(pane) && Self::mark_app(&control, pane, agent).is_ok();
+        if !tagged {
+            let _ = control.run(&format!("kill-window -t {}", target(agent)));
+            return Err(failure("terminal_command_failed"));
         }
         Ok(PaneRef {
             agent: agent.clone(),
@@ -2269,19 +2436,105 @@ impl Host for Tmux {
     }
 
     fn input_at(&self, _agent: &AgentId, at: &PaneAt, bytes: &[u8]) -> Result<bool, HostError> {
-        if !pane_id_valid(&at.pane) {
-            return Ok(false);
-        }
-        let held = self
-            .control
-            .lock()
-            .map_err(|_| failure("terminal_unavailable"))?
-            .clone();
-        let Some(control) = held.filter(|control| control.serial == at.serial && !control.closed())
-        else {
+        let Some(control) = self.control_at(at)? else {
             return Ok(false);
         };
+        assert_eq!(
+            control.serial, at.serial,
+            "a pinned send uses the connection that found it"
+        );
         Self::send_bytes(&control, &at.pane, bytes).map(|()| true)
+    }
+
+    fn own_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        let control = self.live_control()?;
+        let pane = if self.confined.is_some() {
+            self.agent_target(&control, agent)?
+        } else {
+            Self::displayed(&control, &target(agent), "#{pane_id}")?
+        };
+        if !pane_id_valid(&pane) {
+            return Err(failure("terminal_command_failed"));
+        }
+        Ok(pin_at(pane, control.serial))
+    }
+
+    fn app_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        let control = self.live_control()?;
+        let pane = self.app_pane(&control, agent)?;
+        if !pane_id_valid(&pane) {
+            return Err(failure("terminal_command_failed"));
+        }
+        Ok(pin_at(pane, control.serial))
+    }
+
+    fn input_live_at(&self, _agent: &AgentId, at: &PaneAt) -> Result<Option<bool>, HostError> {
+        let Some(control) = self.control_at(at)? else {
+            return Ok(None);
+        };
+        Self::paste_on(&control, &at.pane).map(Some)
+    }
+
+    fn tag_app(&self, agent: &AgentId, pid: u32) -> Result<(), HostError> {
+        assert!(pid > 1, "a pane record keeps a real pid");
+        let control = self.live_control()?;
+        let app = self
+            .panes(agent)?
+            .into_iter()
+            .find(|pane| pane.pid == pid && !pane.dead)
+            .ok_or_else(|| failure(super::APP_PANE_UNKNOWN))?;
+        Self::mark_app(&control, &app.id, agent)
+    }
+
+    fn paste_at(&self, _agent: &AgentId, at: &PaneAt, keys: &[u8]) -> Result<bool, HostError> {
+        if keys.is_empty() || keys.len() > PASTE_BYTES_MAX {
+            return Err(failure("terminal_paste_bounds"));
+        }
+        let Some(control) = self.control_at(at)? else {
+            return Ok(false);
+        };
+        assert_eq!(
+            control.serial, at.serial,
+            "a pinned send uses the connection that found it"
+        );
+        Self::send_paste(&control, &at.pane, keys).map(|()| true)
+    }
+
+    fn resize_at(
+        &self,
+        _agent: &AgentId,
+        at: &PaneAt,
+        size: (u16, u16),
+    ) -> Result<bool, HostError> {
+        let (cols, rows) = size;
+        let bounds = SIZE_MIN..=SIZE_MAX;
+        if !bounds.contains(&cols) || !bounds.contains(&rows) {
+            return Err(failure("terminal_size_bounds"));
+        }
+        let Some(control) = self.control_at(at)? else {
+            return Ok(false);
+        };
+        assert_eq!(
+            control.serial, at.serial,
+            "a pinned send uses the connection that found it"
+        );
+        let line = format!("resize-window -t {} -x {cols} -y {rows}", at.pane);
+        control.run(&line).map(|_| true)
+    }
+
+    /// Names the window a resize of the agent sizes: this server's socket and the window's
+    /// id, so every view of a split team window counts once and two servers never share a
+    /// key. Takes the agent. Returns the key, or `terminal_agent_unknown` once the window is
+    /// gone.
+    fn unit(&self, agent: &AgentId) -> Result<String, HostError> {
+        let control = self.live_control()?;
+        let target = self.agent_target(&control, agent)?;
+        let window = Self::displayed(&control, &target, "#{window_id}")?;
+        let id = window.strip_prefix('@').unwrap_or_default();
+        if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(failure("terminal_command_failed"));
+        }
+        Ok(format!("{} {window}", self.socket.display()))
     }
 
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
@@ -2318,6 +2571,23 @@ impl Host for Tmux {
         Self::paste_on(&*self.live_control()?, &pane)
     }
 
+    fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
+        if keys.is_empty() || keys.len() > PASTE_BYTES_MAX {
+            return Err(failure("terminal_paste_bounds"));
+        }
+        let control = self.live_control()?;
+        let target = self.agent_target(&control, agent)?;
+        Self::send_paste(&control, &target, keys)
+    }
+
+    fn paste_pane(&self, agent: &AgentId, pane: &str, keys: &[u8]) -> Result<(), HostError> {
+        if keys.is_empty() || keys.len() > PASTE_BYTES_MAX {
+            return Err(failure("terminal_paste_bounds"));
+        }
+        let pane = self.member_pane(agent, pane)?;
+        Self::send_paste(&*self.live_control()?, &pane, keys)
+    }
+
     fn adopt_pane(&self, agent: &AgentId, lead: &AgentId, pane: &str) -> Result<(), HostError> {
         if self.confined.is_none() {
             return Err(failure(OWN_SERVER_UNAVAILABLE));
@@ -2338,14 +2608,10 @@ impl Host for Tmux {
     fn quiet(&self, agent: &AgentId) -> Result<Option<Duration>, HostError> {
         let control = self.live_control()?;
         let target = self.agent_target(&control, agent)?;
-        let lines = control.ask(&format!(
-            "display-message -p -t {target} '#{{window_activity}}{FORMAT_END}'"
-        ))?;
-        let activity = lines
-            .first()
-            .and_then(|line| std::str::from_utf8(line).ok())
-            .and_then(|text| text.trim().parse::<u64>().ok())
-            .ok_or_else(|| failure("terminal_command_failed"))?;
+        let activity = Self::displayed(&control, &target, "#{window_activity}")?
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| failure("terminal_command_failed"))?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| failure("terminal_command_failed"))?
@@ -2463,6 +2729,136 @@ impl Host for Tmux {
     fn renew(&self, until: SystemTime) -> Result<(), HostError> {
         renew_socket(&self.socket, until)
     }
+}
+
+const _: () = assert!(SEND_KEYS_BYTES_MAX > super::RUN_CUT_BACK_BYTES_MAX);
+const _: () = assert!(SEND_KEYS_BYTES_MAX <= INPUT_BYTES_MAX);
+
+/// Whether `send_bytes` pastes a request through a tmux buffer: when it is longer than one
+/// `send-keys` run and holds no NUL, which would end the buffer. Takes at most
+/// `INPUT_BYTES_MAX` bytes. Returns the choice.
+fn pastes(bytes: &[u8]) -> bool {
+    assert!(bytes.len() <= INPUT_BYTES_MAX);
+    bytes.len() > SEND_KEYS_BYTES_MAX && !bytes.contains(&0)
+}
+
+/// The `set-option` commands the engine runs on each server it controls, in order: the
+/// terminal type, window names and exits, scrollback, the lead shell on a confined host,
+/// then `set-clipboard external` and `get-clipboard off`, so no pane's OSC 52 query reads a
+/// tmux buffer. Takes whether the host is confined. Returns the commands.
+fn server_options(confined: bool) -> Vec<String> {
+    let mut options = vec![
+        format!("set-option -g default-terminal {TERMINAL_TYPE}"),
+        "set-option -gw allow-rename off".into(),
+        "set-option -gw automatic-rename off".into(),
+        "set-option -gw remain-on-exit off".into(),
+        format!("set-option -g history-limit {SCROLLBACK_LINES}"),
+    ];
+    if confined {
+        options.push(format!("set-option -g default-shell {LEAD_SHELL}"));
+    }
+    options.push("set-option -sq set-clipboard external".into());
+    options.push("set-option -sq get-clipboard off".into());
+    assert!(options.len() >= 7);
+    assert!(
+        options
+            .iter()
+            .all(|option| option.starts_with("set-option -"))
+    );
+    options
+}
+
+/// The most commands one `Control::send_all` writes: a paste's `set-buffer` and
+/// `paste-buffer`.
+const COMMANDS_SENT_MAX: usize = 2;
+
+/// The two commands that paste bytes into one target through a named tmux buffer:
+/// `set-buffer` with every byte other than an ASCII letter or digit written as a `\ooo`
+/// octal escape inside double quotes, so tmux's parser decodes each exactly and expands no
+/// `$`, `~` or `#`, then `paste-buffer -d -r -S`, which writes the bytes unchanged, control
+/// bytes and line ends included, and deletes the buffer. No `-p`: the pasted bytes carry
+/// their own bracket marks. Takes the target, the buffer name and bytes without a NUL.
+/// Returns the commands.
+fn paste_buffer_lines(target: &str, buffer: &str, bytes: &[u8]) -> Vec<String> {
+    assert!(!bytes.contains(&0));
+    assert!(bytes.len() <= INPUT_BYTES_MAX);
+    vec![
+        set_buffer_line(buffer, bytes, false),
+        format!("paste-buffer -d -r -S -b {buffer} -t {target}"),
+    ]
+}
+
+/// One `set-buffer` command that writes bytes into a named buffer, appended with `append`,
+/// every byte other than an ASCII letter or digit written as a `\ooo` octal escape inside
+/// double quotes, so tmux's parser decodes each exactly and expands nothing. Takes the
+/// buffer name, at most `INPUT_BYTES_MAX` bytes without a NUL and whether to append.
+/// Returns the command.
+fn set_buffer_line(buffer: &str, bytes: &[u8], append: bool) -> String {
+    assert!(!bytes.contains(&0));
+    assert!(bytes.len() <= INPUT_BYTES_MAX);
+    let flag = if append { "-a " } else { "" };
+    let mut set = String::with_capacity(28 + buffer.len() + bytes.len() * 4);
+    let _ = write!(set, "set-buffer {flag}-b {buffer} -- \"");
+    for &byte in bytes {
+        if byte.is_ascii_alphanumeric() {
+            set.push(char::from(byte));
+        } else {
+            let _ = write!(set, "\\{byte:03o}");
+        }
+    }
+    set.push('"');
+    assert!(set.len() <= "set-buffer -a -b  -- \"\"".len() + buffer.len() + bytes.len() * 4);
+    set
+}
+
+/// The commands that paste one owner paste into one target through a named buffer (T7):
+/// one `set-buffer` per piece of at most `INPUT_BYTES_MAX` bytes, each piece after the first
+/// appended, then `paste-buffer -d -p -r -S`, which brackets the whole only when the pane's
+/// app asked, writes the bytes unchanged otherwise and deletes the buffer. Takes the target,
+/// the buffer name and 1 to `PASTE_BYTES_MAX` keys without a NUL. Returns the commands.
+fn owner_paste_lines(target: &str, buffer: &str, keys: &[u8]) -> Vec<String> {
+    assert!(!keys.is_empty() && keys.len() <= PASTE_BYTES_MAX);
+    let mut lines: Vec<String> = keys
+        .chunks(INPUT_BYTES_MAX)
+        .enumerate()
+        .map(|(at, piece)| set_buffer_line(buffer, piece, at > 0))
+        .collect();
+    lines.push(format!("paste-buffer -d -p -r -S -b {buffer} -t {target}"));
+    assert_eq!(lines.len(), keys.len().div_ceil(INPUT_BYTES_MAX) + 1);
+    lines
+}
+
+/// A tmux buffer name no other paste of this engine uses, `crazyagent-paste-<pid>-<n>`,
+/// plain enough to sit unquoted in a command. Takes nothing. Returns the name.
+fn paste_buffer_name() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    assert!(next < u64::MAX);
+    let name = format!("crazyagent-paste-{}-{next}", std::process::id());
+    assert!(
+        name.bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    );
+    name
+}
+
+/// The `send-keys -H` commands that type bytes into one target, in order. Takes the target
+/// and the bytes. Returns one command per `input_runs` run of at most `SEND_KEYS_BYTES_MAX`
+/// bytes, so none cuts a character or an escape sequence, and none for no bytes.
+fn send_keys_lines(target: &str, bytes: &[u8]) -> Vec<String> {
+    let lines: Vec<String> = super::input_runs(bytes, SEND_KEYS_BYTES_MAX)
+        .into_iter()
+        .map(|run| {
+            let mut line = format!("send-keys -t {target} -H");
+            for byte in run {
+                let _ = write!(line, " {byte:02x}");
+            }
+            line
+        })
+        .collect();
+    assert!(lines.len() >= bytes.len().div_ceil(SEND_KEYS_BYTES_MAX));
+    assert!(lines.len() <= super::input_runs_max(bytes.len(), SEND_KEYS_BYTES_MAX));
+    lines
 }
 
 mod servers;

@@ -2,8 +2,11 @@ use super::error;
 use super::settings::SettingsSources;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
+#[cfg(windows)]
+use crazyagent_win_sandbox::private;
 use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior};
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -11,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 mod landing_step;
 mod memory_step;
 mod settings_step;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 mod worktrees_step;
 
@@ -21,8 +24,10 @@ mod worktrees_step;
 /// hold or sit inside it.
 pub(crate) const BACKUPS: &str = "backups";
 
-/// How many upgrade backups stay on disk. Older ones are removed once a new one exists.
+/// How many upgrade backups of this user stay on disk: the new one and the newest others.
+/// Older ones are removed once a new one exists; another account's folders are never touched.
 pub(crate) const BACKUPS_KEPT: usize = 5;
+const _: () = assert!(BACKUPS_KEPT >= 1);
 
 /// The newest engine.db version a 2.4 engine writes: 2.4.2 ships the steps up to 11. An
 /// upgrade from at most this version to a newer one is a 2.5 upgrade of 2.4 data.
@@ -415,6 +420,7 @@ pub(crate) fn upgrade(
     settings: Option<&SettingsSources>,
     steps: &[Step],
 ) -> Result<(), EngineError> {
+    #[cfg(unix)]
     forget_restore(path);
     upgrade_at(db, path, settings, steps, SystemTime::now(), check_copy)
 }
@@ -584,20 +590,26 @@ fn restore(
 
 /// The name a restore gives the dated copy it keeps of the data it replaces (DEC-192), before
 /// `-<UTC time>`. It holds no `-to-`, so neither the rotation nor the pin ever counts it.
+#[cfg(unix)]
 const REPLACED: &str = "replaced";
 
 /// The code a restore starts with once no pinned 2.4 backup is left, after PINNED_DAYS.
+#[cfg(unix)]
 pub(crate) const RESTORE_UNAVAILABLE: &str = "storage_restore_unavailable";
 /// The code a restore starts with while a team agent or a research run still runs.
+#[cfg(unix)]
 pub(crate) const RESTORE_AGENTS_RUNNING: &str = "storage_restore_agents_running";
 /// The code a restore starts with while another connection holds engine.db.
+#[cfg(unix)]
 pub(crate) const RESTORE_BUSY: &str = "storage_restore_busy";
 /// The code any other failed restore starts with.
+#[cfg(unix)]
 pub(crate) const RESTORE_FAILED: &str = "storage_restore_failed";
 
 /// Until when the owner can still restore the pinned 2.4 backup of the engine at `root`, read
 /// without creating anything. Inputs: the engine root and the time now. Output: the moment the
 /// pin ends, or None when no pinned backup is left.
+#[cfg(unix)]
 pub(crate) fn restorable_until(root: &Path, now: SystemTime) -> Option<SystemTime> {
     let folder = root.join(BACKUPS);
     let metadata = std::fs::symlink_metadata(&folder).ok()?;
@@ -613,6 +625,7 @@ pub(crate) fn restorable_until(root: &Path, now: SystemTime) -> Option<SystemTim
 
 /// Brings back the pinned 2.4 backup the owner asked for (L5, DEC-192), at the time now.
 /// Inputs: the database path and the settings sources. Output: as [`restore_pinned_at`].
+#[cfg(unix)]
 pub(crate) fn restore_pinned(
     path: &Path,
     settings: Option<&SettingsSources>,
@@ -624,6 +637,7 @@ pub(crate) fn restore_pinned(
 /// whole run, refuses while an agent runs, keeps one dated 0700 copy of the data it replaces,
 /// then restores the pinned copy and checks every table against it. Inputs: the database
 /// path, the settings sources and the time. Output: the folder of the copy it kept.
+#[cfg(unix)]
 fn restore_pinned_at(
     path: &Path,
     settings: Option<&SettingsSources>,
@@ -666,6 +680,7 @@ fn restore_pinned_at(
 /// or a copy that cannot be opened keep every account's files in place. A failure is logged
 /// by what it swept and its code and never fails the checked restore. Inputs: the restored
 /// connection, still held alone, the engine root, the settings sources and the copy's folder.
+#[cfg(unix)]
 fn sweep_unbound_keys(
     db: &Connection,
     root: &Path,
@@ -715,16 +730,19 @@ fn sweep_unbound_keys(
 
 /// Logs one failed part of a restore's sweep by name and by the code before its first `:`,
 /// never a key name or a path. Inputs: what was swept and the failure.
+#[cfg(unix)]
 fn sweep_failed(folder: &str, cause: &EngineError) {
     let code = cause.0.split(':').next().unwrap_or_default();
     eprintln!("restore_key_sweep_failed folder={folder} cause={code}");
 }
 
 /// What a restore's sweep calls the replaced copy's database in its log.
+#[cfg(unix)]
 const REPLACED_DATABASE: &str = "replaced-database";
 
 /// Opens the database of the dated copy of the replaced 2.5 data read-only, without
 /// following a link. Input: the copy's folder. Output: the connection, or the failure.
+#[cfg(unix)]
 fn replaced_database(copy: &Path) -> Result<Connection, EngineError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -733,6 +751,7 @@ fn replaced_database(copy: &Path) -> Result<Connection, EngineError> {
 }
 
 /// What a restore's sweep calls the generated SDK homes and native sign-ins in its log.
+#[cfg(unix)]
 const PROFILES: &str = "account-profiles";
 
 /// Settles each generated SDK home and native profile slot the replaced 2.5 copy names that
@@ -743,6 +762,7 @@ const PROFILES: &str = "account-profiles";
 /// change, and a failed one keeps that one in place and does not stop the others. Inputs: the
 /// engine root, the copy's folder and database, and the keep test by kind and name. Output:
 /// how many were settled, or the copy's or keep test's failure, or the first failed change.
+#[cfg(unix)]
 fn sweep_replaced_profiles(
     root: &Path,
     copy: &Path,
@@ -783,6 +803,7 @@ fn sweep_replaced_profiles(
 /// those of its saved accounts ([`super::accounts::profile_files`]), marked saved, then those
 /// only its trash still notes. Input: the copy's database. Output: each kind with its name
 /// and whether a saved account names it, or the copy's failure.
+#[cfg(unix)]
 fn replaced_profiles(copy: &Connection) -> Result<Vec<(&'static str, String, bool)>, EngineError> {
     use super::trash::{GENERATED_HOME, NATIVE_SIGN_IN};
     use std::collections::BTreeSet;
@@ -819,11 +840,13 @@ fn replaced_profiles(copy: &Connection) -> Result<Vec<(&'static str, String, boo
 }
 
 /// The most trash notes a restore's sweep reads from the replaced copy.
+#[cfg(unix)]
 const SWEEP_NOTES_MAX: i64 = 10_000;
 
 /// Whether a restored app plugin binding holds a plugin key by its file name; a database
 /// with no binding table, as every 2.4 copy, holds none. Inputs: the restored connection
 /// and the name. Output: the answer, or any SQLite failure.
+#[cfg(unix)]
 fn plugin_key_bound(db: &Connection, name: &str) -> Result<bool, EngineError> {
     if !has_table(db, "app_plugin_secrets")? {
         return Ok(false);
@@ -840,6 +863,7 @@ fn plugin_key_bound(db: &Connection, name: &str) -> Result<bool, EngineError> {
 /// exactly its rows, so retries leave no copies outside the rotation, and kept otherwise,
 /// since it may then hold the only whole 2.5 data. Inputs: the connection, the copy folder and
 /// the failure. Output: `storage_restore_failed` naming the cause and whether the copy stays.
+#[cfg(unix)]
 fn drop_unneeded(db: &Connection, kept: &Path, cause: EngineError) -> EngineError {
     let unchanged = check_copy(db, &kept.join(DATABASE)).is_ok();
     if unchanged && std::fs::remove_dir_all(kept).is_ok() {
@@ -853,6 +877,7 @@ fn drop_unneeded(db: &Connection, kept: &Path, cause: EngineError) -> EngineErro
 }
 
 /// Builds a restore error. Input: the cause. Output: `storage_restore_failed` with it.
+#[cfg(unix)]
 fn restore_failed(cause: impl std::fmt::Display) -> EngineError {
     error(format!("{RESTORE_FAILED}: {cause}"))
 }
@@ -861,6 +886,7 @@ fn restore_failed(cause: impl std::fmt::Display) -> EngineError {
 /// and an exclusive transaction, with no wait, as the probe in changes.rs does. Any other
 /// connection, in this process or another, refuses the restore, and none can open while it
 /// runs. Input: the database path. Output: the connection, or `storage_restore_busy`.
+#[cfg(unix)]
 fn alone(path: &Path) -> Result<Connection, EngineError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -890,6 +916,7 @@ fn alone(path: &Path) -> Result<Connection, EngineError> {
 /// Whether a team agent or a research run still runs, as engine.db records it: a team_agents
 /// row, masters included, that is not stopped or failed, or a research_jobs row running. A
 /// table that does not exist holds none. Input: the connection. Output: the answer.
+#[cfg(unix)]
 pub(crate) fn agents_running(db: &Connection) -> Result<bool, EngineError> {
     let checks = [
         (
@@ -928,6 +955,7 @@ pub(crate) fn agents_running(db: &Connection) -> Result<bool, EngineError> {
 /// under backups/, checked and marked as an upgrade backup is. Inputs: the connection, the
 /// backups folder, the settings sources and the time. Output: the folder; a copy that fails
 /// its check is removed.
+#[cfg(unix)]
 fn keep_replaced(
     db: &Connection,
     folder: &Path,
@@ -955,6 +983,7 @@ fn keep_replaced(
 /// The version and schema rows of the pinned copy, which the restored database must read.
 /// The copy is opened as `check_copy` opens it. Input: the copy's path. Output: both, or
 /// `storage_restore_failed` for a copy that is not 2.4 data.
+#[cfg(unix)]
 fn shape(copy: &Path) -> Result<(i64, Vec<String>), EngineError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
@@ -973,8 +1002,10 @@ fn backup_failed(cause: impl std::fmt::Display) -> EngineError {
 }
 
 /// Copies engine.db through the SQLite online backup API, and the settings files, into
-/// `<root>/backups/<from>-to-<to>-<UTC time>/` (folders 0700, files 0600), checks the copy,
-/// marks it checked, then prunes to the pinned backup and the newest BACKUPS_KEPT others.
+/// `<root>/backups/<from>-to-<to>-<UTC time>/` (folders 0700, files 0600; on Windows a
+/// database store, so the copies take engine.db's full medium label), checks the copy,
+/// marks it checked, then keeps it, the pinned backup and the newest others of this user
+/// ([`prune`]).
 /// Inputs: the connection, its path, the settings sources, both versions, the time and the
 /// copy check. Output: the new backup folder; a copy that fails its check is removed.
 fn backup(
@@ -991,10 +1022,19 @@ fn backup(
         .ok_or_else(|| backup_failed("the database has no folder"))?;
     let folder = backups_folder(root)?;
     let target = folder.join(format!("{from}-to-{to}-{}", stamp(now)?));
+    #[cfg(unix)]
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&target)
         .map_err(backup_failed)?;
+    #[cfg(windows)]
+    {
+        std::fs::create_dir(&target).map_err(backup_failed)?;
+        if let Err(cause) = private::store_dir(&target, private::Store::Database) {
+            let _ = std::fs::remove_dir(&target);
+            return Err(backup_failed(cause));
+        }
+    }
     let made = fill(db, &target, settings)
         .and_then(|()| check(db, &target.join(DATABASE)))
         .and_then(|()| mark_checked(&folder, &target));
@@ -1002,7 +1042,7 @@ fn backup(
         let _ = std::fs::remove_dir_all(&target);
         return Err(cause);
     }
-    prune(&folder, now)?;
+    prune(&folder, &target, now)?;
     Ok(target)
 }
 
@@ -1074,15 +1114,19 @@ fn count(db: &Connection, table: &str) -> Result<i64, EngineError> {
 
 /// Records that a backup copy passed its check and makes the record durable: the `checked`
 /// file, then the backup folder and the backups folder synced, so a crash after this point
-/// still finds the backup checked. Inputs: the backups folder and the new backup.
-/// Output: Ok once synced.
+/// still finds the backup checked; on Windows each folder is flushed through W1's
+/// `sync_folder`, as a plain open refuses a folder there. Inputs: the backups folder and the
+/// new backup. Output: Ok once synced.
 fn mark_checked(folder: &Path, target: &Path) -> Result<(), EngineError> {
     assert!(target.starts_with(folder));
     private_file(&target.join(CHECKED), b"")?;
     for synced in [target, folder] {
+        #[cfg(unix)]
         std::fs::File::open(synced)
             .and_then(|handle| handle.sync_all())
             .map_err(backup_failed)?;
+        #[cfg(windows)]
+        private::sync_folder(synced).map_err(backup_failed)?;
     }
     Ok(())
 }
@@ -1091,6 +1135,7 @@ fn mark_checked(folder: &Path, target: &Path) -> Result<(), EngineError> {
 /// again when an older build or a copy left it open to others (F36), and checks it. A link,
 /// a file or a folder of another user is refused. Input: the engine root. Output: the
 /// backups folder path.
+#[cfg(unix)]
 fn backups_folder(root: &Path) -> Result<PathBuf, EngineError> {
     let folder = root.join(BACKUPS);
     match std::fs::DirBuilder::new().mode(0o700).create(&folder) {
@@ -1123,9 +1168,35 @@ fn backups_folder(root: &Path) -> Result<PathBuf, EngineError> {
     Ok(folder)
 }
 
+/// Creates `<root>/backups` as a W1 private folder when missing, or opens and checks the one
+/// there, and makes a local folder of this user there private again when an older build or
+/// a copy left it open to others (F36, DESIGN-0256 D5). A link, a file or a folder of another
+/// user is refused as unsafe. Input: the engine root. Output: the backups folder path.
+#[cfg(windows)]
+fn backups_folder(root: &Path) -> Result<PathBuf, EngineError> {
+    let folder = root.join(BACKUPS);
+    match private::dir(&folder) {
+        Ok(_) => Ok(folder),
+        Err(cause) if cause.kind() == std::io::ErrorKind::PermissionDenied => {
+            match private::repair(&folder) {
+                Ok(_) => {
+                    eprintln!("storage_backup_folder_made_private");
+                    Ok(folder)
+                }
+                Err(_) => Err(error(format!(
+                    "{BACKUP_UNSAFE}: {} must be a private folder of this user",
+                    folder.display()
+                ))),
+            }
+        }
+        Err(cause) => Err(backup_failed(cause)),
+    }
+}
+
 /// Sets one folder of this user to 0700 through a handle opened without following a link,
 /// only when it is still the folder that was checked. Inputs: the folder and its checked
 /// metadata. Output: done, or the refusal or I/O error.
+#[cfg(unix)]
 fn make_private(folder: &Path, checked: &std::fs::Metadata) -> Result<(), EngineError> {
     use rustix::fs::{Mode, OFlags};
     let handle = std::fs::File::from(
@@ -1199,18 +1270,26 @@ fn forget_backup_failure(path: &Path) {
 /// `storage_backup_failed`, or none.
 pub fn backup_failure(root: &Path) -> Option<&'static str> {
     use std::io::Read;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
-        .open(root.join(BACKUP_FAILURE_FILE))
-        .ok()?;
-    let metadata = file.metadata().ok()?;
-    if !metadata.is_file()
-        || metadata.uid() != rustix::process::getuid().as_raw()
-        || metadata.mode() & 0o077 != 0
-    {
-        return None;
-    }
+    #[cfg(unix)]
+    let file = {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(
+                (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
+            )
+            .open(root.join(BACKUP_FAILURE_FILE))
+            .ok()?;
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file()
+            || metadata.uid() != rustix::process::getuid().as_raw()
+            || metadata.mode() & 0o077 != 0
+        {
+            return None;
+        }
+        file
+    };
+    #[cfg(windows)]
+    let file = private::read_only(&root.join(BACKUP_FAILURE_FILE)).ok()?;
     let mut text = String::new();
     file.take(64).read_to_string(&mut text).ok()?;
     [BACKUP_UNSAFE, BACKUP_FAILED]
@@ -1221,18 +1300,24 @@ pub fn backup_failure(root: &Path) -> Option<&'static str> {
 /// The private file beside engine.db that says how the owner's last restore stands, so a
 /// client can say so while no engine answers: `pending`, `restored <copy>` or
 /// `failed <code>`.
+#[cfg(unix)]
 pub(crate) const RESTORE_RECORD_FILE: &str = "restore-record";
 /// The record of a restore the engine stops for.
+#[cfg(unix)]
 pub(crate) const RECORD_PENDING: &str = "pending";
 /// The first word of the record of a restore that brought the 2.4 data back.
+#[cfg(unix)]
 pub(crate) const RECORD_RESTORED: &str = "restored";
 /// The first word of the record of a restore that changed nothing.
+#[cfg(unix)]
 pub(crate) const RECORD_FAILED: &str = "failed";
 /// The most a restore record holds.
+#[cfg(unix)]
 const RESTORE_RECORD_BYTES_MAX: usize = 512;
 
 /// Replaces the restore record of the engine at `root` with one line, written private and
 /// synced. Inputs: the root and the line. Output: Ok once it is on disk.
+#[cfg(unix)]
 pub(crate) fn write_restore_record(root: &Path, line: &str) -> Result<(), EngineError> {
     assert!(!line.is_empty());
     assert!(line.len() <= RESTORE_RECORD_BYTES_MAX);
@@ -1248,6 +1333,7 @@ pub(crate) fn write_restore_record(root: &Path, line: &str) -> Result<(), Engine
 /// Reads the restore record of the engine at `root`, without an engine and without following
 /// a link: only a private regular file of this user counts. Input: the root. Output: its line,
 /// or none.
+#[cfg(unix)]
 pub(crate) fn read_restore_record(root: &Path) -> Option<String> {
     use std::io::Read;
     let file = std::fs::OpenOptions::new()
@@ -1273,6 +1359,7 @@ pub(crate) fn read_restore_record(root: &Path) -> Option<String> {
 /// client from starting the engine after a crash or a return to 2.5; a failed one stays for
 /// the restore screen until the next request. Input: the database path. Output: none; a
 /// record that cannot be removed is logged.
+#[cfg(unix)]
 fn forget_restore(path: &Path) {
     let Some(root) = path.parent() else {
         return;
@@ -1311,39 +1398,51 @@ fn fill(
 /// Creates a new file readable only by this user and writes it to disk.
 /// Inputs: the path, which must not exist, and the bytes. Output: Ok once synced.
 fn private_file(path: &Path, bytes: &[u8]) -> Result<(), EngineError> {
+    #[cfg(unix)]
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(path)
         .map_err(backup_failed)?;
+    #[cfg(windows)]
+    let mut file = private::file(path, true).map_err(backup_failed)?;
     file.write_all(bytes).map_err(backup_failed)?;
     file.sync_all().map_err(backup_failed)
 }
 
-/// Removes the older backup folders: the pinned one stays, and of the others only the newest
-/// BACKUPS_KEPT do. Only real folders named `<from>-to-<to>-<UTC time>` count; anything else
-/// in the folder is left alone. Inputs: the backups folder and the time now.
-/// Output: Ok once the older backups are gone.
-fn prune(folder: &Path, now: SystemTime) -> Result<(), EngineError> {
+/// Removes the older backup folders: the pinned one stays outside the count, the one just
+/// made stays, and of the others the newest BACKUPS_KEPT - 1 do, or BACKUPS_KEPT when the
+/// one just made is the pinned one, so it is not counted twice. Only real folders of this
+/// user ([`own_folder`]) named `<from>-to-<to>-<UTC time>` count; anything else, another
+/// account's folder included, is neither counted nor removed. Inputs: the backups folder,
+/// the new backup and the time now. Output: Ok once the older backups are gone.
+fn prune(folder: &Path, made: &Path, now: SystemTime) -> Result<(), EngineError> {
     let found = backups_in(folder)?;
     let pinned = pinned(folder, &found, now);
+    let made_pinned = pinned.is_some_and(|index| folder.join(&found[index].1) == made);
     let rotating: Vec<&str> = found
         .iter()
         .enumerate()
-        .filter(|(index, _)| Some(*index) != pinned)
+        .filter(|(index, (_, name))| Some(*index) != pinned && folder.join(name) != made)
         .map(|(_, (_, name))| name.as_str())
         .collect();
-    let excess = rotating.len().saturating_sub(BACKUPS_KEPT);
+    let kept = if made_pinned {
+        BACKUPS_KEPT
+    } else {
+        BACKUPS_KEPT - 1
+    };
+    let excess = rotating.len().saturating_sub(kept);
     for name in &rotating[..excess] {
         std::fs::remove_dir_all(folder.join(name)).map_err(backup_failed)?;
     }
-    assert!(rotating.len() - excess <= BACKUPS_KEPT);
+    assert!(rotating.len() - excess <= kept);
     Ok(())
 }
 
-/// The real backup folders, oldest first. Input: the backups folder. Output: each folder's
-/// UTC time and name; links, files and other names are left out.
+/// The real backup folders of this user, oldest first. Input: the backups folder. Output:
+/// each folder's UTC time and name; links, files, other names and folders another account
+/// placed there ([`own_folder`]) are left out.
 fn backups_in(folder: &Path) -> Result<Vec<(String, String)>, EngineError> {
     let mut found = Vec::new();
     for entry in std::fs::read_dir(folder).map_err(backup_failed)? {
@@ -1354,12 +1453,49 @@ fn backups_in(folder: &Path) -> Result<Vec<(String, String)>, EngineError> {
         let Some(time) = backup_time(&name).map(str::to_owned) else {
             continue;
         };
-        if entry.file_type().map_err(backup_failed)?.is_dir() {
+        if own_folder(&folder.join(&name)) {
             found.push((time, name));
         }
     }
     found.sort();
     Ok(found)
+}
+
+/// Whether a backups entry is a real folder of this user, read without following a link, so
+/// a link, a file or a folder another account placed there is never counted or removed.
+/// Input: the entry's path. Output: the answer, false for anything unreadable or gone.
+#[cfg(unix)]
+fn own_folder(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|metadata| {
+        metadata.is_dir() && metadata.uid() == rustix::process::getuid().as_raw()
+    })
+}
+
+/// Whether a backups entry is a real folder of this user, opened as itself, never a link's
+/// target: a folder that is no reparse point, with this user or, for an elevated user, the
+/// administrators as owner (DESIGN-0256 C6). Input: the entry's path. Output: the answer,
+/// false for anything unreadable or gone, so an unknown folder is never removed.
+#[cfg(windows)]
+fn own_folder(path: &Path) -> bool {
+    use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
+    use std::os::windows::fs::OpenOptionsExt;
+    let Ok(folder) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)
+    else {
+        return false;
+    };
+    let (Ok(metadata), Ok(facts), Ok(user)) = (
+        folder.metadata(),
+        private::facts(&folder),
+        private::user_sid(),
+    ) else {
+        return false;
+    };
+    metadata.is_dir()
+        && !facts.reparse
+        && crazyagent_win_sandbox::dacl::trusted_owner(&facts.owner, &user)
 }
 
 /// The backup the rotation leaves alone and a restore brings back: the newest checked one a
@@ -1495,4 +1631,140 @@ fn civil(days: i64) -> (i64, u32, u32) {
     let year = yoe + era * 400 + i64::from(month <= 2);
     assert!((1..=12).contains(&month) && (1..=31).contains(&day));
     (year, month, day)
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use crazyagent_win_sandbox::private;
+    use std::path::Path;
+
+    /// Runs a Windows tool and fails the test when it fails. Inputs: the program and its
+    /// arguments.
+    fn run(program: &str, args: &[&str]) {
+        let status =
+            crate::spawn_gate::status(std::process::Command::new(program).args(args)).unwrap();
+        assert!(status.success(), "{program} {args:?} failed: {status}");
+    }
+
+    /// Lets authenticated users change a folder and what it will hold. Input: the folder.
+    fn open_to_other_users(folder: &Path) {
+        run(
+            "icacls",
+            &[folder.to_str().unwrap(), "/grant", "*S-1-5-11:(OI)(CI)(M)"],
+        );
+    }
+
+    /// W1c D5 (F36): an empty backups folder of this user that other users may change is made
+    /// private again, the twin of the Unix chmod; one that already holds files (#512 r2) and
+    /// a junction in its place are refused as unsafe.
+    #[test]
+    fn an_open_backups_folder_is_repaired_and_a_junction_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        drop(private::dir(&data).unwrap());
+        let backups = data.join(super::BACKUPS);
+        std::fs::create_dir(&backups).unwrap();
+        open_to_other_users(&backups);
+        assert!(private::dir(&backups).is_err());
+        assert_eq!(super::backups_folder(&data).unwrap(), backups);
+        private::check(&private::dir(&backups).unwrap()).unwrap();
+        std::fs::remove_dir(&backups).unwrap();
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        open_to_other_users(&elsewhere);
+        run(
+            "cmd",
+            &[
+                "/C",
+                "mklink",
+                "/J",
+                backups.to_str().unwrap(),
+                elsewhere.to_str().unwrap(),
+            ],
+        );
+        let refused = super::backups_folder(&data).unwrap_err();
+        assert!(refused.0.starts_with(super::BACKUP_UNSAFE), "{}", refused.0);
+        assert!(private::dir(&elsewhere).is_err());
+        std::fs::remove_dir(&backups).unwrap();
+        std::fs::create_dir(&backups).unwrap();
+        std::fs::write(backups.join("older"), "x").unwrap();
+        open_to_other_users(&backups);
+        let held = super::backups_folder(&data).unwrap_err();
+        assert!(held.0.starts_with(super::BACKUP_UNSAFE), "{}", held.0);
+        assert!(private::dir(&backups).is_err());
+        std::fs::remove_dir_all(&backups).unwrap();
+    }
+
+    /// #512 r2 (rv-sec2 F1, leader 05:13): backup-shaped folders another account owns, stamped
+    /// later than any backup, are neither counted nor removed by the prune, so the backup just
+    /// made and this user's older ones stay.
+    #[test]
+    fn folders_another_account_owns_are_neither_counted_nor_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        drop(private::dir(&data).unwrap());
+        let backups = super::backups_folder(&data).unwrap();
+        let foreign: Vec<_> = (1..=super::BACKUPS_KEPT)
+            .map(|day| backups.join(format!("0-to-1-9999010{day}T000000000Z")))
+            .collect();
+        for folder in &foreign {
+            std::fs::create_dir(folder).unwrap();
+            run(
+                "icacls",
+                &[folder.to_str().unwrap(), "/setowner", "*S-1-5-32-545"],
+            );
+            assert!(!super::own_folder(folder), "{}", folder.display());
+        }
+        let older: Vec<_> = (1..=2)
+            .map(|day| backups.join(format!("1-to-2-2000010{day}T000000000Z")))
+            .collect();
+        for folder in &older {
+            std::fs::create_dir(folder).unwrap();
+            assert!(super::own_folder(folder), "{}", folder.display());
+        }
+        let database = data.join(super::DATABASE);
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        let made = super::backup(
+            &connection,
+            &database,
+            None,
+            (1, 2),
+            std::time::SystemTime::now(),
+            super::check_copy,
+        )
+        .unwrap();
+        assert!(made.join(super::DATABASE).is_file(), "{}", made.display());
+        for folder in foreign.iter().chain(&older) {
+            assert!(folder.is_dir(), "{}", folder.display());
+        }
+        drop(connection);
+    }
+
+    /// V244-WIN-BACKUP-DB-LABEL (leader 06:32, #524 r3 sec LOW), V244-WIN-STORE-LABEL-NX: an
+    /// upgrade backup's engine.db copy carries the full medium label engine.db carries, so a
+    /// lower integrity process of the user can neither read nor hold either.
+    #[test]
+    fn a_backup_copy_of_the_database_carries_the_no_read_up_label() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        drop(private::dir(&data).unwrap());
+        let database = data.join(super::DATABASE);
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        let made = super::backup(
+            &connection,
+            &database,
+            None,
+            (1, 2),
+            std::time::SystemTime::now(),
+            super::check_copy,
+        )
+        .unwrap();
+        let copy = private::file(&made.join(super::DATABASE), false).unwrap();
+        let label = private::facts(&copy)
+            .unwrap()
+            .label
+            .and_then(|sacl| crazyagent_win_sandbox::dacl::label(&sacl).unwrap());
+        assert_eq!(label, Some((0x2000, 0x7)));
+        drop((copy, connection));
+    }
 }

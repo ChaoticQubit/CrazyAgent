@@ -1,6 +1,6 @@
 use super::pack::PackManifest;
 use super::{Dependency, DependencyState, DependencyStatus, PackEntry, PackState};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -15,10 +15,13 @@ pub const RECHECK_AFTER: Duration = Duration::from_secs(30);
 /// and the plain reason each entry's last hooks seeding was refused. It also keeps the last
 /// background version check, so a status read never waits, with the permission fix target
 /// that check found for each refused tool, and why the owner's last fix of a tool did not
-/// help (DEC-162), kept apart so the refused row and its command stay.
+/// help (DEC-162), kept apart so the refused row and its command stay. `jobs` are the tools
+/// a lone install or fix holds, `step` the tool the setup run is on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Progress {
     pub running: bool,
+    pub jobs: BTreeSet<Dependency>,
+    pub step: Option<Dependency>,
     pub graph_tool: bool,
     pub dependencies: BTreeMap<Dependency, DependencyState>,
     pub pack: BTreeMap<String, PackState>,
@@ -123,6 +126,8 @@ pub fn dependency_rows(progress: &Progress) -> Vec<DependencyStatus> {
                 name: *dep,
                 label: dep.label().to_owned(),
                 state,
+                busy: false,
+                waiting: None,
             }
         })
         .collect();

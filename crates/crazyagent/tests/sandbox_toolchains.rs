@@ -90,6 +90,13 @@ fn run(sandbox: &ProjectSandbox, profile: &Path, script: &str) -> Output {
 
 fn run_in(sandbox: &ProjectSandbox, profile: &Path, shell: &Path, script: &str) -> Output {
     sandbox.install(profile).unwrap();
+    run_installed(sandbox, profile, shell, script)
+}
+
+/// Runs a script under the profile an earlier install wrote, without installing again, so
+/// the home stays as the row left it after that install. Inputs: the sandbox, the profile,
+/// the shell and the script. Output: the run's output.
+fn run_installed(sandbox: &ProjectSandbox, profile: &Path, shell: &Path, script: &str) -> Output {
     let mut command = sandbox.command(profile, shell);
     command
         .arg("-c")
@@ -2556,9 +2563,10 @@ fn native_team_agents_still_send_a_call_and_remove_the_answer_they_read() {
 /// executes or what trips the next launch (RV-DS241-137 code r1 F4, sec r1 F1, F2,
 /// DEC-173, RV-DS241-186, -187): no cargo or git config, `.gitconfig` included, cargo
 /// subcommand, npm or yarn config, in any letter case, no `.config` built elsewhere and
-/// moved in nor moved away, no flag or ACL on what the next launch keeps, no move, removal
-/// or link in place of a folder a launch walks or of the link to the owner's crates, and no
-/// link at a cargo cache name, while it still writes its own cache and its own folder in
+/// moved in, whether the launch made one first or not, judged by what landed and not by the
+/// move's exit, nor moved away, no flag or ACL on what the next launch keeps, no move,
+/// removal or link in place of a folder a launch walks or of the link to the owner's crates,
+/// and no link at a cargo cache name, while it still writes its own cache and its own folder in
 /// `.config`, sets flags and ACLs on its own copies elsewhere in its home and in its cache,
 /// and makes the cargo git cache the owner lacks. A later `cargo x` and `npm run` outside
 /// the sandbox then run nothing it planted. Needs npm and node on `PATH`.
@@ -2578,6 +2586,7 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
     );
     write(&case.home.join(".npm/_cacache/index"), "cache\n");
     write(&case.home.join("f"), "plain\n");
+    write(&case.home.join("g"), "plain\n");
     write(&case.home.join(".claude.json"), "{}\n");
     let marker = case.profiles.join("ran.txt");
     let required = case.profiles.join("npmrc.js");
@@ -2618,7 +2627,7 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
         (
             "config_parent",
             format!(
-                "rm -rf {config} 2>/dev/null; mkdir -p {built} && printf '[core]\\n' > {built}/config && mv {} {config}",
+                "rm -rf {config} 2>/dev/null; mkdir -p {built} && printf '[core]\\n' > {built}/config && mv {} {config} && test -e {config}/git/config",
                 home("built"),
                 config = home(".config"),
                 built = home("built/git")
@@ -2714,7 +2723,7 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
         ("flag_new", format!("/usr/bin/chflags uchg {}", home("f"))),
         (
             "acl_new",
-            format!("/bin/chmod +a 'everyone deny delete' {}", home("f")),
+            format!("/bin/chmod +a 'everyone deny delete' {}", home("g")),
         ),
         (
             "flag_cache",
@@ -2730,6 +2739,29 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
         ),
     ];
     let mut problems = Vec::new();
+    sandbox.install(&profile).unwrap();
+    fs::remove_dir(case.home.join(".config")).unwrap();
+    let staged = case.home.join("built");
+    run_installed(
+        &sandbox,
+        &profile,
+        Path::new("/bin/sh"),
+        &format!(
+            "mkdir -p {built} && printf '[core]\\n' > {built}/config && mv {} {}",
+            home("built"),
+            home(".config"),
+            built = home("built/git")
+        ),
+    );
+    if fs::symlink_metadata(case.home.join(".config")).is_ok() {
+        problems.push("config_parent with no .config made first: .config planted".to_owned());
+    }
+    if !staged.join("git/config").is_file() {
+        problems.push("config_parent with no .config made first: built moved".to_owned());
+    }
+    if staged.is_dir() {
+        fs::remove_dir_all(&staged).unwrap();
+    }
     for (name, script) in denied {
         let output = run(&sandbox, &profile, &script);
         if output.status.success() {

@@ -44,6 +44,7 @@ test("each row says what installing it runs, or why it can't, from the engine's 
     { kind: "installed", version: "2.1.0" });
   assert.deepEqual(model.harnessRow("codex", entry("codex"), versions("codex", { install: LINE }), ["codex"]), { kind: "waiting" });
   assert.deepEqual(model.harnessRow("codex", entry("codex"), versions("codex", { running: true }), []), { kind: "installing" });
+  assert.deepEqual(model.harnessRow("codex", entry("codex"), versions("codex", { running: true, waiting: "claude-code" }), []), { kind: "waiting" });
   assert.deepEqual(model.harnessRow("codex", entry("codex", "/x/codex"), versions("codex", { last: last(true, null, "0.52.0") }), []), { kind: "done", version: "0.52.0" });
   assert.deepEqual(model.harnessRow("codex", entry("codex"), versions("codex", { last: last(false, "harness_install_failed") }), []),
     { kind: "failed", reason: api.updateCopy("harness_install_failed") });
@@ -178,4 +179,14 @@ test("a Node setup cannot install on this system is never offered or read again 
     assert.deepEqual(model.nodeOffer(true, { state: "unsupported" }, busy), { kind: "none" }, `busy ${busy}`);
     assert.equal(model.nodeReadsAgain(true, { state: "unsupported" }, busy), false, `busy ${busy}`);
   }
+});
+
+test("setup's Node row reads installing while a job on Node runs, else its own state, and the step reads it that way (DEC-199)", () => {
+  const setup = (state, busy) => ({ dependencies: [{ name: "node", label: "Node.js", state, busy }], pack: [], running: false, version: 1 });
+  const failed = { state: "failed", reason: NODE_FAILED };
+  assert.deepEqual(model.nodeRow(setup(failed, true)), { state: "installing" });
+  assert.deepEqual(model.nodeRow(setup(failed, false)), failed);
+  assert.deepEqual(model.nodeRow(setup({ state: "missing" }, true)), { state: "installing" });
+  assert.equal(model.nodeRow(null), null);
+  assert.equal(model.nodeRow({ dependencies: [], pack: [], running: false, version: 1 }), null);
 });

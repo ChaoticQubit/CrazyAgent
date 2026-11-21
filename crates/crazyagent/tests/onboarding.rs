@@ -1377,6 +1377,29 @@ async fn a_nested_crazyagent_folder_never_stands_in_for_the_onboarded_context() 
     bench.stop().await;
 }
 
+/// V243-FIRMLINK-HOME-REFUSAL r2: macOS names every folder under /Users or /private a
+/// second way under /System/Volumes/Data. That spelling is not the folder's canonical one,
+/// so it is refused before the folder checks it would slip past, the engine's own folder
+/// and an ordinary repository alike.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_folder_typed_through_the_data_volume_is_refused() {
+    let mut bench = Bench::start(|_| {}).await;
+    let inside = bench.root.join("inside");
+    fs::create_dir(&inside).unwrap();
+    for folder in [inside, bench.repo.clone()] {
+        let long = PathBuf::from(format!("/System/Volumes/Data{}", folder.display()));
+        assert!(long.is_dir());
+        let response = bench.start_onboarding_at(&long).await;
+        assert_eq!(
+            rejection(&response).as_deref(),
+            Some("onboarding_path_not_canonical"),
+            "{long:?}"
+        );
+    }
+    bench.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unsafe_or_unknown_folders_are_refused_with_plain_codes() {
     let mut bench = Bench::start(|_| {}).await;
@@ -1404,10 +1427,15 @@ async fn unsafe_or_unknown_folders_are_refused_with_plain_codes() {
     bench.stop().await;
 }
 
-/// The installed graphify, or a BLOCKED panic naming the missing tool.
+/// The graphify the graph rows run, found as the library rows find it: the file
+/// `CRAZYAGENT_GRAPHIFY` names, as CI installs it pinned in its own state, else the one this
+/// machine has. Output: the canonical file, or a BLOCKED panic naming what is missing.
 #[cfg(target_os = "macos")]
 fn graphify() -> PathBuf {
-    installed_graphify().expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)")
+    std::env::var_os("CRAZYAGENT_GRAPHIFY")
+        .map(|named| std::fs::canonicalize(named).expect("CRAZYAGENT_GRAPHIFY names a file"))
+        .or_else(installed_graphify)
+        .expect("BLOCKED: graphify not installed (CRAZYAGENT_GRAPHIFY, ~/.local/bin or Homebrew)")
 }
 
 /// Panics BLOCKED unless the engine at `root` finds a graphify the way its graph step

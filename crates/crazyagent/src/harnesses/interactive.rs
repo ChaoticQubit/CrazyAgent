@@ -355,7 +355,7 @@ pub fn command_with(
 ) -> Result<InteractiveCommand, LaunchError> {
     validate(request)?;
     let handover = installed.and_then(Installed::handover);
-    if handover.is_some() && request.sandbox_profile.is_none() {
+    if handover.is_some() && request.boundary.confined_profile().is_none() {
         return Err(failure("launch_environment_refused"));
     }
     if request.account.key().is_some() != run.key_file.is_some() {
@@ -367,7 +367,7 @@ pub fn command_with(
         .working_dir
         .canonicalize()
         .map_err(|_| failure("launch_working_dir_unavailable"))?;
-    let mut argv = match request.sandbox_profile.as_deref() {
+    let mut argv = match request.boundary.confined_profile() {
         Some(profile) => vec![SANDBOX_EXEC.to_owned(), "-f".to_owned(), text(profile)?],
         None => Vec::new(),
     };
@@ -420,7 +420,7 @@ pub fn command_with(
             if !request.tools {
                 return Err(failure("launch_tools_off_unsupported"));
             }
-            if request.unconfined {
+            if request.boundary.is_unconfined() {
                 return Err(failure("launch_harness_unsupported"));
             }
             let harness = request.harness.as_str();
@@ -572,7 +572,10 @@ pub fn command_with(
     if let Some(key) = request.account.key() {
         assert!(!exposes(&built, key));
     }
-    assert_eq!(built.argv[0] == SANDBOX_EXEC, !request.unconfined);
+    assert_eq!(
+        built.argv[0] == SANDBOX_EXEC,
+        !request.boundary.is_unconfined()
+    );
     Ok(built)
 }
 
@@ -726,19 +729,32 @@ pub(crate) fn start_words(resolved: &crate::tools::Resolved) -> Vec<std::ffi::Os
     words
 }
 
-/// The harness the engine starts for a pinned file, only after the tool resolver's entry
-/// checks ([`crate::tools::resolve_entry`]). A version-manager shim starts the real install
-/// its name resolves to, else the shim itself while the resolver would run its file, every
-/// link on its way included ([`crate::tools::check_place`]), and no other user can change it.
-/// Inputs: the harness file and the places. Output: the tool, or the resolver's owner line
-/// for why it cannot run.
+/// The harness the engine starts for a pinned file ([`found_tool`]), refused when it would
+/// start under a `node` other than its own npm prefix's because the resolver passes that
+/// one over ([`crate::tools::own_node_refused`]). Inputs: the harness file and the places.
+/// Output: the tool, or the resolver's owner line for why it cannot run.
 pub(crate) fn launch_tool(
     executable: &Path,
     places: &crate::tools::Places,
 ) -> Result<crate::tools::Resolved, LaunchError> {
     let refused = |missing: crate::tools::Missing| LaunchError(missing.line(), None);
+    let tool = found_tool(executable, places).map_err(refused)?;
+    match crate::tools::own_node_refused(&tool, places) {
+        Some(missing) => Err(refused(missing)),
+        None => Ok(tool),
+    }
+}
+
+/// The harness found for a pinned file, after the resolver's entry checks
+/// ([`crate::tools::resolve_entry`]); a version-manager shim gives the real install its name
+/// resolves to, else itself when the resolver would run it ([`crate::tools::check_place`]).
+/// Inputs: the harness file and the places. Output: the tool, or why it cannot run.
+fn found_tool(
+    executable: &Path,
+    places: &crate::tools::Places,
+) -> Result<crate::tools::Resolved, crate::tools::Missing> {
     if !super::is_shim(places.home(), executable) {
-        return crate::tools::resolve_entry(executable, places).map_err(refused);
+        return crate::tools::resolve_entry(executable, places);
     }
     let name = executable
         .file_name()
@@ -748,12 +764,11 @@ pub(crate) fn launch_tool(
         Ok(found) => Ok(found),
         Err(_)
             if executable.is_absolute()
-                && crate::tools::check_place(places, executable) == Some(Ok(()))
-                && crate::service::changeable_by_others(executable).is_none() =>
+                && crate::tools::check_place(places, executable) == Some(Ok(())) =>
         {
             Ok(as_given(executable))
         }
-        Err(missing) => Err(refused(missing)),
+        Err(missing) => Err(missing),
     }
 }
 

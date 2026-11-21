@@ -51,9 +51,10 @@ test("a delete offers Stop only until its first Trash move, and Finish delete or
   assert.deepEqual(intake.jobActions(deleteJob(cutShort(1, 2))), ["retry", "dismiss"]);
   assert.equal(intake.jobRunning(deleteJob(trashing(0, 2))), true);
   assert.equal(intake.jobRunning(deleteJob(cutShort(1, 2))), false);
-  assert.equal(intake.intakePollMs(deleteJob(trashing(0, 2))), intake.INTAKE_POLL_MS);
-  assert.equal(intake.busyLine(deleteJob(trashing(1, 2))), `Deleting ${NAME} is running. Wait for it to finish on Home.`);
-  assert.deepEqual(intake.sidebarFolders({ kind: "ok", value: [] }, deleteJob(trashing(0, 2)), new Set()), [], "a project being deleted is still a project in the sidebar");
+  assert.equal(intake.intakePollMs([deleteJob(trashing(0, 2))]), intake.INTAKE_POLL_MS);
+  assert.equal(intake.jobLine(deleteJob({ state: "waiting", behind: "shop" })), "Waiting for shop to finish...");
+  assert.deepEqual(intake.jobActions(deleteJob({ state: "waiting", behind: "shop" })), ["stop"]);
+  assert.deepEqual(intake.sidebarFolders({ kind: "ok", value: [] }, [deleteJob(trashing(0, 2))], new Set()), [], "a project being deleted is still a project in the sidebar");
 });
 
 test("Home's row names a delete's state, reads Can't stop now while folders go to the Trash, and offers Finish delete or Keep the project once cut short", () => {
@@ -91,12 +92,11 @@ test("Delete everything in the Remove dialog starts the engine's job and says to
   assert.deepEqual(await settings.deleteStart("notes", NAME, start), { kind: "started", job });
   assert.deepEqual(sent, [["notes", NAME]]);
   const busy = () => Promise.resolve({ kind: "error", code: "job_busy", message: "raw" });
-  const held = () => Promise.resolve({ kind: "ok", value: moveJob({ state: "copying", copied: 2, checked: 0 }) });
-  assert.deepEqual(await settings.deleteStart("notes", NAME, busy, held), { kind: "refused", note: "Moving reading-list is running. Wait for it to finish on Home." });
+  assert.deepEqual(await settings.deleteStart("notes", NAME, busy), { kind: "refused", note: "Several folders are already waiting. Wait for one to finish on Home." });
   const mismatch = () => Promise.resolve({ kind: "error", code: "delete_name_mismatch", message: "raw" });
-  assert.deepEqual(await settings.deleteStart("notes", "notes", mismatch, held), { kind: "refused", note: "Type the project's name exactly as shown to delete it." });
+  assert.deepEqual(await settings.deleteStart("notes", "notes", mismatch), { kind: "refused", note: "Type the project's name exactly as shown to delete it." });
   const unready = () => Promise.resolve({ kind: "not_ready" });
-  assert.deepEqual(await settings.deleteStart("notes", NAME, unready, held), { kind: "refused", note: "Not ready yet: deleting a project isn't in this build." });
+  assert.deepEqual(await settings.deleteStart("notes", NAME, unready), { kind: "refused", note: "Not ready yet: deleting a project isn't in this build." });
   const source = read("src/screens/project/settings.tsx");
   assert.match(source, /Follow it on Home; you can keep working\./);
   assert.match(source, /session\?\.refreshIntake\(started\.job\)/, "the started job shows on Home at once");

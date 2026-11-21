@@ -84,6 +84,8 @@ make build
 
 The Makefile runs Cargo and npm offline, so fetch the locked dependencies once first. `make build` builds the desktop frontend into `apps/desktop/dist` before the Rust workspace, because the desktop app embeds it. The binary is `target/debug/crazyagent`.
 
+The macOS app icon ships as a prebuilt `apps/desktop/src-tauri/icons/Assets.car`, compiled from `icons/AppIcon.icon`, so no build runs `actool`. After changing `AppIcon.icon`, run `scripts/release/assets-car.sh` on macOS 26 with Xcode 26 or newer and commit `Assets.car` with `Assets.car.sha256`; the desktop tests fail until both match the icon.
+
 ## Run the engine
 
 Pick a private folder for the engine, write a minimal settings file, then start the engine:

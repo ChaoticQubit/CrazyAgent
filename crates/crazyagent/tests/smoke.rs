@@ -385,7 +385,17 @@ fn command_function(lib: &str, command: &str) -> bool {
 
 #[test]
 fn the_desktop_app_links_and_registers_every_command_its_build_lists() {
-    let build = listed(&desktop_source("build.rs"), ".commands(&[", "]");
+    let build_rs = desktop_source("build.rs");
+    let webview_only = listed(
+        &build_rs,
+        "const WEBVIEW_TERMINAL_COMMANDS: [&str; 4] = [",
+        "]",
+    );
+    assert_eq!(webview_only.len(), 4);
+    let build: Vec<String> = listed(&build_rs, "let mut commands = vec![", "]")
+        .into_iter()
+        .chain(webview_only.iter().cloned())
+        .collect();
     assert!(!build.is_empty());
     assert!(build.iter().all(|command| command.starts_with("desktop_")));
     let unique = build.iter().collect::<BTreeSet<_>>();
@@ -394,6 +404,7 @@ fn the_desktop_app_links_and_registers_every_command_its_build_lists() {
     let lib = desktop_source("src/lib.rs");
     let handler = listed(&lib, "native_commands! {", "}")
         .into_iter()
+        .map(|item| item.trim_start_matches(';').trim().to_owned())
         .collect::<BTreeSet<_>>();
     assert_eq!(
         handler,
@@ -412,6 +423,7 @@ fn the_desktop_app_links_and_registers_every_command_its_build_lists() {
     };
     let main = granted("main-window.json");
     let wall = granted("terminal-wall.json");
+    let webview = granted("webview-terminal.json");
     for command in &build {
         assert!(
             command_function(&lib, command),
@@ -419,8 +431,10 @@ fn the_desktop_app_links_and_registers_every_command_its_build_lists() {
         );
         let permission = format!("allow-{}", command.replace('_', "-"));
         assert!(
-            main.contains(&permission) || wall.contains(&permission),
-            "{permission} is in neither main-window.json nor terminal-wall.json"
+            main.contains(&permission)
+                || wall.contains(&permission)
+                || webview.contains(&permission),
+            "{permission} is in none of main-window.json, terminal-wall.json and webview-terminal.json"
         );
     }
 
@@ -440,9 +454,11 @@ fn the_desktop_app_links_and_registers_every_command_its_build_lists() {
         }
         from = at + 1;
     }
+    let macos = cfg!(target_os = "macos");
     let missing = build
         .iter()
         .filter(|command| !linked.contains(*command))
+        .filter(|command| !(macos && webview_only.contains(*command)))
         .collect::<Vec<_>>();
     assert!(
         missing.is_empty(),

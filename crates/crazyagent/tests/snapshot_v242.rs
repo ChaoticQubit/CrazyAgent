@@ -6,6 +6,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 mod e2e_support;
+mod full_access_support;
 mod keychain_support;
 
 #[path = "snapshot_v242/caseless.rs"]

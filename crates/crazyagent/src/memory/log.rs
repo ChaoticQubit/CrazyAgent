@@ -4,7 +4,6 @@ use crate::project_setup::removed::event as removed;
 use crate::protocol::{Command, Outcome, ProjectId, RequestId};
 use crate::state_log::replay::{self, Clock, Logged};
 use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
-#[cfg(unix)]
 use crate::storage::opening::Opening;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
@@ -968,7 +967,6 @@ pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, Engi
 /// a plain start moves no revision. Inputs: the connection, outside any transaction, and the
 /// open's proof. Output: whether a change was logged, or the first refusal, which rolls the
 /// whole sweep back.
-#[cfg(unix)]
 pub(crate) fn sweep(db: &Connection, opening: Opening) -> Result<bool, EngineError> {
     assert!(db.is_autocommit(), "the sweep owns its transaction");
     initialize(db)?;
@@ -992,7 +990,6 @@ pub(crate) fn sweep(db: &Connection, opening: Opening) -> Result<bool, EngineErr
 
 /// Whether the log already holds a memory event, so the store's memory reached it as it
 /// was written. Input: the transaction. Output: the answer, or the store's refusal.
-#[cfg(unix)]
 fn on_the_log(tx: &Transaction<'_>) -> Result<bool, EngineError> {
     let log: bool = tx
         .query_row(
@@ -1021,7 +1018,6 @@ fn on_the_log(tx: &Transaction<'_>) -> Result<bool, EngineError> {
 /// again, as when an upgrade from a reset version runs the step over it; none of them moves
 /// a revision. Inputs: the step's transaction and the open's proof. Output: whether a run
 /// was appended, or the log's refusal.
-#[cfg(unix)]
 pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, EngineError> {
     let stated: bool = tx
         .query_row(

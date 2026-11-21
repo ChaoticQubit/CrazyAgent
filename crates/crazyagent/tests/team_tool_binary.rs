@@ -1,13 +1,17 @@
 use crazyagent::plugins::check::{CHECK_TIME, check_stdio};
 use crazyagent::team::Delegation;
 use crazyagent::team::tool::{
-    AGENT_SERVER_COMMAND, ASK_TOOL, CALLS_PER_TICK_MAX, Call, DROP_FILE, LIVE_SERVER_COMMAND,
-    MAILBOX_FOLDER, PROPOSE_RULE_TOOL, QUESTION_TOOLS, RECALL_TOOL, RECORD_TOOL, REMEMBER_TOOL,
-    REQUEST_ACCESS_TOOL, SERVER_COMMAND, TEAM_TOOLS, TOOL_NAME, WAKE_TOOL, WITHDRAW_TOOL,
-    answer_call, take, take_calls,
+    AGENT_SERVER_COMMAND, ASK_TOOL, DROP_FILE, LIVE_SERVER_COMMAND, MAILBOX_FOLDER,
+    PROPOSE_RULE_TOOL, RECALL_TOOL, RECORD_TOOL, REMEMBER_TOOL, REQUEST_ACCESS_TOOL,
+    SERVER_COMMAND, TOOL_NAME, WAKE_TOOL, WITHDRAW_TOOL, take,
+};
+#[cfg(unix)]
+use crazyagent::team::tool::{
+    CALLS_PER_TICK_MAX, Call, QUESTION_TOOLS, TEAM_TOOLS, answer_call, take_calls,
 };
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 #[test]
@@ -141,6 +145,10 @@ fn the_engine_binary_serves_the_delegate_tool_to_an_mcp_client() {
     assert!(String::from_utf8_lossy(&wrong.stderr).contains("usage: crazyagent team-mcp"));
 }
 
+/// The live team server takes the master's calls through its mailbox and hands back the
+/// engine's answers. Unix only, as its siblings that open the mailbox are: off Unix every
+/// mailbox open is refused (`team_mailbox_unavailable`, team/tool.rs), so no call reaches it.
+#[cfg(unix)]
 #[test]
 fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
     let directory = tempfile::tempdir().unwrap();

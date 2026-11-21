@@ -55,7 +55,8 @@ struct Removed {
 /// store. Output: none.
 fn open_as_engine(db: &Connection) {
     initialize_authority_schemas(db).unwrap();
-    crate::github::proposals::start_store(db).unwrap();
+    crate::github::proposals::start_store(db, crate::storage::opening::Opening::for_test(1))
+        .unwrap();
     crate::usage::initialize(db).unwrap();
 }
 

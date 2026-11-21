@@ -228,8 +228,11 @@ fn identified(metadata: &std::fs::Metadata, directory: bool) -> Result<Identity,
     })
 }
 
+#[cfg(all(test, windows))]
+mod canonical_windows_tests;
+
 fn canonical(path: &Path) -> Result<(), EngineError> {
-    if !path.is_absolute() || std::fs::canonicalize(path).map_err(error)? != path {
+    if !path.is_absolute() || !crate::projects_home::is_canonical(path).map_err(error)? {
         return Err(error("repository_path_not_canonical"));
     }
     for ancestor in path.ancestors() {
@@ -313,7 +316,7 @@ fn git_command(repository: &Path, args: &[&str]) -> Process {
         .env("GIT_GRAFT_FILE", "/dev/null")
         .arg("--no-replace-objects")
         .arg("--no-optional-locks")
-        .args(crate::research::runner::GIT_SAFE)
+        .args(crate::research::runner::git_safe())
         .args([
             "-c",
             "core.attributesFile=/dev/null",
@@ -1109,12 +1112,24 @@ fn validate_config(repository: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Refuses a git older than the 2.39 floor before any other git of an agent worktree runs,
+/// so the owner reads which Git to update (V243-WORKTREE-GIT-FLOOR). Input: the
+/// repository. Output: Ok, else `worktree_git_old`, or `changes_git_unsupported` for a
+/// version line that names no version.
+#[cfg(unix)]
+fn refuse_old_git(repository: &Path) -> Result<(), EngineError> {
+    let found = crate::landing::version_numbers(git(repository, &["version"])?);
+    crate::landing::refuse_older(&found, crate::landing::OPEN_VERSION_MIN, GIT_OLD)
+}
+
 fn inspect(repository: &str) -> Result<Admission, EngineError> {
     let path = Path::new(repository);
     canonical(path)?;
     let root = identity(path, true)?;
     let metadata = identity(&path.join(".git"), true)?;
     validate_metadata(path)?;
+    #[cfg(unix)]
+    refuse_old_git(path)?;
     validate_config(path)?;
     let actual = git(path, &["rev-parse", "--show-toplevel"])?;
     if actual.strip_suffix(b"\n") != Some(repository.as_bytes()) {
@@ -1146,7 +1161,6 @@ fn verify(admission: &Admission) -> Result<Admission, EngineError> {
     Ok(current)
 }
 
-#[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(
@@ -1490,7 +1504,6 @@ pub(crate) fn lease_branch(connection: &Connection, path: &Path) -> Result<Strin
     Ok(record.lease.branch)
 }
 
-#[cfg(unix)]
 fn save(connection: &Connection, record: &LeaseRecord) -> Result<(), EngineError> {
     assert_record_consistent(record);
     let count = connection
@@ -1512,6 +1525,9 @@ const VERIFY_RETRY_WAIT: Duration = Duration::from_millis(50);
 /// The code of an engine Git command killed at its deadline. It says the machine was
 /// slow, not that the repository broke a rule.
 const GIT_DEADLINE: &str = "git_deadline";
+/// The code of a lease check refused for a git older than the 2.39 floor. It says the
+/// computer's Git needs updating, not that the lease broke a rule (V243-WORKTREE-GIT-FLOOR).
+const GIT_OLD: &str = "worktree_git_old";
 /// The codes of a Git command that failed at once, which is no rule of the engine's about
 /// the repository. `git_deadline` is not among them: a Git command that ran out of time
 /// has already held its caller for its whole deadline.
@@ -2666,7 +2682,6 @@ fn verify_record(record: &LeaseRecord) -> Result<(), EngineError> {
 /// also [`worktree_matches_index`], so a checkout that failed after its folder was pinned
 /// is never requalified on its pins alone. Input: the stored record. Output: success, or
 /// the refusal code.
-#[cfg(unix)]
 fn verify_at_start(record: &LeaseRecord) -> Result<(), EngineError> {
     verify_record(record)?;
     if record.lease.state == LeaseState::Uncertain {
@@ -2678,17 +2693,16 @@ fn verify_at_start(record: &LeaseRecord) -> Result<(), EngineError> {
 /// Settles every stored lease when the engine starts, checking each through
 /// [`verify_at_start`]. Input: the open sweep's transaction (`log::sweep`), which logs the
 /// result. Output: success, or `lease_capacity` or the storage failure.
-#[cfg(unix)]
 pub(crate) fn reconcile(connection: &Connection) -> Result<(), EngineError> {
     reconcile_with(connection, verify_at_start)
 }
 
 /// Settles every stored lease at an engine start. A lease that verifies, Ready,
 /// RecoveryRequired or pinned Uncertain, or a Ready or RecoveryRequired one whose check ran
-/// out of time, becomes RecoveryRequired, checked again before any use; any other lease is
-/// Uncertain. Each failed check is logged. Inputs: the connection or the open sweep's
-/// transaction, and the lease check. Output: success, `lease_capacity` or the storage error.
-#[cfg(unix)]
+/// out of time or met a git older than the floor, becomes RecoveryRequired, checked again
+/// before any use; any other lease is Uncertain. Each failed check is logged. Inputs: the
+/// connection or the open sweep's transaction, and the lease check. Output: success,
+/// `lease_capacity` or the storage error.
 fn reconcile_with(
     connection: &Connection,
     mut verify: impl FnMut(&LeaseRecord) -> Result<(), EngineError>,
@@ -2715,7 +2729,7 @@ fn reconcile_with(
             Some(Ok(())) => LeaseState::RecoveryRequired,
             Some(Err((problem, retried))) => {
                 log_failed_check(&record, &problem, retried);
-                if held && problem.0 == GIT_DEADLINE {
+                if held && (problem.0 == GIT_DEADLINE || problem.0 == GIT_OLD) {
                     LeaseState::RecoveryRequired
                 } else {
                     LeaseState::Uncertain
@@ -2735,11 +2749,12 @@ fn reconcile_with(
     Ok(())
 }
 
+#[cfg(all(test, windows))]
+mod windows_tests;
+
 #[cfg(all(test, unix))]
 mod tests;
 
 /// The start check that an Uncertain lease's worktree matches its index.
-#[cfg(unix)]
 mod index_check;
-#[cfg(unix)]
 use index_check::worktree_matches_index;

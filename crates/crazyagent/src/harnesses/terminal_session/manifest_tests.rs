@@ -124,8 +124,7 @@ impl Standin {
             },
             model: None,
             tools: true,
-            sandbox_profile: Some(self.profile.clone()),
-            unconfined: false,
+            boundary: crate::harnesses::launch::LaunchBoundary::Profile(self.profile.clone()),
             git_identity: None,
             limits: LaunchLimits::default(),
         };

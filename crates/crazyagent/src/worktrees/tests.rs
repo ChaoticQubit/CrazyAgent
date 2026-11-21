@@ -1030,6 +1030,32 @@ fn a_git_folder_past_the_metadata_bound_is_refused() {
     );
 }
 
+/// V243-WORKTREE-GIT-FLOOR: on a git older than the 2.39 floor an agent worktree is
+/// refused with its own code at admission and at every later check, before the
+/// repository's config is read; the floor itself goes on to the config check.
+#[cfg(unix)]
+#[test]
+fn an_agent_worktree_on_a_git_older_than_the_floor_is_refused_before_its_config_is_read() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temporary.path()).unwrap();
+    let repository = committed_repository(&root);
+    let path = repository.to_str().unwrap();
+    let admission = inspect(path).unwrap();
+    crate::landing::shape_git(Some("git version 2.34.1"));
+    assert_eq!(verify(&admission).unwrap_err().0, "worktree_git_old");
+    let config = repository.join(".git/config");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str("[core]\n\tfsmonitor = /bin/true\n");
+    std::fs::write(&config, text).unwrap();
+    assert_eq!(inspect(path).unwrap_err().0, "worktree_git_old");
+    crate::landing::shape_git(Some("git version 2.39.0"));
+    assert_eq!(
+        inspect(path).unwrap_err().0,
+        "repository_config_refused:core_fsmonitor"
+    );
+    crate::landing::shape_git(None);
+}
+
 /// The engine's worktree git, asked outright for the signature of an owner commit in any
 /// armor, runs none of the repository's signature programs (RV-DS241-39).
 #[test]
@@ -1044,6 +1070,70 @@ fn engine_worktree_git_runs_no_repository_signature_program_in_any_armor() {
         .unwrap();
         assert_eq!(signed.ran(), Vec::<String>::new(), "{armor:?}");
     }
+}
+
+/// The engine's worktree git, asked outright 40 times for an ssh signature while three
+/// busy threads per processor hold up its signature program, reads the subject every
+/// time: the program it pins never starts, so none can exit before git writes it the
+/// payload and kill git with SIGPIPE (V243-WORKTREES-GIT-FLAKE). Linux only, where the
+/// farm saw that race.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "load row: run alone, its busy threads slow timing rows beside it (V243-WORKTREES-GIT-FLAKE)"]
+fn engine_worktree_git_reads_an_ssh_signed_commit_under_load_every_time() {
+    use crate::landing::signature_tests::{Armor, SUBJECT, signed};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Clears the busy flag when dropped, so the busy threads stop and the scope ends
+    /// even when a read panics. Input: the flag. Output: none.
+    struct Stop<'a>(&'a AtomicBool);
+    impl Drop for Stop<'_> {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::Relaxed);
+        }
+    }
+
+    const RUNS: usize = 40;
+    let signed = signed(Armor::Ssh);
+    let busy = AtomicBool::new(true);
+    let threads = 3 * std::thread::available_parallelism().map_or(1, usize::from);
+    let reads: Vec<Result<Vec<u8>, EngineError>> = std::thread::scope(|scope| {
+        let _stop = Stop(&busy);
+        for _ in 0..threads {
+            scope.spawn(|| {
+                while busy.load(Ordering::Relaxed) {
+                    std::hint::spin_loop();
+                }
+            });
+        }
+        (0..RUNS)
+            .map(|_| {
+                git_until(
+                    &signed.root,
+                    &["log", "--show-signature", "-1", "--format=%s"],
+                    OUTPUT_BYTES_MAX,
+                    Instant::now() + Duration::from_secs(60),
+                )
+            })
+            .collect()
+    });
+    assert_eq!(reads.len(), RUNS);
+    let subject = format!("{SUBJECT}\n");
+    let failed: Vec<(usize, String)> = reads
+        .iter()
+        .enumerate()
+        .filter_map(|(run, read)| match read {
+            Ok(bytes) if bytes.ends_with(subject.as_bytes()) => None,
+            Ok(bytes) => Some((run, format!("read {:?}", String::from_utf8_lossy(bytes)))),
+            Err(EngineError(code)) => Some((run, code.clone())),
+        })
+        .collect();
+    assert!(
+        failed.is_empty(),
+        "Ssh: {} of {RUNS} runs failed under {threads} busy threads, (run, code): {failed:?}",
+        failed.len()
+    );
+    assert_eq!(signed.ran(), Vec::<String>::new(), "Ssh");
 }
 
 /// Runs [`restarted_with`] for a pinned lease stored at `state`. Inputs: the state and
@@ -1107,6 +1197,20 @@ fn a_lease_check_that_ran_out_of_time_at_start_keeps_the_lease_for_recovery() {
     for state in [LeaseState::Ready, LeaseState::RecoveryRequired] {
         assert_eq!(
             restarted(state.clone(), &[Err("git_deadline")]),
+            (LeaseState::RecoveryRequired, 1),
+            "{state:?}"
+        );
+    }
+}
+
+/// V243-WORKTREE-GIT-FLOOR: a lease check at start refused for a git older than the floor
+/// says nothing about the lease, so a Ready or RecoveryRequired lease waits for recovery,
+/// checked again once Git is updated, instead of turning Uncertain.
+#[test]
+fn a_lease_check_refused_for_an_old_git_at_start_keeps_the_lease_for_recovery() {
+    for state in [LeaseState::Ready, LeaseState::RecoveryRequired] {
+        assert_eq!(
+            restarted(state.clone(), &[Err("worktree_git_old")]),
             (LeaseState::RecoveryRequired, 1),
             "{state:?}"
         );

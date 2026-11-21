@@ -805,8 +805,9 @@ impl OwnerRuntimeHandle {
             },
             model: Some(handover.model().to_owned()),
             tools: false,
-            sandbox_profile: Some(sandbox.profile().to_path_buf()),
-            unconfined: false,
+            boundary: crate::harnesses::launch::LaunchBoundary::Profile(
+                sandbox.profile().to_path_buf(),
+            ),
             git_identity: None,
             limits: turn_limits(prepared.time, prepared.provider_retry),
         };

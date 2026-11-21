@@ -1,15 +1,14 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { chooseTheme, readQuestionsShown, readTerminalInput, readTheme, saveQuestionsShown, saveTerminalInput, useAppSession, type ThemeChoice } from "../../state";
+import { chooseTheme, readQuestionsShown, readTheme, saveQuestionsShown, useAppSession, type ThemeChoice } from "../../state";
 import type { QuestionsShown } from "../../api-questions";
 import { QuestionsShownSetting } from "../project/question-popup";
-import { INPUT_CHOICES, type InputChoice } from "../team/terminal-io";
+import { TerminalLines } from "./terminal";
 import { Button, LoadError, NotReady, Notice, Segmented, SettingLine, SettingSection, Skeleton } from "../../ui";
 import { ProfileFields, draftFromProfile, emptyProfileDraft, submitProfile, type ProfileDraft, type ProfileErrors } from "../first-run";
 import { LearningReplay } from "../dashboard/learn";
 
 function Appearance() {
   const [theme, setTheme] = useState<ThemeChoice>(readTheme);
-  const [input, setInput] = useState<InputChoice>(readTerminalInput);
   const [questions, setQuestions] = useState<QuestionsShown>(readQuestionsShown);
   return <SettingSection title="Appearance">
     <SettingLine label="Theme" help="System follows your Mac. This choice is kept in this app only.">
@@ -17,9 +16,7 @@ function Appearance() {
         { value: "system", label: "System", icon: "monitor" }, { value: "light", label: "Light", icon: "sun" }, { value: "dark", label: "Dark", icon: "moon" },
       ]} />
     </SettingLine>
-    <SettingLine label="Terminal input" help="Where you type to the master and every agent, on every screen: straight into the terminal, in a message box under it that sends your text as one message, or both. Kept in this app only.">
-      <Segmented label="Terminal input" value={input} onValue={(value) => { setInput(value); saveTerminalInput(value); }} options={INPUT_CHOICES} />
-    </SettingLine>
+    <TerminalLines />
     <QuestionsShownSetting value={questions} onValue={(value) => { setQuestions(value); saveQuestionsShown(value); }} />
   </SettingSection>;
 }

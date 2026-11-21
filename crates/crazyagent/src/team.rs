@@ -1538,6 +1538,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 pane_pid INTEGER
             );
             CREATE INDEX IF NOT EXISTS team_agents_project ON team_agents(project, status);
+            CREATE INDEX IF NOT EXISTS team_agents_status ON team_agents(status, project);
             CREATE TABLE IF NOT EXISTS team_tasks (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project TEXT NOT NULL,
@@ -1562,6 +1563,9 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 mode TEXT
             );
             CREATE INDEX IF NOT EXISTS team_tasks_project ON team_tasks(project, status);
+            CREATE INDEX IF NOT EXISTS team_tasks_status ON team_tasks(status, project);
+            CREATE INDEX IF NOT EXISTS team_tasks_undelivered ON team_tasks(source, status, project)
+                WHERE delivered=0;
             CREATE TABLE IF NOT EXISTS team_conversation_tasks (
                 task INTEGER PRIMARY KEY,
                 project TEXT NOT NULL,
@@ -1580,6 +1584,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 created_ms INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS team_messages_project ON team_messages(project, state);
+            CREATE INDEX IF NOT EXISTS team_messages_state ON team_messages(state, project);
             CREATE TABLE IF NOT EXISTS team_settings (
                 project TEXT PRIMARY KEY,
                 keep_warm INTEGER NOT NULL
@@ -1809,7 +1814,6 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
 /// stopped after a removal leaves no row (HB-S5-I). Apart from [`initialize`] because it
 /// reads `projects`, which only the engine's own schema has. Takes the engine database.
 /// Returns a SQLite failure.
-#[cfg(unix)]
 pub(crate) fn log_status_changes(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(
@@ -4194,7 +4198,6 @@ pub(crate) fn lead_mode(
 /// each task and agent records the lead that started it, NULL for the master's own. A
 /// table the engine has not opened yet gets the column from `initialize`. Takes the
 /// upgrade transaction. Returns any SQLite failure.
-#[cfg(unix)]
 pub(crate) fn add_parent_columns(tx: &Transaction<'_>) -> Result<(), EngineError> {
     for table in ["team_tasks", "team_agents"] {
         let exists: bool = tx

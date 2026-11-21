@@ -187,7 +187,7 @@ fn wide_claims(answering: &Answering<'_>, claims: &[String]) -> Result<Vec<Strin
         if Instant::now() >= stop {
             break;
         }
-        let Ok(paths) = crate::project_files::list(&folder, &prefix, limit, stop) else {
+        let Ok(paths) = crate::project_files::list(&folder, &prefix, limit, stop, None) else {
             break;
         };
         let covered = paths
@@ -1111,6 +1111,7 @@ fn unmerged_for_finish(
         .stored
         .project_folder()
         .canonicalize()
+        .map(crate::projects_home::one_spelling)
         .map_err(|_| EngineError("changes_workspace_invalid".into()))?;
     let db = crate::landing::open(answering.landing)?;
     let mut unmerged = crate::landing::unlanded_teammates(

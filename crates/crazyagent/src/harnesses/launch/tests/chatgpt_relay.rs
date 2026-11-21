@@ -91,11 +91,13 @@ fn agent_base() -> (tempfile::TempDir, PathBuf) {
 }
 
 fn chatgpt_request(harness: &str, account: AccountBinding) -> LaunchRequest {
-    retry_request(
+    let mut request = retry_request(
         harness,
         account,
         crate::provider_retry::ProviderRetry::HarnessDefault,
-    )
+    );
+    request.boundary = super::super::LaunchBoundary::Profile(PathBuf::new());
+    request
 }
 
 fn sign_in_home() -> AccountBinding {
@@ -257,7 +259,8 @@ fn a_chatgpt_launch_is_refused_when_its_agent_home_overlaps_the_managed_home() {
 fn a_chatgpt_launch_with_a_sandbox_made_before_routing_is_refused() {
     let registry = responses_registry();
     let mut request = chatgpt_request("responses-launch", sign_in_home());
-    request.sandbox_profile = Some(PathBuf::from("/tmp/chatgpt-launch-home.sb"));
+    request.boundary =
+        super::super::LaunchBoundary::Profile(PathBuf::from("/tmp/chatgpt-launch-home.sb"));
     let refused = super::super::route_chatgpt(
         request,
         registry.get("responses-launch").unwrap(),

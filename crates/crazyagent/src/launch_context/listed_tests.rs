@@ -394,8 +394,7 @@ fn an_acp_launch_in_a_project_starts_with_its_manifest_arguments_and_home_variab
         },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: crate::harnesses::launch::LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: crate::harnesses::launch::LaunchLimits::default(),
     };
@@ -505,8 +504,7 @@ fn a_started_acp_agent_opens_its_session_with_the_engines_team_server_and_no_own
         },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: crate::harnesses::launch::LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: crate::harnesses::launch::LaunchLimits::default(),
     };
@@ -704,8 +702,12 @@ fn acp_request(
         account,
         model: Some("qwen2.5:0.5b".into()),
         tools: true,
-        unconfined: profile.is_none(),
-        sandbox_profile: profile,
+        boundary: match profile {
+            Some(profile) => crate::harnesses::launch::LaunchBoundary::Profile(profile),
+            None => {
+                crate::harnesses::launch::full_access_for_test(working, working.parent().unwrap())
+            }
+        },
         git_identity: None,
         limits: crate::harnesses::launch::LaunchLimits::default(),
     }

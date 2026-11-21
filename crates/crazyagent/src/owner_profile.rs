@@ -14,7 +14,6 @@ const BODY_BYTES_MAX: usize = 8192;
 /// The owner_texts holder of the stored profile's text (v2.5 L10 Q5): the one row's body.
 pub(crate) const HOLDER: &str = "user_profile/1/body";
 
-#[cfg(any(unix, test))]
 const TABLE: &str = "CREATE TABLE IF NOT EXISTS user_profile (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) BETWEEN 2 AND 8192)
@@ -199,7 +198,6 @@ pub fn stack_item_problem(item: &str) -> Option<String> {
 
 /// Makes the profile table when it is missing, as the engine's open and owner start do.
 /// Input: the connection. Output: Ok, or the store's refusal.
-#[cfg(any(unix, test))]
 pub(crate) fn initialize(db: &rusqlite::Connection) -> Result<(), EngineError> {
     db.execute_batch(TABLE).map_err(error)
 }

@@ -5,7 +5,8 @@ mod engine_support;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::memory::{KnowledgeStatus, ReviewDecision};
 use crazyagent::project_setup::{
-    ContextKind, Platform, ProjectSetup, ResearchKind, ResearchStatus,
+    ContextKind, Platform, ProjectSetup, RESEARCH_UNAVAILABLE_HERE, ResearchKind, ResearchStatus,
+    retryable,
 };
 use crazyagent::protocol::ProjectSpec;
 use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
@@ -326,15 +327,27 @@ async fn flow(root: &Path, sources: &Path) -> Result<(), Box<dyn Error>> {
     let finished = bridge.cancel_research(&id, job, 10).await?;
     assert_eq!(finished.rejection.as_deref(), Some("research_job_finished"));
     let retried = bridge.retry_research(&id, job, 11).await?;
-    assert!(
-        matches!(retried.outcome, ActionOutcome::Applied),
-        "{retried:?}"
-    );
     assert_eq!(retried.intent.kind, "research_retry");
-    assert_eq!(
-        bridge.research_jobs(&id).await?.jobs[0].status,
-        ResearchStatus::NeedsPool
-    );
+    if retryable(ResearchStatus::Cancelled) {
+        assert!(
+            matches!(retried.outcome, ActionOutcome::Applied),
+            "{retried:?}"
+        );
+        assert_eq!(
+            bridge.research_jobs(&id).await?.jobs[0].status,
+            ResearchStatus::NeedsPool
+        );
+    } else {
+        assert_eq!(
+            retried.rejection.as_deref(),
+            Some(RESEARCH_UNAVAILABLE_HERE),
+            "{retried:?}"
+        );
+        assert_eq!(
+            bridge.research_jobs(&id).await?.jobs[0].status,
+            ResearchStatus::Cancelled
+        );
+    }
     let planned = bridge.plan_roadmap(&id, 12).await?;
     assert!(
         matches!(planned.outcome, ActionOutcome::Applied),

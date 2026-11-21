@@ -3,7 +3,7 @@ use super::generated_configured_rcli::{CONFIG, HOMES};
 use super::staging::remove_tree;
 use super::*;
 
-const KEYCHAIN: &str = "login.keychain-db";
+const KEYCHAINS: [&str; 2] = ["login.keychain-db", "profile.keychain-db"];
 const SDK: &str = ".backboard";
 const SDK_KEYS: &str = "keys.json";
 const HOME_DEPTH_MAX: usize = 1;
@@ -111,7 +111,10 @@ pub(crate) fn remove_sign_in(root: &Path, profile_ref: &CredentialRef) -> Result
         let Some(keychains) = harness_folder(&library, "Keychains")? else {
             return Ok(());
         };
-        unlink(&keychains, KEYCHAIN)
+        for name in KEYCHAINS {
+            unlink(&keychains, name)?;
+        }
+        Ok(())
     })
 }
 

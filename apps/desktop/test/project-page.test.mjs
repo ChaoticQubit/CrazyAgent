@@ -112,6 +112,14 @@ test("master status words follow the design's fixed set", () => {
   assert.equal(research.turnLine(turn("queued")), "Waiting to start");
 });
 
+test("a master on a Git older than 2.39 says it couldn't start and which Git to update (V243-WORKTREE-GIT-FLOOR)", () => {
+  const turn = { id: "t", ordinal: 1, phase: "failed", reason: "git_too_old", reply: null, cause: "worktree_git_old" };
+  assert.equal(research.turnLine(turn, false),
+    "The master couldn't start: agents need Git 2.39 or newer, and the Git on this computer is older. Update Git, then send again. (worktree_git_old)");
+  assert.equal(research.turnLine(turn, true),
+    "The master couldn't start: agents need Git 2.39 or newer, and the Git of Xcode or its Command Line Tools on this Mac is older; CrazyAgent doesn't use Homebrew's Git. Update them in Software Update, or in Terminal with softwareupdate --install --all or xcode-select --install, then send again. (worktree_git_old)");
+});
+
 test("a stopped master turn shows a plain sentence and the cause the engine stored", () => {
   const turn = (phase, reason, cause, detail = null) => ({ id: "t", ordinal: 1, phase, reason, cause, detail, reply: null });
   const refused = "/owner/repo has the Git setting core.hooksPath, which runs hooks from a folder the repository chooses. Remove it from the repository's .git/config, then send again.";

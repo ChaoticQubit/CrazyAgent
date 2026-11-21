@@ -108,7 +108,6 @@ pub struct HostStamp {
     pub(crate) engine_epoch: String,
 }
 
-#[cfg(unix)]
 pub(crate) struct Started {
     pub(crate) host: HostStamp,
     pub(crate) owners: [Registration; 2],
@@ -1349,6 +1348,10 @@ pub enum OwnerData {
         bytes: u64,
         #[serde(default, skip_serializing_if = "no_placeholders")]
         placeholders: u64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skipped: Vec<crate::projects_home::icloud::Skipped>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        skipped_more: Option<crate::projects_home::icloud::SkippedMore>,
     },
     Onboarding {
         onboarding: Box<crate::onboarding::OnboardingView>,

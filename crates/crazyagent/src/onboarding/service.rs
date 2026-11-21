@@ -1030,7 +1030,9 @@ fn start_cause(error: &RunError) -> String {
         RunError::Jobs(JobError::NotHeld) => "job_not_held".to_owned(),
         RunError::Jobs(JobError::Storage(_)) => "job_storage".to_owned(),
         RunError::Sandbox(SandboxError::Invalid(_)) => "sandbox_refused".to_owned(),
-        RunError::Sandbox(SandboxError::Unavailable(_)) => "sandbox_unavailable".to_owned(),
+        RunError::Sandbox(SandboxError::Unavailable(_) | SandboxError::Unreadable(_)) => {
+            "sandbox_unavailable".to_owned()
+        }
         RunError::Sandbox(SandboxError::Io(error)) => io_cause("sandbox_io", error),
         RunError::Context(_) => "context_refused".to_owned(),
         RunError::Account(_) => "account_unavailable".to_owned(),
@@ -1350,6 +1352,7 @@ pub fn start_for_engine(
 ) -> Result<OnboardingService, String> {
     let runtime = runtime
         .canonicalize()
+        .map(crate::projects_home::one_spelling)
         .map_err(|error| format!("onboarding runtime: {error}"))?;
     let state = runtime.join("onboarding");
     let projects = runtime.join(crate::project_setup::PROJECTS_DIRECTORY);

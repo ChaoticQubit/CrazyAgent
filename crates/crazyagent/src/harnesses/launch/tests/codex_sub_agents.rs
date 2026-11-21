@@ -19,8 +19,7 @@ fn codex_driver_in_a_turn_keeping(native_threads: bool) -> Driver {
         },
         model: None,
         tools: native_threads,
-        sandbox_profile: None,
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(PathBuf::from("/unused.sb")),
         git_identity: None,
         limits: LaunchLimits::default(),
     };

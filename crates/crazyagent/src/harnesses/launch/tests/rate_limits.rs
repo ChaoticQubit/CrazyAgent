@@ -13,8 +13,7 @@ fn claude_driver() -> Driver {
         },
         model: None,
         tools: false,
-        sandbox_profile: None,
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(PathBuf::from("/unused.sb")),
         git_identity: None,
         limits: LaunchLimits::default(),
     };

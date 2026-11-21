@@ -1,10 +1,13 @@
 use super::intake::copy;
+use super::new_project::size_label;
 use crate::projects_home::AddMode;
+use crate::projects_home::icloud::Progress;
 use crate::projects_home::job::{JobKind, JobState, JobView, Phase};
 use crate::tui::glyphs::Status;
 use crate::tui::text::cut;
 
 const BRIEF_NAME_CELLS_MAX: usize = 16;
+const LEFT_SHOWN: usize = 3;
 
 #[cfg(test)]
 mod tests;
@@ -25,7 +28,8 @@ pub(in crate::tui) enum JobAction {
 pub(in crate::tui) fn running(job: &JobView) -> bool {
     matches!(
         job.state,
-        JobState::Downloading { .. }
+        JobState::Waiting { .. }
+            | JobState::Downloading { .. }
             | JobState::Stopping { .. }
             | JobState::Copying { .. }
             | JobState::Trashing { .. }
@@ -49,34 +53,6 @@ fn agents(left: u64) -> String {
     match left {
         1 => "1 agent".to_owned(),
         left => format!("{left} agents"),
-    }
-}
-
-/// The line for a start the engine refused `job_busy`: names the job that runs, as the client
-/// last read it, or says another job runs when that read found none running. Takes the job
-/// read. Returns the line.
-pub(in crate::tui) fn busy(held: Option<&JobView>) -> String {
-    let line = match held.filter(|job| running(job)) {
-        Some(job) => {
-            format!(
-                "{} {} is running. Wait for it to finish on Home.",
-                verb(job.kind),
-                name(job)
-            )
-        }
-        None => copy("job_busy"),
-    };
-    assert!(line.ends_with("Wait for it to finish on Home."));
-    line
-}
-
-/// The line for a refused job request: a busy refusal names the job that runs, any other
-/// refusal says its own sentence, and a code the engine sent empty or unknown says the plain
-/// fallback. Takes the code and the job read. Returns the line.
-pub(in crate::tui) fn refusal(code: &str, held: Option<&JobView>) -> String {
-    match code {
-        "job_busy" => busy(held),
-        code => copy(code),
     }
 }
 
@@ -114,12 +90,12 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
         AddMode::Copy => ("Copying", "copied"),
     };
     match &job.state {
+        JobState::Waiting { behind } => waiting(behind),
         JobState::Downloading { progress } => {
             if progress.total == 0 || progress.done > progress.total {
                 format!("Downloading {name} from iCloud...")
             } else {
-                let (done, total) = (progress.done, progress.total);
-                format!("Downloading {name} from iCloud: {done} of {total} files")
+                format!("macOS is downloading {name}: {}", landed(progress))
             }
         }
         JobState::Stopping { agents_left } => {
@@ -133,10 +109,14 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
         }
         JobState::Copying { .. } => format!("{verb} {name}..."),
         JobState::Clearing => format!("Removing {name} from its old place..."),
-        JobState::Done if job.kind == JobKind::MoveProject => {
-            format!("{name} is now in your projects folder. Start the team again from Team.")
-        }
-        JobState::Done => format!("{name} is in your projects folder. Set it up from Home."),
+        JobState::Done if job.kind == JobKind::MoveProject => format!(
+            "{name} is now in your projects folder. Start the team again from Team.{}",
+            left_line(job)
+        ),
+        JobState::Done => format!(
+            "{name} is in your projects folder. Set it up from Home.{}",
+            left_line(job)
+        ),
         JobState::Cancelled { .. } if job.kind == JobKind::MoveProject => {
             format!("Moving {name} stopped. Nothing was moved or copied.")
         }
@@ -152,10 +132,67 @@ pub(in crate::tui) fn line(job: &JobView) -> String {
     }
 }
 
+/// The line for a job waiting for its turn, naming the job it waits behind (DEC-197). Takes
+/// that job's name. Returns one sentence.
+fn waiting(behind: &str) -> String {
+    format!("Waiting for {behind} to finish...")
+}
+
+/// The files landed of the total, and their bytes when the engine sent them within their
+/// total. Takes progress whose files are within their total. Returns for example "3 of 8
+/// files (1 MB of 4 MB)".
+fn landed(progress: &Progress) -> String {
+    assert!(progress.done <= progress.total);
+    let files = format!("{} of {} files", progress.done, progress.total);
+    if progress.bytes_total == 0 || progress.bytes_done > progress.bytes_total {
+        return files;
+    }
+    let (done, total) = (
+        size_label(progress.bytes_done),
+        size_label(progress.bytes_total),
+    );
+    format!("{files} ({done} of {total})")
+}
+
+/// What a done add says about the rebuildable folders it left in iCloud: where they stayed
+/// after a Move, that a Copy left them out, and to reinstall them; the ones the engine only
+/// counted join the "more", or make the count when it named none. Takes the job. Returns the
+/// sentence with a leading space, empty when it left none.
+fn left_line(job: &JobView) -> String {
+    let unnamed = job.left_more.map_or(0, |more| more.folders);
+    let count = (job.left.len() as u64).saturating_add(unnamed);
+    if count == 0 {
+        return String::new();
+    }
+    let paths: Vec<&str> = job
+        .left
+        .iter()
+        .take(LEFT_SHOWN)
+        .map(|folder| folder.path.as_str())
+        .collect();
+    let shown = paths.len() as u64;
+    let one = count == 1;
+    let names = match paths.split_last() {
+        None if one => "1 rebuildable folder".to_owned(),
+        None => format!("{count} rebuildable folders"),
+        _ if count > shown => format!("{} and {} more", paths.join(", "), count - shown),
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => paths.concat(),
+    };
+    let place = match job.mode {
+        AddMode::Move => format!("stayed in {}", job.source),
+        AddMode::Copy if one => "was not copied".to_owned(),
+        AddMode::Copy => "were not copied".to_owned(),
+    };
+    let it = if one { "it" } else { "them" };
+    format!(" {names} {place}; reinstall {it} in the project.")
+}
+
 /// What a New Project does now or how it ended, with the project's name and how many of its
 /// documents it copied. Takes the New Project and its name. Returns one sentence.
 fn setup_line(job: &JobView, name: &str) -> String {
     match &job.state {
+        JobState::Waiting { behind } => waiting(behind),
         JobState::Building { done, total } if *total > 0 && done <= total => {
             let noun = if *total == 1 { "document" } else { "documents" };
             format!("Setting up {name}: {done} of {total} {noun} copied")
@@ -182,6 +219,7 @@ fn setup_line(job: &JobView, name: &str) -> String {
 fn delete_line(job: &JobView, name: &str) -> String {
     let folders = |total: u64| if total == 1 { "folder" } else { "folders" };
     match &job.state {
+        JobState::Waiting { behind } => waiting(behind),
         JobState::Stopping { agents_left } => {
             format!("Waiting for {} of {name} to stop...", agents(*agents_left))
         }
@@ -220,7 +258,8 @@ fn delete_line(job: &JobView, name: &str) -> String {
 /// it ended. Takes the job. Returns the actions, the one Enter does first.
 pub(in crate::tui) fn actions(job: &JobView) -> Vec<JobAction> {
     let offered = match &job.state {
-        JobState::Downloading { .. }
+        JobState::Waiting { .. }
+        | JobState::Downloading { .. }
         | JobState::Stopping { .. }
         | JobState::Copying { .. }
         | JobState::Building { .. }
@@ -228,7 +267,8 @@ pub(in crate::tui) fn actions(job: &JobView) -> Vec<JobAction> {
         {
             vec![]
         }
-        JobState::Downloading { .. }
+        JobState::Waiting { .. }
+        | JobState::Downloading { .. }
         | JobState::Stopping { .. }
         | JobState::Copying { .. }
         | JobState::Building { .. } => vec![JobAction::Stop],
@@ -248,17 +288,17 @@ pub(in crate::tui) fn actions(job: &JobView) -> Vec<JobAction> {
     offered
 }
 
-/// The sentence for a job that just ended, said once: only when the read before showed the
-/// same job running. Takes the read before and the read now. Returns the job's line, or None.
-pub(in crate::tui) fn end_line(
-    before: Option<&JobView>,
-    after: Option<&JobView>,
-) -> Option<String> {
-    let (before, after) = (before?, after?);
-    let ended = before.id == after.id && running(before) && !running(after);
-    let said = ended.then(|| line(after));
-    assert!(said.as_ref().is_none_or(|text| !text.is_empty()));
-    said
+/// The jobs that just ended, each said once: a job in the read now that the read before
+/// showed running or waiting under the same id (DEC-197). Takes the read before and the read
+/// now. Returns those jobs from the read now, in its order.
+pub(in crate::tui) fn ended<'a>(before: &[JobView], after: &'a [JobView]) -> Vec<&'a JobView> {
+    let ended: Vec<&JobView> = after
+        .iter()
+        .filter(|job| !running(job))
+        .filter(|job| before.iter().any(|was| was.id == job.id && running(was)))
+        .collect();
+    assert!(ended.len() <= after.len());
+    ended
 }
 
 /// The running job's few words for the header on every screen: what it does and its count,
@@ -270,6 +310,7 @@ pub(in crate::tui) fn brief(job: &JobView, ellipsis: &str) -> String {
     let verb = verb(job.kind);
     let brief = match &job.state {
         _ if job.stopping => format!("Stopping {name}..."),
+        JobState::Waiting { .. } => format!("{name}: waiting"),
         JobState::Downloading { progress }
             if progress.total > 0 && progress.done <= progress.total =>
         {
@@ -309,6 +350,7 @@ pub(in crate::tui) fn badge(job: &JobView) -> (Status, &'static str) {
     let deleting = job.kind == JobKind::Delete;
     let building = job.kind == JobKind::Setup;
     let badge = match &job.state {
+        JobState::Waiting { .. } => (Status::Active, "Waiting"),
         JobState::Building { .. } => (Status::Active, "Setting up"),
         JobState::Downloading { .. } => (Status::Active, "Downloading"),
         JobState::Stopping { .. } => (Status::Active, "Waiting"),

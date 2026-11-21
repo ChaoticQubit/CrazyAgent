@@ -396,7 +396,6 @@ pub(super) fn replace(db: &Connection, table: &str, row: Value) -> Result<(), En
 
 /// Gives `sessions_touched` the seven-table check when an older shape of it exists, every
 /// mark kept. Input: the upgrade transaction. Output: Ok, or the store's refusal.
-#[cfg(any(unix, test))]
 pub(super) fn widen_touched(db: &Connection) -> Result<(), EngineError> {
     use rusqlite::OptionalExtension;
     let found: Option<String> = db
@@ -431,7 +430,6 @@ pub(super) fn widen_touched(db: &Connection) -> Result<(), EngineError> {
 
 /// Whether the log holds an event or a snapshot chunk of the four tables. Input: the
 /// transaction. Output: the answer, or the store's refusal.
-#[cfg(any(unix, test))]
 pub(super) fn on_the_log(db: &Connection) -> Result<bool, EngineError> {
     use crate::state_log::{Aggregate, SNAPSHOT_CHUNK};
     if !exists(db, "state_log")? {

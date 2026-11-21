@@ -290,10 +290,14 @@ impl Search {
         };
         let mut folders = self.set_aside_holding(spec);
         for folder in self.places(spec) {
-            let leads = spec.binaries.iter().any(|binary| {
-                let file = folder.join(binary);
-                executable_file(&file) && self.links_into_temp(&file)
-            });
+            let leads = spec
+                .binaries
+                .iter()
+                .flat_map(|binary| crate::paths::executable_names(binary))
+                .any(|name| {
+                    let file = folder.join(name);
+                    executable_file(&file) && self.links_into_temp(&file)
+                });
             if leads && !folders.contains(&folder) {
                 folders.push(folder);
             }
@@ -318,7 +322,8 @@ impl Search {
             .filter(|folder| {
                 spec.binaries
                     .iter()
-                    .any(|binary| executable_file(&folder.join(binary)))
+                    .flat_map(|binary| crate::paths::executable_names(binary))
+                    .any(|name| executable_file(&folder.join(name)))
             })
             .cloned()
             .collect()
@@ -471,18 +476,20 @@ impl Search {
         for binary in spec.binaries {
             assert!(!binary.contains('/'));
             for directory in &directories {
-                let candidate = directory.join(binary);
-                if found.contains(&candidate)
-                    || !executable_file(&candidate)
-                    || self.links_into_temp(&candidate)
-                    || (!shims && is_shim(self.home(), &candidate))
-                {
-                    continue;
-                }
-                assert!(candidate.is_absolute());
-                found.push(candidate);
-                if found.len() == limit {
-                    return found;
+                for name in crate::paths::executable_names(binary) {
+                    let candidate = directory.join(name);
+                    if found.contains(&candidate)
+                        || !executable_file(&candidate)
+                        || self.links_into_temp(&candidate)
+                        || (!shims && is_shim(self.home(), &candidate))
+                    {
+                        continue;
+                    }
+                    assert!(candidate.is_absolute());
+                    found.push(candidate);
+                    if found.len() == limit {
+                        return found;
+                    }
                 }
             }
         }
@@ -613,11 +620,7 @@ fn below(base: &Path, relative: &str) -> PathBuf {
 /// only the owner and the system can change, and none of them in a `.crazyagent` folder
 /// ([`in_crazyagent_folder`]). Input: the harness's real file. Output: the prefix, or none.
 pub fn node_prefix(program: &Path) -> Option<PathBuf> {
-    let prefix = program
-        .ancestors()
-        .take(NODE_PREFIX_DEPTH_MAX)
-        .find(|folder| folder.ends_with("lib/node_modules"))
-        .and_then(|modules| modules.parent()?.parent())?;
+    let prefix = npm_prefix(program)?;
     let bin = prefix.join("bin");
     let node = bin.join("node");
     let usable = bin.is_absolute()
@@ -629,6 +632,19 @@ pub fn node_prefix(program: &Path) -> Option<PathBuf> {
         && std::fs::canonicalize(&node).is_ok_and(|real| !in_crazyagent_folder(&real))
         && crate::service::changeable_by_others(&node).is_none();
     usable.then(|| prefix.to_path_buf())
+}
+
+/// The npm prefix a program's path names: for a file under `<prefix>/lib/node_modules/`
+/// within [`NODE_PREFIX_DEPTH_MAX`] folders, that prefix, read from the path alone with no
+/// check on what it holds. Input: the program's real file. Output: the prefix, or none.
+pub(crate) fn npm_prefix(program: &Path) -> Option<&Path> {
+    let prefix = program
+        .ancestors()
+        .take(NODE_PREFIX_DEPTH_MAX)
+        .find(|folder| folder.ends_with("lib/node_modules"))
+        .and_then(|modules| modules.parent()?.parent())?;
+    assert!(program.starts_with(prefix));
+    Some(prefix)
 }
 
 /// Whether a path runs through a `.crazyagent` folder, where every project keeps the
@@ -645,8 +661,17 @@ fn usable_path(path: &Path) -> bool {
         && path.as_os_str() != OsStr::new("/")
 }
 
+#[cfg(unix)]
 fn executable_file(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && runnable(&metadata))
+}
+
+/// Whether a file a search finds is one a Windows launch runs: a program, or an npm
+/// cmd-shim whose script is there ([`crate::paths::executable_file`]); any other batch file
+/// is no hit. Input: the file. Output: the answer.
+#[cfg(not(unix))]
+fn executable_file(path: &Path) -> bool {
+    crate::paths::executable_file(path).is_some()
 }
 
 /// Reports whether file metadata grants any execute permission.

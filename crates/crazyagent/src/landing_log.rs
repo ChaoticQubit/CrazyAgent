@@ -971,7 +971,6 @@ const CHUNK_ENVELOPE_BYTES: usize = 1_024;
 /// open's proof. A store without the `state` table or with no landing row gets no run, so
 /// it moves no revision. Inputs: the step's transaction and the open's proof. Output:
 /// whether a run was appended, or the log's refusal.
-#[cfg(unix)]
 pub(crate) fn first_run(
     tx: &Transaction<'_>,
     opening: crate::storage::opening::Opening,

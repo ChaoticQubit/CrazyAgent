@@ -1,4 +1,4 @@
-use super::{AccountBinding, Driver, LaunchEvent, LaunchLimits, LaunchRequest};
+use super::{AccountBinding, Driver, LaunchBoundary, LaunchEvent, LaunchLimits, LaunchRequest};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -43,8 +43,7 @@ fn team_launch(harness: &str) -> TeamLaunch {
             account: AccountBinding::Subscription { home },
             model: None,
             tools: true,
-            sandbox_profile: Some(profile),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(profile),
             git_identity: None,
             limits: LaunchLimits::default(),
         },
@@ -358,8 +357,7 @@ fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_of
         account: AccountBinding::Subscription { home },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: Some(super::GitIdentity::new(name, email).unwrap()),
         limits: LaunchLimits::default(),
     };
@@ -408,9 +406,10 @@ fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_of
     );
 }
 
-/// Off macOS no agent launch is built, since agents run under Seatbelt alone in this
-/// version: a request that is valid in every other way, its sandbox profile named, is
-/// refused with `launch_sandbox_unavailable` and nothing is written into the agent's home.
+/// Off macOS a Seatbelt profile path is no boundary (V244-LINUX-TEAM S5a, rv-sec2 #710 C5):
+/// a request that is valid in every other way and names only a profile, as a stored agent
+/// row does, is refused with `launch_sandbox_unavailable`, and nothing is written into the
+/// agent's home.
 #[cfg(all(unix, not(target_os = "macos")))]
 #[test]
 fn a_launch_off_macos_is_refused_with_the_sandbox_code() {
@@ -439,8 +438,7 @@ fn a_launch_off_macos_is_refused_with_the_sandbox_code() {
             account: AccountBinding::Subscription { home: home.clone() },
             model: None,
             tools,
-            sandbox_profile: Some(profile.clone()),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(profile.clone()),
             git_identity: None,
             limits: LaunchLimits::default(),
         };
@@ -490,8 +488,7 @@ fn an_env_script_harness_starts_headless_through_its_resolved_interpreter_with_t
         account: AccountBinding::Subscription { home: home.clone() },
         model: None,
         tools: false,
-        sandbox_profile: Some(profile.clone()),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile.clone()),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -546,8 +543,7 @@ fn a_headless_harness_inside_a_project_is_refused_with_the_resolvers_line() {
         account: AccountBinding::Subscription { home: home.clone() },
         model: None,
         tools: false,
-        sandbox_profile: Some(profile.clone()),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile.clone()),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -585,8 +581,7 @@ fn a_launch_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it()
             account: AccountBinding::Subscription { home: home.clone() },
             model: None,
             tools,
-            sandbox_profile: Some(profile.clone()),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(profile.clone()),
             git_identity: None,
             limits: LaunchLimits::default(),
         };
@@ -929,8 +924,7 @@ fn retry_request(
         account,
         model: None,
         tools: false,
-        sandbox_profile: None,
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(PathBuf::from("/unused.sb")),
         git_identity: None,
         limits: LaunchLimits {
             provider_retry: retry,
@@ -1085,8 +1079,7 @@ fn an_acp_driver_opens_its_session_with_the_engine_servers_it_is_given() {
         },
         model: None,
         tools: true,
-        sandbox_profile: None,
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(std::path::PathBuf::from("/unused.sb")),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -1147,8 +1140,7 @@ fn an_acp_harness_starts_headless_with_its_manifest_arguments_and_its_tools_off_
             },
             model: None,
             tools,
-            sandbox_profile: Some(profile.clone()),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(profile.clone()),
             git_identity: None,
             limits: LaunchLimits::default(),
         };
@@ -1205,8 +1197,7 @@ fn a_context_less_acp_launch_runs_with_its_home_block_variables() {
         },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -1382,8 +1373,7 @@ fn a_piped_claude_agent_runs_with_auto_memory_off() {
             account: AccountBinding::Subscription { home: home.clone() },
             model: None,
             tools,
-            sandbox_profile: Some(profile.clone()),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(profile.clone()),
             git_identity: None,
             limits: LaunchLimits::default(),
         };
@@ -1405,6 +1395,32 @@ fn a_piped_claude_agent_runs_with_auto_memory_off() {
 
         assert_eq!(settings["autoMemoryEnabled"], json!(false), "tools {tools}");
         assert_eq!(memory, [Some(std::ffi::OsStr::new("1"))], "tools {tools}");
+    }
+}
+
+/// V243-FIRMLINK-SWEEP D2: an account home that is the owner's `~/.codex` is refused whichever
+/// of the two macOS names each side uses, so a home or HOME given through /System/Volumes/Data
+/// still meets the forbidden folders.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_folder_named_through_the_data_volume_is_no_account_home() {
+    use std::os::unix::fs::PermissionsExt;
+    let base = tempfile::tempdir().unwrap();
+    let owner = base.path().canonicalize().unwrap().join("owner");
+    let codex = owner.join(".codex");
+    std::fs::create_dir_all(&codex).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let long =
+        |path: &std::path::Path| PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+    assert!(long(&codex).is_dir());
+    let forbidden = Err("launch_account_home_forbidden".to_owned());
+    for (home, given) in [
+        (codex.clone(), owner.clone()),
+        (long(&codex), owner.clone()),
+        (codex.clone(), long(&owner)),
+    ] {
+        let checked = super::validate_home_for(&home, Some(&given)).map_err(|error| error.0);
+        assert_eq!(checked, forbidden, "home {home:?}, HOME {given:?}");
     }
 }
 

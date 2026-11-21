@@ -241,7 +241,7 @@ fn queued_research_runs_codex_in_the_project_sandbox_and_writes_a_markdown_repor
         format!("{pattern}/{context}"),
         format!("{pattern}/\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/{context}"),
     ] {
-        assert!(profile.contains(&format!("(regex #\"^{below}$\") (regex #\"^{below}/\")")));
+        assert!(profile.contains(&format!("(regex #\"^{below}(/|$)\")")));
     }
     assert!(
         files_containing(&case.state.join("agents"), &marker) > 0,
@@ -1446,7 +1446,7 @@ fn a_tools_on_research_job_profile_denies_by_default_and_opens_the_project_and_i
         format!("{pattern}/\\.[cC][rR][aA][zZ][yY][aA][gG][eE][nN][tT]/{context}"),
     ] {
         assert!(
-            profile.contains(&format!("(regex #\"^{below}$\") (regex #\"^{below}/\")")),
+            profile.contains(&format!("(regex #\"^{below}(/|$)\")")),
             "{profile}"
         );
     }

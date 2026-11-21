@@ -32,10 +32,14 @@ test("macOS signs with a Developer ID and notarizes with an API key or an Apple 
   assert.throws(() => signingStatus({ os: "macos", channel: "dev", env: { ...UPDATER, ...APPLE, APPLE_API_KEY: "KEY1234567" } }), /^Error: macos_notarization_secrets_missing$/);
 });
 
-test("Windows signs with Azure Trusted Signing and only a dev build may stay unsigned", () => {
+test("Windows signs with Azure Trusted Signing when all six secrets are set, ships unsigned on dev and stable when none is, and refuses a partial set (DEC-195 Q8)", () => {
   assert.equal(signingStatus({ os: "windows", channel: "stable", env: { ...UPDATER, ...AZURE } }), "signed");
   assert.equal(signingStatus({ os: "windows", channel: "dev", env: UPDATER }), "unsigned");
-  assert.throws(() => signingStatus({ os: "windows", channel: "stable", env: UPDATER }), /windows_signing_secrets_missing/);
+  assert.equal(signingStatus({ os: "windows", channel: "stable", env: UPDATER }), "unsigned");
+  assert.equal(signingStatus({ os: "windows", channel: "stable", env: { ...UPDATER, CRAZYAGENT_REQUIRE_SIGNING: "1" } }), "unsigned");
+  for (const channel of ["dev", "stable"]) {
+    assert.throws(() => signingStatus({ os: "windows", channel, env: { ...UPDATER, AZURE_CLIENT_SECRET: "v-csec" } }), /^Error: windows_signing_secrets_incomplete:AZURE_CLIENT_ID,/);
+  }
 });
 
 test("no refusal carries a secret value", () => {

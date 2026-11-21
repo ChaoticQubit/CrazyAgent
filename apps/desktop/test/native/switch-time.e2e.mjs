@@ -3,7 +3,7 @@ import { isAbsolute } from "node:path";
 import { newProject, prepareWindow } from "./master-settings-window.mjs";
 import { measureRow, onScreen } from "./switch-time.mjs";
 import { go, paste, pick, reopen, run, tab, until, waitFor } from "./trial-kit.mjs";
-import { TERMINAL, startIfPaused, terminalLive } from "./trial4/n-d8-master-reply.mjs";
+import { startIfPaused, terminalLive } from "./trial4/n-d8-master-reply.mjs";
 
 const evidence = process.env.MS_EVIDENCE;
 const START_MS = 180000;
@@ -14,7 +14,7 @@ const kit = { go, tab, pick, paste, reopen, until, waitFor, project: () => run.p
 
 /** The live master's terminal with the stand-in harness's ready line on it: the marker a
  * switch back must put on screen again. */
-const MASTER_TERMINAL = { scope: TERMINAL, rows: ".xterm-rows > div", text: "stand-in ready" };
+const MASTER_TERMINAL = { scope: ".pj-master-live .tg-terminal-screen", rows: ".tg-terminal-host", text: "stand-in ready" };
 
 describe("Switching back to a live terminal in the real window (DEC-187)", () => {
   before(async () => {

@@ -410,8 +410,8 @@ async fn a_watch_parked_at_a_revocation_is_answered_only_the_second_checks_refus
         for end in [&server, &client] {
             end.set_nonblocking(true).unwrap();
         }
-        let mut server = UnixStream::from_std(server).unwrap();
-        let mut client = UnixStream::from_std(client).unwrap();
+        let mut server = Stream::from_std(server).unwrap();
+        let mut client = Stream::from_std(client).unwrap();
         let (engine, authority) = (runtime.engine.clone(), runtime.authority.clone());
         let admission = admission.clone();
         let serving = tokio::spawn(async move {
@@ -458,7 +458,9 @@ async fn a_watch_parked_at_a_revocation_is_answered_only_the_second_checks_refus
         };
         let (revoked, registration) = runtime
             .engine
-            .owner_job(|reply| Job::OwnerControl(runtime.authority.host.clone(), control, reply))
+            .owner_job(|reply| {
+                Job::OwnerControl(runtime.authority.host.clone(), control, None, reply)
+            })
             .await
             .unwrap();
         runtime

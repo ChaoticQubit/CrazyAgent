@@ -7,7 +7,6 @@ use crate::protocol::{Outcome, ProjectId, SessionId};
 use crate::state_log::fence::Fence;
 use crate::state_log::replay::{self, Clock, Logged};
 use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
-#[cfg(any(unix, test))]
 use crate::storage::opening::Opening;
 use crate::storage::versioned::{Refusal, Writer};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -1027,7 +1026,6 @@ pub fn snapshot(log: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineErr
 /// open's proof. A store without the `state` table, or with no row in any of the tables
 /// that exist, gets no run and moves no revision. Inputs: the step's transaction and the
 /// open's proof. Output: whether a run was appended, or the first refusal.
-#[cfg(any(unix, test))]
 pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, EngineError> {
     if !exists(tx, "state")? || stored_rows(tx, &TABLES)? == 0 {
         return Ok(false);
@@ -1040,7 +1038,6 @@ pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, 
 /// older shape exists, then one full sessions snapshot run when the four tables hold rows
 /// that no event or chunk of theirs reached. Inputs: the step's transaction and the open's
 /// proof. Output: whether a run was appended, or the first refusal.
-#[cfg(any(unix, test))]
 pub(crate) fn first_run_turns(tx: &Transaction<'_>, opening: Opening) -> Result<bool, EngineError> {
     turns::widen_touched(tx)?;
     if !exists(tx, "state")? || stored_rows(tx, &TABLES[3..])? == 0 || turns::on_the_log(tx)? {
@@ -1051,7 +1048,6 @@ pub(crate) fn first_run_turns(tx: &Transaction<'_>, opening: Opening) -> Result<
 
 /// How many rows the tables that exist of a list hold. Inputs: the transaction and the
 /// tables. Output: the count, or the store's refusal.
-#[cfg(any(unix, test))]
 fn stored_rows(tx: &Transaction<'_>, tables: &[&str]) -> Result<i64, EngineError> {
     let mut rows = 0;
     for table in tables {
@@ -1070,7 +1066,6 @@ fn stored_rows(tx: &Transaction<'_>, tables: &[&str]) -> Result<i64, EngineError
 
 /// Appends one snapshot run of the seven tables through the open's proof. Inputs: the
 /// step's transaction and the proof. Output: true once the run closed, or the refusal.
-#[cfg(any(unix, test))]
 fn run_once(tx: &Transaction<'_>, opening: Opening) -> Result<bool, EngineError> {
     let at_ms = opening.at_ms();
     let mut log = Appender::opening(tx, opening)?;

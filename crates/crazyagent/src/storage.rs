@@ -4,7 +4,8 @@ use crate::engine::owner::*;
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::model_gateway::{self, ConnectionState, Observation};
 use crate::protocol::*;
-#[cfg(unix)]
+#[cfg(windows)]
+use crazyagent_win_sandbox::private;
 use rusqlite::OpenFlags;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
@@ -19,7 +20,6 @@ pub(crate) mod accounts;
 pub(crate) mod harness_groups;
 mod master_bootstrap;
 mod master_session;
-#[cfg(unix)]
 pub(crate) mod migrations;
 #[cfg(all(test, unix))]
 pub(crate) use master_session::turn_task_id;
@@ -28,11 +28,12 @@ pub(crate) use master_session::{
     close_master_for_removal, master_resolve_ready, member_request, native_sign_in,
     validate_configured_initial_conversation_receipt, validate_listed_initial_conversation_receipt,
 };
-#[cfg(unix)]
 pub use migrations::backup_failure;
 pub(crate) mod agent_text;
 mod events;
+pub(crate) mod narrowing;
 mod native_auth;
+pub(crate) use native_auth::SIGN_OUT_NOT_RUN;
 #[cfg(all(test, unix))]
 mod native_auth_custody_tests;
 pub(crate) use events::{Changes, changes};
@@ -40,6 +41,7 @@ use events::{events, persist_event, persist_event_ids};
 mod owner_fence;
 pub(crate) use owner_fence::{check_owner_admission, check_owner_host};
 pub(crate) mod plugins;
+pub(crate) mod reinstall;
 pub(crate) mod setup;
 pub(crate) mod trash;
 #[cfg(unix)]
@@ -54,6 +56,124 @@ pub(crate) use native_auth::account_check_running;
 pub(crate) use native_auth::doubt_sign_in;
 pub(crate) use native_auth::sign_in_rechecking;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
+/// A point the storage worker can be held at by a row: before its receive loop, as a slow
+/// start does, or after it dequeues a claimed job and before it claims it.
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Stage {
+    Start,
+    Claim,
+}
+
+#[cfg(all(test, unix))]
+static HELD: (
+    std::sync::Mutex<Vec<(std::path::PathBuf, Stage)>>,
+    std::sync::Condvar,
+) = (std::sync::Mutex::new(Vec::new()), std::sync::Condvar::new());
+
+/// Holds the storage worker of the database at `path` before its receive loop until the
+/// returned guard drops. Input: the path given to `Storage::open`. Output: the guard.
+#[cfg(all(test, unix))]
+pub(crate) fn hold_start(path: &Path) -> StageHold {
+    hold(path, Stage::Start)
+}
+
+/// Holds the storage worker of the database at `path` at the claim of every job it dequeues
+/// until the returned guard drops. Input: the path given to `Storage::open`. Output: the guard.
+#[cfg(all(test, unix))]
+pub(crate) fn hold_claims(path: &Path) -> StageHold {
+    hold(path, Stage::Claim)
+}
+
+/// Puts one hold on the list. Inputs: the database path and the stage.
+/// Output: the guard that lifts it.
+#[cfg(all(test, unix))]
+fn hold(path: &Path, stage: Stage) -> StageHold {
+    let mut held = HELD.0.lock().unwrap();
+    assert!(
+        !held
+            .iter()
+            .any(|other| *other == (path.to_path_buf(), stage))
+    );
+    held.push((path.to_path_buf(), stage));
+    StageHold(path.to_path_buf(), stage)
+}
+
+/// A hold from [`hold_start`] or [`hold_claims`]; dropping it lets that worker go on.
+#[cfg(all(test, unix))]
+pub(crate) struct StageHold(std::path::PathBuf, Stage);
+
+#[cfg(all(test, unix))]
+impl Drop for StageHold {
+    fn drop(&mut self) {
+        let mut held = HELD
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = held.len();
+        held.retain(|other| *other != (self.0.clone(), self.1));
+        assert_eq!(held.len() + 1, before);
+        HELD.1.notify_all();
+    }
+}
+
+/// Waits while a row holds the worker for `path` at `stage`.
+/// Inputs: the database path and the stage. Output: none.
+#[cfg(all(test, unix))]
+fn wait_while_held(path: &Path, stage: Stage) {
+    let mut held = HELD
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while held
+        .iter()
+        .any(|other| *other == (path.to_path_buf(), stage))
+    {
+        held = HELD
+            .1
+            .wait(held)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+}
+
+#[cfg(all(test, unix))]
+static DYING: std::sync::Mutex<Vec<std::path::PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Marks the storage worker of the database at `path` to stop at its next claim, running
+/// neither that job nor any queued after it, as the worker of an engine that dies does.
+/// Input: the path given to `Storage::open`. Output: none; the mark is used up once.
+#[cfg(all(test, unix))]
+pub(crate) fn die_at_claim(path: &Path) {
+    let mut dying = DYING.lock().unwrap();
+    assert!(!dying.iter().any(|other| other == path));
+    dying.push(path.to_path_buf());
+}
+
+/// Whether the mark [`die_at_claim`] left for `path` is still unused, so a row waits until
+/// the worker stopped before it opens the same database again. Input: the database path.
+/// Output: true while the mark waits for a claim.
+#[cfg(all(test, unix))]
+pub(crate) fn dying(path: &Path) -> bool {
+    DYING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .any(|other| other == path)
+}
+
+/// Takes the mark [`die_at_claim`] left for `path`. Input: the database path.
+/// Output: true once for a marked worker, which then stops.
+#[cfg(all(test, unix))]
+fn dies(path: &Path) -> bool {
+    let mut dying = DYING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let before = dying.len();
+    dying.retain(|other| other != path);
+    assert!(before - dying.len() <= 1);
+    before != dying.len()
+}
+
 #[cfg(all(test, unix))]
 mod model_access_page_tests;
 #[cfg(all(test, unix))]
@@ -62,6 +182,8 @@ mod projects_home;
 #[cfg(all(test, unix))]
 mod projects_home_tests;
 mod settings;
+#[cfg(all(test, windows))]
+mod windows_tests;
 pub(crate) mod worker_dispatch;
 
 /// Upper bound on waiting for a master runtime job. Preparing a master turn provisions
@@ -75,6 +197,17 @@ const OPERATIONS_PER_CLIENT_MAX: usize = 64;
 
 /// Recent wire operations kept across all clients; the oldest finished rows go first.
 const OPERATIONS_MAX: usize = 1024;
+
+/// Who asks a native-auth job, which decides what it does with the owner's kept sign-outs:
+/// an owner's new sign-in ends those of its profile, a drained sign-out runs only while its
+/// intent is kept, and any other ask, such as the engine's own check, touches none. The
+/// owner waits until `answer_by`, a margin before its exchange is cut.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum NativeAuthAsk {
+    Owner { answer_by: tokio::time::Instant },
+    Drained(narrowing::IntentId),
+    Engine,
+}
 
 pub(crate) enum Job {
     Accounts(
@@ -120,6 +253,7 @@ pub(crate) enum Job {
     NativeAuth(
         Admission,
         owner_auth::Command,
+        NativeAuthAsk,
         oneshot::Sender<Result<NativeAuthBegin, EngineError>>,
     ),
     NativeAuthFinish(
@@ -131,6 +265,10 @@ pub(crate) enum Job {
         HostStamp,
         Option<SessionId>,
         oneshot::Sender<Result<Vec<NativeAuthStart>, EngineError>>,
+    ),
+    NativeAuthSignOutsDue(
+        HostStamp,
+        oneshot::Sender<Result<Vec<(NativeAuthLogout, NativeAuthMethod)>, EngineError>>,
     ),
     PrepareNativeProfile(
         HostStamp,
@@ -153,12 +291,12 @@ pub(crate) enum Job {
         Box<worker_dispatch::DispatchJob>,
         oneshot::Sender<Result<worker_dispatch::DispatchResult, EngineError>>,
     ),
-    #[cfg(unix)]
     OwnerStart(oneshot::Sender<Result<Started, EngineError>>),
     OwnerStop(HostStamp, oneshot::Sender<Result<(), EngineError>>),
     OwnerControl(
         HostStamp,
         OwnerControl,
+        Option<narrowing::IntentId>,
         oneshot::Sender<Result<(OwnerControlReply, Registration), EngineError>>,
     ),
     OwnerControlReconcile(
@@ -168,7 +306,7 @@ pub(crate) enum Job {
     ),
     HomeAddPlan(
         Admission,
-        Cursor,
+        Option<Cursor>,
         RequestId,
         String,
         crate::projects_home::AddMode,
@@ -184,7 +322,7 @@ pub(crate) enum Job {
         oneshot::Sender<Result<(), EngineError>>,
     ),
     HomeAddSettle(RequestId, bool, oneshot::Sender<Result<(), EngineError>>),
-    HomeAddEnded(oneshot::Sender<Result<Option<projects_home::AddEnded>, EngineError>>),
+    HomeAddEnded(oneshot::Sender<Result<Vec<projects_home::AddEnded>, EngineError>>),
     HomeProjectMoveEnded(oneshot::Sender<Result<Option<projects_home::MoveEnded>, EngineError>>),
     HomeProjectMoveLeft(RequestId, oneshot::Sender<Result<bool, EngineError>>),
     HomeProjectMoveCleared(RequestId, oneshot::Sender<Result<(), EngineError>>),
@@ -216,11 +354,22 @@ pub(crate) enum Job {
         oneshot::Sender<Result<(), EngineError>>,
     ),
     HomeSetupMarkEnd(ProjectId, oneshot::Sender<Result<bool, EngineError>>),
+    HomeReinstallKeep(
+        std::path::PathBuf,
+        Option<std::path::PathBuf>,
+        crate::projects_home::reinstall::Kept,
+        oneshot::Sender<Result<(), EngineError>>,
+    ),
+    HomeReinstallRead(
+        ProjectId,
+        oneshot::Sender<Result<Option<crate::projects_home::reinstall::Offer>, EngineError>>,
+    ),
+    HomeReinstallDismiss(ProjectId, oneshot::Sender<Result<bool, EngineError>>),
     HomeProjectMoveCheck(
         Admission,
         ProjectId,
         crate::projects_home::AddMode,
-        oneshot::Sender<Result<String, EngineError>>,
+        oneshot::Sender<Result<crate::projects_home::MoveCheck, EngineError>>,
     ),
     HomeMovePlan(
         Admission,
@@ -239,7 +388,7 @@ pub(crate) enum Job {
     HomeMoveSettle(u64, bool, oneshot::Sender<Result<(), EngineError>>),
     HomeProjectMovePlan(
         Admission,
-        Cursor,
+        Option<Cursor>,
         ProjectId,
         crate::projects_home::AddMode,
         Vec<crate::projects_home::AddOverride>,
@@ -255,6 +404,7 @@ pub(crate) enum Job {
     DeletePlan(
         Admission,
         Box<OwnerRequest>,
+        Option<Cursor>,
         u64,
         oneshot::Sender<Result<projects_home::DeletePlanned, EngineError>>,
     ),
@@ -269,6 +419,7 @@ pub(crate) enum Job {
     SetupPlan(
         Admission,
         Box<OwnerRequest>,
+        Option<Cursor>,
         oneshot::Sender<Result<Result<crate::project_setup::NewProjectPlan, String>, EngineError>>,
     ),
     SetupRecord(
@@ -302,6 +453,9 @@ pub(crate) enum Job {
     Setup(setup::Command, oneshot::Sender<Result<(), EngineError>>),
     Config(EffectiveConfig, oneshot::Sender<Result<(), EngineError>>),
     Close(oneshot::Sender<Result<(), EngineError>>),
+    /// A timed job and its claim. The worker runs the job only when it takes the claim
+    /// before the caller withdraws it, so a withdrawn job never runs.
+    Claimed(Box<Job>, Arc<Claim>),
     /// Keeps the storage thread busy until the test sends on, or drops, the paired sender,
     /// so every job queued after it is answered only then, however fast the machine is.
     #[cfg(all(test, unix))]
@@ -312,11 +466,224 @@ pub(crate) enum Job {
     BusyHandler(fn(i32) -> bool, oneshot::Sender<Result<(), EngineError>>),
 }
 
+/// Tells whether a plugin change removes or turns off something an agent could use, or
+/// detaches a secret. Input: the command. Output: the answer.
+fn plugin_narrows_access(command: &plugins::Command) -> bool {
+    use crate::coord::tool_switches::Switch;
+    matches!(
+        command,
+        plugins::Command::RemoveSkill { .. }
+            | plugins::Command::RemoveServer { .. }
+            | plugins::Command::DetachSecret { .. }
+            | plugins::Command::SetSkill { enabled: false, .. }
+            | plugins::Command::SetHook { enabled: false, .. }
+            | plugins::Command::SetServer { enabled: false, .. }
+            | plugins::Command::Switch { on: false, .. }
+            | plugins::Command::SetTool {
+                switch: Switch::Off | Switch::Hidden,
+                ..
+            }
+    )
+}
+
+/// Tells whether an owner mutation may narrow what agents can reach: read and hidden
+/// paths, agent policy, sandbox settings and model access as whole setters, a pack entry
+/// turned off or removed, and a baseline revoked. Input: the mutation. Output: the answer.
+fn mutation_narrows_access(mutation: &OwnerMutation) -> bool {
+    matches!(
+        mutation,
+        OwnerMutation::SetProjectReadPaths { .. }
+            | OwnerMutation::SetProjectHiddenPaths { .. }
+            | OwnerMutation::SetProjectAgentPolicy { .. }
+            | OwnerMutation::SetSandboxSettings { .. }
+            | OwnerMutation::ModelAccess { .. }
+            | OwnerMutation::SetPackEntry { on: false, .. }
+            | OwnerMutation::RemovePackEntry { .. }
+            | OwnerMutation::RevokeBaseline { .. }
+    )
+}
+
 pub(crate) struct Storage {
     pub(crate) sender: mpsc::Sender<Job>,
+    admission: Arc<tokio::sync::Semaphore>,
+    receiving: tokio::sync::watch::Receiver<bool>,
+    pub(crate) intents: Option<Arc<narrowing::Intents>>,
+}
+
+const QUEUED: u8 = 0;
+const TAKEN: u8 = 1;
+const WITHDRAWN: u8 = 2;
+
+/// One timed job's place in the queue. It starts queued and is then taken by the worker or
+/// withdrawn by its caller, decided by one compare-and-swap. It holds the job's queue permit
+/// until then and wakes the caller when the worker takes the job.
+pub(crate) struct Claim {
+    state: std::sync::atomic::AtomicU8,
+    permit: std::sync::Mutex<Option<tokio::sync::OwnedSemaphorePermit>>,
+    taken: tokio::sync::Notify,
+}
+
+impl Claim {
+    /// Moves the claim from queued to `to` and frees its queue permit.
+    /// Input: TAKEN or WITHDRAWN. Output: true when this call decided the claim, false when
+    /// the other side already had, so this side backs off.
+    fn decide(&self, to: u8) -> bool {
+        use std::sync::atomic::Ordering;
+        assert!(to == TAKEN || to == WITHDRAWN);
+        let won = self
+            .state
+            .compare_exchange(QUEUED, to, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+        if won {
+            let permit = self
+                .permit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            assert!(permit.is_some());
+        }
+        won
+    }
+}
+
+tokio::task_local! {
+    /// The instant by which a timed job submitted inside a bounded owner request is decided,
+    /// so the request still answers it before the request's bound cuts it.
+    static DECIDE_BY: tokio::time::Instant;
+}
+
+/// The time a bounded request keeps after a submit decision to encode and write its reply,
+/// at most a quarter of the bound.
+const REPLY_ROOM: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Runs one bounded owner request's work so every timed job it submits is decided before
+/// the bound cuts the work, leaving the request room to answer the decision itself.
+/// Inputs: the cut instant, the bound's length and the work. Output: the work's output.
+pub(crate) async fn before_cut<F: std::future::Future>(
+    cut: tokio::time::Instant,
+    bound: std::time::Duration,
+    work: F,
+) -> F::Output {
+    let room = REPLY_ROOM.min(bound / 4);
+    let decide_by = cut.checked_sub(room).unwrap_or(cut);
+    assert!(decide_by <= cut);
+    DECIDE_BY.scope(decide_by, work).await
+}
+
+/// The instant one submit decides by: its own deadline, or the decide-by instant of the
+/// bounded request it runs in when that is earlier. Input: the caller's deadline. Output:
+/// the earlier instant, never later than the input.
+fn decided_by(deadline: tokio::time::Instant) -> tokio::time::Instant {
+    let decided = DECIDE_BY
+        .try_with(|by| deadline.min(*by))
+        .unwrap_or(deadline);
+    assert!(decided <= deadline);
+    decided
+}
+
+/// Withdraws a timed job's claim that is still queued when its submitter stops waiting
+/// before deciding it, as when the transport cuts an owner request at its deadline, so the
+/// worker skips the job and it never lands. It holds no claim for an access-narrowing job,
+/// which always lands.
+struct WithdrawnOnDrop(Option<Arc<Claim>>);
+
+impl Drop for WithdrawnOnDrop {
+    fn drop(&mut self) {
+        if let Some(claim) = self.0.take() {
+            claim.decide(WITHDRAWN);
+            let state = claim.state.load(std::sync::atomic::Ordering::Acquire);
+            assert!(state == TAKEN || state == WITHDRAWN);
+        }
+    }
+}
+
+/// The answer for an access-narrowing job whose bound ran out: it stays queued or running
+/// and takes effect when storage gets to it, unless the engine stops first.
+pub(crate) const ACCESS_CHANGE_PENDING: &str = "access_change_pending";
+
+/// What `Storage::submit` hands back once the worker took the job: whether the job narrows
+/// access, which decides what a caller answers when its reply timer then runs out.
+pub(crate) struct Taken {
+    narrowing: bool,
+}
+
+impl Taken {
+    /// The answer for a reply that did not come in time. Input: the caller's unknown answer.
+    /// Output: access_change_pending for an access-narrowing job, which runs to its end,
+    /// else the unknown answer.
+    pub(crate) fn lost(&self, unknown: EngineError) -> EngineError {
+        if self.narrowing {
+            error(ACCESS_CHANGE_PENDING)
+        } else {
+            unknown
+        }
+    }
+}
+
+/// Storage's own definite answers to a timed job, which every route of every client passes
+/// through by name: a full queue, a worker still starting and a job withdrawn before the
+/// worker took it mean nothing ran, and access_change_pending means an access-narrowing
+/// change still waits its turn.
+pub const STORAGE_ANSWERS: &[&str] = &[
+    "owner_queue_not_submitted",
+    "storage_starting_not_submitted",
+    "storage_busy_not_submitted",
+    ACCESS_CHANGE_PENDING,
+];
+
+/// Tells whether a code is one of storage's own definite answers, which every client shows
+/// by name. Input: the error code. Output: true for a code in `STORAGE_ANSWERS`.
+pub(crate) fn storage_answer(code: &str) -> bool {
+    STORAGE_ANSWERS.contains(&code)
+}
+
+/// Tells whether a storage refusal means the job never reached the worker, so nothing ran
+/// and the same request can be sent again. Input: the error code. Output: true for a full
+/// queue, a worker still starting, and a job withdrawn before the worker took it.
+pub(crate) fn not_submitted(code: &str) -> bool {
+    storage_answer(code) && code != ACCESS_CHANGE_PENDING
 }
 
 impl Job {
+    /// Tells whether losing this job would leave more access than the owner asked for:
+    /// a revocation, a sign-out or sign-in cancel, an account or secret removal, a replaced
+    /// key storage deletes, a grant narrowed, or an access level that may be lowered. Such a
+    /// job is never withdrawn. Input: the job. Output: the answer.
+    pub(crate) fn narrows_access(&self) -> bool {
+        match self {
+            Self::OwnerControl(_, control, _, _) => control.decision == OwnerDecision::Revoke,
+            Self::NativeAuth(_, command, _, _) => matches!(
+                command,
+                owner_auth::Command::Logout(_) | owner_auth::Command::Cancel(_)
+            ),
+            Self::Accounts(_, command, _) => matches!(
+                command,
+                accounts::Command::Remove(_) | accounts::Command::KeyReplaced(..)
+            ),
+            Self::Plugins(command, _) => plugin_narrows_access(command),
+            Self::OwnerApply(_, request, _) => match &request.operation {
+                OwnerOperation::Apply { mutation } => mutation_narrows_access(mutation),
+                _ => false,
+            },
+            Self::Config(..) => true,
+            _ => false,
+        }
+    }
+
+    /// Tells whether this job records a projects home step whose disk work may already have
+    /// run, so a wait its caller drops leaves it queued to land late rather than withdrawn.
+    /// Input: the job. Output: true for HomeRecord, SetupRecord, DeleteRecord and
+    /// HomeProjectMoveCleared.
+    fn records_disk_work(&self) -> bool {
+        matches!(
+            self,
+            Self::HomeRecord(..)
+                | Self::SetupRecord(..)
+                | Self::DeleteRecord(..)
+                | Self::HomeProjectMoveCleared(..)
+        )
+    }
+
     /// Chooses how long a caller waits for this job's reply.
     /// Input: the owner request timeout from settings. Output: that timeout, or at
     /// least MASTER_RUNTIME_TIMEOUT for a master runtime job.
@@ -331,6 +698,68 @@ impl Job {
 }
 
 impl Storage {
+    /// Waits until the storage worker has run its start steps and receives jobs, so a test
+    /// can begin a timed race only once the start can no longer refuse it. Output: none; it
+    /// panics when the worker ended before receiving.
+    #[cfg(all(test, unix))]
+    pub(crate) async fn started(&self) {
+        let mut receiving = self.receiving.clone();
+        assert!(
+            receiving.wait_for(|on| *on).await.is_ok(),
+            "the storage worker ended before it received"
+        );
+    }
+
+    /// Queues one timed job and waits until the worker takes it, a non-narrowing job first
+    /// waiting for the worker to receive. Inputs: the job, the deadline for both waits (earlier
+    /// inside a `before_cut` request), the refusal for a full queue. Output: `Taken`; else a
+    /// not-submitted refusal with nothing run, or access_change_pending for a narrowing job left
+    /// queued. A dropped wait withdraws the job unless it narrows access or records disk work.
+    pub(crate) async fn submit(
+        &self,
+        job: Job,
+        deadline: tokio::time::Instant,
+        full: &str,
+    ) -> Result<Taken, EngineError> {
+        assert!(!matches!(job, Job::Claimed(..)));
+        let deadline = decided_by(deadline);
+        let narrowing = job.narrows_access();
+        let kept = narrowing || job.records_disk_work();
+        if !narrowing {
+            let mut receiving = self.receiving.clone();
+            match tokio::time::timeout_at(deadline, receiving.wait_for(|on| *on)).await {
+                Err(_) => return Err(error("storage_starting_not_submitted")),
+                Ok(Err(_)) => return Err(error(full)),
+                Ok(Ok(_)) => {}
+            }
+        }
+        let permit = self
+            .admission
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| error(full))?;
+        let claim = Arc::new(Claim {
+            state: std::sync::atomic::AtomicU8::new(QUEUED),
+            permit: std::sync::Mutex::new(Some(permit)),
+            taken: tokio::sync::Notify::new(),
+        });
+        self.sender
+            .try_send(Job::Claimed(Box::new(job), claim.clone()))
+            .map_err(|_| error(full))?;
+        let mut dropped = WithdrawnOnDrop((!kept).then(|| claim.clone()));
+        let late = tokio::time::timeout_at(deadline, claim.taken.notified())
+            .await
+            .is_err();
+        dropped.0 = None;
+        if late && narrowing {
+            return Err(error(ACCESS_CHANGE_PENDING));
+        }
+        if late && claim.decide(WITHDRAWN) {
+            return Err(error("storage_busy_not_submitted"));
+        }
+        Ok(Taken { narrowing })
+    }
+
     pub(crate) async fn open(
         path: &Path,
         config: EffectiveConfig,
@@ -355,7 +784,11 @@ impl Storage {
         readonly: bool,
         mut sources: Option<settings::SettingsSources>,
     ) -> Result<(Self, EffectiveConfig), EngineError> {
-        let (sender, mut receiver) = mpsc::channel(config.settings.queue_capacity);
+        let capacity = config.settings.queue_capacity;
+        assert!(capacity > 0);
+        let (sender, mut receiver) = mpsc::channel(capacity * 2);
+        let admission = Arc::new(tokio::sync::Semaphore::new(capacity));
+        let (receiving_send, receiving) = tokio::sync::watch::channel(false);
         let delete_files_jobs = (!readonly).then(|| sender.clone());
         let forgotten_jobs = delete_files_jobs.as_ref().map(mpsc::Sender::downgrade);
         let path = path.to_path_buf();
@@ -390,15 +823,31 @@ impl Storage {
                     )
                     .and_then(|()| store_config(&connection, &config))
                 };
-                if let Err(e) = recovered {
-                    drop(connection);
-                    drop(custody.take());
-                    drop(lock);
-                    drop(sources.take());
-                    let _ = ready_send.send(Err(e));
-                    return;
+                let opened = recovered.and_then(|()| {
+                    if readonly {
+                        return Ok(None);
+                    }
+                    let root = path
+                        .parent()
+                        .ok_or_else(|| error("database parent missing"))?;
+                    narrowing::Intents::open(root).map(|intents| intents.map(Arc::new))
+                });
+                let intents = match opened {
+                    Ok(intents) => intents,
+                    Err(e) => {
+                        drop(connection);
+                        drop(custody.take());
+                        drop(lock);
+                        drop(sources.take());
+                        let _ = ready_send.send(Err(e));
+                        return;
+                    }
+                };
+                #[cfg(unix)]
+                if let Some(intents) = &intents {
+                    replay_intents(&mut connection, intents);
                 }
-                let _ = ready_send.send(Ok(config.clone()));
+                let _ = ready_send.send(Ok((config.clone(), intents.clone())));
                 let mut owner_runtime = None;
                 let mut ended_custody: Option<NativeAuthFact> = None;
                 let mut ended_failure: Option<String> = None;
@@ -434,7 +883,26 @@ impl Storage {
                     }
                     home_watch.restart(&connection);
                 }
+                #[cfg(all(test, unix))]
+                wait_while_held(&path, Stage::Start);
+                let _ = receiving_send.send(true);
                 while let Some(job) = receiver.blocking_recv() {
+                    let job = match job {
+                        Job::Claimed(job, claim) => {
+                            #[cfg(all(test, unix))]
+                            wait_while_held(&path, Stage::Claim);
+                            #[cfg(all(test, unix))]
+                            if dies(&path) {
+                                break;
+                            }
+                            if !claim.decide(TAKEN) {
+                                continue;
+                            }
+                            claim.taken.notify_one();
+                            *job
+                        }
+                        job => job,
+                    };
                     match job {
                         Job::Accounts(admission, command, reply) => {
                             let result = if readonly {
@@ -531,9 +999,19 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
-                        Job::NativeAuth(admission, command, reply) => {
+                        Job::NativeAuth(admission, command, ask, reply) => {
+                            let logout = match &command {
+                                owner_auth::Command::Logout(logout) => Some(logout.request_id.clone()),
+                                _ => None,
+                            };
+                            let signs_in = matches!(command, owner_auth::Command::Start(_))
+                                && matches!(ask, NativeAuthAsk::Owner { .. });
                             let result = if readonly {
                                 Err(error("native_auth_readonly"))
+                            } else if let NativeAuthAsk::Drained(id) = &ask
+                                && !still_kept(intents.as_deref(), id)
+                            {
+                                Err(error("native_auth_sign_out_superseded"))
                             } else {
                                 native_auth::execute(
                                     &mut connection,
@@ -546,6 +1024,17 @@ impl Storage {
                                     command,
                                 )
                             };
+                            if let Some(request_id) = &logout
+                                && result.is_ok()
+                            {
+                                end_logout_intent(intents.as_deref(), request_id);
+                            }
+                            if signs_in
+                                && let Ok(begun) = &result
+                                && let Some(work) = &begun.work
+                            {
+                                end_superseded_sign_outs(&connection, intents.as_deref(), work);
+                            }
                             if let Err(Ok(begun)) = reply.send(result)
                                 && let Some(work) = begun.work
                             {
@@ -558,6 +1047,14 @@ impl Storage {
                                     work,
                                 );
                             }
+                        }
+                        Job::NativeAuthSignOutsDue(host, reply) => {
+                            let result = if readonly {
+                                Err(error("native_auth_readonly"))
+                            } else {
+                                native_auth::sign_outs_due(&mut connection, &config, sources.as_ref(), &host)
+                            };
+                            let _ = reply.send(result);
                         }
                         Job::NativeAuthStale(host, session, reply) => {
                             let result = if readonly {
@@ -642,7 +1139,6 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
-                        #[cfg(unix)]
                         Job::OwnerStart(reply) => {
                             let result = if readonly || owner_runtime.is_some() {
                                 Err(error("owner_runtime_unavailable_or_busy"))
@@ -675,8 +1171,15 @@ impl Storage {
                             }
                             let _ = reply.send(result);
                         }
-                        Job::OwnerControl(stamp, control, reply) => {
-                            let _ = reply.send(owner_control(&mut connection, &stamp, &control));
+                        Job::OwnerControl(stamp, control, kept, reply) => {
+                            let result = owner_control(&mut connection, &stamp, &control);
+                            if let Some(id) = &kept {
+                                let ends = result
+                                    .as_ref()
+                                    .map_or_else(|refused| refused.0 == "owner_control_stale", |_| true);
+                                end_intent(intents.as_deref(), id, ends);
+                            }
+                            let _ = reply.send(result);
                         }
                         Job::OwnerControlReconcile(stamp, control, reply) => {
                             let _ = reply.send(owner_control_reconcile(
@@ -689,7 +1192,7 @@ impl Storage {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
                             } else {
-                                projects_home::add_plan(&mut connection, &path, &admission, &expected, &request, &source, mode, &overrides)
+                                projects_home::add_plan(&mut connection, &path, &admission, expected.as_ref(), &request, &source, mode, &overrides)
                             };
                             let _ = reply.send(result);
                         }
@@ -791,6 +1294,25 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
+                        Job::HomeReinstallKeep(landed, old, kept, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                reinstall::keep(&mut connection, &landed, old.as_deref(), &kept)
+                            };
+                            let _ = reply.send(result);
+                        }
+                        Job::HomeReinstallRead(project, reply) => {
+                            let _ = reply.send(reinstall::offer(&connection, &project));
+                        }
+                        Job::HomeReinstallDismiss(project, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                reinstall::dismiss(&connection, &project)
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::HomeProjectMoveCheck(admission, project, mode, reply) => {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
@@ -831,7 +1353,7 @@ impl Storage {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
                             } else {
-                                projects_home::project_move_plan(&mut connection, &path, &admission, &expected, &project, mode, &overrides, &request, exchange)
+                                projects_home::project_move_plan(&mut connection, &path, &admission, expected.as_ref(), &project, mode, &overrides, &request, exchange)
                             };
                             let _ = reply.send(result);
                         }
@@ -859,11 +1381,11 @@ impl Storage {
                                 home_watch.restart(&connection);
                             }
                         }
-                        Job::DeletePlan(admission, request, exchange, reply) => {
+                        Job::DeletePlan(admission, request, expected, exchange, reply) => {
                             let result = if readonly {
                                 Err(error("project_setup_readonly"))
                             } else {
-                                projects_home::delete_plan(&mut connection, &path, &admission, &request, exchange)
+                                projects_home::delete_plan(&mut connection, &path, &admission, &request, expected.as_ref(), exchange)
                             };
                             let _ = reply.send(result);
                         }
@@ -897,11 +1419,11 @@ impl Storage {
                             }
                             let _ = reply.send(result);
                         }
-                        Job::SetupPlan(admission, request, reply) => {
+                        Job::SetupPlan(admission, request, expected, reply) => {
                             let result = if readonly {
                                 Err(error("project_setup_readonly"))
                             } else {
-                                setup_plan(&mut connection, &config, &path, &admission, &request)
+                                setup_plan(&mut connection, &config, &path, &admission, &request, expected.as_ref())
                             };
                             let _ = reply.send(result);
                         }
@@ -998,8 +1520,21 @@ impl Storage {
                                     mutation: OwnerMutation::RemoveProject { .. }
                                 }
                             );
+                            let team = matches!(
+                                &request.operation,
+                                OwnerOperation::Apply {
+                                    mutation: OwnerMutation::Team { .. }
+                                }
+                            );
                             let result =
                                 owner_apply(&mut connection, &config, &path, &admission, &request);
+                            if team
+                                && result
+                                    .as_ref()
+                                    .is_ok_and(|applied| applied.result == OwnerResult::Applied)
+                            {
+                                crate::team::runtime::wake_loops();
+                            }
                             let restart = set_home && result.is_ok();
                             let forgotten = forgetting
                                 && result
@@ -1167,6 +1702,7 @@ impl Storage {
                         Job::BusyHandler(handler, reply) => {
                             let _ = reply.send(connection.busy_handler(Some(handler)).map_err(error));
                         }
+                        Job::Claimed(..) => unreachable!("a claimed job wraps one plain job"),
                     }
                 }
                 if let Some(stamp) = &owner_runtime {
@@ -1174,8 +1710,16 @@ impl Storage {
                 }
             })
             .map_err(|e| error(format!("database_worker_spawn_failed: {e}")))?;
-        let config = ready_receive.await.map_err(error)??;
-        Ok((Self { sender }, config))
+        let (config, intents) = ready_receive.await.map_err(error)??;
+        Ok((
+            Self {
+                sender,
+                admission,
+                receiving,
+                intents,
+            },
+            config,
+        ))
     }
 }
 
@@ -1198,16 +1742,70 @@ struct OpenedDatabase {
     custody: Result<NativeProfileCustody, EngineError>,
 }
 
-/// Refuses engine storage where the Unix owner and mode checks do not exist.
-/// Takes the database path and read-only mode, both unused.
-/// Returns `storage_unavailable` until Windows has its own owner-only access check.
-#[cfg(not(unix))]
+/// Opens engine storage in a W1 private data folder on Windows (DESIGN-0256 D1-D4): the
+/// folder and the database are held, so neither can be renamed or replaced, before the lock
+/// is taken and SQLite opens the same path, and a fresh open must then be the held file.
+/// Inputs: the database path, read-only mode and the settings sources for an upgrade
+/// backup. Output: the connection, the lock holding both, and the custody result.
+#[cfg(windows)]
 fn open_actor_database(
-    _path: &Path,
-    _readonly: bool,
-    _settings: Option<&settings::SettingsSources>,
+    path: &Path,
+    readonly: bool,
+    settings: Option<&settings::SettingsSources>,
 ) -> Result<OpenedDatabase, EngineError> {
-    Err(error("storage_unavailable"))
+    let parent = path
+        .parent()
+        .ok_or_else(|| error("database parent missing"))?;
+    let folder = private::store_dir(parent, private::Store::Database)
+        .map_err(|e| error(format!("database requires private owner directory: {e}")))?;
+    if !readonly {
+        match private::file(path, true) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(error(e)),
+        }
+    }
+    let database = private::file(path, false)
+        .map_err(|e| error(format!("database must be a private owner file: {e}")))?;
+    let metadata = database.metadata().map_err(error)?;
+    let lock = lock_database(path, folder, database)?;
+    let flags = if readonly {
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+    } else {
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+    };
+    let mut connection = Connection::open_with_flags(
+        path,
+        flags | OpenFlags::SQLITE_OPEN_NO_MUTEX | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(error)?;
+    connection
+        .busy_timeout(std::time::Duration::from_millis(250))
+        .map_err(error)?;
+    if readonly {
+        migrations::check(&connection, migrations::STEPS)?;
+    } else {
+        migrations::upgrade(&mut connection, path, settings, migrations::STEPS)?;
+        initialize_authority_schemas(&connection)?;
+        let started = std::time::Instant::now();
+        if let Some(held @ 1..) = crate::project_setup::removed::hold_left(&connection)? {
+            eprintln!(
+                "projects_removed_backfill held={held} ms={}",
+                started.elapsed().as_millis()
+            );
+        }
+    }
+    assert!(connection.is_autocommit());
+    let named = private::file(path, false).map_err(error)?;
+    if !private::same(&named, &lock.held[1]).map_err(error)? {
+        return Err(error("database_replaced_after_open"));
+    }
+    let custody = NativeProfileCustody::capture(path, &metadata);
+    Ok(OpenedDatabase {
+        connection,
+        lock,
+        custody,
+    })
 }
 
 #[cfg(unix)]
@@ -1291,7 +1889,6 @@ fn open_actor_database(
     })
 }
 
-#[cfg(unix)]
 pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<(), EngineError> {
     initialize_schema(connection)?;
     crate::coordination::initialize(connection)?;
@@ -1304,6 +1901,9 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::learning::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
+    crate::team::cleanup::initialize(connection)?;
+    #[cfg(unix)]
+    crate::landing::initialize(connection)?;
     crate::team::log_status_changes(connection)?;
     crate::ide::bridge::memory::initialize(connection)?;
     crate::coord::ensure(connection)?;
@@ -1497,6 +2097,8 @@ fn gateway_connection_state(
 /// database locked after the hold ends (a restart in the same process then locks at once).
 struct EngineLock {
     file: std::fs::File,
+    #[cfg(windows)]
+    held: [std::fs::File; 2],
 }
 
 impl Drop for EngineLock {
@@ -1532,6 +2134,29 @@ fn lock_database(path: &Path) -> Result<EngineLock, EngineError> {
     Ok(EngineLock { file: lock })
 }
 
+/// Takes the engine lock on Windows (DESIGN-0256 D4): `.engine-lock` beside the database is
+/// a W1 private file locked exclusively at once, and the lock keeps the held data folder and
+/// database open as long as it lives. Inputs: the database path and both held handles.
+/// Output: the lock, `invalid_engine_lock_file` or `database_lock_acquire_failed`.
+#[cfg(windows)]
+fn lock_database(
+    path: &Path,
+    folder: std::fs::File,
+    database: std::fs::File,
+) -> Result<EngineLock, EngineError> {
+    let lock_path = path.with_extension("engine-lock");
+    let lock = match private::file(&lock_path, true) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => private::file(&lock_path, false),
+        opened => opened,
+    }
+    .map_err(|e| error(format!("invalid_engine_lock_file: {e}")))?;
+    private::lock(&lock).map_err(|e| error(format!("database_lock_acquire_failed: {e}")))?;
+    Ok(EngineLock {
+        file: lock,
+        held: [folder, database],
+    })
+}
+
 /// Says whether no engine holds the database lock of a data folder, so a new engine can
 /// open its database. Input: the data folder. Output: true when the lock file is missing or
 /// free, false while an engine holds it or when it cannot be opened. The probe's own shared
@@ -1553,18 +2178,29 @@ pub fn engine_lock_released(root: &Path) -> bool {
     }
 }
 
+/// Says whether no engine holds the database lock of a data folder on Windows (DESIGN-0256
+/// D4). Input: the data folder. Output: true when the lock file is missing or free, false
+/// while an engine holds it or when it cannot be opened as a private file. The probe's own
+/// shared lock is released at once, so it never keeps the new engine out.
+#[cfg(windows)]
+pub fn engine_lock_released(root: &Path) -> bool {
+    match private::file(&root.join("engine.db").with_extension("engine-lock"), false) {
+        Ok(lock) => private::free(&lock).unwrap_or(false),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
 /// Releases the engine database lock and reports whether the unlock succeeded.
 /// Takes the hold. Returns once the lock is released, or `database_lock_release_failed`.
 fn release_database_lock(lock: EngineLock) -> Result<(), EngineError> {
     unlock_database(&lock.file)
 }
 
-/// Unlocks the engine database lock file with the standard library file lock.
+/// Unlocks the engine database lock file on Windows over the range `private::lock` took.
 /// Takes the locked file. Returns `database_lock_release_failed` when the unlock fails.
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn unlock_database(file: &std::fs::File) -> Result<(), EngineError> {
-    file.unlock()
-        .map_err(|e| error(format!("database_lock_release_failed: {e}")))
+    private::unlock(file).map_err(|e| error(format!("database_lock_release_failed: {e}")))
 }
 
 #[cfg(unix)]
@@ -1584,7 +2220,6 @@ pub fn wal_refused(connection: &Connection) -> rusqlite::Result<Option<String>> 
     Ok(kept.then_some(mode))
 }
 
-#[cfg(unix)]
 fn initialize_schema(connection: &Connection) -> Result<(), EngineError> {
     assert!(connection.is_autocommit());
     if let Some(mode) = wal_refused(connection).map_err(error)? {
@@ -2197,7 +2832,6 @@ pub(crate) fn store_config(
     Ok(())
 }
 
-#[cfg(unix)]
 const OWNER_META: &str = "CREATE TABLE owner_meta (
     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
     schema_version INTEGER NOT NULL CHECK(schema_version = 1),
@@ -2205,14 +2839,12 @@ const OWNER_META: &str = "CREATE TABLE owner_meta (
     engine_epoch TEXT NOT NULL CHECK(length(engine_epoch) = 64),
     runtime_state TEXT NOT NULL CHECK(runtime_state IN ('offline', 'active'))
 )";
-#[cfg(unix)]
 const OWNER_IDENTITIES: &str = "CREATE TABLE owner_identities (
     owner_id TEXT NOT NULL PRIMARY KEY CHECK(length(owner_id) = 64),
     client_kind TEXT NOT NULL UNIQUE CHECK(client_kind IN ('tui', 'desktop')),
     owner_epoch INTEGER NOT NULL CHECK(owner_epoch >= 1),
     status TEXT NOT NULL CHECK(status IN ('active', 'revoked'))
 )";
-#[cfg(unix)]
 const OWNER_OPERATIONS: &str = "CREATE TABLE owner_operations (
     origin TEXT NOT NULL CHECK(origin IN ('native_owner', 'trusted_host')),
     owner_id TEXT NOT NULL,
@@ -2227,10 +2859,8 @@ const OWNER_OPERATIONS: &str = "CREATE TABLE owner_operations (
     event_cursor INTEGER CHECK(event_cursor IS NULL OR event_cursor >= 1),
     PRIMARY KEY(origin, owner_id, operation_id)
 )";
-#[cfg(unix)]
 const OWNER_EVENT: &str = "CREATE UNIQUE INDEX owner_operation_event ON owner_operations(event_cursor) WHERE event_cursor IS NOT NULL";
 
-#[cfg(unix)]
 fn owner_schema(tx: &Transaction<'_>) -> Result<bool, EngineError> {
     let expected = [
         ("owner_meta", OWNER_META),
@@ -2263,7 +2893,6 @@ fn owner_schema(tx: &Transaction<'_>) -> Result<bool, EngineError> {
     Ok(true)
 }
 
-#[cfg(unix)]
 fn owner_start(db: &mut Connection) -> Result<Started, EngineError> {
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -2328,6 +2957,26 @@ fn owner_registration(
     host: &HostStamp,
     kind: OwnerClientKind,
 ) -> Result<Registration, EngineError> {
+    let (id, epoch, active) = owner_identity(tx, kind)?;
+    Ok(Registration {
+        kind,
+        admission: Admission {
+            db_instance: host.db_instance.clone(),
+            engine_epoch: host.engine_epoch.clone(),
+            owner_id: id,
+            owner_epoch: epoch,
+        },
+        active,
+    })
+}
+
+/// Reads one client's stored identity. Inputs: the transaction and the client kind.
+/// Output: its owner id, epoch and whether it is active, or `owner_registration_invalid`
+/// for a row out of bounds.
+fn owner_identity(
+    tx: &Transaction<'_>,
+    kind: OwnerClientKind,
+) -> Result<(String, i64, bool), EngineError> {
     let (id, epoch, status): (String, i64, String) = tx
         .query_row(
             "SELECT owner_id,owner_epoch,status FROM owner_identities WHERE client_kind=?1",
@@ -2338,16 +2987,7 @@ fn owner_registration(
     if !is_hex_id(&id) || epoch < 1 || !matches!(status.as_str(), "active" | "revoked") {
         return Err(error("owner_registration_invalid"));
     }
-    Ok(Registration {
-        kind,
-        admission: Admission {
-            db_instance: host.db_instance.clone(),
-            engine_epoch: host.engine_epoch.clone(),
-            owner_id: id,
-            owner_epoch: epoch,
-        },
-        active: status == "active",
-    })
+    Ok((id, epoch, status == "active"))
 }
 
 fn owner_stop(db: &mut Connection, host: &HostStamp) -> Result<(), EngineError> {
@@ -2361,6 +3001,16 @@ fn owner_stop(db: &mut Connection, host: &HostStamp) -> Result<(), EngineError> 
     )
     .map_err(error)?;
     tx.commit().map_err(error)
+}
+
+/// Whether a plan's expected revision is behind the engine's: a client's request names the
+/// revision it read; a job names none and plans at the current one. Input: the transaction
+/// and the revision, if any. Output: true when a named revision is not the current one.
+fn behind(tx: &Transaction<'_>, expected: Option<&Cursor>) -> Result<bool, EngineError> {
+    Ok(match expected {
+        Some(expected) => owner_revision(tx)? != expected.value(),
+        None => false,
+    })
 }
 
 fn owner_revision(tx: &Transaction<'_>) -> Result<u64, EngineError> {
@@ -2488,9 +3138,9 @@ pub(crate) fn delete_recheck(
 }
 
 /// Plans a New Project before the owner transport builds its folder.
-/// Input: the connection, config, database path, owner admission and the
-/// SetupProject request. Output: the checked plan, or the refusal code the
-/// owner sees (`stale_revision` when the engine moved on); nothing on disk
+/// Input: the connection, config, database path, owner admission, the SetupProject request
+/// and the revision a client saw, none for a job. Output: the checked plan, or the refusal
+/// code the owner sees (`stale_revision` when the engine moved on); nothing on disk
 /// changes. An engine failure is an error, not a refusal.
 fn setup_plan(
     db: &mut Connection,
@@ -2498,6 +3148,7 @@ fn setup_plan(
     path: &Path,
     a: &Admission,
     request: &OwnerRequest,
+    expected: Option<&Cursor>,
 ) -> Result<Result<crate::project_setup::NewProjectPlan, String>, EngineError> {
     let OwnerOperation::Apply { mutation } = &request.operation else {
         return Err(error("owner_mutation_required"));
@@ -2507,7 +3158,7 @@ fn setup_plan(
     };
     let tx = db.transaction().map_err(error)?;
     check_owner_admission(&tx, a)?;
-    if owner_revision(&tx)? != request.expected_revision.value() {
+    if behind(&tx, expected)? {
         return Ok(Err("stale_revision".into()));
     }
     let OwnerMutation::CreateDemo { pool, .. } = mutation else {
@@ -2730,31 +3381,42 @@ fn owner_control(
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
     check_owner_host(&tx, host)?;
+    let reply = owner_control_in(&tx, &host.engine_epoch, control)?;
     let registration = owner_registration(&tx, host, control.target)?;
-    let a = &registration.admission;
+    tx.commit().map_err(error)?;
+    Ok((reply, registration))
+}
+
+/// Applies one host control inside the caller's transaction: the stored answer again for a
+/// control already applied, else the client's epoch moved on and its status set, with the
+/// operation recorded. Inputs: the transaction, the engine run named in the record and the
+/// control. Output: the answer, or `owner_control_stale` once the client is past that epoch.
+fn owner_control_in(
+    tx: &Transaction<'_>,
+    engine_epoch: &str,
+    control: &OwnerControl,
+) -> Result<OwnerControlReply, EngineError> {
+    let (owner_id, owner_epoch, _) = owner_identity(tx, control.target)?;
     let bytes = serde_json::to_vec(control).map_err(error)?;
     let hash_text = crate::memory::hash(&bytes);
     if let Some((_, result)) = owner_lookup(
-        &tx,
+        tx,
         "trusted_host",
-        &a.owner_id,
+        &owner_id,
         &control.operation_id,
         Some(&hash_text),
     )? {
-        return Ok((
-            serde_json::from_slice(&result).map_err(error)?,
-            registration,
-        ));
+        return serde_json::from_slice(&result).map_err(error);
     }
-    if control.expected_epoch != a.owner_epoch {
+    if control.expected_epoch != owner_epoch {
         return Err(error("owner_control_stale"));
     }
-    let next = a.owner_epoch.checked_add(1);
+    let next = owner_epoch.checked_add(1);
     if next.is_none() && control.decision == OwnerDecision::Reactivate {
         return Err(error("owner_epoch_exhausted"));
     }
     let reply = OwnerControlReply {
-        owner_id: a.owner_id.clone(),
+        owner_id: owner_id.clone(),
         owner_epoch: next.unwrap_or(i64::MAX),
         active: control.decision == OwnerDecision::Reactivate,
         epoch_exhausted_revoked: next.is_none(),
@@ -2768,28 +3430,217 @@ fn owner_control(
         ],
     )
     .map_err(error)?;
-    let revision = owner_revision(&tx)?;
+    let revision = owner_revision(tx)?;
     let provenance = OwnerProvenance {
         origin: "trusted_host".into(),
-        owner_id: a.owner_id.clone(),
+        owner_id,
         operation_id: control.operation_id.clone(),
         request_hash: hash_text,
-        engine_epoch: host.engine_epoch.clone(),
-        admitted_epoch: a.owner_epoch,
+        engine_epoch: engine_epoch.to_owned(),
+        admitted_epoch: owner_epoch,
         resulting_epoch: reply.owner_epoch,
         revision_before: Cursor::new(revision),
         revision_after: Cursor::new(revision),
         event_cursor: None,
     };
     owner_record(
-        &tx,
+        tx,
         &provenance,
         &Sha256::digest(&bytes),
         &serde_json::to_vec(&reply).map_err(error)?,
     )?;
-    let registration = owner_registration(&tx, host, control.target)?;
-    tx.commit().map_err(error)?;
-    Ok((reply, registration))
+    Ok(reply)
+}
+
+/// What applying a kept narrowing change at open found: it committed now, or it no longer
+/// applies (already applied, past its epoch, or for another database), each of which ends
+/// the intent; the cause is logged.
+#[cfg(unix)]
+pub(crate) enum Replayed {
+    Committed,
+    NotApplicable(&'static str),
+}
+
+/// Applies the revocations and sign-outs kept in the intent folder at open, before the
+/// worker takes any job, so a change a dead or stopped engine never committed takes effect
+/// first. An intent ends once committed or no longer applicable; one storage could not apply
+/// stays for the next open. Inputs: the database and the store. Output: none; every outcome
+/// is logged.
+#[cfg(unix)]
+fn replay_intents(db: &mut Connection, intents: &narrowing::Intents) {
+    let listing = match intents.list() {
+        Ok(listing) => listing,
+        Err(refused) => {
+            eprintln!("narrowing_intents_unread cause={}", refused.0);
+            return;
+        }
+    };
+    if listing.refused > 0 {
+        eprintln!("narrowing_intents_refused count={}", listing.refused);
+    }
+    for (id, intent) in listing.intents {
+        let replayed = match &intent.change {
+            narrowing::Change::Revoke {
+                operation_id,
+                target,
+                expected_epoch,
+            } => replay_revoke(
+                db,
+                &intent.db_instance,
+                &OwnerControl {
+                    operation_id: operation_id.clone(),
+                    target: *target,
+                    expected_epoch: *expected_epoch,
+                    decision: OwnerDecision::Revoke,
+                },
+            ),
+            narrowing::Change::Logout(logout) => {
+                native_auth::replay_logout(db, &intent.db_instance, logout)
+            }
+        };
+        match replayed {
+            Ok(outcome) => {
+                if let Replayed::NotApplicable(cause) = outcome {
+                    eprintln!(
+                        "narrowing_intent_not_applicable id={} cause={cause}",
+                        id.as_str()
+                    );
+                }
+                end_intent(Some(intents), &id, true);
+            }
+            Err(kept) => eprintln!("narrowing_intent_kept id={} cause={}", id.as_str(), kept.0),
+        }
+    }
+}
+
+/// Applies one kept revocation at open, guarded by its database and epoch: for another
+/// database, a database with no owner tables, or a client already past its epoch it does
+/// nothing. Inputs: the database, the intent's database id and the revocation. Output: the
+/// outcome, or the storage error, which keeps the intent.
+#[cfg(unix)]
+fn replay_revoke(
+    db: &mut Connection,
+    db_instance: &str,
+    control: &OwnerControl,
+) -> Result<Replayed, EngineError> {
+    assert_eq!(control.decision, OwnerDecision::Revoke);
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
+    if !owner_schema(&tx)? {
+        return Ok(Replayed::NotApplicable("owner_schema_missing"));
+    }
+    let (instance, engine_epoch): (String, String) = tx
+        .query_row(
+            "SELECT db_instance,engine_epoch FROM owner_meta WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(error)?;
+    if instance != db_instance {
+        return Ok(Replayed::NotApplicable("other_database"));
+    }
+    match owner_control_in(&tx, &engine_epoch, control) {
+        Ok(_) => {
+            tx.commit().map_err(error)?;
+            Ok(Replayed::Committed)
+        }
+        Err(stale) if stale.0 == "owner_control_stale" => {
+            Ok(Replayed::NotApplicable("stale_epoch"))
+        }
+        Err(refused) => Err(refused),
+    }
+}
+
+/// Whether a drained sign-out's intent is still kept, so it may run. A store that cannot be
+/// read, or that refused some entries, counts as keeping it, so the sign-out still lands.
+/// Inputs: the store and the intent's name. Output: the verdict.
+fn still_kept(intents: Option<&narrowing::Intents>, id: &narrowing::IntentId) -> bool {
+    let Some(intents) = intents else {
+        return true;
+    };
+    match intents.list() {
+        Ok(listing) => listing.refused > 0 || listing.intents.iter().any(|(kept, _)| kept == id),
+        Err(refused) => {
+            eprintln!("narrowing_intents_unread cause={}", refused.0);
+            true
+        }
+    }
+}
+
+/// Ends the kept sign-outs an owner's new sign-in supersedes, so neither the drainer nor the
+/// next open signs that sign-in out. Inputs: the database, the store and the begun sign-in.
+/// Output: none; a store or table that cannot be read is logged and ends nothing, so those
+/// sign-outs still land.
+fn end_superseded_sign_outs(
+    db: &Connection,
+    intents: Option<&narrowing::Intents>,
+    begun: &NativeAuthWork,
+) {
+    let Some(intents) = intents else {
+        return;
+    };
+    let listing = match intents.list() {
+        Ok(listing) => listing,
+        Err(refused) => {
+            eprintln!("narrowing_intents_unread cause={}", refused.0);
+            return;
+        }
+    };
+    match native_auth::superseded_sign_outs(db, begun, &listing.intents) {
+        Ok(superseded) => {
+            for id in superseded {
+                end_intent(Some(intents), &id, true);
+            }
+        }
+        Err(refused) => eprintln!("narrowing_sign_outs_unchecked cause={}", refused.0),
+    }
+}
+
+/// Ends the kept sign-out with this operation id once storage recorded its begin, so the next
+/// open does not sign out for it again; a refusal the owner hears is ended where it is
+/// answered. Inputs: the store and the sign-out's operation id. Output: none; a store that
+/// cannot be read is logged and its intent replays later.
+fn end_logout_intent(intents: Option<&narrowing::Intents>, request_id: &RequestId) {
+    let Some(intents) = intents else {
+        return;
+    };
+    let listing = match intents.list() {
+        Ok(listing) => listing,
+        Err(refused) => {
+            eprintln!("narrowing_intents_unread cause={}", refused.0);
+            return;
+        }
+    };
+    for (id, intent) in listing.intents {
+        if matches!(&intent.change, narrowing::Change::Logout(logout) if &logout.request_id == request_id)
+        {
+            end_intent(Some(intents), &id, true);
+        }
+    }
+}
+
+/// Ends a kept narrowing change once storage committed it or found it no longer applies, and
+/// keeps it otherwise, for the next open. Inputs: the store, the intent and whether it ends.
+/// Output: none; a removal that fails is logged and replays as a no-op later.
+fn end_intent(intents: Option<&narrowing::Intents>, id: &narrowing::IntentId, ends: bool) {
+    if !ends {
+        return;
+    }
+    let Some(intents) = intents else {
+        eprintln!(
+            "narrowing_intent_unremoved id={} cause=readonly",
+            id.as_str()
+        );
+        return;
+    };
+    if let Err(left) = intents.remove(id) {
+        eprintln!(
+            "narrowing_intent_unremoved id={} cause={}",
+            id.as_str(),
+            left.0
+        );
+    }
 }
 
 fn owner_control_reconcile(
@@ -2916,7 +3767,7 @@ fn owner_read(
             OwnerData::ProjectHiddenPaths {
                 project_id: project_id.clone(),
                 runs: crate::sandbox::hidden_paths::runs_seeing(project_id.as_str(), &saved),
-                unavailable: crate::sandbox::hidden_paths::UNAVAILABLE,
+                unavailable: crate::sandbox::HIDDEN_UNHELD,
                 paths: saved
                     .iter()
                     .map(|path| path.display().to_string())

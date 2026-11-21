@@ -156,7 +156,7 @@ fn hide(ctx: &mut Ctx) -> u64 {
 
 /// One row of the project list: the New project draft kept after leaving the
 /// wizard, a projects folder entry that is not a ready project, or a project.
-/// Input: the engine's intake job, the kept draft, the found folders and the store. Output:
+/// Input: the engine's intake jobs, the kept draft, the found folders and the store. Output:
 /// drawn as a four-row card; Enter does the job's first action, continues the draft, sets up
 /// the folder or opens the project.
 enum Entry {
@@ -319,7 +319,7 @@ pub struct Home {
     folder: Load<ProjectsHome>,
     found: Load<Vec<FoundProject>>,
     sent: Option<IntakeQuery>,
-    job_shown: bool,
+    jobs_shown: Vec<crate::protocol::RequestId>,
 }
 
 impl Default for Home {
@@ -437,6 +437,8 @@ pub(in crate::tui) mod tests {
                             version: Version::parse("1.0.0").unwrap(),
                         }
                     },
+                    busy: false,
+                    waiting: None,
                 })
                 .collect(),
             pack: Vec::new(),

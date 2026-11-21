@@ -5,7 +5,6 @@ use crate::protocol::{ProjectId, TaskId};
 use crate::state_log::fence::Fence;
 use crate::state_log::replay::{self, Clock, Logged};
 use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
-#[cfg(any(unix, test))]
 use crate::storage::opening::Opening;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
@@ -375,7 +374,6 @@ pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, Engi
 /// nothing changed no appender is built, so a plain start moves no revision. Inputs: the
 /// connection, outside any transaction, and the open's proof. Output: whether a run was
 /// appended, or the first refusal, which rolls the whole sweep back.
-#[cfg(unix)]
 pub(crate) fn sweep(db: &Connection, opening: Opening) -> Result<bool, EngineError> {
     assert!(db.is_autocommit(), "the sweep owns its transaction");
     let tx =
@@ -400,7 +398,6 @@ pub(crate) fn sweep(db: &Connection, opening: Opening) -> Result<bool, EngineErr
 /// write, and one with no worktree row needs no run, so it moves no revision. Inputs: the
 /// step's transaction and the open's proof. Output: whether a run was appended, or the
 /// log's refusal.
-#[cfg(any(unix, test))]
 pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, EngineError> {
     let present: i64 = tx
         .query_row(
@@ -434,7 +431,6 @@ pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, 
 
 /// Both worktree tables as they stand, each ordered by all its columns. Input: the
 /// connection. Output: the admissions and the leases.
-#[cfg(unix)]
 fn live(db: &Connection) -> Result<[Vec<Vec<rusqlite::types::Value>>; 2], EngineError> {
     Ok([replay::rows(db, ADMISSIONS.0)?, replay::rows(db, LEASES.0)?])
 }

@@ -23,9 +23,12 @@ const PROFILE_BYTES_MAX: u64 = 1024 * 1024;
 #[cfg(target_os = "macos")]
 const REPORT_BYTES_MAX: usize = 8;
 #[cfg(target_os = "macos")]
-const HEAR_INTERVAL: Duration = Duration::from_millis(1);
-#[cfg(target_os = "macos")]
 const CONFINED_SIGNALS: &str = "(allow signal (target same-sandbox))";
+
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    static HEARD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// The engine's end of one run's warden: a process the session shim forks inside the run's
 /// Seatbelt sandbox before it starts the harness. Once this end is shut, or closed, as the
@@ -125,21 +128,24 @@ enum Heard {
     Silent,
 }
 
-/// Waits until `deadline` for the warden to write or to close its end, polling the
-/// nonblocking end every [`HEAR_INTERVAL`], since macOS refuses a read timeout on a socket
-/// whose peer has closed. Inputs: the nonblocking engine end, the buffer and the deadline.
-/// Output: how many bytes came, that the warden closed its end, or silence until the
-/// deadline or a read error.
+/// Waits until `deadline` for the warden to write or to close its end, reading the
+/// nonblocking end each time poll(2) finds it ready, since macOS refuses a read timeout on a
+/// socket whose peer has closed. Inputs: the nonblocking engine end, the buffer and the
+/// deadline. Output: how many bytes came, that the warden closed its end, or silence until
+/// the deadline or a read or poll error.
 #[cfg(target_os = "macos")]
 fn hear(
     mut engine: &std::os::unix::net::UnixStream,
     buffer: &mut [u8],
     deadline: Instant,
 ) -> Heard {
+    use rustix::event::{PollFd, PollFlags};
     use std::io::Read;
 
     assert!(!buffer.is_empty());
     loop {
+        #[cfg(test)]
+        HEARD.set(HEARD.get() + 1);
         match engine.read(buffer) {
             Ok(0) => return Heard::Closed,
             Ok(count) => return Heard::Bytes(count),
@@ -147,7 +153,10 @@ fn hear(
             Err(error)
                 if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
             {
-                std::thread::sleep(HEAR_INTERVAL);
+                let mut fds = [PollFd::new(engine, PollFlags::IN)];
+                if crate::platform::fd_wait::ready(&mut fds, Some(deadline)).is_err() {
+                    return Heard::Silent;
+                }
             }
             Err(_) => return Heard::Silent,
         }

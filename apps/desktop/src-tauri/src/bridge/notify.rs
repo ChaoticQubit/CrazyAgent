@@ -166,7 +166,8 @@ pub fn intake_notice(job: &JobView) -> Option<Notice> {
             format!("{name} needs your answer"),
             format!("Open Home in CrazyAgent to decide before it is {way}."),
         ),
-        JobState::Downloading { .. }
+        JobState::Waiting { .. }
+        | JobState::Downloading { .. }
         | JobState::Stopping { .. }
         | JobState::Copying { .. }
         | JobState::Trashing { .. }
@@ -204,7 +205,8 @@ fn delete_notice(job: &JobView) -> Option<Notice> {
             format!("Deleting {name} failed"),
             "Open Home in CrazyAgent to see why.".to_owned(),
         ),
-        JobState::Downloading { .. }
+        JobState::Waiting { .. }
+        | JobState::Downloading { .. }
         | JobState::Stopping { .. }
         | JobState::Copying { .. }
         | JobState::Trashing { .. }
@@ -241,7 +243,8 @@ fn setup_notice(job: &JobView) -> Option<Notice> {
             format!("Setting up {name} failed"),
             "Open Home in CrazyAgent to see why.".to_owned(),
         ),
-        JobState::Downloading { .. }
+        JobState::Waiting { .. }
+        | JobState::Downloading { .. }
         | JobState::Stopping { .. }
         | JobState::Copying { .. }
         | JobState::Trashing { .. }
@@ -677,6 +680,8 @@ mod tests {
 
     fn job(state: crazyagent::projects_home::job::JobState) -> JobView {
         JobView {
+            left: Vec::new(),
+            left_more: None,
             id: crazyagent::protocol::RequestId::new("add-1").unwrap(),
             kind: crazyagent::projects_home::job::JobKind::Add,
             project_id: None,

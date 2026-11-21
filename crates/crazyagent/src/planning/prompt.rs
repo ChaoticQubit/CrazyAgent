@@ -226,9 +226,31 @@ pub(super) fn open_no_follow(path: &Path) -> io::Result<std::fs::File> {
         .open(path)
 }
 
-/// Opens a file for reading where no no-follow open exists; the caller checked it is no link.
+/// Opens a file for reading as itself, a link or junction swapped in at its name included,
+/// never its target ([`crate::platform::open_plain`]); the caller keeps only a regular file.
 /// Takes the path. Returns the open file or the failure.
 #[cfg(not(unix))]
 pub(super) fn open_no_follow(path: &Path) -> io::Result<std::fs::File> {
-    std::fs::File::open(path)
+    crate::platform::open_plain(path)
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn a_prompt_file_swapped_for_a_link_opens_as_the_link_and_is_no_regular_file() {
+        let folder = tempfile::tempdir().unwrap();
+        let target = folder.path().join("secret.md");
+        std::fs::write(&target, "owner text").unwrap();
+        let link = folder.path().join("brief.md");
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        let regular = open_no_follow(&link)
+            .and_then(|file| file.metadata())
+            .map(|metadata| metadata.is_file());
+        assert!(
+            !matches!(regular, Ok(true)),
+            "the open followed the link to its target"
+        );
+    }
 }

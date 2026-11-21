@@ -161,8 +161,9 @@ async fn the_owner_adds_a_project_through_new_project_and_finds_it_set_up() {
 
     let controller = &mut golden.owner.controller;
     let state = wait_until("the New Project job to end", JOB_TIME, async || {
-        let job = controller.job_status().await.unwrap()?;
-        (job.id == request && ended(&job.state)).then_some(job.state)
+        let jobs = controller.job_status().await.unwrap();
+        let job = jobs.into_iter().find(|job| job.id == request)?;
+        ended(&job.state).then_some(job.state)
     })
     .await;
     assert_eq!(state, JobState::Done);
@@ -170,7 +171,15 @@ async fn the_owner_adds_a_project_through_new_project_and_finds_it_set_up() {
 
     let dismissed = golden.owner.controller.job_dismiss(request.clone()).await;
     assert!(dismissed.unwrap(), "the ended job is dismissed");
-    assert_eq!(golden.owner.controller.job_status().await.unwrap(), None);
+    assert!(
+        golden
+            .owner
+            .controller
+            .job_status()
+            .await
+            .unwrap()
+            .is_empty()
+    );
     golden.step(STEPS[4]);
 
     let (config_id, source_hash, _) = pools(&mut golden.owner.controller).await;

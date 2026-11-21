@@ -377,8 +377,7 @@ mod launch {
             },
             model: Some("m-1".into()),
             tools,
-            sandbox_profile: Some(profile),
-            unconfined: false,
+            boundary: crate::harnesses::launch::LaunchBoundary::Profile(profile),
             git_identity: None,
             limits: LaunchLimits::default(),
         };
@@ -678,8 +677,9 @@ mod launch {
         assert!(handed.is_ok(), "{:?}", handed.as_ref().err());
         let (handover, _) = handed.unwrap();
         let mut open = turn(false);
-        open.request.sandbox_profile = None;
-        open.request.unconfined = true;
+        let work = open.request.working_dir.clone();
+        let scratch = work.parent().unwrap().to_path_buf();
+        open.request.boundary = crate::harnesses::launch::full_access_for_test(&work, &scratch);
         let refused = launched(harness, &open, &handover).err();
         let code = refused.map(|error| error.0);
         assert_eq!(code.as_deref(), Some("launch_environment_refused"));

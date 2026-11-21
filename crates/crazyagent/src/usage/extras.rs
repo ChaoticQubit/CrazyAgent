@@ -21,7 +21,8 @@ pub const CLAUDE_DETAIL_QUERY: &str = "cedar_ember=1&skip_spend=1";
 /// of the page renews it.
 pub const DETAIL_LEASE_MS: i64 = 3 * 60 * 1000;
 /// The least time between two private detail reads of the same engine run, however often
-/// the Pools page rereads.
+/// the Pools page rereads; only a source whose detail call differs, as one after Don't read,
+/// reads sooner.
 pub const DETAIL_EVERY_MS: i64 = 5 * 60 * 1000;
 /// The largest amount of money or credits a reply is taken to state.
 const AMOUNT_MAX: f64 = 1e12;

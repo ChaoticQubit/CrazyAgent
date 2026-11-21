@@ -751,3 +751,24 @@ fn a_cut_names_the_sysctl_that_lets_any_address_bind() {
     assert_eq!(reason([Some("1\n"), Some("0\n")]), named);
     assert_eq!(reason([None, Some("1\n")]), named);
 }
+
+#[cfg(unix)]
+#[test]
+fn an_idle_proxy_waits_for_clients_without_waking_every_few_milliseconds() {
+    let proxy = ModelProxy::bind_local(7, vec![host("localhost", 9)], None, &[]).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let before = proxy.serve_passes();
+    std::thread::sleep(Duration::from_secs(1));
+    let passes = proxy.serve_passes() - before;
+    assert!(passes <= 10, "{passes} accept passes in an idle second");
+}
+
+#[test]
+fn dropping_an_idle_proxy_stops_its_accept_thread_at_once() {
+    let proxy = ModelProxy::bind_local(7, vec![host("localhost", 9)], None, &[]).unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let started = Instant::now();
+    drop(proxy);
+    let took = started.elapsed();
+    assert!(took < Duration::from_millis(50), "dropping took {took:?}");
+}

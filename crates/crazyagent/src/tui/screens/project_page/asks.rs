@@ -50,6 +50,8 @@ impl ProjectPage {
             uncommitted_branch: None,
             uncommitted_asked: false,
             job_sent: None,
+            move_read_sent: None,
+            reinstall_sent: None,
             publish_sent: None,
             publish_pane: None,
             publish_asked: None,
@@ -691,7 +693,6 @@ impl ProjectPage {
     /// `TEAM_READ_MS`, and a read lost for `TEAM_WAIT_MS` is asked again. Takes the context.
     pub(super) fn ask_team(&mut self, ctx: &mut Ctx) {
         let hides = self.screen.tab == Tab::Settings
-            && self.screen.hidden_offered()
             && self
                 .screen
                 .hidden_paths

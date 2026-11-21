@@ -1,5 +1,5 @@
 use super::*;
-use crate::harnesses::launch::{CLAUDE_NATIVE_TEAM_TOOLS, LaunchLimits};
+use crate::harnesses::launch::{CLAUDE_NATIVE_TEAM_TOOLS, LaunchBoundary, LaunchLimits};
 use std::os::unix::fs::PermissionsExt;
 
 const SESSION: &str = "0f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f";
@@ -66,8 +66,7 @@ impl Case {
             account,
             model: None,
             tools,
-            sandbox_profile: Some(self.profile()),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(self.profile()),
             git_identity: None,
             limits: LaunchLimits::default(),
         }
@@ -815,10 +814,10 @@ fn a_keyed_claude_gets_its_key_through_its_key_helper_and_a_local_one_a_placehol
 fn every_launch_needs_its_sandbox_profile_and_a_safe_home() {
     let case = Case::new();
     let mut bare = case.request("codex", case.subscription(), true);
-    bare.sandbox_profile = None;
+    bare.boundary = LaunchBoundary::Profile(PathBuf::from("agent.sb"));
     assert_eq!(
         command(&bare, None, &run(None)).unwrap_err().0,
-        "launch_sandbox_required"
+        "launch_sandbox_profile_unavailable"
     );
     std::fs::set_permissions(case.home(), std::fs::Permissions::from_mode(0o755)).unwrap();
     let open = case.request("claude-code", case.subscription(), true);
@@ -2142,6 +2141,32 @@ fn a_shim_harness_starts_its_real_install_or_else_itself_unless_agents_can_write
     assert!(launch_tool(&inside, &places).is_err());
 }
 
+/// G1: a shim with no real install found is judged by the resolver's own rule alone, so a
+/// HOME in this user's folder under a sticky shared folder, as under /tmp on Linux, starts
+/// it as given, while a shim in a folder every user can write never starts.
+#[test]
+fn a_shim_under_a_sticky_shared_folder_starts_as_given_by_the_resolver_rule() {
+    let scratch = tempfile::tempdir().unwrap();
+    let shared = scratch.path().canonicalize().unwrap().join("shared");
+    let mine = shared.join("mine");
+    std::fs::create_dir_all(&mine).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+    std::fs::set_permissions(&mine, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let name = "crazyagent-shim-sticky-row";
+    let home = mine.join("home");
+    let shim = home.join(".volta/bin").join(name);
+    stand_in(&shim);
+    let places = crate::tools::Places::new(Vec::new(), Some(home));
+    assert!(crate::harnesses::is_shim(places.home(), &shim));
+    assert_eq!(launch_tool(&shim, &places).unwrap().entry, shim);
+    std::fs::set_permissions(
+        shim.parent().unwrap(),
+        std::fs::Permissions::from_mode(0o777),
+    )
+    .unwrap();
+    assert!(launch_tool(&shim, &places).is_err());
+}
+
 /// rv-sa241 B1 L1: a shim that finds no real install starts as given only when the resolver
 /// would run its file, every link on its way included. A shim that links through a link in a
 /// project, which agents can move, while both its ends sit in owner folders, is refused.
@@ -2300,8 +2325,8 @@ fn a_manifest_command_refuses_a_keyed_account_tools_off_and_full_access() {
     let refused = command_with(&off, None, &run(None), Some(&settings));
     assert_eq!(refused.err(), Some(failure("launch_tools_off_unsupported")));
     let mut full = case.request("standin-jsonl-append", keyless(&case), true);
-    full.sandbox_profile = None;
-    full.unconfined = true;
+    let scratch = full.working_dir.parent().unwrap().to_path_buf();
+    full.boundary = crate::harnesses::launch::full_access_for_test(&full.working_dir, &scratch);
     let refused = command_with(&full, None, &run(None), Some(&settings));
     assert_eq!(refused.err(), Some(failure("launch_harness_unsupported")));
 }

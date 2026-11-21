@@ -228,6 +228,52 @@ fn bounded_area(width: u16, height: u16) -> Rect {
     Rect::new(0, 0, width.min(300), height.min(120))
 }
 
+/// Answers Ctrl-R: retries an uncertain request, queues the original owner recovery while
+/// a conversation, master, model access or creation is unresolved, does nothing while a
+/// reconnect runs, queues one reconnect while another job runs, else reconnects now.
+/// Inputs: the app, the connection and the loop's queued recovery flag.
+/// Output: none; a refusal or a queued press becomes the app's notice.
+fn reconnect_key(app: &mut App, connection: &mut Connection, queued: &mut bool) {
+    let result = if connection.uncertain() {
+        connection.retry()
+    } else if app.has_unresolved_conversation()
+        || app.master.has_pending()
+        || app.model_access.has_pending()
+        || app.model_access.signing_in()
+        || app.has_unresolved_creation()
+    {
+        *queued = true;
+        app.notice("Original owner recovery queued until the native worker is idle");
+        Ok(())
+    } else if connection.reconnecting() {
+        app.notice("A reconnect is already running");
+        Ok(())
+    } else if connection.busy() {
+        *queued = true;
+        app.notice("Reconnect queued until the native worker is idle");
+        Ok(())
+    } else {
+        connection.reconnect().and_then(|()| app.reconnect_owner())
+    };
+    if let Err(error) = result {
+        app.notice(&error);
+    }
+}
+
+/// Runs the owner recovery a Ctrl-R queued, once the native worker is idle: the original
+/// model access, master, conversation or creation request first, else a reconnect.
+/// Inputs: the app and the idle connection. Output: none; a refusal becomes the notice.
+fn run_queued_reconnect(app: &mut App, connection: &mut Connection) {
+    if !app.model_access.retry()
+        && !app.master.retry()
+        && !app.retry_conversation()
+        && !app.retry_creation()
+        && let Err(error) = connection.reconnect().and_then(|()| app.reconnect_owner())
+    {
+        app.notice(&error);
+    }
+}
+
 fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
@@ -278,14 +324,7 @@ fn event_loop(
         if !connection.busy() {
             if owner_reconnect {
                 owner_reconnect = false;
-                if !app.model_access.retry()
-                    && !app.master.retry()
-                    && !app.retry_conversation()
-                    && !app.retry_creation()
-                    && let Err(error) = connection.reconnect().and_then(|()| app.reconnect_owner())
-                {
-                    app.notice(&error);
-                }
+                run_queued_reconnect(app, connection);
                 dirty = true;
             } else if let Some(command) = app.take_command() {
                 let request_id = connection
@@ -362,25 +401,7 @@ fn event_loop(
                     break;
                 }
                 if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('r') {
-                    let result = if connection.uncertain() {
-                        connection.retry()
-                    } else if app.has_unresolved_conversation()
-                        || app.master.has_pending()
-                        || app.model_access.has_pending()
-                        || app.model_access.signing_in()
-                        || app.has_unresolved_creation()
-                    {
-                        owner_reconnect = true;
-                        app.notice(
-                            "Original owner recovery queued until the native worker is idle",
-                        );
-                        Ok(())
-                    } else {
-                        connection.reconnect().and_then(|()| app.reconnect_owner())
-                    };
-                    if let Err(error) = result {
-                        app.notice(&error);
-                    }
+                    reconnect_key(app, connection, &mut owner_reconnect);
                 } else {
                     for event in key_events(app, key).into_iter().flatten() {
                         let previous_focus = app.focus();

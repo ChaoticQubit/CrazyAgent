@@ -78,14 +78,14 @@ fn ide_git_never_enters_a_repository_planted_below_a_worktree() {
     );
     std::fs::write(planted.join("notes.txt"), "changed\n").unwrap();
 
-    let guarded = git(&worktree, &CONFIG_ENV, &["status", "--porcelain"]);
+    let guarded = git(&worktree, config_env(), &["status", "--porcelain"]);
     assert!(guarded.status.success());
     assert_eq!(String::from_utf8_lossy(&guarded.stdout), "");
     assert!(
         !marker.exists(),
         "the planted repository's fsmonitor never runs under the IDE's git configuration"
     );
-    let guarded_diff = git(&worktree, &CONFIG_ENV, &["diff", "--stat"]);
+    let guarded_diff = git(&worktree, config_env(), &["diff", "--stat"]);
     assert_eq!(String::from_utf8_lossy(&guarded_diff.stdout), "");
     assert!(!marker.exists());
 
@@ -107,10 +107,10 @@ fn the_ide_git_settings_turn_off_nested_repository_and_submodule_detection() {
             "git.autoRepositoryDetection": false,
         })
     );
-    let count: usize = CONFIG_ENV[0].1.parse().unwrap();
-    assert_eq!(CONFIG_ENV.len(), 1 + 2 * count);
+    let count: usize = config_env()[0].1.parse().unwrap();
+    assert_eq!(config_env().len(), 1 + 2 * count);
     assert!(
-        CONFIG_ENV
+        config_env()
             .iter()
             .all(|(name, _)| name.starts_with("GIT_CONFIG_"))
     );
@@ -163,13 +163,13 @@ fn the_ide_git_configuration_runs_no_planted_program_and_refuses_a_bare_looking_
     std::fs::write(repo.join("notes.txt"), "first\n").unwrap();
     let ran = |name: &str| marks.join(name).exists();
 
-    let added = git(&repo, &CONFIG_ENV, &["add", "notes.txt"]);
+    let added = git(&repo, config_env(), &["add", "notes.txt"]);
     assert!(
         added.status.success(),
         "{}",
         String::from_utf8_lossy(&added.stderr)
     );
-    let committed = git(&repo, &CONFIG_ENV, &["commit", "-q", "-m", "guarded"]);
+    let committed = git(&repo, config_env(), &["commit", "-q", "-m", "guarded"]);
     assert!(
         committed.status.success(),
         "{}",
@@ -177,7 +177,7 @@ fn the_ide_git_configuration_runs_no_planted_program_and_refuses_a_bare_looking_
     );
     let signed = git(
         &repo,
-        &CONFIG_ENV,
+        config_env(),
         &["commit", "-q", "-S", "--allow-empty", "-m", "signed"],
     );
     assert!(!signed.status.success());
@@ -224,7 +224,7 @@ fn the_ide_git_configuration_runs_no_planted_program_and_refuses_a_bare_looking_
         ],
     );
     std::fs::write(bare.join("notes.txt"), "planted\n").unwrap();
-    let guarded = git(&bare, &CONFIG_ENV, &["status", "--porcelain"]);
+    let guarded = git(&bare, config_env(), &["status", "--porcelain"]);
     assert!(!guarded.status.success());
     assert!(
         String::from_utf8_lossy(&guarded.stderr).contains("cannot use bare repository"),
@@ -315,7 +315,7 @@ fn the_shim_lets_git_run_hooks_in_the_project_folder_alone() {
                 .env("HOME", dir)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .envs(CONFIG_ENV.iter().copied())
+                .envs(config_env().iter().copied())
                 .args(["config", "--get", "core.hooksPath"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -375,7 +375,7 @@ fn the_shim_keeps_the_relay_secret_from_git_and_hands_it_to_the_forwarder() {
                 .env("HOME", &project)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .envs(CONFIG_ENV.iter().copied())
+                .envs(config_env().iter().copied())
                 .env("CRAZYAGENT_IDE_GIT_SECRET", "dummy-secret")
                 .env("CRAZYAGENT_IDE_GIT_NODE", "/bin/sh")
                 .env("CRAZYAGENT_IDE_GIT_FORWARD", &forwarder)
@@ -614,7 +614,7 @@ fn the_ide_git_never_prunes_an_agent_worktree_it_sees_as_missing() {
                 .env("HOME", &project)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .envs(CONFIG_ENV.iter().copied())
+                .envs(config_env().iter().copied())
                 .args(args)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -720,7 +720,7 @@ fn the_ide_git_refuses_worktree_prune_and_remove_after_a_leading_option() {
                 .env("HOME", &project)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .envs(CONFIG_ENV.iter().copied())
+                .envs(config_env().iter().copied())
                 .envs(forwarder)
                 .args(args)
                 .stdin(Stdio::null())
@@ -804,7 +804,7 @@ fn a_network_command_after_a_leading_option_from_the_ide_stops_with_the_plain_li
                 .env("HOME", &project)
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .envs(CONFIG_ENV.iter().copied())
+                .envs(config_env().iter().copied())
                 .env("CRAZYAGENT_IDE_GIT_NODE", "/usr/bin/true")
                 .env("CRAZYAGENT_IDE_GIT_FORWARD", "/dev/null")
                 .env("CRAZYAGENT_IDE_GIT_SECRET", "synthetic")
@@ -871,7 +871,7 @@ fn the_ide_git_commits_and_tags_unsigned_in_a_project_that_signs_everything() {
 
     let committed = git(
         &repo,
-        &CONFIG_ENV,
+        config_env(),
         &["commit", "-q", "--allow-empty", "-m", "ide"],
     );
     assert!(
@@ -879,7 +879,7 @@ fn the_ide_git_commits_and_tags_unsigned_in_a_project_that_signs_everything() {
         "{}",
         String::from_utf8_lossy(&committed.stderr)
     );
-    let tagged = git(&repo, &CONFIG_ENV, &["tag", "-a", "-m", "ide", "ide"]);
+    let tagged = git(&repo, config_env(), &["tag", "-a", "-m", "ide", "ide"]);
     assert!(
         tagged.status.success(),
         "{}",
@@ -899,6 +899,99 @@ fn the_ide_git_commits_and_tags_unsigned_in_a_project_that_signs_everything() {
     assert!(
         marker.exists(),
         "without it, git signs with the project's program"
+    );
+}
+
+/// V243-WORKTREES-GIT-FLAKE, rv-code #584 F1: in a project that asks every log for signatures
+/// and names its own signature programs, with a `false` first on the search path, the IDE's
+/// git checks a signature in any armor when asked outright and logs the subject alone
+/// otherwise, and runs none of them: its signature programs are no name a lookup finds.
+#[test]
+fn the_ide_git_logs_a_signed_commit_alone_and_runs_no_false_the_path_finds() {
+    use crate::landing::signature_tests::{Armor, SUBJECT, signed};
+    for armor in Armor::ALL {
+        let signed = signed(armor);
+        let bin = signed.base.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let marker = signed.base.join("path-false");
+        planted(&bin.join("false"), &marker);
+        let path = format!("{}:/usr/bin:/bin", bin.display());
+        let env: Vec<(&str, &str)> = config_env()
+            .iter()
+            .copied()
+            .chain([("PATH", path.as_str())])
+            .collect();
+        let checked = git(
+            &signed.root,
+            &env,
+            &["log", "--show-signature", "-1", "--format=%s"],
+        );
+        assert!(
+            !marker.exists(),
+            "{armor:?}: the IDE's git ran the path's false for a signature check"
+        );
+        assert_eq!(signed.ran(), Vec::<String>::new(), "{armor:?}");
+        assert!(
+            checked.status.success(),
+            "{armor:?}: {}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&checked.stdout).ends_with(&format!("{SUBJECT}\n")),
+            "{armor:?}: {}",
+            String::from_utf8_lossy(&checked.stdout)
+        );
+        let logged = git(&signed.root, &env, &["log", "-1", "--format=%s"]);
+        assert!(
+            !marker.exists(),
+            "{armor:?}: the IDE's git ran the path's false"
+        );
+        assert_eq!(signed.ran(), Vec::<String>::new(), "{armor:?}");
+        assert!(
+            logged.status.success(),
+            "{armor:?}: {}",
+            String::from_utf8_lossy(&logged.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&logged.stdout),
+            format!("{SUBJECT}\n"),
+            "{armor:?}"
+        );
+    }
+}
+
+/// V243-WORKTREES-GIT-FLAKE: with a `false` first on the search path, an ssh transport
+/// under the IDE's git configuration fails without running it: the ssh command is an
+/// absolute path git cannot start, never a name a path lookup resolves.
+#[test]
+fn the_ide_git_ssh_transport_runs_no_false_the_path_finds() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let repo = base.join("repo");
+    let bin = base.join("bin");
+    for folder in [&repo, &bin] {
+        std::fs::create_dir(folder).unwrap();
+    }
+    ok(&repo, &["init", "-q"]);
+    let marker = base.join("path-false");
+    let planted_false = bin.join("false");
+    std::fs::write(
+        &planted_false,
+        format!("#!/bin/sh\n: > '{}'\nexit 1\n", marker.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&planted_false, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = format!("{}:/usr/bin:/bin", bin.display());
+    let env: Vec<(&str, &str)> = config_env()
+        .iter()
+        .copied()
+        .chain([("PATH", path.as_str())])
+        .collect();
+    let listed = git(&repo, &env, &["ls-remote", "ssh://example.invalid/x"]);
+    assert!(!listed.status.success());
+    assert!(
+        !marker.exists(),
+        "the IDE's git ran the path's false as its ssh command"
     );
 }
 

@@ -3,6 +3,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod parallel;
+
 struct Machine {
     root: tempfile::TempDir,
 }
@@ -2958,6 +2960,7 @@ fn a_harness_below_the_floor_it_runs_at_reads_needs_x_or_newer() {
         needs: None,
         sign_in_min: None,
         run_min: floor.map(str::to_owned),
+        waiting: None,
     };
     assert_eq!(
         needs_newer_line("Claude Code", &row(Some("2.1.200"), Some("2.1.250"))).as_deref(),

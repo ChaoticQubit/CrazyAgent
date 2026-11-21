@@ -495,7 +495,9 @@ fn lock_only_holds_the_home_and_leaves_no_files() {
 #[cfg(unix)]
 #[test]
 fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
-    use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Secret, Session};
+    use crate::harnesses::launch::{
+        AccountBinding, LaunchBoundary, LaunchLimits, LaunchRequest, Secret, Session,
+    };
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let home = base.join("codex");
@@ -534,8 +536,7 @@ fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
         },
         model: None,
         tools: false,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -551,7 +552,9 @@ fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
 #[cfg(unix)]
 #[test]
 fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
-    use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Secret, Session};
+    use crate::harnesses::launch::{
+        AccountBinding, LaunchBoundary, LaunchLimits, LaunchRequest, Secret, Session,
+    };
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let home = base.join("codex");
@@ -592,8 +595,7 @@ fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents
         },
         model: None,
         tools: false,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -1551,11 +1553,11 @@ fn a_released_skills_folder_leaves_an_owner_s_linked_file_and_a_link_s_target_as
     drop(held);
 }
 
-/// ACL r1 F2 (DEC-141 PA-19): a Codex `skills` folder without write, which cannot move to a
-/// new parent, gains the owner's write through the descriptor its release opened, never its
-/// name: a process an earlier run left that moves the folder aside and links an owner's read
-/// only file with an ACL entry at `skills` meanwhile leaves the owner's file with its mode and
-/// ACL entry, the moved folder opened up, and the launch with an empty `skills` folder.
+/// ACL r1 F2 (DEC-141 PA-19): a Codex `skills` folder without write gains the owner's write
+/// through the descriptor its release opened, never its name: a process an earlier run left
+/// that moves it aside (with write given and taken off again) and links an owner's read only
+/// file with an ACL entry at `skills` leaves that file's mode and ACL entry, the moved folder
+/// opened up, and the launch with an empty `skills` folder.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_skills_folder_without_write_is_opened_up_through_its_descriptor_never_its_name() {
@@ -1584,7 +1586,9 @@ fn a_skills_folder_without_write_is_opened_up_through_its_descriptor_never_its_n
     let (swapped, aside, linked) = (skills.clone(), moved.clone(), owner.clone());
     AFTER_SKILLS_OPEN.with(|step| {
         *step.borrow_mut() = Some(Box::new(move || {
+            fs::set_permissions(&swapped, fs::Permissions::from_mode(0o700)).unwrap();
             fs::rename(&swapped, &aside).unwrap();
+            fs::set_permissions(&aside, fs::Permissions::from_mode(0o500)).unwrap();
             fs::hard_link(&linked, &swapped).unwrap();
         }));
     });
@@ -2313,6 +2317,8 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
                 }],
             }],
             context_mode_off: None,
+            batch_files: Vec::new(),
+            commands_not_found: Vec::new(),
             left_out: Vec::new(),
         },
         instructions: "# Project context from CrazyAgent\n".into(),
@@ -2336,10 +2342,9 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         account: crate::harnesses::launch::AccountBinding::Subscription { home: home.clone() },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile.clone()),
+        boundary: crate::harnesses::launch::LaunchBoundary::Profile(profile.clone()),
         git_identity: None,
         limits: crate::harnesses::launch::LaunchLimits::default(),
-        unconfined: false,
     };
     assert!(context().exposes_secret(home.as_os_str().as_encoded_bytes()));
     let named = LaunchError(
@@ -2443,6 +2448,8 @@ impl LeftPane {
                     }],
                 }],
                 context_mode_off: None,
+                batch_files: Vec::new(),
+                commands_not_found: Vec::new(),
                 left_out: Vec::new(),
             },
             instructions: "# Project context from CrazyAgent\n".into(),
@@ -2466,10 +2473,9 @@ impl LeftPane {
             account: crate::harnesses::launch::AccountBinding::Subscription { home: home.clone() },
             model: None,
             tools: true,
-            sandbox_profile: Some(profile),
+            boundary: crate::harnesses::launch::LaunchBoundary::Profile(profile),
             git_identity: None,
             limits: crate::harnesses::launch::LaunchLimits::default(),
-            unconfined: false,
         };
         let tmux = crate::terminal::tmux::installed(&root)
             .expect("tmux must be installed on this machine");
@@ -2846,6 +2852,8 @@ fn the_context_mode_server_is_declared_under_its_plugin_name_for_claude_and_code
         skills: Vec::new(),
         servers: vec![command_server("context-mode"), command_server("graph")],
         context_mode_off: None,
+        batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
 
@@ -2881,6 +2889,8 @@ fn switched_off_tools_reach_claude_as_denied_names_and_codex_as_disabled_tools()
         skills: Vec::new(),
         servers: vec![command_server("context-mode"), command_server("graph")],
         context_mode_off: None,
+        batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
     let off = || {
@@ -3173,6 +3183,8 @@ fn every_tools_on_launch_delivers_the_tool_rules_as_firm_rules() {
                 }],
                 servers: vec![command_server("context-mode")],
                 context_mode_off: None,
+                batch_files: Vec::new(),
+                commands_not_found: Vec::new(),
                 left_out: Vec::new(),
             },
             Vec::new(),
@@ -3253,6 +3265,8 @@ fn the_task_start_reminder_names_the_select_string_and_skills_per_harness_and_no
             false => vec![command_server("graph")],
         },
         context_mode_off: None,
+        batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
     let off = |tools: &[&str]| {
@@ -3378,6 +3392,8 @@ fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() 
         },
         servers: vec![command_server("context-mode"), command_server("graph")],
         context_mode_off: None,
+        batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
     let off = || {
@@ -3497,6 +3513,8 @@ fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() 
             skills: Vec::new(),
             servers: vec![command_server("graph")],
             context_mode_off: None,
+            batch_files: Vec::new(),
+            commands_not_found: Vec::new(),
             left_out: Vec::new(),
         },
         Vec::new(),
@@ -4740,7 +4758,9 @@ fn log_tail(path: &Path, bytes: usize) -> String {
 #[test]
 #[ignore = "live: needs Claude Code and CRAZYAGENT_CONTEXT_MODE_INSTALL"]
 fn a_fresh_claude_agent_lists_the_context_mode_tools_of_the_engine_install() {
-    use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Session};
+    use crate::harnesses::launch::{
+        AccountBinding, LaunchBoundary, LaunchLimits, LaunchRequest, Session,
+    };
     use std::os::unix::fs::PermissionsExt;
     const TASK: &str = "Name the tools you have for check 4471.";
     const SERVER: &str = "plugin_context-mode_context-mode";
@@ -4798,8 +4818,7 @@ fn a_fresh_claude_agent_lists_the_context_mode_tools_of_the_engine_install() {
             },
             model: Some("qwen2.5:0.5b".into()),
             tools: true,
-            sandbox_profile: Some(profile),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(profile),
             git_identity: None,
             limits: LaunchLimits {
                 run_time: Duration::from_secs(180),
@@ -5067,6 +5086,8 @@ fn a_launch_whose_context_mode_was_dropped_on_an_old_node_says_why_in_its_tools_
         skills: Vec::new(),
         servers: vec![command_server("graph")],
         context_mode_off: dropped.then_some(crate::plugins::ContextModeOff::NodeTooOld),
+        batch_files: Vec::new(),
+        commands_not_found: Vec::new(),
         left_out: Vec::new(),
     };
     let claude = private_home(&root, "claude");
@@ -5263,6 +5284,8 @@ fn a_codex_launch_config_kept_for_a_real_codex() {
                 },
             ],
             context_mode_off: None,
+            batch_files: Vec::new(),
+            commands_not_found: Vec::new(),
             left_out: Vec::new(),
         },
         instructions: "# Project context from CrazyAgent\n".into(),
@@ -5285,6 +5308,9 @@ fn a_codex_launch_config_kept_for_a_real_codex() {
         .keep();
     assert!(Path::new(&home).join("config.toml").is_file());
 }
+
+#[path = "batch_files_tests.rs"]
+mod batch_files_tests;
 
 /// The Codex hook pin rows: a Codex launch pins only its own hooks from its own key list,
 /// never bypasses hook trust, and tells a missing key list apart from a linked, oversized,

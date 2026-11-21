@@ -1,7 +1,8 @@
 #[cfg(unix)]
 use crate::harnesses::launch::{self};
 use crate::harnesses::launch::{
-    AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session,
+    AccountBinding, LaunchBoundary, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Secret,
+    Session,
 };
 use crate::protocol::{CredentialRef, ProjectId, SessionId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -262,8 +263,11 @@ impl AgentSpec {
             account,
             model: self.model.clone(),
             tools: self.tools,
-            sandbox_profile: self.sandbox_profile.clone(),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(
+                self.sandbox_profile
+                    .clone()
+                    .ok_or_else(|| failure("launch_sandbox_required"))?,
+            ),
             git_identity: None,
             limits: LaunchLimits {
                 run_time: Duration::from_secs(self.run_time_secs),
@@ -1411,6 +1415,7 @@ impl Agents {
             return Err(failure("agent_restart_unavailable"));
         }
         self.queue_restart(id)?;
+        crate::team::runtime::wake_loops();
         self.view(id)
     }
 
@@ -1424,7 +1429,11 @@ impl Agents {
         })
     }
 
+    /// Wakes the team loops that host agents, so the owner's stop or restart set on
+    /// `control` is read at once (DEC-200), then waits until the host has ended the agent or
+    /// `deadline` passes. Inputs: the agent's id, its control and the deadline.
     fn await_host(&self, id: &str, control: &Arc<Control>, deadline: Instant) {
+        crate::team::runtime::wake_loops();
         while Instant::now() < deadline {
             let held = match self.live() {
                 Ok(live) => {

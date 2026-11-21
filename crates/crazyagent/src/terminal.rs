@@ -42,7 +42,14 @@ const SERVERS_DEADLINE_DIGITS_MAX: usize = 19;
 const HARNESS_SOCKET_BYTES_MAX: usize = 104;
 pub const AGENT_ID_BYTES_MAX: usize = 64;
 pub const INPUT_BYTES_MAX: usize = 4096;
+/// The marker that closes a bracketed paste. A program may read typed bytes per read, so
+/// no split of them cuts it (RV-DS241-69).
+pub(crate) const PASTE_CLOSE: &[u8] = b"\x1b[201~";
 pub const PROMPT_BYTES_MAX: usize = 4096;
+/// The most bytes one owner paste may hold once the engine gathered its `Paste` chunks, the
+/// most a native view copies.
+pub const PASTE_BYTES_MAX: usize = 1 << 20;
+const _: () = assert!(PASTE_BYTES_MAX.is_multiple_of(INPUT_BYTES_MAX));
 pub const CHUNK_BYTES_MAX: usize = 8192;
 pub const SIZE_MIN: u16 = 2;
 pub const SIZE_MAX: u16 = 1000;
@@ -66,6 +73,13 @@ const _: () = assert!(PANES_PER_PROJECT_MAX == 15);
 
 /// A terminal host failure as a stable lowercase code clients show in plain words.
 /// `terminal_unavailable` means the host cannot run at all, such as tmux missing.
+/// The unit key of a terminal that is the agent's own alone, as a host with no shared window
+/// sizes it. Takes the agent. Returns the key, which no tmux window key equals, since those
+/// start with a socket path.
+fn agent_unit(agent: &AgentId) -> String {
+    format!("agent {agent}")
+}
+
 /// Converts into the engine's own error with the same code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostError(pub String);
@@ -82,6 +96,149 @@ impl From<HostError> for EngineError {
     fn from(error: HostError) -> Self {
         EngineError(error.0)
     }
+}
+
+/// The most bytes a UTF-8 character holds after its first byte.
+const CHARACTER_TAIL_BYTES_MAX: usize = 3;
+/// The most bytes `input_runs` moves a run's end back to keep an escape sequence, such as a
+/// key, a mouse report or a closing paste marker, or a UTF-8 character whole. A sequence that
+/// starts further back is cut at the run size.
+pub(crate) const RUN_CUT_BACK_BYTES_MAX: usize = 64;
+const ESC: u8 = 0x1b;
+const BEL: u8 = 0x07;
+const _: () = assert!(RUN_CUT_BACK_BYTES_MAX >= PASTE_CLOSE.len());
+const _: () = assert!(RUN_CUT_BACK_BYTES_MAX > CHARACTER_TAIL_BYTES_MAX);
+
+/// The most runs `input_runs` cuts `length` bytes into at `run_bytes_max` bytes a run: every
+/// run but the last keeps at least `run_bytes_max - RUN_CUT_BACK_BYTES_MAX` bytes. Inputs:
+/// the length and the run size, over the back-off. Output: the bound.
+pub(crate) const fn input_runs_max(length: usize, run_bytes_max: usize) -> usize {
+    assert!(run_bytes_max > RUN_CUT_BACK_BYTES_MAX);
+    length.div_ceil(run_bytes_max - RUN_CUT_BACK_BYTES_MAX)
+}
+
+/// Splits typed bytes into runs of at most `run_bytes_max` bytes, in order. A run ends between
+/// tokens, never inside a UTF-8 character or an escape sequence (a key, a mouse report, a
+/// reply or a closing paste marker), so a program that reads per read never sees half of one
+/// and takes a lone ESC for the Escape key (RV-DS241-69, #359). Inputs: the bytes and the run
+/// size, over the back-off. Output: the runs, none for no bytes.
+pub(crate) fn input_runs(bytes: &[u8], run_bytes_max: usize) -> Vec<&[u8]> {
+    assert!(run_bytes_max > RUN_CUT_BACK_BYTES_MAX);
+    let mut runs = Vec::new();
+    let mut start = 0;
+    while start < bytes.len() {
+        let limit = start + run_bytes_max;
+        let end = if limit >= bytes.len() {
+            bytes.len()
+        } else {
+            run_end(&bytes[..=limit], start)
+        };
+        assert!(end > start);
+        assert!(end <= limit);
+        runs.push(&bytes[start..end]);
+        start = end;
+    }
+    assert!(runs.iter().all(|run| run.len() <= run_bytes_max));
+    assert!(runs.len() <= input_runs_max(bytes.len(), run_bytes_max));
+    assert_eq!(runs.concat(), bytes);
+    runs
+}
+
+/// Where a run that starts at `start` ends, given the bytes up to one past its size: at the
+/// last token end at most `RUN_CUT_BACK_BYTES_MAX` bytes back, else at the size moved back to
+/// a UTF-8 character's first byte. Inputs: that window and the start, where tokens are read
+/// from. Output: the end, past the start and at most the size.
+fn run_end(window: &[u8], start: usize) -> usize {
+    let limit = window.len() - 1;
+    assert!(limit > start + RUN_CUT_BACK_BYTES_MAX);
+    let mut boundary = start;
+    while boundary < limit {
+        let next = token_end(window, boundary);
+        if next > limit {
+            break;
+        }
+        boundary = next;
+    }
+    let end = if boundary + RUN_CUT_BACK_BYTES_MAX >= limit {
+        boundary
+    } else {
+        (limit - CHARACTER_TAIL_BYTES_MAX..=limit)
+            .rev()
+            .find(|&at| window[at] & 0xc0 != 0x80)
+            .unwrap_or(limit)
+    };
+    assert!(end > start);
+    assert!(end <= limit);
+    end
+}
+
+/// Where the typed token that starts at `at` ends: one UTF-8 character, or one escape
+/// sequence (CSI, an X10 mouse report, SS3 and one character, OSC or DCS up to BEL or ESC \,
+/// or ESC and one character). A sequence the bytes stop inside runs to their end. Inputs:
+/// the bytes and a position in them. Output: the end, past `at`.
+fn token_end(bytes: &[u8], at: usize) -> usize {
+    assert!(at < bytes.len());
+    let end = match (bytes[at], bytes.get(at + 1)) {
+        (ESC, Some(b'[')) => csi_end(bytes, at + 2),
+        (ESC, Some(b'O')) if at + 2 < bytes.len() => character_end(bytes, at + 2),
+        (ESC, Some(b'O')) => at + 2,
+        (ESC, Some(b']' | b'P')) => string_end(bytes, at + 2),
+        (ESC, Some(&ESC) | None) => at + 1,
+        (ESC, Some(_)) => character_end(bytes, at + 1),
+        _ => character_end(bytes, at),
+    };
+    assert!(end > at);
+    assert!(end <= bytes.len());
+    end
+}
+
+/// The end of a CSI whose parameters start at `from`: past its final byte, three bytes on
+/// for an X10 mouse report (`ESC [ M` and three raw bytes, as xterm.js sends them, never
+/// UTF-8), or before a byte no CSI holds. Inputs: the bytes and the position after `ESC [`.
+/// Output: the end.
+fn csi_end(bytes: &[u8], from: usize) -> usize {
+    let Some(tail) = bytes[from..]
+        .iter()
+        .position(|byte| !(0x20..=0x3f).contains(byte))
+    else {
+        return bytes.len();
+    };
+    let last = from + tail;
+    match bytes[last] {
+        b'M' if tail == 0 => (last + 4).min(bytes.len()),
+        0x40..=0x7e => last + 1,
+        _ => last,
+    }
+}
+
+/// The end of an OSC or DCS string whose body starts at `from`: past its BEL or its ESC \,
+/// or before any other ESC, which ends the string and starts the next sequence. Inputs: the
+/// bytes and the position after `ESC ]` or `ESC P`. Output: the end.
+fn string_end(bytes: &[u8], from: usize) -> usize {
+    let Some(stop) = bytes[from..]
+        .iter()
+        .position(|&byte| byte == BEL || byte == ESC)
+    else {
+        return bytes.len();
+    };
+    let at = from + stop;
+    match (bytes[at], bytes.get(at + 1)) {
+        (BEL, _) | (_, None) => at + 1,
+        (_, Some(b'\\')) => at + 2,
+        _ => at,
+    }
+}
+
+/// The end of the UTF-8 character that starts at `at`: past its continuation bytes, at most
+/// `CHARACTER_TAIL_BYTES_MAX` of them; a byte that is not UTF-8 ends alone. Inputs: the bytes
+/// and a position in them. Output: the end.
+fn character_end(bytes: &[u8], at: usize) -> usize {
+    let tail = bytes[at + 1..]
+        .iter()
+        .take(CHARACTER_TAIL_BYTES_MAX)
+        .take_while(|&&byte| byte & 0xc0 == 0x80)
+        .count();
+    at + 1 + tail
 }
 
 fn failure(code: &str) -> HostError {
@@ -328,12 +485,70 @@ pub trait Host: Send + Sync {
         Ok(false)
     }
 
+    /// The pane an input-only view of an agent stays on: the agent's own pane now, the one
+    /// `attach` would view, and the serial of the connection that found it. Takes the name.
+    /// Returns the pane, `terminal_agent_unknown` once the terminal is gone, or
+    /// `terminal_unavailable` for a host with no pane ids, whose views type by name.
+    fn own_pane_at(&self, _agent: &AgentId) -> Result<PaneAt, HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
+    /// Marks the pane of an agent's window whose first process is `pid` as the agent's app
+    /// pane, the one its prompts go to, for a pane an older engine started without that mark.
+    /// Takes the name and the pid its pane record kept. Returns Ok once marked, at once on a
+    /// host with no pane ids, or `APP_PANE_UNKNOWN` when no live pane has that pid.
+    fn tag_app(&self, _agent: &AgentId, _pid: u32) -> Result<(), HostError> {
+        Ok(())
+    }
+
+    /// The pane an agent's prompts go to: its app's own pane, never a teammate split off its
+    /// window, and the serial of the connection that found it. Takes the name. Returns the
+    /// pane, `APP_PANE_UNKNOWN` when no pane is known to be the app's, or `PINS_UNSUPPORTED`
+    /// for a host with no pane ids, whose prompts type by name.
+    fn app_pane_at(&self, _agent: &AgentId) -> Result<PaneAt, HostError> {
+        Err(failure(PINS_UNSUPPORTED))
+    }
+
+    /// Pastes keys straight into the pane a view stays on, as `paste` does by name, while the
+    /// connection that found that pane still serves it. Takes the name, the pane and 1 to
+    /// `PASTE_BYTES_MAX` keys. Returns true once pasted, false when this host cannot use it.
+    fn paste_at(&self, _agent: &AgentId, _at: &PaneAt, _keys: &[u8]) -> Result<bool, HostError> {
+        Ok(false)
+    }
+
+    /// Sizes the window of the pane a view stays on, as `resize` does by name, while the
+    /// connection that found that pane still serves it. Takes the name, the pane and the
+    /// size. Returns true once sized, false when this host cannot use that pane.
+    fn resize_at(
+        &self,
+        _agent: &AgentId,
+        _at: &PaneAt,
+        _size: (u16, u16),
+    ) -> Result<bool, HostError> {
+        Ok(false)
+    }
+
+    /// Names what a resize of the agent sizes, one key for every view whose resize sizes the
+    /// same thing, so the engine counts them together: by default the agent's own terminal.
+    /// Takes the name. Returns the unit's key.
+    fn unit(&self, agent: &AgentId) -> Result<String, HostError> {
+        Ok(agent_unit(agent))
+    }
+
     /// Tells whether the app in an agent terminal reads keys itself yet: interactive apps
     /// turn on bracketed paste once their own input is live, and keys typed before that
     /// go through the terminal's line editing, which turns Enter into a newline.
     /// Takes the name. Returns true once it is on, and always for a host that cannot tell.
     fn input_live(&self, _agent: &AgentId) -> Result<bool, HostError> {
         Ok(true)
+    }
+
+    /// Tells whether bracketed paste is on in the pane a view or a prompt stays on, as
+    /// `input_live` tells it by name, while the connection that found that pane still serves
+    /// it. Takes the name and the pane. Returns the answer, none when this host cannot use
+    /// that pane, or the answer by name on a host with no pane ids.
+    fn input_live_at(&self, agent: &AgentId, _at: &PaneAt) -> Result<Option<bool>, HostError> {
+        self.input_live(agent).map(Some)
     }
 
     /// Reads how long an agent terminal's app has drawn nothing: a working harness redraws
@@ -391,6 +606,20 @@ pub trait Host: Send + Sync {
     /// agent's own pane. Takes the name and the pane id. Returns the answer.
     fn input_live_pane(&self, _agent: &AgentId, _pane: &str) -> Result<bool, HostError> {
         Err(failure("terminal_unavailable"))
+    }
+
+    /// Pastes the owner's keys into the agent's own pane as one paste, bracketed only when
+    /// its app turned bracketed paste on. Takes the name and keys from `paste_keys`, 1 to
+    /// `PASTE_BYTES_MAX` bytes. Returns once the host took them all, or
+    /// `terminal_paste_unsupported` from a host that cannot paste.
+    fn paste(&self, _agent: &AgentId, _keys: &[u8]) -> Result<(), HostError> {
+        Err(failure("terminal_paste_unsupported"))
+    }
+
+    /// Pastes the owner's keys into one pane as `paste` does into the agent's own pane.
+    /// Takes the name, the pane id and the keys. Returns as `paste`.
+    fn paste_pane(&self, _agent: &AgentId, _pane: &str, _keys: &[u8]) -> Result<(), HostError> {
+        Err(failure("terminal_paste_unsupported"))
     }
 
     /// Gives a native teammate's pane its own name (DEC-104 K5a), so later calls by that
@@ -488,6 +717,15 @@ pub fn ended_code(code: &str) -> bool {
     matches!(code, "terminal_agent_unknown" | TEAMMATES_SERVER_ENDED)
 }
 
+/// What a host with no pane ids answers for an agent's app pane, so its prompts type by name.
+/// No tmux host answers it, so a failed connect fails the prompt instead (#686 r1 sec F1).
+pub(crate) const PINS_UNSUPPORTED: &str = "terminal_pins_unsupported";
+
+/// The refusal for a prompt to an agent whose app pane is not known while its window lives: a
+/// split window with no tag, an app pane gone beside a teammate, or a request's pin gone
+/// stale. Not an ended terminal, so a view stays and coord holds the message (#686 r1 F2).
+pub(crate) const APP_PANE_UNKNOWN: &str = "terminal_app_pane_unknown";
+
 /// The refusal for a native lead's teammates' socket answered by a server under another pid
 /// than the one the engine first reached there (PLC c).
 pub const TEAMMATES_SERVER_REPLACED: &str = "terminal_teammates_server_replaced";
@@ -531,8 +769,36 @@ impl Host for OwnServer {
         self.0.input_at(agent, at, bytes)
     }
 
+    fn own_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        self.0.own_pane_at(agent)
+    }
+
+    fn tag_app(&self, agent: &AgentId, pid: u32) -> Result<(), HostError> {
+        self.0.tag_app(agent, pid)
+    }
+
+    fn app_pane_at(&self, agent: &AgentId) -> Result<PaneAt, HostError> {
+        self.0.app_pane_at(agent)
+    }
+
+    fn paste_at(&self, agent: &AgentId, at: &PaneAt, keys: &[u8]) -> Result<bool, HostError> {
+        self.0.paste_at(agent, at, keys)
+    }
+
+    fn resize_at(&self, agent: &AgentId, at: &PaneAt, size: (u16, u16)) -> Result<bool, HostError> {
+        self.0.resize_at(agent, at, size)
+    }
+
+    fn unit(&self, agent: &AgentId) -> Result<String, HostError> {
+        self.0.unit(agent)
+    }
+
     fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
         self.0.input_live(agent)
+    }
+
+    fn input_live_at(&self, agent: &AgentId, at: &PaneAt) -> Result<Option<bool>, HostError> {
+        self.0.input_live_at(agent, at)
     }
 
     fn quiet(&self, agent: &AgentId) -> Result<Option<Duration>, HostError> {
@@ -585,6 +851,14 @@ impl Host for OwnServer {
 
     fn input_live_pane(&self, agent: &AgentId, pane: &str) -> Result<bool, HostError> {
         self.0.input_live_pane(agent, pane)
+    }
+
+    fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
+        self.0.paste(agent, keys)
+    }
+
+    fn paste_pane(&self, agent: &AgentId, pane: &str, keys: &[u8]) -> Result<(), HostError> {
+        self.0.paste_pane(agent, pane, keys)
     }
 
     fn adopt_pane(&self, agent: &AgentId, lead: &AgentId, pane: &str) -> Result<(), HostError> {
@@ -660,12 +934,27 @@ impl Host for PaneView {
         self.host.input_live_pane(agent, &self.pane)
     }
 
+    fn input_live_at(&self, agent: &AgentId, at: &PaneAt) -> Result<Option<bool>, HostError> {
+        if at.pane != self.pane {
+            return Ok(None);
+        }
+        self.host.input_live_at(agent, at)
+    }
+
+    fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
+        self.host.paste_pane(agent, &self.pane, keys)
+    }
+
     fn quiet(&self, agent: &AgentId) -> Result<Option<Duration>, HostError> {
         self.host.quiet(agent)
     }
 
     fn resize(&self, agent: &AgentId, cols: u16, rows: u16) -> Result<(), HostError> {
         self.host.resize(agent, cols, rows)
+    }
+
+    fn unit(&self, agent: &AgentId) -> Result<String, HostError> {
+        self.host.unit(agent)
     }
 
     fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
@@ -838,6 +1127,9 @@ pub fn plain_reason(code: &str) -> &'static str {
         "terminal_agent_running" => "This agent already has a terminal.",
         "terminal_agent_invalid" => "That is not an agent terminal.",
         "terminal_pane_unknown" => "That teammate's terminal has already closed.",
+        APP_PANE_UNKNOWN => {
+            "This agent's own pane could not be found, so the message was not sent."
+        }
         "terminal_project_full" => {
             "This project already runs 15 agents, the most one project may run at once."
         }
@@ -1185,8 +1477,26 @@ pub enum TerminalRequest {
         cols: u16,
         rows: u16,
     },
+    /// Opens a view of the agent's terminal, or one pane of its window, sized to `cols` by
+    /// `rows` and sending no output, for a viewer that draws the pane from elsewhere. With
+    /// `follows`, it sizes the window only while no view without it is open; the key is
+    /// left out when false, so the request reads as before to an engine without it.
+    AttachInput {
+        agent_id: AgentId,
+        pane: Option<String>,
+        cols: u16,
+        rows: u16,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        follows: bool,
+    },
     Input {
         bytes: Vec<u8>,
+    },
+    /// One chunk of 1 to `INPUT_BYTES_MAX` bytes of an owner paste of at most
+    /// `PASTE_BYTES_MAX`, the last one marked; the engine filters the whole and pastes it once.
+    Paste {
+        bytes: Vec<u8>,
+        last: bool,
     },
     Scroll {
         bytes: Vec<u8>,
@@ -1235,21 +1545,132 @@ pub fn prompt_keys(text: &str, bracketed: bool) -> Option<Vec<u8>> {
     Some(keys.into_bytes())
 }
 
+/// The keys one owner paste types, filtered here at the trust boundary as the desktop's
+/// `pasteText` filters it: every control character (C0, DEL and C1) is dropped except tab,
+/// line feed and carriage return, then CR LF and LF become CR, as a terminal sends Enter, so
+/// a paste can never press Escape, end a bracketed paste or send a Ctrl key. Takes the
+/// pasted text. Returns the keys, empty when nothing is left.
+pub fn paste_keys(text: &str) -> Vec<u8> {
+    let kept: String = text
+        .chars()
+        .filter(|character| matches!(character, '\t' | '\n' | '\r') || !character.is_control())
+        .collect();
+    let keys = kept.replace("\r\n", "\r").replace('\n', "\r");
+    assert!(!keys.contains('\x1b') && !keys.contains('\n') && !keys.contains('\0'));
+    assert!(keys.len() <= text.len());
+    keys.into_bytes()
+}
+
 /// Types one prompt into an agent's app as one submission: a paste when the app turned
-/// bracketed paste on, then Enter once the paste settled. Takes the host, the terminal name and
-/// the text. Returns whether it was typed; blank or oversized text types nothing.
+/// bracketed paste on, then Enter once the paste settled, all into the app's own pane, found
+/// once (V243-PASTE-INTERLEAVE-N0), or by name on a host with no pane ids. Takes the host, the
+/// terminal name and the text. Returns whether it was typed; blank or oversized text types
+/// nothing.
 pub fn type_prompt(host: &dyn Host, agent: &AgentId, text: &str) -> Result<bool, HostError> {
+    if let Some(at) = request_pin(host, agent)? {
+        return prompt_pinned(host, agent, &at, text, APP_PANE_UNKNOWN);
+    }
     let bracketed = host.input_live(agent)?;
+    prompt_into(text, bracketed, |keys| host.input(agent, keys))
+}
+
+/// Types one prompt into a view's pinned pane, as `type_prompt` does, never by name. Takes the
+/// host, the terminal name, the pane and the text. Returns as `type_prompt`, or
+/// `terminal_agent_unknown` once that pane is no longer one the host can type into, which ends
+/// the view so it opens again with a fresh pin, as its other pinned sends do.
+#[cfg(unix)]
+pub(crate) fn type_prompt_at(
+    host: &dyn Host,
+    agent: &AgentId,
+    at: &PaneAt,
+    text: &str,
+) -> Result<bool, HostError> {
+    prompt_pinned(host, agent, at, text, "terminal_agent_unknown")
+}
+
+/// Types one prompt's keys and Enter into a pinned pane, the paste mode read from that pane.
+/// Takes the host, the name, the pin, the text and the code a stale pin answers. Returns as
+/// `type_prompt`, or that code once the pin is stale.
+fn prompt_pinned(
+    host: &dyn Host,
+    agent: &AgentId,
+    at: &PaneAt,
+    text: &str,
+    stale: &'static str,
+) -> Result<bool, HostError> {
+    assert!(pane_id_valid(&at.pane), "a pin is a pane id");
+    assert!(
+        at.serial > 0,
+        "a pin names the control connection that found it"
+    );
+    let Some(bracketed) = host.input_live_at(agent, at)? else {
+        return Err(failure(stale));
+    };
+    prompt_into(text, bracketed, |keys| {
+        type_piece(host, agent, Some(at), keys, stale)
+    })
+}
+
+/// The pane one engine prompt goes to, found once so every piece of it lands in one pane
+/// (V243-PASTE-INTERLEAVE-N0): the agent's app pane, or none only on a host that answers
+/// `PINS_UNSUPPORTED`, which types by name. Takes the host and the name. Returns the pin,
+/// none, or the host's error, such as `APP_PANE_UNKNOWN` or a failed connect.
+pub(crate) fn request_pin(host: &dyn Host, agent: &AgentId) -> Result<Option<PaneAt>, HostError> {
+    match host.app_pane_at(agent) {
+        Ok(at) => Ok(Some(at)),
+        Err(problem) if problem.0 == PINS_UNSUPPORTED => Ok(None),
+        Err(problem) => Err(problem),
+    }
+}
+
+/// Types one piece of a request into the pane the request was pinned to, or by name with no
+/// pin. Takes the host, the name, the pin, at most `INPUT_BYTES_MAX` bytes and the code a
+/// stale pin answers: `APP_PANE_UNKNOWN` for a request's pin, `terminal_agent_unknown` for a
+/// view's. Returns once typed, or that code, never typing by name instead.
+pub(crate) fn type_piece(
+    host: &dyn Host,
+    agent: &AgentId,
+    pin: Option<&PaneAt>,
+    bytes: &[u8],
+    stale: &'static str,
+) -> Result<(), HostError> {
+    assert!(
+        bytes.len() <= INPUT_BYTES_MAX,
+        "a piece fits one input request"
+    );
+    assert!(
+        matches!(stale, APP_PANE_UNKNOWN | "terminal_agent_unknown"),
+        "a stale pin refuses the request or ends the view"
+    );
+    let Some(at) = pin else {
+        return host.input(agent, bytes);
+    };
+    assert!(pane_id_valid(&at.pane), "a pin is a pane id");
+    match host.input_at(agent, at, bytes)? {
+        true => Ok(()),
+        false => Err(failure(stale)),
+    }
+}
+
+/// Types one prompt's keys as one submission through the given typing: the keys in chunks of
+/// at most `INPUT_BYTES_MAX`, a settle when they went as a paste, then Enter. Takes the text,
+/// whether the app turned bracketed paste on and the typing. Returns whether it was typed;
+/// blank or oversized text types nothing.
+fn prompt_into(
+    text: &str,
+    bracketed: bool,
+    mut typing: impl FnMut(&[u8]) -> Result<(), HostError>,
+) -> Result<bool, HostError> {
     let Some(keys) = prompt_keys(text, bracketed) else {
         return Ok(false);
     };
     for chunk in keys.chunks(INPUT_BYTES_MAX) {
-        host.input(agent, chunk)?;
+        typing(chunk)?;
     }
     if bracketed {
         std::thread::sleep(PASTE_SETTLE);
     }
-    host.input(agent, b"\r")?;
+    typing(b"\r")?;
     Ok(true)
 }
 

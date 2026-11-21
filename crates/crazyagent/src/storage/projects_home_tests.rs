@@ -40,6 +40,64 @@ fn a_home_move_rechecks_agent_work_under_its_hold_before_the_first_write() {
     );
 }
 
+/// V243-FIRMLINK-HELD-INSIDE (sweep #1, rv-code4 F1): agent work recorded under either name
+/// of the home holds a home move, whichever name the home was saved under and whether the
+/// recorded worktree exists on disk or is gone or not made yet.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_home_move_sees_agent_work_recorded_under_either_name_of_the_home() {
+    let long =
+        |path: &Path| std::path::PathBuf::from(format!("/System/Volumes/Data{}", path.display()));
+    let cases = [false, true]
+        .into_iter()
+        .flat_map(|long_home| [false, true].map(|long_record| (long_home, long_record)))
+        .flat_map(|(long_home, long_record)| {
+            [false, true].map(|made| (long_home, long_record, made))
+        });
+    for (long_home, long_record, made) in cases {
+        let root = tempfile::tempdir().unwrap();
+        let base = root.path().canonicalize().unwrap();
+        let home = base.join("home");
+        let worktree = home.join("demo").join("agent-3");
+        std::fs::create_dir_all(&home).unwrap();
+        if made {
+            std::fs::create_dir_all(&worktree).unwrap();
+        }
+        assert!(long(&home).is_dir(), "{}", long(&home).display());
+        let saved = if long_home { long(&home) } else { home.clone() };
+        let recorded = if long_record {
+            long(&worktree)
+        } else {
+            worktree.clone()
+        };
+        let mut connection = Connection::open(base.join("engine.db")).unwrap();
+        initialize_authority_schemas(&connection).unwrap();
+        crate::projects_home::save(&connection, &saved).unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects_home_move VALUES (1,'request-7',7,?1,?2,'[\"demo\"]')",
+                params![saved.to_str().unwrap(), base.join("next").to_str().unwrap()],
+            )
+            .unwrap();
+        let repository = recorded.parent().unwrap();
+        connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (3,'demo',?1,?2,?3)",
+                params![
+                    repository.to_str().unwrap(),
+                    recorded.to_str().unwrap(),
+                    recorded.join(".git").to_str().unwrap()
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            projects_home::recheck(&mut connection, 7).unwrap(),
+            Err("home_move_agent_work".to_owned()),
+            "home saved long: {long_home}, record long: {long_record}, record made: {made}"
+        );
+    }
+}
+
 /// rv-sec3 S5b F2: a projects home move carries each moved project's GitHub publish job,
 /// named by the project's folder, to the project's folder in the new home, so a recorded
 /// publish is still found there and nothing is left under the old folder.
@@ -736,8 +794,8 @@ fn delete_everything_is_offered_only_on_macos_in_v2() {
 
 /// An add holds the projects home from its plan until its record or settle: the home is not
 /// set or moved elsewhere while a running row exists. An engine start removes the staging an
-/// add cut short left, deletes nothing else, and keeps only the newest end for the owner,
-/// until it is forgotten.
+/// add cut short left, deletes nothing else, and keeps each end for the owner in start order
+/// (DEC-197), until it is forgotten.
 #[test]
 fn an_add_holds_the_home_until_settled_and_a_start_reads_how_a_cut_add_ended() {
     let root = tempfile::tempdir().unwrap();
@@ -776,7 +834,7 @@ fn an_add_holds_the_home_until_settled_and_a_start_reads_how_a_cut_add_ended() {
         projects_home::add_settle(&mut connection, Some((&add_1, false))).unwrap(),
         1
     );
-    assert_eq!(projects_home::add_ended(&connection).unwrap(), None);
+    assert!(projects_home::add_ended(&connection).unwrap().is_empty());
 
     insert(&connection, "add-2");
     assert_eq!(projects_home::add_settle(&mut connection, None).unwrap(), 1);
@@ -785,14 +843,21 @@ fn an_add_holds_the_home_until_settled_and_a_start_reads_how_a_cut_add_ended() {
         std::fs::read_to_string(source.join("lib/a.txt")).unwrap(),
         "a\n"
     );
-    let ended = projects_home::add_ended(&connection).unwrap().unwrap();
+    let ended = projects_home::add_ended(&connection).unwrap();
+    let [ended] = ended.as_slice() else {
+        panic!("one end: {ended:?}");
+    };
     assert_eq!(ended.request.as_str(), "add-2");
     assert_eq!(ended.ended, "home_add_interrupted");
 
     std::fs::create_dir_all(landed.join("lib")).unwrap();
     insert(&connection, "add-3");
     assert_eq!(projects_home::add_settle(&mut connection, None).unwrap(), 1);
-    let ended = projects_home::add_ended(&connection).unwrap().unwrap();
+    let ended = projects_home::add_ended(&connection).unwrap();
+    let [older, ended] = ended.as_slice() else {
+        panic!("both ends: {ended:?}");
+    };
+    assert_eq!(older.request.as_str(), "add-2");
     assert_eq!(ended.request.as_str(), "add-3");
     assert_eq!(ended.ended, "home_move_source_left");
     assert_eq!(
@@ -805,10 +870,113 @@ fn an_add_holds_the_home_until_settled_and_a_start_reads_how_a_cut_add_ended() {
             row.get(0)
         })
         .unwrap();
-    assert_eq!(rows, 1, "only the newest end is kept");
+    assert_eq!(rows, 2, "each end is kept until forgotten");
     let add_3 = RequestId::new("add-3").unwrap();
     projects_home::job_forget(&connection, &add_3).unwrap();
-    assert_eq!(projects_home::add_ended(&connection).unwrap(), None);
+    let kept: Vec<_> = projects_home::add_ended(&connection).unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].request.as_str(), "add-2");
+}
+
+/// DEC-197: adds onto names apart run side by side, so several running rows can be left.
+/// Settling one leaves the others running and the home held; an engine start ends every
+/// running row, removes each staging, deletes nothing of either folder, and keeps each end
+/// for the owner in start order, the newest three, until it is forgotten.
+#[test]
+fn an_engine_start_ends_every_add_running_side_by_side_and_keeps_each_end() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let home = base.join("home");
+    let names = ["shop", "garden"];
+    for name in names {
+        std::fs::create_dir_all(base.join(name).join("lib")).unwrap();
+        std::fs::write(base.join(name).join("lib/a.txt"), format!("{name}\n")).unwrap();
+    }
+    let staging = [
+        home.join(".crazyagent-adding-00ff00ff00ff00ff"),
+        home.join(".crazyagent-adding-11ee11ee11ee11ee"),
+    ];
+    for folder in &staging {
+        std::fs::create_dir_all(folder.join("lib")).unwrap();
+    }
+    let mut connection = Connection::open(base.join("engine.db")).unwrap();
+    initialize_authority_schemas(&connection).unwrap();
+    crate::projects_home::save(&connection, &home).unwrap();
+    let insert = |connection: &Connection, request: &str, name: &str| {
+        connection
+            .execute(
+                "INSERT INTO projects_home_add(request, owner, source, destination, mode)
+                 VALUES (?1, 'owner', ?2, ?3, 'move')",
+                params![
+                    request,
+                    base.join(name).to_str().unwrap(),
+                    home.join(name).to_str().unwrap()
+                ],
+            )
+            .unwrap();
+    };
+    let running = |connection: &Connection| -> i64 {
+        connection
+            .query_row(
+                "SELECT count(*) FROM projects_home_add WHERE ended IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    insert(&connection, "add-shop", "shop");
+    insert(&connection, "add-garden", "garden");
+    let shop = RequestId::new("add-shop").unwrap();
+    assert_eq!(
+        projects_home::add_settle(&mut connection, Some((&shop, false))).unwrap(),
+        1
+    );
+    assert_eq!(running(&connection), 1, "garden still runs");
+    let elsewhere = crate::projects_home::HomeAction::SetHome {
+        path: base.join("elsewhere").to_str().unwrap().into(),
+    };
+    let held = {
+        let tx = connection.transaction().unwrap();
+        projects_home::execute(&tx, &base.join("engine.db"), &elsewhere).unwrap()
+    };
+    assert!(
+        format!("{held:?}").contains("home_add_in_progress"),
+        "{held:?}"
+    );
+
+    insert(&connection, "add-shop-2", "shop");
+    assert_eq!(projects_home::add_settle(&mut connection, None).unwrap(), 2);
+    assert_eq!(running(&connection), 0, "every running add ended");
+    for folder in &staging {
+        assert!(!folder.exists(), "{folder:?}");
+    }
+    for name in names {
+        assert_eq!(
+            std::fs::read_to_string(base.join(name).join("lib/a.txt")).unwrap(),
+            format!("{name}\n"),
+            "a start deletes nothing of {name}"
+        );
+    }
+    let ends = |connection: &Connection| -> Vec<String> {
+        let ended = projects_home::add_ended(connection).unwrap();
+        assert!(ended.iter().all(|end| end.ended == "home_add_interrupted"));
+        ended
+            .into_iter()
+            .map(|end| end.request.as_str().to_owned())
+            .collect()
+    };
+    assert_eq!(ends(&connection), ["add-garden", "add-shop-2"]);
+
+    insert(&connection, "add-3", "shop");
+    insert(&connection, "add-4", "garden");
+    assert_eq!(projects_home::add_settle(&mut connection, None).unwrap(), 2);
+    assert_eq!(
+        ends(&connection),
+        ["add-shop-2", "add-3", "add-4"],
+        "the oldest end goes past three"
+    );
+    projects_home::job_forget(&connection, &RequestId::new("add-3").unwrap()).unwrap();
+    assert_eq!(ends(&connection), ["add-shop-2", "add-4"]);
 }
 
 /// RV-DS241-198: an add whose folder landed in the projects home but whose record never
@@ -851,9 +1019,8 @@ fn an_add_whose_folder_landed_before_a_record_that_never_came_is_kept_as_ended()
 
     insert(&connection, "add-unlanded", "move");
     assert_eq!(settle(&mut connection, "add-unlanded", true), 1);
-    assert_eq!(
-        projects_home::add_ended(&connection).unwrap(),
-        None,
+    assert!(
+        projects_home::add_ended(&connection).unwrap().is_empty(),
         "an add that landed nothing is forgotten"
     );
 
@@ -862,6 +1029,7 @@ fn an_add_whose_folder_landed_before_a_record_that_never_came_is_kept_as_ended()
     assert_eq!(settle(&mut connection, "add-copied", true), 1);
     let ended = projects_home::add_ended(&connection)
         .unwrap()
+        .pop()
         .expect("a landed add whose record never came was forgotten");
     assert_eq!(
         (ended.request.as_str(), ended.mode, ended.ended.as_str()),
@@ -870,7 +1038,10 @@ fn an_add_whose_folder_landed_before_a_record_that_never_came_is_kept_as_ended()
 
     insert(&connection, "add-moved", "move");
     assert_eq!(settle(&mut connection, "add-moved", true), 1);
-    let ended = projects_home::add_ended(&connection).unwrap().unwrap();
+    let ended = projects_home::add_ended(&connection)
+        .unwrap()
+        .pop()
+        .unwrap();
     assert_eq!(
         (ended.request.as_str(), ended.mode, ended.ended.as_str()),
         (
@@ -884,7 +1055,7 @@ fn an_add_whose_folder_landed_before_a_record_that_never_came_is_kept_as_ended()
             row.get(0)
         })
         .unwrap();
-    assert_eq!(rows, 1, "only the newest end is kept");
+    assert_eq!(rows, 2, "each end is kept until forgotten");
     assert_eq!(
         std::fs::read_to_string(source.join("lib/a.txt")).unwrap(),
         "a\n",
@@ -897,12 +1068,18 @@ fn an_add_whose_folder_landed_before_a_record_that_never_came_is_kept_as_ended()
         0,
         "a recorded or settled add has no running row"
     );
-    let kept = projects_home::add_ended(&connection).unwrap().unwrap();
+    let kept = projects_home::add_ended(&connection)
+        .unwrap()
+        .pop()
+        .unwrap();
     assert_eq!(kept.request.as_str(), "add-moved");
 
     insert(&connection, "add-taken", "copy");
     assert_eq!(settle(&mut connection, "add-taken", false), 1);
-    let kept = projects_home::add_ended(&connection).unwrap().unwrap();
+    let kept = projects_home::add_ended(&connection)
+        .unwrap()
+        .pop()
+        .unwrap();
     assert_eq!(
         kept.request.as_str(),
         "add-moved",
@@ -1323,4 +1500,176 @@ fn a_setup_mark_ends_with_its_record_and_a_start_ends_the_rest_naming_the_newest
         crate::projects_home::setup_mark::start(&connection).unwrap(),
         None
     );
+}
+
+/// A fresh engine database with the owners started and the revision moved once past the
+/// start, for the plan rows: the folder, the database path, the config, the connection with
+/// its lock, the TUI owner's admission and the current revision.
+struct Moved {
+    root: tempfile::TempDir,
+    path: std::path::PathBuf,
+    cfg: EffectiveConfig,
+    db: Connection,
+    _lock: EngineLock,
+    admission: Admission,
+    now: u64,
+}
+
+impl Moved {
+    /// Opens the database, starts its owners and moves the revision once. Output: the fixture.
+    fn new() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = root.path().join("db");
+        let cfg =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let (mut db, lock) = open_database(&path, false).unwrap();
+        let admission = owner_start(&mut db).unwrap().owners[0].admission.clone();
+        db.execute("UPDATE state SET revision = revision + 1 WHERE id = 1", [])
+            .unwrap();
+        let now: i64 = db
+            .query_row("SELECT revision FROM state WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        let now = u64::try_from(now).unwrap();
+        assert!(now >= 1);
+        Self {
+            root,
+            path,
+            cfg,
+            db,
+            _lock: lock,
+            admission,
+            now,
+        }
+    }
+
+    /// A change request of the plan rows. Input: the mutation. Output: the request.
+    fn request(mutation: OwnerMutation) -> OwnerRequest {
+        OwnerRequest {
+            protocol_version: PROTOCOL_VERSION,
+            request_id: RequestId::new("plan-1").unwrap(),
+            expected_revision: Cursor::new(0),
+            operation: OwnerOperation::Apply { mutation },
+        }
+    }
+}
+
+/// How a plan ended, as the one code the rows compare. Input: the plan's result. Output:
+/// `planned`, or the refusal or error code.
+fn code<T>(planned: Result<Result<T, String>, EngineError>) -> String {
+    match planned {
+        Ok(Ok(_)) => "planned".into(),
+        Ok(Err(code)) | Err(EngineError(code)) => code,
+    }
+}
+
+/// An AddExistingFolder plan of a folder beside the database. Input: the fixture and the
+/// expected revision. Output: its code.
+fn add_planned(m: &mut Moved, expected: Option<&Cursor>) -> String {
+    let source = m.root.path().join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    code(
+        projects_home::add_plan(
+            &mut m.db,
+            &m.path,
+            &m.admission,
+            expected,
+            &RequestId::new("add-1").unwrap(),
+            source.to_str().unwrap(),
+            crate::projects_home::AddMode::Copy,
+            &[],
+        )
+        .map(Ok),
+    )
+}
+
+/// A MoveProjectHome plan of project `demo`. Input: the fixture and the expected revision.
+/// Output: its code.
+fn project_move_planned(m: &mut Moved, expected: Option<&Cursor>) -> String {
+    code(
+        projects_home::project_move_plan(
+            &mut m.db,
+            &m.path,
+            &m.admission,
+            expected,
+            &ProjectId::new("demo").unwrap(),
+            crate::projects_home::AddMode::Copy,
+            &[],
+            &RequestId::new("move-1").unwrap(),
+            1,
+        )
+        .map(Ok),
+    )
+}
+
+/// A Delete everything plan of project `demo`. Input: the fixture and the expected revision.
+/// Output: its code.
+fn delete_planned(m: &mut Moved, expected: Option<&Cursor>) -> String {
+    let request = Moved::request(OwnerMutation::DeleteProject {
+        project_id: ProjectId::new("demo").unwrap(),
+        name: "Demo".into(),
+    });
+    code(projects_home::delete_plan(
+        &mut m.db,
+        &m.path,
+        &m.admission,
+        &request,
+        expected,
+        1,
+    ))
+}
+
+/// A New Project plan of project `books`. Input: the fixture and the expected revision.
+/// Output: its code.
+fn new_project_planned(m: &mut Moved, expected: Option<&Cursor>) -> String {
+    let request = Moved::request(OwnerMutation::SetupProject {
+        project_id: ProjectId::new("books").unwrap(),
+        spec: ProjectSpec {
+            name: "Books".into(),
+            repositories: vec![],
+        },
+        setup: crate::project_setup::ProjectSetup {
+            about: "Tracks the books I want to read.".into(),
+            tech_stack: vec!["rust".into()],
+            platforms: vec![crate::project_setup::Platform::Website],
+            research: vec![],
+            pool: None,
+            team: None,
+            documents: vec![],
+        },
+    });
+    code(setup_plan(
+        &mut m.db,
+        &m.cfg,
+        &m.path,
+        &m.admission,
+        &request,
+        expected,
+    ))
+}
+
+/// V243-INTAKE-STALE-REVISION-RACE: every plan a job runs skips only the revision compare. At
+/// a revision the engine has moved past, an old revision is refused `stale_revision`, the
+/// current one is not, and a job, which names none, ends exactly as a client at the current
+/// revision does. Each probe gets its own database, so a plan's writes never reach another.
+#[test]
+fn a_job_plan_of_each_kind_skips_only_the_revision_compare() {
+    type Plan = fn(&mut Moved, Option<&Cursor>) -> String;
+    let kinds: [(&str, Plan); 4] = [
+        ("add", add_planned),
+        ("project move", project_move_planned),
+        ("delete", delete_planned),
+        ("new project", new_project_planned),
+    ];
+    for (kind, plan) in kinds {
+        let mut client = Moved::new();
+        let old = Cursor::new(client.now - 1);
+        assert_eq!(plan(&mut client, Some(&old)), "stale_revision", "{kind}");
+        let mut fresh = Moved::new();
+        let now = Cursor::new(fresh.now);
+        let current = plan(&mut fresh, Some(&now));
+        assert_ne!(current, "stale_revision", "{kind}");
+        assert_eq!(plan(&mut Moved::new(), None), current, "{kind}");
+    }
 }

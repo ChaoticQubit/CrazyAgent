@@ -75,7 +75,7 @@ export function ToolsSetupView({ status, ticks, onTick, busy, started, problem, 
     <span><Button onClick={onContinue}>Continue</Button></span>
   </div>;
   const { dependencies, pack, notes } = status.value;
-  const running = setupBusy(status.value);
+  const running = status.value.running;
   const locked = started || running;
   const approval = approvalLine(pack, ticks);
   const progress = setupProgress(status.value, ticks);

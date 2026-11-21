@@ -108,22 +108,7 @@ pub fn read_folder(folder: &Path) -> Result<ImportScan, EngineError> {
 }
 
 fn read_file(path: &Path) -> Option<String> {
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(
-            (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32,
-        );
-    }
-    #[cfg(not(unix))]
-    {
-        if !std::fs::symlink_metadata(path).ok()?.is_file() {
-            return None;
-        }
-    }
-    let file = options.open(path).ok()?;
+    let file = crate::platform::open_plain(path).ok()?;
     let meta = file.metadata().ok()?;
     if !meta.is_file() || meta.len() > FILE_BYTES_MAX {
         return None;
@@ -157,3 +142,19 @@ pub fn without_frontmatter(text: &str) -> &str {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn a_memory_file_that_is_a_link_is_not_read() {
+        let folder = tempfile::tempdir().unwrap();
+        let target = folder.path().join("secret.md");
+        std::fs::write(&target, "owner text").unwrap();
+        let link = folder.path().join("note.md");
+        std::os::windows::fs::symlink_file(&target, &link).unwrap();
+        assert_eq!(read_file(&target).as_deref(), Some("owner text"));
+        assert_eq!(read_file(&link), None);
+    }
+}

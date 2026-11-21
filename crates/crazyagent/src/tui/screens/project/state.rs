@@ -12,6 +12,7 @@ impl ProjectScreen {
             recovery: ProjectRecovery::new(project.clone()),
             roadmap: StatusLine::new(project.clone()),
             github_notice: false,
+            reinstall: None,
             sessions: Sessions::default(),
             project,
             name,
@@ -52,6 +53,9 @@ impl ProjectScreen {
             confirm_stop: None,
             confirm_remove: false,
             confirm_move: false,
+            move_left: None,
+            move_everything: false,
+            move_unread: false,
             removal: None,
             remove_choice: RemoveChoice::Dashboard,
             remove_everything: false,
@@ -1166,6 +1170,43 @@ impl ProjectScreen {
         &transcript.messages[skip..]
     }
 
+    /// Says whether `a` hands the reinstall offer's draft to the master's input: an offer is
+    /// kept and the master can take a message, a pool assigned and its transcript read and
+    /// signed in. Takes the screen. Returns the answer.
+    pub fn reinstall_ask(&self) -> bool {
+        self.reinstall.is_some() && self.master_usable()
+    }
+
+    /// Says whether the reinstall offer adds that an account is needed first: the master's
+    /// accounts aren't signed in. Takes the screen. Returns the answer.
+    pub fn reinstall_signed_out(&self) -> bool {
+        self.reinstall.is_some()
+            && self
+                .transcript
+                .as_ref()
+                .is_some_and(|t| matches!(t.status, MasterStatus::NotSignedIn))
+    }
+
+    /// Hands the reinstall offer's drafted message to the master's input and starts typing;
+    /// the offer stays until it is dismissed. When the owner's text and the draft pass one
+    /// message's bound, the input stays as typed and the problem says why, so nothing is cut.
+    /// Takes the screen. Returns nothing.
+    fn ask_reinstall(&mut self) {
+        let draft = self
+            .reinstall
+            .as_ref()
+            .expect("a only asks while an offer is kept")
+            .draft
+            .clone();
+        let text = console::seeded(self.input.value(), &draft);
+        if text.len() > MESSAGE_BYTES_MAX {
+            self.problem = Some(REINSTALL_TOO_LONG.into());
+            return;
+        }
+        self.input.set(&text);
+        self.typing = true;
+    }
+
     /// Says whether the master can take a message now.
     /// Takes the screen.
     /// Returns false without a pool or while the master is not ready.
@@ -1239,6 +1280,13 @@ impl ProjectScreen {
             KeyCode::Char('t') if !control => ProjectReply::Team,
             KeyCode::Char('e') if !control && self.transcript.as_ref().is_some_and(|t| t.open) => {
                 ProjectReply::EndConversation
+            }
+            KeyCode::Char('a') if !control && self.reinstall_ask() => {
+                self.ask_reinstall();
+                ProjectReply::Handled
+            }
+            KeyCode::Char('d') if !control && self.reinstall.is_some() => {
+                ProjectReply::ReinstallDismiss
             }
             KeyCode::PageUp => self.scroll_transcript(5),
             KeyCode::PageDown => self.scroll_transcript(-5),

@@ -279,3 +279,65 @@ fn runs_started_together_from_their_own_profiles_are_each_ended_only_by_their_ow
     assert_ne!(runs[1].profile, runs[2].profile);
     each_warden_ends_only_its_own_run([&runs[0], &runs[1], &runs[2]]);
 }
+
+/// Runs [`hear`] for `wait` on the engine end of a fresh pair while `peer` acts on the
+/// warden's end on its own thread. Inputs: what the warden end does and the wait. Output:
+/// what `hear` found and how many read passes it made.
+fn heard_with(
+    peer: impl FnOnce(std::os::unix::net::UnixStream) + Send + 'static,
+    wait: Duration,
+) -> (Heard, usize) {
+    let (engine, warden) = crate::spawn_gate::unix_pair_std().unwrap();
+    engine.set_nonblocking(true).unwrap();
+    let acting = std::thread::spawn(move || peer(warden));
+    let before = HEARD.get();
+    let heard = hear(&engine, &mut [0_u8; 1], Instant::now() + wait);
+    let passes = HEARD.get() - before;
+    acting.join().unwrap();
+    assert!(passes >= 1);
+    (heard, passes)
+}
+
+#[test]
+fn a_silent_warden_is_waited_for_in_one_wait_not_a_retry_loop() {
+    let (heard, passes) = heard_with(
+        |warden| {
+            std::thread::sleep(Duration::from_millis(400));
+            drop(warden);
+        },
+        Duration::from_millis(200),
+    );
+    assert_eq!(heard, Heard::Silent);
+    assert!(passes <= 3, "{passes} read passes over a silent 200 ms");
+}
+
+#[test]
+fn a_warden_report_that_comes_late_ends_the_wait_in_a_few_passes() {
+    let (heard, passes) = heard_with(
+        |mut warden| {
+            use std::io::Write;
+
+            std::thread::sleep(Duration::from_millis(100));
+            warden.write_all(b"A").unwrap();
+        },
+        Duration::from_secs(2),
+    );
+    assert_eq!(heard, Heard::Bytes(1));
+    assert!(passes <= 3, "{passes} read passes for a report 100 ms late");
+}
+
+#[test]
+fn a_warden_end_closed_while_the_engine_waits_ends_the_wait_without_spinning() {
+    let (heard, passes) = heard_with(
+        |warden| {
+            std::thread::sleep(Duration::from_millis(100));
+            drop(warden);
+        },
+        Duration::from_secs(2),
+    );
+    assert_eq!(heard, Heard::Closed);
+    assert!(
+        passes <= 3,
+        "{passes} read passes for an end closed 100 ms in"
+    );
+}

@@ -328,16 +328,28 @@ fn windows_path_command_hands_the_folder_over_in_its_environment_only() {
         .collect();
     assert_eq!(args[..3], ["-NoProfile", "-NonInteractive", "-Command"]);
     assert!(args[3].contains(&format!("$f=$env:{WINDOWS_PATH_FOLDER_VARIABLE};")));
+    assert!(args[3].contains("$r=$env:CRAZYAGENT_PATH_KEY;"));
+    assert!(
+        !args[3].contains("HKCU:"),
+        "the key is handed over as data too"
+    );
     assert!(!args[3].contains("$args"));
     assert!(!args[3].contains("Cra'zy"));
     assert_eq!(args.len(), 4);
-    let envs: Vec<_> = command.get_envs().collect();
+    let mut envs: Vec<_> = command.get_envs().collect();
+    envs.sort();
     assert_eq!(
         envs,
-        [(
-            OsStr::new(WINDOWS_PATH_FOLDER_VARIABLE),
-            Some(folder.as_os_str())
-        )]
+        [
+            (
+                OsStr::new(WINDOWS_PATH_FOLDER_VARIABLE),
+                Some(folder.as_os_str())
+            ),
+            (
+                OsStr::new("CRAZYAGENT_PATH_KEY"),
+                Some(OsStr::new(r"HKCU:\Environment"))
+            )
+        ]
     );
 }
 
@@ -371,27 +383,29 @@ fn windows_path_command_keeps_the_user_path_kind_and_its_unexpanded_text() {
     );
 }
 
-/// Serializes the tests that change the user's stored PATH, so one never restores over
-/// another's change.
+/// Builds one PowerShell command for a script and its environment, with no input and both
+/// outputs collected. Inputs: the script and the variables. Output: the command.
 #[cfg(windows)]
-static USER_PATH: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn powershell_command(script: &str, env: &[(&str, &str)]) -> std::process::Command {
+    assert!(!script.is_empty());
+    let mut command = std::process::Command::new("powershell.exe");
+    command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    for (name, value) in env {
+        assert!(!name.is_empty());
+        command.env(name, value);
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    command
+}
 
 /// Runs one PowerShell script with the given environment. Takes the script and the
 /// variables. Returns its standard output; panics when PowerShell fails.
 #[cfg(windows)]
 fn powershell(script: &str, env: &[(&str, &str)]) -> String {
-    let mut command = std::process::Command::new("powershell.exe");
-    command.args(["-NoProfile", "-NonInteractive", "-Command", script]);
-    for (name, value) in env {
-        command.env(name, value);
-    }
-    let output = crate::spawn_gate::output(
-        command
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped()),
-    )
-    .unwrap();
+    let output = crate::spawn_gate::output(&mut powershell_command(script, env)).unwrap();
     assert!(output.status.success(), "{output:?}");
     String::from_utf8(output.stdout).unwrap()
 }
@@ -2565,6 +2579,26 @@ fn one_access_listing_reads_a_whole_path_and_a_repeat_lists_only_changed_parts()
         Vec::<PathBuf>::new(),
         "read in a later second, it is kept"
     );
+}
+
+#[test]
+fn an_unusable_system_folder_refuses_the_start_and_is_named_before_every_other_cause() {
+    use crate::engine::bootstrap::refuse_unsafe_git;
+    use crate::research::runner::GIT_SAFE_UNAVAILABLE;
+    assert!(refuse_unsafe_git(None).is_ok());
+    assert_eq!(
+        refuse_unsafe_git(Some(GIT_SAFE_UNAVAILABLE)).map_err(|error| error.0),
+        Err(GIT_SAFE_UNAVAILABLE.to_owned())
+    );
+    for backup_failed in [false, true] {
+        assert_eq!(
+            failure_code(Some(GIT_SAFE_UNAVAILABLE), backup_failed),
+            GIT_SAFE_UNAVAILABLE,
+            "the TUI and the desktop name the refusal first, backup failed {backup_failed}"
+        );
+    }
+    assert_eq!(failure_code(None, true), "engine_backup_failed");
+    assert_eq!(failure_code(None, false), "engine_start_failed");
 }
 
 /// The launchd property list rows: what the plist runs, the environment it gives the

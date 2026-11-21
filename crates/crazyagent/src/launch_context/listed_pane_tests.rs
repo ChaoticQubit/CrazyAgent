@@ -22,8 +22,7 @@ fn pane_request(harness: &str, home: &Path, work: &Path, profile: &Path) -> Laun
         },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile.to_path_buf()),
-        unconfined: false,
+        boundary: crate::harnesses::launch::LaunchBoundary::Profile(profile.to_path_buf()),
         git_identity: None,
         limits: LaunchLimits::default(),
     }
@@ -239,8 +238,8 @@ fn a_listed_pane_at_full_access_is_refused_its_hand_over() {
     let installed = context.install_listed(&appended, &home, true).unwrap();
     let unused = work.join("project.sb");
     let mut request = pane_request("standin-jsonl-append", &home, &work, &unused);
-    request.sandbox_profile = None;
-    request.unconfined = true;
+    let scratch = work.parent().unwrap().to_path_buf();
+    request.boundary = crate::harnesses::launch::full_access_for_test(&work, &scratch);
 
     let refused = command_with(&request, Some(&installed), &run, Some(&settings));
 

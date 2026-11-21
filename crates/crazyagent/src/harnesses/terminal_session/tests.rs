@@ -83,7 +83,8 @@ mod own_turns {
     use super::super::{TerminalSession, TranscriptEvent};
     use crate::harnesses::interactive::claude_project_folder;
     use crate::harnesses::launch::{
-        AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Secret, group_alive,
+        AccountBinding, LaunchBoundary, LaunchEvent, LaunchLimits, LaunchRequest, Secret,
+        group_alive,
     };
     use crate::terminal::tmux::{SOCKET, Tmux, installed};
     use crate::terminal::{AgentId, FOLDER, Host};
@@ -176,6 +177,27 @@ mod own_turns {
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         let profile = base.join("agent.sb");
         std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+        let boundary = if unconfined {
+            let tmp = base.join("full-access-tmp");
+            private(&tmp);
+            let sandbox = crate::sandbox::ProjectSandbox::new(
+                &work,
+                &home,
+                &tmp,
+                crate::sandbox::SandboxNetwork::Open,
+            )
+            .unwrap();
+            let installed = crate::sandbox::InstalledSandbox::install(
+                sandbox,
+                &base.join("full-access.sb"),
+                crate::sandbox::LinuxSupervisor::On,
+                crate::sandbox::LinuxStrict::Off,
+            )
+            .unwrap();
+            LaunchBoundary::Installed(Arc::new(installed.unconfined()))
+        } else {
+            LaunchBoundary::Profile(profile)
+        };
         let request = LaunchRequest {
             harness: "claude-code".into(),
             executable,
@@ -187,8 +209,7 @@ mod own_turns {
             },
             model: None,
             tools: true,
-            sandbox_profile: (!unconfined).then_some(profile),
-            unconfined,
+            boundary,
             git_identity: None,
             limits: LaunchLimits::default(),
         };
@@ -267,6 +288,105 @@ mod own_turns {
             confined.session.lineage.is_none(),
             "a confined pane its host keeps has no lineage to follow"
         );
+    }
+
+    /// V243-PASTE-INTERLEAVE-N0 R4: a prompt the session types reaches its own app pane,
+    /// paste and Enter, while the active pane moves after the first command to a teammate
+    /// split off its window, as a native lead's split or a focus change can move it.
+    #[test]
+    fn a_session_prompt_stays_in_its_own_pane_when_the_active_pane_moves() {
+        let name = "own-pane-once-1";
+        let mut pane = start(name);
+        let server = &pane._server;
+        let own = format!("#{{==:#{{window_name}},{name}}}");
+        let app = tmux_on(
+            server,
+            &["list-panes", "-a", "-f", &own, "-F", "#{pane_id}"],
+        );
+        assert!(crate::terminal::pane_id_valid(&app), "one app pane: {app}");
+        let theirs = pane.home.join("teammate");
+        let mate = split_teammate(server, &app, &theirs);
+        let moved = format!("select-pane -t {mate}");
+        tmux_on(
+            server,
+            &["set-hook", "-w", "-t", &app, "after-send-keys", &moved],
+        );
+        pane.session.send("typed prompt").unwrap();
+        for target in [&app, &mate] {
+            tmux_on(server, &["send-keys", "-t", target, "-H", "23"]);
+        }
+        let until = Instant::now() + Duration::from_secs(10);
+        let typed = marked(&pane.home.join("typed"), until);
+        assert_eq!(
+            typed, b"\x1b[200~typed prompt\x1b[201~\r#",
+            "paste and Enter in one pane"
+        );
+        assert_eq!(
+            marked(&theirs, until),
+            b"#",
+            "nothing of the prompt reaches the teammate"
+        );
+    }
+
+    /// Runs one tmux command on the row's own server. Inputs: the server and the command's
+    /// words. Output: what tmux printed, trimmed; a command that fails fails the row.
+    fn tmux_on(server: &Server, args: &[&str]) -> String {
+        let output = crate::spawn_gate::collected(
+            Command::new(&server.tmux)
+                .arg("-S")
+                .arg(&server.socket)
+                .args(args)
+                .env_clear(),
+        )
+        .unwrap();
+        assert!(output.status.success(), "tmux {args:?} failed");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    /// Splits a teammate pane off `app` that writes every byte it gets to `theirs`, and waits
+    /// until it reads. Inputs: the server, the app pane id and the teammate's file. Output:
+    /// the teammate's pane id.
+    fn split_teammate(server: &Server, app: &str, theirs: &Path) -> String {
+        let ready = theirs.with_extension("ready");
+        let script = format!(
+            "stty raw -echo; : > '{}'; exec /bin/cat > '{}'",
+            ready.display(),
+            theirs.display()
+        );
+        let split = [
+            "split-window",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            app,
+            "--",
+        ];
+        let mate = tmux_on(server, &[&split[..], &["/bin/sh", "-c", &script]].concat());
+        assert!(
+            crate::terminal::pane_id_valid(&mate),
+            "the split names its pane: {mate}"
+        );
+        let until = Instant::now() + Duration::from_secs(10);
+        while !ready.exists() {
+            assert!(Instant::now() < until, "the teammate pane never got ready");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        mate
+    }
+
+    /// Waits until `file` ends with the `#` mark the row types last. Inputs: the file and the
+    /// deadline. Output: the file's bytes, mark included.
+    fn marked(file: &Path, until: Instant) -> Vec<u8> {
+        loop {
+            let bytes = std::fs::read(file).unwrap_or_default();
+            if bytes.ends_with(b"#") {
+                return bytes;
+            }
+            assert!(Instant::now() < until, "no mark reached {}", file.display());
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
@@ -1141,8 +1261,9 @@ fn keyed_listed(base: &Path) -> (PathBuf, LaunchRequest) {
         },
         model: None,
         tools: true,
-        sandbox_profile: None,
-        unconfined: false,
+        boundary: crate::harnesses::launch::LaunchBoundary::Profile(std::path::PathBuf::from(
+            "/unused.sb",
+        )),
         git_identity: None,
         limits: LaunchLimits::default(),
     };

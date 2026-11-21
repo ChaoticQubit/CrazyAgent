@@ -260,7 +260,7 @@ impl Screen for Harnesses {
     fn busy(&self, _ctx: &Ctx) -> bool {
         self.waiting
             || !self.asking.is_empty()
-            || self.running.is_some()
+            || !self.running.is_empty()
             || !self.finding.is_empty()
             || self.sending_node
     }

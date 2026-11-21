@@ -31,6 +31,10 @@ pub mod instruction_check;
 /// model reply, the pool rule and the one confined model run.
 pub mod instruction_cleanup;
 pub mod instruction_files;
+/// The owner-class endpoints, named by path: the engine and owner listeners, their clients
+/// and the check of the peer at each end: a Unix socket guarded by its parent folder, or on
+/// Windows a named pipe whose pipes file in that folder pins the serving engine.
+pub(crate) mod ipc;
 #[cfg(unix)]
 pub mod isolation;
 pub mod landing;

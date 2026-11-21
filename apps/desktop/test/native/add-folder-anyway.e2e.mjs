@@ -200,7 +200,9 @@ async function movedOnce(source, overrides) {
   assert.deepEqual(adds[0].args.overrides, overrides, "the start sends only the overrides for issues the engine refuses");
   const started = adds[0].answer?.value;
   assert.ok(started && started.source === source && started.mode === "move", `the engine started the move job: ${JSON.stringify(adds[0].answer)}`);
-  const job = await value(run.bridge, "desktop_intake_status");
+  const jobs = await value(run.bridge, "desktop_intake_status");
+  assert.ok(Array.isArray(jobs), `status lists the jobs: ${JSON.stringify(jobs)}`);
+  const job = jobs.find((listed) => listed.id === started.id);
   assert.equal(job?.id, started.id, `the engine still shows the started job: ${JSON.stringify(job)}`);
   assert.equal(job.state.state, "done", `the engine reads the move job as done: ${JSON.stringify(job)}`);
 }

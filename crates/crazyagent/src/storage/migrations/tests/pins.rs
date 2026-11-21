@@ -330,11 +330,12 @@ fn a_pinned_backup_joins_the_rotation_after_thirty_days() {
         .map(|hour| made(V24_VERSION_MAX + 1, start + HOUR * hour))
         .collect();
 
-    prune(&folder, start + DAY * (PINNED_DAYS - 1)).unwrap();
+    let newest = folder.join(later.last().unwrap());
+    prune(&folder, &newest, start + DAY * (PINNED_DAYS - 1)).unwrap();
     assert!(folder.join(&pinned).is_dir());
     assert_eq!(names(&root).len(), BACKUPS_KEPT + 1);
 
-    prune(&folder, start + DAY * PINNED_DAYS).unwrap();
+    prune(&folder, &newest, start + DAY * PINNED_DAYS).unwrap();
     assert!(!folder.join(&pinned).exists());
     assert_eq!(names(&root), later);
 }

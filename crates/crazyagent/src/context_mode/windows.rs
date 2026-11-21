@@ -45,9 +45,17 @@ pub(super) fn npm_ready(bin: &Path) -> bool {
     runnable(&npm_cli(bin))
 }
 
+/// The first drive root among `paths` whose list keeps every app container from reading its
+/// attributes, so a boxed Node.js script there fails to resolve its own path
+/// ([`crazyagent_win_sandbox::unreadable_drive_root`]). Input: the paths. Output: that root,
+/// or none.
+pub(super) fn unreadable_drive_root(paths: &[&Path]) -> Option<PathBuf> {
+    crazyagent_win_sandbox::unreadable_drive_root(paths.iter().copied())
+}
+
 /// The network the install's npm may reach on Windows: open, for this step only, because the
-/// AppContainer refuses every endpoint limit (`FIREWALL_RULE_MISSING`) and the pinned program
-/// needs npm's dependencies. Scripts stay off and both pins are checked before it runs.
+/// pinned program needs npm's dependencies and the AppContainer widens any host limit to the
+/// internet client anyway (DESIGN-0256 O2a). Scripts stay off and both pins are checked first.
 pub(super) fn npm_network() -> SandboxNetwork {
     SandboxNetwork::Open
 }
@@ -70,16 +78,43 @@ pub(super) fn open_plain(path: &Path) -> Option<File> {
     open_no_link(OpenOptions::new().read(true), path)
 }
 
+/// Opens a lock file, created when missing, with no link followed. Input: the lock file.
+/// Output: the file, or `setup_store_unavailable`.
+fn open_lock(path: &Path) -> Result<File, InstallError> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    open_no_link(&mut options, path).ok_or(InstallError("setup_store_unavailable"))
+}
+
 /// Takes the exclusive lock on an install's lock file, created with no link followed,
 /// waiting while another installer holds it. Input: the lock file. Output: the held lock, or
 /// `setup_store_unavailable`.
 pub(super) fn lock(path: &Path) -> Result<Lock, InstallError> {
-    let unavailable = InstallError("setup_store_unavailable");
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
-    let file = open_no_link(&mut options, path).ok_or(unavailable)?;
-    file.lock().map_err(|_| unavailable)?;
+    let file = open_lock(path)?;
+    file.lock()
+        .map_err(|_| InstallError("setup_store_unavailable"))?;
     Ok(Lock(file))
+}
+
+/// Takes a shared lock on a lock file, waiting only while an exclusive holder has it. Input:
+/// the lock file. Output: the held lock, or `setup_store_unavailable`.
+pub(super) fn lock_shared(path: &Path) -> Result<Lock, InstallError> {
+    let file = open_lock(path)?;
+    file.lock_shared()
+        .map_err(|_| InstallError("setup_store_unavailable"))?;
+    Ok(Lock(file))
+}
+
+/// Takes the exclusive lock on a lock file only when no other handle holds it, never
+/// waiting. Input: the lock file. Output: the held lock, none while another handle holds it,
+/// or `setup_store_unavailable`.
+pub(super) fn try_lock(path: &Path) -> Result<Option<Lock>, InstallError> {
+    let file = open_lock(path)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(Lock(file))),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(_)) => Err(InstallError("setup_store_unavailable")),
+    }
 }
 
 /// Creates a folder and its parents, or checks an existing one, refusing a link or a file
@@ -155,7 +190,8 @@ pub(super) fn npm_invocation(bin: &Path, cwd: &Path) -> Command {
 /// Builds the install's npm command inside its installed boundary, the AppContainer and job
 /// the helper starts. No PATH is added: `node.exe` and `npm-cli.js` are absolute and scripts
 /// are off. Inputs: the boundary, the engine root, the profile path, npx's folder and npm's
-/// working folder. Output: the command, or the refusal.
+/// working folder. Output: the command, or the refusal, Node.js's own code when npx's folder
+/// is one no app container may read and this user cannot change.
 pub(super) fn npm_wrap(
     sandbox: ProjectSandbox,
     root: &Path,
@@ -165,6 +201,39 @@ pub(super) fn npm_wrap(
 ) -> Result<Command, InstallError> {
     let settings = boundary_settings(root)?;
     let (calls, strict) = (settings.linux_supervisor, settings.linux_strict);
-    let sandbox = InstalledSandbox::install(sandbox, profile, calls, strict).map_err(refused)?;
+    let real = crate::sandbox::canonical(bin).map_err(refused)?;
+    let sandbox = InstalledSandbox::install(sandbox, profile, calls, strict)
+        .map_err(|error| super::boundary_refused(&real, error))?;
     sandbox.wrap(&npm_invocation(bin, cwd)).map_err(refused)
+}
+
+/// Takes back what the boundary granted a finished job's container and deletes the container
+/// ([`crazyagent_win_sandbox::release`]), then deletes the profile. The container is named
+/// from the canonical job folder and home its launch used, read before the job ran, since the
+/// job may rename or delete its own folders ([`crate::sandbox::windows::container_for`]). A
+/// profile never written means nothing was granted. Inputs: the job's profile, folder and
+/// home. Output: whether nothing is left; a profile that cannot be read or a refused release
+/// is logged with its cause and kept.
+pub(super) fn release(profile: &Path, folder: &Path, home: &Path) -> bool {
+    assert!(folder.is_absolute(), "{}", folder.display());
+    assert!(home.is_absolute(), "{}", home.display());
+    match std::fs::symlink_metadata(profile) {
+        Ok(_) => {}
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(problem) => {
+            eprintln!("context_mode_container_not_released cause={problem}");
+            return false;
+        }
+    }
+    let container = crate::sandbox::windows::container_for(folder, home);
+    match crazyagent_win_sandbox::release(profile, &container) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(profile);
+            true
+        }
+        Err(cause) => {
+            eprintln!("context_mode_container_not_released cause={cause}");
+            false
+        }
+    }
 }

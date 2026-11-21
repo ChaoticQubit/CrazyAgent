@@ -5,6 +5,8 @@ use crate::protocol::RequestId;
 
 fn job(state: JobState) -> JobView {
     JobView {
+        left: Vec::new(),
+        left_more: None,
         id: RequestId::new("add-1").unwrap(),
         kind: crate::projects_home::job::JobKind::Add,
         project_id: None,
@@ -30,7 +32,11 @@ fn failed(code: &str, phase: Phase) -> JobState {
 #[test]
 fn an_intake_job_line_says_what_it_does_now_with_counts_as_files_land() {
     let downloading = |done, total| JobState::Downloading {
-        progress: Progress { total, done },
+        progress: Progress {
+            total,
+            done,
+            ..Default::default()
+        },
     };
     assert_eq!(
         line(&job(downloading(0, 0))),
@@ -38,7 +44,7 @@ fn an_intake_job_line_says_what_it_does_now_with_counts_as_files_land() {
     );
     assert_eq!(
         line(&job(downloading(12, 3000))),
-        "Downloading shop from iCloud: 12 of 3000 files"
+        "macOS is downloading shop: 12 of 3000 files"
     );
     assert_eq!(line(&job(copying(0, 0))), "Moving shop...");
     let copy_job = |state| JobView {
@@ -133,29 +139,92 @@ fn an_intake_job_offers_stop_while_it_runs_retry_only_when_nothing_landed() {
     assert!(!running(&job(JobState::Done)));
 }
 
+/// DEC-197: each job's end is said once, when the read after shows a job that ran or waited
+/// before has ended, while the jobs beside it still run.
 #[test]
-fn a_jobs_end_is_said_once_when_the_read_after_a_running_one_shows_it_ended() {
+fn each_jobs_end_is_said_once_while_the_jobs_beside_it_still_run() {
     let running_job = job(copying(3, 0));
     let done = job(JobState::Done);
-    assert_eq!(
-        end_line(Some(&running_job), Some(&done)).as_deref(),
-        Some("shop is in your projects folder. Set it up from Home.")
-    );
-    assert_eq!(end_line(Some(&done), Some(&done)), None);
-    assert_eq!(end_line(None, Some(&done)), None);
-    assert_eq!(end_line(Some(&running_job), Some(&running_job)), None);
-    assert_eq!(end_line(Some(&running_job), None), None);
-    let other = JobView {
+    let garden = JobView {
         id: RequestId::new("add-2").unwrap(),
+        source: "/Users/mira/Desktop/garden".into(),
+        ..job(copying(1, 0))
+    };
+    let said = |before: &[JobView], after: &[JobView]| {
+        ended(before, after)
+            .into_iter()
+            .map(line)
+            .collect::<Vec<_>>()
+    };
+    let shop_done = "shop is in your projects folder. Set it up from Home.";
+    assert_eq!(
+        said(
+            std::slice::from_ref(&running_job),
+            std::slice::from_ref(&done)
+        ),
+        [shop_done]
+    );
+    assert_eq!(
+        said(
+            &[running_job.clone(), garden.clone()],
+            &[done.clone(), garden.clone()]
+        ),
+        [shop_done]
+    );
+    assert!(said(std::slice::from_ref(&done), std::slice::from_ref(&done)).is_empty());
+    assert!(said(&[], std::slice::from_ref(&done)).is_empty());
+    assert!(
+        said(
+            std::slice::from_ref(&running_job),
+            std::slice::from_ref(&running_job)
+        )
+        .is_empty()
+    );
+    assert!(said(std::slice::from_ref(&running_job), &[]).is_empty());
+    let other = JobView {
+        id: RequestId::new("add-9").unwrap(),
         ..done
     };
-    assert_eq!(end_line(Some(&running_job), Some(&other)), None);
+    assert!(said(std::slice::from_ref(&running_job), &[other]).is_empty());
+    let waiting = job(JobState::Waiting {
+        behind: "garden".into(),
+    });
+    assert!(
+        said(std::slice::from_ref(&waiting), &[running_job]).is_empty(),
+        "a waiting job let go is still at work"
+    );
+    let cancelled = job(JobState::Cancelled {
+        phase: Phase::Waiting,
+    });
+    assert_eq!(
+        said(&[waiting], &[cancelled]),
+        ["Adding shop stopped. Nothing was moved or copied."]
+    );
+}
+
+/// DEC-197: a job waiting its turn names the job it waits behind, offers Stop, and reads
+/// Waiting on its card and in the header.
+#[test]
+fn a_job_waiting_its_turn_names_the_job_it_waits_behind_and_offers_stop() {
+    let waiting = job(JobState::Waiting {
+        behind: "garden".into(),
+    });
+    assert_eq!(line(&waiting), "Waiting for garden to finish...");
+    assert_eq!(actions(&waiting), [JobAction::Stop]);
+    assert_eq!(badge(&waiting), (Status::Active, "Waiting"));
+    assert_eq!(next(&waiting), "Enter stops it.");
+    assert_eq!(brief(&waiting, "~"), "shop: waiting");
+    assert!(running(&waiting));
 }
 
 #[test]
 fn home_s_job_card_names_the_state_in_the_desktop_s_words_and_says_what_its_keys_do() {
     let downloading = JobState::Downloading {
-        progress: Progress { total: 3, done: 1 },
+        progress: Progress {
+            total: 3,
+            done: 1,
+            ..Default::default()
+        },
     };
     let rows = [
         (
@@ -226,7 +295,11 @@ fn home_s_job_card_names_the_state_in_the_desktop_s_words_and_says_what_its_keys
 #[test]
 fn the_header_brief_says_what_a_running_job_does_with_its_count_and_a_short_name() {
     let downloading = |done, total| JobState::Downloading {
-        progress: Progress { total, done },
+        progress: Progress {
+            total,
+            done,
+            ..Default::default()
+        },
     };
     let briefs = [
         (job(downloading(0, 0)), "Downloading shop..."),
@@ -260,6 +333,8 @@ fn the_header_brief_says_what_a_running_job_does_with_its_count_and_a_short_name
 
 fn moving(state: JobState) -> JobView {
     JobView {
+        left: Vec::new(),
+        left_more: None,
         id: RequestId::new("move-1").unwrap(),
         kind: JobKind::MoveProject,
         project_id: Some(crate::protocol::ProjectId::new("reading").unwrap()),
@@ -271,26 +346,18 @@ fn moving(state: JobState) -> JobView {
     }
 }
 
-/// DEC-177 (QUESTION-13:08 Q2 B): a start refused `job_busy` names the job that runs, as
-/// the client last read it; with no running job read, an ended one or none, it says another
-/// job runs.
+/// DEC-197: a start past the waiting list says several folders wait, and a start on a folder
+/// a live job holds points Home; neither names one running job, since several may run.
 #[test]
-fn a_busy_start_names_the_running_job_or_says_another_job_runs() {
+fn a_start_past_the_waiting_list_says_several_wait_and_the_same_folder_points_home() {
     assert_eq!(
-        busy(Some(&moving(JobState::Stopping { agents_left: 1 }))),
-        "Moving reading-list is running. Wait for it to finish on Home."
+        copy("job_busy"),
+        "Several folders are already waiting. Wait for one to finish on Home."
     );
     assert_eq!(
-        busy(Some(&job(copying(4, 0)))),
-        "Adding shop is running. Wait for it to finish on Home."
+        copy("job_same_folder"),
+        "This folder is already being moved or added. See it on Home."
     );
-    let fixed = "Another job is running. Wait for it to finish on Home.";
-    assert_eq!(busy(Some(&moving(JobState::Done))), fixed);
-    assert_eq!(
-        busy(Some(&job(failed("home_add_failed", Phase::Copying)))),
-        fixed
-    );
-    assert_eq!(busy(None), fixed);
 }
 
 /// DEC-177: a project move says it waits for the project's agents, moves, and ends in the
@@ -375,15 +442,21 @@ fn a_project_move_job_says_it_waits_for_its_agents_moves_and_ends_in_the_move_s_
         brief(&moving(copying(4, 0)), "..."),
         "Moving reading-list: 4 files"
     );
+    let moved = moving(JobState::Done);
     assert_eq!(
-        end_line(Some(&waiting), Some(&moving(JobState::Done))).as_deref(),
-        Some("reading-list is now in your projects folder. Start the team again from Team.")
+        ended(std::slice::from_ref(&waiting), std::slice::from_ref(&moved))
+            .into_iter()
+            .map(line)
+            .collect::<Vec<_>>(),
+        ["reading-list is now in your projects folder. Start the team again from Team."]
     );
 }
 
 /// A delete job of the project "notes", whose name labels it whole.
 fn deleting(state: JobState) -> JobView {
     JobView {
+        left: Vec::new(),
+        left_more: None,
         id: crate::protocol::RequestId::new("delete-1").unwrap(),
         kind: JobKind::Delete,
         project_id: Some(crate::protocol::ProjectId::new("notes").unwrap()),
@@ -478,10 +551,6 @@ fn a_delete_job_says_it_moves_folders_to_the_trash_and_offers_finish_delete_once
 
     assert_eq!(brief(&trashing, "..."), "Deleting Notes/2026 plans: 1 of 2");
     assert_eq!(
-        busy(Some(&trashing)),
-        format!("Deleting {called} is running. Wait for it to finish on Home.")
-    );
-    assert_eq!(
         copy("delete_cannot_stop"),
         "It is moving its folders to the Trash, so it cannot stop now. Wait for it to finish on Home."
     );
@@ -500,7 +569,11 @@ fn a_job_read_with_a_count_past_its_total_shows_its_plain_line_with_no_count() {
     let cases = [
         (
             job(JobState::Downloading {
-                progress: Progress { total: 3, done: 7 },
+                progress: Progress {
+                    total: 3,
+                    done: 7,
+                    ..Default::default()
+                },
             }),
             "Downloading shop from iCloud...",
             "Downloading shop...",
@@ -537,7 +610,156 @@ fn a_job_read_with_a_count_past_its_total_shows_its_plain_line_with_no_count() {
 /// not an invariant: its line is the plain fallback sentence, and the TUI keeps running.
 #[test]
 fn a_refused_job_request_with_an_empty_code_says_the_plain_fallback() {
-    let said = std::panic::catch_unwind(|| refusal("", None)).ok();
-    assert_eq!(said, Some(copy("")));
-    assert!(copy("").starts_with("Something went wrong. Try again."));
+    let said = std::panic::catch_unwind(|| copy("")).ok();
+    assert!(said.is_some_and(|line| line.starts_with("Something went wrong. Try again.")));
+}
+
+#[test]
+fn the_download_line_says_macos_downloads_with_the_files_and_bytes_landed() {
+    let landing = |done, total, bytes_done, bytes_total| JobState::Downloading {
+        progress: Progress {
+            total,
+            done,
+            bytes_total,
+            bytes_done,
+        },
+    };
+    assert_eq!(
+        line(&job(landing(556, 127_940, 31 << 20, 2 << 30))),
+        "macOS is downloading shop: 556 of 127940 files (31 MB of 2 GB)"
+    );
+    assert_eq!(
+        line(&job(landing(1, 2, 0, 0))),
+        "macOS is downloading shop: 1 of 2 files"
+    );
+    assert_eq!(
+        line(&job(landing(1, 2, 9, 4))),
+        "macOS is downloading shop: 1 of 2 files",
+        "bytes past their total are left out"
+    );
+}
+
+/// #383 code F1 (DEC-198): a done project move says after its start-the-team line which
+/// rebuildable folders stayed in the old folder, nested ones by their path below it, and
+/// that the owner reinstalls them.
+#[test]
+fn a_done_project_move_says_which_rebuildable_folders_stayed_in_the_old_folder() {
+    let moved = JobView {
+        kind: crate::projects_home::job::JobKind::MoveProject,
+        left: vec![crate::projects_home::icloud::Skipped {
+            path: "packages/web/node_modules".into(),
+            files: Some(57_108),
+        }],
+        mode: AddMode::Move,
+        ..job(JobState::Done)
+    };
+    assert!(
+        line(&moved).ends_with(
+            "is now in your projects folder. Start the team again from Team. \
+             packages/web/node_modules stayed in \
+             /Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop; \
+             reinstall it in the project."
+        ),
+        "{}",
+        line(&moved)
+    );
+}
+
+#[test]
+fn a_done_add_counts_the_left_folders_it_does_not_name() {
+    let folder = |path: &str| crate::projects_home::icloud::Skipped {
+        path: path.into(),
+        files: Some(1),
+    };
+    let capped = JobView {
+        left: vec![
+            folder("a/node_modules"),
+            folder("b/node_modules"),
+            folder("c/node_modules"),
+        ],
+        left_more: Some(crate::projects_home::icloud::SkippedMore {
+            folders: 1997,
+            files: None,
+        }),
+        mode: AddMode::Copy,
+        ..job(JobState::Done)
+    };
+    assert!(
+        line(&capped).contains(
+            " a/node_modules, b/node_modules, c/node_modules and 1997 more were not copied; \
+             reinstall them"
+        ),
+        "{}",
+        line(&capped)
+    );
+}
+
+#[test]
+fn a_done_add_whose_left_folders_are_only_counted_says_how_many() {
+    let counted = |folders: u64, mode: AddMode| JobView {
+        left_more: Some(crate::projects_home::icloud::SkippedMore {
+            folders,
+            files: None,
+        }),
+        mode,
+        ..job(JobState::Done)
+    };
+    assert_eq!(
+        line(&counted(3, AddMode::Move)),
+        "shop is in your projects folder. Set it up from Home. 3 rebuildable folders stayed in \
+         /Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop; reinstall them in the \
+         project."
+    );
+    assert!(
+        line(&counted(1, AddMode::Copy))
+            .ends_with(" 1 rebuildable folder was not copied; reinstall it in the project."),
+        "{}",
+        line(&counted(1, AddMode::Copy))
+    );
+}
+
+#[test]
+fn a_done_add_says_which_rebuildable_folders_it_left_in_icloud_and_where() {
+    let folder = |path: &str, files| crate::projects_home::icloud::Skipped {
+        path: path.into(),
+        files,
+    };
+    let left = vec![folder("node_modules", Some(57_108)), folder(".venv", None)];
+    let moved = JobView {
+        left: left.clone(),
+        ..job(JobState::Done)
+    };
+    assert_eq!(
+        line(&moved),
+        "shop is in your projects folder. Set it up from Home. node_modules and .venv stayed in \
+         /Users/mira/Library/Mobile Documents/com~apple~CloudDocs/shop; reinstall them in the project."
+    );
+    let copied = JobView {
+        left: left[..1].to_vec(),
+        mode: AddMode::Copy,
+        ..job(JobState::Done)
+    };
+    assert_eq!(
+        line(&copied),
+        "shop is in your projects folder. Set it up from Home. node_modules was not copied; \
+         reinstall it in the project."
+    );
+    let many = JobView {
+        left: ["a", "b", "c", "d", "e"]
+            .map(|name| folder(&format!("{name}/node_modules"), Some(1)))
+            .to_vec(),
+        mode: AddMode::Copy,
+        ..job(JobState::Done)
+    };
+    assert!(
+        line(&many).contains(
+            " a/node_modules, b/node_modules, c/node_modules and 2 more were not copied;"
+        ),
+        "{}",
+        line(&many)
+    );
+    assert_eq!(
+        line(&job(JobState::Done)),
+        "shop is in your projects folder. Set it up from Home."
+    );
 }

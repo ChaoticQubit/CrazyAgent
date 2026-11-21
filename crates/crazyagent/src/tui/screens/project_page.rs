@@ -26,8 +26,8 @@ use crate::github::{GitHubPublishPlan, GitHubPublishStep};
 use crate::ide::bridge::reveal::RevealTarget;
 use crate::master_session::{MasterBackend, MasterOwnerAction};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery, SetupView};
-use crate::projects_home::AddMode;
 use crate::projects_home::job::{JobKind, JobSubject};
+use crate::projects_home::{AddMode, AddOverride};
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::sandbox::policy::{AgentAccess, AgentPolicy};
 use crate::tui::app::UiEvent;
@@ -58,6 +58,8 @@ mod asks;
 mod replies;
 
 const SENT_MAX: usize = 8;
+/// What the project says when the engine did not dismiss its reinstall offer.
+const REINSTALL_NOT_DISMISSED: &str = "The reinstall offer was not dismissed. Try again.";
 const MASTER_SENT_MAX: usize = 4;
 const TEAM_READ_MS: i64 = 3_000;
 const TEAM_WAIT_MS: i64 = 15_000;
@@ -265,6 +267,8 @@ pub(in crate::tui) struct ProjectPage {
     uncommitted_branch: Option<String>,
     uncommitted_asked: bool,
     job_sent: Option<IntakeQuery>,
+    move_read_sent: Option<IntakeQuery>,
+    reinstall_sent: Option<IntakeQuery>,
     publish_sent: Option<IntakeQuery>,
     publish_pane: Option<PublishPane>,
     publish_asked: Option<IntakeQuery>,
@@ -586,6 +590,7 @@ impl Screen for ProjectPage {
         self.ask_team(ctx);
         self.ask_import(ctx);
         self.ask_uncommitted(ctx);
+        self.read_reinstall(ctx);
         self.refresh_pool(ctx);
         self.sync_master(ctx);
         self.pump(ctx);

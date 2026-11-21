@@ -24,7 +24,7 @@ test("a grouped list replaces the tab row: Access, Agents and App in the approve
   assert.deepEqual(shown.groups, [
     { name: "Access", links: ["Accounts", "Pools"] },
     { name: "Agents", links: ["Harnesses", "Plugins and skills", "Process", "Pack", "Memory", "Finished agents", "Quitting", "Master"] },
-    { name: "App", links: ["Sandbox", "Team alerts", "Restore 2.4"] },
+    { name: "App", links: ["Sandbox", "Team alerts", "Restore 2.4", "Terminal"] },
   ]);
   assert.deepEqual(shown.current, ["Pools"]);
   assert.equal(shown.tabs, 0, "no tab roles are left");
@@ -103,8 +103,8 @@ test("real Tab keys walk every Settings link in list order with a visible ring, 
     return seen;
   });
   assert.deepEqual(walked.map((item) => item.text), ["Skip to content", "Accounts", "Pools", "Harnesses", "Plugins and skills", "Process", "Pack", "Memory", "Finished agents", "Quitting", "Master",
-    "Sandbox", "Team alerts", "Restore 2.4", "In the panel"]);
-  assert.deepEqual([...new Set(walked.slice(1, 14).map((item) => item.outline))], ["solid"]);
+    "Sandbox", "Team alerts", "Restore 2.4", "Terminal", "In the panel"]);
+  assert.deepEqual([...new Set(walked.slice(1, 15).map((item) => item.outline))], ["solid"]);
 });
 
 test("a real Enter on a focused link opens that section's address", async () => {

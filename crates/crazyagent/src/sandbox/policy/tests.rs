@@ -302,6 +302,143 @@ fn a_network_choice_is_wider_only_than_the_narrower_ones() {
 }
 
 #[test]
+fn full_access_on_windows_is_refused_with_its_own_reason_and_code() {
+    for access in AgentAccess::ALL {
+        assert_eq!(
+            access.refusal().map(|(reason, _)| reason),
+            access.unavailable()
+        );
+    }
+    #[cfg(target_os = "windows")]
+    {
+        assert_eq!(
+            AgentAccess::Full.refusal(),
+            Some((FULL_WINDOWS_UNAVAILABLE, SANDBOX_FULL_UNAVAILABLE_WINDOWS))
+        );
+        for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+            assert_eq!(
+                access.refusal(),
+                Some((WINDOWS_UNAVAILABLE, AGENT_ACCESS_UNAVAILABLE))
+            );
+        }
+    }
+    #[cfg(target_os = "linux")]
+    for access in [AgentAccess::OwnBranch, AgentAccess::Full] {
+        assert_eq!(
+            access.refusal(),
+            Some((LINUX_UNAVAILABLE, AGENT_ACCESS_UNAVAILABLE))
+        );
+    }
+    #[cfg(target_os = "macos")]
+    assert!(
+        AgentAccess::ALL
+            .iter()
+            .all(|access| access.refusal().is_none())
+    );
+}
+
+#[test]
+fn a_windows_model_only_agent_with_tools_starts_no_proxy_and_reaches_the_models_port_on_any_host() {
+    use crate::sandbox::{SandboxNetwork, SandboxRemote};
+    let hosted = SandboxRemote::AnyHost(443);
+    let local = SandboxRemote::Loopback(11_434);
+    assert!(!AgentNetwork::None.proxied("windows", true, hosted));
+    assert_eq!(
+        AgentNetwork::None
+            .reach("windows", true, hosted, None)
+            .unwrap(),
+        SandboxNetwork::Only(vec![hosted])
+    );
+    for os in ["macos", "linux"] {
+        assert!(AgentNetwork::None.proxied(os, true, hosted));
+        assert_eq!(
+            AgentNetwork::None
+                .reach(os, true, hosted, Some(41_300))
+                .unwrap(),
+            SandboxNetwork::Only(vec![SandboxRemote::Loopback(41_300)])
+        );
+        assert!(!AgentNetwork::None.proxied(os, true, local));
+        assert_eq!(
+            AgentNetwork::None.reach(os, true, local, None).unwrap(),
+            SandboxNetwork::Only(vec![local])
+        );
+    }
+    assert!(!AgentNetwork::None.proxied("windows", true, local));
+    for os in ["windows", "macos", "linux"] {
+        assert!(!AgentNetwork::None.proxied(os, false, hosted));
+        assert_eq!(
+            AgentNetwork::None.reach(os, false, hosted, None).unwrap(),
+            SandboxNetwork::Only(vec![hosted])
+        );
+        for network in [AgentNetwork::Open, AgentNetwork::Https] {
+            assert!(!network.proxied(os, true, hosted));
+            assert_eq!(
+                network.reach(os, true, hosted, None).unwrap(),
+                network.sandbox(Some(hosted))
+            );
+        }
+    }
+}
+
+#[test]
+fn a_loopback_model_on_windows_is_refused_under_every_network_choice() {
+    use crate::sandbox::SandboxRemote;
+    let local = SandboxRemote::Loopback(11_434);
+    for network in AgentNetwork::ALL {
+        for tools in [true, false] {
+            let refusal = network.reach("windows", tools, local, None);
+            assert!(
+                refusal
+                    .as_ref()
+                    .is_err_and(crate::sandbox::model_loopback_windows),
+                "{network:?} tools={tools}: {refusal:?}"
+            );
+        }
+    }
+    for os in ["macos", "linux"] {
+        assert!(AgentNetwork::Open.reach(os, true, local, None).is_ok());
+    }
+}
+
+#[test]
+fn full_access_on_windows_names_no_level_this_version_refuses_there() {
+    let plain = crate::config::plain_problem(SANDBOX_FULL_UNAVAILABLE_WINDOWS)
+        .expect("the code has a plain sentence");
+    for level in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+        assert!(!plain.contains(level.label()), "{plain}");
+    }
+    assert!(!plain.contains("always run"), "{plain}");
+    #[cfg(target_os = "windows")]
+    {
+        assert!(
+            AgentAccess::ALL
+                .iter()
+                .all(|level| level.refusal().is_some())
+        );
+        for level in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+            assert!(!FULL_WINDOWS_UNAVAILABLE.contains(level.label()));
+        }
+        assert!(!FULL_WINDOWS_UNAVAILABLE.contains("always run"));
+    }
+}
+
+#[test]
+fn on_windows_a_limited_network_choice_says_it_reaches_the_whole_internet() {
+    for network in [AgentNetwork::Https, AgentNetwork::None] {
+        assert_eq!(
+            windows_network_gap("windows", network),
+            Some(WINDOWS_NETWORK_WIDE_LINE)
+        );
+    }
+    assert_eq!(windows_network_gap("windows", AgentNetwork::Open), None);
+    for os in ["macos", "linux"] {
+        for network in AgentNetwork::ALL {
+            assert_eq!(windows_network_gap(os, network), None);
+        }
+    }
+}
+
+#[test]
 fn each_platform_offers_only_the_levels_it_can_enforce() {
     let offered: Vec<AgentAccess> = AgentAccess::ALL
         .into_iter()
@@ -311,9 +448,13 @@ fn each_platform_offers_only_the_levels_it_can_enforce() {
     {
         assert!(offered.is_empty());
         assert!(
-            AgentAccess::ALL
+            [AgentAccess::Sandboxed, AgentAccess::OwnBranch]
                 .iter()
                 .all(|access| access.unavailable() == Some(WINDOWS_UNAVAILABLE))
+        );
+        assert_eq!(
+            AgentAccess::Full.unavailable(),
+            Some(FULL_WINDOWS_UNAVAILABLE)
         );
     }
     #[cfg(target_os = "linux")]
@@ -632,13 +773,13 @@ fn an_agent_folders_rule_holds_the_agents_root_in_any_letter_case() {
         assert_eq!(
             rule(IdeAgentFiles::NoDeleteOrRename, older_agents),
             format!(
-                "(deny file-write-unlink\n  (regex #\"{agents}/[^/]+$\") (regex #\"{agents}/[^/]+/\"))\n{keep_root}(deny file-write-unlink\n  (regex #\"{state}\"))\n"
+                "(deny file-write-unlink\n  (regex #\"{agents}/[^/]+(/|$)\"))\n{keep_root}(deny file-write-unlink\n  (regex #\"{state}\"))\n"
             )
         );
         assert_eq!(
             rule(IdeAgentFiles::ReadOnly, older_agents),
             format!(
-                "(deny file-write*\n  (regex #\"{agents}/[^/]+$\") (regex #\"{agents}/[^/]+/\"))\n{keep_root}(deny file-write*\n  (regex #\"{state}\"))\n"
+                "(deny file-write*\n  (regex #\"{agents}/[^/]+(/|$)\"))\n{keep_root}(deny file-write*\n  (regex #\"{state}\"))\n"
             )
         );
     }

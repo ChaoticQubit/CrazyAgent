@@ -577,17 +577,66 @@ mod tests {
 }
 
 #[cfg(all(test, windows))]
-mod windows_tests {
+pub(crate) mod windows_tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// Windows PowerShell under the system root. Output: its path.
-    fn powershell() -> PathBuf {
-        PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+    /// The environment name a row sets to the file a grandchild holder writes its
+    /// grandchild's process id to.
+    const HOLDER_MARKER: &str = "CRAZYAGENT_TEST_GRANDCHILD_MARKER";
+
+    /// The file whose presence in a holder's working folder asks it to write the id to
+    /// `grandchild.pid` beside it, for a run whose environment a row cannot set.
+    pub(crate) const HOLDER_REQUEST: &str = "grandchild.request";
+
+    /// The test binary as a silent server that starts a grandchild, in place of a shell
+    /// whose start time varies: the program and the arguments that run
+    /// [`a_grandchild_holder_in_its_own_process`] alone. Output: the program, then its
+    /// arguments.
+    pub(crate) fn grandchild_holder() -> (PathBuf, [&'static str; 5]) {
+        (
+            std::env::current_exe().unwrap(),
+            [
+                "--exact",
+                "plugins::check::windows_tests::a_grandchild_holder_in_its_own_process",
+                "--ignored",
+                "--test-threads",
+                "1",
+            ],
+        )
+    }
+
+    /// Runs only in the process a row starts, when [`HOLDER_MARKER`] names a file or its
+    /// working folder holds [`HOLDER_REQUEST`]: starts ping for two minutes with no streams,
+    /// writes ping's process id to that file, then waits two minutes reading nothing, as a
+    /// silent server. Run any other way it does nothing.
+    #[test]
+    #[ignore]
+    fn a_grandchild_holder_in_its_own_process() {
+        let requested = std::env::current_dir()
+            .ok()
+            .filter(|folder| folder.join(HOLDER_REQUEST).is_file())
+            .map(|folder| folder.join("grandchild.pid"));
+        let Some(marker) = std::env::var_os(HOLDER_MARKER)
+            .map(PathBuf::from)
+            .or(requested)
+        else {
+            return;
+        };
+        let ping = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
             .join("System32")
-            .join("WindowsPowerShell")
-            .join("v1.0")
-            .join("powershell.exe")
+            .join("PING.EXE");
+        let mut command = Command::new(ping);
+        command
+            .args(["-n", "120", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut grandchild = crate::spawn_gate::spawn(&mut command).unwrap();
+        std::fs::write(&marker, grandchild.id().to_string()).unwrap();
+        std::thread::sleep(Duration::from_secs(120));
+        let _ = grandchild.kill();
+        let _ = grandchild.wait();
     }
 
     /// Whether a process id still runs, as `tasklist` lists it. Input: the id. Output: the
@@ -609,21 +658,23 @@ mod windows_tests {
         );
     }
 
+    /// A server that starts a grandchild and never answers times out, and the grandchild
+    /// ends with the check's job. The server is the test binary
+    /// ([`a_grandchild_holder_in_its_own_process`]), which writes the grandchild's id at
+    /// once, so the row never waits on a shell's start.
     #[test]
     fn a_silent_server_times_out_and_every_process_it_started_ends_with_it() {
         let folder = tempfile::tempdir().unwrap();
         let marker = folder.path().join("grandchild.pid");
-        let script = format!(
-            "$p = Start-Process -FilePath ping.exe -ArgumentList '-n','120','127.0.0.1' \
-             -NoNewWindow -PassThru; Set-Content -LiteralPath '{}' -Value $p.Id; \
-             Start-Sleep -Seconds 120",
-            marker.display()
-        );
-        let args = ["-NoProfile", "-NonInteractive", "-Command", &script].map(String::from);
+        let (holder, args) = grandchild_holder();
+        let secrets = [(
+            HOLDER_MARKER.to_owned(),
+            marker.to_str().unwrap().as_bytes().to_vec(),
+        )];
         let checked = check_stdio(
-            powershell().to_str().unwrap(),
-            &args,
-            &[],
+            holder.to_str().unwrap(),
+            &args.map(String::from),
+            &secrets,
             Duration::from_secs(20),
         );
         assert_eq!(checked.unwrap_err(), "server_check_timeout");

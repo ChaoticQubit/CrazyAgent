@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test, { after } from "node:test";
 import { fileURLToPath } from "node:url";
-import { cliArchiveName, collectDesktop, needsLoader, packageCli, sidecars, signFile, stageSidecars, verifySignature } from "./assets.mjs";
+import { TARGETS, cliArchiveName, collectDesktop, needsLoader, packageCli, sidecars, signFile, stageSidecars, verifySignature } from "./assets.mjs";
 
 const REPO = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const TAURI = join(REPO, "apps/desktop/node_modules/@tauri-apps/cli/tauri.js");
@@ -69,6 +69,15 @@ test("each target ships the engine, the rcli host and its own helpers, and macOS
   assert.throws(() => sidecars("aarch64-unknown-linux-gnu"), /release_target_rejected/);
   assert.equal(cliArchiveName(VERSION, "x86_64-unknown-linux-gnu"), `crazyagent-${VERSION}-x86_64-unknown-linux-gnu.tar.gz`);
   assert.equal(cliArchiveName(VERSION, "x86_64-pc-windows-msvc"), `crazyagent-${VERSION}-x86_64-pc-windows-msvc.zip`);
+});
+
+test("every release target's CLI finds its own update entry: update.rs target() returns each TARGETS triple (DEC-195 Q8)", async () => {
+  const source = await readFile(join(REPO, "crates/crazyagent/src/update.rs"), "utf8");
+  const start = source.indexOf("pub fn target() -> Option<&'static str> {\n");
+  assert(start >= 0, "update.rs has target()");
+  const body = source.slice(start, source.indexOf("\n}\n", start));
+  const named = [...body.matchAll(/Some\("([a-z0-9_-]+)"\)/g)].map((match) => match[1]);
+  for (const target of Object.keys(TARGETS)) assert(named.includes(target), `${target}: a CLI built for it reads its own cli-latest.json entry`);
 });
 
 test("staging names sidecars with the target triple and writes the release config overlay", async () => {

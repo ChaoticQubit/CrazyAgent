@@ -368,7 +368,11 @@ fn questions_codes_cover_every_refusal() {
 fn an_approved_github_rule_proposal_is_applied_after_the_answer_and_told() {
     let (_tmp, root, project) = engine();
     let db = questions::open(&root).unwrap();
-    assert_eq!(crate::github::proposals::start_store(&db).unwrap(), 0);
+    assert_eq!(
+        crate::github::proposals::start_store(&db, crate::storage::opening::Opening::for_test(1))
+            .unwrap(),
+        0
+    );
     db.execute(
         "INSERT INTO github_rule_requests(project,asker,rule,turn_on,why,repo,created_ms)
          VALUES (?1,'agent:4','wiki_off',1,'Docs live in the repository.','octo-cat/tool',0)",
@@ -412,7 +416,11 @@ fn an_approved_github_rule_proposal_is_applied_after_the_answer_and_told() {
 fn the_proposal_pass_starts_only_while_a_proposal_waits() {
     let (_tmp, root, _) = engine();
     let db = questions::open(&root).unwrap();
-    assert_eq!(crate::github::proposals::start_store(&db).unwrap(), 0);
+    assert_eq!(
+        crate::github::proposals::start_store(&db, crate::storage::opening::Opening::for_test(1))
+            .unwrap(),
+        0
+    );
     assert!(!apply_later(&root, &db), "nothing waits");
     db.execute(
         "INSERT INTO github_rule_requests(project,asker,rule,turn_on,why,repo,status,created_ms) \
