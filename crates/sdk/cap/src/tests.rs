@@ -259,3 +259,46 @@ fn a_token_out_of_place_is_refused() {
     assert_eq!(refused("enum A { }"), at("cap_unexpected_token", 1, 10));
     assert_eq!(refused("enum A { x"), at("cap_unexpected_token", 1, 11));
 }
+
+#[test]
+fn an_undeclared_output_type_is_refused() {
+    assert_eq!(
+        refused("capability a.b() -> Missing tier: t1 needs: a.c"),
+        at("cap_unknown_type", 1, 21)
+    );
+}
+
+#[test]
+fn a_capability_declared_twice_is_refused_at_the_second() {
+    let one = "capability a.b() -> unit tier: t1 needs: a.c";
+    assert_eq!(
+        refused(&format!("{one}\n{one}")),
+        at("cap_duplicate_name", 2, 12)
+    );
+}
+
+#[test]
+fn an_event_kind_emitted_twice_is_refused_at_the_second() {
+    assert_eq!(
+        refused(
+            "capability a.b() -> unit tier: t1 needs: a.c emits: E { x: u16 } emits: E { y: u16 }"
+        ),
+        at("cap_duplicate_name", 1, 73)
+    );
+}
+
+#[test]
+fn emits_over_the_bound_are_refused_at_the_first_too_many() {
+    let emits: String = (0..=FIELDS_MAX)
+        .map(|index| format!("  emits: E{index} {{ x: u16 }}\n"))
+        .collect();
+    let source = format!("capability a.b() -> unit\n  tier: t1\n  needs: a.c\n{emits}");
+    assert_eq!(
+        refused(&source),
+        at(
+            "cap_too_many_fields",
+            u32::try_from(FIELDS_MAX).unwrap() + 4,
+            3
+        )
+    );
+}
