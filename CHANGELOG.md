@@ -11,6 +11,36 @@ Status of each version:
 
 ## [Unreleased]
 
+## [2.4.4] - 2026-11-21 - Dev build
+
+- Version set to 2.4.4 on 2026-11-21 00:31 UTC (49619d195).
+- Work merged into the 2.4.4 line from 2026-11-18 07:01 UTC to 2026-11-21 00:31 UTC, last merge 1d2a2fc24. Built on [2.4.3].
+- No stable tag yet. Latest stable stays [2.3.2].
+- The Windows build is a preview and is not code signed. Landing an agent's change and the owner terminal on Windows are not finished in this build and move to 2.5.0.
+
+### Added
+
+- Windows preview: the app and the engine connect over Windows named pipes, and the owner transport has its key and root on Windows.
+- Windows preview: the projects home and project moves work on Windows. A move fails closed when it cannot check a project's agent leases, and it sees leases nested anywhere in the project.
+- Windows preview: the native terminal runs on Windows, on the same terminal seam as macOS, with page Copy.
+- Windows preview: an agent launch sets up the agent's home folder and environment, and locks the home to your account after the home check.
+- Windows preview: the master's stream log is kept in the engine's private files, the Codex host runs under the engine's custody, and each master turn runs in its own turn folder.
+- Windows preview: owner git routes project paths on UNC shares.
+
+### Fixed
+
+- A Codex run no longer hangs when its harness waits for its output to be read while the engine is sending it input. The engine keeps reading output while a write is pending, on every system, and the run's output limit still applies.
+- Each terminal view keeps its own pane size when the same session is open in more than one window.
+- An engine prompt reaches only the agent's own app pane.
+- In the TUI, Ctrl-R while an owner job runs reconnects once that job answers, and does nothing while a reconnect is already under way.
+
+### Security
+
+- On every system, the @ file list pins git's common folder to the project's own .git, so a planted commondir file cannot point it elsewhere.
+- On Windows, prompt, memory, usage, IDE extension and agent instruction files open as themselves, never through a link swapped in at their path.
+- On Windows, the engine's secret stores carry labels that refuse reads, writes and runs from lower-trust processes.
+- On Windows, every rename of an engine private file goes through one name rule, and native sign-in profiles are kept in the engine's custody.
+
 ## [2.4.3] - 2026-11-19 - Dev build
 
 - Version set to 2.4.3 on 2026-11-19 16:54 UTC (8a5ab7185).
