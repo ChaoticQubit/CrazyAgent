@@ -1,3 +1,4 @@
+#![no_std]
 #![forbid(unsafe_code)]
 
 macro_rules! twice {

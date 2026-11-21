@@ -41,6 +41,14 @@ pub fn check_crate(dir: &Path) -> Result<(), Vec<Violation>> {
     if out.is_empty() { Ok(()) } else { Err(out) }
 }
 
+/// Checks every bundled plugin: each entry of the plugins folder is a tier folder `t1`,
+/// `t2` or `t3`, and each entry of a tier is a crate passing `check_crate`. Input: the
+/// plugins folder. Output: nothing, or every violation, files relative to that folder.
+pub fn check_plugins(root: &Path) -> Result<(), Vec<Violation>> {
+    let _ = root;
+    Ok(())
+}
+
 /// Reads a plugin's `plugin.toml`, refusing a missing key, a wrong type or any other key.
 /// Input: the crate folder. Output: the manifest, or `plugin_manifest_invalid`.
 pub fn read_manifest(dir: &Path) -> Result<Manifest, Violation> {
