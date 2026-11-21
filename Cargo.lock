@@ -917,6 +917,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "crazyagent-cap"
+version = "2.4.4"
+
+[[package]]
 name = "crazyagent-desktop"
 version = "2.4.4"
 dependencies = [
