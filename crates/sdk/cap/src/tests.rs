@@ -214,7 +214,11 @@ fn items_over_the_bound_are_refused_at_the_first_too_many() {
         .collect();
     assert_eq!(
         refused(&source),
-        at("cap_too_many_items", u32::try_from(ITEMS_MAX).unwrap() + 1, 1)
+        at(
+            "cap_too_many_items",
+            u32::try_from(ITEMS_MAX).unwrap() + 1,
+            1
+        )
     );
     let fits: String = (0..ITEMS_MAX)
         .map(|item| format!("enum E{item} {{ a }}\n"))
@@ -239,10 +243,7 @@ fn fields_over_the_bound_are_refused_at_the_first_too_many() {
 
 #[test]
 fn a_character_outside_the_grammar_is_refused() {
-    assert_eq!(
-        refused("enum A { x } @"),
-        at("cap_unexpected_token", 1, 14)
-    );
+    assert_eq!(refused("enum A { x } @"), at("cap_unexpected_token", 1, 14));
     assert_eq!(
         refused("enum A { x }\nenum B { é }"),
         at("cap_unexpected_token", 2, 10)

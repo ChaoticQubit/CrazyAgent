@@ -88,13 +88,15 @@ pub struct ParseError {
 /// Parses one `.cap` source and checks it. Input: the source text.
 /// Output: the file's syntax tree, or the first refusal with its position.
 pub fn parse(source: &str) -> Result<File, ParseError> {
-    let _ = source;
-    Err(ParseError {
-        line: 0,
-        column: 0,
-        code: "cap_unimplemented",
-    })
+    let tokens = lex::lex(source)?;
+    let (file, spots) = parse::file(tokens)?;
+    check::check(&file, &spots)?;
+    assert!(file.enums.len() + file.types.len() + file.capabilities.len() <= ITEMS_MAX);
+    Ok(file)
 }
 
+mod check;
+mod lex;
+mod parse;
 #[cfg(test)]
 mod tests;
