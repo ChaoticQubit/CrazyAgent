@@ -1,7 +1,8 @@
 #[cfg(unix)]
 use crate::harnesses::launch::{self};
 use crate::harnesses::launch::{
-    AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Secret, Session,
+    AccountBinding, LaunchBoundary, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Secret,
+    Session,
 };
 use crate::protocol::{CredentialRef, ProjectId, SessionId};
 use rusqlite::{Connection, OptionalExtension, Row, params};
@@ -262,8 +263,11 @@ impl AgentSpec {
             account,
             model: self.model.clone(),
             tools: self.tools,
-            sandbox_profile: self.sandbox_profile.clone(),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(
+                self.sandbox_profile
+                    .clone()
+                    .ok_or_else(|| failure("launch_sandbox_required"))?,
+            ),
             git_identity: None,
             limits: LaunchLimits {
                 run_time: Duration::from_secs(self.run_time_secs),

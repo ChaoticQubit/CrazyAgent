@@ -1,5 +1,5 @@
-use super::{BoundaryError, Words, last_error, wide, windows};
-use crate::dacl::{ALL_APPLICATION_PACKAGES, converge, reads, without};
+use super::{BoundaryError, Words, access_list, last_error, wide};
+use crate::dacl::{ALL_APPLICATION_PACKAGES, converge, reads_root, without};
 use crate::plan::{ANCHOR, Access, Ace, KEEP_ENTRIES, MODIFY, READ_EXECUTE};
 use crate::snapshot::{self, Snapshot};
 use std::io::ErrorKind;
@@ -58,14 +58,11 @@ pub(super) struct Withdrawal {
     pub(super) owner_changed: bool,
 }
 
-/// What the container's role on one path needs, from the path's list now (DEC-193): the
-/// container's own entries become the role's, and a guarded path or anchored folder is cut
-/// and every other package narrowed. A granted root must exist and must not be a link or
-/// junction; a guarded path or anchored folder that is missing, a link or a junction gets
-/// nothing, since the plan keeps the entries of the present folder above it. A read root every
-/// container can already read, as with `C:\Program Files`, is left as it is unless it still
-/// holds an entry of the container's own. Inputs: the container SID, the role and the path's
-/// saved snapshot. Output: the step, or the refusal or failed step.
+/// What the container's role on one path needs, from the path's list now (DEC-193): a granted
+/// root must exist and not be a link or junction, and a guarded path or anchored folder is cut,
+/// every other package narrowed. A read root every package already reads ([`reads_root`]) is
+/// left alone unless it holds an entry of the container's own. Inputs: the container SID, the
+/// role and the path's saved snapshot. Output: the step, or the refusal or failed step.
 pub(super) fn role(
     container: &Words,
     ace: &Ace,
@@ -81,7 +78,7 @@ pub(super) fn role(
     let current = read(&ace.path)?;
     let sid = container.bytes();
     if ace.access == Access::ReadExecute
-        && reads(&current.list, &ALL_APPLICATION_PACKAGES)
+        && reads_root(&current.list, &ALL_APPLICATION_PACKAGES, folder)
         && without(&current.list, &sid)
             .map_err(BoundaryError::Refused)?
             .is_none()
@@ -172,9 +169,10 @@ pub(super) fn withdrawal(
 
 /// Writes one change. Input: the change. Output: Ok, or the failed step.
 pub(super) fn write(change: &Change) -> Result<(), BoundaryError> {
-    let path = wide(&change.path);
+    let wide_path = wide(&change.path);
     let list = Words::from_bytes(&change.list);
-    write_dacl(&path, &list, change.info).map_err(windows("change an access list"))
+    write_dacl(&wide_path, &list, change.info)
+        .map_err(access_list("change an access list", &change.path))
 }
 
 /// Whether a path is present as the boundary counts it for a plan: a real file or folder, not
@@ -183,6 +181,17 @@ pub(super) fn write(change: &Change) -> Result<(), BoundaryError> {
 pub(super) fn present(path: &str) -> bool {
     std::fs::symlink_metadata(Path::new(path))
         .is_ok_and(|meta| meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0)
+}
+
+/// Whether the container may read and run `path` through its list as it is now, by allow
+/// entries for ALL APPLICATION PACKAGES or for the container itself: a file itself, a folder
+/// with what lies below it ([`reads_root`], rv-code4 #541 F1). Inputs: the container SID and a
+/// plain drive path. Output: the answer, or the failed read naming it.
+pub(super) fn reached(container: &Words, path: &str) -> Result<bool, BoundaryError> {
+    let current = read(path)?;
+    let folder = std::fs::symlink_metadata(Path::new(path)).is_ok_and(|meta| meta.is_dir());
+    Ok(reads_root(&current.list, &ALL_APPLICATION_PACKAGES, folder)
+        || reads_root(&current.list, &container.bytes(), folder))
 }
 
 /// Whether a path is a folder, or None when it is missing, a link or a junction and `optional`
@@ -240,8 +249,9 @@ impl Drop for Local {
 /// list, which grants everyone everything, is refused. Input: a plain drive path. Output:
 /// the list, or the refusal or failed step.
 fn read(path: &str) -> Result<Dacl, BoundaryError> {
-    let path = wide(path);
-    let (list, control) = read_dacl(&path).map_err(windows("read an access list"))?;
+    let wide_path = wide(path);
+    let (list, control) =
+        read_dacl(&wide_path).map_err(access_list("read an access list", path))?;
     let list = list.ok_or(BoundaryError::Refused("a granted path has no access list"))?;
     let list = list.bytes();
     assert!(list.len() >= 8);

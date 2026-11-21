@@ -879,7 +879,7 @@ dependencies = [
 
 [[package]]
 name = "crazyagent"
-version = "2.4.3"
+version = "2.4.4"
 dependencies = [
  "base64 0.22.1",
  "crazyagent-linux-supervisor",
@@ -918,7 +918,7 @@ dependencies = [
 
 [[package]]
 name = "crazyagent-desktop"
-version = "2.4.3"
+version = "2.4.4"
 dependencies = [
  "alacritty_terminal",
  "bytemuck",
@@ -943,12 +943,14 @@ dependencies = [
  "tokio",
  "unicode-width 0.2.0",
  "wgpu",
+ "windows 0.62.2",
+ "windows-core 0.62.2",
  "windows-sys 0.61.2",
 ]
 
 [[package]]
 name = "crazyagent-linux-supervisor"
-version = "2.4.3"
+version = "2.4.4"
 dependencies = [
  "libc",
  "rustix 1.1.5",
@@ -956,16 +958,17 @@ dependencies = [
 
 [[package]]
 name = "crazyagent-macos-fs"
-version = "2.4.3"
+version = "2.4.4"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "crazyagent-win-sandbox"
-version = "2.4.3"
+version = "2.4.4"
 dependencies = [
  "tempfile",
+ "tokio",
  "windows-sys 0.61.2",
 ]
 
@@ -2121,7 +2124,7 @@ dependencies = [
  "log",
  "presser",
  "thiserror 1.0.69",
- "windows 0.56.0",
+ "windows 0.58.0",
 ]
 
 [[package]]

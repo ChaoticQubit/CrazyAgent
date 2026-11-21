@@ -1636,10 +1636,12 @@ pub fn answering(socket: &Path) -> bool {
     crate::spawn_gate::connect_unix_std(socket).is_ok()
 }
 
-/// Says no engine listens where the Unix socket transport does not exist. Input unused.
-#[cfg(not(unix))]
-pub fn answering(_socket: &Path) -> bool {
-    false
+/// Says whether a checked engine serves the ordinary endpoint now on Windows: its pipe
+/// answers and its server is the start the pipes file pins, with no byte written. Input:
+/// the ordinary endpoint path. Output: the answer.
+#[cfg(windows)]
+pub fn answering(socket: &Path) -> bool {
+    crate::ipc::owner_answering(socket)
 }
 
 /// What a client learns when it checks the engine before opening.
@@ -1839,14 +1841,29 @@ fn logged_ready(layout: &Layout, since: u64) -> bool {
 
 /// Whether the last upgrade backup of the engine at a layout failed, as the record the
 /// engine leaves beside its database says (F36), read without an engine. Input: the layout.
-/// Output: the backup code, or none; always none where no engine database runs.
+/// Output: the backup code, or none.
 pub fn backup_failure(layout: &Layout) -> Option<&'static str> {
-    #[cfg(unix)]
-    return crate::storage::backup_failure(layout.root());
-    #[cfg(not(unix))]
-    {
-        let _ = layout;
-        None
+    crate::storage::backup_failure(layout.root())
+}
+
+/// The code the TUI and the desktop show for an engine start that did not answer
+/// ([`failure_code`]), read without an engine. Input: the layout. Output: the code.
+pub fn start_failure(layout: &Layout) -> &'static str {
+    failure_code(
+        crate::research::runner::git_safe_refusal(),
+        backup_failure(layout).is_some(),
+    )
+}
+
+/// The cause named first: `git_safe_unavailable` when this computer's gits can't be kept
+/// safe (#598 sec N1), then `engine_backup_failed` when the upgrade backup failed (F36),
+/// else `engine_start_failed`. Inputs: the git refusal and whether the backup failed.
+/// Output: the code.
+fn failure_code(refusal: Option<&'static str>, backup_failed: bool) -> &'static str {
+    match (refusal, backup_failed) {
+        (Some(code), _) => code,
+        (None, true) => "engine_backup_failed",
+        (None, false) => "engine_start_failed",
     }
 }
 

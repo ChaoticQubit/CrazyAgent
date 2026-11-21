@@ -7,7 +7,7 @@ use crazyagent::coord::delivery::codex::{self, Bridged, CONTROL_SOCKET};
 use crazyagent::coord::delivery::{Deliveries, NOTICES_KEY, RETRY_MS, Reach};
 use crazyagent::coord::{MessageId, MessageKind, NewMessage, Party};
 use crazyagent::harnesses::interactive::{Run, command};
-use crazyagent::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest};
+use crazyagent::harnesses::launch::{AccountBinding, LaunchBoundary, LaunchLimits, LaunchRequest};
 use crazyagent::harnesses::{HarnessStatus, Search, catalog};
 use crazyagent::protocol::ProjectId;
 use crazyagent::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
@@ -251,8 +251,7 @@ fn start_app(base: &Path, home: &Path, agent: &AgentId) -> (Server, Tmux) {
         },
         model: Some(LOCAL_MODEL.into()),
         tools: true,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };

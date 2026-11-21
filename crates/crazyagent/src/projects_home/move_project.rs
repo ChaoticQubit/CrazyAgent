@@ -65,9 +65,11 @@ fn present(connection: &Connection, table: &str) -> rusqlite::Result<bool> {
 }
 
 /// The SQL test that a path column names `?1` or a path inside it, compared by whole
-/// path parts. Input: the column. Output: the condition text.
+/// path parts split at the platform's separator, `\` on Windows and `/` elsewhere, as
+/// stored paths are (CR-1706). Input: the column. Output: the condition text.
 fn under(column: &str) -> String {
-    format!("({column}=?1 OR substr({column},1,length(?1)+1)=?1||'/')")
+    let separator = std::path::MAIN_SEPARATOR;
+    format!("({column}=?1 OR substr({column},1,length(?1)+1)=?1||'{separator}')")
 }
 
 /// The short name of a folder stored under the macOS data volume: the same path without the
@@ -460,7 +462,7 @@ pub(super) fn landing_repositories(
             |row| row.get::<_, String>(0),
         )
         .map_err(sql)?;
-    let under_origin = |path: &Path| path.starts_with(origin) || path.starts_with(&short);
+    let under_origin = |path: &Path| super::inside(path, origin) || super::inside(path, &short);
     for repository in stored {
         let repository = PathBuf::from(repository.map_err(sql)?);
         let inside = under_origin(&repository)
@@ -493,9 +495,9 @@ pub(crate) fn holds(connection: &Connection, folder: &Path) -> rusqlite::Result<
         .optional()?;
     Ok(origin.is_some_and(|origin| {
         let origin = one_spelling(PathBuf::from(origin));
-        folder.starts_with(&origin)
+        super::inside(folder, &origin)
             || std::fs::canonicalize(folder)
-                .is_ok_and(|real| one_spelling(real).starts_with(&origin))
+                .is_ok_and(|real| super::inside(&one_spelling(real), &origin))
     }))
 }
 
@@ -518,9 +520,9 @@ pub(crate) fn lands(connection: &Connection, folder: &Path) -> rusqlite::Result<
         .optional()?;
     Ok(target.is_some_and(|target| {
         let target = one_spelling(PathBuf::from(target));
-        folder.starts_with(&target)
+        super::inside(folder, &target)
             || std::fs::canonicalize(folder)
-                .is_ok_and(|real| one_spelling(real).starts_with(&target))
+                .is_ok_and(|real| super::inside(&one_spelling(real), &target))
     }))
 }
 
@@ -608,11 +610,14 @@ fn busy(
 /// `destination` or inside it, so moving another project there would rewrite onto its
 /// stored rows. A folder that holds the destination does not count. Inputs: the
 /// destination and the project. Output: the answer.
+#[cfg(all(test, windows))]
+mod spelling_windows_tests;
+
 fn names_inside(destination: &Path, project: &Registered) -> bool {
     assert!(destination.is_absolute());
     std::iter::once(&project.folder)
         .chain(&project.repositories)
-        .any(|used| used.starts_with(destination))
+        .any(|used| super::inside(used, destination))
 }
 
 /// Tells whether an agent of the project works in a linked git worktree of its
@@ -696,8 +701,8 @@ fn checked(
     if set_up == 0 {
         return Err(refused("project_setup_missing"));
     }
-    let real = std::fs::canonicalize(&found.folder).map_err(|_| refused("home_source_missing"))?;
-    if one_spelling(real.clone()).starts_with(one_spelling(home.clone())) {
+    let real = super::resolved(&found.folder).map_err(|_| refused("home_source_missing"))?;
+    if super::inside(&one_spelling(real.clone()), &one_spelling(home.clone())) {
         return Err(refused("move_project_already_home"));
     }
     if real != found.folder || (short_name(&real).is_some() && one_spelling(real.clone()) == real) {

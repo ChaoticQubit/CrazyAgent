@@ -9,6 +9,8 @@ use crate::credentials::SecretString;
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
+use crate::sandbox::InstalledSandbox;
+#[cfg(not(windows))]
 use crate::sandbox::toolchains::{self, ToolHomes};
 use crate::usage::capture::Tokens;
 #[cfg(unix)]
@@ -24,6 +26,7 @@ use std::os::fd::OwnedFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, Stdio};
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
@@ -260,10 +263,10 @@ impl Default for LaunchLimits {
 }
 
 /// Everything needed to start one harness: catalog id, executable, working directory,
-/// account, optional model, tools switch, the project sandbox profile, whether the project
-/// gave its agents Full access, the owner's git identity for the agent's own commits and
-/// limits. Every launch is refused unless a sandbox profile is given, or no profile with
-/// `unconfined` set for a Full access project (DEC-102).
+/// account, optional model, tools switch, the boundary it starts in, the owner's git
+/// identity for the agent's own commits and limits. Every launch names its boundary; Full
+/// access is a boundary marked [`InstalledSandbox::unconfined`] (DEC-102), so no request
+/// can start an agent outside one by leaving a field out.
 #[derive(Debug)]
 pub struct LaunchRequest {
     pub harness: String,
@@ -272,10 +275,49 @@ pub struct LaunchRequest {
     pub account: AccountBinding,
     pub model: Option<String>,
     pub tools: bool,
-    pub sandbox_profile: Option<PathBuf>,
-    pub unconfined: bool,
+    pub boundary: LaunchBoundary,
     pub git_identity: Option<GitIdentity>,
     pub limits: LaunchLimits,
+}
+
+/// The boundary one launch starts in. `Profile` is an installed Seatbelt profile file, the
+/// form a stored agent row keeps, and starts only on macOS. `Installed` is an installed
+/// project sandbox, Full access when it is marked [`InstalledSandbox::unconfined`].
+#[derive(Debug, Clone)]
+pub enum LaunchBoundary {
+    Profile(PathBuf),
+    Installed(Arc<InstalledSandbox>),
+}
+
+impl LaunchBoundary {
+    /// Whether this boundary is a Full access project's (DEC-102). Output: true only for an
+    /// installed sandbox marked unconfined.
+    pub fn is_unconfined(&self) -> bool {
+        match self {
+            Self::Profile(_) => false,
+            Self::Installed(boundary) => boundary.is_unconfined(),
+        }
+    }
+
+    /// The installed profile a confined boundary starts from. Output: the profile file, or
+    /// None for Full access.
+    pub fn confined_profile(&self) -> Option<&Path> {
+        match self {
+            Self::Profile(profile) => Some(profile.as_path()),
+            Self::Installed(boundary) if boundary.is_unconfined() => None,
+            Self::Installed(boundary) => Some(boundary.profile()),
+        }
+    }
+
+    /// What a stop checks of the processes a run left outside its group: the installed
+    /// sandbox's own check, or nothing for a Seatbelt profile, which ends them all. Output:
+    /// the check.
+    pub fn lineage_check(&self) -> crate::sandbox::LineageCheck {
+        match self {
+            Self::Profile(_) => crate::sandbox::LineageCheck::Unneeded,
+            Self::Installed(boundary) => boundary.lineage_check(),
+        }
+    }
 }
 
 const GIT_IDENTITY_BYTES_MAX: usize = 256;
@@ -662,48 +704,24 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         "claude-code" => claude_invocation(request, installed, key_file.as_deref()),
         _ => return Err(failure("launch_harness_unsupported")),
     };
-    if !cfg!(target_os = "macos") {
+    if !cfg!(any(target_os = "macos", target_os = "linux", windows)) {
         return Err(failure("launch_sandbox_unavailable"));
     }
-    let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
-    let path = toolchains::with_agent_git(
-        home,
-        if request.tools {
-            toolchains::agent_path(&homes, TOOLS_ON_PATH)
-        } else {
-            TOOLS_OFF_PATH.to_owned()
-        },
-    );
-    let tmp = toolchains::existing_tmp(home).unwrap_or_else(|| home.to_path_buf());
-    let tools = if request.tools {
-        toolchains::agent_env(home, &homes)
-    } else {
-        Vec::new()
-    };
-    let mut base = vec![
-        ("HOME", home.as_os_str()),
-        ("TMPDIR", tmp.as_os_str()),
-        ("PATH", OsStr::new(&path)),
-        ("LANG", OsStr::new("C")),
-        ("LC_ALL", OsStr::new("C")),
-    ];
-    base.extend(tools.iter().map(|(name, value)| (*name, value.as_os_str())));
-    let proxy = installed
-        .and_then(Installed::model_proxy)
-        .map(crate::sandbox::model_proxy::variables);
-    base.extend(
+    let mut owned = launch_base(home, request.tools)?;
+    let proxy = installed.and_then(Installed::model_proxy);
+    let proxy = proxy.map(crate::sandbox::model_proxy::variables);
+    owned.extend(
         proxy
-            .iter()
+            .into_iter()
             .flatten()
-            .map(|(name, value)| (*name, OsStr::new(value))),
+            .map(|(name, value)| (name, value.into())),
     );
-    if let Some(identity) = &request.git_identity {
-        base.extend(
-            identity
-                .variables()
-                .map(|(name, value)| (name, OsStr::new(value))),
-        );
-    }
+    let identity = request.git_identity.iter().flat_map(GitIdentity::variables);
+    owned.extend(identity.map(|(name, value)| (name, value.into())));
+    let base: Vec<(&str, &OsStr)> = owned
+        .iter()
+        .map(|(name, value)| (*name, value.as_os_str()))
+        .collect();
     let harness_env = environment
         .iter()
         .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str())));
@@ -712,15 +730,8 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         .split_first()
         .ok_or_else(|| failure("launch_environment_refused"))?;
     let program = Path::new(program);
-    let mut command = match &request.sandbox_profile {
-        Some(profile) => crate::sandbox::agent_command(profile, program, &base, harness_env),
-        None => crate::sandbox::unconfined_command(program, &base, harness_env),
-    }
-    .map_err(|_| failure("launch_environment_refused"))?;
+    let mut command = bounded(request, program, script, &arguments, &base, harness_env)?;
     command
-        .args(script)
-        .args(&arguments)
-        .current_dir(&request.working_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -728,9 +739,10 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         command.get_current_dir(),
         Some(request.working_dir.as_path())
     );
+    #[cfg(target_os = "macos")]
     assert_eq!(
         crate::sandbox::starts_at_boundary(command.get_program()),
-        request.sandbox_profile.is_some() && !request.unconfined
+        !request.boundary.is_unconfined()
     );
     assert!(command.get_args().all(|argument| {
         request
@@ -739,6 +751,152 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
             .is_none_or(|key| !argument.to_string_lossy().contains(&key.0))
     }));
     Ok(command)
+}
+
+/// Builds the harness command inside the request's boundary, in its working folder: on
+/// macOS the confined profile through [`crate::sandbox::agent_command`] or the Full access
+/// session shim; on Linux and Windows an installed sandbox with the account's home, through
+/// [`InstalledSandbox::wrap`], on Windows once [`home_containers`] passes; anything else is
+/// `launch_sandbox_unavailable`. Inputs: the request, program, script words, arguments, base
+/// and harness variables. Output: the command.
+fn bounded<'a>(
+    request: &LaunchRequest,
+    program: &Path,
+    script: &[String],
+    arguments: &[OsString],
+    base: &[(&str, &OsStr)],
+    harness_env: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+) -> Result<Command, LaunchError> {
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = match request.boundary.confined_profile() {
+            Some(profile) => crate::sandbox::agent_command(profile, program, base, harness_env),
+            None => crate::sandbox::unconfined_command(program, base, harness_env),
+        }
+        .map_err(|_| failure("launch_environment_refused"))?;
+        command
+            .args(script)
+            .args(arguments)
+            .current_dir(&request.working_dir);
+        Ok(command)
+    }
+    #[cfg(any(target_os = "linux", windows))]
+    {
+        let LaunchBoundary::Installed(boundary) = &request.boundary else {
+            return Err(failure("launch_sandbox_unavailable"));
+        };
+        if request.account.home() != boundary.sandbox().agent_home() {
+            return Err(failure("launch_environment_refused"));
+        }
+        #[cfg(windows)]
+        home_containers(request.account.home(), boundary.sandbox())?;
+        let mut bare = Command::new(program);
+        bare.args(script)
+            .args(arguments)
+            .current_dir(&request.working_dir);
+        for (name, value) in base {
+            bare.env(name, value);
+        }
+        for (name, value) in harness_env {
+            match value {
+                Some(value) => bare.env(name, value),
+                None => bare.env_remove(name),
+            };
+        }
+        let command = boundary.wrap(&bare).map_err(|error| match error {
+            crate::sandbox::SandboxError::Invalid(_) => failure("launch_environment_refused"),
+            error => failure(
+                crate::sandbox::refusal_code(&error).unwrap_or("launch_sandbox_unavailable"),
+            ),
+        })?;
+        assert_eq!(command.get_program(), boundary.launcher().as_os_str());
+        Ok(command)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        let _ = (request, program, script, arguments, base);
+        let _ = harness_env.into_iter().count();
+        Err(failure("launch_sandbox_unavailable"))
+    }
+}
+
+/// The variables a launch starts with before the model proxy and the git identity, from one
+/// function per OS (ANSWER-0405 condition 3): the agent's home and temp folder, the PATH
+/// with the agent's git, the C locale and, with tools on, the tool homes. Inputs: the
+/// agent's home and whether tools are on. Output: the variables, or the refusal.
+#[cfg(not(windows))]
+fn launch_base(home: &Path, tools: bool) -> Result<Vec<(&'static str, OsString)>, LaunchError> {
+    let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
+    let path = toolchains::with_agent_git(
+        home,
+        if tools {
+            toolchains::agent_path(&homes, TOOLS_ON_PATH)
+        } else {
+            TOOLS_OFF_PATH.to_owned()
+        },
+    );
+    let tmp = toolchains::existing_tmp(home).unwrap_or_else(|| home.to_path_buf());
+    let mut base = vec![
+        ("HOME", home.as_os_str().to_owned()),
+        ("TMPDIR", tmp.into_os_string()),
+        ("PATH", OsString::from(path)),
+        ("LANG", OsString::from("C")),
+        ("LC_ALL", OsString::from("C")),
+    ];
+    if tools {
+        base.extend(toolchains::agent_env(home, &homes));
+    }
+    assert_eq!(base[0].0, "HOME");
+    assert_eq!(base[2].0, "PATH");
+    Ok(base)
+}
+
+/// The variables a Windows launch starts with before the model proxy and the git identity:
+/// none, as the boundary's own base sets the home, temp folders and System32 PATH, and a
+/// Windows toolchain PATH waits for group E (H3-Q1, V244-WIN-TOOLS-ON-PATH), so tools on
+/// adds nothing yet. Inputs: the agent's home and whether tools are on. Output: no variables.
+#[cfg(windows)]
+fn launch_base(home: &Path, _tools: bool) -> Result<Vec<(&'static str, OsString)>, LaunchError> {
+    assert!(home.is_absolute());
+    Ok(Vec::new())
+}
+
+/// Checks on Windows that every app container an account home grants is its boundary's own
+/// (Q9, rv-sec3 #712 N1). The expected SID derives only from the boundary's sandbox, never
+/// from the home, a record or a profile. Inputs: the home and the boundary's sandbox.
+/// Output: Ok, or a `launch_account_home_*` or `launch_sandbox_unavailable` refusal.
+#[cfg(windows)]
+fn home_containers(
+    home: &Path,
+    sandbox: &crate::sandbox::ProjectSandbox,
+) -> Result<(), LaunchError> {
+    use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    let unsafe_home = || failure("launch_account_home_unsafe");
+    let unavailable = |_| failure("launch_account_home_unavailable");
+    let name = crate::sandbox::windows::container_name(sandbox);
+    let expected = crazyagent_win_sandbox::container_sid(&name)
+        .map_err(|_| failure("launch_sandbox_unavailable"))?;
+    assert!(app_container(&expected));
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(home)
+        .map_err(unavailable)?;
+    let facts = crazyagent_win_sandbox::private::facts(&held).map_err(unavailable)?;
+    let list = facts.list.as_deref().ok_or_else(unsafe_home)?;
+    let entries = crazyagent_win_sandbox::dacl::entries(list).map_err(|_| unsafe_home())?;
+    let foreign = entries
+        .iter()
+        .any(|entry| entry.allows && app_container(entry.sid) && entry.sid != expected.as_slice());
+    if facts.reparse || foreign {
+        return Err(unsafe_home());
+    }
+    drop(held);
+    Ok(())
 }
 
 /// The Codex app-server command line. Every folder of the working folder's walk is recorded
@@ -1016,6 +1174,10 @@ pub(super) fn harness_id(request: &LaunchRequest) -> &'static str {
     super::spec(&request.harness).map_or("", |spec| spec.id)
 }
 
+/// Checks a launch request before any headless or pane command is built: the executable,
+/// working folder, account home, model, URL, profile path and limits, and that Full access
+/// is asked for only on macOS, so no unconfined boundary becomes a bare command elsewhere.
+/// Input: the request. Output: Ok, or a plain refusal code.
 pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
     let executable = std::fs::metadata(&request.executable)
         .map_err(|_| failure("launch_executable_unavailable"))?;
@@ -1049,13 +1211,10 @@ pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
             return Err(failure("launch_url_invalid"));
         }
     }
-    match (&request.sandbox_profile, request.unconfined) {
-        (Some(_), true) => return Err(failure("launch_sandbox_conflict")),
-        (Some(profile), false) if !profile.is_absolute() || !profile.is_file() => {
-            return Err(failure("launch_sandbox_profile_unavailable"));
-        }
-        (Some(_), false) | (None, true) => {}
-        (None, false) => return Err(failure("launch_sandbox_required")),
+    if let LaunchBoundary::Profile(profile) = &request.boundary
+        && (!profile.is_absolute() || !profile.is_file())
+    {
+        return Err(failure("launch_sandbox_profile_unavailable"));
     }
     let limits = request.limits;
     if limits.run_time.is_zero()
@@ -1063,6 +1222,9 @@ pub(super) fn validate(request: &LaunchRequest) -> Result<(), LaunchError> {
         || limits.stop_grace > Duration::from_secs(30)
     {
         return Err(failure("launch_limits_invalid"));
+    }
+    if !cfg!(target_os = "macos") && request.boundary.is_unconfined() {
+        return Err(failure("launch_sandbox_unavailable"));
     }
     Ok(())
 }
@@ -1110,11 +1272,191 @@ fn validate_home_for(home: &Path, owner: Option<&Path>) -> Result<(), LaunchErro
     Ok(())
 }
 
-/// Refuses an account home where its Unix owner and 0700 mode cannot be checked.
-/// Takes the home, unused. Returns `launch_account_home_unavailable`.
-#[cfg(not(unix))]
-pub(crate) fn validate_home(_home: &Path) -> Result<(), LaunchError> {
-    Err(failure("launch_account_home_unavailable"))
+/// Checks that an account home is safe to launch in on Windows, the twin of the Unix check:
+/// a local folder on a drive, not a link or junction, whose security [`judge_home`] passes,
+/// that is neither the owner's profile folder nor their real `.codex` or `.claude`.
+/// Input: the home. Output: Ok, or a plain `launch_account_home_*` refusal code.
+#[cfg(windows)]
+pub(crate) fn validate_home(home: &Path) -> Result<(), LaunchError> {
+    let owner = std::env::home_dir();
+    validate_home_for(home, owner.as_deref())
+}
+
+/// Tells whether an account home is spelled as an absolute path on a drive, the only
+/// spelling H1 opens: a UNC share, a device name or a relative path is not. Input: the
+/// home. Output: the answer.
+#[cfg(windows)]
+fn on_drive(home: &Path) -> bool {
+    home.is_absolute()
+        && matches!(
+            home.components().next(),
+            Some(std::path::Component::Prefix(prefix))
+                if matches!(prefix.kind(), std::path::Prefix::Disk(_))
+        )
+}
+
+/// Holds an account home on Windows as H1's check opens it: only an absolute path on a
+/// drive, else `launch_account_home_unsafe` before anything is opened, so no share is
+/// contacted; then read only, as itself rather than through a link, and without delete
+/// sharing, so neither it nor a folder above it is renamed while held. Input: the home.
+/// Output: the held folder, `launch_account_home_unsafe` or `launch_account_home_unavailable`.
+#[cfg(windows)]
+pub(crate) fn hold_home(home: &Path) -> Result<std::fs::File, LaunchError> {
+    use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    if !on_drive(home) {
+        return Err(failure("launch_account_home_unsafe"));
+    }
+    std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(home)
+        .map_err(|_| failure("launch_account_home_unavailable"))
+}
+
+/// Checks an account home a launch holds on Windows, as [`validate_home`] checks one by
+/// path, but judging the held folder itself (CodeRabbit CR-1252), so a junction above the
+/// home pointed elsewhere after the hold never makes H1 judge another folder. Inputs: the
+/// home and the folder [`hold_home`] gave for it. Output: Ok, or a plain
+/// `launch_account_home_*` refusal code.
+#[cfg(windows)]
+pub(crate) fn validate_held_home(home: &Path, held: &std::fs::File) -> Result<(), LaunchError> {
+    if !on_drive(home) {
+        return Err(failure("launch_account_home_unsafe"));
+    }
+    validate_held_for(home, held, std::env::home_dir().as_deref())
+}
+
+/// Checks a held account home against a given owner profile folder. Its kind, owner, access
+/// list and label are read from the held handle. The profile folder and its `.codex` and
+/// `.claude` are each opened and refused when they are the held folder itself, read from
+/// both handles, and also when their [`crate::sandbox::canonical`] spelling names the home,
+/// ignoring letter case. Inputs: the home, the held folder and the profile folder, none
+/// when unknown. Output: Ok, or a plain `launch_account_home_*` refusal code.
+#[cfg(windows)]
+fn validate_held_for(
+    home: &Path,
+    held: &std::fs::File,
+    owner: Option<&Path>,
+) -> Result<(), LaunchError> {
+    use crate::platform::FILE_FLAG_BACKUP_SEMANTICS;
+    use crazyagent_win_sandbox::private;
+    use std::os::windows::fs::OpenOptionsExt;
+    let unavailable = |_: std::io::Error| failure("launch_account_home_unavailable");
+    let forbidden_home = || failure("launch_account_home_forbidden");
+    let folder = held.metadata().map_err(unavailable)?.is_dir();
+    let facts = private::facts(held).map_err(unavailable)?;
+    let user = private::user_sid().map_err(unavailable)?;
+    if !folder || judge_home(&facts, &user).is_err() {
+        return Err(failure("launch_account_home_unsafe"));
+    }
+    let canonical = crate::sandbox::canonical(home).map_err(unavailable)?;
+    assert!(canonical.is_absolute());
+    if let Some(owner) = owner {
+        for forbidden in [
+            owner.to_path_buf(),
+            owner.join(".codex"),
+            owner.join(".claude"),
+        ] {
+            if let Ok(opened) = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+                .open(&forbidden)
+                && !matches!(private::same(held, &opened), Ok(false))
+            {
+                return Err(forbidden_home());
+            }
+            let named = crate::sandbox::canonical(&forbidden).unwrap_or(forbidden);
+            if named
+                .as_os_str()
+                .eq_ignore_ascii_case(canonical.as_os_str())
+                || named.as_os_str().eq_ignore_ascii_case(home.as_os_str())
+            {
+                return Err(forbidden_home());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Checks an account home against a given owner profile folder, as [`validate_home`] does
+/// with this process's: holds it with [`hold_home`], so it is not renamed while checked,
+/// and judges the held folder with [`validate_held_for`]. Inputs: the home and the profile
+/// folder, none when unknown. Output: Ok, or a plain `launch_account_home_*` refusal code.
+#[cfg(windows)]
+fn validate_home_for(home: &Path, owner: Option<&Path>) -> Result<(), LaunchError> {
+    let held = hold_home(home)?;
+    validate_held_for(home, &held, owner)
+}
+
+/// Judges an account home's security facts on Windows, the twin of the Unix owner and 0700
+/// check: not a link, junction or network folder, a trusted owner, every allow entry (an
+/// inherit-only one too, as the files made in the home take it) for the user, SYSTEM, the
+/// administrators, OWNER RIGHTS or one app container ([`app_container`]), no entry this
+/// check cannot read, and no label a lower integrity process may write through.
+/// Inputs: the facts and the user's SID. Output: Ok, or the reason the home is refused.
+#[cfg(windows)]
+fn judge_home(
+    facts: &crazyagent_win_sandbox::private::Facts,
+    user: &[u8],
+) -> Result<(), &'static str> {
+    use crazyagent_win_sandbox::dacl;
+    const MEDIUM_LEVEL: u32 = 0x2000;
+    const NO_WRITE_UP: u32 = 0x1;
+    if facts.reparse {
+        return Err("the home is a link or a junction");
+    }
+    if facts.remote {
+        return Err("the home is on a network volume");
+    }
+    if !dacl::trusted_owner(&facts.owner, user) {
+        return Err("another account owns the home");
+    }
+    let list = facts
+        .list
+        .as_deref()
+        .ok_or("the home has no access list, so everyone may open it")?;
+    let entries = dacl::entries(list)?;
+    assert!(list.len() >= 8);
+    if entries.len() != usize::from(u16::from_le_bytes([list[4], list[5]])) {
+        return Err("the home's access list holds an entry this check cannot read");
+    }
+    let held = [
+        user,
+        &dacl::SYSTEM[..],
+        &dacl::ADMINISTRATORS[..],
+        &dacl::OWNER_RIGHTS[..],
+    ];
+    if entries
+        .iter()
+        .any(|entry| entry.allows && !held.contains(&entry.sid) && !app_container(entry.sid))
+    {
+        return Err("another account or package may open the home");
+    }
+    if let Some(sacl) = facts.label.as_deref()
+        && let Some((level, policy)) = dacl::label(sacl)?
+        && (level < MEDIUM_LEVEL || policy & NO_WRITE_UP == 0)
+    {
+        return Err("a lower integrity process may change the home");
+    }
+    Ok(())
+}
+
+/// Whether a SID names one app container: `S-1-15-2-` and the seven parts Windows derives
+/// from the container's name. ALL APPLICATION PACKAGES (`S-1-15-2-1`), ALL RESTRICTED
+/// APPLICATION PACKAGES (`S-1-15-2-2`) and capabilities (`S-1-15-3-*`) are not one.
+/// Input: the SID bytes. Output: the answer.
+#[cfg(windows)]
+fn app_container(sid: &[u8]) -> bool {
+    const PARTS: u8 = 8;
+    const APP_PACKAGE: [u8; 4] = [2, 0, 0, 0];
+    crazyagent_win_sandbox::dacl::package(sid)
+        && sid[1] == PARTS
+        && sid.len() == 8 + 4 * usize::from(PARTS)
+        && sid[8..12] == APP_PACKAGE
 }
 
 /// What a harness output reader hands the session: one line, the note that a line longer
@@ -1601,11 +1943,7 @@ impl Session {
                     .map_err(|_| failure("launch_reader_unavailable"))?;
             }
         }
-        let check = if request.unconfined {
-            crate::sandbox::LineageCheck::FullAccess
-        } else {
-            crate::sandbox::LineageCheck::Unneeded
-        };
+        let check = request.boundary.lineage_check();
         let follower = Follower::start(child.id(), Some(token), check);
         let mut session = Self {
             child,
@@ -2082,3 +2420,12 @@ fn tail(output: File, probe: File, sender: SyncSender<Line>) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, windows))]
+pub(crate) mod low_probe;
+
+#[cfg(all(test, windows))]
+mod home_windows_tests;
+
+#[cfg(all(test, windows))]
+mod bounded_windows_tests;

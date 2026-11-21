@@ -110,7 +110,7 @@ pub(super) async fn still_running(
 /// Where a served change's reply goes: the client that asked, or the intake job that runs
 /// the add, which keeps the reply and lends its tally to the copy.
 pub(super) enum Sink<'a> {
-    Client(&'a mut UnixStream),
+    Client(&'a mut Stream),
     Job(Arc<Tally>, &'a mut Option<Result<OwnerReply, EngineError>>),
 }
 
@@ -883,7 +883,7 @@ async fn files(
         .unwrap_or(now)
         .min(now + crate::project_files::LISTING_TIME);
     let listed = tokio::task::spawn_blocking(move || {
-        crate::project_files::list(&folder, &query, limit, stop)
+        crate::project_files::list(&folder, &query, limit, stop, None)
     })
     .await
     .map_err(|_| failure("project_files_interrupted"))?;

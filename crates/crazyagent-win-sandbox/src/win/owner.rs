@@ -1,15 +1,19 @@
 use super::acl::{ACL_BYTES_MAX, Local};
+use super::container::sid;
 use super::{BoundaryError, last_error, windows};
 use crate::dacl::{
-    ANCESTOR_CHANGES, DENY_TYPES, FILE_CHANGES, OWN_FOLDER_CHANGES, Part, SID_BYTES_MAX,
-    first_changeable_part, held_only_by,
+    ALL_APPLICATION_PACKAGES, ANCESTOR_CHANGES, DENY_TYPES, DRIVE_ROOT_RIGHTS, FILE_CHANGES,
+    OWN_FOLDER_CHANGES, Part, SID_BYTES_MAX, first_changeable_part, held_only_by, holds_allow,
+    read_root_refused,
 };
+use crate::plan::granted_read_roots;
+use crate::profile::BoundaryProfile;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use windows_sys::Win32::Foundation::{
-    ERROR_FILE_NOT_FOUND, ERROR_INVALID_NAME, ERROR_INVALID_SID, ERROR_PATH_NOT_FOUND,
-    ERROR_SUCCESS, GENERIC_ALL, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    ERROR_ACCESS_DENIED, ERROR_FILE_NOT_FOUND, ERROR_INVALID_NAME, ERROR_INVALID_SID,
+    ERROR_PATH_NOT_FOUND, ERROR_SUCCESS, GENERIC_ALL, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
 use windows_sys::Win32::Security::{
@@ -19,8 +23,8 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, DELETE, FILE_APPEND_DATA, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
-    WRITE_OWNER,
+    FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, GetVolumeInformationW, OPEN_EXISTING,
+    READ_CONTROL, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_DENIED_ACE_TYPE, ACCESS_DENIED_CALLBACK_ACE_TYPE,
@@ -29,6 +33,7 @@ use windows_sys::Win32::System::SystemServices::{
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 const TOKEN_USER_BYTES_MAX: usize = 256;
+const FILE_PERSISTENT_ACLS: u32 = 0x0000_0008;
 const FOLDERS_MAX: usize = 128;
 
 const _: () = assert!(
@@ -128,12 +133,105 @@ fn read_part(part: &Path) -> Part {
     }
 }
 
-/// Reads the owner SID and a copy of the access list of the file or folder at `path` itself,
-/// opened with the link flag so a link or junction there is read, never what it leads to.
-/// Relies on the handle staying open for the call, on the owner and list pointing into the
-/// descriptor the call allocated, and on that descriptor staying alive until both are copied.
-/// Input: the path. Output: the owner and the list (None when it has none), or the error.
-fn security(path: &Path) -> Result<(Vec<u8>, Option<Vec<u8>>), u32> {
+/// Whether the boundary refuses `path` as a read root of `container` before its helper runs
+/// ([`crate::dacl::read_root_refused`]): its list is read where it sits, and only when neither
+/// every app container nor this one reads it ([`crate::dacl::reads_root`]) is it opened for
+/// `WRITE_DAC`, the right the helper's write takes; anything it cannot read is left to the
+/// helper, which names it. Inputs: the read root and the container name. Output: true to refuse.
+pub fn unreadable_root(path: &Path, container: &str) -> bool {
+    let (Ok((_, Some(list))), Ok(own)) = (security(path), sid(container)) else {
+        return false;
+    };
+    let folder = std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
+    read_root_refused(&list, &own.bytes(), folder, || {
+        !matches!(opened(path, WRITE_DAC), Err(ERROR_ACCESS_DENIED))
+    })
+}
+
+/// The first read root of `profile` the boundary refuses before its helper runs
+/// ([`unreadable_root`]), among those the helper grants ([`crate::plan::granted_read_roots`]).
+/// Input: the profile. Output: that root, or none.
+pub fn unreadable_read_root(profile: &BoundaryProfile) -> Option<&str> {
+    granted_read_roots(profile)
+        .into_iter()
+        .find(|root| unreadable_root(Path::new(root), &profile.container))
+}
+
+/// The root of the drive or share an absolute path sits on, its last ancestor in the same
+/// form: `C:\` for `C:\x`, `\\?\C:\` for `\\?\C:\x`. Input: the path. Output: the root, or
+/// none for a relative path.
+fn drive_root(path: &Path) -> Option<&Path> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let root = path.ancestors().last()?;
+    assert!(root.parent().is_none());
+    assert!(path.starts_with(root));
+    Some(root)
+}
+
+/// Whether the volume whose root is `root` keeps access lists (`FILE_PERSISTENT_ACLS`); FAT
+/// and exFAT do not, so no list there keeps a container out. Input: the root, with its
+/// trailing separator. Output: the answer, false too when Windows cannot say.
+fn keeps_access_lists(root: &Path) -> bool {
+    let wide: Vec<u16> = root
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    if wide[..wide.len() - 1].contains(&0) {
+        return false;
+    }
+    let mut flags = 0_u32;
+    let read = unsafe {
+        GetVolumeInformationW(
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut flags,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    read != 0 && flags & FILE_PERSISTENT_ACLS != 0
+}
+
+/// Whether the list of `path` itself, read where it sits, keeps every app container from
+/// reading its attributes: no plain allow gives ALL APPLICATION PACKAGES
+/// [`DRIVE_ROOT_RIGHTS`] on it ([`holds_allow`]). A path with no list grants everyone, and
+/// one whose list cannot be read is left to the launch. Input: the path. Output: true to
+/// refuse.
+fn attributes_unreadable(path: &Path) -> bool {
+    matches!(
+        security(path),
+        Ok((_, Some(list))) if !holds_allow(&list, &ALL_APPLICATION_PACKAGES, DRIVE_ROOT_RIGHTS)
+    )
+}
+
+/// The first drive root among `paths`' roots ([`drive_root`]) on a volume that keeps access
+/// lists ([`keeps_access_lists`]) whose list keeps every app container from reading its
+/// attributes ([`attributes_unreadable`]), each root asked once: a boxed Node.js fails to
+/// resolve a path there (V244-WIN-ADMIN-STEP). Input: the paths. Output: that root, or none.
+pub fn unreadable_drive_root<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Option<PathBuf> {
+    let mut asked: Vec<&Path> = Vec::new();
+    for root in paths.into_iter().filter_map(drive_root) {
+        if asked.contains(&root) {
+            continue;
+        }
+        asked.push(root);
+        if keeps_access_lists(root) && attributes_unreadable(root) {
+            return Some(root.to_path_buf());
+        }
+    }
+    None
+}
+
+/// Opens the file or folder at `path` itself for `access`, with the link flag so a link or
+/// junction there is opened, never what it leads to, sharing every kind of access. Inputs:
+/// the path and the access. Output: the handle, or the Windows error.
+fn opened(path: &Path, access: u32) -> Result<OwnedHandle, u32> {
     let wide: Vec<u16> = path
         .as_os_str()
         .encode_wide()
@@ -145,7 +243,7 @@ fn security(path: &Path) -> Result<(Vec<u8>, Option<Vec<u8>>), u32> {
     let opened = unsafe {
         CreateFileW(
             wide.as_ptr(),
-            READ_CONTROL,
+            access,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             std::ptr::null(),
             OPEN_EXISTING,
@@ -156,7 +254,16 @@ fn security(path: &Path) -> Result<(Vec<u8>, Option<Vec<u8>>), u32> {
     if opened == INVALID_HANDLE_VALUE {
         return Err(last_error());
     }
-    let handle = unsafe { OwnedHandle::from_raw_handle(opened) };
+    Ok(unsafe { OwnedHandle::from_raw_handle(opened) })
+}
+
+/// Reads the owner SID and a copy of the access list of the file or folder at `path` itself,
+/// opened with the link flag so a link or junction there is read, never what it leads to.
+/// Relies on the handle staying open for the call, on the owner and list pointing into the
+/// descriptor the call allocated, and on that descriptor staying alive until both are copied.
+/// Input: the path. Output: the owner and the list (None when it has none), or the error.
+fn security(path: &Path) -> Result<(Vec<u8>, Option<Vec<u8>>), u32> {
+    let handle = opened(path, READ_CONTROL)?;
     let mut owner: PSID = std::ptr::null_mut();
     let mut dacl: *mut ACL = std::ptr::null_mut();
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
@@ -189,16 +296,21 @@ fn security(path: &Path) -> Result<(Vec<u8>, Option<Vec<u8>>), u32> {
     Ok((owner, list))
 }
 
-/// The engine's own user SID, read from its process token. Relies on the token handle
-/// staying open for both calls, and on the buffer, aligned for `TOKEN_USER` and as long as
-/// Windows asked for, outliving the read of the SID it holds. Output: the SID bytes, or the
+/// The engine's own user SID, read from its process token. Output: the SID bytes, or the
 /// Windows error.
-fn user_sid() -> Result<Vec<u8>, u32> {
+pub(super) fn user_sid() -> Result<Vec<u8>, u32> {
     let mut token: HANDLE = std::ptr::null_mut();
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return Err(last_error());
     }
     let token = unsafe { OwnedHandle::from_raw_handle(token) };
+    token_user(&token)
+}
+
+/// The user SID a token names. Relies on the buffer, aligned for `TOKEN_USER` and as long
+/// as Windows asked for, outliving the read of the SID it holds. Input: a token opened with
+/// `TOKEN_QUERY`. Output: the SID bytes, or the Windows error.
+pub(super) fn token_user(token: &OwnedHandle) -> Result<Vec<u8>, u32> {
     let mut needed = 0_u32;
     unsafe {
         GetTokenInformation(
@@ -232,7 +344,7 @@ fn user_sid() -> Result<Vec<u8>, u32> {
 
 /// Copies a SID Windows returned. Relies on `sid`, when not null, pointing at memory that
 /// stays alive for the call. Input: the SID. Output: its bytes, or `ERROR_INVALID_SID`.
-fn sid_bytes(sid: PSID) -> Result<Vec<u8>, u32> {
+pub(super) fn sid_bytes(sid: PSID) -> Result<Vec<u8>, u32> {
     if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
         return Err(ERROR_INVALID_SID);
     }
@@ -301,5 +413,82 @@ mod tests {
         }
         users(&above, &remove);
         owner_only(&program).unwrap();
+    }
+
+    /// V244-WIN-ADMIN-STEP: a path's drive root is its last ancestor, the verbatim form kept;
+    /// a relative path, or one relative to a drive, has none.
+    #[test]
+    fn a_paths_drive_root_is_its_last_ancestor_in_the_same_form() {
+        assert_eq!(
+            drive_root(Path::new(r"C:\Users\x")),
+            Some(Path::new(r"C:\"))
+        );
+        assert_eq!(
+            drive_root(Path::new(r"\\?\C:\Users\x")),
+            Some(Path::new(r"\\?\C:\"))
+        );
+        assert_eq!(drive_root(Path::new(r"C:\")), Some(Path::new(r"C:\")));
+        assert_eq!(drive_root(Path::new(r"Users\x")), None);
+        assert_eq!(drive_root(Path::new(r"C:Users")), None);
+    }
+
+    /// V244-WIN-ADMIN-STEP: the system drive keeps access lists, asked by its plain and its
+    /// verbatim root; a folder that is no volume root gets no answer, so it counts as none.
+    #[test]
+    fn the_system_drive_keeps_access_lists_asked_by_either_root() {
+        let drive = std::env::var("SystemDrive").unwrap();
+        assert!(keeps_access_lists(Path::new(&format!(r"{drive}\"))));
+        assert!(keeps_access_lists(Path::new(&format!(r"\\?\{drive}\"))));
+        let windows = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+        assert!(!keeps_access_lists(&windows));
+    }
+
+    /// V244-WIN-ADMIN-STEP: a folder whose own list gives every app container read attributes
+    /// and synchronize, or more, on the folder itself keeps none out; one without such an
+    /// entry, with read attributes alone, or with one only what it holds inherits, does. A
+    /// path whose list cannot be read is left to the launch.
+    #[test]
+    fn a_list_without_read_attributes_for_every_app_container_keeps_them_out() {
+        let directory = tempfile::tempdir_in(std::env::var_os("USERPROFILE").unwrap()).unwrap();
+        let root = directory.path().join("root");
+        fs::create_dir(&root).unwrap();
+        let user = std::env::var("USERNAME").unwrap();
+        users(
+            &root,
+            &["/inheritance:r", "/grant:r", &format!("{user}:(OI)(CI)(F)")],
+        );
+        assert!(attributes_unreadable(&root), "no entry");
+        let package = "*S-1-15-2-1";
+        for (rights, refused) in [
+            ("(RA,S)", false),
+            ("(RX)", false),
+            ("(RA)", true),
+            ("(OI)(CI)(IO)(RA,S)", true),
+        ] {
+            users(&root, &["/grant", &format!("{package}:{rights}")]);
+            assert_eq!(attributes_unreadable(&root), refused, "{rights}");
+            users(&root, &["/remove:g", package]);
+        }
+        assert!(attributes_unreadable(&root));
+        assert!(!attributes_unreadable(&directory.path().join("missing")));
+    }
+
+    /// V244-WIN-ADMIN-STEP: the drive-root check skips a relative path and, on the system
+    /// drive, agrees with that root's own list, asked once for many paths on it.
+    #[test]
+    fn the_drive_root_check_names_a_root_whose_list_keeps_app_containers_out() {
+        let drive = PathBuf::from(format!(r"{}\", std::env::var("SystemDrive").unwrap()));
+        let windows = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+        let system = windows.join("System32");
+        let expected = attributes_unreadable(&drive).then(|| drive.clone());
+        eprintln!(
+            "system drive root keeps app containers out: {}",
+            expected.is_some()
+        );
+        assert_eq!(
+            unreadable_drive_root([Path::new("relative"), windows.as_path(), system.as_path()]),
+            expected
+        );
+        assert_eq!(unreadable_drive_root([Path::new("relative")]), None);
     }
 }

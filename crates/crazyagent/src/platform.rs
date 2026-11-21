@@ -5,6 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub(crate) mod fd_wait;
+#[cfg(unix)]
 pub(crate) mod unix_socket;
 
 #[cfg(unix)]
@@ -63,7 +64,7 @@ pub(crate) const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
 /// The Windows open flag that lets a folder be opened as a handle.
 #[cfg(windows)]
-const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+pub(crate) const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
 
 /// The Windows file attribute of a reparse point: a junction, a link or a mount point.
 #[cfg(windows)]

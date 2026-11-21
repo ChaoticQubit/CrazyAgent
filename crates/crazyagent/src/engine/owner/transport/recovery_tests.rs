@@ -763,14 +763,14 @@ async fn a_dismissal_holds_the_owner_barrier_until_it_commits_and_a_revoked_clie
 /// The owner's half of a connected socket pair, with the client's half kept open.
 /// Output: the server stream and the client stream.
 #[cfg(unix)]
-fn connection() -> (UnixStream, UnixStream) {
+fn connection() -> (Stream, Stream) {
     let (server, client) = crate::spawn_gate::unix_pair_std().unwrap();
     for end in [&server, &client] {
         end.set_nonblocking(true).unwrap();
     }
     (
-        UnixStream::from_std(server).unwrap(),
-        UnixStream::from_std(client).unwrap(),
+        Stream::from_std(server).unwrap(),
+        Stream::from_std(client).unwrap(),
     )
 }
 
@@ -944,8 +944,8 @@ async fn a_client_that_stops_reading_holds_the_owner_barrier_no_longer_than_the_
         }
     }
     assert!(writes > 0, "the client's socket took no bytes");
-    let mut server = UnixStream::from_std(server).unwrap();
-    let _client = UnixStream::from_std(client).unwrap();
+    let mut server = Stream::from_std(server).unwrap();
+    let _client = Stream::from_std(client).unwrap();
     let body = serde_json::to_vec(&serde_json::json!({
         "recovery": {"kind": "dismiss", "action_kind": "agent_spawn", "id": shown.get()}
     }))

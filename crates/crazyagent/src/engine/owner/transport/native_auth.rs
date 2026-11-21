@@ -4,8 +4,8 @@ use crate::engine::owner::{
     Admission, NativeAuthCancel, NativeAuthLogout, NativeAuthQuery, NativeAuthReply,
     NativeAuthStart, OwnerClientKind, failure,
 };
-use crate::engine::{Engine, EngineError, io_error, read_frame, verify_peer};
-use crate::platform::unix_socket::UnixStream;
+use crate::engine::{Engine, EngineError, io_error, read_frame, verify_server};
+use crate::ipc::Stream;
 use crate::protocol::encode_frame;
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,10 +63,10 @@ impl OwnerClient {
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
-            let mut stream = crate::spawn_gate::connect_unix(self.root.path.join(SOCKET))
+            let mut stream = crate::ipc::owner_connect(self.root.path.join(SOCKET))
                 .await
                 .map_err(|_| failure("native_auth_owner_unavailable"))?;
-            verify_peer(&stream)?;
+            verify_server(&stream)?;
             if self.root.socket_identity()? != self.socket {
                 return Err(failure("owner_socket_replaced"));
             }
@@ -119,7 +119,7 @@ const ANSWER_MARGIN: Duration = Duration::from_millis(250);
 /// authority, packet, admission, request bytes and the exchange deadline. Output: none once
 /// the reply is written, else the refusal.
 pub(super) async fn serve(
-    stream: &mut UnixStream,
+    stream: &mut Stream,
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],

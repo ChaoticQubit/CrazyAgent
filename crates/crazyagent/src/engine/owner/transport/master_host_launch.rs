@@ -6,7 +6,6 @@ use crate::config::{ModelConnection, ModelEndpoint};
 use crate::engine::bootstrap::{AgentCredential, NativeProfileUse};
 use crate::engine::io_error;
 use crate::engine::owner::is_hex_id;
-#[cfg(unix)]
 use crate::engine::owner::random_id;
 use crate::master_session::MasterBackend;
 use crate::master_step_limit::StepLimit;
@@ -26,7 +25,6 @@ use crate::worktrees::LeaseState;
 #[cfg(unix)]
 use rustix::fs::{AtFlags, Mode};
 use std::fs::File;
-#[cfg(unix)]
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
@@ -38,18 +36,14 @@ use std::process::Command;
 use std::process::Stdio;
 use std::time::Duration;
 
-#[cfg(unix)]
 const CAPTURE_ALLOCATION_ATTEMPTS: usize = 4;
-#[cfg(unix)]
 const MASTER_INSTRUCTIONS: &str = "instructions.md";
-#[cfg(unix)]
 const _: () = assert!(
     crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX + 1
         < crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX as usize
 );
 #[cfg(unix)]
 const MASTER_TMP: &str = "tmp";
-#[cfg(unix)]
 const MASTER_HOME: &str = "home";
 #[cfg(unix)]
 const MASTER_PROFILE: &str = "sandbox.sb";
@@ -531,11 +525,28 @@ fn master_turn_home(root: &Root, runtime_ref: &RequestId) -> Result<PathBuf, Eng
     Ok(home)
 }
 
-/// Refuses a master turn home where the owner-only turn directory cannot be made.
-/// Takes the owner root and turn reference, both unused. Returns `master_capture_unavailable`.
-#[cfg(not(unix))]
-fn master_turn_home(_root: &Root, _runtime_ref: &RequestId) -> Result<PathBuf, EngineError> {
-    Err(failure("master_capture_unavailable"))
+/// Makes the private home of one master turn inside its turn folder on Windows (PLAN-0410
+/// D1): a new W1 private folder with no label, which S6 grants the turn's container alone.
+/// Any entry already at the name, a junction included, is refused, never followed, and the
+/// made home must be held at its own name in the turn folder. Input: the owner root and the
+/// turn's runtime reference. Output: the home, or `master_home_unsafe` when the name is
+/// taken, or a refusal when the folders are not the engine's.
+#[cfg(windows)]
+fn master_turn_home(root: &Root, runtime_ref: &RequestId) -> Result<PathBuf, EngineError> {
+    let name = format!("master-runtime-{}", runtime_ref.as_str());
+    let runtime = Root::open(&root.path.join(&name))?;
+    verify_master_runtime(root, &runtime, &name)?;
+    let path = runtime.path.join(MASTER_HOME);
+    if std::fs::symlink_metadata(&path).is_ok() {
+        return Err(failure("master_home_unsafe"));
+    }
+    runtime.create_directory(MASTER_HOME)?;
+    let home = Root::open(&path).map_err(|_| failure("master_home_unsafe"))?;
+    verify_master_runtime(&runtime, &home, MASTER_HOME)
+        .map_err(|_| failure("master_home_unsafe"))?;
+    verify_master_runtime(root, &runtime, &name)?;
+    assert_eq!(home.path, path);
+    Ok(path)
 }
 
 /// Owns one master turn's private folder in the owner generation, with its capture,
@@ -780,8 +791,8 @@ fn validate_master_binding(prepared: &PreparedMasterTurn) -> Result<(), EngineEr
     {
         return Err(failure("master_runtime_binding"));
     }
-    if std::fs::canonicalize(&prepared.cwd).map_err(io_error)? != prepared.cwd
-        || std::fs::canonicalize(&prepared.repository).map_err(io_error)? != prepared.repository
+    if !crate::projects_home::is_canonical(&prepared.cwd).map_err(io_error)?
+        || !crate::projects_home::is_canonical(&prepared.repository).map_err(io_error)?
         || !std::fs::symlink_metadata(&prepared.cwd)
             .map_err(io_error)?
             .is_dir()
@@ -985,8 +996,8 @@ fn turn_sandbox(
     policy: &AgentPolicy,
     hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
-    if policy.access.unavailable().is_some() {
-        return Err(failure("agent_access_unavailable"));
+    if let Some((_, code)) = policy.access.refusal() {
+        return Err(failure(code));
     }
     let repository = &crate::projects_home::one_spelling(repository.to_path_buf());
     let worktree = &crate::projects_home::one_spelling(worktree.to_path_buf());
@@ -1157,7 +1168,11 @@ pub(super) fn master_tools_sandbox(
     Err(failure("master_sandbox_unavailable"))
 }
 
-#[cfg(unix)]
+/// Makes one master turn's private folder in the owner generation, with its empty capture
+/// file held open, and checks both are the engine's before and after they are written to
+/// disk. Input: the owner root. Output: the turn's runtime and capture references and the
+/// capture, `master_capture_unavailable` when every attempt met a taken name, or a refusal
+/// when the folder or file is not the engine's.
 pub(super) fn allocate_master_capture(
     root: &Root,
 ) -> Result<(RequestId, RequestId, File), EngineError> {
@@ -1169,10 +1184,8 @@ pub(super) fn allocate_master_capture(
             continue;
         }
         let name = format!("master-runtime-{}", runtime_ref.as_str());
-        match rustix::fs::mkdirat(&root.directory, name.as_str(), Mode::RWXU) {
-            Ok(()) => {}
-            Err(rustix::io::Errno::EXIST) => continue,
-            Err(error) => return Err(io_error(error)),
+        if !make_master_runtime(root, &name)? {
+            continue;
         }
         root.verify()?;
         let runtime = Root::open(&root.path.join(&name))?;
@@ -1181,8 +1194,8 @@ pub(super) fn allocate_master_capture(
         let capture = runtime.open_key(&capture_name, true)?;
         verify_master_capture(&runtime, &capture_name, &capture)?;
         capture.sync_all().map_err(io_error)?;
-        runtime.directory.sync_all().map_err(io_error)?;
-        root.directory.sync_all().map_err(io_error)?;
+        runtime.sync()?;
+        root.sync()?;
         verify_master_runtime(root, &runtime, &name)?;
         verify_master_capture(&runtime, &capture_name, &capture)?;
         assert_ne!(runtime_ref, capture_ref);
@@ -1192,13 +1205,29 @@ pub(super) fn allocate_master_capture(
     Err(failure("master_capture_unavailable"))
 }
 
-/// Refuses a master capture where the owner-only turn directory cannot be made.
-/// Takes the owner root, unused. Returns `master_capture_unavailable`.
-#[cfg(not(unix))]
-pub(super) fn allocate_master_capture(
-    _root: &Root,
-) -> Result<(RequestId, RequestId, File), EngineError> {
-    Err(failure("master_capture_unavailable"))
+/// Makes the folder `name` of one master turn in the owner root on Unix: a 0700 folder made
+/// relative to the held root. Inputs: the root and the name. Output: true when made, false
+/// when the name is taken, or the I/O error.
+#[cfg(unix)]
+fn make_master_runtime(root: &Root, name: &str) -> Result<bool, EngineError> {
+    match rustix::fs::mkdirat(&root.directory, name, Mode::RWXU) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::EXIST) => Ok(false),
+        Err(error) => Err(io_error(error)),
+    }
+}
+
+/// Makes the folder `name` of one master turn in the owner root on Windows: a W1 private
+/// folder through W3's [`Root::create_directory`], which refuses one that is not new and
+/// empty. Inputs: the root and the name. Output: true when made, false when the name is
+/// taken, or the refusal.
+#[cfg(windows)]
+fn make_master_runtime(root: &Root, name: &str) -> Result<bool, EngineError> {
+    if std::fs::symlink_metadata(root.path.join(name)).is_ok() {
+        return Ok(false);
+    }
+    root.create_directory(name)?;
+    Ok(true)
 }
 
 /// Writes the master's startup instruction into its private turn directory as the 0600
@@ -1245,16 +1274,89 @@ pub(super) fn write_master_instructions(
     Ok(runtime.path.join(MASTER_INSTRUCTIONS))
 }
 
-/// Refuses the master instruction file where the owner-only turn directory cannot be made.
-/// Takes the owner root, turn reference and text, all unused.
-/// Returns `master_capture_unavailable`.
-#[cfg(not(unix))]
+/// Writes the master's startup instruction into its private turn folder on Windows as the
+/// file Claude Code reads through `--append-system-prompt-file` (PLAN-0410 D1, Q7): a new
+/// W1 private file with no label, so S6 can grant the turn's container read on it alone.
+/// An entry already at the name, a planted hard link included, is refused, never written
+/// through. Input: the owner root, the turn's runtime reference and the text. Output: the
+/// file's path, `master_instructions_too_large` past the Claude host's limit, or
+/// `master_instructions_identity` when the file is not the private one made at its name.
+#[cfg(windows)]
 pub(super) fn write_master_instructions(
-    _root: &Root,
-    _runtime_ref: &RequestId,
-    _text: &str,
+    root: &Root,
+    runtime_ref: &RequestId,
+    text: &str,
 ) -> Result<PathBuf, EngineError> {
-    Err(failure("master_capture_unavailable"))
+    use crazyagent_win_sandbox::private;
+    let refused = "master_instructions_identity";
+    if text.len() as u64 > crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX {
+        return Err(failure("master_instructions_too_large"));
+    }
+    let name = format!("master-runtime-{}", runtime_ref.as_str());
+    let runtime = Root::open(&root.path.join(&name))?;
+    verify_master_runtime(root, &runtime, &name)?;
+    let path = runtime.path.join(MASTER_INSTRUCTIONS);
+    let mut file = private::file(&path, true).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            failure(refused)
+        } else {
+            super::private_refusal(error, refused)
+        }
+    })?;
+    file.write_all(text.as_bytes()).map_err(io_error)?;
+    file.sync_all().map_err(io_error)?;
+    runtime.sync()?;
+    private::check(&file).map_err(|error| super::private_refusal(error, refused))?;
+    let held = file.metadata().map_err(io_error)?;
+    if !held.is_file()
+        || held.len() != text.len() as u64
+        || private::place(&file).map_err(io_error)? != entry_place(&runtime, MASTER_INSTRUCTIONS)?
+    {
+        return Err(failure(refused));
+    }
+    verify_master_runtime(root, &runtime, &name)?;
+    Ok(path)
+}
+
+/// The real place on Windows the entry `name` of a held folder must have: the folder's W1
+/// place, a `\` and the name, read with the same flags as the entry's own. Inputs: the
+/// folder and the name. Output: the place as UTF-16, or the I/O error.
+#[cfg(windows)]
+fn entry_place(folder: &Root, name: &str) -> Result<Vec<u16>, EngineError> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut place = crazyagent_win_sandbox::private::place(&folder.directory).map_err(io_error)?;
+    place.push(u16::from(b'\\'));
+    place.extend(std::ffi::OsStr::new(name).encode_wide());
+    Ok(place)
+}
+
+/// Confirms on Windows that a held folder is still the engine's private entry `name` of the
+/// held root: both verify through W3 (private, and their path still names them), and the
+/// folder's real place is the root's place plus the name. Inputs: the root, the folder and
+/// the name. Output: Ok, or the refusal.
+#[cfg(windows)]
+fn verify_master_runtime(root: &Root, runtime: &Root, name: &str) -> Result<(), EngineError> {
+    root.verify()?;
+    runtime.verify()?;
+    if crazyagent_win_sandbox::private::place(&runtime.directory).map_err(io_error)?
+        != entry_place(root, name)?
+    {
+        return Err(failure("master_capture_identity"));
+    }
+    Ok(())
+}
+
+/// Confirms on Windows that the capture is still the empty, private, secret-labelled entry
+/// `name` of the held turn folder, through W3's `held_entry`. Inputs: the turn folder, the
+/// name and the capture. Output: Ok, or `master_capture_identity`.
+#[cfg(windows)]
+fn verify_master_capture(runtime: &Root, name: &str, capture: &File) -> Result<(), EngineError> {
+    runtime.verify()?;
+    runtime.held_entry(name, capture, "master_capture_identity")?;
+    if capture.metadata().map_err(io_error)?.len() != 0 {
+        return Err(failure("master_capture_identity"));
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -3221,6 +3323,10 @@ mod tests {
         assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
     }
 }
+
+#[cfg(all(test, windows))]
+#[path = "master_host_launch/turn_folder_windows_tests.rs"]
+mod turn_folder_windows_tests;
 
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/dec_090_tests.rs"]

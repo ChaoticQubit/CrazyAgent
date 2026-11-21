@@ -85,17 +85,26 @@ fn edit_key(press: &Press<'_>) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// The input a named key makes with the modifiers of its press: the key with its modifier
+/// bits, or none for Insert with Shift or Control. Inputs: the key and the press, whose
+/// characters are not read. Output: the input, or none.
+pub fn named_input(key: Named, press: &Press<'_>) -> Option<Input> {
+    let refused = key == Named::Insert && (press.shift || press.control);
+    let input = (!refused).then_some(Input::Key {
+        key,
+        mods: press.mods(),
+    });
+    assert!(input.is_some() || key == Named::Insert);
+    input
+}
+
 /// The input one key press makes in the agent's terminal, matching the xterm panel with
 /// Option as Meta: named keys carry their modifiers, Control maps a bare key to its control
 /// byte, Option puts an Escape before the bare key, and plain text is its UTF-8 bytes.
 /// Input: the press. Output: the input, or none for a key that sends nothing.
 pub fn key_input(press: &Press<'_>) -> Option<Input> {
     if let Some(key) = named(press.bare) {
-        let refused = key == Named::Insert && (press.shift || press.control);
-        return (!refused).then_some(Input::Key {
-            key,
-            mods: press.mods(),
-        });
+        return named_input(key, press);
     }
     if let Some(bytes) = edit_key(press) {
         return Some(Input::Text(bytes));

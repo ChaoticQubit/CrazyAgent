@@ -488,7 +488,9 @@ fn lock_only_holds_the_home_and_leaves_no_files() {
 #[cfg(unix)]
 #[test]
 fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
-    use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Secret, Session};
+    use crate::harnesses::launch::{
+        AccountBinding, LaunchBoundary, LaunchLimits, LaunchRequest, Secret, Session,
+    };
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let home = base.join("codex");
@@ -525,8 +527,7 @@ fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
         },
         model: None,
         tools: false,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -542,7 +543,9 @@ fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
 #[cfg(unix)]
 #[test]
 fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
-    use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Secret, Session};
+    use crate::harnesses::launch::{
+        AccountBinding, LaunchBoundary, LaunchLimits, LaunchRequest, Secret, Session,
+    };
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let home = base.join("codex");
@@ -581,8 +584,7 @@ fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents
         },
         model: None,
         tools: false,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -2298,10 +2300,9 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         account: crate::harnesses::launch::AccountBinding::Subscription { home: home.clone() },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile.clone()),
+        boundary: crate::harnesses::launch::LaunchBoundary::Profile(profile.clone()),
         git_identity: None,
         limits: crate::harnesses::launch::LaunchLimits::default(),
-        unconfined: false,
     };
     assert!(context().exposes_secret(home.as_os_str().as_encoded_bytes()));
     let named = LaunchError(
@@ -2427,10 +2428,9 @@ impl LeftPane {
             account: crate::harnesses::launch::AccountBinding::Subscription { home: home.clone() },
             model: None,
             tools: true,
-            sandbox_profile: Some(profile),
+            boundary: crate::harnesses::launch::LaunchBoundary::Profile(profile),
             git_identity: None,
             limits: crate::harnesses::launch::LaunchLimits::default(),
-            unconfined: false,
         };
         let tmux = crate::terminal::tmux::installed(&root)
             .expect("tmux must be installed on this machine");
@@ -4886,7 +4886,9 @@ fn log_tail(path: &Path, bytes: usize) -> String {
 #[test]
 #[ignore = "live: needs Claude Code and CRAZYAGENT_CONTEXT_MODE_INSTALL"]
 fn a_fresh_claude_agent_lists_the_context_mode_tools_of_the_engine_install() {
-    use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Session};
+    use crate::harnesses::launch::{
+        AccountBinding, LaunchBoundary, LaunchLimits, LaunchRequest, Session,
+    };
     use std::os::unix::fs::PermissionsExt;
     const TASK: &str = "Name the tools you have for check 4471.";
     const SERVER: &str = "plugin_context-mode_context-mode";
@@ -4944,8 +4946,7 @@ fn a_fresh_claude_agent_lists_the_context_mode_tools_of_the_engine_install() {
             },
             model: Some("qwen2.5:0.5b".into()),
             tools: true,
-            sandbox_profile: Some(profile),
-            unconfined: false,
+            boundary: LaunchBoundary::Profile(profile),
             git_identity: None,
             limits: LaunchLimits {
                 run_time: Duration::from_secs(180),
@@ -5270,6 +5271,14 @@ fn a_launch_that_left_context_mode_out_says_why_in_its_tools_section() {
         (
             ContextModeOff::NodeTooOld,
             "- context-mode is off for this launch: it needs Node.js 22.5 or newer, and this machine's Node.js is older. Use the shell instead, and tell the owner in your report to update Node.js.\n",
+        ),
+        (
+            ContextModeOff::NodeFolderUnreadable,
+            "- context-mode is off for this launch: Windows does not let sandboxed programs read the Node.js folder it runs from, and this Windows user cannot change that, so CrazyAgent did not start it. Use the shell instead, and tell the owner in your report to check context-mode in Settings.\n",
+        ),
+        (
+            ContextModeOff::NodeDriveRootUnreadable,
+            "- context-mode is off for this launch: Windows does not let sandboxed programs read the root of a drive it uses, so CrazyAgent did not start it. Use the shell instead, and tell the owner in your report to run the CrazyAgent installer again and approve the administrator step.\n",
         ),
         (
             ContextModeOff::NpxNotFound,

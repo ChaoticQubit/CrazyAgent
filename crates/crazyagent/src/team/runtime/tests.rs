@@ -12898,8 +12898,7 @@ fn own_turn_outliving(
         },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -13025,8 +13024,7 @@ fn a_stop_order_reaches_a_lead_whose_own_turn_runs_without_the_order_sleep() {
         },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        boundary: LaunchBoundary::Profile(profile),
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -15871,8 +15869,57 @@ fn a_task_held_for_an_own_branch_agent_goes_to_the_next_agent_once_the_project_i
     assert!(run.team.shutdown().unwrap().is_empty());
 }
 
+/// The Full access boundary of a hand-made plan (DEC-102): on macOS the project sandbox
+/// over a fresh folder in `scratch`, installed and marked unconfined; elsewhere none, since
+/// only macOS runs Full access. Input: a canonical, existing folder. Output: the boundary.
+fn full_access_boundary(scratch: &Path) -> Option<Arc<InstalledSandbox>> {
+    #[cfg(target_os = "macos")]
+    {
+        let [project, home, tmp] = ["project", "home", "tmp"].map(|name| scratch.join(name));
+        for folder in [&project, &home, &tmp] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Open).unwrap();
+        let installed = InstalledSandbox::install(
+            sandbox,
+            &scratch.join("full-access.sb"),
+            crate::sandbox::LinuxSupervisor::On,
+            LinuxStrict::Off,
+        )
+        .unwrap();
+        Some(Arc::new(installed.unconfined()))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = scratch;
+        None
+    }
+}
+
+/// Checks a Full access start of a hand-made plan: unconfined in the plan's Full access
+/// boundary where this system has one, refused with the plain macOS-only line elsewhere.
+/// Input: the start's result. Panics on any other answer.
+fn assert_full_access(start: Result<LaunchRequest, String>) {
+    if cfg!(target_os = "macos") {
+        let request = start.unwrap();
+        assert!(request.boundary.is_unconfined());
+        assert_eq!(request.boundary.confined_profile(), None);
+    } else {
+        let refused = start.unwrap_err();
+        assert!(
+            refused.starts_with(crate::sandbox::FULL_ACCESS_NEEDS_MACOS),
+            "{refused}"
+        );
+    }
+}
+
 #[test]
 fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-plan-full-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let full_access = full_access_boundary(&scratch.path().canonicalize().unwrap());
     let plan = |layout: Layout| Plan {
         harness: "codex".into(),
         executable: PathBuf::from("/bin/sh"),
@@ -15881,6 +15928,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         model: None,
         tools: true,
         sandbox_profile: PathBuf::from("/tmp/agent-1.sb"),
+        full_access: full_access.clone(),
         access: AgentAccess::Full,
         toolchains: Vec::new(),
         network: crate::sandbox::policy::AgentNetwork::Open,
@@ -15908,27 +15956,23 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         home: PathBuf::from("/tmp/home"),
     };
     for layout in [Layout::Linked, Layout::Clone] {
-        let full = plan(layout).request(account(), AgentAccess::Full).unwrap();
-        assert!(
-            full.unconfined && full.sandbox_profile.is_none(),
-            "{layout:?}"
-        );
+        assert_full_access(plan(layout).request(account(), AgentAccess::Full));
         let own = plan(layout)
             .request(account(), AgentAccess::OwnBranch)
             .unwrap();
         assert!(
-            !own.unconfined,
+            !own.boundary.is_unconfined(),
             "{layout:?}: a plan started at Full is lowered"
         );
         assert_eq!(
-            own.sandbox_profile.as_deref(),
+            own.boundary.confined_profile(),
             Some(Path::new("/tmp/agent-1.sb"))
         );
     }
     let linked = plan(Layout::Linked)
         .request(account(), AgentAccess::Sandboxed)
         .unwrap();
-    assert!(!linked.unconfined && linked.sandbox_profile.is_some());
+    assert!(!linked.boundary.is_unconfined() && linked.boundary.confined_profile().is_some());
     let refused = plan(Layout::Clone)
         .request(account(), AgentAccess::Sandboxed)
         .unwrap_err();
@@ -23736,6 +23780,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         model: None,
         tools: true,
         sandbox_profile: PathBuf::from("/tmp/agent-1.sb"),
+        full_access: None,
         access: AgentAccess::OwnBranch,
         network: crate::sandbox::policy::AgentNetwork::Open,
         grants: Vec::new(),
@@ -25566,6 +25611,10 @@ fn a_registered_native_teammate_shows_once_in_the_owner_graph_as_its_own_row() {
 
 #[test]
 fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_otherwise() {
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-native-full-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
     let plan = Plan {
         harness: "claude-code".into(),
         executable: PathBuf::from("/usr/bin/true"),
@@ -25574,6 +25623,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         model: None,
         tools: true,
         sandbox_profile: PathBuf::from("/private/tmp/agent-1.sb"),
+        full_access: full_access_boundary(&scratch.path().canonicalize().unwrap()),
         access: AgentAccess::Sandboxed,
         network: crate::sandbox::policy::AgentNetwork::Open,
         grants: Vec::new(),
@@ -25607,16 +25657,18 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
     );
     for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
         let request = plan.request(account(), access).unwrap();
-        assert!(!request.unconfined);
-        assert_eq!(request.sandbox_profile, Some(plan.sandbox_profile.clone()));
+        assert!(!request.boundary.is_unconfined());
+        assert_eq!(
+            request.boundary.confined_profile(),
+            Some(plan.sandbox_profile.as_path())
+        );
     }
     let app_spawned = Plan {
         native: false,
         tmux: None,
         ..plan
     };
-    let request = app_spawned.request(account(), AgentAccess::Full).unwrap();
-    assert!(request.unconfined && request.sandbox_profile.is_none());
+    assert_full_access(app_spawned.request(account(), AgentAccess::Full));
 }
 
 #[cfg(target_os = "macos")]

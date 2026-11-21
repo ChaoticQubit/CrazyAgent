@@ -6,8 +6,8 @@ use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::harnesses::launch::{
-    AccountBinding, CLAUDE_TOOLS_OFF, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
-    rate_limited,
+    AccountBinding, CLAUDE_TOOLS_OFF, LaunchBoundary, LaunchError, LaunchEvent, LaunchLimits,
+    LaunchRequest, rate_limited,
 };
 #[cfg(unix)]
 use crate::harnesses::launch::{await_group_exit, kill_group};
@@ -22,7 +22,10 @@ use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
 use crate::sandbox::policy::{AgentAccess, Narrowing, narrowing};
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
 use crate::sandbox::warden::Warden;
-use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
+use crate::sandbox::{
+    InstalledSandbox, LinuxStrict, LinuxSupervisor, ProjectSandbox, SandboxError, SandboxNetwork,
+    SandboxRemote,
+};
 #[cfg(unix)]
 use crate::setup::AGENT_GIT_NEEDS_TOOLS;
 use crate::terminal::{AgentId, Host};
@@ -36,7 +39,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -44,42 +47,122 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub(crate) const GIT: &str = "/usr/bin/git";
 /// The settings every engine git runs with, whatever the repository configures: no hooks,
 /// fsmonitor, pager, submodule recursion or transport, no signature check on a log or show
-/// (RV-DS241-39 r2 F2), and no signature program the repository names (RV-DS241-39). On
-/// Unix each program is `/dev/null`, which git cannot start and goes on without; a started
-/// `/usr/bin/false` could exit before git wrote it an ssh payload and kill git with SIGPIPE
-/// (V243-WORKTREES-GIT-FLAKE). Windows keeps `/usr/bin/false` (V244-WIN-GIT-SAFE-PROGRAM-PATH).
-pub(crate) const GIT_SAFE: [&str; 18] = [
-    "-c",
-    "core.hooksPath=/dev/null",
-    "-c",
-    "core.fsmonitor=false",
-    "-c",
-    "core.pager=cat",
-    "-c",
-    "submodule.recurse=false",
-    "-c",
-    "protocol.allow=never",
-    "-c",
-    if cfg!(unix) {
-        "gpg.program=/dev/null"
-    } else {
-        "gpg.program=/usr/bin/false"
-    },
-    "-c",
-    if cfg!(unix) {
-        "gpg.x509.program=/dev/null"
-    } else {
-        "gpg.x509.program=/usr/bin/false"
-    },
-    "-c",
-    if cfg!(unix) {
-        "gpg.ssh.program=/dev/null"
-    } else {
-        "gpg.ssh.program=/usr/bin/false"
-    },
-    "-c",
-    "log.showSignature=false",
-];
+/// (RV-DS241-39 r2 F2), and [`no_program`] for the hook folder and every signature program
+/// the repository could name (RV-DS241-39). Output: the nine `-c` pairs, built once.
+pub(crate) fn git_safe() -> &'static [String; GIT_SAFE_LEN] {
+    static SAFE: LazyLock<[String; GIT_SAFE_LEN]> = LazyLock::new(|| safe_settings(no_program()));
+    LazyLock::force(&SAFE)
+}
+
+/// How many arguments [`git_safe`] holds: nine `-c` pairs.
+const GIT_SAFE_LEN: usize = 18;
+
+/// The [`git_safe`] arguments, naming `program` for the hook folder and every signature
+/// program. Input: the value. Output: the nine `-c` pairs.
+fn safe_settings(program: &str) -> [String; GIT_SAFE_LEN] {
+    [
+        "-c".to_owned(),
+        format!("core.hooksPath={program}"),
+        "-c".to_owned(),
+        "core.fsmonitor=false".to_owned(),
+        "-c".to_owned(),
+        "core.pager=cat".to_owned(),
+        "-c".to_owned(),
+        "submodule.recurse=false".to_owned(),
+        "-c".to_owned(),
+        "protocol.allow=never".to_owned(),
+        "-c".to_owned(),
+        format!("gpg.program={program}"),
+        "-c".to_owned(),
+        format!("gpg.x509.program={program}"),
+        "-c".to_owned(),
+        format!("gpg.ssh.program={program}"),
+        "-c".to_owned(),
+        "log.showSignature=false".to_owned(),
+    ]
+}
+
+/// What a git the engine or the IDE starts names for a hook folder or a program it must
+/// never run, on Unix: `/dev/null`, which git cannot start and goes on without, where a
+/// started `/usr/bin/false` could exit before git wrote it an ssh payload and kill git with
+/// SIGPIPE (V243-WORKTREES-GIT-FLAKE). Output: the value.
+#[cfg(unix)]
+pub(crate) fn no_program() -> &'static str {
+    "/dev/null"
+}
+
+/// What a git the engine or the IDE starts names for a hook folder or a program it must
+/// never run, on Windows: [`windows_value`] of the system folder, read once, where a
+/// drive-relative `/dev/null` reached a hook any user can plant under `C:\dev\null`
+/// (V244-WIN-GIT-SAFE-PROGRAM-PATH). Output: the value; the engine start refuses an
+/// unusable folder first ([`git_safe_refusal`]), so the `expect` asserts that gate.
+#[cfg(windows)]
+pub(crate) fn no_program() -> &'static str {
+    WINDOWS_VALUE
+        .as_deref()
+        .expect("the engine start refuses git_safe_unavailable before any git runs")
+}
+
+/// [`no_program`]'s Windows value, read once and kept as a Result, so an unusable folder
+/// never panics inside the lock and poisons it for every later git (#598 sec N1).
+#[cfg(windows)]
+static WINDOWS_VALUE: LazyLock<Result<String, &'static str>> =
+    LazyLock::new(|| windows_value(crazyagent_win_sandbox::system_folder()));
+
+/// The code an engine start refuses with when this computer cannot give [`no_program`] its
+/// value, so no engine and no git runs there (#598 sec N1).
+pub const GIT_SAFE_UNAVAILABLE: &str = "git_safe_unavailable";
+
+/// Whether this computer can give [`no_program`] its value, which the engine start asks
+/// before anything runs: on Unix it always can. Output: None.
+#[cfg(unix)]
+pub fn git_safe_refusal() -> Option<&'static str> {
+    None
+}
+
+/// Whether this computer can give [`no_program`] its value, which the engine start asks
+/// before anything runs: on Windows not when the system folder can't be read or
+/// [`windows_no_program`] refuses it. Output: [`GIT_SAFE_UNAVAILABLE`], or None.
+#[cfg(windows)]
+pub fn git_safe_refusal() -> Option<&'static str> {
+    WINDOWS_VALUE.as_ref().err().copied()
+}
+
+/// The Windows value from the system folder GetSystemDirectoryW gave, as
+/// [`windows_no_program`] builds it. Input: the folder, or the read's error. Output: the
+/// value, or [`GIT_SAFE_UNAVAILABLE`] for an error or an unusable folder.
+#[cfg(any(windows, test))]
+fn windows_value(folder: io::Result<PathBuf>) -> Result<String, &'static str> {
+    folder
+        .ok()
+        .and_then(|folder| windows_no_program(&folder))
+        .ok_or(GIT_SAFE_UNAVAILABLE)
+}
+
+/// The Windows value for a hook folder or a program no git may run: `folder` with forward
+/// slashes, the shape Git for Windows starts without a shell, then `/crazyagent-none`.
+/// Input: the system folder. Output: the value, or None unless the folder is `<letter>:\`
+/// and parts of letters, digits, `.`, `_` and `-`, none empty, `.` or `..`.
+#[cfg(any(windows, test))]
+fn windows_no_program(folder: &Path) -> Option<String> {
+    let text = folder.to_str()?.replace('\\', "/");
+    let (drive, rest) = text.split_at_checked(3)?;
+    let mut drive = drive.chars();
+    let lettered = drive
+        .next()
+        .is_some_and(|letter| letter.is_ascii_alphabetic())
+        && drive.as_str() == ":/";
+    let plain = !rest.is_empty()
+        && rest.split('/').all(|part| {
+            !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        });
+    (lettered && plain).then(|| format!("{text}/crazyagent-none"))
+}
 /// The variables every engine git sets whatever else it needs: no lazy fetch of an object a
 /// partial clone lacks, so a repository's own promisor remote never runs a command on a read
 /// (RV-DS241-71), no system config or attributes and no prompt.
@@ -905,21 +988,7 @@ impl ResearchRunner {
                 Ok(run(status, None, None))
             }
             Err(error) => {
-                let (reason, attempts_max) = match &error {
-                    RunError::Context(problem) => (
-                        crate::launch_context::secret_in_command_text(problem).unwrap_or_else(
-                            || "Could not give the agent this project's context".to_owned(),
-                        ),
-                        self.limits.attempts_max,
-                    ),
-                    RunError::Uncertain(_) => {
-                        (crate::sandbox::warden::CLEANUP_UNCERTAIN.to_owned(), 1)
-                    }
-                    _ => (
-                        "Could not prepare the research sandbox".to_owned(),
-                        self.limits.attempts_max,
-                    ),
-                };
+                let (reason, attempts_max) = launch_failure(&error, self.limits.attempts_max);
                 jobs.fail(&job, &reason, attempts_max)?;
                 Err(error)
             }
@@ -1090,7 +1159,14 @@ impl ResearchRunner {
             return Err(RunError::Invalid(reason.into()));
         }
         let kept = job_kept_ports(self.settings.as_ref(), job.tools)?;
-        let (network, proxy) = job_reach(&policy, job.tools, account, job.id, &kept)?;
+        let (network, proxy) = job_reach(
+            std::env::consts::OS,
+            &policy,
+            job.tools,
+            account,
+            job.id,
+            &kept,
+        )?;
         let display = jobs
             .terminal_display(&project)
             .map_err(|_| RunError::Invalid("project coordination settings unreadable".into()))?;
@@ -1144,7 +1220,7 @@ impl ResearchRunner {
         sandbox = allow_harness(sandbox, &program)?;
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
-        let (sandbox, listed) = self.keep_held(job, || -> Result<_, RunError> {
+        let (sandbox, boundary, listed) = self.keep_held(job, || -> Result<_, RunError> {
             let _setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
             ensure_repository(&root, &tmp)?;
             add_worktree(&sandbox, &profile, &worktree)?;
@@ -1169,8 +1245,13 @@ impl ResearchRunner {
                     crate::sandbox::shared_folders::apply(sandbox, &root, &policy.shared_folders)
                         .map_err(|code| RunError::Invalid(code.into()))?;
             }
-            sandbox.install(&profile)?;
-            Ok((sandbox, listed))
+            let boundary = InstalledSandbox::install(
+                sandbox.clone(),
+                &profile,
+                LinuxSupervisor::default(),
+                LinuxStrict::Off,
+            )?;
+            Ok((sandbox, boundary, listed))
         })??;
         still_held(jobs, job)?;
         let linked = self.linked_research(job, &root)?;
@@ -1189,8 +1270,11 @@ impl ResearchRunner {
                 account: binding,
                 model,
                 tools: job.tools,
-                sandbox_profile: (!unconfined).then(|| profile.clone()),
-                unconfined,
+                boundary: LaunchBoundary::Installed(Arc::new(if unconfined {
+                    boundary.unconfined()
+                } else {
+                    boundary
+                })),
                 git_identity: None,
                 limits: LaunchLimits {
                     run_time: self.limits.wall_time,
@@ -1706,6 +1790,7 @@ pub(crate) struct ReadOnlyRun<'a> {
     pub folder: &'a Path,
     #[cfg(unix)]
     pub prompt: &'a str,
+    #[cfg_attr(windows, expect(dead_code))]
     pub account: &'a ResearchAccount,
     pub wall_time: Duration,
     #[cfg(unix)]
@@ -2012,10 +2097,8 @@ impl ResearchRunner {
     }
 
     /// Refuses a read-only run on Windows before any agent state is made: V1 runs no such
-    /// agent there, so the run fails with the owner's plain line. Past that line, the
-    /// AppContainer boundary refuses the endpoint-only reach until its firewall rule exists.
-    /// Takes the run and `stop`, unused. Returns `Invalid` for a bad run, the plain failure,
-    /// or the boundary's `Unavailable` refusal.
+    /// agent there, so the run fails with the owner's plain line. Takes the run and `stop`,
+    /// unused. Returns `Invalid` for a bad run, else the plain failure.
     #[cfg(windows)]
     pub(crate) fn run_read_only(
         &self,
@@ -2025,13 +2108,9 @@ impl ResearchRunner {
         if !valid_run_name(run.name) || run.wall_time.is_zero() {
             return Err(RunError::Invalid("read-only run name or limit".into()));
         }
-        if let Some(line) = confined_unavailable(std::env::consts::OS) {
-            return Ok(ReadOnlyEnding::Failed(line.into()));
-        }
-        let network = SandboxNetwork::Only(vec![model_remote(run.account)?]);
-        let refusal = crate::sandbox::windows::capabilities(&network)
-            .expect_err("an endpoint limit needs the AppContainer firewall rule");
-        Err(RunError::Sandbox(refusal))
+        let line = confined_unavailable(std::env::consts::OS)
+            .expect("V1 runs no read-only agent on Windows");
+        Ok(ReadOnlyEnding::Failed(line.into()))
     }
 }
 
@@ -2090,32 +2169,13 @@ fn job_kept_ports(
     }
 }
 
-/// The sandbox network a research job runs under (DEC-111 Q17, S4R1-2): a tools-off job
-/// reaches only its model endpoint's port, on loopback for a local model, otherwise on any
-/// host, and a tools-on job follows the project's network choice with the model still
-/// reachable. Inputs: the project's agent policy, whether the job has tools, and the model
-/// endpoint. Output: the sandbox network.
-pub(crate) fn job_network(
-    policy: &crate::sandbox::policy::AgentPolicy,
-    tools: bool,
-    model: SandboxRemote,
-) -> SandboxNetwork {
-    if tools {
-        policy.network.sandbox(Some(model))
-    } else {
-        SandboxNetwork::Only(vec![model])
-    }
-}
-
 /// The sandbox network a research job runs under and the model proxy it reaches its model
-/// through (S4B-M1). A tools-on job under None whose model is not on loopback gets a proxy
-/// for its account's hosts and reaches only the proxy's port; any other job gets
-/// [`job_network`]. Inputs: the project's agent policy, whether the job has tools, its
-/// account, its id, which the proxy's refusal lines name, and the owner's model ports the
-/// proxy leaves alone. Output: the network and the proxy, which must live as long as the
-/// job runs, or the refusal of an endpoint no proxy can reach by name or a proxy that could
-/// not start.
+/// through, decided as for a team agent by `AgentNetwork::proxied` and `reach`. Inputs: the OS,
+/// the agent policy, whether the job has tools, its account, its id and the owner's model ports
+/// the proxy leaves alone. Output: the network and the proxy, which must outlive the job, or the
+/// refusal of a model this OS cannot reach, an endpoint no proxy names or a proxy that failed.
 pub(crate) fn job_reach(
+    os: &str,
     policy: &crate::sandbox::policy::AgentPolicy,
     tools: bool,
     account: &ResearchAccount,
@@ -2123,11 +2183,8 @@ pub(crate) fn job_reach(
     kept: &[u16],
 ) -> Result<(SandboxNetwork, Option<ModelProxy>), RunError> {
     let model = model_remote(account)?;
-    let proxied = tools
-        && policy.network == crate::sandbox::policy::AgentNetwork::None
-        && matches!(model, SandboxRemote::AnyHost(_));
-    if !proxied {
-        return Ok((job_network(policy, tools, model), None));
+    if !policy.network.proxied(os, tools, model) {
+        return Ok((policy.network.reach(os, tools, model, None)?, None));
     }
     let fixed = |hosts: &[(&str, u16)]| -> Vec<ModelHost> {
         hosts
@@ -2149,8 +2206,33 @@ pub(crate) fn job_reach(
         ));
     }
     let proxy = ModelProxy::bind(job, hosts, None, kept)?;
-    let network = SandboxNetwork::Only(vec![SandboxRemote::Loopback(proxy.port())]);
+    let network = policy.network.reach(os, tools, model, Some(proxy.port()))?;
     Ok((network, Some(proxy)))
+}
+
+/// The line a research job fails with when its launch errs, and its attempt count: a context
+/// problem names any secret found in the command text, an unconfirmed warden or a model on
+/// this computer that a Windows agent cannot reach fails at once, and anything else is a
+/// sandbox that could not be prepared. Inputs: the error and the attempt limit. Output: both.
+fn launch_failure(error: &RunError, attempts_max: u32) -> (String, u32) {
+    match error {
+        RunError::Context(problem) => (
+            crate::launch_context::secret_in_command_text(problem)
+                .unwrap_or_else(|| "Could not give the agent this project's context".to_owned()),
+            attempts_max,
+        ),
+        RunError::Uncertain(_) => (crate::sandbox::warden::CLEANUP_UNCERTAIN.to_owned(), 1),
+        RunError::Sandbox(refusal) if crate::sandbox::model_loopback_windows(refusal) => (
+            crate::config::plain_problem(crate::sandbox::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS)
+                .unwrap_or(crate::sandbox::MODEL_LOOPBACK_WINDOWS_LINE)
+                .to_owned(),
+            1,
+        ),
+        _ => (
+            "Could not prepare the research sandbox".to_owned(),
+            attempts_max,
+        ),
+    }
 }
 
 /// Puts a keyed endpoint account behind an engine key relay for one run (DEC-141 PA-8): the
@@ -2778,7 +2860,7 @@ pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<
         command.process_group(0);
     }
     command
-        .args(GIT_SAFE)
+        .args(git_safe())
         .args(arguments)
         .current_dir(root)
         .env_clear()
@@ -3126,14 +3208,14 @@ fn real_git() -> Option<PathBuf> {
 }
 
 /// A git command for the engine's own worktree steps under the agent's installed profile:
-/// no global config, no lazy fetch and the [`GIT_SAFE`] settings, with no input or output.
+/// no global config, no lazy fetch and the [`git_safe`] settings, with no input or output.
 /// Takes the sandbox and its installed profile. Returns the command, ready for arguments.
 #[cfg(unix)]
 fn worktree_git(sandbox: &ProjectSandbox, profile: &Path) -> Command {
     let mut git = sandbox.command(profile, sandboxed_git());
     git.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .envs(GIT_SAFE_ENV)
-        .args(GIT_SAFE)
+        .args(git_safe())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(setup_debug_stderr());
@@ -3153,7 +3235,7 @@ pub(crate) struct AgentGit {
 
 /// Runs one git command in a folder an agent owns with that agent's own rights (DEC-104
 /// K5b): under its installed profile, as the worktree setup steps run, with the
-/// [`GIT_SAFE`] settings, the editor `:` git never starts (no path lookup) and the caller's
+/// [`git_safe`] settings, the editor `:` git never starts (no path lookup) and the caller's
 /// extra variables, within the setup time limit. Output is read while it runs. Takes the
 /// agent's sandbox, its installed profile, the folder, the arguments, the variables and
 /// the most output bytes kept. Returns how it ended, or the spawn failure.
@@ -4439,11 +4521,15 @@ mod tests {
                 std::fs::create_dir(&folder).unwrap();
                 folder
             };
+            let proxy = policy
+                .network
+                .proxied("macos", tools, model)
+                .then_some(41_300);
             ProjectSandbox::new(
                 &make("project"),
                 &make("home"),
                 &make("tmp"),
-                job_network(&policy, tools, model),
+                policy.network.reach("macos", tools, model, proxy).unwrap(),
             )
             .unwrap()
             .profile()
@@ -4458,6 +4544,7 @@ mod tests {
         assert!(!https.contains("(remote ip \"*:*\")"), "{https}");
         let none = profile(AgentNetwork::None, true);
         assert!(!none.contains("(remote ip \"*:"), "{none}");
+        assert!(none.contains("(remote ip \"localhost:41300\")"), "{none}");
         assert!(!none.contains("mDNSResponder"), "{none}");
     }
 
@@ -4546,7 +4633,8 @@ mod tests {
             connection: codex_connection(),
             model: None,
         };
-        let (network, proxy) = job_reach(&none, true, &account, 41, &[]).unwrap();
+        let (network, proxy) =
+            job_reach(std::env::consts::OS, &none, true, &account, 41, &[]).unwrap();
         assert!(
             proxy.is_some(),
             "a tools-on job under None gets a model proxy, not {network:?}"
@@ -4576,7 +4664,8 @@ mod tests {
                 .unwrap();
             assert_eq!(line.trim_end(), status, "{target}");
         }
-        let (off, unproxied) = job_reach(&none, false, &account, 41, &[]).unwrap();
+        let (off, unproxied) =
+            job_reach(std::env::consts::OS, &none, false, &account, 41, &[]).unwrap();
         assert!(unproxied.is_none());
         assert_eq!(off, SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]));
         let local = ResearchAccount::Endpoint {
@@ -4584,7 +4673,8 @@ mod tests {
             model: "qwen2.5:0.5b".into(),
             key: None,
         };
-        let (direct, unproxied) = job_reach(&none, true, &local, 41, &[]).unwrap();
+        let (direct, unproxied) =
+            job_reach(std::env::consts::OS, &none, true, &local, 41, &[]).unwrap();
         assert!(unproxied.is_none());
         assert_eq!(
             direct,
@@ -4596,9 +4686,77 @@ mod tests {
             key: None,
         };
         assert!(matches!(
-            job_reach(&none, true, &unnamed, 41, &[]),
+            job_reach(std::env::consts::OS, &none, true, &unnamed, 41, &[]),
             Err(RunError::Invalid(_))
         ));
+    }
+
+    /// A research job on Windows whose model is on this computer is refused with the loopback
+    /// line under every network choice, tools on or off, as a team agent is (#526 r2 F1): under
+    /// Open it would otherwise start and fail every model call. Linux and macOS still reach it,
+    /// and the job fails once with the plain sentence for `model_loopback_unavailable_windows`.
+    #[test]
+    fn a_research_job_on_windows_with_a_model_on_this_computer_is_refused_under_every_choice() {
+        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        let local = ResearchAccount::Endpoint {
+            base_url: "http://localhost:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+            key: None,
+        };
+        for network in [AgentNetwork::Open, AgentNetwork::Https, AgentNetwork::None] {
+            let policy = AgentPolicy {
+                network,
+                ..AgentPolicy::default()
+            };
+            for tools in [true, false] {
+                let refused = job_reach("windows", &policy, tools, &local, 41, &[]);
+                assert!(
+                    matches!(&refused, Err(RunError::Sandbox(error)) if crate::sandbox::model_loopback_windows(error)),
+                    "{network:?} tools {tools}: {:?}",
+                    refused.as_ref().map(|(reach, _)| reach)
+                );
+                for os in ["linux", "macos"] {
+                    assert!(
+                        job_reach(os, &policy, tools, &local, 41, &[]).is_ok(),
+                        "{os} {network:?} tools {tools}"
+                    );
+                }
+            }
+        }
+        let refusal = RunError::Sandbox(SandboxError::Unavailable(
+            crate::sandbox::MODEL_LOOPBACK_WINDOWS_LINE.into(),
+        ));
+        let sentence =
+            crate::config::plain_problem(crate::sandbox::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS)
+                .unwrap();
+        assert_eq!(launch_failure(&refusal, 2), (sentence.to_owned(), 1));
+        let other = RunError::Sandbox(SandboxError::Unavailable("another refusal".into()));
+        assert_eq!(
+            launch_failure(&other, 2),
+            ("Could not prepare the research sandbox".to_owned(), 2)
+        );
+    }
+
+    /// A research job with tools under None on Windows starts no model proxy and reaches its
+    /// hosted model's port on any host, as a team agent there does (DESIGN-0256 O2a, leader
+    /// 06:42); on Linux and macOS the proxy row above still holds.
+    #[test]
+    fn a_windows_research_job_with_tools_under_no_network_starts_no_model_proxy() {
+        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        let none = AgentPolicy {
+            network: AgentNetwork::None,
+            ..AgentPolicy::default()
+        };
+        let account = ResearchAccount::ManagedCodex {
+            connection: codex_connection(),
+            model: None,
+        };
+        let (network, proxy) = job_reach("windows", &none, true, &account, 41, &[]).unwrap();
+        assert!(proxy.is_none(), "{network:?}");
+        assert_eq!(
+            network,
+            SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)])
+        );
     }
 
     #[test]
@@ -8016,6 +8174,9 @@ mod live_codex_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runner/live_engine_tests.rs"]
 pub(crate) mod live_engine_tests;
+#[cfg(test)]
+#[path = "runner/program_tests.rs"]
+mod program_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runner/warden_tests.rs"]
 mod warden_tests;

@@ -1,4 +1,5 @@
 use crate::plugins::{ContextModeOff, ServerSpec, exact_version};
+use crate::sandbox::SandboxError;
 use crate::setup::InstallError;
 use base64::Engine;
 use os::{
@@ -25,6 +26,11 @@ const NODE_CHECK_TIME: Duration = Duration::from_secs(10);
 const NODE_OLDEST: (u32, u32) = (22, 5);
 const NODE_TOO_OLD: &str = "context_mode_node_too_old";
 const NODE_CHECK_FAILED: &str = "context_mode_node_check_failed";
+const NODE_FOLDER_UNREADABLE: &str = "context_mode_node_folder_unreadable";
+/// The install code for a drive root of the node probe's paths that keeps every app container
+/// from reading its attributes, so a boxed Node.js script fails to resolve its own path
+/// (V244-WIN-ADMIN-STEP); matched by name where a check reads it.
+pub(crate) const NODE_DRIVE_ROOT_UNREADABLE: &str = "context_mode_node_drive_root_unreadable";
 const NPX_NOT_FOUND: &str = "context_mode_npx_not_found";
 const NODE_CHECK: &str = "node-check";
 const NODE_PROFILE: &str = "node.sb";
@@ -104,6 +110,10 @@ pub fn for_launch(root: &Path, spec: ServerSpec) -> Result<ServerSpec, ContextMo
         match after_begin(begin_install(root, bin, version), &folder, &node, version) {
             ForCheck::Run(shared) => return Ok(shared),
             ForCheck::Refused(NODE_TOO_OLD) => ContextModeOff::NodeTooOld,
+            ForCheck::Refused(NODE_FOLDER_UNREADABLE) => ContextModeOff::NodeFolderUnreadable,
+            ForCheck::Refused(NODE_DRIVE_ROOT_UNREADABLE) => {
+                ContextModeOff::NodeDriveRootUnreadable
+            }
             _ if mismatch => ContextModeOff::Mismatch,
             ForCheck::SettingUp | ForCheck::Refused("context_mode_installs_busy") => {
                 ContextModeOff::SettingUp
@@ -448,7 +458,8 @@ fn node_command(
     .and_then(|sandbox| sandbox.guard_engine(root))
     .and_then(|sandbox| sandbox.allow_tools(&Toolchains::grant(&homes, &[Toolchain::Node])))
     .map_err(refused)?;
-    let sandbox = sandbox.allow_read(&canonical(bin)?).map_err(refused)?;
+    let real = canonical(bin)?;
+    let sandbox = sandbox.allow_read(&real).map_err(refused)?;
     #[cfg(unix)]
     let sandbox = sandbox
         .allow_node_for(&canonical(&bin.join("npm"))?)
@@ -456,7 +467,8 @@ fn node_command(
     let settings = os::boundary_settings(root)?;
     let (calls, strict) = (settings.linux_supervisor, settings.linux_strict);
     let profile = scratch.join(NODE_PROFILE);
-    let sandbox = InstalledSandbox::install(sandbox, &profile, calls, strict).map_err(refused)?;
+    let sandbox = InstalledSandbox::install(sandbox, &profile, calls, strict)
+        .map_err(|error| boundary_refused(&real, error))?;
     let mut node = std::process::Command::new(bin.join(NODE));
     node.arg("--version").current_dir(&folders[0]);
     sandbox.wrap(&node).map_err(refused)
@@ -561,8 +573,9 @@ fn running(folder: &Path) -> bool {
 }
 
 /// Says whether an install of one version can start now, before it is registered, with the
-/// same refusals [`install`] would return at once. Inputs: the engine root, npx's folder and
-/// the version. Output: none, or the refusal.
+/// same refusals [`install`] would return at once, and a drive root of the engine root or
+/// npx's folder no app container may read ([`NODE_DRIVE_ROOT_UNREADABLE`]). Inputs: the
+/// engine root, npx's folder and the version. Output: none, or the refusal.
 fn can_install(root: &Path, bin: &Path, version: &str) -> Option<Begin> {
     if pin(version).is_none() || program_pin(version).is_none() {
         return Some(Begin::Refused("context_mode_integrity_unpinned"));
@@ -574,6 +587,10 @@ fn can_install(root: &Path, bin: &Path, version: &str) -> Option<Begin> {
         Ok(true) => {}
         Ok(false) => return Some(Begin::Refused(NODE_TOO_OLD)),
         Err(error) => return Some(Begin::Refused(error.0)),
+    }
+    if let Some(drive) = os::unreadable_drive_root(&[root, bin]) {
+        eprintln!("context_mode_drive_root_refused root={}", drive.display());
+        return Some(Begin::Refused(NODE_DRIVE_ROOT_UNREADABLE));
     }
     backoff_left(&failed_marker(root, version)).map(Begin::Failed)
 }
@@ -691,6 +708,22 @@ fn remove_staged(parent: &Path, prefix: &str, version: &str) {
 
 fn refused<E>(_: E) -> InstallError {
     InstallError("context_mode_sandbox_unavailable")
+}
+
+/// The install code for a boundary that did not install: a read root no app container may
+/// read and this user cannot change, which the boundary logs by folder, is
+/// [`NODE_FOLDER_UNREADABLE`] when it is npx's folder; every other refusal is
+/// `context_mode_sandbox_unavailable`. Inputs: npx's canonical folder and the refusal.
+/// Output: the code.
+fn boundary_refused(bin: &Path, error: SandboxError) -> InstallError {
+    let SandboxError::Unreadable(folder) = error else {
+        return refused(error);
+    };
+    if folder == bin {
+        InstallError(NODE_FOLDER_UNREADABLE)
+    } else {
+        refused(folder)
+    }
 }
 
 /// Installs `source` into the staging folder with package scripts off, so no script of the
