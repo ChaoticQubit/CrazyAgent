@@ -306,3 +306,96 @@ fn an_aliased_file_reading_macro_is_refused() {
         BTreeSet::from(["plugin_macro_not_allowed"])
     );
 }
+
+#[test]
+fn a_crate_root_renamed_through_crate_or_self_is_refused() {
+    assert_eq!(
+        codes("alias_alloc"),
+        BTreeSet::from(["plugin_std_not_allowed"])
+    );
+}
+
+#[test]
+fn an_attribute_named_by_a_path_is_refused() {
+    assert_eq!(
+        codes("attr_path_head"),
+        BTreeSet::from(["plugin_attr_not_allowed", "plugin_std_not_allowed"])
+    );
+}
+
+#[test]
+fn every_manifest_table_outside_the_allowlist_is_refused() {
+    let cases = [
+        (
+            "target",
+            "\n[target.'cfg(unix)'.dependencies]\nlibc = \"1\"\n",
+            "plugin_manifest_not_allowed",
+        ),
+        (
+            "patch",
+            "\n[patch.crates-io]\nserde = { path = \"x\" }\n",
+            "plugin_manifest_not_allowed",
+        ),
+        (
+            "replace",
+            "\n[replace]\n\"serde:1.0.0\" = { path = \"x\" }\n",
+            "plugin_manifest_not_allowed",
+        ),
+        (
+            "features",
+            "\n[features]\nextra = []\n",
+            "plugin_manifest_not_allowed",
+        ),
+        (
+            "dev",
+            "\n[dev-dependencies]\nserde = \"1\"\n",
+            "plugin_manifest_not_allowed",
+        ),
+    ];
+    for (name, extra, code) in cases {
+        let (root, dir) = scratch("good", &format!("manifest-{name}"));
+        let mut manifest = fs::read_to_string(dir.join("Cargo.toml")).expect("reads");
+        manifest.push_str(extra);
+        fs::write(dir.join("Cargo.toml"), manifest).expect("writes");
+        assert_eq!(
+            check_crate(&dir)
+                .expect_err(name)
+                .iter()
+                .map(|violation| violation.code)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([code]),
+            "{name}"
+        );
+        fs::remove_dir_all(&root).expect("scratch removed");
+    }
+    let edits = [
+        (
+            "inherited",
+            "crazyagent-sdk = { path = \"../../../crates/sdk/rust\" }",
+            "crazyagent-sdk = { workspace = true }",
+            "plugin_dep_not_allowed",
+        ),
+        (
+            "no-edition",
+            "edition = \"2024\"\n",
+            "",
+            "plugin_manifest_not_allowed",
+        ),
+    ];
+    for (name, from, to, code) in edits {
+        let (root, dir) = scratch("good", &format!("manifest-{name}"));
+        let manifest = fs::read_to_string(dir.join("Cargo.toml")).expect("reads");
+        assert!(manifest.contains(from), "{name}");
+        fs::write(dir.join("Cargo.toml"), manifest.replace(from, to)).expect("writes");
+        assert_eq!(
+            check_crate(&dir)
+                .expect_err(name)
+                .iter()
+                .map(|violation| violation.code)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([code]),
+            "{name}"
+        );
+        fs::remove_dir_all(&root).expect("scratch removed");
+    }
+}
