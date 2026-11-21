@@ -150,7 +150,10 @@ fn a_raw_crate_root_is_refused_like_the_plain_one() {
             .iter()
             .map(|violation| (violation.line, violation.code))
             .collect::<Vec<_>>(),
-        vec![(5, "plugin_std_not_allowed"), (10, "plugin_std_not_allowed")]
+        vec![
+            (5, "plugin_std_not_allowed"),
+            (10, "plugin_std_not_allowed")
+        ]
     );
 }
 

@@ -2,9 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use proc_macro2::{Span, TokenStream, TokenTree};
+use syn::ext::IdentExt;
 use syn::visit::{self, Visit};
 
-use crate::Violation;
+use crate::{Bounded, Violation, read_bounded};
 
 /// The modules of `std`, `core` and `alloc` a plugin may name: data types, traits and
 /// formatting, nothing that reaches files, network, processes, the environment or threads.
@@ -65,12 +66,16 @@ pub(crate) fn sources(dir: &Path, out: &mut Vec<Violation>) {
         out.push(at(&lib, 1, "plugin_forbid_missing"));
     }
     for file in files {
-        let Some(text) = fs::read_to_string(dir.join(&file))
-            .ok()
-            .filter(|text| text.len() <= SOURCE_BYTES_MAX)
-        else {
-            out.push(at(&file, 1, "plugin_source_too_large"));
-            continue;
+        let text = match read_bounded(&dir.join(&file), SOURCE_BYTES_MAX) {
+            Bounded::Text(text) => text,
+            Bounded::TooLarge => {
+                out.push(at(&file, 1, "plugin_source_too_large"));
+                continue;
+            }
+            Bounded::Unreadable => {
+                out.push(at(&file, 1, "plugin_source_unparsed"));
+                continue;
+            }
         };
         let parsed = match syn::parse_file(&text) {
             Ok(parsed) => parsed,
@@ -176,6 +181,39 @@ impl Scan<'_> {
         }
     }
 
+    /// Checks one attribute by its name: `path` moves a module's source out of the scan,
+    /// the export attributes are unsafe in effect. Inputs: the plain name and its span.
+    /// Output: violations added.
+    fn attribute_name(&mut self, name: &str, span: Span) {
+        if name == "path" {
+            self.push(span, "plugin_path_attr");
+        }
+        if ATTRS_UNSAFE.contains(&name) {
+            self.push(span, "plugin_unsafe");
+        }
+    }
+
+    /// Checks every attribute a `cfg_attr` would enable, nested `cfg_attr` included: its
+    /// arguments after the predicate, split at top-level commas. Input: the arguments.
+    /// Output: violations added.
+    fn cfg_attr(&mut self, stream: &TokenStream) {
+        let tokens: Vec<TokenTree> = stream.clone().into_iter().collect();
+        let mut parts = tokens.split(|token| is_punct(Some(token), ','));
+        parts.next();
+        for part in parts {
+            let Some(TokenTree::Ident(ident)) = part.first() else {
+                continue;
+            };
+            let name = plain(ident);
+            self.attribute_name(&name, ident.span());
+            if name == "cfg_attr"
+                && let Some(TokenTree::Group(group)) = part.get(1)
+            {
+                self.cfg_attr(&group.stream());
+            }
+        }
+    }
+
     /// Checks a `use` tree at the top level of a `use` item: a crate root may only be
     /// followed by an allowed module, and is never renamed, globbed or used whole.
     /// Input: the tree. Output: violations added.
@@ -201,10 +239,10 @@ impl Scan<'_> {
     /// Output: violations added.
     fn use_second(&mut self, tree: &syn::UseTree) {
         match tree {
-            syn::UseTree::Path(path) => self.second(&path.ident.to_string(), path.ident.span()),
-            syn::UseTree::Name(name) => self.second(&name.ident.to_string(), name.ident.span()),
+            syn::UseTree::Path(path) => self.second(&plain(&path.ident), path.ident.span()),
+            syn::UseTree::Name(name) => self.second(&plain(&name.ident), name.ident.span()),
             syn::UseTree::Rename(rename) => {
-                self.second(&rename.ident.to_string(), rename.ident.span());
+                self.second(&plain(&rename.ident), rename.ident.span());
             }
             syn::UseTree::Glob(glob) => self.push(glob.star_token.span, "plugin_std_not_allowed"),
             syn::UseTree::Group(group) => {
@@ -216,15 +254,17 @@ impl Scan<'_> {
     }
 
     /// Scans a token stream the parser does not read as code (macro input, attribute
-    /// arguments): a crate root followed by `::` and a module, a forbidden macro name
-    /// followed by `!`, and the word `unsafe`. Input: the tokens. Output: violations added.
+    /// arguments): a crate root is allowed only as `root::module` with an allowed module,
+    /// so a root import, rename or glob inside the tokens is refused; also a forbidden
+    /// macro name followed by `!`, and the word `unsafe`. Raw identifiers count as plain.
+    /// Input: the tokens. Output: violations added.
     fn tokens(&mut self, stream: &TokenStream) {
         let tokens: Vec<TokenTree> = stream.clone().into_iter().collect();
         for (index, token) in tokens.iter().enumerate() {
             match token {
                 TokenTree::Group(group) => self.tokens(&group.stream()),
                 TokenTree::Ident(ident) => {
-                    let name = ident.to_string();
+                    let name = plain(ident);
                     if name == "unsafe" {
                         self.push(ident.span(), "plugin_unsafe");
                     }
@@ -233,13 +273,12 @@ impl Scan<'_> {
                     {
                         self.push(ident.span(), "plugin_macro_not_allowed");
                     }
-                    if ROOTS.contains(&name.as_str())
-                        && is_punct(tokens.get(index + 1), ':')
-                        && is_punct(tokens.get(index + 2), ':')
-                    {
+                    if ROOTS.contains(&name.as_str()) {
+                        let path = is_punct(tokens.get(index + 1), ':')
+                            && is_punct(tokens.get(index + 2), ':');
                         match tokens.get(index + 3) {
-                            Some(TokenTree::Ident(next)) => {
-                                self.second(&next.to_string(), next.span())
+                            Some(TokenTree::Ident(next)) if path => {
+                                self.second(&plain(next), next.span());
                             }
                             _ => self.push(ident.span(), "plugin_std_not_allowed"),
                         }
@@ -289,14 +328,14 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     }
 
     fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
-        let path = attr.path();
-        if path.is_ident("path") {
-            self.push(attr.pound_token.span, "plugin_path_attr");
-        }
-        if ATTRS_UNSAFE.iter().any(|name| path.is_ident(name)) {
-            self.push(attr.pound_token.span, "plugin_unsafe");
+        let name = attr.path().get_ident().map(plain);
+        if let Some(name) = &name {
+            self.attribute_name(name, attr.pound_token.span);
         }
         if let syn::Meta::List(list) = &attr.meta {
+            if name.as_deref() == Some("cfg_attr") {
+                self.cfg_attr(&list.tokens);
+            }
             self.tokens(&list.tokens);
         }
         visit::visit_attribute(self, attr);
@@ -304,7 +343,7 @@ impl<'ast> Visit<'ast> for Scan<'_> {
 
     fn visit_macro(&mut self, mac: &'ast syn::Macro) {
         if let Some(last) = mac.path.segments.last()
-            && MACROS_NOT_ALLOWED.contains(&last.ident.to_string().as_str())
+            && MACROS_NOT_ALLOWED.contains(&plain(&last.ident).as_str())
         {
             self.push(last.ident.span(), "plugin_macro_not_allowed");
         }
@@ -321,7 +360,7 @@ impl<'ast> Visit<'ast> for Scan<'_> {
         if let (Some(first), Some(second)) = (segments.next(), segments.next())
             && is_root(&first.ident)
         {
-            self.second(&second.ident.to_string(), second.ident.span());
+            self.second(&plain(&second.ident), second.ident.span());
         }
         visit::visit_path(self, path);
     }
@@ -330,7 +369,13 @@ impl<'ast> Visit<'ast> for Scan<'_> {
 /// Whether an identifier is one of the crate roots `std`, `core` or `alloc`.
 /// Input: the identifier. Output: true for a root.
 fn is_root(ident: &proc_macro2::Ident) -> bool {
-    ROOTS.iter().any(|root| ident == root)
+    ROOTS.contains(&plain(ident).as_str())
+}
+
+/// An identifier's name with any `r#` raw prefix removed, so `r#std` is checked as `std`.
+/// Input: the identifier. Output: its plain name.
+fn plain(ident: &proc_macro2::Ident) -> String {
+    ident.unraw().to_string()
 }
 
 /// Whether a token is a given punctuation mark. Inputs: the token, if any, and the mark.

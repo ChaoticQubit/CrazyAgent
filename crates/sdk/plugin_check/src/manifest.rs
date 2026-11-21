@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use toml::{Table, Value};
 
-use crate::{CANONICAL_BUILD_RS, Manifest, Violation};
+use crate::{Bounded, CANONICAL_BUILD_RS, Manifest, Violation, read_bounded};
 
 /// The most bytes a plugin's `Cargo.toml`, `plugin.toml` or `build.rs` may hold.
 pub(crate) const MANIFEST_BYTES_MAX: usize = 65_536;
@@ -177,9 +177,10 @@ pub(crate) fn plugin(dir: &Path) -> Result<Manifest, Violation> {
 /// folder, the file name, the violation list and the code for a missing or large file.
 /// Output: the text, or `None` with one violation added.
 fn read(dir: &Path, name: &str, out: &mut Vec<Violation>, code: &'static str) -> Option<String> {
-    let text = fs::read_to_string(dir.join(name))
-        .ok()
-        .filter(|text| text.len() <= MANIFEST_BYTES_MAX);
+    let text = match read_bounded(&dir.join(name), MANIFEST_BYTES_MAX) {
+        Bounded::Text(text) => Some(text),
+        Bounded::TooLarge | Bounded::Unreadable => None,
+    };
     if text.is_none() {
         out.push(Violation {
             file: PathBuf::from(name),

@@ -69,6 +69,37 @@ pub fn enforce_here() {
     }
 }
 
+/// What a bounded read of one file found: its UTF-8 text, more bytes than the bound, or a
+/// file that cannot be opened, read or decoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Bounded {
+    Text(String),
+    TooLarge,
+    Unreadable,
+}
+
+/// Reads one file, taking at most `max` + 1 bytes, so a large file is refused without
+/// holding it whole in memory. Inputs: the path and the bound. Output: the text,
+/// `TooLarge` past the bound, or `Unreadable`.
+pub(crate) fn read_bounded(path: &Path, max: usize) -> Bounded {
+    use std::io::Read;
+    let Ok(file) = std::fs::File::open(path) else {
+        return Bounded::Unreadable;
+    };
+    let limit = u64::try_from(max)
+        .expect("a bound fits u64")
+        .saturating_add(1);
+    let mut bytes = Vec::new();
+    if file.take(limit).read_to_end(&mut bytes).is_err() {
+        return Bounded::Unreadable;
+    }
+    assert!(bytes.len() <= max.saturating_add(1));
+    if bytes.len() > max {
+        return Bounded::TooLarge;
+    }
+    String::from_utf8(bytes).map_or(Bounded::Unreadable, Bounded::Text)
+}
+
 mod manifest;
 mod source;
 #[cfg(test)]
