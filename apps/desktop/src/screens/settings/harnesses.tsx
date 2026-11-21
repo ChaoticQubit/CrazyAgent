@@ -8,7 +8,7 @@ import {
 import { installDependency, loadSetupStatus } from "../../api-intake";
 import { NATIVE_HARNESSES, type DependencyState, type SetupStatus } from "../../engine-client";
 import { displayText } from "../conversation";
-import { HARNESS_WORDS, nodeNeeded, nodeOffer, nodeReadsAgain, rowBadge, type NodeOffer } from "../first-run/harnesses";
+import { HARNESS_WORDS, nodeNeeded, nodeOffer, nodeReadsAgain, nodeRow, rowBadge, type NodeOffer } from "../first-run/harnesses";
 import { choosable, chooseHarnessPath, findHarness, harnessFileName, isPathCode, pathCopy, pickHarnessFile, LOOKED_MAX, type ChoosableHarness, type Found } from "../../api-harness-path";
 import { useLoad, type Loaded } from "../../state";
 import { Button, Dialog, LoadError, NotReady, ProviderMark, Segmented, SettingLine, SettingSection, Skeleton, StatusBadge } from "../../ui";

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { knownError, listAccounts, nextGeneration, oneSelection, plainError, removeAccount, signInRecord, type AccountView, type Result } from "../../api";
+import { harnessCatalog, knownError, listAccounts, nextGeneration, oneSelection, plainError, removeAccount, signInRecord, type AccountView, type HarnessEntry, type Result } from "../../api";
 import { cancelNativeAuth, logoutNativeAuth, readNativeAuth, startNativeAuth, submitClaudeAuthCode, withCode } from "../../engine-client";
 import {
   CHECK_SIGN_IN, nativeAuthAllowed, nativeAuthFailureCode, nativeAuthRunningAccount, nativeAuthText, nativeClaudeInputAllowed, reduceNativeAuth,
