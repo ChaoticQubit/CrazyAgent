@@ -3,7 +3,8 @@
 use std::path::{Path, PathBuf};
 
 /// The one build script every plugin crate carries, byte for byte.
-pub const CANONICAL_BUILD_RS: &str = "fn main() {\n    crazyagent_plugin_check::enforce_here();\n}\n";
+pub const CANONICAL_BUILD_RS: &str =
+    "fn main() {\n    crazyagent_plugin_check::enforce_here();\n}\n";
 
 /// One rule a plugin crate breaks: the file below the crate folder, its 1-based line
 /// (1 when the rule names a whole file or folder) and the refusal code.
@@ -28,19 +29,22 @@ pub struct Manifest {
 /// Checks one plugin crate against every plugin rule. Input: the crate folder.
 /// Output: nothing, or every violation sorted by file, line and code.
 pub fn check_crate(dir: &Path) -> Result<(), Vec<Violation>> {
-    let _ = dir;
-    Ok(())
+    let mut out = Vec::new();
+    manifest::cargo(dir, &mut out);
+    manifest::build_script(dir, &mut out);
+    if let Err(violation) = manifest::plugin(dir) {
+        out.push(violation);
+    }
+    source::sources(dir, &mut out);
+    out.sort();
+    out.dedup();
+    if out.is_empty() { Ok(()) } else { Err(out) }
 }
 
 /// Reads a plugin's `plugin.toml`, refusing a missing key, a wrong type or any other key.
 /// Input: the crate folder. Output: the manifest, or `plugin_manifest_invalid`.
 pub fn read_manifest(dir: &Path) -> Result<Manifest, Violation> {
-    let _ = dir;
-    Err(Violation {
-        file: PathBuf::from("plugin.toml"),
-        line: 1,
-        code: "plugin_unimplemented",
-    })
+    manifest::plugin(dir)
 }
 
 /// The plugin build script's whole job: checks the crate being built and fails the build
@@ -65,5 +69,9 @@ pub fn enforce_here() {
     }
 }
 
+mod manifest;
+mod source;
 #[cfg(test)]
 mod tests;
+
+pub use source::STD_ALLOWED;
