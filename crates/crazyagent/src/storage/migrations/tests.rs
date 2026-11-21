@@ -604,7 +604,8 @@ async fn only_the_newest_five_backups_are_kept() {
 
 /// #512 r2 (rv-sec2 F1, leader 05:13): the backup an upgrade just made is never removed,
 /// even when every other backup folder carries a later stamp, as one made under a clock set
-/// ahead or placed by another account would.
+/// ahead or placed by another account would. Here it is also the pinned 2.4 copy, outside
+/// the count, so of the six later folders the newest BACKUPS_KEPT stay.
 #[tokio::test]
 async fn the_backup_an_upgrade_just_made_outlives_folders_stamped_later() {
     let root = Root::new();
@@ -614,10 +615,10 @@ async fn the_backup_an_upgrade_just_made_outlives_folders_stamped_later() {
         .mode(0o700)
         .create(&folder)
         .unwrap();
-    for day in 1..=BACKUPS_KEPT {
+    for day in 1..=BACKUPS_KEPT + 1 {
         std::fs::create_dir(folder.join(format!("1-to-2-9999010{day}T000000000Z"))).unwrap();
     }
-    let shaped_file = folder.join("1-to-2-99990106T000000000Z");
+    let shaped_file = folder.join("1-to-2-99990107T000000000Z");
     std::fs::write(&shaped_file, b"not a backup").unwrap();
 
     close(root.open().await.unwrap()).await;
@@ -628,11 +629,14 @@ async fn the_backup_an_upgrade_just_made_outlives_folders_stamped_later() {
         .filter(|path| path.is_dir())
         .map(|path| path.file_name().unwrap().to_str().unwrap().to_owned())
         .collect();
-    assert_eq!(names.len(), BACKUPS_KEPT, "{names:?}");
+    assert_eq!(names.len(), BACKUPS_KEPT + 1, "{names:?}");
     assert!(
         names[0].starts_with(&format!("1-to-{}-", latest(STEPS))),
         "{names:?}"
     );
+    let found = backups_in(&folder).unwrap();
+    let held = pinned(&folder, &found, SystemTime::now()).map(|index| found[index].1.as_str());
+    assert_eq!(held, Some(names[0].as_str()));
     assert!(!folder.join("1-to-2-99990101T000000000Z").exists());
     assert!(folder.join("1-to-2-99990102T000000000Z").is_dir());
     assert_eq!(std::fs::read(&shaped_file).unwrap(), b"not a backup");
