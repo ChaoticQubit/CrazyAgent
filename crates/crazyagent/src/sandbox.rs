@@ -4062,18 +4062,8 @@ impl InstalledSandbox {
         }
         #[cfg(target_os = "windows")]
         {
-            let helper = windows::existing_helper(&windows::helper_beside_engine()?)?;
-            let grants = windows::grants_folder()?;
-            let windows =
-                windows::WindowsSandbox::install(sandbox.clone(), &helper, profile, &grants)?;
-            assert!(profile.is_file());
-            Ok(Self {
-                sandbox,
-                profile: profile.to_path_buf(),
-                unconfined: false,
-                calls,
-                windows,
-            })
+            let grants = plain_grants(windows::grants_folder()?)?;
+            Self::install_with_grants(sandbox, profile, calls, &grants)
         }
         #[cfg(not(target_os = "windows"))]
         {
@@ -4098,6 +4088,36 @@ impl InstalledSandbox {
                 linux,
             })
         }
+    }
+
+    /// The Windows arm of [`Self::install`], once its checks pass: the helper beside the
+    /// engine and the boundary profile written with `grants`, which `install` gives as the
+    /// engine's grants folder and a test as a folder of its own (CR-1614). Inputs: the policy,
+    /// the profile path, the call supervisor choice and the grants folder, absolute and plain.
+    /// Output: the boundary, or the refusal.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn install_with_grants(
+        sandbox: ProjectSandbox,
+        profile: &Path,
+        calls: LinuxSupervisor,
+        grants: &Path,
+    ) -> Result<Self, SandboxError> {
+        assert!(grants.is_absolute(), "{}", grants.display());
+        assert!(
+            !grants.as_os_str().to_string_lossy().contains('/'),
+            "{}",
+            grants.display()
+        );
+        let helper = windows::existing_helper(&windows::helper_beside_engine()?)?;
+        let windows = windows::WindowsSandbox::install(sandbox.clone(), &helper, profile, grants)?;
+        assert!(profile.is_file());
+        Ok(Self {
+            sandbox,
+            profile: profile.to_path_buf(),
+            unconfined: false,
+            calls,
+            windows,
+        })
     }
 
     /// Marks this boundary as a Full access project's (DEC-102): every command it wraps then
@@ -5273,6 +5293,20 @@ fn granted_root(root: &Path, owner: &Path, secrets: &[PathBuf]) -> Result<(), Sa
         ));
     }
     Ok(())
+}
+
+/// The engine's grants folder when it is a plain drive path, which `install_with_grants`
+/// asserts: the data root comes from the owner's `CRAZYAGENT_HOME`, so `C:/data` or a UNC
+/// root is refused here, as the boundary install refused it before CR-1614, never a panic.
+/// Input: the folder. Output: the folder, or `Invalid`.
+#[cfg(target_os = "windows")]
+pub(crate) fn plain_grants(grants: PathBuf) -> Result<PathBuf, SandboxError> {
+    assert!(!grants.as_os_str().is_empty());
+    if !clean_absolute(&grants) {
+        return Err(invalid("grants folder must exist"));
+    }
+    assert!(grants.is_absolute());
+    Ok(grants)
 }
 
 #[cfg(not(target_os = "windows"))]

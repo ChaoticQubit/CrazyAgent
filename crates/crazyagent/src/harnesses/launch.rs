@@ -10,6 +10,7 @@ use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 use crate::sandbox::InstalledSandbox;
+#[cfg(not(windows))]
 use crate::sandbox::toolchains::{self, ToolHomes};
 use crate::usage::capture::Tokens;
 #[cfg(unix)]
@@ -703,48 +704,24 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         "claude-code" => claude_invocation(request, installed, key_file.as_deref()),
         _ => return Err(failure("launch_harness_unsupported")),
     };
-    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+    if !cfg!(any(target_os = "macos", target_os = "linux", windows)) {
         return Err(failure("launch_sandbox_unavailable"));
     }
-    let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
-    let path = toolchains::with_agent_git(
-        home,
-        if request.tools {
-            toolchains::agent_path(&homes, TOOLS_ON_PATH)
-        } else {
-            TOOLS_OFF_PATH.to_owned()
-        },
-    );
-    let tmp = toolchains::existing_tmp(home).unwrap_or_else(|| home.to_path_buf());
-    let tools = if request.tools {
-        toolchains::agent_env(home, &homes)
-    } else {
-        Vec::new()
-    };
-    let mut base = vec![
-        ("HOME", home.as_os_str()),
-        ("TMPDIR", tmp.as_os_str()),
-        ("PATH", OsStr::new(&path)),
-        ("LANG", OsStr::new("C")),
-        ("LC_ALL", OsStr::new("C")),
-    ];
-    base.extend(tools.iter().map(|(name, value)| (*name, value.as_os_str())));
-    let proxy = installed
-        .and_then(Installed::model_proxy)
-        .map(crate::sandbox::model_proxy::variables);
-    base.extend(
+    let mut owned = launch_base(home, request.tools)?;
+    let proxy = installed.and_then(Installed::model_proxy);
+    let proxy = proxy.map(crate::sandbox::model_proxy::variables);
+    owned.extend(
         proxy
-            .iter()
+            .into_iter()
             .flatten()
-            .map(|(name, value)| (*name, OsStr::new(value))),
+            .map(|(name, value)| (name, value.into())),
     );
-    if let Some(identity) = &request.git_identity {
-        base.extend(
-            identity
-                .variables()
-                .map(|(name, value)| (name, OsStr::new(value))),
-        );
-    }
+    let identity = request.git_identity.iter().flat_map(GitIdentity::variables);
+    owned.extend(identity.map(|(name, value)| (name, value.into())));
+    let base: Vec<(&str, &OsStr)> = owned
+        .iter()
+        .map(|(name, value)| (*name, value.as_os_str()))
+        .collect();
     let harness_env = environment
         .iter()
         .map(|(name, value)| (OsStr::new(*name), Some(value.as_os_str())));
@@ -778,9 +755,10 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
 
 /// Builds the harness command inside the request's boundary, in its working folder: on
 /// macOS the confined profile through [`crate::sandbox::agent_command`] or the Full access
-/// session shim; on Linux an installed sandbox with the account's home, through
-/// [`InstalledSandbox::wrap`]; anything else is `launch_sandbox_unavailable`. Inputs: the
-/// request, program, script words, arguments, base and harness variables. Output: the command.
+/// session shim; on Linux and Windows an installed sandbox with the account's home, through
+/// [`InstalledSandbox::wrap`], on Windows once [`home_containers`] passes; anything else is
+/// `launch_sandbox_unavailable`. Inputs: the request, program, script words, arguments, base
+/// and harness variables. Output: the command.
 fn bounded<'a>(
     request: &LaunchRequest,
     program: &Path,
@@ -802,7 +780,7 @@ fn bounded<'a>(
             .current_dir(&request.working_dir);
         Ok(command)
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     {
         let LaunchBoundary::Installed(boundary) = &request.boundary else {
             return Err(failure("launch_sandbox_unavailable"));
@@ -810,6 +788,8 @@ fn bounded<'a>(
         if request.account.home() != boundary.sandbox().agent_home() {
             return Err(failure("launch_environment_refused"));
         }
+        #[cfg(windows)]
+        home_containers(request.account.home(), boundary.sandbox())?;
         let mut bare = Command::new(program);
         bare.args(script)
             .args(arguments)
@@ -832,12 +812,91 @@ fn bounded<'a>(
         assert_eq!(command.get_program(), boundary.launcher().as_os_str());
         Ok(command)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = (request, program, script, arguments, base);
         let _ = harness_env.into_iter().count();
         Err(failure("launch_sandbox_unavailable"))
     }
+}
+
+/// The variables a launch starts with before the model proxy and the git identity, from one
+/// function per OS (ANSWER-0405 condition 3): the agent's home and temp folder, the PATH
+/// with the agent's git, the C locale and, with tools on, the tool homes. Inputs: the
+/// agent's home and whether tools are on. Output: the variables, or the refusal.
+#[cfg(not(windows))]
+fn launch_base(home: &Path, tools: bool) -> Result<Vec<(&'static str, OsString)>, LaunchError> {
+    let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
+    let path = toolchains::with_agent_git(
+        home,
+        if tools {
+            toolchains::agent_path(&homes, TOOLS_ON_PATH)
+        } else {
+            TOOLS_OFF_PATH.to_owned()
+        },
+    );
+    let tmp = toolchains::existing_tmp(home).unwrap_or_else(|| home.to_path_buf());
+    let mut base = vec![
+        ("HOME", home.as_os_str().to_owned()),
+        ("TMPDIR", tmp.into_os_string()),
+        ("PATH", OsString::from(path)),
+        ("LANG", OsString::from("C")),
+        ("LC_ALL", OsString::from("C")),
+    ];
+    if tools {
+        base.extend(toolchains::agent_env(home, &homes));
+    }
+    assert_eq!(base[0].0, "HOME");
+    assert_eq!(base[2].0, "PATH");
+    Ok(base)
+}
+
+/// The variables a Windows launch starts with before the model proxy and the git identity:
+/// none, as the boundary's own base sets the home, temp folders and System32 PATH, and a
+/// Windows toolchain PATH waits for group E (H3-Q1, V244-WIN-TOOLS-ON-PATH), so tools on
+/// adds nothing yet. Inputs: the agent's home and whether tools are on. Output: no variables.
+#[cfg(windows)]
+fn launch_base(home: &Path, _tools: bool) -> Result<Vec<(&'static str, OsString)>, LaunchError> {
+    assert!(home.is_absolute());
+    Ok(Vec::new())
+}
+
+/// Checks on Windows that every app container an account home grants is its boundary's own
+/// (Q9, rv-sec3 #712 N1). The expected SID derives only from the boundary's sandbox, never
+/// from the home, a record or a profile. Inputs: the home and the boundary's sandbox.
+/// Output: Ok, or a `launch_account_home_*` or `launch_sandbox_unavailable` refusal.
+#[cfg(windows)]
+fn home_containers(
+    home: &Path,
+    sandbox: &crate::sandbox::ProjectSandbox,
+) -> Result<(), LaunchError> {
+    use crate::platform::{FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT};
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    let unsafe_home = || failure("launch_account_home_unsafe");
+    let unavailable = |_| failure("launch_account_home_unavailable");
+    let name = crate::sandbox::windows::container_name(sandbox);
+    let expected = crazyagent_win_sandbox::container_sid(&name)
+        .map_err(|_| failure("launch_sandbox_unavailable"))?;
+    assert!(app_container(&expected));
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(home)
+        .map_err(unavailable)?;
+    let facts = crazyagent_win_sandbox::private::facts(&held).map_err(unavailable)?;
+    let list = facts.list.as_deref().ok_or_else(unsafe_home)?;
+    let entries = crazyagent_win_sandbox::dacl::entries(list).map_err(|_| unsafe_home())?;
+    let foreign = entries
+        .iter()
+        .any(|entry| entry.allows && app_container(entry.sid) && entry.sid != expected.as_slice());
+    if facts.reparse || foreign {
+        return Err(unsafe_home());
+    }
+    drop(held);
+    Ok(())
 }
 
 /// The Codex app-server command line. Every folder of the working folder's walk is recorded
@@ -2367,3 +2426,6 @@ pub(crate) mod low_probe;
 
 #[cfg(all(test, windows))]
 mod home_windows_tests;
+
+#[cfg(all(test, windows))]
+mod bounded_windows_tests;
