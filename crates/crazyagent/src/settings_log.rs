@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// The kind of the event an owner sandbox settings save appends (v2.5 L10).
 pub const KIND_SANDBOX: &str = "SandboxSettingsSaved";
