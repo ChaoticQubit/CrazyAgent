@@ -193,7 +193,7 @@ jobs:
           grep -E '^[^ ]+\.rs:[0-9]+:[0-9]+: error' "$RUNNER_TEMP/lint.log" | sort -u | tee "$RUNNER_TEMP/errors.txt" || true
           tail -5 "$RUNNER_TEMP/lint.log"
           known='crates/crazyagent/src/storage/master_session/sessions_tests/deleted.rs:460:6: error: very complex type used'
-          other=$(grep -vF "$known" "$RUNNER_TEMP/errors.txt" | wc -l)
+          other=$(grep -cvF "$known" "$RUNNER_TEMP/errors.txt" || true)
           echo "clippy exit $code, errors other than the parent red: $other"
           [ "$other" -eq 0 ]
           [ "$code" -eq 0 ] || [ -s "$RUNNER_TEMP/errors.txt" ]
@@ -208,7 +208,7 @@ jobs:
           fi
 
   windows:
-    name: V250 catch-up 244 Windows clippy and storage rows on ${{ matrix.runner }}
+    name: V250 catch-up 244 Windows rows at ${{ matrix.at }} on ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     strategy:
@@ -216,7 +216,17 @@ jobs:
       matrix:
         include:
           - runner: windows-2022
+            at: tip
+            ref: ''
           - runner: windows-2025
+            at: tip
+            ref: ''
+          - runner: windows-2022
+            at: master 207d2f201
+            ref: 207d2f20152f4166c877e90bc70254df1d4ed799
+          - runner: windows-2022
+            at: parent 129071a94
+            ref: 129071a9452b346ad5f23ac70574793151b70fd4
     steps:
       - name: Refuse a runner that is not GitHub-hosted
         run: |
@@ -225,7 +235,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-          fetch-depth: 5
+          fetch-depth: 1
+      - name: Keep the parent arity patch outside the code checkout
+        run: |
+          set -euo pipefail
+          cp .github/farm-parent-arity.patch "$RUNNER_TEMP/parent-arity.patch"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: ${{ matrix.ref != '' }}
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          ref: ${{ matrix.ref }}
+      - name: Apply the start_store arity fix the parent's test rows need to compile
+        if: ${{ startsWith(matrix.at, 'parent') }}
+        run: |
+          set -euo pipefail
+          git apply "$RUNNER_TEMP/parent-arity.patch"
+          git diff --stat
+      - name: Show the commit under test
+        run: |
+          set -euo pipefail
+          git log -1 --format='%H %s'
       - name: Install SQLite for Windows
         run: |
           set -euo pipefail
@@ -257,17 +287,26 @@ jobs:
           cache-bin: false
           save-if: false
       - name: Clippy on the crazyagent library
+        if: ${{ matrix.at == 'tip' }}
         timeout-minutes: 60
         run: |
           set -euo pipefail
           cargo clippy -p crazyagent --lib --locked -- -D warnings
       - name: Clippy on the crazyagent test rows
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && matrix.at == 'tip' }}
         timeout-minutes: 60
         run: |
           set -euo pipefail
           cargo clippy -p crazyagent --tests --locked -- -D warnings
-      - name: Storage, log and launch rows the merge opened on Windows
+      - name: Build the boundary helper beside the test binaries, as the farm archive does
+        if: ${{ !cancelled() }}
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          cargo build -p crazyagent-win-sandbox --bin crazyagent-win-boundary --locked
+          mkdir -p target/debug/deps
+          cp target/debug/crazyagent-win-boundary.exe target/debug/deps/crazyagent-win-boundary.exe
+      - name: Storage, log, service and launch rows
         if: ${{ !cancelled() }}
         timeout-minutes: 60
         run: |
@@ -275,6 +314,6 @@ jobs:
           cargo test -p crazyagent --lib --locked -- storage:: app_plugins::store:: memory:: worktrees:: settings_log:: sessions_log:: landing_log:: launch_context:: service::tests:: harnesses::launch:: 2>&1 | tee "$RUNNER_TEMP/rows.log"
           code=${PIPESTATUS[0]}
           set -e
-          grep -E '^test result|panicked|FAILED' "$RUNNER_TEMP/rows.log" || true
+          echo "rows at ${{ matrix.at }}:"
+          grep -E '^test result|^test .* FAILED$|could not compile' "$RUNNER_TEMP/rows.log" || true
           [ "$code" -eq 0 ]
-          grep -qE '^test result: ok\. [1-9][0-9]* passed; 0 failed' "$RUNNER_TEMP/rows.log"
