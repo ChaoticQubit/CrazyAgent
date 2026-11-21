@@ -49,9 +49,8 @@ enum Shape {
     Dotted,
 }
 
-/// One parsed field with the tokens of its name and of its type.
+/// One parsed field with the token of its type, for the spot of a named type.
 struct Parsed<'s> {
-    name: Token<'s>,
     field: Field,
     ty: Token<'s>,
 }
@@ -200,7 +199,6 @@ impl<'s> Parser<'s> {
         self.expect(Kind::Colon)?;
         let ty = self.expect(Kind::Word)?;
         let parsed = Parsed {
-            name,
             field: Field {
                 name: name.text.to_owned(),
                 ty: type_ref(&ty)?,
@@ -223,7 +221,6 @@ impl<'s> Parser<'s> {
         let mut named = Vec::new();
         let mut fields = Vec::with_capacity(entries.len());
         for (_, parsed) in entries {
-            assert!(!parsed.name.text.is_empty());
             if matches!(parsed.field.ty, TypeRef::Named(_)) {
                 named.push(Spot::of(&parsed.ty));
             }
