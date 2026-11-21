@@ -636,5 +636,6 @@ fn a_failure_after_step_13_leaves_no_event_and_no_change() {
     assert_eq!(standing_of(&db), before);
 }
 
+mod budget;
 mod restore;
 mod v244_fixture;
