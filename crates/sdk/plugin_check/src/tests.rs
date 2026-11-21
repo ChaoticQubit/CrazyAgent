@@ -153,3 +153,17 @@ fn a_raw_crate_root_is_refused_like_the_plain_one() {
         vec![(5, "plugin_std_not_allowed"), (10, "plugin_std_not_allowed")]
     );
 }
+
+#[test]
+fn a_file_over_its_bound_is_refused_from_a_bounded_read() {
+    let dir = std::env::temp_dir().join(format!("plugin-check-bounded-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("scratch folder");
+    let path = dir.join("big.txt");
+    fs::write(&path, vec![b'a'; 100]).expect("writes");
+    assert_eq!(read_bounded(&path, 99), Bounded::TooLarge);
+    assert_eq!(read_bounded(&path, 100), Bounded::Text("a".repeat(100)));
+    fs::write(&path, [0xff, 0xfe]).expect("writes");
+    assert_eq!(read_bounded(&path, 10), Bounded::Unreadable);
+    assert_eq!(read_bounded(&dir.join("missing"), 10), Bounded::Unreadable);
+    fs::remove_dir_all(&dir).expect("scratch folder removed");
+}
