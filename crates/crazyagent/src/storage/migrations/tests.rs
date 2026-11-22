@@ -259,8 +259,22 @@ fn broken(tx: &Transaction<'_>) -> Result<(), StorageError> {
     Ok(())
 }
 
+/// A step that ends the upgrade transaction with no transaction statement, which the runner
+/// refuses: SQLite itself rolls it back on a duplicate under `OR ROLLBACK`, the step
+/// swallows that error, then deletes and creates a table in autocommit, so the backup has
+/// committed work to undo.
 fn escaping(tx: &Transaction<'_>) -> Result<(), StorageError> {
-    tx.execute_batch("COMMIT; DELETE FROM projects; CREATE TABLE migration_escaped (a);")
+    tx.execute_batch(
+        "DELETE FROM projects; CREATE TABLE migration_escaped (a UNIQUE); \
+         INSERT INTO migration_escaped VALUES (1);",
+    )
+    .map_err(error)?;
+    let duplicate = tx.execute("INSERT OR ROLLBACK INTO migration_escaped VALUES (1)", []);
+    assert!(
+        duplicate.is_err(),
+        "the duplicate rolls the transaction back"
+    );
+    tx.execute_batch("DELETE FROM projects; CREATE TABLE migration_escaped_after (a);")
         .map_err(error)?;
     Ok(())
 }
