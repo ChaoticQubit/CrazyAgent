@@ -208,7 +208,7 @@ impl OwnedProcess {
         bounds: ProcessBounds,
     ) -> io::Result<Self> {
         let run_deadline = bounds.validate(Instant::now())?;
-        let mut child = crate::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             command
                 .env_clear()
                 .envs(environment.iter().map(|(key, value)| (key, value)))

@@ -208,7 +208,7 @@ impl Proxied {
 /// The first letter of a process's state as `ps` shows it, `T` for stopped, or none for a
 /// process that is gone. Input: the process id. Output: the letter.
 fn state_of(pid: u32) -> Option<char> {
-    let shown = crate::spawn_gate::output(
+    let shown = kernel_processes::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-o", "stat=", "-p", &pid.to_string()])
             .stdin(Stdio::null())
@@ -226,14 +226,14 @@ fn state_of(pid: u32) -> Option<char> {
 /// Holds a loopback address on `port` that answers nothing. Inputs: the address and the
 /// port. Output: the listener, not blocking.
 fn hold(address: &str, port: u16) -> TcpListener {
-    let listener = crate::spawn_gate::bind_tcp_std((address, port)).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std((address, port)).unwrap();
     listener.set_nonblocking(true).unwrap();
     listener
 }
 
 /// Tells whether a held listener took a connection. Input: the listener. Output: true then.
 fn requested(listener: &TcpListener) -> bool {
-    crate::spawn_gate::accept_tcp_std(listener).is_ok()
+    kernel_processes::spawn_gate::accept_tcp_std(listener).is_ok()
 }
 
 /// DEC-158: a kept pane with a model proxy is stopped once the engine quits, every process
@@ -700,7 +700,7 @@ impl NativeLead {
             .expect("a frozen native lead keeps its server keepers")
             .iter()
             .flat_map(|keeper| {
-                let shown = crate::spawn_gate::output(
+                let shown = kernel_processes::spawn_gate::output(
                     Command::new("/usr/bin/pgrep")
                         .args(["-P", &keeper.pid.to_string()])
                         .stdin(Stdio::null())
@@ -1062,10 +1062,10 @@ fn an_unrecorded_native_lead_whose_teammates_server_ended_is_ended_by_a_next_eng
     let agent = AgentId::team(lead.id).unwrap();
     let mates = crate::terminal::teammates_socket(&lead.fixture.base, &agent).unwrap();
     assert!(
-        crate::spawn_gate::connect_unix_std(&mates).is_ok(),
+        kernel_processes::spawn_gate::connect_unix_std(&mates).is_ok(),
         "the lead's teammates' server listens"
     );
-    let ended = crate::spawn_gate::status(
+    let ended = kernel_processes::spawn_gate::status(
         Command::new(&lead.fixture.tmux)
             .arg("-S")
             .arg(&mates)
@@ -1078,7 +1078,7 @@ fn an_unrecorded_native_lead_whose_teammates_server_ended_is_ended_by_a_next_eng
     .unwrap();
     assert!(ended.success(), "the teammates' server was not ended");
     let deadline = Instant::now() + WAIT;
-    while crate::spawn_gate::connect_unix_std(&mates).is_ok() {
+    while kernel_processes::spawn_gate::connect_unix_std(&mates).is_ok() {
         assert!(
             Instant::now() < deadline,
             "the ended teammates' server still listens"
@@ -1287,9 +1287,10 @@ fn a_proxied_agent_s_pane_record_says_its_keeper_can_freeze_it() {
 /// the keepers do not count as ended, so the lead's proxy stays bound.
 #[test]
 fn a_keeper_whose_state_cannot_be_read_is_not_signalled() {
-    let mut child =
-        crate::spawn_gate::spawn(Command::new("/bin/sleep").arg("30").stdin(Stdio::null()))
-            .unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(
+        Command::new("/bin/sleep").arg("30").stdin(Stdio::null()),
+    )
+    .unwrap();
     let pin = KeeperPin {
         pid: child.id(),
         started: keeper_started(child.id()).expect("the stand-in keeper's start reads"),
@@ -1315,9 +1316,10 @@ fn a_keeper_whose_state_cannot_be_read_is_not_signalled() {
 #[test]
 fn a_keeper_whose_first_read_fails_is_signalled_once_it_reads_running() {
     use std::os::unix::process::ExitStatusExt;
-    let mut child =
-        crate::spawn_gate::spawn(Command::new("/bin/sleep").arg("30").stdin(Stdio::null()))
-            .unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(
+        Command::new("/bin/sleep").arg("30").stdin(Stdio::null()),
+    )
+    .unwrap();
     let pin = KeeperPin {
         pid: child.id(),
         started: keeper_started(child.id()).expect("the stand-in keeper's start reads"),

@@ -65,7 +65,7 @@ fn lane_in(folder: Option<&Path>, scratch: &Path, arguments: &[&str]) -> Child {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    crazyagent::spawn_gate::spawn(&mut command).unwrap()
+    kernel_processes::spawn_gate::spawn(&mut command).unwrap()
 }
 
 fn now_ms() -> i64 {

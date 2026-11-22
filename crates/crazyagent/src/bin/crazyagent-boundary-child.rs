@@ -131,7 +131,7 @@ fn burn_cpu() {
 fn spawn_children() -> Result<(), Box<dyn std::error::Error>> {
     let mut children = Vec::new();
     for index in 0..6 {
-        match crazyagent::spawn_gate::spawn(
+        match kernel_processes::spawn_gate::spawn(
             Command::new(std::env::current_exe()?).arg("sleep-child"),
         ) {
             Ok(child) => children.push(child),

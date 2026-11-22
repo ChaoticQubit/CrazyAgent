@@ -879,7 +879,7 @@ fn a_claude_handoff_refuses_the_profile_home_and_a_home_outside_the_engine_folde
 #[cfg(target_os = "macos")]
 fn home_setting(home: &Path, which: &str) -> String {
     assert!(matches!(which, "default-keychain" | "list-keychains"));
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/security")
             .args([which, "-d", "user"])
             .env_clear()

@@ -38,7 +38,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -558,7 +558,7 @@ fn pid_in(folder: &Path, name: &str) -> Option<rustix::process::Pid> {
 /// Reads a process's parent id with `ps`. Input: the process. Output: the parent, or none
 /// once it has ended.
 fn parent_of(process: rustix::process::Pid) -> Option<i32> {
-    let listing = crazyagent::spawn_gate::output(
+    let listing = kernel_processes::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-o", "ppid=", "-p", &process.as_raw_nonzero().to_string()])
             .stdin(Stdio::null())
@@ -690,7 +690,7 @@ const PARENT_STAND_IN: &str = "#!/bin/sh\nif kill -0 \"$PPID\" 2>/dev/null; then
 
 /// The command line `ps` shows for one process. Input: the pid. Output: the line.
 fn command_of(pid: Pid) -> String {
-    let listed = crazyagent::spawn_gate::output(
+    let listed = kernel_processes::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-o", "command=", "-p"])
             .arg(pid.as_raw_nonzero().get().to_string())

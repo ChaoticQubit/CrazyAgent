@@ -785,7 +785,7 @@ mod tests {
     /// Inputs: the home, the folder and the arguments. Output: standard output.
     #[cfg(unix)]
     fn git(home: &Path, dir: &Path, args: &[&str]) -> String {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             std::process::Command::new("/usr/bin/git")
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")

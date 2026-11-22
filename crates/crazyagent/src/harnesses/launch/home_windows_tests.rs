@@ -181,7 +181,7 @@ fn the_home_judge_refuses_a_link_a_share_a_foreign_owner_and_a_low_label() {
 }
 
 fn run(program: &str, arguments: &[&str]) {
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         Command::new(program)
             .args(arguments)
             .stdin(Stdio::null())
@@ -301,7 +301,7 @@ fn boxed(installed: &WindowsSandbox, project: &Path, line: &str) -> bool {
         .join("cmd.exe");
     let mut command = Command::new(shell);
     command.arg("/C").arg(line).current_dir(project);
-    crate::spawn_gate::status(
+    kernel_processes::spawn_gate::status(
         Sandbox::wrap(installed, &command)
             .unwrap()
             .stdin(Stdio::null())

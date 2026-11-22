@@ -19,7 +19,7 @@ impl Drop for Process {
 }
 
 fn launch(root: &std::path::Path, endpoint: &str) -> Process {
-    let mut child = crazyagent::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         std::process::Command::new(env!("CARGO_BIN_EXE_crazyagent"))
             .arg("engine")
             .arg(root)
@@ -64,7 +64,7 @@ async fn disconnect_kill_restart_and_replay_executes_once() {
             },
         },
     };
-    let mut stream = crazyagent::spawn_gate::connect_unix(root.path().join("first.sock"))
+    let mut stream = kernel_processes::spawn_gate::connect_unix(root.path().join("first.sock"))
         .await
         .unwrap();
     stream

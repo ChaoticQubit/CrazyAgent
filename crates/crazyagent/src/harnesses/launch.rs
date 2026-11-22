@@ -2311,7 +2311,7 @@ impl Session {
                     .stdin(Stdio::from(io.child_input))
                     .stdout(Stdio::from(io.child_output))
                     .stderr(Stdio::null());
-                child = crate::spawn_gate::spawn(&mut command)
+                child = kernel_processes::spawn_gate::spawn(&mut command)
                     .map_err(|_| failure("launch_spawn_failed"))?;
                 drop(command);
                 stdin = Some(io.input);
@@ -2647,7 +2647,7 @@ impl DurableIo {
                 _ => return Err(failure("launch_state_in_use")),
             }
         }
-        let made = crate::spawn_gate::status(
+        let made = kernel_processes::spawn_gate::status(
             Command::new(MKFIFO)
                 .arg("-m")
                 .arg("600")

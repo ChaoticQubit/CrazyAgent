@@ -5,7 +5,7 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 
 fn cli(args: &[&str]) -> Output {
-    crazyagent::spawn_gate::output(
+    kernel_processes::spawn_gate::output(
         Command::new(env!("CARGO_BIN_EXE_crazyagent"))
             .args(args)
             .stdin(std::process::Stdio::null())
@@ -16,7 +16,7 @@ fn cli(args: &[&str]) -> Output {
 }
 
 fn admit(path: &Path, root: &TempDir, source: &str, profile: &str) -> Output {
-    crazyagent::spawn_gate::output(
+    kernel_processes::spawn_gate::output(
         Command::new(env!("CARGO_BIN_EXE_crazyagent"))
             .args(["qualification", "admit", "--report"])
             .arg(path)
@@ -163,7 +163,7 @@ fn binary_requires_trusted_source_profile_and_nonempty_requirements() {
         assert_eq!(output.status.code(), Some(2), "{:?}", output);
         assert!(!output.stderr.is_empty());
     }
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new(env!("CARGO_BIN_EXE_crazyagent"))
             .args(["qualification", "admit", "--report"])
             .arg(&path)

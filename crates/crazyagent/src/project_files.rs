@@ -98,7 +98,7 @@ pub(crate) fn list(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = crate::spawn_gate::spawn(command).map_err(git_failed)?;
+    let mut child = kernel_processes::spawn_gate::spawn(command).map_err(git_failed)?;
     let output = child
         .stdout
         .take()
@@ -434,7 +434,7 @@ mod tests {
     /// Runs git as a test owner would, with an empty home and no system config.
     /// Inputs: the home, the folder and the arguments.
     fn git(home: &Path, dir: &Path, args: &[&str]) {
-        let status = crate::spawn_gate::output(
+        let status = kernel_processes::spawn_gate::output(
             std::process::Command::new("/usr/bin/git")
                 .args(args)
                 .current_dir(dir)
@@ -616,7 +616,7 @@ mod windows_tests {
     /// Runs git from the runner's PATH as a test owner would, with an empty home and no
     /// system config. Inputs: the home, the folder and the arguments.
     fn git(home: &Path, dir: &Path, args: &[&str]) {
-        let made = crate::spawn_gate::output(
+        let made = kernel_processes::spawn_gate::output(
             Command::new("git")
                 .args(args)
                 .current_dir(dir)
@@ -635,7 +635,7 @@ mod windows_tests {
     /// Makes a junction, which needs no privilege, from a folder in the project to one
     /// outside it. Inputs: the junction and its target.
     fn junction(link: &Path, target: &Path) {
-        let made = crate::spawn_gate::output(
+        let made = kernel_processes::spawn_gate::output(
             Command::new("cmd")
                 .args(["/C", "mklink", "/J"])
                 .arg(link)

@@ -9,6 +9,8 @@ members = [
     "crates/sdk/rust",
     "crates/kernel/bus_gateway",
     "crates/kernel/storage",
+    "crates/kernel/processes",
+    "crates/kernel/common",
     "crates/kernel/security",
     "crates/sdk/plugin_check",
     "plugins/t2/agent-quit",
@@ -40,4 +42,16 @@ opt-level = 3
 opt-level = 3
 
 [profile.test.package.crazyagent-kernel-storage]
+opt-level = 3
+
+[profile.dev.package.crazyagent-kernel-processes]
+opt-level = 3
+
+[profile.test.package.crazyagent-kernel-processes]
+opt-level = 3
+
+[profile.dev.package.crazyagent-kernel-common]
+opt-level = 3
+
+[profile.test.package.crazyagent-kernel-common]
 opt-level = 3

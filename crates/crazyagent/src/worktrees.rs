@@ -297,7 +297,8 @@ fn git_until(
     output_max: usize,
     deadline: Instant,
 ) -> Result<Vec<u8>, EngineError> {
-    let child = crate::spawn_gate::spawn(&mut git_command(repository, args)).map_err(error)?;
+    let child =
+        kernel_processes::spawn_gate::spawn(&mut git_command(repository, args)).map_err(error)?;
     collect_git_output(child, output_max, deadline)
 }
 
@@ -2016,7 +2017,7 @@ fn write_tree(
     entries: &[TreeEntry],
     deadline: Instant,
 ) -> Result<Vec<String>, EngineError> {
-    let mut child = crate::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         git_command(repository, &["cat-file", "--batch"]).stdin(Stdio::piped()),
     )
     .map_err(error)?;

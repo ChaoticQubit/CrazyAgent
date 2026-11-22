@@ -718,7 +718,7 @@ pub fn find_cli() -> Option<&'static Path> {
 /// (at least `HOME`). Output: the token, or `github_cli_not_signed_in`.
 pub fn cli_token(gh: &Path, env: &[(&str, &std::ffi::OsStr)]) -> Result<SecretString, EngineError> {
     let unavailable = || failure("github_cli_not_signed_in");
-    let mut child = crate::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         Command::new(gh)
             .args(["auth", "token", "--hostname", "github.com"])
             .env_clear()

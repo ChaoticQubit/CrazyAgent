@@ -187,7 +187,7 @@ pub fn check_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
-    let mut child = crate::spawn_gate::spawn(&mut process).map_err(start_refused)?;
+    let mut child = kernel_processes::spawn_gate::spawn(&mut process).map_err(start_refused)?;
     let tree = match crazyagent_win_sandbox::ProcessTree::hold(&child) {
         Ok(tree) => tree,
         Err(error) => {
@@ -390,7 +390,7 @@ mod tests {
         let path = root.join("mcp_fixture.py");
         std::fs::write(&path, FIXTURE).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let first = crate::spawn_gate::first_run(
+        let first = kernel_processes::spawn_gate::first_run(
             Command::new(&path)
                 .arg("exit")
                 .env_clear()
@@ -632,7 +632,7 @@ pub(crate) mod windows_tests {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let mut grandchild = crate::spawn_gate::spawn(&mut command).unwrap();
+        let mut grandchild = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
         std::fs::write(&marker, grandchild.id().to_string()).unwrap();
         std::thread::sleep(Duration::from_secs(120));
         let _ = grandchild.kill();
@@ -644,7 +644,7 @@ pub(crate) mod windows_tests {
     fn running(pid: u32) -> bool {
         let mut tasklist = Command::new("tasklist");
         tasklist.args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"]);
-        let listed = crate::spawn_gate::collected(&mut tasklist).unwrap();
+        let listed = kernel_processes::spawn_gate::collected(&mut tasklist).unwrap();
         String::from_utf8_lossy(&listed.stdout).contains(&format!("\"{pid}\""))
     }
 

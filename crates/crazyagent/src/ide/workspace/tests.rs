@@ -83,7 +83,7 @@ fn add_project_waits_for_another_writer_and_does_not_fail_on_a_stale_read() {
 /// Runs git in `dir` with no global or system configuration. Inputs: the folder and the
 /// arguments. Output: standard output.
 fn git(dir: &Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

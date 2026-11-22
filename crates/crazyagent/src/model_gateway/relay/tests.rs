@@ -32,7 +32,7 @@ struct Provider {
 
 impl Provider {
     fn start(mut answer: impl FnMut(&Incoming, &mut TcpStream) + Send + 'static) -> Self {
-        let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
+        let listener = kernel_processes::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
@@ -40,7 +40,8 @@ impl Provider {
         let (recorded, stopping) = (Arc::clone(&seen), Arc::clone(&stop));
         let thread = std::thread::spawn(move || {
             while !stopping.load(Ordering::Acquire) {
-                let Ok((mut stream, _)) = crate::spawn_gate::accept_tcp_std(&listener) else {
+                let Ok((mut stream, _)) = kernel_processes::spawn_gate::accept_tcp_std(&listener)
+                else {
                     std::thread::sleep(Duration::from_millis(10));
                     continue;
                 };
@@ -103,7 +104,7 @@ fn header<'a>(incoming: &'a Incoming, name: &str) -> Option<&'a str> {
 /// Sends one raw request to the relay and reads the whole reply.
 /// Output: the status code, the header block and the body.
 fn send(port: u16, raw: &[u8]) -> (u16, String, Vec<u8>) {
-    let mut stream = crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)).unwrap();
+    let mut stream = kernel_processes::spawn_gate::connect_tcp_std(("127.0.0.1", port)).unwrap();
     stream.set_read_timeout(Some(WAIT)).unwrap();
     stream.write_all(raw).unwrap();
     let mut reply = Vec::new();
@@ -383,7 +384,8 @@ fn a_request_without_the_token_is_refused_before_its_body_is_read() {
         "Transfer-Encoding: chunked".to_owned(),
     ];
     for framing in &announced {
-        let mut stream = crate::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
+        let mut stream =
+            kernel_processes::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
         stream.set_read_timeout(Some(answer)).unwrap();
         let head = format!("POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\n{framing}\r\n\r\n");
         stream.write_all(head.as_bytes()).unwrap();
@@ -399,7 +401,8 @@ fn a_request_without_the_token_is_refused_before_its_body_is_read() {
         assert!(reply.starts_with("HTTP/1.1 401 "), "{framing}: {reply}");
     }
 
-    let mut stream = crate::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
+    let mut stream =
+        kernel_processes::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
     stream.set_read_timeout(Some(answer)).unwrap();
     let head = format!(
         "POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nx-api-key: {}\r\nContent-Length: {}\r\n\r\n",
@@ -427,7 +430,7 @@ fn callers_without_the_token_cannot_hold_the_slots_the_agent_needs() {
     let mut held: Vec<TcpStream> = (0..CONNECTIONS_MAX)
         .map(|_| {
             let mut stream =
-                crate::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
+                kernel_processes::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
             stream
                 .write_all(b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\n")
                 .unwrap();
@@ -529,7 +532,8 @@ fn streamed_replies_reach_the_harness_before_the_provider_finishes() {
         stream.write_all(b"data: two\n\n").unwrap();
     });
     let relay = Relay::start(&provider.origin(), key()).unwrap();
-    let mut stream = crate::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
+    let mut stream =
+        kernel_processes::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
     stream.set_read_timeout(Some(WAIT)).unwrap();
     stream
         .write_all(&post(
@@ -702,7 +706,8 @@ fn dropping_the_relay_aborts_a_provider_request_still_in_flight() {
     });
     let relay = Relay::start(&provider.origin(), key()).unwrap();
     let shared = Arc::clone(&relay.shared);
-    let mut harness = crate::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
+    let mut harness =
+        kernel_processes::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
     harness.set_read_timeout(Some(WAIT)).unwrap();
     harness
         .write_all(&post(
@@ -795,7 +800,7 @@ fn a_relay_port_the_system_refuses_is_skipped_for_the_next_one() {
             41_428 => Err(Error::from(ErrorKind::PermissionDenied)),
             41_429 => Err(Error::from(ErrorKind::AddrNotAvailable)),
             41_430 => Err(Error::from(ErrorKind::AddrInUse)),
-            _ => crate::spawn_gate::bind_tcp_std("127.0.0.1:0"),
+            _ => kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0"),
         }
     };
     let bound = first_bound(&ports, 0, refusing).unwrap();
@@ -1255,7 +1260,8 @@ fn dropping_a_chatgpt_relay_during_a_renewal_returns_promptly() {
     );
     let port = relay.port();
     let client = std::thread::spawn(move || {
-        let mut stream = crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)).unwrap();
+        let mut stream =
+            kernel_processes::spawn_gate::connect_tcp_std(("127.0.0.1", port)).unwrap();
         stream.set_read_timeout(Some(WAIT)).unwrap();
         stream.write_all(&request).unwrap();
         let mut reply = Vec::new();

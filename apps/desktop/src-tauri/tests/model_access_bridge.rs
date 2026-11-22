@@ -709,7 +709,7 @@ async fn desktop_a_write_between_inspect_and_edit_still_refuses_the_edit() {
 }
 
 fn sqlite(root: &std::path::Path, sql: &str) -> TestResult<String> {
-    let result = crazyagent::spawn_gate::output(
+    let result = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/sqlite3")
             .arg(root.join("engine.db"))
             .arg(sql)

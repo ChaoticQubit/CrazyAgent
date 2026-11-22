@@ -2,7 +2,7 @@ use super::*;
 
 /// Makes a real FIFO at `path` with `mkfifo`. Input: the path.
 fn fifo(path: &Path) {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Process::new("/usr/bin/mkfifo")
             .arg(path)
             .stdin(std::process::Stdio::null())
@@ -251,7 +251,7 @@ async fn interrupted_allocation_is_retained() {
     let (engine, config) = setup(&root, &repo).await;
     admit(&engine, &repo).await;
     engine.close().await.unwrap();
-    let mut child = crazyagent::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         Process::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",

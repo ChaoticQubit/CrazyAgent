@@ -34,7 +34,7 @@ fn a_lead_socket_whose_keeper_ended_cleanly_and_whose_connect_is_refused_routes_
     let own = || failure(OWN_SERVER_UNAVAILABLE);
     let gone = || failure("terminal_agent_unknown");
 
-    let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
     assert_eq!(
         host.pane_pid(&lead),
         Err(own()),
@@ -54,7 +54,7 @@ fn a_lead_socket_whose_keeper_ended_cleanly_and_whose_connect_is_refused_routes_
         "a refused socket this engine holds no keeper for was taken as gone"
     );
 
-    let keeper = crate::spawn_gate::spawn(
+    let keeper = kernel_processes::spawn_gate::spawn(
         std::process::Command::new("/bin/sleep")
             .arg("30")
             .stdin(std::process::Stdio::null())
@@ -79,7 +79,7 @@ fn a_lead_socket_whose_keeper_ended_cleanly_and_whose_connect_is_refused_routes_
         "a refused socket whose keeper exited without confirming the end was taken as gone"
     );
 
-    let mut keeper = crate::spawn_gate::spawn(
+    let mut keeper = kernel_processes::spawn_gate::spawn(
         std::process::Command::new("/usr/bin/true")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())

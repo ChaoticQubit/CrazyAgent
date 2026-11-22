@@ -405,7 +405,8 @@ fn powershell_command(script: &str, env: &[(&str, &str)]) -> std::process::Comma
 /// variables. Returns its standard output; panics when PowerShell fails.
 #[cfg(windows)]
 fn powershell(script: &str, env: &[(&str, &str)]) -> String {
-    let output = crate::spawn_gate::output(&mut powershell_command(script, env)).unwrap();
+    let output =
+        kernel_processes::spawn_gate::output(&mut powershell_command(script, env)).unwrap();
     assert!(output.status.success(), "{output:?}");
     String::from_utf8(output.stdout).unwrap()
 }
@@ -674,9 +675,10 @@ fn changeable_by_others_names_a_world_writable_folder_on_the_path_or_behind_a_li
 /// Changes who may write `path` with icacls. Inputs: the path and the icacls arguments.
 #[cfg(windows)]
 fn icacls(path: &Path, change: &[&str]) {
-    let changed =
-        crate::spawn_gate::collected(std::process::Command::new("icacls").arg(path).args(change))
-            .unwrap();
+    let changed = kernel_processes::spawn_gate::collected(
+        std::process::Command::new("icacls").arg(path).args(change),
+    )
+    .unwrap();
     assert!(
         changed.status.success(),
         "{}",
@@ -1656,7 +1658,7 @@ fn persistable_keeps_the_copy_of_a_newer_engine_the_data_root_reports() {
     assert_eq!(read(&installed), "crazyagent bytes");
     assert_eq!(read(&runner), "crazyagent-runner bytes");
     let recorded = layout.root().join("setup").join("bin-version");
-    assert_eq!(read(&recorded), crate::version::VERSION);
+    assert_eq!(read(&recorded), kernel_processes::version::VERSION);
     write_mode(&installed, "crazyagent newer bytes", 0o700);
     std::fs::write(&recorded, "99.0.0\n").unwrap();
     assert_eq!(
@@ -2405,7 +2407,7 @@ fn a_tool_folder_staff_may_change_through_its_access_list_is_changeable() {
     write_mode(&tool, "#!/bin/sh\n", 0o755);
     assert_eq!(changeable_by_others(&tool), None);
     let chmod = |rule: &str| {
-        let status = crate::spawn_gate::status(
+        let status = kernel_processes::spawn_gate::status(
             std::process::Command::new("/bin/chmod")
                 .arg("+a")
                 .arg(rule)
@@ -2502,7 +2504,7 @@ fn changed_and_read_in_one_second(tool: &Path, folder: &Path, root: &Path) {
     for attempt in 0..3u32 {
         early_in_a_second();
         if attempt == 0 {
-            let status = crate::spawn_gate::status(
+            let status = kernel_processes::spawn_gate::status(
                 std::process::Command::new("/bin/chmod")
                     .arg("+a")
                     .arg("group:staff allow add_file,delete_child")

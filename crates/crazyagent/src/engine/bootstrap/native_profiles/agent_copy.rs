@@ -1029,7 +1029,7 @@ fn keychain_record(home: &File, path: &Path) -> Result<Vec<u8>, EngineError> {
         return Err(unavailable());
     }
     let service = claude_service(text);
-    let mut child = crate::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         Command::new(SECURITY)
             .args(["find-generic-password", "-s", service.as_str(), "-w"])
             .arg(&keychain)

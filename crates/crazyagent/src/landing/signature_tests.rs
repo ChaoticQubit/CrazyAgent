@@ -72,7 +72,7 @@ impl Signed {
 /// Runs the test's own git in `repo` with a private home and no system config. Inputs:
 /// the repository, the home and the arguments. Output: git's standard output.
 fn git(repo: &Path, home: &Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .args(args)
             .current_dir(repo)

@@ -436,7 +436,7 @@ fn owner_git(folder: &Path, args: &[&str], date: Option<&str>) -> Result<(), Str
             .env("GIT_AUTHOR_DATE", date)
             .env("GIT_COMMITTER_DATE", date);
     }
-    let output = crazyagent::spawn_gate::output(&mut command).map_err(text)?;
+    let output = kernel_processes::spawn_gate::output(&mut command).map_err(text)?;
     match output.status.success() {
         true => Ok(()),
         false => Err(format!("git {} gave {}", args[0], output.status)),

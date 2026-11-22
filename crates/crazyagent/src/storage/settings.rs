@@ -43,7 +43,7 @@ struct SourceState {
 
 impl SourceState {
     fn hash(&self) -> Result<String, EngineError> {
-        Ok(crate::memory::hash(
+        Ok(kernel_common::hash(
             &serde_json::to_vec(self).map_err(error)?,
         ))
     }
@@ -62,7 +62,7 @@ fn source_id(
     project: &SourceFile,
     project_folder: (u64, u64),
 ) -> Result<String, EngineError> {
-    Ok(crate::memory::hash(
+    Ok(kernel_common::hash(
         &serde_json::to_vec(&(
             global.path.join(&global.name),
             global_folder,
@@ -325,7 +325,7 @@ impl SettingsSources {
         let source_id = source_id(&global, global.identity, &project, project.identity)?;
         let lease_name = OsString::from(format!(
             ".crazyagent-settings-{}.lock",
-            crate::memory::hash(global.name.as_encoded_bytes())
+            kernel_common::hash(global.name.as_encoded_bytes())
         ));
         #[cfg(unix)]
         let lease = {

@@ -15,7 +15,7 @@ fn sleeper(own_group: bool) -> (Child, i32) {
     if own_group {
         command.process_group(0);
     }
-    let child = crate::spawn_gate::spawn(&mut command).unwrap();
+    let child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
     let pid = i32::try_from(child.id()).unwrap();
     assert!(pid > 1);
     (child, pid)

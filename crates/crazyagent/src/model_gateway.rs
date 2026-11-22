@@ -184,7 +184,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
 }
 
 fn connection_revision(connection: &ModelConnection) -> Result<String, EngineError> {
-    Ok(crate::memory::hash(
+    Ok(kernel_common::hash(
         &serde_json::to_vec(connection).map_err(error)?,
     ))
 }
@@ -282,7 +282,7 @@ pub(crate) fn sign_in_renewed(
     let observation = Observation {
         id: RequestId::new(format!(
             "sign-in:{}",
-            crate::memory::hash(format!("{revision}\n{}", latest.sequence).as_bytes())
+            kernel_common::hash(format!("{revision}\n{}", latest.sequence).as_bytes())
         ))
         .map_err(error)?,
         connection: model.clone(),
@@ -926,7 +926,7 @@ fn finish_attempt_inner(
         let observation = Observation {
             id: RequestId::new(format!(
                 "failure:{}",
-                crate::memory::hash(id.as_str().as_bytes())
+                kernel_common::hash(id.as_str().as_bytes())
             ))
             .map_err(error)?,
             connection: attempt.connection.clone(),
@@ -984,7 +984,7 @@ fn record_success_observation(
     let observation = Observation {
         id: RequestId::new(format!(
             "success:{}",
-            crate::memory::hash(id.as_str().as_bytes())
+            kernel_common::hash(id.as_str().as_bytes())
         ))
         .map_err(error)?,
         connection: attempt.connection.clone(),

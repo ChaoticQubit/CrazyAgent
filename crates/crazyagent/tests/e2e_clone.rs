@@ -145,10 +145,10 @@ fn answer(mut stream: TcpStream, served: &Path, token: &str) {
 }
 
 fn stand_in(served: PathBuf, token: String) -> u16 {
-    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
-        for stream in crazyagent::spawn_gate::incoming_tcp_std(&listener).flatten() {
+        for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener).flatten() {
             answer(stream, &served, &token);
         }
     });

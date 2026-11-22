@@ -53,7 +53,8 @@ fallback_allowed = false
 
 async fn exchange(root: &Path, command: Value) -> std::io::Result<Value> {
     tokio::time::timeout(Duration::from_secs(3), async {
-        let mut stream = crazyagent::spawn_gate::connect_unix(root.join("control.sock")).await?;
+        let mut stream =
+            kernel_processes::spawn_gate::connect_unix(root.join("control.sock")).await?;
         let request = json!({"protocol_version": PROTOCOL_VERSION, "command": command});
         stream.write_all(&encode_frame(&request).unwrap()).await?;
         let mut header = [0; 4];
@@ -81,7 +82,7 @@ impl Runner {
             .mode(0o600)
             .open(root.join("stderr.log"))
             .unwrap();
-        let process = crazyagent::spawn_gate::spawn(
+        let process = kernel_processes::spawn_gate::spawn(
             ProcessCommand::new(env!("CARGO_BIN_EXE_crazyagent-runner"))
                 .arg("serve")
                 .arg(root)
@@ -122,7 +123,7 @@ impl Runner {
 
     fn signal(&self, signal: &str) {
         assert!(matches!(signal, "-STOP" | "-CONT"));
-        let mut process = crazyagent::spawn_gate::spawn(
+        let mut process = kernel_processes::spawn_gate::spawn(
             ProcessCommand::new("/bin/kill")
                 .arg(signal)
                 .arg(self.process.id().to_string())
@@ -268,7 +269,7 @@ fn owner_request(id: &str, revision: u64, operation: OwnerOperation) -> OwnerReq
 fn git(root: &Path, repository: &Path, label: &str, args: &[&str]) -> String {
     let output_path = root.join(format!("git-{label}.out"));
     let error_path = root.join(format!("git-{label}.err"));
-    let mut process = crazyagent::spawn_gate::spawn(
+    let mut process = kernel_processes::spawn_gate::spawn(
         ProcessCommand::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

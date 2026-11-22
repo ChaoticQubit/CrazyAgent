@@ -60,7 +60,11 @@ fn pack(work: &Path, source: &Path) -> (PathBuf, String) {
     for entry in std::fs::read_dir(source).unwrap() {
         tar.arg(entry.unwrap().file_name());
     }
-    assert!(crate::spawn_gate::status(&mut tar).unwrap().success());
+    assert!(
+        kernel_processes::spawn_gate::status(&mut tar)
+            .unwrap()
+            .success()
+    );
     let sha256 = file_sha256(&archive).unwrap();
     (archive, sha256)
 }
@@ -216,8 +220,10 @@ fn an_unpacked_tree_is_kept_only_with_plain_files_folders_and_links_that_stay_in
     assert_eq!(check_tree(&climbing, limits), unsafe_tree);
 
     let special = tree(&work.path().join("special"), TOP, "v26.13.1");
-    let fifo = crate::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(special.join("pipe")))
-        .unwrap();
+    let fifo = kernel_processes::spawn_gate::status(
+        Command::new("/usr/bin/mkfifo").arg(special.join("pipe")),
+    )
+    .unwrap();
     assert!(fifo.success());
     assert_eq!(check_tree(&special, limits), unsafe_tree);
 

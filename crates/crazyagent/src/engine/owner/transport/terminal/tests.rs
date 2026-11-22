@@ -25,7 +25,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -55,7 +55,7 @@ async fn closed(output: &mut TerminalOutput) -> String {
 /// A connected viewer and engine socket pair made inside the spawn gate, as the engine makes
 /// every socket. Takes nothing. Returns the viewer's end and the engine's end.
 fn socket_pair() -> (Stream, Stream) {
-    let (viewer, engine) = crate::spawn_gate::unix_pair_std().unwrap();
+    let (viewer, engine) = kernel_processes::spawn_gate::unix_pair_std().unwrap();
     for end in [&viewer, &engine] {
         end.set_nonblocking(true).unwrap();
     }
@@ -234,7 +234,7 @@ async fn a_pane_attach_on_a_lead_whose_servers_ended_is_refused_as_its_teammates
     private(record.parent().unwrap());
     let socket = crate::terminal::renew_teammates_socket(root, &lead).unwrap();
     private(socket.parent().unwrap());
-    drop(crate::spawn_gate::bind_unix_std(&socket).unwrap());
+    drop(kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap());
 
     let refused = owner
         .terminal_attach_pane(lead, "%0".into())
@@ -1151,7 +1151,7 @@ async fn an_input_only_view_types_and_pastes_without_sending_output() {
 /// `list-windows`, so no view of the engine reads or sets it. Takes the tmux program, the
 /// server's socket and the agent. Returns the columns and rows, or none for no such window.
 fn window_size(tmux: &Path, socket: &Path, agent: &AgentId) -> Option<(u16, u16)> {
-    let listed = crate::spawn_gate::collected(
+    let listed = kernel_processes::spawn_gate::collected(
         Command::new(tmux)
             .arg("-S")
             .arg(socket)

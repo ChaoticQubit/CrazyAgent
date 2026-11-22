@@ -1730,9 +1730,9 @@ mod tests {
         let older = engine.join("o0badc0de");
         private_directory(&older);
         let _sockets = [
-            crate::spawn_gate::bind_unix_std(engine.join("e.sock")).unwrap(),
-            crate::spawn_gate::bind_unix_std(older.join("owner.sock")).unwrap(),
-            crate::spawn_gate::bind_unix_std(base.join("owner.sock")).unwrap(),
+            kernel_processes::spawn_gate::bind_unix_std(engine.join("e.sock")).unwrap(),
+            kernel_processes::spawn_gate::bind_unix_std(older.join("owner.sock")).unwrap(),
+            kernel_processes::spawn_gate::bind_unix_std(base.join("owner.sock")).unwrap(),
         ];
         let sandbox = master_in_generation(&base).unwrap();
         let secrets = sandbox.sandbox().secret_paths();
@@ -2131,7 +2131,11 @@ mod tests {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        assert!(crate::spawn_gate::status(&mut child).unwrap().success());
+        assert!(
+            kernel_processes::spawn_gate::status(&mut child)
+                .unwrap()
+                .success()
+        );
         assert!(tmp.join("work/scratch.txt").is_file());
         assert!(
             std::fs::symlink_metadata(tmp.join("link"))
@@ -2468,7 +2472,9 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            crate::spawn_gate::status(&mut child).unwrap().success()
+            kernel_processes::spawn_gate::status(&mut child)
+                .unwrap()
+                .success()
         };
         for allowed in [
             worktree.join("work.txt"),
@@ -2634,7 +2640,7 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            crate::spawn_gate::output(&mut child).unwrap()
+            kernel_processes::spawn_gate::output(&mut child).unwrap()
         };
         let quoted = |path: &Path| format!("'{}'", path.display());
         let own_config = own.join(".backboard").join("config.json");
@@ -2743,7 +2749,7 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            crate::spawn_gate::output(&mut child).unwrap()
+            kernel_processes::spawn_gate::output(&mut child).unwrap()
         };
         let quoted = |path: &Path| format!("'{}'", path.display());
         let read = run(&format!("cat {}", quoted(&own.join("mcp.json"))));
@@ -2897,7 +2903,9 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            crate::spawn_gate::status(&mut child).unwrap().success()
+            kernel_processes::spawn_gate::status(&mut child)
+                .unwrap()
+                .success()
         };
         assert!(read(&repository.join("open.txt")));
         assert!(!read(&hidden.join("key.txt")));
@@ -2957,7 +2965,7 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            crate::spawn_gate::output(&mut child).unwrap()
+            kernel_processes::spawn_gate::output(&mut child).unwrap()
         };
         let open = read(&repository.join("open.txt"));
         assert!(
@@ -3008,7 +3016,11 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            assert!(crate::spawn_gate::status(&mut command).unwrap().success());
+            assert!(
+                kernel_processes::spawn_gate::status(&mut command)
+                    .unwrap()
+                    .success()
+            );
         };
         git(&["init", "-q"]);
         git(&["add", "secret/key.txt"]);
@@ -3057,7 +3069,7 @@ mod tests {
         }
         let git = crate::research::runner::setup_git();
         let owner = |args: &[&str]| -> String {
-            let output = crate::spawn_gate::output(
+            let output = kernel_processes::spawn_gate::output(
                 Command::new(git)
                     .args([
                         "-c",
@@ -3135,7 +3147,9 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            crate::spawn_gate::status(&mut child).unwrap().success()
+            kernel_processes::spawn_gate::status(&mut child)
+                .unwrap()
+                .success()
         };
         let repository_text = repository.to_str().unwrap();
         let other_admin = git_dir.join("worktrees/other");
@@ -3313,7 +3327,7 @@ mod tests {
             )
             .unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let first = crate::spawn_gate::first_run(
+            let first = kernel_processes::spawn_gate::first_run(
                 Command::new(path).arg("first-exec").current_dir(&base),
             );
             assert_eq!(first.code(), Some(3));
@@ -3379,7 +3393,9 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            crate::spawn_gate::status(&mut child).unwrap().success()
+            kernel_processes::spawn_gate::status(&mut child)
+                .unwrap()
+                .success()
         };
         let write = |target: &Path| {
             run(

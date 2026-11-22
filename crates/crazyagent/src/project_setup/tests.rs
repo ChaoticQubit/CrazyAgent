@@ -486,9 +486,11 @@ fn documents_copy_only_allowed_regular_files_within_bounds() {
     std::fs::create_dir(source.join("folder.md")).unwrap();
     let fifo = source.join("pipe.txt");
     assert!(
-        crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&fifo))
-            .unwrap()
-            .success()
+        kernel_processes::spawn_gate::status(
+            std::process::Command::new("/usr/bin/mkfifo").arg(&fifo)
+        )
+        .unwrap()
+        .success()
     );
     std::fs::write(source.join("script.sh"), "#!/bin/sh\n").unwrap();
     std::fs::write(source.join("big.txt"), vec![b'a'; 64]).unwrap();

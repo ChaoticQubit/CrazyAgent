@@ -435,7 +435,7 @@ fn a_link_or_a_pipe_put_in_a_listed_entry_s_place_is_still_refused() {
                 }
                 unlink(path);
                 if pipe {
-                    let made = crate::spawn_gate::status(
+                    let made = kernel_processes::spawn_gate::status(
                         std::process::Command::new("/usr/bin/mkfifo").arg(path),
                     )
                     .unwrap();

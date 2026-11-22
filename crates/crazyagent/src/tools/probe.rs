@@ -495,7 +495,7 @@ fn run_leading(command: &mut Command, limit: Duration) -> Option<Vec<u8>> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let deadline = Instant::now() + limit;
-    let mut child = crate::spawn_gate::spawn(command).ok()?;
+    let mut child = kernel_processes::spawn_gate::spawn(command).ok()?;
     let mut stdout = child.stdout.take().expect("standard output is piped");
     let nonblocking = rustix::fs::fcntl_getfl(&stdout)
         .and_then(|flags| rustix::fs::fcntl_setfl(&stdout, flags | rustix::fs::OFlags::NONBLOCK))

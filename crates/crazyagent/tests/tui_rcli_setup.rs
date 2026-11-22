@@ -299,7 +299,7 @@ impl Driver {
         private_file(&output, b"");
         private_file(&error, b"");
         let logs = |path| fs::OpenOptions::new().append(true).open(path).unwrap();
-        let child = crazyagent::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new("/usr/bin/python3")
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
@@ -357,7 +357,7 @@ impl Driver {
 
 fn signal_group(group: u32, signal: &str) {
     assert!(group > 1 && matches!(signal, "-TERM" | "-KILL"));
-    let _ = crazyagent::spawn_gate::status(
+    let _ = kernel_processes::spawn_gate::status(
         Command::new("/bin/kill")
             .args([signal, "--", &format!("-{group}")])
             .stdout(Stdio::null())

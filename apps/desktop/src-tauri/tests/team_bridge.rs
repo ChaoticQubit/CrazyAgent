@@ -303,7 +303,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
 }
 
 fn sqlite(root: &Path, sql: &str) -> Result<String, Box<dyn Error>> {
-    let result = crazyagent::spawn_gate::output(
+    let result = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/sqlite3")
             .arg("-cmd")
             .arg(".timeout 5000")
@@ -454,7 +454,7 @@ SELECT '{project}','escalation',hex(zeroblob(1000)),i FROM n;
 SELECT count(*) FROM team_tasks WHERE project='{project}';
 "
     );
-    let mut child = crazyagent::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         Command::new("/usr/bin/sqlite3")
             .arg(root.join("engine.db"))
             .stdin(Stdio::piped())

@@ -3620,7 +3620,7 @@ mod tests {
         owner.commit().unwrap();
         let id = "0f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f";
         let record = folder.path().join(format!("{id}.jsonl"));
-        let made = crate::spawn_gate::status(
+        let made = kernel_processes::spawn_gate::status(
             std::process::Command::new("/usr/bin/mkfifo")
                 .arg(&record)
                 .env_clear()

@@ -700,7 +700,7 @@ impl Servers {
             .ok_or_else(|| failure("ide_state_unavailable"))?;
         let capability = self.grants.issue(data, project)?;
         assert_eq!(capability, info.capability_path);
-        crate::spawn_gate::spawn(command).map_err(|_| {
+        kernel_processes::spawn_gate::spawn(command).map_err(|_| {
             let _ = self.grants.revoke(project);
             failure("ide_server_start_failed")
         })
@@ -803,7 +803,7 @@ async fn ready(
         }
         let connected = tokio::time::timeout(
             CONNECT_TIME,
-            crate::spawn_gate::connect_tcp(("127.0.0.1", port)),
+            kernel_processes::spawn_gate::connect_tcp(("127.0.0.1", port)),
         )
         .await;
         if matches!(connected, Ok(Ok(_))) {

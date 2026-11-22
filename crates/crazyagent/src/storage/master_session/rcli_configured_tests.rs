@@ -173,7 +173,7 @@ fn private_file(path: &Path, bytes: &[u8]) {
 }
 
 fn git(repository: &Path, home: &Path, arguments: &[&str]) {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

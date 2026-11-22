@@ -122,10 +122,11 @@ impl Bridge {
         let fd = self.fd.ok_or("the bridge has no descriptor")?;
         let mut listeners = Vec::new();
         for port in &self.ports {
-            let v4 = crate::spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, *port))
+            let v4 = kernel_processes::spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, *port))
                 .map_err(|error| format!("bridge port {port}: {error}"))?;
             listeners.push((V4, *port, v4));
-            if let Ok(v6) = crate::spawn_gate::bind_tcp_std((Ipv6Addr::LOCALHOST, *port)) {
+            if let Ok(v6) = kernel_processes::spawn_gate::bind_tcp_std((Ipv6Addr::LOCALHOST, *port))
+            {
                 listeners.push((V6, *port, v6));
             }
         }
@@ -234,7 +235,8 @@ pub(super) fn open(ports: &[u16], args: &[OsString]) -> Result<(OwnedFd, Vec<OsS
         .stdin(Stdio::from(outside))
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    crate::spawn_gate::spawn(&mut broker).map_err(|error| format!("bridge broker: {error}"))?;
+    kernel_processes::spawn_gate::spawn(&mut broker)
+        .map_err(|error| format!("bridge broker: {error}"))?;
     fcntl(inside.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::empty()))
         .map_err(|error| format!("bridge socket: {error}"))?;
     assert!(inside.as_raw_fd() > 2);
@@ -731,16 +733,17 @@ mod tests {
 
     #[test]
     fn the_broker_carries_a_connection_both_ways_to_the_same_port_on_this_computer() {
-        let program = crate::spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let program = kernel_processes::spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = program.local_addr().unwrap().port();
         program.set_nonblocking(true).unwrap();
-        let nest = crate::spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let mut agent = crate::spawn_gate::connect_tcp_std(nest.local_addr().unwrap()).unwrap();
+        let nest = kernel_processes::spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut agent =
+            kernel_processes::spawn_gate::connect_tcp_std(nest.local_addr().unwrap()).unwrap();
         let accepted = accept4(nest.as_raw_fd(), SockFlag::SOCK_CLOEXEC).unwrap();
         let carried = std::thread::spawn(move || relay(V4, port, accepted));
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut served = loop {
-            match crate::spawn_gate::accept_tcp_std(&program) {
+            match kernel_processes::spawn_gate::accept_tcp_std(&program) {
                 Ok((served, _)) => break served,
                 Err(_) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(10));
@@ -764,11 +767,12 @@ mod tests {
 
     #[test]
     fn a_bridged_port_with_nothing_behind_it_closes_the_connection() {
-        let free = crate::spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let free = kernel_processes::spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
         let port = free.local_addr().unwrap().port();
         drop(free);
-        let nest = crate::spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let mut agent = crate::spawn_gate::connect_tcp_std(nest.local_addr().unwrap()).unwrap();
+        let nest = kernel_processes::spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let mut agent =
+            kernel_processes::spawn_gate::connect_tcp_std(nest.local_addr().unwrap()).unwrap();
         let accepted = accept4(nest.as_raw_fd(), SockFlag::SOCK_CLOEXEC).unwrap();
         relay(V4, port, accepted);
         let mut answer = Vec::new();
