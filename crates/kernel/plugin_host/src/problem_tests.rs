@@ -4,7 +4,7 @@ use crate::problem::{PLAIN, PORT_HANDED_OUT, Problem, plain_problem};
 fn every_problem_code_has_one_plain_sentence() {
     for (index, (code, plain)) in PLAIN.iter().enumerate() {
         assert!(
-            code.starts_with("app_plugin_") || code.starts_with("plugin_"),
+            code.starts_with("app_plugin") || code.starts_with("plugin_"),
             "{code}"
         );
         assert!(

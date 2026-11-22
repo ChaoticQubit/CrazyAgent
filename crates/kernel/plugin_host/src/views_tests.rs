@@ -104,7 +104,9 @@ fn a_preview_keeps_the_shape_the_bridge_reads() {
     assert_eq!(shown["kind"], "refused");
     assert_eq!(shown["problem"]["field"], "http.url");
     assert!(
-        serde_json::from_value::<PluginStatus>(serde_json::json!({"kind": "ready", "extra": 1}))
-            .is_err()
+        serde_json::from_value::<Listing>(
+            serde_json::json!({"plugins": [], "more": false, "extra": 1})
+        )
+        .is_err()
     );
 }

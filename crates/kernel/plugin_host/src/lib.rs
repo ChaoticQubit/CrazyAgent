@@ -8,11 +8,14 @@ pub struct Refused {
     pub line: usize,
 }
 
+#[cfg(feature = "store")]
 pub mod embedding;
 pub mod manifest;
 pub mod problem;
 pub mod views;
 
+#[cfg(all(test, feature = "store"))]
+mod embedding_tests;
 #[cfg(test)]
 mod problem_tests;
 #[cfg(test)]

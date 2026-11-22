@@ -1,0 +1,25 @@
+plugin = "openai"
+tier = "t2"
+kind = "embedding"
+version = 1
+permissions = []
+title = "OpenAI embeddings"
+release = "1.0.0"
+description = "text-embedding-3-small through the OpenAI API at 256 dimensions. Use the key of an OpenAI API account or enter one. Copy this file to use another OpenAI-compatible host."
+
+[http]
+url = "https://api.openai.com/v1/embeddings"
+hosts = ["api.openai.com"]
+secrets = ["api_key"]
+vectors = "data.*.embedding"
+dimensions = 256
+batch = 64
+
+[http.headers]
+Authorization = "Bearer {{secret.api_key}}"
+
+[http.body]
+model = "text-embedding-3-small"
+input = "{{inputs}}"
+dimensions = 256
+encoding_format = "float"
