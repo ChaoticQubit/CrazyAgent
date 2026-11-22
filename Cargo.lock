@@ -884,6 +884,7 @@ dependencies = [
  "base64 0.22.1",
  "crazyagent-bus-gateway",
  "crazyagent-cap",
+ "crazyagent-kernel-security",
  "crazyagent-kernel-storage",
  "crazyagent-linux-supervisor",
  "crazyagent-macos-fs",
@@ -972,6 +973,10 @@ dependencies = [
  "windows-core 0.62.2",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "crazyagent-kernel-security"
+version = "2.4.4"
 
 [[package]]
 name = "crazyagent-kernel-storage"
