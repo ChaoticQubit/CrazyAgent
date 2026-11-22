@@ -1,5 +1,6 @@
 use super::*;
 use rusqlite::Connection;
+use rusqlite::config::DbConfig;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
@@ -407,21 +408,48 @@ fn a_value_past_the_value_bound_is_refused_not_built() {
 }
 
 /// Review t15-sec F5: a virtual table under a schema table name is refused, so no table
-/// module runs over tables the harness wrote.
+/// module runs over tables the harness wrote. The fixture writes the table's schema row
+/// itself, so the row holds on a SQLite built without the module (Windows vcpkg, no fts5);
+/// the fixture's own connection turns defensive mode off for that, as Apple's SQLite has it
+/// on, and the reader opens its own.
 #[test]
 fn a_virtual_table_under_a_schema_name_is_refused() {
     let tmp = root();
     let path = tmp.path().join("virtual.db");
     let connection = Connection::open(&path).unwrap();
     connection
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, false)
+        .unwrap();
+    connection
         .execute_batch(
             "CREATE TABLE meta(version INTEGER);
              INSERT INTO meta(version) VALUES (3);
-             CREATE VIRTUAL TABLE facts USING fts5(seq, kind, body);
-             INSERT INTO facts(seq, kind, body) VALUES (1, 'text', 'hi');",
+             PRAGMA writable_schema = ON;
+             INSERT INTO sqlite_schema(type, name, tbl_name, rootpage, sql)
+             VALUES ('table', 'facts', 'facts', 0,
+                     'CREATE VIRTUAL TABLE facts USING fts5(seq, kind, body)');
+             PRAGMA writable_schema = OFF;",
         )
         .unwrap();
+    let writable: i64 = connection
+        .query_row("PRAGMA writable_schema", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        writable, 0,
+        "the schema is shut before the reader opens the file"
+    );
     drop(connection);
+    let check = Connection::open(&path).unwrap();
+    let (kind, made): (String, String) = check
+        .query_row(
+            "SELECT type, sql FROM sqlite_master WHERE name = 'facts'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(kind, "table");
+    assert!(made.starts_with("CREATE VIRTUAL TABLE facts USING fts5"));
+    drop(check);
     if !reads(&path) {
         return;
     }
@@ -506,4 +534,139 @@ fn a_sqlite_library_older_than_3_39_is_refused_with_its_own_sentence() {
     if reads(&missing) {
         assert_eq!(SqlitePoll::new(missing, &SCHEMA, 0).read(), Ok(Vec::new()));
     }
+}
+
+/// A WAL database whose harness closed it and whose WAL file is gone but whose index file is
+/// left, the shape the macOS system SQLite refuses to open read-only (V250-READONLY-WAL).
+/// Input: the database path. Output: the root page and page size of the facts table.
+fn index_but_no_wal(path: &Path) -> (u64, u64) {
+    let writer = database(path, 3);
+    writer.pragma_update(None, "journal_mode", "wal").unwrap();
+    add(&writer, &turn());
+    let root: i64 = writer
+        .query_row(
+            "SELECT rootpage FROM sqlite_master WHERE name = 'facts'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let size: i64 = writer
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .unwrap();
+    let (root, size) = (u64::try_from(root).unwrap(), u64::try_from(size).unwrap());
+    writer
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
+    let index = path.with_extension("db-shm");
+    let kept = std::fs::read(&index).unwrap();
+    drop(writer);
+    if let Err(error) = std::fs::remove_file(path.with_extension("db-wal")) {
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+    std::fs::write(&index, kept).unwrap();
+    assert!(!path.with_extension("db-wal").exists());
+    assert!(index.is_file());
+    assert!(root >= 2 && size >= 512);
+    (root, size)
+}
+
+/// V250-READONLY-WAL: a WAL database with its index file but no WAL file is read as
+/// immutable, so the macOS system SQLite's refusal of that read-only open never reaches the
+/// reader; its rows are read and nothing in its folder changes.
+#[test]
+fn a_wal_database_with_an_index_file_but_no_wal_file_is_read_as_immutable() {
+    let tmp = root();
+    let path = tmp.path().join("record.db");
+    index_but_no_wal(&path);
+    if !reads(&path) {
+        return;
+    }
+    let before = folder(tmp.path());
+
+    assert_eq!(mode(&path).unwrap(), Some(Mode::Immutable));
+    let mut reader = SqlitePoll::new(path.clone(), &SCHEMA, 0);
+    assert_eq!(reader.read().unwrap(), turn_events());
+
+    assert_eq!(folder(tmp.path()), before);
+}
+
+/// V250-READONLY-WAL: a writer that arrives during an immutable read and checkpoints into
+/// the database leaves a page the read finds torn; that read gives no facts as a busy one
+/// does, and once the writer's page is whole the next read gives the rows.
+#[test]
+fn a_page_torn_by_a_writer_under_an_immutable_read_is_retried_as_busy() {
+    let tmp = root();
+    let path = tmp.path().join("record.db");
+    let (page, size) = index_but_no_wal(&path);
+    if !reads(&path) {
+        return;
+    }
+    let whole = std::fs::read(&path).unwrap();
+    let mut torn = whole.clone();
+    let start = usize::try_from((page - 1) * size).unwrap();
+    let end = start + usize::try_from(size).unwrap();
+    torn[start..end].fill(0xff);
+    std::fs::write(&path, &torn).unwrap();
+    let mut reader = SqlitePoll::new(path.clone(), &SCHEMA, 0);
+
+    assert_eq!(mode(&path).unwrap(), Some(Mode::Immutable));
+    assert_eq!(reader.read().unwrap(), Vec::new());
+    assert_eq!(reader.busy, 1);
+    std::fs::write(&path, &whole).unwrap();
+    assert_eq!(reader.read().unwrap(), turn_events());
+    assert_eq!(reader.busy, 0);
+}
+
+/// V250-READONLY-WAL r2 (CodeRabbit H2): a writer that arrives during an immutable read,
+/// commits a row and checkpoints it into the database, then closes with no WAL file left,
+/// changes the pages under that read; the read's facts are not taken and its position does
+/// not move, as for a busy read, and the next read gives every row, the new one included.
+/// The new row is two pages long, so the database grows and the row holds whatever the
+/// file system's time tick.
+#[test]
+fn a_writer_that_checkpoints_during_an_immutable_read_voids_that_read() {
+    let tmp = root();
+    let path = tmp.path().join("record.db");
+    let (_, page) = index_but_no_wal(&path);
+    if !reads(&path) {
+        return;
+    }
+    let late = "l".repeat(usize::try_from(page).unwrap() * 2);
+    assert!(
+        late.len() < ROW_TEXT_BYTES_MAX,
+        "the late row is read whole"
+    );
+    let (writer_path, written) = (path.clone(), late.clone());
+    MID_READ.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let size = std::fs::metadata(&writer_path).unwrap().len();
+            let writer = Connection::open(&writer_path).unwrap();
+            add(&writer, &[("text", Some(written.as_str()))]);
+            writer
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+                .unwrap();
+            drop(writer);
+            if let Err(error) = std::fs::remove_file(writer_path.with_extension("db-wal")) {
+                assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+            }
+            let grown = std::fs::metadata(&writer_path).unwrap().len();
+            assert!(
+                grown > size,
+                "a row past a page grows the database, so the size alone shows the change: {size} -> {grown}"
+            );
+        }));
+    });
+    let mut reader = SqlitePoll::new(path.clone(), &SCHEMA, 0);
+
+    assert_eq!(mode(&path).unwrap(), Some(Mode::Immutable));
+    assert_eq!(reader.read().unwrap(), Vec::new());
+    assert_eq!(reader.after(), 0);
+    assert_eq!(reader.busy, 1);
+    assert!(MID_READ.with(|hook| hook.borrow().is_none()));
+
+    let mut events = turn_events();
+    events.push(TranscriptEvent::Text { text: late });
+    assert_eq!(reader.read().unwrap(), events);
+    assert_eq!(reader.after(), 5);
+    assert_eq!(reader.busy, 0);
 }
