@@ -522,14 +522,20 @@ fn sweep_failed(folder: &str, cause: &EngineError) {
 #[cfg(unix)]
 const REPLACED_DATABASE: &str = "replaced-database";
 
-/// Opens the database of the dated copy of the replaced 2.5 data read-only, without
-/// following a link. Input: the copy's folder. Output: the connection, or the failure.
+/// Opens the database of the dated copy of the replaced 2.5 data without following a link:
+/// read-write like `shape`, so a WAL copy with no -wal or -shm file opens on Apple's SQLite,
+/// then `query_only`, so the sweep can never write the kept copy. Input: the copy's folder.
+/// Output: the connection, or the failure.
 #[cfg(unix)]
 fn replaced_database(copy: &Path) -> Result<Connection, EngineError> {
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_NOFOLLOW;
-    Connection::open_with_flags(copy.join(DATABASE), flags).map_err(error)
+    let opened = Connection::open_with_flags(copy.join(DATABASE), flags).map_err(error)?;
+    opened
+        .execute_batch("PRAGMA query_only = ON")
+        .map_err(error)?;
+    Ok(opened)
 }
 
 /// What a restore's sweep calls the generated SDK homes and native sign-ins in its log.
