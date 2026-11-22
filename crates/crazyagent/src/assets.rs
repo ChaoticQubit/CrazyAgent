@@ -1,7 +1,8 @@
 use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
-use crate::memory::{capacity, error, hash, principal, reject};
+use crate::memory::{capacity, error, principal, reject};
 use crate::protocol::*;
+use kernel_common::hash;
 use rusqlite::Connection;
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};

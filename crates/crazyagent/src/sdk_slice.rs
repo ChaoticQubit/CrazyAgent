@@ -36,19 +36,15 @@ struct CallRefused {
     needs: String,
 }
 
-/// The capabilities the bundled plugins can call, the only ones a `CallRefused` body may
-/// name.
-const CAPABILITIES: [Capability; 1] = [sdk_settings::SAVE_QUIT];
-
 /// Whether a body is a `CallRefused` body: exactly its three keys, a bundled plugin id and a
-/// capability with its permission from [`CAPABILITIES`], so it never holds free text.
+/// capability with its permission from the generated `sdk::CAPABILITIES`, so it never holds free text.
 /// Input: the body bytes. Output: true when it is.
 pub(crate) fn call_refused_closed(body: &[u8]) -> bool {
     let Ok(refused) = serde_json::from_slice::<CallRefused>(body) else {
         return false;
     };
     BUNDLED.iter().any(|(plugin, ..)| *plugin == refused.plugin)
-        && CAPABILITIES.iter().any(|capability| {
+        && sdk::CAPABILITIES.iter().any(|capability| {
             capability.name == refused.capability && capability.needs == refused.needs
         })
 }

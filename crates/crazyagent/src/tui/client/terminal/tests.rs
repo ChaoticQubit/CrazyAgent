@@ -21,7 +21,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Process::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -366,7 +366,7 @@ fn the_tui_types_into_resizes_and_detaches_from_a_live_agent_terminal() {
 }
 
 fn tmux_text(tmux: &Path, socket: &Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Process::new(tmux)
             .arg("-S")
             .arg(socket)

@@ -15,7 +15,7 @@ const LIMIT_SECS: u32 = 90;
 /// The running processes whose command line holds `needle`, read from `ps` through a pipe.
 /// Input: the text. Output: each process's pid and command line.
 fn processes_with(needle: &str) -> Vec<String> {
-    let listed = crate::spawn_gate::output(
+    let listed = kernel_processes::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-axww", "-o", "pid=,command="])
             .stdout(Stdio::piped()),

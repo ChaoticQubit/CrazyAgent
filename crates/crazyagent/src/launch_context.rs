@@ -1103,10 +1103,7 @@ impl AgentContext {
             server
                 .secrets
                 .iter()
-                .find(|secret| {
-                    let value = secret.value.expose();
-                    !value.is_empty() && text.windows(value.len()).any(|window| window == value)
-                })
+                .find(|secret| kernel_security::exposure::holds(secret.value.expose(), text))
                 .map(|secret| SecretInCommand {
                     server: server.name.clone(),
                     secret: secret.name.clone(),
@@ -3211,7 +3208,7 @@ fn release_skills(parent: &std::os::fd::OwnedFd) {
     let Ok(input) = entry.try_clone() else {
         return;
     };
-    let _ = crate::spawn_gate::status(
+    let _ = kernel_processes::spawn_gate::status(
         std::process::Command::new("/bin/chmod")
             .args(["-N", "/dev/stdin"])
             .stdin(std::process::Stdio::from(input))
@@ -3416,7 +3413,7 @@ fn release(path: &Path, tree: bool) {
         vec![flags, acl, mode]
     };
     for mut command in commands {
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             command
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())

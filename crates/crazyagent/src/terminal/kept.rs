@@ -619,7 +619,7 @@ mod tests {
     #[cfg(unix)]
     impl Drop for Server {
         fn drop(&mut self) {
-            let _ = crate::spawn_gate::status(
+            let _ = kernel_processes::spawn_gate::status(
                 std::process::Command::new(&self.0)
                     .arg("-S")
                     .arg(&self.1)

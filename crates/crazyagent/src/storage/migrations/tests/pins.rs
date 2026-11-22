@@ -607,7 +607,7 @@ fn a_crash_between_steps_keeps_the_2_4_database_and_pins_the_newest_2_4_copy() {
         "{module}::a_crash_between_steps_keeps_the_2_4_database_and_pins_the_newest_2_4_copy"
     );
 
-    let ran = crate::spawn_gate::collected(
+    let ran = kernel_processes::spawn_gate::collected(
         Command::new(std::env::current_exe().unwrap())
             .args([test.as_str(), "--exact", "--nocapture", "--test-threads=1"])
             .env(CRASH_ROOT, root.path()),

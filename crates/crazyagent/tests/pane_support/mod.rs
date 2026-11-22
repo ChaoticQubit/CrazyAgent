@@ -173,7 +173,7 @@ impl PaneCallers {
     /// the child.
     pub fn spawn(&self, pane: &str, command: &mut Command) -> Child {
         let mut panes = self.panes.lock().unwrap();
-        let child = crazyagent::spawn_gate::spawn(command).unwrap();
+        let child = kernel_processes::spawn_gate::spawn(command).unwrap();
         panes.push((pane.to_owned(), child.id()));
         child
     }

@@ -1245,7 +1245,10 @@ impl ManagedAgent {
     /// Runs one `/bin/sh` script as the agent. Input: the script.
     /// Output: the finished process with its captured output.
     pub(crate) fn shell(&self, script: &str) -> Output {
-        crate::spawn_gate::output(&mut self.command(Path::new("/bin/sh"), &["-c", script])).unwrap()
+        kernel_processes::spawn_gate::output(
+            &mut self.command(Path::new("/bin/sh"), &["-c", script]),
+        )
+        .unwrap()
     }
 }
 

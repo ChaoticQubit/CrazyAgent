@@ -96,7 +96,7 @@ impl TestKeychain {
     }
 
     fn run(&self, args: &[&str], input: Option<&str>) -> Output {
-        let mut child = crate::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             Command::new(SECURITY)
                 .args(args)
                 .env_clear()
@@ -237,7 +237,7 @@ mod tests {
     use super::*;
 
     fn preference(home: &Path, args: &[&str]) -> String {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new(SECURITY)
                 .args(args)
                 .env_clear()

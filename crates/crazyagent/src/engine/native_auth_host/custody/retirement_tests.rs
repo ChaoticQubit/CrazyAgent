@@ -99,7 +99,7 @@ impl Case {
     }
 
     fn child_reaped(&mut self) -> Retirement {
-        let mut child = crate::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             Command::new("/bin/cat")
                 .env_clear()
                 .current_dir(&self.home)

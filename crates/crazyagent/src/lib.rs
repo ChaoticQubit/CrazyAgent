@@ -85,13 +85,6 @@ pub mod sessions_log;
 pub mod settings_log;
 pub mod setup;
 pub mod skills;
-/// The short address a Unix socket is bound and reached at when its own path is too long
-/// for a socket address.
-#[cfg(unix)]
-pub mod socket_address;
-/// The one place this crate starts child processes and creates sockets, so no child
-/// inherits a pipe or socket another thread has not marked close-on-exec yet.
-pub mod spawn_gate;
 /// The engine's ordered event log in engine.db (v2.5 L1): one `seq` per event, the
 /// transaction's revision, a closed aggregate, and snapshot runs in chunks.
 pub mod state_log;
@@ -113,3 +106,6 @@ pub mod worktrees;
 #[cfg(all(test, unix))]
 #[path = "../tests/poll_support/mod.rs"]
 mod poll_support;
+
+#[cfg(all(test, unix))]
+mod budget_processes_tests;

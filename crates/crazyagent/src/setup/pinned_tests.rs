@@ -262,7 +262,7 @@ fn wheel(dir: &Path, python: &Path) -> (PathBuf, String) {
         std::fs::write(path, text).unwrap();
     }
     let wheel = dir.join("demo_tool-1.0-py3-none-any.whl");
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         Command::new(python)
             .args(["-I", "-m", "zipfile", "-c"])
             .arg(&wheel)
@@ -737,7 +737,7 @@ fn an_archive_unpacks_with_neither_its_owners_nor_its_modes() {
     std::fs::create_dir_all(source.join("top")).unwrap();
     std::fs::write(source.join("top/tool"), "#!/bin/sh\nexit 0\n").unwrap();
     let archive = root.path().join("tool.tar.gz");
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         Command::new(TAR)
             .arg("-czf")
             .arg(&archive)

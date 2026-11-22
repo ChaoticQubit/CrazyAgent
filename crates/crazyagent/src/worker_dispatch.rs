@@ -218,7 +218,7 @@ pub fn dispatch_id(
         ))
         .map_err(|error| crate::engine::EngineError(error.to_string()))?,
     );
-    RequestId::new(crate::memory::hash(&bytes))
+    RequestId::new(kernel_common::hash(&bytes))
         .map_err(|error| crate::engine::EngineError(error.to_string()))
 }
 
@@ -284,7 +284,7 @@ impl AdmissionCheckOffer {
             ))
             .map_err(|error| crate::engine::EngineError(error.to_string()))?,
         );
-        Ok(crate::memory::hash(&bytes))
+        Ok(kernel_common::hash(&bytes))
     }
 
     pub fn validate(&self) -> Result<(), crate::engine::EngineError> {

@@ -51,7 +51,7 @@ impl Engine {
     /// Output: the running engine.
     fn start(root: &Path, rcli: &Path, (flag, harness): (&str, &Path)) -> Self {
         let stdout = root.join("engine.stdout");
-        let child = crazyagent::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new(env!("CARGO_BIN_EXE_crazyagent"))
                 .arg("engine")
                 .arg(root)
@@ -81,7 +81,7 @@ impl Engine {
 
     /// Stops the engine with SIGTERM as the desktop app does and waits for it to exit.
     fn stop(&mut self) {
-        let terminated = crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+        let terminated = kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([
             "-s",
             "TERM",
             &self.child.id().to_string(),
@@ -164,7 +164,7 @@ fn scanning_harness() -> (&'static str, PathBuf) {
 
 /// Reads the local Ollama's model list. Output: the raw reply, at most [`TAGS_BYTES_MAX`].
 async fn ollama_tags() -> std::io::Result<String> {
-    let mut stream = crazyagent::spawn_gate::connect_tcp(OLLAMA).await?;
+    let mut stream = kernel_processes::spawn_gate::connect_tcp(OLLAMA).await?;
     stream
         .write_all(b"GET /api/tags HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
         .await?;
@@ -200,9 +200,10 @@ fn git_repository(path: &Path) -> String {
             "init",
         ],
     ] {
-        let status =
-            crazyagent::spawn_gate::status(Command::new("git").args(arguments).current_dir(path))
-                .unwrap();
+        let status = kernel_processes::spawn_gate::status(
+            Command::new("git").args(arguments).current_dir(path),
+        )
+        .unwrap();
         assert!(status.success(), "git {arguments:?}");
     }
     path.to_str().unwrap().to_owned()

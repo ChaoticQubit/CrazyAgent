@@ -769,7 +769,7 @@ async fn native_auth_dispatch_lifetime_real_spawn_failure_releases_the_dispatche
             .register_native_auth_host(RegisteredNativeAuthHost::capture(&path).unwrap())
             .unwrap();
         let (fact, work) = case.work("actual-os-spawn-failure").await;
-        assert!(crate::spawn_gate::spawn(&mut ProcessCommand::new(&path)).is_err());
+        assert!(kernel_processes::spawn_gate::spawn(&mut ProcessCommand::new(&path)).is_err());
         case.retain(work);
         let drained = tokio::time::timeout(
             Duration::from_secs(8),
@@ -797,7 +797,7 @@ async fn native_auth_dispatch_lifetime_a_spawn_failure_joined_by_the_drain_itsel
             .register_native_auth_host(RegisteredNativeAuthHost::capture(&path).unwrap())
             .unwrap();
         let (fact, work) = case.work("drain-joins-spawn-failure").await;
-        assert!(crate::spawn_gate::spawn(&mut ProcessCommand::new(&path)).is_err());
+        assert!(kernel_processes::spawn_gate::spawn(&mut ProcessCommand::new(&path)).is_err());
         case.retain(work);
         for _ in 0..4 {
             tokio::task::yield_now().await;
@@ -821,7 +821,7 @@ async fn native_auth_dispatch_lifetime_real_broken_bootstrap_pipe_releases_the_f
         let (fact, work) = case.work("actual-bootstrap-pipe-failure").await;
         let launch = case.host.prepare_native_auth_custody(work).await.unwrap();
         let mut child = TestChild(
-            crate::spawn_gate::spawn(
+            kernel_processes::spawn_gate::spawn(
                 ProcessCommand::new("/bin/cat")
                     .stdin(Stdio::piped())
                     .stdout(Stdio::null())
@@ -849,7 +849,7 @@ async fn native_auth_dispatch_lifetime_real_custodian_attach_failure_releases_th
         std::fs::set_permissions(&missing, std::fs::Permissions::from_mode(0o700)).unwrap();
         let registered = RegisteredNativeAuthHost::capture(&executable()).unwrap();
         let mut child = TestChild(
-            crate::spawn_gate::spawn(
+            kernel_processes::spawn_gate::spawn(
                 ProcessCommand::new(registered.verified_path().unwrap())
                     .arg("native-auth-custodian")
                     .arg(&missing)

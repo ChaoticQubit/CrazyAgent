@@ -11,6 +11,7 @@ members = [
     "crates/kernel/storage",
     "crates/kernel/processes",
     "crates/kernel/common",
+    "crates/kernel/security",
     "crates/sdk/plugin_check",
     "plugins/t2/agent-quit",
     "apps/desktop/src-tauri",

@@ -691,7 +691,7 @@ async fn a_real_claude_master_whose_engine_is_killed_mid_turn_leaves_no_detached
         "{module}::a_real_claude_master_whose_engine_is_killed_mid_turn_leaves_no_detached_shell"
     );
     let started = std::time::Instant::now();
-    let mut engine = crate::spawn_gate::spawn(
+    let mut engine = kernel_processes::spawn_gate::spawn(
         std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 test.as_str(),
@@ -735,7 +735,7 @@ async fn a_real_claude_master_whose_engine_is_killed_mid_turn_leaves_no_detached
 
 #[test]
 fn processes_naming_finds_a_running_process_of_this_user() {
-    let mut sleeper = crate::spawn_gate::spawn(
+    let mut sleeper = kernel_processes::spawn_gate::spawn(
         std::process::Command::new("/bin/sleep")
             .arg("3011")
             .stdin(std::process::Stdio::null())

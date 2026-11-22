@@ -1509,7 +1509,7 @@ fn chmod_acls(flags: &[&str], entries: &[&Path]) {
     if entries.is_empty() {
         return;
     }
-    let _ = crate::spawn_gate::status(
+    let _ = kernel_processes::spawn_gate::status(
         std::process::Command::new("/bin/chmod")
             .args(flags)
             .args(entries)

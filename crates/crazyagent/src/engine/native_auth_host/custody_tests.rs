@@ -165,7 +165,7 @@ impl Drop for InertChild {
 
 impl Sentinel {
     fn start(root: &Path) -> Self {
-        let child = crate::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new("/bin/sleep")
                 .arg("30")
                 .env_clear()

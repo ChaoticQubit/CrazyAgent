@@ -349,7 +349,7 @@ async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
             let mut url = std::ffi::OsString::from("file://");
             url.push(&source);
             let git = |arguments: &[&std::ffi::OsStr]| {
-                let status = crate::spawn_gate::status(
+                let status = kernel_processes::spawn_gate::status(
                     std::process::Command::new("/usr/bin/git").args(arguments),
                 )
                 .unwrap();

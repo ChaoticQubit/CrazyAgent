@@ -23,6 +23,8 @@ pub mod hidden_paths;
 pub mod ide_shell;
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(test)]
+mod low_ports_tests;
 pub mod model_proxy;
 pub mod policy;
 pub mod shared_folders;
@@ -90,6 +92,19 @@ pub fn starts_at_boundary(program: &OsStr) -> bool {
 /// matches a local address by port only (`localhost` there matches every local address), so
 /// it cannot keep an agent's listener on loopback; it can keep these ports free.
 pub const OWNER_PORTS: [u16; 2] = [1455, 11434];
+const _: () = {
+    use kernel_processes::spawn_gate::LOW_PORTS;
+    use model_proxy::{PICKED_PORTS_START, PROXY_PORTS};
+    assert!(*LOW_PORTS.start() > 1024 && *LOW_PORTS.end() < 30_000);
+    assert!(*LOW_PORTS.end() < PICKED_PORTS_START);
+    assert!(*LOW_PORTS.end() < *PROXY_PORTS.start());
+    let mut index = 0;
+    while index < OWNER_PORTS.len() {
+        let port = OWNER_PORTS[index];
+        assert!(port < *LOW_PORTS.start() || port > *LOW_PORTS.end());
+        index += 1;
+    }
+};
 
 /// The most ports of the owner's configured local model endpoints one tools-on sandbox keeps
 /// free beside [`OWNER_PORTS`], which bounds the profile's deny rules.

@@ -184,53 +184,6 @@ fn a_refusing_port_turns_connects_away_and_stays_taken_while_held() {
     drop(held);
 }
 
-/// A refusing port stands for a stopped model provider in a row's settings, so it lies where
-/// an owner's model port would: below every range the system hands out by itself, which on
-/// Linux a kept model port must stay out of or no Landlock agent starts (G1 N8 P4), and apart
-/// from the owner's and the model proxy's ports.
-#[test]
-fn a_refusing_port_lies_below_the_ports_the_system_hands_out() {
-    use crate::sandbox::OWNER_PORTS;
-    use crate::sandbox::model_proxy::{PICKED_PORTS_START, PROXY_PORTS};
-    let held: Vec<_> = (0..4)
-        .map(|_| super::refusing_tcp_port().unwrap())
-        .collect();
-    for (_, port) in &held {
-        assert!(*port > 1024 && *port < PICKED_PORTS_START, "{port}");
-        assert!(
-            !PROXY_PORTS.contains(port) && !OWNER_PORTS.contains(port),
-            "{port}"
-        );
-    }
-    assert_eq!(held.len(), 4);
-}
-
-/// A low free port lies below every range the system hands out by itself, below the ports
-/// Linux node services use, and apart from the owner's and the model proxy's ports. A
-/// listener of its own binds it, and the next call in this process names another port.
-#[test]
-fn a_low_free_port_is_outside_the_system_and_proxy_ranges_and_each_call_moves_on() {
-    use crate::sandbox::OWNER_PORTS;
-    use crate::sandbox::model_proxy::{PICKED_PORTS_START, PROXY_PORTS};
-    use std::net::{Ipv4Addr, SocketAddr};
-    let first = super::free_low_tcp_port().unwrap();
-    let second = super::free_low_tcp_port().unwrap();
-    assert_ne!(first, second);
-    for port in [first, second] {
-        assert!(
-            port > 1024 && port < 30_000 && port < PICKED_PORTS_START,
-            "{port}"
-        );
-        assert!(
-            !PROXY_PORTS.contains(&port) && !OWNER_PORTS.contains(&port),
-            "{port}"
-        );
-        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-        let listener = super::bind_tcp_std_exclusive(address).unwrap();
-        assert_eq!(listener.local_addr().unwrap(), address);
-    }
-}
-
 /// 2.4.3 W10: a stream accepted from a non-blocking listener, as the model proxy's are, is
 /// blocking on every system, so a read with a timeout waits that long for the client
 /// instead of failing at once (Winsock hands the listener's mode to the accepted socket).
@@ -388,4 +341,11 @@ fn a_drive_relative_or_folder_relative_program_is_refused_and_a_bare_name_is_not
         Some(7),
         "a bare name starts"
     );
+}
+
+/// The low port block stays where the engine's compile-time port check expects it, so a
+/// change to it is seen here as well as there.
+#[test]
+fn the_low_port_block_is_unchanged() {
+    assert_eq!(super::LOW_PORTS, 20_000..=28_999);
 }

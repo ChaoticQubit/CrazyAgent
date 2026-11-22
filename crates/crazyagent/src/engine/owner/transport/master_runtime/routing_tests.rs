@@ -225,7 +225,7 @@ fn applied(reply: &OwnerReply) {
 }
 
 fn git(repository: &Path, home: &Path, arguments: &[&str]) {
-    let mut child = crate::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         std::process::Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -3958,7 +3958,7 @@ async fn a_master_s_second_editing_turn_on_a_pending_set_ends_with_no_changes_no
 async fn a_master_head_pointed_away_from_its_lease_branch_is_refused_and_moves_no_branch() {
     let (case, prepared) = tools_case(true).await;
     let read = |args: &[&str]| -> String {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             std::process::Command::new("/usr/bin/git")
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
@@ -4659,7 +4659,7 @@ async fn a_conversation_master_s_questions_are_logged_and_recorded_when_its_turn
 /// Reads the commit a worktree's HEAD names. Inputs: the worktree and the git home. Output:
 /// the commit id.
 fn head_of(worktree: &Path, home: &Path) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

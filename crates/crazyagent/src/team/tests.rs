@@ -2800,7 +2800,7 @@ fn concurrent_agent_setups_create_one_project_repository() {
     for setup in setups {
         setup.join().unwrap().unwrap();
     }
-    let commits = crate::spawn_gate::output(
+    let commits = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .args(["-C", root.to_str().unwrap(), "rev-list", "--count", "HEAD"])
             .env_clear()

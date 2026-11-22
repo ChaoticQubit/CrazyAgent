@@ -69,7 +69,7 @@ impl TemporaryKeychain {
             "security {:?} names no keychain; a test may only use its own",
             args.first()
         );
-        crazyagent::spawn_gate::output(
+        kernel_processes::spawn_gate::output(
             Command::new(SECURITY)
                 .args(args)
                 .env_clear()

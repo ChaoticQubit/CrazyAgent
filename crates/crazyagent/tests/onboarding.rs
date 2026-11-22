@@ -60,7 +60,7 @@ const FORGED_BRIEF: &str = "# Forged brief\n\nWritten by a project agent.\n";
 #[cfg(target_os = "macos")]
 fn require_model() {
     assert!(CATALOG.contains(&format!("model = {{ id = \"{MODEL}\"")));
-    let listed = crazyagent::spawn_gate::connect_tcp_std(OLLAMA).and_then(|mut stream| {
+    let listed = kernel_processes::spawn_gate::connect_tcp_std(OLLAMA).and_then(|mut stream| {
         stream.set_read_timeout(Some(OLLAMA_TIME))?;
         stream.set_write_timeout(Some(OLLAMA_TIME))?;
         stream.write_all(
@@ -84,7 +84,7 @@ fn require_model() {
 
 /// Runs git in `repo` with no global or system configuration.
 fn git(repo: &Path, args: &[&str]) -> String {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .current_dir(repo)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -170,7 +170,7 @@ struct EngineProcess {
 impl EngineProcess {
     /// Starts the binary and waits up to 20 s for its `ready` line.
     fn start(root: &Path, global: &Path, project_settings: &Path) -> Self {
-        let mut child = crazyagent::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             Command::new(env!("CARGO_BIN_EXE_crazyagent"))
                 .arg("engine")
                 .arg(root)
@@ -207,7 +207,7 @@ impl EngineProcess {
         if let Some(status) = self.child.try_wait().ok().flatten() {
             return status.success();
         }
-        let _ = crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+        let _ = kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([
             "-s",
             "TERM",
             &self.child.id().to_string(),
@@ -700,10 +700,10 @@ async fn stop_service(service: OnboardingService) {
 /// once. Returns the port; the serving thread ends with the test process.
 #[cfg(target_os = "macos")]
 fn rejecting_endpoint() -> u16 {
-    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
-        for stream in crazyagent::spawn_gate::incoming_tcp_std(&listener).take(64) {
+        for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener).take(64) {
             let Ok(stream) = stream else { break };
             let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
             let mut reader = BufReader::new(stream);
@@ -1971,7 +1971,7 @@ async fn a_failing_mapping_agent_reports_its_own_reason() {
 async fn a_mapping_step_whose_provider_refuses_connections_stops_at_once_with_the_reach_line() {
     let mut bench = Bench::start(|_| {}).await;
     let project = bench.start_onboarding().await;
-    let (_held, port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let account = ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "e2e-model".into(),
@@ -2075,7 +2075,7 @@ async fn a_mapping_step_runs_on_the_next_pool_member_when_the_first_ones_provide
  {
     let mut bench = Bench::start(|_| {}).await;
     let project = bench.start_onboarding().await;
-    let (_held, down) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let (_held, down) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let up = rejecting_endpoint();
     let resolver = loopback_resolver(&bench, &[(down, "first-model"), (up, "second-model")]);
     let (service, agents) = reachable_mapping(&bench, resolver);
@@ -2101,8 +2101,8 @@ async fn a_mapping_step_whose_members_all_refuse_connections_stops_at_once_with_
  {
     let mut bench = Bench::start(|_| {}).await;
     let project = bench.start_onboarding().await;
-    let (_first, first) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
-    let (_second, second) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let (_first, first) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
+    let (_second, second) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let resolver = loopback_resolver(&bench, &[(first, "first-model"), (second, "second-model")]);
     let started = Instant::now();
     let (service, agents) = reachable_mapping(&bench, resolver);
@@ -2200,7 +2200,7 @@ fn onboarding_created_ms(root: &Path) -> i64 {
 async fn a_step_that_cannot_start_records_its_cause_code() {
     let mut bench = Bench::start(|_| {}).await;
     let project = bench.start_onboarding().await;
-    let provider = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let provider = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let account = ResearchAccount::Endpoint {
         base_url: format!(
             "http://127.0.0.1:{}/v1",

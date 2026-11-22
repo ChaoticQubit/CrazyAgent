@@ -82,7 +82,7 @@ impl TestAgent {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        crate::spawn_gate::output(&mut command).expect("the sandboxed shell starts")
+        kernel_processes::spawn_gate::output(&mut command).expect("the sandboxed shell starts")
     }
 
     /// Runs `script` in the sandbox and fails the test unless it succeeds.

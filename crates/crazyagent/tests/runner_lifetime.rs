@@ -21,7 +21,7 @@ impl Service {
             .unwrap();
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let executable = env!("CARGO_BIN_EXE_crazyagent-runner");
-        let process = crazyagent::spawn_gate::spawn(
+        let process = kernel_processes::spawn_gate::spawn(
             Command::new(executable)
                 .arg("serve")
                 .arg(root.path().canonicalize().unwrap())
@@ -43,7 +43,7 @@ impl Service {
                 "runner exited before ready: {}",
                 fs::read_to_string(self.root.path().join("stderr.log")).unwrap()
             );
-            if crazyagent::spawn_gate::connect_unix_std(self.root.path().join("control.sock"))
+            if kernel_processes::spawn_gate::connect_unix_std(self.root.path().join("control.sock"))
                 .is_ok()
             {
                 let status = self.status();
@@ -86,7 +86,7 @@ impl Service {
     /// Starts the runner again on the same state root and waits until it answers status.
     /// Takes the service whose runner has ended.
     fn serve_again(&mut self) {
-        self.process = crazyagent::spawn_gate::spawn(
+        self.process = kernel_processes::spawn_gate::spawn(
             Command::new(env!("CARGO_BIN_EXE_crazyagent-runner"))
                 .arg("serve")
                 .arg(self.root.path().canonicalize().unwrap())
@@ -114,7 +114,8 @@ impl Drop for Service {
 }
 
 fn exchange(root: &std::path::Path, command: Value) -> Value {
-    let mut stream = crazyagent::spawn_gate::connect_unix_std(root.join("control.sock")).unwrap();
+    let mut stream =
+        kernel_processes::spawn_gate::connect_unix_std(root.join("control.sock")).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
@@ -162,7 +163,8 @@ fn private_control_service_survives_controller_disconnect() {
     let before = service.status();
     assert_eq!(service.claim("engine-1", 0)["kind"], "claimed");
     let client =
-        crazyagent::spawn_gate::connect_unix_std(service.root.path().join("control.sock")).unwrap();
+        kernel_processes::spawn_gate::connect_unix_std(service.root.path().join("control.sock"))
+            .unwrap();
     drop(client);
     assert_eq!(service.claim("engine-2", 1)["kind"], "claimed");
     let after = service.status();
@@ -288,7 +290,8 @@ fn unqualified_child_cancellation_never_reports_child_quiescence() {
 fn oversized_frames_are_rejected_without_disrupting_other_clients() {
     let service = Service::start();
     let mut stream =
-        crazyagent::spawn_gate::connect_unix_std(service.root.path().join("control.sock")).unwrap();
+        kernel_processes::spawn_gate::connect_unix_std(service.root.path().join("control.sock"))
+            .unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
@@ -343,7 +346,7 @@ fn graceful_termination_removes_the_owned_control_endpoint() {
     let mut service = Service::start();
     assert_eq!(service.status()["kind"], "status");
     assert!(
-        crazyagent::spawn_gate::status(
+        kernel_processes::spawn_gate::status(
             Command::new("/bin/kill")
                 .arg("-TERM")
                 .arg(service.process.id().to_string())
@@ -371,7 +374,7 @@ fn control_service_survives_actual_controller_peer_process_death() {
     }
     let service = Service::start();
     let identity = service.status()["identity"].clone();
-    let mut peer = crazyagent::spawn_gate::spawn(
+    let mut peer = kernel_processes::spawn_gate::spawn(
         Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -400,7 +403,7 @@ fn control_service_survives_actual_controller_peer_process_death() {
 }
 
 fn reject_start(root: &std::path::Path, reason: &str) {
-    let mut process = crazyagent::spawn_gate::spawn(
+    let mut process = kernel_processes::spawn_gate::spawn(
         Command::new(env!("CARGO_BIN_EXE_crazyagent-runner"))
             .arg("serve")
             .arg(root)
@@ -548,7 +551,7 @@ fn changed_endpoint_is_never_deleted_by_graceful_cleanup() {
     fs::rename(&path, service.root.path().join("moved.sock")).unwrap();
     fs::write(&path, b"replacement endpoint canary").unwrap();
     assert!(
-        crazyagent::spawn_gate::status(
+        kernel_processes::spawn_gate::status(
             Command::new("/bin/kill")
                 .arg("-TERM")
                 .arg(service.process.id().to_string())
@@ -636,7 +639,7 @@ fn another_socket_left_after_a_volume_renumber_is_refused_and_kept() {
     let root = service.root.path().canonicalize().unwrap();
     let path = root.join("control.sock");
     let staged = root.join("replacement.sock");
-    let replacement = crazyagent::spawn_gate::bind_unix_std(&staged).unwrap();
+    let replacement = kernel_processes::spawn_gate::bind_unix_std(&staged).unwrap();
     fs::rename(&staged, &path).unwrap();
     let replaced = fs::symlink_metadata(&path).unwrap();
     assert!(replaced.file_type().is_socket());
@@ -704,7 +707,7 @@ fn timed_out_incomplete_clients_release_bounded_connection_capacity() {
     let service = Service::start();
     let peers: Vec<_> = (0..16)
         .map(|_| {
-            crazyagent::spawn_gate::connect_unix_std(service.root.path().join("control.sock"))
+            kernel_processes::spawn_gate::connect_unix_std(service.root.path().join("control.sock"))
                 .unwrap()
         })
         .collect();
@@ -718,7 +721,8 @@ fn receipt_is_retained_when_requester_disconnects_before_acknowledgement() {
     assert_eq!(service.claim("engine-1", 0)["kind"], "claimed");
     let runner = service.status()["identity"]["runner_id"].clone();
     let mut stream =
-        crazyagent::spawn_gate::connect_unix_std(service.root.path().join("control.sock")).unwrap();
+        kernel_processes::spawn_gate::connect_unix_std(service.root.path().join("control.sock"))
+            .unwrap();
     stream
         .write_all(
             &encode_frame(&json!({"protocol_version":1,

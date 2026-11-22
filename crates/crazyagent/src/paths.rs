@@ -325,13 +325,13 @@ pub(crate) fn executable_names(name: &str) -> Vec<String> {
 }
 
 /// The real file a launch of an entry runs, while it is a runnable file: on Windows an npm
-/// cmd-shim gives the script it names ([`crate::tools::cmd_shim_real`]), the pin, and any
+/// cmd-shim gives the script it names ([`kernel_processes::batch::cmd_shim_real`]), the pin, and any
 /// other batch file gives none. Input: the entry. Output: the real file, or none.
 pub(crate) fn executable_file(path: &Path) -> Option<PathBuf> {
     let real = std::fs::canonicalize(path).ok()?;
     #[cfg(windows)]
-    let real = if crate::tools::batch_file(&real) {
-        crate::tools::cmd_shim_real(&real)?
+    let real = if kernel_processes::batch::batch_file(&real) {
+        kernel_processes::batch::cmd_shim_real(&real)?
     } else {
         real
     };
@@ -735,7 +735,11 @@ mod tests {
                 root.join("o00000000").join("owner.sock"),
                 root.join(SOCKET_NAME),
             ] {
-                assert!(crate::socket_address::fits(&socket), "{}", socket.display());
+                assert!(
+                    kernel_processes::socket_address::fits(&socket),
+                    "{}",
+                    socket.display()
+                );
             }
         }
     }

@@ -20,7 +20,7 @@ struct Server {
 
 impl Server {
     fn run(&self, arguments: &[&str]) -> String {
-        let output = crazyagent::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -53,7 +53,7 @@ impl Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::output(
+        let _ = kernel_processes::spawn_gate::output(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)

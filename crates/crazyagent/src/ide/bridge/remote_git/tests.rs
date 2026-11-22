@@ -18,7 +18,7 @@ impl Daemon {
     /// Starts the daemon on a free loopback port and waits until it accepts connections.
     /// Input: the folder of bare repositories. Output: the running daemon.
     pub(crate) fn start(base: &Path) -> Self {
-        let port = crate::spawn_gate::bind_tcp_std("127.0.0.1:0")
+        let port = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap()
@@ -45,9 +45,9 @@ impl Daemon {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .process_group(0);
-        let child = crate::spawn_gate::spawn(&mut command).unwrap();
+        let child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
         let deadline = Instant::now() + LISTEN_TIME;
-        while crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)).is_err() {
+        while kernel_processes::spawn_gate::connect_tcp_std(("127.0.0.1", port)).is_err() {
             assert!(Instant::now() < deadline, "git daemon never listened");
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -72,7 +72,7 @@ impl Drop for Daemon {
 /// own setup step outside any engine path. Inputs: the folder and the arguments. Output:
 /// what git printed and its status.
 pub(crate) fn plain_git(dir: &Path, args: &[&str]) -> Output {
-    crate::spawn_gate::output(
+    kernel_processes::spawn_gate::output(
         Command::new(GIT)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -1104,7 +1104,7 @@ fn a_global_config_reached_through_links_outside_the_project_still_lands() {
 #[test]
 fn a_git_command_past_its_limit_is_killed_and_its_outcome_unknown() {
     let project = Project::new();
-    let silent = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let silent = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = silent.local_addr().unwrap().port();
     ok(
         &project.folder,

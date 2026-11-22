@@ -79,7 +79,7 @@ fn database(root: &Path) -> Connection {
 }
 
 fn git(root: &Path, home: &Path, arguments: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .args(arguments)
             .current_dir(root)
@@ -237,7 +237,7 @@ fn a_pool_offers_the_demo_only_with_a_signed_in_account_for_its_master_and_never
     let sign_in = |profile: &[u8]| {
         tx.execute(
             "INSERT INTO native_auth_operations VALUES(?1,1,'authenticated_observed')",
-            [crate::memory::hash(profile)],
+            [kernel_common::hash(profile)],
         )
         .unwrap();
     };

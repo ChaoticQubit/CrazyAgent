@@ -24,7 +24,7 @@ fn the_claude_custodian_status_never_loads_what_a_tools_on_agent_wrote() {
     let planted = agent.shell(&plant);
     let planted = String::from_utf8_lossy(&planted.stdout).into_owned();
     assert!(planted.starts_with("helper written\n"), "{planted}");
-    let status = crate::spawn_gate::output(
+    let status = kernel_processes::spawn_gate::output(
         &mut auth_command(
             &crate::harnesses::interactive::launch_words(&claude)
                 .unwrap()

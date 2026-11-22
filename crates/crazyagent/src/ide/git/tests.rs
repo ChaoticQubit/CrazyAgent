@@ -8,7 +8,7 @@ use std::process::{Command, Output, Stdio};
 /// a process the IDE server starts would. Inputs: the folder, the extra variables and the
 /// arguments. Output: what git printed and its status.
 fn git(dir: &Path, env: &[(&str, &str)], args: &[&str]) -> Output {
-    crate::spawn_gate::output(
+    kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -307,7 +307,7 @@ fn the_shim_lets_git_run_hooks_in_the_project_folder_alone() {
         std::fs::set_permissions(shim, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     let hooks_path = |shim: &Path, dir: &Path| {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new(shim)
                 .current_dir(dir)
                 .env_clear()
@@ -367,7 +367,7 @@ fn the_shim_keeps_the_relay_secret_from_git_and_hands_it_to_the_forwarder() {
         std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     let run = |args: &[&str]| {
-        crate::spawn_gate::output(
+        kernel_processes::spawn_gate::output(
             Command::new(&shim)
                 .current_dir(&project)
                 .env_clear()
@@ -606,7 +606,7 @@ fn the_ide_git_never_prunes_an_agent_worktree_it_sees_as_missing() {
     std::fs::write(&shim, SHIM_TEXT).unwrap();
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o700)).unwrap();
     let ide = |args: &[&str]| {
-        crate::spawn_gate::output(
+        kernel_processes::spawn_gate::output(
             Command::new(&shim)
                 .current_dir(&project)
                 .env_clear()
@@ -712,7 +712,7 @@ fn the_ide_git_refuses_worktree_prune_and_remove_after_a_leading_option() {
         std::fs::set_permissions(shim, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     let ide = |shim: &Path, args: &[&str]| {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new(shim)
                 .current_dir(&project)
                 .env_clear()
@@ -796,7 +796,7 @@ fn a_network_command_after_a_leading_option_from_the_ide_stops_with_the_plain_li
         std::fs::set_permissions(shim, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     let ide = |shim: &Path, args: &[&str]| {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new(shim)
                 .current_dir(&project)
                 .env_clear()
@@ -1061,7 +1061,7 @@ fn the_shim_keeps_the_secret_from_git_and_reports_both_failures() {
                 .unwrap()
                 .to_owned(),
         );
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new(&shim)
                 .arg("add")
                 .current_dir(&project)
@@ -1124,7 +1124,7 @@ fn the_shim_copies_the_index_with_its_modified_time() {
             .unwrap()
             .to_owned(),
     );
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new(&shim)
             .arg("add")
             .current_dir(&project)
@@ -1162,7 +1162,7 @@ fn the_shim_leaves_no_copy_of_an_immutable_index_behind() {
     let index = project.join(".git").join("index");
     std::fs::write(&index, "real").unwrap();
     let flags = |flag: &str, path: &Path| {
-        crate::spawn_gate::output(
+        kernel_processes::spawn_gate::output(
             Command::new("/usr/bin/chflags")
                 .args(["-R", flag])
                 .arg(path)
@@ -1190,7 +1190,7 @@ fn the_shim_leaves_no_copy_of_an_immutable_index_behind() {
             .strip_prefix("#!/bin/sh\n")
             .unwrap(),
     );
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new(&shim)
             .arg("add")
             .current_dir(&project)

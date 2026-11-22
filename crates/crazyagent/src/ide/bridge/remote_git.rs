@@ -1049,8 +1049,8 @@ fn ran_stopped(
     limit: Duration,
     grace: Duration,
 ) -> Result<Ran, EngineError> {
-    let mut child =
-        crate::spawn_gate::spawn(&mut command).map_err(|_| failure("ide_git_unavailable"))?;
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command)
+        .map_err(|_| failure("ide_git_unavailable"))?;
     let group = Pid::from_child(&child);
     assert!(group.as_raw_nonzero().get() > 1);
     let stdout = reader(child.stdout.take(), keep);

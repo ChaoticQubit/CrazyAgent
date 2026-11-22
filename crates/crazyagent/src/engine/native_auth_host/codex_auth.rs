@@ -663,7 +663,7 @@ pub(in crate::engine) async fn run(
     else {
         return session.seal_without_effect();
     };
-    let Ok(child) = crate::spawn_gate::spawn(&mut launch) else {
+    let Ok(child) = kernel_processes::spawn_gate::spawn(&mut launch) else {
         return session.seal_without_effect();
     };
     let group = Pid::from_raw(i32::try_from(child.id()).map_err(io_error)?)

@@ -94,7 +94,7 @@ pub fn name_call(mailbox: &Path, id: &str, digest: &[u8; DIGEST_BYTES]) -> bool 
     {
         return true;
     }
-    let Ok(mut stream) = crate::spawn_gate::connect_unix_std(&socket) else {
+    let Ok(mut stream) = kernel_processes::spawn_gate::connect_unix_std(&socket) else {
         return false;
     };
     let mut line = Vec::with_capacity(LINE_BYTES);
@@ -135,7 +135,7 @@ pub fn own_place(mailbox: &Path, wait: Duration) -> Place {
 /// Sends `who` on the caller socket and reads one answer line within `wait`. Takes the
 /// socket and the wait. Returns the pane and who runs in it, or None.
 fn ask_place(socket: &Path, wait: Duration) -> Option<(String, Whom)> {
-    let mut stream = crate::spawn_gate::connect_unix_std(socket).ok()?;
+    let mut stream = kernel_processes::spawn_gate::connect_unix_std(socket).ok()?;
     stream.set_read_timeout(Some(wait)).ok()?;
     stream.set_write_timeout(Some(wait)).ok()?;
     stream.write_all(WHO).ok()?;
@@ -164,7 +164,7 @@ pub fn relay(mailbox: &Path, request: &str, wait: Duration) -> Option<Vec<u8>> {
         return None;
     }
     let socket = socket_for_mailbox(mailbox)?;
-    let mut stream = crate::spawn_gate::connect_unix_std(&socket).ok()?;
+    let mut stream = kernel_processes::spawn_gate::connect_unix_std(&socket).ok()?;
     stream.set_read_timeout(Some(wait)).ok()?;
     stream.set_write_timeout(Some(wait)).ok()?;
     let mut line = Vec::with_capacity(RELAY.len() + request.len() + 1);
@@ -375,7 +375,7 @@ impl Callers {
         {
             return Err(error);
         }
-        let listener = crate::spawn_gate::bind_unix_std(&binding)?;
+        let listener = kernel_processes::spawn_gate::bind_unix_std(&binding)?;
         listener.set_nonblocking(true)?;
         let gone = || std::io::Error::new(std::io::ErrorKind::NotFound, "the bound socket is gone");
         let made = socket_pin(&binding).ok_or_else(gone)?;
@@ -452,7 +452,7 @@ impl Callers {
             if self.pending.len() >= PENDING_MAX {
                 break;
             }
-            let Ok(stream) = crate::spawn_gate::accept_unix_std(&self.listener) else {
+            let Ok(stream) = kernel_processes::spawn_gate::accept_unix_std(&self.listener) else {
                 break;
             };
             let Some(pid) = peer_pid(&stream) else {
@@ -702,7 +702,7 @@ fn pane_of(
 }
 
 pub(crate) fn process_parents() -> Option<HashMap<u32, u32>> {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-A", "-o", "pid=,ppid="])
             .env_clear()
@@ -732,7 +732,7 @@ pub(crate) fn process_parents() -> Option<HashMap<u32, u32>> {
 /// process id. Returns the answer; a table that cannot be read, is out of bounds or does not
 /// list the root says stopped.
 pub(crate) fn stopped_under(root: u32) -> bool {
-    let table = crate::spawn_gate::output(
+    let table = kernel_processes::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-A", "-o", "pid=,ppid=,stat="])
             .env_clear()

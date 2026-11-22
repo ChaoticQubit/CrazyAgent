@@ -101,7 +101,7 @@ impl Case {
         let lines = self.engine.join("zero-stat");
         fs::write(&lines, format!("{entry}\0")).unwrap();
         command.stdin(Stdio::from(fs::File::open(&lines).unwrap()));
-        let done = crate::spawn_gate::output(&mut command).unwrap();
+        let done = kernel_processes::spawn_gate::output(&mut command).unwrap();
         assert!(done.status.success(), "{done:?}");
     }
 
@@ -128,7 +128,7 @@ impl Case {
         let mut command = Command::new("/usr/bin/mkfifo");
         command.arg(self.project.join(".gitattributes"));
         assert!(
-            crate::spawn_gate::output(&mut command)
+            kernel_processes::spawn_gate::output(&mut command)
                 .unwrap()
                 .status
                 .success()
@@ -161,7 +161,7 @@ fn plain(dir: &Path, index: Option<&Path>, args: &[&str]) -> Command {
 
 /// Runs [`plain`] to its end. Inputs: as [`plain`]. Output: its output.
 fn output(dir: &Path, index: Option<&Path>, args: &[&str]) -> Output {
-    crate::spawn_gate::output(&mut plain(dir, index, args)).unwrap()
+    kernel_processes::spawn_gate::output(&mut plain(dir, index, args)).unwrap()
 }
 
 /// Runs [`plain`], which must exit 0. Inputs: as [`plain`]. Output: what it printed.
@@ -341,7 +341,7 @@ fn hostile_private_files_leave_the_real_index_alone() {
     let mut fifo = Command::new("/usr/bin/mkfifo");
     fifo.arg(&work);
     assert!(
-        crate::spawn_gate::output(&mut fifo)
+        kernel_processes::spawn_gate::output(&mut fifo)
             .unwrap()
             .status
             .success()
@@ -734,7 +734,7 @@ fn status_after_a_large_stage_is_no_slower_than_twice_in_place() {
                 command.env("GIT_OPTIONAL_LOCKS", "0");
                 let started = Instant::now();
                 assert!(
-                    crate::spawn_gate::output(&mut command)
+                    kernel_processes::spawn_gate::output(&mut command)
                         .unwrap()
                         .status
                         .success()

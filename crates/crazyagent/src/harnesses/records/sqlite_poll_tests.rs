@@ -326,9 +326,10 @@ fn a_journal_that_is_not_a_plain_file_is_refused_without_waiting() {
     let path = tmp.path().join("record.db");
     add(&database(&path, 3), &turn());
     let journal = tmp.path().join("record.db-journal");
-    let made =
-        crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&journal))
-            .unwrap();
+    let made = kernel_processes::spawn_gate::status(
+        std::process::Command::new("/usr/bin/mkfifo").arg(&journal),
+    )
+    .unwrap();
     assert!(made.success());
     if !reads(&path) {
         return;

@@ -28,7 +28,7 @@ const STAND_IN: &str = "#!/bin/sh\n/bin/mkdir -p \"$HOME/.cache\" || exit 1\nthr
 /// Runs git in `repo` with no global or system configuration.
 /// Takes the folder and the arguments. A failure fails the test.
 fn git(repo: &Path, args: &[&str]) {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .current_dir(repo)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")

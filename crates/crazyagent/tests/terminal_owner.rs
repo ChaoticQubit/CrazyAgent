@@ -23,7 +23,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -182,7 +182,7 @@ async fn the_owner_attaches_to_an_agent_terminal_over_the_engine_socket() {
 /// Counts the tmux processes whose command line names `socket`: the server on it and any
 /// client still connected. Input: the server's socket path. Output: the count.
 fn servers(socket: &Path) -> usize {
-    let listed = crazyagent::spawn_gate::output(
+    let listed = kernel_processes::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-A", "-o", "args="])
             .env_clear()

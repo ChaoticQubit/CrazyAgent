@@ -189,7 +189,7 @@ impl Request<'_> {
 /// reads the reply within the request time. Inputs: the command and its config. Output:
 /// the reply, or `github_unreachable`.
 fn exchange(mut command: Command, mut config: Vec<u8>) -> Result<Reply, EngineError> {
-    let spawned = crate::spawn_gate::spawn(&mut command);
+    let spawned = kernel_processes::spawn_gate::spawn(&mut command);
     let mut child = match spawned {
         Ok(child) => child,
         Err(_) => {

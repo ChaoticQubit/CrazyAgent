@@ -93,7 +93,7 @@ impl OwnerRequest {
         if !matches!(self.operation, OwnerOperation::Apply { .. }) {
             return Err(failure("owner_mutation_required"));
         }
-        Ok(crate::memory::hash(
+        Ok(kernel_common::hash(
             &serde_json::to_vec(self).map_err(|_| failure("owner_request_encoding"))?,
         ))
     }

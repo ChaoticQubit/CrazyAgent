@@ -1500,7 +1500,7 @@ fn run_quiet(command: &[OsString]) -> Result<(bool, String), ServiceError> {
     let (program, args) = command
         .split_first()
         .ok_or_else(|| failure("empty service command"))?;
-    let output = match crate::spawn_gate::output(
+    let output = match kernel_processes::spawn_gate::output(
         std::process::Command::new(program)
             .args(args)
             .stdin(std::process::Stdio::null())
@@ -1531,7 +1531,7 @@ fn run_checked(command: &[OsString]) -> Result<(), ServiceError> {
 /// and error text, never its environment.
 fn run_process(process: &mut std::process::Command) -> Result<(), ServiceError> {
     let program = process.get_program().to_string_lossy().into_owned();
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         process
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -1558,7 +1558,7 @@ fn run_process(process: &mut std::process::Command) -> Result<(), ServiceError> 
 /// Output: true when a connection is accepted.
 #[cfg(unix)]
 pub fn answering(socket: &Path) -> bool {
-    crate::spawn_gate::connect_unix_std(socket).is_ok()
+    kernel_processes::spawn_gate::connect_unix_std(socket).is_ok()
 }
 
 /// Says whether a checked engine serves the ordinary endpoint now on Windows: its pipe
@@ -1679,7 +1679,7 @@ fn spawn_detached(
     }
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    crate::spawn_gate::spawn(&mut command)
+    kernel_processes::spawn_gate::spawn(&mut command)
         .map_err(|error| failure(format!("{}: {error}", executable.display())))
 }
 
@@ -1690,7 +1690,7 @@ fn spawn_detached(
 /// engine answers, or an error naming the pid and the engine log after the bound.
 #[cfg(unix)]
 pub fn stop_detached(layout: &Layout) -> Result<Option<u32>, ServiceError> {
-    let Ok(stream) = crate::spawn_gate::connect_unix_std(layout.socket()) else {
+    let Ok(stream) = kernel_processes::spawn_gate::connect_unix_std(layout.socket()) else {
         return Ok(None);
     };
     let pid = serving_pid(&stream)?;

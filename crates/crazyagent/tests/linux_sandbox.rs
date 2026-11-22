@@ -12,7 +12,7 @@ use crazyagent::sandbox::{
 use crazyagent::harnesses::launch::{
     AccountBinding, GitIdentity, LaunchBoundary, LaunchLimits, LaunchRequest,
 };
-use crazyagent::spawn_gate::Keeper;
+use kernel_processes::spawn_gate::Keeper;
 
 use landlock::{CompatLevel, Compatible, Ruleset, RulesetAttr, Scope};
 
@@ -123,7 +123,7 @@ fn run(sandbox: &dyn Sandbox, case: &Case, script: &str) -> Output {
         .arg("-c")
         .arg(script)
         .current_dir(case.project.join("worktrees"));
-    crazyagent::spawn_gate::output(
+    kernel_processes::spawn_gate::output(
         sandbox
             .wrap(&harness)
             .unwrap()
@@ -218,7 +218,7 @@ fn process_state(pid: u32) -> Option<char> {
 fn a_helper_told_to_die_with_its_parent_is_killed_when_that_parent_exits() {
     let case = case();
     let started = case.tmp.join("started");
-    let parent = crazyagent::spawn_gate::status(
+    let parent = kernel_processes::spawn_gate::status(
         without_loader(Command::new("/bin/sh"))
             .arg("-c")
             .arg(
@@ -249,7 +249,7 @@ fn a_helper_told_to_die_with_its_parent_is_killed_when_that_parent_exits() {
     );
 
     let refused = case.tmp.join("refused");
-    let status = crazyagent::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         helper_command()
             .args([
                 "--die-with",
@@ -268,7 +268,7 @@ fn a_helper_told_to_die_with_its_parent_is_killed_when_that_parent_exits() {
     .unwrap();
     assert_eq!(status.code(), Some(3), "a parent id that is not the parent");
     assert!(!refused.exists(), "nothing started for a wrong parent id");
-    let first = crazyagent::spawn_gate::status(
+    let first = kernel_processes::spawn_gate::status(
         helper_command()
             .args(["--die-with", "1", "--read", "/", "--", "/bin/true"])
             .stdin(Stdio::null())
@@ -295,7 +295,7 @@ mkdir "$admin/logs" && printf log > "$admin/logs/HEAD" && echo folder
 ln -s /etc "$admin/link" 2>>"$err" && echo symlinked
 ln "$admin/index" "$away/index" 2>>"$err" && echo linked
 exit 0"#;
-    let output = crazyagent::spawn_gate::collected(
+    let output = kernel_processes::spawn_gate::collected(
         helper_command()
             .args(["--read", "/", "--write"])
             .arg(&case.tmp)
@@ -397,7 +397,7 @@ fn neither_backend_lets_an_agent_truncate_a_file_it_may_only_read() {
             .arg(&brief)
             .arg(&fixture)
             .current_dir(case.project.join("worktrees"));
-        let output = crazyagent::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             sandbox
                 .wrap(&harness)
                 .unwrap()
@@ -427,7 +427,7 @@ const SESSION: &str = "read -r stat < /proc/$$/stat; set -- ${stat##*\") \"}; ec
 /// numbers it printed, as Linux shows them to the agent: its process id, its process group,
 /// its session and its controlling terminal.
 fn session_fields(command: &mut Command) -> Vec<String> {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -498,7 +498,7 @@ fn agent_stdout(sandbox: Option<&dyn Sandbox>, harness: Command) -> String {
         Some(sandbox) => sandbox.wrap(&harness).unwrap(),
         None => harness,
     };
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -516,7 +516,7 @@ fn agent_stdout(sandbox: Option<&dyn Sandbox>, harness: Command) -> String {
 #[test]
 fn no_agent_signals_an_outside_process_where_the_kernel_can_scope_signals() {
     let case = case();
-    let mut outside = crazyagent::spawn_gate::spawn(
+    let mut outside = kernel_processes::spawn_gate::spawn(
         Command::new("/bin/sleep")
             .arg("60")
             .stdin(Stdio::null())
@@ -593,7 +593,7 @@ fn no_agent_opens_a_terminal_the_owner_holds_outside_its_boundary() {
         Path::new("/usr/bin/python3").is_file(),
         "Linux test machines need /usr/bin/python3"
     );
-    let mut holder = crazyagent::spawn_gate::spawn(
+    let mut holder = kernel_processes::spawn_gate::spawn(
         Command::new("/usr/bin/python3")
             .args(["-I", "-c", HOLD_TERMINAL])
             .stdin(Stdio::piped())
@@ -748,7 +748,7 @@ fn an_agent_adds_top_level_entries_to_its_own_worktree_but_not_to_the_project_fo
     for sandbox in [&landlock as &dyn Sandbox, &bubblewrap] {
         let mut harness = Command::new("/bin/sh");
         harness.arg("-c").arg(&script).current_dir(&worktree);
-        let output = crazyagent::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             sandbox
                 .wrap(&harness)
                 .unwrap()
@@ -777,8 +777,8 @@ fn an_agent_adds_top_level_entries_to_its_own_worktree_but_not_to_the_project_fo
 #[test]
 fn landlock_limits_a_tools_off_agent_to_its_model_endpoint_port() {
     let case = case();
-    let allowed = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let denied = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let allowed = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let denied = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let allowed_port = allowed.local_addr().unwrap().port();
     let denied_port = denied.local_addr().unwrap().port();
     let network = SandboxNetwork::Only(vec![SandboxRemote::Loopback(allowed_port)]);
@@ -796,7 +796,7 @@ fn landlock_limits_a_tools_off_agent_to_its_model_endpoint_port() {
              (exec 3<>/dev/tcp/127.0.0.1/{denied_port}) 2>/dev/null && echo denied; true"
         ))
         .current_dir(&case.project);
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         sandbox
             .wrap(&harness)
             .unwrap()
@@ -1038,7 +1038,7 @@ fn reach(
         Some(sandbox) => sandbox.wrap(&harness).unwrap(),
         None => harness,
     };
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -1064,8 +1064,8 @@ fn a_linux_agent_reaches_ip_endpoints_but_no_unix_socket_in_the_engine_runtime()
     let terminal = runtime.join("terminal");
     fs::create_dir_all(&terminal).unwrap();
     let socket = terminal.join("tmux.sock");
-    let _listener = crazyagent::spawn_gate::bind_unix_std(&socket).unwrap();
-    let endpoint = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let _listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
+    let endpoint = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = endpoint.local_addr().unwrap().port();
     let guarded = |network: SandboxNetwork| policy(&case, network).guard_engine(&runtime).unwrap();
     assert_eq!(
@@ -1116,8 +1116,8 @@ fn a_bubblewrap_agent_reaches_no_unix_socket_in_a_folder_bound_for_it() {
     let runtime = case.outside.parent().unwrap().join("runtime");
     fs::create_dir_all(&runtime).unwrap();
     let socket = case.project.join("owner.sock");
-    let _listener = crazyagent::spawn_gate::bind_unix_std(&socket).unwrap();
-    let endpoint = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let _listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
+    let endpoint = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = endpoint.local_addr().unwrap().port();
     assert_eq!(
         reach(None, &case, &socket, port, &runtime),
@@ -1164,7 +1164,7 @@ for name, family, kind, protocol in (('unix', socket.AF_UNIX, socket.SOCK_STREAM
 /// the arguments it is given. Input: the command. Output: one line per socket kind, `ok`,
 /// `refused` for the socket filter's `EACCES`, or `other` for any other failure.
 fn families(mut command: Command) -> String {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -1288,7 +1288,7 @@ fn port_probe(sandbox: &dyn Sandbox, case: &Case, script: &str, ports: &[u16]) -
         .args(["-I", "-c", script])
         .args(ports.iter().map(u16::to_string))
         .current_dir(case.project.join("worktrees"));
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         sandbox
             .wrap(&harness)
             .unwrap()
@@ -1430,7 +1430,7 @@ fn a_limited_network_with_a_kept_port_linux_could_pick_is_refused_at_launch() {
             other => panic!("a kept port Linux could pick must refuse the launch: {other:?}"),
         }
     }
-    let direct = crazyagent::spawn_gate::output(
+    let direct = kernel_processes::spawn_gate::output(
         helper_command()
             .args([
                 "--limit-network",
@@ -1578,7 +1578,7 @@ fn an_open_network_with_a_kept_port_linux_could_pick_is_refused_at_launch() {
         }
         other => panic!("a kept port Linux could pick must refuse the launch: {other:?}"),
     }
-    let direct = crazyagent::spawn_gate::output(
+    let direct = kernel_processes::spawn_gate::output(
         helper_command()
             .args(["--keep-free", &low.to_string(), "--", "/bin/true"])
             .stdin(Stdio::null())
@@ -1603,7 +1603,7 @@ struct Checkouts {
 }
 
 fn git(cwd: &Path, arguments: &[&str]) {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("git")
             .args([
                 "-c",
@@ -1832,7 +1832,7 @@ fn a_tcp_only_agent_sends_no_datagram_and_may_ask_names_on_tcp_port_53() {
         Path::new("/usr/bin/python3").is_file(),
         "Linux test machines need /usr/bin/python3"
     );
-    let endpoint = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let endpoint = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = endpoint.local_addr().unwrap().port();
     let open = datagrams(None, &case, port);
     assert!(
@@ -1897,7 +1897,7 @@ fn a_tcp_only_agent_sends_no_datagram_and_may_ask_names_on_tcp_port_53() {
 #[test]
 fn a_tcp_ports_agent_keeps_its_port_limit_but_opens_datagrams_and_asks_names_its_own_way() {
     let case = case();
-    let endpoint = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let endpoint = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = endpoint.local_addr().unwrap().port();
     let named = SandboxNetwork::Only(vec![
         SandboxRemote::Loopback(port),
@@ -2051,7 +2051,7 @@ fn no_agent_reads_the_environment_of_a_process_outside_its_boundary() {
         Path::new("/usr/bin/python3").is_file(),
         "Linux test machines need /usr/bin/python3"
     );
-    let mut outside = crazyagent::spawn_gate::spawn(
+    let mut outside = kernel_processes::spawn_gate::spawn(
         Command::new("/bin/sleep")
             .arg("60")
             .env("CRAZYAGENT_TEST_MARKER", "outside")
@@ -2108,7 +2108,7 @@ fn nesting_bwrap() -> Option<PathBuf> {
         .map(Path::new)
         .find(|path| path.is_file())
         .expect("Linux test machines need bubblewrap installed");
-    let made = crazyagent::spawn_gate::status(
+    let made = kernel_processes::spawn_gate::status(
         Command::new(bwrap)
             .args(NEST_ARGS)
             .args(["--unshare-net", "--", "/bin/true"])
@@ -2145,7 +2145,7 @@ fn started(sandbox: &dyn Sandbox, case: &Case, script: &str) -> (Child, BufReade
     harness
         .args(["-c", script])
         .current_dir(case.project.join("worktrees"));
-    let mut child = crazyagent::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         sandbox
             .wrap(&harness)
             .unwrap()
@@ -2164,7 +2164,7 @@ fn started(sandbox: &dyn Sandbox, case: &Case, script: &str) -> (Child, BufReade
 /// Sends a signal with `/bin/kill`. Inputs: the signal's name and the target as kill takes
 /// it, a process id, or a process group as its id after a minus sign. Output: none.
 fn send(signal: &str, target: &str) {
-    let status = crazyagent::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         Command::new("/bin/kill")
             .arg(format!("-{signal}"))
             .args(["--", target])
@@ -2259,7 +2259,7 @@ fn a_nested_agent_neither_signals_nor_lists_a_process_outside_its_own() {
     let Some(sandbox) = nested(policy(&case, SandboxNetwork::Open)) else {
         return;
     };
-    let mut outside = crazyagent::spawn_gate::spawn(
+    let mut outside = kernel_processes::spawn_gate::spawn(
         Command::new("/bin/sleep")
             .arg("60")
             .stdin(Stdio::null())
@@ -2378,7 +2378,7 @@ fn a_nested_pane_agent_keeps_its_pane_as_its_terminal() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = crazyagent::spawn_gate::output(&mut pane).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut pane).unwrap();
     let shown = String::from_utf8_lossy(&output.stdout);
     assert!(
         shown.contains("opened"),
@@ -2500,7 +2500,7 @@ fn the_host_report_agrees_with_the_kernel_and_the_nesting_control() {
         .set_compatibility(CompatLevel::HardRequirement)
         .scope(Scope::Signal)
         .is_ok();
-    let asked = crazyagent::spawn_gate::status(
+    let asked = kernel_processes::spawn_gate::status(
         helper_command()
             .arg("--scoped")
             .stdin(Stdio::null())
@@ -2592,7 +2592,7 @@ fn the_helper_refuses_the_variables_that_load_code_in_every_mode() {
     let modes = [nest, vec!["--probe".into()], vec!["--scoped".into()]];
     for mode in &modes {
         for name in ["LD_LIBRARY_PATH", "GLIBC_TUNABLES", "GCONV_PATH"] {
-            let output = crazyagent::spawn_gate::collected(
+            let output = kernel_processes::spawn_gate::collected(
                 Command::new(HELPER)
                     .args(mode)
                     .env_clear()
@@ -2662,7 +2662,7 @@ fn planted_or_concurrent_probe_folders_never_turn_the_call_supervisor_off() {
 /// Output: the address; it panics on a machine with no route, where the rows that ask for
 /// another host prove nothing.
 fn outward_address() -> std::net::IpAddr {
-    let socket = crazyagent::spawn_gate::bind_udp_std("0.0.0.0:0").unwrap();
+    let socket = kernel_processes::spawn_gate::bind_udp_std("0.0.0.0:0").unwrap();
     socket
         .connect("192.0.2.1:9")
         .expect("Linux test machines need a default route");
@@ -2677,11 +2677,11 @@ fn outward_address() -> std::net::IpAddr {
 #[test]
 fn a_loopback_only_nested_agent_reaches_its_port_on_this_computer_and_on_no_other_host() {
     let case = case();
-    let served = crazyagent::spawn_gate::bind_tcp_std("0.0.0.0:0").unwrap();
+    let served = kernel_processes::spawn_gate::bind_tcp_std("0.0.0.0:0").unwrap();
     let port = served.local_addr().unwrap().port();
     let other = outward_address();
     std::thread::spawn(move || {
-        for mut asked in crazyagent::spawn_gate::incoming_tcp_std(&served)
+        for mut asked in kernel_processes::spawn_gate::incoming_tcp_std(&served)
             .flatten()
             .take(16)
         {
@@ -2741,7 +2741,7 @@ fn listed_with_inherited(sandbox: &dyn Sandbox, case: &Case) -> String {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let inherited = fs::File::open("/dev/null").unwrap();
-    let output = crazyagent::spawn_gate::spawn_handing(&mut wrapped, inherited.into())
+    let output = kernel_processes::spawn_gate::spawn_handing(&mut wrapped, inherited.into())
         .unwrap()
         .wait_with_output()
         .unwrap();
@@ -2766,7 +2766,7 @@ fn a_descriptor_the_engine_inherited_reaches_no_harness() {
         .arg("/proc/self/fd")
         .stdin(Stdio::null())
         .stdout(Stdio::piped());
-    let control = crazyagent::spawn_gate::spawn_handing(&mut plain, inherited.into())
+    let control = kernel_processes::spawn_gate::spawn_handing(&mut plain, inherited.into())
         .unwrap()
         .wait_with_output()
         .unwrap();
@@ -2807,7 +2807,7 @@ fn a_helper_that_cannot_list_its_inherited_descriptors_starts_nothing() {
     for (name, _) in std::env::vars_os().filter(|(name, _)| loader_variable(name)) {
         nest.env_remove(name);
     }
-    let output = crazyagent::spawn_gate::collected(
+    let output = kernel_processes::spawn_gate::collected(
         nest.args(shared)
             .args(["--tmpfs", "/proc", "--", HELPER, "--read", "/", "--write"])
             .arg(&case.tmp)
@@ -2843,7 +2843,7 @@ fn broker_runs(port: u16) -> bool {
 #[test]
 fn the_broker_runs_while_the_agent_does_and_ends_with_it() {
     let case = case();
-    let held = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let held = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = held.local_addr().unwrap().port();
     let network = SandboxNetwork::Only(vec![SandboxRemote::Loopback(port)]);
     let Some(bridged) = nested(policy(&case, network)) else {
@@ -2866,7 +2866,7 @@ fn the_broker_runs_while_the_agent_does_and_ends_with_it() {
 /// `iptables-restore` on the nf_tables backend. No input. Output: true when it has both.
 fn routing_tools() -> bool {
     let slirp = SLIRP_PATHS.iter().all(|path| Path::new(path).is_file());
-    let version = crazyagent::spawn_gate::collected(
+    let version = kernel_processes::spawn_gate::collected(
         Command::new("/usr/sbin/iptables-restore")
             .arg("--version")
             .stdin(Stdio::null()),
@@ -2913,10 +2913,10 @@ fn bash(sandbox: &dyn Sandbox, case: &Case, script: &str) -> String {
 /// Serves `pong` on every address at a port Linux picks, for up to 16 connections. No
 /// input. Output: the port.
 fn pong_everywhere() -> u16 {
-    let served = crazyagent::spawn_gate::bind_tcp_std("0.0.0.0:0").unwrap();
+    let served = kernel_processes::spawn_gate::bind_tcp_std("0.0.0.0:0").unwrap();
     let port = served.local_addr().unwrap().port();
     std::thread::spawn(move || {
-        for mut asked in crazyagent::spawn_gate::incoming_tcp_std(&served)
+        for mut asked in kernel_processes::spawn_gate::incoming_tcp_std(&served)
             .flatten()
             .take(16)
         {
@@ -3115,7 +3115,7 @@ fn a_failed_setup_never_starts_the_agent() {
     };
     let temp = tempfile::tempdir().unwrap();
     let folder = temp.path().canonicalize().unwrap();
-    let mut staged = crazyagent::spawn_gate::spawn(
+    let mut staged = kernel_processes::spawn_gate::spawn(
         Command::new("/bin/sh")
             .args(["-c", STAGED, "sh"])
             .arg(&folder)
@@ -3158,7 +3158,7 @@ fn a_nested_helper_starts_only_on_the_go_byte_after_bubblewraps_own() {
     let run = |bytes: &str| {
         let temp = tempfile::tempdir().unwrap();
         let folder = temp.path().canonicalize().unwrap();
-        let mut staged = crazyagent::spawn_gate::spawn(
+        let mut staged = kernel_processes::spawn_gate::spawn(
             Command::new("/bin/sh")
                 .args(["-c", GO_STAGED, "sh"])
                 .arg(&folder)
@@ -3196,7 +3196,7 @@ fn a_nested_helper_starts_only_on_the_go_byte_after_bubblewraps_own() {
 /// need no bubblewrap, so they hold on every machine.
 #[test]
 fn the_setup_child_runs_only_on_its_nests_pipes_for_its_nests_child() {
-    let mut stand_in = crazyagent::spawn_gate::spawn(
+    let mut stand_in = kernel_processes::spawn_gate::spawn(
         Command::new("/bin/sleep")
             .arg("60")
             .stdin(Stdio::null())
@@ -3216,7 +3216,7 @@ fn the_setup_child_runs_only_on_its_nests_pipes_for_its_nests_child() {
         } else {
             setup.stdin(Stdio::null()).stdout(Stdio::null());
         }
-        let mut child = crazyagent::spawn_gate::spawn(&mut setup).unwrap();
+        let mut child = kernel_processes::spawn_gate::spawn(&mut setup).unwrap();
         if let Some(mut input) = child.stdin.take() {
             let info = format!("{{\n    \"child-pid\": {named}\n}}\n");
             let _ = input.write_all(info.as_bytes());
@@ -3326,8 +3326,10 @@ fn kept_started(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let (mut child, keeper) =
-        crazyagent::spawn_gate::kept(move || crazyagent::spawn_gate::spawn(&mut command)).unwrap();
+    let (mut child, keeper) = kernel_processes::spawn_gate::kept(move || {
+        kernel_processes::spawn_gate::spawn(&mut command)
+    })
+    .unwrap();
     let mut output = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
     output.read_line(&mut line).unwrap();
@@ -3391,7 +3393,7 @@ fn a_kept_nested_agent_ends_with_the_engine() {
     }
     let token = format!("604.{}", std::process::id());
     let ready = case.tmp.join("kept-engine-ready");
-    let mut engine = crazyagent::spawn_gate::spawn(
+    let mut engine = kernel_processes::spawn_gate::spawn(
         Command::new(std::env::current_exe().unwrap())
             .args([
                 "a_kept_nested_agent_ends_with_the_engine",
@@ -3435,7 +3437,7 @@ fn a_nested_agent_ends_with_its_harness_and_leaves_nothing_it_started() {
         .arg("-c")
         .arg(format!("setsid sleep {token} & exit 5"))
         .current_dir(case.project.join("worktrees"));
-    let mut child = crazyagent::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         sandbox
             .wrap(&harness)
             .unwrap()
@@ -3474,7 +3476,8 @@ fn supervised(case: &Case, flags: &[&str], program: &str, args: &[&str]) -> Comm
 
 /// Runs a launch to its end. Input: the launch. Output: what it wrote and how it ended.
 fn finished(mut command: Command) -> Output {
-    crazyagent::spawn_gate::output(command.stdout(Stdio::piped()).stderr(Stdio::piped())).unwrap()
+    kernel_processes::spawn_gate::output(command.stdout(Stdio::piped()).stderr(Stdio::piped()))
+        .unwrap()
 }
 
 /// What a finished launch wrote to its output, after it ended well. Input: the output.
@@ -3500,7 +3503,7 @@ fn the_call_supervisor_probe_holds_on_this_machine_and_fails_with_nothing_superv
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        crazyagent::spawn_gate::status(silenced).unwrap()
+        kernel_processes::spawn_gate::status(silenced).unwrap()
     };
     let held = tempfile::tempdir().unwrap();
     let folder = held.path().canonicalize().unwrap().join("probe");
@@ -3512,7 +3515,7 @@ fn the_call_supervisor_probe_holds_on_this_machine_and_fails_with_nothing_superv
         "Linux test machines need Linux 5.19 or newer and a ptrace scope below 2: {probe:?}"
     );
     let case = case();
-    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port().to_string();
     let mut check = helper_command();
     check.arg("--probe-supervised").arg(&port).arg(&case.tmp);
@@ -3557,7 +3560,7 @@ print('wide=' + (str(ctypes.get_errno()) if refused else 'ok'))
 #[test]
 fn a_supervised_agent_reaches_a_guarded_port_on_this_machine_and_on_no_other_host() {
     let case = case();
-    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port().to_string();
     let limited = ["--limit-network", "--connect", &port];
     let guarded = [&limited[..], &["--guard-loopback", &port][..]].concat();
@@ -3832,7 +3835,7 @@ fn a_supervised_agent_makes_no_name_outside_ascii_where_a_held_name_is_not_there
         "ref: refs/heads/main\n",
     )
     .unwrap();
-    let folding = crazyagent::spawn_gate::status(
+    let folding = kernel_processes::spawn_gate::status(
         Command::new("chattr")
             .arg("+F")
             .arg(case.project.join("folding"))
@@ -3951,7 +3954,7 @@ print('ended=' + str(child.wait()))
 #[test]
 fn a_supervised_agent_signals_only_the_programs_it_started() {
     let case = case();
-    let mut outside = crazyagent::spawn_gate::spawn(
+    let mut outside = kernel_processes::spawn_gate::spawn(
         Command::new("/bin/sleep")
             .arg("60")
             .stdin(Stdio::null())
@@ -4058,7 +4061,7 @@ fn a_supervised_agent_ends_with_its_harness_code_and_stops_with_its_group() {
     assert_eq!(code("kill -KILL $$"), Some(137));
     let token = format!("611.{}", std::process::id());
     let script = format!("trap 'echo stopped; exit 9' TERM; echo ready; sleep {token} & wait");
-    let mut child = crazyagent::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         supervised(&case, &guard, "/bin/sh", &["-c", &script])
             .stdout(Stdio::piped())
             .stderr(Stdio::null()),

@@ -80,7 +80,7 @@ pub fn depth(var: impl Fn(&str) -> Option<String>) -> Option<Depth> {
 /// Input: none. Output: Dark when macOS prints "Dark", otherwise Light,
 /// including when the command is missing or fails.
 pub fn system_appearance() -> Appearance {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/defaults")
             .args(["read", "-g", "AppleInterfaceStyle"])
             .stdin(std::process::Stdio::null())

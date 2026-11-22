@@ -282,7 +282,7 @@ pub(super) fn finish(
     failed: &str,
     timed_out: &str,
 ) -> Result<(), EngineError> {
-    let mut child = crate::spawn_gate::spawn(command).map_err(|_| failure(failed))?;
+    let mut child = kernel_processes::spawn_gate::spawn(command).map_err(|_| failure(failed))?;
     let stderr = child.stderr.take().expect("git stderr is piped");
     let reader = std::thread::spawn(move || {
         let mut sink = Vec::new();
@@ -325,7 +325,7 @@ pub(super) fn verify_config(
     if !metadata.is_file() || metadata.len() > CONFIG_BYTES_MAX {
         return Err(failed());
     }
-    let listed = crate::spawn_gate::output(
+    let listed = kernel_processes::spawn_gate::output(
         git_command(git, empty_home)
             .args(["config", "--file"])
             .arg(config)

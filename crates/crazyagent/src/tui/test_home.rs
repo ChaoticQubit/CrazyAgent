@@ -74,7 +74,7 @@ pub(in crate::tui) const LOCAL_ADDRESS: &str = "LOCAL_ADDRESS";
 /// `SO_REUSEADDR` fails. Output: the connection's two ends, which the test engine holds while
 /// it runs, and the port's address.
 pub(in crate::tui) fn refusing_port() -> ([std::net::TcpStream; 2], std::net::SocketAddr) {
-    let (held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let (held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     assert!(port != 0, "{address}");
     (held, address)
@@ -98,9 +98,11 @@ pub(in crate::tui) fn refusing_settings(settings: &str) -> ([std::net::TcpStream
 fn the_seeded_port_refuses_a_connect_within_a_tenth_of_a_second() {
     let (_held, address) = refusing_port();
     let started = std::time::Instant::now();
-    let refused =
-        crate::spawn_gate::connect_tcp_std_timeout(&address, std::time::Duration::from_secs(1))
-            .unwrap_err();
+    let refused = kernel_processes::spawn_gate::connect_tcp_std_timeout(
+        &address,
+        std::time::Duration::from_secs(1),
+    )
+    .unwrap_err();
     let took = started.elapsed();
     assert_eq!(
         refused.kind(),
@@ -152,7 +154,7 @@ pub(in crate::tui) async fn assert_no_host_model_server(global: &std::path::Path
 /// a project checkout. Inputs: the folder and the git arguments. Output: git's standard
 /// output; panics when git fails.
 pub(in crate::tui) fn git(folder: &std::path::Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

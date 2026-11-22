@@ -88,7 +88,7 @@ fn built(backend: Hiding, case: &Case) -> Result<LinuxSandbox, SandboxError> {
     let bwrap = bwrap();
     match backend {
         Hiding::Nested => {
-            let nests = crazyagent::spawn_gate::status(
+            let nests = kernel_processes::spawn_gate::status(
                 Command::new(bwrap)
                     .args(NEST_ARGS)
                     .args(["--unshare-net", "--", "/bin/true"])
@@ -121,7 +121,7 @@ struct Bound(PathBuf);
 
 impl Bound {
     fn new(source: &Path, at: &Path) -> Self {
-        let status = crazyagent::spawn_gate::status(
+        let status = kernel_processes::spawn_gate::status(
             Command::new("sudo")
                 .args(["-n", "mount", "--bind"])
                 .arg(source)
@@ -136,7 +136,7 @@ impl Bound {
 
 impl Drop for Bound {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new("sudo")
                 .args(["-n", "umount", "-l"])
                 .arg(&self.0)
@@ -215,7 +215,7 @@ fn through_a_later_mount(backend: Hiding, case: &Case, alias: &Path) -> String {
     harness
         .args(["-c", &script])
         .current_dir(case.project.join("worktrees"));
-    let mut child = crazyagent::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         sandbox
             .wrap(&harness)
             .unwrap()
@@ -305,7 +305,7 @@ impl Drop for Limit {
 
 /// Writes `user.max_user_namespaces`. Input: the value. Output: whether sysctl took it.
 fn set_limit(value: &str) -> bool {
-    crazyagent::spawn_gate::status(
+    kernel_processes::spawn_gate::status(
         Command::new("sudo")
             .args(["-n", "sysctl", "-q", "-w"])
             .arg(format!("user.max_user_namespaces={value}"))
@@ -324,13 +324,14 @@ fn set_limit(value: &str) -> bool {
 fn the_helper_and_both_builds_fail_closed_where_no_user_namespace_can_be_made() {
     let mut wrong = Vec::new();
     let helper = |what: &str| {
-        let output = crazyagent::spawn_gate::collected(Command::new(HELPER).env_clear().args([
-            "--filter-sockets",
-            "--private-mounts",
-            "--",
-            "/bin/true",
-        ]))
-        .unwrap();
+        let output =
+            kernel_processes::spawn_gate::collected(Command::new(HELPER).env_clear().args([
+                "--filter-sockets",
+                "--private-mounts",
+                "--",
+                "/bin/true",
+            ]))
+            .unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         (what.to_owned(), output.status.code(), stderr)
     };

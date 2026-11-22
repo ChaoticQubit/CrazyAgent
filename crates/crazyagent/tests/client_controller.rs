@@ -24,7 +24,7 @@ struct OwnedCli {
 
 impl OwnedCli {
     fn start(root: &Path) -> Self {
-        let child = crazyagent::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             ProcessCommand::new(env!("CARGO_BIN_EXE_crazyagent"))
                 .args(["engine"])
                 .arg(root)

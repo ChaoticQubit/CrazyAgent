@@ -314,9 +314,10 @@ pub async fn run_chooser(mut command: Command) -> Result<Pick, BridgeError> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = tokio::task::spawn_blocking(move || crazyagent::spawn_gate::output(&mut command))
-        .await
-        .map_err(|_| failure("picker_failed"))?
-        .map_err(|_| failure("picker_failed"))?;
+    let output =
+        tokio::task::spawn_blocking(move || kernel_processes::spawn_gate::output(&mut command))
+            .await
+            .map_err(|_| failure("picker_failed"))?
+            .map_err(|_| failure("picker_failed"))?;
     read_output(&output)
 }
