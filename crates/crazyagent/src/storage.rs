@@ -4300,7 +4300,7 @@ mod open_tests;
 #[cfg(all(test, unix))]
 mod project_removed_tests;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod refused_event_tests;
 
 #[cfg(all(test, unix))]

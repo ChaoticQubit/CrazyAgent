@@ -11,6 +11,7 @@ use crazyagent_plugin_agent_quit as agent_quit;
 use rusqlite::Connection;
 use sdk::settings::SAVE_QUIT;
 use sdk::{Refusal, Tier};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 /// The one `CallRefused` body a refused agent-quit save logs: ids only, no settings value.
@@ -31,11 +32,7 @@ struct Store {
 /// Opens a fresh [`Store`]. Output: the store.
 fn store() -> Store {
     let root = tempfile::tempdir().unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let path = root.path().join("db");
     let config =
         crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
