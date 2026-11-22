@@ -1281,8 +1281,8 @@ fn a_keyed_piped_harness_ends_when_the_engine_holding_its_relay_dies() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_listed_harness_on_its_own_relay_holds_the_engine_s_lifeline_and_a_keyless_one_none() {
-    use crate::credentials::SecretString;
     use crate::model_gateway::relay::Relay;
+    use kernel_security::secret::SecretString;
     use std::os::unix::fs::PermissionsExt;
     const URL: &str = "http://127.0.0.1:9/v1";
     for keyed in [true, false] {

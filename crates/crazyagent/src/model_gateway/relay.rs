@@ -1,7 +1,7 @@
 use crate::credentials::Piece::{Escaped, Plain};
-use crate::credentials::SecretString;
 use crate::engine::EngineError;
 use crate::platform::fd_wait::{self, Wake};
+use kernel_security::secret::SecretString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -583,12 +583,12 @@ fn exchange(
     let input = child.stdin.take();
     let output = child.stdout.take();
     if let Err(mut child) = shared.attach(id, child) {
-        crate::credentials::wipe(&mut config);
+        kernel_security::secret::wipe(&mut config);
         stop(&mut child);
         return Err(502);
     }
     let written = input.map(|mut input| input.write_all(&config));
-    crate::credentials::wipe(&mut config);
+    kernel_security::secret::wipe(&mut config);
     let sent = match (written, body) {
         (Some(Ok(())), Some(mut body)) => body.write_all(&incoming.body).is_ok(),
         (Some(Ok(())), None) => true,
@@ -669,7 +669,7 @@ fn upstream_child(
     match spawned {
         Ok(child) => Ok((child, config, body)),
         Err(_) => {
-            crate::credentials::wipe(&mut config);
+            kernel_security::secret::wipe(&mut config);
             Err(502)
         }
     }

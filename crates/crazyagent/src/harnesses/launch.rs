@@ -8,7 +8,6 @@ use crate::adapters::claude::{ClaudeProtocol, State as ClaudeState};
 use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexState, TurnStatus};
 use crate::adapters::events::{EventKind, RateLimitStatus, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
-use crate::credentials::SecretString;
 use crate::launch_context::{AgentContext, EngineServer, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
@@ -16,6 +15,7 @@ use crate::sandbox::InstalledSandbox;
 #[cfg(not(windows))]
 use crate::sandbox::toolchains::{self, ToolHomes};
 use crate::usage::capture::Tokens;
+use kernel_security::secret::SecretString;
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use serde::Serialize;
@@ -172,7 +172,7 @@ impl Secret {
                 .chars()
                 .any(|character| character.is_control() || character.is_whitespace())
         {
-            crate::credentials::wipe(&mut value.into_bytes());
+            kernel_security::secret::wipe(&mut value.into_bytes());
             return Err(failure("launch_secret_invalid"));
         }
         Ok(Self(value))
@@ -189,7 +189,7 @@ impl Secret {
 
 impl Drop for Secret {
     fn drop(&mut self) {
-        crate::credentials::wipe(&mut std::mem::take(&mut self.0).into_bytes());
+        kernel_security::secret::wipe(&mut std::mem::take(&mut self.0).into_bytes());
     }
 }
 

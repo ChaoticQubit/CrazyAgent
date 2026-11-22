@@ -1,8 +1,9 @@
 #![cfg(any(target_os = "linux", target_os = "windows"))]
 
 use crazyagent::credentials::{
-    GIT_HELPER_COMMAND, OsKeyring, SecretString, Store, parts, platform_store, reference,
+    GIT_HELPER_COMMAND, OsKeyring, Store, parts, platform_store, reference,
 };
+use kernel_security::secret::SecretString;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};

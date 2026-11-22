@@ -948,6 +948,7 @@ dependencies = [
  "alacritty_terminal",
  "bytemuck",
  "crazyagent",
+ "crazyagent-kernel-security",
  "getrandom 0.4.3",
  "glyphon",
  "notify",
@@ -977,6 +978,9 @@ dependencies = [
 [[package]]
 name = "crazyagent-kernel-security"
 version = "2.4.4"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "crazyagent-kernel-storage"

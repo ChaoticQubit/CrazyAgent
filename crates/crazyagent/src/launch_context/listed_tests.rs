@@ -779,7 +779,7 @@ fn an_acp_launch_on_a_keyed_account_is_handed_its_relay_and_token_and_never_the_
     let (_work, _profiles, working, profile) = work_and_profile();
     let relay = crate::model_gateway::relay::Relay::start(
         KEYED_URL,
-        crate::credentials::SecretString::new(SAVED_KEY.as_bytes().to_vec()).unwrap(),
+        kernel_security::secret::SecretString::new(SAVED_KEY.as_bytes().to_vec()).unwrap(),
     )
     .unwrap();
     let handover = crate::harnesses::accounts::handover(
@@ -990,7 +990,7 @@ fn an_acp_launch_refuses_a_keyless_hand_over_on_a_binding_with_a_relay_token() {
     let (_work, _profiles, working, profile) = work_and_profile();
     let relay = crate::model_gateway::relay::Relay::start(
         KEYED_URL,
-        crate::credentials::SecretString::new(SAVED_KEY.as_bytes().to_vec()).unwrap(),
+        kernel_security::secret::SecretString::new(SAVED_KEY.as_bytes().to_vec()).unwrap(),
     )
     .unwrap();
     let handover =

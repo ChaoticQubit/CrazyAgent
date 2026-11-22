@@ -136,7 +136,7 @@ struct PrivateInput {
 
 impl Drop for PrivateInput {
     fn drop(&mut self) {
-        crate::credentials::wipe(&mut self.bytes);
+        kernel_security::secret::wipe(&mut self.bytes);
     }
 }
 

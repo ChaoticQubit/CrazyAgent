@@ -515,7 +515,7 @@ fn a_codex_usage_read_gets_a_full_size_chatgpt_access_token() {
     let mut case = UseCase::new();
     let access = chatgpt_token(now() + 3600);
     assert!(
-        access.len() > crate::credentials::SECRET_BYTES_MAX,
+        access.len() > kernel_security::secret::SECRET_BYTES_MAX,
         "a ChatGPT access token outgrows a stored secret: {} bytes",
         access.len()
     );

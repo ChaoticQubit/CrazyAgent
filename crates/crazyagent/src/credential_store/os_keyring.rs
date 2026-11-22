@@ -1,6 +1,8 @@
 use super::Piece::Plain;
-use super::{SecretString, Store, StoreError, checked_name, parts, platform_store, reference};
+use super::{Store, checked_name, parts, platform_store, reference};
 use crate::protocol::CredentialRef;
+use kernel_security::error::StoreError;
+use kernel_security::secret::SecretString;
 use keyring_core::{CredentialStore, Entry};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -141,7 +143,7 @@ pub fn answer_git_credential(
     parts(&reference)?;
     let mut request = Vec::new();
     let read = input.take(GIT_REQUEST_BYTES_MAX).read_to_end(&mut request);
-    crate::credentials::wipe(&mut request);
+    kernel_security::secret::wipe(&mut request);
     read.map_err(|_| StoreError::code("credential_helper_io_failed"))?;
     if operation != "get" {
         return Ok(());
@@ -156,7 +158,7 @@ pub fn answer_git_credential(
     ])
     .ok_or_else(|| StoreError::code("credential_helper_io_failed"))?;
     let written = output.write_all(&answer).and_then(|()| output.flush());
-    crate::credentials::wipe(&mut answer);
+    kernel_security::secret::wipe(&mut answer);
     written.map_err(|_| StoreError::code("credential_helper_io_failed"))
 }
 
