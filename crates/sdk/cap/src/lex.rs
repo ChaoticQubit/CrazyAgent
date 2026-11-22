@@ -1,7 +1,7 @@
 use crate::{ParseError, SOURCE_BYTES_MAX};
 
 /// The kinds of token the grammar has: a word (name, keyword or scalar, dots kept inside),
-/// the five punctuation marks, the arrow, and the end of the source.
+/// the seven punctuation marks, the arrow, and the end of the source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
     Word,
@@ -9,6 +9,8 @@ pub(crate) enum Kind {
     CloseBrace,
     OpenParen,
     CloseParen,
+    OpenAngle,
+    CloseAngle,
     Comma,
     Colon,
     Arrow,
@@ -69,6 +71,8 @@ pub(crate) fn lex(source: &str) -> Result<Vec<Token<'_>>, ParseError> {
             b'}' => Kind::CloseBrace,
             b'(' => Kind::OpenParen,
             b')' => Kind::CloseParen,
+            b'<' => Kind::OpenAngle,
+            b'>' => Kind::CloseAngle,
             b',' => Kind::Comma,
             b':' => Kind::Colon,
             b'-' if bytes.get(index + 1) == Some(&b'>') => {

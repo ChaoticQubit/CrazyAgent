@@ -1,0 +1,27 @@
+handle Secret
+enum Method { get, post }
+type Header { name: text, value: text }
+type Request { method: Method, url: text, headers: list<Header>, body: option<bytes>, timeout_ms: option<u32> }
+type Reply { status: u16, body: bytes }
+type Pair { secret: Secret, count: u16 }
+type Keyed { secret: Secret, label: text }
+type Envelope { reply: Reply, tags: list<text>, extra: option<Header>, grid: list<list<text>> }
+capability fixture.send(request: Request) -> Reply
+  tier: t2
+  needs: fixture.net
+  emits: FixtureSent { status: u16, url: text }
+capability fixture.reveal(secret: Secret) -> option<text>
+  tier: t1
+  needs: fixture.secret
+capability fixture.pair(pair: Pair, keyed: Keyed) -> unit
+  tier: t1
+  needs: fixture.secret
+capability fixture.count(flags: list<bool>) -> u32
+  tier: t1
+  needs: fixture.count
+capability fixture.wrap(envelope: Envelope) -> unit
+  tier: t1
+  needs: fixture.count
+capability fixture.shadow(fits_reply: Reply, fits_header: list<Header>) -> unit
+  tier: t1
+  needs: fixture.count
