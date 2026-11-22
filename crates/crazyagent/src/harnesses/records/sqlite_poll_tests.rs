@@ -407,7 +407,8 @@ fn a_value_past_the_value_bound_is_refused_not_built() {
 }
 
 /// Review t15-sec F5: a virtual table under a schema table name is refused, so no table
-/// module runs over tables the harness wrote.
+/// module runs over tables the harness wrote. The fixture writes the table's schema row
+/// itself, so the row holds on a SQLite built without the module (Windows vcpkg, no fts5).
 #[test]
 fn a_virtual_table_under_a_schema_name_is_refused() {
     let tmp = root();
@@ -417,11 +418,32 @@ fn a_virtual_table_under_a_schema_name_is_refused() {
         .execute_batch(
             "CREATE TABLE meta(version INTEGER);
              INSERT INTO meta(version) VALUES (3);
-             CREATE VIRTUAL TABLE facts USING fts5(seq, kind, body);
-             INSERT INTO facts(seq, kind, body) VALUES (1, 'text', 'hi');",
+             PRAGMA writable_schema = ON;
+             INSERT INTO sqlite_schema(type, name, tbl_name, rootpage, sql)
+             VALUES ('table', 'facts', 'facts', 0,
+                     'CREATE VIRTUAL TABLE facts USING fts5(seq, kind, body)');
+             PRAGMA writable_schema = OFF;",
         )
         .unwrap();
+    let writable: i64 = connection
+        .query_row("PRAGMA writable_schema", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        writable, 0,
+        "the schema is shut before the reader opens the file"
+    );
     drop(connection);
+    let check = Connection::open(&path).unwrap();
+    let (kind, made): (String, String) = check
+        .query_row(
+            "SELECT type, sql FROM sqlite_master WHERE name = 'facts'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(kind, "table");
+    assert!(made.starts_with("CREATE VIRTUAL TABLE facts USING fts5"));
+    drop(check);
     if !reads(&path) {
         return;
     }
