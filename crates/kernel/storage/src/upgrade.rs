@@ -1,5 +1,6 @@
 use crate::StorageError;
 use crate::migrations::{DATABASE, Texts, backup, error, forget_backup_failure, recorded, schema};
+use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -184,7 +185,11 @@ fn run(db: &mut Connection, steps: &[Step], from: i64, latest: i64) -> Result<()
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(failed(from + 1))?;
     for step in steps.iter().filter(|step| step.to > from) {
+        tx.authorizer(Some(keeps_the_transaction))
+            .map_err(failed(step.to))?;
         let result = (step.run)(&tx);
+        tx.authorizer(None::<fn(AuthContext<'_>) -> Authorization>)
+            .map_err(failed(step.to))?;
         if tx.is_autocommit() {
             return Err(Failure {
                 step: step.to,
@@ -204,6 +209,16 @@ fn run(db: &mut Connection, steps: &[Step], from: i64, latest: i64) -> Result<()
     tx.execute_batch(&format!("PRAGMA user_version = {latest}"))
         .map_err(failed(latest))?;
     tx.commit().map_err(failed(latest))
+}
+
+/// The authorizer a step runs under: it refuses every transaction and savepoint statement
+/// before it runs, so no step can commit, roll back, begin or release and leave the upgrade
+/// transaction, and allows everything else. Input: the statement's action. Output: the verdict.
+fn keeps_the_transaction(context: AuthContext<'_>) -> Authorization {
+    match context.action {
+        AuthAction::Transaction { .. } | AuthAction::Savepoint { .. } => Authorization::Deny,
+        _ => Authorization::Allow,
+    }
 }
 
 /// Returns engine.db to its state before the upgrade and builds the refusal. A step

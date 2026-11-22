@@ -41,9 +41,54 @@ fn broken(tx: &Transaction<'_>) -> Result<(), StorageError> {
     tx.execute_batch("CREATE TABLE broken (").map_err(error)
 }
 
+/// A step that ends the upgrade transaction with no transaction statement: SQLite itself
+/// rolls it back on a duplicate under `OR ROLLBACK`, and the step swallows that error.
 fn escaping(tx: &Transaction<'_>) -> Result<(), StorageError> {
-    tx.execute_batch("COMMIT; DELETE FROM kept; CREATE TABLE escaped (a);")
+    tx.execute_batch(
+        "DELETE FROM kept; CREATE TABLE escaped (a UNIQUE); INSERT INTO escaped VALUES (1);",
+    )
+    .map_err(error)?;
+    let duplicate = tx.execute("INSERT OR ROLLBACK INTO escaped VALUES (1)", []);
+    assert!(
+        duplicate.is_err(),
+        "the duplicate rolls the transaction back"
+    );
+    Ok(())
+}
+
+fn commits_and_begins(tx: &Transaction<'_>) -> Result<(), StorageError> {
+    tx.execute_batch("DELETE FROM kept; COMMIT; BEGIN;")
         .map_err(error)
+}
+
+fn commits(tx: &Transaction<'_>) -> Result<(), StorageError> {
+    tx.execute_batch("DELETE FROM kept; COMMIT;").map_err(error)
+}
+
+fn savepoints(tx: &Transaction<'_>) -> Result<(), StorageError> {
+    tx.execute_batch("SAVEPOINT inner; DELETE FROM kept; RELEASE inner;")
+        .map_err(error)
+}
+
+/// Runs an upgrade whose second step tries a transaction statement and checks it is
+/// refused before it runs, so the upgrade fails, the step's earlier delete rolls back with
+/// the transaction, and the runner's hook is gone after. Input: that step. Output: none.
+fn refused_unchanged(step: StepRun) {
+    let (root, path, mut db) = database(true);
+    let failed = upgrade(&mut db, &path, &no_texts, &steps(&[added, step]))
+        .unwrap_err()
+        .0;
+    assert!(
+        failed.starts_with("storage_migration_failed: step 3 failed: "),
+        "{failed}"
+    );
+    assert!(failed.contains("not authorized"), "{failed}");
+    assert!(failed.contains("; the database is unchanged; "), "{failed}");
+    assert_eq!(version(&db).unwrap(), 0);
+    assert!(!holds(&db, "added"));
+    assert_eq!(kept(&db), ["one"]);
+    assert_eq!(backups(root.path()).len(), 1);
+    db.execute_batch("BEGIN; ROLLBACK;").unwrap();
 }
 
 /// Whether the database holds a table. Inputs: the connection and the name. Output: the answer.
@@ -117,6 +162,7 @@ fn check_refuses_an_old_database_until_the_upgrade_brings_it_to_the_newest() {
     );
     upgrade(&mut db, &path, &no_texts, &steps(&[added, empty])).unwrap();
     check(&db, &all).unwrap();
+    db.execute_batch("BEGIN; COMMIT;").unwrap();
     assert_eq!(version(&db).unwrap(), 3);
     assert!(holds(&db, "added"));
     assert_eq!(backups(root.path()).len(), 1);
@@ -192,4 +238,19 @@ fn a_step_that_ends_the_transaction_is_restored_from_the_backup() {
     assert_eq!(version(&db).unwrap(), 0);
     assert!(!holds(&db, "added") && !holds(&db, "escaped"));
     assert_eq!(kept(&db), ["one"]);
+}
+
+#[test]
+fn a_step_that_commits_and_begins_again_is_refused_and_changes_nothing() {
+    refused_unchanged(commits_and_begins);
+}
+
+#[test]
+fn a_step_that_commits_is_refused_and_changes_nothing() {
+    refused_unchanged(commits);
+}
+
+#[test]
+fn a_step_that_opens_a_savepoint_is_refused_and_changes_nothing() {
+    refused_unchanged(savepoints);
 }
