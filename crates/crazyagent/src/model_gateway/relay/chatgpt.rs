@@ -1,6 +1,6 @@
-use crate::credentials::SecretString;
 use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
+use kernel_security::secret::SecretString;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 

@@ -233,9 +233,9 @@ impl OwnerClient {
                 let mut bytes = key.into_bytes();
                 let mut framed = (bytes.len() as u32).to_be_bytes().to_vec();
                 framed.extend_from_slice(&bytes);
-                crate::credentials::wipe(&mut bytes);
+                kernel_security::secret::wipe(&mut bytes);
                 let sent = stream.write_all(&framed).await;
-                crate::credentials::wipe(&mut framed);
+                kernel_security::secret::wipe(&mut framed);
                 sent.map_err(|_| failure("accounts_owner_unavailable"))?;
             }
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
@@ -399,12 +399,12 @@ async fn handle(
             let listed = match actor(engine, admission, Command::Get(id.clone())).await {
                 Ok(ResultValue::Account(listed)) => listed,
                 refused => {
-                    crate::credentials::wipe(&mut key.into_bytes());
+                    kernel_security::secret::wipe(&mut key.into_bytes());
                     return Err(refused.err().unwrap_or_else(unknown));
                 }
             };
             let ModelAuthentication::ApiKey { credential_ref } = &listed.connection.auth else {
-                crate::credentials::wipe(&mut key.into_bytes());
+                kernel_security::secret::wipe(&mut key.into_bytes());
                 return Err(failure("account_key_not_allowed"));
             };
             replace_key(root, credential_ref, key)?;
@@ -483,7 +483,7 @@ async fn receive_key(stream: &mut Stream) -> Result<AccountSecret, EngineError> 
         }
         let mut bytes = vec![0; size];
         if stream.read_exact(&mut bytes).await.is_err() {
-            crate::credentials::wipe(&mut bytes);
+            kernel_security::secret::wipe(&mut bytes);
             return Err(invalid());
         }
         AccountSecret::new(bytes).map_err(|_| failure("account_key_invalid"))
@@ -595,7 +595,7 @@ fn write_key(directory: &File, name: &str, key: AccountSecret) -> Result<(), Eng
     let mut file = File::from(fd);
     let mut bytes = key.into_bytes();
     let written = std::io::Write::write_all(&mut file, &bytes).and_then(|()| file.sync_all());
-    crate::credentials::wipe(&mut bytes);
+    kernel_security::secret::wipe(&mut bytes);
     if written.is_err() {
         let _ = rustix::fs::unlinkat(directory, name, rustix::fs::AtFlags::empty());
         return Err(failure("account_key_store_unavailable"));
@@ -641,7 +641,7 @@ fn store_key(
     let stored = root
         .engine_root()
         .and_then(|engine| crate::storage::accounts::store_key_file(engine, credential, &bytes));
-    crate::credentials::wipe(&mut bytes);
+    kernel_security::secret::wipe(&mut bytes);
     stored
 }
 
@@ -688,7 +688,7 @@ pub(super) fn replace_key(
     let replaced = root
         .engine_root()
         .and_then(|engine| crate::storage::accounts::replace_key_file(engine, credential, &bytes));
-    crate::credentials::wipe(&mut bytes);
+    kernel_security::secret::wipe(&mut bytes);
     replaced
 }
 
@@ -711,7 +711,7 @@ fn read_key(root: &Root, credential: &CredentialRef) -> Result<Option<Vec<u8>>, 
         .is_err()
         || bytes.len() > SECRET_MAX
     {
-        crate::credentials::wipe(&mut bytes);
+        kernel_security::secret::wipe(&mut bytes);
         return Err(failure("account_key_store_unavailable"));
     }
     Ok(Some(bytes))
@@ -948,7 +948,7 @@ async fn check(
     let checked = probe::check(&url, key.as_deref(), CHECK_PROBE).await;
     let mut key = key;
     if let Some(bytes) = key.as_mut() {
-        crate::credentials::wipe(bytes);
+        kernel_security::secret::wipe(bytes);
     }
     Ok(match checked {
         Err(_) => (view(&listed, AccountStatus::Unreachable), Vec::new()),

@@ -2736,14 +2736,14 @@ fn sized_json(value: &impl Serialize) -> Result<String, LaunchError> {
     let mut text = Vec::with_capacity(counted.0);
     let capacity = text.capacity();
     if serde_json::to_writer(&mut text, value).is_err() {
-        crate::credentials::wipe(&mut text);
+        kernel_security::secret::wipe(&mut text);
         return Err(failure("launch_context_unavailable"));
     }
     assert_eq!(text.len(), counted.0);
     assert_eq!(text.capacity(), capacity);
     String::from_utf8(text).map_err(|error| {
         let mut bytes = error.into_bytes();
-        crate::credentials::wipe(&mut bytes);
+        kernel_security::secret::wipe(&mut bytes);
         failure("launch_context_unavailable")
     })
 }
@@ -3507,7 +3507,7 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), LaunchError> {
 fn write_secret(path: &Path, text: String) -> Result<(), LaunchError> {
     let mut bytes = text.into_bytes();
     let written = write_private(path, &bytes);
-    crate::credentials::wipe(&mut bytes);
+    kernel_security::secret::wipe(&mut bytes);
     written
 }
 

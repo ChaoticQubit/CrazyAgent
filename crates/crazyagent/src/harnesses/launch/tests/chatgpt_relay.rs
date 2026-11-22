@@ -33,7 +33,7 @@ fn launch_source_of(
 ) -> std::sync::Arc<crate::model_gateway::relay::chatgpt::ChatGptSource> {
     use crate::model_gateway::relay::chatgpt::{ChatGptSource, ChatGptTokens};
     let tokens = ChatGptTokens {
-        access: crate::credentials::SecretString::bearer(LAUNCH_ACCESS.as_bytes().to_vec())
+        access: kernel_security::secret::SecretString::bearer(LAUNCH_ACCESS.as_bytes().to_vec())
             .unwrap(),
         account_id: Some("acct-launch".to_owned()),
         expires: std::time::SystemTime::now()

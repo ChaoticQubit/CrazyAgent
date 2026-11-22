@@ -383,7 +383,7 @@ impl SecretValue {
 
 impl Drop for SecretValue {
     fn drop(&mut self) {
-        crate::credentials::wipe(&mut self.0);
+        kernel_security::secret::wipe(&mut self.0);
     }
 }
 

@@ -8,3 +8,6 @@ publish.workspace = true
 [lib]
 name = "kernel_security"
 path = "src/lib.rs"
+
+[dependencies]
+zeroize = "=1.9.1"
