@@ -1,13 +1,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
-use proc_macro2::{Span, TokenStream, TokenTree};
-use syn::visit::{self, Visit};
+use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 
-use crate::Violation;
+use crate::{Bounded, Violation, read_bounded};
 
-/// The modules of `std`, `core` and `alloc` a plugin may name: data types, traits and
-/// formatting, nothing that reaches files, network, processes, the environment or threads.
+/// The modules of `core` and `alloc` a plugin may name: data types, traits and formatting,
+/// nothing that reaches files, network, processes, the environment or threads.
 pub const STD_ALLOWED: [&str; 18] = [
     "borrow",
     "boxed",
@@ -28,11 +28,35 @@ pub const STD_ALLOWED: [&str; 18] = [
     "string",
     "vec",
 ];
-/// The crate roots whose paths the allowlist governs.
-const ROOTS: [&str; 3] = ["std", "core", "alloc"];
-/// Macros a plugin may not call: file and environment readers, inline assembly, the
-/// prelude's output macros, and `macro_rules` (its bodies are not scanned as code).
-const MACROS_NOT_ALLOWED: [&str; 13] = [
+/// The macros a plugin may call, by name; any other macro call is refused.
+pub const MACROS_ALLOWED: [&str; 23] = [
+    "assert",
+    "assert_eq",
+    "assert_ne",
+    "debug_assert",
+    "debug_assert_eq",
+    "debug_assert_ne",
+    "format",
+    "write",
+    "writeln",
+    "vec",
+    "matches",
+    "panic",
+    "unreachable",
+    "todo",
+    "unimplemented",
+    "concat",
+    "stringify",
+    "cfg",
+    "line",
+    "column",
+    "file",
+    "module_path",
+    "compile_error",
+];
+/// Names refused wherever they appear, so no alias import reaches them: the compile-time
+/// file and environment readers, inline assembly and `macro_rules`.
+const NAMES_NOT_ALLOWED: [&str; 9] = [
     "include",
     "include_str",
     "include_bytes",
@@ -40,62 +64,90 @@ const MACROS_NOT_ALLOWED: [&str; 13] = [
     "option_env",
     "asm",
     "global_asm",
-    "println",
-    "print",
-    "eprintln",
-    "eprint",
-    "dbg",
+    "naked_asm",
     "macro_rules",
 ];
-/// Attributes that export or place a symbol, unsafe in effect.
-const ATTRS_UNSAFE: [&str; 3] = ["no_mangle", "export_name", "link_section"];
+/// The attributes a plugin may write, by name; any other attribute is refused.
+pub const ATTRS_ALLOWED: [&str; 14] = [
+    "doc",
+    "derive",
+    "cfg",
+    "test",
+    "inline",
+    "must_use",
+    "allow",
+    "warn",
+    "deny",
+    "forbid",
+    "expect",
+    "non_exhaustive",
+    "repr",
+    "no_std",
+];
+/// The keywords that may stand before `!` and a group without being a macro call, as in
+/// `if !(a)` or `return !(a)`.
+const KEYWORDS: [&str; 8] = [
+    "if", "while", "return", "match", "in", "break", "else", "yield",
+];
+/// The first segments a `use` may start with.
+const USE_ROOTS: [&str; 6] = ["sdk", "core", "alloc", "crate", "self", "super"];
+/// The crate roots a path may name, each only with a second segment from the allowlists.
+const ROOTS: [&str; 2] = ["core", "alloc"];
+/// The exact first lines of every plugin's `src/lib.rs`.
+pub const HEADER: &str = "#![no_std]\n#![forbid(unsafe_code)]\n";
 /// The most `.rs` files one plugin's `src` may hold.
 pub(crate) const SOURCE_FILES_MAX: usize = 256;
 /// The most bytes one plugin source file may hold.
 pub(crate) const SOURCE_BYTES_MAX: usize = 1_048_576;
 /// The deepest folder nesting below `src` the scan walks.
 const DEPTH_MAX: usize = 16;
+/// The deepest token group nesting the scan walks.
+const GROUP_DEPTH_MAX: usize = 256;
 
-/// Scans every `.rs` file below the crate's `src`, and checks that `src/lib.rs` forbids
-/// unsafe code. Inputs: the crate folder and the violation list. Output: the list grows.
+/// Scans every `.rs` file below the crate's `src` with one token pass per file, and checks
+/// that `src/lib.rs` starts with `HEADER`. Inputs: the crate folder and the violation list.
+/// Output: the list grows.
 pub(crate) fn sources(dir: &Path, out: &mut Vec<Violation>) {
     let files = rust_files(dir, out);
     let lib = PathBuf::from("src/lib.rs");
     if !files.contains(&lib) {
-        out.push(at(&lib, 1, "plugin_forbid_missing"));
+        out.push(at(&lib, 1, "plugin_header_missing"));
     }
     for file in files {
-        let Some(text) = fs::read_to_string(dir.join(&file))
-            .ok()
-            .filter(|text| text.len() <= SOURCE_BYTES_MAX)
-        else {
-            out.push(at(&file, 1, "plugin_source_too_large"));
-            continue;
-        };
-        let parsed = match syn::parse_file(&text) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                out.push(at(
-                    &file,
-                    error.span().start().line,
-                    "plugin_source_unparsed",
-                ));
+        let text = match read_bounded(&dir.join(&file), SOURCE_BYTES_MAX) {
+            Bounded::Text(text) => text,
+            Bounded::TooLarge => {
+                out.push(at(&file, 1, "plugin_source_too_large"));
+                continue;
+            }
+            Bounded::Unreadable => {
+                out.push(at(&file, 1, "plugin_source_unparsed"));
                 continue;
             }
         };
-        if file == lib && !forbids_unsafe(&parsed) {
-            out.push(at(&file, 1, "plugin_forbid_missing"));
+        if let Err(error) = syn::parse_file(&text) {
+            let line = error.span().start().line;
+            out.push(at(&file, line, "plugin_source_unparsed"));
+            continue;
+        }
+        let Ok(stream) = TokenStream::from_str(&text) else {
+            out.push(at(&file, 1, "plugin_source_unparsed"));
+            continue;
+        };
+        if file == lib && !text.starts_with(HEADER) {
+            out.push(at(&file, 1, "plugin_header_missing"));
         }
         let mut scan = Scan {
             file: &file,
             out: &mut *out,
         };
-        scan.visit_file(&parsed);
+        scan.walk(&stream, Mode::Code, 0);
     }
 }
 
 /// Lists the `.rs` files below `src`, relative to the crate folder, sorted; a symlink, a
-/// folder past `DEPTH_MAX` or more than `SOURCE_FILES_MAX` files is a violation.
+/// file not named exactly `*.rs` (a case-insensitive file system resolves `mod m;` to
+/// `m.RS`), a folder past `DEPTH_MAX` or more than `SOURCE_FILES_MAX` files is a violation.
 /// Inputs: the crate folder and the violation list. Output: the files.
 fn rust_files(dir: &Path, out: &mut Vec<Violation>) -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -121,8 +173,10 @@ fn rust_files(dir: &Path, out: &mut Vec<Violation>) -> Vec<PathBuf> {
                 } else {
                     folders.push((name, depth + 1));
                 }
-            } else if name.extension().is_some_and(|ext| ext == "rs") {
+            } else if is_rust_file(&name) {
                 files.push(name);
+            } else {
+                out.push(at(&name, 1, "plugin_manifest_not_allowed"));
             }
         }
         if files.len() > SOURCE_FILES_MAX {
@@ -136,15 +190,12 @@ fn rust_files(dir: &Path, out: &mut Vec<Violation>) -> Vec<PathBuf> {
     files
 }
 
-/// Whether a file's inner attributes hold `forbid(unsafe_code)`. Input: the parsed file.
-/// Output: true when they do.
-fn forbids_unsafe(file: &syn::File) -> bool {
-    file.attrs.iter().any(|attr| {
-        matches!(attr.style, syn::AttrStyle::Inner(_))
-            && attr.path().is_ident("forbid")
-            && matches!(&attr.meta, syn::Meta::List(list)
-                if list.tokens.clone().into_iter().any(|token| matches!(token, TokenTree::Ident(ident) if ident == "unsafe_code")))
-    })
+/// Whether a file name ends in exactly `.rs` with a stem before it. Input: the path.
+/// Output: true for a Rust source name.
+fn is_rust_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.len() > 3 && name.ends_with(".rs"))
 }
 
 /// Builds a violation. Inputs: the file, line and code. Output: the violation.
@@ -156,7 +207,16 @@ fn at(file: &Path, line: usize, code: &'static str) -> Violation {
     }
 }
 
-/// The visitor over one parsed file, adding each forbidden item it meets.
+/// Where a token stream sits: plain code, the arguments of a macro call, or the inside of
+/// an attribute. Macro arguments and attribute insides are opaque to the parser, so items
+/// and attributes there are refused outright.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Code,
+    Opaque,
+}
+
+/// The token pass over one file, adding each refused token it meets.
 struct Scan<'a> {
     file: &'a Path,
     out: &'a mut Vec<Violation>,
@@ -168,173 +228,216 @@ impl Scan<'_> {
         self.out.push(at(self.file, span.start().line, code));
     }
 
-    /// Checks the module named right after a crate root. Inputs: the name and its span.
-    /// Output: a violation when the module is outside `STD_ALLOWED`.
-    fn second(&mut self, name: &str, span: Span) {
-        if !STD_ALLOWED.contains(&name) {
-            self.push(span, "plugin_std_not_allowed");
+    /// Walks one token stream and every group inside it. Inputs: the tokens, where they
+    /// sit and the group depth. Output: violations added.
+    fn walk(&mut self, stream: &TokenStream, mode: Mode, depth: usize) {
+        let tokens: Vec<TokenTree> = stream.clone().into_iter().collect();
+        if depth > GROUP_DEPTH_MAX {
+            if let Some(first) = tokens.first() {
+                self.push(first.span(), "plugin_source_too_large");
+            }
+            return;
+        }
+        let mut index = 0;
+        while index < tokens.len() {
+            index = self.token(&tokens, index, mode, depth);
         }
     }
 
-    /// Checks a `use` tree at the top level of a `use` item: a crate root may only be
-    /// followed by an allowed module, and is never renamed, globbed or used whole.
-    /// Input: the tree. Output: violations added.
-    fn use_top(&mut self, tree: &syn::UseTree) {
-        match tree {
-            syn::UseTree::Path(path) if is_root(&path.ident) => self.use_second(&path.tree),
-            syn::UseTree::Name(name) if is_root(&name.ident) => {
-                self.push(name.ident.span(), "plugin_std_not_allowed");
+    /// Checks the token at one index and walks what it opens. Inputs: the tokens, the
+    /// index, the mode and the group depth. Output: the index of the next token to check.
+    fn token(&mut self, tokens: &[TokenTree], index: usize, mode: Mode, depth: usize) -> usize {
+        match &tokens[index] {
+            TokenTree::Group(group) => {
+                self.walk(&group.stream(), mode, depth + 1);
+                index + 1
             }
-            syn::UseTree::Rename(rename) if is_root(&rename.ident) => {
-                self.push(rename.ident.span(), "plugin_std_not_allowed");
+            TokenTree::Punct(punct) if punct.as_char() == '#' => {
+                self.attribute(tokens, index, mode, depth)
             }
-            syn::UseTree::Group(group) => {
-                for item in &group.items {
-                    self.use_top(item);
+            TokenTree::Punct(_) | TokenTree::Literal(_) => index + 1,
+            TokenTree::Ident(ident) => {
+                let name = ident.to_string();
+                if name.starts_with("r#") {
+                    self.push(ident.span(), "plugin_raw_ident");
+                    return index + 1;
                 }
+                self.ident(tokens, index, &name, mode, depth)
+            }
+        }
+    }
+
+    /// Checks one plain identifier: `std`, `unsafe`, the refused names, a crate root and its
+    /// second segment, `use` and `extern crate`, items inside macro arguments, and a macro
+    /// call's name. Inputs: the tokens, the index, the name, the mode and the group depth.
+    /// Output: the index of the next token to check.
+    fn ident(
+        &mut self,
+        tokens: &[TokenTree],
+        index: usize,
+        name: &str,
+        mode: Mode,
+        depth: usize,
+    ) -> usize {
+        let span = tokens[index].span();
+        match name {
+            "std" => self.push(span, "plugin_std_not_allowed"),
+            "unsafe" => self.push(span, "plugin_unsafe"),
+            "use" | "extern" | "mod" if mode == Mode::Opaque => {
+                self.push(span, "plugin_macro_item_not_allowed");
+            }
+            "use" => self.use_roots(tokens.get(index + 1..).unwrap_or_default()),
+            "extern" if is_ident(tokens.get(index + 1), "crate") => {
+                return self.extern_crate(tokens, index);
             }
             _ => {}
         }
+        if NAMES_NOT_ALLOWED.contains(&name) {
+            self.push(span, "plugin_macro_not_allowed");
+        }
+        if ROOTS.contains(&name) {
+            self.root(tokens, index);
+        }
+        let called = !KEYWORDS.contains(&name)
+            && is_punct(tokens.get(index + 1), '!')
+            && matches!(tokens.get(index + 2), Some(TokenTree::Group(_)));
+        if !called {
+            return index + 1;
+        }
+        if !MACROS_ALLOWED.contains(&name) && !NAMES_NOT_ALLOWED.contains(&name) {
+            self.push(span, "plugin_macro_not_allowed");
+        }
+        if let Some(TokenTree::Group(group)) = tokens.get(index + 2) {
+            self.walk(&group.stream(), Mode::Opaque, depth + 1);
+        }
+        index + 3
     }
 
-    /// Checks the tree right after a crate root in a `use`. Input: the tree.
+    /// Checks a crate root's second segment: `core` and `alloc` are named only as
+    /// `root::name` with `name` an allowed module or macro, wherever the root sits, so a
+    /// rename through `crate::` or `self::` is refused too. Inputs: the tokens and the root's
+    /// index. Output: a violation when the form is any other.
+    fn root(&mut self, tokens: &[TokenTree], index: usize) {
+        let path = is_punct(tokens.get(index + 1), ':') && is_punct(tokens.get(index + 2), ':');
+        match tokens.get(index + 3) {
+            Some(TokenTree::Ident(next)) if path => {
+                let next = next.to_string();
+                let allowed = STD_ALLOWED.contains(&next.as_str())
+                    || MACROS_ALLOWED.contains(&next.as_str())
+                    || NAMES_NOT_ALLOWED.contains(&next.as_str())
+                    || next.starts_with("r#");
+                if !allowed {
+                    self.push(tokens[index + 3].span(), "plugin_std_not_allowed");
+                }
+            }
+            _ => self.push(tokens[index].span(), "plugin_std_not_allowed"),
+        }
+    }
+
+    /// Checks the first segment of each tree of a `use`: one of `USE_ROOTS`, never a leading
+    /// `::`; a `std` start is left to the `std` rule. Input: the tokens after `use`.
     /// Output: violations added.
-    fn use_second(&mut self, tree: &syn::UseTree) {
-        match tree {
-            syn::UseTree::Path(path) => self.second(&path.ident.to_string(), path.ident.span()),
-            syn::UseTree::Name(name) => self.second(&name.ident.to_string(), name.ident.span()),
-            syn::UseTree::Rename(rename) => {
-                self.second(&rename.ident.to_string(), rename.ident.span());
-            }
-            syn::UseTree::Glob(glob) => self.push(glob.star_token.span, "plugin_std_not_allowed"),
-            syn::UseTree::Group(group) => {
-                for item in &group.items {
-                    self.use_second(item);
+    fn use_roots(&mut self, rest: &[TokenTree]) {
+        match rest.first() {
+            Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Brace => {
+                let inner: Vec<TokenTree> = group.stream().into_iter().collect();
+                for part in inner.split(|token| is_punct(Some(token), ',')) {
+                    self.use_root(part);
                 }
             }
-        }
-    }
-
-    /// Scans a token stream the parser does not read as code (macro input, attribute
-    /// arguments): a crate root followed by `::` and a module, a forbidden macro name
-    /// followed by `!`, and the word `unsafe`. Input: the tokens. Output: violations added.
-    fn tokens(&mut self, stream: &TokenStream) {
-        let tokens: Vec<TokenTree> = stream.clone().into_iter().collect();
-        for (index, token) in tokens.iter().enumerate() {
-            match token {
-                TokenTree::Group(group) => self.tokens(&group.stream()),
-                TokenTree::Ident(ident) => {
-                    let name = ident.to_string();
-                    if name == "unsafe" {
-                        self.push(ident.span(), "plugin_unsafe");
-                    }
-                    if is_punct(tokens.get(index + 1), '!')
-                        && MACROS_NOT_ALLOWED.contains(&name.as_str())
-                    {
-                        self.push(ident.span(), "plugin_macro_not_allowed");
-                    }
-                    if ROOTS.contains(&name.as_str())
-                        && is_punct(tokens.get(index + 1), ':')
-                        && is_punct(tokens.get(index + 2), ':')
-                    {
-                        match tokens.get(index + 3) {
-                            Some(TokenTree::Ident(next)) => {
-                                self.second(&next.to_string(), next.span())
-                            }
-                            _ => self.push(ident.span(), "plugin_std_not_allowed"),
-                        }
-                    }
-                }
-                TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+            _ => {
+                let end = rest
+                    .iter()
+                    .position(|token| is_punct(Some(token), ';'))
+                    .unwrap_or(rest.len());
+                self.use_root(&rest[..end]);
             }
         }
     }
-}
 
-impl<'ast> Visit<'ast> for Scan<'_> {
-    fn visit_signature(&mut self, sig: &'ast syn::Signature) {
-        if let Some(token) = &sig.unsafety {
-            self.push(token.span, "plugin_unsafe");
+    /// Checks one `use` tree's first segment. Input: the tree's tokens. Output: a violation
+    /// when it starts with `::` or a name outside `USE_ROOTS`.
+    fn use_root(&mut self, tree: &[TokenTree]) {
+        let leading = is_punct(tree.first(), ':');
+        if leading && let Some(first) = tree.first() {
+            let name = tree.iter().find_map(|token| match token {
+                TokenTree::Ident(ident) => Some(ident.to_string()),
+                _ => None,
+            });
+            if name.as_deref() != Some("std") {
+                self.push(first.span(), "plugin_use_not_allowed");
+            }
+            return;
         }
-        visit::visit_signature(self, sig);
-    }
-
-    fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
-        if let Some(token) = &item.unsafety {
-            self.push(token.span, "plugin_unsafe");
+        let first = tree.iter().find(|token| !is_punct(Some(token), ':'));
+        let Some(TokenTree::Ident(ident)) = first else {
+            return;
+        };
+        let name = ident.to_string();
+        if name == "std" || name.starts_with("r#") {
+            return;
         }
-        visit::visit_item_impl(self, item);
-    }
-
-    fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
-        if let Some(token) = &item.unsafety {
-            self.push(token.span, "plugin_unsafe");
+        if leading || !USE_ROOTS.contains(&name.as_str()) {
+            self.push(ident.span(), "plugin_use_not_allowed");
         }
-        visit::visit_item_trait(self, item);
     }
 
-    fn visit_expr_unsafe(&mut self, expr: &'ast syn::ExprUnsafe) {
-        self.push(expr.unsafe_token.span, "plugin_unsafe");
-        visit::visit_expr_unsafe(self, expr);
-    }
-
-    fn visit_item_foreign_mod(&mut self, item: &'ast syn::ItemForeignMod) {
-        self.push(item.abi.extern_token.span, "plugin_unsafe");
-        visit::visit_item_foreign_mod(self, item);
-    }
-
-    fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
-        self.push(item.extern_token.span, "plugin_extern_crate");
-        visit::visit_item_extern_crate(self, item);
-    }
-
-    fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
-        let path = attr.path();
-        if path.is_ident("path") {
-            self.push(attr.pound_token.span, "plugin_path_attr");
+    /// Checks an `extern crate` item: only the exact `extern crate alloc;` passes.
+    /// Inputs: the tokens and the index of `extern`. Output: the index after the item.
+    fn extern_crate(&mut self, tokens: &[TokenTree], index: usize) -> usize {
+        let exact =
+            is_ident(tokens.get(index + 2), "alloc") && is_punct(tokens.get(index + 3), ';');
+        if exact {
+            return index + 4;
         }
-        if ATTRS_UNSAFE.iter().any(|name| path.is_ident(name)) {
-            self.push(attr.pound_token.span, "plugin_unsafe");
-        }
-        if let syn::Meta::List(list) = &attr.meta {
-            self.tokens(&list.tokens);
-        }
-        visit::visit_attribute(self, attr);
+        self.push(tokens[index].span(), "plugin_extern_crate");
+        tokens[index..]
+            .iter()
+            .position(|token| is_punct(Some(token), ';'))
+            .map_or(tokens.len(), |end| index + end + 1)
     }
 
-    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-        if let Some(last) = mac.path.segments.last()
-            && MACROS_NOT_ALLOWED.contains(&last.ident.to_string().as_str())
-        {
-            self.push(last.ident.span(), "plugin_macro_not_allowed");
+    /// Checks an attribute `#[..]` or `#![..]`: refused inside macro arguments, else its name
+    /// must be in `ATTRS_ALLOWED` (`path` has its own code); its inside is walked as opaque.
+    /// Inputs: the tokens, the index of `#`, the mode and the group depth. Output: the index
+    /// after the attribute.
+    fn attribute(&mut self, tokens: &[TokenTree], index: usize, mode: Mode, depth: usize) -> usize {
+        let inner = usize::from(is_punct(tokens.get(index + 1), '!'));
+        let Some(TokenTree::Group(group)) = tokens.get(index + 1 + inner) else {
+            return index + 1;
+        };
+        if group.delimiter() != Delimiter::Bracket {
+            return index + 1;
         }
-        self.tokens(&mac.tokens);
-        visit::visit_macro(self, mac);
-    }
-
-    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-        self.use_top(&item.tree);
-    }
-
-    fn visit_path(&mut self, path: &'ast syn::Path) {
-        let mut segments = path.segments.iter();
-        if let (Some(first), Some(second)) = (segments.next(), segments.next())
-            && is_root(&first.ident)
-        {
-            self.second(&second.ident.to_string(), second.ident.span());
+        if mode == Mode::Opaque {
+            self.push(tokens[index].span(), "plugin_macro_item_not_allowed");
+            return index + 2 + inner;
         }
-        visit::visit_path(self, path);
+        match group.stream().into_iter().next() {
+            Some(TokenTree::Ident(head)) => {
+                let name = head.to_string();
+                if name == "path" {
+                    self.push(head.span(), "plugin_path_attr");
+                } else if !name.starts_with("r#") && !ATTRS_ALLOWED.contains(&name.as_str()) {
+                    self.push(head.span(), "plugin_attr_not_allowed");
+                }
+            }
+            Some(head) => self.push(head.span(), "plugin_attr_not_allowed"),
+            None => self.push(tokens[index].span(), "plugin_attr_not_allowed"),
+        }
+        self.walk(&group.stream(), Mode::Opaque, depth + 1);
+        index + 2 + inner
     }
-}
-
-/// Whether an identifier is one of the crate roots `std`, `core` or `alloc`.
-/// Input: the identifier. Output: true for a root.
-fn is_root(ident: &proc_macro2::Ident) -> bool {
-    ROOTS.iter().any(|root| ident == root)
 }
 
 /// Whether a token is a given punctuation mark. Inputs: the token, if any, and the mark.
 /// Output: true when it is that mark.
 fn is_punct(token: Option<&TokenTree>, mark: char) -> bool {
     matches!(token, Some(TokenTree::Punct(punct)) if punct.as_char() == mark)
+}
+
+/// Whether a token is a given plain identifier. Inputs: the token, if any, and the name.
+/// Output: true when it is that identifier.
+fn is_ident(token: Option<&TokenTree>, name: &str) -> bool {
+    matches!(token, Some(TokenTree::Ident(ident)) if ident == name)
 }

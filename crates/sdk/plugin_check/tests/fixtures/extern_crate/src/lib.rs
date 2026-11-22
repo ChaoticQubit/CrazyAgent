@@ -1,8 +1,9 @@
+#![no_std]
 #![forbid(unsafe_code)]
 
-extern crate alloc;
+extern crate core as c;
 
-/// A boxed byte.
-pub fn boxed() -> alloc::boxed::Box<u8> {
-    alloc::boxed::Box::new(1)
+/// One.
+pub fn one() -> u8 {
+    c::convert::identity(1)
 }

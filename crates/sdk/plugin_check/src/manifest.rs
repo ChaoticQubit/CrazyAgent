@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use toml::{Table, Value};
 
-use crate::{CANONICAL_BUILD_RS, Manifest, Violation};
+use crate::{Bounded, CANONICAL_BUILD_RS, Manifest, Violation, read_bounded};
 
 /// The most bytes a plugin's `Cargo.toml`, `plugin.toml` or `build.rs` may hold.
 pub(crate) const MANIFEST_BYTES_MAX: usize = 65_536;
@@ -17,6 +17,8 @@ const CHECK_DEPENDENCY: (&str, &str) = (
     "crazyagent-plugin-check",
     "../../../crates/sdk/plugin_check",
 );
+/// The one edition a plugin is built with, literal or inherited from the workspace.
+const EDITION: &str = "2024";
 /// The tables a plugin `Cargo.toml` may hold.
 const TOP_KEYS: [&str; 4] = ["package", "lib", "dependencies", "build-dependencies"];
 /// The keys a plugin `[package]` may hold.
@@ -74,6 +76,20 @@ pub(crate) fn cargo(dir: &Path, out: &mut Vec<Violation>) {
         if value.is_some_and(|value| value.as_str() != Some(wanted)) {
             refuse(out, key, "plugin_manifest_not_allowed");
         }
+    }
+    let edition = table
+        .get("package")
+        .and_then(|package| package.get("edition"));
+    let pinned = match edition {
+        Some(Value::String(edition)) => edition == EDITION,
+        Some(Value::Table(inherited)) => {
+            inherited.len() == 1
+                && inherited.get("workspace").and_then(Value::as_bool) == Some(true)
+        }
+        _ => false,
+    };
+    if !pinned {
+        refuse(out, "edition", "plugin_manifest_not_allowed");
     }
     for (section, (name, path)) in [
         ("dependencies", SDK_DEPENDENCY),
@@ -177,9 +193,10 @@ pub(crate) fn plugin(dir: &Path) -> Result<Manifest, Violation> {
 /// folder, the file name, the violation list and the code for a missing or large file.
 /// Output: the text, or `None` with one violation added.
 fn read(dir: &Path, name: &str, out: &mut Vec<Violation>, code: &'static str) -> Option<String> {
-    let text = fs::read_to_string(dir.join(name))
-        .ok()
-        .filter(|text| text.len() <= MANIFEST_BYTES_MAX);
+    let text = match read_bounded(&dir.join(name), MANIFEST_BYTES_MAX) {
+        Bounded::Text(text) => Some(text),
+        Bounded::TooLarge | Bounded::Unreadable => None,
+    };
     if text.is_none() {
         out.push(Violation {
             file: PathBuf::from(name),

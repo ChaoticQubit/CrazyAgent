@@ -1,6 +1,7 @@
+#![no_std]
 #![forbid(unsafe_code)]
 
-/// Names the program arguments.
+/// Names whether the root exists.
 pub fn args() -> String {
-    format!("{:?}", std::env::args().count())
+    format!("{:?}", std::fs::metadata("/").is_ok())
 }

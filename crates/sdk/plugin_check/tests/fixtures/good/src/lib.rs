@@ -1,7 +1,12 @@
+#![no_std]
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
 use core::fmt::Write;
-use std::collections::BTreeMap;
 
 use sdk::settings::{self, QuitSettings};
 
@@ -13,5 +18,8 @@ pub fn save(host: &dyn sdk::Host, settings: QuitSettings) -> Result<String, sdk:
     *seen.entry(settings.hours).or_default() += 1;
     let mut line = format!("hours {}", settings.hours);
     let _ = write!(line, " seen {}", seen.len());
+    if !(seen.is_empty() || settings.hours == 0) {
+        line.push_str(" kept");
+    }
     Ok(line)
 }

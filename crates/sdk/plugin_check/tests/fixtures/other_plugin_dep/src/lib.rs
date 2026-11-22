@@ -1,7 +1,12 @@
+#![no_std]
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::String;
 use core::fmt::Write;
-use std::collections::BTreeMap;
 
 use sdk::settings::{self, QuitSettings};
 
