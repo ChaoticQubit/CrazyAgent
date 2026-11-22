@@ -992,6 +992,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "crazyagent-plugin-agent-quit"
+version = "2.4.4"
+dependencies = [
+ "crazyagent-plugin-check",
+ "crazyagent-sdk",
+]
+
+[[package]]
+name = "crazyagent-plugin-check"
+version = "2.4.4"
+dependencies = [
+ "proc-macro2",
+ "syn 2.0.119",
+ "toml 1.1.6+spec-1.1.0",
+]
+
+[[package]]
 name = "crazyagent-sdk"
 version = "2.4.4"
 dependencies = [

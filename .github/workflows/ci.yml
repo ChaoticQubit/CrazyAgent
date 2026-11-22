@@ -184,6 +184,8 @@ jobs:
         run: cargo fetch --locked
       - name: Lint workspace
         run: make lint
+      - name: Check the bundled plugins
+        run: cargo test -p crazyagent-plugin-check --locked --offline
       - name: Show the free disk and the Rust target size
         if: always()
         run: |
