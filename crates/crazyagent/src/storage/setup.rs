@@ -744,11 +744,11 @@ pub(crate) fn apply_owner(
 /// this commits. Inputs: the transaction and the engine root. Output: applied or a refusal.
 #[cfg(unix)]
 fn restore_check(tx: &Transaction<'_>, root: &Path) -> Result<Outcome, EngineError> {
-    if migrations::restorable_until(root, std::time::SystemTime::now()).is_none() {
-        return Ok(rejected(migrations::RESTORE_UNAVAILABLE));
+    if kernel_storage::restore::restorable_until(root, std::time::SystemTime::now()).is_none() {
+        return Ok(rejected(kernel_storage::restore::RESTORE_UNAVAILABLE));
     }
     if migrations::agents_running(tx)? {
-        return Ok(rejected(migrations::RESTORE_AGENTS_RUNNING));
+        return Ok(rejected(kernel_storage::restore::RESTORE_AGENTS_RUNNING));
     }
     Ok(Outcome::Applied)
 }
@@ -761,14 +761,17 @@ fn restore_check(_tx: &Transaction<'_>, _root: &Path) -> Result<Outcome, EngineE
 }
 
 #[cfg(unix)]
-pub(crate) use super::migrations::{RECORD_FAILED, RECORD_PENDING, RECORD_RESTORED};
+pub(crate) use kernel_storage::restore::{RECORD_FAILED, RECORD_PENDING, RECORD_RESTORED};
 
 /// Records a restore the owner asked for as pending before the engine stops for it, so no
 /// client starts the engine again while it copies. Input: the engine root. Output: Ok once
 /// the record is on disk.
 #[cfg(unix)]
 pub(crate) fn restore_pending(root: &Path) -> Result<(), EngineError> {
-    migrations::write_restore_record(root, migrations::RECORD_PENDING)
+    Ok(kernel_storage::restore::write_restore_record(
+        root,
+        kernel_storage::restore::RECORD_PENDING,
+    )?)
 }
 
 /// Brings back the pinned 2.4 backup once the engine has stopped and every connection it
@@ -794,21 +797,21 @@ pub(crate) fn restore_after_stop(
                 .and_then(|name| name.to_str())
                 .unwrap_or("");
             assert!(!name.is_empty());
-            format!("{} {name}", migrations::RECORD_RESTORED)
+            format!("{} {name}", kernel_storage::restore::RECORD_RESTORED)
         }
         Err(cause) => {
             let code = [
-                migrations::RESTORE_UNAVAILABLE,
-                migrations::RESTORE_AGENTS_RUNNING,
-                migrations::RESTORE_BUSY,
+                kernel_storage::restore::RESTORE_UNAVAILABLE,
+                kernel_storage::restore::RESTORE_AGENTS_RUNNING,
+                kernel_storage::restore::RESTORE_BUSY,
             ]
             .into_iter()
             .find(|code| cause.0.starts_with(code))
-            .unwrap_or(migrations::RESTORE_FAILED);
-            format!("{} {code}", migrations::RECORD_FAILED)
+            .unwrap_or(kernel_storage::restore::RESTORE_FAILED);
+            format!("{} {code}", kernel_storage::restore::RECORD_FAILED)
         }
     };
-    if let Err(problem) = migrations::write_restore_record(root, &line) {
+    if let Err(problem) = kernel_storage::restore::write_restore_record(root, &line) {
         eprintln!("{}", problem.0);
     }
     restored
@@ -818,14 +821,14 @@ pub(crate) fn restore_after_stop(
 /// Output: its line, or none.
 #[cfg(unix)]
 pub(crate) fn restore_record(root: &Path) -> Option<String> {
-    migrations::read_restore_record(root)
+    kernel_storage::restore::read_restore_record(root)
 }
 
 /// Until when the owner can restore the pinned 2.4 backup of the engine at `root`, read
 /// without an engine. Input: the root. Output: the pin's end, or none.
 #[cfg(unix)]
 pub(crate) fn restorable_until(root: &Path) -> Option<std::time::SystemTime> {
-    migrations::restorable_until(root, std::time::SystemTime::now())
+    kernel_storage::restore::restorable_until(root, std::time::SystemTime::now())
 }
 
 /// Reads the setup screen inside an owner read: every pack entry with its state from the

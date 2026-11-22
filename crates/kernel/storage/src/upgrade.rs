@@ -34,10 +34,8 @@ fn latest(steps: &[Step]) -> i64 {
     expected - 1
 }
 
-/// Reads the version of record. Public until Task 7c moves the pinned restore, its last
-/// crazyagent caller, into the kernel (backlog row). Input: the connection. Output:
-/// `PRAGMA user_version`.
-pub fn version(db: &Connection) -> Result<i64, StorageError> {
+/// Reads the version of record. Input: the connection. Output: `PRAGMA user_version`.
+pub(crate) fn version(db: &Connection) -> Result<i64, StorageError> {
     db.query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(error)
 }
@@ -80,8 +78,8 @@ pub fn check(db: &Connection, steps: &[Step]) -> Result<(), StorageError> {
     }
 }
 
-/// Brings engine.db to the newest version before anything else writes to it. A database
-/// with no schema is stamped newest. An older one is backed up through
+/// Brings engine.db to the newest version before anything else writes to it, after
+/// forgetting a finished restore's record on unix. A database with no schema is stamped newest. An older one is backed up through
 /// [`crate::migrations::backup`], whose copy check always runs, then every pending step runs
 /// in one transaction. Inputs: the writable connection, its path, the settings texts to keep
 /// beside the backup and the steps. Output: Ok at the newest version, or an error naming the
@@ -92,6 +90,8 @@ pub fn upgrade(
     texts: Texts<'_>,
     steps: &[Step],
 ) -> Result<(), StorageError> {
+    #[cfg(unix)]
+    crate::restore::forget_restore(path);
     upgrade_checked(db, path, texts, steps, SystemTime::now(), backup)
 }
 
@@ -253,10 +253,9 @@ fn recover(
 }
 
 /// Copies the backup over the live database through the SQLite backup API, then checks
-/// that it reads the version and schema found before the upgrade. Public until Task 7c moves
-/// the pinned restore, its last crazyagent caller, into the kernel (backlog row). Inputs: the
-/// connection, the backup folder, that version and schema. Output: Ok once restored.
-pub fn restore(
+/// that it reads the version and schema found before the upgrade. Inputs: the connection,
+/// the backup folder, that version and schema. Output: Ok once restored.
+pub(crate) fn restore(
     db: &mut Connection,
     backup: &Path,
     found: i64,
