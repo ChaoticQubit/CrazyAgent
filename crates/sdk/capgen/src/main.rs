@@ -79,7 +79,7 @@ fn test_module(cap: &Path, out: &Path) -> ExitCode {
     let written = std::fs::read_to_string(cap)
         .map_err(|error| format!("capgen_read {}: {error}", cap.display()))
         .and_then(|source| {
-            crazyagent_cap::parse(&source).map_err(|error| {
+            crazyagent_cap::parse_as(stem, &source).map_err(|error| {
                 format!(
                     "{} {}: line {} column {}",
                     error.code,

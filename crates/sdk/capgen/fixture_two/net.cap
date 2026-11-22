@@ -1,0 +1,2 @@
+type Request { bearer: option<secrets.Secret>, keys: list<secrets.Secret>, mode: secrets.Mode }
+type Route { mode: secrets.Mode, port: u16 }
