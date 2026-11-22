@@ -136,7 +136,7 @@ fn mod_rs_lists_every_capability_once_in_file_order() {
         .1;
     assert!(
         module.contains(
-            "pub const CAPABILITIES: [crate::Capability; 3] = [alpha::ONE, beta::TWO, beta::THREE];\n"
+            "#[rustfmt::skip]\npub const CAPABILITIES: [crate::Capability; 3] = [\n    alpha::ONE,\n    beta::TWO,\n    beta::THREE,\n];\n"
         ),
         "{module}"
     );
