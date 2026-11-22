@@ -782,7 +782,10 @@ pub(crate) fn restore_after_stop(
     project: &Path,
 ) -> Result<PathBuf, EngineError> {
     let restored = super::settings::SettingsSources::open(global, project).and_then(|sources| {
-        migrations::restore_pinned(&root.join(migrations::DATABASE), Some(&sources))
+        migrations::restore_pinned(
+            &root.join(kernel_storage::migrations::DATABASE),
+            Some(&sources),
+        )
     });
     let line = match &restored {
         Ok(copy) => {

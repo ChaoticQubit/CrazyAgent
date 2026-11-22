@@ -32623,10 +32623,8 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
             problems.push(format!("{entry} kept by the launch"));
         }
     }
-    for entry in ["projects/note"] {
-        if std::fs::symlink_metadata(home.join(entry)).is_err() {
-            problems.push(format!("{entry} removed by the launch"));
-        }
+    if std::fs::symlink_metadata(home.join("projects/note")).is_err() {
+        problems.push("projects/note removed by the launch".to_owned());
     }
     if marker.exists() {
         problems.push(format!(
