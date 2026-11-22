@@ -49,7 +49,7 @@ fn sources(root: &Root) -> SettingsSources {
 }
 
 /// A later 2.5 step that changes nothing. Input: the transaction. Output: Ok.
-fn kept(_tx: &Transaction<'_>) -> Result<(), EngineError> {
+fn kept(_tx: &Transaction<'_>) -> Result<(), StorageError> {
     Ok(())
 }
 
@@ -320,7 +320,7 @@ fn checked_sha256(body: &str) -> String {
 /// A step that ends the process mid-upgrade as a crash would: it marks that it ran, then exits
 /// with no rollback and no destructor. Input: the open upgrade transaction. Output: never
 /// returns.
-fn crash(tx: &Transaction<'_>) -> Result<(), EngineError> {
+fn crash(tx: &Transaction<'_>) -> Result<(), StorageError> {
     let database = Path::new(tx.path().expect("the upgrade runs on a file"));
     std::fs::write(database.with_file_name(REACHED), b"").unwrap();
     std::process::exit(CRASH_EXIT);

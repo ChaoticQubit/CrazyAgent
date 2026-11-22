@@ -1,4 +1,4 @@
-use crate::engine::EngineError;
+use kernel_storage::StorageError;
 use rusqlite::Transaction;
 
 /// Step 14 (v2.5 L10): the settings aggregate goes on the state log. Settings rows written
@@ -6,7 +6,7 @@ use rusqlite::Transaction;
 /// through the open's proof; the step makes any settings table missing first, and a store
 /// with no settings row gets no run. Input: the open upgrade transaction. Output: Ok or the
 /// log's refusal.
-pub(super) fn settings_on_the_log(tx: &Transaction<'_>) -> Result<(), EngineError> {
+pub(super) fn settings_on_the_log(tx: &Transaction<'_>) -> Result<(), StorageError> {
     let at_ms = crate::state_log::replay::Clock::System.now_ms();
     let opening = crate::storage::opening::Opening::new(at_ms);
     crate::settings_log::first_run(tx, opening)?;
@@ -22,7 +22,7 @@ pub(super) fn settings_on_the_log(tx: &Transaction<'_>) -> Result<(), EngineErro
 /// sessions tables (L13c's four too), appended through the open's proof, texts and bodies
 /// kept as digests; a store with no row in them gets no run. Input: the open upgrade
 /// transaction. Output: Ok or the log's refusal.
-pub(super) fn sessions_on_the_log(tx: &Transaction<'_>) -> Result<(), EngineError> {
+pub(super) fn sessions_on_the_log(tx: &Transaction<'_>) -> Result<(), StorageError> {
     let at_ms = crate::state_log::replay::Clock::System.now_ms();
     let opening = crate::storage::opening::Opening::new(at_ms);
     crate::sessions_log::first_run(tx, opening)?;
@@ -38,7 +38,7 @@ pub(super) fn sessions_on_the_log(tx: &Transaction<'_>) -> Result<(), EngineErro
 /// then rows of the four written before the log reach replay through one snapshot run of
 /// all seven sessions tables, unless the log already holds an event or chunk of them. Input:
 /// the open upgrade transaction. Output: Ok or the log's refusal.
-pub(super) fn session_turns_on_the_log(tx: &Transaction<'_>) -> Result<(), EngineError> {
+pub(super) fn session_turns_on_the_log(tx: &Transaction<'_>) -> Result<(), StorageError> {
     let at_ms = crate::state_log::replay::Clock::System.now_ms();
     let opening = crate::storage::opening::Opening::new(at_ms);
     crate::sessions_log::first_run_turns(tx, opening)?;
