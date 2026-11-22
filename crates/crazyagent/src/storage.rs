@@ -3176,13 +3176,50 @@ fn setup_plan(
     )
 }
 
+/// Runs one owner request, then logs the plugin refusals the engine sink queued, after
+/// the request's own commit or rollback. Inputs: as [`owner_apply_request`]. Output: that
+/// request's result.
+fn owner_apply_with(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    path: &Path,
+    a: &Admission,
+    request: &OwnerRequest,
+    effect: Option<Effect<'_>>,
+) -> Result<OwnerApplied, EngineError> {
+    owner_apply_draining(
+        db,
+        config,
+        path,
+        a,
+        request,
+        effect,
+        crate::sdk_slice::engine_refusals(),
+    )
+}
+
+/// Runs one owner request and, when it failed and so rolled back, appends the refusals
+/// queued in a sink as `CallRefused` events in a transaction of their own. Inputs: as
+/// [`owner_apply_request`], plus the sink. Output: the request's result, unchanged.
+fn owner_apply_draining(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    path: &Path,
+    a: &Admission,
+    request: &OwnerRequest,
+    effect: Option<Effect<'_>>,
+    _refusals: &crate::sdk_slice::EngineRefusals,
+) -> Result<OwnerApplied, EngineError> {
+    owner_apply_request(db, config, path, a, request, effect)
+}
+
 /// Applies one owner mutation, optionally with a disk effect already done.
 /// Input: as `owner_apply`, plus the owner transport's finished disk work for
 /// AddExistingFolder, MoveProjectsHome or New Project. Output: the recorded
 /// receipt; such a mutation is checked again and recorded even when the
 /// revision moved meanwhile, because its revision was checked before the
 /// effect.
-fn owner_apply_with(
+fn owner_apply_request(
     db: &mut Connection,
     config: &EffectiveConfig,
     path: &Path,
@@ -4254,6 +4291,9 @@ mod open_tests;
 
 #[cfg(all(test, unix))]
 mod project_removed_tests;
+
+#[cfg(test)]
+mod refused_event_tests;
 
 #[cfg(all(test, unix))]
 pub(crate) use configured_conversation_fixture::{

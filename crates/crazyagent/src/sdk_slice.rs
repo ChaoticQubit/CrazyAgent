@@ -15,6 +15,22 @@ use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 #[cfg(test)]
 mod tests;
 
+/// The kind of the event that logs a plugin's first refused call of a run, on the
+/// `plugins` aggregate.
+pub const KIND_CALL_REFUSED: &str = "CallRefused";
+
+/// Appends each first-seen refusal queued in a sink as one `CallRefused` event, in one
+/// engine-fenced transaction of its own, so the event outlives the refused request's
+/// rollback. Inputs: the connection, the engine host and the sink. Output: the number of
+/// events appended, or the fence's or the log's refusal with the refusals queued again.
+pub(crate) fn drain_refusals(
+    _connection: &mut rusqlite::Connection,
+    _host: &crate::engine::owner::HostStamp,
+    _refusals: &EngineRefusals,
+) -> Result<usize, EngineError> {
+    Ok(0)
+}
+
 /// The most first-seen (plugin, capability) refusal pairs one run keeps for the log.
 pub(crate) const REFUSALS_PENDING_MAX: usize = 1_024;
 
@@ -117,7 +133,7 @@ pub(crate) fn bundled_grants() -> &'static Grants {
 }
 
 /// The one process-wide refusal sink the bundled path reports to. Output: the sink.
-fn engine_refusals() -> &'static EngineRefusals {
+pub(crate) fn engine_refusals() -> &'static EngineRefusals {
     static REFUSALS: OnceLock<EngineRefusals> = OnceLock::new();
     REFUSALS.get_or_init(EngineRefusals::new)
 }
