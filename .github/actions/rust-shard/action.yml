@@ -23,7 +23,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+        rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt
         echo "RUSTUP_TOOLCHAIN=$RUST_TOOLCHAIN" >> "$GITHUB_ENV"
     - name: Set debug info for the platform's disk
       shell: bash
