@@ -327,3 +327,31 @@ fn caller_is_a_reserved_input_name() {
         "capgen_reserved_name"
     );
 }
+
+#[test]
+fn a_bounded_type_named_twice_is_written_once() {
+    let source = "type Zeta { t: text }\ntype Alpha { zeta: Zeta, more: list<Zeta> }\n\
+                  capability s.a(alpha: Alpha) -> Zeta tier: t1 needs: s.w";
+    let module = crate::rust::test_module("s", &crazyagent_cap::parse(source).expect("parses"))
+        .expect("generates");
+    assert_eq!(module.matches("fn fits_zeta(").count(), 1, "{module}");
+    assert_eq!(module.matches("fn fits_alpha(").count(), 1, "{module}");
+}
+
+#[test]
+fn a_capability_named_like_a_generated_check_is_refused() {
+    assert_eq!(
+        refused(&[(
+            "s",
+            "type R { b: bytes }\ncapability s.fits_r() -> R tier: t1 needs: s.w"
+        )]),
+        "capgen_name_collision"
+    );
+    assert_eq!(
+        refused(&[(
+            "s",
+            "capability s.a(x: text) -> unit tier: t1 needs: s.w\ncapability s.check_a_input() -> unit tier: t1 needs: s.w"
+        )]),
+        "capgen_name_collision"
+    );
+}

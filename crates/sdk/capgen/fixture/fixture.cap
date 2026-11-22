@@ -5,6 +5,7 @@ type Request { method: Method, url: text, headers: list<Header>, body: option<by
 type Reply { status: u16, body: bytes }
 type Pair { secret: Secret, count: u16 }
 type Keyed { secret: Secret, label: text }
+type Envelope { reply: Reply, tags: list<text>, extra: option<Header>, grid: list<list<text>> }
 capability fixture.send(request: Request) -> Reply
   tier: t2
   needs: fixture.net
@@ -16,5 +17,8 @@ capability fixture.pair(pair: Pair, keyed: Keyed) -> unit
   tier: t1
   needs: fixture.secret
 capability fixture.count(flags: list<bool>) -> u32
+  tier: t1
+  needs: fixture.count
+capability fixture.wrap(envelope: Envelope) -> unit
   tier: t1
   needs: fixture.count

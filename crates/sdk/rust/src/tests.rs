@@ -97,8 +97,8 @@ fn the_bounds_have_their_declared_values() {
 mod bounds {
     use crate::Refusal;
     use crate::fixture_generated::{
-        Header, Method, Reply, Request, Secret, check_count_input, check_reveal_output,
-        check_send_input, check_send_output,
+        Envelope, Header, Method, Reply, Request, Secret, check_count_input, check_reveal_output,
+        check_send_input, check_send_output, check_wrap_input,
     };
 
     /// A request whose url holds `url` bytes, with `headers` headers and a body of `body`
@@ -193,6 +193,52 @@ mod bounds {
             check_reveal_output(&Some("s".repeat(crate::TEXT_BYTES_MAX + 1))),
             Err(failed)
         );
+    }
+
+    /// An envelope whose every bounded part sits exactly at its bound.
+    fn full_envelope() -> Envelope {
+        Envelope {
+            reply: Reply {
+                status: 200,
+                body: vec![0; crate::BYTES_MAX],
+            },
+            tags: vec!["t".repeat(crate::TEXT_BYTES_MAX); crate::LIST_ITEMS_MAX],
+            extra: Some(Header {
+                name: "n".repeat(crate::TEXT_BYTES_MAX),
+                value: "v".into(),
+            }),
+            grid: vec![vec!["g".into(); crate::LIST_ITEMS_MAX]; 2],
+        }
+    }
+
+    #[test]
+    fn an_envelope_at_every_bound_passes_and_each_part_one_over_is_refused() {
+        assert_eq!(check_wrap_input(&full_envelope()), Ok(()));
+        let mut body = full_envelope();
+        body.reply.body.push(0);
+        let mut tag = full_envelope();
+        tag.tags[3].push('t');
+        let mut header = full_envelope();
+        if let Some(extra) = header.extra.as_mut() {
+            extra.name.push('n');
+        }
+        let mut row = full_envelope();
+        row.grid[1].push("g".into());
+        let mut cell = full_envelope();
+        cell.grid[0][5] = "g".repeat(crate::TEXT_BYTES_MAX + 1);
+        for (part, envelope) in [
+            ("body", body),
+            ("tag", tag),
+            ("header", header),
+            ("row", row),
+            ("cell", cell),
+        ] {
+            assert_eq!(
+                check_wrap_input(&envelope),
+                Err(too_large_input()),
+                "{part}"
+            );
+        }
     }
 
     #[test]
