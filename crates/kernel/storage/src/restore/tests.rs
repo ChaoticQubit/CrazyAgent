@@ -208,3 +208,100 @@ fn the_restore_record_reads_back_only_from_a_private_file_and_a_start_forgets_al
     std::os::unix::fs::symlink(&elsewhere, &record).unwrap();
     assert_eq!(read_restore_record(root.path()), None);
 }
+
+/// A check after the restore wrote that refuses the pinned copy and checks the kept copy as the
+/// restore does, so only the restore's own check fails. Inputs: the connection and the copy.
+/// Output: Ok, or `check_forced`.
+fn fails_the_pinned_copy(db: &Connection, copy: &Path) -> Result<(), StorageError> {
+    let kept = copy
+        .parent()
+        .and_then(|folder| folder.file_name())
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(REPLACED));
+    if kept {
+        return check_copy(db, copy);
+    }
+    Err(error("check_forced"))
+}
+
+/// A check after the restore wrote that refuses every copy, so the rollback fails as well.
+/// Inputs: the connection and the copy. Output: `check_forced`.
+fn always_fails(_: &Connection, _: &Path) -> Result<(), StorageError> {
+    Err(error("check_forced"))
+}
+
+/// Runs a restore of the upgraded root whose check after the write is `check`, and returns
+/// what it left: the error, the one kept copy and the live data. Input: the check. Output:
+/// the root, the database path, the error text and the kept copy's folder.
+fn failed_after_write(check: CopyCheck) -> (tempfile::TempDir, PathBuf, String, PathBuf) {
+    let (root, path) = upgraded(true);
+    let after = Cell::new(0);
+    let hooks = Hooks {
+        texts: &no_texts,
+        busy: &idle,
+        after_restore: &|_, _, _| after.set(after.get() + 1),
+    };
+
+    let refused = restore_pinned_at(&path, &hooks, SystemTime::now(), check)
+        .unwrap_err()
+        .0;
+
+    assert_eq!(after.get(), 0);
+    let kept = replaced(root.path());
+    assert_eq!(kept.len(), 1, "{refused}");
+    assert_eq!(read(&kept[0].join(DATABASE)), (vec!["two".to_owned()], 12));
+    let folder = kept[0].clone();
+    (root, path, refused, folder)
+}
+
+#[test]
+fn a_check_that_fails_after_the_restore_wrote_rolls_engine_db_back_and_keeps_the_copy() {
+    let (_root, path, refused, kept) = failed_after_write(fails_the_pinned_copy);
+
+    assert!(refused.starts_with(RESTORE_FAILED), "{refused}");
+    assert!(refused.contains("check_forced"), "{refused}");
+    let stays = format!("the replaced data stays in {}", kept.display());
+    assert!(refused.ends_with(&stays), "{refused}");
+    assert_eq!(read(&path), (vec!["two".to_owned()], 12));
+}
+
+#[test]
+fn a_rollback_that_fails_keeps_the_copy_and_names_both_causes() {
+    let (_root, _path, refused, kept) = failed_after_write(always_fails);
+
+    assert!(refused.starts_with(RESTORE_ROLLBACK_FAILED), "{refused}");
+    assert_eq!(refused.matches("check_forced").count(), 2, "{refused}");
+    let stays = format!("the replaced data stays in {}", kept.display());
+    assert!(refused.ends_with(&stays), "{refused}");
+}
+
+#[test]
+fn a_pinned_copy_the_shape_check_refuses_leaves_no_replaced_copy() {
+    let (root, path) = upgraded(true);
+    let pinned = std::fs::read_dir(root.path().join(BACKUPS))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|folder| folder.join(DATABASE).is_file())
+        .unwrap();
+    Connection::open(pinned.join(DATABASE))
+        .unwrap()
+        .pragma_update(None, "user_version", V24_VERSION_MAX + 1)
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    let refused = restore_pinned(
+        &path,
+        &Hooks {
+            texts: &no_texts,
+            busy: &idle,
+            after_restore: &|_, _, _| panic!("no sweep after a refused restore"),
+        },
+    )
+    .unwrap_err()
+    .0;
+
+    assert!(refused.starts_with(RESTORE_FAILED), "{refused}");
+    assert!(!refused.contains("stays in"), "{refused}");
+    assert!(replaced(root.path()).is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}

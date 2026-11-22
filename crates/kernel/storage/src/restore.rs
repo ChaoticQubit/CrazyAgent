@@ -1,6 +1,6 @@
 use crate::StorageError;
 use crate::migrations::{
-    BACKUPS, DATABASE, PINNED_DAYS, Texts, V24_VERSION_MAX, backup_time, backups_folder,
+    BACKUPS, CopyCheck, DATABASE, PINNED_DAYS, Texts, V24_VERSION_MAX, backup_time, backups_folder,
     backups_in, check_copy, error, fill, mark_checked, pinned, private_file, schema, stamp,
     stamp_time,
 };
@@ -34,6 +34,9 @@ pub const RESTORE_AGENTS_RUNNING: &str = "storage_restore_agents_running";
 pub const RESTORE_BUSY: &str = "storage_restore_busy";
 /// The code any other failed restore starts with.
 pub const RESTORE_FAILED: &str = "storage_restore_failed";
+/// The code a restore starts with when it wrote engine.db, failed, and could not bring the
+/// replaced data back either, so engine.db holds neither copy for sure.
+pub const RESTORE_ROLLBACK_FAILED: &str = "storage_restore_rollback_failed";
 
 /// Until when the owner can still restore the pinned 2.4 backup of the engine at `root`, read
 /// without creating anything. Inputs: the engine root and the time now. Output: the moment the
@@ -54,7 +57,7 @@ pub fn restorable_until(root: &Path, now: SystemTime) -> Option<SystemTime> {
 /// Brings back the pinned 2.4 backup the owner asked for (L5, DEC-192), at the time now.
 /// Inputs: the database path and the engine's hooks. Output: as [`restore_pinned_at`].
 pub fn restore_pinned(path: &Path, hooks: &Hooks<'_>) -> Result<PathBuf, StorageError> {
-    restore_pinned_at(path, hooks, SystemTime::now())
+    restore_pinned_at(path, hooks, SystemTime::now(), check_copy)
 }
 
 /// [`restore_pinned`] at a given time, which ages the pin. Inputs: the database path, the
@@ -65,18 +68,20 @@ pub fn restore_pinned_at_for_test(
     hooks: &Hooks<'_>,
     now: SystemTime,
 ) -> Result<PathBuf, StorageError> {
-    restore_pinned_at(path, hooks, now)
+    restore_pinned_at(path, hooks, now, check_copy)
 }
 
 /// [`restore_pinned`] at a given time, which ages the pin. It holds engine.db alone for its
 /// whole run, refuses while the engine's busy hook says an agent runs or fails, keeps one
 /// dated 0700 copy of the data it replaces, then restores the pinned copy, checks every table
 /// against it and hands the result to the engine's after-restore hook. Inputs: the database
-/// path, the hooks and the time. Output: the folder of the copy it kept.
+/// path, the hooks, the time and the check of the live database against a copy once the
+/// restore wrote it. Output: the folder of the copy it kept.
 fn restore_pinned_at(
     path: &Path,
     hooks: &Hooks<'_>,
     now: SystemTime,
+    check: CopyCheck,
 ) -> Result<PathBuf, StorageError> {
     let root = path
         .parent()
@@ -93,7 +98,7 @@ fn restore_pinned_at(
     let pinned_copy = source.join(DATABASE);
     let restored = shape(&pinned_copy).and_then(|(version_pinned, schema_pinned)| {
         restore(&mut db, &source, version_pinned, &schema_pinned)?;
-        check_copy(&db, &pinned_copy)?;
+        check(&db, &pinned_copy)?;
         assert_eq!(version(&db)?, version_pinned);
         Ok(())
     });
