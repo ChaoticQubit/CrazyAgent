@@ -5,8 +5,9 @@ use std::sync::OnceLock;
 /// One reviewed difference against a 2.4.2 golden (v250 plan 9.13, H7, P6): the golden lines
 /// starting at line `at` that the line's capture shows as `capture` instead, the commit that
 /// made the change and why. An entry touching sandbox policy, grants, secret-carrying
-/// environment or files in an agent home is `security`, says what it widens or narrows in
-/// `change`, and holds its scenario red until the owner sets `owner_signed`.
+/// environment or files in an agent home is `security`, says in `change` whether it widens,
+/// narrows or keeps the same what agents reach, and holds its scenario red until the owner
+/// sets `owner_signed`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Entry {
@@ -31,19 +32,18 @@ pub(super) fn entries() -> &'static [Entry] {
     ALL.get_or_init(|| {
         let mut all = Vec::new();
         for kind in KINDS {
-            let path = snapshots_root().join(kind).join("intended.yaml");
-            let Ok(text) = std::fs::read_to_string(&path) else {
+            let Ok(text) =
+                std::fs::read_to_string(snapshots_root().join(kind).join("intended.yaml"))
+            else {
                 continue;
             };
             let listed: Vec<Entry> = serde_json::from_str(&text)
-                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+                .unwrap_or_else(|error| panic!("{kind}/intended.yaml: {error}"));
             for entry in &listed {
                 if let Err(why) = shape(kind, entry) {
                     panic!(
-                        "{}: {} at {}: {why}",
-                        path.display(),
-                        entry.scenario,
-                        entry.at
+                        "{kind}/intended.yaml: {} at {}: {why}",
+                        entry.scenario, entry.at
                     );
                 }
             }
@@ -52,6 +52,10 @@ pub(super) fn entries() -> &'static [Entry] {
         all
     })
 }
+
+/// How a security entry's `change` starts: what agents reach grows, shrinks, or is spelled
+/// another way with the same reach.
+const CHANGES: [&str; 3] = ["widens: ", "narrows: ", "same: "];
 
 /// Checks one entry against the rules of the list. Inputs: the kind whose file holds it and
 /// the entry. Output: Ok, or the rule it breaks.
@@ -82,9 +86,11 @@ fn shape(kind: &str, entry: &Entry) -> Result<(), String> {
     let says = entry
         .change
         .as_deref()
-        .is_some_and(|change| change.starts_with("widens: ") || change.starts_with("narrows: "));
+        .is_some_and(|change| CHANGES.iter().any(|said| change.starts_with(said)));
     if entry.security && !says {
-        return Err("a security entry says what it widens or narrows".to_owned());
+        return Err(
+            "a security entry says whether it widens, narrows or keeps the same".to_owned(),
+        );
     }
     if !entry.security && (entry.change.is_some() || entry.owner_signed) {
         return Err("only a security entry carries a change or the owner's sign-off".to_owned());
@@ -238,6 +244,11 @@ fn an_unsigned_security_entry_holds_its_scenario_and_a_signed_one_does_not() {
         ["runner/sample at line 2 (992947bb6): narrows: a sample deny"]
     );
     assert!(shape("runner", &entry(2, &["two"], &["2"], true)).is_ok());
+    let mut respelled = entry(2, &["two"], &["2"], true);
+    respelled.change = Some("same: one regex for two".to_owned());
+    assert!(shape("runner", &respelled).is_ok());
+    respelled.change = Some("a regex for two".to_owned());
+    assert!(shape("runner", &respelled).is_err());
     let mut silent = entry(2, &["two"], &["2"], true);
     silent.change = None;
     assert!(shape("runner", &silent).is_err());
