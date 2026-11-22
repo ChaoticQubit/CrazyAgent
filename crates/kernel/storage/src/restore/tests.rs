@@ -305,3 +305,42 @@ fn a_pinned_copy_the_shape_check_refuses_leaves_no_replaced_copy() {
     assert!(replaced(root.path()).is_empty());
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
+
+/// A writer that leaves a partial file behind and fails. Inputs: the path and the bytes.
+/// Output: `write_forced`.
+fn fails_after_a_partial_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
+    std::fs::write(path, &bytes[..1]).unwrap();
+    Err(error("write_forced"))
+}
+
+#[test]
+fn a_record_write_that_fails_keeps_the_old_record_and_leaves_no_temp_file() {
+    let root = tempfile::Builder::new()
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    write_restore_record(root.path(), RECORD_PENDING).unwrap();
+    let before = std::fs::read(root.path().join(RESTORE_RECORD_FILE)).unwrap();
+
+    let refused = write_record_with(
+        root.path(),
+        "restored replaced-x",
+        fails_after_a_partial_write,
+    )
+    .unwrap_err()
+    .0;
+
+    assert!(refused.contains("write_forced"), "{refused}");
+    assert_eq!(
+        std::fs::read(root.path().join(RESTORE_RECORD_FILE)).unwrap(),
+        before
+    );
+    let names = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, [RESTORE_RECORD_FILE]);
+    assert_eq!(
+        read_restore_record(root.path()).as_deref(),
+        Some(RECORD_PENDING)
+    );
+}

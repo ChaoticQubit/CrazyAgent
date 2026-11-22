@@ -37,6 +37,9 @@ pub const RESTORE_FAILED: &str = "storage_restore_failed";
 /// The code a restore starts with when it wrote engine.db, failed, and could not bring the
 /// replaced data back either, so engine.db holds neither copy for sure.
 pub const RESTORE_ROLLBACK_FAILED: &str = "storage_restore_rollback_failed";
+/// The code an engine start refuses with while the restore record says a rollback failed,
+/// so data that did not pass its check after a restore is never migrated.
+pub const ENGINE_RESTORE_BROKEN: &str = "engine_restore_broken";
 
 /// Until when the owner can still restore the pinned 2.4 backup of the engine at `root`, read
 /// without creating anything. Inputs: the engine root and the time now. Output: the moment the
@@ -236,6 +239,16 @@ const RESTORE_RECORD_BYTES_MAX: usize = 512;
 /// Replaces the restore record of the engine at `root` with one line, written private and
 /// synced. Inputs: the root and the line. Output: Ok once it is on disk.
 pub fn write_restore_record(root: &Path, line: &str) -> Result<(), StorageError> {
+    write_record_with(root, line, private_file)
+}
+
+/// [`write_restore_record`] with the private file writer given, so a row can fail it.
+/// Inputs: the root, the line and the writer. Output: as [`write_restore_record`].
+fn write_record_with(
+    root: &Path,
+    line: &str,
+    write: fn(&Path, &[u8]) -> Result<(), StorageError>,
+) -> Result<(), StorageError> {
     assert!(!line.is_empty());
     assert!(line.len() <= RESTORE_RECORD_BYTES_MAX);
     let record = root.join(RESTORE_RECORD_FILE);
@@ -244,7 +257,7 @@ pub fn write_restore_record(root: &Path, line: &str) -> Result<(), StorageError>
         Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
         Err(cause) => return Err(restore_failed(cause)),
     }
-    private_file(&record, line.as_bytes()).map_err(|cause| restore_failed(cause.0))
+    write(&record, line.as_bytes()).map_err(|cause| restore_failed(cause.0))
 }
 
 /// Reads the restore record of the engine at `root`, without an engine and without following

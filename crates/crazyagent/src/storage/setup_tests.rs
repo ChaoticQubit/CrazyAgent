@@ -2346,7 +2346,7 @@ fn removing_a_project_keeps_the_hooks_a_new_pin_matches_by_what_they_run() {
 }
 
 #[test]
-fn a_restore_names_its_copy_or_its_code_and_a_failed_rollback_leaves_no_line() {
+fn a_restore_names_its_copy_or_its_code_and_a_failed_rollback_is_recorded_as_failed() {
     let copy = Path::new("/engine/backups/replaced-20261122T110000Z").to_path_buf();
     let failed = |text: String| restore_line(&Err(EngineError(text)));
 
@@ -2366,7 +2366,8 @@ fn a_restore_names_its_copy_or_its_code_and_a_failed_rollback_leaves_no_line() {
         failed(format!(
             "{}: check; the rollback failed: check; the replaced data stays in /x",
             kernel_storage::restore::RESTORE_ROLLBACK_FAILED
-        )),
-        None
+        ))
+        .as_deref(),
+        Some("failed storage_restore_rollback_failed")
     );
 }
