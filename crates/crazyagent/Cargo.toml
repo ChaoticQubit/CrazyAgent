@@ -61,6 +61,7 @@ crazyagent-macos-fs = { path = "../crazyagent-macos-fs" }
 sha2 = { version = "=0.10.9", features = ["asm"] }
 
 [dev-dependencies]
+crazyagent-kernel-storage = { path = "../kernel/storage", features = ["test-support"] }
 tempfile = "=3.27.0"
 minisign = "=0.10.0"
 

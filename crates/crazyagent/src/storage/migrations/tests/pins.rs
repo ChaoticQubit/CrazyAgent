@@ -1,4 +1,5 @@
 use super::*;
+use kernel_storage::migrations::{backup_for_test, prune_for_test};
 use std::process::Command;
 
 /// The variable that turns a run of the crash row into the child process that crashes.
@@ -101,7 +102,7 @@ fn probed(db: &Connection) -> bool {
 /// A copy check that drops one project row from the copy first, as a write that slipped in
 /// between the copy and its check would look. Inputs: the live connection and the copy.
 /// Output: the real check's answer.
-fn tampered(db: &Connection, copy: &Path) -> Result<(), EngineError> {
+fn tampered(db: &Connection, copy: &Path) -> Result<(), StorageError> {
     let opened = Connection::open(copy).unwrap();
     let dropped = opened
         .execute(
@@ -114,10 +115,34 @@ fn tampered(db: &Connection, copy: &Path) -> Result<(), EngineError> {
     check_copy(db, copy)
 }
 
+/// The kernel backup with the [`tampered`] check in place of the real one. Inputs and output
+/// as `kernel_storage::migrations::backup`.
+fn tampered_backup(
+    db: &Connection,
+    path: &Path,
+    texts: Texts<'_>,
+    versions: (i64, i64),
+    now: SystemTime,
+) -> Result<PathBuf, StorageError> {
+    backup_for_test(db, path, texts, versions, now, tampered)
+}
+
+/// The kernel backup with the [`corrupted`] check in place of the real one. Inputs and output
+/// as `kernel_storage::migrations::backup`.
+fn corrupted_backup(
+    db: &Connection,
+    path: &Path,
+    texts: Texts<'_>,
+    versions: (i64, i64),
+    now: SystemTime,
+) -> Result<PathBuf, StorageError> {
+    backup_for_test(db, path, texts, versions, now, corrupted)
+}
+
 /// A copy check that overwrites the projects table's root page in the copy first, as a disk
 /// that lost the write would look. Inputs: the live connection and the copy. Output: the
 /// real check's answer.
-fn corrupted(db: &Connection, copy: &Path) -> Result<(), EngineError> {
+fn corrupted(db: &Connection, copy: &Path) -> Result<(), StorageError> {
     let opened = Connection::open(copy).unwrap();
     let root_page: i64 = opened
         .query_row(
@@ -155,7 +180,7 @@ fn crash_between_steps(root: &Path) -> ! {
         Some(&sources),
         &steps,
         SystemTime::now(),
-        check_copy,
+        backup,
     );
     panic!("the crash step must end the process; the upgrade returned {ended:?}");
 }
@@ -182,7 +207,7 @@ fn the_first_upgrade_of_a_2_4_database_checks_and_pins_its_backup() {
         Some(&sources),
         &steps(&[probe]),
         now,
-        check_copy,
+        backup,
     )
     .unwrap();
 
@@ -219,7 +244,7 @@ fn a_failing_step_leaves_the_p5_fixture_byte_identical() {
         Some(&sources),
         &steps(&[probe, broken]),
         SystemTime::now(),
-        check_copy,
+        backup,
     )
     .unwrap_err()
     .0;
@@ -245,7 +270,7 @@ fn a_step_that_ends_the_transaction_restores_the_p5_fixture_byte_identical() {
         Some(&sources),
         &steps(&[probe, escaping]),
         SystemTime::now(),
-        check_copy,
+        backup,
     )
     .unwrap_err()
     .0;
@@ -290,7 +315,7 @@ fn the_pinned_backup_survives_six_later_upgrades() {
             Some(&sources),
             &steps(&extra[..=index]),
             now,
-            check_copy,
+            backup,
         )
         .unwrap();
         let reached = first + i64::try_from(index).unwrap();
@@ -331,11 +356,11 @@ fn a_pinned_backup_joins_the_rotation_after_thirty_days() {
         .collect();
 
     let newest = folder.join(later.last().unwrap());
-    prune(&folder, &newest, start + DAY * (PINNED_DAYS - 1)).unwrap();
+    prune_for_test(&folder, &newest, start + DAY * (PINNED_DAYS - 1)).unwrap();
     assert!(folder.join(&pinned).is_dir());
     assert_eq!(names(&root).len(), BACKUPS_KEPT + 1);
 
-    prune(&folder, &newest, start + DAY * PINNED_DAYS).unwrap();
+    prune_for_test(&folder, &newest, start + DAY * PINNED_DAYS).unwrap();
     assert!(!folder.join(&pinned).exists());
     assert_eq!(names(&root), later);
 }
@@ -389,7 +414,7 @@ fn a_count_mismatch_stops_the_upgrade_before_any_step() {
         Some(&sources),
         &steps(&[probe]),
         SystemTime::now(),
-        tampered,
+        tampered_backup,
     )
     .unwrap_err()
     .0;
@@ -422,7 +447,7 @@ fn a_corrupt_copy_stops_the_upgrade_before_any_step() {
         Some(&sources),
         &steps(&[probe]),
         SystemTime::now(),
-        corrupted,
+        corrupted_backup,
     )
     .unwrap_err()
     .0;
@@ -479,7 +504,7 @@ fn a_crash_between_steps_keeps_the_2_4_database_and_pins_the_first_copy() {
         Some(&sources),
         &steps(&[probe]),
         SystemTime::now(),
-        check_copy,
+        backup,
     )
     .unwrap();
 
@@ -570,7 +595,7 @@ fn an_upgrade_of_the_p5_fixture_puts_its_worktree_rows_on_the_log() {
         Some(&sources),
         STEPS,
         SystemTime::now(),
-        check_copy,
+        backup,
     )
     .unwrap();
 
@@ -618,7 +643,7 @@ fn a_failure_after_step_13_leaves_no_event_and_no_change() {
         Some(&sources),
         &steps(&[broken]),
         SystemTime::now(),
-        check_copy,
+        backup,
     )
     .unwrap_err()
     .0;

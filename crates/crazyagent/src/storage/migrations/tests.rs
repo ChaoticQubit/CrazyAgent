@@ -7,9 +7,11 @@ use crate::engine::owner::{
 use crate::memory::library::{LibraryAction, MemoryScope};
 use crate::protocol::{PROTOCOL_VERSION, ProjectId, ProjectSpec, RequestId};
 use crate::storage::{Job, Storage};
+use kernel_storage::migrations::{BACKUP_FAILED, BACKUP_FAILURE_FILE, BACKUPS_KEPT, CHECKED};
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
+use std::time::UNIX_EPOCH;
 use tokio::sync::oneshot;
 
 const GLOBAL: &str = r#"version = 1
@@ -642,24 +644,6 @@ async fn the_backup_an_upgrade_just_made_outlives_folders_stamped_later() {
     assert_eq!(std::fs::read(&shaped_file).unwrap(), b"not a backup");
 }
 
-/// #512 r2 (rv-sec2 F1, leader 05:13): only a real folder of this user counts as a backup, so
-/// a folder another account placed, a link to a folder, a file or a missing entry is never
-/// counted or removed by the prune.
-#[test]
-fn only_a_real_folder_of_this_user_counts_as_a_backup() {
-    let root = Root::new();
-    let link = root.path().join("link");
-    std::os::unix::fs::symlink(root.path(), &link).unwrap();
-    assert!(own_folder(root.path()));
-    assert!(!own_folder(&link));
-    assert!(!own_folder(&root.global()));
-    assert!(!own_folder(&root.path().join("missing")));
-    assert_eq!(
-        own_folder(Path::new("/")),
-        rustix::process::getuid().as_raw() == 0
-    );
-}
-
 #[tokio::test]
 async fn newer_settings_file_is_refused_before_the_database_opens() {
     let root = Root::new();
@@ -679,34 +663,6 @@ async fn newer_settings_file_is_refused_before_the_database_opens() {
 #[should_panic(expected = "migration steps are numbered from 2 without gaps")]
 fn steps_must_be_numbered_from_two_without_gaps() {
     latest(&[Step { to: 3, run: probe }]);
-}
-
-#[test]
-fn backup_names_use_a_sortable_utc_stamp() {
-    assert_eq!(stamp(UNIX_EPOCH).unwrap(), "19700101T000000000Z");
-    assert_eq!(
-        stamp(UNIX_EPOCH + Duration::from_secs(951_868_800)).unwrap(),
-        "20000301T000000000Z"
-    );
-    assert_eq!(
-        stamp(UNIX_EPOCH + Duration::from_millis(1_709_251_199_999)).unwrap(),
-        "20240229T235959999Z"
-    );
-    assert!(stamp(UNIX_EPOCH + Duration::from_secs(253_402_300_800)).is_err());
-    assert_eq!(
-        backup_time("1-to-2-20240229T235959999Z"),
-        Some("20240229T235959999Z")
-    );
-    for other in [
-        "keep-me",
-        "1-to-2-",
-        "x-to-2-20240229T235959999Z",
-        "1-to-2-20240229T235959999",
-        "1-to-2-2024022XT235959999Z",
-        "1-to-2-2024022\u{e9}T35959999Z",
-    ] {
-        assert_eq!(backup_time(other), None, "{other}");
-    }
 }
 
 /// A setup body as engines before DEC-096 addendum 3 saved it.
@@ -1303,31 +1259,6 @@ async fn a_refused_backup_is_recorded_for_clients_and_a_later_backup_clears_it()
     assert_eq!(backup_failure(root.path()), None);
     assert!(!root.path().join(BACKUP_FAILURE_FILE).exists());
     assert_eq!(root.backups().len(), 1);
-}
-
-/// F36: clients trust the failure record only as the engine writes it: a private regular
-/// file of this user holding one known code, never through a link.
-#[test]
-fn a_backup_failure_record_counts_only_as_the_engine_writes_it() {
-    let root = Root::new();
-    let record = root.path().join(BACKUP_FAILURE_FILE);
-    let write = |text: &[u8], mode: u32| {
-        let _ = std::fs::remove_file(&record);
-        std::fs::write(&record, text).unwrap();
-        std::fs::set_permissions(&record, std::fs::Permissions::from_mode(mode)).unwrap();
-    };
-    write(b"storage_backup_failed", 0o600);
-    assert_eq!(backup_failure(root.path()), Some("storage_backup_failed"));
-    write(b"storage_backup_unsafe", 0o644);
-    assert_eq!(backup_failure(root.path()), None);
-    write(b"storage_backup_unsafe: /Users/someone", 0o600);
-    assert_eq!(backup_failure(root.path()), None);
-    std::fs::remove_file(&record).unwrap();
-    let target = root.path().join("elsewhere");
-    std::fs::write(&target, b"storage_backup_failed").unwrap();
-    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).unwrap();
-    std::os::unix::fs::symlink(&target, &record).unwrap();
-    assert_eq!(backup_failure(root.path()), None);
 }
 
 mod pins;

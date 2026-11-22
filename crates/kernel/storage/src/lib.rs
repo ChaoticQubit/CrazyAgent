@@ -1,3 +1,6 @@
+#![forbid(unsafe_code)]
+
+pub mod migrations;
 pub mod state_log;
 
 /// A refusal or failure of a storage call, as its stable code or message text. The engine
