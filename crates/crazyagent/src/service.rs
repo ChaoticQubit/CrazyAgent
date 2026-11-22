@@ -1209,13 +1209,14 @@ pub fn persistable(
         std::fs::rename(&staged, &copy).map_err(fail)?;
     }
     let recorded = copy_version_file(layout.root());
-    if bounded_text(&recorded).as_deref().map(str::trim) != Some(crate::version::VERSION) {
+    if bounded_text(&recorded).as_deref().map(str::trim) != Some(kernel_processes::version::VERSION)
+    {
         let fail = |error: std::io::Error| failure(format!("{}: {error}", recorded.display()));
         let staged = recorded.with_file_name(format!(".bin-version.{}", std::process::id()));
         if std::fs::symlink_metadata(&staged).is_ok() {
             std::fs::remove_file(&staged).map_err(fail)?;
         }
-        std::fs::write(&staged, crate::version::VERSION).map_err(fail)?;
+        std::fs::write(&staged, kernel_processes::version::VERSION).map_err(fail)?;
         std::fs::rename(&staged, &recorded).map_err(fail)?;
     }
     assert!(installed.starts_with(&copies) && installed.is_file());
@@ -1236,7 +1237,7 @@ fn copy_version_file(root: &Path) -> PathBuf {
 fn newer_engine_at(root: &Path) -> bool {
     let recorded = bounded_text(&copy_version_file(root))
         .map(|text| text.trim().to_owned())
-        .filter(|known| crate::update::is_newer(known, crate::version::VERSION).is_ok());
+        .filter(|known| crate::update::is_newer(known, kernel_processes::version::VERSION).is_ok());
     [
         crate::engine::bootstrap::reported_engine_version(root),
         recorded,
@@ -1249,7 +1250,7 @@ fn newer_engine_at(root: &Path) -> bool {
 /// Whether a known engine version is newer than this engine, or cannot be read as a version,
 /// so this engine never takes its place. Input: the known version. Output: the answer.
 fn newer_than_this(known: &str) -> bool {
-    !crate::update::is_newer(known, crate::version::VERSION).is_ok_and(|newer| !newer)
+    !crate::update::is_newer(known, kernel_processes::version::VERSION).is_ok_and(|newer| !newer)
 }
 
 /// Retires the copy an older version kept in `<data root>/bin` once the login service names
@@ -1584,11 +1585,11 @@ pub async fn check_engine(root: &Path, kind: OwnerClientKind, timeout: Duration)
     let reported = match OwnerClient::discover(root, kind, timeout).await {
         Ok((_, identity)) => identity.engine_version().to_owned(),
         Err(error) => match crate::engine::bootstrap::reported_engine_version(root) {
-            Some(version) if version != crate::version::VERSION => version,
+            Some(version) if version != kernel_processes::version::VERSION => version,
             _ => return EngineCheck::Unavailable { reason: error.0 },
         },
     };
-    match crate::version::mismatch(&reported) {
+    match kernel_processes::version::mismatch(&reported) {
         None => EngineCheck::Ready { version: reported },
         Some(message) => EngineCheck::Mismatch {
             version: reported,

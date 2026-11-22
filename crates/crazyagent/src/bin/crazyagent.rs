@@ -51,7 +51,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if args == ["--version"] {
-        println!("{}", crazyagent::version::line());
+        println!("{}", kernel_processes::version::line());
         return ExitCode::SUCCESS;
     }
     if args == ["--third-party-notices"] {

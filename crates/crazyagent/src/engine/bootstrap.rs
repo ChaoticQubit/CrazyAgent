@@ -1256,7 +1256,7 @@ impl EngineService {
             owner_socket,
             ordinary_name: ordinary.into(),
             ordinary_socket,
-            engine_version: crate::version::VERSION.into(),
+            engine_version: kernel_processes::version::VERSION.into(),
         };
         self.publish(value, previous)?;
         self.sweep_generations();
@@ -1785,7 +1785,7 @@ mod tests {
             owner_socket: id,
             ordinary_name: "engine.sock".into(),
             ordinary_socket: id,
-            engine_version: crate::version::VERSION.into(),
+            engine_version: kernel_processes::version::VERSION.into(),
         }
     }
 
@@ -1930,7 +1930,7 @@ mod tests {
     #[test]
     fn locator_carries_a_bounded_engine_version_and_tolerates_older_engines() {
         let parsed = parse_locator(&serde_json::to_vec(&sample()).unwrap()).unwrap();
-        assert_eq!(parsed.engine_version, crate::version::VERSION);
+        assert_eq!(parsed.engine_version, kernel_processes::version::VERSION);
         let mut older = serde_json::to_value(sample()).unwrap();
         older.as_object_mut().unwrap().remove("engine_version");
         let parsed = parse_locator(&serde_json::to_vec(&older).unwrap()).unwrap();
