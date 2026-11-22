@@ -4,7 +4,9 @@ use std::str::FromStr;
 
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 
-use crate::{Bounded, Violation, read_bounded};
+use kernel_plugin_host::manifest::{Bounded, read_bounded};
+
+use crate::Violation;
 
 /// The modules of `core` and `alloc` a plugin may name: data types, traits and formatting,
 /// nothing that reaches files, network, processes, the environment or threads.
