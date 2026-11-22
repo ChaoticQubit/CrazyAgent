@@ -3198,8 +3198,8 @@ fn owner_apply_with(
     )
 }
 
-/// Runs one owner request and, when it failed and so rolled back, appends the refusals
-/// queued in a sink as `CallRefused` events in a transaction of their own. Inputs: as
+/// Runs one owner request, then, after its commit or rollback, appends the refusals queued
+/// in a sink as `CallRefused` events in a transaction of their own. Inputs: as
 /// [`owner_apply_request`], plus the sink. Output: the request's result, unchanged.
 fn owner_apply_draining(
     db: &mut Connection,
@@ -3208,9 +3208,17 @@ fn owner_apply_draining(
     a: &Admission,
     request: &OwnerRequest,
     effect: Option<Effect<'_>>,
-    _refusals: &crate::sdk_slice::EngineRefusals,
+    refusals: &crate::sdk_slice::EngineRefusals,
 ) -> Result<OwnerApplied, EngineError> {
-    owner_apply_request(db, config, path, a, request, effect)
+    let result = owner_apply_request(db, config, path, a, request, effect);
+    let host = HostStamp {
+        db_instance: a.db_instance.clone(),
+        engine_epoch: a.engine_epoch.clone(),
+    };
+    if let Err(refused) = crate::sdk_slice::drain_refusals(db, &host, refusals) {
+        eprintln!("plugin_call_refused_not_logged code={}", refused.0);
+    }
+    result
 }
 
 /// Applies one owner mutation, optionally with a disk effect already done.

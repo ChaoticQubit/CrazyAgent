@@ -4,13 +4,17 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use bus_gateway::{Gateway, Grants, Refusals};
 use crazyagent_plugin_agent_quit as agent_quit;
-use rusqlite::Transaction;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 use sdk::settings::{self as sdk_settings, Provide};
 use sdk::{Capability, Refusal, Tier};
+use serde::{Deserialize, Serialize};
 
 use crate::engine::EngineError;
+use crate::engine::owner::{HostStamp, failure};
 use crate::protocol::Outcome;
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
+use crate::state_log::fence::Fence;
+use crate::state_log::{Aggregate, Appender, Draft};
 
 #[cfg(test)]
 mod tests;
@@ -19,16 +23,97 @@ mod tests;
 /// `plugins` aggregate.
 pub const KIND_CALL_REFUSED: &str = "CallRefused";
 
+/// The schema of a `CallRefused` body.
+const CALL_REFUSED_SCHEMA: u16 = 1;
+
+/// A `CallRefused` body: the refused plugin, capability and permission, static ids only,
+/// never a call input.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CallRefused {
+    plugin: String,
+    capability: String,
+    needs: String,
+}
+
+/// The capabilities the bundled plugins can call, the only ones a `CallRefused` body may
+/// name.
+const CAPABILITIES: [Capability; 1] = [sdk_settings::SAVE_QUIT];
+
+/// Whether a body is a `CallRefused` body: exactly its three keys, a bundled plugin id and a
+/// capability with its permission from [`CAPABILITIES`], so it never holds free text.
+/// Input: the body bytes. Output: true when it is.
+pub(crate) fn call_refused_closed(body: &[u8]) -> bool {
+    let Ok(refused) = serde_json::from_slice::<CallRefused>(body) else {
+        return false;
+    };
+    BUNDLED.iter().any(|(plugin, ..)| *plugin == refused.plugin)
+        && CAPABILITIES.iter().any(|capability| {
+            capability.name == refused.capability && capability.needs == refused.needs
+        })
+}
+
+/// One queued first refusal: plugin id, capability name and the permission it needs.
+type Queued = (&'static str, &'static str, &'static str);
+
 /// Appends each first-seen refusal queued in a sink as one `CallRefused` event, in one
 /// engine-fenced transaction of its own, so the event outlives the refused request's
-/// rollback. Inputs: the connection, the engine host and the sink. Output: the number of
-/// events appended, or the fence's or the log's refusal with the refusals queued again.
+/// rollback; an empty queue opens no transaction. Inputs: the connection, the engine host
+/// and the sink. Output: the events appended, or the refusal with the queue kept.
 pub(crate) fn drain_refusals(
-    _connection: &mut rusqlite::Connection,
-    _host: &crate::engine::owner::HostStamp,
-    _refusals: &EngineRefusals,
+    connection: &mut Connection,
+    host: &HostStamp,
+    refusals: &EngineRefusals,
 ) -> Result<usize, EngineError> {
-    Ok(0)
+    let queued = refusals.take_queued();
+    if queued.is_empty() {
+        return Ok(0);
+    }
+    let appended = append_refusals(connection, host, &queued);
+    if appended.is_err() {
+        refusals.requeue(queued);
+    }
+    appended
+}
+
+/// Appends queued refusals as `CallRefused` events on the `plugins` aggregate and commits.
+/// Inputs: the connection, the engine host and the refusals. Output: their number, or the
+/// fence's, the log's or SQLite's refusal.
+fn append_refusals(
+    connection: &mut Connection,
+    host: &HostStamp,
+    queued: &[Queued],
+) -> Result<usize, EngineError> {
+    assert!(!queued.is_empty() && queued.len() <= REFUSALS_PENDING_MAX);
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| failure("plugin_refusal_log_begin"))?;
+    {
+        let mut appender = Appender::own(&tx, Fence::Engine(host.clone()))?;
+        let at_ms = u64::try_from(crate::team::now_ms()).unwrap_or(0);
+        for (plugin, capability, needs) in queued {
+            let body = serde_json::to_vec(&CallRefused {
+                plugin: (*plugin).to_owned(),
+                capability: (*capability).to_owned(),
+                needs: (*needs).to_owned(),
+            })
+            .map_err(|_| failure("plugin_refusal_log_body"))?;
+            assert!(
+                call_refused_closed(&body),
+                "the engine names only its own ids"
+            );
+            appender.append(&Draft {
+                aggregate: Aggregate::Plugins,
+                kind: KIND_CALL_REFUSED,
+                schema: CALL_REFUSED_SCHEMA,
+                at_ms,
+                body: &body,
+            })?;
+        }
+    }
+    tx.commit()
+        .map_err(|_| failure("plugin_refusal_log_commit"))?;
+    Ok(queued.len())
 }
 
 /// The most first-seen (plugin, capability) refusal pairs one run keeps for the log.
@@ -139,11 +224,12 @@ pub(crate) fn engine_refusals() -> &'static EngineRefusals {
 }
 
 /// The engine's refusal sink: one diagnostic line per refused call, a per-plugin count,
-/// and the (plugin, capability) pairs first refused in this run, bounded by
-/// `REFUSALS_PENDING_MAX`. It records static ids only, never call inputs.
+/// the (plugin, capability) pairs first refused in this run, bounded by
+/// `REFUSALS_PENDING_MAX`, and the queue of those not yet logged. Static ids only.
 pub(crate) struct EngineRefusals {
     counts: Mutex<BTreeMap<&'static str, u64>>,
     pending: Mutex<BTreeSet<(&'static str, &'static str)>>,
+    queue: Mutex<Vec<Queued>>,
 }
 
 impl EngineRefusals {
@@ -152,7 +238,23 @@ impl EngineRefusals {
         Self {
             counts: Mutex::new(BTreeMap::new()),
             pending: Mutex::new(BTreeSet::new()),
+            queue: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Takes the first refusals queued since the last take. Output: them, in order.
+    fn take_queued(&self) -> Vec<Queued> {
+        let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        std::mem::take(&mut *queue)
+    }
+
+    /// Puts refusals whose events were not written back at the front of the queue.
+    /// Input: the refusals. Output: none.
+    fn requeue(&self, queued: Vec<Queued>) {
+        let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        let later = std::mem::replace(&mut *queue, queued);
+        queue.extend(later);
+        assert!(queue.len() <= REFUSALS_PENDING_MAX);
     }
 
     /// How many calls of one plugin were refused. Input: the plugin id. Output: the count.
@@ -185,8 +287,10 @@ impl Refusals for EngineRefusals {
         *count = count.saturating_add(1);
         drop(counts);
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        if pending.len() < REFUSALS_PENDING_MAX {
-            pending.insert((plugin, capability.name));
+        if pending.len() < REFUSALS_PENDING_MAX && pending.insert((plugin, capability.name)) {
+            let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+            queue.push((plugin, capability.name, needs));
+            assert!(queue.len() <= pending.len());
         }
         assert!(pending.len() <= REFUSALS_PENDING_MAX);
     }
