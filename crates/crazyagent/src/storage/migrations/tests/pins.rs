@@ -585,15 +585,16 @@ fn a_corrupt_copy_stops_the_upgrade_before_any_step() {
 }
 
 #[test]
-fn a_crash_between_steps_keeps_the_2_4_database_and_pins_the_first_copy() {
+fn a_crash_between_steps_keeps_the_2_4_database_and_pins_the_newest_2_4_copy() {
     if let Some(crashing) = std::env::var_os(CRASH_ROOT) {
         crash_between_steps(Path::new(&crashing));
     }
     let (root, bytes) = fixture();
     let before = rows(&root.connection());
     let module = module_path!().split_once("::").unwrap().1;
-    let test =
-        format!("{module}::a_crash_between_steps_keeps_the_2_4_database_and_pins_the_first_copy");
+    let test = format!(
+        "{module}::a_crash_between_steps_keeps_the_2_4_database_and_pins_the_newest_2_4_copy"
+    );
 
     let ran = crate::spawn_gate::collected(
         Command::new(std::env::current_exe().unwrap())
@@ -617,6 +618,7 @@ fn a_crash_between_steps_keeps_the_2_4_database_and_pins_the_first_copy() {
     let crashed = names(&root);
     assert_eq!(crashed.len(), 1);
     assert!(root.backups()[0].join(CHECKED).is_file());
+    let crashed_copy = std::fs::read(root.backups()[0].join(DATABASE)).unwrap();
 
     let sources = sources(&root);
     upgrade_at(
@@ -631,10 +633,15 @@ fn a_crash_between_steps_keeps_the_2_4_database_and_pins_the_first_copy() {
 
     assert_eq!(version(&db).unwrap(), latest(STEPS) + 1);
     assert_eq!(stable_rows(&db), uncrashed());
-    assert_eq!(names(&root).len(), 2);
+    let kept = names(&root);
+    assert_eq!(kept.len(), 2);
+    let rerun = kept.iter().find(|name| **name != crashed[0]).unwrap();
+    assert_eq!(pinned_name(&root, SystemTime::now()).as_ref(), Some(rerun));
+    let rerun_copy = std::fs::read(root.path().join(BACKUPS).join(rerun).join(DATABASE)).unwrap();
     assert_eq!(
-        pinned_name(&root, SystemTime::now()),
-        Some(crashed[0].clone())
+        differences(&rerun_copy, &crashed_copy),
+        Vec::<usize>::new(),
+        "the pinned re-run copy holds the 2.4 bytes of the crashed copy"
     );
 }
 
