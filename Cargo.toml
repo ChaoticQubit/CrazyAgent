@@ -9,6 +9,7 @@ members = [
     "crates/sdk/rust",
     "crates/kernel/bus_gateway",
     "crates/kernel/storage",
+    "crates/kernel/security",
     "crates/sdk/plugin_check",
     "plugins/t2/agent-quit",
     "apps/desktop/src-tauri",
