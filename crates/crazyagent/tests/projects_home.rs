@@ -73,7 +73,7 @@ fn sample(folder: &Path) {
 }
 
 fn git(folder: &Path, args: &[&str]) -> String {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("git")
             .arg("-C")
             .arg(folder)
@@ -370,7 +370,7 @@ fn special_files_are_refused_and_nothing_is_left_behind() {
     let case = case();
     let source = case.sources.join("socketed");
     sample(&source);
-    let _listener = crazyagent::spawn_gate::bind_unix_std(source.join("agent.sock")).unwrap();
+    let _listener = kernel_processes::spawn_gate::bind_unix_std(source.join("agent.sock")).unwrap();
     let before = names(&source);
 
     let refused = plan_add(
@@ -926,7 +926,7 @@ impl Volume {
             ],
         ] {
             let status =
-                crazyagent::spawn_gate::status(Command::new("/usr/bin/hdiutil").args(&args))
+                kernel_processes::spawn_gate::status(Command::new("/usr/bin/hdiutil").args(&args))
                     .unwrap();
             assert!(status.success(), "{args:?}");
         }
@@ -946,7 +946,7 @@ impl Volume {
 #[cfg(target_os = "macos")]
 impl Drop for Volume {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(Command::new("/usr/bin/hdiutil").args([
+        let _ = kernel_processes::spawn_gate::status(Command::new("/usr/bin/hdiutil").args([
             "detach",
             "-quiet",
             "-force",
@@ -958,7 +958,7 @@ impl Drop for Volume {
 #[cfg(target_os = "macos")]
 fn tool(program: &str, args: &[&str], path: &Path) {
     let status =
-        crazyagent::spawn_gate::status(Command::new(program).args(args).arg(path)).unwrap();
+        kernel_processes::spawn_gate::status(Command::new(program).args(args).arg(path)).unwrap();
     assert!(status.success(), "{program} {args:?}");
 }
 
@@ -1469,7 +1469,7 @@ fn deep(folder: &Path, levels: usize) -> PathBuf {
 }
 
 fn git_fails(folder: &Path, args: &[&str]) -> bool {
-    !crazyagent::spawn_gate::status(
+    !kernel_processes::spawn_gate::status(
         Command::new("git")
             .arg("-C")
             .arg(folder)
@@ -1678,7 +1678,8 @@ fn hard_stops_stay_whatever_the_owner_overrides() {
     }
     let socketed = case.sources.join("socketed");
     sample(&socketed);
-    let _listener = crazyagent::spawn_gate::bind_unix_std(socketed.join("agent.sock")).unwrap();
+    let _listener =
+        kernel_processes::spawn_gate::bind_unix_std(socketed.join("agent.sock")).unwrap();
     let refused = plan_add(
         &case.home,
         &case.engine,

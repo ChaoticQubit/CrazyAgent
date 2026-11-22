@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use crazyagent::spawn_gate;
+use kernel_processes::spawn_gate;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};

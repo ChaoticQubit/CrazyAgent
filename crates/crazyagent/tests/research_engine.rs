@@ -50,7 +50,7 @@ fn require_model() {
             .count(),
         2
     );
-    let listed = crazyagent::spawn_gate::connect_tcp_std(OLLAMA).and_then(|mut stream| {
+    let listed = kernel_processes::spawn_gate::connect_tcp_std(OLLAMA).and_then(|mut stream| {
         stream.set_read_timeout(Some(OLLAMA_TIME))?;
         stream.set_write_timeout(Some(OLLAMA_TIME))?;
         stream.write_all(
@@ -114,7 +114,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -134,7 +134,7 @@ struct Engine {
 
 impl Engine {
     fn start(runtime: &Path) -> Self {
-        let mut child = crazyagent::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             Command::new(env!("CARGO_BIN_EXE_crazyagent"))
                 .arg("engine")
                 .arg(runtime)
@@ -191,7 +191,7 @@ impl Engine {
 
     fn stop(mut self) -> String {
         assert!(
-            crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+            kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([
                 "-s",
                 "TERM",
                 &self.child.id().to_string()
@@ -221,7 +221,7 @@ impl Drop for Engine {
         if self.child.try_wait().ok().flatten().is_some() {
             return;
         }
-        let _ = crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+        let _ = kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([
             "-s",
             "TERM",
             &self.child.id().to_string(),
@@ -461,7 +461,7 @@ fn killing_the_engine_ends_its_research_agents() {
         left = processes_with(&marker);
     }
     for pid in &left {
-        let _ = crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+        let _ = kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([
             "-s",
             "KILL",
             &pid.to_string(),

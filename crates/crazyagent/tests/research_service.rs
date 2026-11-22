@@ -202,11 +202,11 @@ fn stopping_the_service_stops_running_agents_and_requeues_their_jobs() {
     let id = jobs
         .enqueue("project-b", "design_research", "codex", true)
         .unwrap();
-    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         let mut held = Vec::new();
-        for stream in crazyagent::spawn_gate::incoming_tcp_std(&listener)
+        for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener)
             .take(64)
             .flatten()
         {

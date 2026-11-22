@@ -265,7 +265,7 @@ fn random_ids_need_no_dev_urandom_file_as_on_windows() {
     use std::process::{Command, Stdio};
     const NO_URANDOM: &str =
         "(version 1)(allow default)(deny file-read* (literal \"/dev/urandom\"))";
-    let denied = crazyagent::spawn_gate::output(
+    let denied = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/sandbox-exec")
             .args(["-p", NO_URANDOM, "/usr/bin/head", "-c", "1", "/dev/urandom"])
             .stdin(Stdio::null())
@@ -277,7 +277,7 @@ fn random_ids_need_no_dev_urandom_file_as_on_windows() {
         !denied.status.success(),
         "the sandbox let /dev/urandom be read"
     );
-    let child = crazyagent::spawn_gate::output(
+    let child = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/sandbox-exec")
             .args(["-p", NO_URANDOM])
             .arg(std::env::current_exe().unwrap())

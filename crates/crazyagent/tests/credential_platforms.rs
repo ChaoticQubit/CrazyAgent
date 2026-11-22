@@ -63,7 +63,7 @@ fn token() -> String {
 fn git_credential(helper: &str, operation: &str, request: &str, home: &Path) -> Output {
     let config = home.join("gitconfig");
     std::fs::write(&config, "").unwrap();
-    let mut child = crazyagent::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         Command::new("git")
             .arg("-c")
             .arg("credential.helper=")
@@ -91,7 +91,7 @@ fn git_credential(helper: &str, operation: &str, request: &str, home: &Path) -> 
 }
 
 fn engine_helper(namespace: &str, item: &str, operation: &str) -> Output {
-    crazyagent::spawn_gate::output(
+    kernel_processes::spawn_gate::output(
         Command::new(ENGINE)
             .args([
                 GIT_HELPER_COMMAND,

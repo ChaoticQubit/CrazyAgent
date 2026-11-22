@@ -156,7 +156,7 @@ fn first_disk(attached: &str) -> Option<String> {
 /// Runs hdiutil. Input: its arguments, then the paths it acts on. Output: what it printed
 /// when it succeeded, or why it did not start or what it reported when it failed.
 fn hdiutil(arguments: &[&str], paths: &[&Path]) -> Result<String, String> {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/hdiutil")
             .args(arguments)
             .args(paths)

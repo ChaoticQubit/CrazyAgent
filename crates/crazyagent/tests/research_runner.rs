@@ -47,19 +47,22 @@ fn local_model() -> std::sync::MutexGuard<'static, ()> {
 fn require_model() {
     assert_eq!(OLLAMA, format!("http://{OLLAMA_HOST}/v1"));
     assert_eq!(OLLAMA_ANTHROPIC, format!("http://{OLLAMA_HOST}"));
-    let listed = crazyagent::spawn_gate::connect_tcp_std(OLLAMA_HOST).and_then(|mut stream| {
-        stream.set_read_timeout(Some(OLLAMA_TIME))?;
-        stream.set_write_timeout(Some(OLLAMA_TIME))?;
-        stream.write_all(
-            format!("GET /api/tags HTTP/1.1\r\nHost: {OLLAMA_HOST}\r\nConnection: close\r\n\r\n")
+    let listed =
+        kernel_processes::spawn_gate::connect_tcp_std(OLLAMA_HOST).and_then(|mut stream| {
+            stream.set_read_timeout(Some(OLLAMA_TIME))?;
+            stream.set_write_timeout(Some(OLLAMA_TIME))?;
+            stream.write_all(
+                format!(
+                    "GET /api/tags HTTP/1.1\r\nHost: {OLLAMA_HOST}\r\nConnection: close\r\n\r\n"
+                )
                 .as_bytes(),
-        )?;
-        let mut reply = String::new();
-        stream
-            .take(OLLAMA_TAGS_BYTES_MAX)
-            .read_to_string(&mut reply)?;
-        Ok(reply)
-    });
+            )?;
+            let mut reply = String::new();
+            stream
+                .take(OLLAMA_TAGS_BYTES_MAX)
+                .read_to_string(&mut reply)?;
+            Ok(reply)
+        });
     let reply = listed.unwrap_or_else(|problem| {
         panic!("the local Ollama at {OLLAMA_HOST} is required and did not answer: {problem}")
     });
@@ -133,7 +136,7 @@ fn endpoint(port: u16) -> ResearchAccount {
 /// finds the provider up for a row whose stand-in harness never calls it. Input: none.
 /// Output: the listener, which the caller holds for the run.
 fn listening_provider() -> std::net::TcpListener {
-    let provider = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let provider = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     assert!(provider.local_addr().unwrap().ip().is_loopback());
     provider
 }
@@ -1271,7 +1274,7 @@ fn research_whose_engine_dies_leaves_nothing_its_harness_detached() {
         case.database,
         case.state.parent().unwrap().join("engine.db")
     );
-    let mut engine = crazyagent::spawn_gate::spawn(
+    let mut engine = kernel_processes::spawn_gate::spawn(
         Command::new(std::env::current_exe().unwrap())
             .args([
                 "research_whose_engine_dies_leaves_nothing_its_harness_detached",

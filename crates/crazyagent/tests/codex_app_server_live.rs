@@ -45,7 +45,7 @@ impl AppServer {
             .tempdir()
             .unwrap();
         std::fs::set_permissions(home.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let mut child = crazyagent::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             Command::new(codex_executable())
                 .args(["-c", "cli_auth_credentials_store=\"file\""])
                 .args(settings.iter().flat_map(|setting| ["-c", setting]))

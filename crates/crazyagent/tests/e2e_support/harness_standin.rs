@@ -145,7 +145,7 @@ impl Standin {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
+        let child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
         Live::new(child)
     }
 
@@ -255,7 +255,7 @@ impl Live {
     /// Sends a signal to the stand-in's whole process group, as Ctrl-C in a terminal does.
     /// Input: the signal's name for `/bin/kill`, such as `INT`. Output: whether it was sent.
     pub fn signal(&self, name: &str) -> bool {
-        crazyagent::spawn_gate::status(
+        kernel_processes::spawn_gate::status(
             Command::new("/bin/kill")
                 .args(["-s", name, "--", &format!("-{}", self.pid())])
                 .env_clear()

@@ -735,7 +735,7 @@ fn a_teammate_claiming_the_leads_letter_never_marks_it_delivered_unseen() {
     .unwrap();
     serve();
 
-    let forged = crazyagent::spawn_gate::output(
+    let forged = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/touch")
             .arg(team.entry(&format!("{to_lead:032x}.shown")))
             .env_clear()

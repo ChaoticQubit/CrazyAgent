@@ -91,7 +91,7 @@ fn run(bare: bool) -> Run {
         &plugin,
     );
     let stream = base.join("stream.jsonl");
-    let (_held, port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
 
     let mut command = Command::new(claude());
     command
@@ -118,7 +118,7 @@ fn run(bare: bool) -> Run {
         .args(["-p", "check", "--plugin-dir"])
         .arg(&plugin)
         .args(["--output-format", "stream-json", "--verbose"]);
-    let mut child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
     let deadline = Instant::now() + RUN_TIME_MAX;
     while child.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
