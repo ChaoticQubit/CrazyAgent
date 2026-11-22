@@ -1,13 +1,12 @@
 use super::*;
 use crate::adapters::{FIELD_BYTES_MAX, LINE_BYTES_MAX};
+use crate::harnesses::drivers::test_paths::{CWD, HOME};
 use crate::harnesses::launch::PROMPT_BYTES_MAX;
 use crate::usage::capture::Tokens;
 use serde_json::{Value, json};
 use std::path::Path;
 
 const STANDIN: &str = include_str!("../../../tests/fixtures/harness/standin-jsonl-turn.yaml");
-const HOME: &str = "/agent/home";
-const CWD: &str = "/work/project";
 
 fn manifest_of(text: &str) -> Manifest {
     manifest::parse(text.as_bytes()).unwrap()

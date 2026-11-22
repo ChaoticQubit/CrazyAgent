@@ -1,9 +1,9 @@
 use super::*;
 use crate::adapters::{FIELD_BYTES_MAX, LINE_BYTES_MAX};
+use crate::harnesses::drivers::test_paths::CWD;
 use serde_json::{Value, json};
 use std::path::Path;
 
-const CWD: &str = "/work/project";
 const SESSION: &str = "sess_1";
 
 fn frame_of(value: Value) -> Vec<u8> {
@@ -835,7 +835,7 @@ fn an_acp_agent_starts_with_its_manifest_arguments_and_its_tools_off_switch_only
     assert_eq!(
         arguments(&filled, home, cwd, Some("m-1"), true).ok(),
         Some(vec![
-            "--cwd=/work/project".to_owned(),
+            format!("--cwd={CWD}"),
             "--model".to_owned(),
             "m-1".to_owned()
         ])
