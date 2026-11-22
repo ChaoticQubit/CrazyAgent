@@ -584,12 +584,7 @@ pub(crate) fn owner(
             })
         }
         Command::OwnerAgentQuit { settings } => {
-            if let Some(rejected) = crate::quit_settings::check(settings) {
-                return Ok(rejected);
-            }
-            Event::Quit(Saved {
-                settings: *settings,
-            })
+            return crate::sdk_slice::save_quit(tx, revision, settings);
         }
         Command::OwnerProviderRetry { choice } => Event::Retry(Saved { settings: *choice }),
         Command::OwnerMasterSteps { settings } => Event::Steps(Saved {
@@ -712,6 +707,29 @@ pub(crate) fn record_own(tx: &Transaction<'_>, event: &Event) -> Result<u64, Eng
     assert!(seq > 0, "a recorded event has a seq");
     assert!(revision > 0, "own moved the revision");
     Ok(revision)
+}
+
+/// Saves the owner's agents-on-quit choice in the request: refuses invalid settings, else
+/// logs one `AgentQuitSaved` event at the next revision. The SDK slice's provider calls it.
+/// Inputs: the request transaction, the signed revision and the settings. Output: the
+/// outcome, or the engine error.
+pub(crate) fn save_quit_at(
+    tx: &Transaction<'_>,
+    revision: u64,
+    settings: &QuitSettings,
+) -> Result<Outcome, EngineError> {
+    if let Some(rejected) = crate::quit_settings::check(settings) {
+        return Ok(rejected);
+    }
+    let event = Event::Quit(Saved {
+        settings: *settings,
+    });
+    let next = revision
+        .checked_add(1)
+        .ok_or_else(|| error("revision_exhausted"))?;
+    record_at(tx, next, &event)?;
+    assert!(!tx.is_autocommit(), "the save is part of the request");
+    Ok(Outcome::Applied)
 }
 
 /// Writes one settings event inside an owner request whose next revision is already signed:

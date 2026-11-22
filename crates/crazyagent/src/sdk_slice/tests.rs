@@ -20,9 +20,19 @@ fn stop_never_12() -> QuitSettings {
     }
 }
 
-/// Every logged event's aggregate, kind, schema and body, in seq order. Input: the store.
-/// Output: the rows.
+/// Every logged event's aggregate, kind, schema and body, in seq order, none when the store
+/// has no log yet. Input: the store. Output: the rows.
 fn logged(db: &Connection) -> Vec<(String, String, i64, Vec<u8>)> {
+    let exists: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='state_log')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    if !exists {
+        return Vec::new();
+    }
     db.prepare("SELECT aggregate, kind, schema, body FROM state_log ORDER BY seq")
         .unwrap()
         .query_map([], |row| {
