@@ -1,4 +1,5 @@
 use super::*;
+use kernel_processes::batch::{batch_file, cmd_shim_real, fixed_program};
 
 /// 2.4.3 W9: on Windows the user's temp folder is one root in every spelling, as %TEMP%
 /// gives it (8.3 on hosted runners), plain long and verbatim, so a file directly in it
