@@ -1,7 +1,5 @@
 #[cfg(unix)]
 use crazyagent::protocol;
-#[cfg(unix)]
-use kernel_processes::spawn_gate;
 
 #[cfg(unix)]
 #[path = "../runner.rs"]
