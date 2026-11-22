@@ -16,7 +16,7 @@ fn fixture() -> (tempfile::TempDir, PathBuf, crate::config::EffectiveConfig) {
 /// Grants authenticated users inheritable modify on a folder through icacls. Input: the
 /// folder.
 fn open_to_other_users(folder: &Path) {
-    let status = crate::spawn_gate::status(std::process::Command::new("icacls").args([
+    let status = kernel_processes::spawn_gate::status(std::process::Command::new("icacls").args([
         folder.to_str().unwrap(),
         "/grant",
         "*S-1-5-11:(OI)(CI)(M)",
@@ -117,7 +117,7 @@ async fn a_settings_file_other_users_may_read_is_refused() {
     let data = path.parent().unwrap().to_path_buf();
     let global = data.join("global.toml");
     std::fs::write(&global, "").unwrap();
-    let status = crate::spawn_gate::status(std::process::Command::new("icacls").args([
+    let status = kernel_processes::spawn_gate::status(std::process::Command::new("icacls").args([
         global.to_str().unwrap(),
         "/grant",
         "*S-1-5-11:(R)",
@@ -234,7 +234,7 @@ fn a_plugin_secret_round_trips_privately_and_an_open_one_is_refused() {
         .unwrap()
         .join(&reference);
     private::check(&private::read_only(&file).unwrap()).unwrap();
-    let status = crate::spawn_gate::status(std::process::Command::new("icacls").args([
+    let status = kernel_processes::spawn_gate::status(std::process::Command::new("icacls").args([
         file.to_str().unwrap(),
         "/grant",
         "*S-1-5-11:(R)",
@@ -271,7 +271,7 @@ fn an_account_key_is_read_privately_and_an_open_one_is_refused() {
         .unwrap();
     let key = read_key_file(&data, &reference).unwrap().unwrap();
     assert_eq!(key.expose(), "sk-ant-test-key");
-    let status = crate::spawn_gate::status(std::process::Command::new("icacls").args([
+    let status = kernel_processes::spawn_gate::status(std::process::Command::new("icacls").args([
         file.to_str().unwrap(),
         "/grant",
         "*S-1-5-11:(R)",

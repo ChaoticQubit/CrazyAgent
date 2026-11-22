@@ -219,7 +219,7 @@ fn sid_text(sid: &[u8]) -> String {
 /// does. Inputs: the folder and the SID text.
 fn grant(folder: &Path, sid: &str) {
     let grant = format!("*{sid}:(OI)(CI)(M)");
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         Command::new("icacls")
             .args([folder.to_str().unwrap(), "/grant", grant.as_str()])
             .stdin(Stdio::null())

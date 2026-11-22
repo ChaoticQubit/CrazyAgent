@@ -112,7 +112,7 @@ impl Pty {
             .env("HOME", &self.home)
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("XDG_DATA_HOME");
-        let output = crazyagent::spawn_gate::output(&mut command).expect(TMUX);
+        let output = kernel_processes::spawn_gate::output(&mut command).expect(TMUX);
         assert!(
             output.status.success(),
             "tmux {args:?}: {}",
@@ -623,7 +623,7 @@ fn to_tab(pty: &Pty, project: &str, tab: &str, keys: &[&str]) {
 /// Input: the engine. Output: the held port's two ends, which the row keeps until it ends so
 /// no other listener takes the port meanwhile.
 fn unreachable_provider(engine: &Engine) -> [std::net::TcpStream; 2] {
-    let (held, port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let (held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     std::fs::write(
         engine.path().join("global.toml"),
         MODEL_ACCESS.replace("PORT", &port.to_string()),
@@ -1103,7 +1103,7 @@ impl ScriptPty {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let mut child = crazyagent::spawn_gate::spawn(&mut script)
+        let mut child = kernel_processes::spawn_gate::spawn(&mut script)
             .expect("/usr/bin/script runs the TUI on a pseudo-terminal");
         let input = child.stdin.take().unwrap();
         let mut stdout = child.stdout.take().unwrap();
@@ -3128,7 +3128,7 @@ impl Volume {
             ],
         ] {
             let status =
-                crazyagent::spawn_gate::status(Command::new("/usr/bin/hdiutil").args(&args))
+                kernel_processes::spawn_gate::status(Command::new("/usr/bin/hdiutil").args(&args))
                     .unwrap();
             assert!(status.success(), "hdiutil {args:?}");
         }
@@ -3143,7 +3143,7 @@ impl Volume {
 #[cfg(target_os = "macos")]
 impl Drop for Volume {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(Command::new("/usr/bin/hdiutil").args([
+        let _ = kernel_processes::spawn_gate::status(Command::new("/usr/bin/hdiutil").args([
             "detach",
             "-quiet",
             "-force",

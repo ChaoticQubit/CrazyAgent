@@ -22,7 +22,7 @@ fn codex_executable() -> PathBuf {
 #[ignore = "live qualification: the owner finishes a ChatGPT sign-in in the browser"]
 fn v1_tui_runs_from_first_run_to_research_and_a_master_reply_on_a_managed_codex_account() {
     let codex = codex_executable();
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("python3")
             .env_remove("PYTHONOPTIMIZE")
             .env("PYTHONDONTWRITEBYTECODE", "1")

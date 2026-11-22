@@ -92,7 +92,7 @@ fn a_relayed_request_frees_no_copy_of_the_key() {
     let mut reply = Vec::new();
     let freed = freed_with_key(1, || {
         let mut stream =
-            crazyagent::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
+            kernel_processes::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(20)))
             .unwrap();

@@ -160,7 +160,7 @@ fn host_tmux() -> PathBuf {
 /// the `clean-mac-gate` feature holds the remap's variable name. Output: the answer; panics
 /// when the binary can't be read.
 fn engine_has_remap() -> bool {
-    let status = crazyagent::spawn_gate::status(Command::new("/usr/bin/grep").args([
+    let status = kernel_processes::spawn_gate::status(Command::new("/usr/bin/grep").args([
         "-q",
         "-F",
         "--",
@@ -416,7 +416,7 @@ impl Mac {
             .stdin(Stdio::null())
             .stdout(stdout)
             .stderr(stderr);
-        self.engine = Some(crazyagent::spawn_gate::spawn(&mut command).unwrap());
+        self.engine = Some(kernel_processes::spawn_gate::spawn(&mut command).unwrap());
         let start = Instant::now();
         while fs::read(self.kept.join("engine-stdout.log")).unwrap() != READY_LINE {
             if let Some(status) = self.engine.as_mut().unwrap().try_wait().unwrap() {
@@ -442,7 +442,7 @@ impl Mac {
         let Some(mut child) = self.engine.take() else {
             return;
         };
-        let _ = crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+        let _ = kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([
             "-s",
             "TERM",
             &child.id().to_string(),
@@ -470,7 +470,7 @@ impl Drop for Mac {
             .root
             .join(crazyagent::terminal::FOLDER)
             .join(crazyagent::terminal::tmux::SOCKET);
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&socket)

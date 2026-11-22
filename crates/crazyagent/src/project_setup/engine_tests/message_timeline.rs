@@ -90,7 +90,7 @@ impl Drop for Pane {
             .unwrap()
             .join(crate::terminal::FOLDER)
             .join(SOCKET);
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(socket)

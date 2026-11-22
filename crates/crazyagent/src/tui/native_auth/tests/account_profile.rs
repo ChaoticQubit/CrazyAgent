@@ -365,7 +365,7 @@ fn local_receipt(
 #[tokio::test]
 async fn full_profile_history_prunes_finished_rows_and_keeps_unfinished_ones() {
     run(|case| async move {
-        let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let (mut ui, connection) = local(&case, &listener).await;
         private_panel(&mut ui, &connection);
@@ -426,7 +426,7 @@ async fn full_profile_history_prunes_finished_rows_and_keeps_unfinished_ones() {
 #[tokio::test]
 async fn local_none_commits_private_profile_and_recovers_original_receipt_without_endpoint_io() {
     run(|case| async move {
-        let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let (mut ui, connection) = local(&case, &listener).await;
         let original = std::fs::read(&case.global).unwrap();
@@ -478,7 +478,7 @@ async fn local_none_commits_private_profile_and_recovers_original_receipt_withou
             .unwrap();
         assert_eq!(count, 1);
         assert_eq!(
-            crate::spawn_gate::accept_tcp_std(&listener)
+            kernel_processes::spawn_gate::accept_tcp_std(&listener)
                 .unwrap_err()
                 .kind(),
             ErrorKind::WouldBlock

@@ -46,7 +46,7 @@ fn reference(value: &str) -> CredentialRef {
 }
 
 fn git(repository: &Path, args: &[&str]) {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Process::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -380,7 +380,7 @@ fn harness_group() -> (std::process::Child, i32) {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .process_group(0);
-    let child = crate::spawn_gate::spawn(&mut command).unwrap();
+    let child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
     let group = i32::try_from(child.id()).unwrap();
     (child, group)
 }

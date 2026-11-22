@@ -820,7 +820,7 @@ fn no_install_command_ever_names_a_look_alike_package_a_script_or_sudo() {
 
 fn executable(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    crate::spawn_gate::guarded(|| std::fs::write(path, text)).unwrap();
+    kernel_processes::spawn_gate::guarded(|| std::fs::write(path, text)).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
@@ -994,13 +994,13 @@ fn the_root_user_is_refused() {
 
 fn serve_once(reply: Vec<u8>) -> (String, std::thread::JoinHandle<String>) {
     use std::io::{Read, Write};
-    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let url = format!(
         "http://127.0.0.1:{}/pointer",
         listener.local_addr().unwrap().port()
     );
     let served = std::thread::spawn(move || {
-        let (mut stream, _) = crate::spawn_gate::accept_tcp_std(&listener).unwrap();
+        let (mut stream, _) = kernel_processes::spawn_gate::accept_tcp_std(&listener).unwrap();
         let mut head = Vec::new();
         let mut byte = [0_u8; 1];
         while !head.ends_with(b"\r\n\r\n")
@@ -1069,7 +1069,7 @@ fn a_pointer_server_that_answers_an_error_is_a_failed_lookup() {
 
 #[test]
 fn a_pointer_server_that_never_answers_is_a_failed_lookup_within_the_time_limit() {
-    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let url = format!(
         "http://127.0.0.1:{}/pointer",
         listener.local_addr().unwrap().port()
@@ -1230,7 +1230,7 @@ fn a_harness_npm_put_in_the_engine_prefix_updates_and_checks_with_the_found_npm(
 
 /// The groups this user is in, as `/usr/bin/id -G` lists them.
 fn user_groups() -> Vec<u32> {
-    let listed = crate::spawn_gate::output(
+    let listed = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/id")
             .arg("-G")
             .stdin(std::process::Stdio::null())

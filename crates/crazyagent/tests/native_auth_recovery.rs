@@ -65,7 +65,7 @@ impl Case {
     /// and the engine's places set it aside as a temp folder (2.4.1 R1). Output: the case.
     #[cfg(target_os = "macos")]
     fn with_interpreter_on_login_path() -> Self {
-        let temp = crazyagent::spawn_gate::output(
+        let temp = kernel_processes::spawn_gate::output(
             Command::new("/usr/bin/getconf")
                 .arg("DARWIN_USER_TEMP_DIR")
                 .stdin(Stdio::null())
@@ -233,7 +233,7 @@ done
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(log));
-        let mut child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
+        let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
         let stdout = child.stdout.take().unwrap();
         self.engine = Some(child);
         let (send, receive) = std::sync::mpsc::sync_channel(1);
@@ -294,7 +294,7 @@ done
     }
 
     fn custodian(&self) -> Pid {
-        let listing = crazyagent::spawn_gate::output(
+        let listing = kernel_processes::spawn_gate::output(
             Command::new("/bin/ps")
                 .args(["-A", "-o", "pid=,ppid=,command="])
                 .stdin(Stdio::null())
@@ -408,7 +408,7 @@ fn scratch(prefix: &str) -> tempfile::TempDir {
 /// folder.
 #[cfg(target_os = "macos")]
 fn owner_cache_folder(prefix: &str) -> tempfile::TempDir {
-    let entry = crazyagent::spawn_gate::output(
+    let entry = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/id")
             .arg("-P")
             .stdin(Stdio::null())

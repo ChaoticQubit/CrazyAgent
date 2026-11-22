@@ -12,7 +12,7 @@ const WAIT_STEP: Duration = Duration::from_millis(25);
 
 fn executable(path: &Path, text: &str) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    crazyagent::spawn_gate::guarded(|| std::fs::write(path, text)).unwrap();
+    kernel_processes::spawn_gate::guarded(|| std::fs::write(path, text)).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 

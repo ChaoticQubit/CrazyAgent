@@ -298,7 +298,7 @@ fn git_init(root: &Path) {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .current_dir(root);
-    let status = crate::spawn_gate::status(&mut command);
+    let status = kernel_processes::spawn_gate::status(&mut command);
     assert!(
         status.as_ref().is_ok_and(std::process::ExitStatus::success),
         "git init: {status:?}"
@@ -319,7 +319,7 @@ fn git_in(root: &Path, args: &[&str]) {
         .env("GIT_COMMITTER_NAME", "Mapping Test")
         .env("GIT_COMMITTER_EMAIL", "mapping@example.invalid")
         .current_dir(root);
-    let status = crate::spawn_gate::status(&mut command);
+    let status = kernel_processes::spawn_gate::status(&mut command);
     assert!(
         status.as_ref().is_ok_and(std::process::ExitStatus::success),
         "git {args:?}: {status:?}"
@@ -1262,7 +1262,7 @@ fn graphify_behind_a_version_link(root: &Path) -> std::path::PathBuf {
         "#!{}\nprintf '{{}}' > graphify-out/graph.json\n",
         bin.join("python").display()
     );
-    crate::spawn_gate::guarded(|| std::fs::write(&graphify, script)).unwrap();
+    kernel_processes::spawn_gate::guarded(|| std::fs::write(&graphify, script)).unwrap();
     std::fs::set_permissions(
         &graphify,
         std::os::unix::fs::PermissionsExt::from_mode(0o755),
@@ -2540,8 +2540,10 @@ fn a_graph_mark_that_is_a_fifo_reads_as_no_mark_without_waiting_for_a_writer() {
     let out = folder.path().join("planted");
     std::fs::create_dir(&out).unwrap();
     let fifo = out.join(graph::KEPT_OUT_MARK);
-    let made = crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&fifo))
-        .unwrap();
+    let made = kernel_processes::spawn_gate::status(
+        std::process::Command::new("/usr/bin/mkfifo").arg(&fifo),
+    )
+    .unwrap();
     assert!(made.success());
     let (sent, read) = std::sync::mpsc::channel();
     std::thread::spawn(move || {

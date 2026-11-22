@@ -525,7 +525,7 @@ impl Server {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let done = crazyagent::spawn_gate::output(&mut command).expect("tmux runs");
+        let done = kernel_processes::spawn_gate::output(&mut command).expect("tmux runs");
         assert!(done.status.success(), "tmux {arguments:?}: {done:?}");
         String::from_utf8_lossy(&done.stdout).into_owned()
     }
@@ -556,7 +556,7 @@ impl Drop for Server {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let killed = crazyagent::spawn_gate::output(&mut command);
+        let killed = kernel_processes::spawn_gate::output(&mut command);
         assert!(
             killed.is_ok() || std::thread::panicking(),
             "tmux kill-server: {killed:?}"

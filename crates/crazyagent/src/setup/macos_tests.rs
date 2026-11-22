@@ -20,7 +20,7 @@ fn archive(dir: &Path, line: &str) -> (PathBuf, String) {
     let source = dir.join("source");
     script(&source.join("uv-test/uv"), line);
     let archive = dir.join("uv-test.tar.gz");
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         Command::new("/usr/bin/tar")
             .arg("-czf")
             .arg(&archive)

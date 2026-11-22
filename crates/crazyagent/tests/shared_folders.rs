@@ -41,7 +41,7 @@ const SECRETS: &[&str] = &[
 ];
 
 fn git(folder: &Path, arguments: &[&str]) {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -123,7 +123,7 @@ fn run(case: &Case, sandbox: &ProjectSandbox, script: &str) -> Output {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crazyagent::spawn_gate::output(&mut command).unwrap()
+    kernel_processes::spawn_gate::output(&mut command).unwrap()
 }
 
 fn quoted(path: &Path) -> String {

@@ -770,7 +770,7 @@ pub(in crate::tui) struct ProjectScreen {
 pub(in crate::tui) fn memory_source(memory: &KnowledgeEntry) -> Option<ResearchKind> {
     let digest = memory.id.as_str().strip_prefix("research-")?;
     ResearchKind::ALL.into_iter().find(|kind| {
-        let expected = crate::memory::hash(
+        let expected = kernel_common::hash(
             format!(
                 "{}\n{}\n{}",
                 memory.project_id.as_str(),

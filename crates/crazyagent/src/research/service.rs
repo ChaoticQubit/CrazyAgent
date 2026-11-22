@@ -1141,8 +1141,8 @@ mod tests {
     #[test]
     fn status_runs_pick_again_in_their_thread_and_take_the_next_member_when_the_first_one_is_down()
     {
-        let (_held, down) = crate::spawn_gate::refusing_tcp_port().unwrap();
-        let up = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let (_held, down) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
+        let up = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         let up_port = up.local_addr().unwrap().port();
         let (_temp, runner, db, resolver) = engine_with_loopback_pool(&[down, up_port]);
         assert_eq!(
@@ -1159,8 +1159,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn status_runs_with_every_members_provider_down_store_the_first_ones_line() {
-        let (_first, first) = crate::spawn_gate::refusing_tcp_port().unwrap();
-        let (_second, second) = crate::spawn_gate::refusing_tcp_port().unwrap();
+        let (_first, first) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
+        let (_second, second) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
         let (_temp, runner, db, resolver) = engine_with_loopback_pool(&[first, second]);
         let line = format!(
             "Can't reach the model provider at 127.0.0.1:{first}. Start it or pick another account in this pool, then try again."

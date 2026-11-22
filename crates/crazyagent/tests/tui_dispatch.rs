@@ -67,7 +67,7 @@ impl OwnedProcess {
                 .open(path)
                 .unwrap()
         };
-        let child = crazyagent::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             command
                 .stdin(Stdio::null())
                 .stdout(log(&stdout))

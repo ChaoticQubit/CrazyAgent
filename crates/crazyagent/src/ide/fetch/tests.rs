@@ -31,7 +31,7 @@ struct Server {
 
 impl Server {
     fn start(body: Vec<u8>, held: bool) -> Self {
-        let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!(
             "http://{}/vscodium-reh-web.tar.gz",
@@ -45,7 +45,7 @@ impl Server {
             let (hits, stop, gate) = (Arc::clone(&hits), Arc::clone(&stop), Arc::clone(&gate));
             std::thread::spawn(move || {
                 while !stop.load(Ordering::SeqCst) {
-                    let stream = match crate::spawn_gate::accept_tcp_std(&listener) {
+                    let stream = match kernel_processes::spawn_gate::accept_tcp_std(&listener) {
                         Ok((stream, _)) => stream,
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             std::thread::sleep(Duration::from_millis(5));
@@ -118,7 +118,7 @@ fn answer(mut stream: std::net::TcpStream, body: &[u8], gate: &(Mutex<bool>, Con
 }
 
 fn run(command: &mut Command) {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

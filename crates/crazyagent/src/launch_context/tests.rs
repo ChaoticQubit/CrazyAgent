@@ -221,7 +221,7 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
         tool_home: None,
     };
     let installed = context.install("codex", &home, false).unwrap();
-    let mut child = crate::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         std::process::Command::new("/bin/sleep")
             .arg("30")
             .stdin(installed._lock.try_clone().unwrap())
@@ -315,7 +315,7 @@ fn a_launch_replaces_a_lock_name_that_is_no_plain_file_and_locks_the_home() {
             }
             "link" => std::os::unix::fs::symlink(&outside, &lock).unwrap(),
             _ => {
-                let made = crate::spawn_gate::collected(
+                let made = kernel_processes::spawn_gate::collected(
                     std::process::Command::new("/usr/bin/mkfifo").arg(&lock),
                 )
                 .unwrap();
@@ -408,7 +408,7 @@ fn a_launch_locks_a_home_whose_acl_denies_listing_and_searching_it() {
     let root = directory.path().canonicalize().unwrap();
     let home = root.join("claude");
     fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
-    let added = crate::spawn_gate::collected(
+    let added = kernel_processes::spawn_gate::collected(
         std::process::Command::new("/bin/chmod")
             .args(["+a", "everyone deny list,search"])
             .arg(&home),
@@ -420,7 +420,7 @@ fn a_launch_locks_a_home_whose_acl_denies_listing_and_searching_it() {
         .map(|_| ())
         .map_err(|error| error.0);
 
-    let _ = crate::spawn_gate::collected(
+    let _ = kernel_processes::spawn_gate::collected(
         std::process::Command::new("/bin/chmod")
             .arg("-N")
             .arg(&home),
@@ -830,7 +830,7 @@ fn a_planted_codex_system_skill_does_not_survive_a_relaunch() {
 /// agent would. Inputs: the flag name and the path. Output: whether `chflags` succeeded.
 #[cfg(target_os = "macos")]
 fn chflags(flag: &str, path: &Path) -> bool {
-    crate::spawn_gate::status(
+    kernel_processes::spawn_gate::status(
         std::process::Command::new("/usr/bin/chflags")
             .arg(flag)
             .arg(path)
@@ -1039,7 +1039,7 @@ fn a_context_less_codex_hold_removes_planted_system_skills() {
 /// path and the path. Output: whether `chmod` succeeded.
 #[cfg(target_os = "macos")]
 fn chmod(arguments: &[&str], path: &Path) -> bool {
-    crate::spawn_gate::status(
+    kernel_processes::spawn_gate::status(
         std::process::Command::new("/bin/chmod")
             .args(arguments)
             .arg(path)
@@ -1058,7 +1058,7 @@ struct Unpinned(PathBuf);
 #[cfg(target_os = "macos")]
 impl Drop for Unpinned {
     fn drop(&mut self) {
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             std::process::Command::new("/usr/bin/chflags")
                 .args(["-R", "-P", "nouchg,nouappnd"])
                 .arg(&self.0)
@@ -1173,7 +1173,7 @@ fn listed(folders: &[&Path]) -> String {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    let output = crate::spawn_gate::output(&mut command).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut command).unwrap();
     assert!(output.status.success());
     String::from_utf8(output.stdout).unwrap()
 }
@@ -2516,7 +2516,7 @@ impl LeftPane {
 
     /// Ends the tmux server that holds the pane.
     fn kill_server(&self) {
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             std::process::Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -3693,7 +3693,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
     assert!(start.get("matcher").is_none());
     let command = start["hooks"][0]["command"].as_str().unwrap();
     assert!(!command.contains(stored.to_str().unwrap()), "{command}");
-    let ran = crate::spawn_gate::output(
+    let ran = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(command)
@@ -3763,7 +3763,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
     let command = start["hooks"].as_array().unwrap()[0]["command"]
         .as_str()
         .unwrap();
-    let ran = crate::spawn_gate::output(
+    let ran = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(command)
@@ -4006,7 +4006,7 @@ fn mcp_handshake(
         .stdout(Stdio::piped())
         .stderr(errors.reopen().unwrap());
     let started = std::time::Instant::now();
-    let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let (lines, replies) = std::sync::mpsc::channel();
@@ -4369,7 +4369,7 @@ fn shared_context_mode(base: &Path) -> (AgentContext, rusqlite::Connection, Path
     let root = private_folder(&base.join("engine"));
     let npm = private_folder(&root.join("setup").join("npm"));
     let install = npm.join(format!("context-mode@{CONTEXT_MODE_VERSION}"));
-    let copied = crate::spawn_gate::status(
+    let copied = kernel_processes::spawn_gate::status(
         std::process::Command::new("/bin/cp")
             .arg("-cR")
             .arg(&source)
@@ -4544,7 +4544,7 @@ exit 0"#;
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let changed = crate::spawn_gate::output(&mut change).unwrap();
+    let changed = kernel_processes::spawn_gate::output(&mut change).unwrap();
     assert!(changed.status.success(), "{changed:?}");
     assert_eq!(
         String::from_utf8_lossy(&changed.stdout),
@@ -4588,7 +4588,7 @@ fn each_launch_getconf_answers_its_agent_temp_folder_first_on_the_path() {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        crate::spawn_gate::output(command).unwrap()
+        kernel_processes::spawn_gate::output(command).unwrap()
     };
     let answer = |home: &Path, user: &Path, name: &str| {
         let getconf = home.join(STATE).join("bin").join("getconf");
@@ -4656,12 +4656,12 @@ fn secret_names_ride_only_on_a_secret_in_command_refusal() {
 fn request_capture() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     use std::io::{BufRead, BufReader, Read, Write};
     const BODY_BYTES_MAX: usize = 8 * 1024 * 1024;
-    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = bodies.clone();
     std::thread::spawn(move || {
-        for stream in crate::spawn_gate::incoming_tcp_std(&listener).flatten() {
+        for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener).flatten() {
             let sink = sink.clone();
             std::thread::spawn(move || {
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -4774,7 +4774,7 @@ fn a_fresh_claude_agent_lists_the_context_mode_tools_of_the_engine_install() {
     let (context, _connection, _install) = shared_context_mode(&base);
     let home = private_folder(&base.join("home"));
     let work = private_folder(&base.join("work"));
-    let initialized = crate::spawn_gate::status(
+    let initialized = kernel_processes::spawn_gate::status(
         std::process::Command::new("/usr/bin/git")
             .args(["init", "-q"])
             .arg(&work),
@@ -4971,12 +4971,12 @@ fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
     fs::create_dir_all(&work).unwrap();
     let home = root.join("codex");
     fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
-    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let sink = bodies.clone();
     std::thread::spawn(move || {
-        for stream in crate::spawn_gate::incoming_tcp_std(&listener).flatten() {
+        for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener).flatten() {
             answer_as_responses(stream, &sink);
         }
     });
@@ -5036,7 +5036,7 @@ fn a_real_codex_resumed_after_an_instruction_change_is_given_the_new_text() {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let output = crate::spawn_gate::output(&mut command).unwrap();
+        let output = kernel_processes::spawn_gate::output(&mut command).unwrap();
         let shown = format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
@@ -5204,7 +5204,7 @@ fn both_mcp_configs_hold_each_secret_exactly() {
 #[ignore]
 fn a_context_file_written_under_a_narrow_umask_in_its_own_process() {
     use std::os::unix::fs::PermissionsExt;
-    let Some(folder) = std::env::var_os(crate::spawn_gate::ROW_FOLDER) else {
+    let Some(folder) = std::env::var_os(kernel_processes::spawn_gate::ROW_FOLDER) else {
         return;
     };
     let folder = PathBuf::from(folder);
@@ -5228,7 +5228,7 @@ fn a_context_file_written_under_a_narrow_umask_in_its_own_process() {
 #[test]
 fn a_context_file_written_under_a_narrow_umask_is_private() {
     let folder = tempfile::tempdir().unwrap();
-    let status = crate::spawn_gate::row_alone(
+    let status = kernel_processes::spawn_gate::row_alone(
         "launch_context::tests::a_context_file_written_under_a_narrow_umask_in_its_own_process",
         ":",
         folder.path(),

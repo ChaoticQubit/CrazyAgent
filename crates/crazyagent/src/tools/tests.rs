@@ -87,7 +87,7 @@ fn an_npm_codex_with_an_env_node_line_starts_with_no_search_path() {
         "grants are real files, so /bin/sh is granted where it really sits"
     );
 
-    let by_name = crate::spawn_gate::output(
+    let by_name = kernel_processes::spawn_gate::output(
         Command::new(prefix.join("bin/codex"))
             .env_clear()
             .env("PATH", "/usr/bin:/bin"),
@@ -98,7 +98,7 @@ fn an_npm_codex_with_an_env_node_line_starts_with_no_search_path() {
         "env finds no node on /usr/bin:/bin"
     );
     let words = codex.argv();
-    let run = crate::spawn_gate::output(
+    let run = kernel_processes::spawn_gate::output(
         Command::new(&words[0])
             .args(&words[1..])
             .env_clear()

@@ -389,7 +389,7 @@ fn a_real_tools_on_claude_master_keeps_its_default_tools_but_no_built_in_sub_age
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
     child
         .stdin
         .take()

@@ -328,7 +328,7 @@ async fn exchange<T: Serialize>(
     request: &T,
 ) -> io::Result<Option<Value>> {
     tokio::time::timeout(Duration::from_secs(2), async {
-        let mut stream = crazyagent::spawn_gate::connect_unix(socket).await?;
+        let mut stream = kernel_processes::spawn_gate::connect_unix(socket).await?;
         if let Some((principal, slot, token)) = auth {
             let mut prelude = [0; 37];
             prelude[..4].copy_from_slice(principal);
@@ -373,7 +373,7 @@ impl OwnedRunner {
             .mode(0o600)
             .open(prepared.root().join("stderr.log"))
             .unwrap();
-        let process = crazyagent::spawn_gate::spawn(
+        let process = kernel_processes::spawn_gate::spawn(
             ProcessCommand::new(env!("CARGO_BIN_EXE_crazyagent-runner"))
                 .arg("serve")
                 .arg(prepared.root())
@@ -819,7 +819,7 @@ async fn a_runner_folder_an_earlier_runner_pinned_never_costs_a_runner_slot() {
 /// the program, its arguments and the path. Returns whether it exited successfully.
 #[cfg(target_os = "macos")]
 fn file_tool(program: &str, args: &[&str], path: &Path) -> bool {
-    crazyagent::spawn_gate::status(
+    kernel_processes::spawn_gate::status(
         ProcessCommand::new(program)
             .args(args)
             .arg(path)
@@ -966,7 +966,7 @@ fn delivery_git(root: &Path, repository: &Path, label: &str, args: &[&str]) -> S
         .mode(0o600)
         .open(&error_path)
         .unwrap();
-    let mut process = crazyagent::spawn_gate::spawn(
+    let mut process = kernel_processes::spawn_gate::spawn(
         ProcessCommand::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

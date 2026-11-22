@@ -12939,7 +12939,7 @@ fn end_teammate(
 fn socket_refuses(path: &Path) -> bool {
     use std::os::unix::fs::FileTypeExt;
     std::fs::symlink_metadata(path).is_ok_and(|found| found.file_type().is_socket())
-        && crate::spawn_gate::connect_unix_std(path).is_err()
+        && kernel_processes::spawn_gate::connect_unix_std(path).is_err()
 }
 
 /// Whether a path names a socket that refuses a connect, never on this platform. Takes the
@@ -14711,7 +14711,7 @@ fn end_keepers(_pins: &[KeeperPin]) -> bool {
 /// none when `ps` cannot be run or its answer cannot be read.
 #[cfg(target_os = "macos")]
 fn keeper_seen(pin: &KeeperPin) -> Option<bool> {
-    let shown = crate::spawn_gate::output(
+    let shown = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/ps")
             .env_clear()
             .env("LC_ALL", "C")

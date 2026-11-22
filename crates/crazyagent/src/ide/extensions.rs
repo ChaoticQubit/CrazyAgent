@@ -694,7 +694,7 @@ impl Server<'_> {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let mut child = crate::spawn_gate::spawn(&mut command).map_err(|_| refused())?;
+        let mut child = kernel_processes::spawn_gate::spawn(&mut command).map_err(|_| refused())?;
         let stdout = child.stdout.take().ok_or_else(refused)?;
         let reader = std::thread::spawn(move || {
             let mut bytes = Vec::new();

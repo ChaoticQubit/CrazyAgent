@@ -43,7 +43,7 @@ fn short(path: &Path, folder: &Path) -> Option<(PathBuf, PathBuf)> {
     }
     let parent = path.parent()?;
     let name = path.file_name()?;
-    let hash = crate::memory::hash(parent.as_os_str().as_bytes());
+    let hash = kernel_common::hash(parent.as_os_str().as_bytes());
     let link = folder.join(&hash[..LINK_HEX]);
     let address = link.join(name);
     direct(&address).then_some((link, address))

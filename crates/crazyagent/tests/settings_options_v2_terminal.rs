@@ -89,7 +89,7 @@ impl Terminal {
         let project = ProjectId::new(PROJECT).unwrap();
         let folder = ide::workspace::folder(engine.path(), &project).unwrap();
         fs::write(folder.join("README.md"), "buoys\n").unwrap();
-        let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         ready_build(&engine, &owner).await;
         Self {
             engine,
@@ -158,7 +158,7 @@ fn output(command: &mut Command) -> String {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = crazyagent::spawn_gate::output(command).unwrap();
+    let output = kernel_processes::spawn_gate::output(command).unwrap();
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
@@ -190,7 +190,9 @@ fn handshake(token: &str) -> Vec<u8> {
 /// Connects to the bridge with a handshake and sends one length-prefixed request for the
 /// project. Inputs: the socket, the token and the call. Output: the open connection.
 async fn send(socket: &Path, token: &str, call: serde_json::Value) -> UnixStream {
-    let mut stream = crazyagent::spawn_gate::connect_unix(socket).await.unwrap();
+    let mut stream = kernel_processes::spawn_gate::connect_unix(socket)
+        .await
+        .unwrap();
     stream.write_all(&handshake(token)).await.unwrap();
     let body =
         serde_json::to_vec(&serde_json::json!({ "project": PROJECT, "call": call })).unwrap();

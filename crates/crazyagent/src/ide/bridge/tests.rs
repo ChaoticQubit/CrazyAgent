@@ -1284,7 +1284,7 @@ async fn a_write_past_its_bound_answers_its_unknown_outcome_over_the_connection(
         "the write still waits when its bound passes"
     );
     let held = held_writes(case.root.path());
-    let (client, server) = crate::spawn_gate::unix_pair_std().unwrap();
+    let (client, server) = kernel_processes::spawn_gate::unix_pair_std().unwrap();
     for end in [&client, &server] {
         end.set_nonblocking(true).unwrap();
     }
@@ -1568,14 +1568,14 @@ async fn ide_git_calls_past_their_cap_are_refused_while_the_others_run() {
     const REFUSED: Duration = Duration::from_secs(10);
     const { assert!(PROJECT_GIT_CALLS_MAX < GIT_CALLS_MAX) };
     let mut case = Case::start().await;
-    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let url = format!(
         "git://127.0.0.1:{}/slow.git",
         listener.local_addr().unwrap().port()
     );
     let (accepted, mut held) = tokio::sync::mpsc::unbounded_channel();
     std::thread::spawn(move || {
-        for stream in crate::spawn_gate::incoming_tcp_std(&listener).flatten() {
+        for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener).flatten() {
             if accepted.send(stream).is_err() {
                 return;
             }
@@ -1729,7 +1729,7 @@ async fn sandboxed_terminal_runs_in_an_engine_pane_and_cannot_read_the_capabilit
     let folder = case.root.path().join("projects").join("alpha");
     std::fs::write(folder.join("README.md"), "alpha readme\n").unwrap();
     let database = case.root.path().join("engine.db");
-    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let path = issue(&case.runtime, &alpha).unwrap();
     let socket = case.socket(&path);
@@ -2037,7 +2037,7 @@ fn revoking_every_capability_keeps_going_past_a_replaced_file() {
 #[test]
 #[ignore]
 fn an_ide_capability_write_cut_short_in_its_own_process() {
-    let Some(folder) = std::env::var_os(crate::spawn_gate::ROW_FOLDER) else {
+    let Some(folder) = std::env::var_os(kernel_processes::spawn_gate::ROW_FOLDER) else {
         return;
     };
     let written = write_capability(&Path::new(&folder).join("capability"), &[7; 32]);
@@ -2049,7 +2049,7 @@ fn an_ide_capability_write_cut_short_in_its_own_process() {
 #[test]
 fn an_ide_capability_write_cut_short_leaves_no_capability_file() {
     let folder = tempfile::tempdir().unwrap();
-    let status = crate::spawn_gate::row_alone(
+    let status = kernel_processes::spawn_gate::row_alone(
         "ide::bridge::tests::an_ide_capability_write_cut_short_in_its_own_process",
         "trap '' XFSZ; ulimit -f 0",
         folder.path(),

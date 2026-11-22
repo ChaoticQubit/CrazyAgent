@@ -94,7 +94,7 @@ fn marker(scratch: &Path) -> PathBuf {
     )
     .unwrap();
     let program = scratch.join("marker.exe");
-    let built = crate::spawn_gate::status(
+    let built = kernel_processes::spawn_gate::status(
         Command::new("rustc")
             .arg("-O")
             .arg(source)
@@ -109,7 +109,7 @@ fn marker(scratch: &Path) -> PathBuf {
 /// Runs a setup git and returns what it printed, trimmed, failing the row when it fails.
 /// Input: the command. Output: the standard output.
 fn setup(command: &mut Command) -> String {
-    let output = crate::spawn_gate::collected(command).unwrap();
+    let output = kernel_processes::spawn_gate::collected(command).unwrap();
     assert!(
         output.status.success(),
         "{command:?}: {}",
@@ -290,20 +290,22 @@ fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
         let first = &commits[0].1;
         check(
             format!("{at} publish update-ref"),
-            crate::spawn_gate::collected(project_git(&publish_git, home, project).args([
-                "update-ref",
-                "-m",
-                "row",
-                "refs/heads/published",
-                first.as_str(),
-            ]))
+            kernel_processes::spawn_gate::collected(project_git(&publish_git, home, project).args(
+                [
+                    "update-ref",
+                    "-m",
+                    "row",
+                    "refs/heads/published",
+                    first.as_str(),
+                ],
+            ))
             .unwrap(),
             true,
             None,
         );
         check(
             format!("{at} stage init"),
-            crate::spawn_gate::collected(
+            kernel_processes::spawn_gate::collected(
                 clone::git_command(&git, home)
                     .args(git_safe())
                     .args(["init", "--bare", "-q", "--template=", "--"])
@@ -315,7 +317,7 @@ fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
         );
         check(
             format!("{at} commit"),
-            crate::spawn_gate::collected(
+            kernel_processes::spawn_gate::collected(
                 project_git(&publish_git, home, project)
                     .args([
                         "-c",
@@ -332,20 +334,22 @@ fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
         for (armor, commit) in commits {
             check(
                 format!("{at} {armor} signature check"),
-                crate::spawn_gate::collected(project_git(&publish_git, home, project).args([
-                    "log",
-                    "--show-signature",
-                    "-1",
-                    "--format=%s",
-                    commit.as_str(),
-                ]))
+                kernel_processes::spawn_gate::collected(
+                    project_git(&publish_git, home, project).args([
+                        "log",
+                        "--show-signature",
+                        "-1",
+                        "--format=%s",
+                        commit.as_str(),
+                    ]),
+                )
                 .unwrap(),
                 true,
                 Some(subject.as_str()),
             );
             check(
                 format!("{at} {armor} signature check with TEMP"),
-                crate::spawn_gate::collected(
+                kernel_processes::spawn_gate::collected(
                     with_temp(&mut project_git(&publish_git, home, project)).args([
                         "log",
                         "--show-signature",
@@ -360,7 +364,7 @@ fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
             );
             check(
                 format!("{at} {armor} IDE signature check with TEMP"),
-                crate::spawn_gate::collected(
+                kernel_processes::spawn_gate::collected(
                     with_temp(&mut ide_git(&git, project, home, &path)).args([
                         "log",
                         "--show-signature",
@@ -375,13 +379,15 @@ fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
             );
             check(
                 format!("{at} {armor} IDE signature check"),
-                crate::spawn_gate::collected(ide_git(&git, project, home, &path).args([
-                    "log",
-                    "--show-signature",
-                    "-1",
-                    "--format=%s",
-                    commit.as_str(),
-                ]))
+                kernel_processes::spawn_gate::collected(ide_git(&git, project, home, &path).args(
+                    [
+                        "log",
+                        "--show-signature",
+                        "-1",
+                        "--format=%s",
+                        commit.as_str(),
+                    ],
+                ))
                 .unwrap(),
                 true,
                 Some(subject.as_str()),
@@ -389,7 +395,7 @@ fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
         }
         check(
             format!("{at} IDE ssh"),
-            crate::spawn_gate::collected(
+            kernel_processes::spawn_gate::collected(
                 ide_git(&git, project, home, &path).args(["ls-remote", "ssh://example.invalid/x"]),
             )
             .unwrap(),
@@ -398,7 +404,7 @@ fn no_planted_program_runs_for_a_hook_a_signature_check_or_the_ssh_command() {
         );
         check(
             format!("{at} IDE commit"),
-            crate::spawn_gate::collected(
+            kernel_processes::spawn_gate::collected(
                 ide_git(&git, project, home, &path)
                     .args([
                         "-c",

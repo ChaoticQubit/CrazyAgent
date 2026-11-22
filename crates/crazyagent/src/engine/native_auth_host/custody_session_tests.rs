@@ -48,7 +48,7 @@ fn fallback_cleanup(child: &mut Child) -> io::Result<()> {
 
 impl InertChild {
     fn spawn(root: &Path, executable: &str, arguments: &[&str]) -> Self {
-        let child = crate::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new(executable)
                 .args(arguments)
                 .env_clear()

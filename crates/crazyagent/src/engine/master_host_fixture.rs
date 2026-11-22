@@ -208,7 +208,7 @@ impl MasterFixture {
         )
         .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        let first = crate::spawn_gate::first_run(
+        let first = kernel_processes::spawn_gate::first_run(
             std::process::Command::new(&script)
                 .arg("first-exec")
                 .current_dir(&bin),
@@ -638,7 +638,7 @@ impl Drop for Orphan {
 /// it has ended.
 #[cfg(target_os = "macos")]
 fn parent_of(process: Pid) -> Option<i32> {
-    let listing = crate::spawn_gate::output(
+    let listing = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/ps")
             .args(["-o", "ppid=", "-p", &process.as_raw_nonzero().to_string()])
             .stdin(std::process::Stdio::null())

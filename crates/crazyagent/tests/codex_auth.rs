@@ -162,7 +162,7 @@ fn child_output(folder: &Path, reply: &Value) -> Vec<u8> {
     let script = folder.join("codex-reply.sh");
     std::fs::write(&script, "#!/bin/sh\nprintf '%s\\n' \"$1\"\n").unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new(&script)
             .arg(reply.to_string())
             .stdin(std::process::Stdio::null())

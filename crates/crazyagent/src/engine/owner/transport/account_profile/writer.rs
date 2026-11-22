@@ -185,7 +185,7 @@ fn perform(
         .stderr(Stdio::piped())
         .process_group(0);
     assert_eq!(command.get_current_dir(), Some(home.as_path()));
-    let child = crate::spawn_gate::spawn(&mut command).map_err(|_| unknown())?;
+    let child = kernel_processes::spawn_gate::spawn(&mut command).map_err(|_| unknown())?;
     let group = Pid::from_raw(i32::try_from(child.id()).expect("OS child PID range"))
         .expect("positive child PID");
     process.group = Some(group);
@@ -347,7 +347,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn an_exited_unreaped_writer_group_answers_until_the_reap_and_settles_cleanly() {
-        let child = crate::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new("/bin/sh")
                 .args(["-c", "exit 0"])
                 .process_group(0),
@@ -382,7 +382,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn exited_unreaped_writer_group_settles_cleanly() {
-        let child = crate::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new("/bin/sh")
                 .args(["-c", "exit 0"])
                 .process_group(0),

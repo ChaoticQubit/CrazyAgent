@@ -138,7 +138,7 @@ fn run(
     }
     let was_pushed = pushed.load(Ordering::SeqCst);
     crate::tui::run::restore_with(out, pushed)?;
-    let ran = crate::spawn_gate::status(command);
+    let ran = kernel_processes::spawn_gate::status(command);
     if raw {
         enable_raw_mode()?;
     }

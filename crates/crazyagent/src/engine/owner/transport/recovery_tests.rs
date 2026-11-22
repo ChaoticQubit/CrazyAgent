@@ -764,7 +764,7 @@ async fn a_dismissal_holds_the_owner_barrier_until_it_commits_and_a_revoked_clie
 /// Output: the server stream and the client stream.
 #[cfg(unix)]
 fn connection() -> (Stream, Stream) {
-    let (server, client) = crate::spawn_gate::unix_pair_std().unwrap();
+    let (server, client) = kernel_processes::spawn_gate::unix_pair_std().unwrap();
     for end in [&server, &client] {
         end.set_nonblocking(true).unwrap();
     }
@@ -926,7 +926,7 @@ async fn a_client_that_stops_reading_holds_the_owner_barrier_no_longer_than_the_
     let runtime = running.runtime();
     let packet = running.packet();
     let admission = runtime.authority.authenticate(&packet).unwrap();
-    let (mut server, client) = crate::spawn_gate::unix_pair_std().unwrap();
+    let (mut server, client) = kernel_processes::spawn_gate::unix_pair_std().unwrap();
     for end in [&server, &client] {
         end.set_nonblocking(true).unwrap();
     }

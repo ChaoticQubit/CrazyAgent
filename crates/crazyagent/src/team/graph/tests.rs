@@ -1174,7 +1174,7 @@ fn lead_tree_orders_workers_under_their_leads() {
 
 #[cfg(unix)]
 fn git(dir: &Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

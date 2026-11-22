@@ -454,7 +454,7 @@ fn run_priming(folder: &Path, uv: &Path) -> Result<(), &'static str> {
     let failed = |_| "tool_cache_priming_failed";
     std::fs::create_dir(folder.join("home")).map_err(failed)?;
     let mut command = priming_command(folder, uv);
-    let mut child = crate::spawn_gate::spawn(&mut command).map_err(failed)?;
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).map_err(failed)?;
     let until = Instant::now() + PRIMING_TIME;
     let status = loop {
         match child.try_wait() {

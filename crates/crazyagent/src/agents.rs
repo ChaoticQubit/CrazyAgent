@@ -1625,7 +1625,7 @@ fn writers(output: &Path, probe: &File) -> Option<Vec<rustix::process::Pid>> {
     if !names_probe() {
         return None;
     }
-    let listed = crate::spawn_gate::output(
+    let listed = kernel_processes::spawn_gate::output(
         std::process::Command::new(LSOF)
             .args(["-w", "-n", "-P", "-F", "pa", "--"])
             .arg(output)
