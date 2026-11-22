@@ -820,9 +820,9 @@ fn one_line_rule<'a>(body: &'a str, folders: &'a [String]) -> Option<(&'a str, &
 
 /// Tells whether one profile line, its closing parentheses taken off, is the credential deny
 /// the engine writes below a toolchain folder, anchored at one machine folder: the 2.4.2
-/// spelling with an optional `(/.*)?$` tail, or the 2.5 pair of an exact `$` regex and a
-/// `/` regex naming the same files. Inputs: the line so trimmed and the folders. Output: the
-/// folder, or none.
+/// optional `(/.*)?$` tail, the 2.4.3 `(/|$)` tail, or the 2.5 pair of an exact `$` regex
+/// and a `/` regex naming the same files. Inputs: the line so trimmed and the folders.
+/// Output: the folder, or none.
 fn credential_deny<'a>(open: &str, folders: &'a [String]) -> Option<&'a str> {
     folders
         .iter()
@@ -832,6 +832,7 @@ fn credential_deny<'a>(open: &str, folders: &'a [String]) -> Option<&'a str> {
                 return false;
             };
             names.ends_with(")(/.*)?$\"")
+                || names.ends_with(")(/|$)\"")
                 || names
                     .split_once(")$\") ")
                     .is_some_and(|(files, below)| below == format!("{head}{files})/\""))
