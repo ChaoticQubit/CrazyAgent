@@ -232,6 +232,17 @@ impl PartialEq for Places {
 impl Eq for Places {}
 
 impl Places {
+    /// These places searching one folder only, for a file found beside another (npx's
+    /// `npx-cli.js` beside `npx.cmd`). Input: the folder. Output: a copy whose search
+    /// folders are that folder alone.
+    #[cfg(windows)]
+    pub(crate) fn only_in(&self, folder: &Path) -> Places {
+        Places {
+            folders: vec![folder.to_path_buf()],
+            ..self.clone()
+        }
+    }
+
     /// Builds places from explicit folders and HOME, for a caller that names its own search
     /// space. Relative, oversized and repeated folders are dropped, and so is every folder
     /// inside a project or a `.crazyagent` folder. Inputs: the folders in order and HOME.

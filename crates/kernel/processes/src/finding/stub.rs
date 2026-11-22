@@ -42,6 +42,7 @@ pub(crate) fn stub_new(folders: Vec<PathBuf>, home: Option<PathBuf>) -> Places {
 
 /// The engine's places on the stub seed ([`Places::engine`]). Inputs: the engine root, the
 /// app's folder, HOME and the PATH. Output: the places.
+#[cfg(unix)]
 pub(crate) fn stub_engine(
     engine_root: Option<&Path>,
     app_folder: Option<&Path>,

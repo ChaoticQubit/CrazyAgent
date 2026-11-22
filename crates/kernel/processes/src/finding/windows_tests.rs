@@ -1,7 +1,7 @@
 use super::stub::*;
 use super::*;
 
-use crate::batch::{batch_file, cmd_shim_real, fixed_program};
+use crate::batch::{batch_file, fixed_program};
 
 /// A folder with a stand-in `node.exe` (a copy of the `where.exe` Windows ships, a real
 /// program) and places that look there. Input: none. Output: the folder guard, its real
