@@ -1009,8 +1009,7 @@ fn a_harness_launch_takes_the_owner_retry_option_for_its_provider() {
 #[test]
 fn an_acp_driver_hands_prompts_interrupts_and_lines_to_its_protocol() {
     let (protocol, start) =
-        crate::harnesses::drivers::acp::Acp::new(std::path::Path::new("/work"), true, None)
-            .unwrap();
+        crate::harnesses::drivers::acp::Acp::new(&std::env::temp_dir(), true, None).unwrap();
     let start: Value = serde_json::from_slice(&start).unwrap();
     assert_eq!(start["method"], "initialize");
     let mut driver = Driver::Acp {
@@ -1071,7 +1070,7 @@ fn an_acp_driver_opens_its_session_with_the_engine_servers_it_is_given() {
     let request = LaunchRequest {
         harness: "standin-acp".into(),
         executable: PathBuf::from("/usr/bin/true"),
-        working_dir: PathBuf::from("/work"),
+        working_dir: std::env::temp_dir(),
         account: AccountBinding::Url {
             home: std::env::temp_dir().join("launch-test-home"),
             base_url: "http://127.0.0.1:11434".into(),
