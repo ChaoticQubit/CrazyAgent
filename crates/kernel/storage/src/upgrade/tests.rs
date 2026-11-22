@@ -42,7 +42,8 @@ fn broken(tx: &Transaction<'_>) -> Result<(), StorageError> {
 }
 
 /// A step that ends the upgrade transaction with no transaction statement: SQLite itself
-/// rolls it back on a duplicate under `OR ROLLBACK`, and the step swallows that error.
+/// rolls it back on a duplicate under `OR ROLLBACK`, the step swallows that error, then
+/// deletes and creates a table in autocommit, so the backup has committed work to undo.
 fn escaping(tx: &Transaction<'_>) -> Result<(), StorageError> {
     tx.execute_batch(
         "DELETE FROM kept; CREATE TABLE escaped (a UNIQUE); INSERT INTO escaped VALUES (1);",
@@ -53,6 +54,8 @@ fn escaping(tx: &Transaction<'_>) -> Result<(), StorageError> {
         duplicate.is_err(),
         "the duplicate rolls the transaction back"
     );
+    tx.execute_batch("DELETE FROM kept; CREATE TABLE escaped_after (a);")
+        .map_err(error)?;
     Ok(())
 }
 
@@ -237,6 +240,10 @@ fn a_step_that_ends_the_transaction_is_restored_from_the_backup() {
     );
     assert_eq!(version(&db).unwrap(), 0);
     assert!(!holds(&db, "added") && !holds(&db, "escaped"));
+    assert!(
+        !holds(&db, "escaped_after"),
+        "the committed table is undone"
+    );
     assert_eq!(kept(&db), ["one"]);
 }
 

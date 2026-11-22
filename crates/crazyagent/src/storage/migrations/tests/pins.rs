@@ -422,10 +422,7 @@ fn a_step_that_ends_the_transaction_restores_the_p5_fixture_byte_identical() {
     let library = u32::try_from(rusqlite::version_number()).unwrap();
     assert_eq!(header(&restored, 96), library);
     let cookie = header(&restored, 40);
-    assert!(
-        cookie > header(&bytes, 40),
-        "the restore moves the cookie on"
-    );
+    assert!(cookie >= header(&bytes, 40) + 2, "the cookie moves on");
     let read: i64 = root
         .connection()
         .query_row("PRAGMA schema_version", [], |row| row.get(0))
