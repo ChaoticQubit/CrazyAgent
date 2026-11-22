@@ -12,7 +12,12 @@ fn sdk(path: &str) -> PathBuf {
 fn parsed<'s>(sources: &[(&'s str, &str)]) -> Vec<(&'s str, File)> {
     sources
         .iter()
-        .map(|(stem, source)| (*stem, crazyagent_cap::parse(source).expect("parses")))
+        .map(|(stem, source)| {
+            (
+                *stem,
+                crazyagent_cap::parse_as(stem, source).expect("parses"),
+            )
+        })
         .collect()
 }
 
@@ -195,7 +200,7 @@ fn fixture_module() -> String {
     let source =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixture/fixture.cap"))
             .expect("fixture.cap reads");
-    let file = crazyagent_cap::parse(&source).expect("fixture.cap parses");
+    let file = crazyagent_cap::parse_as("fixture", &source).expect("fixture.cap parses");
     rust_test_module("fixture", &file).expect("fixture.cap generates")
 }
 
@@ -332,8 +337,9 @@ fn caller_is_a_reserved_input_name() {
 fn a_bounded_type_named_twice_is_written_once() {
     let source = "type Zeta { t: text }\ntype Alpha { zeta: Zeta, more: list<Zeta> }\n\
                   capability s.a(alpha: Alpha) -> Zeta tier: t1 needs: s.w";
-    let module = crate::rust::test_module("s", &crazyagent_cap::parse(source).expect("parses"))
-        .expect("generates");
+    let module =
+        crate::rust::test_module("s", &crazyagent_cap::parse_as("s", source).expect("parses"))
+            .expect("generates");
     assert_eq!(module.matches("fn fits_zeta(").count(), 1, "{module}");
     assert_eq!(module.matches("fn fits_alpha(").count(), 1, "{module}");
 }
@@ -369,7 +375,7 @@ fn chain(leaf: &str) -> String {
 fn generated_within(source: String, seconds: u64) -> String {
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let file = crazyagent_cap::parse(&source).expect("parses");
+        let file = crazyagent_cap::parse_as("s", &source).expect("parses");
         let module = crate::rust::test_module("s", &file).expect("generates");
         let _ = sender.send(module);
     });
@@ -399,4 +405,150 @@ fn a_deep_chain_of_shared_types_generates_without_blowing_up() {
     assert_eq!(bounded.matches("fn fits_t40(").count(), 1, "{bounded}");
     assert_eq!(bounded.matches("fn fits_t0(").count(), 1, "{bounded}");
     assert!(bounded.contains("fn check_a_input("), "{bounded}");
+}
+
+/// Generates the SDK for sources that must generate. Input: stems with sources.
+/// Output: the generated files; panics on a refusal.
+fn generated(sources: &[(&str, &str)]) -> Vec<(String, String)> {
+    rust(&parsed(sources)).expect("generates")
+}
+
+/// The text of one generated file. Inputs: the files and the path. Output: the text.
+fn file_text<'f>(files: &'f [(String, String)], path: &str) -> &'f str {
+    &files
+        .iter()
+        .find(|(name, _)| name == path)
+        .expect("the file is generated")
+        .1
+}
+
+#[test]
+fn an_unknown_foreign_stem_or_name_is_refused() {
+    assert_eq!(
+        refused(&[("net", "type A { s: vault.Secret }")]),
+        "capgen_unknown_type"
+    );
+    assert_eq!(
+        refused(&[
+            ("net", "type A { s: option<secrets.Missing> }"),
+            ("secrets", "handle Secret"),
+        ]),
+        "capgen_unknown_type"
+    );
+}
+
+#[test]
+fn a_foreign_ref_to_a_type_is_refused() {
+    assert_eq!(
+        refused(&[
+            ("net", "type A { k: list<secrets.Key> }"),
+            ("secrets", "type Key { id: u16 }"),
+        ]),
+        "capgen_foreign_not_leaf"
+    );
+}
+
+#[test]
+fn a_foreign_handle_in_an_event_is_refused() {
+    let secrets = ("secrets", "handle Secret\nenum Mode { read, write }");
+    assert_eq!(
+        refused(&[
+            (
+                "net",
+                "capability net.a() -> unit tier: t1 needs: net.w emits: E { s: secrets.Secret }"
+            ),
+            secrets,
+        ]),
+        "capgen_handle_in_event"
+    );
+    assert_eq!(
+        refused(&[
+            (
+                "net",
+                "type W { s: option<secrets.Secret> }\ncapability net.a() -> unit tier: t1 needs: net.w emits: E { w: list<W> }"
+            ),
+            secrets,
+        ]),
+        "capgen_handle_in_event"
+    );
+    generated(&[
+        (
+            "net",
+            "capability net.a() -> unit tier: t1 needs: net.w emits: E { m: secrets.Mode }",
+        ),
+        secrets,
+    ]);
+}
+
+#[test]
+fn a_type_holding_a_foreign_handle_derives_no_debug_or_serde() {
+    let files = generated(&[
+        (
+            "net",
+            "type Held { s: option<secrets.Secret> }\ntype Plain { m: secrets.Mode, n: u16 }",
+        ),
+        ("secrets", "handle Secret\nenum Mode { read, write }"),
+    ]);
+    let net = file_text(&files, "net.rs");
+    assert_eq!(
+        derive_of(net, "pub struct Held"),
+        "#[derive(Clone, Copy, PartialEq, Eq)]"
+    );
+    assert_eq!(
+        derive_of(net, "pub struct Plain"),
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]"
+    );
+}
+
+#[test]
+fn a_test_module_refuses_a_foreign_ref() {
+    let file = crazyagent_cap::parse_as("net", "type A { s: secrets.Secret }").expect("parses");
+    assert_eq!(
+        rust_test_module("net", &file).unwrap_err().code,
+        "capgen_unknown_type"
+    );
+}
+
+#[test]
+fn a_two_file_fixture_shares_one_handle_type() {
+    let loaded = load(&sdk("capgen/fixture_two")).expect("the fixture loads");
+    let borrowed: Vec<(&str, File)> = loaded
+        .iter()
+        .map(|(stem, file)| (stem.as_str(), file.clone()))
+        .collect();
+    let files = rust(&borrowed).expect("the fixture generates");
+    assert_eq!(
+        files
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["host.rs", "mod.rs", "net.rs", "secrets.rs"]
+    );
+    assert_eq!(
+        drift(&sdk("rust/src/fixture_two"), &files),
+        Vec::<String>::new()
+    );
+    let net = file_text(&files, "net.rs");
+    assert!(
+        net.contains("pub bearer: core::option::Option<super::secrets::Secret>,"),
+        "{net}"
+    );
+    assert!(
+        net.contains("pub keys: alloc::vec::Vec<super::secrets::Secret>,"),
+        "{net}"
+    );
+    assert!(!net.contains("pub struct Secret"), "{net}");
+    let host = generated(&[
+        (
+            "net",
+            "capability net.send(s: secrets.Secret) -> option<secrets.Secret> tier: t1 needs: net.send",
+        ),
+        ("secrets", "handle Secret"),
+    ]);
+    let host = file_text(&host, "host.rs");
+    assert!(host.contains("s: super::secrets::Secret"), "{host}");
+    assert!(
+        host.contains("Result<core::option::Option<super::secrets::Secret>, Refusal>;"),
+        "{host}"
+    );
 }

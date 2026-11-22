@@ -249,3 +249,26 @@ mod bounds {
         assert!(secret != Secret::from_kernel(8));
     }
 }
+
+#[test]
+fn a_foreign_handle_and_enum_are_the_owning_files_types() {
+    use crate::fixture_two::net::{Request, Route};
+    use crate::fixture_two::secrets::{Mode, Secret};
+    let secret = Secret::from_kernel(7);
+    let request = Request {
+        bearer: Some(secret),
+        keys: vec![secret, Secret::from_kernel(8)],
+        mode: Mode::Read,
+    };
+    let held: Secret = request.bearer.expect("the bearer is set");
+    assert_eq!(held.kernel_id(), 7);
+    assert_eq!(request.keys[1].kernel_id(), 8);
+    let route = Route {
+        mode: Mode::Write,
+        port: 443,
+    };
+    assert_eq!(
+        serde_json::to_string(&route).expect("a route serializes"),
+        r#"{"mode":"write","port":443}"#
+    );
+}
