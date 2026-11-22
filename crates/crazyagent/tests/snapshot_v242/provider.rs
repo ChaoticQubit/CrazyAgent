@@ -9,10 +9,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-/// Every provider the account screens offer, in display order.
-const PROVIDERS: [Provider; 7] = [
+/// Every provider the account screens offer, in display order; Gemini since 2.5 T21
+/// (45dc85cc9), an intended difference against the 2.4.2 capture.
+const PROVIDERS: [Provider; 8] = [
     Provider::Chatgpt,
     Provider::Claude,
+    Provider::Gemini,
     Provider::Openrouter,
     Provider::OpenaiApi,
     Provider::AnthropicApi,
