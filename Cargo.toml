@@ -8,6 +8,7 @@ members = [
     "crates/sdk/capgen",
     "crates/sdk/rust",
     "crates/kernel/bus_gateway",
+    "crates/kernel/storage",
     "crates/sdk/plugin_check",
     "plugins/t2/agent-quit",
     "apps/desktop/src-tauri",
@@ -32,4 +33,10 @@ opt-level = 3
 opt-level = 3
 
 [profile.test.package.crazyagent]
+opt-level = 3
+
+[profile.dev.package.crazyagent-kernel-storage]
+opt-level = 3
+
+[profile.test.package.crazyagent-kernel-storage]
 opt-level = 3

@@ -1,0 +1,2423 @@
+[
+  {
+    "scenario": "storage/fresh",
+    "at": 203,
+    "commit": "dbe466756",
+    "reason": "2.5 H2 adds the app plugin store's tables, the secret column left out",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "      \"excluded\": [",
+      "        \"secret\"",
+      "      ],",
+      "      \"row_count\": 0,",
+      "      \"rows\": [],",
+      "      \"schema\": [",
+      "        \"CREATE TABLE app_plugin_secrets (\",",
+      "        \"    plugin TEXT NOT NULL CHECK(length(plugin) BETWEEN 1 AND 64),\",",
+      "        \"    secret TEXT NOT NULL CHECK(length(secret) BETWEEN 1 AND 64),\",",
+      "        \"    source TEXT NOT NULL CHECK(source IN ('account', 'key')),\",",
+      "        \"    reference TEXT NOT NULL CHECK(length(reference) BETWEEN 1 AND 128),\",",
+      "        \"    PRIMARY KEY (plugin, secret)\",",
+      "        \")\"",
+      "      ],",
+      "      \"table\": \"app_plugin_secrets\"",
+      "    },",
+      "    {",
+      "      \"attached\": [],",
+      "      \"excluded\": [],",
+      "      \"row_count\": 0,",
+      "      \"rows\": [],",
+      "      \"schema\": [",
+      "        \"CREATE TABLE app_plugin_state (\",",
+      "        \"    name TEXT PRIMARY KEY CHECK(length(name) BETWEEN 1 AND 64),\",",
+      "        \"    enabled INTEGER NOT NULL CHECK(enabled IN (0, 1))\",",
+      "        \")\"",
+      "      ],",
+      "      \"table\": \"app_plugin_state\"",
+      "    },",
+      "    {",
+      "      \"attached\": [],",
+      "      \"excluded\": [],",
+      "      \"row_count\": 0,",
+      "      \"rows\": [],",
+      "      \"schema\": [",
+      "        \"CREATE TABLE app_plugin_trust (\",",
+      "        \"    name TEXT PRIMARY KEY CHECK(length(name) BETWEEN 1 AND 64),\",",
+      "        \"    sha256 TEXT NOT NULL CHECK(length(sha256) = 64),\",",
+      "        \"    hosts TEXT NOT NULL CHECK(length(hosts) <= 4096),\",",
+      "        \"    trusted_ms INTEGER NOT NULL\",",
+      "        \")\"",
+      "      ],",
+      "      \"table\": \"app_plugin_trust\"",
+      "    },",
+      "    {",
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_asset_snapshots_delete AFTER DELETE ON asset_snapshots\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'asset_snapshots', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='asset_snapshots' AND k1=OLD.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_asset_snapshots_insert AFTER INSERT ON asset_snapshots\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'asset_snapshots', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='asset_snapshots' AND k1=NEW.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_asset_snapshots_update AFTER UPDATE ON asset_snapshots\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'asset_snapshots', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='asset_snapshots' AND k1=OLD.id AND k2=''); INSERT INTO memory_touched SELECT 'asset_snapshots', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='asset_snapshots' AND k1=NEW.id AND k2=''); END\"",
+      "        ]",
+      "      ],"
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 212,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [
+      "      \"attached\": [],"
+    ],
+    "capture": [
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_asset_sources_delete AFTER DELETE ON asset_sources\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'asset_sources', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='asset_sources' AND k1=OLD.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_asset_sources_insert AFTER INSERT ON asset_sources\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'asset_sources', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='asset_sources' AND k1=NEW.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_asset_sources_update AFTER UPDATE ON asset_sources\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'asset_sources', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='asset_sources' AND k1=OLD.id AND k2=''); INSERT INTO memory_touched SELECT 'asset_sources', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='asset_sources' AND k1=NEW.id AND k2=''); END\"",
+      "        ]",
+      "      ],"
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 686,
+    "commit": "eaa0dd6c0",
+    "reason": "2.4.3 adds an index for waiting message reads",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "          \"CREATE INDEX coord_messages_receipt ON coord_messages(project, receipt, to_kind, to_agent)\"",
+      "        ],",
+      "        ["
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 953,
+    "commit": "65f6affb1",
+    "reason": "2.5 L10 creates the harness update settings table on a new store",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "        \"CREATE TABLE harness_update_settings (\",",
+      "        \"    id INTEGER PRIMARY KEY CHECK(id = 1),\",",
+      "        \"    mode TEXT NOT NULL CHECK(mode IN ('check_and_update', 'check_only', 'off')),\",",
+      "        \"    check_when TEXT NOT NULL CHECK(check_when IN ('on_button', 'on_open')),\",",
+      "        \"    online TEXT NOT NULL DEFAULT 'on' CHECK(online IN ('on', 'off')),\",",
+      "        \"    install TEXT NOT NULL DEFAULT 'on' CHECK(install IN ('on', 'off'))\",",
+      "        \")\"",
+      "      ],",
+      "      \"table\": \"harness_update_settings\"",
+      "    },",
+      "    {",
+      "      \"attached\": [],",
+      "      \"excluded\": [],",
+      "      \"row_count\": 0,",
+      "      \"rows\": [],",
+      "      \"schema\": ["
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 954,
+    "commit": "6effffba1",
+    "reason": "2.5 L7 rewrites the ide_asks CREATE text with plain indentation, same columns",
+    "security": false,
+    "golden": [
+      "        \"                project TEXT NOT NULL,\",",
+      "        \"                entry TEXT NOT NULL,\",",
+      "        \"                version INTEGER NOT NULL CHECK (version > 0),\",",
+      "        \"                decision TEXT NOT NULL CHECK (decision IN ('approve','reject')),\",",
+      "        \"                asked_ms INTEGER NOT NULL,\",",
+      "        \"                PRIMARY KEY (project, entry)\",",
+      "        \"            ) WITHOUT ROWID\""
+    ],
+    "capture": [
+      "        \"    project TEXT NOT NULL,\",",
+      "        \"    entry TEXT NOT NULL,\",",
+      "        \"    version INTEGER NOT NULL CHECK (version > 0),\",",
+      "        \"    decision TEXT NOT NULL CHECK (decision IN ('approve','reject')),\",",
+      "        \"    asked_ms INTEGER NOT NULL,\",",
+      "        \"    PRIMARY KEY (project, entry)\",",
+      "        \") WITHOUT ROWID\""
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 995,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_activity_delete AFTER DELETE ON knowledge_activity\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_activity', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_activity' AND k1=OLD.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_activity_insert AFTER INSERT ON knowledge_activity\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_activity', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_activity' AND k1=NEW.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_activity_update AFTER UPDATE ON knowledge_activity\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_activity', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_activity' AND k1=OLD.id AND k2=''); INSERT INTO memory_touched SELECT 'knowledge_activity', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_activity' AND k1=NEW.id AND k2=''); END\""
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 1008,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [
+      "      \"attached\": [],"
+    ],
+    "capture": [
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_entries_delete AFTER DELETE ON knowledge_entries\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_entries', OLD.id, OLD.version\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_entries' AND k1=OLD.id AND k2=OLD.version); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_entries_insert AFTER INSERT ON knowledge_entries\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_entries', NEW.id, NEW.version\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_entries' AND k1=NEW.id AND k2=NEW.version); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_entries_update AFTER UPDATE ON knowledge_entries\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_entries', OLD.id, OLD.version\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_entries' AND k1=OLD.id AND k2=OLD.version); INSERT INTO memory_touched SELECT 'knowledge_entries', NEW.id, NEW.version\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_entries' AND k1=NEW.id AND k2=NEW.version); END\"",
+      "        ]",
+      "      ],"
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 1023,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_globals_delete AFTER DELETE ON knowledge_globals\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_globals', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_globals' AND k1=OLD.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_globals_insert AFTER INSERT ON knowledge_globals\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_globals', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_globals' AND k1=NEW.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_globals_update AFTER UPDATE ON knowledge_globals\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_globals', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_globals' AND k1=OLD.id AND k2=''); INSERT INTO memory_touched SELECT 'knowledge_globals', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_globals' AND k1=NEW.id AND k2=''); END\""
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 1039,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_heads_delete AFTER DELETE ON knowledge_heads\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_heads', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_heads' AND k1=OLD.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_heads_insert AFTER INSERT ON knowledge_heads\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_heads', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_heads' AND k1=NEW.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_heads_update AFTER UPDATE ON knowledge_heads\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_heads', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_heads' AND k1=OLD.id AND k2=''); INSERT INTO memory_touched SELECT 'knowledge_heads', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_heads' AND k1=NEW.id AND k2=''); END\""
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 1051,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [
+      "      \"attached\": [],"
+    ],
+    "capture": [
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_jobs_delete AFTER DELETE ON knowledge_jobs\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_jobs', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_jobs' AND k1=OLD.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_jobs_insert AFTER INSERT ON knowledge_jobs\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_jobs', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_jobs' AND k1=NEW.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_jobs_update AFTER UPDATE ON knowledge_jobs\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_jobs', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_jobs' AND k1=OLD.id AND k2=''); INSERT INTO memory_touched SELECT 'knowledge_jobs', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_jobs' AND k1=NEW.id AND k2=''); END\"",
+      "        ]",
+      "      ],"
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 1066,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_nominations_delete AFTER DELETE ON knowledge_nominations\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_nominations', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_nominations' AND k1=OLD.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_nominations_insert AFTER INSERT ON knowledge_nominations\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_nominations', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_nominations' AND k1=NEW.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_nominations_update AFTER UPDATE ON knowledge_nominations\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_nominations', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_nominations' AND k1=OLD.id AND k2=''); INSERT INTO memory_touched SELECT 'knowledge_nominations', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_nominations' AND k1=NEW.id AND k2=''); END\""
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 1078,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [
+      "      \"attached\": [],"
+    ],
+    "capture": [
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_principals_delete AFTER DELETE ON knowledge_principals\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_principals', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_principals' AND k1=OLD.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_principals_insert AFTER INSERT ON knowledge_principals\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_principals', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_principals' AND k1=NEW.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_principals_update AFTER UPDATE ON knowledge_principals\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_principals', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_principals' AND k1=OLD.id AND k2=''); INSERT INTO memory_touched SELECT 'knowledge_principals', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_principals' AND k1=NEW.id AND k2=''); END\"",
+      "        ]",
+      "      ],"
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 1089,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [
+      "      \"attached\": [],"
+    ],
+    "capture": [
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_sources_delete AFTER DELETE ON knowledge_sources\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_sources', OLD.project, OLD.id\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_sources' AND k1=OLD.project AND k2=OLD.id); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_sources_insert AFTER INSERT ON knowledge_sources\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_sources', NEW.project, NEW.id\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_sources' AND k1=NEW.project AND k2=NEW.id); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_sources_update AFTER UPDATE ON knowledge_sources\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_sources', OLD.project, OLD.id\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_sources' AND k1=OLD.project AND k2=OLD.id); INSERT INTO memory_touched SELECT 'knowledge_sources', NEW.project, NEW.id\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_sources' AND k1=NEW.project AND k2=NEW.id); END\"",
+      "        ]",
+      "      ],"
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 1101,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [
+      "      \"attached\": [],"
+    ],
+    "capture": [
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_watermarks_delete AFTER DELETE ON knowledge_watermarks\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_watermarks', OLD.project, OLD.destination\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_watermarks' AND k1=OLD.project AND k2=OLD.destination); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_watermarks_insert AFTER INSERT ON knowledge_watermarks\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_watermarks', NEW.project, NEW.destination\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_watermarks' AND k1=NEW.project AND k2=NEW.destination); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_watermarks_update AFTER UPDATE ON knowledge_watermarks\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_watermarks', OLD.project, OLD.destination\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_watermarks' AND k1=OLD.project AND k2=OLD.destination); INSERT INTO memory_touched SELECT 'knowledge_watermarks', NEW.project, NEW.destination\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_watermarks' AND k1=NEW.project AND k2=NEW.destination); END\"",
+      "        ]",
+      "      ],"
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 1333,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [
+      "      \"attached\": [],"
+    ],
+    "capture": [
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_memory_agent_scope_delete AFTER DELETE ON memory_agent_scope\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'memory_agent_scope', OLD.singleton, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_agent_scope' AND k1=OLD.singleton AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_memory_agent_scope_insert AFTER INSERT ON memory_agent_scope\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'memory_agent_scope', NEW.singleton, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_agent_scope' AND k1=NEW.singleton AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_memory_agent_scope_update AFTER UPDATE ON memory_agent_scope\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'memory_agent_scope', OLD.singleton, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_agent_scope' AND k1=OLD.singleton AND k2=''); INSERT INTO memory_touched SELECT 'memory_agent_scope', NEW.singleton, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_agent_scope' AND k1=NEW.singleton AND k2=''); END\"",
+      "        ]",
+      "      ],"
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 1349,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_memory_library_delete AFTER DELETE ON memory_library\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'memory_library', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_library' AND k1=OLD.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_memory_library_insert AFTER INSERT ON memory_library\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'memory_library', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_library' AND k1=NEW.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_memory_library_update AFTER UPDATE ON memory_library\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'memory_library', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_library' AND k1=OLD.id AND k2=''); INSERT INTO memory_touched SELECT 'memory_library', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_library' AND k1=NEW.id AND k2=''); END\""
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 1366,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [
+      "      \"attached\": [],"
+    ],
+    "capture": [
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_memory_settings_delete AFTER DELETE ON memory_settings\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'memory_settings', OLD.singleton, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_settings' AND k1=OLD.singleton AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_memory_settings_insert AFTER INSERT ON memory_settings\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'memory_settings', NEW.singleton, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_settings' AND k1=NEW.singleton AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_memory_settings_update AFTER UPDATE ON memory_settings\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'memory_settings', OLD.singleton, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_settings' AND k1=OLD.singleton AND k2=''); INSERT INTO memory_touched SELECT 'memory_settings', NEW.singleton, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_settings' AND k1=NEW.singleton AND k2=''); END\"",
+      "        ]",
+      "      ],"
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 1377,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "    },",
+      "    {",
+      "      \"attached\": [],",
+      "      \"excluded\": [],",
+      "      \"row_count\": 0,",
+      "      \"rows\": [],",
+      "      \"schema\": [",
+      "        \"CREATE TABLE memory_touched\",",
+      "        \"         (tbl TEXT NOT NULL, k1 NOT NULL, k2 NOT NULL, PRIMARY KEY (tbl, k1, k2)) WITHOUT ROWID\"",
+      "      ],",
+      "      \"table\": \"memory_touched\""
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 2374,
+    "commit": "43b8fd27b",
+    "reason": "2.4.3 adds indexes for the active project read",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "          \"CREATE INDEX team_agents_status ON team_agents(status, project)\"",
+      "        ],",
+      "        ["
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 2870,
+    "commit": "43b8fd27b",
+    "reason": "2.4.3 adds indexes for the active project read",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "        ],",
+      "        [",
+      "          \"CREATE INDEX team_messages_state ON team_messages(state, project)\""
+    ]
+  },
+  {
+    "scenario": "storage/fresh",
+    "at": 3218,
+    "commit": "43b8fd27b",
+    "reason": "2.4.3 adds indexes for the active project read",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "        ],",
+      "        [",
+      "          \"CREATE INDEX team_tasks_status ON team_tasks(status, project)\"",
+      "        ],",
+      "        [",
+      "          \"CREATE INDEX team_tasks_undelivered ON team_tasks(source, status, project)\",",
+      "          \"                WHERE delivered=0\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 245,
+    "commit": "dbe466756",
+    "reason": "2.5 H2 adds the app plugin store's tables, the secret column left out",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "      \"excluded\": [",
+      "        \"secret\"",
+      "      ],",
+      "      \"row_count\": 0,",
+      "      \"rows\": [],",
+      "      \"schema\": [",
+      "        \"CREATE TABLE app_plugin_secrets (\",",
+      "        \"    plugin TEXT NOT NULL CHECK(length(plugin) BETWEEN 1 AND 64),\",",
+      "        \"    secret TEXT NOT NULL CHECK(length(secret) BETWEEN 1 AND 64),\",",
+      "        \"    source TEXT NOT NULL CHECK(source IN ('account', 'key')),\",",
+      "        \"    reference TEXT NOT NULL CHECK(length(reference) BETWEEN 1 AND 128),\",",
+      "        \"    PRIMARY KEY (plugin, secret)\",",
+      "        \")\"",
+      "      ],",
+      "      \"table\": \"app_plugin_secrets\"",
+      "    },",
+      "    {",
+      "      \"attached\": [],",
+      "      \"excluded\": [],",
+      "      \"row_count\": 0,",
+      "      \"rows\": [],",
+      "      \"schema\": [",
+      "        \"CREATE TABLE app_plugin_state (\",",
+      "        \"    name TEXT PRIMARY KEY CHECK(length(name) BETWEEN 1 AND 64),\",",
+      "        \"    enabled INTEGER NOT NULL CHECK(enabled IN (0, 1))\",",
+      "        \")\"",
+      "      ],",
+      "      \"table\": \"app_plugin_state\"",
+      "    },",
+      "    {",
+      "      \"attached\": [],",
+      "      \"excluded\": [],",
+      "      \"row_count\": 0,",
+      "      \"rows\": [],",
+      "      \"schema\": [",
+      "        \"CREATE TABLE app_plugin_trust (\",",
+      "        \"    name TEXT PRIMARY KEY CHECK(length(name) BETWEEN 1 AND 64),\",",
+      "        \"    sha256 TEXT NOT NULL CHECK(length(sha256) = 64),\",",
+      "        \"    hosts TEXT NOT NULL CHECK(length(hosts) <= 4096),\",",
+      "        \"    trusted_ms INTEGER NOT NULL\",",
+      "        \")\"",
+      "      ],",
+      "      \"table\": \"app_plugin_trust\"",
+      "    },",
+      "    {",
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_asset_snapshots_delete AFTER DELETE ON asset_snapshots\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'asset_snapshots', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='asset_snapshots' AND k1=OLD.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_asset_snapshots_insert AFTER INSERT ON asset_snapshots\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'asset_snapshots', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='asset_snapshots' AND k1=NEW.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_asset_snapshots_update AFTER UPDATE ON asset_snapshots\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'asset_snapshots', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='asset_snapshots' AND k1=OLD.id AND k2=''); INSERT INTO memory_touched SELECT 'asset_snapshots', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='asset_snapshots' AND k1=NEW.id AND k2=''); END\"",
+      "        ]",
+      "      ],"
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 254,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [
+      "      \"attached\": [],"
+    ],
+    "capture": [
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_asset_sources_delete AFTER DELETE ON asset_sources\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'asset_sources', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='asset_sources' AND k1=OLD.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_asset_sources_insert AFTER INSERT ON asset_sources\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'asset_sources', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='asset_sources' AND k1=NEW.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_asset_sources_update AFTER UPDATE ON asset_sources\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'asset_sources', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='asset_sources' AND k1=OLD.id AND k2=''); INSERT INTO memory_touched SELECT 'asset_sources', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='asset_sources' AND k1=NEW.id AND k2=''); END\"",
+      "        ]",
+      "      ],"
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 743,
+    "commit": "eaa0dd6c0",
+    "reason": "2.4.3 adds an index for waiting message reads",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "          \"CREATE INDEX coord_messages_receipt ON coord_messages(project, receipt, to_kind, to_agent)\"",
+      "        ],",
+      "        ["
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 940,
+    "commit": "1d3635a9c",
+    "reason": "2.5 events carry a topic and engine-own writes publish their own events rows, so revisions and cursors move",
+    "security": false,
+    "golden": [
+      "      \"row_count\": 45,"
+    ],
+    "capture": [
+      "      \"row_count\": 48,"
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 946,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-3>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-3>\",",
+      "            \"topic\": \"settings\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 954,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-4>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-4>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 962,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-5>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-5>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 970,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-6>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-6>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 978,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-7>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-7>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 986,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-8>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-8>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 994,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-9>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-9>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1002,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-10>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-10>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1010,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-11>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-11>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1018,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-12>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-12>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1026,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-13>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-13>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1034,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-14>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-14>\",",
+      "            \"topic\": \"projects\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1042,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-15>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-15>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1050,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-16>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-16>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1058,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-17>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-17>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1066,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-18>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-18>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1074,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-19>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-19>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1082,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-20>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-20>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1090,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-21>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-21>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1098,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-22>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-22>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1106,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-23>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-23>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1114,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-24>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-24>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1122,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-25>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-25>\",",
+      "            \"topic\": \"projects\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1130,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-26>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-26>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1138,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-27>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-27>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1146,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-28>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-28>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1154,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-29>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-29>\",",
+      "            \"topic\": \"settings\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1162,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-30>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-30>\",",
+      "            \"topic\": \"projects\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1170,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-31>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-31>\",",
+      "            \"topic\": \"projects\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1178,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-32>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-32>\",",
+      "            \"topic\": \"settings\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1186,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-33>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-33>\",",
+      "            \"topic\": \"settings\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1194,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-34>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-34>\",",
+      "            \"topic\": \"settings\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1202,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-35>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-35>\",",
+      "            \"topic\": \"settings\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1210,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-36>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-36>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1218,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-37>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-37>\",",
+      "            \"topic\": \"settings\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1226,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-38>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-38>\",",
+      "            \"topic\": \"settings\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1234,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-39>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-39>\",",
+      "            \"topic\": \"settings\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1242,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-40>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-40>\",",
+      "            \"topic\": \"settings\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1249,
+    "commit": "1d3635a9c",
+    "reason": "2.5 events carry a topic and engine-own writes publish their own events rows, so revisions and cursors move",
+    "security": false,
+    "golden": [
+      "            \"cursor\": \"44\",",
+      "            \"request_id\": \"<id-41>\"",
+      "          },",
+      "          \"cursor\": 44",
+      "        },",
+      "        {",
+      "          \"body\": {",
+      "            \"client_id\": \"owner:<id-2>\","
+    ],
+    "capture": []
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1258,
+    "commit": "1d3635a9c",
+    "reason": "2.5 events carry a topic and engine-own writes publish their own events rows, so revisions and cursors move",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-42>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-41>\",",
+      "            \"topic\": \"memory\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1265,
+    "commit": "1d3635a9c",
+    "reason": "2.5 events carry a topic and engine-own writes publish their own events rows, so revisions and cursors move",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "            \"cursor\": \"48\",",
+      "            \"request_id\": \"<id-42>\",",
+      "            \"topic\": \"memory\"",
+      "          },",
+      "          \"cursor\": 48",
+      "        },",
+      "        {",
+      "          \"body\": {",
+      "            \"client_id\": \"owner:<id-2>\","
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1266,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-43>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-43>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1274,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-44>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-44>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1282,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-45>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-45>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1290,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-46>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-46>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1298,
+    "commit": "2bd14fa08",
+    "reason": "2.5 S3a: each events row names the topic its change is about",
+    "security": false,
+    "golden": [
+      "            \"request_id\": \"<id-47>\""
+    ],
+    "capture": [
+      "            \"request_id\": \"<id-47>\",",
+      "            \"topic\": \"team\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1301,
+    "commit": "1d3635a9c",
+    "reason": "2.5 events carry a topic and engine-own writes publish their own events rows, so revisions and cursors move",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "        },",
+      "        {",
+      "          \"body\": {",
+      "            \"client_id\": \"owner:engine\",",
+      "            \"cursor\": \"44\",",
+      "            \"request_id\": \"engine-44\",",
+      "            \"topic\": \"unknown\"",
+      "          },",
+      "          \"cursor\": 44",
+      "        },",
+      "        {",
+      "          \"body\": {",
+      "            \"client_id\": \"owner:engine\",",
+      "            \"cursor\": \"46\",",
+      "            \"request_id\": \"engine-46\",",
+      "            \"topic\": \"unknown\"",
+      "          },",
+      "          \"cursor\": 46",
+      "        },",
+      "        {",
+      "          \"body\": {",
+      "            \"client_id\": \"owner:engine\",",
+      "            \"cursor\": \"47\",",
+      "            \"request_id\": \"engine-47\",",
+      "            \"topic\": \"unknown\"",
+      "          },",
+      "          \"cursor\": 47"
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1416,
+    "commit": "6effffba1",
+    "reason": "2.5 L7 rewrites the ide_asks CREATE text with plain indentation, same columns",
+    "security": false,
+    "golden": [
+      "        \"                project TEXT NOT NULL,\",",
+      "        \"                entry TEXT NOT NULL,\",",
+      "        \"                version INTEGER NOT NULL CHECK (version > 0),\",",
+      "        \"                decision TEXT NOT NULL CHECK (decision IN ('approve','reject')),\",",
+      "        \"                asked_ms INTEGER NOT NULL,\",",
+      "        \"                PRIMARY KEY (project, entry)\",",
+      "        \"            ) WITHOUT ROWID\""
+    ],
+    "capture": [
+      "        \"    project TEXT NOT NULL,\",",
+      "        \"    entry TEXT NOT NULL,\",",
+      "        \"    version INTEGER NOT NULL CHECK (version > 0),\",",
+      "        \"    decision TEXT NOT NULL CHECK (decision IN ('approve','reject')),\",",
+      "        \"    asked_ms INTEGER NOT NULL,\",",
+      "        \"    PRIMARY KEY (project, entry)\",",
+      "        \") WITHOUT ROWID\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1454,
+    "commit": "9c999b0e0",
+    "reason": "2.5 keeps owner texts in the kept_text tables, digests labelled by text",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "      \"attached\": [],",
+      "      \"excluded\": [],",
+      "      \"row_count\": 1,",
+      "      \"rows\": [",
+      "        {",
+      "          \"id\": 1,",
+      "          \"key\": {",
+      "            \"blob_bytes\": 32",
+      "          }",
+      "        }",
+      "      ],",
+      "      \"schema\": [",
+      "        \"CREATE TABLE kept_text_key\",",
+      "        \"    (id INTEGER PRIMARY KEY CHECK(id=1), key BLOB NOT NULL)\"",
+      "      ],",
+      "      \"table\": \"kept_text_key\"",
+      "    },",
+      "    {",
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE INDEX kept_text_refs_digest ON kept_text_refs(digest)\"",
+      "        ],",
+      "        [",
+      "          \"CREATE INDEX kept_text_refs_project ON kept_text_refs(project)\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER kept_text_refs_deleted AFTER DELETE ON kept_text_refs\",",
+      "          \"BEGIN DELETE FROM kept_texts WHERE digest=OLD.digest\",",
+      "          \"    AND NOT EXISTS (SELECT 1 FROM kept_text_refs WHERE digest=OLD.digest); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER kept_text_refs_moved AFTER UPDATE OF digest ON kept_text_refs\",",
+      "          \"BEGIN DELETE FROM kept_texts WHERE digest=OLD.digest\",",
+      "          \"    AND NOT EXISTS (SELECT 1 FROM kept_text_refs WHERE digest=OLD.digest); END\"",
+      "        ]",
+      "      ],",
+      "      \"excluded\": [],",
+      "      \"row_count\": 5,",
+      "      \"rows\": [",
+      "        {",
+      "          \"digest\": \"<kept-text-1>\",",
+      "          \"holder\": \"memory_library/note-<id-48>/text\",",
+      "          \"project\": \"snapshot-p5\"",
+      "        },",
+      "        {",
+      "          \"digest\": \"<kept-text-2>\",",
+      "          \"holder\": \"memory_library/note-<id-49>/text\",",
+      "          \"project\": null",
+      "        },",
+      "        {",
+      "          \"digest\": \"<kept-text-3>\",",
+      "          \"holder\": \"memory_library/note-<id-48>/origin\",",
+      "          \"project\": \"snapshot-p5\"",
+      "        },",
+      "        {",
+      "          \"digest\": \"<kept-text-3>\",",
+      "          \"holder\": \"memory_library/note-<id-49>/origin\",",
+      "          \"project\": null",
+      "        },",
+      "        {",
+      "          \"digest\": \"<kept-text-4>\",",
+      "          \"holder\": \"user_profile/1/body\",",
+      "          \"project\": null",
+      "        }",
+      "      ],",
+      "      \"schema\": [",
+      "        \"CREATE TABLE kept_text_refs\",",
+      "        \"    (holder TEXT PRIMARY KEY, digest TEXT NOT NULL, project TEXT)\"",
+      "      ],",
+      "      \"table\": \"kept_text_refs\"",
+      "    },",
+      "    {",
+      "      \"attached\": [],",
+      "      \"excluded\": [],",
+      "      \"row_count\": 4,",
+      "      \"rows\": [",
+      "        {",
+      "          \"digest\": \"<kept-text-1>\",",
+      "          \"text\": {",
+      "            \"blob\": \"Buoy alerts go to the harbour channel.\"",
+      "          }",
+      "        },",
+      "        {",
+      "          \"digest\": \"<kept-text-2>\",",
+      "          \"text\": {",
+      "            \"blob\": \"Tide tables are read at dawn.\"",
+      "          }",
+      "        },",
+      "        {",
+      "          \"digest\": \"<kept-text-3>\",",
+      "          \"text\": {",
+      "            \"blob\": {",
+      "              \"kind\": \"written\"",
+      "            }",
+      "          }",
+      "        },",
+      "        {",
+      "          \"digest\": \"<kept-text-4>\",",
+      "          \"text\": {",
+      "            \"blob\": {",
+      "              \"bio\": \"Builds tools for marine researchers.\",",
+      "              \"name\": \"Mira Okafor\",",
+      "              \"preferred_stack\": [",
+      "                \"Rust\",",
+      "                \"TypeScript\"",
+      "              ],",
+      "              \"role\": \"Founder and full-stack developer\",",
+      "              \"working_style\": {",
+      "                \"detail\": \"terse\",",
+      "                \"initiative\": \"ask_first\"",
+      "              }",
+      "            }",
+      "          }",
+      "        }",
+      "      ],",
+      "      \"schema\": [",
+      "        \"CREATE TABLE kept_texts\",",
+      "        \"    (digest TEXT PRIMARY KEY, text BLOB NOT NULL)\"",
+      "      ],",
+      "      \"table\": \"kept_texts\"",
+      "    },",
+      "    {"
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1457,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_activity_delete AFTER DELETE ON knowledge_activity\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_activity', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_activity' AND k1=OLD.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_activity_insert AFTER INSERT ON knowledge_activity\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_activity', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_activity' AND k1=NEW.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_activity_update AFTER UPDATE ON knowledge_activity\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_activity', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_activity' AND k1=OLD.id AND k2=''); INSERT INTO memory_touched SELECT 'knowledge_activity', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_activity' AND k1=NEW.id AND k2=''); END\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1470,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [
+      "      \"attached\": [],"
+    ],
+    "capture": [
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_entries_delete AFTER DELETE ON knowledge_entries\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_entries', OLD.id, OLD.version\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_entries' AND k1=OLD.id AND k2=OLD.version); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_entries_insert AFTER INSERT ON knowledge_entries\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_entries', NEW.id, NEW.version\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_entries' AND k1=NEW.id AND k2=NEW.version); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_entries_update AFTER UPDATE ON knowledge_entries\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_entries', OLD.id, OLD.version\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_entries' AND k1=OLD.id AND k2=OLD.version); INSERT INTO memory_touched SELECT 'knowledge_entries', NEW.id, NEW.version\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_entries' AND k1=NEW.id AND k2=NEW.version); END\"",
+      "        ]",
+      "      ],"
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1485,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_globals_delete AFTER DELETE ON knowledge_globals\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_globals', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_globals' AND k1=OLD.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_globals_insert AFTER INSERT ON knowledge_globals\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_globals', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_globals' AND k1=NEW.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_globals_update AFTER UPDATE ON knowledge_globals\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_globals', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_globals' AND k1=OLD.id AND k2=''); INSERT INTO memory_touched SELECT 'knowledge_globals', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_globals' AND k1=NEW.id AND k2=''); END\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1501,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_heads_delete AFTER DELETE ON knowledge_heads\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_heads', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_heads' AND k1=OLD.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_heads_insert AFTER INSERT ON knowledge_heads\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_heads', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_heads' AND k1=NEW.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_heads_update AFTER UPDATE ON knowledge_heads\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_heads', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_heads' AND k1=OLD.id AND k2=''); INSERT INTO memory_touched SELECT 'knowledge_heads', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_heads' AND k1=NEW.id AND k2=''); END\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1513,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [
+      "      \"attached\": [],"
+    ],
+    "capture": [
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_jobs_delete AFTER DELETE ON knowledge_jobs\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_jobs', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_jobs' AND k1=OLD.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_jobs_insert AFTER INSERT ON knowledge_jobs\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_jobs', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_jobs' AND k1=NEW.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_jobs_update AFTER UPDATE ON knowledge_jobs\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_jobs', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_jobs' AND k1=OLD.id AND k2=''); INSERT INTO memory_touched SELECT 'knowledge_jobs', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_jobs' AND k1=NEW.id AND k2=''); END\"",
+      "        ]",
+      "      ],"
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1528,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_nominations_delete AFTER DELETE ON knowledge_nominations\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_nominations', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_nominations' AND k1=OLD.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_nominations_insert AFTER INSERT ON knowledge_nominations\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_nominations', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_nominations' AND k1=NEW.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_nominations_update AFTER UPDATE ON knowledge_nominations\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_nominations', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_nominations' AND k1=OLD.id AND k2=''); INSERT INTO memory_touched SELECT 'knowledge_nominations', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_nominations' AND k1=NEW.id AND k2=''); END\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1540,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [
+      "      \"attached\": [],"
+    ],
+    "capture": [
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_principals_delete AFTER DELETE ON knowledge_principals\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_principals', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_principals' AND k1=OLD.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_principals_insert AFTER INSERT ON knowledge_principals\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_principals', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_principals' AND k1=NEW.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_principals_update AFTER UPDATE ON knowledge_principals\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_principals', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_principals' AND k1=OLD.id AND k2=''); INSERT INTO memory_touched SELECT 'knowledge_principals', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_principals' AND k1=NEW.id AND k2=''); END\"",
+      "        ]",
+      "      ],"
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1551,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [
+      "      \"attached\": [],"
+    ],
+    "capture": [
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_sources_delete AFTER DELETE ON knowledge_sources\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_sources', OLD.project, OLD.id\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_sources' AND k1=OLD.project AND k2=OLD.id); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_sources_insert AFTER INSERT ON knowledge_sources\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_sources', NEW.project, NEW.id\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_sources' AND k1=NEW.project AND k2=NEW.id); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_sources_update AFTER UPDATE ON knowledge_sources\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_sources', OLD.project, OLD.id\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_sources' AND k1=OLD.project AND k2=OLD.id); INSERT INTO memory_touched SELECT 'knowledge_sources', NEW.project, NEW.id\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_sources' AND k1=NEW.project AND k2=NEW.id); END\"",
+      "        ]",
+      "      ],"
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1563,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [
+      "      \"attached\": [],"
+    ],
+    "capture": [
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_watermarks_delete AFTER DELETE ON knowledge_watermarks\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_watermarks', OLD.project, OLD.destination\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_watermarks' AND k1=OLD.project AND k2=OLD.destination); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_watermarks_insert AFTER INSERT ON knowledge_watermarks\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_watermarks', NEW.project, NEW.destination\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_watermarks' AND k1=NEW.project AND k2=NEW.destination); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_knowledge_watermarks_update AFTER UPDATE ON knowledge_watermarks\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'knowledge_watermarks', OLD.project, OLD.destination\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_watermarks' AND k1=OLD.project AND k2=OLD.destination); INSERT INTO memory_touched SELECT 'knowledge_watermarks', NEW.project, NEW.destination\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='knowledge_watermarks' AND k1=NEW.project AND k2=NEW.destination); END\"",
+      "        ]",
+      "      ],"
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1800,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [
+      "      \"attached\": [],"
+    ],
+    "capture": [
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_memory_agent_scope_delete AFTER DELETE ON memory_agent_scope\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'memory_agent_scope', OLD.singleton, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_agent_scope' AND k1=OLD.singleton AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_memory_agent_scope_insert AFTER INSERT ON memory_agent_scope\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'memory_agent_scope', NEW.singleton, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_agent_scope' AND k1=NEW.singleton AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_memory_agent_scope_update AFTER UPDATE ON memory_agent_scope\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'memory_agent_scope', OLD.singleton, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_agent_scope' AND k1=OLD.singleton AND k2=''); INSERT INTO memory_touched SELECT 'memory_agent_scope', NEW.singleton, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_agent_scope' AND k1=NEW.singleton AND k2=''); END\"",
+      "        ]",
+      "      ],"
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1816,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_memory_library_delete AFTER DELETE ON memory_library\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'memory_library', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_library' AND k1=OLD.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_memory_library_insert AFTER INSERT ON memory_library\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'memory_library', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_library' AND k1=NEW.id AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_memory_library_update AFTER UPDATE ON memory_library\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'memory_library', OLD.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_library' AND k1=OLD.id AND k2=''); INSERT INTO memory_touched SELECT 'memory_library', NEW.id, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_library' AND k1=NEW.id AND k2=''); END\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1822,
+    "commit": "9c999b0e0",
+    "reason": "the kept_text rows name the notes first, so their masked ids number in another order",
+    "security": false,
+    "golden": [
+      "          \"id\": \"note-<id-48>\","
+    ],
+    "capture": [
+      "          \"id\": \"note-<id-49>\","
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1831,
+    "commit": "9c999b0e0",
+    "reason": "the kept_text rows name the notes first, so their masked ids number in another order",
+    "security": false,
+    "golden": [
+      "          \"id\": \"note-<id-49>\","
+    ],
+    "capture": [
+      "          \"id\": \"note-<id-48>\","
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1852,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [
+      "      \"attached\": [],"
+    ],
+    "capture": [
+      "      \"attached\": [",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_memory_settings_delete AFTER DELETE ON memory_settings\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'memory_settings', OLD.singleton, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_settings' AND k1=OLD.singleton AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_memory_settings_insert AFTER INSERT ON memory_settings\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'memory_settings', NEW.singleton, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_settings' AND k1=NEW.singleton AND k2=''); END\"",
+      "        ],",
+      "        [",
+      "          \"CREATE TRIGGER memory_touched_memory_settings_update AFTER UPDATE ON memory_settings\",",
+      "          \"             BEGIN INSERT INTO memory_touched SELECT 'memory_settings', OLD.singleton, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_settings' AND k1=OLD.singleton AND k2=''); INSERT INTO memory_touched SELECT 'memory_settings', NEW.singleton, ''\",",
+      "          \"                 WHERE NOT EXISTS (SELECT 1 FROM memory_touched\",",
+      "          \"                     WHERE tbl='memory_settings' AND k1=NEW.singleton AND k2=''); END\"",
+      "        ]",
+      "      ],"
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 1863,
+    "commit": "3837b4379",
+    "reason": "2.5 memory aggregate on the state log: memory_touched and its triggers",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "    },",
+      "    {",
+      "      \"attached\": [],",
+      "      \"excluded\": [],",
+      "      \"row_count\": 0,",
+      "      \"rows\": [],",
+      "      \"schema\": [",
+      "        \"CREATE TABLE memory_touched\",",
+      "        \"         (tbl TEXT NOT NULL, k1 NOT NULL, k2 NOT NULL, PRIMARY KEY (tbl, k1, k2)) WITHOUT ROWID\"",
+      "      ],",
+      "      \"table\": \"memory_touched\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 2525,
+    "commit": "1d3635a9c",
+    "reason": "2.5 events carry a topic and engine-own writes publish their own events rows, so revisions and cursors move",
+    "security": false,
+    "golden": [
+      "          \"event_cursor\": 44,"
+    ],
+    "capture": [
+      "          \"event_cursor\": 45,"
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 2527,
+    "commit": "1d3635a9c",
+    "reason": "2.5 events carry a topic and engine-own writes publish their own events rows, so revisions and cursors move",
+    "security": false,
+    "golden": [
+      "          \"origin\": \"native_owner\",",
+      "          \"owner_id\": \"<id-2>\",",
+      "          \"resulting_epoch\": 1,",
+      "          \"revision_after\": 44,",
+      "          \"revision_before\": 43",
+      "        },",
+      "        {",
+      "          \"admitted_epoch\": 1,",
+      "          \"engine_epoch\": \"<id-52>\",",
+      "          \"event_cursor\": 45,",
+      "          \"operation_id\": \"<id-42>\","
+    ],
+    "capture": []
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 2543,
+    "commit": "1d3635a9c",
+    "reason": "2.5 events carry a topic and engine-own writes publish their own events rows, so revisions and cursors move",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "        },",
+      "        {",
+      "          \"admitted_epoch\": 1,",
+      "          \"engine_epoch\": \"<id-52>\",",
+      "          \"event_cursor\": 48,",
+      "          \"operation_id\": \"<id-42>\",",
+      "          \"origin\": \"native_owner\",",
+      "          \"owner_id\": \"<id-2>\",",
+      "          \"resulting_epoch\": 1,",
+      "          \"revision_after\": 48,",
+      "          \"revision_before\": 47"
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 3492,
+    "commit": "1d3635a9c",
+    "reason": "2.5 events carry a topic and engine-own writes publish their own events rows, so revisions and cursors move",
+    "security": false,
+    "golden": [
+      "          \"revision\": 45"
+    ],
+    "capture": [
+      "          \"revision\": 48"
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 3499,
+    "commit": "f9c958482",
+    "reason": "2.5 log core: the state_log rows of the settings, memory and landing writes",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "    },",
+      "    {",
+      "      \"attached\": [],",
+      "      \"excluded\": [],",
+      "      \"row_count\": 13,",
+      "      \"rows\": [",
+      "        {",
+      "          \"aggregate\": \"landing\",",
+      "          \"at_ms\": \"<t>\",",
+      "          \"body\": {",
+      "            \"blob\": {",
+      "              \"project\": \"snapshot-p5\"",
+      "            }",
+      "          },",
+      "          \"kind\": \"PublishPromptNever\",",
+      "          \"revision\": 47,",
+      "          \"schema\": 1,",
+      "          \"seq\": 12",
+      "        },",
+      "        {",
+      "          \"aggregate\": \"memory\",",
+      "          \"at_ms\": \"<t>\",",
+      "          \"body\": {",
+      "            \"blob\": {",
+      "              \"action\": \"library\",",
+      "              \"deleted\": [],",
+      "              \"put\": [",
+      "                {",
+      "                  \"cells\": [",
+      "                    {",
+      "                      \"id\": \"note-<id-49>\"",
+      "                    },",
+      "                    {",
+      "                      \"int\": 1",
+      "                    },",
+      "                    \"null\",",
+      "                    {",
+      "                      \"text\": \"<id-58>\"",
+      "                    },",
+      "                    {",
+      "                      \"text\": \"<id-59>\"",
+      "                    }",
+      "                  ],",
+      "                  \"table\": \"memory_library\"",
+      "                }",
+      "              ]",
+      "            }",
+      "          },",
+      "          \"kind\": \"MemoryChanged\",",
+      "          \"revision\": 45,",
+      "          \"schema\": 1,",
+      "          \"seq\": 10",
+      "        },",
+      "        {",
+      "          \"aggregate\": \"memory\",",
+      "          \"at_ms\": \"<t>\",",
+      "          \"body\": {",
+      "            \"blob\": {",
+      "              \"action\": \"library\",",
+      "              \"deleted\": [],",
+      "              \"put\": [",
+      "                {",
+      "                  \"cells\": [",
+      "                    {",
+      "                      \"id\": \"note-<id-48>\"",
+      "                    },",
+      "                    {",
+      "                      \"int\": 2",
+      "                    },",
+      "                    {",
+      "                      \"id\": \"snapshot-p5\"",
+      "                    },",
+      "                    {",
+      "                      \"text\": \"<id-58>\"",
+      "                    },",
+      "                    {",
+      "                      \"text\": \"<id-60>\"",
+      "                    }",
+      "                  ],",
+      "                  \"table\": \"memory_library\"",
+      "                }",
+      "              ]",
+      "            }",
+      "          },",
+      "          \"kind\": \"MemoryChanged\",",
+      "          \"revision\": 48,",
+      "          \"schema\": 1,",
+      "          \"seq\": 13",
+      "        },",
+      "        {",
+      "          \"aggregate\": \"settings\",",
+      "          \"at_ms\": \"<t>\",",
+      "          \"body\": {",
+      "            \"blob\": {",
+      "              \"body\": \"<id-61>\"",
+      "            }",
+      "          },",
+      "          \"kind\": \"UserProfileSaved\",",
+      "          \"revision\": 1,",
+      "          \"schema\": 1,",
+      "          \"seq\": 1",
+      "        },",
+      "        {",
+      "          \"aggregate\": \"settings\",",
+      "          \"at_ms\": \"<t>\",",
+      "          \"body\": {",
+      "            \"blob\": {",
+      "              \"project\": \"snapshot-p5\",",
+      "              \"settings\": \"refresh_only\"",
+      "            }",
+      "          },",
+      "          \"kind\": \"RoadmapRefreshSaved\",",
+      "          \"revision\": 46,",
+      "          \"schema\": 1,",
+      "          \"seq\": 11",
+      "        },",
+      "        {",
+      "          \"aggregate\": \"settings\",",
+      "          \"at_ms\": \"<t>\",",
+      "          \"body\": {",
+      "            \"blob\": {",
+      "              \"settings\": \"stop_at_once\"",
+      "            }",
+      "          },",
+      "          \"kind\": \"ProviderRetrySaved\",",
+      "          \"revision\": 38,",
+      "          \"schema\": 1,",
+      "          \"seq\": 5",
+      "        },",
+      "        {",
+      "          \"aggregate\": \"settings\",",
+      "          \"at_ms\": \"<t>\",",
+      "          \"body\": {",
+      "            \"blob\": {",
+      "              \"settings\": {",
+      "                \"days\": 14,",
+      "                \"mode\": \"manual\"",
+      "              }",
+      "            }",
+      "          },",
+      "          \"kind\": \"AgentCleanupSaved\",",
+      "          \"revision\": 36,",
+      "          \"schema\": 1,",
+      "          \"seq\": 3",
+      "        },",
+      "        {",
+      "          \"aggregate\": \"settings\",",
+      "          \"at_ms\": \"<t>\",",
+      "          \"body\": {",
+      "            \"blob\": {",
+      "              \"settings\": {",
+      "                \"hours\": 12,",
+      "                \"left_running\": \"never\",",
+      "                \"on_quit\": \"stop\"",
+      "              }",
+      "            }",
+      "          },",
+      "          \"kind\": \"AgentQuitSaved\",",
+      "          \"revision\": 37,",
+      "          \"schema\": 1,",
+      "          \"seq\": 4",
+      "        },",
+      "        {",
+      "          \"aggregate\": \"settings\",",
+      "          \"at_ms\": \"<t>\",",
+      "          \"body\": {",
+      "            \"blob\": {",
+      "              \"settings\": {",
+      "                \"install\": \"off\",",
+      "                \"mode\": \"check_only\",",
+      "                \"online\": \"off\",",
+      "                \"when\": \"on_open\"",
+      "              }",
+      "            }",
+      "          },",
+      "          \"kind\": \"HarnessUpdateSaved\",",
+      "          \"revision\": 44,",
+      "          \"schema\": 1,",
+      "          \"seq\": 9",
+      "        },",
+      "        {",
+      "          \"aggregate\": \"settings\",",
+      "          \"at_ms\": \"<t>\",",
+      "          \"body\": {",
+      "            \"blob\": {",
+      "              \"settings\": {",
+      "                \"limit\": \"kib256\"",
+      "              }",
+      "            }",
+      "          },",
+      "          \"kind\": \"MasterFramesSaved\",",
+      "          \"revision\": 39,",
+      "          \"schema\": 1,",
+      "          \"seq\": 6",
+      "        },",
+      "        {",
+      "          \"aggregate\": \"settings\",",
+      "          \"at_ms\": \"<t>\",",
+      "          \"body\": {",
+      "            \"blob\": {",
+      "              \"settings\": {",
+      "                \"limit\": \"minutes30\"",
+      "              }",
+      "            }",
+      "          },",
+      "          \"kind\": \"MasterTimeSaved\",",
+      "          \"revision\": 41,",
+      "          \"schema\": 1,",
+      "          \"seq\": 8",
+      "        },",
+      "        {",
+      "          \"aggregate\": \"settings\",",
+      "          \"at_ms\": \"<t>\",",
+      "          \"body\": {",
+      "            \"blob\": {",
+      "              \"settings\": {",
+      "                \"limit\": \"steps100\"",
+      "              }",
+      "            }",
+      "          },",
+      "          \"kind\": \"MasterStepsSaved\",",
+      "          \"revision\": 40,",
+      "          \"schema\": 1,",
+      "          \"seq\": 7",
+      "        },",
+      "        {",
+      "          \"aggregate\": \"settings\",",
+      "          \"at_ms\": \"<t>\",",
+      "          \"body\": {",
+      "            \"blob\": {",
+      "              \"settings\": {",
+      "                \"linux_sockets\": \"refuse\",",
+      "                \"linux_strict\": \"on\",",
+      "                \"linux_supervisor\": \"off\"",
+      "              }",
+      "            }",
+      "          },",
+      "          \"kind\": \"SandboxSettingsSaved\",",
+      "          \"revision\": 33,",
+      "          \"schema\": 1,",
+      "          \"seq\": 2",
+      "        }",
+      "      ],",
+      "      \"schema\": [",
+      "        \"CREATE TABLE state_log (\",",
+      "        \"            seq INTEGER PRIMARY KEY,\",",
+      "        \"            revision INTEGER NOT NULL CHECK(revision >= 1),\",",
+      "        \"            aggregate TEXT NOT NULL,\",",
+      "        \"            kind TEXT NOT NULL CHECK(length(kind) BETWEEN 1 AND 64),\",",
+      "        \"            schema INTEGER NOT NULL CHECK(schema >= 1),\",",
+      "        \"            at_ms INTEGER NOT NULL CHECK(at_ms >= 0),\",",
+      "        \"            body BLOB NOT NULL CHECK(length(body) <= 65536))\"",
+      "      ],",
+      "      \"table\": \"state_log\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 3612,
+    "commit": "43b8fd27b",
+    "reason": "2.4.3 adds indexes for the active project read",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "        ],",
+      "        [",
+      "          \"CREATE INDEX team_agents_status ON team_agents(status, project)\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 4198,
+    "commit": "43b8fd27b",
+    "reason": "2.4.3 adds indexes for the active project read",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "        ],",
+      "        [",
+      "          \"CREATE INDEX team_messages_state ON team_messages(state, project)\""
+    ]
+  },
+  {
+    "scenario": "storage/settings",
+    "at": 4572,
+    "commit": "43b8fd27b",
+    "reason": "2.4.3 adds indexes for the active project read",
+    "security": false,
+    "golden": [],
+    "capture": [
+      "        ],",
+      "        [",
+      "          \"CREATE INDEX team_tasks_status ON team_tasks(status, project)\"",
+      "        ],",
+      "        [",
+      "          \"CREATE INDEX team_tasks_undelivered ON team_tasks(source, status, project)\",",
+      "          \"                WHERE delivered=0\""
+    ]
+  }
+]
