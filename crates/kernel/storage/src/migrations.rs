@@ -66,7 +66,7 @@ pub const DATABASE: &str = "engine.db";
 
 /// The schema rows of engine.db, sorted, used to see whether a failed upgrade left
 /// the database changed. Input: the connection. Output: one line per schema row.
-pub fn schema(db: &Connection) -> Result<Vec<String>, StorageError> {
+pub(crate) fn schema(db: &Connection) -> Result<Vec<String>, StorageError> {
     let mut statement = db
         .prepare(
             "SELECT type || ' ' || name || ' ' || tbl_name || ' ' || coalesce(sql, '') \
@@ -227,7 +227,7 @@ fn count(db: &Connection, table: &str) -> Result<i64, StorageError> {
 /// still finds the backup checked; on Windows each folder is flushed through W1's
 /// `sync_folder`, as a plain open refuses a folder there. Inputs: the backups folder and the
 /// new backup. Output: Ok once synced.
-pub fn mark_checked(folder: &Path, target: &Path) -> Result<(), StorageError> {
+pub(crate) fn mark_checked(folder: &Path, target: &Path) -> Result<(), StorageError> {
     assert!(target.starts_with(folder));
     private_file(&target.join(CHECKED), b"")?;
     for synced in [target, folder] {
@@ -246,7 +246,7 @@ pub fn mark_checked(folder: &Path, target: &Path) -> Result<(), StorageError> {
 /// a file or a folder of another user is refused. Input: the engine root. Output: the
 /// backups folder path.
 #[cfg(unix)]
-pub fn backups_folder(root: &Path) -> Result<PathBuf, StorageError> {
+pub(crate) fn backups_folder(root: &Path) -> Result<PathBuf, StorageError> {
     let folder = root.join(BACKUPS);
     match std::fs::DirBuilder::new().mode(0o700).create(&folder) {
         Ok(()) => {}
@@ -283,7 +283,7 @@ pub fn backups_folder(root: &Path) -> Result<PathBuf, StorageError> {
 /// a copy left it open to others (F36, DESIGN-0256 D5). A link, a file or a folder of another
 /// user is refused as unsafe. Input: the engine root. Output: the backups folder path.
 #[cfg(windows)]
-pub fn backups_folder(root: &Path) -> Result<PathBuf, StorageError> {
+pub(crate) fn backups_folder(root: &Path) -> Result<PathBuf, StorageError> {
     let folder = root.join(BACKUPS);
     match private::dir(&folder) {
         Ok(_) => Ok(folder),
@@ -416,7 +416,7 @@ pub fn backup_failure(root: &Path) -> Option<&'static str> {
 /// crazyagent calls it until Task 7c moves that restore here.
 /// Inputs: the connection, the folder and the settings texts. Output: Ok once every copy is
 /// on disk; a text name that is not one plain file name fails the assert.
-pub fn fill(db: &Connection, target: &Path, texts: Texts<'_>) -> Result<(), StorageError> {
+pub(crate) fn fill(db: &Connection, target: &Path, texts: Texts<'_>) -> Result<(), StorageError> {
     let file = target.join(DATABASE);
     private_file(&file, b"")?;
     db.backup(rusqlite::MAIN_DB, &file, None)
@@ -442,7 +442,7 @@ fn plain_name(name: &str) -> bool {
 
 /// Creates a new file readable only by this user and writes it to disk.
 /// Inputs: the path, which must not exist, and the bytes. Output: Ok once synced.
-pub fn private_file(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
+pub(crate) fn private_file(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
     #[cfg(unix)]
     let mut file = std::fs::OpenOptions::new()
         .write(true)
