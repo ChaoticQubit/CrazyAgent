@@ -1,7 +1,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use bus_gateway::{Gateway, Grants, Refusals};
+use crate::{Gateway, Grants, Refusals};
 use sdk::settings::{self, LeftRunning, OnQuit, Provide, QuitSettings};
 use sdk::{Capability, Refusal, Tier};
 
@@ -76,8 +76,12 @@ fn report(name: &str, sorted: &[u64]) -> u64 {
     p95
 }
 
+/// Times the SDK call overhead against OWNER Q4, run on demand on a named Mac condition:
+/// `OVERHEAD_MAC=quiet cargo test --release -p crazyagent-bus-gateway --lib overhead_tests:: -- --ignored --nocapture`
+/// (`OVERHEAD_MAC=loaded` on the loaded Mac). Prints p50, p95 and p99 ns per call for the
+/// direct call, the SDK call and their difference; fails when the difference's p95 is over.
 #[test]
-#[ignore = "timing row, run on demand: OVERHEAD_MAC=quiet|loaded cargo test --release -p crazyagent-bus-gateway --test overhead -- --ignored --nocapture"]
+#[ignore = "timing row, run on demand with OVERHEAD_MAC=quiet or OVERHEAD_MAC=loaded"]
 fn overhead_per_sdk_call() {
     let (budget, condition) = budget();
     let grants = Grants::new(&[(PLUGIN, Tier::T2, &["settings.write"])]).unwrap();
