@@ -982,6 +982,33 @@ fn a_credential_deny_in_the_pair_spelling_is_taken_out_like_the_optional_tail_on
     assert_eq!(facts["credentials_denied"], json!(false));
 }
 
+/// V250-SNAPSHOT-RED: since 2.4.3 (992947bb6) the engine spells an at-or-below credential
+/// deny with a `(/|$)` tail instead of `(/.*)?$`; the same paths match, so the deny below a
+/// machine folder is taken out and counted like the 2.4.2 spelling, and a deny below another
+/// folder in the new spelling still stays.
+#[test]
+fn a_credential_deny_in_the_slash_or_end_spelling_is_taken_out_like_the_optional_tail_one() {
+    let developer = "/Applications/Xcode.app/Contents/Developer".to_owned();
+    let below = "^/Applications/Xcode\\.app/Contents/Developer/(.*/)?(\\.netrc|\\.npmrc)";
+    let base = "(allow file-read*\n  (subpath \"/opt/x\"))\n(deny file-read* file-write*\n  (subpath \"/s\"))\n";
+    let profile = format!(
+        "(allow file-read*\n  (subpath \"/opt/x\")\n  (subpath \"{developer}\"))\n(deny file-read* file-write*\n  (subpath \"/s\")\n  (regex #\"{below}(/|$)\"))\n"
+    );
+    let (kept, facts) = without_machine_reads(&profile, std::slice::from_ref(&developer));
+    assert_eq!(kept, base);
+    assert_eq!(
+        facts,
+        json!({"read_only": true, "named_elsewhere": false, "credentials_denied": true})
+    );
+    let other = "^/opt/x/(.*/)?(\\.netrc|\\.npmrc)";
+    let unrelated = format!(
+        "(allow file-read*\n  (subpath \"/opt/x\")\n  (subpath \"{developer}\"))\n(deny file-read* file-write*\n  (subpath \"/s\")\n  (regex #\"{other}(/|$)\"))\n"
+    );
+    let (kept, facts) = without_machine_reads(&unrelated, std::slice::from_ref(&developer));
+    assert!(kept.contains(&format!("(regex #\"{other}(/|$)\")")), "{kept}");
+    assert_eq!(facts["credentials_denied"], json!(false));
+}
+
 #[test]
 fn a_machine_folder_in_a_write_rule_turns_the_read_only_fact() {
     let developer = "/Applications/Xcode.app/Contents/Developer".to_owned();
