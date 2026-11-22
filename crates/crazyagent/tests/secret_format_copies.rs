@@ -1,8 +1,9 @@
 use crazyagent::credentials::Piece::{Escaped, Form, Hex, Plain};
-use crazyagent::credentials::{SecretString, sized};
+use crazyagent::credentials::sized;
 use crazyagent::model_gateway::relay::Relay;
 use crazyagent::usage::extras::Adapter;
 use crazyagent::usage::poll::poll_balance;
+use kernel_security::secret::SecretString;
 use std::alloc::{GlobalAlloc, Layout, System};
 #[cfg(unix)]
 use std::io::{Read, Write};

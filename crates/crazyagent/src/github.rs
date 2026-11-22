@@ -1,5 +1,6 @@
-use crate::credentials::{SecretString, Store};
+use crate::credentials::Store;
 use crate::engine::EngineError;
+use kernel_security::secret::SecretString;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};

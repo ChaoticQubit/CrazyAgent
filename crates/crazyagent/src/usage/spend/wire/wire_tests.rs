@@ -1,7 +1,7 @@
 use super::super::{Outcome, attempt_key};
 use super::*;
-use crate::credentials::SecretString;
 use crate::github::test_server::{Answer, Server};
+use kernel_security::secret::SecretString;
 
 fn secret() -> String {
     let mut bytes = [0_u8; 12];

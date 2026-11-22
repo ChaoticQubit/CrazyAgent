@@ -126,9 +126,9 @@ fn a_listed_pane_is_handed_its_keyless_account_and_refuses_one_for_another_addre
 /// hand-over a key is refused.
 #[test]
 fn a_keyed_listed_pane_is_handed_its_relay_and_token_and_never_the_key() {
-    use crate::credentials::SecretString;
     use crate::harnesses::launch::Secret;
     use crate::model_gateway::relay::Relay;
+    use kernel_security::secret::SecretString;
     use std::ffi::OsStr;
     let (_folder, home) = harness_home("standin-jsonl-append");
     let scratch = tempfile::tempdir().unwrap();

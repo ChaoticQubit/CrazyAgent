@@ -98,6 +98,12 @@ impl From<EngineError> for kernel_storage::StorageError {
     }
 }
 
+impl From<kernel_security::error::StoreError> for EngineError {
+    fn from(error: kernel_security::error::StoreError) -> Self {
+        EngineError(error.0)
+    }
+}
+
 pub type ClientError = EngineError;
 
 pub struct Client {

@@ -398,7 +398,7 @@ pub(crate) fn store_secret(
         drop(file);
         private::sync_folder(&folder).map_err(|_| error("plugin_secret_store_unavailable"))
     })();
-    crate::credentials::wipe(&mut secret);
+    kernel_security::secret::wipe(&mut secret);
     stored
 }
 
@@ -444,7 +444,7 @@ pub(crate) fn store_secret(
             .sync_all()
             .map_err(|_| error("plugin_secret_store_unavailable"))
     })();
-    crate::credentials::wipe(&mut secret);
+    kernel_security::secret::wipe(&mut secret);
     stored
 }
 
@@ -481,7 +481,7 @@ pub(crate) fn read_secret(root: &Path, reference: &str) -> Result<Vec<u8>, Engin
         .is_err()
         || bytes.len() > SECRET_BYTES_MAX
     {
-        crate::credentials::wipe(&mut bytes);
+        kernel_security::secret::wipe(&mut bytes);
         return Err(error("plugin_secret_store_unavailable"));
     }
     Ok(bytes)
@@ -526,7 +526,7 @@ pub(crate) fn read_secret(root: &Path, reference: &str) -> Result<Vec<u8>, Engin
         .is_err()
         || bytes.len() > SECRET_BYTES_MAX
     {
-        crate::credentials::wipe(&mut bytes);
+        kernel_security::secret::wipe(&mut bytes);
         return Err(error("plugin_secret_store_unavailable"));
     }
     Ok(bytes)
