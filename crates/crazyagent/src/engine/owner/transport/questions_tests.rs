@@ -6,8 +6,9 @@ use serde_json::json;
 #[cfg(unix)]
 const PROJECT: &str = "alpha";
 
-/// An engine root whose database holds the team tables and one set-up project with its
-/// `.crazyagent/` folder. Output: the temporary folder, the engine root and the project.
+/// An engine root whose database holds the team tables, one set-up project with its
+/// `.crazyagent/` folder and a running engine host, so the writes an answer logs pass the
+/// owner fence. Output: the temporary folder, the engine root and the project.
 #[cfg(unix)]
 fn engine() -> (tempfile::TempDir, PathBuf, ProjectId) {
     let tmp = tempfile::Builder::new()
@@ -25,6 +26,7 @@ fn engine() -> (tempfile::TempDir, PathBuf, ProjectId) {
     crate::storage::initialize_authority_schemas(&db).unwrap();
     crate::team::initialize(&db).unwrap();
     crate::ide::workspace::tests::add_project(&db, PROJECT, &folder);
+    crate::landing_log::seed(&db);
     (tmp, root, ProjectId::new(PROJECT).unwrap())
 }
 
