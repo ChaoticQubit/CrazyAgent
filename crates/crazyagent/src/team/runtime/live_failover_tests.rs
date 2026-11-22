@@ -142,7 +142,7 @@ fn signed_in_account(
         return None;
     };
     assert_eq!(
-        crate::memory::hash(profile_ref.as_str().as_bytes()),
+        kernel_common::hash(profile_ref.as_str().as_bytes()),
         key,
         "a profile's sign-in names that profile"
     );

@@ -3462,7 +3462,7 @@ async fn observe_dispatch(
 ) -> Result<DispatchSnapshot, EngineError> {
     let metadata = dispatch_files(&snapshot.seal)?;
     let mut child = DispatchGit(
-        crate::spawn_gate::spawn(
+        kernel_processes::spawn_gate::spawn(
             std::process::Command::new("/usr/bin/git")
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
@@ -4394,7 +4394,7 @@ fallback_allowed = false
         let link = address.parent().unwrap();
         std::fs::remove_file(link).unwrap();
         std::fs::create_dir(link).unwrap();
-        let expected = crate::spawn_gate::bind_unix(&path)
+        let expected = kernel_processes::spawn_gate::bind_unix(&path)
             .err()
             .unwrap()
             .to_string();

@@ -1650,7 +1650,7 @@ fn signed_in_account(
             super::TeamReach::Endpoint { .. } => return Ok(true),
             super::TeamReach::Managed { profile_ref, .. } => profile_ref,
         };
-        let key = crate::memory::hash(profile.as_str().as_bytes());
+        let key = kernel_common::hash(profile.as_str().as_bytes());
         let phase: Option<String> = connection
             .query_row(
                 "SELECT phase FROM native_auth_operations WHERE profile_key=?1

@@ -85,11 +85,6 @@ pub mod sessions_log;
 pub mod settings_log;
 pub mod setup;
 pub mod skills;
-/// Temporary forwarder while callers move to `kernel_processes::spawn_gate` in batches of at
-/// most 150 files (leader L1 and L11, POD-C). Removed by ticket C1d, whose report quotes a
-/// grep with zero hits for `crate::spawn_gate` and `crazyagent::spawn_gate`. Input: none.
-/// Output: the kernel module under its old name.
-pub use kernel_processes::spawn_gate;
 /// The engine's ordered event log in engine.db (v2.5 L1): one `seq` per event, the
 /// transaction's revision, a closed aggregate, and snapshot runs in chunks.
 pub mod state_log;

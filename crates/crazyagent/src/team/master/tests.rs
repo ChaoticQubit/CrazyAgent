@@ -4323,7 +4323,7 @@ fn codex_sign_in(fixture: &Fixture, generation: i64, phase: &str) {
              VALUES (?1,?2,?3,?4,X'01',X'01')",
             params![
                 format!("operation-{generation}"),
-                crate::memory::hash(CODEX_PROFILE.as_bytes()),
+                kernel_common::hash(CODEX_PROFILE.as_bytes()),
                 generation,
                 phase
             ],
