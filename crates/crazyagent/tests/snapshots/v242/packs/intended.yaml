@@ -6,7 +6,7 @@
     "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
     "security": true,
     "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
-    "owner_signed": false,
+    "owner_signed": true,
     "golden": [],
     "capture": [
       "          \"path\": \"crazyagent/codex-hook-keys.json\",",
@@ -24,7 +24,7 @@
     "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
     "security": true,
     "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
-    "owner_signed": false,
+    "owner_signed": true,
     "golden": [],
     "capture": [
       "          \"path\": \"crazyagent/codex-hook-keys.json\",",
@@ -42,7 +42,7 @@
     "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
     "security": true,
     "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
-    "owner_signed": false,
+    "owner_signed": true,
     "golden": [],
     "capture": [
       "          \"path\": \"crazyagent/codex-hook-keys.json\",",
@@ -60,7 +60,7 @@
     "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
     "security": true,
     "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
-    "owner_signed": false,
+    "owner_signed": true,
     "golden": [],
     "capture": [
       "          \"path\": \"crazyagent/codex-hook-keys.json\",",
@@ -78,7 +78,7 @@
     "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
     "security": true,
     "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
-    "owner_signed": false,
+    "owner_signed": true,
     "golden": [],
     "capture": [
       "          \"path\": \"crazyagent/codex-hook-keys.json\",",
@@ -96,7 +96,7 @@
     "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
     "security": true,
     "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
-    "owner_signed": false,
+    "owner_signed": true,
     "golden": [],
     "capture": [
       "          \"path\": \"crazyagent/codex-hook-keys.json\",",
@@ -114,7 +114,7 @@
     "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
     "security": true,
     "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
-    "owner_signed": false,
+    "owner_signed": true,
     "golden": [],
     "capture": [
       "          \"path\": \"crazyagent/codex-hook-keys.json\",",
@@ -132,7 +132,7 @@
     "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
     "security": true,
     "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
-    "owner_signed": false,
+    "owner_signed": true,
     "golden": [],
     "capture": [
       "          \"path\": \"crazyagent/codex-hook-keys.json\",",
@@ -150,7 +150,7 @@
     "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
     "security": true,
     "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
-    "owner_signed": false,
+    "owner_signed": true,
     "golden": [],
     "capture": [
       "          \"path\": \"crazyagent/codex-hook-keys.json\",",
@@ -168,7 +168,7 @@
     "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
     "security": true,
     "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
-    "owner_signed": false,
+    "owner_signed": true,
     "golden": [],
     "capture": [
       "          \"path\": \"crazyagent/codex-hook-keys.json\",",
