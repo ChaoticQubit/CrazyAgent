@@ -215,3 +215,52 @@ fn a_full_first_refusal_set_still_refuses_and_logs() {
     assert_eq!(refusals.count(agent_quit::ID), 1);
     assert_eq!(refusals.pending_len(), REFUSALS_PENDING_MAX);
 }
+
+#[test]
+fn the_engine_build_script_checks_every_plugin() {
+    let script = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("build.rs"),
+    )
+    .unwrap();
+    assert!(script.contains("crazyagent_plugin_check::check_plugins("));
+    assert!(script.contains("cargo:rerun-if-changed=../../plugins"));
+    assert!(script.contains("cargo:rerun-if-changed=build.rs"));
+}
+
+#[test]
+fn the_engine_depends_on_plugins_only_from_the_plugins_folder() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest: toml::Table = std::fs::read_to_string(root.join("Cargo.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut plugins = Vec::new();
+    for section in ["dependencies", "dev-dependencies", "build-dependencies"] {
+        let Some(deps) = manifest.get(section).and_then(toml::Value::as_table) else {
+            continue;
+        };
+        for (name, dep) in deps {
+            let path = dep.get("path").and_then(toml::Value::as_str);
+            if name.starts_with("crazyagent-plugin-") && name != "crazyagent-plugin-check" {
+                let path = path.unwrap_or_else(|| panic!("{name} is a path dependency"));
+                let parts: Vec<&str> = path.split('/').collect();
+                assert_eq!(parts.len(), 5, "{name} sits at ../../plugins/<tier>/<plugin>");
+                assert_eq!(&parts[..3], ["..", "..", "plugins"], "{name}");
+                assert!(["t1", "t2", "t3"].contains(&parts[3]), "{name}");
+                plugins.push((parts[3].to_owned(), root.join(path)));
+            }
+            if let Some(path) = path {
+                assert!(
+                    !path.contains("plugins/") || name.starts_with("crazyagent-plugin-"),
+                    "{name} reaches into plugins/"
+                );
+            }
+        }
+    }
+    assert_eq!(plugins.len(), 1);
+    for (tier, folder) in plugins {
+        let manifest = plugin_check::read_manifest(&folder).unwrap();
+        assert_eq!(manifest.tier, tier, "the folder tier is the manifest tier");
+        assert_eq!(manifest.plugin, agent_quit::ID);
+    }
+}
