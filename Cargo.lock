@@ -882,9 +882,14 @@ name = "crazyagent"
 version = "2.4.4"
 dependencies = [
  "base64 0.22.1",
+ "crazyagent-bus-gateway",
+ "crazyagent-cap",
  "crazyagent-kernel-storage",
  "crazyagent-linux-supervisor",
  "crazyagent-macos-fs",
+ "crazyagent-plugin-agent-quit",
+ "crazyagent-plugin-check",
+ "crazyagent-sdk",
  "crazyagent-win-sandbox",
  "crossterm",
  "getrandom 0.4.3",
