@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 const SAMPLES: usize = 200;
 const SAMPLES_MIN: usize = 100;
 const PERCENTILE: usize = 95;
+const _: () = assert!(SAMPLES >= SAMPLES_MIN && PERCENTILE < 100);
 
 /// Opens a scratch store that is never the owner's: a temporary keychain file in a
 /// temporary home (`tests/keychain_support/mod.rs`, deleted on drop). Input: the
@@ -44,7 +45,6 @@ fn percentile(sorted: &[Duration], rank: usize) -> Duration {
 #[test]
 #[ignore = "budget row: run with --ignored --nocapture on a quiet and a loaded Mac"]
 fn store_calls_p95() {
-    assert!(SAMPLES >= SAMPLES_MIN);
     let mut random = [0_u8; 6];
     getrandom::fill(&mut random).unwrap();
     let suffix: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
