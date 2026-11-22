@@ -52,11 +52,12 @@ fn settings_cap_parses_to_its_ast() {
                     field("hours", TypeRef::U16),
                 ],
             }],
+            handles: vec![],
             capabilities: vec![Capability {
                 name: "settings.save_quit".to_owned(),
                 inputs: vec![quit()],
                 output: None,
-                tier: Tier::T1,
+                tier: Tier::Kernel,
                 needs: "settings.write".to_owned(),
                 emits: vec![Event {
                     kind: "AgentQuitSaved".to_owned(),
@@ -171,7 +172,10 @@ fn an_undeclared_type_is_refused() {
 
 #[test]
 fn a_lower_case_type_that_is_no_scalar_is_refused() {
-    assert_eq!(refused("type A { b: text }"), at("cap_unknown_type", 1, 13));
+    assert_eq!(
+        refused("type A { b: string }"),
+        at("cap_unknown_type", 1, 13)
+    );
 }
 
 #[test]
@@ -300,5 +304,234 @@ fn emits_over_the_bound_are_refused_at_the_first_too_many() {
             u32::try_from(FIELDS_MAX).unwrap() + 4,
             3
         )
+    );
+}
+
+/// Wraps a type in `list<..>`. Input: the item type. Output: the list type.
+fn list(item: TypeRef) -> TypeRef {
+    TypeRef::List(Box::new(item))
+}
+
+/// Wraps a type in `option<..>`. Input: the inner type. Output: the option type.
+fn option(inner: TypeRef) -> TypeRef {
+    TypeRef::Option(Box::new(inner))
+}
+
+#[test]
+fn text_and_bytes_parse_as_fields() {
+    let file = parse("type A { t: text, b: bytes }").expect("parses");
+    assert_eq!(
+        file.types[0].fields,
+        vec![field("t", TypeRef::Text), field("b", TypeRef::Bytes)]
+    );
+}
+
+#[test]
+fn a_list_parses_with_its_item_type() {
+    let file = parse("type A { l: list<u16>, n: list<B> }\ntype B { x: u16 }").expect("parses");
+    assert_eq!(
+        file.types[0].fields,
+        vec![field("l", list(TypeRef::U16)), field("n", list(named("B")))]
+    );
+}
+
+#[test]
+fn an_option_parses_with_its_inner_type() {
+    let file =
+        parse("type A { o: option<text>, l: list<option<B>> }\ntype B { x: u16 }").expect("parses");
+    assert_eq!(
+        file.types[0].fields,
+        vec![
+            field("o", option(TypeRef::Text)),
+            field("l", list(option(named("B")))),
+        ]
+    );
+}
+
+#[test]
+fn a_wrapped_output_parses_to_some() {
+    let file = parse("capability a.b() -> option<text> tier: t1 needs: a.c").expect("parses");
+    assert_eq!(file.capabilities[0].output, Some(option(TypeRef::Text)));
+}
+
+#[test]
+fn a_handle_parses_and_types_may_name_it() {
+    let file = parse(
+        "handle Secret\ntype A { s: Secret }\ncapability a.b(s: Secret) -> Secret tier: kernel needs: a.c",
+    )
+    .expect("parses");
+    assert_eq!(
+        file.handles,
+        vec![Handle {
+            name: "Secret".to_owned()
+        }]
+    );
+    assert_eq!(file.types[0].fields, vec![field("s", named("Secret"))]);
+    assert_eq!(
+        file.capabilities[0].inputs,
+        vec![field("s", named("Secret"))]
+    );
+    assert_eq!(file.capabilities[0].output, Some(named("Secret")));
+}
+
+#[test]
+fn a_lower_case_handle_name_is_refused() {
+    assert_eq!(refused("handle secret"), at("cap_name_invalid", 1, 8));
+}
+
+#[test]
+fn a_handle_and_a_type_of_one_name_are_refused_at_the_second() {
+    assert_eq!(
+        refused("handle A\ntype A { x: u16 }"),
+        at("cap_duplicate_name", 2, 6)
+    );
+}
+
+#[test]
+fn handles_count_toward_the_item_bound() {
+    let source: String = (0..=ITEMS_MAX)
+        .map(|item| format!("handle H{item}\n"))
+        .collect();
+    assert_eq!(
+        refused(&source),
+        at(
+            "cap_too_many_items",
+            u32::try_from(ITEMS_MAX).unwrap() + 1,
+            1
+        )
+    );
+}
+
+#[test]
+fn an_option_inside_an_option_is_refused_at_the_inner() {
+    assert_eq!(
+        refused("type A { o: option<option<u16>> }"),
+        at("cap_nested_option", 1, 20)
+    );
+}
+
+#[test]
+fn a_type_nested_past_the_depth_bound_is_refused_at_the_first_too_deep() {
+    assert_eq!(TYPE_DEPTH_MAX, 4);
+    assert_eq!(
+        refused("type A { l: list<list<list<list<list<u16>>>>> }"),
+        at("cap_type_too_deep", 1, 33)
+    );
+    assert!(parse("type A { l: list<list<list<list<u16>>>> }").is_ok());
+    assert_eq!(
+        refused("capability a.b() -> list<list<list<list<list<u16>>>>> tier: t1 needs: a.c"),
+        at("cap_type_too_deep", 1, 41)
+    );
+}
+
+#[test]
+fn an_undeclared_type_inside_a_wrapper_is_refused() {
+    assert_eq!(
+        refused("type A { l: list<Missing> }"),
+        at("cap_unknown_type", 1, 18)
+    );
+    assert_eq!(
+        refused("capability a.b() -> option<Missing> tier: t1 needs: a.c"),
+        at("cap_unknown_type", 1, 28)
+    );
+}
+
+#[test]
+fn a_type_cycle_through_a_wrapper_is_refused() {
+    assert_eq!(
+        refused("type A { l: list<A> }"),
+        at("cap_type_cycle", 1, 18)
+    );
+}
+
+#[test]
+fn a_wrapper_without_its_item_type_is_refused() {
+    assert_eq!(
+        refused("type A { l: list }"),
+        at("cap_unexpected_token", 1, 18)
+    );
+}
+
+#[test]
+fn a_handle_in_an_event_body_is_refused() {
+    assert_eq!(
+        refused("handle S\ncapability a.b() -> unit tier: t1 needs: a.c emits: E { s: S }"),
+        at("cap_handle_in_event", 2, 60)
+    );
+}
+
+#[test]
+fn a_handle_nested_in_an_emitted_type_is_refused() {
+    assert_eq!(
+        refused(
+            "handle S\ntype W { s: option<S> }\ncapability a.b() -> unit tier: t1 needs: a.c emits: E { w: list<W> }"
+        ),
+        at("cap_handle_in_event", 3, 65)
+    );
+}
+
+/// Names a reference to another file's handle or enum. Inputs: its stem and name.
+/// Output: the reference.
+fn foreign(stem: &str, name: &str) -> TypeRef {
+    TypeRef::Foreign {
+        stem: stem.to_owned(),
+        name: name.to_owned(),
+    }
+}
+
+#[test]
+fn a_foreign_typeref_parses() {
+    let file = parse_as(
+        "net",
+        "type A { s: secrets.Secret, o: option<secrets.Secret>, l: list<secrets.Mode> }\ncapability net.send(s: secrets.Secret) -> option<secrets.Secret> tier: t1 needs: net.send emits: Sent { m: secrets.Mode }",
+    )
+    .expect("parses");
+    assert_eq!(
+        file.types[0].fields,
+        vec![
+            field("s", foreign("secrets", "Secret")),
+            field("o", option(foreign("secrets", "Secret"))),
+            field("l", list(foreign("secrets", "Mode"))),
+        ]
+    );
+    assert_eq!(
+        file.capabilities[0].inputs,
+        vec![field("s", foreign("secrets", "Secret"))]
+    );
+    assert_eq!(
+        file.capabilities[0].output,
+        Some(option(foreign("secrets", "Secret")))
+    );
+    assert_eq!(
+        file.capabilities[0].emits[0].fields,
+        vec![field("m", foreign("secrets", "Mode"))]
+    );
+}
+
+#[test]
+fn a_self_qualified_typeref_is_refused() {
+    assert_eq!(
+        parse_as("net", "handle S\ntype A { s: option<net.S> }"),
+        Err(at("cap_self_qualified", 2, 20))
+    );
+    assert_eq!(
+        parse_as("net", "capability net.b() -> net.S tier: t1 needs: net.c"),
+        Err(at("cap_self_qualified", 1, 23))
+    );
+}
+
+#[test]
+fn a_misshapen_foreign_typeref_is_refused() {
+    assert_eq!(
+        refused("type A { s: secrets.secret }"),
+        at("cap_unknown_type", 1, 13)
+    );
+    assert_eq!(
+        refused("type A { s: a.b.Secret }"),
+        at("cap_unknown_type", 1, 13)
+    );
+    assert_eq!(
+        refused("type A { s: Secrets.Secret }"),
+        at("cap_unknown_type", 1, 13)
     );
 }
