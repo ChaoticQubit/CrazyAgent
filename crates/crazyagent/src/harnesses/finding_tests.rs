@@ -977,5 +977,9 @@ fn temp_folders_named_through_the_data_volume_are_still_temp() {
     let search = Search::engine_in(Some(&path), &[], None, &temps);
     assert_eq!(search.find("codex"), None);
     assert_eq!(search.find("claude-code"), None);
-    assert!(crate::tools::in_temp_of(&long(&set_aside), &temps));
+    assert!(crate::tools::in_temp_of(
+        &crate::tools::HOOKS,
+        &long(&set_aside),
+        &temps
+    ));
 }

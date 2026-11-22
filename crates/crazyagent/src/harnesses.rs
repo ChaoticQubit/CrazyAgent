@@ -229,7 +229,12 @@ impl Search {
     /// then the HOME folders ([`home_places`]). Inputs: the PATH value, the system folders and
     /// HOME. Output: the search.
     pub fn engine(path: Option<&OsStr>, system: &[PathBuf], home: Option<PathBuf>) -> Self {
-        Self::engine_in(path, system, home, &crate::tools::temp_roots())
+        Self::engine_in(
+            path,
+            system,
+            home,
+            &crate::tools::temp_roots(&crate::tools::HOOKS),
+        )
     }
 
     /// Builds the engine search as [`Search::engine`] does with the temp folders given, so a
@@ -251,7 +256,10 @@ impl Search {
             .map(|path| std::env::split_paths(path).collect::<Vec<PathBuf>>())
             .unwrap_or_default()
             .into_iter()
-            .partition(|folder| crate::tools::in_temp_of(folder, temps) && !kept.contains(folder));
+            .partition(|folder| {
+                crate::tools::in_temp_of(&crate::tools::HOOKS, folder, temps)
+                    && !kept.contains(folder)
+            });
         for folder in system {
             if !directories.contains(folder)
                 && crate::service::changeable_by_others(folder).is_none()
@@ -333,8 +341,9 @@ impl Search {
     /// refuses ([`crate::tools::leads_into_temp`]). Input: the file. Output: the answer.
     fn links_into_temp(&self, file: &Path) -> bool {
         !self.temps.is_empty()
-            && std::fs::canonicalize(file)
-                .is_ok_and(|real| crate::tools::leads_into_temp(file, &real, &self.temps))
+            && std::fs::canonicalize(file).is_ok_and(|real| {
+                crate::tools::leads_into_temp(&crate::tools::HOOKS, file, &real, &self.temps)
+            })
     }
 
     /// Builds the engine search from this process's PATH and HOME and the built-in system

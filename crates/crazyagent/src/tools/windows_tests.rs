@@ -7,7 +7,7 @@ use kernel_processes::batch::{batch_file, cmd_shim_real, fixed_program};
 /// leads into temp. Input: none. Output: passes or panics.
 #[test]
 fn a_windows_temp_folder_is_one_root_in_every_spelling_and_only_a_link_into_it_is_refused() {
-    let roots = temp_roots();
+    let roots = temp_roots(&HOOKS);
     let owner = std::env::temp_dir();
     let verbatim = owner.canonicalize().unwrap();
     let plain = crate::sandbox::canonical(&owner).unwrap();
@@ -26,13 +26,16 @@ fn a_windows_temp_folder_is_one_root_in_every_spelling_and_only_a_link_into_it_i
     std::fs::write(&file, "").unwrap();
     let real = file.canonicalize().unwrap();
     for written in [folder.path().join("tool.exe"), file.clone(), real.clone()] {
-        assert!(in_temp_of(&written, &roots), "{written:?}");
-        assert!(!leads_into_temp(&written, &real, &roots), "{written:?}");
+        assert!(in_temp_of(&HOOKS, &written, &roots), "{written:?}");
+        assert!(
+            !leads_into_temp(&HOOKS, &written, &real, &roots),
+            "{written:?}"
+        );
     }
-    let places = Places::engine(None, None, None, Some(OsStr::new("")));
+    let places = tools_engine(None, None, None, Some(OsStr::new("")));
     assert_eq!(check_place(&places, &file), Some(Ok(())));
     let outside = Path::new(r"C:\CrazyAgentOutsideTemp\bin\tool.exe");
-    assert!(leads_into_temp(outside, &real, &roots));
+    assert!(leads_into_temp(&HOOKS, outside, &real, &roots));
 }
 
 /// A folder with a stand-in `node.exe` (a copy of the `where.exe` Windows ships, a real
@@ -45,7 +48,7 @@ fn node_folder() -> (tempfile::TempDir, PathBuf, Places) {
         .join("System32")
         .join("where.exe");
     std::fs::copy(shipped, real.join("node.exe")).unwrap();
-    let places = Places::new(vec![real.clone()], None);
+    let places = tools_new(vec![real.clone()], None);
     (folder, real, places)
 }
 
@@ -140,7 +143,7 @@ fn npx_off_the_engine_s_path_runs_with_the_node_beside_it() {
     std::fs::write(npm.join("npx-cli.js"), "#!/usr/bin/env node\n").unwrap();
     let npx = real.join("npx.cmd");
     std::fs::write(&npx, "@ECHO off\r\n").unwrap();
-    let elsewhere = Places::new(Vec::new(), None);
+    let elsewhere = tools_new(Vec::new(), None);
     let resolved = resolve_entry(&npx, &elsewhere).unwrap();
     let real_of = |file: PathBuf| file.canonicalize().unwrap().into_os_string();
     assert_eq!(
@@ -165,7 +168,7 @@ fn a_launcher_found_under_another_spelling_is_refused_on_windows() {
     std::fs::copy(shipped, real.join("env.exe")).unwrap();
     let script = real.join("tool.js");
     std::fs::write(&script, "#!/usr/bin/env Env\n").unwrap();
-    let places = Places::new(vec![real.clone()], None);
+    let places = tools_new(vec![real.clone()], None);
     let missing = resolve_entry(&script, &places).unwrap_err();
     assert_eq!(missing.refused.unwrap().why, Refusal::FirstLine);
     for name in ["env.exe", "ENV.EXE", "BusyBox.exe", "nice"] {

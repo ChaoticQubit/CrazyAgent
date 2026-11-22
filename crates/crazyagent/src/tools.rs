@@ -10,6 +10,135 @@ mod windows_tests;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
+/// The engine answers program finding needs without naming the engine crate: harness
+/// shims and prefixes, the projects the engine registered, and the folder checks that live
+/// with the sandbox and the service until their own moves. Built once by crazyagent
+/// ([`HOOKS`]). Inputs: the fields. Output: a value carried on [`Places`].
+#[derive(Clone, Copy)]
+pub struct FindingHooks {
+    pub link_hops: fn(&Path) -> Option<Vec<PathBuf>>,
+    pub home_places: fn(&Path) -> Vec<PathBuf>,
+    pub in_crazyagent_folder: fn(&Path) -> bool,
+    pub is_shim: fn(Option<&Path>, &Path) -> bool,
+    pub npm_prefix: for<'a> fn(&'a Path) -> Option<&'a Path>,
+    pub registered_projects: fn(&Path) -> Option<Vec<PathBuf>>,
+    pub projects_marker: &'static str,
+    pub data_twin: fn(&Path) -> Option<PathBuf>,
+    pub one_spelling: fn(PathBuf) -> PathBuf,
+    pub canonical: fn(&Path) -> std::io::Result<PathBuf>,
+    pub in_agent_tmp: fn(&Path) -> bool,
+    pub changeable_past_sticky: fn(&Path) -> Option<PathBuf>,
+    pub changeable_by_others: fn(&Path) -> Option<PathBuf>,
+    pub harness_prefix: fn(&Path) -> PathBuf,
+}
+
+impl std::fmt::Debug for FindingHooks {
+    /// Prints the hooks without their addresses, which say nothing a reader can use.
+    /// Input: the formatter. Output: the write result.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FindingHooks")
+            .finish_non_exhaustive()
+    }
+}
+
+/// The engine's real program finding hooks, the only [`FindingHooks`] production code
+/// builds. Output: the hooks.
+pub const HOOKS: FindingHooks = FindingHooks {
+    link_hops: crate::harnesses::finding::link_hops,
+    home_places: crate::harnesses::home_places,
+    in_crazyagent_folder: crate::harnesses::in_crazyagent_folder,
+    is_shim: crate::harnesses::is_shim,
+    npm_prefix: crate::harnesses::npm_prefix,
+    registered_projects,
+    projects_marker: crate::projects_home::CRAZYAGENT_DIRECTORY,
+    data_twin: crate::projects_home::data_twin,
+    one_spelling: crate::projects_home::one_spelling,
+    canonical: crate::sandbox::canonical,
+    in_agent_tmp: crate::sandbox::toolchains::in_agent_tmp,
+    changeable_past_sticky: crate::service::changeable_past_sticky,
+    changeable_by_others: crate::service::changeable_by_others,
+    harness_prefix: crate::setup::harness_prefix,
+};
+
+/// What program finding needs from the engine: the hooks, the data folder the layout names
+/// for places built with no engine root, and each harness's install folders under HOME.
+/// Carried on every [`Places`], so a background folder run a resolve starts builds its
+/// places the same way ([`probe::missed`]). Inputs: the fields. Output: the seed.
+#[derive(Clone, Debug)]
+pub struct FindingSeed {
+    pub hooks: FindingHooks,
+    pub layout_root: Option<PathBuf>,
+    pub harness_locations: Vec<&'static str>,
+}
+
+impl PartialEq for FindingSeed {
+    /// Compares every field but the hooks, which hold fn addresses that compare unreliably
+    /// and never differ in production ([`HOOKS`]); the fields are named one by one, so a new
+    /// one does not compile until it is compared. Input: the other seed. Output: the answer.
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            hooks: _,
+            layout_root,
+            harness_locations,
+        } = self;
+        *layout_root == other.layout_root && *harness_locations == other.harness_locations
+    }
+}
+
+impl Eq for FindingSeed {}
+
+/// The engine's finding seed: [`HOOKS`], the layout's data folder and the harness catalog's
+/// install folders. Output: the seed.
+pub fn finding_seed() -> FindingSeed {
+    FindingSeed {
+        hooks: HOOKS,
+        layout_root: layout_root(),
+        harness_locations: harness_locations(),
+    }
+}
+
+/// Builds places from explicit folders and HOME on the engine's seed ([`Places::new`]).
+/// Inputs: the folders in order and HOME. Output: the bounded places.
+pub fn tools_new(folders: Vec<PathBuf>, home: Option<PathBuf>) -> Places {
+    Places::new(folders, home, finding_seed())
+}
+
+/// Builds the engine's places on the engine's hooks and harness catalog ([`Places::engine`]).
+/// Inputs: the engine root, the app's folder, HOME and the PATH. Output: the places.
+pub fn tools_engine(
+    engine_root: Option<&Path>,
+    app_folder: Option<&Path>,
+    home: Option<PathBuf>,
+    path: Option<&OsStr>,
+) -> Places {
+    Places::engine(engine_root, app_folder, home, path, finding_seed())
+}
+
+/// Builds the engine's places from this process's environment on the engine's hooks, data
+/// folder and harness catalog ([`Places::from_environment`]). Input: the engine root.
+/// Output: the places.
+pub fn tools_places(engine_root: Option<&Path>) -> Places {
+    Places::from_environment(engine_root, finding_seed())
+}
+
+/// The data folder this process's layout names, for places built with no engine root.
+/// Output: the folder, or none when the layout cannot be read.
+fn layout_root() -> Option<PathBuf> {
+    crate::paths::Layout::current()
+        .ok()
+        .map(|layout| layout.root().to_path_buf())
+}
+
+/// Every harness's own install folders under HOME, from the harness catalog, in catalog
+/// order. Output: the HOME-relative folders.
+fn harness_locations() -> Vec<&'static str> {
+    crate::harnesses::specs()
+        .iter()
+        .flat_map(|spec| spec.locations.iter().copied())
+        .collect()
+}
+
 const PLACES_MAX: usize = 160;
 const NAME_BYTES_MAX: usize = 64;
 const PATH_BYTES_MAX: usize = 1024;
@@ -124,7 +253,7 @@ pub const TMUX_MISSING: &str =
 /// there, and the engine's own places set aside a PATH or probed temp folder the same way
 /// ([`Places::set_aside_temp`]). The app's folder is kept on its own for the tools the app
 /// ships ([`Places::bundled`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Places {
     folders: Vec<PathBuf>,
     home: Option<PathBuf>,
@@ -135,29 +264,64 @@ pub struct Places {
     refused_temp: Vec<PathBuf>,
     app_folder: Option<PathBuf>,
     projects: Option<Vec<PathBuf>>,
+    seed: FindingSeed,
 }
+
+impl PartialEq for Places {
+    /// Compares every field; the seed compares without its hooks ([`FindingSeed`]). The
+    /// fields are named one by one, so a new one does not compile until it is compared.
+    /// Input: the other places. Output: the answer.
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            folders,
+            home,
+            engine_roots,
+            temp_refused,
+            temps,
+            refused_setup,
+            refused_temp,
+            app_folder,
+            projects,
+            seed,
+        } = self;
+        *folders == other.folders
+            && *home == other.home
+            && *engine_roots == other.engine_roots
+            && *temp_refused == other.temp_refused
+            && *temps == other.temps
+            && *refused_setup == other.refused_setup
+            && *refused_temp == other.refused_temp
+            && *app_folder == other.app_folder
+            && *projects == other.projects
+            && *seed == other.seed
+    }
+}
+
+impl Eq for Places {}
 
 impl Places {
     /// Builds places from explicit folders and HOME, for a caller that names its own search
     /// space. Relative, oversized and repeated folders are dropped, and so is every folder
     /// inside a project or a `.crazyagent` folder. Inputs: the folders in order and HOME.
     /// Output: the bounded places.
-    pub fn new(folders: Vec<PathBuf>, home: Option<PathBuf>) -> Self {
-        Self::kept(folders, home, Vec::new(), false, Some(Vec::new()))
+    pub fn new(folders: Vec<PathBuf>, home: Option<PathBuf>, seed: FindingSeed) -> Self {
+        Self::kept(folders, home, Vec::new(), false, Some(Vec::new()), seed)
     }
 
     /// Keeps the folders in order, dropping relative, oversized and repeated ones and every
     /// one agents can write, at most [`PLACES_MAX`], and sets aside one of those in an engine
     /// `setup` folder ([`Places::in_engine_setup`]). Inputs: the folders, HOME, the engine
     /// data folders, whether probed temp folders are refused and the set-up projects' folders,
-    /// none when they could not be read. Output: the bounded places.
+    /// none when they could not be read, and the seed. Output: the bounded places.
     fn kept(
         folders: Vec<PathBuf>,
         home: Option<PathBuf>,
         engine_roots: Vec<PathBuf>,
         temp_refused: bool,
         projects: Option<Vec<PathBuf>>,
+        seed: FindingSeed,
     ) -> Self {
+        let hooks = seed.hooks;
         let mut places = Self {
             folders: Vec::new(),
             home: home.filter(|home| usable(home)),
@@ -167,7 +331,7 @@ impl Places {
                 .collect(),
             temp_refused,
             temps: if temp_refused {
-                temp_roots()
+                temp_roots(&hooks)
             } else {
                 Vec::new()
             },
@@ -175,6 +339,7 @@ impl Places {
             refused_temp: Vec::new(),
             app_folder: None,
             projects,
+            seed,
         };
         for folder in folders {
             if places.folders.len() == PLACES_MAX {
@@ -242,13 +407,15 @@ impl Places {
     /// engine's own folders ([`engine_folders`]): the owner's installs win, the app's are the
     /// fallback. A folder agents can write is never kept ([`Places::agent_writable`]); the
     /// app's folder is also kept for the tools it ships ([`Places::bundled`]). Inputs: the
-    /// engine root, the app's folder, HOME and the PATH. Output: the places.
+    /// engine root, the app's folder, HOME, the PATH and the seed. Output: the places.
     pub fn engine(
         engine_root: Option<&Path>,
         app_folder: Option<&Path>,
         home: Option<PathBuf>,
         path: Option<&OsStr>,
+        seed: FindingSeed,
     ) -> Self {
+        let hooks = seed.hooks;
         let system: Vec<PathBuf> = SYSTEM_FOLDERS.iter().map(PathBuf::from).collect();
         let homebrew: Vec<PathBuf> = HOMEBREW_FOLDERS.iter().map(PathBuf::from).collect();
         let mut folders: Vec<PathBuf> = Vec::new();
@@ -259,7 +426,7 @@ impl Places {
             for folder in
                 std::env::split_paths(path).filter(|f| !system.contains(f) && !homebrew.contains(f))
             {
-                if in_temp(&folder) {
+                if in_temp(&hooks, &folder) {
                     temp.push(folder);
                 } else {
                     folders.push(folder);
@@ -267,19 +434,22 @@ impl Places {
             }
         }
         if let Some(home) = home.as_deref().filter(|home| home.is_absolute()) {
-            folders.extend(crate::harnesses::home_places(home));
+            folders.extend((hooks.home_places)(home));
             folders.extend(node_version_folders(home));
             folders.extend(
-                crate::harnesses::specs()
+                seed.harness_locations
                     .iter()
-                    .flat_map(|spec| spec.locations.iter())
                     .map(|relative| below(home, relative)),
             );
         }
         #[cfg(target_os = "linux")]
         folders.extend(LINUX_FOLDERS.iter().map(PathBuf::from));
         folders.extend(system);
-        folders.extend(engine_root.into_iter().flat_map(engine_folders));
+        folders.extend(
+            engine_root
+                .into_iter()
+                .flat_map(|root| engine_folders(&hooks, root)),
+        );
         Self {
             app_folder: app_folder
                 .filter(|folder| usable(folder))
@@ -287,9 +457,10 @@ impl Places {
             ..Self::kept(
                 folders,
                 home,
-                engine_roots(engine_root),
+                engine_roots(&hooks, engine_root),
                 true,
                 Some(Vec::new()),
+                seed,
             )
             .set_aside_temp(temp)
         }
@@ -298,10 +469,10 @@ impl Places {
     /// Builds the engine's places from this process's HOME and PATH and the folder of the
     /// running executable. With no engine root given, a launch takes the one this process's
     /// engine recorded ([`record_engine_root`]), so it looks where setup does; with none,
-    /// the data folder is still refused, though its setup folder is not looked in. Input:
-    /// the engine root. Output: the places ([`Places::engine`]).
-    pub fn from_environment(engine_root: Option<&Path>) -> Self {
-        Self::at_roots(engine_root, ENGINE_ROOT.get().map(PathBuf::as_path))
+    /// the data folder is still refused, though its setup folder is not looked in. Inputs:
+    /// the engine root and the seed. Output: the places ([`Places::engine`]).
+    pub fn from_environment(engine_root: Option<&Path>, seed: FindingSeed) -> Self {
+        Self::at_roots(engine_root, ENGINE_ROOT.get().map(PathBuf::as_path), seed)
     }
 
     /// Builds the engine's places as [`Places::from_environment`] does, with the engine
@@ -309,29 +480,31 @@ impl Places {
     /// engine root given or recorded, the set-up projects are read from its `engine.db` on
     /// every build, so a project set up after the engine started counts
     /// ([`registered_projects`]); with neither, only the `.crazyagent` folder marks a project.
-    /// Inputs: the engine root given, if any, and the recorded one. Output: the places.
-    fn at_roots(engine_root: Option<&Path>, recorded: Option<&Path>) -> Self {
+    /// Inputs: the engine root given, if any, the recorded one and the seed. Output: the
+    /// places.
+    fn at_roots(engine_root: Option<&Path>, recorded: Option<&Path>, seed: FindingSeed) -> Self {
         let engine_root = engine_root.or(recorded);
         let app = std::env::current_exe()
             .ok()
             .and_then(|exe| exe.canonicalize().ok())
             .and_then(|exe| exe.parent().map(Path::to_path_buf));
-        let data_root = engine_root.map(Path::to_path_buf).or_else(|| {
-            crate::paths::Layout::current()
-                .ok()
-                .map(|layout| layout.root().to_path_buf())
-        });
+        let hooks = seed.hooks;
+        let finding_seed = seed.clone();
+        let data_root = engine_root
+            .map(Path::to_path_buf)
+            .or_else(|| seed.layout_root.clone());
         Self {
-            engine_roots: engine_roots(data_root.as_deref()),
-            projects: engine_root.map_or_else(|| Some(Vec::new()), registered_projects),
+            engine_roots: engine_roots(&hooks, data_root.as_deref()),
+            projects: engine_root.map_or_else(|| Some(Vec::new()), hooks.registered_projects),
             ..Self::engine(
                 engine_root,
                 app.as_deref(),
                 std::env::var_os("HOME").map(PathBuf::from),
                 std::env::var_os("PATH").as_deref(),
+                seed,
             )
         }
-        .with_probed(probe::folders())
+        .with_probed(probe::folders(|| finding_seed))
     }
 
     /// Adds the folders the background probes found ([`probe::folders`]), such as npm's
@@ -348,7 +521,7 @@ impl Places {
         tail.extend(
             self.engine_roots
                 .iter()
-                .flat_map(|root| engine_folders(root)),
+                .flat_map(|root| engine_folders(&self.seed.hooks, root)),
         );
         let temp_refused = self.temp_refused;
         let (last, mut folders): (Vec<PathBuf>, Vec<PathBuf>) = self
@@ -358,7 +531,7 @@ impl Places {
         let (temp, probed): (Vec<PathBuf>, Vec<PathBuf>) = probed
             .into_iter()
             .filter(|folder| !tail.contains(folder))
-            .partition(|folder| temp_refused && in_temp(folder));
+            .partition(|folder| temp_refused && in_temp(&self.seed.hooks, folder));
         folders.extend(probed);
         folders.extend(last);
         let set_aside = self.refused_setup;
@@ -370,6 +543,7 @@ impl Places {
             self.engine_roots,
             temp_refused,
             self.projects,
+            self.seed,
         );
         for folder in set_aside {
             if !places.refused_setup.contains(&folder) && places.refused_setup.len() < PLACES_MAX {
@@ -436,8 +610,8 @@ impl Places {
         folder.is_absolute()
             && folder.is_dir()
             && !self.agent_writable(folder)
-            && crate::service::changeable_past_sticky(folder).is_none()
-            && !(self.temp_refused && in_temp_of(folder, &self.temps))
+            && (self.seed.hooks.changeable_past_sticky)(folder).is_none()
+            && !(self.temp_refused && in_temp_of(&self.seed.hooks, folder, &self.temps))
             && self.link_hops_kept(folder)
     }
 
@@ -448,7 +622,7 @@ impl Places {
     /// Input: the absolute path. Output: the answer, false past the link bound.
     pub(crate) fn link_hops_kept(&self, path: &Path) -> bool {
         assert!(path.is_absolute());
-        crate::harnesses::finding::link_hops(path)
+        (self.seed.hooks.link_hops)(path)
             .is_some_and(|hops| self.hop_refusal(path, &hops).is_none())
     }
 
@@ -463,11 +637,11 @@ impl Places {
         }
         let changeable = hops
             .iter()
-            .find_map(|hop| crate::service::changeable_past_sticky(hop));
+            .find_map(|hop| (self.seed.hooks.changeable_past_sticky)(hop));
         if let Some(part) = changeable {
             return Some(Refusal::OthersCanChange(part));
         }
-        let leads = |hop: &PathBuf| leads_into_temp(path, hop, &self.temps);
+        let leads = |hop: &PathBuf| leads_into_temp(&self.seed.hooks, path, hop, &self.temps);
         (self.temp_refused && hops.iter().any(leads)).then_some(Refusal::InTemp)
     }
 
@@ -478,17 +652,17 @@ impl Places {
     /// Output: the answer.
     pub(crate) fn agent_writable(&self, path: &Path) -> bool {
         let real = path.canonicalize().ok();
-        let plain = crate::sandbox::canonical(path).ok();
-        let homes = home_names(self.home());
+        let plain = (self.seed.hooks.canonical)(path).ok();
+        let homes = home_names(&self.seed.hooks, self.home());
         let mut forms = std::iter::once(path)
             .chain(real.as_deref())
             .chain(plain.as_deref());
         forms.any(|path| {
-            crate::harnesses::in_crazyagent_folder(path)
-                || in_project(&homes, path)
+            (self.seed.hooks.in_crazyagent_folder)(path)
+                || in_project(&self.seed.hooks, &homes, path)
                 || self.in_set_up_project(&homes, path)
                 || in_engine_data(&self.engine_roots, path)
-                || crate::sandbox::toolchains::in_agent_tmp(path)
+                || (self.seed.hooks.in_agent_tmp)(path)
         })
     }
 
@@ -510,13 +684,13 @@ impl Places {
 
 /// HOME's names: as given, with its links resolved, in its one spelling and, on macOS, that
 /// spelling's data volume name, so a path in either spelling meets HOME in its own. Input:
-/// HOME, or none. Output: the names, each once.
-fn home_names(home: Option<&Path>) -> Vec<PathBuf> {
+/// the hooks and HOME, or none. Output: the names, each once.
+fn home_names(hooks: &FindingHooks, home: Option<&Path>) -> Vec<PathBuf> {
     let Some(home) = home else {
         return Vec::new();
     };
-    let plain = crate::sandbox::canonical(home).ok();
-    let twin = plain.as_deref().and_then(crate::projects_home::data_twin);
+    let plain = (hooks.canonical)(home).ok();
+    let twin = plain.as_deref().and_then(hooks.data_twin);
     let mut names = vec![home.to_path_buf()];
     for name in [home.canonicalize().ok(), plain, twin]
         .into_iter()
@@ -584,25 +758,23 @@ pub(crate) fn in_engine_data(roots: &[PathBuf], path: &Path) -> bool {
 
 /// The engine's own folders, looked in after every folder of the owner: its setup `bin`,
 /// then its npm harness prefix's `bin` ([`crate::setup::harness_prefix`]). Input: the engine
-/// root. Output: the two folders in that order.
-fn engine_folders(root: &Path) -> [PathBuf; 2] {
+/// root and the hooks. Output: the two folders in that order.
+fn engine_folders(hooks: &FindingHooks, root: &Path) -> [PathBuf; 2] {
     [
         root.join("setup").join("bin"),
-        crate::setup::harness_prefix(root).join("bin"),
+        (hooks.harness_prefix)(root).join("bin"),
     ]
 }
 
 /// The engine data folder as given, with its links resolved and in its one spelling
 /// ([`crate::sandbox::canonical`]), so a path in the short spelling meets a data folder given
-/// through the data volume. Input: the folder, or none. Output: the folders, each once.
-pub(crate) fn engine_roots(root: Option<&Path>) -> Vec<PathBuf> {
+/// through the data volume. Inputs: the hooks and the folder, or none. Output: the
+/// folders, each once.
+pub(crate) fn engine_roots(hooks: &FindingHooks, root: Option<&Path>) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = root.map(Path::to_path_buf).into_iter().collect();
-    let resolved = root.into_iter().flat_map(|root| {
-        [
-            root.canonicalize().ok(),
-            crate::sandbox::canonical(root).ok(),
-        ]
-    });
+    let resolved = root
+        .into_iter()
+        .flat_map(|root| [root.canonicalize().ok(), (hooks.canonical)(root).ok()]);
     for real in resolved.flatten() {
         if !roots.contains(&real) {
             roots.push(real);
@@ -615,8 +787,8 @@ pub(crate) fn engine_roots(root: Option<&Path>) -> Vec<PathBuf> {
 /// Whether a path is inside a CrazyAgent project: it or a folder above it, other than HOME
 /// under any of its names ([`home_names`]) and `/`, holds a `.crazyagent` entry, which the
 /// sandbox never lets an agent remove. A path deeper than [`ANCESTORS_MAX`] counts as
-/// inside. Inputs: HOME's names and the path. Output: the answer.
-fn in_project(homes: &[PathBuf], path: &Path) -> bool {
+/// inside. Inputs: the hooks, HOME's names and the path. Output: the answer.
+fn in_project(hooks: &FindingHooks, homes: &[PathBuf], path: &Path) -> bool {
     assert!(homes.len() <= 4);
     if path.components().count() > ANCESTORS_MAX {
         return true;
@@ -625,26 +797,28 @@ fn in_project(homes: &[PathBuf], path: &Path) -> bool {
         .filter(|folder| {
             folder.parent().is_some() && !homes.iter().any(|home| home.as_path() == *folder)
         })
-        .any(|folder| {
-            std::fs::symlink_metadata(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY))
-                .is_ok()
-        })
+        .any(|folder| std::fs::symlink_metadata(folder.join(hooks.projects_marker)).is_ok())
 }
 
 /// Whether a file found through a place outside every temp folder really lies in one, as an
 /// owner link from `~/.local/bin` into the temp folder does, which agents with the owner's
 /// temp folder grant can replace; a file whose place is itself in a temp folder (a test HOME,
-/// an engine root, a mounted app) does not. Inputs: the file as written, its real path and
-/// the temp folders. Output: the answer.
-pub(crate) fn leads_into_temp(written: &Path, real: &Path, temps: &[PathBuf]) -> bool {
-    !under_temp(written, temps) && under_temp(real, temps)
+/// an engine root, a mounted app) does not. Inputs: the hooks, the file as written, its real
+/// path and the temp folders. Output: the answer.
+pub(crate) fn leads_into_temp(
+    hooks: &FindingHooks,
+    written: &Path,
+    real: &Path,
+    temps: &[PathBuf],
+) -> bool {
+    !under_temp(hooks, written, temps) && under_temp(hooks, real, temps)
 }
 
 /// Whether a path lies under one of the temp folders given, as written or in its one spelling,
 /// so a macOS path named through the data volume still matches its short-named temp folder.
-/// Inputs: the path and the temp folders. Output: the answer.
-fn under_temp(path: &Path, temps: &[PathBuf]) -> bool {
-    let short = crate::projects_home::one_spelling(path.to_path_buf());
+/// Inputs: the hooks, the path and the temp folders. Output: the answer.
+fn under_temp(hooks: &FindingHooks, path: &Path, temps: &[PathBuf]) -> bool {
+    let short = (hooks.one_spelling)(path.to_path_buf());
     temps
         .iter()
         .any(|temp| path.starts_with(temp) || short.starts_with(temp))
@@ -653,11 +827,11 @@ fn under_temp(path: &Path, temps: &[PathBuf]) -> bool {
 /// The temp folders: the shared ones and this user's own, as given, with its links resolved
 /// and in the plain form [`crate::sandbox::canonical`] gives (a Windows drive path without
 /// `\\?\`), so a path matches however it is written; an owner temp folder of `/` is
-/// dropped. Output: the absolute folders, each once.
-pub(crate) fn temp_roots() -> Vec<PathBuf> {
+/// dropped. Input: the hooks. Output: the absolute folders, each once.
+pub(crate) fn temp_roots(hooks: &FindingHooks) -> Vec<PathBuf> {
     let owner = std::env::temp_dir();
     let real = owner.canonicalize().ok();
-    let plain = crate::sandbox::canonical(&owner).ok();
+    let plain = (hooks.canonical)(&owner).ok();
     let mut roots: Vec<PathBuf> = TEMP_FOLDERS.iter().map(PathBuf::from).collect();
     for root in std::iter::once(owner).chain(real).chain(plain) {
         if root.is_absolute() && root.parent().is_some() && !roots.contains(&root) {
@@ -670,22 +844,22 @@ pub(crate) fn temp_roots() -> Vec<PathBuf> {
 
 /// Whether a folder is in a temp folder, which other users, or agents with the temp folder
 /// grant, can write: this user's temp folder or a shared one, as written and with its links
-/// resolved. Input: the folder. Output: the answer.
-fn in_temp(folder: &Path) -> bool {
-    in_temp_of(folder, &temp_roots())
+/// resolved. Inputs: the hooks and the folder. Output: the answer.
+fn in_temp(hooks: &FindingHooks, folder: &Path) -> bool {
+    in_temp_of(hooks, folder, &temp_roots(hooks))
 }
 
 /// Whether a folder is in one of the temp folders given, as written and with its links
-/// resolved, in either macOS spelling; none given refuses nothing. Inputs: the folder and the
-/// temp folders. Output: the answer.
-pub(crate) fn in_temp_of(folder: &Path, temps: &[PathBuf]) -> bool {
+/// resolved, in either macOS spelling; none given refuses nothing. Inputs: the hooks, the
+/// folder and the temp folders. Output: the answer.
+pub(crate) fn in_temp_of(hooks: &FindingHooks, folder: &Path, temps: &[PathBuf]) -> bool {
     if temps.is_empty() {
         return false;
     }
     let real = folder.canonicalize().ok();
     std::iter::once(folder)
         .chain(real.as_deref())
-        .any(|folder| under_temp(folder, temps))
+        .any(|folder| under_temp(hooks, folder, temps))
 }
 
 /// How a resolved program runs: as the program itself, or as a script its interpreter reads,
@@ -984,7 +1158,7 @@ fn resolve_at(name: &str, places: &Places, depth: usize) -> Result<Resolved, Mis
             None => false,
         });
     let Some(found) = found else {
-        probe::missed();
+        probe::missed(|| places.seed.clone());
         return Err(match refused {
             Some(refused) => Missing {
                 reason: Reason::Refused,
@@ -1041,7 +1215,7 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
         Some(Err(why)) => return Err(refused(program.as_path(), why)),
         _ => return Err(not_there()),
     }
-    if places.temp_refused && leads_into_temp(entry, &program, &places.temps) {
+    if places.temp_refused && leads_into_temp(&places.seed.hooks, entry, &program, &places.temps) {
         return Err(refused(program.as_path(), Refusal::InTemp));
     }
     assert!(program.is_absolute());
@@ -1072,13 +1246,13 @@ fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Mis
     if depth == INTERPRETER_DEPTH_MAX {
         return Err(needs(&interpreter_name));
     }
-    let through_shim =
-        shebang.by_name.is_none() && crate::harnesses::is_shim(places.home(), &shebang.interpreter);
+    let through_shim = shebang.by_name.is_none()
+        && (places.seed.hooks.is_shim)(places.home(), &shebang.interpreter);
     let into_temp = places.temp_refused
         && shebang
             .interpreter
             .canonicalize()
-            .is_ok_and(|real| leads_into_temp(entry, &real, &places.temps));
+            .is_ok_and(|real| leads_into_temp(&places.seed.hooks, entry, &real, &places.temps));
     let interpreter = match &shebang.by_name {
         Some(name) => named_interpreter(name, &program, places, depth + 1),
         None if through_shim => match check_place(places, &shebang.interpreter) {
@@ -1183,7 +1357,7 @@ fn own_node(
 ) -> Option<(PathBuf, Result<Resolved, Missing>)> {
     assert!(depth <= INTERPRETER_DEPTH_MAX);
     assert!(script.is_absolute());
-    let node = crate::harnesses::npm_prefix(script)?
+    let node = (places.seed.hooks.npm_prefix)(script)?
         .join("bin")
         .join("node");
     let judged = entry_at(&node, places, depth);
@@ -1525,7 +1699,7 @@ fn install_hint(tool: &str) -> &'static str {
 /// Inputs: the places and the file. Output: the check.
 fn check_candidate(places: &Places, candidate: &Path) -> Option<Result<(), Refusal>> {
     let place = check_place(places, candidate)?;
-    Some(if crate::harnesses::is_shim(places.home(), candidate) {
+    Some(if (places.seed.hooks.is_shim)(places.home(), candidate) {
         Err(Refusal::Shim)
     } else {
         place
@@ -1542,12 +1716,14 @@ pub(crate) fn check_place(places: &Places, candidate: &Path) -> Option<Result<()
         return None;
     }
     let real = candidate.canonicalize().ok()?;
-    let hops = crate::harnesses::finding::link_hops(candidate)?;
+    let hops = (places.seed.hooks.link_hops)(candidate)?;
     Some(if places.agent_writable(candidate) {
         Err(Refusal::AgentsCanWrite)
-    } else if let Some(part) = crate::service::changeable_past_sticky(candidate) {
+    } else if let Some(part) = (places.seed.hooks.changeable_past_sticky)(candidate) {
         Err(Refusal::OthersCanChange(part))
-    } else if places.temp_refused && leads_into_temp(candidate, &real, &places.temps) {
+    } else if places.temp_refused
+        && leads_into_temp(&places.seed.hooks, candidate, &real, &places.temps)
+    {
         Err(Refusal::InTemp)
     } else if let Some(refusal) = places.hop_refusal(candidate, &hops) {
         Err(refusal)

@@ -349,7 +349,7 @@ pub(crate) fn executable_file(path: &Path) -> Option<PathBuf> {
 /// absolute entry with its links kept, or none when no entry leads to a runnable file.
 fn path_entry(name: &str, path: Option<&OsStr>, temps: &[PathBuf]) -> Option<PathBuf> {
     for folder in std::env::split_paths(path?) {
-        if !folder.is_absolute() || crate::tools::in_temp_of(&folder, temps) {
+        if !folder.is_absolute() || crate::tools::in_temp_of(&crate::tools::HOOKS, &folder, temps) {
             continue;
         }
         for file in executable_names(name) {
@@ -357,7 +357,7 @@ fn path_entry(name: &str, path: Option<&OsStr>, temps: &[PathBuf]) -> Option<Pat
             let Some(real) = executable_file(&entry) else {
                 continue;
             };
-            if crate::tools::leads_into_temp(&entry, &real, temps) {
+            if crate::tools::leads_into_temp(&crate::tools::HOOKS, &entry, &real, temps) {
                 continue;
             }
             assert!(entry.is_absolute());
@@ -401,7 +401,7 @@ pub fn resolve_harnesses(
             .or_else(|| harness_entry("claude-code", search, path)),
         rcli: rcli_entry(
             given.rcli,
-            &crate::tools::Places::engine(None, None, None, path),
+            &crate::tools::tools_engine(None, None, None, path),
             executable_folder,
         ),
     }
@@ -501,7 +501,7 @@ pub fn harness_candidates(
 /// match for its name, never one in a temp folder or leading into one for an entry outside
 /// every temp folder; else NotFound, which a launch reports as not installed.
 pub fn launch_executable(entry: &Path, path: Option<&OsStr>) -> std::io::Result<PathBuf> {
-    launch_executable_in(entry, path, &crate::tools::temp_roots())
+    launch_executable_in(entry, path, &crate::tools::temp_roots(&crate::tools::HOOKS))
 }
 
 /// Resolves a harness entry as [`launch_executable`] does with the temp folders given, so a
@@ -526,7 +526,7 @@ fn launch_executable_in(
 /// under the rules of [`launch_executable`]; else NotFound. Inputs: the absolute entry and
 /// the PATH value. Output: the entry used.
 pub fn launch_entry(entry: &Path, path: Option<&OsStr>) -> std::io::Result<PathBuf> {
-    launch_entry_in(entry, path, &crate::tools::temp_roots())
+    launch_entry_in(entry, path, &crate::tools::temp_roots(&crate::tools::HOOKS))
 }
 
 /// Finds the entry a launch goes through as [`launch_entry`] does with the temp folders
@@ -543,7 +543,7 @@ fn launch_entry_in(
     let on_path = || {
         let folder = entry.parent()?;
         let name = entry.file_name()?.to_str()?;
-        let refused: &[PathBuf] = if crate::tools::in_temp_of(folder, temps) {
+        let refused: &[PathBuf] = if crate::tools::in_temp_of(&crate::tools::HOOKS, folder, temps) {
             &[]
         } else {
             temps
@@ -889,7 +889,7 @@ mod tests {
         let app = root.join("app");
         let bin = root.join("bin");
         program(&bin.join(RCLI_EXECUTABLE), 0o755);
-        let places = crate::tools::Places::new(vec![bin.clone()], None);
+        let places = crate::tools::tools_new(vec![bin.clone()], None);
         assert_eq!(
             rcli_entry(None, &places, Some(&app)),
             Some(bin.join(RCLI_EXECUTABLE))
@@ -926,7 +926,7 @@ mod tests {
     /// engine's search order without this machine's Homebrew and system folders. Inputs:
     /// the places and the scratch root. Output: the places.
     fn scratch_only(places: crate::tools::Places, root: &Path) -> crate::tools::Places {
-        crate::tools::Places::new(
+        crate::tools::tools_new(
             places
                 .folders()
                 .iter()
@@ -955,7 +955,7 @@ mod tests {
         let hidden = root.join("project/.crazyagent/bin");
         std::fs::create_dir_all(&home).unwrap();
         let path = std::env::join_paths([planted.clone(), installed.clone()]).unwrap();
-        let looked = crate::tools::Places::engine(
+        let looked = crate::tools::tools_engine(
             Some(&engine),
             None,
             Some(home.clone()),
@@ -964,7 +964,7 @@ mod tests {
         assert!(looked.folders().contains(&installed));
         assert!(!looked.folders().contains(&planted));
         let scratch = scratch_only(looked, &root);
-        let places = crate::tools::Places::new(
+        let places = crate::tools::tools_new(
             [scratch.folders(), &[hidden.clone(), elsewhere.clone()]].concat(),
             Some(home.clone()),
         );
@@ -1003,7 +1003,7 @@ mod tests {
         program(&real, 0o755);
         std::fs::create_dir_all(&linked).unwrap();
         std::os::unix::fs::symlink(&real, linked.join(RCLI_EXECUTABLE)).unwrap();
-        let only_link = crate::tools::Places::new(vec![linked.clone()], Some(home));
+        let only_link = crate::tools::tools_new(vec![linked.clone()], Some(home));
         assert_eq!(
             rcli_entry(None, &only_link, None),
             Some(linked.join(RCLI_EXECUTABLE)),

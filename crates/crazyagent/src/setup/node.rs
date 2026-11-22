@@ -159,7 +159,7 @@ pub fn usable(places: &crate::tools::Places) -> Option<Usable> {
         Some((node, npm))
     });
     let Some((node, npm)) = found else {
-        crate::tools::probe::missed();
+        crate::tools::probe::missed(crate::tools::finding_seed);
         return None;
     };
     assert_eq!(node.entry.parent(), npm.entry.parent());

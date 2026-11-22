@@ -276,8 +276,7 @@ fn native_auth_sign_in_child_starts_an_env_script_through_its_resolved_interpret
     assert_eq!(launch.len(), 2);
     let harness = harness.with_launch(launch);
     let command = super::command(&harness.launch_words().unwrap(), &case.home).unwrap();
-    let interpreter =
-        crate::tools::resolve("sh", &crate::tools::Places::from_environment(None)).unwrap();
+    let interpreter = crate::tools::resolve("sh", &crate::tools::tools_places(None)).unwrap();
     assert_eq!(command.get_program(), interpreter.program.as_os_str());
     assert_eq!(command.get_args().next(), Some(script.as_os_str()));
     let path = command
@@ -429,7 +428,7 @@ fn a_sign_in_harness_inside_a_project_is_refused_with_the_resolvers_line() {
     std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
     std::fs::write(&entry, "#!/bin/sh\nexit 0\n").unwrap();
     std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let line = crate::tools::resolve_entry(&entry, &crate::tools::Places::from_environment(None))
+    let line = crate::tools::resolve_entry(&entry, &crate::tools::tools_places(None))
         .unwrap_err()
         .line();
     let refused = crate::engine::native_auth_host::sign_in_command(&entry).unwrap_err();

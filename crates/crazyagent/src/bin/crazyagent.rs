@@ -605,7 +605,7 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
             .or_else(|| found("claude-code")),
         rcli: crazyagent::paths::rcli_entry(
             explicit.rcli,
-            &crazyagent::tools::Places::from_environment(Some(layout.root())),
+            &crazyagent::tools::tools_places(Some(layout.root())),
             executable.parent(),
         ),
     };

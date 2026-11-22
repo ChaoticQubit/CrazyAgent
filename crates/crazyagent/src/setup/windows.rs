@@ -350,7 +350,7 @@ mod tests {
     /// Places with no folders and no HOME, whose refusals are the ones every place has, so a
     /// row's temp folders are kept and its project folders are not. Output: the places.
     fn places() -> crate::tools::Places {
-        crate::tools::Places::new(Vec::new(), None)
+        crate::tools::tools_new(Vec::new(), None)
     }
 
     /// RV-DS241-95: setup on Windows finds uv only in an absolute PATH folder the tool
@@ -610,7 +610,7 @@ mod tests {
                 std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
             }
         }
-        let places = crate::tools::Places::new(vec![bin.clone()], None);
+        let places = crate::tools::tools_new(vec![bin.clone()], None);
         let installer =
             WindowsInstaller::new(&base.join("app"), Some(&base.join("local")), places).unwrap();
         assert_eq!(installer.program("npx"), Some(bin.join("npx.cmd")));

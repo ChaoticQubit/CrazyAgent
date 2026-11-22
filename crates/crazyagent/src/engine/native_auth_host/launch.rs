@@ -40,7 +40,7 @@ pub enum HandedWord<'a> {
 /// words cannot be pinned.
 pub(super) fn resolved(harness: &RegisteredNativeAuthHost) -> Option<Vec<LaunchWord>> {
     let path = harness.verified_path().ok()?;
-    let places = crate::tools::Places::from_environment(None);
+    let places = crate::tools::tools_places(None);
     let tool = crate::harnesses::interactive::launch_tool(path, &places).ok()?;
     let words = crate::harnesses::interactive::start_words(&tool);
     let grants = tool.grants();

@@ -59,27 +59,31 @@ static VERSIONS: Mutex<BTreeMap<PathBuf, Known>> = Mutex::new(BTreeMap::new());
 /// The folders the background probes found: npm's global prefix `bin` of the npm the
 /// resolver finds and the login shell's PATH folders. Answers at once from what the probes
 /// cached, empty until the first run finishes, and starts a background run when one is due
-/// ([`Probes::start`]). Output: the absolute folders.
-pub fn folders() -> Vec<PathBuf> {
+/// ([`Probes::start`]). Input: what a run needs, asked only when one starts. Output: the
+/// absolute folders.
+pub fn folders(seed: impl FnOnce() -> super::FindingSeed) -> Vec<PathBuf> {
     refreshed(
         |probes, now| probes.start(now, false),
         |probes| probes.found.clone(),
+        seed,
     )
 }
 
 /// Where the folder probes stand, after starting a run when one is due as [`folders`] does:
 /// setup reads it just before it builds its places and checks again once it moved, so a
 /// tool the login shell's PATH holds shows as soon as the run that found it ends. Never
-/// blocks. Output: the mark ([`Probes::mark`]).
-pub fn mark() -> Mark {
-    refreshed(|probes, now| probes.start(now, false), Probes::mark)
+/// blocks. Input: what a run needs, asked only when one starts. Output: the mark
+/// ([`Probes::mark`]).
+pub fn mark(seed: impl FnOnce() -> super::FindingSeed) -> Mark {
+    refreshed(|probes, now| probes.start(now, false), Probes::mark, seed)
 }
 
 /// A program's version as it reports it, read in the background with a time limit and
 /// cached for its file's identity, so an update in place is read again, as is a probe that
-/// gave none once [`RETRY_AFTER`] passed. Input: the program's real file. Output: the
-/// version, or none while unknown, which never counts as missing.
-pub fn version(program: &Path) -> Option<String> {
+/// gave none once [`RETRY_AFTER`] passed. Inputs: the program's real file and what a probe
+/// needs, asked only when one starts. Output: the version, or none while unknown, which
+/// never counts as missing.
+pub fn version(program: &Path, seed: impl FnOnce() -> super::FindingSeed) -> Option<String> {
     if !program.is_absolute() || program.as_os_str().len() > PATH_BYTES_MAX {
         return None;
     }
@@ -91,7 +95,7 @@ pub fn version(program: &Path) -> Option<String> {
         return known.and_then(|known| known.version.clone());
     }
     let room = known.is_some() || versions.len() < VERSIONS_MAX;
-    if room && start_version_probe(program, identity) {
+    if room && start_version_probe(program, identity, seed) {
         let probing = Known {
             identity,
             version: None,
@@ -105,16 +109,17 @@ pub fn version(program: &Path) -> Option<String> {
 
 /// Tells the probes a resolve found nothing, so the folders are probed again in the
 /// background once the last run waited out its backoff ([`Probes::start`]); a run already
-/// going is enough. Never blocks.
-pub fn missed() {
-    refreshed(|probes, now| probes.start(now, true), |_| ());
+/// going is enough. Never blocks. Input: what a run needs, asked only when one starts.
+pub fn missed(seed: impl FnOnce() -> super::FindingSeed) {
+    refreshed(|probes, now| probes.start(now, true), |_| (), seed);
 }
 
 /// Starts a folder run in the background at once for a user's explicit retry (the live
 /// master's Try again or Start again, setup's Recheck or retry), whatever the backoff; a run
 /// already going is enough. Automatic resolves call [`missed`] instead. Never blocks.
-pub(crate) fn refresh_now() {
-    refreshed(|probes, _| probes.start_now(), |_| ());
+/// Input: what a run needs, asked only when one starts.
+pub(crate) fn refresh_now(seed: impl FnOnce() -> super::FindingSeed) {
+    refreshed(|probes, _| probes.start_now(), |_| (), seed);
 }
 
 /// Whether the first folder run is going and none has finished yet, as right after the
@@ -144,14 +149,16 @@ pub(crate) fn last_run() -> Option<Run> {
 
 /// Starts a background folder run when the given rule marks one as going, recording a run
 /// that could not start as failed so it is retried, then reads the cache under the same
-/// lock. Inputs: the rule, given the cache and now, and the read. Output: what it read.
+/// lock. Inputs: the rule, given the cache and now, the read and what a run needs. Output:
+/// what it read.
 fn refreshed<T>(
     due: impl FnOnce(&mut Probes, Instant) -> bool,
     read: impl FnOnce(&Probes) -> T,
+    seed: impl FnOnce() -> super::FindingSeed,
 ) -> T {
     let now = Instant::now();
     let mut probes = lock(&FOLDERS);
-    if due(&mut probes, now) && !start_folder_probe() {
+    if due(&mut probes, now) && !start_folder_probe(seed) {
         probes.finish(Vec::new(), false, now);
     }
     read(&probes)
@@ -393,36 +400,44 @@ fn lock<T>(cache: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// Starts one folder run on a background thread that records what it found. Unit tests
 /// never start one, so a developer's own shell files are never run, and where Unix shells
-/// do not exist nothing is probed. Output: whether the run started.
-fn start_folder_probe() -> bool {
+/// do not exist nothing is probed. Input: what the run needs. Output: whether the run
+/// started.
+fn start_folder_probe(seed: impl FnOnce() -> super::FindingSeed) -> bool {
     #[cfg(all(unix, not(test)))]
     {
+        let seed = seed();
         std::thread::Builder::new()
             .name("tools-probe".to_owned())
-            .spawn(|| {
+            .spawn(move || {
                 let running = Running::new(&FOLDERS);
-                let (found, complete) = probe_folders();
+                let (found, complete) = probe_folders(&seed);
                 running.finish(found, complete);
             })
             .is_ok()
     }
     #[cfg(not(all(unix, not(test))))]
     {
+        let _ = seed;
         false
     }
 }
 
 /// Starts one program's version probe on a background thread that fills its cache entry
 /// while the entry still names the same file identity. Inputs: the program and its
-/// identity. Output: whether the probe started.
-fn start_version_probe(program: &Path, identity: Identity) -> bool {
+/// identity and what the probe needs. Output: whether the probe started.
+fn start_version_probe(
+    program: &Path,
+    identity: Identity,
+    seed: impl FnOnce() -> super::FindingSeed,
+) -> bool {
     #[cfg(unix)]
     {
         let program = program.to_path_buf();
+        let seed = seed();
         std::thread::Builder::new()
             .name("tools-version".to_owned())
             .spawn(move || {
-                let found = probe_version(&program, VERSION_LIMIT);
+                let found = probe_version(&program, VERSION_LIMIT, seed);
                 let mut versions = lock(&VERSIONS);
                 let entry = versions
                     .get_mut(&program)
@@ -436,17 +451,18 @@ fn start_version_probe(program: &Path, identity: Identity) -> bool {
     }
     #[cfg(not(unix))]
     {
-        let _ = (program, identity);
+        let _ = (program, identity, seed);
         false
     }
 }
 
 /// Runs both folder probes for this account: the login shell its account names, with this
 /// process's HOME, then the npm the engine's places find. Output: the probed folders, and
-/// whether both answered (false when the account or HOME is unknown).
+/// whether both answered (false when the account or HOME is unknown). Input: what the run
+/// needs to build the engine's places.
 #[cfg(unix)]
 #[cfg_attr(test, allow(dead_code))]
-fn probe_folders() -> (Vec<PathBuf>, bool) {
+fn probe_folders(seed: &super::FindingSeed) -> (Vec<PathBuf>, bool) {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|home| home.is_absolute());
@@ -461,14 +477,10 @@ fn probe_folders() -> (Vec<PathBuf>, bool) {
         .and_then(|shell| login_path(shell, &home, &account.name, SHELL_LIMIT));
     let login_folders = login
         .as_deref()
-        .map(|path| kept(path, Some(&home)))
+        .map(|path| kept(&seed.hooks, path, Some(&home)))
         .unwrap_or_default();
-    let (found, npm_answered) = probed(
-        &login_folders,
-        super::Places::from_environment(None),
-        &home,
-        &account.name,
-    );
+    let places = super::Places::from_environment(None, seed.clone());
+    let (found, npm_answered) = probed(&login_folders, places, &home, &account.name);
     (found, login.is_some() && npm_answered)
 }
 
@@ -616,22 +628,26 @@ pub(crate) fn login_path(
 /// The folders of a PATH value a launch may search: absolute plain folders of bounded
 /// length that exist, in no `.crazyagent` folder and in no project ([`super::in_project`],
 /// the rule [`super::Places`] applies too), that only this user and the system can
-/// change, each once, at most [`FOLDERS_MAX`]. Inputs: the PATH value and HOME. Output: the
-/// folders in order.
-pub(crate) fn kept(path: &OsStr, home: Option<&Path>) -> Vec<PathBuf> {
-    kept_folders(std::env::split_paths(path), home)
+/// change, each once, at most [`FOLDERS_MAX`]. Inputs: the hooks, the PATH value and HOME.
+/// Output: the folders in order.
+pub(crate) fn kept(hooks: &super::FindingHooks, path: &OsStr, home: Option<&Path>) -> Vec<PathBuf> {
+    kept_folders(hooks, std::env::split_paths(path), home)
 }
 
-/// Keeps the folders [`kept`] keeps from folders already split. Inputs: the folders and
-/// HOME. Output: the kept folders in order.
-fn kept_folders(folders: impl Iterator<Item = PathBuf>, home: Option<&Path>) -> Vec<PathBuf> {
+/// Keeps the folders [`kept`] keeps from folders already split. Inputs: the hooks, the
+/// folders and HOME. Output: the kept folders in order.
+fn kept_folders(
+    hooks: &super::FindingHooks,
+    folders: impl Iterator<Item = PathBuf>,
+    home: Option<&Path>,
+) -> Vec<PathBuf> {
     let real_home = home.and_then(|home| std::fs::canonicalize(home).ok());
     let mut kept: Vec<PathBuf> = Vec::new();
     for folder in folders {
         if kept.len() == FOLDERS_MAX {
             break;
         }
-        if !kept.contains(&folder) && searchable(&folder, real_home.as_deref()) {
+        if !kept.contains(&folder) && searchable(hooks, &folder, real_home.as_deref()) {
             kept.push(folder);
         }
     }
@@ -639,24 +655,24 @@ fn kept_folders(folders: impl Iterator<Item = PathBuf>, home: Option<&Path>) -> 
     kept
 }
 
-/// Whether one folder may be searched for programs ([`kept`]). Inputs: the folder and HOME
-/// with its links resolved. Output: the answer.
-fn searchable(folder: &Path, real_home: Option<&Path>) -> bool {
+/// Whether one folder may be searched for programs ([`kept`]). Inputs: the hooks, the folder
+/// and HOME with its links resolved. Output: the answer.
+fn searchable(hooks: &super::FindingHooks, folder: &Path, real_home: Option<&Path>) -> bool {
     let plain = folder.as_os_str().len() <= PATH_BYTES_MAX
         && folder.is_absolute()
         && folder
             .components()
             .all(|part| matches!(part, Component::RootDir | Component::Normal(_)));
-    if !plain || crate::harnesses::in_crazyagent_folder(folder) {
+    if !plain || (hooks.in_crazyagent_folder)(folder) {
         return false;
     }
     let Ok(real) = std::fs::canonicalize(folder) else {
         return false;
     };
     real.is_dir()
-        && !crate::harnesses::in_crazyagent_folder(&real)
-        && !super::in_project(&super::home_names(real_home), &real)
-        && crate::service::changeable_by_others(folder).is_none()
+        && !(hooks.in_crazyagent_folder)(&real)
+        && !super::in_project(hooks, &super::home_names(hooks, real_home), &real)
+        && (hooks.changeable_by_others)(folder).is_none()
 }
 
 /// The `bin` folder of the npm global prefix npm prints. Input: npm's output. Output: the
@@ -708,12 +724,17 @@ pub(crate) fn probed(
     home: &Path,
     user: &str,
 ) -> (Vec<PathBuf>, bool) {
+    let hooks = places.seed.hooks;
     let npm = super::resolve("npm", &places.with_probed(login.to_vec())).ok();
     let bin = npm
         .as_ref()
         .and_then(|npm| npm_bin(npm, home, user, NPM_LIMIT));
     let answered = npm.is_none() || bin.is_some();
-    let found = kept_folders(bin.into_iter().chain(login.iter().cloned()), Some(home));
+    let found = kept_folders(
+        &hooks,
+        bin.into_iter().chain(login.iter().cloned()),
+        Some(home),
+    );
     (found, answered)
 }
 
@@ -735,11 +756,15 @@ pub(crate) fn reported(output: &[u8]) -> Option<String> {
 
 /// Runs a program with the flag it answers its version to (`-V` for tmux, `--version` for
 /// the rest), through its interpreter when it is a script, from HOME with the environment
-/// cleared to HOME and a system PATH. Inputs: the program's file and the limit.
-/// Output: the version, or none.
+/// cleared to HOME and a system PATH. Inputs: the program's file, the limit and the seed
+/// its places are built on. Output: the version, or none.
 #[cfg(unix)]
-pub(crate) fn probe_version(program: &Path, limit: Duration) -> Option<String> {
-    let places = super::Places::from_environment(None);
+pub(crate) fn probe_version(
+    program: &Path,
+    limit: Duration,
+    seed: super::FindingSeed,
+) -> Option<String> {
+    let places = super::Places::from_environment(None, seed);
     let resolved = super::resolve_entry(program, &places).ok()?;
     let flag = if resolved.program.file_name() == Some(OsStr::new("tmux")) {
         "-V"

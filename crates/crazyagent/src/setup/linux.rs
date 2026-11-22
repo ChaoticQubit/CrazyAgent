@@ -338,7 +338,7 @@ mod tests {
         let home = root.path().join("home");
         let local = home.join(".local/bin");
         std::fs::create_dir_all(&local).unwrap();
-        let places = crate::tools::Places::new(
+        let places = crate::tools::tools_new(
             vec![root.path().join("setup/bin"), local.clone()],
             Some(home),
         );
@@ -371,7 +371,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn the_resolver_looks_in_linuxbrew_and_the_nixos_profiles() {
-        let places = crate::tools::Places::engine(None, None, None, None);
+        let places = crate::tools::tools_engine(None, None, None, None);
         let folders = places.folders();
         let system = folders
             .iter()
@@ -396,7 +396,7 @@ mod tests {
     #[test]
     fn setup_finds_tmux_exactly_when_the_live_start_does() {
         let root = tempfile::tempdir().unwrap();
-        let places = crate::tools::Places::from_environment(Some(root.path()));
+        let places = crate::tools::tools_places(Some(root.path()));
         let shared = PinnedInstaller::with_places(root.path(), vec![], places);
         let installer = LinuxInstaller::new(Box::new(shared));
         let started = crate::terminal::tmux::installed(root.path());

@@ -336,7 +336,7 @@ async fn the_backfill_makes_no_setup_folder_before_setup_and_seeds_the_shipped_h
 /// backoff ([`crate::tools::probe::missed`]) would not.
 #[test]
 fn an_explicit_setup_run_asks_the_probes_to_look_again_at_once() {
-    let _ = crate::tools::probe::folders();
+    let _ = crate::tools::probe::folders(crate::tools::finding_seed);
     let before = crate::tools::probe::last_run().map(|run| run.finished);
     let root = tempfile::tempdir().unwrap();
     assert!(setup::begin_run(root.path(), &[]));

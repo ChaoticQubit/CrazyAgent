@@ -43,7 +43,7 @@ impl MacInstaller {
             pinned: PinnedInstaller::with_places(
                 engine_root,
                 system_folders(fixed),
-                crate::tools::Places::from_environment(Some(engine_root)),
+                crate::tools::tools_places(Some(engine_root)),
             ),
             brew: brew.into_iter().filter(|path| path.is_absolute()).collect(),
         }

@@ -493,8 +493,7 @@ fn an_env_script_harness_starts_headless_through_its_resolved_interpreter_with_t
         limits: LaunchLimits::default(),
     };
     let command = super::command(&request).unwrap();
-    let interpreter =
-        crate::tools::resolve("sh", &crate::tools::Places::from_environment(None)).unwrap();
+    let interpreter = crate::tools::resolve("sh", &crate::tools::tools_places(None)).unwrap();
     assert!(interpreter.program.is_absolute());
     let args: Vec<&std::ffi::OsStr> = command.get_args().collect();
     let at = args
@@ -547,7 +546,7 @@ fn a_headless_harness_inside_a_project_is_refused_with_the_resolvers_line() {
         git_identity: None,
         limits: LaunchLimits::default(),
     };
-    let line = crate::tools::resolve_entry(&entry, &crate::tools::Places::from_environment(None))
+    let line = crate::tools::resolve_entry(&entry, &crate::tools::tools_places(None))
         .unwrap_err()
         .line();
     assert_eq!(

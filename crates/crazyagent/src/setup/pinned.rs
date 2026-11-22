@@ -63,7 +63,7 @@ impl PinnedInstaller {
         }
         assert!(!search.is_empty());
         let places =
-            crate::tools::Places::new(search.clone(), std::env::var_os("HOME").map(PathBuf::from));
+            crate::tools::tools_new(search.clone(), std::env::var_os("HOME").map(PathBuf::from));
         Self {
             setup,
             search,

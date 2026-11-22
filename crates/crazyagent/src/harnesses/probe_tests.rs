@@ -244,7 +244,7 @@ fn a_found_harness_the_resolver_cant_start_is_cant_run_over_ready_and_limited() 
         None,
         Vec::new(),
     ));
-    let places = crate::tools::Places::new(vec![folder.path().to_path_buf()], None);
+    let places = crate::tools::tools_new(vec![folder.path().to_path_buf()], None);
     let line = "codex needs ca-catalog-missing-runtime, which is missing. Install it, or run \
                 setup again from Settings. Then try again.";
     let cant_run = HarnessStatus::CantRun {

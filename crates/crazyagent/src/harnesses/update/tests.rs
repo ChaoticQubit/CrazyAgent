@@ -20,7 +20,7 @@ impl Machine {
         let npm = self.root.path().join("brew/bin/npm");
         let engine = crate::setup::harness_prefix(self.root.path());
         let home = self.root.path().join("home");
-        let places = crate::tools::Places::new(
+        let places = crate::tools::tools_new(
             vec![
                 self.root.path().join("setup/bin"),
                 self.root.path().join("brew/bin"),
@@ -1876,13 +1876,13 @@ fn an_unrecognized_install_of_a_harness_crazyagent_cannot_start_is_never_run() {
 /// folders under that machine's HOME only, so this Mac's own Node never counts.
 fn home_node_roots(machine: &Machine) -> Roots {
     let home = machine.roots().home;
-    let folders: Vec<PathBuf> = crate::tools::Places::engine(None, None, Some(home.clone()), None)
+    let folders: Vec<PathBuf> = crate::tools::tools_engine(None, None, Some(home.clone()), None)
         .folders()
         .iter()
         .filter(|folder| folder.starts_with(&home))
         .cloned()
         .collect();
-    let places = crate::tools::Places::new(folders, Some(home));
+    let places = crate::tools::tools_new(folders, Some(home));
     Roots {
         npm: super::state::engine_npm_at(machine.root.path(), &places),
         ..machine.roots()
@@ -2248,7 +2248,7 @@ fn a_harness_entry_that_leads_into_temp_is_never_asked_its_version_on_macos() {
     let link = outside.path().join("bin/codex");
     std::fs::create_dir_all(link.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&real, &link).unwrap();
-    let engine = crate::tools::Places::from_environment(Some(&at.join("engine")));
+    let engine = crate::tools::tools_places(Some(&at.join("engine")));
     let refused = crate::tools::resolve_entry(&link, &engine).unwrap_err();
     assert_eq!(
         refused.refused.as_ref().map(|refused| refused.why.clone()),
@@ -2712,7 +2712,7 @@ fn a_command_whose_link_chain_passes_through_the_temp_folder_is_refused_on_macos
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
         std::os::unix::fs::symlink(to, link).unwrap();
     }
-    let engine = crate::tools::Places::from_environment(Some(&at.join("engine")));
+    let engine = crate::tools::tools_places(Some(&at.join("engine")));
     let command = |program: &Path| Fixed {
         program: program.to_path_buf(),
         args: vec!["--version"],
@@ -2849,7 +2849,7 @@ fn a_second_npm_install_keeps_the_prefix_node_on_the_real_node_when_the_resolver
     let prefix = crate::setup::harness_prefix(root);
     let node = machine.program("home/.nvm/versions/node/v22.11.0/bin/node", 0o755);
     machine.program("home/.nvm/versions/node/v22.11.0/bin/npm", 0o755);
-    let places = crate::tools::Places::new(
+    let places = crate::tools::tools_new(
         vec![prefix.join("bin"), node.parent().unwrap().to_path_buf()],
         None,
     );
@@ -2879,7 +2879,7 @@ fn the_prefix_node_follows_a_homebrew_upgrade_that_removes_the_old_keg() {
     let old = machine.program("brew/Cellar/node/26.0.0/bin/node", 0o755);
     machine.program("brew/bin/npm", 0o755);
     std::os::unix::fs::symlink(&old, brew_bin.join("node")).unwrap();
-    let places = crate::tools::Places::new(vec![brew_bin.clone()], None);
+    let places = crate::tools::tools_new(vec![brew_bin.clone()], None);
     let npm = super::state::engine_npm_at(root, &places).unwrap();
     crate::setup::node::make_prefix(&npm.prefix, &npm.node).unwrap();
     let relative = prefix.strip_prefix(root).unwrap().to_str().unwrap();

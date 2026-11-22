@@ -2105,7 +2105,7 @@ fn a_harness_entry_inside_a_project_never_launches() {
     std::fs::create_dir_all(project.join(".crazyagent")).unwrap();
     let entry = project.join("bin").join("codex");
     stand_in(&entry);
-    let places = crate::tools::Places::from_environment(None);
+    let places = crate::tools::tools_places(None);
     let line = crate::tools::resolve_entry(&entry, &places)
         .unwrap_err()
         .line();
@@ -2129,17 +2129,17 @@ fn a_shim_harness_starts_its_real_install_or_else_itself_unless_agents_can_write
     stand_in(&shim);
     let real = base.join("real");
     stand_in(&real.join(name));
-    let found = crate::tools::Places::new(vec![real.clone()], Some(home.clone()));
+    let found = crate::tools::tools_new(vec![real.clone()], Some(home.clone()));
     assert!(crate::harnesses::is_shim(found.home(), &shim));
     assert_eq!(launch_tool(&shim, &found).unwrap().entry, real.join(name));
-    let none = crate::tools::Places::new(Vec::new(), Some(home));
+    let none = crate::tools::tools_new(Vec::new(), Some(home));
     assert_eq!(launch_tool(&shim, &none).unwrap().entry, shim);
     let project = base.join("project");
     std::fs::create_dir_all(project.join(".crazyagent")).unwrap();
     let inside_home = project.join("home");
     let inside = inside_home.join(".volta/bin").join(name);
     stand_in(&inside);
-    let places = crate::tools::Places::new(Vec::new(), Some(inside_home));
+    let places = crate::tools::tools_new(Vec::new(), Some(inside_home));
     assert!(launch_tool(&inside, &places).is_err());
 }
 
@@ -2158,7 +2158,7 @@ fn a_shim_under_a_sticky_shared_folder_starts_as_given_by_the_resolver_rule() {
     let home = mine.join("home");
     let shim = home.join(".volta/bin").join(name);
     stand_in(&shim);
-    let places = crate::tools::Places::new(Vec::new(), Some(home));
+    let places = crate::tools::tools_new(Vec::new(), Some(home));
     assert!(crate::harnesses::is_shim(places.home(), &shim));
     assert_eq!(launch_tool(&shim, &places).unwrap().entry, shim);
     std::fs::set_permissions(
@@ -2188,7 +2188,7 @@ fn a_shim_reached_through_a_link_agents_can_move_never_starts_as_given() {
     let shim = home.join(".volta/bin").join(name);
     std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&hop, &shim).unwrap();
-    let places = crate::tools::Places::new(Vec::new(), Some(home));
+    let places = crate::tools::tools_new(Vec::new(), Some(home));
     assert!(crate::harnesses::is_shim(places.home(), &shim));
     assert!(
         !places.agent_writable(&shim),
@@ -2209,7 +2209,7 @@ fn a_pinned_harness_inside_a_project_is_refused_by_name_not_reported_missing() {
     std::fs::create_dir_all(project.join(".crazyagent")).unwrap();
     let entry = project.join("bin").join("codex");
     stand_in(&entry);
-    let places = crate::tools::Places::from_environment(None);
+    let places = crate::tools::tools_places(None);
     let missing = crate::tools::resolve_entry(&entry, &places).unwrap_err();
     assert_eq!(missing.reason, crate::tools::Reason::Refused);
     assert_eq!(

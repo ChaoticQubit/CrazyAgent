@@ -224,7 +224,7 @@ fn follow_saved_levels(authority: &Arc<Authority>) {
 fn follow_saved_levels(_authority: &Arc<Authority>) {}
 
 fn start_check(root: &Path) {
-    let mark = crate::tools::probe::mark();
+    let mark = crate::tools::probe::mark(crate::tools::finding_seed);
     let begin = progress::with(root, |state| {
         let stale = progress::check_due(state.checked.as_ref(), mark, std::time::Instant::now());
         let begin = stale && !state.checking;
@@ -378,7 +378,7 @@ pub(super) fn begin_run(root: &Path, entries: &[PackManifestEntry]) -> bool {
         true
     });
     if begun {
-        crate::tools::probe::refresh_now();
+        crate::tools::probe::refresh_now(crate::tools::finding_seed);
     }
     begun
 }
@@ -1026,7 +1026,7 @@ mod install_tests {
             state.checked = Some(progress::Checked {
                 at: std::time::Instant::now(),
                 found: Vec::new(),
-                probe: crate::tools::probe::mark(),
+                probe: crate::tools::probe::mark(crate::tools::finding_seed),
             });
         });
         let guard = begin_one(root.clone(), Dependency::Graphify).unwrap();

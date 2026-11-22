@@ -102,7 +102,7 @@ impl Roots {
     /// Homebrew prefixes, casks only on macOS and the resolver's places with no engine root.
     /// Output: the roots; an unknown home is an empty home.
     pub fn system() -> Self {
-        Self::on(crate::tools::Places::from_environment(None))
+        Self::on(crate::tools::tools_places(None))
     }
 
     /// The roots of this machine with the given resolver places: the engine's own home
@@ -125,7 +125,7 @@ impl Roots {
     /// places, and the engine's own prefix `<engine root>/setup/harnesses`. Nothing is run.
     /// Input: the engine root. Output: the roots; no npm when no usable Node is found.
     pub fn engine(engine_root: &Path) -> Self {
-        let mut roots = Self::on(crate::tools::Places::from_environment(Some(engine_root)));
+        let mut roots = Self::on(crate::tools::tools_places(Some(engine_root)));
         roots.npm = engine_npm(engine_root, &roots.places);
         roots
     }
@@ -1004,7 +1004,7 @@ mod windows_tests {
             brew_prefixes: Vec::new(),
             casks: false,
             npm: None,
-            places: crate::tools::Places::new(Vec::new(), None),
+            places: crate::tools::tools_new(Vec::new(), None),
         };
         let real =
             Path::new(r"C:\Users\unit\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js");
@@ -1047,7 +1047,7 @@ mod windows_tests {
         let curl = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
             .join("System32")
             .join("curl.exe");
-        let places = crate::tools::Places::from_environment(None);
+        let places = crate::tools::tools_places(None);
         let version = version_if_runs(&curl, &home, &places).unwrap();
         assert!(super::super::plain_version(&version), "{version}");
     }
@@ -1059,7 +1059,7 @@ mod windows_tests {
     #[test]
     fn a_windows_program_another_account_can_change_tells_no_version() {
         let home = home_folder().unwrap();
-        let places = crate::tools::Places::from_environment(None);
+        let places = crate::tools::tools_places(None);
         let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
             .join("System32")
             .join("curl.exe");
@@ -1099,7 +1099,7 @@ mod windows_tests {
         std::fs::copy(&shipped, node.join("node.exe")).unwrap();
         let script = package.join("codex.js");
         std::fs::write(&script, "#!/usr/bin/env node\n").unwrap();
-        let places = crate::tools::Places::new(vec![node.clone()], None);
+        let places = crate::tools::tools_new(vec![node.clone()], None);
         assert!(version_if_runs(&script, &home, &places).is_some());
 
         let step: Step = Box::new(move || {

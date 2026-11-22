@@ -246,7 +246,7 @@ pub(super) fn stand_in() -> Result<PathBuf, String> {
 /// name no HOME, so every folder above the file counts, as in an engine on a fixture HOME.
 /// Input: the stand-in. Output: the answer; any other refusal is not this one.
 pub(super) fn passed_over_as_agents(program: &Path) -> bool {
-    let places = crazyagent::tools::Places::new(Vec::new(), None);
+    let places = crazyagent::tools::tools_new(Vec::new(), None);
     crazyagent::tools::resolve_entry(program, &places)
         .err()
         .and_then(|missing| missing.refused)

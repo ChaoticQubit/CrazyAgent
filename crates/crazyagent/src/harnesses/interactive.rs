@@ -702,7 +702,7 @@ fn moved(to: &Path, rest: &Path) -> Result<String, LaunchError> {
 /// absolute file, its words and then the script. Input: the harness file. Output: the
 /// words, or the resolver's owner line when it cannot run ([`launch_tool`]).
 pub(crate) fn launch_words(executable: &Path) -> Result<Vec<String>, LaunchError> {
-    let places = crate::tools::Places::from_environment(None);
+    let places = crate::tools::tools_places(None);
     let resolved = launch_tool(executable, &places)?;
     let words = start_words(&resolved)
         .iter()

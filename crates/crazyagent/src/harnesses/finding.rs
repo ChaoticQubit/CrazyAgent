@@ -144,7 +144,7 @@ impl AgentSpace {
                     .as_deref()
                     .is_some_and(|owner| owner.starts_with(folder))
         };
-        let mut engine: Vec<PathBuf> = crate::tools::engine_roots(Some(root))
+        let mut engine: Vec<PathBuf> = crate::tools::engine_roots(&crate::tools::HOOKS, Some(root))
             .into_iter()
             .chain(crate::sandbox::canonical(root).ok())
             .filter(usable)
@@ -699,14 +699,14 @@ pub(crate) fn outside_temp(prefix: &str) -> tempfile::TempDir {
         place.display()
     );
     assert!(
-        !crate::tools::temp_roots()
+        !crate::tools::temp_roots(&crate::tools::HOOKS)
             .iter()
             .any(|temp| place.starts_with(temp)),
         "HOME lies in a temp folder: {}",
         place.display()
     );
     assert!(
-        !crate::tools::Places::from_environment(None).agent_writable(&place),
+        !crate::tools::tools_places(None).agent_writable(&place),
         "HOME lies where agents can write, such as below a project's .crazyagent folder: {}",
         place.display()
     );

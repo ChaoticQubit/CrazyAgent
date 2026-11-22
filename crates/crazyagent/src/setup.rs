@@ -771,7 +771,7 @@ pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
                 .map(std::path::PathBuf::from)
                 .collect(),
         ),
-        crate::tools::Places::from_environment(Some(engine_root)),
+        crate::tools::tools_places(Some(engine_root)),
     );
     Box::new(linux::LinuxInstaller::new(Box::new(shared)))
 }
@@ -786,7 +786,7 @@ pub fn platform_installer(engine_root: &std::path::Path) -> Box<dyn Installer> {
     match windows::WindowsInstaller::new(
         &engine_root.join("setup"),
         local_app_data.as_deref(),
-        crate::tools::Places::from_environment(Some(engine_root)),
+        crate::tools::tools_places(Some(engine_root)),
     ) {
         Ok(installer) => Box::new(installer),
         Err(code) => Box::new(RefusingInstaller(code)),

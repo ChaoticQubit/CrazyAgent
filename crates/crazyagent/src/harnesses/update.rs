@@ -811,11 +811,7 @@ fn numbers(text: &str) -> Option<Vec<u64>> {
 /// refused or cannot be asked, prints no plain version, or the home is unknown.
 pub(crate) fn version_under_home(executable: &Path) -> Option<String> {
     let home = state::home_folder()?;
-    state::version_if_runs(
-        executable,
-        &home,
-        &crate::tools::Places::from_environment(None),
-    )
+    state::version_if_runs(executable, &home, &crate::tools::tools_places(None))
 }
 
 /// Tells whether text is a plain version: two to six numbers joined by single dots, at most
@@ -1005,7 +1001,7 @@ mod windows_tests {
             brew_prefixes: Vec::new(),
             casks: false,
             npm: None,
-            places: crate::tools::Places::new(Vec::new(), None),
+            places: crate::tools::tools_new(Vec::new(), None),
         };
         let real =
             Path::new(r"C:\Users\unit\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.js");
@@ -1048,7 +1044,7 @@ mod windows_tests {
             brew_prefixes: Vec::new(),
             casks: false,
             npm: None,
-            places: crate::tools::Places::new(Vec::new(), None),
+            places: crate::tools::tools_new(Vec::new(), None),
         };
         assert_eq!(method("codex", &entry, &roots), Method::SelfUpdate);
         assert_eq!(

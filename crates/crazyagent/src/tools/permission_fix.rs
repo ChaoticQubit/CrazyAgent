@@ -145,9 +145,9 @@ fn allowed(path: &Path, places: &Places) -> bool {
         })
         && !places.agent_writable(path)
         && !(places.temp_refused
-            && real
-                .as_deref()
-                .is_some_and(|real| super::leads_into_temp(path, real, &places.temps)))
+            && real.as_deref().is_some_and(|real| {
+                super::leads_into_temp(&places.seed.hooks, path, real, &places.temps)
+            }))
 }
 
 /// Removes group and other write from a target the places allow ([`allowed`]), walking it

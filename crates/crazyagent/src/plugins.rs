@@ -462,8 +462,8 @@ pub(crate) fn found_context_mode<'a>(
     if pinned_context_mode(spec).is_none() {
         return Ok(None);
     }
-    let pending = crate::tools::probe::mark().first_run_pending;
-    let places = crate::tools::Places::from_environment(Some(root));
+    let pending = crate::tools::probe::mark(crate::tools::finding_seed).first_run_pending;
+    let places = crate::tools::tools_places(Some(root));
     context_mode_on(spec, &places, pending)
 }
 
@@ -489,7 +489,7 @@ pub(crate) fn context_mode_on<'a>(
     if pending {
         return Err(ContextModeOff::SettingUp);
     }
-    crate::tools::probe::missed();
+    crate::tools::probe::missed(crate::tools::finding_seed);
     Err(ContextModeOff::NpxNotFound)
 }
 
@@ -515,7 +515,7 @@ pub(crate) fn without_cmd_exe(root: &Path, spec: ServerSpec) -> Result<ServerSpe
             return Err("server_command_not_found");
         }
         if batch {
-            let places = crate::tools::Places::from_environment(Some(root));
+            let places = crate::tools::tools_places(Some(root));
             return npx_spec(command, args, &places);
         }
         let program = kernel_processes::batch::program_file(command)
@@ -1436,7 +1436,7 @@ mod windows_tests {
         for name in ["npx.cmd", "other.cmd", "run.bat", "tool.cmd", "tool.v2.cmd"] {
             std::fs::write(real.join(name), "@ECHO off\r\n").unwrap();
         }
-        let places = crate::tools::Places::new(vec![real.clone()], None);
+        let places = crate::tools::tools_new(vec![real.clone()], None);
         let args = vec!["-y".to_owned(), "@scope/server".to_owned()];
         let text = |path: PathBuf| path.to_str().unwrap().to_owned();
         let spec = |name: &str| ServerSpec::Stdio {
