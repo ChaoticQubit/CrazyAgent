@@ -1,6 +1,7 @@
 use super::{FindingHooks, FindingSeed, Places};
-use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+#[cfg(unix)]
+use std::{ffi::OsStr, path::Path};
 
 /// Hooks that answer nothing, for the kernel's own rows: no links, shims, prefixes,
 /// projects, twins, agent temp folders, folders others can change or gate root; a path is

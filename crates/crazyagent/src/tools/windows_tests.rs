@@ -1,7 +1,7 @@
 use crate::tools::{HOOKS, tools_engine};
-use kernel_processes::batch::{batch_file, cmd_shim_real, fixed_program};
-use kernel_processes::finding::test_support::*;
+use kernel_processes::batch::cmd_shim_real;
 use kernel_processes::finding::*;
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 /// 2.4.3 W9: on Windows the user's temp folder is one root in every spelling, as %TEMP%
