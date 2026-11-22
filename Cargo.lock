@@ -884,6 +884,8 @@ dependencies = [
  "base64 0.22.1",
  "crazyagent-bus-gateway",
  "crazyagent-cap",
+ "crazyagent-kernel-common",
+ "crazyagent-kernel-processes",
  "crazyagent-kernel-storage",
  "crazyagent-linux-supervisor",
  "crazyagent-macos-fs",
@@ -947,6 +949,7 @@ dependencies = [
  "alacritty_terminal",
  "bytemuck",
  "crazyagent",
+ "crazyagent-kernel-processes",
  "getrandom 0.4.3",
  "glyphon",
  "notify",
@@ -972,6 +975,14 @@ dependencies = [
  "windows-core 0.62.2",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "crazyagent-kernel-common"
+version = "2.4.4"
+
+[[package]]
+name = "crazyagent-kernel-processes"
+version = "2.4.4"
 
 [[package]]
 name = "crazyagent-kernel-storage"

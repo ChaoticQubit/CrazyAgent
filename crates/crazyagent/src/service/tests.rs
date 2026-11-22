@@ -1656,7 +1656,7 @@ fn persistable_keeps_the_copy_of_a_newer_engine_the_data_root_reports() {
     assert_eq!(read(&installed), "crazyagent bytes");
     assert_eq!(read(&runner), "crazyagent-runner bytes");
     let recorded = layout.root().join("setup").join("bin-version");
-    assert_eq!(read(&recorded), crate::version::VERSION);
+    assert_eq!(read(&recorded), kernel_processes::version::VERSION);
     write_mode(&installed, "crazyagent newer bytes", 0o700);
     std::fs::write(&recorded, "99.0.0\n").unwrap();
     assert_eq!(
