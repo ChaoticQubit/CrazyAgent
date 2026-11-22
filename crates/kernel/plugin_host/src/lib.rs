@@ -8,6 +8,14 @@ pub struct Refused {
     pub line: usize,
 }
 
+pub mod embedding;
 pub mod manifest;
+pub mod problem;
+pub mod views;
+
+#[cfg(test)]
+mod problem_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod views_tests;
