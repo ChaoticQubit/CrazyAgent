@@ -140,7 +140,7 @@ async fn run_with_planted_home() {
     let exe = std::env::current_exe().unwrap();
     let planted = root.path().to_path_buf();
     let output = tokio::task::spawn_blocking(move || {
-        crazyagent::spawn_gate::output(
+        kernel_processes::spawn_gate::output(
             std::process::Command::new(exe)
                 .args([IMPORT_TEST, "--exact", "--nocapture"])
                 .env("HOME", planted.join("home"))

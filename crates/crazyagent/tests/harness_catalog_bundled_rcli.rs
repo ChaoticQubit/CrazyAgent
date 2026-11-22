@@ -42,7 +42,7 @@ impl Drop for Engine {
 /// and waits for its ready line. Takes the executable, the engine home and the owner home.
 /// Returns the running engine.
 fn start(executable: &Path, home: &Path, owner: &Path) -> Engine {
-    let mut child = crazyagent::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         Command::new(executable)
             .arg("engine")
             .arg("--home")

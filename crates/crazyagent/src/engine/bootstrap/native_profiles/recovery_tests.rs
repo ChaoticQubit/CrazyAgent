@@ -661,7 +661,7 @@ fn repin_interrupted_at_every_step_settles_on_one_new_generation() {
 fn a_repinned_profile_is_usable_at_once_while_other_threads_start_children() {
     let mut case = ConfiguredCase::new(false, true);
     case.register();
-    let (stop, starter) = crate::spawn_gate::start_children_until_stopped();
+    let (stop, starter) = kernel_processes::spawn_gate::start_children_until_stopped();
     let mut busy = Vec::new();
     for round in 0..200 {
         touch(&case.home.join(".backboard/config.json"));

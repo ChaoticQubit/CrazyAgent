@@ -540,7 +540,7 @@ fn the_attached_of_a_live_open_reaches_the_host_only_once_its_view_is_open() {
     }
     impl Drop for Server {
         fn drop(&mut self) {
-            let _ = crazyagent::spawn_gate::status(
+            let _ = kernel_processes::spawn_gate::status(
                 std::process::Command::new(&self.tmux)
                     .arg("-S")
                     .arg(&self.socket)

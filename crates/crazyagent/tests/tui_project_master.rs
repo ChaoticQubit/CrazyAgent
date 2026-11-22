@@ -225,7 +225,7 @@ impl Driver {
                 .open(path)
                 .unwrap()
         };
-        let child = crazyagent::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             ProcessCommand::new("python3")
                 .env_remove("PYTHONOPTIMIZE")
                 .env("PYTHONDONTWRITEBYTECODE", "1")
@@ -296,7 +296,7 @@ impl Driver {
 fn signal_group(group: u32, signal: &str) {
     assert!(group > 1);
     assert!(matches!(signal, "-TERM" | "-KILL"));
-    let _ = crazyagent::spawn_gate::status(
+    let _ = kernel_processes::spawn_gate::status(
         ProcessCommand::new("/bin/kill")
             .args([signal, "--", &format!("-{group}")])
             .stdout(Stdio::null())

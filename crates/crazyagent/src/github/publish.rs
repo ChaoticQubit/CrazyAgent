@@ -345,8 +345,8 @@ impl Watched {
     /// Starts the command and its watcher. Inputs: the command and the time limit.
     /// Output: the watched git, or `github_publish_failed` when it could not start.
     fn start(command: &mut Command, limit: Duration) -> Result<Self, EngineError> {
-        let child =
-            crate::spawn_gate::spawn(command).map_err(|_| failure("github_publish_failed"))?;
+        let child = kernel_processes::spawn_gate::spawn(command)
+            .map_err(|_| failure("github_publish_failed"))?;
         let child = Arc::new(Mutex::new(child));
         let (done, told) = mpsc::channel::<()>();
         let watched = Arc::clone(&child);

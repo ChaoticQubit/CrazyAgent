@@ -17,6 +17,8 @@ owner-trace = []
 crazyagent-bus-gateway = { path = "../kernel/bus_gateway" }
 crazyagent-kernel-security = { path = "../kernel/security" }
 crazyagent-kernel-storage = { path = "../kernel/storage" }
+crazyagent-kernel-processes = { path = "../kernel/processes" }
+crazyagent-kernel-common = { path = "../kernel/common" }
 crazyagent-plugin-agent-quit = { path = "../../plugins/t2/agent-quit" }
 crazyagent-sdk = { path = "../sdk/rust" }
 crazyagent-win-sandbox = { path = "../crazyagent-win-sandbox" }
@@ -69,6 +71,7 @@ crazyagent-plugin-check = { path = "../sdk/plugin_check" }
 
 [dev-dependencies]
 crazyagent-kernel-storage = { path = "../kernel/storage", features = ["test-support"] }
+crazyagent-kernel-processes = { path = "../kernel/processes", features = ["test-support"] }
 crazyagent-cap = { path = "../sdk/cap" }
 crazyagent-plugin-check = { path = "../sdk/plugin_check" }
 tempfile = "=3.27.0"

@@ -814,7 +814,7 @@ async fn desktop_native_auth_cancelled_sign_in_releases_settings_changes() {
             fixture.owner_fact(&cancelled).await.fact.phase,
             NativeAuthPhase::Cancelled
         );
-        let alive = crazyagent::spawn_gate::status(
+        let alive = kernel_processes::spawn_gate::status(
             std::process::Command::new("/bin/kill")
                 .args(["-0", &pid])
                 .stderr(std::process::Stdio::null()),
@@ -1208,7 +1208,7 @@ async fn desktop_native_auth_open_drawer_cancels_its_sign_in_after_another_owner
             fixture.owner_fact(&cancelled).await.fact.phase,
             NativeAuthPhase::Cancelled
         );
-        let alive = crazyagent::spawn_gate::status(
+        let alive = kernel_processes::spawn_gate::status(
             std::process::Command::new("/bin/kill")
                 .args(["-0", &pid])
                 .stderr(std::process::Stdio::null()),
@@ -1442,7 +1442,7 @@ async fn desktop_native_auth_settings_change_mid_sign_in_does_not_wedge_the_desk
         assert_eq!(cancelling["operation_id"], started["operation_id"]);
         let cancelled = settle(&mut bridge, "cancelled").await;
         assert_eq!(cancelled["operation_id"], started["operation_id"]);
-        let alive = crazyagent::spawn_gate::status(
+        let alive = kernel_processes::spawn_gate::status(
             std::process::Command::new("/bin/kill")
                 .args(["-0", &pid])
                 .stderr(std::process::Stdio::null()),

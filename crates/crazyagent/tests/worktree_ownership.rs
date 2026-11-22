@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command as Process;
 
 fn git(root: &Path, args: &[&str]) -> String {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Process::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

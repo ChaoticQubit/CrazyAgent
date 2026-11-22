@@ -4638,7 +4638,7 @@ async fn an_at_word_in_the_console_lists_the_project_files_through_the_engine() 
         .unwrap()
         .unwrap();
     let folder = std::path::PathBuf::from(&setup.folder);
-    let status = crate::spawn_gate::output(
+    let status = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .args(["init", "-q", "--template="])
             .current_dir(&folder)
@@ -6052,7 +6052,7 @@ async fn s_on_the_agents_tab_opens_team_settings_and_each_setting_reaches_the_en
 }
 
 fn git_in(home: &std::path::Path, dir: &std::path::Path, args: &[&str]) {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

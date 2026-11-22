@@ -40,7 +40,7 @@ fn holds(bytes: &[u8], wanted: &[u8]) -> bool {
 /// The N-D9 display variables a running process has, read from its environment by `ps`.
 /// Input: the process id. Output: each `name=value` of the three variables it has.
 fn display_variables(pid: &str) -> Vec<String> {
-    let listed = crate::spawn_gate::output(
+    let listed = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/ps")
             .args(["-E", "-ww", "-o", "command=", "-p", pid])
             .stdout(std::process::Stdio::piped()),

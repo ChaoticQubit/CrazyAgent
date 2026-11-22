@@ -33,7 +33,7 @@ struct Terminals {
 
 impl Drop for Terminals {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(self.base.join(FOLDER).join(SOCKET))
@@ -172,7 +172,7 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
     let mailbox = base.join(MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
     std::fs::set_permissions(&mailbox, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut server = crazyagent::spawn_gate::spawn(
+    let mut server = kernel_processes::spawn_gate::spawn(
         Command::new(env!("CARGO_BIN_EXE_crazyagent"))
             .arg(LIVE_SERVER_COMMAND)
             .arg(&mailbox)
@@ -405,7 +405,7 @@ fn a_live_master_s_team_tools_reach_its_named_sub_agents_through_the_engine_bina
 /// output; panics when git fails.
 #[cfg(target_os = "macos")]
 fn git(folder: &std::path::Path, home: &std::path::Path, arguments: &[&str]) -> String {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -560,7 +560,7 @@ fn a_live_master_s_merge_lands_on_the_land_on_branch_through_the_engine_binary()
     let mailbox = base.join(MAILBOX_FOLDER);
     std::fs::create_dir(&mailbox).unwrap();
     std::fs::set_permissions(&mailbox, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let mut server = crazyagent::spawn_gate::spawn(
+    let mut server = kernel_processes::spawn_gate::spawn(
         Command::new(env!("CARGO_BIN_EXE_crazyagent"))
             .arg(LIVE_SERVER_COMMAND)
             .arg(&mailbox)

@@ -201,7 +201,7 @@ fn a_path_is_canonical_only_in_the_spelling_one_spelling_stores_and_never_throug
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
-    let made = crate::spawn_gate::output(&mut junction).unwrap();
+    let made = kernel_processes::spawn_gate::output(&mut junction).unwrap();
     assert!(made.status.success(), "{made:?}");
     assert!(
         super::is_canonical(&plain).unwrap(),

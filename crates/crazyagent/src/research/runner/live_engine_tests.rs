@@ -110,7 +110,7 @@ impl Drop for EngineResearch {
     fn drop(&mut self) {
         drop(self.service.take());
         let _ = self.host.close(&[]);
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(self.base.join(FOLDER).join(SOCKET))

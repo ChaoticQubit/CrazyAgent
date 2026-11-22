@@ -10,12 +10,13 @@ use crazyagent::credentials::Keychain;
 use crazyagent::credentials::OsKeyring;
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 use crazyagent::credentials::platform_store;
-use crazyagent::credentials::{SecretString, Store, reference};
+use crazyagent::credentials::{Store, reference};
 use crazyagent::engine::owner::{OwnerClient, OwnerClientKind, OwnerResult};
 use crazyagent::github::{Endpoints, GitHub, GitHubMethod, namespace};
 use crazyagent::projects_home::FoundState;
 use crazyagent::protocol::CredentialRef;
 use e2e_support::{Engine, Owner, git, hex, named, repository, scratch};
+use kernel_security::secret::SecretString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -145,10 +146,10 @@ fn answer(mut stream: TcpStream, served: &Path, token: &str) {
 }
 
 fn stand_in(served: PathBuf, token: String) -> u16 {
-    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
-        for stream in crazyagent::spawn_gate::incoming_tcp_std(&listener).flatten() {
+        for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener).flatten() {
             answer(stream, &served, &token);
         }
     });

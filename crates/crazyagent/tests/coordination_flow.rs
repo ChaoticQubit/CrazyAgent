@@ -761,7 +761,9 @@ async fn socket_proposal_cannot_carry_human_approval() {
     let body = serde_json::to_vec(&forged).unwrap();
     let mut frame = u32::try_from(body.len()).unwrap().to_be_bytes().to_vec();
     frame.extend(body);
-    let mut stream = crazyagent::spawn_gate::connect_unix(&path).await.unwrap();
+    let mut stream = kernel_processes::spawn_gate::connect_unix(&path)
+        .await
+        .unwrap();
     tokio::io::AsyncWriteExt::write_all(&mut stream, &frame)
         .await
         .unwrap();

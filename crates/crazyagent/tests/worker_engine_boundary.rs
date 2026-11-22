@@ -24,7 +24,7 @@ impl Drop for EngineProcess {
 }
 
 fn launch(root: &Path, artifacts: &Path) -> EngineProcess {
-    let child = crazyagent::spawn_gate::spawn(
+    let child = kernel_processes::spawn_gate::spawn(
         ProcessCommand::new(env!("CARGO_BIN_EXE_crazyagent"))
             .args(["engine"])
             .arg(root)

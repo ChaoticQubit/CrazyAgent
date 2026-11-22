@@ -328,7 +328,7 @@ impl LeadServers {
     /// Input: the server's socket. Output: each pane id with its window id, or none when
     /// the server did not answer.
     fn panes(&self, socket: &Path) -> Option<BTreeMap<String, String>> {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(socket)
@@ -354,7 +354,7 @@ impl LeadServers {
     /// its `TMUX` names. Inputs: the server's socket and the pane. Output: the text, empty
     /// when the read was refused.
     fn read_as_lead(&self, socket: &Path, pane: &str) -> String {
-        crate::spawn_gate::output(
+        kernel_processes::spawn_gate::output(
             Command::new(crate::sandbox::SANDBOX_EXEC)
                 .arg("-f")
                 .arg(&self.profile)
@@ -426,7 +426,7 @@ impl LeadServers {
 impl Drop for LeadServers {
     fn drop(&mut self) {
         for socket in [&self.own, &self.mates] {
-            let _ = crate::spawn_gate::status(
+            let _ = kernel_processes::spawn_gate::status(
                 Command::new(&self.tmux)
                     .arg("-S")
                     .arg(socket)
@@ -648,7 +648,7 @@ fn live_a_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot() {
         "the native lead's launch installed its teammates' profile"
     );
     let marker = team.home.join("snapshot-planted.txt");
-    let planted = crate::spawn_gate::output(
+    let planted = kernel_processes::spawn_gate::output(
         Command::new(crate::sandbox::SANDBOX_EXEC)
             .arg("-f")
             .arg(&teammates)
@@ -942,7 +942,7 @@ fn own_home_prompt(token: &str) -> String {
 #[ignore = "live qualification: needs a signed-in Claude account, CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folders() {
     let mut signed_in = SignedIn::claude();
-    let started_at = crate::spawn_gate::output(
+    let started_at = kernel_processes::spawn_gate::output(
         Command::new("/bin/date")
             .arg("+%Y-%m-%d %H:%M:%S")
             .env_clear()
@@ -1003,7 +1003,7 @@ fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folder
     let tasks = files_under(&team.home.join("tasks"), 2);
     let (walked, _, _) =
         crate::usage::capture::records(&team.home, crate::usage::capture::Format::Claude);
-    let denials = crate::spawn_gate::output(
+    let denials = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/log")
             .args(["show", "--style", "compact", "--start", &started_at, "--predicate"])
             .arg("eventMessage CONTAINS \"deny\" AND (eventMessage CONTAINS \"/teams\" OR eventMessage CONTAINS \"/tasks\")")

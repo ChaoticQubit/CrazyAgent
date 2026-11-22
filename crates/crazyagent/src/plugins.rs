@@ -383,7 +383,7 @@ impl SecretValue {
 
 impl Drop for SecretValue {
     fn drop(&mut self) {
-        crate::credentials::wipe(&mut self.0);
+        kernel_security::secret::wipe(&mut self.0);
     }
 }
 
@@ -495,7 +495,7 @@ pub(crate) fn context_mode_on<'a>(
 
 /// The spec a harness or a server check runs for one approved server, never through cmd.exe
 /// (V243-WIN-MCP-NPX, #341 sec F1): on Windows a stdio command runs only as a program, as
-/// written and as its real file ([`crate::tools::program_file`]), or as npm's own `npx.cmd`
+/// written and as its real file ([`kernel_processes::batch::program_file`]), or as npm's own `npx.cmd`
 /// mapped by its layout ([`npx_spec`]); a batch name that is not there is not found. Inputs:
 /// the engine root and the spec. Output: the spec to run, or the code that leaves it out.
 pub(crate) fn without_cmd_exe(root: &Path, spec: ServerSpec) -> Result<ServerSpec, &'static str> {
@@ -507,8 +507,10 @@ pub(crate) fn without_cmd_exe(root: &Path, spec: ServerSpec) -> Result<ServerSpe
             .as_ref()
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
         let real = found.ok();
-        let batch = crate::tools::batch_file(command)
-            || real.as_deref().is_some_and(crate::tools::batch_file);
+        let batch = kernel_processes::batch::batch_file(command)
+            || real
+                .as_deref()
+                .is_some_and(kernel_processes::batch::batch_file);
         if batch && missing {
             return Err("server_command_not_found");
         }
@@ -516,8 +518,10 @@ pub(crate) fn without_cmd_exe(root: &Path, spec: ServerSpec) -> Result<ServerSpe
             let places = crate::tools::Places::from_environment(Some(root));
             return npx_spec(command, args, &places);
         }
-        let program = crate::tools::program_file(command)
-            && real.as_deref().is_none_or(crate::tools::program_file);
+        let program = kernel_processes::batch::program_file(command)
+            && real
+                .as_deref()
+                .is_none_or(kernel_processes::batch::program_file);
         if !program {
             return Err("server_batch_file");
         }
@@ -528,7 +532,7 @@ pub(crate) fn without_cmd_exe(root: &Path, spec: ServerSpec) -> Result<ServerSpe
 }
 
 /// npm's `npx.cmd` as the tool resolver runs it ([`crate::tools::resolve_entry`]), kept only
-/// when the resolver mapped it by npx's layout ([`crate::tools::npx_real`]): `node.exe` with
+/// when the resolver mapped it by npx's layout ([`kernel_processes::batch::npx_real`]): `node.exe` with
 /// `npx-cli.js` before the approved arguments, both in plain drive spelling. Inputs: the
 /// command, its arguments and the places. Output: the spec, `server_command_not_found` for
 /// an npx.cmd the resolver refuses, its cause logged (#341 code F1), or `server_batch_file`.
@@ -539,7 +543,7 @@ fn npx_spec(
     places: &crate::tools::Places,
 ) -> Result<ServerSpec, &'static str> {
     let other = "server_batch_file";
-    let (node, cli) = crate::tools::npx_real(command).ok_or(other)?;
+    let (node, cli) = kernel_processes::batch::npx_real(command).ok_or(other)?;
     let tool = crate::tools::resolve_entry(command, places).map_err(|missing| {
         let why = missing.refused.as_ref().map(|refused| &refused.why);
         eprintln!(

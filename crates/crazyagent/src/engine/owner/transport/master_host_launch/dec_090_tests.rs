@@ -95,7 +95,7 @@ fn a_codex_master_loads_no_instructions_or_skills_from_where_a_tools_on_agent_wr
     )
     .unwrap();
     command.stderr(Stdio::null());
-    let mut server = Server(crate::spawn_gate::spawn(&mut command).unwrap());
+    let mut server = Server(kernel_processes::spawn_gate::spawn(&mut command).unwrap());
     let mut input = server.0.stdin.take().unwrap();
     let output = server.0.stdout.take().unwrap();
     let (sender, lines) = channel();

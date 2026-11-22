@@ -86,7 +86,7 @@ fn setup_git(folder: &std::path::Path, args: &[&str]) {
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     assert!(
-        crate::spawn_gate::output(&mut git)
+        kernel_processes::spawn_gate::output(&mut git)
             .unwrap()
             .status
             .success()
@@ -168,14 +168,14 @@ fn in_terminal_holding(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    crate::spawn_gate::output(&mut command).unwrap()
+    kernel_processes::spawn_gate::output(&mut command).unwrap()
 }
 
 /// Listens on a free port of this machine for the network rows. Output: the listener, which
 /// must stay alive, and its port.
 #[cfg(target_os = "macos")]
 fn local_listener() -> (std::net::TcpListener, u16) {
-    let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     (listener, port)
 }
@@ -235,7 +235,7 @@ fn a_terminal_starts_with_no_shell_startup_file_left_in_its_home() {
     };
 
     let mut command = ide_shell::command(&launch).unwrap();
-    let output = crate::spawn_gate::collected(&mut command).unwrap();
+    let output = kernel_processes::spawn_gate::collected(&mut command).unwrap();
 
     let printed = String::from_utf8_lossy(&output.stdout);
     assert!(printed.contains("ran"), "{output:?}");
@@ -649,7 +649,7 @@ fn pane_first_line(project_access: AgentAccess, level: AgentAccess) -> String {
         .stdin(std::fs::File::open(&typed).unwrap())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let output = crate::spawn_gate::output(&mut command).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut command).unwrap();
     let said = String::from_utf8_lossy(&output.stdout).into_owned();
     assert_eq!(said.lines().nth(1), Some("started"), "{output:?}");
     said.lines().next().unwrap_or_default().to_owned()
@@ -808,7 +808,7 @@ fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let output = crate::spawn_gate::output(&mut command).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut command).unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(output.status.success(), "{stdout}\n{stderr}");

@@ -169,7 +169,7 @@ fn a_fifo_in_the_codex_hook_key_list_s_place_is_unreadable_without_waiting_for_a
     let root = directory.path().canonicalize().unwrap();
     let home = private_home(&root, "codex");
     fs::create_dir(home.join(STATE)).unwrap();
-    let made = crate::spawn_gate::collected(
+    let made = kernel_processes::spawn_gate::collected(
         std::process::Command::new("/usr/bin/mkfifo").arg(home.join(STATE).join(CODEX_HOOK_KEYS)),
     )
     .unwrap();

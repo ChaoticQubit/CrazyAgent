@@ -1488,7 +1488,7 @@ fn a_conversation_record_gives_its_typed_messages_and_replies() {
 fn a_fifo_in_place_of_a_transcript_never_blocks_a_reader() {
     let case = Case::new();
     let (file, reader) = case.claude();
-    let made = crate::spawn_gate::status(
+    let made = kernel_processes::spawn_gate::status(
         std::process::Command::new("/usr/bin/mkfifo")
             .arg(&file)
             .env_clear()

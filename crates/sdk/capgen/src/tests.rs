@@ -118,3 +118,74 @@ fn a_capability_outside_its_file_is_refused() {
         "capgen_name_outside_file"
     );
 }
+
+#[test]
+fn mod_rs_lists_every_capability_once_in_file_order() {
+    let files = rust(&parsed(&[
+        (
+            "beta",
+            "capability beta.two() -> unit tier: t2 needs: beta.w\ncapability beta.three() -> unit tier: t1 needs: beta.w",
+        ),
+        ("alpha", "capability alpha.one() -> unit tier: t1 needs: alpha.r"),
+    ]))
+    .expect("generates");
+    let module = &files
+        .iter()
+        .find(|(path, _)| path == "mod.rs")
+        .expect("mod.rs")
+        .1;
+    assert!(
+        module.contains(
+            "pub const CAPABILITIES: [crate::Capability; 3] = [alpha::ONE, beta::TWO, beta::THREE];\n"
+        ),
+        "{module}"
+    );
+}
+
+/// Generates `mod.rs` from one `.cap` file and returns its `CAPABILITIES` item, from the
+/// const line to the end. Inputs: the stem and the source. Output: the item text.
+fn capabilities_item(stem: &str, source: &str) -> String {
+    let files = rust(&parsed(&[(stem, source)])).expect("generates");
+    let module = &files
+        .iter()
+        .find(|(path, _)| path == "mod.rs")
+        .expect("mod.rs")
+        .1;
+    let start = module.find("pub const CAPABILITIES").expect("the list");
+    assert!(!module.contains("rustfmt::skip"), "{module}");
+    module[start..].to_owned()
+}
+
+#[test]
+fn the_capability_list_takes_the_layout_rustfmt_gives_it() {
+    assert_eq!(
+        capabilities_item(
+            "settings",
+            "capability settings.save_quit() -> unit tier: t1 needs: settings.write\n\
+             capability settings.save_tabs() -> unit tier: t1 needs: settings.write\n\
+             capability settings.save_home() -> unit tier: t1 needs: settings.write",
+        ),
+        "pub const CAPABILITIES: [crate::Capability; 3] = [\n    settings::SAVE_QUIT,\n    settings::SAVE_TABS,\n    settings::SAVE_HOME,\n];\n"
+    );
+    assert_eq!(
+        capabilities_item(
+            "processes",
+            "capability processes.spawn_and_wait_for() -> unit tier: t1 needs: processes.run\n\
+             capability processes.output_of_command() -> unit tier: t1 needs: processes.run",
+        ),
+        "pub const CAPABILITIES: [crate::Capability; 2] =\n    [processes::SPAWN_AND_WAIT_FOR, processes::OUTPUT_OF_COMMAND];\n"
+    );
+}
+
+#[test]
+fn generation_fails_closed_without_rustfmt() {
+    let missing = std::ffi::OsStr::new("/nonexistent/capgen-test/rustfmt");
+    let refused = crate::rustfmt_with(missing, "mod.rs", "pub mod host;\n").unwrap_err();
+    assert_eq!(refused.code, "capgen_rustfmt_missing");
+    assert_eq!(refused.file, "mod.rs");
+    assert!(
+        refused.detail.contains("rustup component add rustfmt"),
+        "{}",
+        refused.detail
+    );
+}

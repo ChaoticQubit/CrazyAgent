@@ -497,7 +497,8 @@ fn planted_server_makes_its_marker(agent: &ManagedAgent, config: &str, marker: &
         .map(|argument| argument.as_str().unwrap())
         .collect::<Vec<_>>();
     let ran =
-        crate::spawn_gate::output(&mut agent.command(Path::new(program), &arguments)).unwrap();
+        kernel_processes::spawn_gate::output(&mut agent.command(Path::new(program), &arguments))
+            .unwrap();
     assert!(
         ran.status.success() && marker.exists(),
         "control: the planted server's own command made no marker inside the agent's sandbox"

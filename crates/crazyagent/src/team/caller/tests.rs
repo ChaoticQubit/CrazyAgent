@@ -20,7 +20,7 @@ fn line(id: &str, digest: &[u8; DIGEST_BYTES]) -> Vec<u8> {
 }
 
 fn sent(socket: &Path, bytes: &[u8]) -> UnixStream {
-    let mut stream = crate::spawn_gate::connect_unix_std(socket).unwrap();
+    let mut stream = kernel_processes::spawn_gate::connect_unix_std(socket).unwrap();
     stream.set_read_timeout(Some(CALLER_WAIT)).unwrap();
     stream.write_all(bytes).unwrap();
     stream
@@ -550,7 +550,7 @@ fn a_dropped_socket_leaves_its_node_for_hooks_to_be_refused_on() {
         std::fs::symlink_metadata(&socket).is_ok_and(|meta| meta.file_type().is_socket()),
         "the node stays"
     );
-    assert!(crate::spawn_gate::connect_unix_std(&socket).is_err());
+    assert!(kernel_processes::spawn_gate::connect_unix_std(&socket).is_err());
 }
 
 /// A caller socket bound again, as on a native lead's relaunch or the rebind after an engine

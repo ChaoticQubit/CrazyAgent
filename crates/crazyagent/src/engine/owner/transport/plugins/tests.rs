@@ -294,7 +294,7 @@ fn the_context_mode_check_runs_the_shared_install_agents_launch_and_never_npx() 
     let npx = bin.join("npx");
     std::fs::write(&npx, "#!/bin/sh\nexit 3\n").unwrap();
     std::fs::set_permissions(&npx, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let copied = crate::spawn_gate::status(
+    let copied = kernel_processes::spawn_gate::status(
         std::process::Command::new("/bin/cp")
             .arg("-cR")
             .arg(&source)
@@ -389,7 +389,7 @@ fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
 #[cfg(target_os = "windows")]
 fn access_list(folder: &Path) -> String {
     let mut icacls = std::process::Command::new("icacls");
-    let listed = crate::spawn_gate::collected(icacls.arg(folder)).unwrap();
+    let listed = kernel_processes::spawn_gate::collected(icacls.arg(folder)).unwrap();
     assert!(listed.status.success(), "{listed:?}");
     let text = String::from_utf8_lossy(&listed.stdout).replace("(I)", "");
     assert!(text.contains(folder.to_str().unwrap()), "{listed:?}");

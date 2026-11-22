@@ -884,6 +884,8 @@ dependencies = [
  "base64 0.22.1",
  "crazyagent-bus-gateway",
  "crazyagent-cap",
+ "crazyagent-kernel-common",
+ "crazyagent-kernel-processes",
  "crazyagent-kernel-security",
  "crazyagent-kernel-storage",
  "crazyagent-linux-supervisor",
@@ -948,6 +950,8 @@ dependencies = [
  "alacritty_terminal",
  "bytemuck",
  "crazyagent",
+ "crazyagent-kernel-processes",
+ "crazyagent-kernel-security",
  "getrandom 0.4.3",
  "glyphon",
  "notify",
@@ -975,8 +979,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "crazyagent-kernel-common"
+version = "2.4.4"
+dependencies = [
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "crazyagent-kernel-processes"
+version = "2.4.4"
+dependencies = [
+ "crazyagent-kernel-common",
+ "crazyagent-win-sandbox",
+ "getrandom 0.4.3",
+ "nix",
+ "rustix 1.1.5",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "crazyagent-kernel-security"
 version = "2.4.4"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "crazyagent-kernel-storage"

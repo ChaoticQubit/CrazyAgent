@@ -372,7 +372,7 @@ async fn native_auth_custodian_claude_failure_report_keeps_the_cause_that_sealed
 async fn native_auth_custodian_codex_failure_report_keeps_the_cause_that_sealed_its_channel() {
     channel_case(|case| async move {
         let (launch, mut channel, mut session) = sealed_by_a_replaced_home(&case).await;
-        let child = crate::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             ProcessCommand::new("/usr/bin/true")
                 .env_clear()
                 .stdin(Stdio::null())
@@ -414,7 +414,7 @@ async fn native_auth_custodian_codex_failure_report_keeps_its_cause_when_the_log
         let mut channel = case.channel().await;
         let guard = case.guard(&committed, NativeProfileUsePurpose::Authentication);
         let mut session = CustodySession::new(guard);
-        let child = crate::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             ProcessCommand::new("/usr/bin/true")
                 .env_clear()
                 .stdin(Stdio::null())
@@ -461,7 +461,7 @@ async fn native_auth_custodian_codex_failure_report_keeps_a_guard_refusal_seen_a
         let mut channel = case.channel().await;
         let guard = case.guard(&committed, NativeProfileUsePurpose::Authentication);
         let mut session = CustodySession::new(guard);
-        let child = crate::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             ProcessCommand::new("/usr/bin/true")
                 .env_clear()
                 .stdin(Stdio::null())

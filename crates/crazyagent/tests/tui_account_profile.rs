@@ -193,7 +193,7 @@ impl Driver {
         private_file(&output, b"");
         private_file(&error, b"");
         let logs = |path| fs::OpenOptions::new().append(true).open(path).unwrap();
-        let child = crazyagent::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new("/usr/bin/python3")
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
@@ -250,7 +250,7 @@ impl Driver {
 
 fn signal_group(group: u32, signal: &str) {
     assert!(group > 1 && matches!(signal, "-TERM" | "-KILL"));
-    let _ = crazyagent::spawn_gate::status(
+    let _ = kernel_processes::spawn_gate::status(
         Command::new("/bin/kill")
             .args([signal, "--", &format!("-{group}")])
             .stdout(Stdio::null())
@@ -547,7 +547,7 @@ async fn local_none_account_before_projects_configures_private_profile_and_unass
         fs::Permissions::from_mode(0o700),
     )
     .unwrap();
-    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
     let (_stop, stopped) = watch::channel(false);
@@ -581,7 +581,7 @@ async fn local_none_account_before_projects_configures_private_profile_and_unass
         }
     }
     let cleanup = service.shutdown().await;
-    let passive = crazyagent::spawn_gate::accept_tcp_std(&listener);
+    let passive = kernel_processes::spawn_gate::accept_tcp_std(&listener);
     let untouched = passive
         .as_ref()
         .err()

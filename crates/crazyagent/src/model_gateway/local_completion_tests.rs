@@ -204,7 +204,7 @@ fn local_completion_ordinary_finish_still_records_provider_failure_observation()
         observed.id.as_str(),
         format!(
             "failure:{}",
-            crate::memory::hash(fixture.request.id.as_str().as_bytes())
+            kernel_common::hash(fixture.request.id.as_str().as_bytes())
         )
     );
     assert_eq!(observed.connection, fixture.original.connection);
@@ -338,7 +338,7 @@ fn local_completion_bounds_match_ordinary_finish_and_preserve_active_attempt() {
                     rows[0].0,
                     format!(
                         "failure:{}",
-                        crate::memory::hash(boundary.request.id.as_str().as_bytes())
+                        kernel_common::hash(boundary.request.id.as_str().as_bytes())
                     )
                 );
             }

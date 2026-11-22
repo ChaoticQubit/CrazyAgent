@@ -64,7 +64,7 @@ fn shell(installed: &InstalledSandbox, cwd: &Path, script: &str) -> Output {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crazyagent::spawn_gate::output(&mut command).unwrap()
+    kernel_processes::spawn_gate::output(&mut command).unwrap()
 }
 
 fn quoted(path: &Path) -> String {

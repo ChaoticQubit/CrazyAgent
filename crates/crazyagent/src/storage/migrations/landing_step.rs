@@ -1,11 +1,11 @@
-use crate::engine::EngineError;
+use kernel_storage::StorageError;
 use rusqlite::Transaction;
 
 /// Step 17 (v2.5 L9): the landing tables go on the state log. Rows written before the log
 /// reach replay through one snapshot run of every landing table the store has, appended
 /// through the open's proof; a store with no landing row gets no run. Input: the open
 /// upgrade transaction. Output: Ok or the log's refusal.
-pub(super) fn landing_on_the_log(tx: &Transaction<'_>) -> Result<(), EngineError> {
+pub(super) fn landing_on_the_log(tx: &Transaction<'_>) -> Result<(), StorageError> {
     assert!(
         !tx.is_autocommit(),
         "a step runs inside the upgrade transaction"

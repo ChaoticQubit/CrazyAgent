@@ -121,7 +121,7 @@ fn outlasted_the_owner_deadline(started: std::time::Instant) {
 /// Runs git as the owner would in a test: an isolated home, no system config, in `dir`.
 /// Inputs: the owner home, the folder and the arguments. Output: none; a failure panics.
 fn git(home: &Path, dir: &Path, args: &[&str]) {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

@@ -30,7 +30,7 @@ pub fn parse_offset(text: &str) -> Option<i64> {
 /// Input: none. Output: seconds east of UTC; 0 when the command fails.
 pub fn local_offset() -> i64 {
     *OFFSET.get_or_init(|| {
-        crate::spawn_gate::output(
+        kernel_processes::spawn_gate::output(
             std::process::Command::new("/bin/date")
                 .arg("+%z")
                 .stdin(std::process::Stdio::null())

@@ -19,7 +19,7 @@ struct Case {
 /// Runs git as the owner would in a test: an isolated home, no system config, in `dir`.
 /// Inputs: the owner home, the folder and the arguments. Output: standard output.
 fn git_in(home: &Path, dir: &Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -1081,7 +1081,9 @@ struct AclCleared(PathBuf);
 #[cfg(target_os = "macos")]
 impl Drop for AclCleared {
     fn drop(&mut self) {
-        let _ = crate::spawn_gate::collected(Command::new("/bin/chmod").arg("-N").arg(&self.0));
+        let _ = kernel_processes::spawn_gate::collected(
+            Command::new("/bin/chmod").arg("-N").arg(&self.0),
+        );
     }
 }
 
@@ -1098,7 +1100,7 @@ fn removing_an_agent_tree_never_clears_an_acl_a_link_in_it_leads_to() {
     let owner = root.join("owner.txt");
     write(&owner, b"the owner's\n");
     let _owner = AclCleared(owner.clone());
-    let added = crate::spawn_gate::collected(
+    let added = kernel_processes::spawn_gate::collected(
         Command::new("/bin/chmod")
             .args(["+a", "everyone deny write"])
             .arg(&owner),
@@ -1114,7 +1116,8 @@ fn removing_an_agent_tree_never_clears_an_acl_a_link_in_it_leads_to() {
     let outcome = remove_agent_tree(&worktree);
 
     let listed =
-        crate::spawn_gate::collected(Command::new("/bin/ls").arg("-led").arg(&owner)).unwrap();
+        kernel_processes::spawn_gate::collected(Command::new("/bin/ls").arg("-led").arg(&owner))
+            .unwrap();
     assert_eq!(outcome, Ok(()));
     assert!(!worktree.exists(), "the tree stayed");
     assert!(
@@ -1127,9 +1130,10 @@ fn removing_an_agent_tree_never_clears_an_acl_a_link_in_it_leads_to() {
 /// ACL entry and the paths.
 #[cfg(target_os = "macos")]
 fn add_acl(entry: &str, paths: &[PathBuf]) {
-    let added =
-        crate::spawn_gate::collected(Command::new("/bin/chmod").arg("+a").arg(entry).args(paths))
-            .unwrap();
+    let added = kernel_processes::spawn_gate::collected(
+        Command::new("/bin/chmod").arg("+a").arg(entry).args(paths),
+    )
+    .unwrap();
     assert!(added.status.success(), "{added:?}");
 }
 
@@ -1137,7 +1141,8 @@ fn add_acl(entry: &str, paths: &[PathBuf]) {
 #[cfg(target_os = "macos")]
 fn denies(path: &Path) -> bool {
     let listed =
-        crate::spawn_gate::collected(Command::new("/bin/ls").arg("-led").arg(path)).unwrap();
+        kernel_processes::spawn_gate::collected(Command::new("/bin/ls").arg("-led").arg(path))
+            .unwrap();
     String::from_utf8_lossy(&listed.stdout).contains("deny")
 }
 
@@ -1494,11 +1499,11 @@ fn removing_a_large_agent_tree_one_read_only_folder_holds_starts_no_child() {
     let shut = tree.join("shut");
     write(&shut.join("f"), b"the agent's\n");
     std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o500)).unwrap();
-    let before = crate::spawn_gate::spawned();
+    let before = kernel_processes::spawn_gate::spawned();
 
     let outcome = remove_agent_tree(&tree);
 
-    let started = crate::spawn_gate::spawned() - before;
+    let started = kernel_processes::spawn_gate::spawned() - before;
     assert_eq!(outcome, Ok(()));
     assert!(!tree.exists(), "the tree stayed");
     assert_eq!(
@@ -1523,11 +1528,11 @@ fn removing_an_agent_tree_of_acl_pinned_files_clears_them_without_a_child() {
     }
     let _files: Vec<AclCleared> = files.iter().cloned().map(AclCleared).collect();
     add_acl("everyone deny delete", &files);
-    let before = crate::spawn_gate::spawned();
+    let before = kernel_processes::spawn_gate::spawned();
 
     let outcome = remove_agent_tree(&tree);
 
-    let started = crate::spawn_gate::spawned() - before;
+    let started = kernel_processes::spawn_gate::spawned() - before;
     assert_eq!(outcome, Ok(()));
     assert!(!tree.exists(), "the tree stayed");
     assert_eq!(started, 0, "{started} children for {} entries", files.len());
@@ -1568,7 +1573,9 @@ struct AclsCleared(Vec<PathBuf>);
 #[cfg(target_os = "macos")]
 impl Drop for AclsCleared {
     fn drop(&mut self) {
-        let _ = crate::spawn_gate::collected(Command::new("/bin/chmod").arg("-N").args(&self.0));
+        let _ = kernel_processes::spawn_gate::collected(
+            Command::new("/bin/chmod").arg("-N").args(&self.0),
+        );
     }
 }
 
@@ -1694,7 +1701,7 @@ fn a_link_in_an_agent_tree_loses_its_own_acl_and_its_target_keeps_its_own() {
     std::os::unix::fs::symlink(&owner, &link).unwrap();
     let _cleared = AclCleared(owner.clone());
     add_acl("everyone deny delete", std::slice::from_ref(&owner));
-    let added = crate::spawn_gate::collected(
+    let added = kernel_processes::spawn_gate::collected(
         Command::new("/bin/chmod")
             .args(["-h", "+a", "everyone deny delete"])
             .arg(&link),
@@ -1758,11 +1765,11 @@ fn removing_a_long_chain_of_folders_that_deny_listing_goes_without_a_child() {
     let _cleared = AclsCleared(levels.clone());
     let deepest_first: Vec<PathBuf> = levels.iter().rev().cloned().collect();
     add_acl("everyone deny list,search,delete_child", &deepest_first);
-    let before = crate::spawn_gate::spawned();
+    let before = kernel_processes::spawn_gate::spawned();
 
     let outcome = remove_agent_tree(&tree);
 
-    let started = crate::spawn_gate::spawned() - before;
+    let started = kernel_processes::spawn_gate::spawned() - before;
     assert_eq!(outcome, Ok(()));
     assert!(!tree.exists(), "the tree stayed");
     assert_eq!(
@@ -2265,7 +2272,7 @@ fn a_removed_native_lead_keeps_its_teammates_records_until_its_project_is_delete
 /// Inputs: the flag name and the file. Output: whether `chflags` succeeded.
 #[cfg(target_os = "macos")]
 fn chflags(flag: &str, file: &Path) -> bool {
-    crate::spawn_gate::status(
+    kernel_processes::spawn_gate::status(
         Command::new("/usr/bin/chflags")
             .arg(flag)
             .arg(file)
@@ -2421,7 +2428,7 @@ fn a_leftover_removal_forgets_the_agent_branch_record_and_drops_the_branch() {
     assert_eq!(case.remove(&[1]), refused("cleanup_worktree_leftover"));
     assert!(!case.git_dir(1).exists() && stuck.exists());
     assert_eq!(recorded(&case), 0, "the branch record is forgotten");
-    let gone = crate::spawn_gate::output(
+    let gone = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .args([
                 "rev-parse",

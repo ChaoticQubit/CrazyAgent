@@ -10,7 +10,7 @@ const MESSAGE: &str = "Publish with CrazyAgent";
 const LIMIT: Duration = Duration::from_secs(2);
 
 fn git_by(email: &str, args: &[&str], folder: &Path) -> String {
-    let output = crate::spawn_gate::collected(
+    let output = kernel_processes::spawn_gate::collected(
         Command::new(GIT)
             .args(args)
             .current_dir(folder)
@@ -309,7 +309,8 @@ fn the_config_is_read_once_through_an_open_that_follows_no_link_and_waits_on_no_
     git(&["init", "-q", "-b", "main"], &piped.path());
     let fifo = piped.path().join(".git/config");
     std::fs::remove_file(&fifo).unwrap();
-    let made = crate::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(&fifo)).unwrap();
+    let made =
+        kernel_processes::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(&fifo)).unwrap();
     assert!(made.success());
     let started = Instant::now();
     assert_eq!(
@@ -783,7 +784,8 @@ fn the_author_is_the_owners_git_identity_else_the_github_noreply_address() {
 
 fn mkfifo(path: &Path) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let status = crate::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(path)).unwrap();
+    let status =
+        kernel_processes::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(path)).unwrap();
     assert!(status.success());
 }
 

@@ -32,7 +32,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -129,10 +129,10 @@ fn answer(mut stream: TcpStream) {
 }
 
 fn model() -> String {
-    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
-        for stream in crazyagent::spawn_gate::incoming_tcp_std(&listener).flatten() {
+        for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener).flatten() {
             std::thread::spawn(move || answer(stream));
         }
     });
@@ -174,7 +174,7 @@ fn world(codex_folder: bool) -> Option<World> {
         std::fs::Permissions::from_mode(0o600),
     )
     .unwrap();
-    let done = crazyagent::spawn_gate::output(
+    let done = kernel_processes::spawn_gate::output(
         Command::new(GIT)
             .args(["init", "-q"])
             .current_dir(&repo)
@@ -311,7 +311,7 @@ fn control_runs_the_plant(world: &World, cwd: &Path, marker: &Path) {
         "model_providers.standin={{name=\"standin\",base_url=\"{}\",wire_api=\"responses\"}}",
         world.model
     );
-    let done = crazyagent::spawn_gate::output(
+    let done = kernel_processes::spawn_gate::output(
         Command::new(&world.codex)
             .args([
                 "exec",

@@ -44,7 +44,7 @@ fn names_feature(value: &toml::Value, feature: &str) -> bool {
 /// engine. Folders git does not track (agent worktrees, tool state) are never read.
 /// Input: the repo. Output: the manifests, relative to the repo.
 fn tracked_manifests(repo: &Path) -> Vec<PathBuf> {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("git")
             .arg("-C")
             .arg(repo)

@@ -102,7 +102,7 @@ impl Case {
     }
 
     fn spawn(&mut self, mut command: Command, output: Stdio) -> (ChildStdin, Pid) {
-        let mut child = crate::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             command
                 .env_clear()
                 .current_dir(&self.home)

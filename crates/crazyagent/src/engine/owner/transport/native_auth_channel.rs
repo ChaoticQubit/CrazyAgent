@@ -504,7 +504,7 @@ impl Drop for NativeAuthCustodyLaunch {
             slot.attached = true;
             slot.live.store(false, Ordering::SeqCst);
         }
-        crate::credentials::wipe(&mut self.token);
+        kernel_security::secret::wipe(&mut self.token);
     }
 }
 
@@ -2371,9 +2371,9 @@ impl NativeAuthCustodyChannel {
         let mut packet = [0; 37];
         packet[..4].copy_from_slice(b"CAN1");
         packet[5..].copy_from_slice(&token);
-        crate::credentials::wipe(&mut token);
+        kernel_security::secret::wipe(&mut token);
         stream.write_all(&packet).await.map_err(io_error)?;
-        crate::credentials::wipe(&mut packet);
+        kernel_security::secret::wipe(&mut packet);
         let frame = encode_frame(&Attach {
             protocol_version: PROTOCOL_VERSION,
             kind: AttachKind::Attach,
@@ -3080,7 +3080,7 @@ fallback_allowed = false
 
         async fn retire(&mut self) -> NativeAuthFact {
             let mut session = CustodySession::new(self.guard.take().unwrap());
-            let mut child = crate::spawn_gate::spawn(
+            let mut child = kernel_processes::spawn_gate::spawn(
                 ProcessCommand::new("/bin/cat")
                     .env_clear()
                     .stdin(Stdio::piped())
@@ -3437,7 +3437,7 @@ fallback_allowed = false
 "#;
 
     fn master_git(home: &std::path::Path, repository: &std::path::Path, arguments: &[&str]) {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             ProcessCommand::new("/usr/bin/git")
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")

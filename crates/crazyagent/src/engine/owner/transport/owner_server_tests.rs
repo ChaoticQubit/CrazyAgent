@@ -332,7 +332,7 @@ auth = { method = "native_managed", profile_ref = "claude-profile" }
 async fn a_page_filled_by_config_only_accounts_still_leads_to_the_added_ones() {
     let fixture = Fixture::start_with(CONFIG_ONLY_ACCOUNT).await;
     let client = fixture.client().await;
-    let closed = crate::spawn_gate::bind_tcp("127.0.0.1:0")
+    let closed = kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0")
         .await
         .unwrap()
         .local_addr()
@@ -380,7 +380,7 @@ async fn a_page_filled_by_config_only_accounts_still_leads_to_the_added_ones() {
 /// Runs git in a test checkout with an isolated home and no system config. Inputs: the
 /// home, the folder and the arguments. Output: standard output.
 fn checkout_git(home: &Path, dir: &Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

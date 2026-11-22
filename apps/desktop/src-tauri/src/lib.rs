@@ -287,7 +287,7 @@ async fn ensure_default_engine() -> Result<(), BridgeError> {
     let running = service
         .status()
         .map_err(|_| engine_failure("engine_version_mismatch"))?;
-    if !swap_on_launch(&version, crazyagent::version::VERSION, &running)
+    if !swap_on_launch(&version, kernel_processes::version::VERSION, &running)
         || !first_replacement(&ENGINE_REPLACED)
     {
         return Err(engine_failure("engine_version_mismatch"));
@@ -353,7 +353,7 @@ async fn desktop_engine_versions(webview: Webview) -> Result<EngineVersions, Bri
     };
     Ok(EngineVersions {
         engine,
-        app: crazyagent::version::VERSION.into(),
+        app: kernel_processes::version::VERSION.into(),
         message,
     })
 }

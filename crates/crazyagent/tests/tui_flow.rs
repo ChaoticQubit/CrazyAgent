@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn optimized_python_qualification_refuses_before_argument_parsing() {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("python3")
             .arg("-O")
             .arg(concat!(
@@ -30,7 +30,7 @@ fn optimized_python_qualification_refuses_before_argument_parsing() {
 
 #[test]
 fn real_engine_and_tui_complete_the_local_pty_flow() {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("python3")
             .env_remove("PYTHONOPTIMIZE")
             .arg(concat!(
@@ -55,7 +55,7 @@ fn cli(arguments: &[&str]) -> std::process::Output {
     let root = tempfile::tempdir().unwrap();
     let stdout = std::fs::File::create(root.path().join("stdout")).unwrap();
     let stderr = std::fs::File::create(root.path().join("stderr")).unwrap();
-    let mut child = crazyagent::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         Command::new(env!("CARGO_BIN_EXE_crazyagent"))
             .args(arguments)
             .stdin(Stdio::null())
@@ -459,7 +459,7 @@ async fn real_wire_data_preserves_selection_and_scopes_configuration() {
 
 #[test]
 fn shared_screen_decoder_preserves_terminal_cells() {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("python3")
             .env_remove("PYTHONOPTIMIZE")
             .env("PYTHONDONTWRITEBYTECODE", "1")
@@ -492,7 +492,7 @@ fn tui_speed_row_reads_screens_and_names_its_times() {
     .filter(|line| line.starts_with("def test_"))
     .count();
     assert!(defined > 0);
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("python3")
             .env_remove("PYTHONOPTIMIZE")
             .env("PYTHONDONTWRITEBYTECODE", "1")

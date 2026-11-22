@@ -6,13 +6,13 @@ use super::pump;
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
 use crate::harnesses::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
-#[cfg(unix)]
-use crate::platform::fd_wait;
 use crate::protocol::ProjectId;
 use crate::sandbox::LineageCheck;
 use crate::sandbox::warden::{self, Warden};
 #[cfg(windows)]
 use crazyagent_win_sandbox::ProcessTree;
+#[cfg(unix)]
+use kernel_processes::fd_wait;
 #[cfg(unix)]
 use rustix::event::{PollFd, PollFlags};
 #[cfg(unix)]
@@ -834,7 +834,7 @@ mod tests {
     fn shared(queued: usize) -> ProcessShared {
         assert!(queued <= OUTPUT_QUEUE_MAX);
         let chunk = || CodexHostOutput::Stdout(vec![b'x'; READ_BYTES]);
-        let (wake, woken) = crate::platform::fd_wait::wake_pair().unwrap();
+        let (wake, woken) = kernel_processes::fd_wait::wake_pair().unwrap();
         ProcessShared {
             state: Mutex::new(ProcessState {
                 started: None,

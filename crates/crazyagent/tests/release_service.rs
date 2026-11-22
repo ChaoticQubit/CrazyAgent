@@ -72,7 +72,7 @@ fn engine(args: &[&OsStr], home: Option<&Path>, path: &OsStr) -> Child {
     if let Some(home) = home {
         command.env("CRAZYAGENT_HOME", home);
     }
-    crazyagent::spawn_gate::spawn(&mut command).unwrap()
+    kernel_processes::spawn_gate::spawn(&mut command).unwrap()
 }
 
 fn ready(child: &mut Child) -> String {
@@ -184,7 +184,7 @@ fn a_found_harness_the_engine_cannot_register_is_skipped_not_fatal() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
     assert_eq!(ready(&mut child).trim(), "ready");
     assert_eq!(check(&root), ready_version());
     let stderr = stopped_stderr(Engine(child));
@@ -199,7 +199,7 @@ fn a_found_harness_the_engine_cannot_register_is_skipped_not_fatal() {
         !stderr.contains(&set_aside.display().to_string()),
         "{stderr}"
     );
-    let explicit = crazyagent::spawn_gate::output(
+    let explicit = kernel_processes::spawn_gate::output(
         Command::new(BIN)
             .arg("engine")
             .arg("--home")
@@ -312,7 +312,7 @@ struct Installed(Service);
 impl Drop for Installed {
     fn drop(&mut self) {
         let uid = rustix::process::getuid().as_raw();
-        let _ = crazyagent::spawn_gate::output(
+        let _ = kernel_processes::spawn_gate::output(
             Command::new("/bin/launchctl")
                 .arg("bootout")
                 .arg(format!("gui/{uid}/{}", self.0.name))
@@ -597,7 +597,7 @@ fn service_status_for_another_data_root_names_its_own_label_not_the_default() {
     let home = temp.path().join("home");
     std::fs::create_dir(&home).unwrap();
     let root = temp.path().join("engine");
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new(BIN)
             .args(["service", "status"])
             .env_clear()

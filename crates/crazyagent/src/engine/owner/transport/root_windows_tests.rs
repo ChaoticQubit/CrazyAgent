@@ -38,7 +38,7 @@ fn short_alias(long: &Path) -> Option<PathBuf> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let done = crate::spawn_gate::output(&mut command).unwrap();
+    let done = kernel_processes::spawn_gate::output(&mut command).unwrap();
     assert!(done.status.success(), "{done:?}");
     let short = PathBuf::from(String::from_utf8(done.stdout).unwrap().trim());
     assert!(short.is_absolute(), "{}", short.display());
@@ -52,7 +52,7 @@ fn run(program: &str, args: &[&std::ffi::OsStr]) {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    let done = crate::spawn_gate::output(&mut command).unwrap();
+    let done = kernel_processes::spawn_gate::output(&mut command).unwrap();
     assert!(
         done.status.success(),
         "{program}: {}",

@@ -70,13 +70,13 @@ pub(crate) struct Server {
 
 impl Server {
     pub(crate) fn start(handler: impl Fn(&Seen, usize) -> Answer + Send + Sync + 'static) -> Self {
-        let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let handler: Arc<Handler> = Arc::new(handler);
         let recorded = Arc::clone(&seen);
         std::thread::spawn(move || {
-            for stream in crate::spawn_gate::incoming_tcp_std(&listener) {
+            for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener) {
                 let Ok(stream) = stream else { return };
                 let handler = Arc::clone(&handler);
                 let recorded = Arc::clone(&recorded);

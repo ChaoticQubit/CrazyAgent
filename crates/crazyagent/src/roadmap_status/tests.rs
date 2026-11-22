@@ -639,7 +639,7 @@ fn repo_case() -> RepoCase {
 
 impl RepoCase {
     fn git(&self, args: &[&str]) {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new("/usr/bin/git")
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
@@ -1379,7 +1379,7 @@ fn a_status_check_whose_provider_refuses_connections_fails_at_once_with_the_reac
     std::fs::create_dir(root.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
     let runner =
         ResearchRunner::without_codex(&database, &state, ResearchLimits::default()).unwrap();
-    let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let account = ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{port}/v1"),
         model: "local-model".into(),

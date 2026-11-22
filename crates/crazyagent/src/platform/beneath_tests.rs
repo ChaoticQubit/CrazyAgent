@@ -20,7 +20,7 @@ fn link_folder(link: &Path, target: &Path) {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let made = crate::spawn_gate::output(&mut command).unwrap();
+    let made = kernel_processes::spawn_gate::output(&mut command).unwrap();
     assert!(
         made.status.success(),
         "{}",
@@ -277,7 +277,7 @@ fn short_name(folder: &Path) -> String {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let told = crate::spawn_gate::output(&mut command).unwrap();
+    let told = kernel_processes::spawn_gate::output(&mut command).unwrap();
     assert!(told.status.success());
     let text = String::from_utf8_lossy(&told.stdout);
     let name = text.trim().rsplit('\\').next().unwrap().to_owned();

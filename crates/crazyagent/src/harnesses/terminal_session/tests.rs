@@ -106,7 +106,7 @@ mod own_turns {
 
     impl Drop for Server {
         fn drop(&mut self) {
-            let _ = crate::spawn_gate::status(
+            let _ = kernel_processes::spawn_gate::status(
                 Command::new(&self.tmux)
                     .arg("-S")
                     .arg(&self.socket)
@@ -331,7 +331,7 @@ mod own_turns {
     /// Runs one tmux command on the row's own server. Inputs: the server and the command's
     /// words. Output: what tmux printed, trimmed; a command that fails fails the row.
     fn tmux_on(server: &Server, args: &[&str]) -> String {
-        let output = crate::spawn_gate::collected(
+        let output = kernel_processes::spawn_gate::collected(
             Command::new(&server.tmux)
                 .arg("-S")
                 .arg(&server.socket)
@@ -1098,7 +1098,7 @@ mod own_turns {
 /// Makes a real FIFO at `path` with the system `mkfifo`. Input: the path. Output: none.
 #[cfg(unix)]
 fn fifo(path: &std::path::Path) {
-    let made = crate::spawn_gate::status(
+    let made = kernel_processes::spawn_gate::status(
         std::process::Command::new("/usr/bin/mkfifo")
             .arg(path)
             .env_clear()

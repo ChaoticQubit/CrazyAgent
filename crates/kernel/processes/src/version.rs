@@ -119,4 +119,20 @@ mod tests {
             format!("Engine is version unknown, this app is {VERSION}; restart the engine")
         );
     }
+
+    #[test]
+    fn version_is_the_workspace_version() {
+        let manifest = include_str!("../../../../Cargo.toml");
+        let section = manifest
+            .split_once("[workspace.package]\n")
+            .expect("the root Cargo.toml has a [workspace.package] table")
+            .1;
+        let version = section
+            .lines()
+            .take_while(|line| !line.starts_with('['))
+            .find_map(|line| line.strip_prefix("version = \""))
+            .and_then(|rest| rest.strip_suffix('"'))
+            .expect("[workspace.package] names a version");
+        assert_eq!(VERSION, version);
+    }
 }

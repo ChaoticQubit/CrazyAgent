@@ -92,6 +92,18 @@ impl From<kernel_storage::StorageError> for EngineError {
     }
 }
 
+impl From<EngineError> for kernel_storage::StorageError {
+    fn from(error: EngineError) -> Self {
+        kernel_storage::StorageError(error.0)
+    }
+}
+
+impl From<kernel_security::error::StoreError> for EngineError {
+    fn from(error: kernel_security::error::StoreError) -> Self {
+        EngineError(error.0)
+    }
+}
+
 pub type ClientError = EngineError;
 
 pub struct Client {
@@ -1306,7 +1318,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn peer_without_kernel_credentials_is_rejected() {
-        let stream = crate::spawn_gate::unconnected_unix_stream().unwrap();
+        let stream = kernel_processes::spawn_gate::unconnected_unix_stream().unwrap();
         stream.set_nonblocking(true).unwrap();
         let stream = Stream::from_std(stream).unwrap();
         assert!(verify_client(&stream).is_err());

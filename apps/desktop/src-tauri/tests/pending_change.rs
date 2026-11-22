@@ -61,7 +61,7 @@ impl Case {
     }
 
     fn sqlite(&self, sql: &str) -> TestResult<String> {
-        let result = crazyagent::spawn_gate::output(
+        let result = kernel_processes::spawn_gate::output(
             std::process::Command::new("/usr/bin/sqlite3")
                 .arg(self.root.path().join("engine.db"))
                 .arg(sql)

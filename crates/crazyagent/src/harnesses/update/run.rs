@@ -284,8 +284,8 @@ mod unix {
         assert!(fixed.search.iter().all(|folder| folder.is_absolute()));
         assert!(fixed.prefix.as_deref().is_none_or(Path::is_absolute));
         let path = search_path(fixed).ok_or(TOOL_UNSAFE)?;
-        let mut child =
-            crate::spawn_gate::spawn(&mut command(fixed, home, path)).map_err(|_| START_FAILED)?;
+        let mut child = kernel_processes::spawn_gate::spawn(&mut command(fixed, home, path))
+            .map_err(|_| START_FAILED)?;
         let group = Pid::from_child(&child);
         assert!(group.as_raw_nonzero().get() > 1);
         let stdout = Tail::start(child.stdout.take());
@@ -364,8 +364,8 @@ mod windows {
         assert!(search.len() <= SEARCH_MAX);
         assert!(search.iter().all(|folder| folder.is_absolute()));
         let path = search_path(search).ok_or(TOOL_UNSAFE)?;
-        let mut child =
-            crate::spawn_gate::spawn(&mut command(words, home, path)).map_err(|_| START_FAILED)?;
+        let mut child = kernel_processes::spawn_gate::spawn(&mut command(words, home, path))
+            .map_err(|_| START_FAILED)?;
         let tree = match crazyagent_win_sandbox::ProcessTree::hold(&child) {
             Ok(tree) => tree,
             Err(error) => {
@@ -542,7 +542,7 @@ mod windows_tests {
     fn running(pid: u32) -> bool {
         let mut tasklist = std::process::Command::new("tasklist");
         tasklist.args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"]);
-        let listed = crate::spawn_gate::collected(&mut tasklist).unwrap();
+        let listed = kernel_processes::spawn_gate::collected(&mut tasklist).unwrap();
         String::from_utf8_lossy(&listed.stdout).contains(&format!("\"{pid}\""))
     }
 
