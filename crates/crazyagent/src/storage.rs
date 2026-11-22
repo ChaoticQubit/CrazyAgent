@@ -3199,8 +3199,9 @@ fn owner_apply_with(
 }
 
 /// Runs one owner request, then, after its commit or rollback, appends the refusals queued
-/// in a sink as `CallRefused` events in a transaction of their own. Inputs: as
-/// [`owner_apply_request`], plus the sink. Output: the request's result, unchanged.
+/// in a sink as `CallRefused` events in a transaction of their own; a receipt then names
+/// the revision after them, its provenance kept. Inputs: as [`owner_apply_request`], plus
+/// the sink. Output: the request's result.
 fn owner_apply_draining(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -3210,13 +3211,34 @@ fn owner_apply_draining(
     effect: Option<Effect<'_>>,
     refusals: &crate::sdk_slice::EngineRefusals,
 ) -> Result<OwnerApplied, EngineError> {
-    let result = owner_apply_request(db, config, path, a, request, effect);
+    let mut result = owner_apply_request(db, config, path, a, request, effect);
     let host = HostStamp {
         db_instance: a.db_instance.clone(),
         engine_epoch: a.engine_epoch.clone(),
     };
-    if let Err(refused) = crate::sdk_slice::drain_refusals(db, &host, refusals) {
-        eprintln!("plugin_call_refused_not_logged code={}", refused.0);
+    match crate::sdk_slice::drain_refusals(db, &host, refusals) {
+        Ok(0) => {}
+        Ok(_) => {
+            if let Ok(applied) = result.as_mut() {
+                let read = db
+                    .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .ok()
+                    .and_then(|revision| u64::try_from(revision).ok());
+                match read {
+                    Some(revision) => {
+                        assert!(
+                            revision > applied.current_revision.value(),
+                            "the drain moved it"
+                        );
+                        applied.current_revision = Cursor::new(revision);
+                    }
+                    None => eprintln!("plugin_call_refused_revision_unread"),
+                }
+            }
+        }
+        Err(refused) => eprintln!("plugin_call_refused_not_logged code={}", refused.0),
     }
     result
 }

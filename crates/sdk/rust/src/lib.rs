@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod generated;
+pub use generated::CAPABILITIES;
 pub use generated::host::Host;
 pub use generated::settings;
 
