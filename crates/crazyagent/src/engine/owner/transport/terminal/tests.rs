@@ -814,7 +814,7 @@ impl Viewing for Counted {
     fn allows(&self) -> bool {
         use std::sync::atomic::Ordering::SeqCst;
         self.allows_left
-            .fetch_update(SeqCst, SeqCst, |left| left.checked_sub(1))
+            .try_update(SeqCst, SeqCst, |left| left.checked_sub(1))
             .is_ok()
     }
 
