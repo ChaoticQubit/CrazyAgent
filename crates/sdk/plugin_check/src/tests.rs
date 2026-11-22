@@ -257,17 +257,17 @@ fn sec_h6_the_central_check_refuses_an_unchecked_plugin_folder() {
     fs::write(plugins.join("README"), "x").expect("stray file");
     fs::create_dir_all(plugins.join("t9")).expect("unknown tier");
     let violations = check_plugins(&plugins).expect_err("refused");
-    let found: BTreeSet<(String, &str)> = violations
+    let found: BTreeSet<(PathBuf, &str)> = violations
         .iter()
-        .map(|violation| (violation.file.display().to_string(), violation.code))
+        .map(|violation| (violation.file.clone(), violation.code))
         .collect();
     assert_eq!(
         found,
         BTreeSet::from([
-            ("README".to_owned(), "plugin_tree_not_allowed"),
-            ("t9".to_owned(), "plugin_tree_not_allowed"),
+            (PathBuf::from("README"), "plugin_tree_not_allowed"),
+            (PathBuf::from("t9"), "plugin_tree_not_allowed"),
             (
-                "t2/no-build-rs/build.rs".to_owned(),
+                Path::new("t2").join("no-build-rs").join("build.rs"),
                 "plugin_build_rs_changed"
             ),
         ])
