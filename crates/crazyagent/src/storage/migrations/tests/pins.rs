@@ -250,10 +250,15 @@ fn stable_rows(db: &Connection) -> BTreeMap<String, Vec<String>> {
                 .collect();
             let mut values: Vec<String> = statement
                 .query_map([], |row| {
+                    let kind = columns
+                        .iter()
+                        .position(|column| table == "state_log" && column == "kind")
+                        .map(|index| row.get::<_, String>(index))
+                        .transpose()?;
                     let mut cells = Vec::with_capacity(columns.len());
                     for (index, column) in columns.iter().enumerate() {
                         let value = row.get::<_, rusqlite::types::Value>(index)?;
-                        cells.push(stable_cell(&table, column, value, &named));
+                        cells.push(stable_cell(&table, column, kind.as_deref(), value, &named));
                     }
                     Ok(cells.join("|"))
                 })
@@ -266,12 +271,14 @@ fn stable_rows(db: &Connection) -> BTreeMap<String, Vec<String>> {
         .collect()
 }
 
-/// One cell of [`stable_rows`]. Inputs: the table, the column, the value and the digest
-/// namer. Output: the value as `rows` prints it, or the run-random part named: the kept text
-/// key, a state log time, a digest, or a checked SnapshotDone sha256.
+/// One cell of [`stable_rows`]. Inputs: the table, the column, the state log row's kind,
+/// the value and the digest namer. Output: the value as `rows` prints it, or the run-random
+/// part named: the kept text key, a state log time, a digest, or the sha256 of a SnapshotDone
+/// body, which [`stable_rows`] checked against its chunks; no other body's bytes are named.
 fn stable_cell(
     table: &str,
     column: &str,
+    kind: Option<&str>,
     value: rusqlite::types::Value,
     named: &dyn Fn(&str) -> String,
 ) -> String {
@@ -281,7 +288,11 @@ fn stable_cell(
         ("state_log", "at_ms", Value::Integer(_)) => "Integer(<at_ms>)".to_owned(),
         ("state_log", "body", Value::Blob(body)) => {
             let body = named(std::str::from_utf8(&body).unwrap());
-            format!("Body({})", checked_sha256(&body))
+            if kind == Some("SnapshotDone") {
+                format!("Body({})", checked_sha256(&body))
+            } else {
+                format!("Body({body})")
+            }
         }
         (_, _, Value::Text(text)) => format!("{:?}", Value::Text(named(&text))),
         (_, _, value) => format!("{value:?}"),
