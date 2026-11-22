@@ -43,8 +43,8 @@ pub fn run_command(mut command: Command, limit: Duration) -> Result<(bool, Vec<u
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
-    let mut child =
-        crate::spawn_gate::spawn(&mut command).map_err(|_| InstallError("setup_install_failed"))?;
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command)
+        .map_err(|_| InstallError("setup_install_failed"))?;
     let pid = child.id();
     let stdout = child.stdout.take();
     let (finished, read_to_end) = std::sync::mpsc::channel::<()>();

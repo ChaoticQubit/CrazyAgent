@@ -41,7 +41,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -65,7 +65,7 @@ impl TeamEngine {
     /// Starts the engine and waits for its `ready` line. Inputs: the engine root and the
     /// codex executable. Output: the running engine, or a panic with its stderr.
     fn start(root: &Path, codex: &Path) -> Self {
-        let mut child = crazyagent::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             Command::new(env!("CARGO_BIN_EXE_crazyagent"))
                 .arg("engine")
                 .arg(root)
@@ -118,7 +118,7 @@ impl TeamEngine {
 
     /// Stops the engine with SIGTERM as the desktop app does and checks it exits cleanly.
     fn stop(mut self) {
-        let signalled = crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+        let signalled = kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([
             "-s",
             "TERM",
             &self.child.id().to_string(),

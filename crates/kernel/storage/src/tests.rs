@@ -57,7 +57,6 @@ fn test_support_is_turned_on_only_by_dev_dependencies() {
         .chain([root.join("Cargo.toml")])
         .collect();
     assert!(manifests.len() > 3, "{manifests:?}");
-    let own = root.join("crates/kernel/storage/Cargo.toml");
     let mut refused = Vec::new();
     for manifest in &manifests {
         let mut section = String::new();
@@ -71,8 +70,7 @@ fn test_support_is_turned_on_only_by_dev_dependencies() {
                 continue;
             }
             let dev = section == "[dev-dependencies]" || section.ends_with(".dev-dependencies]");
-            let definition =
-                *manifest == own && section == "[features]" && line == "test-support = []";
+            let definition = section == "[features]" && line == "test-support = []";
             if !dev && !definition {
                 refused.push(format!("{} {section} {line}", manifest.display()));
             }

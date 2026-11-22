@@ -933,7 +933,7 @@ fn a_listed_master_stop_that_left_processes_holds_them() {
         Err(failure(STOP_UNCERTAIN))
     );
     assert!(held_in(project).is_empty());
-    let mut sleeper = crate::spawn_gate::spawn(
+    let mut sleeper = kernel_processes::spawn_gate::spawn(
         Command::new("/usr/bin/perl")
             .args([
                 "-mPOSIX",

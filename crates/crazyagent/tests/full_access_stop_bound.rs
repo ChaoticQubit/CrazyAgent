@@ -39,7 +39,7 @@ fn a_full_access_stop_whose_process_listing_cannot_start_ends_within_its_bound()
     let harness = bin.join("claude");
     std::fs::write(&harness, STAND_IN).unwrap();
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let first = crazyagent::spawn_gate::status(
+    let first = kernel_processes::spawn_gate::status(
         std::process::Command::new(&harness)
             .arg("first-exec")
             .current_dir(&bin)
@@ -69,7 +69,7 @@ fn a_full_access_stop_whose_process_listing_cannot_start_ends_within_its_bound()
 
     let (entered, gate_held) = std::sync::mpsc::channel();
     let holder = std::thread::spawn(move || {
-        crazyagent::spawn_gate::guarded(|| {
+        kernel_processes::spawn_gate::guarded(|| {
             entered.send(()).unwrap();
             std::thread::sleep(Duration::from_secs(6));
         });

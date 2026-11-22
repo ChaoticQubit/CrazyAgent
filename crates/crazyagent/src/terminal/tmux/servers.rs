@@ -70,7 +70,7 @@ fn listening(socket: &Path) -> bool {
 /// path. Returns the answer.
 fn refused(socket: &Path) -> bool {
     matches!(
-        crate::spawn_gate::connect_unix_std(socket),
+        kernel_processes::spawn_gate::connect_unix_std(socket),
         Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused
     )
 }
@@ -332,7 +332,7 @@ impl Servers {
             .starts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match crate::spawn_gate::connect_unix_std(socket) {
+        match kernel_processes::spawn_gate::connect_unix_std(socket) {
             Ok(_) => return Ok(false),
             Err(error) if mates && error.kind() != std::io::ErrorKind::NotFound => {
                 return Err(failure("terminal_unavailable"));
@@ -372,7 +372,7 @@ impl Servers {
         if let Some(until) = renewed {
             keep_servers_deadline(&self.root, lead, until)?;
         }
-        let mut keeper = crate::spawn_gate::spawn(
+        let mut keeper = kernel_processes::spawn_gate::spawn(
             std::process::Command::new(crate::sandbox::KEEPER[0])
                 .args(&crate::sandbox::KEEPER[1..])
                 .arg(crate::sandbox::SANDBOX_EXEC)
@@ -397,7 +397,7 @@ impl Servers {
         )
         .map_err(|_| failure("terminal_unavailable"))?;
         let ready = Instant::now() + KEEPER_READY;
-        while crate::spawn_gate::connect_unix_std(socket).is_err() {
+        while kernel_processes::spawn_gate::connect_unix_std(socket).is_err() {
             if !keeper_runs(&mut keeper) || Instant::now() >= ready {
                 if !end_keeper(&mut keeper) && keeper_runs(&mut keeper) {
                     match kept.lock() {
@@ -644,7 +644,7 @@ impl Servers {
     /// socket. Returns the answer.
     fn mates_gone(&self, lead: &AgentId, socket: &Path) -> bool {
         match keeper_ended(&self.mates_keepers, lead) {
-            None => crate::spawn_gate::connect_unix_std(socket).is_err(),
+            None => kernel_processes::spawn_gate::connect_unix_std(socket).is_err(),
             Some(true) => refused(socket),
             Some(false) => false,
         }

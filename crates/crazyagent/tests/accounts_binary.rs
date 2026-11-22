@@ -32,7 +32,7 @@ impl Engine {
 
     fn start_with(root: &Path, run: &str, extra: &[&OsStr]) -> Self {
         let stdout = root.join(format!("{run}.stdout"));
-        let child = crazyagent::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new(env!("CARGO_BIN_EXE_crazyagent"))
                 .arg("engine")
                 .arg(root)
@@ -60,7 +60,7 @@ impl Engine {
     }
 
     fn stop(&mut self) {
-        let terminated = crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+        let terminated = kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([
             "-s",
             "TERM",
             &self.child.id().to_string(),
@@ -130,7 +130,9 @@ async fn all_accounts(client: &OwnerClient) -> Vec<AccountView> {
 
 async fn serve_models(listener: &TcpListener) -> String {
     let (mut stream, request) = loop {
-        let (mut stream, _) = crazyagent::spawn_gate::accept_tcp(listener).await.unwrap();
+        let (mut stream, _) = kernel_processes::spawn_gate::accept_tcp(listener)
+            .await
+            .unwrap();
         let mut request = Vec::new();
         let mut buffer = [0; 1024];
         while !request.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -170,7 +172,7 @@ async fn wiring_real_engine_binary_keeps_accounts_and_keys_across_restart() {
     std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n").unwrap();
     std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
     let secret = format!("sk-binary-{}", std::process::id());
-    let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
+    let listener = kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0")
         .await
         .unwrap();
     let lab_url = format!(
@@ -307,9 +309,10 @@ fn git_repository(path: &Path) -> String {
             "init",
         ],
     ] {
-        let status =
-            crazyagent::spawn_gate::status(Command::new("git").args(arguments).current_dir(path))
-                .unwrap();
+        let status = kernel_processes::spawn_gate::status(
+            Command::new("git").args(arguments).current_dir(path),
+        )
+        .unwrap();
         assert!(status.success(), "git {arguments:?}");
     }
     path.to_str().unwrap().to_owned()
@@ -317,7 +320,7 @@ fn git_repository(path: &Path) -> String {
 
 async fn key_gate(listener: TcpListener, key: String, seen: Arc<Mutex<Vec<bool>>>) {
     loop {
-        let Ok((mut client, _)) = crazyagent::spawn_gate::accept_tcp(&listener).await else {
+        let Ok((mut client, _)) = kernel_processes::spawn_gate::accept_tcp(&listener).await else {
             return;
         };
         let key = key.clone();
@@ -350,7 +353,8 @@ async fn key_gate(listener: TcpListener, key: String, seen: Arc<Mutex<Vec<bool>>
                 let _ = client.write_all(reply.as_bytes()).await;
                 return;
             }
-            let Ok(mut upstream) = crazyagent::spawn_gate::connect_tcp("127.0.0.1:11434").await
+            let Ok(mut upstream) =
+                kernel_processes::spawn_gate::connect_tcp("127.0.0.1:11434").await
             else {
                 return;
             };
@@ -438,7 +442,7 @@ async fn project_masters_reach_models_with_saved_keys_and_local_accounts_through
     std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n").unwrap();
     std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
     let secret = format!("sk-gate-{}", std::process::id());
-    let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
+    let listener = kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0")
         .await
         .unwrap();
     let gate_url = format!(

@@ -22,7 +22,7 @@ use std::process::Command;
 /// it plants, so a marker can only come from the engine under test. Takes the working
 /// directory and arguments. Returns stdout, panicking on failure.
 fn git(dir: &Path, args: &[&str]) -> String {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

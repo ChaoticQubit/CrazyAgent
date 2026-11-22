@@ -67,7 +67,7 @@ impl ProductEngine {
             .unwrap()
             .write_all(CATALOG.as_bytes())
             .unwrap();
-        let child = crazyagent::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new(env!("CARGO_BIN_EXE_crazyagent"))
                 .arg("engine")
                 .arg(&state)

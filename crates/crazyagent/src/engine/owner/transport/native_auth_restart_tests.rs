@@ -1562,7 +1562,7 @@ async fn an_existing_claude_sign_in_whose_token_lapsed_and_cannot_be_renewed_is_
         );
         let service = format!(
             "Claude Code-credentials-{}",
-            &crate::memory::hash(home.to_str().unwrap().as_bytes())[..8]
+            &kernel_common::hash(home.to_str().unwrap().as_bytes())[..8]
         );
         keychain.add(
             "unknown",
@@ -1959,7 +1959,7 @@ async fn live_master_says_it_waits_while_another_process_holds_its_profile() {
             "unknown",
             &format!(
                 "Claude Code-credentials-{}",
-                &crate::memory::hash(home.to_str().unwrap().as_bytes())[..8]
+                &kernel_common::hash(home.to_str().unwrap().as_bytes())[..8]
             ),
             &serde_json::json!({
                 "claudeAiOauth": {

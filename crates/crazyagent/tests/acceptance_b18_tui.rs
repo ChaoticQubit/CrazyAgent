@@ -69,7 +69,7 @@ impl Pty {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        let output = crazyagent::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)

@@ -308,7 +308,7 @@ fn a_hard_linked_fifo_oversized_or_non_utf8_file_is_not_read() {
     assert_eq!(read_linked(&folder, "docs/one.md"), None);
     assert_eq!(read_linked(&folder, "docs/two.md"), None);
 
-    let made = crate::spawn_gate::status(
+    let made = kernel_processes::spawn_gate::status(
         std::process::Command::new("/usr/bin/mkfifo").arg(folder.join("docs/pipe.md")),
     )
     .unwrap();

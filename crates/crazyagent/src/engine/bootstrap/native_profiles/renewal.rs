@@ -233,7 +233,7 @@ fn managed_command(executable: &Path, managed: &Path) -> Result<Command, EngineE
 fn spawn_locked(command: &mut Command, lock: &HeldLock) -> Result<Child, EngineError> {
     let shared = rustix::io::fcntl_dupfd_cloexec(&lock.0, 3)
         .map_err(|_| failure("native_profile_renewal_failed"))?;
-    crate::spawn_gate::spawn_handing(command, shared)
+    kernel_processes::spawn_gate::spawn_handing(command, shared)
         .map_err(|_| failure("native_profile_renewal_failed"))
 }
 

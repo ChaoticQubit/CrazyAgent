@@ -40,7 +40,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -358,7 +358,7 @@ fn a_shared_terminal_folder_is_refused() {
 }
 
 fn option(tmux: &Path, socket: &Path, name: &str) -> String {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new(tmux)
             .arg("-S")
             .arg(socket)
@@ -601,7 +601,7 @@ fn closing_the_host_ends_every_terminal_and_the_server_unless_one_is_kept() {
         !socket.exists(),
         "listing after a clean quit starts no server"
     );
-    let listed = crazyagent::spawn_gate::output(
+    let listed = kernel_processes::spawn_gate::output(
         Command::new(&tmux)
             .arg("-S")
             .arg(&socket)
@@ -639,7 +639,7 @@ struct Orphan {
 
 impl Drop for Orphan {
     fn drop(&mut self) {
-        let named = crazyagent::spawn_gate::output(
+        let named = kernel_processes::spawn_gate::output(
             Command::new("/bin/ps")
                 .args(["-o", "command=", "-p", &self.pid.to_string()])
                 .env_clear()
@@ -651,7 +651,7 @@ impl Drop for Orphan {
             String::from_utf8_lossy(&output.stdout).contains(&*self.socket.to_string_lossy())
         });
         if named {
-            let _ = crazyagent::spawn_gate::status(
+            let _ = kernel_processes::spawn_gate::status(
                 Command::new("/bin/kill")
                     .args(["-s", "TERM", &self.pid.to_string()])
                     .stdin(Stdio::null())
@@ -663,7 +663,7 @@ impl Drop for Orphan {
 }
 
 fn process_running(pid: u32) -> bool {
-    crazyagent::spawn_gate::output(
+    kernel_processes::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-o", "stat=", "-p", &pid.to_string()])
             .env_clear()
@@ -760,7 +760,7 @@ struct Stray {
 
 impl Drop for Stray {
     fn drop(&mut self) {
-        let named = crazyagent::spawn_gate::output(
+        let named = kernel_processes::spawn_gate::output(
             Command::new("/bin/ps")
                 .args(["-o", "command=", "-p", &self.pid.to_string()])
                 .env_clear()
@@ -770,7 +770,7 @@ impl Drop for Stray {
         )
         .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains(self.marker));
         if named {
-            let _ = crazyagent::spawn_gate::status(
+            let _ = kernel_processes::spawn_gate::status(
                 Command::new("/bin/kill")
                     .args(["-KILL", &self.pid.to_string()])
                     .env_clear()
@@ -1065,7 +1065,7 @@ fn an_unreadable_quitting_setting_renews_with_the_default_limit() {
 }
 
 fn tmux_reply(tmux: &Path, socket: &Path, arguments: &[&str]) -> String {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new(tmux)
             .arg("-S")
             .arg(socket)
@@ -1286,7 +1286,7 @@ fn a_pane_holds_only_its_declared_environment_whatever_the_engine_and_server_hol
         tmux: tmux.clone(),
         socket: socket.clone(),
     };
-    let planted_server = crazyagent::spawn_gate::status(
+    let planted_server = kernel_processes::spawn_gate::status(
         Command::new(&tmux)
             .args(["-u", "-f", "/dev/null", "-S"])
             .arg(&socket)
@@ -1316,7 +1316,7 @@ fn a_pane_holds_only_its_declared_environment_whatever_the_engine_and_server_hol
         "the server starts out holding the planted variables"
     );
 
-    let engine = crazyagent::spawn_gate::output(
+    let engine = kernel_processes::spawn_gate::output(
         Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -1770,7 +1770,7 @@ impl Drop for Lead {
             self.mates.clone(),
             self.path().join(FOLDER).join(SOCKET),
         ] {
-            let _ = crazyagent::spawn_gate::status(
+            let _ = kernel_processes::spawn_gate::status(
                 Command::new(&self.tmux)
                     .arg("-S")
                     .arg(&socket)
@@ -1790,7 +1790,7 @@ impl Drop for Lead {
 #[cfg(target_os = "macos")]
 fn until_refused(socket: &Path) {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while crazyagent::spawn_gate::connect_unix_std(socket).is_ok() {
+    while kernel_processes::spawn_gate::connect_unix_std(socket).is_ok() {
         assert!(
             Instant::now() < deadline,
             "{} still accepts connections",
@@ -1910,7 +1910,7 @@ fn a_native_lead_runs_in_its_own_server_and_every_call_reaches_it_by_name() {
         "an ended teammates' server keeps its socket, so no teammate can bind one there"
     );
     assert_eq!(
-        crazyagent::spawn_gate::connect_unix_std(&lead.mates)
+        kernel_processes::spawn_gate::connect_unix_std(&lead.mates)
             .unwrap_err()
             .kind(),
         std::io::ErrorKind::ConnectionRefused
@@ -2078,7 +2078,7 @@ fn a_native_lead_s_team_pane_calls_never_reach_its_own_server_once_its_teammates
     );
     host.adopt_pane(&ann, &leader, &ann_pane).unwrap();
 
-    let killed = crazyagent::spawn_gate::status(
+    let killed = kernel_processes::spawn_gate::status(
         Command::new(&lead.tmux)
             .arg("-S")
             .arg(&lead.mates)
@@ -2166,7 +2166,7 @@ fn an_adopted_teammate_s_calls_never_reach_its_lead_s_own_server_once_its_teamma
         ],
     );
 
-    let killed = crazyagent::spawn_gate::status(
+    let killed = kernel_processes::spawn_gate::status(
         Command::new(&lead.tmux)
             .arg("-S")
             .arg(&lead.mates)
@@ -2269,7 +2269,7 @@ fn stand_in(tmux: &Path, socket: &Path, lead: &AgentId) {
         Ok(()) => {}
         Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
     }
-    let started = crazyagent::spawn_gate::status(
+    let started = kernel_processes::spawn_gate::status(
         Command::new(tmux)
             .args(["-u", "-f", "/dev/null", "-S"])
             .arg(socket)
@@ -2324,7 +2324,7 @@ fn a_server_started_at_a_native_lead_s_teammates_socket_after_its_own_ended_is_r
     host.spawn_own_server(&leader, &command).unwrap();
     assert_eq!(host.panes(&leader).unwrap().len(), 1);
     for socket in [&lead.socket, &lead.mates] {
-        let killed = crazyagent::spawn_gate::status(
+        let killed = kernel_processes::spawn_gate::status(
             Command::new(&lead.tmux)
                 .arg("-S")
                 .arg(socket)

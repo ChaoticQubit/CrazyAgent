@@ -337,7 +337,7 @@ fn in_clean_env(row: &str) -> bool {
             command.env(name, value);
         }
     }
-    let mut child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
     let deadline = Instant::now() + CLEAN_ENV_WAIT;
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {

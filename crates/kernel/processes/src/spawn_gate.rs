@@ -9,7 +9,7 @@ thread_local! {
     static HELD: Cell<bool> = const { Cell::new(false) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static SPAWNED: Cell<usize> = const { Cell::new(0) };
 }
@@ -28,21 +28,21 @@ pub(crate) fn accept_waits() -> usize {
 
 /// Test helper: how many children this thread has started through the gate, so a row can
 /// bound the processes one call starts. Output: the count.
-#[cfg(all(test, target_os = "macos"))]
-pub(crate) fn spawned() -> usize {
+#[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
+pub fn spawned() -> usize {
     SPAWNED.get()
 }
 
 /// Test helper: names the folder a row run by [`row_alone`] works and reports in.
-#[cfg(all(test, unix))]
-pub(crate) const ROW_FOLDER: &str = "CRAZYAGENT_TEST_ROW_FOLDER";
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub const ROW_FOLDER: &str = "CRAZYAGENT_TEST_ROW_FOLDER";
 
 /// Test helper: runs one ignored row of this test binary in its own process, so a
 /// per-process setting, such as a umask or a file size limit, reaches no other row.
 /// Inputs: the row's full name, a shell line run before it (`:` for none) and the folder
 /// named to it in [`ROW_FOLDER`]. Output: the row's exit status.
-#[cfg(all(test, unix))]
-pub(crate) fn row_alone(row: &str, prelude: &str, folder: &std::path::Path) -> ExitStatus {
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub fn row_alone(row: &str, prelude: &str, folder: &std::path::Path) -> ExitStatus {
     status(
         Command::new("/bin/sh")
             .arg("-c")
@@ -87,26 +87,26 @@ pub fn guarded<T>(create: impl FnOnce() -> T) -> T {
 
 /// Starts a child process while no other thread of this process starts one or creates a
 /// socket, so the child inherits only its own pipes. On Windows a `.cmd` or `.bat` program
-/// ([`crate::tools::batch_file`]) and a program neither absolute nor a bare file name
-/// ([`crate::tools::fixed_program`]) are refused. Input: the configured command. Output: the
+/// ([`crate::batch::batch_file`]) and a program neither absolute nor a bare file name
+/// ([`crate::batch::fixed_program`]) are refused. Input: the configured command. Output: the
 /// child, or the error that kept it from starting.
 #[allow(clippy::disallowed_methods)]
 pub fn spawn(command: &mut Command) -> io::Result<Child> {
     #[cfg(windows)]
-    if crate::tools::batch_file(std::path::Path::new(command.get_program())) {
+    if crate::batch::batch_file(std::path::Path::new(command.get_program())) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "spawn_batch_file_refused",
         ));
     }
     #[cfg(windows)]
-    if !crate::tools::fixed_program(std::path::Path::new(command.get_program())) {
+    if !crate::batch::fixed_program(std::path::Path::new(command.get_program())) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "spawn_relative_program_refused",
         ));
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     SPAWNED.set(SPAWNED.get() + 1);
     guarded(|| command.spawn())
 }
@@ -118,7 +118,7 @@ pub fn spawn(command: &mut Command) -> io::Result<Child> {
 #[cfg(unix)]
 #[allow(clippy::disallowed_methods)]
 pub fn spawn_handing(command: &mut Command, handed: std::os::fd::OwnedFd) -> io::Result<Child> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     SPAWNED.set(SPAWNED.get() + 1);
     guarded(move || {
         rustix::io::fcntl_setfd(&handed, rustix::io::FdFlags::empty())?;
@@ -437,21 +437,9 @@ pub fn refusing_tcp_port() -> io::Result<([std::net::TcpStream; 2], u16)> {
 
 /// The loopback block [`free_low_tcp_port`] picks from: below the ports every system hands
 /// out by itself, below the 30000 up that Linux node services use, and below both systems'
-/// model proxy blocks.
-const LOW_PORTS: std::ops::RangeInclusive<u16> = 20_000..=28_999;
-const _: () = {
-    use crate::sandbox::OWNER_PORTS;
-    use crate::sandbox::model_proxy::{PICKED_PORTS_START, PROXY_PORTS};
-    assert!(*LOW_PORTS.start() > 1024 && *LOW_PORTS.end() < 30_000);
-    assert!(*LOW_PORTS.end() < PICKED_PORTS_START);
-    assert!(*LOW_PORTS.end() < *PROXY_PORTS.start());
-    let mut index = 0;
-    while index < OWNER_PORTS.len() {
-        let port = OWNER_PORTS[index];
-        assert!(port < *LOW_PORTS.start() || port > *LOW_PORTS.end());
-        index += 1;
-    }
-};
+/// model proxy blocks. The engine checks at compile time that its owner ports and proxy
+/// blocks stay clear of it. Output: the inclusive port range.
+pub const LOW_PORTS: std::ops::RangeInclusive<u16> = 20_000..=28_999;
 
 /// Picks a loopback TCP port nothing holds now from the low block, 20000 to 28999, so no
 /// port-0 bind or outbound connect takes it before the caller's own listener, such as a
@@ -538,7 +526,7 @@ pub fn accept_tcp_std(
                     listener,
                     rustix::event::PollFlags::IN,
                 )];
-                if crate::platform::fd_wait::ready(&mut fds, None).is_err() {
+                if crate::fd_wait::ready(&mut fds, None).is_err() {
                     std::thread::sleep(ACCEPT_POLL);
                 }
             }
@@ -577,9 +565,9 @@ pub fn incoming_tcp_std(
 
 /// Creates an unconnected Unix stream socket inside the gate, for checks that
 /// need a socket with no peer. Input: none. Output: the socket as a stream.
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
 #[allow(clippy::disallowed_methods)]
-pub(crate) fn unconnected_unix_stream() -> io::Result<std::os::unix::net::UnixStream> {
+pub fn unconnected_unix_stream() -> io::Result<std::os::unix::net::UnixStream> {
     use nix::sys::socket::{AddressFamily, SockFlag, SockType, socket};
     guarded(|| {
         socket(
@@ -605,8 +593,8 @@ fn nonblocking(listener: &std::net::TcpListener) -> io::Result<bool> {
 /// Starts short real children through the gate on another thread until the returned flag
 /// is set, the way the engine keeps starting agents while other work runs.
 /// Input: none. Output: the stop flag and the thread, which returns how many it started.
-#[cfg(all(test, unix))]
-pub(crate) fn start_children_until_stopped() -> (
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub fn start_children_until_stopped() -> (
     std::sync::Arc<std::sync::atomic::AtomicBool>,
     std::thread::JoinHandle<u64>,
 ) {
@@ -633,14 +621,14 @@ pub(crate) fn start_children_until_stopped() -> (
 /// How long a test waits for a freshly written executable's first run. macOS assesses each
 /// new executable once on its first exec, after spawn returns and one at a time across the
 /// machine, so this start bound stays apart from the short bounds a test then measures.
-#[cfg(all(test, unix))]
-pub(crate) const FIRST_EXEC_TIME: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub const FIRST_EXEC_TIME: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Runs a freshly written executable once to completion through the gate, so macOS has
 /// assessed it before a test times it. Input: the command with its program and arguments.
 /// Output: its exit status; panics past [`FIRST_EXEC_TIME`] after stopping it.
-#[cfg(all(test, unix))]
-pub(crate) fn first_run(command: &mut Command) -> ExitStatus {
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub fn first_run(command: &mut Command) -> ExitStatus {
     let mut child = spawn(
         command
             .stdin(std::process::Stdio::null())

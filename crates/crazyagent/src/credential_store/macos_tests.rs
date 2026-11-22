@@ -199,7 +199,7 @@ fn keychain_git_helper_answers_get_from_the_store_with_no_secret_in_its_text() {
     assert!(!helper.contains(&value));
     let home = tempfile::tempdir().unwrap();
     let run = |action: &str| {
-        crate::spawn_gate::output(
+        kernel_processes::spawn_gate::output(
             Command::new("/bin/sh")
                 .arg("-c")
                 .arg(format!("{} {action}", &helper[1..]))

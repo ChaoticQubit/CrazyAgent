@@ -181,7 +181,7 @@ mod slow_remote {
     }
 
     fn git(args: &[&str], directory: &Path) {
-        let status = crate::spawn_gate::status(
+        let status = kernel_processes::spawn_gate::status(
             Command::new("/usr/bin/git")
                 .args(args)
                 .current_dir(directory)

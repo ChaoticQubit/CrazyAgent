@@ -38,7 +38,7 @@ impl Drop for PythonRun {
         if matches!(self.child.try_wait(), Ok(Some(_))) {
             return;
         }
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new("/bin/kill")
                 .args(["-TERM", &self.child.id().to_string()])
                 .stdin(Stdio::null())
@@ -105,7 +105,7 @@ fn run_case(root: &Path) {
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap() + Duration::from_secs(60);
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut python = PythonRun {
-        child: crazyagent::spawn_gate::spawn(
+        child: kernel_processes::spawn_gate::spawn(
             Command::new("python3")
                 .env_remove("PYTHONOPTIMIZE")
                 .arg(concat!(

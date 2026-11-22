@@ -90,7 +90,7 @@ fn payload(stdout: &[u8]) -> &[u8] {
 fn running(pid: u32) -> bool {
     let mut tasklist = Command::new("tasklist");
     tasklist.args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"]);
-    let listed = crate::spawn_gate::collected(&mut tasklist).unwrap();
+    let listed = kernel_processes::spawn_gate::collected(&mut tasklist).unwrap();
     String::from_utf8_lossy(&listed.stdout).contains(&format!("\"{pid}\""))
 }
 
@@ -531,7 +531,7 @@ fn codex_host_stand_in() {
                 clippy::zombie_processes,
                 reason = "the holder leaves its grandchild running for the host to end"
             )]
-            let grandchild = crate::spawn_gate::spawn(&mut command).unwrap();
+            let grandchild = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
             std::fs::write(&marker, grandchild.id().to_string()).unwrap();
             wait();
         }

@@ -760,7 +760,7 @@ fn listed(repo: &Path, excludes: Option<&str>, args: &[&str]) -> Option<Vec<Stri
 /// `None` when it cannot start, runs past the time, is stopped by a signal, does not take
 /// all its input or prints more.
 fn answer(command: &mut Command, input: Vec<u8>) -> Option<(i32, Vec<u8>)> {
-    let mut child = crate::spawn_gate::spawn(command).ok()?;
+    let mut child = kernel_processes::spawn_gate::spawn(command).ok()?;
     let writer = child
         .stdin
         .take()

@@ -44,7 +44,7 @@ fn documented_cargo_run_selects_main_binary_with_probe_present() {
     if !probe.exists() {
         std::fs::write(probe, "fn main() { std::process::exit(7); }\n").unwrap();
     }
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new(env!("CARGO"))
             .current_dir(root.path())
             .args([
@@ -98,7 +98,7 @@ fn workspace_members(workspace: &Path) -> Vec<String> {
 /// Inputs: the workspace root and a folder relative to it. Output: the files that exist,
 /// relative to the workspace root.
 fn kept_files(workspace: &Path, folder: &str) -> Vec<PathBuf> {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new("git")
             .current_dir(workspace)
             .args([

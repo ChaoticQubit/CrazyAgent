@@ -763,7 +763,7 @@ impl Control {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let mut child = crazyagent::spawn_gate::spawn(&mut command)?;
+        let mut child = kernel_processes::spawn_gate::spawn(&mut command)?;
         let stdin = child
             .stdin
             .take()

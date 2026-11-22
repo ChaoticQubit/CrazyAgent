@@ -63,7 +63,7 @@ impl Drop for Server {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -97,7 +97,7 @@ fn installed_codex() -> PathBuf {
         "UNAVAILABLE: codex must be installed for the live bridge check"
     );
     let executable = std::fs::canonicalize(entry.executable.as_ref().unwrap()).unwrap();
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new(&executable)
             .arg("--version")
             .stdin(Stdio::null())

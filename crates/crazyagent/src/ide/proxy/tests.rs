@@ -472,7 +472,7 @@ async fn the_proxy_serves_webview_files_without_the_token_and_nothing_else() {
     fs::write(pre.join("host.js"), "not served").unwrap();
     fs::write(scratch.path().join("secret.txt"), "engine secret").unwrap();
     std::os::unix::fs::symlink(scratch.path().join("secret.txt"), pre.join("fake.html")).unwrap();
-    let closed = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0))
+    let closed = kernel_processes::spawn_gate::bind_tcp_std(("127.0.0.1", 0))
         .unwrap()
         .local_addr()
         .unwrap()
@@ -497,7 +497,7 @@ async fn the_proxy_serves_webview_files_without_the_token_and_nothing_else() {
         vec![(std::process::id() as i32, format!("127.0.0.1:{port}"))]
     );
     let exchange = move |head: String| async move {
-        let mut stream = crate::spawn_gate::connect_tcp(("127.0.0.1", port))
+        let mut stream = kernel_processes::spawn_gate::connect_tcp(("127.0.0.1", port))
             .await
             .unwrap();
         let _ = stream.write_all(head.as_bytes()).await;
@@ -688,7 +688,7 @@ async fn fetched(port: u16) -> String {
         "GET /static/app.js HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {COOKIE}={}\r\n\r\n",
         token()
     );
-    let mut stream = crate::spawn_gate::connect_tcp(("127.0.0.1", port))
+    let mut stream = kernel_processes::spawn_gate::connect_tcp(("127.0.0.1", port))
         .await
         .unwrap();
     stream.write_all(head.as_bytes()).await.unwrap();
@@ -704,7 +704,7 @@ async fn fetched(port: u16) -> String {
 async fn answer_once(upstream: &TcpListener) -> String {
     let accepted = tokio::time::timeout(
         Duration::from_secs(20),
-        crate::spawn_gate::accept_tcp(upstream),
+        kernel_processes::spawn_gate::accept_tcp(upstream),
     )
     .await;
     let (mut server, _) = accepted.expect("the proxy connects").unwrap();
@@ -731,11 +731,11 @@ struct Holder(std::process::Child);
 
 #[cfg(target_os = "macos")]
 impl Holder {
-    /// Hands a socket to a new child ([`crate::spawn_gate::spawn_handing`] closes this
+    /// Hands a socket to a new child ([`kernel_processes::spawn_gate::spawn_handing`] closes this
     /// process's copy of it). Input: the socket, or a duplicate of one this process keeps.
     /// Output: the holder.
     fn of(socket: std::os::fd::OwnedFd) -> Self {
-        let child = crate::spawn_gate::spawn_handing(
+        let child = kernel_processes::spawn_gate::spawn_handing(
             std::process::Command::new("/bin/sleep")
                 .arg("30")
                 .stdin(std::process::Stdio::null())
@@ -777,7 +777,7 @@ async fn a_request_reaches_only_the_listeners_the_open_saw_ready() {
     let before = tokio::spawn(fetched(proxy));
     let reached = tokio::time::timeout(
         Duration::from_secs(2),
-        crate::spawn_gate::accept_tcp(&upstream),
+        kernel_processes::spawn_gate::accept_tcp(&upstream),
     )
     .await;
     assert!(
@@ -789,7 +789,9 @@ async fn a_request_reaches_only_the_listeners_the_open_saw_ready() {
 
     let (proxy, refused) = proxy_to(server_port, Some(vec![i32::MAX])).await;
     let taken = tokio::spawn(fetched(proxy));
-    let (mut squatter, _) = crate::spawn_gate::accept_tcp(&upstream).await.unwrap();
+    let (mut squatter, _) = kernel_processes::spawn_gate::accept_tcp(&upstream)
+        .await
+        .unwrap();
     let mut got = Vec::new();
     let _ = tokio::time::timeout(Duration::from_secs(5), squatter.read_to_end(&mut got)).await;
     assert!(
@@ -819,7 +821,7 @@ async fn a_request_reaches_only_the_listeners_the_open_saw_ready() {
 async fn a_wildcard_listener_beside_the_server_fails_no_request() {
     use std::os::fd::AsFd;
     let (upstream, server_port) = bind(None).await.unwrap();
-    let beside = crate::spawn_gate::bind_tcp_std(("0.0.0.0", server_port)).unwrap();
+    let beside = kernel_processes::spawn_gate::bind_tcp_std(("0.0.0.0", server_port)).unwrap();
     assert_eq!(beside.local_addr().unwrap().port(), server_port);
     let holder = Holder::of(beside.as_fd().try_clone_to_owned().unwrap());
     let held = crate::ide::server::listeners(server_port).unwrap();
@@ -839,7 +841,7 @@ async fn a_wildcard_listener_beside_the_server_fails_no_request() {
     assert!(!flagged(&refused), "the launch is kept");
     beside.set_nonblocking(true).unwrap();
     assert!(
-        crate::spawn_gate::accept_tcp_std(&beside).is_err(),
+        kernel_processes::spawn_gate::accept_tcp_std(&beside).is_err(),
         "the wildcard listener got nothing"
     );
 }
@@ -852,7 +854,7 @@ async fn a_wildcard_listener_beside_the_server_fails_no_request() {
 #[tokio::test]
 async fn a_listener_off_127_0_0_1_the_open_never_saw_fails_no_request() {
     let (upstream, server_port) = bind(None).await.unwrap();
-    let beside = crate::spawn_gate::bind_tcp_std(("::1", server_port)).unwrap();
+    let beside = kernel_processes::spawn_gate::bind_tcp_std(("::1", server_port)).unwrap();
     let holder = Holder::of(beside.into());
     let held = crate::ide::server::listeners(server_port).unwrap();
     assert!(
@@ -905,7 +907,9 @@ async fn a_process_the_open_did_not_see_holding_the_listening_socket_gets_nothin
     let ours = vec![i32::try_from(std::process::id()).unwrap()];
     let (proxy, refused) = proxy_to(server_port, Some(ours)).await;
     let taken = tokio::spawn(fetched(proxy));
-    let (mut reached, _) = crate::spawn_gate::accept_tcp(&upstream).await.unwrap();
+    let (mut reached, _) = kernel_processes::spawn_gate::accept_tcp(&upstream)
+        .await
+        .unwrap();
     let mut got = Vec::new();
     let _ = tokio::time::timeout(Duration::from_secs(5), reached.read_to_end(&mut got)).await;
     drop(reached);

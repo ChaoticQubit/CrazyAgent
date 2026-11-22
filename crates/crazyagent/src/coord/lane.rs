@@ -928,7 +928,7 @@ fn command(request: &Request, out: &mut dyn Write) -> i32 {
         }
     }
     let spawn = || {
-        crate::spawn_gate::spawn(
+        kernel_processes::spawn_gate::spawn(
             std::process::Command::new(&request.program).args(&request.arguments),
         )
     };
@@ -1051,7 +1051,9 @@ pub fn run(arguments: &[OsString], out: &mut dyn Write) -> i32 {
     };
     let _ = writeln!(out, "{NO_LANE}");
     match own_program(&request.program).and_then(|program| {
-        crate::spawn_gate::status(std::process::Command::new(program).args(&request.arguments))
+        kernel_processes::spawn_gate::status(
+            std::process::Command::new(program).args(&request.arguments),
+        )
     }) {
         Ok(status) => status.code().unwrap_or(LANE_FAILED),
         Err(problem) => {
@@ -1072,7 +1074,7 @@ pub fn run(arguments: &[OsString], out: &mut dyn Write) -> i32 {
 #[cfg(not(unix))]
 fn own_program(program: &OsStr) -> std::io::Result<OsString> {
     let path = Path::new(program);
-    if crate::tools::fixed_program(path) {
+    if kernel_processes::batch::fixed_program(path) {
         return Ok(program.to_owned());
     }
     if path.has_root()
@@ -1087,7 +1089,7 @@ fn own_program(program: &OsStr) -> std::io::Result<OsString> {
         ));
     }
     let absolute = std::path::absolute(path)?;
-    assert!(crate::tools::fixed_program(&absolute));
+    assert!(kernel_processes::batch::fixed_program(&absolute));
     Ok(absolute.into_os_string())
 }
 

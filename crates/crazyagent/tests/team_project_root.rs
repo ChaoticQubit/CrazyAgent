@@ -25,7 +25,7 @@ const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []
 /// Runs git in `repo` with no global or system configuration.
 /// Takes the folder and the arguments. Returns standard output; a failure fails the test.
 fn git(repo: &Path, args: &[&str]) -> String {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .current_dir(repo)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")

@@ -695,9 +695,10 @@ pub(crate) mod farm {
     /// Runs `net` with `args` and returns what it printed. Input: the arguments. Output:
     /// standard output and error, as one text.
     fn net(args: &[&str]) -> String {
-        let output =
-            crate::spawn_gate::collected(Command::new("net").args(args).stdin(Stdio::null()))
-                .unwrap();
+        let output = kernel_processes::spawn_gate::collected(
+            Command::new("net").args(args).stdin(Stdio::null()),
+        )
+        .unwrap();
         format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
@@ -725,7 +726,7 @@ pub(crate) mod farm {
     /// refuses as dubious ownership (P2e). Input: the folder.
     pub(crate) fn own(folder: &Path) {
         let sid = exported("CRAZYAGENT_FARM_USER_SID");
-        let output = crate::spawn_gate::collected(
+        let output = kernel_processes::spawn_gate::collected(
             Command::new("icacls")
                 .arg(folder)
                 .args(["/setowner", &format!("*{sid}"), "/T", "/C", "/L", "/Q"])
@@ -780,7 +781,7 @@ pub(crate) mod farm {
                 owner.git().display()
             )
         });
-        let ran = crate::spawn_gate::collected(&mut wrapped).unwrap();
+        let ran = kernel_processes::spawn_gate::collected(&mut wrapped).unwrap();
         assert!(
             ran.status.success(),
             "owner git --version in its container: {:?}, stderr: {}",

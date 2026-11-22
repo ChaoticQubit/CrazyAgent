@@ -62,7 +62,7 @@ fn run(sandbox: &ProjectSandbox, profile: &Path, script: &str) -> Output {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crazyagent::spawn_gate::output(&mut command).unwrap()
+    kernel_processes::spawn_gate::output(&mut command).unwrap()
 }
 
 fn owner_home() -> PathBuf {
@@ -591,7 +591,7 @@ fn sandboxed_child_can_run_git_worktrees_inside_the_project() {
             "start",
         ],
     ] {
-        let status = crazyagent::spawn_gate::status(
+        let status = kernel_processes::spawn_gate::status(
             std::process::Command::new("/usr/bin/git")
                 .args(arguments)
                 .current_dir(&case.project)
@@ -661,7 +661,7 @@ fn sandboxed_child_can_run_git_worktrees_inside_the_project() {
 /// configuration. Input: the folder, the agent home as HOME and the arguments.
 /// Output: the command's output.
 fn owner_git(folder: &Path, home: &Path, arguments: &[&str]) -> Output {
-    crazyagent::spawn_gate::output(
+    kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -1228,8 +1228,8 @@ fn a_sandbox_refuses_writes_to_the_submodule_store() {
 #[test]
 fn network_is_open_only_when_tools_are_on() {
     let case = case();
-    let allowed = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-    let other = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let allowed = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let other = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let allowed_port = allowed.local_addr().unwrap().port();
     let other_port = other.local_addr().unwrap().port();
     let connect = |sandbox: &ProjectSandbox, name: &str, port: u16| {
@@ -1295,7 +1295,7 @@ fn listen(
 fn a_tools_on_agent_serves_on_loopback_but_never_listens_on_an_owner_tool_port() {
     let case = case();
     let open = sandbox(&case, SandboxNetwork::Open);
-    let port = crazyagent::spawn_gate::free_low_tcp_port().unwrap();
+    let port = kernel_processes::spawn_gate::free_low_tcp_port().unwrap();
     assert_eq!(
         listen(&open, &case, "dev-server.sb", "127.0.0.1", port, true),
         ("hello".to_owned(), String::new()),
@@ -1407,7 +1407,7 @@ fn settings_owner_ports_fail_closed_on_a_file_that_does_not_read() {
 #[test]
 fn a_configured_local_model_port_stays_reachable_but_no_tools_on_agent_listens_on_it() {
     let case = case();
-    let server = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let server = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = server.local_addr().unwrap().port();
     let ports = crazyagent::sandbox::owner_ports(&local_model_access(&case, port));
     assert_eq!(ports, [port]);
@@ -1427,7 +1427,7 @@ fn a_configured_local_model_port_stays_reachable_but_no_tools_on_agent_listens_o
         );
     }
     let served = std::thread::spawn(move || {
-        let (mut stream, _) = crazyagent::spawn_gate::accept_tcp_std(&server).unwrap();
+        let (mut stream, _) = kernel_processes::spawn_gate::accept_tcp_std(&server).unwrap();
         let mut got = String::new();
         std::io::Read::read_to_string(&mut stream, &mut got).unwrap();
         got
@@ -1569,7 +1569,7 @@ fn wrap_puts_an_existing_harness_command_under_the_sandbox_and_keeps_only_safe_e
         .env("HOME", owner_home())
         .current_dir(case.project.join("worktrees"));
     let mut wrapped = sandbox.wrap(&profile, &harness).unwrap();
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         wrapped
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -1661,7 +1661,7 @@ fn installed_sandbox_wraps_through_the_platform_seam_and_reports_its_policy() {
     let direct = installed.wrap(&harness).unwrap();
     assert_eq!(wrapped.get_program(), direct.get_program());
     assert!(wrapped.get_args().eq(direct.get_args()));
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         wrapped
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -2135,7 +2135,7 @@ fn a_confined_agent_cannot_chmod_flag_or_acl_the_shared_git_objects_or_its_git_l
     let profile = case.profiles.join("object-modes.sb");
     let tried = run(&sandbox, &profile, &format!("{script}echo tried"));
     let after: Vec<Option<(u32, u32)>> = targets.iter().map(state).collect();
-    let listed = crazyagent::spawn_gate::output(
+    let listed = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/ls")
             .arg("-led")
             .args(&targets)
@@ -2147,7 +2147,7 @@ fn a_confined_agent_cannot_chmod_flag_or_acl_the_shared_git_objects_or_its_git_l
     for (target, found) in targets.iter().zip(&before) {
         let mode = found.map_or(0o700, |(mode, _)| mode & 0o7777);
         for (program, argument) in [("/usr/bin/chflags", "nouchg"), ("/bin/chmod", "-N")] {
-            let _ = crazyagent::spawn_gate::status(
+            let _ = kernel_processes::spawn_gate::status(
                 std::process::Command::new(program)
                     .arg(argument)
                     .arg(target),
@@ -3944,7 +3944,7 @@ fn the_harness_the_engine_launches_from_an_app_bundle_still_starts_but_its_bundl
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = crazyagent::spawn_gate::output(&mut launched).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut launched).unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -4070,7 +4070,7 @@ fn a_confined_child_reads_no_process_arguments_by_sysctl() {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        crazyagent::spawn_gate::spawn(command).unwrap()
+        kernel_processes::spawn_gate::spawn(command).unwrap()
     };
     let mut dummy = quiet(
         std::process::Command::new(std::env::current_exe().unwrap())
@@ -4099,7 +4099,7 @@ fn a_confined_child_reads_no_process_arguments_by_sysctl() {
             )
         };
         let plain = |target: u32| {
-            crazyagent::spawn_gate::output(
+            kernel_processes::spawn_gate::output(
                 std::process::Command::new("/usr/bin/perl")
                     .args(["-e", PROBE, &mib.to_string(), &target.to_string()])
                     .stdin(Stdio::null())
@@ -4209,17 +4209,17 @@ fn access_grants_reach_one_socket_hand_over_the_temp_folder_and_keep_its_sockets
     fs::create_dir_all(&owner_tmp).unwrap();
     let granted = owner_tmp.join("g.sock");
     let other = owner_tmp.join("o.sock");
-    let listener = crazyagent::spawn_gate::bind_unix_std(&granted).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_unix_std(&granted).unwrap();
     listener.set_nonblocking(true).unwrap();
     let _served = std::thread::spawn(move || {
         for _ in 0..600 {
-            if crazyagent::spawn_gate::accept_unix_std(&listener).is_ok() {
+            if kernel_processes::spawn_gate::accept_unix_std(&listener).is_ok() {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
     });
-    let _other = crazyagent::spawn_gate::bind_unix_std(&other).unwrap();
+    let _other = kernel_processes::spawn_gate::bind_unix_std(&other).unwrap();
     let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()))
         .grant_access(
             &[
@@ -4296,11 +4296,11 @@ fn a_profile_with_every_grant_kind_parses_and_keeps_its_rules() {
         fs::write(path, text).unwrap();
     }
     let granted = owner_tmp.join("g.sock");
-    let listener = crazyagent::spawn_gate::bind_unix_std(&granted).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_unix_std(&granted).unwrap();
     listener.set_nonblocking(true).unwrap();
     let _served = std::thread::spawn(move || {
         for _ in 0..600 {
-            if crazyagent::spawn_gate::accept_unix_std(&listener).is_ok() {
+            if kernel_processes::spawn_gate::accept_unix_std(&listener).is_ok() {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -4420,7 +4420,7 @@ fn every_secret_name_stays_denied_once_the_secret_rule_is_split() {
     let list = case.outside.join("samples.txt");
     fs::write(&list, format!("{}\n", SAMPLES.join("\n"))).unwrap();
     for (at, name) in SECRET_NAMES.iter().enumerate() {
-        let found = crazyagent::spawn_gate::output(
+        let found = kernel_processes::spawn_gate::output(
             std::process::Command::new("/usr/bin/grep")
                 .arg("-Eix")
                 .arg(format!("(.*/)?({name})(/.*)?"))

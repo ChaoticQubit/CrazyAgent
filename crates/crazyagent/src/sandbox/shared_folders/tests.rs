@@ -23,7 +23,7 @@ fn git(root: &Path, args: &[&str]) {
         .env("GIT_COMMITTER_NAME", "Shared Test")
         .env("GIT_COMMITTER_EMAIL", "shared@example.invalid")
         .current_dir(root);
-    let status = crate::spawn_gate::status(&mut command);
+    let status = kernel_processes::spawn_gate::status(&mut command);
     assert!(
         status.as_ref().is_ok_and(std::process::ExitStatus::success),
         "git {args:?}: {status:?}"

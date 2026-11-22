@@ -107,7 +107,7 @@ impl Host for ConptyHost {
         if command.argv.len() > ARGV_MAX
             || command.env.len() > ENV_MAX
             || !Path::new(program).is_absolute()
-            || crate::tools::batch_file(Path::new(program))
+            || kernel_processes::batch::batch_file(Path::new(program))
             || !command.cwd.is_absolute()
             || command.env.iter().any(|(name, value)| {
                 !crate::sandbox::agent_variable_allowed(OsStr::new(name), OsStr::new(value))
@@ -328,7 +328,7 @@ fn end_tree(pid: u32) {
         .map(PathBuf::from)
         .filter(|root| root.is_absolute())
         .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-    let _ = crate::spawn_gate::status(
+    let _ = kernel_processes::spawn_gate::status(
         Command::new(root.join("System32").join("taskkill.exe"))
             .arg("/PID")
             .arg(pid.to_string())

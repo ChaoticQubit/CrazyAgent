@@ -846,7 +846,7 @@ mod tests {
             .arg("/C")
             .arg(format!("echo changed>{}", brief.display()))
             .current_dir(&folders.project);
-        let status = crate::spawn_gate::status(
+        let status = kernel_processes::spawn_gate::status(
             Sandbox::wrap(&installed, &overwrite)
                 .unwrap()
                 .stdin(Stdio::null())
@@ -858,7 +858,7 @@ mod tests {
         assert_eq!(fs::read_to_string(&brief).unwrap(), "brief\r\n");
         let mut shell = Command::new(cmd());
         shell.arg("/K").current_dir(&folders.project);
-        let mut running = crate::spawn_gate::spawn(
+        let mut running = kernel_processes::spawn_gate::spawn(
             Sandbox::wrap(&installed, &shell)
                 .unwrap()
                 .stdin(Stdio::piped())
@@ -903,7 +903,7 @@ mod tests {
     }
 
     fn quiet(installed: &WindowsSandbox, command: &Command) -> bool {
-        crate::spawn_gate::status(
+        kernel_processes::spawn_gate::status(
             Sandbox::wrap(installed, command)
                 .unwrap()
                 .stdin(Stdio::null())
@@ -943,7 +943,7 @@ mod tests {
             .env(CALL, line(verb))
             .current_dir(&folders.project);
         let mut wrapped = Sandbox::wrap(installed, &command).unwrap();
-        crate::spawn_gate::collected(&mut wrapped).unwrap()
+        kernel_processes::spawn_gate::collected(&mut wrapped).unwrap()
     }
 
     fn denied(output: &std::process::Output) -> bool {

@@ -10,7 +10,7 @@ fn repo_with(files: &[(&str, &str)]) -> tempfile::TempDir {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .current_dir(dir.path());
-    let status = crate::spawn_gate::status(&mut command);
+    let status = kernel_processes::spawn_gate::status(&mut command);
     assert!(status.is_ok_and(|status| status.success()), "git init");
     for (path, text) in files {
         let path = dir.path().join(path);
@@ -368,7 +368,7 @@ fn fixture_git(repo: &Path, args: &[&str]) {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .current_dir(repo);
-    let status = crate::spawn_gate::status(&mut command);
+    let status = kernel_processes::spawn_gate::status(&mut command);
     assert!(status.is_ok_and(|status| status.success()), "git {args:?}");
 }
 

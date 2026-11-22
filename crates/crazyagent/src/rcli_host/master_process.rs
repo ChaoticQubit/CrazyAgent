@@ -6,7 +6,7 @@ use crate::protocol::CredentialRef;
 use crate::protocol::{FRAME_BYTES_MAX, ProtocolError};
 use crate::sandbox::LineageCheck;
 use crate::sandbox::warden::{self, Warden};
-use crate::spawn_gate::Keeper;
+use kernel_processes::spawn_gate::Keeper;
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Pid, Signal};
 use std::io::{self, Read, Write};
@@ -45,7 +45,7 @@ pub(super) struct HostProcess {
 
 impl HostProcess {
     /// Starts the rcli master host with its pipes open and not blocking, forked on a thread
-    /// kept as long as the host ([`crate::spawn_gate::kept`]), so it outlives the engine
+    /// kept as long as the host ([`kernel_processes::spawn_gate::kept`]), so it outlives the engine
     /// thread that asked for it. Inputs: the wrapped command, what the stop checks of the
     /// processes it leaves outside its group and who to hold those under. Output: the
     /// process, or a plain refusal.
@@ -64,7 +64,7 @@ impl HostProcess {
             command.env(LINEAGE_VARIABLE, token.as_str());
         }
         let ((mut child, warden), custody) =
-            crate::spawn_gate::kept(move || warden::spawn(&mut command))
+            kernel_processes::spawn_gate::kept(move || warden::spawn(&mut command))
                 .map_err(|_| error("rcli_master_spawn_failed"))?;
         assert!(child.id() > 1);
         let follower = Follower::start(child.id(), token, check);
@@ -604,7 +604,7 @@ mod tests {
             .process_group(0);
         let mut process = HostProcess::spawn(command, LineageCheck::Unneeded, test_by()).unwrap();
         let group = i32::try_from(process.child.id()).unwrap();
-        let mut member = crate::spawn_gate::spawn(
+        let mut member = kernel_processes::spawn_gate::spawn(
             Command::new("/bin/sh")
                 .args(["-c", "exit 0"])
                 .process_group(group),

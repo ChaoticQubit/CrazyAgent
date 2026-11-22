@@ -155,7 +155,9 @@ async fn serve_once(listener: &TcpListener, status: &str, body: &str) -> String 
 
 async fn serve_after(listener: &TcpListener, delay: Duration, status: &str, body: &str) -> String {
     let (mut stream, request) = loop {
-        let (mut stream, _) = crazyagent::spawn_gate::accept_tcp(listener).await.unwrap();
+        let (mut stream, _) = kernel_processes::spawn_gate::accept_tcp(listener)
+            .await
+            .unwrap();
         let mut request = Vec::new();
         let mut buffer = [0; 1024];
         while !request.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -188,11 +190,11 @@ async fn every_add_path_lists_plain_statuses_and_supports_rename_and_remove() {
     assert_eq!(catalog[0].methods[0].label, "Sign in with ChatGPT");
     assert!(all_accounts(&client).await.is_empty());
 
-    let up = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
+    let up = kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0")
         .await
         .unwrap();
     let up_url = format!("http://127.0.0.1:{}/v1", up.local_addr().unwrap().port());
-    let (_down, down_port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let (_down, down_port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let down_url = format!("http://127.0.0.1:{down_port}/v1");
 
     let chatgpt = client
@@ -428,7 +430,7 @@ async fn wiring_api_key_reaches_a_stand_in_server_only_in_the_authorization_head
     let fixture = Fixture::start().await;
     let client = fixture.client().await;
     let secret = format!("sk-local-{}", std::process::id());
-    let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
+    let listener = kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0")
         .await
         .unwrap();
     let url = format!(
@@ -555,7 +557,7 @@ async fn received(listener: &TcpListener) -> Vec<Vec<u8>> {
     let mut requests = Vec::new();
     while let Ok(Ok((mut stream, _))) = tokio::time::timeout(
         Duration::from_millis(300),
-        crazyagent::spawn_gate::accept_tcp(listener),
+        kernel_processes::spawn_gate::accept_tcp(listener),
     )
     .await
     {
@@ -572,7 +574,7 @@ async fn a_saved_key_never_goes_out_over_plain_http_to_another_host() {
     let mut fixture = Fixture::start().await;
     let client = fixture.client().await;
     let secret = format!("sk-remote-{}", std::process::id());
-    let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
+    let listener = kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0")
         .await
         .unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -766,7 +768,7 @@ async fn wiring_replacing_a_key_keeps_the_account_and_deletes_the_old_key() {
     let client = fixture.client().await;
     let old = format!("sk-old-{}-leaked", std::process::id());
     let new = format!("sk-new-{}-rotated", std::process::id());
-    let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
+    let listener = kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0")
         .await
         .unwrap();
     let url = format!(
@@ -877,7 +879,7 @@ async fn wiring_replacing_a_key_keeps_the_account_and_deletes_the_old_key() {
 async fn wiring_an_account_check_slower_than_the_owner_wait_still_answers() {
     let fixture = Fixture::start_with(1000).await;
     let client = fixture.client().await;
-    let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
+    let listener = kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0")
         .await
         .unwrap();
     let url = format!(
@@ -996,7 +998,7 @@ async fn an_openai_compatible_account_check_lists_the_real_ollama_models() {
 async fn one_thousand_accounts_are_created_and_listed_within_bounds() {
     let fixture = Fixture::start().await;
     let client = fixture.client().await;
-    let (_held, port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let url = format!("http://127.0.0.1:{port}/v1");
     let created = Instant::now();
     for index in 0..1000 {
