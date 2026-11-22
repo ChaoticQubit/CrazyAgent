@@ -1,8 +1,11 @@
 use crate::engine::EngineError;
 use fence::Fence;
+use kernel_storage::state_log::{
+    AggregateName, Chunk, Draft, SNAPSHOT_CHUNK, SNAPSHOT_DONE, TRANSACTION_EVENTS_MAX, check,
+    ensure, snapshot_bodies,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 /// The write fence on append, one per writer class, and the engine hosts this process runs
 /// (v2.5 L3).
@@ -13,20 +16,6 @@ pub mod replay;
 #[cfg(test)]
 mod tests;
 
-/// The most bytes one event body may hold; a snapshot chunk is one event, so it holds
-/// at most this many too (v2.5 plan section 3.2).
-pub const BODY_BYTES_MAX: usize = 65_536;
-/// The most bytes an event kind name may hold.
-pub const KIND_BYTES_MAX: usize = 64;
-/// The most events one appending transaction may hold, a snapshot run included.
-pub const TRANSACTION_EVENTS_MAX: usize = 65_536;
-/// The body a redacted event keeps in place of its own, so its seq and revision stay and
-/// replay skips it; no appended event may carry it.
-pub const TOMBSTONE: &[u8] = b"\0redacted\0";
-/// The kind of one chunk of a snapshot run.
-pub const SNAPSHOT_CHUNK: &str = "SnapshotChunk";
-/// The kind of the event that closes a snapshot run.
-pub const SNAPSHOT_DONE: &str = "SnapshotDone";
 
 /// The engine state groups the log orders events by (v2.5 plan section 3.1), a closed
 /// set: each name is stored in the log's `aggregate` column and in snapshot bodies.
@@ -67,43 +56,15 @@ impl Aggregate {
     }
 }
 
-/// One event a writer appends: its aggregate, kind name, body schema version, the time
-/// from the writer's clock and its body bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Draft<'b> {
-    pub aggregate: Aggregate,
-    pub kind: &'b str,
-    pub schema: u16,
-    pub at_ms: u64,
-    pub body: &'b [u8],
+impl From<Aggregate> for AggregateName {
+    fn from(aggregate: Aggregate) -> Self {
+        AggregateName::new(aggregate.name())
+    }
 }
 
-/// One chunk a snapshot run carries: rows of one table, as JSON values.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Chunk {
-    pub table: String,
-    pub rows: Vec<serde_json::Value>,
-}
 
-/// The body of one snapshot chunk event, in run order from 0.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SnapshotChunk {
-    aggregate: Aggregate,
-    table: String,
-    seq: u32,
-    rows: Vec<serde_json::Value>,
-}
 
-/// The body of the event that closes a snapshot run: its chunk count and the sha256 of
-/// the chunk bodies in order.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SnapshotDone {
-    aggregate: Aggregate,
-    chunks: u32,
-    sha256: String,
-}
+
 
 /// Appends the events of one write transaction to `state_log` at that transaction's
 /// `state` revision, each with the next `seq`, behind the writer's fence.
@@ -222,33 +183,16 @@ impl<'a, 'c> Appender<'a, 'c> {
     /// event, or `state_log_chunk_bounds` or `state_log_transaction_full`.
     pub fn snapshot(
         &mut self,
-        aggregate: Aggregate,
+        aggregate: impl Into<AggregateName>,
         at_ms: u64,
         chunks: Vec<Chunk>,
     ) -> Result<u64, EngineError> {
+        let aggregate = aggregate.into();
         if chunks.len() >= TRANSACTION_EVENTS_MAX - self.appended {
             return Err(error("state_log_transaction_full"));
         }
-        let count = chunks.len() as u32;
-        let bodies = chunks
-            .into_iter()
-            .enumerate()
-            .map(|(seq, chunk)| {
-                serde_json::to_vec(&SnapshotChunk {
-                    aggregate,
-                    table: chunk.table,
-                    seq: seq as u32,
-                    rows: chunk.rows,
-                })
-                .map_err(error)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if bodies.iter().any(|body| body.len() > BODY_BYTES_MAX) {
-            return Err(error("state_log_chunk_bounds"));
-        }
-        let mut digest = Sha256::new();
+        let (bodies, done) = snapshot_bodies(aggregate, chunks)?;
         for body in &bodies {
-            digest.update(body);
             self.push(&Draft {
                 aggregate,
                 kind: SNAPSHOT_CHUNK,
@@ -257,12 +201,6 @@ impl<'a, 'c> Appender<'a, 'c> {
                 body,
             })?;
         }
-        let done = serde_json::to_vec(&SnapshotDone {
-            aggregate,
-            chunks: count,
-            sha256: format!("{:x}", digest.finalize()),
-        })
-        .map_err(error)?;
         self.push(&Draft {
             aggregate,
             kind: SNAPSHOT_DONE,
@@ -306,91 +244,7 @@ impl<'a, 'c> Appender<'a, 'c> {
     }
 }
 
-/// Checks the snapshot run a closing event ends: the sha256 of the bodies of the events
-/// before it, as many as it counts, must match, and each must be a chunk of its aggregate
-/// in order from 0. A missing, changed or reordered chunk fails the hash; a count no run
-/// can hold is refused before any row is read, and a body over [`BODY_BYTES_MAX`] before
-/// it is loaded, as a log made without the table's checks can hold one. Inputs: the
-/// connection and the closing event's `seq`. Output: Ok, or `state_log_snapshot_missing`,
-/// `state_log_snapshot_invalid`, `state_log_snapshot_hash` or `state_log_snapshot_chunks`.
-pub fn verify_snapshot(db: &Connection, done: u64) -> Result<(), EngineError> {
-    let missing = || error("state_log_snapshot_missing");
-    let invalid = || error("state_log_snapshot_invalid");
-    let seq = i64::try_from(done).map_err(|_| missing())?;
-    let cap = BODY_BYTES_MAX as i64;
-    let closing: Option<(String, Option<Vec<u8>>)> = db
-        .query_row(
-            "SELECT kind, CASE WHEN length(body) <= ?2 THEN body END FROM state_log WHERE seq=?1",
-            [seq, cap],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(error)?;
-    let Some((_, body)) = closing.filter(|(kind, _)| kind == SNAPSHOT_DONE) else {
-        return Err(missing());
-    };
-    let closed = body
-        .and_then(|body| serde_json::from_slice::<SnapshotDone>(&body).ok())
-        .filter(|closed| (closed.chunks as usize) < TRANSACTION_EVENTS_MAX)
-        .ok_or_else(invalid)?;
-    let mut statement = db
-        .prepare(
-            "SELECT kind, CASE WHEN length(body) <= ?3 THEN body END FROM state_log
-            WHERE seq>=?1 AND seq<?2 ORDER BY seq",
-        )
-        .map_err(error)?;
-    let rows = statement
-        .query_map([seq - i64::from(closed.chunks), seq, cap], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
-        })
-        .map_err(error)?;
-    let mut digest = Sha256::new();
-    let mut count: u32 = 0;
-    let mut in_order = true;
-    for row in rows {
-        let (kind, body) = row.map_err(error)?;
-        let body = body.ok_or_else(invalid)?;
-        digest.update(&body);
-        let chunk = (kind == SNAPSHOT_CHUNK)
-            .then(|| serde_json::from_slice::<SnapshotChunk>(&body).ok())
-            .flatten();
-        in_order &=
-            chunk.is_some_and(|chunk| chunk.aggregate == closed.aggregate && chunk.seq == count);
-        count = count.saturating_add(1);
-    }
-    if format!("{:x}", digest.finalize()) != closed.sha256 {
-        return Err(error("state_log_snapshot_hash"));
-    }
-    if !in_order || count != closed.chunks {
-        return Err(error("state_log_snapshot_chunks"));
-    }
-    Ok(())
-}
 
-/// Refuses a draft out of the log's bounds: a body over [`BODY_BYTES_MAX`] or equal to
-/// [`TOMBSTONE`], a kind that is not 1 to [`KIND_BYTES_MAX`] ASCII letters and digits,
-/// schema 0, or a time past the largest `i64`. Input: the draft. Output: Ok, or the refusal.
-fn check(draft: &Draft<'_>) -> Result<(), EngineError> {
-    if draft.body.len() > BODY_BYTES_MAX {
-        return Err(error("state_log_body_bounds"));
-    }
-    if draft.body == TOMBSTONE {
-        return Err(error("state_log_body_reserved"));
-    }
-    if draft.kind.is_empty()
-        || draft.kind.len() > KIND_BYTES_MAX
-        || !draft.kind.bytes().all(|byte| byte.is_ascii_alphanumeric())
-    {
-        return Err(error("state_log_kind"));
-    }
-    if draft.schema == 0 {
-        return Err(error("state_log_schema"));
-    }
-    if draft.at_ms > i64::MAX as u64 {
-        return Err(error("state_log_at_ms"));
-    }
-    Ok(())
-}
 
 /// Reads the store's `state` revision. Input: the connection. Output: the revision.
 fn state_revision(db: &Connection) -> Result<u64, EngineError> {
@@ -439,22 +293,6 @@ fn publish(tx: &Transaction<'_>, revision: u64) -> Result<(), EngineError> {
     Ok(())
 }
 
-/// Creates the log table inside the caller's transaction when it is absent, so it
-/// commits or rolls back with that transaction. Input: the connection. Output: any
-/// SQLite failure.
-fn ensure(db: &Connection) -> Result<(), EngineError> {
-    db.execute_batch(&format!(
-        "CREATE TABLE IF NOT EXISTS state_log (
-            seq INTEGER PRIMARY KEY,
-            revision INTEGER NOT NULL CHECK(revision >= 1),
-            aggregate TEXT NOT NULL,
-            kind TEXT NOT NULL CHECK(length(kind) BETWEEN 1 AND {KIND_BYTES_MAX}),
-            schema INTEGER NOT NULL CHECK(schema >= 1),
-            at_ms INTEGER NOT NULL CHECK(at_ms >= 0),
-            body BLOB NOT NULL CHECK(length(body) <= {BODY_BYTES_MAX}))"
-    ))
-    .map_err(error)
-}
 
 fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())

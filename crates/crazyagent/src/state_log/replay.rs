@@ -49,46 +49,6 @@ pub struct ProcessExited {
     pub signal: Option<i32>,
 }
 
-/// Where a writer reads the time it stamps on an event: the system clock, or a manual one a
-/// test sets. Replay never reads a clock; a projection takes time from each event's `at_ms`.
-#[derive(Debug)]
-pub enum Clock {
-    System,
-    Manual(AtomicU64),
-}
-
-impl Clock {
-    /// A manual clock reading the given time. Input: ms since the Unix epoch. Output: the
-    /// clock.
-    pub fn manual(at_ms: u64) -> Self {
-        Self::Manual(AtomicU64::new(at_ms))
-    }
-
-    /// The time now. Output: ms since the Unix epoch, 0 for a system time before it.
-    pub fn now_ms(&self) -> u64 {
-        match self {
-            Self::System => SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |elapsed| {
-                    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-                }),
-            Self::Manual(now) => now.load(Ordering::SeqCst),
-        }
-    }
-
-    /// Sets a manual clock. Input: ms since the Unix epoch. Output: Ok, or
-    /// `state_log_clock_system` for the system clock.
-    pub fn set_ms(&self, at_ms: u64) -> Result<(), EngineError> {
-        match self {
-            Self::System => Err(error("state_log_clock_system")),
-            Self::Manual(now) => {
-                now.store(at_ms, Ordering::SeqCst);
-                Ok(())
-            }
-        }
-    }
-}
-
 /// Replays the log after `after` into one aggregate's projection. Every event is read, in
 /// batches of at most [`REPLAY_BATCH_MAX`]: each `seq` must be the previous plus one and no
 /// revision lower than the one before, across all aggregates. `apply` gets the aggregate's
