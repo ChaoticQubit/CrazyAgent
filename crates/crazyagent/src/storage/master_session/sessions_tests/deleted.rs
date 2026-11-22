@@ -451,16 +451,15 @@ async fn deleting_a_deleted_session_again_logs_a_second_event_and_redacts_the_fi
     case.close().await;
 }
 
+/// The rows of each table [`live_and_rebuilt`] reads, in its order, each row as its column
+/// values.
+type TableRows = Vec<Vec<Vec<rusqlite::types::Value>>>;
+
 /// The master sessions, conversation entries, turns, preparations, waiting Resolves and
 /// profile receipts as they stand, then as a replay of the sessions events rebuilds them,
 /// both read in one write transaction that is rolled back. Input: the case. Output: the
 /// live rows and the rebuilt rows.
-fn live_and_rebuilt(
-    case: &Case,
-) -> (
-    Vec<Vec<Vec<rusqlite::types::Value>>>,
-    Vec<Vec<Vec<rusqlite::types::Value>>>,
-) {
+fn live_and_rebuilt(case: &Case) -> (TableRows, TableRows) {
     let mut db = case.db();
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)

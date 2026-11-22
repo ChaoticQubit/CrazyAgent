@@ -3176,13 +3176,80 @@ fn setup_plan(
     )
 }
 
+/// Runs one owner request, then logs the plugin refusals the engine sink queued, after
+/// the request's own commit or rollback. Inputs: as [`owner_apply_request`]. Output: that
+/// request's result.
+fn owner_apply_with(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    path: &Path,
+    a: &Admission,
+    request: &OwnerRequest,
+    effect: Option<Effect<'_>>,
+) -> Result<OwnerApplied, EngineError> {
+    owner_apply_draining(
+        db,
+        config,
+        path,
+        a,
+        request,
+        effect,
+        crate::sdk_slice::engine_refusals(),
+    )
+}
+
+/// Runs one owner request, then, after its commit or rollback, appends the refusals queued
+/// in a sink as `CallRefused` events in a transaction of their own; a receipt then names
+/// the revision after them, its provenance kept. Inputs: as [`owner_apply_request`], plus
+/// the sink. Output: the request's result.
+fn owner_apply_draining(
+    db: &mut Connection,
+    config: &EffectiveConfig,
+    path: &Path,
+    a: &Admission,
+    request: &OwnerRequest,
+    effect: Option<Effect<'_>>,
+    refusals: &crate::sdk_slice::EngineRefusals,
+) -> Result<OwnerApplied, EngineError> {
+    let mut result = owner_apply_request(db, config, path, a, request, effect);
+    let host = HostStamp {
+        db_instance: a.db_instance.clone(),
+        engine_epoch: a.engine_epoch.clone(),
+    };
+    match crate::sdk_slice::drain_refusals(db, &host, refusals) {
+        Ok(0) => {}
+        Ok(_) => {
+            if let Ok(applied) = result.as_mut() {
+                let read = db
+                    .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .ok()
+                    .and_then(|revision| u64::try_from(revision).ok());
+                match read {
+                    Some(revision) => {
+                        assert!(
+                            revision > applied.current_revision.value(),
+                            "the drain moved it"
+                        );
+                        applied.current_revision = Cursor::new(revision);
+                    }
+                    None => eprintln!("plugin_call_refused_revision_unread"),
+                }
+            }
+        }
+        Err(refused) => eprintln!("plugin_call_refused_not_logged code={}", refused.0),
+    }
+    result
+}
+
 /// Applies one owner mutation, optionally with a disk effect already done.
 /// Input: as `owner_apply`, plus the owner transport's finished disk work for
 /// AddExistingFolder, MoveProjectsHome or New Project. Output: the recorded
 /// receipt; such a mutation is checked again and recorded even when the
 /// revision moved meanwhile, because its revision was checked before the
 /// effect.
-fn owner_apply_with(
+fn owner_apply_request(
     db: &mut Connection,
     config: &EffectiveConfig,
     path: &Path,
@@ -4254,6 +4321,9 @@ mod open_tests;
 
 #[cfg(all(test, unix))]
 mod project_removed_tests;
+
+#[cfg(all(test, unix))]
+mod refused_event_tests;
 
 #[cfg(all(test, unix))]
 pub(crate) use configured_conversation_fixture::{

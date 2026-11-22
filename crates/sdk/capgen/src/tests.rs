@@ -118,3 +118,26 @@ fn a_capability_outside_its_file_is_refused() {
         "capgen_name_outside_file"
     );
 }
+
+#[test]
+fn mod_rs_lists_every_capability_once_in_file_order() {
+    let files = rust(&parsed(&[
+        (
+            "beta",
+            "capability beta.two() -> unit tier: t2 needs: beta.w\ncapability beta.three() -> unit tier: t1 needs: beta.w",
+        ),
+        ("alpha", "capability alpha.one() -> unit tier: t1 needs: alpha.r"),
+    ]))
+    .expect("generates");
+    let module = &files
+        .iter()
+        .find(|(path, _)| path == "mod.rs")
+        .expect("mod.rs")
+        .1;
+    assert!(
+        module.contains(
+            "pub const CAPABILITIES: [crate::Capability; 3] = [alpha::ONE, beta::TWO, beta::THREE];\n"
+        ),
+        "{module}"
+    );
+}
