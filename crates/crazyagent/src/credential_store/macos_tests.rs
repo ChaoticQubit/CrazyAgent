@@ -1,7 +1,7 @@
 use super::*;
 use crate::credentials::test_keychain::TestKeychain;
-use kernel_security::store::{SecretRef, Store, parts, reference};
 use kernel_security::secret::SecretString;
+use kernel_security::store::{SecretRef, Store, parts, reference};
 use std::process::{Command, Stdio};
 
 struct Scratch {

@@ -216,12 +216,20 @@ fn device_sign_in_honors_pending_and_slow_down_then_keeps_only_a_reference() {
     assert!(state.contains(&format!("{}.github:token", scratch.namespace)));
     let saved = state::load(&account.root).unwrap().unwrap();
     assert_eq!(
-        scratch.store.get(&saved.credential).unwrap().expose(),
+        scratch
+            .store
+            .get(&crate::protocol::kernel(&saved.credential).unwrap())
+            .unwrap()
+            .expose(),
         secret_text
     );
     assert!(!account.sign_out().unwrap().signed_in);
     assert_eq!(
-        scratch.store.get(&saved.credential).unwrap_err().0,
+        scratch
+            .store
+            .get(&crate::protocol::kernel(&saved.credential).unwrap())
+            .unwrap_err()
+            .0,
         "credential_missing"
     );
     assert_eq!(scratch.state(), None);

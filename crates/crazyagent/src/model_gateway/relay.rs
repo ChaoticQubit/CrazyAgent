@@ -1,6 +1,6 @@
-use kernel_security::secret::Piece::{Escaped, Plain};
 use crate::engine::EngineError;
 use kernel_processes::fd_wait::{self, Wake};
+use kernel_security::secret::Piece::{Escaped, Plain};
 use kernel_security::secret::SecretString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};

@@ -1,7 +1,6 @@
 use super::*;
-use crate::credentials::test_keychain::TestKeychain;
-use kernel_security::store::{Store, reference};
 use crate::credentials::Keychain;
+use crate::credentials::test_keychain::TestKeychain;
 use crate::github::test_server::{Answer, Server};
 use crate::github::{
     Endpoints, GitHub, GitHubPublishJob, GitHubPublishPlan, GitHubPublishStep, GitHubRuleOutcome,
@@ -10,6 +9,7 @@ use crate::github::{
 use crate::protocol::SessionId;
 use crate::questions::{Answer as Picked, Question, QuestionKind, Settlement};
 use kernel_security::secret::SecretString;
+use kernel_security::store::{Store, reference};
 use rusqlite::TransactionBehavior;
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;

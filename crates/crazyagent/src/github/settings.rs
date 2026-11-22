@@ -35,7 +35,9 @@ impl GitHub {
     /// folder. Output: the page, or `github_rules_not_published` until its publish is done.
     pub fn repo_rules(&self, project: &Path) -> Result<GitHubRepoRules, EngineError> {
         let full_name = self.published(project)?;
-        let token = self.store.get(&self.saved()?.credential)?;
+        let token = self
+            .store
+            .get(&crate::protocol::kernel(&self.saved()?.credential)?)?;
         let made = self.record(&full_name)?;
         let (page, _) = rules::read(&self.endpoints, &token, &full_name, &made)?;
         Ok(page)
@@ -63,7 +65,9 @@ impl GitHub {
         if full_name != repo {
             return Err(failure("github_rules_repo_mismatch"));
         }
-        let token = self.store.get(&self.saved()?.credential)?;
+        let token = self
+            .store
+            .get(&crate::protocol::kernel(&self.saved()?.credential)?)?;
         let made = self.record(&full_name)?;
         let (live, facts) = rules::read(&self.endpoints, &token, &full_name, &made)?;
         let outcome = self.with_record(&full_name, |made| {

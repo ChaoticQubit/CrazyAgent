@@ -1,8 +1,8 @@
+use kernel_security::error::StoreError;
 use kernel_security::secret::Piece::{Hex, Plain};
 use kernel_security::secret::sized;
-use kernel_security::store::{SecretRef, Store, checked_name, parts, reference};
-use kernel_security::error::StoreError;
 use kernel_security::secret::{SECRET_BYTES_MAX, SecretString};
+use kernel_security::store::{SecretRef, Store, checked_name, parts, reference};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -78,10 +78,7 @@ impl Keychain {
         Ok(service)
     }
 
-    fn owned_parts<'a>(
-        &self,
-        reference: &'a SecretRef,
-    ) -> Result<(&'a str, &'a str), StoreError> {
+    fn owned_parts<'a>(&self, reference: &'a SecretRef) -> Result<(&'a str, &'a str), StoreError> {
         let (service, account) = parts(reference)?;
         Ok((self.owned(service)?, account))
     }

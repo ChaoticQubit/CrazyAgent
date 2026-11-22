@@ -1,9 +1,9 @@
 use super::platform_store;
+use kernel_security::error::StoreError;
 use kernel_security::secret::Piece::Plain;
+use kernel_security::secret::SecretString;
 use kernel_security::secret::sized;
 use kernel_security::store::{SecretRef, Store, checked_name, parts, reference};
-use kernel_security::error::StoreError;
-use kernel_security::secret::SecretString;
 use keyring_core::{CredentialStore, Entry};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};

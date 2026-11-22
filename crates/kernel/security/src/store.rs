@@ -106,6 +106,5 @@ pub fn parts(reference: &SecretRef) -> Result<(&str, &str), StoreError> {
     ))
 }
 
-
 #[cfg(test)]
 mod tests;

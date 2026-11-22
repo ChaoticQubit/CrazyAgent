@@ -1,5 +1,5 @@
-use kernel_security::secret::Piece::{Escaped, Form, Plain};
 use crate::engine::EngineError;
+use kernel_security::secret::Piece::{Escaped, Form, Plain};
 use kernel_security::secret::SecretString;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};

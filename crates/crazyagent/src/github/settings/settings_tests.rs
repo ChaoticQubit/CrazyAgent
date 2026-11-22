@@ -1,14 +1,14 @@
 use super::super::state;
 use super::*;
-use crate::credentials::test_keychain::TestKeychain;
-use kernel_security::store::{Store, reference};
 use crate::credentials::Keychain;
+use crate::credentials::test_keychain::TestKeychain;
 use crate::github::test_server::{Answer, Seen, Server};
 use crate::github::{
     Endpoints, GitHubPublishJob, GitHubPublishPlan, GitHubPublishStep, GitHubRuleOutcome,
     GitHubRuleState,
 };
 use kernel_security::secret::SecretString;
+use kernel_security::store::{Store, reference};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;

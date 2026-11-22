@@ -831,8 +831,24 @@ mod tests {
     #[test]
     fn a_kernel_reference_is_accepted_exactly_where_a_credential_ref_is() {
         let names = [
-            "a", "c", "z", "cd", "a.", "a_.", "svc.", "aux", "aux.", "aux.x", "con.v1", "nul.github",
-            "com1", "com1.a", "lpt9.x", "console", "token", "dev.crazyagent.x.github",
+            "a",
+            "c",
+            "z",
+            "cd",
+            "a.",
+            "a_.",
+            "svc.",
+            "aux",
+            "aux.",
+            "aux.x",
+            "con.v1",
+            "nul.github",
+            "com1",
+            "com1.a",
+            "lpt9.x",
+            "console",
+            "token",
+            "dev.crazyagent.x.github",
         ];
         for service in names {
             for account in names {
