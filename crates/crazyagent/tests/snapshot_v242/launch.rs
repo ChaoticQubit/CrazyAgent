@@ -1006,7 +1006,10 @@ fn a_credential_deny_in_the_slash_or_end_spelling_is_taken_out_like_the_optional
         "(allow file-read*\n  (subpath \"/opt/x\")\n  (subpath \"{developer}\"))\n(deny file-read* file-write*\n  (subpath \"/s\")\n  (regex #\"{other}(/|$)\"))\n"
     );
     let (kept, facts) = without_machine_reads(&unrelated, std::slice::from_ref(&developer));
-    assert!(kept.contains(&format!("(regex #\"{other}(/|$)\")")), "{kept}");
+    assert!(
+        kept.contains(&format!("(regex #\"{other}(/|$)\")")),
+        "{kept}"
+    );
     assert_eq!(facts["credentials_denied"], json!(false));
 }
 
