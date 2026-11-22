@@ -332,3 +332,19 @@ fn a_manual_clock_reads_what_it_was_set_to_and_the_system_clock_cannot_be_set() 
         Some("state_log_clock_system".into())
     );
 }
+
+#[test]
+fn a_chunk_body_reads_back_only_for_the_aggregate_it_names() {
+    let body = chunk("worktrees", 0);
+    assert_eq!(
+        read_chunk("worktrees", &body),
+        Some(Chunk {
+            table: "worktrees".into(),
+            rows: Vec::new()
+        })
+    );
+    assert_eq!(read_chunk("ide", &body), None);
+    assert_eq!(read_chunk("worktrees", b"not json"), None);
+    let closing = closing("worktrees", 0, &[]);
+    assert_eq!(read_chunk("worktrees", &closing), None);
+}

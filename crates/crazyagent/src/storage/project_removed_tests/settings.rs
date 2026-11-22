@@ -61,8 +61,8 @@ fn a_removal_tombstones_its_project_s_settings_and_their_replay_brings_none_back
         .map(|(_, _, _, _, body)| body)
         .collect();
     assert_eq!(saved.len(), 4);
-    assert_eq!(saved[0].as_slice(), crate::state_log::TOMBSTONE);
-    assert_eq!(saved[1].as_slice(), crate::state_log::TOMBSTONE);
+    assert_eq!(saved[0].as_slice(), kernel_storage::state_log::TOMBSTONE);
+    assert_eq!(saved[1].as_slice(), kernel_storage::state_log::TOMBSTONE);
     assert!(String::from_utf8_lossy(saved[2]).contains("\"other\""));
     assert!(String::from_utf8_lossy(saved[3]).contains("\"other\""));
 

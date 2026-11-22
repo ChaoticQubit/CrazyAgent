@@ -1,14 +1,13 @@
 use super::fence::{self, Fence};
-use super::{
-    Aggregate, BODY_BYTES_MAX, Chunk, SNAPSHOT_CHUNK, SNAPSHOT_DONE, SnapshotChunk, TOMBSTONE,
-    error, verify_snapshot,
-};
+use super::{Aggregate, error};
 use crate::engine::EngineError;
+use kernel_storage::state_log::{
+    BODY_BYTES_MAX, Chunk, SNAPSHOT_CHUNK, SNAPSHOT_DONE, TOMBSTONE, read_chunk, verify_snapshot,
+};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 #[cfg(test)]
 mod tests;
@@ -93,14 +92,7 @@ pub fn chunk(event: &Logged) -> Result<Chunk, EngineError> {
     if event.kind != SNAPSHOT_CHUNK {
         return Err(refused());
     }
-    let chunk: SnapshotChunk = serde_json::from_slice(&event.body).map_err(|_| refused())?;
-    if chunk.aggregate != event.aggregate {
-        return Err(refused());
-    }
-    Ok(Chunk {
-        table: chunk.table,
-        rows: chunk.rows,
-    })
+    read_chunk(event.aggregate.name(), &event.body).ok_or_else(refused)
 }
 
 /// Redacts one logged event in place for an owner delete: its body becomes [`TOMBSTONE`]

@@ -107,6 +107,17 @@ pub fn snapshot_bodies(
     Ok((bodies, done))
 }
 
+/// The chunk a snapshot chunk body carries, when the body names `aggregate`, for a projection
+/// rebuilding from a snapshot run. Inputs: the aggregate's stored name and the body. Output:
+/// the chunk, or None for a body that is not a chunk of that aggregate.
+pub fn read_chunk(aggregate: &str, body: &[u8]) -> Option<Chunk> {
+    let chunk = serde_json::from_slice::<SnapshotChunk>(body).ok()?;
+    (chunk.aggregate == aggregate).then_some(Chunk {
+        table: chunk.table,
+        rows: chunk.rows,
+    })
+}
+
 /// Checks the snapshot run a closing event ends: the sha256 of the bodies of the events
 /// before it, as many as it counts, must match, and each must be a chunk of its aggregate
 /// in order from 0. A missing, changed or reordered chunk fails the hash; a count no run

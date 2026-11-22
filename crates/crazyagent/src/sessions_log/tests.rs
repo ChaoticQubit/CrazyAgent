@@ -3,8 +3,9 @@ use crate::engine::EngineError;
 use crate::master_session::{MasterSessionView, SESSION_DELETED};
 use crate::state_log::fence::{engine, seed, test_owner};
 use crate::state_log::replay::{Logged, redact, rows};
-use crate::state_log::{Aggregate, Appender, Draft, SNAPSHOT_CHUNK, SNAPSHOT_DONE, TOMBSTONE};
+use crate::state_log::{Aggregate, Appender};
 use crate::storage::opening::Opening;
+use kernel_storage::state_log::{Draft, SNAPSHOT_CHUNK, SNAPSHOT_DONE, TOMBSTONE};
 use rusqlite::Connection;
 use rusqlite::types::Value as Column;
 use serde_json::json;
@@ -262,7 +263,7 @@ fn every_marked_write_closes_into_events_whose_replay_equals_the_live_rows() {
     assert_eq!(close(&mut log).unwrap(), 3);
     let deleted = serde_json::to_vec(&json!({"project": "p1", "session": "s9"})).unwrap();
     log.append(&Draft {
-        aggregate: Aggregate::Sessions,
+        aggregate: Aggregate::Sessions.into(),
         kind: SESSION_DELETED,
         schema: 1,
         at_ms: 1,
@@ -329,7 +330,7 @@ fn a_close_at_a_revision_another_writer_logged_leaves_its_marks_for_the_next_clo
     let mut other = Appender::own(&tx, engine()).unwrap();
     other
         .append(&Draft {
-            aggregate: Aggregate::Worktrees,
+            aggregate: Aggregate::Worktrees.into(),
             kind: "Noted",
             schema: 1,
             at_ms: 1,
@@ -493,7 +494,7 @@ fn a_snapshot_run_and_the_events_after_it_replay_to_the_same_rows() {
     assert_eq!(close(&mut log).unwrap(), 1);
     drop(log);
     tx.commit().unwrap();
-    crate::state_log::verify_snapshot(&db, done).unwrap();
+    kernel_storage::state_log::verify_snapshot(&db, done).unwrap();
     let chunks = kinds(&db)
         .iter()
         .filter(|kind| kind.as_str() == SNAPSHOT_CHUNK)

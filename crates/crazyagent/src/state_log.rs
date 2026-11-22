@@ -16,7 +16,6 @@ pub mod replay;
 #[cfg(test)]
 mod tests;
 
-
 /// The engine state groups the log orders events by (v2.5 plan section 3.1), a closed
 /// set: each name is stored in the log's `aggregate` column and in snapshot bodies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,10 +60,6 @@ impl From<Aggregate> for AggregateName {
         AggregateName::new(aggregate.name())
     }
 }
-
-
-
-
 
 /// Appends the events of one write transaction to `state_log` at that transaction's
 /// `state` revision, each with the next `seq`, behind the writer's fence.
@@ -244,8 +239,6 @@ impl<'a, 'c> Appender<'a, 'c> {
     }
 }
 
-
-
 /// Reads the store's `state` revision. Input: the connection. Output: the revision.
 fn state_revision(db: &Connection) -> Result<u64, EngineError> {
     let revision: i64 = db
@@ -292,7 +285,6 @@ fn publish(tx: &Transaction<'_>, revision: u64) -> Result<(), EngineError> {
     assert_eq!(event.cursor.value(), revision);
     Ok(())
 }
-
 
 fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
