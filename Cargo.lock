@@ -974,6 +974,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "crazyagent-kernel-security"
+version = "2.4.4"
+
+[[package]]
 name = "crazyagent-kernel-storage"
 version = "2.4.4"
 dependencies = [
