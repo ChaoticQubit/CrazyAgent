@@ -1103,10 +1103,7 @@ impl AgentContext {
             server
                 .secrets
                 .iter()
-                .find(|secret| {
-                    let value = secret.value.expose();
-                    !value.is_empty() && text.windows(value.len()).any(|window| window == value)
-                })
+                .find(|secret| kernel_security::exposure::holds(secret.value.expose(), text))
                 .map(|secret| SecretInCommand {
                     server: server.name.clone(),
                     secret: secret.name.clone(),
