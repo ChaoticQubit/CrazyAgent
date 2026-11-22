@@ -107,12 +107,14 @@ impl EngineRefusals {
     }
 
     /// How many calls of one plugin were refused. Input: the plugin id. Output: the count.
+    #[cfg(test)]
     pub(crate) fn count(&self, plugin: &str) -> u64 {
         let counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
         counts.get(plugin).copied().unwrap_or(0)
     }
 
     /// How many first-seen refusal pairs are kept. Output: the number.
+    #[cfg(test)]
     pub(crate) fn pending_len(&self) -> usize {
         let pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         pending.len()
