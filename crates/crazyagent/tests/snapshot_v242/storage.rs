@@ -39,6 +39,7 @@ use crazyagent::team::{
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -909,9 +910,10 @@ fn settled(dump: Value) -> Result<Value, String> {
 pub(super) fn dump(db: &Path) -> Result<Value, String> {
     let (_scratch, connection) = scratch_copy(db)?;
     let probe = Masks::new();
+    let labels = kept_text_labels(&connection)?;
     let mut tables = Vec::new();
     for (name, sql) in schema(&connection, "table")? {
-        tables.push(table(&connection, &probe, &name, &sql)?);
+        tables.push(table(&connection, &probe, &labels, &name, &sql)?);
     }
     let views: Vec<Value> = schema(&connection, "view")?
         .into_iter()
@@ -970,9 +972,48 @@ fn schema(connection: &Connection, kind: &str) -> Result<Vec<(String, String)>, 
     items.collect::<Result<Vec<_>, _>>().map_err(said)
 }
 
-/// Dumps one table. Inputs: the connection, a mask probe, the table's name and CREATE text.
-/// Output: the table's schema, row count, excluded columns and rows.
-fn table(connection: &Connection, probe: &Masks, name: &str, sql: &str) -> Result<Value, String> {
+/// The 2.5 tables whose `digest` column is keyed by the store's random `kept_text_key`.
+const KEYED_DIGESTS: [&str; 2] = ["kept_texts", "kept_text_refs"];
+
+/// Numbers each kept text's keyed digest from 1 by the text's byte order, so a dump shows
+/// `<kept-text-N>` in both kept-text tables where the store's random key decides the digest.
+/// Input: the connection. Output: each digest's label, none for a store without the table.
+fn kept_text_labels(connection: &Connection) -> Result<BTreeMap<String, String>, String> {
+    let held: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='kept_texts')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(said)?;
+    if !held {
+        return Ok(BTreeMap::new());
+    }
+    let mut ordered = connection
+        .prepare("SELECT digest FROM kept_texts ORDER BY text, digest")
+        .map_err(said)?;
+    let digests = ordered
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(said)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(said)?;
+    let labels: BTreeMap<String, String> = digests
+        .into_iter()
+        .enumerate()
+        .map(|(index, digest)| (digest, format!("<kept-text-{}>", index + 1)))
+        .collect();
+    Ok(labels)
+}
+
+/// Dumps one table. Inputs: the connection, a mask probe, the kept-text labels, the table's
+/// name and CREATE text. Output: the table's schema, row count, excluded columns and rows.
+fn table(
+    connection: &Connection,
+    probe: &Masks,
+    labels: &BTreeMap<String, String>,
+    name: &str,
+    sql: &str,
+) -> Result<Value, String> {
     let mut attached = connection
         .prepare(
             "SELECT sql FROM sqlite_master WHERE tbl_name = ?1 AND type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY type, name",
@@ -1014,10 +1055,18 @@ fn table(connection: &Connection, probe: &Masks, name: &str, sql: &str) -> Resul
         while let Some(row) = found.next().map_err(said)? {
             let mut cells = Map::new();
             for (index, column) in shown.iter().enumerate() {
-                cells.insert(
-                    column.clone(),
-                    cell(probe, row.get_ref(index).map_err(said)?)?,
-                );
+                let value = row.get_ref(index).map_err(said)?;
+                let shown = if KEYED_DIGESTS.contains(&name) && column == "digest" {
+                    let digest = value.as_str().map_err(said)?;
+                    Value::from(
+                        labels
+                            .get(digest)
+                            .map_or("<kept-text-missing>", String::as_str),
+                    )
+                } else {
+                    cell(probe, value)?
+                };
+                cells.insert(column.clone(), shown);
             }
             rows.push(Value::Object(cells));
         }
