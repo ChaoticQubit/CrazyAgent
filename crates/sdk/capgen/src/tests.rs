@@ -355,3 +355,48 @@ fn a_capability_named_like_a_generated_check_is_refused() {
         "capgen_name_collision"
     );
 }
+
+fn chain(leaf: &str) -> String {
+    let mut source = format!("type T0 {{ a: {leaf} }}\n");
+    for level in 1..=40 {
+        let below = level - 1;
+        source.push_str(&format!("type T{level} {{ a: T{below}, b: T{below} }}\n"));
+    }
+    source.push_str("capability s.a(t: T40) -> unit tier: t1 needs: s.w");
+    source
+}
+
+fn generated_within(source: String, seconds: u64) -> String {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let file = crazyagent_cap::parse(&source).expect("parses");
+        let module = crate::rust::test_module("s", &file).expect("generates");
+        let _ = sender.send(module);
+    });
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(seconds))
+        .expect("a 41-type chain generates in linear work, not 2^40")
+}
+
+#[test]
+fn a_deep_chain_of_shared_types_generates_without_blowing_up() {
+    let plain = generated_within(chain("u16"), 30);
+    assert!(
+        derive_of(&plain, "pub struct T40").contains("Copy"),
+        "{plain}"
+    );
+    assert!(
+        derive_of(&plain, "pub struct T40").contains("Debug"),
+        "{plain}"
+    );
+    assert!(!plain.contains("fn fits_t40("), "{plain}");
+    assert!(!plain.contains("fn check_a_input("), "{plain}");
+    let bounded = generated_within(chain("text"), 30);
+    assert!(
+        !derive_of(&bounded, "pub struct T40").contains("Copy"),
+        "{bounded}"
+    );
+    assert_eq!(bounded.matches("fn fits_t40(").count(), 1, "{bounded}");
+    assert_eq!(bounded.matches("fn fits_t0(").count(), 1, "{bounded}");
+    assert!(bounded.contains("fn check_a_input("), "{bounded}");
+}

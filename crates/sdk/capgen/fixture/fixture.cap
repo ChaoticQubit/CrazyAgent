@@ -22,3 +22,6 @@ capability fixture.count(flags: list<bool>) -> u32
 capability fixture.wrap(envelope: Envelope) -> unit
   tier: t1
   needs: fixture.count
+capability fixture.shadow(fits_reply: Reply, fits_header: list<Header>) -> unit
+  tier: t1
+  needs: fixture.count
