@@ -189,3 +189,126 @@ fn generation_fails_closed_without_rustfmt() {
         refused.detail
     );
 }
+
+/// Generates the test module from the fixture `.cap`. Output: its text.
+fn fixture_module() -> String {
+    let source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixture/fixture.cap"))
+        .expect("fixture.cap reads");
+    let file = crazyagent_cap::parse(&source).expect("fixture.cap parses");
+    rust_test_module("fixture", &file).expect("fixture.cap generates")
+}
+
+/// Returns the derive line written above one generated item. Inputs: the module text and
+/// the item's head, such as `pub struct Pair`. Output: the derive line.
+fn derive_of<'t>(module: &'t str, head: &str) -> &'t str {
+    let at = module.find(&format!("{head} {{")).expect("the item is generated");
+    module[..at]
+        .lines()
+        .rev()
+        .find(|line| line.starts_with("#[derive("))
+        .expect("the item has a derive line")
+}
+
+#[test]
+fn the_fixture_generates_the_checked_in_test_module() {
+    let checked_in = fs::read_to_string(sdk("rust/src/fixture_generated.rs"))
+        .expect("the test module reads");
+    assert_eq!(fixture_module(), checked_in);
+}
+
+#[test]
+fn derives_follow_the_fields() {
+    let module = fixture_module();
+    assert_eq!(
+        derive_of(&module, "pub struct Header"),
+        "#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]"
+    );
+    assert_eq!(
+        derive_of(&module, "pub struct Pair"),
+        "#[derive(Clone, Copy, PartialEq, Eq)]"
+    );
+    assert_eq!(
+        derive_of(&module, "pub struct Keyed"),
+        "#[derive(Clone, PartialEq, Eq)]"
+    );
+    assert_eq!(
+        derive_of(&module, "pub struct Secret"),
+        "#[derive(Clone, Copy, PartialEq, Eq, Hash)]"
+    );
+    assert_eq!(
+        derive_of(&module, "pub enum Method"),
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]"
+    );
+    for (head, denies) in [
+        ("pub struct Header", true),
+        ("pub struct Pair", false),
+        ("pub struct Keyed", false),
+    ] {
+        let at = module.find(&format!("{head} {{")).expect("the item is generated");
+        let block = module[..at].rsplit("\n\n").next().expect("the item's block");
+        assert_eq!(block.contains("deny_unknown_fields"), denies, "{head}");
+    }
+}
+
+#[test]
+fn wrapped_types_use_alloc_and_core_paths() {
+    let module = fixture_module();
+    for line in [
+        "    pub headers: alloc::vec::Vec<Header>,\n",
+        "    pub body: core::option::Option<alloc::vec::Vec<u8>>,\n",
+        "    pub timeout_ms: core::option::Option<u32>,\n",
+    ] {
+        assert!(module.contains(line), "{line}");
+    }
+}
+
+#[test]
+fn bound_checks_are_written_only_where_a_field_is_bounded() {
+    let module = fixture_module();
+    for present in [
+        "pub fn check_send_input(",
+        "pub fn check_send_output(",
+        "pub fn check_reveal_output(",
+        "pub fn check_pair_input(",
+        "pub fn check_count_input(",
+    ] {
+        assert!(module.contains(present), "{present}");
+    }
+    for absent in ["check_reveal_input", "check_pair_output", "check_count_output"] {
+        assert!(!module.contains(absent), "{absent}");
+    }
+    let settings = generated_from_caps()
+        .into_iter()
+        .find(|(path, _)| path == "settings.rs")
+        .expect("settings.rs")
+        .1;
+    assert!(!settings.contains("check_"), "{settings}");
+    assert!(!settings.contains("alloc::"), "{settings}");
+}
+
+#[test]
+fn settings_changes_only_by_the_caller_and_the_tier() {
+    let settings = generated_from_caps()
+        .into_iter()
+        .find(|(path, _)| path == "settings.rs")
+        .expect("settings.rs")
+        .1;
+    assert!(settings.contains(
+        "    fn save_quit(&self, caller: &'static str, settings: QuitSettings) -> Result<(), Refusal>;\n"
+    ));
+    assert!(settings.contains("    tier: Tier::Kernel,\n"));
+    assert!(settings.contains(
+        "pub fn save_quit(host: &dyn Host, settings: QuitSettings) -> Result<(), Refusal> {\n    host.settings_save_quit(settings)\n}\n"
+    ));
+    assert!(settings.contains(
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]\n#[serde(deny_unknown_fields)]\npub struct QuitSettings {"
+    ));
+}
+
+#[test]
+fn caller_is_a_reserved_input_name() {
+    assert_eq!(
+        refused(&[("s", "capability s.a(caller: u16) -> unit tier: t1 needs: s.w")]),
+        "capgen_reserved_name"
+    );
+}

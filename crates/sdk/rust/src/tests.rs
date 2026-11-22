@@ -42,7 +42,7 @@ fn the_save_quit_capability_has_its_declared_facts() {
         crate::settings::SAVE_QUIT,
         crate::Capability {
             name: "settings.save_quit",
-            tier: crate::Tier::T1,
+            tier: crate::Tier::Kernel,
             needs: "settings.write",
         }
     );
@@ -70,5 +70,126 @@ fn the_sdk_re_exports_no_ambient_power() {
         ] {
             assert!(!text.contains(banned), "{} has {banned}", file.display());
         }
+    }
+}
+
+#[test]
+fn the_host_and_free_functions_take_no_caller() {
+    let generated = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/generated");
+    let host = fs::read_to_string(generated.join("host.rs")).expect("host.rs reads");
+    assert!(host.contains(
+        "    fn settings_save_quit(&self, settings: settings::QuitSettings) -> Result<(), Refusal>;\n"
+    ));
+    let settings = fs::read_to_string(generated.join("settings.rs")).expect("settings.rs reads");
+    assert!(settings.contains(
+        "pub fn save_quit(host: &dyn Host, settings: QuitSettings) -> Result<(), Refusal> {\n"
+    ));
+    assert!(!host.contains("caller"));
+}
+
+#[test]
+fn the_bounds_have_their_declared_values() {
+    assert_eq!(crate::TEXT_BYTES_MAX, 8_192);
+    assert_eq!(crate::BYTES_MAX, 4_194_304);
+    assert_eq!(crate::LIST_ITEMS_MAX, 64);
+}
+
+mod bounds {
+    use crate::Refusal;
+    use crate::fixture_generated::{
+        Header, Method, Reply, Request, Secret, check_count_input, check_reveal_output,
+        check_send_input, check_send_output,
+    };
+
+    /// A request whose url holds `url` bytes, with `headers` headers and a body of `body`
+    /// bytes. Output: the request.
+    fn request(url: usize, headers: usize, body: Option<usize>) -> Request {
+        Request {
+            method: Method::Get,
+            url: "u".repeat(url),
+            headers: (0..headers)
+                .map(|_| Header {
+                    name: "n".into(),
+                    value: "v".into(),
+                })
+                .collect(),
+            body: body.map(|len| vec![0; len]),
+            timeout_ms: None,
+        }
+    }
+
+    /// The refusal of an input over its bound.
+    fn too_large_input() -> Refusal {
+        Refusal::Rejected {
+            code: "cap_input_too_large".into(),
+        }
+    }
+
+    #[test]
+    fn a_text_at_its_bound_passes_and_one_byte_more_is_refused() {
+        assert_eq!(check_send_input(&request(crate::TEXT_BYTES_MAX, 0, None)), Ok(()));
+        assert_eq!(
+            check_send_input(&request(crate::TEXT_BYTES_MAX + 1, 0, None)),
+            Err(too_large_input())
+        );
+    }
+
+    #[test]
+    fn a_list_at_its_bound_passes_and_one_item_more_is_refused() {
+        assert_eq!(check_send_input(&request(1, crate::LIST_ITEMS_MAX, None)), Ok(()));
+        assert_eq!(
+            check_send_input(&request(1, crate::LIST_ITEMS_MAX + 1, None)),
+            Err(too_large_input())
+        );
+        assert_eq!(check_count_input(&vec![true; crate::LIST_ITEMS_MAX]), Ok(()));
+        assert_eq!(
+            check_count_input(&vec![true; crate::LIST_ITEMS_MAX + 1]),
+            Err(too_large_input())
+        );
+    }
+
+    #[test]
+    fn a_text_inside_a_listed_type_is_checked() {
+        let mut long = request(1, 1, None);
+        long.headers[0].value = "v".repeat(crate::TEXT_BYTES_MAX + 1);
+        assert_eq!(check_send_input(&long), Err(too_large_input()));
+    }
+
+    #[test]
+    fn optional_bytes_at_their_bound_pass_and_one_byte_more_is_refused() {
+        assert_eq!(check_send_input(&request(1, 0, Some(crate::BYTES_MAX))), Ok(()));
+        assert_eq!(
+            check_send_input(&request(1, 0, Some(crate::BYTES_MAX + 1))),
+            Err(too_large_input())
+        );
+    }
+
+    #[test]
+    fn an_output_over_its_bound_is_a_failure() {
+        let failed = Refusal::Failed {
+            code: "cap_output_too_large".into(),
+        };
+        let at = Reply {
+            status: 200,
+            body: vec![0; crate::BYTES_MAX],
+        };
+        assert_eq!(check_send_output(&at), Ok(()));
+        let over = Reply {
+            status: 200,
+            body: vec![0; crate::BYTES_MAX + 1],
+        };
+        assert_eq!(check_send_output(&over), Err(failed.clone()));
+        assert_eq!(check_reveal_output(&None), Ok(()));
+        assert_eq!(
+            check_reveal_output(&Some("s".repeat(crate::TEXT_BYTES_MAX + 1))),
+            Err(failed)
+        );
+    }
+
+    #[test]
+    fn a_handle_keeps_the_kernel_id() {
+        let secret = Secret::from_kernel(7);
+        assert_eq!(secret.kernel_id(), 7);
+        assert_eq!(secret, Secret::from_kernel(7));
     }
 }
