@@ -79,7 +79,8 @@ pub fn check(db: &Connection, steps: &[Step]) -> Result<(), StorageError> {
 }
 
 /// Brings engine.db to the newest version before anything else writes to it, after
-/// forgetting a finished restore's record on unix. A database with no schema is stamped newest. An older one is backed up through
+/// refusing a start after a failed rollback and forgetting a finished restore's record on
+/// unix. A database with no schema is stamped newest. An older one is backed up through
 /// [`crate::migrations::backup`], whose copy check always runs, then every pending step runs
 /// in one transaction. Inputs: the writable connection, its path, the settings texts to keep
 /// beside the backup and the steps. Output: Ok at the newest version, or an error naming the
@@ -91,7 +92,10 @@ pub fn upgrade(
     steps: &[Step],
 ) -> Result<(), StorageError> {
     #[cfg(unix)]
-    crate::restore::forget_restore(path);
+    {
+        crate::restore::refuse_broken(path)?;
+        crate::restore::forget_restore(path);
+    }
     upgrade_checked(db, path, texts, steps, SystemTime::now(), backup)
 }
 

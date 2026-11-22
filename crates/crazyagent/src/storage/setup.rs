@@ -789,20 +789,18 @@ pub(crate) fn restore_after_stop(
             Some(&sources),
         )
     });
-    if let Some(line) = restore_line(&restored)
-        && let Err(problem) = kernel_storage::restore::write_restore_record(root, &line)
-    {
+    let line = restore_line(&restored);
+    if let Err(problem) = kernel_storage::restore::write_restore_record(root, &line) {
         eprintln!("{}", problem.0);
     }
     restored
 }
 
 /// The record line a finished restore leaves: `restored <copy>`, or `failed <code>` with the
-/// code alone so no path reaches the record. A restore whose rollback failed leaves none, so
-/// the pending record stays and no line says it changed nothing. Input: how it ended.
-/// Output: the line, or none.
+/// code alone so no path reaches the record. A failed rollback is recorded as its own code,
+/// which the next start refuses. Input: how it ended. Output: the line.
 #[cfg(unix)]
-fn restore_line(restored: &Result<PathBuf, EngineError>) -> Option<String> {
+fn restore_line(restored: &Result<PathBuf, EngineError>) -> String {
     let cause = match restored {
         Ok(copy) => {
             let name = copy
@@ -810,20 +808,12 @@ fn restore_line(restored: &Result<PathBuf, EngineError>) -> Option<String> {
                 .and_then(|name| name.to_str())
                 .unwrap_or("");
             assert!(!name.is_empty());
-            return Some(format!(
-                "{} {name}",
-                kernel_storage::restore::RECORD_RESTORED
-            ));
+            return format!("{} {name}", kernel_storage::restore::RECORD_RESTORED);
         }
         Err(cause) => cause,
     };
-    if cause
-        .0
-        .starts_with(kernel_storage::restore::RESTORE_ROLLBACK_FAILED)
-    {
-        return None;
-    }
     let code = [
+        kernel_storage::restore::RESTORE_ROLLBACK_FAILED,
         kernel_storage::restore::RESTORE_UNAVAILABLE,
         kernel_storage::restore::RESTORE_AGENTS_RUNNING,
         kernel_storage::restore::RESTORE_BUSY,
@@ -831,7 +821,7 @@ fn restore_line(restored: &Result<PathBuf, EngineError>) -> Option<String> {
     .into_iter()
     .find(|code| cause.0.starts_with(code))
     .unwrap_or(kernel_storage::restore::RESTORE_FAILED);
-    Some(format!("{} {code}", kernel_storage::restore::RECORD_FAILED))
+    format!("{} {code}", kernel_storage::restore::RECORD_FAILED)
 }
 
 /// The restore record of the engine at `root`, read without an engine. Input: the root.

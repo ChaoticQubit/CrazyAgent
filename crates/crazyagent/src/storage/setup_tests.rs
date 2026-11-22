@@ -2351,23 +2351,22 @@ fn a_restore_names_its_copy_or_its_code_and_a_failed_rollback_is_recorded_as_fai
     let failed = |text: String| restore_line(&Err(EngineError(text)));
 
     assert_eq!(
-        restore_line(&Ok(copy)).as_deref(),
-        Some("restored replaced-20261122T110000Z")
+        restore_line(&Ok(copy)),
+        "restored replaced-20261122T110000Z"
     );
     assert_eq!(
-        failed("storage_restore_busy".into()).as_deref(),
-        Some("failed storage_restore_busy")
+        failed("storage_restore_busy".into()),
+        "failed storage_restore_busy"
     );
     assert_eq!(
-        failed("storage_restore_failed: check; the replaced data stays in /x".into()).as_deref(),
-        Some("failed storage_restore_failed")
+        failed("storage_restore_failed: check; the replaced data stays in /x".into()),
+        "failed storage_restore_failed"
     );
     assert_eq!(
         failed(format!(
             "{}: check; the rollback failed: check; the replaced data stays in /x",
             kernel_storage::restore::RESTORE_ROLLBACK_FAILED
-        ))
-        .as_deref(),
-        Some("failed storage_restore_rollback_failed")
+        )),
+        "failed storage_restore_rollback_failed"
     );
 }

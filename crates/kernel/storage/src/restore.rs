@@ -231,19 +231,26 @@ pub const RESTORE_RECORD_FILE: &str = "restore-record";
 pub const RECORD_PENDING: &str = "pending";
 /// The first word of the record of a restore that brought the 2.4 data back.
 pub const RECORD_RESTORED: &str = "restored";
-/// The first word of the record of a restore that changed nothing.
+/// The first word of the record of a restore that did not finish.
 pub const RECORD_FAILED: &str = "failed";
 /// The most a restore record holds.
 const RESTORE_RECORD_BYTES_MAX: usize = 512;
 
-/// Replaces the restore record of the engine at `root` with one line, written private and
-/// synced. Inputs: the root and the line. Output: Ok once it is on disk.
+/// Replaces the restore record of the engine at `root` with one line: the line goes to a private
+/// temp file beside it, synced, which is then renamed over the record, and the folder is
+/// synced, so a failure at any step leaves the old record whole. Inputs: the root and the
+/// line. Output: Ok once it is on disk.
 pub fn write_restore_record(root: &Path, line: &str) -> Result<(), StorageError> {
     write_record_with(root, line, private_file)
 }
 
-/// [`write_restore_record`] with the private file writer given, so a row can fail it.
-/// Inputs: the root, the line and the writer. Output: as [`write_restore_record`].
+/// The temp file a record write fills before it renames it over the record.
+const RESTORE_RECORD_TEMP: &str = "restore-record.new";
+
+/// [`write_restore_record`] with the private file writer given, so a row can fail it. A temp
+/// file left by an earlier crash is removed first, and the temp file is removed after any
+/// failure before the rename. Inputs: the root, the line and the writer. Output: as
+/// [`write_restore_record`].
 fn write_record_with(
     root: &Path,
     line: &str,
@@ -252,12 +259,38 @@ fn write_record_with(
     assert!(!line.is_empty());
     assert!(line.len() <= RESTORE_RECORD_BYTES_MAX);
     let record = root.join(RESTORE_RECORD_FILE);
-    match std::fs::remove_file(&record) {
+    let temp = root.join(RESTORE_RECORD_TEMP);
+    match std::fs::remove_file(&temp) {
         Ok(()) => {}
         Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => {}
         Err(cause) => return Err(restore_failed(cause)),
     }
-    write(&record, line.as_bytes()).map_err(|cause| restore_failed(cause.0))
+    let renamed = write(&temp, line.as_bytes())
+        .and_then(|()| std::fs::rename(&temp, &record).map_err(restore_failed));
+    if let Err(cause) = renamed {
+        let _ = std::fs::remove_file(&temp);
+        return Err(restore_failed(cause.0));
+    }
+    std::fs::File::open(root)
+        .and_then(|folder| folder.sync_all())
+        .map_err(restore_failed)
+}
+
+/// Refuses an engine start while the restore record says a restore wrote engine.db and could
+/// not roll it back, so data that did not pass its check is never migrated. Input: the
+/// database path. Output: Ok, or `engine_restore_broken`.
+pub(crate) fn refuse_broken(path: &Path) -> Result<(), StorageError> {
+    let Some(root) = path.parent() else {
+        return Ok(());
+    };
+    let broken = format!("{RECORD_FAILED} {RESTORE_ROLLBACK_FAILED}");
+    if read_restore_record(root).as_deref() == Some(broken.as_str()) {
+        return Err(error(format!(
+            "{ENGINE_RESTORE_BROKEN}: the engine data did not pass its check after a failed \
+             restore; the replaced 2.5 data stays in the {BACKUPS} folder"
+        )));
+    }
+    Ok(())
 }
 
 /// Reads the restore record of the engine at `root`, without an engine and without following
