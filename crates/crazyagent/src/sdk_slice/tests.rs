@@ -218,10 +218,9 @@ fn a_full_first_refusal_set_still_refuses_and_logs() {
 
 #[test]
 fn the_engine_build_script_checks_every_plugin() {
-    let script = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("build.rs"),
-    )
-    .unwrap();
+    let script =
+        std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("build.rs"))
+            .unwrap();
     assert!(script.contains("crazyagent_plugin_check::check_plugins("));
     assert!(script.contains("cargo:rerun-if-changed=../../plugins"));
     assert!(script.contains("cargo:rerun-if-changed=build.rs"));
@@ -244,7 +243,11 @@ fn the_engine_depends_on_plugins_only_from_the_plugins_folder() {
             if name.starts_with("crazyagent-plugin-") && name != "crazyagent-plugin-check" {
                 let path = path.unwrap_or_else(|| panic!("{name} is a path dependency"));
                 let parts: Vec<&str> = path.split('/').collect();
-                assert_eq!(parts.len(), 5, "{name} sits at ../../plugins/<tier>/<plugin>");
+                assert_eq!(
+                    parts.len(),
+                    5,
+                    "{name} sits at ../../plugins/<tier>/<plugin>"
+                );
                 assert_eq!(&parts[..3], ["..", "..", "plugins"], "{name}");
                 assert!(["t1", "t2", "t3"].contains(&parts[3]), "{name}");
                 plugins.push((parts[3].to_owned(), root.join(path)));
