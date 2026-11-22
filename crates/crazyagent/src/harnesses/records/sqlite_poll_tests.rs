@@ -1,5 +1,6 @@
 use super::*;
 use rusqlite::Connection;
+use rusqlite::config::DbConfig;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Instant;
@@ -408,12 +409,17 @@ fn a_value_past_the_value_bound_is_refused_not_built() {
 
 /// Review t15-sec F5: a virtual table under a schema table name is refused, so no table
 /// module runs over tables the harness wrote. The fixture writes the table's schema row
-/// itself, so the row holds on a SQLite built without the module (Windows vcpkg, no fts5).
+/// itself, so the row holds on a SQLite built without the module (Windows vcpkg, no fts5);
+/// the fixture's own connection turns defensive mode off for that, as Apple's SQLite has it
+/// on, and the reader opens its own.
 #[test]
 fn a_virtual_table_under_a_schema_name_is_refused() {
     let tmp = root();
     let path = tmp.path().join("virtual.db");
     let connection = Connection::open(&path).unwrap();
+    connection
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, false)
+        .unwrap();
     connection
         .execute_batch(
             "CREATE TABLE meta(version INTEGER);
