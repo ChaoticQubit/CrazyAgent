@@ -8,6 +8,8 @@ use crate::memory::library::{LibraryAction, MemoryScope};
 use crate::protocol::{PROTOCOL_VERSION, ProjectId, ProjectSpec, RequestId};
 use crate::storage::{Job, Storage};
 use kernel_storage::migrations::{BACKUP_FAILED, BACKUP_FAILURE_FILE, BACKUPS_KEPT, CHECKED};
+use kernel_storage::migrations::{Texts, backup};
+use kernel_storage::upgrade::{Backup, StepRun, upgrade_at_for_test};
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
@@ -241,23 +243,53 @@ fn refused<T>(result: Result<T, EngineError>) -> String {
     }
 }
 
-fn probe(tx: &Transaction<'_>) -> Result<(), EngineError> {
+fn probe(tx: &Transaction<'_>) -> Result<(), StorageError> {
     tx.execute_batch(&format!(
         "CREATE TABLE migration_probe (step INTEGER PRIMARY KEY); \
          INSERT INTO migration_probe VALUES ({});",
         latest(STEPS) + 1
     ))
-    .map_err(error)
+    .map_err(error)?;
+    Ok(())
 }
 
-fn broken(tx: &Transaction<'_>) -> Result<(), EngineError> {
+fn broken(tx: &Transaction<'_>) -> Result<(), StorageError> {
     tx.execute_batch("CREATE TABLE migration_broken (")
-        .map_err(error)
+        .map_err(error)?;
+    Ok(())
 }
 
-fn escaping(tx: &Transaction<'_>) -> Result<(), EngineError> {
+fn escaping(tx: &Transaction<'_>) -> Result<(), StorageError> {
     tx.execute_batch("COMMIT; DELETE FROM projects; CREATE TABLE migration_escaped (a);")
-        .map_err(error)
+        .map_err(error)?;
+    Ok(())
+}
+
+/// The newest version a list of steps reaches, which the kernel checks is numbered from 2
+/// without gaps. Input: the steps. Output: the last one's version, or 1 for none.
+fn latest(steps: &[Step]) -> i64 {
+    steps.last().map_or(1, |step| step.to)
+}
+
+/// The kernel upgrade with the time and backup given, so rows age backups and refuse copies
+/// on purpose; like the engine's upgrade it reads the settings texts it keeps from the
+/// sources. Inputs: as the engine's upgrade, plus the time and the backup. Output: as it.
+fn upgrade_at(
+    db: &mut Connection,
+    path: &Path,
+    settings: Option<&SettingsSources>,
+    steps: &[Step],
+    now: SystemTime,
+    take: Backup,
+) -> Result<(), EngineError> {
+    Ok(upgrade_at_for_test(
+        db,
+        path,
+        &|| settings_texts(settings),
+        steps,
+        now,
+        take,
+    )?)
 }
 
 /// The production steps followed by test-only steps numbered after them.
@@ -657,12 +689,6 @@ async fn newer_settings_file_is_refused_before_the_database_opens() {
 
     assert!(refused.contains("settings_newer_than_engine:"), "{refused}");
     assert!(!root.database().exists());
-}
-
-#[test]
-#[should_panic(expected = "migration steps are numbered from 2 without gaps")]
-fn steps_must_be_numbered_from_two_without_gaps() {
-    latest(&[Step { to: 3, run: probe }]);
 }
 
 /// A setup body as engines before DEC-096 addendum 3 saved it.
