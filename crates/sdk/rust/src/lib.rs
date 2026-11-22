@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+
 pub mod generated;
 pub use generated::CAPABILITIES;
 pub use generated::host::Host;
@@ -41,5 +43,14 @@ pub struct Capability {
     pub needs: &'static str,
 }
 
+/// The most bytes one `text` value of a capability call may hold.
+pub const TEXT_BYTES_MAX: usize = 8_192;
+/// The most bytes one `bytes` value of a capability call may hold.
+pub const BYTES_MAX: usize = 4_194_304;
+/// The most items one `list` value of a capability call may hold.
+pub const LIST_ITEMS_MAX: usize = 64;
+
+#[cfg(test)]
+pub mod fixture_generated;
 #[cfg(test)]
 mod tests;
