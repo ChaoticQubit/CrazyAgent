@@ -529,3 +529,32 @@ fn a_restore_moves_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds_into_its_
         assert_eq!(std::fs::read(&file).unwrap(), b"secret-dummy");
     }
 }
+
+#[test]
+fn the_sweep_reads_a_kept_wal_copy_that_has_no_wal_or_shm_file() {
+    let copy = tempfile::tempdir().unwrap();
+    let path = copy.path().join(DATABASE);
+    let made = Connection::open(&path).unwrap();
+    made.execute_batch(
+        "PRAGMA journal_mode = WAL; CREATE TABLE kept (value TEXT); \
+         INSERT INTO kept VALUES ('one');",
+    )
+    .unwrap();
+    drop(made);
+    assert_eq!(&std::fs::read(&path).unwrap()[18..20], &[2, 2], "the copy is in WAL mode");
+    for side in ["engine.db-wal", "engine.db-shm"] {
+        let side = copy.path().join(side);
+        if side.exists() {
+            std::fs::remove_file(&side).unwrap();
+        }
+    }
+
+    let rows: i64 = replaced_database(copy.path())
+        .and_then(|db| {
+            db.query_row("SELECT COUNT(*) FROM kept", [], |row| row.get(0))
+                .map_err(error)
+        })
+        .unwrap();
+
+    assert_eq!(rows, 1);
+}
