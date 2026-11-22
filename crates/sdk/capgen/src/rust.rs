@@ -59,7 +59,11 @@ pub(crate) fn files(files: &[(&str, File)]) -> Result<Vec<(String, String)>, Cap
     ];
     for (stem, file) in &sorted {
         let own: Vec<&Call> = calls.iter().filter(|call| call.stem == *stem).collect();
-        out.push((format!("{stem}.rs"), module(stem, file, &own, false)?));
+        let leaves = resolve(stem, file, &sorted)?;
+        out.push((
+            format!("{stem}.rs"),
+            module(stem, file, &own, false, &leaves)?,
+        ));
     }
     out.sort();
     assert_eq!(out.len(), sorted.len() + 2);
@@ -79,7 +83,85 @@ pub(crate) fn test_module(stem: &str, file: &File) -> Result<String, CapgenError
         .map(|capability| Call::of(stem, capability))
         .collect::<Result<Vec<_>, _>>()?;
     let own: Vec<&Call> = calls.iter().collect();
-    module(stem, file, &own, true)
+    let leaves = resolve(stem, file, &[&(stem, file.clone())])?;
+    module(stem, file, &own, true, &leaves)
+}
+
+/// What another file's item a foreign ref may name is: a handle or an enum, never a type.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Leaf {
+    Handle,
+    Enum,
+}
+
+/// Each foreign ref of a file, by stem and name, with the leaf it names.
+type Leaves<'f> = BTreeMap<(&'f str, &'f str), Leaf>;
+
+/// Resolves every foreign ref of a file against the loaded files. Inputs: the stem, the
+/// file and every loaded file. Output: the leaves, or `cap_self_qualified` (its own stem),
+/// `capgen_unknown_type` (no such file or item) or `capgen_foreign_not_leaf` (a type).
+fn resolve<'f>(
+    stem: &str,
+    file: &'f File,
+    all: &[&(&str, File)],
+) -> Result<Leaves<'f>, CapgenError> {
+    let mut leaves = Leaves::new();
+    for ty in type_refs(file) {
+        let Some((owner, name)) = foreign_in(ty) else {
+            continue;
+        };
+        let spelled = format!("{owner}.{name}");
+        if owner == stem {
+            return Err(refuse(stem, "cap_self_qualified", spelled));
+        }
+        let target = all
+            .iter()
+            .find(|(other, _)| *other == owner)
+            .map(|(_, target)| target)
+            .ok_or_else(|| refuse(stem, "capgen_unknown_type", spelled.clone()))?;
+        let leaf = if target.handles.iter().any(|item| item.name == name) {
+            Leaf::Handle
+        } else if target.enums.iter().any(|item| item.name == name) {
+            Leaf::Enum
+        } else if target.types.iter().any(|item| item.name == name) {
+            return Err(refuse(stem, "capgen_foreign_not_leaf", spelled));
+        } else {
+            return Err(refuse(stem, "capgen_unknown_type", spelled));
+        };
+        leaves.insert((owner, name), leaf);
+    }
+    assert!(leaves.len() <= type_refs(file).count());
+    Ok(leaves)
+}
+
+/// Every field type of a file: type fields, capability inputs and outputs, event fields.
+/// Input: the file. Output: the types, in source order per kind of place.
+fn type_refs(file: &File) -> impl Iterator<Item = &TypeRef> {
+    let fields = file.types.iter().flat_map(|item| item.fields.iter());
+    let calls = file.capabilities.iter().flat_map(|capability| {
+        capability
+            .inputs
+            .iter()
+            .chain(
+                capability
+                    .emits
+                    .iter()
+                    .flat_map(|event| event.fields.iter()),
+            )
+            .map(|field| &field.ty)
+            .chain(capability.output.as_ref())
+    });
+    fields.map(|field| &field.ty).chain(calls)
+}
+
+/// The foreign ref a type names through its lists and options, if any. Input: the type.
+/// Output: the ref's stem and name.
+fn foreign_in(ty: &TypeRef) -> Option<(&str, &str)> {
+    match ty {
+        TypeRef::List(inner) | TypeRef::Option(inner) => foreign_in(inner),
+        TypeRef::Foreign { stem, name } => Some((stem.as_str(), name.as_str())),
+        _ => None,
+    }
 }
 
 /// One capability as generated Rust names it: its file, the `.cap` name, the function and
@@ -283,16 +365,28 @@ fn host_trait(text: &mut String, calls: &[(&Call<'_>, Option<&str>)]) {
 
 /// Writes one file's module: its enums, handles and types, then per capability its facts,
 /// the `Provide` trait, the bound checks and the call functions. Inputs: the stem, the
-/// file, its calls, and whether the module carries its own `Host` trait (a test module)
-/// instead of the SDK's. Output: the text, or `capgen_name_collision` when a generated
-/// function name is taken twice.
+/// file, its calls, whether it carries its own `Host` trait (a test module), and its
+/// resolved foreign refs. Output: the text, or `capgen_handle_in_event` (a foreign handle
+/// in an event body) or `capgen_name_collision` (a generated name taken twice).
 fn module(
     stem: &str,
     file: &File,
     calls: &[&Call<'_>],
     own_host: bool,
+    leaves: &Leaves<'_>,
 ) -> Result<String, CapgenError> {
-    let kinds = Kinds::of(file);
+    let kinds = Kinds::of(file, leaves);
+    for capability in &file.capabilities {
+        for event in &capability.emits {
+            if event
+                .fields
+                .iter()
+                .any(|field| kinds.traits(&field.ty).handle)
+            {
+                return Err(refuse(stem, "capgen_handle_in_event", event.kind.clone()));
+            }
+        }
+    }
     let mut text = String::new();
     if !calls.is_empty() {
         text.push_str(if own_host {
@@ -357,18 +451,21 @@ struct Traits {
     bounded: bool,
 }
 
-/// What each name of a file declares, and the [`Traits`] of each named type, computed once
-/// per type so the work stays linear in the fields however often a type is named.
+/// What each name of a file declares, the foreign leaves it names, and the [`Traits`] of
+/// each named type, computed once per type so the work stays linear in the fields however
+/// often a type is named.
 struct Kinds<'f> {
     types: BTreeMap<&'f str, &'f Type>,
     handles: BTreeSet<&'f str>,
+    enums: BTreeSet<&'f str>,
+    leaves: &'f Leaves<'f>,
     named: BTreeMap<&'f str, Traits>,
 }
 
 impl<'f> Kinds<'f> {
     /// Indexes a parsed file, whose types the grammar keeps acyclic, and computes every
-    /// type's traits. Input: the file. Output: the index.
-    fn of(file: &'f File) -> Self {
+    /// type's traits. Inputs: the file and its resolved foreign refs. Output: the index.
+    fn of(file: &'f File, leaves: &'f Leaves<'f>) -> Self {
         let mut kinds = Self {
             types: file
                 .types
@@ -376,6 +473,8 @@ impl<'f> Kinds<'f> {
                 .map(|item| (item.name.as_str(), item))
                 .collect(),
             handles: file.handles.iter().map(|item| item.name.as_str()).collect(),
+            enums: file.enums.iter().map(|item| item.name.as_str()).collect(),
+            leaves,
             named: BTreeMap::new(),
         };
         for item in &file.types {
@@ -438,12 +537,19 @@ impl<'f> Kinds<'f> {
                     .named
                     .get(name.as_str())
                     .expect("a named type's traits are computed before it is read"),
-                None => Traits {
-                    copy: true,
-                    handle: self.handles.contains(name.as_str()),
-                    bounded: false,
-                },
+                None => {
+                    let handle = self.handles.contains(name.as_str());
+                    assert!(handle || self.enums.contains(name.as_str()));
+                    leaf_traits(handle)
+                }
             },
+            TypeRef::Foreign { stem, name } => {
+                let leaf = self
+                    .leaves
+                    .get(&(stem.as_str(), name.as_str()))
+                    .expect("every foreign ref is resolved before generation");
+                leaf_traits(*leaf == Leaf::Handle)
+            }
         }
     }
 
@@ -463,6 +569,16 @@ impl<'f> Kinds<'f> {
     /// Output: the answer.
     fn bounded(&self, ty: &TypeRef) -> bool {
         self.traits(ty).bounded
+    }
+}
+
+/// The traits of a handle or an enum: `Copy`, no bound, a handle only when it is one.
+/// Input: whether the leaf is a handle. Output: the traits.
+fn leaf_traits(handle: bool) -> Traits {
+    Traits {
+        copy: true,
+        handle,
+        bounded: false,
     }
 }
 
@@ -887,6 +1003,7 @@ fn rust_type(ty: &TypeRef, module: Option<&str>) -> String {
         }
         (TypeRef::Named(name), None) => name.clone(),
         (TypeRef::Named(name), Some(module)) => format!("{module}::{name}"),
+        (TypeRef::Foreign { stem, name }, _) => format!("super::{stem}::{name}"),
     }
 }
 
