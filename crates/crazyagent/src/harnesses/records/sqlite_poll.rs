@@ -4,7 +4,7 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, ErrorCode, OpenFlags};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// The most reads in a row a busy or locked database may answer with no events before the
 /// reader refuses it with [`BUSY`].
@@ -124,6 +124,15 @@ impl SqlitePoll {
     fn read_rows(&mut self, mode: Mode) -> Result<Vec<TranscriptEvent>, Stop> {
         let immutable = mode == Mode::Immutable;
         let sort = |error: rusqlite::Error| stop(&error, immutable);
+        let before = if immutable {
+            Some(
+                stamp(&self.path)
+                    .filter(|seen| !seen.wal)
+                    .ok_or(Stop::Busy)?,
+            )
+        } else {
+            None
+        };
         let connection = open(&self.path, mode).map_err(sort)?;
         for table in self.schema.tables {
             let (kind, made): (String, Option<String>) = connection
@@ -192,11 +201,43 @@ impl SqlitePoll {
         if let Some(step) = MID_READ.with(|hook| hook.borrow_mut().take()) {
             step();
         }
+        if before.is_some_and(|before| stamp(&self.path) != Some(before)) {
+            return Err(Stop::Busy);
+        }
         assert!(last >= self.after && text <= READ_TEXT_BYTES_MAX);
         assert!(events.len() <= ROWS_PER_READ_MAX);
         self.after = last;
         Ok(events)
     }
+}
+
+/// What an immutable read finds unchanged at its end before its facts are taken: the
+/// database's size and modification time and whether a WAL file is beside it. A writer's
+/// checkpoint writes the database and moves that time, which file systems keep to the
+/// nanosecond (APFS, ext4) or 100 ns (NTFS), so only two writes within one tick look alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stamp {
+    size: u64,
+    modified: SystemTime,
+    wal: bool,
+}
+
+/// Reads the [`Stamp`] of a database without following a link. Input: the database path.
+/// Output: the stamp, or none when the database or its WAL file cannot be looked at.
+fn stamp(path: &Path) -> Option<Stamp> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    let mut name = path.as_os_str().to_owned();
+    name.push("-wal");
+    let wal = match std::fs::symlink_metadata(&name) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => return None,
+    };
+    Some(Stamp {
+        size: metadata.len(),
+        modified: metadata.modified().ok()?,
+        wal,
+    })
 }
 
 /// How one read opens the database: read-only through the WAL index the harness keeps, or,
