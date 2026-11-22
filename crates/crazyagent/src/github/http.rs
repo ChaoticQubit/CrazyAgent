@@ -1,4 +1,4 @@
-use crate::credentials::Piece::{Escaped, Form, Plain};
+use kernel_security::secret::Piece::{Escaped, Form, Plain};
 use crate::engine::EngineError;
 use kernel_security::secret::SecretString;
 use std::io::{Read, Write};
@@ -115,7 +115,7 @@ impl Request<'_> {
                 None => {}
             }
         }
-        crate::credentials::sized(&pieces).ok_or_else(|| failure("github_request_invalid"))
+        kernel_security::secret::sized(&pieces).ok_or_else(|| failure("github_request_invalid"))
     }
 
     /// Builds the curl command without running it. Output: the command, whose arguments

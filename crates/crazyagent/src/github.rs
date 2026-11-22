@@ -1,4 +1,4 @@
-use crate::credentials::Store;
+use kernel_security::store::Store;
 use crate::engine::EngineError;
 use kernel_security::secret::SecretString;
 use serde::{Deserialize, Serialize};

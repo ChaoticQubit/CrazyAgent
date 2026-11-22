@@ -1,5 +1,5 @@
 use super::os_keyring::OsKeyring;
-use crate::credentials::Store;
+use kernel_security::store::Store;
 use kernel_security::error::StoreError;
 use keyring_core::{CredentialStore, Entry};
 use std::collections::HashMap;

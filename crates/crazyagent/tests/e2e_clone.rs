@@ -10,7 +10,7 @@ use crazyagent::credentials::Keychain;
 use crazyagent::credentials::OsKeyring;
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 use crazyagent::credentials::platform_store;
-use crazyagent::credentials::{Store, reference};
+use kernel_security::store::{Store, reference};
 use crazyagent::engine::owner::{OwnerClient, OwnerClientKind, OwnerResult};
 use crazyagent::github::{Endpoints, GitHub, GitHubMethod, namespace};
 use crazyagent::projects_home::FoundState;

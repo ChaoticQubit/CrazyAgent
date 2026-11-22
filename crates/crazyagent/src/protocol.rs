@@ -1,3 +1,6 @@
+use kernel_common::windows_device;
+use kernel_security::error::StoreError;
+use kernel_security::store::SecretRef;
 use serde::{Deserialize, Serialize};
 
 pub const PROTOCOL_VERSION: u16 = 1;
@@ -19,11 +22,6 @@ impl std::fmt::Display for ProtocolError {
 
 impl std::error::Error for ProtocolError {}
 
-const WINDOWS_DEVICE_NAMES: [&str; 22] = [
-    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
-    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
-];
-
 /// True when the text is exactly one plain path component that names one child, never
 /// itself, its parent or another root: not empty, `.`, `..`, a separator, a root or a
 /// Windows drive like `c:`, no trailing dot or space, which Windows strips, and no Windows
@@ -37,21 +35,6 @@ pub(crate) fn single_component(text: &str) -> bool {
         (Some(std::path::Component::Normal(part)), None) if part == std::ffi::OsStr::new(text)
     ) && !text.ends_with(['.', ' '])
         && !windows_device(text)
-}
-
-/// True when Windows opens the name as a device instead of a file: CON, PRN, AUX, NUL,
-/// COM1 to COM9 or LPT1 to LPT9 in any case, alone, before an extension or before one
-/// trailing colon, with or without spaces before the dot. Input: one path component.
-/// Output: whether it is reserved on Windows.
-pub(crate) fn windows_device(name: &str) -> bool {
-    let name = name.strip_suffix(':').unwrap_or(name);
-    let stem = name
-        .split_once('.')
-        .map_or(name, |(stem, _)| stem)
-        .trim_end_matches(' ');
-    WINDOWS_DEVICE_NAMES
-        .iter()
-        .any(|device| stem.eq_ignore_ascii_case(device))
 }
 
 fn validate_identity(value: &str) -> Result<(), ProtocolError> {
@@ -109,6 +92,24 @@ identity!(
     ControllerEpoch,
     CredentialRef
 );
+
+/// Turns a kernel store reference into the wire reference the engine saves and sends,
+/// byte-equal. A kernel reference is two checked names joined by one `:` and refused on
+/// the shapes an identity refuses, so the conversion cannot fail. Input: the reference.
+/// Output: the same text as a `CredentialRef`.
+pub fn wire(reference: &SecretRef) -> CredentialRef {
+    let wired = CredentialRef::new(reference.as_str())
+        .expect("a kernel reference is always a valid identity");
+    assert_eq!(wired.as_str(), reference.as_str());
+    wired
+}
+
+/// Turns a saved or received wire reference back into a kernel store reference,
+/// byte-equal. Input: the wire reference. Output: the kernel reference, or
+/// `credential_reference_invalid` when it is not `<service>:<account>` with both names checked.
+pub fn kernel(reference: &CredentialRef) -> Result<SecretRef, StoreError> {
+    SecretRef::try_from(reference.as_str())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]

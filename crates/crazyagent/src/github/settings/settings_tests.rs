@@ -1,7 +1,8 @@
 use super::super::state;
 use super::*;
 use crate::credentials::test_keychain::TestKeychain;
-use crate::credentials::{Keychain, Store, reference};
+use kernel_security::store::{Store, reference};
+use crate::credentials::Keychain;
 use crate::github::test_server::{Answer, Seen, Server};
 use crate::github::{
     Endpoints, GitHubPublishJob, GitHubPublishPlan, GitHubPublishStep, GitHubRuleOutcome,

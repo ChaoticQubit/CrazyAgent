@@ -154,7 +154,8 @@ mod slow_remote {
     use super::*;
     use crate::client_controller::OwnerController;
     use crate::credentials::test_keychain::TestKeychain;
-    use crate::credentials::{Store, platform_store, reference};
+    use kernel_security::store::{Store, reference};
+    use crate::credentials::platform_store;
     use crate::engine::owner::{OwnerResponse, OwnerResult};
     use crate::github::test_server::{Answer, Server, base64};
     use crate::github::{Endpoints, GitHub, namespace, use_loopback};

@@ -1,6 +1,7 @@
-use super::Piece::Plain;
-use super::{Store, checked_name, parts, platform_store, reference};
-use crate::protocol::CredentialRef;
+use super::platform_store;
+use kernel_security::secret::Piece::Plain;
+use kernel_security::secret::sized;
+use kernel_security::store::{SecretRef, Store, checked_name, parts, reference};
 use kernel_security::error::StoreError;
 use kernel_security::secret::SecretString;
 use keyring_core::{CredentialStore, Entry};
@@ -58,7 +59,7 @@ impl OsKeyring {
         (self.entry_for)(&*self.store, service, account).map_err(failure)
     }
 
-    fn owned_entry(&self, reference: &CredentialRef) -> Result<Entry, StoreError> {
+    fn owned_entry(&self, reference: &SecretRef) -> Result<Entry, StoreError> {
         let (service, account) = parts(reference)?;
         self.entry(owned_service(&self.namespace, service)?, account)
     }
@@ -70,7 +71,7 @@ impl Store for OsKeyring {
         service: &str,
         account: &str,
         secret: &SecretString,
-    ) -> Result<CredentialRef, StoreError> {
+    ) -> Result<SecretRef, StoreError> {
         let service = owned_service(&self.namespace, service)?;
         let account = checked_name(account)?;
         let found = reference(service, account)?;
@@ -82,14 +83,14 @@ impl Store for OsKeyring {
         Ok(found)
     }
 
-    fn get(&self, reference: &CredentialRef) -> Result<SecretString, StoreError> {
+    fn get(&self, reference: &SecretRef) -> Result<SecretString, StoreError> {
         let entry = self.owned_entry(reference)?;
         bounded(self.step_time, move || {
             SecretString::new(entry.get_secret().map_err(failure)?)
         })
     }
 
-    fn delete(&self, reference: &CredentialRef) -> Result<(), StoreError> {
+    fn delete(&self, reference: &SecretRef) -> Result<(), StoreError> {
         let entry = self.owned_entry(reference)?;
         bounded(self.step_time, move || match entry.delete_credential() {
             Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
@@ -99,7 +100,7 @@ impl Store for OsKeyring {
 
     fn git_credential_helper(
         &self,
-        reference: &CredentialRef,
+        reference: &SecretRef,
         username: &str,
     ) -> Result<String, StoreError> {
         let (service, _) = parts(reference)?;
@@ -138,8 +139,7 @@ pub fn answer_git_credential(
     mut output: impl Write,
 ) -> Result<(), StoreError> {
     let username = checked_username(username)?;
-    let reference = CredentialRef::new(reference)
-        .map_err(|_| StoreError::code("credential_reference_invalid"))?;
+    let reference = SecretRef::try_from(reference)?;
     parts(&reference)?;
     let mut request = Vec::new();
     let read = input.take(GIT_REQUEST_BYTES_MAX).read_to_end(&mut request);
@@ -149,7 +149,7 @@ pub fn answer_git_credential(
         return Ok(());
     }
     let secret = platform_store(namespace)?.get(&reference)?;
-    let mut answer = super::sized(&[
+    let mut answer = sized(&[
         Plain("username="),
         Plain(username),
         Plain("\npassword="),

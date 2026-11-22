@@ -737,7 +737,7 @@ pub fn folder_name(name: &str) -> Result<(), EngineError> {
         || name.chars().any(|c| {
             c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
         })
-        || crate::protocol::windows_device(name)
+        || kernel_common::windows_device(name)
     {
         return Err(refused("home_folder_name_invalid"));
     }
@@ -768,7 +768,7 @@ pub fn slug(name: &str) -> Option<String> {
         }
         slug.push(c.to_ascii_lowercase());
     }
-    if slug.is_empty() || crate::protocol::windows_device(&slug) {
+    if slug.is_empty() || kernel_common::windows_device(&slug) {
         return None;
     }
     assert!(slug.len() <= SLUG_BYTES_MAX && !slug.ends_with('-'));

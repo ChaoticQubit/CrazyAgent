@@ -1,6 +1,6 @@
 use super::test_server::{Answer, Seen, Server, base64};
 use super::*;
-use crate::credentials::reference;
+use kernel_security::store::reference;
 use std::os::unix::fs::OpenOptionsExt;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -1297,7 +1297,7 @@ fn namespaces_differ_per_engine_root_and_stay_short() {
     assert_ne!(first, second);
     assert!(first.starts_with("dev.crazyagent.e"));
     assert_eq!(first.len(), "dev.crazyagent.e".len() + 12);
-    assert!(crate::credentials::checked_name(&format!("{first}.github")).is_ok());
+    assert!(kernel_security::store::checked_name(&format!("{first}.github")).is_ok());
 }
 
 #[test]

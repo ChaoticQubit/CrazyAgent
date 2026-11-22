@@ -1,6 +1,6 @@
 use super::CloneReceipt;
 use super::api::Endpoints;
-use crate::credentials::Store;
+use kernel_security::store::Store;
 use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
 use std::ffi::{OsStr, OsString};

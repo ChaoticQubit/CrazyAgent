@@ -1,5 +1,5 @@
-use crazyagent::credentials::Piece::{Escaped, Form, Hex, Plain};
-use crazyagent::credentials::sized;
+use kernel_security::secret::Piece::{Escaped, Form, Hex, Plain};
+use kernel_security::secret::sized;
 use crazyagent::model_gateway::relay::Relay;
 use crazyagent::usage::extras::Adapter;
 use crazyagent::usage::poll::poll_balance;
