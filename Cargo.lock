@@ -979,10 +979,22 @@ dependencies = [
 [[package]]
 name = "crazyagent-kernel-common"
 version = "2.4.4"
+dependencies = [
+ "sha2 0.10.9",
+]
 
 [[package]]
 name = "crazyagent-kernel-processes"
 version = "2.4.4"
+dependencies = [
+ "crazyagent-kernel-common",
+ "crazyagent-win-sandbox",
+ "getrandom 0.4.3",
+ "nix",
+ "rustix 1.1.5",
+ "tempfile",
+ "tokio",
+]
 
 [[package]]
 name = "crazyagent-kernel-storage"

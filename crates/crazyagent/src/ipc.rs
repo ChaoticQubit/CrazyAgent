@@ -2,9 +2,9 @@ use std::io;
 use std::path::Path;
 
 #[cfg(unix)]
-pub(crate) use crate::platform::unix_socket::{
-    OwnedReadHalf, OwnedWriteHalf, ReadHalf, UnixListener as Listener, UnixStream as Stream,
-};
+pub(crate) use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf, ReadHalf};
+#[cfg(unix)]
+pub(crate) use tokio::net::{UnixListener as Listener, UnixStream as Stream};
 #[cfg(windows)]
 pub(crate) use windows::{
     OwnedReadHalf, OwnedWriteHalf, PipeListener as Listener, PipeStream as Stream, ReadHalf,

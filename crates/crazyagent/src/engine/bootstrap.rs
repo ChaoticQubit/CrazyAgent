@@ -864,7 +864,7 @@ fn cancelled(shutdown: &watch::Receiver<bool>) -> Result<(), EngineError> {
 /// `owner_socket_path_too_long`.
 #[cfg(unix)]
 fn check_path_length(path: &Path) -> Result<(), EngineError> {
-    if !crate::socket_address::fits(path) {
+    if !kernel_processes::socket_address::fits(path) {
         return Err(fail("owner_socket_path_too_long"));
     }
     Ok(())

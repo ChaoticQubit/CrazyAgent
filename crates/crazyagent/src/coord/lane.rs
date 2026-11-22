@@ -1072,7 +1072,7 @@ pub fn run(arguments: &[OsString], out: &mut dyn Write) -> i32 {
 #[cfg(not(unix))]
 fn own_program(program: &OsStr) -> std::io::Result<OsString> {
     let path = Path::new(program);
-    if crate::tools::fixed_program(path) {
+    if kernel_processes::batch::fixed_program(path) {
         return Ok(program.to_owned());
     }
     if path.has_root()
@@ -1087,7 +1087,7 @@ fn own_program(program: &OsStr) -> std::io::Result<OsString> {
         ));
     }
     let absolute = std::path::absolute(path)?;
-    assert!(crate::tools::fixed_program(&absolute));
+    assert!(kernel_processes::batch::fixed_program(&absolute));
     Ok(absolute.into_os_string())
 }
 

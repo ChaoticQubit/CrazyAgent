@@ -154,7 +154,7 @@ fn hear(
                 if error.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
             {
                 let mut fds = [PollFd::new(engine, PollFlags::IN)];
-                if crate::platform::fd_wait::ready(&mut fds, Some(deadline)).is_err() {
+                if kernel_processes::fd_wait::ready(&mut fds, Some(deadline)).is_err() {
                     return Heard::Silent;
                 }
             }

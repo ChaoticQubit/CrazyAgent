@@ -4390,7 +4390,7 @@ fallback_allowed = false
         std::fs::create_dir(&long).unwrap();
         std::fs::set_permissions(&long, std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = long.join(SOCKET);
-        let address = crate::socket_address::address(&path).unwrap();
+        let address = kernel_processes::socket_address::address(&path).unwrap();
         let link = address.parent().unwrap();
         std::fs::remove_file(link).unwrap();
         std::fs::create_dir(link).unwrap();

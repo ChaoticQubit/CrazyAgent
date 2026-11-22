@@ -1,7 +1,7 @@
 use crate::credentials::Piece::{Escaped, Plain};
 use crate::credentials::SecretString;
 use crate::engine::EngineError;
-use crate::platform::fd_wait::{self, Wake};
+use kernel_processes::fd_wait::{self, Wake};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};

@@ -582,13 +582,14 @@ impl Tmux {
     /// one too long for a socket address, which a confined host may not use. Output: the
     /// address, or `terminal_socket_path_long` or `terminal_folder_unsafe`.
     fn address(&self) -> Result<PathBuf, HostError> {
-        let socket = crate::socket_address::address(&self.socket()).map_err(|error| {
-            failure(if error.kind() == std::io::ErrorKind::InvalidInput {
-                "terminal_socket_path_long"
-            } else {
-                "terminal_folder_unsafe"
-            })
-        })?;
+        let socket =
+            kernel_processes::socket_address::address(&self.socket()).map_err(|error| {
+                failure(if error.kind() == std::io::ErrorKind::InvalidInput {
+                    "terminal_socket_path_long"
+                } else {
+                    "terminal_folder_unsafe"
+                })
+            })?;
         if self.confined.is_some() && socket != self.socket {
             return Err(failure("terminal_socket_path_long"));
         }

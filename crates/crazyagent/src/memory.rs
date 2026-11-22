@@ -4,7 +4,6 @@ use crate::protocol::*;
 use rusqlite::Connection;
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 pub mod import;
@@ -323,8 +322,11 @@ pub(crate) fn reject(code: &str) -> Result<Outcome, EngineError> {
     Ok(Outcome::Rejected { code: code.into() })
 }
 
+/// Temporary forwarder while the callers in pod B files wait for ticket C1d (leader E1,
+/// POD-C), whose report quotes a grep with zero hits for `memory::hash`. Input: the bytes.
+/// Output: their lowercase hex sha256, from `kernel_common::hash`.
 pub(crate) fn hash(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    kernel_common::hash(bytes)
 }
 
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {

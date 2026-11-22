@@ -4,10 +4,6 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
-pub(crate) mod fd_wait;
-#[cfg(unix)]
-pub(crate) mod unix_socket;
-
 #[cfg(unix)]
 pub(crate) use std::os::unix::fs::FileExt;
 

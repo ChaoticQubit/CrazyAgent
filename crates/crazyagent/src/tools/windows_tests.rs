@@ -63,7 +63,7 @@ fn an_npm_cmd_shim_runs_as_node_and_the_script_it_names() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(package.join("codex.js"), "#!/usr/bin/env node\n").unwrap();
     let shim = real.join("codex.cmd");
-    std::fs::write(&shim, batch::tests::CODEX).unwrap();
+    std::fs::write(&shim, kernel_processes::batch::CODEX).unwrap();
 
     let resolved = resolve_entry(&shim, &places).unwrap();
     assert_eq!(resolved.entry, shim);
@@ -114,7 +114,11 @@ fn npx_runs_by_its_layout_and_every_other_batch_file_is_refused() {
     let lone_npx = other.join("npx.cmd");
     std::fs::copy(&npx, &lone_npx).unwrap();
     let tool = other.join("tool.cmd");
-    std::fs::write(&tool, batch::tests::CODEX.replace("CALL", "calc & CALL")).unwrap();
+    std::fs::write(
+        &tool,
+        kernel_processes::batch::CODEX.replace("CALL", "calc & CALL"),
+    )
+    .unwrap();
     let script = other.join("tool.BAT");
     std::fs::write(&script, "@ECHO off\r\n").unwrap();
     for file in [lone_npx, tool, script] {
@@ -186,13 +190,13 @@ fn a_shim_whose_target_is_a_batch_file_pins_nothing() {
     let to_batch = real.join("batch.cmd");
     std::fs::write(
         &to_batch,
-        batch::tests::CODEX.replace(codex, r"node_modules\x\run.cmd"),
+        kernel_processes::batch::CODEX.replace(codex, r"node_modules\x\run.cmd"),
     )
     .unwrap();
     let to_script = real.join("script.cmd");
     std::fs::write(
         &to_script,
-        batch::tests::CODEX.replace(codex, r"node_modules\x\run.js"),
+        kernel_processes::batch::CODEX.replace(codex, r"node_modules\x\run.js"),
     )
     .unwrap();
     assert_eq!(cmd_shim_real(&to_batch.canonicalize().unwrap()), None);
@@ -214,7 +218,7 @@ fn codex_shim(folder: &Path) -> (PathBuf, PathBuf) {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(package.join("codex.js"), "#!/usr/bin/env node\n").unwrap();
     let shim = folder.join("codex.cmd");
-    std::fs::write(&shim, batch::tests::CODEX).unwrap();
+    std::fs::write(&shim, kernel_processes::batch::CODEX).unwrap();
     (shim, package.join("codex.js").canonicalize().unwrap())
 }
 

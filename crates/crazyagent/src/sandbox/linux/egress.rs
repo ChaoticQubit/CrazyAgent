@@ -1561,7 +1561,7 @@ mod tests {
         let folder = tempfile::tempdir().unwrap();
         let path = folder.path().join("tmux.sock");
         assert_eq!(
-            crate::socket_address::address(&path).unwrap(),
+            kernel_processes::socket_address::address(&path).unwrap(),
             path,
             "the socket is reached at its own path, so no file opens on the way"
         );
