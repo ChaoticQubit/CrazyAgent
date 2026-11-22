@@ -58,10 +58,11 @@ struct Parsed {
 }
 
 /// Parses the tokens of one source into its file and the positions the checks need.
-/// Input: the tokens, ending with `End`. Output: the file and its spots, or the first refusal.
-pub(crate) fn file(tokens: Vec<Token<'_>>) -> Result<(File, Spots), ParseError> {
+/// Inputs: the file's stem and the tokens, ending with `End`. Output: the file and its spots, or the first refusal.
+pub(crate) fn file<'s>(stem: &'s str, tokens: Vec<Token<'s>>) -> Result<(File, Spots), ParseError> {
     assert_eq!(tokens.last().map(|token| token.kind), Some(Kind::End));
     let mut parser = Parser {
+        stem,
         tokens,
         at: 0,
         spots: Spots::default(),
@@ -103,6 +104,7 @@ pub(crate) fn file(tokens: Vec<Token<'_>>) -> Result<(File, Spots), ParseError> 
 
 /// A recursive-descent parser over the tokens of one source.
 struct Parser<'s> {
+    stem: &'s str,
     tokens: Vec<Token<'s>>,
     at: usize,
     spots: Spots,
@@ -217,11 +219,11 @@ impl<'s> Parser<'s> {
         Ok((name, parsed))
     }
 
-    /// Consumes a type: a scalar, `text`, `bytes`, a Pascal name, or `list<type>` and
-    /// `option<type>` up to `TYPE_DEPTH_MAX` wrappers deep, never an option directly inside
-    /// an option. Inputs: the wrappers already open, whether the nearest is an option, and
-    /// the spots of named types found so far. Output: the type, `cap_type_too_deep`,
-    /// `cap_nested_option`, `cap_name_too_long`, `cap_unknown_type` or `cap_unexpected_token`.
+    /// Consumes a type: a scalar, `text`, `bytes`, a Pascal name, `stem.Name`, or `list<type>`
+    /// and `option<type>` up to `TYPE_DEPTH_MAX` deep, never an option directly in an option.
+    /// Inputs: the wrappers already open, whether the nearest is an option, and the spots of
+    /// named types found so far. Output: the type, or `cap_type_too_deep`, `cap_nested_option`,
+    /// `cap_name_too_long`, `cap_self_qualified`, `cap_unknown_type`, `cap_unexpected_token`.
     fn type_ref(
         &mut self,
         depth: usize,
@@ -236,7 +238,7 @@ impl<'s> Parser<'s> {
             _ => None,
         };
         let Some(is_option) = wrapper else {
-            let ty = leaf(&token)?;
+            let ty = leaf(&token, self.stem)?;
             if matches!(ty, TypeRef::Named(_)) {
                 named.push(Spot::of(&token));
             }
@@ -375,10 +377,11 @@ impl<'s> Parser<'s> {
     }
 }
 
-/// Reads an unwrapped type from its word: a scalar, `text`, `bytes`, or a Pascal name of a
-/// declared enum, type or handle. Input: the word token. Output: the type,
-/// `cap_name_too_long` or `cap_unknown_type`.
-fn leaf(token: &Token<'_>) -> Result<TypeRef, ParseError> {
+/// Reads an unwrapped type from its word: a scalar, `text`, `bytes`, a Pascal name of a
+/// declared enum, type or handle, or `stem.Name` of another file's item. Inputs: the word
+/// token and the file's stem. Output: the type, `cap_name_too_long`, `cap_self_qualified`
+/// or `cap_unknown_type`.
+fn leaf(token: &Token<'_>, own: &str) -> Result<TypeRef, ParseError> {
     match token.text {
         "u16" => Ok(TypeRef::U16),
         "u32" => Ok(TypeRef::U32),
@@ -388,7 +391,14 @@ fn leaf(token: &Token<'_>) -> Result<TypeRef, ParseError> {
         "bytes" => Ok(TypeRef::Bytes),
         text if text.len() > NAME_BYTES_MAX => Err(token.refuse("cap_name_too_long")),
         text if is_pascal(text) => Ok(TypeRef::Named(text.to_owned())),
-        _ => Err(token.refuse("cap_unknown_type")),
+        text => match text.split_once('.') {
+            Some((stem, _)) if stem == own => Err(token.refuse("cap_self_qualified")),
+            Some((stem, name)) if is_snake(stem) && is_pascal(name) => Ok(TypeRef::Foreign {
+                stem: stem.to_owned(),
+                name: name.to_owned(),
+            }),
+            _ => Err(token.refuse("cap_unknown_type")),
+        },
     }
 }
 

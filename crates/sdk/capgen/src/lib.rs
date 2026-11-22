@@ -143,7 +143,7 @@ pub fn load(caps: &Path) -> Result<Vec<(String, File)>, CapgenError> {
         let name = format!("{stem}.cap");
         let source = fs::read_to_string(caps.join(&name))
             .map_err(|error| refuse(&name, "capgen_read", error.to_string()))?;
-        let file = crazyagent_cap::parse(&source).map_err(|error| {
+        let file = crazyagent_cap::parse_as(&stem, &source).map_err(|error| {
             refuse(
                 &name,
                 error.code,
