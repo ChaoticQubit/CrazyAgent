@@ -5,8 +5,8 @@ use std::sync::OnceLock;
 /// One reviewed difference against a 2.4.2 golden (v250 plan 9.13, H7, P6): the golden lines
 /// from line `at` that the capture shows as `capture`, with the commit and why. An entry on
 /// sandbox policy, grants, secret-carrying env or agent-home files is `security`, says in
-/// `change` whether agents' reach widens, narrows or stays the same, and holds its scenario
-/// red until the owner sets `owner_signed`.
+/// `change` whether agents' reach widens, narrows or stays the same, and keeps the owner
+/// sign-off row red until the owner sets `owner_signed`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Entry {
@@ -153,8 +153,8 @@ pub(super) fn expected(scenario: &str, golden: &[u8]) -> Result<Vec<u8>, String>
     apply(scenario, &listed, golden)
 }
 
-/// Names each scenario a security entry not yet signed by the owner holds red, with what the
-/// entry widens or narrows. Input: the entries. Output: one line per held entry, sorted.
+/// Names each security entry the owner has not yet signed, so the sign-off row stays red,
+/// with what the entry changes. Input: the entries. Output: one line per held entry, sorted.
 pub(super) fn held(listed: &[Entry]) -> Vec<String> {
     let mut held: Vec<String> = listed
         .iter()

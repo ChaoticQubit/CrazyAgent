@@ -2,7 +2,7 @@
   {
     "scenario": "provider/account-draft-refusals",
     "at": 127,
-    "commit": "91e422100",
+    "commit": "dc4523033",
     "reason": "2.5 T21 adds the Gemini API key provider to the account catalog",
     "security": false,
     "golden": [],
@@ -33,7 +33,7 @@
   {
     "scenario": "provider/account-drafts",
     "at": 113,
-    "commit": "91e422100",
+    "commit": "dc4523033",
     "reason": "2.5 T21 adds the Gemini API key provider to the account catalog",
     "security": false,
     "golden": [],
@@ -72,7 +72,7 @@
   {
     "scenario": "provider/catalog",
     "at": 46,
-    "commit": "91e422100",
+    "commit": "dc4523033",
     "reason": "2.5 T21 adds the Gemini API key provider to the account catalog",
     "security": false,
     "golden": [],
