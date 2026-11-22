@@ -2,6 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
+use kernel_plugin_host::manifest::{self as host_manifest, Manifest};
+#[cfg(test)]
+use kernel_plugin_host::manifest::{Bounded, read_bounded};
+
 /// The one build script every plugin crate carries, byte for byte.
 pub const CANONICAL_BUILD_RS: &str =
     "fn main() {\n    crazyagent_plugin_check::enforce_here();\n}\n";
@@ -15,24 +19,13 @@ pub struct Violation {
     pub code: &'static str,
 }
 
-/// A plugin's `plugin.toml`: its id, tier word, kind, manifest version and the
-/// permissions it asks the kernel for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Manifest {
-    pub plugin: String,
-    pub tier: String,
-    pub kind: String,
-    pub version: i64,
-    pub permissions: Vec<String>,
-}
-
 /// Checks one plugin crate against every plugin rule. Input: the crate folder.
 /// Output: nothing, or every violation sorted by file, line and code.
 pub fn check_crate(dir: &Path) -> Result<(), Vec<Violation>> {
     let mut out = Vec::new();
     manifest::cargo(dir, &mut out);
     manifest::build_script(dir, &mut out);
-    if let Err(violation) = manifest::plugin(dir) {
+    if let Err(violation) = read_manifest(dir) {
         out.push(violation);
     }
     source::sources(dir, &mut out);
@@ -134,7 +127,11 @@ fn tree(file: PathBuf) -> Violation {
 /// Reads a plugin's `plugin.toml`, refusing a missing key, a wrong type or any other key.
 /// Input: the crate folder. Output: the manifest, or `plugin_manifest_invalid`.
 pub fn read_manifest(dir: &Path) -> Result<Manifest, Violation> {
-    manifest::plugin(dir)
+    host_manifest::read(dir).map_err(|refused| Violation {
+        file: PathBuf::from("plugin.toml"),
+        line: refused.line,
+        code: refused.code,
+    })
 }
 
 /// The plugin build script's whole job: checks the crate being built and fails the build
@@ -157,37 +154,6 @@ pub fn enforce_here() {
             .collect();
         panic!("plugin check refused this crate:\n{}", lines.join("\n"));
     }
-}
-
-/// What a bounded read of one file found: its UTF-8 text, more bytes than the bound, or a
-/// file that cannot be opened, read or decoded.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Bounded {
-    Text(String),
-    TooLarge,
-    Unreadable,
-}
-
-/// Reads one file, taking at most `max` + 1 bytes, so a large file is refused without
-/// holding it whole in memory. Inputs: the path and the bound. Output: the text,
-/// `TooLarge` past the bound, or `Unreadable`.
-pub(crate) fn read_bounded(path: &Path, max: usize) -> Bounded {
-    use std::io::Read;
-    let Ok(file) = std::fs::File::open(path) else {
-        return Bounded::Unreadable;
-    };
-    let limit = u64::try_from(max)
-        .expect("a bound fits u64")
-        .saturating_add(1);
-    let mut bytes = Vec::new();
-    if file.take(limit).read_to_end(&mut bytes).is_err() {
-        return Bounded::Unreadable;
-    }
-    assert!(bytes.len() <= max.saturating_add(1));
-    if bytes.len() > max {
-        return Bounded::TooLarge;
-    }
-    String::from_utf8(bytes).map_or(Bounded::Unreadable, Bounded::Text)
 }
 
 mod manifest;
