@@ -348,72 +348,131 @@ fn module(
     Ok(text)
 }
 
-/// What each name of a file declares, and per type whether it is `Copy`, holds a handle,
-/// or holds a bounded field, each through the types it names.
+/// Whether a type is `Copy`, holds a handle, or holds text, bytes or a list, each through
+/// the types it names.
+#[derive(Clone, Copy)]
+struct Traits {
+    copy: bool,
+    handle: bool,
+    bounded: bool,
+}
+
+/// What each name of a file declares, and the [`Traits`] of each named type, computed once
+/// per type so the work stays linear in the fields however often a type is named.
 struct Kinds<'f> {
     types: BTreeMap<&'f str, &'f Type>,
     handles: BTreeSet<&'f str>,
+    named: BTreeMap<&'f str, Traits>,
 }
 
 impl<'f> Kinds<'f> {
-    /// Indexes a parsed file, whose types the grammar keeps acyclic. Input: the file.
-    /// Output: the index.
+    /// Indexes a parsed file, whose types the grammar keeps acyclic, and computes every
+    /// type's traits. Input: the file. Output: the index.
     fn of(file: &'f File) -> Self {
-        Self {
+        let mut kinds = Self {
             types: file
                 .types
                 .iter()
                 .map(|item| (item.name.as_str(), item))
                 .collect(),
             handles: file.handles.iter().map(|item| item.name.as_str()).collect(),
+            named: BTreeMap::new(),
+        };
+        for item in &file.types {
+            kinds.fill(item.name.as_str(), 0);
+        }
+        assert_eq!(kinds.named.len(), kinds.types.len());
+        kinds
+    }
+
+    /// Computes one named type's traits after the types its fields name, once each.
+    /// Inputs: the type's name and how many types deep the walk is. Output: the index grows.
+    fn fill(&mut self, name: &'f str, depth: usize) {
+        assert!(depth <= self.types.len());
+        if self.named.contains_key(name) {
+            return;
+        }
+        let item = *self.types.get(name).expect("fill walks declared types");
+        for field in &item.fields {
+            let declared = named_in(&field.ty)
+                .and_then(|inner| self.types.get_key_value(inner).map(|(key, _)| *key));
+            if let Some(key) = declared {
+                self.fill(key, depth + 1);
+            }
+        }
+        let fields: Vec<Traits> = item
+            .fields
+            .iter()
+            .map(|field| self.traits(&field.ty))
+            .collect();
+        let traits = Traits {
+            copy: fields.iter().all(|field| field.copy),
+            handle: fields.iter().any(|field| field.handle),
+            bounded: fields.iter().any(|field| field.bounded),
+        };
+        self.named.insert(name, traits);
+    }
+
+    /// The traits of one type, reading each named type's from the index. Input: the type.
+    /// Output: the traits.
+    fn traits(&self, ty: &TypeRef) -> Traits {
+        match ty {
+            TypeRef::U16 | TypeRef::U32 | TypeRef::U64 | TypeRef::Bool => Traits {
+                copy: true,
+                handle: false,
+                bounded: false,
+            },
+            TypeRef::Text | TypeRef::Bytes => Traits {
+                copy: false,
+                handle: false,
+                bounded: true,
+            },
+            TypeRef::List(inner) => Traits {
+                copy: false,
+                handle: self.traits(inner).handle,
+                bounded: true,
+            },
+            TypeRef::Option(inner) => self.traits(inner),
+            TypeRef::Named(name) => match self.types.get(name.as_str()) {
+                Some(_) => *self
+                    .named
+                    .get(name.as_str())
+                    .expect("a named type's traits are computed before it is read"),
+                None => Traits {
+                    copy: true,
+                    handle: self.handles.contains(name.as_str()),
+                    bounded: false,
+                },
+            },
         }
     }
 
     /// Whether a type is `Copy`: scalars, enums and handles are, text, bytes and lists are
     /// not, an option or type is when all it holds is. Input: the type. Output: the answer.
     fn copy(&self, ty: &TypeRef) -> bool {
-        match ty {
-            TypeRef::U16 | TypeRef::U32 | TypeRef::U64 | TypeRef::Bool => true,
-            TypeRef::Text | TypeRef::Bytes | TypeRef::List(_) => false,
-            TypeRef::Option(inner) => self.copy(inner),
-            TypeRef::Named(name) => self
-                .types
-                .get(name.as_str())
-                .is_none_or(|item| item.fields.iter().all(|field| self.copy(&field.ty))),
-        }
-    }
-
-    /// Whether a type holds a handle anywhere inside it. Input: the type. Output: the answer.
-    fn handle_in(&self, ty: &TypeRef) -> bool {
-        match ty {
-            TypeRef::List(inner) | TypeRef::Option(inner) => self.handle_in(inner),
-            TypeRef::Named(name) => self.holds_handle(name),
-            _ => false,
-        }
+        self.traits(ty).copy
     }
 
     /// Whether a named item is a handle or a type holding one. Input: the name.
     /// Output: the answer.
     fn holds_handle(&self, name: &str) -> bool {
-        self.handles.contains(name)
-            || self
-                .types
-                .get(name)
-                .is_some_and(|item| item.fields.iter().any(|field| self.handle_in(&field.ty)))
+        self.handles.contains(name) || self.named.get(name).is_some_and(|traits| traits.handle)
     }
 
     /// Whether a type holds text, bytes or a list anywhere inside it. Input: the type.
     /// Output: the answer.
     fn bounded(&self, ty: &TypeRef) -> bool {
-        match ty {
-            TypeRef::Text | TypeRef::Bytes | TypeRef::List(_) => true,
-            TypeRef::Option(inner) => self.bounded(inner),
-            TypeRef::Named(name) => self
-                .types
-                .get(name.as_str())
-                .is_some_and(|item| item.fields.iter().any(|field| self.bounded(&field.ty))),
-            _ => false,
-        }
+        self.traits(ty).bounded
+    }
+}
+
+/// The name a type refers to through its lists and options, if any. Input: the type.
+/// Output: the named item's name.
+fn named_in(ty: &TypeRef) -> Option<&str> {
+    match ty {
+        TypeRef::List(inner) | TypeRef::Option(inner) => named_in(inner),
+        TypeRef::Named(name) => Some(name.as_str()),
+        _ => None,
     }
 }
 
@@ -460,7 +519,7 @@ fn fits_expr(
         TypeRef::Named(name) => {
             fits.insert(name.clone());
             let borrow = if by_ref { "" } else { "&" };
-            Some(format!("{}({borrow}{value})", fits_name(name)))
+            Some(format!("self::{}({borrow}{value})", fits_name(name)))
         }
         _ => None,
     }
@@ -479,7 +538,7 @@ fn each(
             return None;
         }
         fits.insert(name.clone());
-        return Some(fits_name(name));
+        return Some(format!("self::{}", fits_name(name)));
     }
     let item = format!("item{depth}");
     fits_expr(kinds, ty, (&item, true), depth + 1, fits).map(|check| format!("|{item}| {check}"))
