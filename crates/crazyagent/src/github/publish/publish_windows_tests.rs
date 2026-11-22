@@ -12,10 +12,10 @@ const SHAPES: [&str; 5] = [
 ];
 
 /// Runs the runner's git as a test owner would, with no system or global config, and
-/// returns what it printed, its output collected ([`crate::spawn_gate::collected`]).
+/// returns what it printed, its output collected ([`kernel_processes::spawn_gate::collected`]).
 /// Inputs: the folder and the arguments. Output: its standard output.
 fn owner_git(folder: &Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::collected(
+    let output = kernel_processes::spawn_gate::collected(
         Command::new(git().unwrap().program())
             .args(args)
             .current_dir(folder)
@@ -123,7 +123,7 @@ impl Project {
 /// Makes `link` a junction to the folder `target`, as an agent could. Inputs: the link,
 /// which must not exist, and the target. Output: none; a failed `mklink` fails the row.
 fn junction(link: &Path, target: &Path) {
-    let made = crate::spawn_gate::output(
+    let made = kernel_processes::spawn_gate::output(
         Command::new("cmd")
             .args(["/C", "mklink", "/J"])
             .arg(link)
@@ -547,7 +547,7 @@ fn a_contained_windows_publish_reads_no_git_folder_or_gitfile_planted_below_the_
                 std::fs::write(inner.join("y.txt"), "y").unwrap();
                 owner_git(&inner, &["add", "y.txt"]);
                 owner_git(&inner, &["commit", "-q", "--no-gpg-sign", "-m", "inner"]);
-                let started_inside = crate::spawn_gate::collected(
+                let started_inside = kernel_processes::spawn_gate::collected(
                     Command::new(git().unwrap().program())
                         .args(["rev-parse", "--abbrev-ref", "HEAD"])
                         .current_dir(&inner)

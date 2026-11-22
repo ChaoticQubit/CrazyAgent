@@ -38,8 +38,10 @@ fn a_graph_mark_is_written_only_into_a_regular_file_of_its_own_and_never_waits_o
     let planted = folder.path().join("planted");
     std::fs::create_dir(&planted).unwrap();
     let fifo = planted.join(graph::KEPT_OUT_MARK);
-    let made = crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&fifo))
-        .unwrap();
+    let made = kernel_processes::spawn_gate::status(
+        std::process::Command::new("/usr/bin/mkfifo").arg(&fifo),
+    )
+    .unwrap();
     assert!(made.success());
     let (sent, wrote) = std::sync::mpsc::channel();
     let target = planted.clone();

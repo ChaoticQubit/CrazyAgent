@@ -425,7 +425,7 @@ impl Tmux {
     fn forget_server(&self) -> Result<(), HostError> {
         let socket = self.socket();
         let deadline = Instant::now() + REPLY_TIME;
-        while crate::spawn_gate::connect_unix_std(&socket).is_ok() {
+        while kernel_processes::spawn_gate::connect_unix_std(&socket).is_ok() {
             if Instant::now() >= deadline {
                 return Err(failure("terminal_not_answering"));
             }
@@ -463,7 +463,7 @@ impl Tmux {
             .control
             .lock()
             .map_err(|_| failure("terminal_unavailable"))?;
-        match crate::spawn_gate::connect_unix_std(self.address()?) {
+        match kernel_processes::spawn_gate::connect_unix_std(self.address()?) {
             Ok(_) => Ok(true),
             Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
                 self.remove_socket()?;
@@ -482,7 +482,7 @@ impl Tmux {
     /// there answers or the listener is bound elsewhere.
     fn server_pid(&self) -> Option<u32> {
         let socket = self.address().ok()?;
-        let stream = crate::spawn_gate::connect_unix_std(&socket).ok()?;
+        let stream = kernel_processes::spawn_gate::connect_unix_std(&socket).ok()?;
         let peer = stream.peer_addr().ok()?;
         let named = peer.as_pathname()?.as_os_str().as_bytes();
         if named.split(|byte| *byte == 0).next()? != socket.as_os_str().as_bytes() {
@@ -622,7 +622,7 @@ impl Tmux {
             }
             None => Command::new(executable),
         };
-        let mut child = crate::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             command
                 .args(["-u", "-f", "/dev/null"])
                 .args((!may_start || self.confined.is_some()).then_some("-N"))

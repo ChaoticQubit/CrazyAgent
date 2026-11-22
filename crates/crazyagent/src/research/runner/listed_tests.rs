@@ -341,7 +341,7 @@ fn a_research_agent_whose_stop_left_processes_stays_listed_while_they_run() {
     use crate::sandbox::hidden_paths::{RunKind, runs_seeing, starting};
     let project = "sa-vid14-research-left";
     let saved = [PathBuf::from("/tmp/sa-vid14-research-left/vault")];
-    let mut sleeper = crate::spawn_gate::spawn(
+    let mut sleeper = kernel_processes::spawn_gate::spawn(
         std::process::Command::new("/usr/bin/perl")
             .args([
                 "-mPOSIX",

@@ -328,7 +328,7 @@ fn end_tree(pid: u32) {
         .map(PathBuf::from)
         .filter(|root| root.is_absolute())
         .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
-    let _ = crate::spawn_gate::status(
+    let _ = kernel_processes::spawn_gate::status(
         Command::new(root.join("System32").join("taskkill.exe"))
             .arg("/PID")
             .arg(pid.to_string())

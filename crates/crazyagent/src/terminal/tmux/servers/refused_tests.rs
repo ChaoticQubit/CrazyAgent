@@ -85,7 +85,7 @@ fn lead_with_own_socket() -> (tempfile::TempDir, Servers, AgentId, PathBuf) {
 
 /// Starts a stand-in keeper that runs until it is killed. Output: the child.
 fn running_keeper() -> std::process::Child {
-    crate::spawn_gate::spawn(
+    kernel_processes::spawn_gate::spawn(
         std::process::Command::new("/bin/sleep")
             .arg("30")
             .stdin(std::process::Stdio::null())
@@ -104,7 +104,7 @@ fn socket_file(path: &Path) -> bool {
 /// Starts a stand-in keeper and waits for it to exit. Takes its program. Output: the child,
 /// already reaped.
 fn exited_keeper(program: &str) -> std::process::Child {
-    let mut keeper = crate::spawn_gate::spawn(
+    let mut keeper = kernel_processes::spawn_gate::spawn(
         std::process::Command::new(program)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -168,7 +168,7 @@ fn a_refused_teammates_socket_is_no_server_only_once_its_held_keeper_ended_clean
     let (_root, host, lead, socket) = lead_with_teammates_socket();
     let found = || host.mates(&lead).map(|server| server.is_some());
 
-    let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
     let stays = found();
     assert_ne!(
         stays,
@@ -218,7 +218,7 @@ fn a_refused_teammates_socket_is_no_server_only_once_its_held_keeper_ended_clean
         "a refused teammates' socket whose keeper exited without confirming the end was taken as no server"
     );
 
-    let mut keeper = crate::spawn_gate::spawn(
+    let mut keeper = kernel_processes::spawn_gate::spawn(
         std::process::Command::new("/usr/bin/true")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -231,7 +231,7 @@ fn a_refused_teammates_socket_is_no_server_only_once_its_held_keeper_ended_clean
         .unwrap()
         .insert(lead.clone(), keeper);
     std::fs::remove_file(&socket).unwrap();
-    let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
     assert_eq!(
         found(),
         stays,
@@ -256,7 +256,7 @@ fn a_refused_teammates_socket_is_no_server_only_once_its_held_keeper_ended_clean
 #[test]
 fn an_earlier_engines_lead_whose_teammates_server_ended_is_killed_as_unknown() {
     let (_root, host, lead, socket) = lead_with_teammates_socket();
-    let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
     drop(listener);
     assert!(socket_file(&socket), "the ended server's socket file stays");
     assert!(
@@ -293,7 +293,7 @@ fn an_unlinked_own_socket_is_no_server_only_once_its_held_keeper_ended_cleanly()
     let found = || host.own(&lead).map(|server| server.is_some());
     let unavailable = || failure(OWN_SERVER_UNAVAILABLE);
 
-    let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
     assert_eq!(
         host.leads_listening(),
         vec![lead.clone()],
@@ -334,7 +334,7 @@ fn an_unlinked_own_socket_is_no_server_only_once_its_held_keeper_ended_cleanly()
         "the lead of an unlinked own socket whose keeper still runs was found gone"
     );
     let (other, other_socket) = own_lead(&host, 8);
-    let other_listener = crate::spawn_gate::bind_unix_std(&other_socket).unwrap();
+    let other_listener = kernel_processes::spawn_gate::bind_unix_std(&other_socket).unwrap();
     assert_eq!(
         host.own(&other).map(|server| server.is_some()),
         Ok(true),
@@ -358,7 +358,7 @@ fn an_unlinked_own_socket_is_no_server_only_once_its_held_keeper_ended_cleanly()
         "an unlinked own socket whose keeper exited without confirming the end was taken as no server"
     );
 
-    let mut keeper = crate::spawn_gate::spawn(
+    let mut keeper = kernel_processes::spawn_gate::spawn(
         std::process::Command::new("/usr/bin/true")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -453,12 +453,12 @@ fn a_lead_server_start_keeps_another_leads_cleanly_exited_keeper() {
     let (starting, starting_socket) = own_lead(&host, 7);
     let (ended, ended_socket) = own_lead(&host, 8);
     let found = || host.own(&ended).map(|server| server.is_some());
-    drop(crate::spawn_gate::bind_unix_std(&ended_socket).unwrap());
+    drop(kernel_processes::spawn_gate::bind_unix_std(&ended_socket).unwrap());
     assert!(
         socket_file(&ended_socket),
         "the ended server's socket file stays"
     );
-    let mut keeper = crate::spawn_gate::spawn(
+    let mut keeper = kernel_processes::spawn_gate::spawn(
         std::process::Command::new("/usr/bin/true")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -502,7 +502,7 @@ fn a_lead_server_start_keeps_another_leads_cleanly_exited_keeper() {
 #[test]
 fn a_killed_leads_teammates_keeper_leaves_the_map_whatever_the_kill_answers() {
     let (_root, host, lead, socket) = lead_with_teammates_socket();
-    drop(crate::spawn_gate::bind_unix_std(&socket).unwrap());
+    drop(kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap());
     assert!(socket_file(&socket), "the ended server's socket file stays");
     let mut exited = exited_keeper("/usr/bin/false");
     assert!(!exited.wait().unwrap().success());
@@ -573,7 +573,7 @@ fn a_teammates_server_start_after_256_ended_leads_still_runs() {
     for killed in [true, false] {
         if killed {
             for (ended, ended_socket) in &ended_leads {
-                drop(crate::spawn_gate::bind_unix_std(ended_socket).unwrap());
+                drop(kernel_processes::spawn_gate::bind_unix_std(ended_socket).unwrap());
                 assert!(
                     socket_file(ended_socket),
                     "the ended server's socket file stays"
@@ -628,8 +628,8 @@ fn a_teammates_server_start_after_256_ended_leads_still_runs() {
 fn a_stop_of_a_teammate_whose_teammates_server_missed_one_look_looks_again() {
     let (_root, host, lead, own_socket) = lead_with_own_socket();
     let (_, mates_socket) = teammates_lead(&host, 7);
-    let _own = crate::spawn_gate::bind_unix_std(&own_socket).unwrap();
-    let _mates = crate::spawn_gate::bind_unix_std(&mates_socket).unwrap();
+    let _own = kernel_processes::spawn_gate::bind_unix_std(&own_socket).unwrap();
+    let _mates = kernel_processes::spawn_gate::bind_unix_std(&mates_socket).unwrap();
     let ann = AgentId::team(8).unwrap();
     host.remember(&ann, &lead).unwrap();
     MATES_MISSES.set(2);
@@ -665,9 +665,9 @@ fn a_stop_of_a_remembered_teammate_after_a_missed_look_never_opens_another_leads
     let (_root, host, lead, own_socket) = lead_with_own_socket();
     let (_, mates_socket) = teammates_lead(&host, 7);
     let (other, other_socket) = own_lead(&host, 9);
-    let _own = crate::spawn_gate::bind_unix_std(&own_socket).unwrap();
-    let _mates = crate::spawn_gate::bind_unix_std(&mates_socket).unwrap();
-    let _other = crate::spawn_gate::bind_unix_std(&other_socket).unwrap();
+    let _own = kernel_processes::spawn_gate::bind_unix_std(&own_socket).unwrap();
+    let _mates = kernel_processes::spawn_gate::bind_unix_std(&mates_socket).unwrap();
+    let _other = kernel_processes::spawn_gate::bind_unix_std(&other_socket).unwrap();
     let ann = AgentId::team(8).unwrap();
     host.remember(&ann, &lead).unwrap();
     MATES_MISSES.set(2);

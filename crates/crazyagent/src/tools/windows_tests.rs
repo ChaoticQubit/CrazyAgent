@@ -288,7 +288,8 @@ fn no_batch_file_is_ever_started_on_windows() {
     let marker = folder.path().join("ran");
     let script = folder.path().join("x.cmd");
     std::fs::write(&script, format!("@echo ran> \"{}\"\r\n", marker.display())).unwrap();
-    let refused = crate::spawn_gate::spawn(&mut std::process::Command::new(&script)).unwrap_err();
+    let refused =
+        kernel_processes::spawn_gate::spawn(&mut std::process::Command::new(&script)).unwrap_err();
     assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
     assert!(!marker.exists());
 }

@@ -731,8 +731,8 @@ fn loopback_pool(
 #[test]
 fn edit_with_ai_runs_on_the_next_member_when_the_first_ones_provider_refuses_connects() {
     use crate::research::runner::{ResearchAccount, ResearchHarness};
-    let (_held, down) = crate::spawn_gate::refusing_tcp_port().unwrap();
-    let up = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let (_held, down) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
+    let up = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let up_port = up.local_addr().unwrap().port();
     let (_folder, resolver) = loopback_pool(&[down, up_port]);
     let picked = pool("pool-a");
@@ -757,8 +757,8 @@ fn edit_with_ai_runs_on_the_next_member_when_the_first_ones_provider_refuses_con
 #[test]
 fn edit_with_ai_with_every_members_provider_down_keeps_the_unreachable_code() {
     use crate::research::runner::ResearchHarness;
-    let (_first, first) = crate::spawn_gate::refusing_tcp_port().unwrap();
-    let (_second, second) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let (_first, first) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
+    let (_second, second) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let (_folder, resolver) = loopback_pool(&[first, second]);
     let picked = pool("pool-a");
     let project = ProjectId::new("alpha").unwrap();

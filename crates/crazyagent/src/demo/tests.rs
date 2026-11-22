@@ -79,7 +79,7 @@ fn database(root: &Path) -> Connection {
 }
 
 fn git(root: &Path, home: &Path, arguments: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .args(arguments)
             .current_dir(root)

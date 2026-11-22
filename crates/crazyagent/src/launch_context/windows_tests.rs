@@ -21,7 +21,7 @@ fn run(tool: &str, args: &[&str]) {
     let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
     let mut command = std::process::Command::new(system.join(tool));
     command.args(args);
-    let ran = crate::spawn_gate::collected(&mut command).unwrap();
+    let ran = kernel_processes::spawn_gate::collected(&mut command).unwrap();
     assert!(ran.status.success(), "{tool} {args:?} failed");
 }
 

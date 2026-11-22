@@ -170,8 +170,8 @@ fn a_down_providers_line_outranks_a_pause_and_the_first_line_found_is_kept() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_read_only_pick_with_the_reachable_member_paused_keeps_the_down_providers_line() {
-    let (_held, down) = crate::spawn_gate::refusing_tcp_port().unwrap();
-    let up = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let (_held, down) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
+    let up = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let up_port = up.local_addr().unwrap().port();
     let access = ModelAccess {
         accounts: vec![reference("owner-account")],
@@ -223,7 +223,7 @@ fn a_read_only_pick_with_the_reachable_member_paused_keeps_the_down_providers_li
 #[cfg(target_os = "macos")]
 #[test]
 fn the_log_line_of_a_passed_over_member_names_it_and_its_providers_host_and_port_only() {
-    let (_held, down) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let (_held, down) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let account = ResearchAccount::Endpoint {
         base_url: format!("http://127.0.0.1:{down}/private/v1"),
         model: "some-model".into(),

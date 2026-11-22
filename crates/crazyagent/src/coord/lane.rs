@@ -928,7 +928,7 @@ fn command(request: &Request, out: &mut dyn Write) -> i32 {
         }
     }
     let spawn = || {
-        crate::spawn_gate::spawn(
+        kernel_processes::spawn_gate::spawn(
             std::process::Command::new(&request.program).args(&request.arguments),
         )
     };
@@ -1051,7 +1051,9 @@ pub fn run(arguments: &[OsString], out: &mut dyn Write) -> i32 {
     };
     let _ = writeln!(out, "{NO_LANE}");
     match own_program(&request.program).and_then(|program| {
-        crate::spawn_gate::status(std::process::Command::new(program).args(&request.arguments))
+        kernel_processes::spawn_gate::status(
+            std::process::Command::new(program).args(&request.arguments),
+        )
     }) {
         Ok(status) => status.code().unwrap_or(LANE_FAILED),
         Err(problem) => {

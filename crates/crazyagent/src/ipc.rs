@@ -19,7 +19,7 @@ pub(crate) fn owner_listener(path: impl AsRef<Path>, streams: usize) -> io::Resu
     assert!(streams > 0, "a listener serves at least one stream");
     #[cfg(unix)]
     {
-        crate::spawn_gate::bind_unix(path)
+        kernel_processes::spawn_gate::bind_unix(path)
     }
     #[cfg(windows)]
     {
@@ -33,7 +33,7 @@ pub(crate) fn owner_listener(path: impl AsRef<Path>, streams: usize) -> io::Resu
 pub(crate) async fn owner_accept(listener: &Listener) -> io::Result<Stream> {
     #[cfg(unix)]
     {
-        crate::spawn_gate::accept_unix(listener)
+        kernel_processes::spawn_gate::accept_unix(listener)
             .await
             .map(|(stream, _)| stream)
     }
@@ -49,7 +49,7 @@ pub(crate) async fn owner_accept(listener: &Listener) -> io::Result<Stream> {
 pub(crate) async fn owner_connect(path: impl AsRef<Path>) -> io::Result<Stream> {
     #[cfg(unix)]
     {
-        crate::spawn_gate::connect_unix(path).await
+        kernel_processes::spawn_gate::connect_unix(path).await
     }
     #[cfg(windows)]
     {
@@ -708,7 +708,7 @@ mod windows_tests {
         let (_temp, root) = private_root();
         let leftover = root.join("pipes.0123456789abcdef.new");
         std::fs::write(&leftover, "theirs\n").unwrap();
-        let set = crate::spawn_gate::status(
+        let set = kernel_processes::spawn_gate::status(
             std::process::Command::new("icacls")
                 .arg(&leftover)
                 .args(["/setowner", "*S-1-5-32-545"])
@@ -733,7 +733,7 @@ mod windows_tests {
         let (_temp, root) = private_root();
         let file = root.join("pipes");
         std::fs::write(&file, "theirs\n").unwrap();
-        let set = crate::spawn_gate::status(
+        let set = kernel_processes::spawn_gate::status(
             std::process::Command::new("icacls")
                 .arg(&file)
                 .args(["/setowner", "*S-1-5-32-545"])

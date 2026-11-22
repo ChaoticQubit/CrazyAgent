@@ -875,7 +875,7 @@ fn an_app_closing_while_its_window_is_tagged_hands_its_teammate_no_prompt() {
 #[cfg(target_os = "macos")]
 fn tmux_client(server: &Server, args: &[&str]) -> String {
     assert!(!args.is_empty());
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new(&server.tmux)
             .arg("-S")
             .arg(&server.socket)
@@ -1720,7 +1720,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -1749,7 +1749,7 @@ fn an_owner_whose_shell_is_csh_keeps_the_private_session_and_its_agents() {
         tmux: tmux.clone(),
         socket: host.socket(),
     };
-    let started = crate::spawn_gate::status(
+    let started = kernel_processes::spawn_gate::status(
         Command::new(&tmux)
             .args(["-u", "-f"])
             .arg(&config)
@@ -1764,7 +1764,7 @@ fn an_owner_whose_shell_is_csh_keeps_the_private_session_and_its_agents() {
     )
     .unwrap();
     assert!(started.success());
-    let shell = crate::spawn_gate::output(
+    let shell = kernel_processes::spawn_gate::output(
         Command::new(&tmux)
             .arg("-S")
             .arg(host.socket())
@@ -1787,7 +1787,7 @@ fn an_owner_whose_shell_is_csh_keeps_the_private_session_and_its_agents() {
     };
     host.spawn(&agent, &command).unwrap();
     std::thread::sleep(Duration::from_secs(3));
-    let windows = crate::spawn_gate::output(
+    let windows = kernel_processes::spawn_gate::output(
         Command::new(&tmux)
             .arg("-S")
             .arg(host.socket())
@@ -1975,7 +1975,7 @@ fn a_reply_tmux_cut_short_while_its_server_stalls_is_asked_again() {
     };
     let agent = AgentId::team(1).unwrap();
     host.spawn(&agent, &command).unwrap();
-    let pid = crate::spawn_gate::output(
+    let pid = kernel_processes::spawn_gate::output(
         Command::new(&tmux)
             .arg("-S")
             .arg(host.socket())
@@ -2060,7 +2060,7 @@ fn a_reply_tmux_cut_short_while_its_server_stalls_is_asked_again() {
 /// Panics unless tmux splits it.
 #[cfg(target_os = "macos")]
 fn split(server: &Server, pane: &str, command: &str) {
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         Command::new(&server.tmux)
             .arg("-S")
             .arg(&server.socket)
@@ -2346,7 +2346,7 @@ fn close_ends_every_process_in_the_server_pane_groups() {
     };
     host.spawn(&agent, &sleeper).unwrap();
     let started = home.path().join("child.pid");
-    let opened = crate::spawn_gate::output(
+    let opened = kernel_processes::spawn_gate::output(
         Command::new(&server.tmux)
             .arg("-S")
             .arg(&server.socket)
@@ -2383,7 +2383,7 @@ fn close_ends_every_process_in_the_server_pane_groups() {
 #[test]
 fn a_group_once_gone_is_never_tested_or_signalled_again() {
     use std::os::unix::process::{CommandExt, ExitStatusExt};
-    let mut ended = crate::spawn_gate::spawn(
+    let mut ended = kernel_processes::spawn_gate::spawn(
         Command::new("/usr/bin/true")
             .process_group(0)
             .env_clear()
@@ -2394,7 +2394,7 @@ fn a_group_once_gone_is_never_tested_or_signalled_again() {
     .unwrap();
     let ended_group = rustix::process::Pid::from_child(&ended);
     assert!(ended.wait().unwrap().success());
-    let mut survivor = crate::spawn_gate::spawn(
+    let mut survivor = kernel_processes::spawn_gate::spawn(
         Command::new("/bin/sleep")
             .arg("120")
             .process_group(0)
@@ -2598,7 +2598,7 @@ fn a_pane_view_shows_and_types_into_only_the_teammate_pane_its_lead_window_lists
     host.spawn(&other, &shell("echo other-lead-screen; exec /bin/sleep 30"))
         .unwrap();
     let client = |args: &[&str]| {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new(&tmux)
                 .arg("-S")
                 .arg(&socket)
@@ -2761,7 +2761,7 @@ fn a_pane_view_types_keys_into_its_attached_pane_with_no_pane_listing() {
     host.spawn(&other, &shell("echo other-lead-screen; exec /bin/cat"))
         .unwrap();
     let client = |args: &[&str]| {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new(&tmux)
                 .arg("-S")
                 .arg(&socket)
@@ -2949,7 +2949,7 @@ fn ended_from_outside(home: &Path, agent: &AgentId) -> (Tmux, Server, u64) {
         "the host holds a reading control"
     );
     let bound = socket_inode(&host).expect("the server bound its socket");
-    let ended = crate::spawn_gate::status(
+    let ended = kernel_processes::spawn_gate::status(
         Command::new(&tmux)
             .arg("-S")
             .arg(host.socket())
@@ -3007,7 +3007,8 @@ fn the_holder_ends_a_server_only_once_its_renewed_deadline_passed() {
     let (late, _late) = fast_deadline(ending.path(), &agent);
     let ahead = || SystemTime::now() + Duration::from_secs(3);
     late.renew(ahead()).unwrap();
-    let listens = |host: &Tmux| crate::spawn_gate::connect_unix_std(host.socket()).is_ok();
+    let listens =
+        |host: &Tmux| kernel_processes::spawn_gate::connect_unix_std(host.socket()).is_ok();
     let until = Instant::now() + Duration::from_secs(30);
     while listens(&late) {
         assert!(
@@ -3036,7 +3037,8 @@ fn a_server_ended_from_outside_has_no_live_agents_and_is_not_started_again() {
     let agent = AgentId::team(1).unwrap();
     let (host, _server, _) = ended_from_outside(home.path(), &agent);
     let until = Instant::now() + REPLY_TIME;
-    while holds_reading_control(&host) || crate::spawn_gate::connect_unix_std(host.socket()).is_ok()
+    while holds_reading_control(&host)
+        || kernel_processes::spawn_gate::connect_unix_std(host.socket()).is_ok()
     {
         assert!(
             Instant::now() < until,
@@ -3051,7 +3053,7 @@ fn a_server_ended_from_outside_has_no_live_agents_and_is_not_started_again() {
         "the ended server's socket file is forgotten"
     );
     assert!(
-        crate::spawn_gate::connect_unix_std(host.socket()).is_err(),
+        kernel_processes::spawn_gate::connect_unix_std(host.socket()).is_err(),
         "no server was started again"
     );
 }
@@ -3107,7 +3109,7 @@ fn a_live_server_keeps_its_socket_when_a_probe_of_it_fails_without_a_refusal() {
     };
     host.spawn(&agent, &command).unwrap();
     let bound = socket_inode(&host).expect("the server bound its socket");
-    let ran = crate::spawn_gate::status(
+    let ran = kernel_processes::spawn_gate::status(
         Command::new(std::env::current_exe().unwrap())
             .args(["--exact", PROBE_HELPER, "--ignored", "--test-threads", "1"])
             .env(PROBE_FOLDER, &folder)
@@ -3225,7 +3227,7 @@ impl StandIn {
         let agent = AgentId::team(1).unwrap();
         let host = Tmux::open(Some(forging_tmux(home.path(), &agent, pid)), &folder);
         let address = host.address().unwrap();
-        let listener = crate::spawn_gate::bind_unix_std(&address).unwrap();
+        let listener = kernel_processes::spawn_gate::bind_unix_std(&address).unwrap();
         Self {
             home,
             _listener: listener,
@@ -3241,7 +3243,7 @@ impl StandIn {
 /// dropped.
 #[cfg(target_os = "macos")]
 fn foreign_group() -> (Child, Group) {
-    let mut shell = crate::spawn_gate::spawn(
+    let mut shell = kernel_processes::spawn_gate::spawn(
         Command::new("/bin/sh")
             .args([
                 "-c",
@@ -3266,7 +3268,7 @@ fn foreign_group() -> (Child, Group) {
 #[cfg(target_os = "macos")]
 fn listeners_group() -> (Child, Group) {
     use std::os::unix::process::CommandExt;
-    let child = crate::spawn_gate::spawn(
+    let child = kernel_processes::spawn_gate::spawn(
         Command::new("/bin/sleep")
             .arg("120")
             .process_group(0)
@@ -3412,7 +3414,7 @@ fn the_server_pid_comes_only_from_a_listener_bound_at_the_socket_itself() {
     let stand_in = StandIn::naming(2);
     assert_eq!(stand_in.host.server_pid(), Some(std::process::id()));
     let other = stand_in.home.path().join("other.sock");
-    let _other = crate::spawn_gate::bind_unix_std(&other).unwrap();
+    let _other = kernel_processes::spawn_gate::bind_unix_std(&other).unwrap();
 
     std::fs::remove_file(&stand_in.address).unwrap();
     std::os::unix::fs::symlink(&other, &stand_in.address).unwrap();
@@ -3577,7 +3579,7 @@ fn read_text(text: &[u8], state: &Mutex<State>) {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = crate::spawn_gate::spawn(&mut cat).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut cat).unwrap();
     let output = child.stdout.take().unwrap();
     read(output, state);
     let _ = child.wait();
@@ -3917,7 +3919,7 @@ fn a_capture_cut_after_its_row_counts_is_read_as_data_and_the_control_reads_on()
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = crate::spawn_gate::spawn(&mut printf).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut printf).unwrap();
     let output = child.stdout.take().unwrap();
     read(output, &state);
     let _ = child.wait();
