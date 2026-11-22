@@ -3,9 +3,9 @@ use super::extras::{
     codex_from_usage, key_balance,
 };
 use super::{LimitWindow, Observation, PLAN_BYTES_MAX, RESET_MS_MAX, checked_text, failure};
-use crate::credentials::SecretString;
 use crate::engine::EngineError;
 use crate::github::http::Request;
+use kernel_security::secret::SecretString;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

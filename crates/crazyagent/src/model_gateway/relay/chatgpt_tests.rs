@@ -1,7 +1,7 @@
 use super::chatgpt::*;
-use crate::credentials::SecretString;
 use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
+use kernel_security::secret::SecretString;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

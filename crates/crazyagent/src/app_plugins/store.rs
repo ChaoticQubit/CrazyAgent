@@ -805,7 +805,7 @@ pub fn set_key(
         prepare(db, root)?;
         bindable(db, root, name, secret)?;
         if key.is_empty()
-            || key.len() > crate::credentials::SECRET_BYTES_MAX
+            || key.len() > kernel_security::secret::SECRET_BYTES_MAX
             || key.iter().any(|byte| !(0x21..=0x7e).contains(byte))
         {
             return Err(error("app_plugin_key_invalid"));
@@ -829,7 +829,7 @@ pub fn set_key(
         }
         bound
     })();
-    crate::credentials::wipe(&mut key);
+    kernel_security::secret::wipe(&mut key);
     saved
 }
 
@@ -881,7 +881,7 @@ pub fn ready(db: &Connection, root: &Path, name: &str) -> Result<Loaded, EngineE
 pub fn secret_value(
     root: &Path,
     bound: &Bound,
-) -> Result<crate::credentials::SecretString, EngineError> {
+) -> Result<kernel_security::secret::SecretString, EngineError> {
     let (folder, reference) = match bound {
         Bound::Account(reference) => (ACCOUNT_KEYS, reference),
         Bound::Key(reference) => (PLUGIN_KEYS, reference),
