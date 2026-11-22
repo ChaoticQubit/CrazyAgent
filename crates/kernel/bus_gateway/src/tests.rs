@@ -5,9 +5,11 @@ use sdk::{Capability, Refusal, Tier};
 
 use super::*;
 
-/// The settings provider fake: counts calls, keeps the last settings, answers as told.
+/// The settings provider fake: counts calls, keeps the last caller and settings, answers
+/// as told.
 struct CountingProvider {
     calls: Cell<u32>,
+    caller: Cell<Option<&'static str>>,
     last: Cell<Option<QuitSettings>>,
     answer: Result<(), Refusal>,
 }
@@ -18,6 +20,7 @@ impl CountingProvider {
     fn answering(answer: Result<(), Refusal>) -> Self {
         Self {
             calls: Cell::new(0),
+            caller: Cell::new(None),
             last: Cell::new(None),
             answer,
         }
@@ -25,8 +28,9 @@ impl CountingProvider {
 }
 
 impl Provide for CountingProvider {
-    fn save_quit(&self, settings: QuitSettings) -> Result<(), Refusal> {
+    fn save_quit(&self, caller: &'static str, settings: QuitSettings) -> Result<(), Refusal> {
         self.calls.set(self.calls.get() + 1);
+        self.caller.set(Some(caller));
         self.last.set(Some(settings));
         self.answer.clone()
     }
@@ -154,10 +158,16 @@ fn a_t1_plugin_may_not_call_a_t2_capability() {
     assert_eq!(gateway.admit("low", &T1_SAME), Ok(()));
     let ran = Cell::new(false);
     assert_eq!(
-        gateway.call("low", &T2_ONLY, || {
-            ran.set(true);
-            Ok(())
-        }),
+        gateway.call(
+            "low",
+            &T2_ONLY,
+            || Ok(()),
+            || {
+                ran.set(true);
+                Ok(())
+            },
+            |_: &()| Ok(())
+        ),
         Err(refusal.clone())
     );
     assert!(!ran.get());
@@ -225,4 +235,161 @@ fn grants_refuse_more_than_their_bounds() {
         Err("grants_too_many")
     );
     assert!(Grants::new(&[("a", Tier::T2, &permissions[..PERMISSIONS_MAX])]).is_ok());
+}
+
+#[test]
+fn the_settings_provider_gets_the_bound_plugin_as_caller() {
+    let (grants, provider, refusals) = (
+        grants(),
+        CountingProvider::answering(Ok(())),
+        RecordingRefusals::default(),
+    );
+    let gateway = Gateway::new(&grants, &provider, &refusals);
+    assert_eq!(
+        settings::save_quit(&gateway.bind("agent-quit"), quit()),
+        Ok(())
+    );
+    assert_eq!(provider.caller.get(), Some("agent-quit"));
+}
+
+/// A capability the bound rows call through `Gateway::call`, granted to `low`.
+const BOUNDED: Capability = Capability {
+    name: "test.bounded",
+    tier: Tier::T1,
+    needs: "test.use",
+};
+
+/// The bound the rows' checks hold a text to.
+const ROW_BYTES_MAX: usize = 8;
+
+/// The bound check of the rows: a text at most `ROW_BYTES_MAX` bytes. Inputs: the text and
+/// the refusal. Output: nothing, or the refusal.
+fn within(text: &str, refusal: fn() -> Refusal) -> Result<(), Refusal> {
+    if text.len() <= ROW_BYTES_MAX {
+        Ok(())
+    } else {
+        Err(refusal())
+    }
+}
+
+/// The refusal of an input over its bound.
+fn input_too_large() -> Refusal {
+    Refusal::Rejected {
+        code: "cap_input_too_large".to_owned(),
+    }
+}
+
+/// The refusal of an output over its bound.
+fn output_too_large() -> Refusal {
+    Refusal::Failed {
+        code: "cap_output_too_large".to_owned(),
+    }
+}
+
+/// Calls `BOUNDED` as `low` with one input and the output the provider answers.
+/// Inputs: the gateway, the input, the output and the provider's call counter.
+/// Output: the call's result.
+fn bounded_call(
+    gateway: &Gateway<'_>,
+    input: &str,
+    output: &str,
+    ran: &Cell<u32>,
+) -> Result<String, Refusal> {
+    gateway.call(
+        "low",
+        &BOUNDED,
+        || within(input, input_too_large),
+        || {
+            ran.set(ran.get() + 1);
+            Ok(output.to_owned())
+        },
+        |answer: &String| within(answer, output_too_large),
+    )
+}
+
+#[test]
+fn an_input_over_its_bound_never_reaches_the_provider() {
+    let (grants, provider, refusals) = (
+        grants(),
+        CountingProvider::answering(Ok(())),
+        RecordingRefusals::default(),
+    );
+    let gateway = Gateway::new(&grants, &provider, &refusals);
+    let ran = Cell::new(0);
+    let over = "i".repeat(ROW_BYTES_MAX + 1);
+    assert_eq!(
+        bounded_call(&gateway, &over, "ok", &ran),
+        Err(input_too_large())
+    );
+    assert_eq!(ran.get(), 0);
+    assert!(refusals.seen.borrow().is_empty());
+}
+
+#[test]
+fn an_input_at_its_bound_reaches_the_provider() {
+    let (grants, provider, refusals) = (
+        grants(),
+        CountingProvider::answering(Ok(())),
+        RecordingRefusals::default(),
+    );
+    let gateway = Gateway::new(&grants, &provider, &refusals);
+    let ran = Cell::new(0);
+    let at = "i".repeat(ROW_BYTES_MAX);
+    assert_eq!(bounded_call(&gateway, &at, "ok", &ran), Ok("ok".to_owned()));
+    assert_eq!(ran.get(), 1);
+    assert!(refusals.seen.borrow().is_empty());
+}
+
+#[test]
+fn an_output_over_its_bound_fails_with_cap_output_too_large() {
+    let (grants, provider, refusals) = (
+        grants(),
+        CountingProvider::answering(Ok(())),
+        RecordingRefusals::default(),
+    );
+    let gateway = Gateway::new(&grants, &provider, &refusals);
+    let ran = Cell::new(0);
+    let over = "o".repeat(ROW_BYTES_MAX + 1);
+    assert_eq!(
+        bounded_call(&gateway, "in", &over, &ran),
+        Err(output_too_large())
+    );
+    assert_eq!(ran.get(), 1);
+    let at = "o".repeat(ROW_BYTES_MAX);
+    assert_eq!(bounded_call(&gateway, "in", &at, &ran), Ok(at.clone()));
+    assert_eq!(ran.get(), 2);
+    assert!(refusals.seen.borrow().is_empty());
+}
+
+#[test]
+fn an_ungranted_bounded_call_runs_no_check() {
+    let (grants, provider, refusals) = (
+        grants(),
+        CountingProvider::answering(Ok(())),
+        RecordingRefusals::default(),
+    );
+    let gateway = Gateway::new(&grants, &provider, &refusals);
+    let checked = Cell::new(false);
+    let refusal = Refusal::NotGranted {
+        capability: "test.bounded",
+        needs: "test.use",
+    };
+    assert_eq!(
+        gateway.call(
+            "reader",
+            &BOUNDED,
+            || {
+                checked.set(true);
+                Ok(())
+            },
+            || Ok(()),
+            |_: &()| Ok(())
+        ),
+        Err(refusal.clone())
+    );
+    assert!(!checked.get());
+    assert_eq!(
+        *refusals.seen.borrow(),
+        vec![("reader", "test.bounded", refusal)]
+    );
 }
