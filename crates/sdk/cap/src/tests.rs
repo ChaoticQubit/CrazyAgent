@@ -469,3 +469,69 @@ fn a_handle_nested_in_an_emitted_type_is_refused() {
         at("cap_handle_in_event", 3, 65)
     );
 }
+
+/// Names a reference to another file's handle or enum. Inputs: its stem and name.
+/// Output: the reference.
+fn foreign(stem: &str, name: &str) -> TypeRef {
+    TypeRef::Foreign {
+        stem: stem.to_owned(),
+        name: name.to_owned(),
+    }
+}
+
+#[test]
+fn a_foreign_typeref_parses() {
+    let file = parse_as(
+        "net",
+        "type A { s: secrets.Secret, o: option<secrets.Secret>, l: list<secrets.Mode> }\ncapability net.send(s: secrets.Secret) -> option<secrets.Secret> tier: t1 needs: net.send emits: Sent { m: secrets.Mode }",
+    )
+    .expect("parses");
+    assert_eq!(
+        file.types[0].fields,
+        vec![
+            field("s", foreign("secrets", "Secret")),
+            field("o", option(foreign("secrets", "Secret"))),
+            field("l", list(foreign("secrets", "Mode"))),
+        ]
+    );
+    assert_eq!(
+        file.capabilities[0].inputs,
+        vec![field("s", foreign("secrets", "Secret"))]
+    );
+    assert_eq!(
+        file.capabilities[0].output,
+        Some(option(foreign("secrets", "Secret")))
+    );
+    assert_eq!(
+        file.capabilities[0].emits[0].fields,
+        vec![field("m", foreign("secrets", "Mode"))]
+    );
+}
+
+#[test]
+fn a_self_qualified_typeref_is_refused() {
+    assert_eq!(
+        parse_as("net", "handle S\ntype A { s: option<net.S> }"),
+        Err(at("cap_self_qualified", 2, 20))
+    );
+    assert_eq!(
+        parse_as("net", "capability net.b() -> net.S tier: t1 needs: net.c"),
+        Err(at("cap_self_qualified", 1, 23))
+    );
+}
+
+#[test]
+fn a_misshapen_foreign_typeref_is_refused() {
+    assert_eq!(
+        refused("type A { s: secrets.secret }"),
+        at("cap_unknown_type", 1, 13)
+    );
+    assert_eq!(
+        refused("type A { s: a.b.Secret }"),
+        at("cap_unknown_type", 1, 13)
+    );
+    assert_eq!(
+        refused("type A { s: Secrets.Secret }"),
+        at("cap_unknown_type", 1, 13)
+    );
+}
