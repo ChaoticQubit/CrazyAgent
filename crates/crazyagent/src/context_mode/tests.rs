@@ -859,7 +859,7 @@ fn a_pinned_shaped_npx_the_resolver_does_not_find_is_left_out_and_nothing_of_its
     };
     assert!(pinned(&spec).is_some(), "shaped like the pinned launch");
     assert!(
-        !crate::tools::probe::mark(crate::tools::finding_seed).first_run_pending,
+        !kernel_processes::finding::probe::mark(crate::tools::finding_seed).first_run_pending,
         "unit tests never start a real folder run, so the probes count as ended"
     );
     assert_eq!(

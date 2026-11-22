@@ -2058,12 +2058,13 @@ fn checks(root: &Path, project: Option<&ProjectId>, text: &str, app: Option<&str
     }
     let (folder, skills, servers) = inventory(root, project);
     let places = crate::tools::tools_places(Some(root));
-    let pending = crate::tools::probe::mark(crate::tools::finding_seed).first_run_pending;
+    let pending =
+        kernel_processes::finding::probe::mark(crate::tools::finding_seed).first_run_pending;
     let program = |name: &str| {
         if pending {
             return None;
         }
-        match crate::tools::resolve(name, &places) {
+        match kernel_processes::finding::resolve(name, &places) {
             Ok(_) => Some(true),
             Err(missing) => missing.refused.is_none().then_some(false),
         }

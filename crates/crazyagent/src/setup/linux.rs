@@ -142,14 +142,14 @@ impl Installer for LinuxInstaller {
         self.common.program(name)
     }
 
-    fn lookup_program(&self, name: &str) -> Result<PathBuf, crate::tools::Missing> {
+    fn lookup_program(&self, name: &str) -> Result<PathBuf, kernel_processes::finding::Missing> {
         self.common.lookup_program(name)
     }
 
     fn fix_target(
         &self,
-        missing: &crate::tools::Missing,
-    ) -> Option<crate::tools::permission_fix::Target> {
+        missing: &kernel_processes::finding::Missing,
+    ) -> Option<kernel_processes::finding::permission_fix::Target> {
         self.common.fix_target(missing)
     }
 
@@ -158,7 +158,7 @@ impl Installer for LinuxInstaller {
         dep: Dependency,
         confirmed: &str,
         recursive: bool,
-    ) -> Result<crate::tools::permission_fix::Report, &'static str> {
+    ) -> Result<kernel_processes::finding::permission_fix::Report, &'static str> {
         self.common.fix_permissions(dep, confirmed, recursive)
     }
 
@@ -345,8 +345,11 @@ mod tests {
         let shared = PinnedInstaller::with_places(root.path(), vec![], places.clone());
         let installer = LinuxInstaller::new(Box::new(shared));
         let missing = installer.lookup(Dependency::Tmux).unwrap().unwrap_err();
-        assert_eq!(missing, crate::tools::resolve("tmux", &places).unwrap_err());
-        assert_eq!(missing.line(), crate::tools::TMUX_MISSING);
+        assert_eq!(
+            missing,
+            kernel_processes::finding::resolve("tmux", &places).unwrap_err()
+        );
+        assert_eq!(missing.line(), kernel_processes::finding::TMUX_MISSING);
         assert_eq!(installer.find(Dependency::Tmux), Ok(None));
         let tmux = local.join("tmux");
         std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.7a'\n").unwrap();
@@ -411,7 +414,7 @@ mod tests {
             Ok(Ok(_)) => assert!(started.is_some()),
             Ok(Err(missing)) => {
                 assert!(started.is_none());
-                assert_eq!(missing.line(), crate::tools::TMUX_MISSING);
+                assert_eq!(missing.line(), kernel_processes::finding::TMUX_MISSING);
             }
             Err(code) => assert_eq!(code, InstallError("setup_version_unreadable")),
         }

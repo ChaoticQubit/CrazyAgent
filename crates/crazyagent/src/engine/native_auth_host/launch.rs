@@ -85,12 +85,12 @@ pub(super) async fn resolved_after_probe(
     if let Some(launch) = crate::engine::off_worker(|| resolved(harness)) {
         return Some(launch);
     }
-    if !may_wait || !crate::tools::probe::first_run_going() {
+    if !may_wait || !kernel_processes::finding::probe::first_run_going() {
         return None;
     }
     eprintln!("native_auth_harness_waiting harness={kind}");
-    let deadline = Instant::now() + crate::tools::probe::first_run_bound();
-    while crate::tools::probe::first_run_going() && Instant::now() < deadline {
+    let deadline = Instant::now() + kernel_processes::finding::probe::first_run_bound();
+    while kernel_processes::finding::probe::first_run_going() && Instant::now() < deadline {
         tokio::time::sleep(PROBE_POLL).await;
     }
     crate::engine::off_worker(|| resolved(harness))

@@ -338,7 +338,7 @@ fn a_link_that_climbs_out_through_another_link_is_refused_though_its_words_stay_
     );
 }
 
-fn places(folders: Vec<PathBuf>) -> crate::tools::Places {
+fn places(folders: Vec<PathBuf>) -> kernel_processes::finding::Places {
     crate::tools::tools_new(folders, None)
 }
 
@@ -390,7 +390,7 @@ fn the_resolver_returns_the_engine_node_when_no_system_node_exists() {
     let empty = work.path().join("no-system-node");
     std::fs::create_dir_all(&empty).unwrap();
     let only_engine = places(vec![empty, setup_bin.clone()]);
-    let node = crate::tools::resolve("node", &only_engine).unwrap();
+    let node = kernel_processes::finding::resolve("node", &only_engine).unwrap();
     assert_eq!(node.entry, setup_bin.join("node"));
     assert_eq!(
         node.program,
@@ -639,7 +639,7 @@ fn the_node_install_runs_its_programs_with_gzip_on_their_path() {
             .is_ok_and(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
     };
     assert!(folders.iter().any(gzip), "{path:?}");
-    let system: Vec<PathBuf> = crate::tools::SYSTEM_FOLDERS
+    let system: Vec<PathBuf> = kernel_processes::finding::SYSTEM_FOLDERS
         .iter()
         .map(PathBuf::from)
         .collect();

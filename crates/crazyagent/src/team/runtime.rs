@@ -1247,7 +1247,9 @@ impl TeamRuntime {
             agents: None,
             terminal: None,
             terminal_probe: None,
-            tools_refresh: || crate::tools::probe::refresh_now(crate::tools::finding_seed),
+            tools_refresh: || {
+                kernel_processes::finding::probe::refresh_now(crate::tools::finding_seed)
+            },
             live_switched_on: BTreeSet::new(),
             swept: None,
             events: None,
@@ -9611,7 +9613,8 @@ impl TeamRuntime {
             .parent()
             .map(Path::to_path_buf)
             .ok_or("harness install folder")?;
-        let resolved = crate::tools::resolve_entry(&program, &crate::tools::tools_places(None));
+        let resolved =
+            kernel_processes::finding::resolve_entry(&program, &crate::tools::tools_places(None));
         sandbox = sandbox
             .allow_read(&install)
             .and_then(|sandbox| sandbox.allow_exec(&program))

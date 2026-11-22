@@ -149,7 +149,7 @@ impl Dependency {
 
     /// Why this dependency cannot run when no answer names another reason: it is found
     /// nowhere the tool resolver looks. Output: the missing tool, with its owner line.
-    pub fn not_found(self) -> crate::tools::Missing {
+    pub fn not_found(self) -> kernel_processes::finding::Missing {
         program_not_found(self.program())
     }
 
@@ -260,7 +260,7 @@ pub enum Pin {
 /// Where one dependency stands on the setup screen. `Checking` means its version check
 /// is still running in the background; the screen reads the status again to see it.
 /// `Missing` carries the tool resolver's owner line for why the tool cannot run
-/// ([`crate::tools::Missing::line`]), the same words a launch that needs it says.
+/// ([`kernel_processes::finding::Missing::line`]), the same words a launch that needs it says.
 /// `Refused` is a tool the resolver found and passed over (DEC-162): its line, the file, the
 /// part another user or group can change, the permission fix when one can help, and why the
 /// owner's last fix did not, never counted as missing.
@@ -327,8 +327,8 @@ pub struct ToolFix {
     pub command: String,
 }
 
-impl From<&crate::tools::permission_fix::Target> for ToolFix {
-    fn from(target: &crate::tools::permission_fix::Target) -> Self {
+impl From<&kernel_processes::finding::permission_fix::Target> for ToolFix {
+    fn from(target: &kernel_processes::finding::permission_fix::Target) -> Self {
         Self {
             tree: target.path.to_string_lossy().into_owned(),
             recursive: target.recursive,
@@ -491,24 +491,24 @@ pub fn locked_tool_args(
 /// the app data folder; `program` finds a program setup installed or the system has.
 /// Implementations never use sudo and never change global configuration.
 /// What looking for one dependency found: its version, why it cannot run
-/// ([`crate::tools::Missing`]), or the check's code.
-pub type Lookup = Result<Result<Located, crate::tools::Missing>, InstallError>;
+/// ([`kernel_processes::finding::Missing`]), or the check's code.
+pub type Lookup = Result<Result<Located, kernel_processes::finding::Missing>, InstallError>;
 
 /// A dependency setup found: the version it reports, whether it is the copy the app ships
 /// beside the engine (DEC-157), which setup shows as bundled and never installs, and why
-/// another tmux runs in place of that copy, if one does ([`crate::tools::BundleNote`]).
+/// another tmux runs in place of that copy, if one does ([`kernel_processes::finding::BundleNote`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Located {
     pub version: Version,
     pub bundled: bool,
-    pub note: Option<crate::tools::BundleNote>,
+    pub note: Option<kernel_processes::finding::BundleNote>,
 }
 
 pub trait Installer: Send + Sync {
     fn find(&self, dep: Dependency) -> Result<Option<Version>, InstallError>;
 
     /// Finds a dependency as [`Installer::find`] does, naming why it cannot run when it is
-    /// missing ([`crate::tools::Missing`]), the answer the setup screen shows. Input: the
+    /// missing ([`kernel_processes::finding::Missing`]), the answer the setup screen shows. Input: the
     /// dependency. Output: its version, why it cannot run, or the check's code.
     fn lookup(&self, dep: Dependency) -> Lookup {
         Ok(self
@@ -535,7 +535,10 @@ pub trait Installer: Send + Sync {
     /// Finds one program as [`Installer::program`] does, naming why it cannot run when it
     /// is found and passed over (DEC-162), the line the onboarding graph step shows. Input:
     /// the program name. Output: the program, or why it cannot run.
-    fn lookup_program(&self, name: &str) -> Result<std::path::PathBuf, crate::tools::Missing> {
+    fn lookup_program(
+        &self,
+        name: &str,
+    ) -> Result<std::path::PathBuf, kernel_processes::finding::Missing> {
         self.program(name).ok_or_else(|| program_not_found(name))
     }
 
@@ -543,8 +546,8 @@ pub trait Installer: Send + Sync {
     /// places (DEC-162). Input: why the tool cannot run. Output: the target, or none.
     fn fix_target(
         &self,
-        missing: &crate::tools::Missing,
-    ) -> Option<crate::tools::permission_fix::Target> {
+        missing: &kernel_processes::finding::Missing,
+    ) -> Option<kernel_processes::finding::permission_fix::Target> {
         let _ = missing;
         None
     }
@@ -558,18 +561,18 @@ pub trait Installer: Send + Sync {
         dep: Dependency,
         confirmed: &str,
         recursive: bool,
-    ) -> Result<crate::tools::permission_fix::Report, &'static str> {
+    ) -> Result<kernel_processes::finding::permission_fix::Report, &'static str> {
         let _ = (dep, confirmed, recursive);
-        Err(crate::tools::permission_fix::TOOL_FIX_UNAVAILABLE)
+        Err(kernel_processes::finding::permission_fix::TOOL_FIX_UNAVAILABLE)
     }
 }
 
 /// Why a program cannot run when it is found nowhere the tool resolver looks. Input: the
 /// program name. Output: the missing tool, with its owner line.
-pub(crate) fn program_not_found(name: &str) -> crate::tools::Missing {
-    crate::tools::Missing {
+pub(crate) fn program_not_found(name: &str) -> kernel_processes::finding::Missing {
+    kernel_processes::finding::Missing {
         tool: name.to_owned(),
-        reason: crate::tools::Reason::NotFound,
+        reason: kernel_processes::finding::Reason::NotFound,
         needs: None,
         found: None,
         looked: Vec::new(),
@@ -687,31 +690,31 @@ const REASONS: [(&str, &str); 36] = [
         "Windows did not say where your local app data folder is, so setup can't install here.",
     ),
     (
-        crate::tools::permission_fix::TOOL_FIX_OFF,
+        kernel_processes::finding::permission_fix::TOOL_FIX_OFF,
         "Fixing permissions from CrazyAgent is turned off in Settings. Run the command shown instead.",
     ),
     (
-        crate::tools::permission_fix::TOOL_FIX_NOT_NEEDED,
+        kernel_processes::finding::permission_fix::TOOL_FIX_NOT_NEEDED,
         "This tool can run now, so nothing needed fixing.",
     ),
     (
-        crate::tools::permission_fix::TOOL_FIX_UNAVAILABLE,
+        kernel_processes::finding::permission_fix::TOOL_FIX_UNAVAILABLE,
         "Changing permissions can't fix why this tool is not used. Follow the line shown.",
     ),
     (
-        crate::tools::permission_fix::TOOL_FIX_CHANGED,
+        kernel_processes::finding::permission_fix::TOOL_FIX_CHANGED,
         "What blocks this tool changed since you looked, so nothing was changed. Check the row again.",
     ),
     (
-        crate::tools::permission_fix::TOOL_FIX_REFUSED,
+        kernel_processes::finding::permission_fix::TOOL_FIX_REFUSED,
         "CrazyAgent only fixes folders you own inside your home folder, never system, Homebrew, project or app data folders. Run the command yourself if you are sure.",
     ),
     (
-        crate::tools::permission_fix::TOOL_FIX_TOO_LARGE,
+        kernel_processes::finding::permission_fix::TOOL_FIX_TOO_LARGE,
         "That folder is too large to fix from CrazyAgent. Run the command shown instead.",
     ),
     (
-        crate::tools::permission_fix::TOOL_FIX_FAILED,
+        kernel_processes::finding::permission_fix::TOOL_FIX_FAILED,
         "The permissions could not be changed. Run the command shown instead.",
     ),
 ];

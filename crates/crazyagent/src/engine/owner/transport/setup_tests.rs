@@ -333,10 +333,10 @@ async fn the_backfill_makes_no_setup_folder_before_setup_and_seeds_the_shipped_h
 /// The owner's explicit setup run, the tool rows' Set up tools, Install missing and Try
 /// again, asks the background probes to look for tool folders again at once, whatever their
 /// backoff: each run that begins records a new folder run, while a passive look within the
-/// backoff ([`crate::tools::probe::missed`]) would not.
+/// backoff ([`kernel_processes::finding::probe::missed`]) would not.
 #[test]
 fn an_explicit_setup_run_asks_the_probes_to_look_again_at_once() {
-    let _ = crate::tools::probe::folders(crate::tools::finding_seed);
+    let _ = kernel_processes::finding::probe::folders(crate::tools::finding_seed);
     let before = kernel_processes::finding::test_support::last_run_finished();
     let root = tempfile::tempdir().unwrap();
     assert!(setup::begin_run(root.path(), &[]));

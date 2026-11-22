@@ -462,7 +462,8 @@ pub(crate) fn found_context_mode<'a>(
     if pinned_context_mode(spec).is_none() {
         return Ok(None);
     }
-    let pending = crate::tools::probe::mark(crate::tools::finding_seed).first_run_pending;
+    let pending =
+        kernel_processes::finding::probe::mark(crate::tools::finding_seed).first_run_pending;
     let places = crate::tools::tools_places(Some(root));
     context_mode_on(spec, &places, pending)
 }
@@ -474,7 +475,7 @@ pub(crate) fn found_context_mode<'a>(
 /// whether that probe was still going. Output: npx's folder and version, none, or why not.
 pub(crate) fn context_mode_on<'a>(
     spec: &'a ServerSpec,
-    places: &crate::tools::Places,
+    places: &kernel_processes::finding::Places,
     pending: bool,
 ) -> Result<Option<(&'a Path, &'a str)>, ContextModeOff> {
     let (ServerSpec::Stdio { command, .. }, Some((bin, version))) =
@@ -483,13 +484,13 @@ pub(crate) fn context_mode_on<'a>(
         return Ok(None);
     };
     let listed = places.folders().iter().any(|folder| folder == bin);
-    if listed && crate::tools::resolve_entry(Path::new(command), places).is_ok() {
+    if listed && kernel_processes::finding::resolve_entry(Path::new(command), places).is_ok() {
         return Ok(Some((bin, version)));
     }
     if pending {
         return Err(ContextModeOff::SettingUp);
     }
-    crate::tools::probe::missed(crate::tools::finding_seed);
+    kernel_processes::finding::probe::missed(crate::tools::finding_seed);
     Err(ContextModeOff::NpxNotFound)
 }
 
@@ -531,7 +532,7 @@ pub(crate) fn without_cmd_exe(root: &Path, spec: ServerSpec) -> Result<ServerSpe
     Ok(spec)
 }
 
-/// npm's `npx.cmd` as the tool resolver runs it ([`crate::tools::resolve_entry`]), kept only
+/// npm's `npx.cmd` as the tool resolver runs it ([`kernel_processes::finding::resolve_entry`]), kept only
 /// when the resolver mapped it by npx's layout ([`kernel_processes::batch::npx_real`]): `node.exe` with
 /// `npx-cli.js` before the approved arguments, both in plain drive spelling. Inputs: the
 /// command, its arguments and the places. Output: the spec, `server_command_not_found` for
@@ -540,11 +541,11 @@ pub(crate) fn without_cmd_exe(root: &Path, spec: ServerSpec) -> Result<ServerSpe
 fn npx_spec(
     command: &Path,
     args: &[String],
-    places: &crate::tools::Places,
+    places: &kernel_processes::finding::Places,
 ) -> Result<ServerSpec, &'static str> {
     let other = "server_batch_file";
     let (node, cli) = kernel_processes::batch::npx_real(command).ok_or(other)?;
-    let tool = crate::tools::resolve_entry(command, places).map_err(|missing| {
+    let tool = kernel_processes::finding::resolve_entry(command, places).map_err(|missing| {
         let why = missing.refused.as_ref().map(|refused| &refused.why);
         eprintln!(
             "plugin_server_npx_refused reason={:?} refused={why:?}",

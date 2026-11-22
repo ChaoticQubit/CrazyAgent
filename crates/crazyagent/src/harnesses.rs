@@ -233,7 +233,7 @@ impl Search {
             path,
             system,
             home,
-            &crate::tools::temp_roots(&crate::tools::HOOKS),
+            &kernel_processes::finding::temp_roots(&crate::tools::HOOKS),
         )
     }
 
@@ -257,7 +257,7 @@ impl Search {
             .unwrap_or_default()
             .into_iter()
             .partition(|folder| {
-                crate::tools::in_temp_of(&crate::tools::HOOKS, folder, temps)
+                kernel_processes::finding::in_temp_of(&crate::tools::HOOKS, folder, temps)
                     && !kept.contains(folder)
             });
         for folder in system {
@@ -338,23 +338,30 @@ impl Search {
     }
 
     /// Whether a file this search found in a kept folder really lies in a temp folder it
-    /// refuses ([`crate::tools::leads_into_temp`]). Input: the file. Output: the answer.
+    /// refuses ([`kernel_processes::finding::leads_into_temp`]). Input: the file. Output: the answer.
     fn links_into_temp(&self, file: &Path) -> bool {
         !self.temps.is_empty()
             && std::fs::canonicalize(file).is_ok_and(|real| {
-                crate::tools::leads_into_temp(&crate::tools::HOOKS, file, &real, &self.temps)
+                kernel_processes::finding::leads_into_temp(
+                    &crate::tools::HOOKS,
+                    file,
+                    &real,
+                    &self.temps,
+                )
             })
     }
 
     /// Builds the engine search from this process's PATH and HOME and the built-in system
     /// folders, with no registered executables; off Linux, Homebrew's folders come first
-    /// from the tool resolver's own list ([`crate::tools::homebrew_folders`]), so the
+    /// from the tool resolver's own list ([`kernel_processes::finding::homebrew_folders`]), so the
     /// clean-Mac gate's remap covers the catalog and its pin. Output: the search
     /// ([`Search::engine`]).
     pub fn from_environment() -> Self {
         let mut system: Vec<PathBuf> = Vec::new();
         #[cfg(not(target_os = "linux"))]
-        system.extend(crate::tools::homebrew_folders(&crate::tools::HOOKS));
+        system.extend(kernel_processes::finding::homebrew_folders(
+            &crate::tools::HOOKS,
+        ));
         system.extend(SYSTEM_DIRECTORIES.iter().map(PathBuf::from));
         Self::engine(
             std::env::var_os("PATH").as_deref(),
@@ -769,7 +776,7 @@ pub(crate) fn entry(harness: &'static registry::Harness, search: &Search) -> Har
 /// rows in the same order.
 pub(crate) fn with_needs(
     entries: Vec<HarnessEntry>,
-    places: &crate::tools::Places,
+    places: &kernel_processes::finding::Places,
 ) -> Vec<HarnessEntry> {
     let count = entries.len();
     let marked: Vec<HarnessEntry> = entries

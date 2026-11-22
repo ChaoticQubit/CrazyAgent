@@ -134,7 +134,7 @@ fn count_tool_look() {
 
 /// The owner installs a tool and presses Try again: each time the owner switches the live
 /// master on, the runtime asks the tool probes to look again at once
-/// (`tools::probe::refresh_now`), whatever their backoff, so a tool found only on the login
+/// (`kernel_processes::finding::probe::refresh_now`), whatever their backoff, so a tool found only on the login
 /// shell's PATH or npm's prefix is seen; ticks while the switch stays off never look.
 #[test]
 fn each_live_master_start_the_owner_asks_for_looks_for_tools_again() {

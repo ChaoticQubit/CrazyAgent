@@ -1,5 +1,4 @@
-pub use kernel_processes::finding::*;
-
+use kernel_processes::finding::{FindingHooks, FindingSeed, Places};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 

@@ -344,12 +344,14 @@ pub(crate) fn executable_file(path: &Path) -> Option<PathBuf> {
 }
 
 /// Finds the PATH entry a shell would run for a name, skipping relative PATH folders, folders
-/// in the temp folders given and entries leading into one ([`crate::tools::leads_into_temp`]).
+/// in the temp folders given and entries leading into one ([`kernel_processes::finding::leads_into_temp`]).
 /// Inputs: the name, a PATH value and the temp folders, none to refuse nothing. Output: the
 /// absolute entry with its links kept, or none when no entry leads to a runnable file.
 fn path_entry(name: &str, path: Option<&OsStr>, temps: &[PathBuf]) -> Option<PathBuf> {
     for folder in std::env::split_paths(path?) {
-        if !folder.is_absolute() || crate::tools::in_temp_of(&crate::tools::HOOKS, &folder, temps) {
+        if !folder.is_absolute()
+            || kernel_processes::finding::in_temp_of(&crate::tools::HOOKS, &folder, temps)
+        {
             continue;
         }
         for file in executable_names(name) {
@@ -357,7 +359,12 @@ fn path_entry(name: &str, path: Option<&OsStr>, temps: &[PathBuf]) -> Option<Pat
             let Some(real) = executable_file(&entry) else {
                 continue;
             };
-            if crate::tools::leads_into_temp(&crate::tools::HOOKS, &entry, &real, temps) {
+            if kernel_processes::finding::leads_into_temp(
+                &crate::tools::HOOKS,
+                &entry,
+                &real,
+                temps,
+            ) {
                 continue;
             }
             assert!(entry.is_absolute());
@@ -387,7 +394,7 @@ pub struct Harnesses {
 /// and the folder holding the running executable. Output: each given path, else the `codex`
 /// and `claude` entries the search finds as the catalog does (PATH, system, then HOME
 /// folders), and the RCLI host next to the executable, then in the engine's places with that
-/// PATH ([`crate::tools::Places::engine`]), which set aside a temp folder, links kept.
+/// PATH ([`kernel_processes::finding::Places::engine`]), which set aside a temp folder, links kept.
 pub fn resolve_harnesses(
     given: Harnesses,
     search: &crate::harnesses::Search,
@@ -408,12 +415,12 @@ pub fn resolve_harnesses(
 }
 
 /// Resolves the RCLI host for one engine start: the given path, else the host next to the
-/// running executable, then wherever the tool resolver looks ([`crate::tools::resolve`]),
+/// running executable, then wherever the tool resolver looks ([`kernel_processes::finding::resolve`]),
 /// links kept. Inputs: the given path, the places and the folder holding the running
 /// executable. Output: the entry, or none.
 pub fn rcli_entry(
     given: Option<PathBuf>,
-    places: &crate::tools::Places,
+    places: &kernel_processes::finding::Places,
     executable_folder: Option<&Path>,
 ) -> Option<PathBuf> {
     let beside = || {
@@ -426,7 +433,7 @@ pub fn rcli_entry(
     let resolved = || {
         executable_names(RCLI_EXECUTABLE)
             .iter()
-            .find_map(|name| crate::tools::resolve(name, places).ok())
+            .find_map(|name| kernel_processes::finding::resolve(name, places).ok())
             .map(|found| found.entry)
     };
     given.or_else(|| {
@@ -501,7 +508,11 @@ pub fn harness_candidates(
 /// match for its name, never one in a temp folder or leading into one for an entry outside
 /// every temp folder; else NotFound, which a launch reports as not installed.
 pub fn launch_executable(entry: &Path, path: Option<&OsStr>) -> std::io::Result<PathBuf> {
-    launch_executable_in(entry, path, &crate::tools::temp_roots(&crate::tools::HOOKS))
+    launch_executable_in(
+        entry,
+        path,
+        &kernel_processes::finding::temp_roots(&crate::tools::HOOKS),
+    )
 }
 
 /// Resolves a harness entry as [`launch_executable`] does with the temp folders given, so a
@@ -526,7 +537,11 @@ fn launch_executable_in(
 /// under the rules of [`launch_executable`]; else NotFound. Inputs: the absolute entry and
 /// the PATH value. Output: the entry used.
 pub fn launch_entry(entry: &Path, path: Option<&OsStr>) -> std::io::Result<PathBuf> {
-    launch_entry_in(entry, path, &crate::tools::temp_roots(&crate::tools::HOOKS))
+    launch_entry_in(
+        entry,
+        path,
+        &kernel_processes::finding::temp_roots(&crate::tools::HOOKS),
+    )
 }
 
 /// Finds the entry a launch goes through as [`launch_entry`] does with the temp folders
@@ -543,11 +558,12 @@ fn launch_entry_in(
     let on_path = || {
         let folder = entry.parent()?;
         let name = entry.file_name()?.to_str()?;
-        let refused: &[PathBuf] = if crate::tools::in_temp_of(&crate::tools::HOOKS, folder, temps) {
-            &[]
-        } else {
-            temps
-        };
+        let refused: &[PathBuf] =
+            if kernel_processes::finding::in_temp_of(&crate::tools::HOOKS, folder, temps) {
+                &[]
+            } else {
+                temps
+            };
         std::env::split_paths(path?)
             .any(|listed| listed == folder)
             .then(|| path_entry(name, path, refused))
@@ -925,7 +941,10 @@ mod tests {
     /// Keeps only the folders of `places` inside `root`, in their order, so a row sees the
     /// engine's search order without this machine's Homebrew and system folders. Inputs:
     /// the places and the scratch root. Output: the places.
-    fn scratch_only(places: crate::tools::Places, root: &Path) -> crate::tools::Places {
+    fn scratch_only(
+        places: kernel_processes::finding::Places,
+        root: &Path,
+    ) -> kernel_processes::finding::Places {
         crate::tools::tools_new(
             places
                 .folders()

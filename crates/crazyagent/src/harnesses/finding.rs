@@ -43,7 +43,7 @@ pub(crate) const NAMED_FOLDERS_MAX: usize = AGENT_ROWS_MAX * (PROJECT_REPOSITORI
 const AGENT_FOLDERS_MAX: usize = 2 * (NAMED_FOLDERS_MAX + 1);
 /// The engine tables that name folders agents can write, how each names them and the query
 /// that reads them, bounded by its one parameter: engine start's [`AgentSpace`] and the tool
-/// resolver's places ([`crate::tools::Places`]) read this one list.
+/// resolver's places ([`kernel_processes::finding::Places`]) read this one list.
 pub(crate) const AGENT_TABLES: [(&str, Names, &str); 4] = [
     (
         "project_setups",
@@ -91,7 +91,7 @@ pub(crate) enum Names {
 }
 
 /// The folders agents can write, where no harness file may come from: the engine folder
-/// outside its `setup` folder ([`crate::tools::in_engine_data`]) with every agent home, the
+/// outside its `setup` folder ([`kernel_processes::finding::in_engine_data`]) with every agent home, the
 /// agents' temp folders, the engine's own temp folder, which the agents' temp grant gives
 /// them ([`crate::sandbox::grants::owner_temp_folder`]), any `.crazyagent` folder with its
 /// agent worktrees, and each project folder, declared repository and agent worktree the
@@ -144,11 +144,12 @@ impl AgentSpace {
                     .as_deref()
                     .is_some_and(|owner| owner.starts_with(folder))
         };
-        let mut engine: Vec<PathBuf> = crate::tools::engine_roots(&crate::tools::HOOKS, Some(root))
-            .into_iter()
-            .chain(crate::sandbox::canonical(root).ok())
-            .filter(usable)
-            .collect();
+        let mut engine: Vec<PathBuf> =
+            kernel_processes::finding::engine_roots(&crate::tools::HOOKS, Some(root))
+                .into_iter()
+                .chain(crate::sandbox::canonical(root).ok())
+                .filter(usable)
+                .collect();
         engine.sort();
         engine.dedup();
         let mut folders = Vec::new();
@@ -190,7 +191,7 @@ impl AgentSpace {
             .any(|at| {
                 in_crazyagent_folder(&at)
                     || at.to_str().is_some_and(|text| text.starts_with(AGENT_TMP))
-                    || crate::tools::in_engine_data(&self.engine, &at)
+                    || kernel_processes::finding::in_engine_data(&self.engine, &at)
                     || self.temp.iter().any(|folder| at.starts_with(folder))
                     || self.folders.iter().any(|folder| at.starts_with(folder))
             })
@@ -699,7 +700,7 @@ pub(crate) fn outside_temp(prefix: &str) -> tempfile::TempDir {
         place.display()
     );
     assert!(
-        !crate::tools::temp_roots(&crate::tools::HOOKS)
+        !kernel_processes::finding::temp_roots(&crate::tools::HOOKS)
             .iter()
             .any(|temp| place.starts_with(temp)),
         "HOME lies in a temp folder: {}",

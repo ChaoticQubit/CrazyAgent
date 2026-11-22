@@ -1,5 +1,8 @@
-use crate::tools::*;
+use crate::tools::{
+    HOOKS, finding_seed, gate_root, registered_projects, tools_engine, tools_new, tools_places,
+};
 use kernel_processes::finding::test_support::*;
+use kernel_processes::finding::*;
 use std::ffi::{OsStr, OsString};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};

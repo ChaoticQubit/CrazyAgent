@@ -2106,7 +2106,7 @@ fn a_harness_entry_inside_a_project_never_launches() {
     let entry = project.join("bin").join("codex");
     stand_in(&entry);
     let places = crate::tools::tools_places(None);
-    let line = crate::tools::resolve_entry(&entry, &places)
+    let line = kernel_processes::finding::resolve_entry(&entry, &places)
         .unwrap_err()
         .line();
     assert_eq!(launch_words(&entry), Err(LaunchError(line.clone(), None)));
@@ -2210,11 +2210,11 @@ fn a_pinned_harness_inside_a_project_is_refused_by_name_not_reported_missing() {
     let entry = project.join("bin").join("codex");
     stand_in(&entry);
     let places = crate::tools::tools_places(None);
-    let missing = crate::tools::resolve_entry(&entry, &places).unwrap_err();
-    assert_eq!(missing.reason, crate::tools::Reason::Refused);
+    let missing = kernel_processes::finding::resolve_entry(&entry, &places).unwrap_err();
+    assert_eq!(missing.reason, kernel_processes::finding::Reason::Refused);
     assert_eq!(
         missing.refused.map(|refused| refused.why),
-        Some(crate::tools::Refusal::AgentsCanWrite)
+        Some(kernel_processes::finding::Refusal::AgentsCanWrite)
     );
     let LaunchError(line, _) = launch_tool(&entry, &places).unwrap_err();
     assert!(line.contains(&entry.display().to_string()), "{line}");

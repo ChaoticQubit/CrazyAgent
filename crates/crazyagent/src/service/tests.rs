@@ -885,7 +885,7 @@ fn an_appimage_persisted_tmux_is_found_beside_the_engine_not_refused() {
     let app = installed.parent().unwrap();
     assert_eq!(app, layout.root().join("setup").join("bin"));
     let places = crate::tools::tools_engine(Some(layout.root()), Some(app), None, None);
-    let tmux = crate::tools::resolve("tmux", &places).unwrap();
+    let tmux = kernel_processes::finding::resolve("tmux", &places).unwrap();
     assert_eq!(tmux.entry, app.join("crazyagent-tmux"));
 }
 
