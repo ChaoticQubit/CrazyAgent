@@ -39,6 +39,11 @@ fn the_good_fixture_passes() {
 }
 
 #[test]
+fn a_no_std_plugin_building_the_new_type_values_passes() {
+    assert_eq!(check_crate(&fixture("uses_new_types")), Ok(()));
+}
+
+#[test]
 fn each_bad_fixture_gets_exactly_its_code() {
     for (name, code) in [
         ("uses_fs", "plugin_std_not_allowed"),

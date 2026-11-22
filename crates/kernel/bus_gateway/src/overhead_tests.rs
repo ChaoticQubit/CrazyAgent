@@ -18,8 +18,8 @@ const PLUGIN: &str = "overhead";
 struct Noop;
 
 impl Provide for Noop {
-    fn save_quit(&self, settings: QuitSettings) -> Result<(), Refusal> {
-        black_box(settings);
+    fn save_quit(&self, caller: &'static str, settings: QuitSettings) -> Result<(), Refusal> {
+        black_box((caller, settings));
         Ok(())
     }
 }
@@ -94,7 +94,7 @@ fn overhead_per_sdk_call() {
         left_running: LeftRunning::Never,
         hours: 12,
     };
-    let mut direct_call = || black_box(provider.save_quit(black_box(input))).unwrap();
+    let mut direct_call = || black_box(provider.save_quit(PLUGIN, black_box(input))).unwrap();
     let mut sdk_call = || black_box(settings::save_quit(&bound, black_box(input))).unwrap();
     for _ in 0..ROUNDS / 10 {
         batch(&mut direct_call);
