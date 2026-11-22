@@ -34,6 +34,14 @@ pub fn rust(files: &[(&str, File)]) -> Result<Vec<(String, String)>, CapgenError
         .collect()
 }
 
+/// Writes one `.cap` file as a single test module with its own `Host` trait, laid out by
+/// rustfmt, for the SDK's tests to compile every emitter. Inputs: the stem and the parsed
+/// file. Output: the module text, or the first refusal.
+pub fn rust_test_module(stem: &str, file: &File) -> Result<String, CapgenError> {
+    let text = rust::test_module(stem, file)?;
+    rustfmt(&format!("{stem}.rs"), &text)
+}
+
 /// Lays one generated file out with `RUSTFMT` when set, else the toolchain's `rustfmt`
 /// on the path. Inputs: the file's path, for refusals, and its text. Output: as
 /// [`rustfmt_with`].
