@@ -884,6 +884,7 @@ dependencies = [
  "base64 0.22.1",
  "crazyagent-bus-gateway",
  "crazyagent-cap",
+ "crazyagent-kernel-security",
  "crazyagent-kernel-storage",
  "crazyagent-linux-supervisor",
  "crazyagent-macos-fs",
