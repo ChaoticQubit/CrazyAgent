@@ -77,6 +77,10 @@ pub fn check_plugins(root: &Path) -> Result<(), Vec<Violation>> {
     if out.is_empty() { Ok(()) } else { Err(out) }
 }
 
+/// The one file name the checks skip: the folder view file macOS Finder writes into any
+/// folder it shows. It is never Rust source and never a crate.
+pub const FINDER_FILE: &str = ".DS_Store";
+
 /// The most bundled plugins the central check walks.
 pub const PLUGINS_MAX: usize = 1_024;
 
@@ -90,6 +94,7 @@ fn entries(folder: &Path, below: &Path, out: &mut Vec<Violation>) -> Vec<PathBuf
     };
     let mut names: Vec<PathBuf> = read
         .flatten()
+        .filter(|entry| entry.file_name() != FINDER_FILE)
         .map(|entry| PathBuf::from(entry.file_name()))
         .collect();
     names.sort();

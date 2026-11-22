@@ -428,6 +428,9 @@ fn a_finder_ds_store_file_is_the_one_named_exception() {
     }
     assert_eq!(check_plugins(&plugins), Ok(()));
     fs::write(plugin.join("src").join("._lib.rs"), [0u8; 8]).expect("resource fork file");
-    assert!(check_plugins(&plugins).is_err(), "only .DS_Store is excepted");
+    assert!(
+        check_plugins(&plugins).is_err(),
+        "only .DS_Store is excepted"
+    );
     fs::remove_dir_all(&root).expect("scratch removed");
 }
