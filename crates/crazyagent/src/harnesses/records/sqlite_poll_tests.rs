@@ -515,16 +515,17 @@ fn index_but_no_wal(path: &Path) -> (u64, u64) {
     let writer = database(path, 3);
     writer.pragma_update(None, "journal_mode", "wal").unwrap();
     add(&writer, &turn());
-    let root: u64 = writer
+    let root: i64 = writer
         .query_row(
             "SELECT rootpage FROM sqlite_master WHERE name = 'facts'",
             [],
             |row| row.get(0),
         )
         .unwrap();
-    let size: u64 = writer
+    let size: i64 = writer
         .query_row("PRAGMA page_size", [], |row| row.get(0))
         .unwrap();
+    let (root, size) = (u64::try_from(root).unwrap(), u64::try_from(size).unwrap());
     writer
         .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
         .unwrap();
