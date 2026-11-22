@@ -800,4 +800,49 @@ mod tests {
             assert!(spec(name).validate().is_ok(), "{name:?}");
         }
     }
+
+    #[test]
+    fn a_secret_ref_reads_the_same_bytes_as_the_credential_ref_it_replaces() {
+        let found = kernel_security::store::reference("a.b", "c").unwrap();
+        assert_eq!(wire(&found).as_str(), "a.b:c");
+        assert_eq!(kernel(&wire(&found)).unwrap(), found);
+        let saved = CredentialRef::new("dev.crazyagent.x.github:token".to_string()).unwrap();
+        assert_eq!(kernel(&saved).unwrap().as_str(), saved.as_str());
+        let foreign = CredentialRef::new("a:b:c".to_string()).unwrap();
+        assert_eq!(
+            kernel(&foreign).unwrap_err(),
+            kernel_security::error::StoreError::code("credential_reference_invalid")
+        );
+    }
+
+    #[test]
+    fn wire_accepts_the_longest_reference_and_every_byte_class() {
+        let longest = "a".repeat(kernel_security::store::NAME_BYTES_MAX);
+        let widest = kernel_security::store::reference(&longest, &longest).unwrap();
+        assert_eq!(
+            wire(&widest).as_str().len(),
+            kernel_security::store::REFERENCE_BYTES_MAX
+        );
+        let classes = kernel_security::store::reference("az09.-_", "_z-9.a").unwrap();
+        assert_eq!(wire(&classes).as_str(), "az09.-_:_z-9.a");
+    }
+
+    #[test]
+    fn a_kernel_reference_is_accepted_exactly_where_a_credential_ref_is() {
+        let names = [
+            "a", "c", "z", "cd", "a.", "a_.", "svc.", "aux", "aux.", "aux.x", "con.v1", "nul.github",
+            "com1", "com1.a", "lpt9.x", "console", "token", "dev.crazyagent.x.github",
+        ];
+        for service in names {
+            for account in names {
+                let joined = format!("{service}:{account}");
+                let today = CredentialRef::new(joined.clone()).is_ok();
+                let found = kernel_security::store::reference(service, account);
+                assert_eq!(found.is_ok(), today, "{joined:?}");
+                if let Ok(found) = found {
+                    assert_eq!(wire(&found).as_str(), joined);
+                }
+            }
+        }
+    }
 }
