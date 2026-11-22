@@ -94,7 +94,7 @@ impl Case {
     }
 
     fn retain(&mut self, program: &str, args: &[&str]) {
-        let child = crate::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new(program)
                 .args(args)
                 .env_clear()
@@ -155,7 +155,7 @@ fn native_auth_codex_retirement_requires_a_spawned_child() {
 #[test]
 fn native_auth_codex_retirement_accepts_a_reaped_child_and_absent_group() {
     let mut case = Case::new();
-    let mut child = crate::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         Command::new("/bin/cat")
             .env_clear()
             .current_dir(&case.home)

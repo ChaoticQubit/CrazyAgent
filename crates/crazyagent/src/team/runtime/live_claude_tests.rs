@@ -190,7 +190,7 @@ fn a_resumed_claude_agent_keeps_its_conversation_and_sees_an_edit_only_as_the_en
 /// The running processes whose command line holds `needle`, as `ps` lists them.
 /// Input: the text. Output: each process's pid and command line.
 pub(super) fn processes_with(needle: &str) -> Vec<String> {
-    let listed = crate::spawn_gate::output(
+    let listed = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/ps")
             .args(["-axww", "-o", "pid=,command="])
             .stdout(std::process::Stdio::piped()),

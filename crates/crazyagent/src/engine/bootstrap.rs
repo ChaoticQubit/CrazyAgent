@@ -1321,7 +1321,7 @@ impl EngineService {
             return false;
         }
         let refused = matches!(
-            tokio::time::timeout(self.timeout, crate::spawn_gate::connect_unix(&path)).await,
+            tokio::time::timeout(self.timeout, kernel_processes::spawn_gate::connect_unix(&path)).await,
             Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused
         );
         refused && check_socket(&self.anchor, &path, identity).is_ok()
@@ -1431,7 +1431,12 @@ impl EngineService {
         if check_socket(&self.anchor, path, identity).is_err() {
             return Err(fail("socket_path_already_exists"));
         }
-        match tokio::time::timeout(self.timeout, crate::spawn_gate::connect_unix(path)).await {
+        match tokio::time::timeout(
+            self.timeout,
+            kernel_processes::spawn_gate::connect_unix(path),
+        )
+        .await
+        {
             Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => {}
             _ => return Err(fail("socket_path_already_exists")),
         }
@@ -1478,7 +1483,12 @@ impl EngineService {
         };
         old.verify(&self.anchor)?;
         check_socket(&self.anchor, &path, old.value.ordinary_socket)?;
-        match tokio::time::timeout(self.timeout, crate::spawn_gate::connect_unix(&path)).await {
+        match tokio::time::timeout(
+            self.timeout,
+            kernel_processes::spawn_gate::connect_unix(&path),
+        )
+        .await
+        {
             Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => {}
             _ => return Err(fail("ordinary_socket_not_proven_stale")),
         }
@@ -2192,7 +2202,7 @@ mod tests {
         std::fs::create_dir(&generation).unwrap();
         std::fs::set_permissions(&generation, std::fs::Permissions::from_mode(0o700)).unwrap();
         let dead_socket = |socket: &Path| {
-            drop(crate::spawn_gate::bind_unix_std(socket).unwrap());
+            drop(kernel_processes::spawn_gate::bind_unix_std(socket).unwrap());
             std::fs::set_permissions(socket, std::fs::Permissions::from_mode(0o600)).unwrap();
             Identity::of(&std::fs::symlink_metadata(socket).unwrap())
         };
@@ -2247,7 +2257,7 @@ mod tests {
             crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
         let (_stop, stopped) = watch::channel(false);
         let socket = root.path().join("e.sock");
-        let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
+        let listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
         drop(listener);
         assert!(
@@ -2296,10 +2306,10 @@ mod tests {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
         };
         let dead = root.path().join("e.sock.stale-0000000a");
-        drop(crate::spawn_gate::bind_unix_std(&dead).unwrap());
+        drop(kernel_processes::spawn_gate::bind_unix_std(&dead).unwrap());
         private(&dead, 0o600);
         let live = root.path().join("e.sock.stale-0000000b");
-        let listener = crate::spawn_gate::bind_unix_std(&live).unwrap();
+        let listener = kernel_processes::spawn_gate::bind_unix_std(&live).unwrap();
         private(&live, 0o600);
         let old_locator = root.path().join("owner-current.stale-0000000c");
         std::fs::write(&old_locator, b"{}").unwrap();
@@ -2311,7 +2321,7 @@ mod tests {
         std::fs::write(&unrelated, b"owner notes").unwrap();
         private(&unrelated, 0o600);
         let other_socket = root.path().join("other.sock.stale-0000000e");
-        drop(crate::spawn_gate::bind_unix_std(&other_socket).unwrap());
+        drop(kernel_processes::spawn_gate::bind_unix_std(&other_socket).unwrap());
         private(&other_socket, 0o600);
 
         let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)

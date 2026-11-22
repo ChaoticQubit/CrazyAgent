@@ -418,7 +418,7 @@ fn a_tools_on_codex_agent_cannot_change_its_own_launch_files() {
 /// Fetches `url` with curl and returns the HTTP status it printed, `000` without a reply.
 /// Input: the command that runs curl. Output: the status text and curl's stderr.
 fn http_status(command: &mut std::process::Command) -> (String, String) {
-    let output = crate::spawn_gate::output(command).unwrap();
+    let output = kernel_processes::spawn_gate::output(command).unwrap();
     (
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
@@ -432,7 +432,8 @@ fn http_status(command: &mut std::process::Command) -> (String, String) {
 fn agent_starts_and_reaches_the_provider(harness: &'static str, executable: &Path, url: &str) {
     let agent = ManagedAgent::new(harness, executable);
     let version =
-        crate::spawn_gate::output(&mut agent.command(executable, &["--version"])).unwrap();
+        kernel_processes::spawn_gate::output(&mut agent.command(executable, &["--version"]))
+            .unwrap();
     assert!(
         version.status.success() && !version.stdout.is_empty(),
         "the {harness} harness did not start in its sandbox: {}",

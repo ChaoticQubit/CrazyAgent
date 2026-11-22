@@ -61,12 +61,12 @@ pub fn spawn(command: &mut Command) -> io::Result<(Child, Option<Warden>)> {
     use std::os::fd::{AsRawFd, OwnedFd};
 
     if !wardable(command)? {
-        return crate::spawn_gate::spawn(command).map(|child| (child, None));
+        return kernel_processes::spawn_gate::spawn(command).map(|child| (child, None));
     }
-    let (engine, warden) = crate::spawn_gate::unix_pair_std()?;
+    let (engine, warden) = kernel_processes::spawn_gate::unix_pair_std()?;
     let handed = OwnedFd::from(warden);
     command.env(WARDEN_FD, handed.as_raw_fd().to_string());
-    let child = crate::spawn_gate::spawn_handing(command, handed)?;
+    let child = kernel_processes::spawn_gate::spawn_handing(command, handed)?;
     Ok((child, Some(Warden::reported(engine, ARM_TIME))))
 }
 
@@ -74,7 +74,7 @@ pub fn spawn(command: &mut Command) -> io::Result<(Child, Option<Warden>)> {
 /// and no warden.
 #[cfg(not(target_os = "macos"))]
 pub fn spawn(command: &mut Command) -> io::Result<(Child, Option<Warden>)> {
-    crate::spawn_gate::spawn(command).map(|child| (child, None))
+    kernel_processes::spawn_gate::spawn(command).map(|child| (child, None))
 }
 
 /// Tells whether a command starts the session shim under `sandbox-exec -f <profile>` whose

@@ -288,7 +288,7 @@ pub(super) fn open(ports: &[u16], args: &[OsString]) -> Result<(Ends, Vec<OsStri
         .stdin(Stdio::from(info_read))
         .stdout(Stdio::from(block_write))
         .stderr(Stdio::inherit());
-    crate::spawn_gate::spawn(&mut setup).map_err(failed)?;
+    kernel_processes::spawn_gate::spawn(&mut setup).map_err(failed)?;
     drop(setup);
     Ok((
         Ends {
@@ -530,8 +530,8 @@ fn tools() -> Result<(), String> {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let version =
-            crate::spawn_gate::output(&mut asked).map_err(|error| format!("{restore}: {error}"))?;
+        let version = kernel_processes::spawn_gate::output(&mut asked)
+            .map_err(|error| format!("{restore}: {error}"))?;
         if !version.status.success() || !nf_tables(&String::from_utf8_lossy(&version.stdout)) {
             return Err(format!("{restore} is not the nf_tables iptables"));
         }
@@ -548,7 +548,7 @@ fn start_slirp(child: u32) -> Result<Slirp, String> {
     let failed = |error: std::io::Error| format!("slirp4netns: {error}");
     let helper = std::env::current_exe().map_err(failed)?;
     let (exit_read, exit_write) = std::io::pipe().map_err(failed)?;
-    let (ready, handed) = crate::spawn_gate::unix_pair_std().map_err(failed)?;
+    let (ready, handed) = kernel_processes::spawn_gate::unix_pair_std().map_err(failed)?;
     ready.set_read_timeout(Some(READY_TIME)).map_err(failed)?;
     let handed = OwnedFd::from(handed);
     let fd = handed.as_raw_fd();
@@ -562,7 +562,8 @@ fn start_slirp(child: u32) -> Result<Slirp, String> {
         .stdin(Stdio::from(exit_read))
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
-    let process = crate::spawn_gate::spawn_handing(&mut command, handed).map_err(failed)?;
+    let process =
+        kernel_processes::spawn_gate::spawn_handing(&mut command, handed).map_err(failed)?;
     drop(command);
     let started = Slirp {
         process,
@@ -750,8 +751,8 @@ fn apply(restore: &str, save: &str, rules: &str) -> Result<(), String> {
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit());
-    let mut running =
-        crate::spawn_gate::spawn(&mut command).map_err(|error| format!("{restore}: {error}"))?;
+    let mut running = kernel_processes::spawn_gate::spawn(&mut command)
+        .map_err(|error| format!("{restore}: {error}"))?;
     let written = running
         .stdin
         .take()
@@ -769,8 +770,8 @@ fn apply(restore: &str, save: &str, rules: &str) -> Result<(), String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit());
-    let saved =
-        crate::spawn_gate::output(&mut reading).map_err(|error| format!("{save}: {error}"))?;
+    let saved = kernel_processes::spawn_gate::output(&mut reading)
+        .map_err(|error| format!("{save}: {error}"))?;
     if !saved.status.success() || saved.stdout.len() > SAVED_BYTES_MAX {
         return Err(format!("{save} did not print the rules"));
     }
@@ -1565,17 +1566,18 @@ mod tests {
             path,
             "the socket is reached at its own path, so no file opens on the way"
         );
-        let _server = crate::spawn_gate::bind_unix_std(&path).unwrap();
+        let _server = kernel_processes::spawn_gate::bind_unix_std(&path).unwrap();
         assert!(
-            crate::spawn_gate::connect_unix_std(&path).is_ok(),
+            kernel_processes::spawn_gate::connect_unix_std(&path).is_ok(),
             "the control: it connects unconfined"
         );
         let child = std::process::id();
         let (opened, connected, pair, udp) = std::thread::spawn(move || {
             let opened = confine_slirp(child);
-            let connected = crate::spawn_gate::connect_unix_std(&path);
-            let pair = crate::spawn_gate::unix_pair_std();
-            let udp = crate::spawn_gate::bind_udp_std((std::net::Ipv4Addr::LOCALHOST, 0));
+            let connected = kernel_processes::spawn_gate::connect_unix_std(&path);
+            let pair = kernel_processes::spawn_gate::unix_pair_std();
+            let udp =
+                kernel_processes::spawn_gate::bind_udp_std((std::net::Ipv4Addr::LOCALHOST, 0));
             (opened, connected, pair, udp)
         })
         .join()

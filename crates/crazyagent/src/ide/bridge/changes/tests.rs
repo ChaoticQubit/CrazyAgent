@@ -23,7 +23,7 @@ pub(in crate::ide::bridge) struct Case {
 /// Runs git as the owner would in a test: an isolated home, no system config, in `dir`.
 /// Inputs: the owner home, the folder and the arguments. Output: standard output.
 fn git_in(home: &Path, dir: &Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

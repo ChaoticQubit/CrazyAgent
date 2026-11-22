@@ -74,7 +74,7 @@ fn sandbox(case: &Case) -> ProjectSandbox {
 /// Runs the owner's own git in `folder` with no system or global config. Inputs: the
 /// folder, the home and the arguments. Output: the finished process.
 fn owner_git(folder: &Path, home: &Path, arguments: &[&str]) -> Output {
-    crate::spawn_gate::output(
+    kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -142,7 +142,7 @@ fn run(sandbox: &ProjectSandbox, profile: &Path, script: &str) -> Output {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crate::spawn_gate::output(&mut command).unwrap()
+    kernel_processes::spawn_gate::output(&mut command).unwrap()
 }
 
 /// Fails unless `script` fails under the profile and leaves nothing at `target`.

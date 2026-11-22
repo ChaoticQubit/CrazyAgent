@@ -1652,7 +1652,7 @@ fn run_listing(argv: &[String], deadline: Instant, keep: Option<String>) -> Opti
     use std::io::Read;
     use std::process::{Command, Stdio};
     let (program, arguments) = argv.split_first()?;
-    let mut child = crate::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         Command::new(program)
             .args(arguments)
             .env_clear()
@@ -2074,7 +2074,7 @@ pub(crate) mod tests {
     /// Reads a process's program with `ps`. Input: the id. Output: its basename, if running.
     #[cfg(target_os = "macos")]
     fn program_of(pid: i32) -> Option<String> {
-        let listing = crate::spawn_gate::output(
+        let listing = kernel_processes::spawn_gate::output(
             std::process::Command::new("/bin/ps")
                 .args(["-o", "comm=", "-p", &pid.to_string()])
                 .stdin(std::process::Stdio::null())
@@ -2094,7 +2094,7 @@ pub(crate) mod tests {
     #[test]
     fn a_leftover_that_runs_a_new_program_after_the_snapshot_is_still_named() {
         let folder = tempfile::tempdir().unwrap();
-        let mut leader = crate::spawn_gate::spawn(
+        let mut leader = kernel_processes::spawn_gate::spawn(
             std::process::Command::new("/usr/bin/perl")
                 .args([
                     "-mPOSIX",
@@ -2325,7 +2325,7 @@ pub(crate) mod tests {
 
     #[test]
     fn signing_out_lets_go_of_an_account_a_full_access_stop_keeps_and_names() {
-        let mut leftover = crate::spawn_gate::spawn(
+        let mut leftover = kernel_processes::spawn_gate::spawn(
             std::process::Command::new("/usr/bin/perl")
                 .args(["-mPOSIX", "-e", "POSIX::setsid() > 0 or exit 1; sleep 30"])
                 .stdin(std::process::Stdio::null())
@@ -2718,7 +2718,7 @@ pub(crate) mod tests {
         if let Some(token) = token {
             command.env(LINEAGE_VARIABLE, token.as_str());
         }
-        let mut shell = crate::spawn_gate::spawn(
+        let mut shell = kernel_processes::spawn_gate::spawn(
             command
                 .env(SLEEPER_PID, folder.join(name))
                 .env(extra.0, extra.1)
@@ -2851,7 +2851,7 @@ pub(crate) mod tests {
     #[test]
     fn a_sandboxed_follower_names_what_its_run_left_outside_its_group_as_sandboxed() {
         let folder = tempfile::tempdir().unwrap();
-        let mut leader = crate::spawn_gate::spawn(
+        let mut leader = kernel_processes::spawn_gate::spawn(
             std::process::Command::new("/usr/bin/perl")
                 .args(["-mPOSIX", "-e", "POSIX::setsid() > 0 or exit 1; exec '/bin/sh', '-c', $ARGV[0] or exit 1"])
                 .arg(
@@ -2918,7 +2918,7 @@ pub(crate) mod tests {
         } else {
             "POSIX::setsid() > 0 or exit 1; sleep 60"
         };
-        let child = crate::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             std::process::Command::new("/usr/bin/perl")
                 .args(["-mPOSIX", "-e", script])
                 .stdin(std::process::Stdio::null())
@@ -3504,7 +3504,7 @@ pub(crate) mod tests {
         let folder = tempfile::tempdir().unwrap();
         let ours = LineageToken::new().unwrap();
         let (_, unrelated) = detached_with(folder.path(), "unrelated.pid", None, ("UNUSED", "x"));
-        let started = crate::spawn_gate::output(
+        let started = kernel_processes::spawn_gate::output(
             std::process::Command::new("/bin/ps")
                 .args(["-o", "lstart=", "-p", &unrelated.to_string()])
                 .env_clear()
@@ -3522,7 +3522,7 @@ pub(crate) mod tests {
             "x\n{unrelated} {user} S {started} {LINEAGE_VARIABLE}={}\n{unrelated} {unrelated} {user} S {started}",
             ours.as_str()
         );
-        let mut shell = crate::spawn_gate::spawn(
+        let mut shell = kernel_processes::spawn_gate::spawn(
             std::process::Command::new("/bin/sh")
                 .arg("-c")
                 .arg(

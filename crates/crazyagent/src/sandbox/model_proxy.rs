@@ -1,5 +1,5 @@
-use crate::spawn_gate;
 use kernel_processes::fd_wait::{self, Wake};
+use kernel_processes::spawn_gate;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;

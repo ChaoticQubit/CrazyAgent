@@ -108,7 +108,7 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         if let Some(tmux) = &self.tmux {
-            let _ = crate::spawn_gate::status(
+            let _ = kernel_processes::spawn_gate::status(
                 Command::new(tmux)
                     .arg("-S")
                     .arg(self.base.join(FOLDER).join(SOCKET))
@@ -154,7 +154,7 @@ fn a_failed_typing_frees_the_live_master_for_the_next_input() {
     reads_keys(host.as_ref(), &other);
     fixture.live(Some(MASTER));
     let tmux = fixture.tmux.clone().unwrap();
-    let selected = crate::spawn_gate::status(
+    let selected = kernel_processes::spawn_gate::status(
         Command::new(&tmux)
             .arg("-S")
             .arg(fixture.base.join(FOLDER).join(SOCKET))
@@ -231,7 +231,7 @@ fn engine_input_asks_the_host_outside_its_write_transaction() {
     reads_keys(host.as_ref(), &pane);
     fixture.live(Some(MASTER));
     let tmux = fixture.tmux.clone().unwrap();
-    let shown = crate::spawn_gate::output(
+    let shown = kernel_processes::spawn_gate::output(
         Command::new(&tmux)
             .arg("-S")
             .arg(fixture.base.join(FOLDER).join(SOCKET))
@@ -244,7 +244,7 @@ fn engine_input_asks_the_host_outside_its_write_transaction() {
     let pid = String::from_utf8(shown.stdout).unwrap().trim().to_owned();
     assert!(pid.parse::<u32>().is_ok(), "{pid:?}");
     let signal = |name: &str| {
-        crate::spawn_gate::status(Command::new("/bin/kill").args([name, pid.as_str()]))
+        kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([name, pid.as_str()]))
             .is_ok_and(|status| status.success())
     };
     let db = fixture.base.join("engine.db");
@@ -2024,7 +2024,7 @@ fn the_masters_overlapping_start_work_notes_the_sub_agent_unless_overlaps_are_of
     master_row(&fixture);
     known_project(&fixture);
     let folder = fixture.base.join("project");
-    crate::spawn_gate::status(
+    kernel_processes::spawn_gate::status(
         Command::new("git")
             .args(["init", "-q"])
             .current_dir(&folder)
@@ -3231,7 +3231,7 @@ fn a_waiting_task_s_handle_is_named_as_waiting_even_after_an_earlier_holder_move
 fn git_at(fixture: &Fixture, dir: &Path, args: &[&str]) -> String {
     let home = fixture.base.join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -4248,7 +4248,7 @@ const WORKER: i64 = 52;
 /// and a fixed identity. Takes the home, the folder and the arguments. Returns its
 /// trimmed standard output; a failing git fails the test.
 fn git_in(home: &Path, folder: &Path, arguments: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

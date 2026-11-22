@@ -17,7 +17,7 @@ fn start(script: &str, text: &str) -> (Child, CustodianCause) {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
     let cause = CustodianCause::new(child.stderr.take().unwrap()).unwrap();
     (child, cause)
 }

@@ -138,7 +138,9 @@ fn outlasted_the_owner_wait(result: Result<impl std::fmt::Debug, EngineError>, c
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_account_added_while_storage_is_busy_is_withdrawn_and_leaves_no_key() {
     let busy = Busy::start().await;
-    let listener = crate::spawn_gate::bind_tcp("127.0.0.1:0").await.unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let url = format!(
         "http://127.0.0.1:{}/v1",
         listener.local_addr().unwrap().port()
@@ -352,7 +354,9 @@ async fn server_with_secrets(busy: &Busy, name: &str, secrets: &[(&str, &str)]) 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_account_removed_while_storage_is_busy_leaves_no_key_on_disk() {
     let busy = Busy::start().await;
-    let listener = crate::spawn_gate::bind_tcp("127.0.0.1:0").await.unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let url = format!(
         "http://127.0.0.1:{}/v1",
         listener.local_addr().unwrap().port()
@@ -557,7 +561,9 @@ async fn a_checked_server_removed_while_storage_is_busy_leaves_no_check_folder()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_key_replaced_after_its_account_was_removed_leaves_no_key_on_disk() {
     let busy = Busy::start().await;
-    let listener = crate::spawn_gate::bind_tcp("127.0.0.1:0").await.unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let url = format!(
         "http://127.0.0.1:{}/v1",
         listener.local_addr().unwrap().port()
@@ -634,7 +640,9 @@ async fn removing_an_account_leaves_no_key_in_its_generated_home() {
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::DirBuilderExt;
     let busy = Busy::start().await;
-    let listener = crate::spawn_gate::bind_tcp("127.0.0.1:0").await.unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let url = format!(
         "http://127.0.0.1:{}/v1",
         listener.local_addr().unwrap().port()
@@ -746,7 +754,7 @@ fn planted_key(root: &Path, name: &str, secret: &str) -> PathBuf {
 /// names, and removing the last of them deletes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn removing_one_of_two_connections_on_one_key_keeps_the_key_until_the_last_goes() {
-    let (_refusing, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let (_refusing, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let busy = Busy::with_settings(&shared_key_settings(port)).await;
     let secret = format!("sk-shared-{}", std::process::id());
     let key = planted_key(&busy.engine_root(), SHARED_KEY, &secret);
@@ -775,7 +783,7 @@ async fn removing_one_of_two_connections_on_one_key_keeps_the_key_until_the_last
 /// disk while another connection on the same key still uses it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_key_replaced_after_its_connection_was_removed_stays_for_the_other_on_that_key() {
-    let (_refusing, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let (_refusing, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let busy = Busy::with_settings(&shared_key_settings(port)).await;
     let before = format!("sk-shared-before-{}", std::process::id());
     planted_key(&busy.engine_root(), SHARED_KEY, &before);
@@ -878,7 +886,7 @@ async fn remove_connection(busy: &Busy, id: &str) {
 async fn a_key_whose_last_connection_leaves_the_settings_goes_with_its_generated_home() {
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::DirBuilderExt;
-    let (_refusing, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let (_refusing, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let busy = Busy::with_settings(&shared_key_settings(port)).await;
     let secret = format!("sk-shared-edit-{}", std::process::id());
     let key = planted_key(&busy.engine_root(), SHARED_KEY, &secret);
@@ -946,7 +954,9 @@ async fn a_saved_account_moved_to_another_key_and_removed_leaves_its_first_key_n
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::DirBuilderExt;
     let busy = Busy::with_settings("timeout_ms = 10000\n").await;
-    let listener = crate::spawn_gate::bind_tcp("127.0.0.1:0").await.unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let url = format!(
         "http://127.0.0.1:{}/v1",
         listener.local_addr().unwrap().port()

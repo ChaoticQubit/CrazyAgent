@@ -50,7 +50,7 @@ pub(crate) fn output_with_engine(
     home: &Path,
     root: &Path,
 ) -> std::process::Output {
-    let mut child = crate::spawn_gate::spawn(command).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(command).unwrap();
     let (request, answer) = (home.join(FORWARD_REQUEST), home.join(FORWARD_ANSWER));
     let private = home.join(crate::ide::git::PRIVATE_INDEX);
     let deadline = std::time::Instant::now() + ENGINE_STEP_TIME;

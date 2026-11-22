@@ -199,7 +199,7 @@ fn a_project_stored_under_the_long_name_launches_an_agent_on_the_short_one() {
         plan = quoted(&drafts.join("plan.txt")),
         long_plan = quoted(&long(&drafts).join("plan.txt")),
     );
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/sandbox-exec")
             .arg("-f")
             .arg(&plan.sandbox_profile)

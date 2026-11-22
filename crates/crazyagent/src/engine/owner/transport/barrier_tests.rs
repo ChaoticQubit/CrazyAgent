@@ -31,7 +31,7 @@ fn revocation(runtime: &OwnerRuntimeHandle, target: OwnerClientKind, name: &str)
 /// Runs git for a test repository with no user or system configuration.
 /// Inputs: the home folder, the repository folder and the arguments.
 fn git(home: &Path, dir: &Path, args: &[&str]) {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -801,7 +801,9 @@ async fn a_plugin_change_storage_cannot_take_is_refused_to_a_client_whose_wait_e
 async fn an_account_removal_held_at_the_barrier_then_behind_storage_is_pending_before_its_cut() {
     let owner = Usage::start_waiting(REMOVAL_CUT_MS).await;
     let runtime = owner.runtime();
-    let listener = crate::spawn_gate::bind_tcp("127.0.0.1:0").await.unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let url = format!(
         "http://127.0.0.1:{}/v1",
         listener.local_addr().unwrap().port()
@@ -929,7 +931,9 @@ async fn a_plugin_change_behind_busy_storage_is_refused_to_a_client_far_below_th
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_account_removal_behind_busy_storage_is_pending_to_a_client_far_below_the_engine() {
     let owner = Usage::start_waiting(SLOW_ENGINE_MS).await;
-    let listener = crate::spawn_gate::bind_tcp("127.0.0.1:0").await.unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let url = format!(
         "http://127.0.0.1:{}/v1",
         listener.local_addr().unwrap().port()

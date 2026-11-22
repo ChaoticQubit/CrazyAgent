@@ -150,7 +150,7 @@ impl Case {
 impl Drop for Case {
     fn drop(&mut self) {
         if let Some(tmux) = &self.tmux {
-            let _ = crate::spawn_gate::status(
+            let _ = kernel_processes::spawn_gate::status(
                 Command::new(tmux)
                     .arg("-S")
                     .arg(self.base.join(FOLDER).join(SOCKET))
@@ -167,7 +167,7 @@ impl Drop for Case {
 /// Runs git as the owner would in a test: no global or system config, in `dir`.
 /// Inputs: the folder and the arguments. Output: standard output.
 fn git(dir: &Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
