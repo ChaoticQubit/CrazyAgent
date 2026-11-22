@@ -121,7 +121,7 @@ fn a_relay_refuses_to_start_where_curl_cannot_take_the_body_pipe() {
     );
 }
 
-/// SECRET-FORMAT-COPIES: `credentials::sized` writes each piece as the formatting it
+/// SECRET-FORMAT-COPIES: `kernel_security::secret::sized` writes each piece as the formatting it
 /// replaced did (the `replace` escaping, the form serializer, `{:02x}`), into a buffer of
 /// exactly that size, and refuses a control byte only in an escaped piece.
 #[test]
