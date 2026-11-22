@@ -30,7 +30,7 @@ fn install(folder: &Path) -> PathBuf {
 #[cfg(target_os = "macos")]
 #[test]
 fn the_catalog_looks_in_homebrew_where_the_tool_resolver_does() {
-    let homebrew = crate::tools::homebrew_folders();
+    let homebrew = crate::tools::homebrew_folders(&crate::tools::HOOKS);
     let directories = Search::from_environment().directories;
     for folder in &homebrew {
         assert!(

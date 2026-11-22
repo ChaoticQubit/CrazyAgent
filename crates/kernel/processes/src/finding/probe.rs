@@ -118,7 +118,7 @@ pub fn missed(seed: impl FnOnce() -> super::FindingSeed) {
 /// master's Try again or Start again, setup's Recheck or retry), whatever the backoff; a run
 /// already going is enough. Automatic resolves call [`missed`] instead. Never blocks.
 /// Input: what a run needs, asked only when one starts.
-pub(crate) fn refresh_now(seed: impl FnOnce() -> super::FindingSeed) {
+pub fn refresh_now(seed: impl FnOnce() -> super::FindingSeed) {
     refreshed(|probes, _| probes.start_now(), |_| (), seed);
 }
 
@@ -126,14 +126,14 @@ pub(crate) fn refresh_now(seed: impl FnOnce() -> super::FindingSeed) {
 /// engine starts, so a resolve that missed may wait for its answer ([`first_run_bound`]).
 /// Output: the answer.
 #[cfg(unix)]
-pub(crate) fn first_run_going() -> bool {
+pub fn first_run_going() -> bool {
     lock(&FOLDERS).first_run_going()
 }
 
 /// The longest a folder run may take: the login shell's limit and npm's, each with the
 /// grace for its last output. Output: the bound.
 #[cfg(unix)]
-pub(crate) fn first_run_bound() -> Duration {
+pub fn first_run_bound() -> Duration {
     let bound = SHELL_LIMIT + NPM_LIMIT + OUTPUT_GRACE + OUTPUT_GRACE;
     assert!(bound > SHELL_LIMIT && bound < Duration::from_secs(60));
     bound
@@ -142,7 +142,7 @@ pub(crate) fn first_run_bound() -> Duration {
 /// The last finished folder run, so a caller's row can check that an explicit retry
 /// recorded a new one; unit tests never start a real run, so each recorded run is a failed
 /// one. Output: the last run, none before the first.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn last_run() -> Option<Run> {
     lock(&FOLDERS).last
 }
@@ -232,7 +232,7 @@ impl Probes {
 
     /// Whether the first run is going and none has finished yet. Output: the answer.
     #[cfg(unix)]
-    pub(crate) fn first_run_going(&self) -> bool {
+    pub fn first_run_going(&self) -> bool {
         self.running && self.last.is_none()
     }
 
@@ -298,11 +298,13 @@ fn backoff(streak: u32) -> Duration {
 
 /// A folder run going on its thread: dropped without [`Running::finish`], such as when the
 /// run panics, it records the run as failed, so the next one can start after its backoff.
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 pub(crate) struct Running<'cache> {
     probes: &'cache Mutex<Probes>,
     finished: bool,
 }
 
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 impl<'cache> Running<'cache> {
     /// Takes charge of the run [`Probes::start`] marked as going. Input: the cache.
     /// Output: the guard.
@@ -403,7 +405,7 @@ fn lock<T>(cache: &Mutex<T>) -> MutexGuard<'_, T> {
 /// do not exist nothing is probed. Input: what the run needs. Output: whether the run
 /// started.
 fn start_folder_probe(seed: impl FnOnce() -> super::FindingSeed) -> bool {
-    #[cfg(all(unix, not(test)))]
+    #[cfg(all(unix, not(any(test, feature = "test-support"))))]
     {
         let seed = seed();
         std::thread::Builder::new()
@@ -415,7 +417,7 @@ fn start_folder_probe(seed: impl FnOnce() -> super::FindingSeed) -> bool {
             })
             .is_ok()
     }
-    #[cfg(not(all(unix, not(test))))]
+    #[cfg(not(all(unix, not(any(test, feature = "test-support")))))]
     {
         let _ = seed;
         false
@@ -461,7 +463,7 @@ fn start_version_probe(
 /// whether both answered (false when the account or HOME is unknown). Input: what the run
 /// needs to build the engine's places.
 #[cfg(unix)]
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(any(test, feature = "test-support"), allow(dead_code))]
 fn probe_folders(seed: &super::FindingSeed) -> (Vec<PathBuf>, bool) {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -507,7 +509,7 @@ fn run_leading(command: &mut Command, limit: Duration) -> Option<Vec<u8>> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     let deadline = Instant::now() + limit;
-    let mut child = kernel_processes::spawn_gate::spawn(command).ok()?;
+    let mut child = crate::spawn_gate::spawn(command).ok()?;
     let mut stdout = child.stdout.take().expect("standard output is piped");
     let nonblocking = rustix::fs::fcntl_getfl(&stdout)
         .and_then(|flags| rustix::fs::fcntl_setfl(&stdout, flags | rustix::fs::OFlags::NONBLOCK))

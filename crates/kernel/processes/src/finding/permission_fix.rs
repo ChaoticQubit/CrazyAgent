@@ -127,7 +127,7 @@ fn below_home(path: &Path, home: &Path) -> Option<usize> {
 /// a `.crazyagent` folder, an agent temp folder), the engine's data folder with its setup
 /// folder, or, when the places refuse temp folders, a path that leads into one.
 /// Inputs: the path and the places. Output: the answer.
-fn allowed(path: &Path, places: &Places) -> bool {
+pub(crate) fn allowed(path: &Path, places: &Places) -> bool {
     let Some(home) = places.home() else {
         return false;
     };
@@ -175,7 +175,7 @@ pub fn fix(target: &Target, places: &Places) -> Result<Report, &'static str> {
 /// setup installs into it, since uv writes files under the process umask (DEC-162 R2).
 /// Inputs: the setup folder and the tree. Output: the report, or the code as for [`fix`].
 #[cfg(unix)]
-pub(crate) fn tighten_setup(setup: &Path, tree: &Path) -> Result<Report, &'static str> {
+pub fn tighten_setup(setup: &Path, tree: &Path) -> Result<Report, &'static str> {
     if tree == setup || !tree.starts_with(setup) {
         return Err(TOOL_FIX_REFUSED);
     }

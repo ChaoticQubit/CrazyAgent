@@ -354,7 +354,7 @@ impl Search {
     pub fn from_environment() -> Self {
         let mut system: Vec<PathBuf> = Vec::new();
         #[cfg(not(target_os = "linux"))]
-        system.extend(crate::tools::homebrew_folders());
+        system.extend(crate::tools::homebrew_folders(&crate::tools::HOOKS));
         system.extend(SYSTEM_DIRECTORIES.iter().map(PathBuf::from));
         Self::engine(
             std::env::var_os("PATH").as_deref(),

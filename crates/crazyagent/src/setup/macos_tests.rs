@@ -60,7 +60,7 @@ fn leftovers(setup: &Path) -> Vec<String> {
 fn setup_looks_for_homebrew_where_the_tool_resolver_does() {
     let root = root();
     let installer = MacInstaller::new(root.path());
-    let homebrew = crate::tools::homebrew_folders();
+    let homebrew = crate::tools::homebrew_folders(&crate::tools::HOOKS);
     let brew: Vec<PathBuf> = homebrew.iter().map(|folder| folder.join("brew")).collect();
     assert_eq!(installer.brew, brew);
     let search: Vec<PathBuf> = std::env::split_paths(&installer.search_path()).collect();

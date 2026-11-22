@@ -35,7 +35,7 @@ impl MacInstaller {
     /// programs setup starts search `setup/bin`, `~/.local/bin`, the engine's `PATH`,
     /// Homebrew and the system folders. Input: the engine root. Output: the installer.
     pub fn new(engine_root: &Path) -> Self {
-        let homebrew = crate::tools::homebrew_folders();
+        let homebrew = crate::tools::homebrew_folders(&crate::tools::HOOKS);
         let brew: Vec<PathBuf> = homebrew.iter().map(|folder| folder.join("brew")).collect();
         let mut fixed = homebrew;
         fixed.extend(SYSTEM_PATH.iter().map(PathBuf::from));

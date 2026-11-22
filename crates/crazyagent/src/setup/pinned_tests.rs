@@ -102,8 +102,10 @@ fn setup_and_the_terminal_use_the_system_tmux_when_the_bundled_one_cannot_run() 
     let tmux = system.join("tmux");
     std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.7a'\n").unwrap();
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let places = crate::tools::tools_new(vec![system], Some(root.path().join("home")))
-        .with_app_folder(app.clone());
+    let places = kernel_processes::finding::test_support::with_app_folder(
+        crate::tools::tools_new(vec![system], Some(root.path().join("home"))),
+        app.clone(),
+    );
     let installer = PinnedInstaller::with_places(root.path(), Vec::new(), places.clone());
     for (number, broken) in ["#!/bin/sh\nexit 1\n", "#!/bin/sh\necho 'tmux 3.1'\n"]
         .into_iter()

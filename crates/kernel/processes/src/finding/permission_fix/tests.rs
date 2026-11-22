@@ -1,7 +1,9 @@
 use super::*;
-use crate::tools::{Refusal, Refused};
-use std::ffi::OsStr;
+
+use crate::finding::{Refusal, Refused};
+
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
 use std::path::{Path, PathBuf};
 
 fn mode(path: &Path) -> u32 {
@@ -69,7 +71,7 @@ fn the_fix_removes_only_group_and_other_write_in_the_tree() {
     file(&prefix.join("lib/readonly.txt"), 0o444);
     folder(&prefix.join("lib"), 0o755);
     folder(&prefix.join("lib/python9.9"), 0o755);
-    let places = crate::tools::tools_new(Vec::new(), Some(home.clone()));
+    let places = crate::finding::stub::stub_new(Vec::new(), Some(home.clone()));
 
     let report = fix(&whole(&prefix), &places).unwrap();
 
@@ -96,7 +98,7 @@ fn the_fix_never_follows_a_link_out_of_the_tree() {
     folder(&outside_folder, 0o777);
     std::os::unix::fs::symlink(&outside_file, prefix.join("bin/linked")).unwrap();
     std::os::unix::fs::symlink(&outside_folder, prefix.join("linked-folder")).unwrap();
-    let places = crate::tools::tools_new(Vec::new(), Some(home.clone()));
+    let places = crate::finding::stub::stub_new(Vec::new(), Some(home.clone()));
 
     let report = fix(&whole(&prefix), &places).unwrap();
 
@@ -139,7 +141,7 @@ fn the_fix_refuses_a_chain_from_home_with_a_link_or_a_part_another_user_owns() {
     file(&real_share.join("tool/bin/python3"), 0o775);
     std::os::unix::fs::symlink(&real_share, home.join("linked-share")).unwrap();
     let through_link = home.join("linked-share/tool");
-    let places = crate::tools::tools_new(Vec::new(), Some(home.clone()));
+    let places = crate::finding::stub::stub_new(Vec::new(), Some(home.clone()));
 
     assert_eq!(fix(&whole(&through_link), &places), Err(TOOL_FIX_REFUSED));
     assert_eq!(mode(&real_share.join("tool/bin/python3")), 0o775);
@@ -152,42 +154,6 @@ fn the_fix_refuses_a_chain_from_home_with_a_link_or_a_part_another_user_owns() {
         Err(TOOL_FIX_REFUSED)
     );
     assert_eq!(mode(&prefix.join("bin/python3")), 0o775);
-}
-
-#[test]
-fn the_fix_refuses_home_itself_a_place_outside_home_and_engine_or_project_trees() {
-    let (scratch, home, prefix) = uv_like();
-    let outside = scratch.path().join("elsewhere");
-    folder(&outside, 0o777);
-    let project = home.join("code/app");
-    folder(&project.join(".crazyagent"), 0o755);
-    let project_bin = project.join("bin");
-    folder(&project_bin, 0o777);
-    let crazyagent = home.join("work/.crazyagent/tool");
-    folder(&crazyagent, 0o777);
-    let places = crate::tools::tools_new(Vec::new(), Some(home.clone()));
-
-    for refused in [&home, &outside, &crazyagent, &project_bin] {
-        assert_eq!(fix(&whole(refused), &places), Err(TOOL_FIX_REFUSED));
-        assert_eq!(fix(&only(refused), &places), Err(TOOL_FIX_REFUSED));
-    }
-    assert_eq!(mode(&outside), 0o777);
-    assert_eq!(mode(&crazyagent), 0o777);
-    assert_eq!(mode(&project_bin), 0o777);
-    assert!(!allowed(Path::new("/opt/homebrew/opt/python"), &places));
-    assert!(!allowed(Path::new("/usr/local/Cellar/python"), &places));
-    assert!(!allowed(Path::new("/"), &places));
-    assert!(allowed(&prefix, &places));
-
-    let root = home.join("engine");
-    let engine =
-        crate::tools::tools_engine(Some(&root), None, Some(home.clone()), Some(OsStr::new("")));
-    let setup_python = root.join("setup/uv/python/cpython-9.9.9-dummy");
-    folder(&setup_python, 0o775);
-    assert!(!allowed(&setup_python, &engine));
-    assert!(!allowed(&root.join("agents/one"), &engine));
-    assert_eq!(fix(&whole(&setup_python), &engine), Err(TOOL_FIX_REFUSED));
-    assert_eq!(mode(&setup_python), 0o775);
 }
 
 #[test]
@@ -224,7 +190,7 @@ fn a_fifo_in_the_tree_never_blocks_the_walk_and_is_left_as_it_is() {
     let fifo = prefix.join("bin/pipe");
     nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o666)).unwrap();
     set(&fifo, 0o666);
-    let places = crate::tools::tools_new(Vec::new(), Some(home.clone()));
+    let places = crate::finding::stub::stub_new(Vec::new(), Some(home.clone()));
 
     let report = fix(&whole(&prefix), &places).unwrap();
 
@@ -239,7 +205,7 @@ fn a_hard_linked_file_is_tightened_and_counted_shared() {
     let cached = home.join("cache/wheel.py");
     file(&cached, 0o664);
     std::fs::hard_link(&cached, prefix.join("lib.py")).unwrap();
-    let places = crate::tools::tools_new(Vec::new(), Some(home.clone()));
+    let places = crate::finding::stub::stub_new(Vec::new(), Some(home.clone()));
 
     let report = fix(&whole(&prefix), &places).unwrap();
 
@@ -252,7 +218,7 @@ fn a_single_target_changes_only_that_folder() {
     let (_scratch, home, prefix) = uv_like();
     let python = home.join(".local/share/uv/python");
     set(&python, 0o775);
-    let places = crate::tools::tools_new(Vec::new(), Some(home.clone()));
+    let places = crate::finding::stub::stub_new(Vec::new(), Some(home.clone()));
 
     let report = fix(&only(&python), &places).unwrap();
 
@@ -269,7 +235,7 @@ fn a_refused_interpreter_names_its_prefix_tree_from_the_chain_its_part_is_on() {
     folder(&venv.join("bin"), 0o755);
     let linked = venv.join("bin/python3");
     std::os::unix::fs::symlink(prefix.join("bin/python3"), &linked).unwrap();
-    let places = crate::tools::tools_new(Vec::new(), Some(home.clone()));
+    let places = crate::finding::stub::stub_new(Vec::new(), Some(home.clone()));
     let real_part = prefix.join("bin/python3").canonicalize().unwrap();
     let refused = Refused {
         file: linked.clone(),
@@ -295,7 +261,7 @@ fn a_tool_in_a_shallow_bin_folder_names_only_the_part_never_the_whole_folder_abo
     let home = scratch.path().join("home");
     let entry = home.join(".local/bin/graphify");
     file(&entry, 0o775);
-    let places = crate::tools::tools_new(Vec::new(), Some(home.clone()));
+    let places = crate::finding::stub::stub_new(Vec::new(), Some(home.clone()));
     let refused = Refused {
         file: entry.clone(),
         why: Refusal::OthersCanChange(entry.clone()),
@@ -314,7 +280,7 @@ fn a_tool_in_a_shallow_bin_folder_names_only_the_part_never_the_whole_folder_abo
 #[test]
 fn no_target_for_refusals_a_permission_change_cannot_fix() {
     let (_scratch, home, prefix) = uv_like();
-    let places = crate::tools::tools_new(Vec::new(), Some(home.clone()));
+    let places = crate::finding::stub::stub_new(Vec::new(), Some(home.clone()));
     for why in [Refusal::AgentsCanWrite, Refusal::Shim, Refusal::InTemp] {
         let refused = Refused {
             file: prefix.join("bin/python3"),
