@@ -1,0 +1,182 @@
+[
+  {
+    "scenario": "packs/hook-folder",
+    "at": 236,
+    "commit": "dd6f8e756",
+    "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
+    "security": true,
+    "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "          \"path\": \"crazyagent/codex-hook-keys.json\",",
+      "          \"text\": [",
+      "            \"[]\"",
+      "          ]",
+      "        },",
+      "        {"
+    ]
+  },
+  {
+    "scenario": "packs/hook-folder",
+    "at": 319,
+    "commit": "dd6f8e756",
+    "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
+    "security": true,
+    "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "          \"path\": \"crazyagent/codex-hook-keys.json\",",
+      "          \"text\": [",
+      "            \"[\\\"<path-1>/home-codex-on/config.toml:pre_tool_use:0:0\\\"]\"",
+      "          ]",
+      "        },",
+      "        {"
+    ]
+  },
+  {
+    "scenario": "packs/mcp-added-not-approved",
+    "at": 216,
+    "commit": "dd6f8e756",
+    "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
+    "security": true,
+    "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "          \"path\": \"crazyagent/codex-hook-keys.json\",",
+      "          \"text\": [",
+      "            \"[]\"",
+      "          ]",
+      "        },",
+      "        {"
+    ]
+  },
+  {
+    "scenario": "packs/mcp-added-not-approved",
+    "at": 288,
+    "commit": "dd6f8e756",
+    "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
+    "security": true,
+    "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "          \"path\": \"crazyagent/codex-hook-keys.json\",",
+      "          \"text\": [",
+      "            \"[]\"",
+      "          ]",
+      "        },",
+      "        {"
+    ]
+  },
+  {
+    "scenario": "packs/mcp-stdio-approved",
+    "at": 216,
+    "commit": "dd6f8e756",
+    "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
+    "security": true,
+    "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "          \"path\": \"crazyagent/codex-hook-keys.json\",",
+      "          \"text\": [",
+      "            \"[]\"",
+      "          ]",
+      "        },",
+      "        {"
+    ]
+  },
+  {
+    "scenario": "packs/mcp-stdio-approved",
+    "at": 292,
+    "commit": "dd6f8e756",
+    "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
+    "security": true,
+    "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "          \"path\": \"crazyagent/codex-hook-keys.json\",",
+      "          \"text\": [",
+      "            \"[]\"",
+      "          ]",
+      "        },",
+      "        {"
+    ]
+  },
+  {
+    "scenario": "packs/none",
+    "at": 216,
+    "commit": "dd6f8e756",
+    "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
+    "security": true,
+    "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "          \"path\": \"crazyagent/codex-hook-keys.json\",",
+      "          \"text\": [",
+      "            \"[]\"",
+      "          ]",
+      "        },",
+      "        {"
+    ]
+  },
+  {
+    "scenario": "packs/none",
+    "at": 288,
+    "commit": "dd6f8e756",
+    "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
+    "security": true,
+    "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "          \"path\": \"crazyagent/codex-hook-keys.json\",",
+      "          \"text\": [",
+      "            \"[]\"",
+      "          ]",
+      "        },",
+      "        {"
+    ]
+  },
+  {
+    "scenario": "packs/skill-folder",
+    "at": 241,
+    "commit": "dd6f8e756",
+    "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
+    "security": true,
+    "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "          \"path\": \"crazyagent/codex-hook-keys.json\",",
+      "          \"text\": [",
+      "            \"[]\"",
+      "          ]",
+      "        },",
+      "        {"
+    ]
+  },
+  {
+    "scenario": "packs/skill-folder",
+    "at": 320,
+    "commit": "dd6f8e756",
+    "reason": "2.4.3 writes a Codex launch's pinned hook keys to crazyagent/codex-hook-keys.json in its launch state",
+    "security": true,
+    "change": "widens: each Codex home holds one more engine-written file, crazyagent/codex-hook-keys.json, its pinned hook keys",
+    "owner_signed": true,
+    "golden": [],
+    "capture": [
+      "          \"path\": \"crazyagent/codex-hook-keys.json\",",
+      "          \"text\": [",
+      "            \"[]\"",
+      "          ]",
+      "        },",
+      "        {"
+    ]
+  }
+]

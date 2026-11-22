@@ -1,3 +1,4 @@
+use super::kept_text::{KEYED_DIGESTS, kept_text_labels};
 use super::{Masks, Scenario, compare, normalise, refuse_private, snapshots_root, withheld};
 use crate::e2e_support::{self, Engine, Owner};
 use crate::keychain_support::TemporaryKeychain;
@@ -39,6 +40,7 @@ use crazyagent::team::{
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Map, Value, json};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -909,9 +911,10 @@ fn settled(dump: Value) -> Result<Value, String> {
 pub(super) fn dump(db: &Path) -> Result<Value, String> {
     let (_scratch, connection) = scratch_copy(db)?;
     let probe = Masks::new();
+    let labels = kept_text_labels(&connection)?;
     let mut tables = Vec::new();
     for (name, sql) in schema(&connection, "table")? {
-        tables.push(table(&connection, &probe, &name, &sql)?);
+        tables.push(table(&connection, &probe, &labels, &name, &sql)?);
     }
     let views: Vec<Value> = schema(&connection, "view")?
         .into_iter()
@@ -922,7 +925,7 @@ pub(super) fn dump(db: &Path) -> Result<Value, String> {
 
 /// Finds one table's entry in a dump. Inputs: the dump and the table name. Output: the
 /// entry, or none when the engine.db has no such table.
-fn table_entry<'a>(dump: &'a Value, name: &str) -> Option<&'a Value> {
+pub(super) fn table_entry<'a>(dump: &'a Value, name: &str) -> Option<&'a Value> {
     dump["tables"]
         .as_array()?
         .iter()
@@ -970,9 +973,15 @@ fn schema(connection: &Connection, kind: &str) -> Result<Vec<(String, String)>, 
     items.collect::<Result<Vec<_>, _>>().map_err(said)
 }
 
-/// Dumps one table. Inputs: the connection, a mask probe, the table's name and CREATE text.
-/// Output: the table's schema, row count, excluded columns and rows.
-fn table(connection: &Connection, probe: &Masks, name: &str, sql: &str) -> Result<Value, String> {
+/// Dumps one table. Inputs: the connection, a mask probe, the kept-text labels, the table's
+/// name and CREATE text. Output: the table's schema, row count, excluded columns and rows.
+fn table(
+    connection: &Connection,
+    probe: &Masks,
+    labels: &BTreeMap<String, String>,
+    name: &str,
+    sql: &str,
+) -> Result<Value, String> {
     let mut attached = connection
         .prepare(
             "SELECT sql FROM sqlite_master WHERE tbl_name = ?1 AND type IN ('index', 'trigger') AND sql IS NOT NULL ORDER BY type, name",
@@ -1014,10 +1023,18 @@ fn table(connection: &Connection, probe: &Masks, name: &str, sql: &str) -> Resul
         while let Some(row) = found.next().map_err(said)? {
             let mut cells = Map::new();
             for (index, column) in shown.iter().enumerate() {
-                cells.insert(
-                    column.clone(),
-                    cell(probe, row.get_ref(index).map_err(said)?)?,
-                );
+                let value = row.get_ref(index).map_err(said)?;
+                let shown = if KEYED_DIGESTS.contains(&name) && column == "digest" {
+                    let digest = value.as_str().map_err(said)?;
+                    Value::from(
+                        labels
+                            .get(digest)
+                            .map_or("<kept-text-missing>", String::as_str),
+                    )
+                } else {
+                    cell(probe, value)?
+                };
+                cells.insert(column.clone(), shown);
             }
             rows.push(Value::Object(cells));
         }
@@ -1142,7 +1159,7 @@ fn path_text(folder: &Path) -> Result<String, String> {
 }
 
 /// Prints an error through its Display form. Input: the error. Output: the text.
-fn said(error: impl std::fmt::Display) -> String {
+pub(super) fn said(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
