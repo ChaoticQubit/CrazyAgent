@@ -96,3 +96,4 @@ jobs:
           echo "crash row on ubuntu-22.04:"
           grep -E "^test |^test result|could not compile|panicked" "$RUNNER_TEMP/rows.log" || true
           [ "$code" -eq 0 ]
+          grep -qE "^test result: ok\. 1 passed; 0 failed" "$RUNNER_TEMP/rows.log" || { echo "::error::the filter did not run exactly the crash row"; exit 1; }
