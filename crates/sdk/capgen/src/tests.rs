@@ -552,3 +552,46 @@ fn a_two_file_fixture_shares_one_handle_type() {
         "{host}"
     );
 }
+
+#[test]
+fn a_self_qualified_ref_parsed_without_its_stem_is_refused() {
+    let file = crazyagent_cap::parse("handle S\ntype A { s: net.S }").expect("parses");
+    assert_eq!(
+        rust(&[("net", file)]).unwrap_err().code,
+        "cap_self_qualified"
+    );
+}
+
+#[test]
+fn a_call_taking_a_foreign_handle_writes_its_checks_and_traits() {
+    let files = generated(&[
+        (
+            "net",
+            "type Ring { keys: list<secrets.Secret> }\ncapability net.send(keys: list<secrets.Secret>, ring: Ring, s: secrets.Secret) -> unit tier: t1 needs: net.send",
+        ),
+        ("secrets", "handle Secret"),
+    ]);
+    let net = file_text(&files, "net.rs");
+    assert!(
+        net.contains("keys: &[super::secrets::Secret], ring: &Ring"),
+        "{net}"
+    );
+    assert!(
+        net.contains("keys.len() <= crate::LIST_ITEMS_MAX && self::fits_ring(ring)"),
+        "{net}"
+    );
+    assert!(
+        net.contains(
+            "fn fits_ring(value: &Ring) -> bool {\n    value.keys.len() <= crate::LIST_ITEMS_MAX\n}"
+        ),
+        "{net}"
+    );
+    assert!(
+        net.contains("s: super::secrets::Secret,\n    ) -> Result<(), Refusal>;"),
+        "{net}"
+    );
+    assert_eq!(
+        derive_of(net, "pub struct Ring"),
+        "#[derive(Clone, PartialEq, Eq)]"
+    );
+}
