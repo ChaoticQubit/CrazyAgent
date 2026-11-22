@@ -14,7 +14,7 @@ fn upgraded(at: SystemTime) -> (Root, BTreeMap<String, Vec<String>>) {
         Some(&sources),
         &steps(&[probe]),
         at,
-        check_copy,
+        backup,
     )
     .unwrap();
     let written = db
@@ -206,7 +206,7 @@ fn a_later_upgrades_rotation_leaves_the_restore_copy() {
             Some(&sources),
             &steps(&extra[..=index]),
             now,
-            check_copy,
+            backup,
         )
         .unwrap();
     }
@@ -239,7 +239,7 @@ fn a_second_restore_brings_back_the_2_4_data_written_after_the_first() {
         Some(&sources),
         &steps(&[probe]),
         start + HOUR * 2,
-        check_copy,
+        backup,
     )
     .unwrap();
     drop(db);
@@ -317,7 +317,7 @@ fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_acc
         Some(&sources),
         &steps(&[probe]),
         start,
-        check_copy,
+        backup,
     )
     .unwrap();
     crate::app_plugins::store::initialize(&db).unwrap();
@@ -465,7 +465,7 @@ fn a_restore_moves_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds_into_its_
         Some(&sources),
         &steps(&[probe]),
         start,
-        check_copy,
+        backup,
     )
     .unwrap();
     let new_key = ModelAuthentication::ApiKey {

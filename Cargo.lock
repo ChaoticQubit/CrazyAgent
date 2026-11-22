@@ -972,8 +972,12 @@ dependencies = [
 name = "crazyagent-kernel-storage"
 version = "2.4.4"
 dependencies = [
+ "crazyagent-win-sandbox",
+ "rusqlite",
+ "rustix 1.1.5",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

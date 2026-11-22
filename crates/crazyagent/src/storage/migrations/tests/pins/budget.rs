@@ -162,10 +162,9 @@ fn backup_call() -> Call {
             let folder = backup(
                 &db,
                 &root.database(),
-                Some(&sources),
+                &|| settings_texts(Some(&sources)),
                 versions,
                 SystemTime::now(),
-                check_copy,
             )
             .unwrap();
             let spent = start.elapsed();
