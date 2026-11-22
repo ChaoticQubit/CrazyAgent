@@ -621,19 +621,27 @@ fn a_page_torn_by_a_writer_under_an_immutable_read_is_retried_as_busy() {
 /// commits a row and checkpoints it into the database, then closes with no WAL file left,
 /// changes the pages under that read; the read's facts are not taken and its position does
 /// not move, as for a busy read, and the next read gives every row, the new one included.
+/// The new row is two pages long, so the database grows and the row holds whatever the
+/// file system's time tick.
 #[test]
 fn a_writer_that_checkpoints_during_an_immutable_read_voids_that_read() {
     let tmp = root();
     let path = tmp.path().join("record.db");
-    index_but_no_wal(&path);
+    let (_, page) = index_but_no_wal(&path);
     if !reads(&path) {
         return;
     }
-    let writer_path = path.clone();
+    let late = "l".repeat(usize::try_from(page).unwrap() * 2);
+    assert!(
+        late.len() < ROW_TEXT_BYTES_MAX,
+        "the late row is read whole"
+    );
+    let (writer_path, written) = (path.clone(), late.clone());
     MID_READ.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move || {
+            let size = std::fs::metadata(&writer_path).unwrap().len();
             let writer = Connection::open(&writer_path).unwrap();
-            add(&writer, &[("text", Some("late"))]);
+            add(&writer, &[("text", Some(written.as_str()))]);
             writer
                 .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
                 .unwrap();
@@ -641,6 +649,11 @@ fn a_writer_that_checkpoints_during_an_immutable_read_voids_that_read() {
             if let Err(error) = std::fs::remove_file(writer_path.with_extension("db-wal")) {
                 assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
             }
+            let grown = std::fs::metadata(&writer_path).unwrap().len();
+            assert!(
+                grown > size,
+                "a row past a page grows the database, so the size alone shows the change: {size} -> {grown}"
+            );
         }));
     });
     let mut reader = SqlitePoll::new(path.clone(), &SCHEMA, 0);
@@ -652,9 +665,7 @@ fn a_writer_that_checkpoints_during_an_immutable_read_voids_that_read() {
     assert!(MID_READ.with(|hook| hook.borrow().is_none()));
 
     let mut events = turn_events();
-    events.push(TranscriptEvent::Text {
-        text: "late".into(),
-    });
+    events.push(TranscriptEvent::Text { text: late });
     assert_eq!(reader.read().unwrap(), events);
     assert_eq!(reader.after(), 5);
     assert_eq!(reader.busy, 0);
