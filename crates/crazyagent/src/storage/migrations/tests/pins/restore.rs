@@ -14,7 +14,7 @@ fn upgraded(at: SystemTime) -> (Root, BTreeMap<String, Vec<String>>) {
         Some(&sources),
         &steps(&[probe]),
         at,
-        check_copy,
+        backup,
     )
     .unwrap();
     let written = db
@@ -206,7 +206,7 @@ fn a_later_upgrades_rotation_leaves_the_restore_copy() {
             Some(&sources),
             &steps(&extra[..=index]),
             now,
-            check_copy,
+            backup,
         )
         .unwrap();
     }
@@ -239,10 +239,10 @@ fn a_second_restore_brings_back_the_2_4_data_written_after_the_first() {
         Some(&sources),
         &steps(&[probe]),
         start + HOUR * 2,
-        check_copy,
+        backup,
     )
     .unwrap();
-    drop(db);
+    drop((db, sources));
     assert_eq!(names(&root).len(), 2);
 
     restored(&root, start + HOUR * 3).unwrap();
@@ -317,7 +317,7 @@ fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_acc
         Some(&sources),
         &steps(&[probe]),
         start,
-        check_copy,
+        backup,
     )
     .unwrap();
     crate::app_plugins::store::initialize(&db).unwrap();
@@ -332,7 +332,7 @@ fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_acc
         [br#"{"credential_ref":"restore-new-key"}"#.as_slice()],
     )
     .unwrap();
-    drop(db);
+    drop((db, sources));
     for (folder, name) in [
         (PLUGIN_KEYS, "plugin-key-restore"),
         (PLUGIN_KEYS, "plugin-key-orphan"),
@@ -465,7 +465,7 @@ fn a_restore_moves_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds_into_its_
         Some(&sources),
         &steps(&[probe]),
         start,
-        check_copy,
+        backup,
     )
     .unwrap();
     let new_key = ModelAuthentication::ApiKey {
@@ -478,7 +478,7 @@ fn a_restore_moves_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds_into_its_
     save_account(&db, "restore-native", native);
     crate::storage::trash::initialize(&db).unwrap();
     crate::storage::trash::put(&db, "generated_home", "restore-gone-key").unwrap();
-    drop(db);
+    drop((db, sources));
     let homes = root.path().join("configured-sdk-homes");
     let kept_home = homes.join(slot_name("restore-old-key"));
     let new_home = homes.join(slot_name("restore-new-key"));
