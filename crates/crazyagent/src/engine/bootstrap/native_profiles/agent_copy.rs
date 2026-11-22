@@ -127,7 +127,7 @@ pub(super) struct Record {
 
 impl Drop for Record {
     fn drop(&mut self) {
-        crate::credentials::wipe(&mut self.copy);
+        kernel_security::secret::wipe(&mut self.copy);
     }
 }
 
@@ -301,7 +301,7 @@ pub(super) fn account_record(
         Harness::Codex => codex_copy(&bytes),
         Harness::Claude => claude_copy(&bytes),
     };
-    crate::credentials::wipe(&mut bytes);
+    kernel_security::secret::wipe(&mut bytes);
     record
 }
 
@@ -562,7 +562,7 @@ fn read_record(folder: &File, name: &str) -> Result<Vec<u8>, EngineError> {
     let mut bytes = Vec::with_capacity(RECORD_BYTES_MAX as usize + 1);
     let read = file.take(RECORD_BYTES_MAX + 1).read_to_end(&mut bytes);
     if read.is_err() || bytes.len() as u64 > RECORD_BYTES_MAX {
-        crate::credentials::wipe(&mut bytes);
+        kernel_security::secret::wipe(&mut bytes);
         return Err(unavailable());
     }
     Ok(bytes)
@@ -616,7 +616,7 @@ impl RecordText<'_> {
 impl Drop for RecordText<'_> {
     fn drop(&mut self) {
         if let Cow::Owned(text) = &mut self.0 {
-            crate::credentials::wipe(&mut std::mem::take(text).into_bytes());
+            kernel_security::secret::wipe(&mut std::mem::take(text).into_bytes());
         }
     }
 }
@@ -809,7 +809,7 @@ fn polled(
     plan: Option<&Value>,
 ) -> Result<crate::usage::poll::PollCredential, EngineError> {
     Ok(crate::usage::poll::PollCredential {
-        token: crate::credentials::SecretString::bearer(token.as_bytes().to_vec())
+        token: kernel_security::secret::SecretString::bearer(token.as_bytes().to_vec())
             .map_err(|_| unavailable())?,
         account_id: account_id.and_then(Value::as_str).map(str::to_owned),
         plan: plan.and_then(Value::as_str).map(str::to_owned),
@@ -852,7 +852,7 @@ pub(crate) fn chatgpt_tokens(
     let (_, tokens) = codex_record(record)?;
     let access = filled(tokens.access_token.as_ref()).ok_or_else(codex_unreadable)?;
     let expires = Duration::from_secs(token_expiry(access)?);
-    let access = crate::credentials::SecretString::bearer(access.as_bytes().to_vec())
+    let access = kernel_security::secret::SecretString::bearer(access.as_bytes().to_vec())
         .map_err(|_| codex_unreadable())?;
     let account_id = tokens
         .account_id
@@ -1062,7 +1062,7 @@ fn keychain_record(home: &File, path: &Path) -> Result<Vec<u8>, EngineError> {
         None => Ok(0),
     };
     if read.is_err() || !status.success() || bytes.len() as u64 > RECORD_BYTES_MAX {
-        crate::credentials::wipe(&mut bytes);
+        kernel_security::secret::wipe(&mut bytes);
         return Err(unavailable());
     }
     while bytes.last() == Some(&b'\n') {

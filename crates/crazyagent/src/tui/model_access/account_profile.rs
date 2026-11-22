@@ -30,7 +30,7 @@ impl SecretBuffer {
         let mut encoded = [0; 4];
         self.0
             .extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
-        crate::credentials::wipe(&mut encoded);
+        kernel_security::secret::wipe(&mut encoded);
         assert!(self.0.len() <= SECRET_BYTES_MAX);
         Ok(())
     }
@@ -38,7 +38,7 @@ impl SecretBuffer {
     fn backspace(&mut self) {
         let text = std::str::from_utf8(&self.0).expect("key input contains only UTF-8 characters");
         if let Some((start, _)) = text.char_indices().next_back() {
-            crate::credentials::wipe(&mut self.0[start..]);
+            kernel_security::secret::wipe(&mut self.0[start..]);
             self.0.truncate(start);
         }
     }
@@ -54,7 +54,7 @@ impl SecretBuffer {
 
 impl Drop for SecretBuffer {
     fn drop(&mut self) {
-        crate::credentials::wipe(&mut self.0);
+        kernel_security::secret::wipe(&mut self.0);
     }
 }
 

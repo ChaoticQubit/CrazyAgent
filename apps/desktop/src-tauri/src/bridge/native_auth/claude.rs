@@ -12,7 +12,7 @@ impl NativeBridge {
             && separator.is_some_and(|index| index > 0 && index + 1 < bytes.len())
             && bytes.iter().filter(|byte| **byte == b'#').count() == 1;
         if !valid {
-            crazyagent::credentials::wipe(&mut bytes);
+            kernel_security::secret::wipe(&mut bytes);
             return Err(failure("native_auth_claude_input_invalid"));
         }
         AccountSecret::new(bytes).map_err(|_| failure("native_auth_claude_input_invalid"))

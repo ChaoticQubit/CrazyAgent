@@ -31,7 +31,7 @@ pub(super) struct PrivateBytes(Vec<u8>);
 
 impl Drop for PrivateBytes {
     fn drop(&mut self) {
-        crate::credentials::wipe(&mut self.0);
+        kernel_security::secret::wipe(&mut self.0);
     }
 }
 
@@ -461,7 +461,7 @@ impl OwnerClient {
             };
             packet[5..].copy_from_slice(&self.token);
             stream.write_all(&packet).await.map_err(io_error)?;
-            crate::credentials::wipe(&mut packet);
+            kernel_security::secret::wipe(&mut packet);
             stream
                 .write_all(
                     &encode_frame(&InputEnvelope {

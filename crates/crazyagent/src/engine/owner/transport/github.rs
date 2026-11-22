@@ -1,11 +1,11 @@
 use super::*;
-use crate::credentials::{SECRET_BYTES_MAX, SecretString};
 use crate::engine::owner::AccountSecret;
 use crate::github::{
     CloneReceipt, GitHub, GitHubDeviceCode, GitHubOwners, GitHubPublishJob, GitHubPublishLeft,
     GitHubPublishPlan, GitHubRepoPage, GitHubRepoRules, GitHubRule, GitHubStatus,
 };
 use crate::protocol::{ProjectId, encode_frame};
+use kernel_security::secret::{SECRET_BYTES_MAX, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -422,9 +422,9 @@ impl OwnerClient {
                 let mut bytes = token.into_bytes();
                 let mut framed = (bytes.len() as u32).to_be_bytes().to_vec();
                 framed.extend_from_slice(&bytes);
-                crate::credentials::wipe(&mut bytes);
+                kernel_security::secret::wipe(&mut bytes);
                 let sent = stream.write_all(&framed).await;
-                crate::credentials::wipe(&mut framed);
+                kernel_security::secret::wipe(&mut framed);
                 sent.map_err(|_| failure("github_owner_unavailable"))?;
             }
             let frame = read_frame(&mut stream).await.map_err(|_| unknown())?;
@@ -718,7 +718,7 @@ async fn receive_token(stream: &mut Stream) -> Result<SecretString, EngineError>
         }
         let mut bytes = vec![0; size];
         if stream.read_exact(&mut bytes).await.is_err() {
-            crate::credentials::wipe(&mut bytes);
+            kernel_security::secret::wipe(&mut bytes);
             return Err(invalid());
         }
         SecretString::new(bytes).map_err(|_| failure("github_token_invalid"))

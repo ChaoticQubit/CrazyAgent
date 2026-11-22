@@ -1,6 +1,6 @@
 use crate::credentials::Piece::{Escaped, Form, Plain};
-use crate::credentials::SecretString;
 use crate::engine::EngineError;
+use kernel_security::secret::SecretString;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -193,13 +193,13 @@ fn exchange(mut command: Command, mut config: Vec<u8>) -> Result<Reply, EngineEr
     let mut child = match spawned {
         Ok(child) => child,
         Err(_) => {
-            crate::credentials::wipe(&mut config);
+            kernel_security::secret::wipe(&mut config);
             return Err(failure("github_unreachable"));
         }
     };
     let mut stdin = child.stdin.take().expect("curl stdin is piped");
     let written = stdin.write_all(&config);
-    crate::credentials::wipe(&mut config);
+    kernel_security::secret::wipe(&mut config);
     drop(stdin);
     let stdout = child.stdout.take().expect("curl stdout is piped");
     let reader = std::thread::spawn(move || {

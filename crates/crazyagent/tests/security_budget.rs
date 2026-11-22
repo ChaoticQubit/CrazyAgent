@@ -1,7 +1,8 @@
 #[cfg(target_os = "macos")]
 mod keychain_support;
 
-use crazyagent::credentials::{SecretString, Store, reference};
+use crazyagent::credentials::{Store, reference};
+use kernel_security::secret::SecretString;
 use std::time::{Duration, Instant};
 
 const SAMPLES: usize = 200;

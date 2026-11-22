@@ -154,12 +154,13 @@ mod slow_remote {
     use super::*;
     use crate::client_controller::OwnerController;
     use crate::credentials::test_keychain::TestKeychain;
-    use crate::credentials::{SecretString, Store, platform_store, reference};
+    use crate::credentials::{Store, platform_store, reference};
     use crate::engine::owner::{OwnerResponse, OwnerResult};
     use crate::github::test_server::{Answer, Server, base64};
     use crate::github::{Endpoints, GitHub, namespace, use_loopback};
     use crate::projects_home::FoundState;
     use crate::protocol::CredentialRef;
+    use kernel_security::secret::SecretString;
     use std::process::Command;
     use std::sync::Mutex as StdMutex;
     use std::sync::mpsc;
