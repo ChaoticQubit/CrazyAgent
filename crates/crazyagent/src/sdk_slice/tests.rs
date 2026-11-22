@@ -5,11 +5,15 @@ use crazyagent_plugin_check as plugin_check;
 use sdk::settings::QuitSettings as SdkQuit;
 use sdk::{Refusal, Tier};
 
-use super::{EngineRefusals, REFUSALS_PENDING_MAX, bundled_grants, save_quit_with};
+use super::{BUNDLED, EngineRefusals, Entry, REFUSALS_PENDING_MAX, bundled_grants, save_quit_with};
 use crate::protocol::{Command, Outcome};
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crate::settings_log::tests::{moved, store};
 use rusqlite::Connection;
+use std::collections::BTreeSet;
+
+/// The agent-quit plugin's id, from the engine's own table.
+const QUIT: &str = BUNDLED[0].0;
 
 /// The quit settings the rows save: stop, never, 12 hours.
 fn stop_never_12() -> QuitSettings {
@@ -101,7 +105,14 @@ fn refused_moves_nothing(grants: &Grants, refusals: &EngineRefusals) {
     let tx = db.transaction().unwrap();
     let before = moved(&tx);
     let revision = u64::try_from(before.0).unwrap();
-    let result = save_quit_with(grants, refusals, &tx, revision, &stop_never_12());
+    let result = save_quit_with(
+        agent_quit::save,
+        grants,
+        refusals,
+        &tx,
+        revision,
+        &stop_never_12(),
+    );
     assert_eq!(
         result.err().map(|error| error.0),
         Some("plugin_call_refused".to_owned())
@@ -113,10 +124,10 @@ fn refused_moves_nothing(grants: &Grants, refusals: &EngineRefusals) {
 
 #[test]
 fn the_quit_save_without_its_grant_is_refused_and_moves_nothing() {
-    let grants = Grants::new(&[(agent_quit::ID, Tier::T2, &[])]).unwrap();
+    let grants = Grants::new(&[(QUIT, Tier::T2, &[])]).unwrap();
     let refusals = EngineRefusals::new();
     refused_moves_nothing(&grants, &refusals);
-    assert_eq!(refusals.count(agent_quit::ID), 1);
+    assert_eq!(refusals.count(QUIT), 1);
 }
 
 #[test]
@@ -124,7 +135,7 @@ fn the_quit_save_of_an_unknown_plugin_is_refused_and_moves_nothing() {
     let grants = Grants::new(&[]).unwrap();
     let refusals = EngineRefusals::new();
     refused_moves_nothing(&grants, &refusals);
-    assert_eq!(refusals.count(agent_quit::ID), 1);
+    assert_eq!(refusals.count(QUIT), 1);
 }
 
 #[test]
@@ -135,13 +146,21 @@ fn the_granted_quit_save_through_the_slice_logs_the_same_event() {
     let revision = u64::try_from(before.0).unwrap();
     let refusals = EngineRefusals::new();
     assert_eq!(
-        save_quit_with(bundled_grants(), &refusals, &tx, revision, &stop_never_12()).unwrap(),
+        save_quit_with(
+            agent_quit::save,
+            bundled_grants(),
+            &refusals,
+            &tx,
+            revision,
+            &stop_never_12()
+        )
+        .unwrap(),
         Outcome::Applied
     );
     assert_eq!(moved(&tx).0, before.0 + 1);
     assert!(quit_row(&tx));
     assert_eq!(logged(&tx).len(), 1);
-    assert_eq!(refusals.count(agent_quit::ID), 0);
+    assert_eq!(refusals.count(QUIT), 0);
 }
 
 #[test]
@@ -181,21 +200,50 @@ fn the_sdk_and_engine_quit_bodies_are_equal() {
 }
 
 #[test]
-fn the_grants_match_the_plugin_manifest() {
-    let plugin =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/t2/agent-quit");
-    let manifest = plugin_check::read_manifest(&plugin).unwrap();
-    assert_eq!(manifest.plugin, agent_quit::ID);
-    assert_eq!(manifest.tier, "t2");
-    let permissions: Vec<&'static str> = manifest
-        .permissions
+fn every_bundled_plugin_matches_its_manifest() {
+    let plugins = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins");
+    let mut manifests = BTreeSet::new();
+    for tier in std::fs::read_dir(&plugins).unwrap() {
+        let tier = tier.unwrap().path();
+        if !tier.is_dir() {
+            continue;
+        }
+        for folder in std::fs::read_dir(&tier).unwrap() {
+            let folder = folder.unwrap().path();
+            if !folder.is_dir() {
+                continue;
+            }
+            let manifest = plugin_check::read_manifest(&folder).unwrap();
+            assert_eq!(
+                tier.file_name().unwrap().to_str().unwrap(),
+                manifest.tier,
+                "the folder tier is the manifest tier"
+            );
+            manifests.insert((manifest.plugin, manifest.tier, manifest.permissions));
+        }
+    }
+    let bundled: BTreeSet<(String, String, Vec<String>)> = BUNDLED
         .iter()
-        .map(|permission| &*Box::leak(permission.clone().into_boxed_str()))
+        .map(|(plugin, tier, permissions)| {
+            let tier = match tier {
+                Tier::T1 => "t1",
+                Tier::T2 => "t2",
+                Tier::T3 => "t3",
+                Tier::Kernel => "kernel",
+            };
+            (
+                (*plugin).to_owned(),
+                tier.to_owned(),
+                permissions
+                    .iter()
+                    .map(|permission| (*permission).to_owned())
+                    .collect(),
+            )
+        })
         .collect();
-    assert_eq!(
-        bundled_grants(),
-        &Grants::new(&[(agent_quit::ID, Tier::T2, &permissions)]).unwrap()
-    );
+    assert_eq!(manifests, bundled, "none missing, none extra");
+    let permissions: Vec<(&'static str, Tier, &[&'static str])> = BUNDLED.to_vec();
+    assert_eq!(bundled_grants(), &Grants::new(&permissions).unwrap());
 }
 
 #[test]
@@ -212,7 +260,7 @@ fn a_full_first_refusal_set_still_refuses_and_logs() {
     assert_eq!(refusals.pending_len(), REFUSALS_PENDING_MAX);
     let grants = Grants::new(&[]).unwrap();
     refused_moves_nothing(&grants, &refusals);
-    assert_eq!(refusals.count(agent_quit::ID), 1);
+    assert_eq!(refusals.count(QUIT), 1);
     assert_eq!(refusals.pending_len(), REFUSALS_PENDING_MAX);
 }
 
@@ -264,6 +312,133 @@ fn the_engine_depends_on_plugins_only_from_the_plugins_folder() {
     for (tier, folder) in plugins {
         let manifest = plugin_check::read_manifest(&folder).unwrap();
         assert_eq!(manifest.tier, tier, "the folder tier is the manifest tier");
-        assert_eq!(manifest.plugin, agent_quit::ID);
+        assert!(
+            BUNDLED
+                .iter()
+                .any(|(plugin, ..)| *plugin == manifest.plugin)
+        );
+    }
+}
+
+/// Runs one quit save through the slice with a test-double plugin entry and the bundled
+/// grants, rolls the request back as the engine does on an error, and returns the result
+/// code. Inputs: the entry, the grants and the sink. Output: the engine error code, or
+/// "applied"; asserts the store moved and logged nothing after the rollback.
+fn shape(entry: Entry, grants: &Grants, refusals: &EngineRefusals) -> String {
+    let mut db = store();
+    let before = moved(&db);
+    let revision = u64::try_from(before.0).unwrap();
+    let tx = db.transaction().unwrap();
+    let result = save_quit_with(entry, grants, refusals, &tx, revision, &stop_never_12());
+    tx.rollback().unwrap();
+    assert_eq!(moved(&db), before, "the store's revision is unchanged");
+    assert!(!quit_row(&db), "no agent_quit_settings change");
+    assert!(
+        logged(&db)
+            .iter()
+            .all(|(_, kind, ..)| kind != "AgentQuitSaved"),
+        "no AgentQuitSaved event"
+    );
+    match result {
+        Ok(outcome) => format!("{outcome:?}"),
+        Err(error) => error.0,
+    }
+}
+
+#[test]
+fn ok_without_a_host_call_is_invalid_and_moves_nothing() {
+    let refusals = EngineRefusals::new();
+    let code = shape(|_, _| Ok(()), bundled_grants(), &refusals);
+    assert_eq!(code, "plugin_call_invalid");
+}
+
+#[test]
+fn two_host_calls_are_invalid_and_move_nothing() {
+    let entries: [Entry; 2] = [
+        |host, settings| {
+            host.settings_save_quit(settings)?;
+            host.settings_save_quit(settings)
+        },
+        |host, settings| {
+            let _ = host.settings_save_quit(settings);
+            let _ = host.settings_save_quit(settings);
+            Ok(())
+        },
+    ];
+    for entry in entries {
+        let refusals = EngineRefusals::new();
+        assert_eq!(
+            shape(entry, bundled_grants(), &refusals),
+            "plugin_call_invalid"
+        );
+    }
+}
+
+#[test]
+fn a_made_up_rejected_or_failed_is_invalid() {
+    let entries: [Entry; 2] = [
+        |_, _| {
+            Err(Refusal::Rejected {
+                code: "made_up".to_owned(),
+            })
+        },
+        |_, _| {
+            Err(Refusal::Failed {
+                code: "made_up".to_owned(),
+            })
+        },
+    ];
+    for entry in entries {
+        let refusals = EngineRefusals::new();
+        assert_eq!(
+            shape(entry, bundled_grants(), &refusals),
+            "plugin_call_invalid"
+        );
+    }
+}
+
+#[test]
+fn a_made_up_not_granted_without_a_gateway_refusal_is_invalid() {
+    let refusals = EngineRefusals::new();
+    let entry: Entry = |_, _| {
+        Err(Refusal::NotGranted {
+            capability: sdk::settings::SAVE_QUIT.name,
+            needs: sdk::settings::SAVE_QUIT.needs,
+        })
+    };
+    assert_eq!(
+        shape(entry, bundled_grants(), &refusals),
+        "plugin_call_invalid"
+    );
+    assert_eq!(refusals.count(QUIT), 0);
+    assert_eq!(refusals.pending_len(), 0, "no line queued");
+}
+
+#[test]
+fn a_gateway_refusal_is_refused_whatever_the_plugin_returns() {
+    let grants = Grants::new(&[(QUIT, Tier::T2, &[])]).unwrap();
+    let entries: [Entry; 3] = [
+        |host, settings| {
+            let _ = host.settings_save_quit(settings);
+            Ok(())
+        },
+        |host, settings| {
+            let _ = host.settings_save_quit(settings);
+            Err(Refusal::Failed {
+                code: "made_up".to_owned(),
+            })
+        },
+        |host, settings| {
+            let _ = host.settings_save_quit(settings);
+            let _ = host.settings_save_quit(settings);
+            Err(Refusal::Rejected {
+                code: "made_up".to_owned(),
+            })
+        },
+    ];
+    for entry in entries {
+        let refusals = EngineRefusals::new();
+        assert_eq!(shape(entry, &grants, &refusals), "plugin_call_refused");
+        assert!(refusals.count(QUIT) >= 1);
     }
 }

@@ -18,6 +18,16 @@ mod tests;
 /// The most first-seen (plugin, capability) refusal pairs one run keeps for the log.
 pub(crate) const REFUSALS_PENDING_MAX: usize = 1_024;
 
+/// A bundled plugin's quit-save entry: what the plugin crate exports for the engine to
+/// call with the host bound to it. Inputs: the host and the settings. Output: the
+/// plugin's result, which the engine reads as input, never as an invariant.
+pub(crate) type Entry = fn(&dyn sdk::Host, sdk_settings::QuitSettings) -> Result<(), Refusal>;
+
+/// The bundled plugins the engine binds and grants, by the engine's own id: per plugin
+/// its id (the plugin's folder and `plugin.toml` id), tier and granted permissions.
+pub(crate) const BUNDLED: [(&str, Tier, &[&str]); 1] =
+    [("agent-quit", Tier::T2, &["settings.write"])];
+
 /// Saves the owner's agents-on-quit choice through the bundled agent-quit plugin, the
 /// generated SDK and the bus gateway's grant check. Inputs: the request transaction, the
 /// signed revision and the settings. Output: the same outcome or error as a direct save,
@@ -27,13 +37,21 @@ pub(crate) fn save_quit(
     revision: u64,
     settings: &QuitSettings,
 ) -> Result<Outcome, EngineError> {
-    save_quit_with(bundled_grants(), engine_refusals(), tx, revision, settings)
+    save_quit_with(
+        agent_quit::save,
+        bundled_grants(),
+        engine_refusals(),
+        tx,
+        revision,
+        settings,
+    )
 }
 
 /// Saves the quit settings through the plugin with a given grant table and refusal sink.
 /// Inputs: the grants, the sink, the request transaction, the signed revision and the
 /// settings. Output: the provider's exact outcome or error, or `plugin_call_refused`.
 pub(crate) fn save_quit_with(
+    entry: Entry,
     grants: &Grants,
     refusals: &EngineRefusals,
     tx: &Transaction<'_>,
@@ -47,7 +65,7 @@ pub(crate) fn save_quit_with(
         error: RefCell::new(None),
     };
     let gateway = Gateway::new(grants, &provider, refusals);
-    let result = agent_quit::save(&gateway.bind(agent_quit::ID), (*settings).into());
+    let result = entry(&gateway.bind(agent_quit::ID), (*settings).into());
     let outcome = provider.outcome.take();
     let error = provider.error.take();
     match result {
