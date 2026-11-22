@@ -4,19 +4,130 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use bus_gateway::{Gateway, Grants, Refusals};
 use crazyagent_plugin_agent_quit as agent_quit;
-use rusqlite::Transaction;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 use sdk::settings::{self as sdk_settings, Provide};
 use sdk::{Capability, Refusal, Tier};
+use serde::{Deserialize, Serialize};
 
 use crate::engine::EngineError;
+use crate::engine::owner::{HostStamp, failure};
 use crate::protocol::Outcome;
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
+use crate::state_log::fence::Fence;
+use crate::state_log::{Aggregate, Appender, Draft};
 
 #[cfg(test)]
 mod tests;
 
+/// The kind of the event that logs a plugin's first refused call of a run, on the
+/// `plugins` aggregate.
+pub const KIND_CALL_REFUSED: &str = "CallRefused";
+
+/// The schema of a `CallRefused` body.
+const CALL_REFUSED_SCHEMA: u16 = 1;
+
+/// A `CallRefused` body: the refused plugin, capability and permission, static ids only,
+/// never a call input.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CallRefused {
+    plugin: String,
+    capability: String,
+    needs: String,
+}
+
+/// The capabilities the bundled plugins can call, the only ones a `CallRefused` body may
+/// name.
+const CAPABILITIES: [Capability; 1] = [sdk_settings::SAVE_QUIT];
+
+/// Whether a body is a `CallRefused` body: exactly its three keys, a bundled plugin id and a
+/// capability with its permission from [`CAPABILITIES`], so it never holds free text.
+/// Input: the body bytes. Output: true when it is.
+pub(crate) fn call_refused_closed(body: &[u8]) -> bool {
+    let Ok(refused) = serde_json::from_slice::<CallRefused>(body) else {
+        return false;
+    };
+    BUNDLED.iter().any(|(plugin, ..)| *plugin == refused.plugin)
+        && CAPABILITIES.iter().any(|capability| {
+            capability.name == refused.capability && capability.needs == refused.needs
+        })
+}
+
+/// One queued first refusal: plugin id, capability name and the permission it needs.
+type Queued = (&'static str, &'static str, &'static str);
+
+/// Appends each first-seen refusal queued in a sink as one `CallRefused` event, in one
+/// engine-fenced transaction of its own, so the event outlives the refused request's
+/// rollback; an empty queue opens no transaction. Inputs: the connection, the engine host
+/// and the sink. Output: the events appended, or the refusal with the queue kept.
+pub(crate) fn drain_refusals(
+    connection: &mut Connection,
+    host: &HostStamp,
+    refusals: &EngineRefusals,
+) -> Result<usize, EngineError> {
+    let queued = refusals.take_queued();
+    if queued.is_empty() {
+        return Ok(0);
+    }
+    let appended = append_refusals(connection, host, &queued);
+    if appended.is_err() {
+        refusals.requeue(queued);
+    }
+    appended
+}
+
+/// Appends queued refusals as `CallRefused` events on the `plugins` aggregate and commits.
+/// Inputs: the connection, the engine host and the refusals. Output: their number, or the
+/// fence's, the log's or SQLite's refusal.
+fn append_refusals(
+    connection: &mut Connection,
+    host: &HostStamp,
+    queued: &[Queued],
+) -> Result<usize, EngineError> {
+    assert!(!queued.is_empty() && queued.len() <= REFUSALS_PENDING_MAX);
+    let tx = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|_| failure("plugin_refusal_log_begin"))?;
+    {
+        let mut appender = Appender::own(&tx, Fence::Engine(host.clone()))?;
+        let at_ms = u64::try_from(crate::team::now_ms()).unwrap_or(0);
+        for (plugin, capability, needs) in queued {
+            let body = serde_json::to_vec(&CallRefused {
+                plugin: (*plugin).to_owned(),
+                capability: (*capability).to_owned(),
+                needs: (*needs).to_owned(),
+            })
+            .map_err(|_| failure("plugin_refusal_log_body"))?;
+            assert!(
+                call_refused_closed(&body),
+                "the engine names only its own ids"
+            );
+            appender.append(&Draft {
+                aggregate: Aggregate::Plugins,
+                kind: KIND_CALL_REFUSED,
+                schema: CALL_REFUSED_SCHEMA,
+                at_ms,
+                body: &body,
+            })?;
+        }
+    }
+    tx.commit()
+        .map_err(|_| failure("plugin_refusal_log_commit"))?;
+    Ok(queued.len())
+}
+
 /// The most first-seen (plugin, capability) refusal pairs one run keeps for the log.
 pub(crate) const REFUSALS_PENDING_MAX: usize = 1_024;
+
+/// A bundled plugin's quit-save entry: what the plugin crate exports for the engine to
+/// call with the host bound to it. Inputs: the host and the settings. Output: the
+/// plugin's result, which the engine reads as input, never as an invariant.
+pub(crate) type Entry = fn(&dyn sdk::Host, sdk_settings::QuitSettings) -> Result<(), Refusal>;
+
+/// The bundled plugins the engine binds and grants, by the engine's own id: per plugin
+/// its id (the plugin's folder and `plugin.toml` id), tier and granted permissions.
+pub(crate) const BUNDLED: [(&str, Tier, &[&str]); 1] =
+    [("agent-quit", Tier::T2, &["settings.write"])];
 
 /// Saves the owner's agents-on-quit choice through the bundled agent-quit plugin, the
 /// generated SDK and the bus gateway's grant check. Inputs: the request transaction, the
@@ -27,13 +138,23 @@ pub(crate) fn save_quit(
     revision: u64,
     settings: &QuitSettings,
 ) -> Result<Outcome, EngineError> {
-    save_quit_with(bundled_grants(), engine_refusals(), tx, revision, settings)
+    save_quit_with(
+        agent_quit::save,
+        bundled_grants(),
+        engine_refusals(),
+        tx,
+        revision,
+        settings,
+    )
 }
 
-/// Saves the quit settings through the plugin with a given grant table and refusal sink.
-/// Inputs: the grants, the sink, the request transaction, the signed revision and the
-/// settings. Output: the provider's exact outcome or error, or `plugin_call_refused`.
+/// Saves the quit settings through a plugin entry with a given grant table and refusal
+/// sink. The plugin's result is input: a refusal the gateway recorded in this call is
+/// `plugin_call_refused`, one admitted host call whose result the plugin returns is that
+/// result, and every other shape is `plugin_call_invalid`. Inputs: the entry, the grants,
+/// the sink, the request transaction, the signed revision and the settings.
 pub(crate) fn save_quit_with(
+    entry: Entry,
     grants: &Grants,
     refusals: &EngineRefusals,
     tx: &Transaction<'_>,
@@ -43,58 +164,72 @@ pub(crate) fn save_quit_with(
     let provider = QuitProvider {
         tx,
         revision,
+        calls: Cell::new(0),
         outcome: Cell::new(None),
         error: RefCell::new(None),
     };
-    let gateway = Gateway::new(grants, &provider, refusals);
-    let result = agent_quit::save(&gateway.bind(agent_quit::ID), (*settings).into());
-    let outcome = provider.outcome.take();
-    let error = provider.error.take();
-    match result {
-        Ok(()) => {
-            assert!(error.is_none());
-            Ok(outcome.expect("an applied save keeps its outcome"))
+    let record = CallRecord {
+        sink: refusals,
+        refused: Cell::new(false),
+    };
+    let gateway = Gateway::new(grants, &provider, &record);
+    let result = entry(&gateway.bind(BUNDLED[0].0), (*settings).into());
+    if record.refused.get() {
+        return Err(EngineError("plugin_call_refused".to_owned()));
+    }
+    let invalid = || Err(EngineError("plugin_call_invalid".to_owned()));
+    if provider.calls.get() != 1 {
+        return invalid();
+    }
+    match (result, provider.outcome.take(), provider.error.take()) {
+        (Ok(()), Some(outcome), None) if !matches!(outcome, Outcome::Rejected { .. }) => {
+            Ok(outcome)
         }
-        Err(Refusal::NotGranted { .. } | Refusal::TierTooHigh { .. }) => {
-            assert!(
-                outcome.is_none() && error.is_none(),
-                "a refused call never ran"
-            );
-            Err(EngineError("plugin_call_refused".to_owned()))
+        (Err(Refusal::Rejected { code }), Some(Outcome::Rejected { code: kept }), None)
+            if code == kept =>
+        {
+            Ok(Outcome::Rejected { code })
         }
-        Err(Refusal::Rejected { .. }) => {
-            assert!(error.is_none());
-            Ok(outcome.expect("a rejected save keeps its outcome"))
-        }
-        Err(Refusal::Failed { .. }) => {
-            assert!(outcome.is_none());
-            Err(error.expect("a failed save keeps its error"))
-        }
+        (Err(Refusal::Failed { code }), None, Some(error)) if code == error.0 => Err(error),
+        _ => invalid(),
     }
 }
 
-/// The bundled plugins' grant table: agent-quit at tier 2 holding `settings.write`, as its
-/// `plugin.toml` asks. Output: the table, built once.
+/// The refusal sink one call sees: it forwards each refusal to the engine sink and keeps
+/// whether the gateway refused anything in this call, so "refused" is the gateway's own
+/// record, never the variant the plugin returned.
+struct CallRecord<'s> {
+    sink: &'s EngineRefusals,
+    refused: Cell<bool>,
+}
+
+impl Refusals for CallRecord<'_> {
+    fn refused(&self, plugin: &'static str, capability: &Capability, refusal: &Refusal) {
+        self.refused.set(true);
+        self.sink.refused(plugin, capability, refusal);
+    }
+}
+
+/// The bundled plugins' grant table, built once from `BUNDLED`, which a row proves equal to
+/// every `plugin.toml`. Output: the table.
 pub(crate) fn bundled_grants() -> &'static Grants {
     static GRANTS: OnceLock<Grants> = OnceLock::new();
-    GRANTS.get_or_init(|| {
-        Grants::new(&[(agent_quit::ID, Tier::T2, &["settings.write"])])
-            .expect("the bundled grant table builds")
-    })
+    GRANTS.get_or_init(|| Grants::new(&BUNDLED).expect("the bundled grant table builds"))
 }
 
 /// The one process-wide refusal sink the bundled path reports to. Output: the sink.
-fn engine_refusals() -> &'static EngineRefusals {
+pub(crate) fn engine_refusals() -> &'static EngineRefusals {
     static REFUSALS: OnceLock<EngineRefusals> = OnceLock::new();
     REFUSALS.get_or_init(EngineRefusals::new)
 }
 
 /// The engine's refusal sink: one diagnostic line per refused call, a per-plugin count,
-/// and the (plugin, capability) pairs first refused in this run, bounded by
-/// `REFUSALS_PENDING_MAX`. It records static ids only, never call inputs.
+/// the (plugin, capability) pairs first refused in this run, bounded by
+/// `REFUSALS_PENDING_MAX`, and the queue of those not yet logged. Static ids only.
 pub(crate) struct EngineRefusals {
     counts: Mutex<BTreeMap<&'static str, u64>>,
     pending: Mutex<BTreeSet<(&'static str, &'static str)>>,
+    queue: Mutex<Vec<Queued>>,
 }
 
 impl EngineRefusals {
@@ -103,7 +238,23 @@ impl EngineRefusals {
         Self {
             counts: Mutex::new(BTreeMap::new()),
             pending: Mutex::new(BTreeSet::new()),
+            queue: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Takes the first refusals queued since the last take. Output: them, in order.
+    fn take_queued(&self) -> Vec<Queued> {
+        let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        std::mem::take(&mut *queue)
+    }
+
+    /// Puts refusals whose events were not written back at the front of the queue.
+    /// Input: the refusals. Output: none.
+    fn requeue(&self, queued: Vec<Queued>) {
+        let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+        let later = std::mem::replace(&mut *queue, queued);
+        queue.extend(later);
+        assert!(queue.len() <= REFUSALS_PENDING_MAX);
     }
 
     /// How many calls of one plugin were refused. Input: the plugin id. Output: the count.
@@ -136,24 +287,35 @@ impl Refusals for EngineRefusals {
         *count = count.saturating_add(1);
         drop(counts);
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-        if pending.len() < REFUSALS_PENDING_MAX {
-            pending.insert((plugin, capability.name));
+        if pending.len() < REFUSALS_PENDING_MAX && pending.insert((plugin, capability.name)) {
+            let mut queue = self.queue.lock().unwrap_or_else(PoisonError::into_inner);
+            queue.push((plugin, capability.name, needs));
+            assert!(queue.len() <= pending.len());
         }
         assert!(pending.len() <= REFUSALS_PENDING_MAX);
     }
 }
 
 /// The settings provider the gateway hands an admitted quit save to: it saves in the
-/// request transaction and keeps the exact outcome or error for the caller.
+/// request transaction once, counts every call, and keeps the exact outcome or error for
+/// the caller.
 struct QuitProvider<'t, 'c> {
     tx: &'t Transaction<'c>,
     revision: u64,
+    calls: Cell<u32>,
     outcome: Cell<Option<Outcome>>,
     error: RefCell<Option<EngineError>>,
 }
 
 impl Provide for QuitProvider<'_, '_> {
     fn save_quit(&self, settings: sdk_settings::QuitSettings) -> Result<(), Refusal> {
+        let calls = self.calls.get().saturating_add(1);
+        self.calls.set(calls);
+        if calls > 1 {
+            return Err(Refusal::Failed {
+                code: "plugin_call_invalid".to_owned(),
+            });
+        }
         match crate::settings_log::save_quit_at(self.tx, self.revision, &settings.into()) {
             Ok(Outcome::Applied) => {
                 self.outcome.set(Some(Outcome::Applied));

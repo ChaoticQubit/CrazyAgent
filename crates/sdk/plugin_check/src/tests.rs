@@ -252,6 +252,7 @@ fn sec_h5_only_the_exact_header_passes() {
 #[test]
 fn sec_h6_the_central_check_refuses_an_unchecked_plugin_folder() {
     let (root, plugin) = scratch("good", "plugins/t2/no-build-rs");
+    set_id(&plugin, "\"no-build-rs\"");
     fs::remove_file(plugin.join("build.rs")).expect("build.rs removed");
     let plugins = root.join("plugins");
     fs::write(plugins.join("README"), "x").expect("stray file");
@@ -422,6 +423,7 @@ fn a_use_group_with_a_leading_colon_is_refused() {
 #[test]
 fn a_finder_ds_store_file_is_the_one_named_exception() {
     let (root, plugin) = scratch("good", "plugins/t2/finder");
+    set_id(&plugin, "\"finder\"");
     let plugins = root.join("plugins");
     for folder in [plugins.clone(), plugins.join("t2"), plugin.join("src")] {
         fs::write(folder.join(".DS_Store"), [0u8; 8]).expect("finder file");
@@ -431,6 +433,85 @@ fn a_finder_ds_store_file_is_the_one_named_exception() {
     assert!(
         check_plugins(&plugins).is_err(),
         "only .DS_Store is excepted"
+    );
+    fs::remove_dir_all(&root).expect("scratch removed");
+}
+
+/// Sets the `plugin` value of a scratch plugin's `plugin.toml`. Inputs: the plugin folder
+/// and the new value as TOML text. Output: none; panics when the fixture id is missing.
+fn set_id(plugin: &Path, value: &str) {
+    let path = plugin.join("plugin.toml");
+    let text = fs::read_to_string(&path).expect("plugin.toml reads");
+    assert!(text.contains("plugin = \"fixture\""), "the fixture id line");
+    let text = text.replace("plugin = \"fixture\"", &format!("plugin = {value}"));
+    fs::write(&path, text).expect("plugin.toml written");
+}
+
+/// Collects the (file, code) pairs of a refusal. Input: the violations. Output: the pairs.
+fn pairs(violations: &[Violation]) -> BTreeSet<(PathBuf, &'static str)> {
+    violations
+        .iter()
+        .map(|violation| (violation.file.clone(), violation.code))
+        .collect()
+}
+
+#[test]
+fn a_plugin_id_not_equal_to_its_folder_is_refused() {
+    let (root, plugin) = scratch("good", "plugins/t2/other-name");
+    let plugins = root.join("plugins");
+    let violations = check_plugins(&plugins).expect_err("refused");
+    assert_eq!(
+        pairs(&violations),
+        BTreeSet::from([(
+            PathBuf::from("t2/other-name/plugin.toml"),
+            "plugin_id_not_folder"
+        )])
+    );
+    set_id(&plugin, "\"other-name\"");
+    assert_eq!(check_plugins(&plugins), Ok(()));
+    fs::remove_dir_all(&root).expect("scratch removed");
+}
+
+#[test]
+fn a_plugin_id_outside_its_charset_or_over_64_bytes_is_refused() {
+    let long = "a".repeat(65);
+    let cases = [
+        ("newline", "\"a\\nb\""),
+        ("escape", "\"a\\u001bb\""),
+        ("upper", "\"Agent-Quit\""),
+        ("long", &format!("\"{long}\"")),
+        ("underscore", "\"agent_quit\""),
+    ];
+    for (name, value) in cases {
+        let (root, plugin) = scratch("good", &format!("plugins/t2/id-{name}"));
+        set_id(&plugin, value);
+        let violations = check_crate(&plugin).expect_err(name);
+        assert!(
+            pairs(&violations).contains(&(PathBuf::from("plugin.toml"), "plugin_id_invalid")),
+            "{name}: {violations:?}"
+        );
+        fs::remove_dir_all(&root).expect("scratch removed");
+    }
+    let edge = "a".repeat(64);
+    let (root, plugin) = scratch("good", &format!("plugins/t2/{edge}"));
+    set_id(&plugin, &format!("\"{edge}\""));
+    assert_eq!(
+        check_plugins(&root.join("plugins")),
+        Ok(()),
+        "64 bytes is allowed"
+    );
+    fs::remove_dir_all(&root).expect("scratch removed");
+}
+
+#[test]
+fn a_duplicate_plugin_id_across_tiers_is_refused() {
+    let (root, first) = scratch("good", "plugins/t1/twin");
+    set_id(&first, "\"twin\"");
+    copy_tree(&first, &root.join("plugins/t2/twin"));
+    let violations = check_plugins(&root.join("plugins")).expect_err("refused");
+    assert_eq!(
+        pairs(&violations),
+        BTreeSet::from([(PathBuf::from("t2/twin/plugin.toml"), "plugin_id_duplicate")])
     );
     fs::remove_dir_all(&root).expect("scratch removed");
 }

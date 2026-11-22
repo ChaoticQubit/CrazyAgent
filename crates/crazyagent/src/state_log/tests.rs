@@ -480,7 +480,7 @@ fn a_body_over_the_cap_in_a_log_made_without_its_checks_is_invalid() {
 
 /// Every kind a writer appends to the log. [`no_event_body_can_carry_a_secret`] holds a body
 /// rule for each and fails for a kind listed here without one.
-const KINDS: [&str; 54] = [
+const KINDS: [&str; 55] = [
     SNAPSHOT_CHUNK,
     SNAPSHOT_DONE,
     replay::PROCESS_EXITED,
@@ -535,6 +535,7 @@ const KINDS: [&str; 54] = [
     crate::settings_log::KIND_TIME,
     crate::settings_log::KIND_FRAMES,
     crate::settings_log::KIND_PROFILE,
+    crate::sdk_slice::KIND_CALL_REFUSED,
 ];
 
 /// The one body key per kind that may hold free text, each by name (leader 07:16, A): a file
@@ -549,11 +550,12 @@ const FREE_FORM: [(&str, &str); 2] = [
 /// as paths under `src` in sorted order, each with the kinds its drafts may name: the code
 /// after `kind:` with its spaces removed, the constants of its own kinds. ide/log.rs and
 /// landing_log.rs write `change.kind()`, which maps each `Change` variant to one of theirs.
-const WRITERS: [(&str, &[&str]); 9] = [
+const WRITERS: [(&str, &[&str]); 10] = [
     ("ide/log.rs", &["change.kind()"]),
     ("landing_log.rs", &["change.kind()"]),
     ("memory/log.rs", &["KIND"]),
     ("project_setup/removed/event.rs", &["KIND"]),
+    ("sdk_slice.rs", &["KIND_CALL_REFUSED"]),
     (
         "sessions_log.rs",
         &[
@@ -1388,6 +1390,16 @@ fn no_event_body_can_carry_a_secret() {
             sessions if crate::sessions_log::KINDS.contains(&sessions) => {
                 sessions_body_is_closed(sessions)
             }
+            crate::sdk_slice::KIND_CALL_REFUSED => closed_body(
+                kind,
+                crate::sdk_slice::call_refused_closed,
+                json!({
+                    "plugin": "agent-quit",
+                    "capability": "settings.save_quit",
+                    "needs": "settings.write"
+                }),
+                &["plugin", "capability", "needs"],
+            ),
             other => panic!("the kind {other} has no body rule"),
         }
     }
