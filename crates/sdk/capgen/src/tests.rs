@@ -192,8 +192,9 @@ fn generation_fails_closed_without_rustfmt() {
 
 /// Generates the test module from the fixture `.cap`. Output: its text.
 fn fixture_module() -> String {
-    let source = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixture/fixture.cap"))
-        .expect("fixture.cap reads");
+    let source =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixture/fixture.cap"))
+            .expect("fixture.cap reads");
     let file = crazyagent_cap::parse(&source).expect("fixture.cap parses");
     rust_test_module("fixture", &file).expect("fixture.cap generates")
 }
@@ -201,7 +202,9 @@ fn fixture_module() -> String {
 /// Returns the derive line written above one generated item. Inputs: the module text and
 /// the item's head, such as `pub struct Pair`. Output: the derive line.
 fn derive_of<'t>(module: &'t str, head: &str) -> &'t str {
-    let at = module.find(&format!("{head} {{")).expect("the item is generated");
+    let at = module
+        .find(&format!("{head} {{"))
+        .expect("the item is generated");
     module[..at]
         .lines()
         .rev()
@@ -211,8 +214,8 @@ fn derive_of<'t>(module: &'t str, head: &str) -> &'t str {
 
 #[test]
 fn the_fixture_generates_the_checked_in_test_module() {
-    let checked_in = fs::read_to_string(sdk("rust/src/fixture_generated.rs"))
-        .expect("the test module reads");
+    let checked_in =
+        fs::read_to_string(sdk("rust/src/fixture_generated.rs")).expect("the test module reads");
     assert_eq!(fixture_module(), checked_in);
 }
 
@@ -244,8 +247,13 @@ fn derives_follow_the_fields() {
         ("pub struct Pair", false),
         ("pub struct Keyed", false),
     ] {
-        let at = module.find(&format!("{head} {{")).expect("the item is generated");
-        let block = module[..at].rsplit("\n\n").next().expect("the item's block");
+        let at = module
+            .find(&format!("{head} {{"))
+            .expect("the item is generated");
+        let block = module[..at]
+            .rsplit("\n\n")
+            .next()
+            .expect("the item's block");
         assert_eq!(block.contains("deny_unknown_fields"), denies, "{head}");
     }
 }
@@ -274,7 +282,11 @@ fn bound_checks_are_written_only_where_a_field_is_bounded() {
     ] {
         assert!(module.contains(present), "{present}");
     }
-    for absent in ["check_reveal_input", "check_pair_output", "check_count_output"] {
+    for absent in [
+        "check_reveal_input",
+        "check_pair_output",
+        "check_count_output",
+    ] {
         assert!(!module.contains(absent), "{absent}");
     }
     let settings = generated_from_caps()
@@ -308,7 +320,10 @@ fn settings_changes_only_by_the_caller_and_the_tier() {
 #[test]
 fn caller_is_a_reserved_input_name() {
     assert_eq!(
-        refused(&[("s", "capability s.a(caller: u16) -> unit tier: t1 needs: s.w")]),
+        refused(&[(
+            "s",
+            "capability s.a(caller: u16) -> unit tier: t1 needs: s.w"
+        )]),
         "capgen_reserved_name"
     );
 }

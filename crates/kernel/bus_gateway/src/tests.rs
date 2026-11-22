@@ -335,10 +335,7 @@ fn an_input_at_its_bound_reaches_the_provider() {
     let gateway = Gateway::new(&grants, &provider, &refusals);
     let ran = Cell::new(0);
     let at = "i".repeat(ROW_BYTES_MAX);
-    assert_eq!(
-        bounded_call(&gateway, &at, "ok", &ran),
-        Ok("ok".to_owned())
-    );
+    assert_eq!(bounded_call(&gateway, &at, "ok", &ran), Ok("ok".to_owned()));
     assert_eq!(ran.get(), 1);
     assert!(refusals.seen.borrow().is_empty());
 }

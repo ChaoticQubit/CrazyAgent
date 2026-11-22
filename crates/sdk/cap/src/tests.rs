@@ -172,7 +172,10 @@ fn an_undeclared_type_is_refused() {
 
 #[test]
 fn a_lower_case_type_that_is_no_scalar_is_refused() {
-    assert_eq!(refused("type A { b: string }"), at("cap_unknown_type", 1, 13));
+    assert_eq!(
+        refused("type A { b: string }"),
+        at("cap_unknown_type", 1, 13)
+    );
 }
 
 #[test]
@@ -334,8 +337,8 @@ fn a_list_parses_with_its_item_type() {
 
 #[test]
 fn an_option_parses_with_its_inner_type() {
-    let file = parse("type A { o: option<text>, l: list<option<B>> }\ntype B { x: u16 }")
-        .expect("parses");
+    let file =
+        parse("type A { o: option<text>, l: list<option<B>> }\ntype B { x: u16 }").expect("parses");
     assert_eq!(
         file.types[0].fields,
         vec![
@@ -348,10 +351,7 @@ fn an_option_parses_with_its_inner_type() {
 #[test]
 fn a_wrapped_output_parses_to_some() {
     let file = parse("capability a.b() -> option<text> tier: t1 needs: a.c").expect("parses");
-    assert_eq!(
-        file.capabilities[0].output,
-        Some(option(TypeRef::Text))
-    );
+    assert_eq!(file.capabilities[0].output, Some(option(TypeRef::Text)));
 }
 
 #[test]
@@ -367,7 +367,10 @@ fn a_handle_parses_and_types_may_name_it() {
         }]
     );
     assert_eq!(file.types[0].fields, vec![field("s", named("Secret"))]);
-    assert_eq!(file.capabilities[0].inputs, vec![field("s", named("Secret"))]);
+    assert_eq!(
+        file.capabilities[0].inputs,
+        vec![field("s", named("Secret"))]
+    );
     assert_eq!(file.capabilities[0].output, Some(named("Secret")));
 }
 
@@ -452,9 +455,7 @@ fn a_wrapper_without_its_item_type_is_refused() {
 #[test]
 fn a_handle_in_an_event_body_is_refused() {
     assert_eq!(
-        refused(
-            "handle S\ncapability a.b() -> unit tier: t1 needs: a.c emits: E { s: S }"
-        ),
+        refused("handle S\ncapability a.b() -> unit tier: t1 needs: a.c emits: E { s: S }"),
         at("cap_handle_in_event", 2, 60)
     );
 }

@@ -127,7 +127,10 @@ mod bounds {
 
     #[test]
     fn a_text_at_its_bound_passes_and_one_byte_more_is_refused() {
-        assert_eq!(check_send_input(&request(crate::TEXT_BYTES_MAX, 0, None)), Ok(()));
+        assert_eq!(
+            check_send_input(&request(crate::TEXT_BYTES_MAX, 0, None)),
+            Ok(())
+        );
         assert_eq!(
             check_send_input(&request(crate::TEXT_BYTES_MAX + 1, 0, None)),
             Err(too_large_input())
@@ -136,14 +139,17 @@ mod bounds {
 
     #[test]
     fn a_list_at_its_bound_passes_and_one_item_more_is_refused() {
-        assert_eq!(check_send_input(&request(1, crate::LIST_ITEMS_MAX, None)), Ok(()));
+        assert_eq!(
+            check_send_input(&request(1, crate::LIST_ITEMS_MAX, None)),
+            Ok(())
+        );
         assert_eq!(
             check_send_input(&request(1, crate::LIST_ITEMS_MAX + 1, None)),
             Err(too_large_input())
         );
-        assert_eq!(check_count_input(&vec![true; crate::LIST_ITEMS_MAX]), Ok(()));
+        assert_eq!(check_count_input(&[true; crate::LIST_ITEMS_MAX]), Ok(()));
         assert_eq!(
-            check_count_input(&vec![true; crate::LIST_ITEMS_MAX + 1]),
+            check_count_input(&[true; crate::LIST_ITEMS_MAX + 1]),
             Err(too_large_input())
         );
     }
@@ -157,7 +163,10 @@ mod bounds {
 
     #[test]
     fn optional_bytes_at_their_bound_pass_and_one_byte_more_is_refused() {
-        assert_eq!(check_send_input(&request(1, 0, Some(crate::BYTES_MAX))), Ok(()));
+        assert_eq!(
+            check_send_input(&request(1, 0, Some(crate::BYTES_MAX))),
+            Ok(())
+        );
         assert_eq!(
             check_send_input(&request(1, 0, Some(crate::BYTES_MAX + 1))),
             Err(too_large_input())
@@ -190,6 +199,7 @@ mod bounds {
     fn a_handle_keeps_the_kernel_id() {
         let secret = Secret::from_kernel(7);
         assert_eq!(secret.kernel_id(), 7);
-        assert_eq!(secret, Secret::from_kernel(7));
+        assert!(secret == Secret::from_kernel(7));
+        assert!(secret != Secret::from_kernel(8));
     }
 }
