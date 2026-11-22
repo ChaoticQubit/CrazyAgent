@@ -3,11 +3,10 @@ use serde::Deserialize;
 use std::sync::OnceLock;
 
 /// One reviewed difference against a 2.4.2 golden (v250 plan 9.13, H7, P6): the golden lines
-/// starting at line `at` that the line's capture shows as `capture` instead, the commit that
-/// made the change and why. An entry touching sandbox policy, grants, secret-carrying
-/// environment or files in an agent home is `security`, says in `change` whether it widens,
-/// narrows or keeps the same what agents reach, and holds its scenario red until the owner
-/// sets `owner_signed`.
+/// from line `at` that the capture shows as `capture`, with the commit and why. An entry on
+/// sandbox policy, grants, secret-carrying env or agent-home files is `security`, says in
+/// `change` whether agents' reach widens, narrows or stays the same, and holds its scenario
+/// red until the owner sets `owner_signed`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Entry {
