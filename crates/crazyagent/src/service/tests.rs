@@ -1101,6 +1101,7 @@ fn current_holds_only_for_the_definition_install_would_write_now() {
     for platform in [Platform::MacOs, Platform::Linux, Platform::Windows] {
         let mut wanted = service(platform);
         wanted.root = temp.path().join("engine");
+        wanted.home = Some(temp.path().to_path_buf());
         wanted.executable = temp.path().join("app").join("crazyagent");
         wanted.definition = temp.path().join(format!("{platform:?}.definition"));
         if platform == Platform::Windows {
@@ -1137,6 +1138,7 @@ fn a_definition_that_runs_another_program_is_told_apart_from_one_with_another_pa
     for platform in [Platform::MacOs, Platform::Linux] {
         let mut own = service(platform);
         own.root = temp.path().join("engine");
+        own.home = Some(temp.path().to_path_buf());
         own.executable = temp.path().join("CrazyAgent.app").join("crazyagent");
         own.definition = temp.path().join(format!("{platform:?}.definition"));
         assert!(!own.runs_another_program());
@@ -1173,6 +1175,7 @@ fn an_executable_path_with_escaped_characters_is_still_found_in_its_definition()
     for platform in [Platform::MacOs, Platform::Linux] {
         let mut own = service(platform);
         own.root = temp.path().join("engine");
+        own.home = Some(temp.path().to_path_buf());
         own.executable = temp
             .path()
             .join("Tools & $Apps")
@@ -1280,6 +1283,7 @@ fn stale_replaces_a_definition_only_for_a_private_copy_of_the_bundled_engine() {
     for platform in [Platform::MacOs, Platform::Linux] {
         let mut installed = service(platform);
         installed.root = temp.path().join("engine");
+        installed.home = Some(temp.path().to_path_buf());
         installed.executable = bundled.clone();
         installed.path = OsString::from("/usr/bin:/bin");
         installed.definition = temp.path().join(format!("{platform:?}.definition"));

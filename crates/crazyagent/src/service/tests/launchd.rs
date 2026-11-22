@@ -50,6 +50,7 @@ fn launchd_plist_runs_the_recorded_executable_with_logs_and_restart() {
 /// A launchd property list gives the engine the HOME of the process that defined the service,
 /// escaped as every other path, so a run on a scratch HOME never starts an engine on the
 /// owner's real one.
+#[cfg(unix)]
 #[test]
 fn launchd_plist_gives_the_engine_the_defining_home_escaped() {
     let mut odd = service(Platform::MacOs);
