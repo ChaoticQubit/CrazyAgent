@@ -146,7 +146,8 @@ pub(crate) fn sources(dir: &Path, out: &mut Vec<Violation>) {
 }
 
 /// Lists the `.rs` files below `src`, relative to the crate folder, sorted; a symlink, a
-/// folder past `DEPTH_MAX` or more than `SOURCE_FILES_MAX` files is a violation.
+/// file not named exactly `*.rs` (a case-insensitive file system resolves `mod m;` to
+/// `m.RS`), a folder past `DEPTH_MAX` or more than `SOURCE_FILES_MAX` files is a violation.
 /// Inputs: the crate folder and the violation list. Output: the files.
 fn rust_files(dir: &Path, out: &mut Vec<Violation>) -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -172,8 +173,10 @@ fn rust_files(dir: &Path, out: &mut Vec<Violation>) -> Vec<PathBuf> {
                 } else {
                     folders.push((name, depth + 1));
                 }
-            } else if name.extension().is_some_and(|ext| ext == "rs") {
+            } else if is_rust_file(&name) {
                 files.push(name);
+            } else {
+                out.push(at(&name, 1, "plugin_manifest_not_allowed"));
             }
         }
         if files.len() > SOURCE_FILES_MAX {
@@ -185,6 +188,14 @@ fn rust_files(dir: &Path, out: &mut Vec<Violation>) -> Vec<PathBuf> {
     files.sort();
     assert!(files.len() <= SOURCE_FILES_MAX);
     files
+}
+
+/// Whether a file name ends in exactly `.rs` with a stem before it. Input: the path.
+/// Output: true for a Rust source name.
+fn is_rust_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.len() > 3 && name.ends_with(".rs"))
 }
 
 /// Builds a violation. Inputs: the file, line and code. Output: the violation.
@@ -348,6 +359,16 @@ impl Scan<'_> {
     /// when it starts with `::` or a name outside `USE_ROOTS`.
     fn use_root(&mut self, tree: &[TokenTree]) {
         let leading = is_punct(tree.first(), ':');
+        if leading && let Some(first) = tree.first() {
+            let name = tree.iter().find_map(|token| match token {
+                TokenTree::Ident(ident) => Some(ident.to_string()),
+                _ => None,
+            });
+            if name.as_deref() != Some("std") {
+                self.push(first.span(), "plugin_use_not_allowed");
+            }
+            return;
+        }
         let first = tree.iter().find(|token| !is_punct(Some(token), ':'));
         let Some(TokenTree::Ident(ident)) = first else {
             return;
