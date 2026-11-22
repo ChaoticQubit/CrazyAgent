@@ -114,3 +114,6 @@ pub mod worktrees;
 #[cfg(all(test, unix))]
 #[path = "../tests/poll_support/mod.rs"]
 mod poll_support;
+
+#[cfg(all(test, unix))]
+mod budget_processes_tests;
