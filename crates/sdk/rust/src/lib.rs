@@ -53,4 +53,6 @@ pub const LIST_ITEMS_MAX: usize = 64;
 #[cfg(test)]
 pub mod fixture_generated;
 #[cfg(test)]
+pub mod fixture_two;
+#[cfg(test)]
 mod tests;

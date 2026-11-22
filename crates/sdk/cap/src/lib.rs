@@ -47,8 +47,9 @@ pub struct Field {
     pub ty: TypeRef,
 }
 
-/// A field's type: a built-in scalar, text or bytes, a list or option of a type, or an
-/// enum, type or handle declared in the same file.
+/// A field's type: a built-in scalar, text or bytes, a list or option of a type, an enum,
+/// type or handle declared in the same file, or another file's item named `stem.Name`,
+/// which capgen resolves across files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeRef {
     U16,
@@ -60,6 +61,7 @@ pub enum TypeRef {
     List(Box<TypeRef>),
     Option(Box<TypeRef>),
     Named(String),
+    Foreign { stem: String, name: String },
 }
 
 /// The plugin tiers of DEC-206 Q5, lowest first; `Kernel` is a kernel module's capability.
@@ -99,11 +101,18 @@ pub struct ParseError {
     pub code: &'static str,
 }
 
-/// Parses one `.cap` source and checks it. Input: the source text.
-/// Output: the file's syntax tree, or the first refusal with its position.
+/// Parses one `.cap` source whose file stem is not known, so no ref counts as naming its
+/// own file. Input: the source text. Output: as [`parse_as`].
 pub fn parse(source: &str) -> Result<File, ParseError> {
+    parse_as("", source)
+}
+
+/// Parses one `.cap` source and checks it, refusing a ref qualified with the file's own
+/// stem (`cap_self_qualified`). Inputs: the file's stem and the source text.
+/// Output: the file's syntax tree, or the first refusal with its position.
+pub fn parse_as(stem: &str, source: &str) -> Result<File, ParseError> {
     let tokens = lex::lex(source)?;
-    let (file, spots) = parse::file(tokens)?;
+    let (file, spots) = parse::file(stem, tokens)?;
     check::check(&file, &spots)?;
     assert!(
         file.enums.len() + file.types.len() + file.handles.len() + file.capabilities.len()
