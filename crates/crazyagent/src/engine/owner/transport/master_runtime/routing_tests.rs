@@ -1819,22 +1819,24 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
     assert_eq!(after.captures, before.captures);
     assert_eq!(after.revision, before.revision + 3);
     assert_eq!(after.events.len(), before.events.len() + 3);
-    let started: Vec<(String, String)> = {
-        let db = case.db();
-        let mut statement = db
-            .prepare("SELECT aggregate, kind FROM state_log WHERE revision=?1 ORDER BY seq")
-            .unwrap();
+    let (store, revision) = (database.clone(), before.revision + 1);
+    let started = tokio::task::spawn_blocking(move || {
+        let db = Connection::open_with_flags(
+            store,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        db.busy_timeout(Duration::from_secs(1))?;
+        let mut statement =
+            db.prepare("SELECT aggregate, kind FROM state_log WHERE revision=?1 ORDER BY seq")?;
         statement
-            .query_map([i64::try_from(before.revision + 1).unwrap()], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
-            .unwrap()
-            .map(Result::unwrap)
-            .collect()
-    };
+            .query_map([revision], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<(String, String)>>>()
+    })
+    .await
+    .expect("the state_log read ends");
     assert_eq!(
         started,
-        [("landing".to_owned(), "BaseSet".to_owned())],
+        Ok(vec![("landing".to_owned(), "BaseSet".to_owned())]),
         "the master start's base write is the drive's only other commit (V250-L9)"
     );
     assert!(matches!(

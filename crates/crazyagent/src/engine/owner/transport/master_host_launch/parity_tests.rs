@@ -178,13 +178,16 @@ fn command_record(command: &Command) -> Value {
 
 /// One master turn as the snapshot holds it: the command, the files of its home, the
 /// folders its boundary lets it write and read, the toolchain folders it grants, which
-/// `tool_placeholders` names, and its tool record. Input: the launch. Output: the record.
+/// `tool_placeholders` names, and its tool record. Input: the launch. Output: the record;
+/// a home whose search list names other keychains than it holds fails the row.
 fn turn_record(launch: &MasterTurnLaunch) -> Value {
     let text = |path: &PathBuf| path.to_str().unwrap().to_owned();
     let rules = launch.sandbox.sandbox();
+    let home = json!(files(&launch.home));
+    keychains_tied(&home);
     json!({
         "command": command_record(&launch.command),
-        "home": files(&launch.home),
+        "home": home,
         "writable": rules.writable_roots().map(text).collect::<Vec<_>>(),
         "read": rules.read_roots().iter().map(text).collect::<Vec<_>>(),
         "tools": rules.tool_roots().iter().map(text).collect::<Vec<_>>(),
@@ -297,7 +300,24 @@ impl RandomName {
 /// the tie can no longer be seen; a home with neither holds none. Input: the home listing.
 /// Output: none; a keychain the plist does not name, or a name with no file, fails the row.
 fn keychains_tied(home: &Value) {
-    assert!(home.is_object(), "a home listing is an object");
+    let listing = home.as_object().expect("a home listing is an object");
+    let held: BTreeSet<&str> = listing
+        .keys()
+        .flat_map(|key| KEYCHAIN_FILE.found(key))
+        .collect();
+    let listed: BTreeSet<&str> = listing
+        .get(PLIST)
+        .map(|plist| {
+            plist["text"]
+                .as_str()
+                .expect("the search-list plist reads as text")
+        })
+        .map(|text| KEYCHAIN_LISTED.found(text).into_iter().collect())
+        .unwrap_or_default();
+    assert_eq!(
+        listed, held,
+        "the search list names other keychains than the home holds"
+    );
 }
 
 /// Replaces each placeholder's text in every string and key of a record. Inputs: the
@@ -322,7 +342,10 @@ fn normalized(value: Value, pairs: &[(String, String)]) -> Value {
         Value::Object(fields) => {
             let mut renamed = Map::new();
             for (key, item) in fields {
-                renamed.insert(replaced(key), normalized(item, pairs));
+                let fixed = replaced(key);
+                let shown = fixed.clone();
+                let kept = renamed.insert(fixed, normalized(item, pairs));
+                assert!(kept.is_none(), "two names read as one key: {shown}");
             }
             Value::Object(renamed)
         }
