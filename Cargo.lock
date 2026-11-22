@@ -986,6 +986,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "crazyagent-kernel-plugin-host"
+version = "2.4.4"
+dependencies = [
+ "toml 1.1.6+spec-1.1.0",
+]
+
+[[package]]
 name = "crazyagent-kernel-processes"
 version = "2.4.4"
 dependencies = [
