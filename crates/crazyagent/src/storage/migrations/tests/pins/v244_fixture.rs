@@ -51,7 +51,7 @@ fn an_upgrade_of_the_2_4_4_fixture_replays_to_the_rows_it_held() {
         Some(&sources),
         STEPS,
         now,
-        check_copy,
+        backup,
     )
     .unwrap();
 
@@ -105,7 +105,7 @@ fn a_failure_in_step_12_leaves_the_2_4_4_fixture_byte_identical() {
         Some(&sources),
         &failing_at_12(),
         SystemTime::now(),
-        check_copy,
+        backup,
     )
     .unwrap_err()
     .0;
