@@ -192,6 +192,9 @@ async fn an_owner_request_wakes_a_watch_with_its_topic_and_the_next_watch_waits(
         crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
     let database = root.path().join(DATABASE);
     let engine = Engine::open(&database, config).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), engine.storage.started())
+        .await
+        .unwrap();
     let watches = Arc::new(Watches::new());
     let mark = first(&watches, &database).await;
     let watch = waiting(&watches, &database, 0, mark);

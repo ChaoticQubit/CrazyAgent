@@ -1,0 +1,187 @@
+{
+  "tools-off": {
+    "command": {
+      "args": [
+        "--print",
+        "--verbose",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--model",
+        "parity-model",
+        "--tools",
+        "",
+        "--system-prompt",
+        "You are Claude, answering inside CrazyAgent with no tools. You cannot run commands, read or write files, browse or call any tool, and no tool results will ever come back. Never write tool calls, function call markup or commands for yourself to run. Answer directly in plain text from the conversation and the text you are given.",
+        "--strict-mcp-config",
+        "--mcp-config",
+        "{\"mcpServers\":{}}",
+        "--setting-sources",
+        "",
+        "--settings",
+        "{\"autoMemoryEnabled\":false,\"disableAllHooks\":true}",
+        "--disable-slash-commands",
+        "--no-session-persistence",
+        "--max-turns",
+        "1",
+        "--append-system-prompt-file",
+        "<BASE>/state/runtime/master-runtime-<tools-off-turn>/instructions.md"
+      ],
+      "cwd": "<BASE>/worktrees/lease",
+      "env": {
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+        "CLAUDE_CODE_MAX_RETRIES": "0",
+        "CLAUDE_CONFIG_DIR": "<BASE>/state/runtime/master-runtime-<tools-off-turn>/home",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR": "<BASE>/state/runtime/master-runtime-<tools-off-turn>/home",
+        "HOME": "<BASE>/state/runtime/master-runtime-<tools-off-turn>/home",
+        "TERM": "dumb"
+      },
+      "program": "<BASE>/install/claude"
+    },
+    "home": {
+      ".cargo/": {
+        "mode": "700"
+      },
+      ".config/": {
+        "mode": "700"
+      },
+      ".credentials.json": {
+        "mode": "600",
+        "text": "{\"claudeAiOauth\":{\"accessToken\":\"sk-ant-oat01-parity\",\"expiresAt\":4102444800000,\"refreshToken\":null,\"scopes\":[\"user:inference\"],\"subscriptionType\":\"max\"}}"
+      },
+      "Library/": {
+        "mode": "700"
+      },
+      "Library/Keychains/": {
+        "mode": "700"
+      },
+      "Library/Keychains/<AGENT_KEYCHAIN>": {
+        "mode": "600",
+        "text": null
+      },
+      "Library/Keychains/<KEYCHAIN_LOCK>": {
+        "mode": "444",
+        "text": ""
+      },
+      "Library/Preferences/": {
+        "mode": "700"
+      },
+      "Library/Preferences/com.apple.security.plist": {
+        "mode": "644",
+        "text": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>DLDBSearchList</key>\n\t<array>\n\t\t<dict>\n\t\t\t<key>DbName</key>\n\t\t\t<string>~/Library/Keychains/<AGENT_KEYCHAIN_LISTED></string>\n\t\t\t<key>GUID</key>\n\t\t\t<string>{87191ca3-0fc9-11d4-849a-000502b52122}</string>\n\t\t\t<key>SubserviceType</key>\n\t\t\t<integer>6</integer>\n\t\t</dict>\n\t</array>\n\t<key>DefaultKeychain</key>\n\t<array>\n\t\t<dict>\n\t\t\t<key>DbName</key>\n\t\t\t<string>~/Library/Keychains/<AGENT_KEYCHAIN_LISTED></string>\n\t\t\t<key>GUID</key>\n\t\t\t<string>{87191ca3-0fc9-11d4-849a-000502b52122}</string>\n\t\t\t<key>SubserviceType</key>\n\t\t\t<integer>6</integer>\n\t\t</dict>\n\t</array>\n</dict>\n</plist>\n"
+      }
+    },
+    "read": [
+      "<BASE>/repository",
+      "<BASE>/install",
+      "<BASE>/state/runtime/master-runtime-<tools-off-turn>"
+    ],
+    "tool_record": null,
+    "tools": [
+      "<XCODE_DEVELOPER>"
+    ],
+    "writable": [
+      "<BASE>/worktrees/lease",
+      "<BASE>/state/runtime/master-runtime-<tools-off-turn>/home",
+      "<BASE>/state/runtime/master-runtime-<tools-off-turn>/tmp",
+      "<BASE>/state/tool-cache/<REPOSITORY_TOOL_CACHE>/sandboxed-worktree"
+    ]
+  },
+  "tools-on": {
+    "command": {
+      "args": [
+        "--print",
+        "--verbose",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--model",
+        "parity-model",
+        "--tools",
+        "default",
+        "--permission-mode",
+        "bypassPermissions",
+        "--disallowedTools",
+        "Agent",
+        "Workflow",
+        "TeamCreate",
+        "--strict-mcp-config",
+        "--mcp-config",
+        "{\"mcpServers\":{\"crazyagent-team\":{\"args\":[\"team-mcp\",\"<BASE>/state/runtime/master-runtime-<tools-on-turn>/tmp/crazyagent-delegations.jsonl\",\"<BASE>/state/runtime/master-runtime-<tools-on-turn>/tmp/crazyagent-team-calls\",\"wake\"],\"command\":\"<BASE>/install/crazyagent\",\"type\":\"stdio\"}}}",
+        "--setting-sources",
+        "",
+        "--settings",
+        "{\"autoMemoryEnabled\":false,\"disableAllHooks\":true}",
+        "--disable-slash-commands",
+        "--no-session-persistence",
+        "--append-system-prompt-file",
+        "<BASE>/state/runtime/master-runtime-<tools-on-turn>/instructions.md",
+        "--max-turns",
+        "50"
+      ],
+      "cwd": "<BASE>/worktrees/lease",
+      "env": {
+        "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+        "CLAUDE_CODE_MAX_RETRIES": "0",
+        "CLAUDE_CONFIG_DIR": "<BASE>/state/runtime/master-runtime-<tools-on-turn>/home",
+        "CLAUDE_SECURESTORAGE_CONFIG_DIR": "<BASE>/state/runtime/master-runtime-<tools-on-turn>/home",
+        "HOME": "<BASE>/state/runtime/master-runtime-<tools-on-turn>/home",
+        "SHELL": "/bin/zsh",
+        "TERM": "dumb"
+      },
+      "program": "<BASE>/install/claude"
+    },
+    "home": {
+      ".cargo/": {
+        "mode": "700"
+      },
+      ".config/": {
+        "mode": "700"
+      },
+      ".credentials.json": {
+        "mode": "600",
+        "text": "{\"claudeAiOauth\":{\"accessToken\":\"sk-ant-oat01-parity\",\"expiresAt\":4102444800000,\"refreshToken\":null,\"scopes\":[\"user:inference\"],\"subscriptionType\":\"max\"}}"
+      },
+      "Library/": {
+        "mode": "700"
+      },
+      "Library/Keychains/": {
+        "mode": "700"
+      },
+      "Library/Keychains/<AGENT_KEYCHAIN>": {
+        "mode": "600",
+        "text": null
+      },
+      "Library/Keychains/<KEYCHAIN_LOCK>": {
+        "mode": "444",
+        "text": ""
+      },
+      "Library/Preferences/": {
+        "mode": "700"
+      },
+      "Library/Preferences/com.apple.security.plist": {
+        "mode": "644",
+        "text": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n\t<key>DLDBSearchList</key>\n\t<array>\n\t\t<dict>\n\t\t\t<key>DbName</key>\n\t\t\t<string>~/Library/Keychains/<AGENT_KEYCHAIN_LISTED></string>\n\t\t\t<key>GUID</key>\n\t\t\t<string>{87191ca3-0fc9-11d4-849a-000502b52122}</string>\n\t\t\t<key>SubserviceType</key>\n\t\t\t<integer>6</integer>\n\t\t</dict>\n\t</array>\n\t<key>DefaultKeychain</key>\n\t<array>\n\t\t<dict>\n\t\t\t<key>DbName</key>\n\t\t\t<string>~/Library/Keychains/<AGENT_KEYCHAIN_LISTED></string>\n\t\t\t<key>GUID</key>\n\t\t\t<string>{87191ca3-0fc9-11d4-849a-000502b52122}</string>\n\t\t\t<key>SubserviceType</key>\n\t\t\t<integer>6</integer>\n\t\t</dict>\n\t</array>\n</dict>\n</plist>\n"
+      }
+    },
+    "read": [
+      "<BASE>/repository",
+      "<BASE>/install",
+      "<BASE>/install",
+      "<BASE>/state/runtime/master-runtime-<tools-on-turn>"
+    ],
+    "tool_record": "<BASE>/state/runtime/master-runtime-<tools-on-turn>/tmp/crazyagent-delegations.jsonl",
+    "tools": [
+      "<XCODE_DEVELOPER>"
+    ],
+    "writable": [
+      "<BASE>/worktrees/lease",
+      "<BASE>/state/runtime/master-runtime-<tools-on-turn>/home",
+      "<BASE>/state/runtime/master-runtime-<tools-on-turn>/tmp",
+      "<BASE>/state/tool-cache/<REPOSITORY_TOOL_CACHE>/sandboxed-worktree"
+    ]
+  }
+}

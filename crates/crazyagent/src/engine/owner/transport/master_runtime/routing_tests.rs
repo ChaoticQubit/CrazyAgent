@@ -1817,8 +1817,26 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
     );
     assert_eq!(after.registrations, before.registrations);
     assert_eq!(after.captures, before.captures);
-    assert_eq!(after.revision, before.revision + 2);
-    assert_eq!(after.events.len(), before.events.len() + 2);
+    assert_eq!(after.revision, before.revision + 3);
+    assert_eq!(after.events.len(), before.events.len() + 3);
+    let started: Vec<(String, String)> = {
+        let db = case.db();
+        let mut statement = db
+            .prepare("SELECT aggregate, kind FROM state_log WHERE revision=?1 ORDER BY seq")
+            .unwrap();
+        statement
+            .query_map([i64::try_from(before.revision + 1).unwrap()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect()
+    };
+    assert_eq!(
+        started,
+        [("landing".to_owned(), "BaseSet".to_owned())],
+        "the master start's base write is the drive's only other commit (V250-L9)"
+    );
     assert!(matches!(
         custody.acquire_configured_rcli_use(
             &case.runtime().identity(),
