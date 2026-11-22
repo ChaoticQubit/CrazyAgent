@@ -507,3 +507,83 @@ fn a_sqlite_library_older_than_3_39_is_refused_with_its_own_sentence() {
         assert_eq!(SqlitePoll::new(missing, &SCHEMA, 0).read(), Ok(Vec::new()));
     }
 }
+
+/// A WAL database whose harness closed it and whose WAL file is gone but whose index file is
+/// left, the shape the macOS system SQLite refuses to open read-only (V250-READONLY-WAL).
+/// Input: the database path. Output: the root page and page size of the facts table.
+fn index_but_no_wal(path: &Path) -> (u64, u64) {
+    let writer = database(path, 3);
+    writer.pragma_update(None, "journal_mode", "wal").unwrap();
+    add(&writer, &turn());
+    let root: u64 = writer
+        .query_row(
+            "SELECT rootpage FROM sqlite_master WHERE name = 'facts'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let size: u64 = writer
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .unwrap();
+    writer
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
+    let index = path.with_extension("db-shm");
+    let kept = std::fs::read(&index).unwrap();
+    drop(writer);
+    if let Err(error) = std::fs::remove_file(path.with_extension("db-wal")) {
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+    std::fs::write(&index, kept).unwrap();
+    assert!(!path.with_extension("db-wal").exists());
+    assert!(index.is_file());
+    assert!(root >= 2 && size >= 512);
+    (root, size)
+}
+
+/// V250-READONLY-WAL: a WAL database with its index file but no WAL file is read as
+/// immutable, so the macOS system SQLite's refusal of that read-only open never reaches the
+/// reader; its rows are read and nothing in its folder changes.
+#[test]
+fn a_wal_database_with_an_index_file_but_no_wal_file_is_read_as_immutable() {
+    let tmp = root();
+    let path = tmp.path().join("record.db");
+    index_but_no_wal(&path);
+    if !reads(&path) {
+        return;
+    }
+    let before = folder(tmp.path());
+
+    assert_eq!(mode(&path).unwrap(), Some(Mode::Immutable));
+    let mut reader = SqlitePoll::new(path.clone(), &SCHEMA, 0);
+    assert_eq!(reader.read().unwrap(), turn_events());
+
+    assert_eq!(folder(tmp.path()), before);
+}
+
+/// V250-READONLY-WAL: a writer that arrives during an immutable read and checkpoints into
+/// the database leaves a page the read finds torn; that read gives no facts as a busy one
+/// does, and once the writer's page is whole the next read gives the rows.
+#[test]
+fn a_page_torn_by_a_writer_under_an_immutable_read_is_retried_as_busy() {
+    let tmp = root();
+    let path = tmp.path().join("record.db");
+    let (page, size) = index_but_no_wal(&path);
+    if !reads(&path) {
+        return;
+    }
+    let whole = std::fs::read(&path).unwrap();
+    let mut torn = whole.clone();
+    let start = usize::try_from((page - 1) * size).unwrap();
+    let end = start + usize::try_from(size).unwrap();
+    torn[start..end].fill(0xff);
+    std::fs::write(&path, &torn).unwrap();
+    let mut reader = SqlitePoll::new(path.clone(), &SCHEMA, 0);
+
+    assert_eq!(mode(&path).unwrap(), Some(Mode::Immutable));
+    assert_eq!(reader.read().unwrap(), Vec::new());
+    assert_eq!(reader.busy, 1);
+    std::fs::write(&path, &whole).unwrap();
+    assert_eq!(reader.read().unwrap(), turn_events());
+    assert_eq!(reader.busy, 0);
+}
