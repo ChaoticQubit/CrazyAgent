@@ -51,7 +51,9 @@ struct Fixtures {
     tmux: PathBuf,
     host: Tmux,
     echo: AgentId,
+    #[cfg(target_os = "macos")]
     shown: AgentId,
+    #[cfg(target_os = "macos")]
     typed: std::cell::Cell<u64>,
     stream: std::cell::RefCell<TerminalStream>,
     archive: PathBuf,
@@ -78,8 +80,10 @@ impl Fixtures {
             host.spawn(agent, &command).unwrap();
         };
         let echo = AgentId::team(1).unwrap();
+        #[cfg(target_os = "macos")]
         let shown = AgentId::team(2).unwrap();
         cat(&echo);
+        #[cfg(target_os = "macos")]
         cat(&shown);
         let stream = std::cell::RefCell::new(host.attach(&echo).unwrap());
         let (archive, sha256, signature, key) = signed_archive(home);
@@ -98,7 +102,9 @@ impl Fixtures {
             tmux,
             host,
             echo,
+            #[cfg(target_os = "macos")]
             shown,
+            #[cfg(target_os = "macos")]
             typed: std::cell::Cell::new(0),
             stream,
             archive,
