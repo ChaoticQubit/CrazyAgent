@@ -399,3 +399,22 @@ fn every_manifest_table_outside_the_allowlist_is_refused() {
         fs::remove_dir_all(&root).expect("scratch removed");
     }
 }
+
+#[test]
+fn a_source_file_not_named_exactly_rs_is_refused() {
+    for name in ["upper_ext", "upper_mod"] {
+        assert_eq!(
+            codes(name),
+            BTreeSet::from(["plugin_manifest_not_allowed"]),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_use_group_with_a_leading_colon_is_refused() {
+    assert_eq!(
+        codes("use_leading_group"),
+        BTreeSet::from(["plugin_use_not_allowed"])
+    );
+}
