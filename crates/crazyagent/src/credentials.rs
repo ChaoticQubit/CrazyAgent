@@ -1,6 +1,6 @@
 use crate::protocol::CredentialRef;
 use kernel_security::error::StoreError;
-use kernel_security::secret::{SecretString, wipe};
+use kernel_security::secret::SecretString;
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
@@ -199,7 +199,7 @@ pub(crate) fn sized_json(value: &impl serde::Serialize) -> serde_json::Result<Ve
     let mut buffer = Vec::with_capacity(counted.0);
     let capacity = buffer.capacity();
     if let Err(problem) = serde_json::to_writer(&mut buffer, value) {
-        wipe(&mut buffer);
+        kernel_security::secret::wipe(&mut buffer);
         return Err(problem);
     }
     assert_eq!(buffer.len(), counted.0);
