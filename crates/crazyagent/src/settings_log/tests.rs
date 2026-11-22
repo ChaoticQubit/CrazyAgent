@@ -34,7 +34,7 @@ const STATE: &str =
 
 /// A store with the `state` row at revision 0, the owner tables holding the test host
 /// started, and every settings table. Output: the connection.
-fn store() -> Connection {
+pub(crate) fn store() -> Connection {
     let db = Connection::open_in_memory().unwrap();
     db.execute_batch(STATE).unwrap();
     seed(&db);
@@ -155,7 +155,7 @@ fn write(db: &mut Connection, events: &[Event]) -> Vec<u64> {
 
 /// The `state` revision, the logged events (0 with no log) and the `events` rows. Input: the
 /// store. Output: the three counts.
-fn moved(db: &Connection) -> (i64, i64, i64) {
+pub(crate) fn moved(db: &Connection) -> (i64, i64, i64) {
     let revision = db
         .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
             row.get(0)
@@ -179,7 +179,7 @@ fn moved(db: &Connection) -> (i64, i64, i64) {
 
 /// The kinds of the logged events in seq order, with the revision each carries. Input: the
 /// store. Output: the pairs.
-fn kinds(db: &Connection) -> Vec<(i64, String)> {
+pub(crate) fn kinds(db: &Connection) -> Vec<(i64, String)> {
     db.prepare("SELECT revision, kind FROM state_log ORDER BY seq")
         .unwrap()
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))

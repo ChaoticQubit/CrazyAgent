@@ -185,6 +185,138 @@ fn crash_between_steps(root: &Path) -> ! {
     panic!("the crash step must end the process; the upgrade returned {ended:?}");
 }
 
+/// The rows the P5 fixture holds after one upgrade through the probe step with no crash, the
+/// end a crashed upgrade must reach once it runs again. Output: those rows.
+fn uncrashed() -> BTreeMap<String, Vec<String>> {
+    let (root, _) = fixture();
+    let sources = sources(&root);
+    let mut db = root.connection();
+    upgrade_at(
+        &mut db,
+        &root.database(),
+        Some(&sources),
+        &steps(&[probe]),
+        SystemTime::now(),
+        backup,
+    )
+    .unwrap();
+    assert_eq!(version(&db).unwrap(), latest(STEPS) + 1);
+    stable_rows(&db)
+}
+
+/// The rows of an upgraded database, shaped as `rows` shapes them, with the bytes two runs of
+/// one upgrade write differently named in place and nothing else changed: the kept text key,
+/// each keyed kept text digest (named by the rank of the text it hashes), the state log
+/// `at_ms` times, and each SnapshotDone sha256, which hashes chunks holding those digests and
+/// is checked against its chunks first. Input: the connection. Output: the rows.
+fn stable_rows(db: &Connection) -> BTreeMap<String, Vec<String>> {
+    let done: Vec<i64> = db
+        .prepare("SELECT seq FROM state_log WHERE kind = 'SnapshotDone'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(!done.is_empty(), "the upgrade puts snapshots on the log");
+    for seq in done {
+        crate::state_log::verify_snapshot(db, u64::try_from(seq).unwrap()).unwrap();
+    }
+    let mut kept: Vec<(String, Vec<u8>)> = db
+        .prepare("SELECT digest, text FROM kept_texts")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(!kept.is_empty(), "the upgrade keeps texts");
+    kept.sort_by(|left, right| left.1.cmp(&right.1));
+    let named = |text: &str| {
+        let mut text = text.to_owned();
+        for (rank, (digest, _)) in kept.iter().enumerate() {
+            assert_eq!(digest.len(), 64);
+            text = text.replace(digest.as_str(), &format!("<digest of kept text {rank}>"));
+        }
+        text
+    };
+    let tables: Vec<String> = rows(db).into_keys().collect();
+    tables
+        .into_iter()
+        .map(|table| {
+            let mut statement = db.prepare(&format!("SELECT * FROM \"{table}\"")).unwrap();
+            let columns: Vec<String> = statement
+                .column_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            let mut values: Vec<String> = statement
+                .query_map([], |row| {
+                    let kind = columns
+                        .iter()
+                        .position(|column| table == "state_log" && column == "kind")
+                        .map(|index| row.get::<_, String>(index))
+                        .transpose()?;
+                    let mut cells = Vec::with_capacity(columns.len());
+                    for (index, column) in columns.iter().enumerate() {
+                        let value = row.get::<_, rusqlite::types::Value>(index)?;
+                        cells.push(stable_cell(&table, column, kind.as_deref(), value, &named));
+                    }
+                    Ok(cells.join("|"))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            values.sort();
+            (table, values)
+        })
+        .collect()
+}
+
+/// One cell of [`stable_rows`]. Inputs: the table, the column, the state log row's kind,
+/// the value and the digest namer. Output: the value as `rows` prints it, or the run-random
+/// part named: the kept text key, a state log time, a digest, or the sha256 of a SnapshotDone
+/// body, which [`stable_rows`] checked against its chunks; no other body's bytes are named.
+fn stable_cell(
+    table: &str,
+    column: &str,
+    kind: Option<&str>,
+    value: rusqlite::types::Value,
+    named: &dyn Fn(&str) -> String,
+) -> String {
+    use rusqlite::types::Value;
+    match (table, column, value) {
+        ("kept_text_key", _, Value::Blob(_)) => "Blob(<kept text key>)".to_owned(),
+        ("state_log", "at_ms", Value::Integer(_)) => "Integer(<at_ms>)".to_owned(),
+        ("state_log", "body", Value::Blob(body)) => {
+            let body = named(std::str::from_utf8(&body).unwrap());
+            if kind == Some("SnapshotDone") {
+                format!("Body({})", checked_sha256(&body))
+            } else {
+                format!("Body({body})")
+            }
+        }
+        (_, _, Value::Text(text)) => format!("{:?}", Value::Text(named(&text))),
+        (_, _, value) => format!("{value:?}"),
+    }
+}
+
+/// Names the sha256 of a SnapshotDone body, which [`stable_rows`] checked against its chunks.
+/// Input: a state log body. Output: the body with each `"sha256":"<64 hex>"` value named.
+fn checked_sha256(body: &str) -> String {
+    const KEY: &str = "\"sha256\":\"";
+    let mut out = String::with_capacity(body.len());
+    let mut rest = body;
+    while let Some(at) = rest.find(KEY) {
+        let (head, tail) = rest.split_at(at + KEY.len());
+        let hex = tail.get(..64).unwrap();
+        assert!(hex.bytes().all(|byte| byte.is_ascii_hexdigit()), "{body}");
+        out.push_str(head);
+        out.push_str("<checked sha256>");
+        rest = &tail[64..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// A step that ends the process mid-upgrade as a crash would: it marks that it ran, then exits
 /// with no rollback and no destructor. Input: the open upgrade transaction. Output: never
 /// returns.
@@ -464,15 +596,16 @@ fn a_corrupt_copy_stops_the_upgrade_before_any_step() {
 }
 
 #[test]
-fn a_crash_between_steps_keeps_the_2_4_database_and_pins_the_first_copy() {
+fn a_crash_between_steps_keeps_the_2_4_database_and_pins_the_newest_2_4_copy() {
     if let Some(crashing) = std::env::var_os(CRASH_ROOT) {
         crash_between_steps(Path::new(&crashing));
     }
     let (root, bytes) = fixture();
     let before = rows(&root.connection());
     let module = module_path!().split_once("::").unwrap().1;
-    let test =
-        format!("{module}::a_crash_between_steps_keeps_the_2_4_database_and_pins_the_first_copy");
+    let test = format!(
+        "{module}::a_crash_between_steps_keeps_the_2_4_database_and_pins_the_newest_2_4_copy"
+    );
 
     let ran = crate::spawn_gate::collected(
         Command::new(std::env::current_exe().unwrap())
@@ -496,6 +629,7 @@ fn a_crash_between_steps_keeps_the_2_4_database_and_pins_the_first_copy() {
     let crashed = names(&root);
     assert_eq!(crashed.len(), 1);
     assert!(root.backups()[0].join(CHECKED).is_file());
+    let crashed_copy = std::fs::read(root.backups()[0].join(DATABASE)).unwrap();
 
     let sources = sources(&root);
     upgrade_at(
@@ -509,20 +643,16 @@ fn a_crash_between_steps_keeps_the_2_4_database_and_pins_the_first_copy() {
     .unwrap();
 
     assert_eq!(version(&db).unwrap(), latest(STEPS) + 1);
-    let mut after = rows(&db);
-    assert_eq!(after.remove("migration_probe").unwrap().len(), 1);
-    for table in ["app_plugin_secrets", "app_plugin_state", "app_plugin_trust"] {
-        assert_eq!(
-            after.remove(table),
-            Some(Vec::new()),
-            "step 12 adds {table} empty"
-        );
-    }
-    assert_eq!(after, before);
-    assert_eq!(names(&root).len(), 2);
+    assert_eq!(stable_rows(&db), uncrashed());
+    let kept = names(&root);
+    assert_eq!(kept.len(), 2);
+    let rerun = kept.iter().find(|name| **name != crashed[0]).unwrap();
+    assert_eq!(pinned_name(&root, SystemTime::now()).as_ref(), Some(rerun));
+    let rerun_copy = std::fs::read(root.path().join(BACKUPS).join(rerun).join(DATABASE)).unwrap();
     assert_eq!(
-        pinned_name(&root, SystemTime::now()),
-        Some(crashed[0].clone())
+        differences(&rerun_copy, &crashed_copy),
+        Vec::<usize>::new(),
+        "the pinned re-run copy holds the 2.4 bytes of the crashed copy"
     );
 }
 

@@ -882,9 +882,14 @@ name = "crazyagent"
 version = "2.4.4"
 dependencies = [
  "base64 0.22.1",
+ "crazyagent-bus-gateway",
+ "crazyagent-cap",
  "crazyagent-kernel-storage",
  "crazyagent-linux-supervisor",
  "crazyagent-macos-fs",
+ "crazyagent-plugin-agent-quit",
+ "crazyagent-plugin-check",
+ "crazyagent-sdk",
  "crazyagent-win-sandbox",
  "crossterm",
  "getrandom 0.4.3",
@@ -993,6 +998,23 @@ name = "crazyagent-macos-fs"
 version = "2.4.4"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "crazyagent-plugin-agent-quit"
+version = "2.4.4"
+dependencies = [
+ "crazyagent-plugin-check",
+ "crazyagent-sdk",
+]
+
+[[package]]
+name = "crazyagent-plugin-check"
+version = "2.4.4"
+dependencies = [
+ "proc-macro2",
+ "syn 2.0.119",
+ "toml 1.1.6+spec-1.1.0",
 ]
 
 [[package]]

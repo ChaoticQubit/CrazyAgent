@@ -592,7 +592,7 @@ fn a_demo_clear_tombstones_every_sessions_event_of_its_project_and_no_other() {
         put_session(
             &tx,
             &view(project, &format!("s-{project}"), 3, "configured"),
-            3,
+            if project == "p1" { 2 } else { 3 },
         );
         put_entry(
             &tx,

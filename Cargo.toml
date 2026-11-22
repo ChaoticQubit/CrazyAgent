@@ -9,9 +9,12 @@ members = [
     "crates/sdk/rust",
     "crates/kernel/bus_gateway",
     "crates/kernel/storage",
+    "crates/sdk/plugin_check",
+    "plugins/t2/agent-quit",
     "apps/desktop/src-tauri",
 ]
 default-members = ["crates/crazyagent"]
+exclude = ["crates/sdk/plugin_check/tests/fixtures"]
 resolver = "3"
 
 [workspace.package]

@@ -137,6 +137,21 @@ fn ordered<'a>(
     options.iter().chain(resume).chain(off).chain(rest)
 }
 
+/// The private home and working folder the driver rows start sessions with, absolute on the
+/// host that runs them as every driver requires (V250-WINDOWS-DRIVERS-ROWS): POSIX on unix,
+/// drive paths on Windows. No row makes or reads either folder.
+#[cfg(test)]
+mod test_paths {
+    #[cfg(unix)]
+    pub(super) const HOME: &str = "/agent/home";
+    #[cfg(unix)]
+    pub(super) const CWD: &str = "/work/project";
+    #[cfg(windows)]
+    pub(super) const HOME: &str = r"C:\agent\home";
+    #[cfg(windows)]
+    pub(super) const CWD: &str = r"C:\work\project";
+}
+
 #[cfg(test)]
 #[path = "drivers_tests.rs"]
 mod tests;
