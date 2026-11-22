@@ -593,7 +593,7 @@ impl ManagedAgent {
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let base = root.path().canonicalize().unwrap();
         let database = base.join("engine.db");
-        let connection = Connection::open(&database).unwrap();
+        let connection = crate::landing_log::seeded(Connection::open(&database).unwrap());
         crate::storage::initialize_authority_schemas(&connection).unwrap();
         crate::team::initialize(&connection).unwrap();
         crate::project_setup::initialize(&connection).unwrap();
