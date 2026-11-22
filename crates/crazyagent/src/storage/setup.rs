@@ -775,8 +775,7 @@ pub(crate) fn restore_pending(root: &Path) -> Result<(), EngineError> {
 }
 
 /// Brings back the pinned 2.4 backup once the engine has stopped and every connection it
-/// held is closed, then records how it ended: `restored <copy>` or `failed <code>`, the code
-/// alone so no path reaches the record. Inputs: the engine root and the settings files.
+/// held is closed, then records how it ended as [`restore_line`] says. Inputs: the engine root and the settings files.
 /// Output: the folder of the copy kept of the 2.5 data, or the failure.
 #[cfg(unix)]
 pub(crate) fn restore_after_stop(
@@ -790,31 +789,49 @@ pub(crate) fn restore_after_stop(
             Some(&sources),
         )
     });
-    let line = match &restored {
+    if let Some(line) = restore_line(&restored)
+        && let Err(problem) = kernel_storage::restore::write_restore_record(root, &line)
+    {
+        eprintln!("{}", problem.0);
+    }
+    restored
+}
+
+/// The record line a finished restore leaves: `restored <copy>`, or `failed <code>` with the
+/// code alone so no path reaches the record. A restore whose rollback failed leaves none, so
+/// the pending record stays and no line says it changed nothing. Input: how it ended.
+/// Output: the line, or none.
+#[cfg(unix)]
+fn restore_line(restored: &Result<PathBuf, EngineError>) -> Option<String> {
+    let cause = match restored {
         Ok(copy) => {
             let name = copy
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("");
             assert!(!name.is_empty());
-            format!("{} {name}", kernel_storage::restore::RECORD_RESTORED)
+            return Some(format!(
+                "{} {name}",
+                kernel_storage::restore::RECORD_RESTORED
+            ));
         }
-        Err(cause) => {
-            let code = [
-                kernel_storage::restore::RESTORE_UNAVAILABLE,
-                kernel_storage::restore::RESTORE_AGENTS_RUNNING,
-                kernel_storage::restore::RESTORE_BUSY,
-            ]
-            .into_iter()
-            .find(|code| cause.0.starts_with(code))
-            .unwrap_or(kernel_storage::restore::RESTORE_FAILED);
-            format!("{} {code}", kernel_storage::restore::RECORD_FAILED)
-        }
+        Err(cause) => cause,
     };
-    if let Err(problem) = kernel_storage::restore::write_restore_record(root, &line) {
-        eprintln!("{}", problem.0);
+    if cause
+        .0
+        .starts_with(kernel_storage::restore::RESTORE_ROLLBACK_FAILED)
+    {
+        return None;
     }
-    restored
+    let code = [
+        kernel_storage::restore::RESTORE_UNAVAILABLE,
+        kernel_storage::restore::RESTORE_AGENTS_RUNNING,
+        kernel_storage::restore::RESTORE_BUSY,
+    ]
+    .into_iter()
+    .find(|code| cause.0.starts_with(code))
+    .unwrap_or(kernel_storage::restore::RESTORE_FAILED);
+    Some(format!("{} {code}", kernel_storage::restore::RECORD_FAILED))
 }
 
 /// The restore record of the engine at `root`, read without an engine. Input: the root.

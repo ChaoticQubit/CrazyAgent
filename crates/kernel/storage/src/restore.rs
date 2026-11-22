@@ -94,36 +94,51 @@ fn restore_pinned_at(
     if (hooks.busy)(&db)? {
         return Err(error(RESTORE_AGENTS_RUNNING));
     }
-    let kept = keep_replaced(&db, &folder, hooks.texts, now)?;
     let pinned_copy = source.join(DATABASE);
-    let restored = shape(&pinned_copy).and_then(|(version_pinned, schema_pinned)| {
-        restore(&mut db, &source, version_pinned, &schema_pinned)?;
+    let (version_pinned, schema_pinned) =
+        shape(&pinned_copy).map_err(|cause| restore_failed(cause.0))?;
+    let (version_live, schema_live) = (version(&db)?, schema(&db)?);
+    let kept = keep_replaced(&db, &folder, hooks.texts, now)?;
+    let restored = restore(&mut db, &source, version_pinned, &schema_pinned).and_then(|()| {
         check(&db, &pinned_copy)?;
         assert_eq!(version(&db)?, version_pinned);
         Ok(())
     });
     if let Err(cause) = restored {
-        return Err(drop_unneeded(&db, &kept, cause));
+        return Err(roll_back(
+            &mut db,
+            &kept,
+            (version_live, &schema_live),
+            check,
+            cause,
+        ));
     }
     (hooks.after_restore)(&db, root, &kept);
     assert!(kept.starts_with(&folder));
     Ok(kept)
 }
 
-/// Settles the copy a failed restore kept: it is removed when the live database still holds
-/// exactly its rows, so retries leave no copies outside the rotation, and kept otherwise,
-/// since it may then hold the only whole 2.5 data. Inputs: the connection, the copy folder and
-/// the failure. Output: `storage_restore_failed` naming the cause and whether the copy stays.
-fn drop_unneeded(db: &Connection, kept: &Path, cause: StorageError) -> StorageError {
-    let unchanged = check_copy(db, &kept.join(DATABASE)).is_ok();
-    if unchanged && std::fs::remove_dir_all(kept).is_ok() {
-        return restore_failed(cause.0);
+/// Brings the replaced data back into engine.db from the copy kept of it, after a restore
+/// that wrote engine.db failed, on the same held connection, and checks it against that copy.
+/// The copy always stays. Inputs: the connection, the copy's folder, the version and schema
+/// it holds, the copy check and the failure. Output: `storage_restore_failed` naming the cause
+/// and the copy, or `storage_restore_rollback_failed` naming both causes and the copy.
+fn roll_back(
+    db: &mut Connection,
+    kept: &Path,
+    (found, before): (i64, &[String]),
+    check: CopyCheck,
+    cause: StorageError,
+) -> StorageError {
+    let back = restore(db, kept, found, before).and_then(|()| check(db, &kept.join(DATABASE)));
+    let stays = format!("the replaced data stays in {}", kept.display());
+    match back {
+        Ok(()) => restore_failed(format!("{}; {stays}", cause.0)),
+        Err(rollback) => error(format!(
+            "{RESTORE_ROLLBACK_FAILED}: {}; the rollback failed: {}; {stays}",
+            cause.0, rollback.0
+        )),
     }
-    restore_failed(format!(
-        "{}; the replaced data stays in {}",
-        cause.0,
-        kept.display()
-    ))
 }
 
 /// Builds a restore error. Input: the cause. Output: `storage_restore_failed` with it.
