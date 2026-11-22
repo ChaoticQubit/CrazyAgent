@@ -1209,7 +1209,8 @@ pub fn persistable(
         std::fs::rename(&staged, &copy).map_err(fail)?;
     }
     let recorded = copy_version_file(layout.root());
-    if bounded_text(&recorded).as_deref().map(str::trim) != Some(kernel_processes::version::VERSION) {
+    if bounded_text(&recorded).as_deref().map(str::trim) != Some(kernel_processes::version::VERSION)
+    {
         let fail = |error: std::io::Error| failure(format!("{}: {error}", recorded.display()));
         let staged = recorded.with_file_name(format!(".bin-version.{}", std::process::id()));
         if std::fs::symlink_metadata(&staged).is_ok() {
