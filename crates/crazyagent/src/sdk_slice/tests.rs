@@ -442,3 +442,20 @@ fn a_gateway_refusal_is_refused_whatever_the_plugin_returns() {
         assert!(refusals.count(QUIT) >= 1);
     }
 }
+
+#[test]
+fn every_generated_capability_may_be_named_in_a_refusal() {
+    assert!(sdk::CAPABILITIES.contains(&sdk::settings::SAVE_QUIT));
+    for capability in sdk::CAPABILITIES {
+        let body = serde_json::json!({
+            "plugin": QUIT,
+            "capability": capability.name,
+            "needs": capability.needs,
+        });
+        assert!(
+            super::call_refused_closed(&serde_json::to_vec(&body).unwrap()),
+            "{}",
+            capability.name
+        );
+    }
+}

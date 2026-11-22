@@ -262,3 +262,68 @@ fn a_refusal_queued_before_a_committed_request_is_logged() {
         0
     );
 }
+
+#[test]
+fn a_committed_request_after_a_drain_returns_the_drained_revision() {
+    let mut s = store();
+    let sink = EngineRefusals::new();
+    refuse(&sink);
+    let before = revision(&s.db);
+    let request = quit_request(&mut s.db, "drained-quit");
+    let admission = &s.started.owners[0].admission;
+    let applied = owner_apply_draining(
+        &mut s.db, &s.config, &s.path, admission, &request, None, &sink,
+    )
+    .unwrap();
+    assert_eq!(applied.result, OwnerResult::Applied);
+    let now = revision(&s.db);
+    assert_eq!(now, before + 2, "the request's commit, then the drain's");
+    assert_eq!(
+        applied.current_revision.value(),
+        u64::try_from(now).unwrap(),
+        "the receipt names the revision after the drain"
+    );
+    assert_eq!(
+        applied.provenance.revision_after.value(),
+        u64::try_from(before + 1).unwrap(),
+        "the provenance keeps the request's own commit"
+    );
+    let next = quit_request(&mut s.db, "next-quit");
+    assert_eq!(
+        next.expected_revision.value(),
+        applied.current_revision.value()
+    );
+}
+
+#[test]
+fn the_next_mutation_after_a_refused_request_is_not_stale() {
+    let mut s = store();
+    let sink = EngineRefusals::new();
+    refuse(&sink);
+    let request = quit_request(&mut s.db, "refused-quit");
+    let admission = &s.started.owners[0].admission;
+    let done = Ok(Vec::new());
+    let refused = owner_apply_draining(
+        &mut s.db,
+        &s.config,
+        &s.path,
+        admission,
+        &request,
+        Some(Effect::Delete(&done)),
+        &sink,
+    );
+    assert!(refused.is_err());
+    let published: i64 =
+        s.db.query_row("SELECT max(cursor) FROM events", [], |row| row.get(0))
+            .unwrap();
+    assert_eq!(
+        published,
+        revision(&s.db),
+        "the drain publishes the revision it moved to"
+    );
+    let mut next = quit_request(&mut s.db, "next-quit");
+    next.expected_revision = Cursor::new(u64::try_from(published).unwrap());
+    let applied =
+        owner_apply_draining(&mut s.db, &s.config, &s.path, admission, &next, None, &sink).unwrap();
+    assert_eq!(applied.result, OwnerResult::Applied);
+}
