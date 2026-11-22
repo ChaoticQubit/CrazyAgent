@@ -27,7 +27,7 @@ const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
 /// Builds a storage error from any cause, with its text unchanged. Input: the cause.
 /// Output: the error.
-fn error(value: impl std::fmt::Display) -> StorageError {
+pub(crate) fn error(value: impl std::fmt::Display) -> StorageError {
     StorageError(value.to_string())
 }
 
@@ -340,7 +340,7 @@ pub const BACKUP_FAILURE_FILE: &str = "backup-failed";
 /// Keeps a durable record of how an upgrade backup ended: a failure writes its code into
 /// [`BACKUP_FAILURE_FILE`], a success removes the file. Writing the record never changes
 /// the result. Inputs: the database path and the backup's result. Output: the same result.
-pub fn recorded(
+pub(crate) fn recorded(
     path: &Path,
     result: Result<PathBuf, StorageError>,
 ) -> Result<PathBuf, StorageError> {
@@ -368,7 +368,7 @@ pub fn recorded(
 /// Removes the record of a failed upgrade backup once the database needs no backup or one
 /// was made. Input: the database path. Output: none; a record that cannot be removed is
 /// logged.
-pub fn forget_backup_failure(path: &Path) {
+pub(crate) fn forget_backup_failure(path: &Path) {
     let Some(root) = path.parent() else {
         return;
     };

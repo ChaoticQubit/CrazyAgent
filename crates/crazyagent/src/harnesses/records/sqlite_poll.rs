@@ -4,7 +4,7 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, ErrorCode, OpenFlags};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// The most reads in a row a busy or locked database may answer with no events before the
 /// reader refuses it with [`BUSY`].
@@ -124,6 +124,15 @@ impl SqlitePoll {
     fn read_rows(&mut self, mode: Mode) -> Result<Vec<TranscriptEvent>, Stop> {
         let immutable = mode == Mode::Immutable;
         let sort = |error: rusqlite::Error| stop(&error, immutable);
+        let before = if immutable {
+            Some(
+                stamp(&self.path)
+                    .filter(|seen| !seen.wal)
+                    .ok_or(Stop::Busy)?,
+            )
+        } else {
+            None
+        };
         let connection = open(&self.path, mode).map_err(sort)?;
         for table in self.schema.tables {
             let (kind, made): (String, Option<String>) = connection
@@ -188,6 +197,13 @@ impl SqlitePoll {
             last = sequence;
             events.extend(event);
         }
+        #[cfg(test)]
+        if let Some(step) = MID_READ.with(|hook| hook.borrow_mut().take()) {
+            step();
+        }
+        if before.is_some_and(|before| stamp(&self.path) != Some(before)) {
+            return Err(Stop::Busy);
+        }
         assert!(last >= self.after && text <= READ_TEXT_BYTES_MAX);
         assert!(events.len() <= ROWS_PER_READ_MAX);
         self.after = last;
@@ -195,9 +211,39 @@ impl SqlitePoll {
     }
 }
 
+/// What an immutable read finds unchanged at its end before its facts are taken: the
+/// database's size and modification time and whether a WAL file is beside it. A writer's
+/// checkpoint writes the database and moves that time, which file systems keep to the
+/// nanosecond (APFS, ext4) or 100 ns (NTFS), so only two writes within one tick look alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Stamp {
+    size: u64,
+    modified: SystemTime,
+    wal: bool,
+}
+
+/// Reads the [`Stamp`] of a database without following a link. Input: the database path.
+/// Output: the stamp, or none when the database or its WAL file cannot be looked at.
+fn stamp(path: &Path) -> Option<Stamp> {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    let mut name = path.as_os_str().to_owned();
+    name.push("-wal");
+    let wal = match std::fs::symlink_metadata(&name) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => return None,
+    };
+    Some(Stamp {
+        size: metadata.len(),
+        modified: metadata.modified().ok()?,
+        wal,
+    })
+}
+
 /// How one read opens the database: read-only through the WAL index the harness keeps, or,
-/// for a WAL database no process has open, as immutable, so the read makes no WAL or index
-/// file beside it. A harness on the macOS system SQLite keeps its side files after a clean
+/// for a WAL database with no WAL file beside it, as immutable, so the read makes no WAL or
+/// index file and meets no refusal of the macOS system SQLite, which opens such a database
+/// read-only only with its WAL file present. That SQLite keeps its side files after a clean
 /// close, so read-only is the usual mode there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -239,20 +285,19 @@ fn mode(path: &Path) -> Result<Option<Mode>, LaunchError> {
     if header.len() < 100 || !header.starts_with(b"SQLite format 3\0") {
         return Err(failure(UNREADABLE));
     }
-    let mut beside = 0;
+    let mut wal_file = false;
     for suffix in ["-wal", "-shm", "-journal"] {
         let mut name = path.as_os_str().to_owned();
         name.push(suffix);
         match std::fs::symlink_metadata(&name) {
-            Ok(metadata) if plain(&metadata) => beside += usize::from(suffix != "-journal"),
+            Ok(metadata) if plain(&metadata) => wal_file |= suffix == "-wal",
             Ok(_) => return Err(failure(UNSAFE)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err(failure(UNREADABLE)),
         }
     }
-    assert!(beside <= 2);
     let wal = header[18] == 2 || header[19] == 2;
-    Ok(Some(if wal && beside == 0 {
+    Ok(Some(if wal && !wal_file {
         Mode::Immutable
     } else {
         Mode::ReadOnly
@@ -392,6 +437,14 @@ pub fn sentence(code: &str) -> Option<&'static str> {
         }
         _ => return None,
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A step a test row runs inside one read, after its last row and before it is taken, as
+    /// a writer that arrives mid-read would; taken once. Holds: the step, none by default.
+    static MID_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]

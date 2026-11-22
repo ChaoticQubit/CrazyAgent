@@ -2,6 +2,9 @@
 
 pub mod migrations;
 pub mod state_log;
+/// The engine.db upgrade runner: the version of record, the forward steps run in one
+/// transaction after a checked backup, and the recovery when a step fails.
+pub mod upgrade;
 
 /// A refusal or failure of a storage call, as its stable code or message text. The engine
 /// maps it to its own error with the same text, so refusals read the same after a move.

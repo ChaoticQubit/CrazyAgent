@@ -3199,8 +3199,9 @@ fn owner_apply_with(
 }
 
 /// Runs one owner request, then, after its commit or rollback, appends the refusals queued
-/// in a sink as `CallRefused` events in a transaction of their own. Inputs: as
-/// [`owner_apply_request`], plus the sink. Output: the request's result, unchanged.
+/// in a sink as `CallRefused` events in a transaction of their own; a receipt then names
+/// the revision that transaction committed, its provenance kept. Inputs: as [`owner_apply_request`], plus
+/// the sink. Output: the request's result.
 fn owner_apply_draining(
     db: &mut Connection,
     config: &EffectiveConfig,
@@ -3210,13 +3211,23 @@ fn owner_apply_draining(
     effect: Option<Effect<'_>>,
     refusals: &crate::sdk_slice::EngineRefusals,
 ) -> Result<OwnerApplied, EngineError> {
-    let result = owner_apply_request(db, config, path, a, request, effect);
+    let mut result = owner_apply_request(db, config, path, a, request, effect);
     let host = HostStamp {
         db_instance: a.db_instance.clone(),
         engine_epoch: a.engine_epoch.clone(),
     };
-    if let Err(refused) = crate::sdk_slice::drain_refusals(db, &host, refusals) {
-        eprintln!("plugin_call_refused_not_logged code={}", refused.0);
+    match crate::sdk_slice::drain_refusals(db, &host, refusals) {
+        Ok(None) => {}
+        Ok(Some(drained)) => {
+            if let Ok(applied) = result.as_mut() {
+                assert!(
+                    drained.revision.value() > applied.current_revision.value(),
+                    "the drain commits after the request"
+                );
+                applied.current_revision = drained.revision;
+            }
+        }
+        Err(refused) => eprintln!("plugin_call_refused_not_logged code={}", refused.0),
     }
     result
 }

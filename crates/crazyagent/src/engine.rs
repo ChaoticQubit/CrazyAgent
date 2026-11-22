@@ -92,6 +92,12 @@ impl From<kernel_storage::StorageError> for EngineError {
     }
 }
 
+impl From<EngineError> for kernel_storage::StorageError {
+    fn from(error: EngineError) -> Self {
+        kernel_storage::StorageError(error.0)
+    }
+}
+
 impl From<kernel_security::error::StoreError> for EngineError {
     fn from(error: kernel_security::error::StoreError) -> Self {
         EngineError(error.0)
