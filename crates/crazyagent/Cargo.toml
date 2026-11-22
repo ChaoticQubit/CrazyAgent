@@ -15,6 +15,7 @@ owner-trace = []
 
 [dependencies]
 crazyagent-bus-gateway = { path = "../kernel/bus_gateway" }
+crazyagent-kernel-security = { path = "../kernel/security" }
 crazyagent-kernel-storage = { path = "../kernel/storage" }
 crazyagent-kernel-processes = { path = "../kernel/processes" }
 crazyagent-kernel-common = { path = "../kernel/common" }
