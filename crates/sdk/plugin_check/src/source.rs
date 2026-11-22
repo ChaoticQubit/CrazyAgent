@@ -158,6 +158,7 @@ fn rust_files(dir: &Path, out: &mut Vec<Violation>) -> Vec<PathBuf> {
         };
         let mut names: Vec<PathBuf> = entries
             .flatten()
+            .filter(|entry| entry.file_name() != crate::FINDER_FILE)
             .map(|entry| folder.join(entry.file_name()))
             .collect();
         names.sort();

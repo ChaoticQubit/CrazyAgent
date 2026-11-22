@@ -77,6 +77,9 @@ pub mod routing;
 pub mod sandbox;
 pub mod sandbox_settings;
 pub mod scheduling;
+/// The capability SDK slice: the owner's quit save runs through the generated SDK, the bus
+/// gateway's grant check and the bundled agent-quit plugin.
+mod sdk_slice;
 pub mod service;
 pub mod sessions_log;
 pub mod settings_log;

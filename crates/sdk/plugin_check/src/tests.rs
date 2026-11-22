@@ -418,3 +418,19 @@ fn a_use_group_with_a_leading_colon_is_refused() {
         BTreeSet::from(["plugin_use_not_allowed"])
     );
 }
+
+#[test]
+fn a_finder_ds_store_file_is_the_one_named_exception() {
+    let (root, plugin) = scratch("good", "plugins/t2/finder");
+    let plugins = root.join("plugins");
+    for folder in [plugins.clone(), plugins.join("t2"), plugin.join("src")] {
+        fs::write(folder.join(".DS_Store"), [0u8; 8]).expect("finder file");
+    }
+    assert_eq!(check_plugins(&plugins), Ok(()));
+    fs::write(plugin.join("src").join("._lib.rs"), [0u8; 8]).expect("resource fork file");
+    assert!(
+        check_plugins(&plugins).is_err(),
+        "only .DS_Store is excepted"
+    );
+    fs::remove_dir_all(&root).expect("scratch removed");
+}
