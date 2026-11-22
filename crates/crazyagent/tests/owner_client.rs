@@ -81,6 +81,7 @@ async fn owner_fixture() -> (
 #[tokio::test]
 async fn ordinary_wire_cannot_allocate_baselines_or_exhaust_trusted_capacity() {
     let (root, config, engine) = owner_fixture().await;
+    engine.start_owner_runtime().await.unwrap();
     let server = Server::bind(&root.path().join("ordinary.sock"), engine.clone(), &config).unwrap();
     let (stop, rx) = oneshot::channel();
     let task = tokio::spawn(server.run(rx));
@@ -370,6 +371,9 @@ async fn authenticated_proposals_require_projects_preserve_history_and_bound_new
 #[tokio::test]
 async fn owner_baseline_effect_is_atomic_replayable_and_restart_authenticated() {
     let (root, config, engine) = owner_fixture().await;
+    let (server, host) = OwnerServer::bind(root.path(), engine.clone(), &config)
+        .await
+        .unwrap();
     let draft = baseline();
     let id = draft.identity().unwrap();
     assert_eq!(
@@ -402,9 +406,6 @@ async fn owner_baseline_effect_is_atomic_replayable_and_restart_authenticated() 
         engine.apply(propose).await.unwrap().outcome,
         Outcome::Applied
     );
-    let (server, host) = OwnerServer::bind(root.path(), engine.clone(), &config)
-        .await
-        .unwrap();
     let (stop, rx) = oneshot::channel();
     let task = tokio::spawn(server.run(rx));
     let old =

@@ -132,6 +132,19 @@ pub(crate) fn build_script(dir: &Path, out: &mut Vec<Violation>) {
     }
 }
 
+/// The most bytes a plugin id may hold.
+pub(crate) const PLUGIN_ID_MAX: usize = 64;
+
+/// Whether a plugin id is 1 to `PLUGIN_ID_MAX` bytes of lowercase ASCII letters, digits
+/// and hyphens, so it is safe in a log line, an event body and a folder name. Input: the
+/// id. Output: true when it is.
+pub(crate) fn is_plugin_id(id: &str) -> bool {
+    (1..=PLUGIN_ID_MAX).contains(&id.len())
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
 /// Reads and checks `plugin.toml`: exactly its five keys, a tier word, a positive
 /// version and at most `PERMISSIONS_MAX` permission strings. Input: the crate folder.
 /// Output: the manifest, or `plugin_manifest_invalid` at the first refused key.
@@ -162,6 +175,12 @@ pub(crate) fn plugin(dir: &Path) -> Result<Manifest, Violation> {
             .ok_or_else(|| invalid(&text, key))
     };
     let (plugin, tier, kind) = (string("plugin")?, string("tier")?, string("kind")?);
+    if !is_plugin_id(&plugin) {
+        return Err(Violation {
+            code: "plugin_id_invalid",
+            ..invalid(&text, "plugin")
+        });
+    }
     if !matches!(tier.as_str(), "t1" | "t2" | "t3") {
         return Err(invalid(&text, "tier"));
     }

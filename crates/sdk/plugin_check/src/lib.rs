@@ -42,11 +42,13 @@ pub fn check_crate(dir: &Path) -> Result<(), Vec<Violation>> {
 }
 
 /// Checks every bundled plugin: each entry of the plugins folder is a tier folder `t1`,
-/// `t2` or `t3`, and each entry of a tier is a crate passing `check_crate`. Input: the
-/// plugins folder. Output: nothing, or every violation, files relative to that folder.
+/// `t2` or `t3`, each entry of a tier is a crate passing `check_crate`, and its
+/// `plugin.toml` id is its folder name, unique across the tiers. Input: the plugins
+/// folder. Output: nothing, or every violation, files relative to that folder.
 pub fn check_plugins(root: &Path) -> Result<(), Vec<Violation>> {
     let mut out = Vec::new();
     let mut seen = 0usize;
+    let mut ids = std::collections::BTreeSet::new();
     for tier in entries(root, Path::new("."), &mut out) {
         let name = tier.to_string_lossy().into_owned();
         if !matches!(name.as_str(), "t1" | "t2" | "t3") || !is_folder(&root.join(&tier)) {
@@ -69,6 +71,19 @@ pub fn check_plugins(root: &Path) -> Result<(), Vec<Violation>> {
                     file: below.join(violation.file),
                     ..violation
                 }));
+            }
+            if let Ok(manifest) = read_manifest(&root.join(&below)) {
+                let id_at = |code| Violation {
+                    file: below.join("plugin.toml"),
+                    line: 1,
+                    code,
+                };
+                if Path::new(&manifest.plugin) != plugin {
+                    out.push(id_at("plugin_id_not_folder"));
+                }
+                if !ids.insert(manifest.plugin) {
+                    out.push(id_at("plugin_id_duplicate"));
+                }
             }
         }
     }
