@@ -192,6 +192,69 @@ fn turn_record(launch: &MasterTurnLaunch) -> Value {
     })
 }
 
+/// A name a build draws at random in a profile home's keychain folder, so two builds of
+/// the same turn differ in it alone: its text before the random hex digits, how many
+/// digits, its text after them and the fixed token it reads as in a record.
+struct RandomName {
+    before: &'static str,
+    digits: usize,
+    after: &'static str,
+    token: &'static str,
+}
+
+/// The only random names a master turn's home holds, in the order they are fixed: the agent
+/// keychain file the engine names `agent-<16 hex>.keychain-db`, the same keychain as the
+/// search-list plist names it, `agent-<16 hex>.keychain`, and the `.fl<8 hex>` lock file
+/// `security` keeps beside it.
+const RANDOM_NAMES: [RandomName; 3] = [
+    RandomName {
+        before: "Library/Keychains/agent-",
+        digits: 16,
+        after: ".keychain-db",
+        token: "Library/Keychains/<AGENT_KEYCHAIN>",
+    },
+    RandomName {
+        before: "Library/Keychains/agent-",
+        digits: 16,
+        after: ".keychain<",
+        token: "Library/Keychains/<AGENT_KEYCHAIN_LISTED><",
+    },
+    RandomName {
+        before: "Library/Keychains/.fl",
+        digits: 8,
+        after: "",
+        token: "Library/Keychains/<KEYCHAIN_LOCK>",
+    },
+];
+
+impl RandomName {
+    /// Replaces each whole occurrence of this name in a text with its token: the hex digits
+    /// must be exactly `digits` long and be followed by `after`. Input: the text. Output: the
+    /// text with every such name fixed, any other text unchanged.
+    fn fixed(&self, text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(at) = rest.find(self.before) {
+            out.push_str(&rest[..at]);
+            let tail = &rest[at + self.before.len()..];
+            let hex = tail
+                .as_bytes()
+                .iter()
+                .take_while(|byte| byte.is_ascii_hexdigit())
+                .count();
+            if hex == self.digits && tail[hex..].starts_with(self.after) {
+                out.push_str(self.token);
+                rest = &tail[hex + self.after.len()..];
+            } else {
+                out.push_str(self.before);
+                rest = tail;
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+}
+
 /// Replaces each placeholder's text in every string and key of a record. Inputs: the
 /// record and the pairs, longest text first. Output: the record.
 fn normalized(value: Value, pairs: &[(String, String)]) -> Value {
@@ -199,7 +262,9 @@ fn normalized(value: Value, pairs: &[(String, String)]) -> Value {
         for (from, to) in pairs {
             text = text.replace(from.as_str(), to);
         }
-        text
+        RANDOM_NAMES
+            .iter()
+            .fold(text, |text, name| name.fixed(&text))
     };
     match value {
         Value::String(text) => Value::String(replaced(text)),
@@ -440,6 +505,43 @@ fn check(name: &str, record: &Value) {
     let kept = std::fs::read_to_string(&path)
         .unwrap_or_else(|_| panic!("no snapshot at {}", path.display()));
     assert_eq!(shown, kept, "{name} differs from its snapshot");
+}
+
+/// Only a whole random keychain or lock name reads as its token; a name with too few or too
+/// many digits, other characters or another folder stays as it was, so a real change to a
+/// keychain name still shows in the record.
+#[test]
+fn only_the_random_keychain_names_read_as_their_tokens() {
+    let fixed = |text: &str| {
+        RANDOM_NAMES
+            .iter()
+            .fold(text.to_owned(), |text, name| name.fixed(&text))
+    };
+    assert_eq!(
+        fixed("~/Library/Keychains/agent-ea6cafb336abf863.keychain-db</string>"),
+        "~/Library/Keychains/<AGENT_KEYCHAIN></string>"
+    );
+    assert_eq!(
+        fixed("<string>~/Library/Keychains/agent-ea6cafb336abf863.keychain</string>"),
+        "<string>~/Library/Keychains/<AGENT_KEYCHAIN_LISTED></string>"
+    );
+    assert_eq!(
+        fixed("Library/Keychains/.fl9CEA45C0"),
+        "Library/Keychains/<KEYCHAIN_LOCK>"
+    );
+    for kept in [
+        "Library/Keychains/agent-ea6cafb336abf86.keychain-db",
+        "Library/Keychains/agent-ea6cafb336abf8631.keychain-db",
+        "Library/Keychains/agent-ea6cafb336abf86g.keychain-db",
+        "Library/Keychains/agent-ea6cafb336abf863.keychain",
+        "Library/Keychains/agent-ea6cafb336abf863.keychains<",
+        "Library/Keychains/login.keychain-db",
+        "Library/Keychains/.fl9CEA45C",
+        "Library/Keychains/.fl9CEA45C01",
+        "Library/Other/.fl9CEA45C0",
+    ] {
+        assert_eq!(fixed(kept), kept);
+    }
 }
 
 /// A Codex master turn, tools off and on, equals the snapshot taken at the base commit:
