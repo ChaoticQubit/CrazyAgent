@@ -908,8 +908,8 @@ fn a_read_only_pick_passes_over_a_member_whose_loopback_provider_refuses_connect
     use crazyagent::research::runner::ResearchHarness;
     let runtime =
         research_support::EngineRuntime::with_projects(&[("project-a", "Sells house plants.")]);
-    let (_held, down) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
-    let up = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let (_held, down) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
+    let up = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let up_port = up.local_addr().unwrap().port();
     let resolver = loopback_resolver(&runtime, &[down, up_port]);
     let pool = CredentialRef::new("local-pool").unwrap();
@@ -944,8 +944,8 @@ fn a_read_only_pick_with_every_member_down_carries_the_first_down_providers_line
     use crazyagent::research::runner::ResearchHarness;
     let runtime =
         research_support::EngineRuntime::with_projects(&[("project-a", "Sells house plants.")]);
-    let (_first, first) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
-    let (_second, second) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let (_first, first) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
+    let (_second, second) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let resolver = loopback_resolver(&runtime, &[first, second]);
     let unreached = AccountPick::Unreached {
         line: format!(

@@ -848,7 +848,7 @@ fn root_backups(case: &Case) -> Vec<String> {
 }
 
 fn git(folder: &Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new("git")
             .args([
                 "-c",

@@ -1756,7 +1756,7 @@ pub(super) fn validate_bootstrap_auth(
             else {
                 return Err(error("master_bootstrap_authentication_stale"));
             };
-            let key = crate::memory::hash(profile_ref.as_str().as_bytes());
+            let key = kernel_common::hash(profile_ref.as_str().as_bytes());
             let actual: Option<Vec<u8>> = tx.query_row(
                 "SELECT fact FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
                 [&key], |row| row.get(0),
@@ -2532,7 +2532,7 @@ fn proved_sign_in(
     let ModelAuthentication::NativeManaged { profile_ref } = &connection.auth else {
         return Err(error("native_profile_not_managed"));
     };
-    let key = crate::memory::hash(profile_ref.as_str().as_bytes());
+    let key = kernel_common::hash(profile_ref.as_str().as_bytes());
     let wanted = generation.map(signed).transpose()?;
     type OperationRow = (String, i64, String, Vec<u8>, Vec<u8>);
     let row: Option<OperationRow> = tx.query_row(
@@ -3247,7 +3247,7 @@ fn admit(
 /// Inputs: the master session id and the turn's request id.
 /// Output: a stable task id derived from both, distinct for every turn of every session.
 pub(crate) fn turn_task_id(session: &SessionId, turn: &RequestId) -> Result<TaskId, EngineError> {
-    let digest = crate::memory::hash(format!("{}\n{}", session.as_str(), turn.as_str()).as_bytes());
+    let digest = kernel_common::hash(format!("{}\n{}", session.as_str(), turn.as_str()).as_bytes());
     let task = TaskId::new(format!("master-turn-{digest}")).map_err(error)?;
     assert!(task.as_str().starts_with("master-turn-"));
     Ok(task)

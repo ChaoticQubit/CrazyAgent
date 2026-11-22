@@ -493,10 +493,10 @@ fn prepare(
                         DispatchState::RunnerUnavailable
                     },
                     delivery_generation: 1,
-                    binding_digest: crate::memory::hash(
+                    binding_digest: kernel_common::hash(
                         &serde_json::to_vec(&actual.binding).map_err(error)?,
                     ),
-                    lease_digest: crate::memory::hash(&seal_bytes),
+                    lease_digest: kernel_common::hash(&seal_bytes),
                     offer_digest: None,
                     cancellation: DispatchCancellation::None,
                     receipt: None,

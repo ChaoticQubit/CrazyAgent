@@ -381,7 +381,7 @@ pub(super) fn owner_excludes(
 /// over or its output could not be read.
 #[cfg(unix)]
 fn lookup(command: &mut Command) -> Option<(i32, Vec<u8>)> {
-    let mut child = crate::spawn_gate::spawn(command).ok()?;
+    let mut child = kernel_processes::spawn_gate::spawn(command).ok()?;
     let Some(stdout) = child.stdout.take() else {
         let _ = child.kill();
         let _ = child.wait();
@@ -1219,8 +1219,8 @@ impl Repo {
         } else {
             Stdio::null()
         });
-        let mut child =
-            crate::spawn_gate::spawn(&mut command).map_err(|_| failure("changes_git_failed"))?;
+        let mut child = kernel_processes::spawn_gate::spawn(&mut command)
+            .map_err(|_| failure("changes_git_failed"))?;
         let writer = match (input, child.stdin.take()) {
             (Some(bytes), Some(mut stdin)) => {
                 let bytes = bytes.to_vec();

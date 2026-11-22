@@ -167,7 +167,7 @@ impl Restarted {
 /// A connected socket pair whose buffers hold about 1 KiB, so a reply larger than that
 /// waits for its client to read. Output: the engine end and the client end.
 fn small_buffers() -> (Stream, Stream) {
-    let (server, client) = crate::spawn_gate::unix_pair_std().unwrap();
+    let (server, client) = kernel_processes::spawn_gate::unix_pair_std().unwrap();
     for end in [&server, &client] {
         end.set_nonblocking(true).unwrap();
     }

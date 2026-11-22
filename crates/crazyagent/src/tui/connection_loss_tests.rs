@@ -60,7 +60,7 @@ impl Live {
     }
 
     fn sqlite(&self, sql: &str) {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             std::process::Command::new("/usr/bin/sqlite3")
                 .arg(self.root.path().join("engine.db"))
                 .arg(sql)

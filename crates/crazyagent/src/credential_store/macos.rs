@@ -251,7 +251,7 @@ fn run(
     if let Some(home) = home {
         command.env("HOME", home);
     }
-    let mut child = crate::spawn_gate::spawn(&mut command).map_err(|_| unavailable())?;
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).map_err(|_| unavailable())?;
     if let Some(input) = input {
         let mut stdin = child.stdin.take().ok_or_else(unavailable)?;
         let written = stdin.write_all(input);

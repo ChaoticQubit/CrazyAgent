@@ -19,7 +19,7 @@ pub(crate) enum Try {
 pub(crate) fn low_probe(folder: &Path) -> PathBuf {
     let probe = folder.join("low-probe.exe");
     std::fs::copy(std::env::current_exe().unwrap(), &probe).unwrap();
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         Command::new("icacls")
             .args([probe.to_str().unwrap(), "/setintegritylevel", "low"])
             .stdin(std::process::Stdio::null())
@@ -56,7 +56,7 @@ pub(crate) fn probe(probe: &Path, tries: &[(Try, &Path)]) -> String {
             "1",
         ])
         .env(PROBE, line.join("\n"));
-    let output = crate::spawn_gate::collected(&mut command).unwrap();
+    let output = kernel_processes::spawn_gate::collected(&mut command).unwrap();
     assert!(output.status.success(), "{output:?}");
     let seen = String::from_utf8_lossy(&output.stdout).into_owned();
     assert!(
@@ -76,7 +76,8 @@ fn child() {
     let whoami = PathBuf::from(std::env::var("SystemRoot").unwrap())
         .join("System32")
         .join("whoami.exe");
-    let groups = crate::spawn_gate::collected(Command::new(whoami).arg("/groups")).unwrap();
+    let groups =
+        kernel_processes::spawn_gate::collected(Command::new(whoami).arg("/groups")).unwrap();
     println!("GROUPS {}", String::from_utf8_lossy(&groups.stdout));
     for item in line.lines() {
         match item.split_once('|') {

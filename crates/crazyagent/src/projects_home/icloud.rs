@@ -1209,7 +1209,7 @@ pub fn brctl(batch: &[PathBuf]) -> Command {
 /// `BRCTL_TIME_MAX` before it is stopped. Inputs: the batch and the stop check, which ends
 /// the wait. Output: Ok once brctl took the batch.
 fn request(batch: &[PathBuf], stop: &dyn Fn() -> bool) -> Result<(), EngineError> {
-    let mut child = crate::spawn_gate::spawn(&mut brctl(batch)).map_err(|error| {
+    let mut child = kernel_processes::spawn_gate::spawn(&mut brctl(batch)).map_err(|error| {
         eprintln!(
             "icloud_download_failed cause=brctl_spawn errno={}",
             errno(&error)

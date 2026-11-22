@@ -1314,7 +1314,7 @@ fn listed(
         (ModelAuthentication::NativeManaged { profile_ref }, Some(_)) => {
             super::native_auth::unfinished_sign_out(
                 tx,
-                &crate::memory::hash(profile_ref.as_str().as_bytes()),
+                &kernel_common::hash(profile_ref.as_str().as_bytes()),
             )?
         }
         _ => None,
@@ -1341,7 +1341,7 @@ fn latest_sign_in(
     if !exists {
         return Ok(None);
     }
-    let key = crate::memory::hash(profile_ref.as_str().as_bytes());
+    let key = kernel_common::hash(profile_ref.as_str().as_bytes());
     let row: Option<Vec<u8>> = tx
         .query_row(
             "SELECT fact FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",

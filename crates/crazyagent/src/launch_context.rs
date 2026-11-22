@@ -3208,7 +3208,7 @@ fn release_skills(parent: &std::os::fd::OwnedFd) {
     let Ok(input) = entry.try_clone() else {
         return;
     };
-    let _ = crate::spawn_gate::status(
+    let _ = kernel_processes::spawn_gate::status(
         std::process::Command::new("/bin/chmod")
             .args(["-N", "/dev/stdin"])
             .stdin(std::process::Stdio::from(input))
@@ -3413,7 +3413,7 @@ fn release(path: &Path, tree: bool) {
         vec![flags, acl, mode]
     };
     for mut command in commands {
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             command
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())

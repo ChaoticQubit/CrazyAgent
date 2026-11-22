@@ -1,10 +1,10 @@
 use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
 use crate::protocol::*;
+use kernel_common::hash;
 use rusqlite::Connection;
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 pub mod import;
@@ -321,10 +321,6 @@ pub(crate) fn error(value: impl std::fmt::Display) -> EngineError {
 
 pub(crate) fn reject(code: &str) -> Result<Outcome, EngineError> {
     Ok(Outcome::Rejected { code: code.into() })
-}
-
-pub(crate) fn hash(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
 }
 
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {

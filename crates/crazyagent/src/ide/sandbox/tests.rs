@@ -31,7 +31,7 @@ fn run(profile: &Path, program: &str, args: &[&std::ffi::OsStr]) -> (bool, Strin
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = crate::spawn_gate::output(&mut command).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut command).unwrap();
     (
         output.status.success(),
         String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -135,8 +135,8 @@ fn a_process_launched_the_ide_way_reads_its_capability_but_no_owner_key_or_engin
     let socket = owner.join("owner.sock");
     let stray = owner.join("other.sock");
     let _listeners = [
-        crate::spawn_gate::bind_unix_std(&socket).unwrap(),
-        crate::spawn_gate::bind_unix_std(&stray).unwrap(),
+        kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap(),
+        kernel_processes::spawn_gate::bind_unix_std(&stray).unwrap(),
     ];
     let connect = |path: &Path| {
         run(
@@ -760,7 +760,7 @@ const REAL_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
 /// config, plus the given variables. Inputs: the folder, the variables and the arguments.
 /// Output: whether git exited 0, with what it printed on standard output.
 fn setup_git(dir: &Path, env: &[(&str, &str)], args: &[&str]) -> (bool, String) {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new(REAL_GIT)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -1817,7 +1817,7 @@ fn ide_git_runs_no_xcrun_shim_under_the_profile_with_the_engines_path() {
     let ide = |args: &[&str]| {
         let mut command = server_git(&profile, &shim, &home, &root, false, "/usr/bin:/bin");
         command.args(args).current_dir(&root);
-        crate::spawn_gate::output(&mut command).unwrap()
+        kernel_processes::spawn_gate::output(&mut command).unwrap()
     };
 
     let status = ide(&["status", "--porcelain"]);
@@ -1850,7 +1850,7 @@ fn ide_git_runs_no_xcrun_shim_under_the_profile_with_the_engines_path() {
 /// A listener on a free loopback port, with nothing behind it. Output: the listener, held
 /// while the row runs, and its port.
 fn local_listener() -> (std::net::TcpListener, u16) {
-    let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     (listener, port)
 }
@@ -2087,7 +2087,7 @@ impl Server {
             command.env_remove(name);
         }
         command.args(["-c", line]).current_dir(&self.root);
-        crate::spawn_gate::output(&mut command).unwrap()
+        kernel_processes::spawn_gate::output(&mut command).unwrap()
     }
 
     /// The real index's path. Output: the path.
@@ -2238,7 +2238,7 @@ fn a_git_outside_the_shim_cannot_stage() {
     let real = Path::new(crate::research::runner::TOOLS_GIT);
     let mut command = server_git(&s.profile, real, &s.home, &s.root, false, "/usr/bin:/bin");
     command.args(["add", "a.txt"]).current_dir(&s.root);
-    let output = crate::spawn_gate::output(&mut command).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut command).unwrap();
     assert!(!output.status.success());
     assert!(
         String::from_utf8_lossy(&output.stderr).contains("index.lock"),
@@ -2409,7 +2409,7 @@ fn a_git_that_cannot_reach_the_engine_fails_before_it_runs() {
         direct.env_remove(name);
     }
     direct.args(["add", "a.txt"]).current_dir(&s.root);
-    held(&crate::spawn_gate::output(&mut direct).unwrap());
+    held(&kernel_processes::spawn_gate::output(&mut direct).unwrap());
     held(&s.task("git add a.txt"));
     let read = s.task("git branch --show-current");
     assert!(read.status.success(), "{read:?}");

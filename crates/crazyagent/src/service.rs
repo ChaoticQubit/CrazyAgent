@@ -1209,13 +1209,14 @@ pub fn persistable(
         std::fs::rename(&staged, &copy).map_err(fail)?;
     }
     let recorded = copy_version_file(layout.root());
-    if bounded_text(&recorded).as_deref().map(str::trim) != Some(crate::version::VERSION) {
+    if bounded_text(&recorded).as_deref().map(str::trim) != Some(kernel_processes::version::VERSION)
+    {
         let fail = |error: std::io::Error| failure(format!("{}: {error}", recorded.display()));
         let staged = recorded.with_file_name(format!(".bin-version.{}", std::process::id()));
         if std::fs::symlink_metadata(&staged).is_ok() {
             std::fs::remove_file(&staged).map_err(fail)?;
         }
-        std::fs::write(&staged, crate::version::VERSION).map_err(fail)?;
+        std::fs::write(&staged, kernel_processes::version::VERSION).map_err(fail)?;
         std::fs::rename(&staged, &recorded).map_err(fail)?;
     }
     assert!(installed.starts_with(&copies) && installed.is_file());
@@ -1236,7 +1237,7 @@ fn copy_version_file(root: &Path) -> PathBuf {
 fn newer_engine_at(root: &Path) -> bool {
     let recorded = bounded_text(&copy_version_file(root))
         .map(|text| text.trim().to_owned())
-        .filter(|known| crate::update::is_newer(known, crate::version::VERSION).is_ok());
+        .filter(|known| crate::update::is_newer(known, kernel_processes::version::VERSION).is_ok());
     [
         crate::engine::bootstrap::reported_engine_version(root),
         recorded,
@@ -1249,7 +1250,7 @@ fn newer_engine_at(root: &Path) -> bool {
 /// Whether a known engine version is newer than this engine, or cannot be read as a version,
 /// so this engine never takes its place. Input: the known version. Output: the answer.
 fn newer_than_this(known: &str) -> bool {
-    !crate::update::is_newer(known, crate::version::VERSION).is_ok_and(|newer| !newer)
+    !crate::update::is_newer(known, kernel_processes::version::VERSION).is_ok_and(|newer| !newer)
 }
 
 /// Retires the copy an older version kept in `<data root>/bin` once the login service names
@@ -1499,7 +1500,7 @@ fn run_quiet(command: &[OsString]) -> Result<(bool, String), ServiceError> {
     let (program, args) = command
         .split_first()
         .ok_or_else(|| failure("empty service command"))?;
-    let output = match crate::spawn_gate::output(
+    let output = match kernel_processes::spawn_gate::output(
         std::process::Command::new(program)
             .args(args)
             .stdin(std::process::Stdio::null())
@@ -1530,7 +1531,7 @@ fn run_checked(command: &[OsString]) -> Result<(), ServiceError> {
 /// and error text, never its environment.
 fn run_process(process: &mut std::process::Command) -> Result<(), ServiceError> {
     let program = process.get_program().to_string_lossy().into_owned();
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         process
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
@@ -1557,7 +1558,7 @@ fn run_process(process: &mut std::process::Command) -> Result<(), ServiceError> 
 /// Output: true when a connection is accepted.
 #[cfg(unix)]
 pub fn answering(socket: &Path) -> bool {
-    crate::spawn_gate::connect_unix_std(socket).is_ok()
+    kernel_processes::spawn_gate::connect_unix_std(socket).is_ok()
 }
 
 /// Says whether a checked engine serves the ordinary endpoint now on Windows: its pipe
@@ -1584,11 +1585,11 @@ pub async fn check_engine(root: &Path, kind: OwnerClientKind, timeout: Duration)
     let reported = match OwnerClient::discover(root, kind, timeout).await {
         Ok((_, identity)) => identity.engine_version().to_owned(),
         Err(error) => match crate::engine::bootstrap::reported_engine_version(root) {
-            Some(version) if version != crate::version::VERSION => version,
+            Some(version) if version != kernel_processes::version::VERSION => version,
             _ => return EngineCheck::Unavailable { reason: error.0 },
         },
     };
-    match crate::version::mismatch(&reported) {
+    match kernel_processes::version::mismatch(&reported) {
         None => EngineCheck::Ready { version: reported },
         Some(message) => EngineCheck::Mismatch {
             version: reported,
@@ -1678,7 +1679,7 @@ fn spawn_detached(
     }
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    crate::spawn_gate::spawn(&mut command)
+    kernel_processes::spawn_gate::spawn(&mut command)
         .map_err(|error| failure(format!("{}: {error}", executable.display())))
 }
 
@@ -1689,7 +1690,7 @@ fn spawn_detached(
 /// engine answers, or an error naming the pid and the engine log after the bound.
 #[cfg(unix)]
 pub fn stop_detached(layout: &Layout) -> Result<Option<u32>, ServiceError> {
-    let Ok(stream) = crate::spawn_gate::connect_unix_std(layout.socket()) else {
+    let Ok(stream) = kernel_processes::spawn_gate::connect_unix_std(layout.socket()) else {
         return Ok(None);
     };
     let pid = serving_pid(&stream)?;

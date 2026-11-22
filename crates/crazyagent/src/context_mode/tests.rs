@@ -368,8 +368,10 @@ fn system_bin() -> PathBuf {
 fn copy_node(node: &Path, bin: &Path) {
     let own = bin.join("node");
     fs::copy(node, &own).unwrap();
-    let start =
-        || crate::spawn_gate::collected(std::process::Command::new(&own).arg("--version")).unwrap();
+    let start = || {
+        kernel_processes::spawn_gate::collected(std::process::Command::new(&own).arg("--version"))
+            .unwrap()
+    };
     if start().status.success() {
         return;
     }
@@ -439,7 +441,7 @@ fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_insta
     let modules = prefix.join("lib").join("node_modules");
     fs::create_dir_all(&bin).unwrap();
     fs::create_dir_all(&modules).unwrap();
-    let copied = crate::spawn_gate::status(
+    let copied = kernel_processes::spawn_gate::status(
         std::process::Command::new("/bin/cp")
             .arg("-R")
             .arg(&package)
@@ -447,7 +449,7 @@ fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_insta
     )
     .unwrap();
     assert!(copied.success(), "{package:?}");
-    let writable = crate::spawn_gate::status(
+    let writable = kernel_processes::spawn_gate::status(
         std::process::Command::new("/bin/chmod")
             .arg("-R")
             .arg("u+w")
@@ -478,7 +480,7 @@ fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_insta
     let (ok, output) = run_command(npm(), Duration::from_secs(60)).unwrap();
     let version = String::from_utf8(output).unwrap();
     if !ok {
-        let failed = crate::spawn_gate::collected(&mut npm()).unwrap();
+        let failed = kernel_processes::spawn_gate::collected(&mut npm()).unwrap();
         panic!(
             "npm linked into its package did not start under the install profile: {}",
             String::from_utf8_lossy(&failed.stderr)
@@ -525,7 +527,7 @@ fn the_engine_s_own_node_passes_the_node_check_and_starts_npm_under_the_install_
             .create(folder)
             .unwrap();
     }
-    let copied = crate::spawn_gate::status(
+    let copied = kernel_processes::spawn_gate::status(
         std::process::Command::new("/bin/cp")
             .arg("-R")
             .arg(&package)
@@ -533,7 +535,7 @@ fn the_engine_s_own_node_passes_the_node_check_and_starts_npm_under_the_install_
     )
     .unwrap();
     assert!(copied.success(), "{package:?}");
-    let writable = crate::spawn_gate::status(
+    let writable = kernel_processes::spawn_gate::status(
         std::process::Command::new("/bin/chmod")
             .arg("-R")
             .arg("u+w")
@@ -560,7 +562,7 @@ fn the_engine_s_own_node_passes_the_node_check_and_starts_npm_under_the_install_
         let scratch = staging_folder(&npm, NODE_CHECK).unwrap();
         let canonical = crate::sandbox::canonical(&scratch).unwrap();
         let mut command = node_command(&root, &scratch, &bin).unwrap();
-        let failed = crate::spawn_gate::collected(&mut command).unwrap();
+        let failed = kernel_processes::spawn_gate::collected(&mut command).unwrap();
         end_check(&scratch, &canonical);
         format!(
             "{:?} {}{}",
@@ -581,7 +583,7 @@ fn the_engine_s_own_node_passes_the_node_check_and_starts_npm_under_the_install_
     let npm_error = if started {
         String::new()
     } else {
-        let failed = crate::spawn_gate::collected(&mut npm_version()).unwrap();
+        let failed = kernel_processes::spawn_gate::collected(&mut npm_version()).unwrap();
         String::from_utf8_lossy(&failed.stderr).into_owned()
     };
     assert!(
@@ -668,7 +670,7 @@ fn forging_tarball(folder: &Path) -> PathBuf {
     )
     .unwrap();
     let tarball = folder.join(format!("context-mode-{VERSION}.tgz"));
-    let packed = crate::spawn_gate::status(
+    let packed = kernel_processes::spawn_gate::status(
         std::process::Command::new("/usr/bin/tar")
             .env("COPYFILE_DISABLE", "1")
             .arg("-czf")
@@ -1068,7 +1070,7 @@ fn a_node_check_that_did_not_run_answers_its_own_code_not_too_old() {
                 .join("Refused.app/Contents/MacOS");
             fs::create_dir_all(&bundle).unwrap();
             node_reports(&bundle, "v24.0.0");
-            let alone = crate::spawn_gate::collected(
+            let alone = kernel_processes::spawn_gate::collected(
                 std::process::Command::new(bundle.join("node")).arg("--version"),
             )
             .unwrap();

@@ -3080,7 +3080,7 @@ fallback_allowed = false
 
         async fn retire(&mut self) -> NativeAuthFact {
             let mut session = CustodySession::new(self.guard.take().unwrap());
-            let mut child = crate::spawn_gate::spawn(
+            let mut child = kernel_processes::spawn_gate::spawn(
                 ProcessCommand::new("/bin/cat")
                     .env_clear()
                     .stdin(Stdio::piped())
@@ -3437,7 +3437,7 @@ fallback_allowed = false
 "#;
 
     fn master_git(home: &std::path::Path, repository: &std::path::Path, arguments: &[&str]) {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             ProcessCommand::new("/usr/bin/git")
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")

@@ -544,7 +544,7 @@ fn a_pipe_at_the_nvm_default_alias_never_holds_up_the_search() {
     std::fs::create_dir_all(&version).unwrap();
     let alias = case.home.join(".nvm/alias/default");
     std::fs::create_dir_all(alias.parent().unwrap()).unwrap();
-    let made = crate::spawn_gate::status(
+    let made = kernel_processes::spawn_gate::status(
         std::process::Command::new("/usr/bin/mkfifo")
             .arg(&alias)
             .stdin(std::process::Stdio::null())

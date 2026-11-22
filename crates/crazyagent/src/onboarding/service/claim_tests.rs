@@ -231,7 +231,7 @@ fn a_landing_on_main_makes_the_published_main_graph_due_again() {
         std::fs::create_dir(folder).unwrap();
     }
     let git = |args: &[&str]| {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new("/usr/bin/git")
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")

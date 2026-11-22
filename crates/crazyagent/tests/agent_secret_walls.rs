@@ -67,7 +67,7 @@ fn run(sandbox: &ProjectSandbox, profile: &Path, program: &str, args: &[&str]) -
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crazyagent::spawn_gate::output(&mut command).unwrap()
+    kernel_processes::spawn_gate::output(&mut command).unwrap()
 }
 
 fn shell(sandbox: &ProjectSandbox, profile: &Path, script: &str) -> Output {
@@ -533,7 +533,7 @@ fn a_tools_on_agent_cannot_read_another_agents_key_file() {
         .arg(&first)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let unsandboxed = crazyagent::spawn_gate::output(&mut owner).unwrap();
+    let unsandboxed = kernel_processes::spawn_gate::output(&mut owner).unwrap();
     assert_eq!(String::from_utf8(unsandboxed.stdout).unwrap(), first_token);
 }
 
@@ -548,7 +548,7 @@ fn sandboxed_agent_env_holds_only_the_builder_variables() {
         .env("ANTHROPIC_API_KEY", "crazyagent-local")
         .env("TERM", "dumb")
         .current_dir(&case.project);
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         sandbox
             .wrap(&profile, &harness)
             .unwrap()
@@ -622,7 +622,7 @@ fn sandboxed_agent_git_has_no_credential_helper_and_gets_no_password() {
     assert_eq!(String::from_utf8_lossy(&helpers.stdout).trim(), "");
     sandbox.install(&profile).unwrap();
     let mut fill = sandbox.command(&profile, Path::new("/usr/bin/git"));
-    let mut child = crazyagent::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         fill.args(["credential", "fill"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -657,11 +657,11 @@ fn tools_on_agent_reaches_ip_endpoints_but_no_engine_unix_socket() {
     ];
     let _listeners: Vec<_> = sockets
         .iter()
-        .map(|path| crazyagent::spawn_gate::bind_unix_std(path).unwrap())
+        .map(|path| kernel_processes::spawn_gate::bind_unix_std(path).unwrap())
         .collect();
-    let endpoint = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let endpoint = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = endpoint.local_addr().unwrap().port();
-    let served = crazyagent::spawn_gate::free_low_tcp_port().unwrap();
+    let served = kernel_processes::spawn_gate::free_low_tcp_port().unwrap();
     let open = ProjectSandbox::new(&case.project, &case.home, &case.tmp, SandboxNetwork::Open)
         .unwrap()
         .guard_engine(&case.runtime)
@@ -734,7 +734,7 @@ fn agent_opens_only_its_own_terminal_and_ptys_it_creates() {
     let profile = case.profiles.join("tty.sb");
     sandbox.install(&profile).unwrap();
     let named = case.profiles.join("other-tty");
-    let mut holder = crazyagent::spawn_gate::spawn(
+    let mut holder = kernel_processes::spawn_gate::spawn(
         Command::new("/usr/bin/script")
             .args(["-q", "/dev/null", "/bin/sh", "-c"])
             .arg("/usr/bin/tty > \"$0\"; exec /bin/sleep 30")
@@ -773,7 +773,7 @@ fn agent_opens_only_its_own_terminal_and_ptys_it_creates() {
          /usr/bin/head -c 4 /dev/urandom >/dev/null 2>&1 && echo random=ok || echo random=denied\n\
          ( echo x > /dev/stdout ) >/dev/null 2>&1 && echo stdout=ok || echo stdout=denied\n"
     );
-    let control = crazyagent::spawn_gate::status(
+    let control = kernel_processes::spawn_gate::status(
         Command::new("/bin/sh")
             .args(["-c", "exec 3</dev/auditsessions"])
             .stdin(Stdio::null())
@@ -802,7 +802,7 @@ fn agent_opens_only_its_own_terminal_and_ptys_it_creates() {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = crazyagent::spawn_gate::output(&mut command).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut command).unwrap();
     let _ = holder.kill();
     let _ = holder.wait();
     let text = String::from_utf8_lossy(&output.stdout).replace('\r', "");
@@ -854,7 +854,7 @@ fn a_headless_agent_cannot_open_the_engine_terminal() {
         engine_with_a_terminal();
         return;
     }
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/script")
             .args(["-q", "/dev/null"])
             .arg(std::env::current_exe().unwrap())
@@ -888,7 +888,7 @@ struct TmuxServer {
 
 impl TmuxServer {
     fn tmux(&self, arguments: &[&str]) -> Output {
-        crazyagent::spawn_gate::output(
+        kernel_processes::spawn_gate::output(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -1012,7 +1012,7 @@ fn git_dir_in(folder: &Path, home: &Path, agent: bool) -> Output {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    crazyagent::spawn_gate::output(&mut command).unwrap()
+    kernel_processes::spawn_gate::output(&mut command).unwrap()
 }
 
 #[test]
@@ -1052,7 +1052,7 @@ fn an_agent_git_never_opens_a_folder_laid_out_as_a_bare_repository() {
 
     let project = root.join("project");
     fs::create_dir_all(project.join("src")).unwrap();
-    let made = crazyagent::spawn_gate::output(
+    let made = kernel_processes::spawn_gate::output(
         Command::new(CLT_GIT)
             .env_clear()
             .env("HOME", &home)

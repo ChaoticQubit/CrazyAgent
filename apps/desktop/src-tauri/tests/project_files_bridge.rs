@@ -54,7 +54,7 @@ async fn flow(root: &Path) -> Result<(), Box<dyn Error>> {
     std::fs::create_dir(&notes)?;
     std::fs::write(notes.join("watering-plan.txt"), "Water on Mondays.\n")?;
     let gate = notes.join(".gitignore");
-    let made = crazyagent::spawn_gate::status(
+    let made = kernel_processes::spawn_gate::status(
         std::process::Command::new("/usr/bin/mkfifo")
             .arg(&gate)
             .env_clear(),

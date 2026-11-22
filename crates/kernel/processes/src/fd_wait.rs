@@ -22,12 +22,12 @@ const DRAIN_READS_MAX: usize = 64;
 /// One end of a pair that wakes a thread waiting in poll(2): its owner calls
 /// [`Wake::rouse`] and the thread waits on the other end, then drains it. Windows has no such
 /// pair here, so its waiters sleep instead.
-pub(crate) struct Wake(#[cfg(unix)] std::os::unix::net::UnixStream);
+pub struct Wake(#[cfg(unix)] std::os::unix::net::UnixStream);
 
 /// Makes a wake pair with both ends non-blocking. Output: the end to rouse and the end to
 /// wait on, or the socket error.
 #[cfg(unix)]
-pub(crate) fn wake_pair() -> io::Result<(Wake, Wake)> {
+pub fn wake_pair() -> io::Result<(Wake, Wake)> {
     let (rouse, woken) = crate::spawn_gate::unix_pair_std()?;
     rouse.set_nonblocking(true)?;
     woken.set_nonblocking(true)?;
@@ -36,7 +36,7 @@ pub(crate) fn wake_pair() -> io::Result<(Wake, Wake)> {
 
 /// Makes the stand-in pair for a system with no poll(2) here. Output: both ends.
 #[cfg(not(unix))]
-pub(crate) fn wake_pair() -> io::Result<(Wake, Wake)> {
+pub fn wake_pair() -> io::Result<(Wake, Wake)> {
     Ok((Wake(), Wake()))
 }
 
@@ -45,7 +45,7 @@ impl Wake {
     /// holds a wake and a closed end has no waiter, so neither is an error (Rust programs
     /// ignore SIGPIPE, so a closed end only fails the write); any other failure leaves the
     /// waiter to its own wait bound. Input: the end. Output: none.
-    pub(crate) fn rouse(&self) {
+    pub fn rouse(&self) {
         #[cfg(unix)]
         {
             use std::io::Write;
@@ -56,7 +56,7 @@ impl Wake {
     /// Reads away the bytes [`Wake::rouse`] wrote, at most [`DRAIN_READS_MAX`] reads, so the
     /// end stops being ready until the next wake. Input: the end. Output: none.
     #[cfg(unix)]
-    pub(crate) fn drain(&self) {
+    pub fn drain(&self) {
         use std::io::Read;
         let mut bytes = [0_u8; 64];
         for _ in 0..DRAIN_READS_MAX {
@@ -79,7 +79,7 @@ impl std::os::fd::AsFd for Wake {
 /// then drains `woken`. Sleeps `fallback` instead where there is no poll(2) here or when the
 /// poll fails, so the wait never becomes a busy loop. Inputs: the listeners, the wake end,
 /// the instant to stop at and the fallback sleep. Output: none.
-pub(crate) fn wait_for_clients(
+pub fn wait_for_clients(
     listeners: &[&TcpListener],
     woken: &Wake,
     until: Instant,
@@ -111,7 +111,7 @@ pub(crate) fn wait_for_clients(
 /// each waits for, and the instant to stop at, or none to wait until one is ready. Output:
 /// how many descriptors are ready, 0 once `until` has passed, or the poll error.
 #[cfg(unix)]
-pub(crate) fn ready(fds: &mut [PollFd<'_>], until: Option<Instant>) -> io::Result<usize> {
+pub fn ready(fds: &mut [PollFd<'_>], until: Option<Instant>) -> io::Result<usize> {
     assert!(!fds.is_empty());
     assert!(fds.len() <= FDS_MAX);
     loop {

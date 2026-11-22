@@ -259,7 +259,8 @@ fn members_skips_lead_links_and_bad_panes() {
     .unwrap();
     std::fs::create_dir_all(engine.home.join("teams/c")).unwrap();
     let fifo = engine.home.join("teams/c/config.json");
-    let made = crate::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(&fifo)).unwrap();
+    let made =
+        kernel_processes::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(&fifo)).unwrap();
     assert!(made.success());
     let huge = engine.team(
         "teams/d",

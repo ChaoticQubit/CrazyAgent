@@ -875,8 +875,8 @@ async fn a_server_whose_check_home_holds_many_files_answers_its_removal_at_once(
 /// prompts sent there; another loopback port stays free for it to bind.
 #[tokio::test]
 async fn a_server_check_cannot_listen_on_a_configured_local_model_port() {
-    let kept = crazyagent::spawn_gate::free_low_tcp_port().unwrap();
-    let other = crazyagent::spawn_gate::free_low_tcp_port().unwrap();
+    let kept = kernel_processes::spawn_gate::free_low_tcp_port().unwrap();
+    let other = kernel_processes::spawn_gate::free_low_tcp_port().unwrap();
     assert_ne!(kept, other);
     let case = Case::with_settings(&local_model_settings(kept)).await;
     let controller = case.controller().await;
@@ -912,7 +912,7 @@ async fn a_server_check_cannot_listen_on_a_configured_local_model_port() {
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_server_check_is_refused_on_linux_when_the_kept_port_lies_where_the_kernel_picks() {
-    let kept = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0")
+    let kept = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap()
@@ -968,7 +968,7 @@ async fn a_server_check_is_refused_on_linux_when_the_kept_port_lies_where_the_ke
 /// listens on that port.
 #[tokio::test]
 async fn a_server_check_with_unreadable_settings_is_refused_not_run_without_kept_ports() {
-    let kept = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0")
+    let kept = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap()

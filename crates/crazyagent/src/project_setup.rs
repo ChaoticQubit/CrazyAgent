@@ -1167,7 +1167,7 @@ pub fn signed_in_connections(
         let ModelAuthentication::NativeManaged { profile_ref } = &connection.auth else {
             continue;
         };
-        let key = crate::memory::hash(profile_ref.as_str().as_bytes());
+        let key = kernel_common::hash(profile_ref.as_str().as_bytes());
         let phase: Option<String> = tx
             .query_row(
                 "SELECT phase FROM native_auth_operations WHERE profile_key=?1

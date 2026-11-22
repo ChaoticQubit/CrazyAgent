@@ -19,7 +19,7 @@ struct Engine {
 impl Engine {
     fn start(root: &Path, run: &str) -> Self {
         let stdout = root.join(format!("{run}.stdout"));
-        let child = crazyagent::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new(env!("CARGO_BIN_EXE_crazyagent"))
                 .arg("engine")
                 .arg(root)
@@ -46,7 +46,7 @@ impl Engine {
     }
 
     fn stop(&mut self) {
-        let terminated = crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+        let terminated = kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([
             "-s",
             "TERM",
             &self.child.id().to_string(),

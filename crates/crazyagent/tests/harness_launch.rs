@@ -591,7 +591,7 @@ fn sandboxed_stand_in(
     let harness = bin.join("claude");
     std::fs::write(&harness, script).unwrap();
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let first = crazyagent::spawn_gate::status(
+    let first = kernel_processes::spawn_gate::status(
         std::process::Command::new(&harness)
             .arg("first-exec")
             .current_dir(&bin)
@@ -633,7 +633,7 @@ fn sandboxed_stand_in(
 /// shim itself became the harness. Takes the executable, unique to this test. Returns the
 /// wardens killed, so a caller that expects exactly one can check.
 fn kill_wardens_of(harness: &Path) -> Vec<i32> {
-    let listing = crazyagent::spawn_gate::output(
+    let listing = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/ps")
             .args(["-A", "-ww", "-o", "pid=,uid=,command="])
             .stdin(std::process::Stdio::null())
@@ -730,7 +730,7 @@ impl Drop for Leftover {
 /// Reads a process's parent id with `ps`. Input: the process. Output: the parent, or none
 /// once it has ended.
 fn parent_of(process: rustix::process::Pid) -> Option<i32> {
-    let listing = crazyagent::spawn_gate::output(
+    let listing = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/ps")
             .args(["-o", "ppid=", "-p", &process.as_raw_nonzero().to_string()])
             .stdin(std::process::Stdio::null())
@@ -763,7 +763,7 @@ fn stopping_a_full_access_headless_agent_names_what_it_left_running_and_holds_un
     let harness = bin.join("claude");
     std::fs::write(&harness, LEAVING_AGENT).unwrap();
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let first = crazyagent::spawn_gate::status(
+    let first = kernel_processes::spawn_gate::status(
         std::process::Command::new(&harness)
             .arg("first-exec")
             .current_dir(&bin)
@@ -870,7 +870,7 @@ fn stopping_a_full_access_headless_agent_names_what_left_its_session_and_parent(
     let harness = bin.join("claude");
     std::fs::write(&harness, ORPHANING_AGENT).unwrap();
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let first = crazyagent::spawn_gate::status(
+    let first = kernel_processes::spawn_gate::status(
         std::process::Command::new(&harness)
             .arg("first-exec")
             .current_dir(&bin)
@@ -946,7 +946,7 @@ fn a_full_access_headless_stop_names_a_setsid_child_whose_seen_parent_exited_at_
     let harness = bin.join("claude");
     std::fs::write(&harness, SEEN_PARENT_ORPHANING_AGENT).unwrap();
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let first = crazyagent::spawn_gate::status(
+    let first = kernel_processes::spawn_gate::status(
         std::process::Command::new(&harness)
             .arg("first-exec")
             .current_dir(&bin)
@@ -1022,7 +1022,7 @@ fn a_full_access_headless_stop_names_or_misses_an_orphan_made_between_two_tables
     let harness = bin.join("claude");
     std::fs::write(&harness, FAST_ORPHANING_AGENT).unwrap();
     std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let first = crazyagent::spawn_gate::status(
+    let first = kernel_processes::spawn_gate::status(
         std::process::Command::new(&harness)
             .arg("first-exec")
             .current_dir(&bin)
@@ -1262,7 +1262,7 @@ fn live_keyed_codex_and_claude_reach_the_model_through_the_relay_with_their_key_
 /// that refuses, so the row needs no model and no network (rv-sec3 engine-hermetic F1).
 #[test]
 fn a_keyed_launch_writes_a_private_placeholder_key_file_that_ends_with_its_session() {
-    let (_refusing, port) = crazyagent::spawn_gate::refusing_tcp_port().unwrap();
+    let (_refusing, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     assert!(!crazyagent::sandbox::OWNER_PORTS.contains(&port), "{port}");
     for (harness, name, base_url) in [
         ("codex", "codex", format!("http://127.0.0.1:{port}/v1")),
@@ -1358,7 +1358,7 @@ fn the_launch_trust_setting_loads_no_mcp_server_from_the_repository() {
     std::fs::write(code_home.join("config.toml"), "project_doc_max_bytes = 0\n").unwrap();
     let repo = private_dir("ca-trust-repo-");
     let root = std::fs::canonicalize(repo.path()).unwrap();
-    let git = crazyagent::spawn_gate::output(
+    let git = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")
             .args(["init", "-q"])
             .current_dir(&root)
@@ -1381,7 +1381,7 @@ fn the_launch_trust_setting_loads_no_mcp_server_from_the_repository() {
         )
     };
     let list = |args: &[&str]| {
-        let output = crazyagent::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             std::process::Command::new(&codex)
                 .args(args)
                 .current_dir(&root)

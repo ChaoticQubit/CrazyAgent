@@ -400,7 +400,7 @@ fn dropping_a_lease_frees_the_profile_while_another_process_shares_its_descripto
     let shared = guard.manifest.file.try_clone().unwrap();
     fcntl_setfd(&shared, FdFlags::empty()).unwrap();
     assert!(!fcntl_getfd(&shared).unwrap().contains(FdFlags::CLOEXEC));
-    let mut holder = crate::spawn_gate::spawn(
+    let mut holder = kernel_processes::spawn_gate::spawn(
         Command::new("/bin/sleep")
             .env_clear()
             .arg("30")
@@ -888,7 +888,7 @@ impl ExecProbe {
             "e{}.sock",
             SOCKET_ID.fetch_add(1, Ordering::Relaxed),
         ));
-        let readiness = crate::spawn_gate::bind_unix_datagram_std(&path).unwrap();
+        let readiness = kernel_processes::spawn_gate::bind_unix_datagram_std(&path).unwrap();
         readiness
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
@@ -907,7 +907,7 @@ impl ExecProbe {
             })
             .collect::<Vec<_>>();
         assert_eq!(protected.len(), 7);
-        let child = crate::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new("/usr/bin/python3")
                 .env_clear()
                 .args(["-I", "-S", "-c", EXEC_PROBE])

@@ -29,7 +29,7 @@ impl Drop for Case {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let _ = crazyagent::spawn_gate::status(&mut command);
+        let _ = kernel_processes::spawn_gate::status(&mut command);
     }
 }
 
@@ -79,7 +79,7 @@ fn run(sandbox: &ProjectSandbox, profile: &Path, program: &str, args: &[&str]) -
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let mut child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
     let pid = child.id();
     let status = child.wait().unwrap();
     (status.success(), pid)
@@ -104,7 +104,7 @@ fn compile_errors(pids: &[u32]) -> Vec<String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let output = crazyagent::spawn_gate::output(&mut command).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut command).unwrap();
     assert!(output.status.success(), "{output:?}");
     String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -133,7 +133,7 @@ fn log_caught_up(folder: &Path) {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let mut child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
     let pid = child.id();
     assert!(child.wait().unwrap().success());
     let deadline = Instant::now() + Duration::from_secs(60);

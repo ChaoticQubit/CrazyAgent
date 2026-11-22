@@ -283,7 +283,7 @@ mod windows_tests {
             .join("icacls.exe");
         let mut command = std::process::Command::new(icacls);
         command.arg(path).args(["/grant", "*S-1-5-32-545:(R)"]);
-        let granted = crate::spawn_gate::collected(&mut command).unwrap();
+        let granted = kernel_processes::spawn_gate::collected(&mut command).unwrap();
         assert!(granted.status.success(), "icacls refused the grant");
     }
 

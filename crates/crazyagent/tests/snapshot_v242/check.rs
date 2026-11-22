@@ -360,7 +360,7 @@ fn qualification(scratch: &Path, arguments: &[&str]) -> Result<Value, String> {
     if !home.is_dir() {
         private_folder(scratch, "home")?;
     }
-    let ran = crazyagent::spawn_gate::collected(
+    let ran = kernel_processes::spawn_gate::collected(
         Process::new(ENGINE)
             .arg("qualification")
             .args(arguments)

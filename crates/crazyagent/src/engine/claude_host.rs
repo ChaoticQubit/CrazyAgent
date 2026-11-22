@@ -13,7 +13,7 @@ use crate::master_step_limit::StepLimit;
 #[cfg(unix)]
 use crate::master_time_limit::{RUN_TIME_MAX, START_TIME_MAX};
 #[cfg(unix)]
-use crate::platform::fd_wait::{self, Wake};
+use kernel_processes::fd_wait::{self, Wake};
 
 /// The code a Claude master stops with when it has not started by its start bound: the
 /// run clock's end when the owner's time limit bounds it, as the other masters stop, else

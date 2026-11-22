@@ -241,7 +241,7 @@ fn listen(running: &Arc<AtomicBool>) -> (Arc<AtomicBool>, std::thread::JoinHandl
 /// Sends one real signal to this test process with `/bin/kill`.
 /// Takes the signal name without SIG. Returns once `kill` delivered it.
 fn signal(name: &str) {
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         Command::new("/bin/kill")
             .arg("-s")
             .arg(name)

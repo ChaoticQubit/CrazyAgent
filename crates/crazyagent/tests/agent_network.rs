@@ -132,7 +132,7 @@ async fn checked_tools(network: AgentNetwork) -> (Vec<String>, ServerStatus, Opt
     let mut controller = case.controller().await;
     let project = create_project(&mut controller, "app").await;
     set_network(&mut controller, project.clone(), network).await;
-    let listener = crazyagent::spawn_gate::bind_tcp("127.0.0.1:0")
+    let listener = kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0")
         .await
         .unwrap();
     let port = listener.local_addr().unwrap().port();

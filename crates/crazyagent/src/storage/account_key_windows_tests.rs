@@ -57,7 +57,7 @@ fn assert_secret_file(path: &Path) {
 }
 
 fn run(program: &str, arguments: &[&str]) {
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         Command::new(program)
             .args(arguments)
             .stdin(Stdio::null())
@@ -152,7 +152,7 @@ fn boxed_read(installed: &WindowsSandbox, project: &Path, path: &Path) -> bool {
         .arg("/C")
         .arg(format!("type {named}"))
         .current_dir(project);
-    crate::spawn_gate::status(
+    kernel_processes::spawn_gate::status(
         Sandbox::wrap(installed, &command)
             .unwrap()
             .stdin(Stdio::null())

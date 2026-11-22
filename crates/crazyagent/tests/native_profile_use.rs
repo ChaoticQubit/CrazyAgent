@@ -365,11 +365,11 @@ impl LockProcess {
             "l{}.sock",
             SOCKET_ID.fetch_add(1, Ordering::Relaxed),
         ));
-        let readiness = crazyagent::spawn_gate::bind_unix_datagram_std(&socket).unwrap();
+        let readiness = kernel_processes::spawn_gate::bind_unix_datagram_std(&socket).unwrap();
         readiness
             .set_read_timeout(Some(Duration::from_secs(2)))
             .unwrap();
-        let child = crazyagent::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new("/usr/bin/python3")
                 .env_clear()
                 .args(["-I", "-S", "-c", LOCK_PROCESS])

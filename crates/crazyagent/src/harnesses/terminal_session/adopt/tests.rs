@@ -84,7 +84,7 @@ impl Fixture {
 #[cfg(target_os = "macos")]
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(self.root.path().join(FOLDER).join(SOCKET))
@@ -652,7 +652,7 @@ fn an_adopted_pane_past_the_old_event_and_byte_caps_is_taken_over_and_reads_on()
 
 /// Makes a real FIFO at `path` with the system `mkfifo`. Input: the path. Output: none.
 fn fifo(path: &std::path::Path) {
-    let made = crate::spawn_gate::status(
+    let made = kernel_processes::spawn_gate::status(
         std::process::Command::new("/usr/bin/mkfifo")
             .arg(path)
             .env_clear()
@@ -1014,7 +1014,7 @@ fn a_pane_whose_process_is_not_the_recorded_one_is_not_adopted_and_its_group_is_
     let agent = AgentId::team(7).unwrap();
     let file = fixture.transcript(&[TURN_OPEN, TURN_DONE]);
     let record = fixture.spawn(&host, &agent, "exec cat", &file);
-    let mut other = crate::spawn_gate::spawn(
+    let mut other = kernel_processes::spawn_gate::spawn(
         Command::new("/bin/sleep")
             .arg("60")
             .process_group(0)

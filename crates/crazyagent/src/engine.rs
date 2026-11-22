@@ -1318,7 +1318,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn peer_without_kernel_credentials_is_rejected() {
-        let stream = crate::spawn_gate::unconnected_unix_stream().unwrap();
+        let stream = kernel_processes::spawn_gate::unconnected_unix_stream().unwrap();
         stream.set_nonblocking(true).unwrap();
         let stream = Stream::from_std(stream).unwrap();
         assert!(verify_client(&stream).is_err());

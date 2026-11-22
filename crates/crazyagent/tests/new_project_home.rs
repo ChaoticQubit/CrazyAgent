@@ -25,7 +25,7 @@ fn names(folder: &Path) -> Vec<String> {
 }
 
 fn git(folder: &Path, args: &[&str]) -> String {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .arg("-C")
             .arg(folder)

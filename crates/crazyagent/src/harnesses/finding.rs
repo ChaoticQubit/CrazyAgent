@@ -625,7 +625,7 @@ pub(crate) fn owner_folder(prefix: &str) -> tempfile::TempDir {
     if !cfg!(target_os = "macos") {
         return outside_temp(prefix);
     }
-    let cache = crate::spawn_gate::output(
+    let cache = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/getconf")
             .arg("DARWIN_USER_CACHE_DIR")
             .stdin(std::process::Stdio::null())
