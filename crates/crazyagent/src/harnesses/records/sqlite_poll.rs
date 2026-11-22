@@ -188,6 +188,10 @@ impl SqlitePoll {
             last = sequence;
             events.extend(event);
         }
+        #[cfg(test)]
+        if let Some(step) = MID_READ.with(|hook| hook.borrow_mut().take()) {
+            step();
+        }
         assert!(last >= self.after && text <= READ_TEXT_BYTES_MAX);
         assert!(events.len() <= ROWS_PER_READ_MAX);
         self.after = last;
@@ -392,6 +396,14 @@ pub fn sentence(code: &str) -> Option<&'static str> {
         }
         _ => return None,
     })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A step a test row runs inside one read, after its last row and before it is taken, as
+    /// a writer that arrives mid-read would; taken once. Holds: the step, none by default.
+    static MID_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]

@@ -588,3 +588,46 @@ fn a_page_torn_by_a_writer_under_an_immutable_read_is_retried_as_busy() {
     assert_eq!(reader.read().unwrap(), turn_events());
     assert_eq!(reader.busy, 0);
 }
+
+/// V250-READONLY-WAL r2 (CodeRabbit H2): a writer that arrives during an immutable read,
+/// commits a row and checkpoints it into the database, then closes with no WAL file left,
+/// changes the pages under that read; the read's facts are not taken and its position does
+/// not move, as for a busy read, and the next read gives every row, the new one included.
+#[test]
+fn a_writer_that_checkpoints_during_an_immutable_read_voids_that_read() {
+    let tmp = root();
+    let path = tmp.path().join("record.db");
+    index_but_no_wal(&path);
+    if !reads(&path) {
+        return;
+    }
+    let writer_path = path.clone();
+    MID_READ.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let writer = Connection::open(&writer_path).unwrap();
+            add(&writer, &[("text", Some("late"))]);
+            writer
+                .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+                .unwrap();
+            drop(writer);
+            if let Err(error) = std::fs::remove_file(writer_path.with_extension("db-wal")) {
+                assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+            }
+        }));
+    });
+    let mut reader = SqlitePoll::new(path.clone(), &SCHEMA, 0);
+
+    assert_eq!(mode(&path).unwrap(), Some(Mode::Immutable));
+    assert_eq!(reader.read().unwrap(), Vec::new());
+    assert_eq!(reader.after(), 0);
+    assert_eq!(reader.busy, 1);
+    assert!(MID_READ.with(|hook| hook.borrow().is_none()));
+
+    let mut events = turn_events();
+    events.push(TranscriptEvent::Text {
+        text: "late".into(),
+    });
+    assert_eq!(reader.read().unwrap(), events);
+    assert_eq!(reader.after(), 5);
+    assert_eq!(reader.busy, 0);
+}
