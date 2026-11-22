@@ -200,16 +200,16 @@ pub(crate) const KEY_BYTES_MAX: u64 = 8192;
 fn key_text(
     file: std::fs::File,
     len: u64,
-) -> Result<crate::credentials::SecretString, EngineError> {
+) -> Result<kernel_security::secret::SecretString, EngineError> {
     use std::io::Read;
     assert!(len <= KEY_BYTES_MAX);
     let mut bytes = Vec::with_capacity(len as usize);
     let read = file.take(KEY_BYTES_MAX + 1).read_to_end(&mut bytes);
     if read.is_err() || bytes.len() as u64 > KEY_BYTES_MAX {
-        crate::credentials::wipe(&mut bytes);
+        kernel_security::secret::wipe(&mut bytes);
         return Err(error("account_key_store_unavailable"));
     }
-    crate::credentials::SecretString::new(bytes).map_err(|_| error("account_key_store_unsafe"))
+    kernel_security::secret::SecretString::new(bytes).map_err(|_| error("account_key_store_unsafe"))
 }
 
 /// Reads one saved account key on Windows so the engine can hand it to its key relay, never
@@ -221,7 +221,7 @@ fn key_text(
 pub(crate) fn read_key_file(
     root: &Path,
     credential: &CredentialRef,
-) -> Result<Option<crate::credentials::SecretString>, EngineError> {
+) -> Result<Option<kernel_security::secret::SecretString>, EngineError> {
     let Some(file) = open_key_file(root, credential)? else {
         return Ok(None);
     };
@@ -237,7 +237,7 @@ pub(crate) fn read_key_file(
 pub(crate) fn read_key_file(
     root: &Path,
     credential: &CredentialRef,
-) -> Result<Option<crate::credentials::SecretString>, EngineError> {
+) -> Result<Option<kernel_security::secret::SecretString>, EngineError> {
     read_key_in(root, ACCOUNT_KEYS, credential)
 }
 
@@ -250,7 +250,7 @@ pub(crate) fn read_key_in(
     root: &Path,
     folder: &str,
     credential: &CredentialRef,
-) -> Result<Option<crate::credentials::SecretString>, EngineError> {
+) -> Result<Option<kernel_security::secret::SecretString>, EngineError> {
     use rustix::fs::{Mode, OFlags};
     use std::os::unix::fs::MetadataExt;
     let Some(directory) = key_folder_in(root, folder, credential.as_str())? else {
@@ -318,7 +318,7 @@ pub(crate) fn replace_key_in(
     mut key: Vec<u8>,
 ) -> Result<(), EngineError> {
     let saved = replace_staged(root, folder, credential, &key);
-    crate::credentials::wipe(&mut key);
+    kernel_security::secret::wipe(&mut key);
     saved
 }
 
@@ -625,7 +625,7 @@ pub(crate) fn read_key_in(
     _root: &Path,
     _folder: &str,
     _credential: &CredentialRef,
-) -> Result<Option<crate::credentials::SecretString>, EngineError> {
+) -> Result<Option<kernel_security::secret::SecretString>, EngineError> {
     Err(error("account_key_store_unavailable"))
 }
 
@@ -650,7 +650,7 @@ pub(crate) fn replace_key_in(
     _credential: &CredentialRef,
     mut key: Vec<u8>,
 ) -> Result<(), EngineError> {
-    crate::credentials::wipe(&mut key);
+    kernel_security::secret::wipe(&mut key);
     Err(error("account_key_store_unavailable"))
 }
 

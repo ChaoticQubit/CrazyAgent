@@ -1,5 +1,6 @@
 use crate::protocol::CredentialRef;
 use kernel_security::error::StoreError;
+use kernel_security::secret::{SecretString, wipe};
 use std::sync::Arc;
 
 #[cfg(target_os = "linux")]
@@ -22,7 +23,6 @@ mod os_keyring;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub use os_keyring::{GIT_HELPER_COMMAND, OsKeyring, answer_git_credential};
 
-pub use kernel_security::secret::{SECRET_BYTES_MAX, SecretString, wipe};
 pub const NAME_BYTES_MAX: usize = 63;
 
 /// Opens this computer's credential store for one engine namespace under
