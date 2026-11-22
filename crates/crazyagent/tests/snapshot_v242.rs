@@ -16,6 +16,10 @@ mod caseless;
 mod check;
 #[path = "snapshot_v242/harness.rs"]
 mod harness;
+#[path = "snapshot_v242/intended.rs"]
+mod intended;
+#[path = "snapshot_v242/kept_text.rs"]
+mod kept_text;
 #[path = "snapshot_v242/landing.rs"]
 mod landing;
 #[path = "snapshot_v242/launch.rs"]
@@ -1070,7 +1074,11 @@ fn check(scenario: &Scenario, write: bool) -> Result<(), String> {
     let path = golden_path(scenario);
     let text = capture_text(scenario).map_err(|error| format!("{at}: {error}"))?;
     match std::fs::read(&path) {
-        Ok(golden) => compare(&golden, &text).map_err(|diff| format!("{at}: {diff}")),
+        Ok(golden) => {
+            let expected =
+                intended::expected(&at, &golden).map_err(|why| format!("{at}: {why}"))?;
+            compare(&expected, &text).map_err(|diff| format!("{at}: {diff}"))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && write => {
             let again = capture_text(scenario).map_err(|error| format!("{at}: {error}"))?;
             if again != text {
