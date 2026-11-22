@@ -56,7 +56,39 @@ pub(super) fn entries() -> &'static [Entry] {
 /// Checks one entry against the rules of the list. Inputs: the kind whose file holds it and
 /// the entry. Output: Ok, or the rule it breaks.
 fn shape(kind: &str, entry: &Entry) -> Result<(), String> {
-    let _ = (kind, entry);
+    let (listed_kind, name) = entry
+        .scenario
+        .split_once('/')
+        .ok_or("the scenario is not kind/name")?;
+    if listed_kind != kind || name.is_empty() {
+        return Err(format!("the scenario is not one of {kind}"));
+    }
+    if entry.at == 0 {
+        return Err("golden lines count from 1".to_owned());
+    }
+    if entry.golden.is_empty() && entry.capture.is_empty() {
+        return Err("the entry changes nothing".to_owned());
+    }
+    if entry.golden == entry.capture {
+        return Err("the golden and capture lines are equal".to_owned());
+    }
+    let short = entry.commit.len() >= 9 && entry.commit.len() <= 40;
+    if !short || !entry.commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("the commit is not a sha of 9 to 40 hex digits".to_owned());
+    }
+    if entry.reason.trim().is_empty() {
+        return Err("the reason is empty".to_owned());
+    }
+    let says = entry
+        .change
+        .as_deref()
+        .is_some_and(|change| change.starts_with("widens: ") || change.starts_with("narrows: "));
+    if entry.security && !says {
+        return Err("a security entry says what it widens or narrows".to_owned());
+    }
+    if !entry.security && (entry.change.is_some() || entry.owner_signed) {
+        return Err("only a security entry carries a change or the owner's sign-off".to_owned());
+    }
     Ok(())
 }
 
@@ -66,8 +98,43 @@ fn shape(kind: &str, entry: &Entry) -> Result<(), String> {
 /// `kind/name`, its entries and the golden's bytes. Output: the expected bytes, or why an
 /// entry does not apply.
 pub(super) fn apply(scenario: &str, listed: &[&Entry], golden: &[u8]) -> Result<Vec<u8>, String> {
-    let _ = (scenario, listed);
-    Ok(golden.to_vec())
+    let lines: Vec<&[u8]> = golden.split(|byte| *byte == b'\n').collect();
+    let mut ordered = listed.to_vec();
+    ordered.sort_by_key(|entry| entry.at);
+    let mut out: Vec<&[u8]> = Vec::with_capacity(lines.len());
+    let mut cursor = 0;
+    for entry in ordered {
+        let start = entry.at - 1;
+        if start < cursor {
+            return Err(format!(
+                "intended entry at line {} overlaps the one before it",
+                entry.at
+            ));
+        }
+        let end = start + entry.golden.len();
+        let held = lines.get(start..end).ok_or_else(|| {
+            format!(
+                "intended entry at line {} runs past the golden's end",
+                entry.at
+            )
+        })?;
+        if !held
+            .iter()
+            .copied()
+            .eq(entry.golden.iter().map(String::as_bytes))
+        {
+            return Err(format!(
+                "intended entry at line {} no longer matches the golden ({scenario})",
+                entry.at
+            ));
+        }
+        out.extend_from_slice(&lines[cursor..start]);
+        out.extend(entry.capture.iter().map(String::as_bytes));
+        cursor = end;
+    }
+    out.extend_from_slice(&lines[cursor..]);
+    assert!(cursor <= lines.len());
+    Ok(out.join(&b'\n'))
 }
 
 /// The golden a scenario's capture must equal: the 2.4.2 golden with the scenario's listed
@@ -84,8 +151,19 @@ pub(super) fn expected(scenario: &str, golden: &[u8]) -> Result<Vec<u8>, String>
 /// Names each scenario a security entry not yet signed by the owner holds red, with what the
 /// entry widens or narrows. Input: the entries. Output: one line per held entry, sorted.
 pub(super) fn held(listed: &[Entry]) -> Vec<String> {
-    let _ = listed;
-    Vec::new()
+    let mut held: Vec<String> = listed
+        .iter()
+        .filter(|entry| entry.security && !entry.owner_signed)
+        .map(|entry| {
+            let change = entry.change.as_deref().unwrap_or("says no change");
+            format!(
+                "{} at line {} ({}): {change}",
+                entry.scenario, entry.at, entry.commit
+            )
+        })
+        .collect();
+    held.sort();
+    held
 }
 
 #[test]
