@@ -176,3 +176,16 @@ fn the_capability_list_takes_the_layout_rustfmt_gives_it() {
         "pub const CAPABILITIES: [crate::Capability; 2] =\n    [processes::SPAWN_AND_WAIT_FOR, processes::OUTPUT_OF_COMMAND];\n"
     );
 }
+
+#[test]
+fn generation_fails_closed_without_rustfmt() {
+    let missing = std::ffi::OsStr::new("/nonexistent/capgen-test/rustfmt");
+    let refused = crate::rustfmt_with(missing, "mod.rs", "pub mod host;\n").unwrap_err();
+    assert_eq!(refused.code, "capgen_rustfmt_missing");
+    assert_eq!(refused.file, "mod.rs");
+    assert!(
+        refused.detail.contains("rustup component add rustfmt"),
+        "{}",
+        refused.detail
+    );
+}
