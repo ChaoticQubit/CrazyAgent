@@ -98,8 +98,8 @@ enum Leaf {
 type Leaves<'f> = BTreeMap<(&'f str, &'f str), Leaf>;
 
 /// Resolves every foreign ref of a file against the loaded files. Inputs: the stem, the
-/// file and every loaded file. Output: the leaves, or `capgen_unknown_type` (no such file
-/// or item) or `capgen_foreign_not_leaf` (the item is a type).
+/// file and every loaded file. Output: the leaves, or `cap_self_qualified` (its own stem),
+/// `capgen_unknown_type` (no such file or item) or `capgen_foreign_not_leaf` (a type).
 fn resolve<'f>(
     stem: &str,
     file: &'f File,
@@ -111,6 +111,9 @@ fn resolve<'f>(
             continue;
         };
         let spelled = format!("{owner}.{name}");
+        if owner == stem {
+            return Err(refuse(stem, "cap_self_qualified", spelled));
+        }
         let target = all
             .iter()
             .find(|(other, _)| *other == owner)
