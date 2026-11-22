@@ -406,7 +406,7 @@ async fn a_watch_parked_at_a_revocation_is_answered_only_the_second_checks_refus
             "watch": { "after": cursor, "mark": mark, "wait_ms": 10_000 }
         }))
         .unwrap();
-        let (server, client) = crate::spawn_gate::unix_pair_std().unwrap();
+        let (server, client) = kernel_processes::spawn_gate::unix_pair_std().unwrap();
         for end in [&server, &client] {
             end.set_nonblocking(true).unwrap();
         }

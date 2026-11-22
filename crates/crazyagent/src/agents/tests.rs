@@ -42,7 +42,7 @@ pub(crate) fn install_fixture(root: &Path) {
     let child = root.join("agent_child.py");
     std::fs::write(&child, CHILD).unwrap();
     std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let first = crate::spawn_gate::first_run(
+    let first = kernel_processes::spawn_gate::first_run(
         std::process::Command::new(&child)
             .arg("first-exec")
             .current_dir(root),
@@ -174,7 +174,7 @@ fn escaping_engine_process() {
 
 #[cfg(target_os = "macos")]
 fn crash(root: &Path, test: &str) -> Vec<String> {
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", test, "--ignored", "--test-threads", "1"])
             .env(CRASH_ROOT, root)
@@ -268,7 +268,7 @@ fn stopping_a_reattached_agent_ends_what_holds_its_log_and_never_a_foreign_group
     let case = Case::new();
     let root = case.path();
     let (id, escaped) = escaped_after_crash(&root);
-    let mut foreign = crate::spawn_gate::spawn(
+    let mut foreign = kernel_processes::spawn_gate::spawn(
         std::process::Command::new("/bin/sleep")
             .arg("300")
             .process_group(0)
@@ -813,7 +813,7 @@ fn wiring_a_keyed_agent_cannot_restart_once_its_key_is_gone() {
 fn wiring_after_an_engine_crash_live_agents_are_reattached_and_dead_ones_are_marked_closed() {
     let case = Case::new();
     let root = case.path();
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -1172,8 +1172,10 @@ fn an_output_log_that_is_a_fifo_is_no_probe_and_is_not_waited_on() {
     std::fs::write(&plain, "line\n").unwrap();
     assert!(log_probe(&plain).is_some());
     let fifo = folder.path().join("planted.log");
-    let made = crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&fifo))
-        .unwrap();
+    let made = kernel_processes::spawn_gate::status(
+        std::process::Command::new("/usr/bin/mkfifo").arg(&fifo),
+    )
+    .unwrap();
     assert!(made.success());
     let (sent, probed) = std::sync::mpsc::channel();
     let path = fifo.clone();

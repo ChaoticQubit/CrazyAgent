@@ -22,7 +22,7 @@ struct Server {
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -231,7 +231,7 @@ async fn the_owner_types_into_an_engine_terminal_and_the_team_graph_shows_the_ma
 }
 
 fn server_pid(tmux: &std::path::Path, socket: &std::path::Path) -> u32 {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new(tmux)
             .arg("-S")
             .arg(socket)

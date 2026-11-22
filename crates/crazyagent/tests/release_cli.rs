@@ -1,7 +1,7 @@
 use std::process::{Command, Stdio};
 
 fn crazyagent(args: &[&str]) -> std::process::Output {
-    crazyagent::spawn_gate::output(
+    kernel_processes::spawn_gate::output(
         Command::new(env!("CARGO_BIN_EXE_crazyagent"))
             .args(args)
             .stdin(Stdio::null())

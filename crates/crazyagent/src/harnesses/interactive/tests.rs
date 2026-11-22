@@ -507,7 +507,7 @@ fn a_keyed_codex_reads_its_key_from_the_key_file_and_never_from_its_environment(
         key_file.display()
     );
     assert!(built.argv.contains(&provider), "{:?}", built.argv);
-    let helper = crate::spawn_gate::output(
+    let helper = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/cat")
             .arg(&key_file)
             .stdin(std::process::Stdio::null())
@@ -519,7 +519,7 @@ fn a_keyed_codex_reads_its_key_from_the_key_file_and_never_from_its_environment(
 
     #[cfg(target_os = "macos")]
     {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             std::process::Command::new(&built.argv[0])
                 .args(&built.argv[1..])
                 .env_clear()
@@ -571,7 +571,7 @@ fn the_codex_bridge_attaches_the_app_to_its_app_server_and_stops_the_server_afte
         )
     };
     let bridge = |codex: &Path, resume: &str| {
-        crate::spawn_gate::output(
+        kernel_processes::spawn_gate::output(
             std::process::Command::new("/bin/sh")
                 .args(["-c", CODEX_BRIDGE_SCRIPT, "codex-bridge"])
                 .arg(codex)
@@ -608,7 +608,7 @@ fn the_codex_bridge_attaches_the_app_to_its_app_server_and_stops_the_server_afte
     );
     let pid = std::fs::read_to_string(&server).unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    while crate::spawn_gate::output(
+    while kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/kill")
             .args(["-0", pid.trim()])
             .stdin(std::process::Stdio::null())
@@ -772,7 +772,7 @@ fn a_keyed_claude_gets_its_key_through_its_key_helper_and_a_local_one_a_placehol
             .iter()
             .any(|(name, _)| name == "ANTHROPIC_API_KEY")
     );
-    let helper = crate::spawn_gate::output(
+    let helper = kernel_processes::spawn_gate::output(
         std::process::Command::new("/bin/sh")
             .args(["-c", settings["apiKeyHelper"].as_str().unwrap()])
             .stdin(std::process::Stdio::null())
@@ -881,7 +881,7 @@ fn a_key_written_under_a_narrow_umask_in_its_own_process() {
 #[test]
 fn a_key_written_under_a_narrow_umask_is_still_a_private_file() {
     let case = Case::new();
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -933,7 +933,7 @@ fn a_key_write_cut_short_in_its_own_process() {
 #[test]
 fn a_key_write_cut_short_leaves_no_key_file() {
     let case = Case::new();
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         std::process::Command::new("/bin/sh")
             .args([
                 "-c",
@@ -1127,9 +1127,11 @@ fn a_claude_config_that_is_a_fifo_or_link_is_refused_without_blocking() {
     let project = case.path().join("work");
     let config = case.home().join(".claude.json");
     assert!(
-        crate::spawn_gate::status(std::process::Command::new("/usr/bin/mkfifo").arg(&config))
-            .unwrap()
-            .success()
+        kernel_processes::spawn_gate::status(
+            std::process::Command::new("/usr/bin/mkfifo").arg(&config)
+        )
+        .unwrap()
+        .success()
     );
     assert_eq!(
         prepare_claude_home(&case.home(), &project).unwrap_err().0,
@@ -1490,7 +1492,7 @@ fn the_installed_codex_reads_a_native_lead_with_its_own_sub_agents_on() {
             .current_dir(case.path().join("work"))
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let output = crate::spawn_gate::output(&mut features).unwrap();
+        let output = kernel_processes::spawn_gate::output(&mut features).unwrap();
         let text = String::from_utf8(output.stdout).unwrap();
         assert!(
             output.status.success(),
@@ -2419,7 +2421,7 @@ fn the_claude_sign_in_floor_never_falls_below_the_first_claude_with_the_snapshot
 #[test]
 #[ignore]
 fn a_teammate_command_written_under_a_narrow_umask_in_its_own_process() {
-    let Some(folder) = std::env::var_os(crate::spawn_gate::ROW_FOLDER) else {
+    let Some(folder) = std::env::var_os(kernel_processes::spawn_gate::ROW_FOLDER) else {
         return;
     };
     let case = Case::new();
@@ -2452,7 +2454,7 @@ fn a_teammate_command_written_under_a_narrow_umask_in_its_own_process() {
 #[test]
 fn a_teammate_command_written_under_a_narrow_umask_is_a_private_program() {
     let folder = tempfile::tempdir().unwrap();
-    let status = crate::spawn_gate::row_alone(
+    let status = kernel_processes::spawn_gate::row_alone(
         "harnesses::interactive::tests::a_teammate_command_written_under_a_narrow_umask_in_its_own_process",
         ":",
         folder.path(),

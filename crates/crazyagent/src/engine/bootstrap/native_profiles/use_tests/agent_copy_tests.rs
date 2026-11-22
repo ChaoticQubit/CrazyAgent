@@ -515,7 +515,7 @@ fn a_codex_usage_read_gets_a_full_size_chatgpt_access_token() {
     let mut case = UseCase::new();
     let access = chatgpt_token(now() + 3600);
     assert!(
-        access.len() > crate::credentials::SECRET_BYTES_MAX,
+        access.len() > kernel_security::secret::SECRET_BYTES_MAX,
         "a ChatGPT access token outgrows a stored secret: {} bytes",
         access.len()
     );
@@ -879,7 +879,7 @@ fn a_claude_handoff_refuses_the_profile_home_and_a_home_outside_the_engine_folde
 #[cfg(target_os = "macos")]
 fn home_setting(home: &Path, which: &str) -> String {
     assert!(matches!(which, "default-keychain" | "list-keychains"));
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         std::process::Command::new("/usr/bin/security")
             .args([which, "-d", "user"])
             .env_clear()

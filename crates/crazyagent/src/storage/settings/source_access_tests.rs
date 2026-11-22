@@ -72,7 +72,7 @@ fn settings_source_access_reopens_at_once_while_other_threads_start_children() {
         ..
     } = fixture;
     drop(sources);
-    let (stop, starter) = crate::spawn_gate::start_children_until_stopped();
+    let (stop, starter) = kernel_processes::spawn_gate::start_children_until_stopped();
     let mut busy = Vec::new();
     for round in 0..1000 {
         if let Err(problem) = SettingsSources::open(&global, &project) {

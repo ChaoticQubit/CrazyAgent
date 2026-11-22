@@ -38,7 +38,7 @@ struct Observation {
 /// test's child inherits this child's stdin. Input: the command. Output: the
 /// child, killed and reaped when dropped.
 fn spawn(command: &mut Command) -> OwnedChild {
-    OwnedChild(crazyagent::spawn_gate::spawn(command).unwrap())
+    OwnedChild(kernel_processes::spawn_gate::spawn(command).unwrap())
 }
 
 fn private_root() -> tempfile::TempDir {

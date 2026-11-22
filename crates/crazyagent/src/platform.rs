@@ -4,10 +4,6 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
-pub(crate) mod fd_wait;
-#[cfg(unix)]
-pub(crate) mod unix_socket;
-
 #[cfg(unix)]
 pub(crate) use std::os::unix::fs::FileExt;
 
@@ -519,7 +515,8 @@ pub fn copy_text(text: &str) -> Result<(), &'static str> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     quiet(&mut command);
-    let mut child = crate::spawn_gate::spawn(&mut command).map_err(|_| "clipboard_unavailable")?;
+    let mut child =
+        kernel_processes::spawn_gate::spawn(&mut command).map_err(|_| "clipboard_unavailable")?;
     let written = child
         .stdin
         .take()
@@ -544,7 +541,8 @@ fn finish(mut command: Command) -> Result<(), &'static str> {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     quiet(&mut command);
-    let status = crate::spawn_gate::status(&mut command).map_err(|_| "open_unavailable")?;
+    let status =
+        kernel_processes::spawn_gate::status(&mut command).map_err(|_| "open_unavailable")?;
     if status.success() || cfg!(target_os = "windows") {
         Ok(())
     } else {
@@ -686,7 +684,8 @@ mod tests {
         std::fs::write(&binary, [0xff, 0xfe]).unwrap();
         assert_eq!(read_plain_file(&binary, 64), None);
         let fifo = folder.path().join("fifo");
-        let made = crate::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(&fifo)).unwrap();
+        let made = kernel_processes::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(&fifo))
+            .unwrap();
         assert!(made.success());
         let (sent, read) = std::sync::mpsc::channel();
         std::thread::spawn(move || {

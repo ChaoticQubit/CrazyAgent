@@ -310,7 +310,7 @@ fn reminder(folder: &Path, mode: &str, input: &str) -> (bool, String) {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
     child
         .stdin
         .take()

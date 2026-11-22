@@ -598,7 +598,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         moved = quoted(&engine.with_extension("moved")),
         probe = quoted(&worktree.join("probe.txt")),
     );
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/sandbox-exec")
             .arg("-f")
             .arg(turn.sandbox.profile())
@@ -672,7 +672,7 @@ fn the_installed_codex_reads_a_tools_on_master_with_its_own_sub_agents_off() {
         .current_dir(&base)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let output = crate::spawn_gate::output(&mut features).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut features).unwrap();
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(
         output.status.success(),

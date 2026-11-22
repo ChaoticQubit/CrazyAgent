@@ -111,7 +111,7 @@ async fn the_tui_controller_lists_the_harness_catalog_from_a_discovered_engine()
 /// Input: the folder name's prefix. Output: the folder, removed when dropped.
 fn owner_folder(prefix: &str) -> tempfile::TempDir {
     let cache = if cfg!(target_os = "macos") {
-        let cache = crazyagent::spawn_gate::output(
+        let cache = kernel_processes::spawn_gate::output(
             std::process::Command::new("/usr/bin/getconf")
                 .arg("DARWIN_USER_CACHE_DIR")
                 .stdin(std::process::Stdio::null())

@@ -3125,7 +3125,10 @@ pub(crate) fn engine_git(root: &Path, tmp: &Path, arguments: &[&str]) -> Result<
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    Ok(wait_bounded(crate::spawn_gate::spawn(&mut command)?, SETUP_TIMEOUT)? == Ended::Succeeded)
+    Ok(wait_bounded(
+        kernel_processes::spawn_gate::spawn(&mut command)?,
+        SETUP_TIMEOUT,
+    )? == Ended::Succeeded)
 }
 
 /// The owner's line refusing agents a folder of the owner's that is no git repository.
@@ -3350,7 +3353,7 @@ pub(crate) fn add_teammate_worktree_at(
 /// sees which step failed and how.
 #[cfg(unix)]
 fn setup_step(command: &mut Command, failed: &'static str) -> Result<(), RunError> {
-    match wait_bounded(crate::spawn_gate::spawn(command)?, SETUP_TIMEOUT)? {
+    match wait_bounded(kernel_processes::spawn_gate::spawn(command)?, SETUP_TIMEOUT)? {
         Ended::Succeeded => Ok(()),
         Ended::Failed => Err(RunError::Setup(step_failure(failed, Path::new(TOOLS_ROOT)))),
         Ended::TimedOut => Err(RunError::Setup(SETUP_TIMED_OUT)),
@@ -3451,7 +3454,7 @@ fn step_failure(failed: &'static str, tools: &Path) -> &'static str {
 /// absent or fails so the caller keeps using [`GIT`].
 #[cfg(unix)]
 fn real_git() -> Option<PathBuf> {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/xcrun")
             .args(["--find", "git"])
             .env_clear()
@@ -3534,7 +3537,7 @@ fn git_output(
     limit: usize,
 ) -> Result<(Option<ExitStatus>, Vec<u8>, bool), RunError> {
     command.stdout(Stdio::piped());
-    let mut child = crate::spawn_gate::spawn(command)?;
+    let mut child = kernel_processes::spawn_gate::spawn(command)?;
     let stdout = child
         .stdout
         .take()
@@ -3911,7 +3914,7 @@ impl Lifeline {
     pub(crate) fn watch(group: u32) -> io::Result<Self> {
         use std::os::unix::process::CommandExt;
         assert!(group > 1);
-        let child = crate::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new("/bin/sh")
                 .env_clear()
                 .args(["-c", LIFELINE, "lifeline", &group.to_string()])
@@ -4928,7 +4931,8 @@ mod tests {
             ("api.openai.com:443", "HTTP/1.1 200 Connection Established"),
             ("example.com:443", "HTTP/1.1 403 Forbidden"),
         ] {
-            let mut client = crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)).unwrap();
+            let mut client =
+                kernel_processes::spawn_gate::connect_tcp_std(("127.0.0.1", port)).unwrap();
             client
                 .set_read_timeout(Some(Duration::from_secs(15)))
                 .unwrap();
@@ -5172,7 +5176,7 @@ mod tests {
         let id = jobs
             .enqueue("alpha", "market_research", "codex", false)
             .unwrap();
-        let provider = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let provider = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         let project = ResearchProject {
             id: "alpha",
             root: &folder,
@@ -5235,7 +5239,7 @@ mod tests {
         let id = jobs
             .enqueue("alpha", "market_research", "codex", false)
             .unwrap();
-        let provider = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let provider = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         let project = ResearchProject {
             id: "alpha",
             root: &folder,
@@ -5517,8 +5521,8 @@ mod tests {
                 unreached.line().to_owned()
             })
         };
-        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
-        let open = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
+        let open = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         let listening = open.local_addr().unwrap().port();
         let codex = |base_url: String| ResearchAccount::Endpoint {
             base_url,
@@ -5710,7 +5714,7 @@ mod tests {
     /// keeps its place.
     #[test]
     fn the_reach_check_here_names_a_refusing_provider_only_where_confined_runs_exist() {
-        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+        let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
         let account = ResearchAccount::Endpoint {
             base_url: format!("http://127.0.0.1:{port}/v1"),
             model: "local-model".into(),
@@ -5741,7 +5745,7 @@ mod tests {
         repository_git(&folder, &["init", "-q"]);
         repository_git(&folder, &["commit", "-q", "--allow-empty", "-m", "Start"]);
         register_project(&root.database, "alpha", &folder);
-        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+        let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
         let runner = ResearchRunner::new(
             &root.database,
             &root.state,
@@ -5869,9 +5873,9 @@ mod tests {
     /// provider it did not start on that port.
     #[test]
     fn a_port_kept_for_a_down_provider_refuses_connects_and_no_plain_bind_takes_it() {
-        let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+        let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
         let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
-        let taken = crate::spawn_gate::bind_tcp_std_exclusive(address);
+        let taken = kernel_processes::spawn_gate::bind_tcp_std_exclusive(address);
         assert_eq!(
             taken.as_ref().map(drop).map_err(std::io::Error::kind),
             Err(std::io::ErrorKind::AddrInUse),
@@ -6750,7 +6754,7 @@ mod tests {
     }
 
     fn group_members(group: u32) -> usize {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new("/usr/bin/pgrep")
                 .env_clear()
                 .arg("-g")
@@ -6767,7 +6771,7 @@ mod tests {
     fn an_agent_dropped_while_a_panic_unwinds_leaves_no_process_in_its_group() {
         use std::os::unix::process::CommandExt;
         const MID_RUN: &str = "the run fails while its agent and the agent's child are running";
-        let child = crate::spawn_gate::spawn(
+        let child = kernel_processes::spawn_gate::spawn(
             Command::new("/bin/sh")
                 .env_clear()
                 .args(["-c", "/bin/sleep 120 & /bin/sleep 120"])
@@ -6798,7 +6802,7 @@ mod tests {
     fn a_lifeline_kills_its_agent_group_only_when_its_pipe_closes_without_done() {
         use std::os::unix::process::CommandExt;
         let spawn = || {
-            let agent = crate::spawn_gate::spawn(
+            let agent = kernel_processes::spawn_gate::spawn(
                 Command::new("/bin/sh")
                     .env_clear()
                     .args(["-c", "/bin/sleep 120 & /bin/sleep 120"])
@@ -7200,7 +7204,7 @@ mod tests {
         std::os::unix::fs::symlink(&report, &link).unwrap();
         assert!(read_bounded(folder.path(), &link, 64).is_err());
         let fifo = folder.path().join("fifo.md");
-        let made = crate::spawn_gate::status(
+        let made = kernel_processes::spawn_gate::status(
             std::process::Command::new("/usr/bin/mkfifo")
                 .arg(&fifo)
                 .stdin(std::process::Stdio::null()),
@@ -7314,7 +7318,7 @@ mod tests {
         )
         .unwrap();
         fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
-        let configured = crate::spawn_gate::status(
+        let configured = kernel_processes::spawn_gate::status(
             Command::new(GIT)
                 .env_clear()
                 .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -7357,7 +7361,7 @@ mod tests {
         }
         ensure_repository(&project, &tmp).unwrap();
         let owner_git = |dir: &Path, args: &[&str]| {
-            crate::spawn_gate::output(
+            kernel_processes::spawn_gate::output(
                 Command::new(GIT)
                     .env_clear()
                     .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -7410,7 +7414,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn engine_git_keeps_the_selected_toolchain_and_sandboxed_git_is_the_command_line_tools_git() {
-        let found = crate::spawn_gate::output(
+        let found = kernel_processes::spawn_gate::output(
             Command::new("/usr/bin/xcrun")
                 .args(["--find", "git"])
                 .env_clear()
@@ -7474,7 +7478,7 @@ mod tests {
             ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
         let profile = profiles.join("agent.sb");
         sandbox.install(&profile).unwrap();
-        let printed = crate::spawn_gate::output(
+        let printed = kernel_processes::spawn_gate::output(
             sandbox
                 .command(&profile, sandboxed_git())
                 .args(["version"])
@@ -7653,7 +7657,7 @@ mod tests {
                             .stdin(Stdio::null())
                             .stdout(Stdio::null())
                             .stderr(Stdio::piped());
-                        let output = crate::spawn_gate::output(&mut command).unwrap();
+                        let output = kernel_processes::spawn_gate::output(&mut command).unwrap();
                         if !output.status.success() {
                             refused
                                 .lock()
@@ -7680,7 +7684,7 @@ mod tests {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            let child = crate::spawn_gate::spawn(&mut command).unwrap();
+            let child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
             let group = child.id();
             (wait_bounded(child, limit).unwrap(), group)
         };
@@ -7706,7 +7710,7 @@ mod tests {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        let child = crate::spawn_gate::spawn(&mut command).unwrap();
+        let child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
         let started = Instant::now();
         assert_eq!(
             wait_bounded(child, Duration::from_millis(200)).unwrap(),
@@ -7823,7 +7827,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     pub(super) fn repository_git(project: &Path, arguments: &[&str]) {
-        let status = crate::spawn_gate::status(
+        let status = kernel_processes::spawn_gate::status(
             Command::new(GIT)
                 .env_clear()
                 .env("GIT_CONFIG_NOSYSTEM", "1")

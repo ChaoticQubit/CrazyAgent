@@ -231,7 +231,7 @@ pub(crate) fn start_identity(pid: i32) -> Result<Option<String>, EngineError> {
     if pid <= 1 {
         return Err(error("harness_group_invalid"));
     }
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/bin/ps")
             .env_clear()
             .env("LC_ALL", "C")

@@ -21,7 +21,7 @@ const SEAL: &str = "000000000000000000000000000000000000000000000000000000000000
 /// the folder and the arguments. Output: whether git succeeded and its trimmed standard
 /// output.
 fn git_try(dir: &Path, args: &[&str]) -> (bool, String) {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")

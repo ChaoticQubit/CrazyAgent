@@ -213,13 +213,13 @@ pub fn hanging_endpoint() -> (u16, std::thread::JoinHandle<()>) {
 /// request, so a test can wait until an agent is mid-run, waiting on its model.
 /// Returns the port, the serving thread and the count.
 pub fn counted_hanging_endpoint() -> (u16, std::thread::JoinHandle<()>, Arc<AtomicUsize>) {
-    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let requests = Arc::new(AtomicUsize::new(0));
     let counted = requests.clone();
     let handle = std::thread::spawn(move || {
         let mut held = Vec::new();
-        for stream in crazyagent::spawn_gate::incoming_tcp_std(&listener).take(64) {
+        for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener).take(64) {
             let Ok(mut stream) = stream else { break };
             let _ = stream.set_read_timeout(Some(Duration::from_millis(50)));
             let mut buffer = [0_u8; 4096];
@@ -236,13 +236,13 @@ pub fn counted_hanging_endpoint() -> (u16, std::thread::JoinHandle<()>, Arc<Atom
 /// [`RECORDED_IDLE`], up to [`RECORDED_BYTES_MAX`] bytes, so a test can read what an
 /// agent asked its model for. Returns the port, the serving thread and the requests.
 pub fn recording_hanging_endpoint() -> (u16, std::thread::JoinHandle<()>, Recorded) {
-    let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let recorded = requests.clone();
     let handle = std::thread::spawn(move || {
         let mut held = Vec::new();
-        for stream in crazyagent::spawn_gate::incoming_tcp_std(&listener).take(64) {
+        for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener).take(64) {
             let Ok(mut stream) = stream else { break };
             let _ = stream.set_read_timeout(Some(RECORDED_IDLE));
             let mut request = Vec::new();
@@ -266,7 +266,7 @@ pub fn recording_hanging_endpoint() -> (u16, std::thread::JoinHandle<()>, Record
 /// The ids of the live processes whose command line contains `marker`, such
 /// as a research agent whose `-o` report path sits in `<state>/agents/`.
 pub fn processes_with(marker: &Path) -> Vec<u32> {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/pgrep")
             .env_clear()
             .arg("-f")

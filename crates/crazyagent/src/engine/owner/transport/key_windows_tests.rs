@@ -51,7 +51,7 @@ fn run(program: &str, args: &[&std::ffi::OsStr]) {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    let done = crate::spawn_gate::output(&mut command).unwrap();
+    let done = kernel_processes::spawn_gate::output(&mut command).unwrap();
     assert!(
         done.status.success(),
         "{program}: {}",

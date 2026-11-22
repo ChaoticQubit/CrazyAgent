@@ -379,7 +379,8 @@ fn name_inside(name: &str) -> bool {
 /// land outside the target. Input: the verified archive. Output: Ok, or
 /// `ide_build_archive_invalid`.
 fn check_names(archive: &Path) -> Result<(), EngineError> {
-    let output = crate::spawn_gate::output(tar("-t", archive).arg("-P")).map_err(invalid)?;
+    let output =
+        kernel_processes::spawn_gate::output(tar("-t", archive).arg("-P")).map_err(invalid)?;
     if !output.status.success() {
         return Err(failure("ide_build_archive_invalid"));
     }
@@ -399,8 +400,8 @@ fn check_names(archive: &Path) -> Result<(), EngineError> {
 
 fn extract(archive: &Path, staging: &Path) -> Result<(), EngineError> {
     std::fs::create_dir(staging).map_err(storage)?;
-    let output =
-        crate::spawn_gate::output(tar("-x", archive).arg("-C").arg(staging)).map_err(invalid)?;
+    let output = kernel_processes::spawn_gate::output(tar("-x", archive).arg("-C").arg(staging))
+        .map_err(invalid)?;
     if !output.status.success() {
         return Err(failure("ide_build_archive_invalid"));
     }

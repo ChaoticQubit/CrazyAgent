@@ -481,7 +481,7 @@ mod launch {
     /// Runs git as the owner would in a test: an isolated home, no system config, in `dir`.
     /// Inputs: the owner home, the folder and the arguments. Output: unit.
     fn git(home: &Path, dir: &Path, args: &[&str]) {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new("/usr/bin/git")
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
@@ -890,7 +890,7 @@ mod import {
     /// Runs git as the owner would in a test: an isolated home, no system config, in `dir`.
     /// Inputs: the owner home, the folder and the arguments. Output: standard output.
     fn git(home: &Path, dir: &Path, args: &[&str]) -> String {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new("/usr/bin/git")
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
@@ -1263,7 +1263,7 @@ mod import {
         }
         let engine_git = crate::research::runner::setup_git();
         let run = |args: &[&str]| {
-            crate::spawn_gate::output(
+            kernel_processes::spawn_gate::output(
                 Command::new(engine_git)
                     .env_clear()
                     .env("PATH", "/usr/bin:/bin")
@@ -1514,7 +1514,7 @@ mod import {
         std::os::unix::fs::symlink(&outside, folder.join("CLAUDE.md")).unwrap();
         std::os::unix::fs::symlink("../.crazyagent/notes.md", folder.join(".claude/CLAUDE.md"))
             .unwrap();
-        let fifo = crate::spawn_gate::output(
+        let fifo = kernel_processes::spawn_gate::output(
             Command::new("/usr/bin/mkfifo")
                 .arg(folder.join("AGENTS.md"))
                 .stdin(Stdio::null())

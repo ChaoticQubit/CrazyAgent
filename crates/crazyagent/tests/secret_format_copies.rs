@@ -1,8 +1,9 @@
 use crazyagent::credentials::Piece::{Escaped, Form, Hex, Plain};
-use crazyagent::credentials::{SecretString, sized};
+use crazyagent::credentials::sized;
 use crazyagent::model_gateway::relay::Relay;
 use crazyagent::usage::extras::Adapter;
 use crazyagent::usage::poll::poll_balance;
+use kernel_security::secret::SecretString;
 use std::alloc::{GlobalAlloc, Layout, System};
 #[cfg(unix)]
 use std::io::{Read, Write};
@@ -92,7 +93,7 @@ fn a_relayed_request_frees_no_copy_of_the_key() {
     let mut reply = Vec::new();
     let freed = freed_with_key(1, || {
         let mut stream =
-            crazyagent::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
+            kernel_processes::spawn_gate::connect_tcp_std(("127.0.0.1", relay.port())).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(20)))
             .unwrap();

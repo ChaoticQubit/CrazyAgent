@@ -142,7 +142,7 @@ fn signed_in_account(
         return None;
     };
     assert_eq!(
-        crate::memory::hash(profile_ref.as_str().as_bytes()),
+        kernel_common::hash(profile_ref.as_str().as_bytes()),
         key,
         "a profile's sign-in names that profile"
     );
@@ -778,7 +778,7 @@ impl Drop for Team {
     fn drop(&mut self) {
         let _ = self.runtime.shutdown();
         let _ = self.host.close(&[]);
-        let _ = crate::spawn_gate::status(
+        let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(self.base.join(FOLDER).join(SOCKET))

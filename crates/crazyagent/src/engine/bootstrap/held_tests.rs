@@ -70,7 +70,7 @@ fn link_folder(link: &Path, target: &Path) {
     std::os::unix::fs::symlink(target, link).unwrap();
     #[cfg(windows)]
     {
-        let status = crate::spawn_gate::status(
+        let status = kernel_processes::spawn_gate::status(
             std::process::Command::new("cmd")
                 .args(["/C", "mklink", "/J"])
                 .arg(link)
@@ -93,7 +93,7 @@ fn open_to_everyone(path: &Path) {
     }
     #[cfg(windows)]
     {
-        let status = crate::spawn_gate::status(
+        let status = kernel_processes::spawn_gate::status(
             std::process::Command::new("icacls")
                 .arg(path)
                 .args(["/grant", "*S-1-1-0:(OI)(CI)(R)"])
@@ -314,7 +314,7 @@ fn file_to_everyone(path: &Path) {
     }
     #[cfg(windows)]
     {
-        let status = crate::spawn_gate::status(
+        let status = kernel_processes::spawn_gate::status(
             std::process::Command::new("icacls")
                 .arg(path)
                 .args(["/grant", "*S-1-1-0:(R)"])
@@ -581,7 +581,7 @@ fn an_unjudged_call_on_a_private_tree_trips_the_layer() {
 #[test]
 fn a_fifo_at_a_file_name_is_refused_without_blocking() {
     let (_temp, root) = private_root();
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         std::process::Command::new("mkfifo")
             .args(["-m", "600"])
             .arg(root.join("fifo"))
@@ -669,7 +669,7 @@ exit [HeldJunction]::Set($Folder, $Target)
 fn turn_into_junction(folder: &Path, target: &Path, scratch: &Path) -> i32 {
     let script = scratch.join("held-junction.ps1");
     std::fs::write(&script, JUNCTION_SCRIPT).unwrap();
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         std::process::Command::new("powershell.exe")
             .args([
                 "-NoProfile",

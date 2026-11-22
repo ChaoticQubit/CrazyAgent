@@ -1,7 +1,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use bus_gateway::{Gateway, Grants, Refusals};
+use crate::{Gateway, Grants, Refusals};
 use sdk::settings::{self, LeftRunning, OnQuit, Provide, QuitSettings};
 use sdk::{Capability, Refusal, Tier};
 
@@ -18,8 +18,8 @@ const PLUGIN: &str = "overhead";
 struct Noop;
 
 impl Provide for Noop {
-    fn save_quit(&self, settings: QuitSettings) -> Result<(), Refusal> {
-        black_box(settings);
+    fn save_quit(&self, caller: &'static str, settings: QuitSettings) -> Result<(), Refusal> {
+        black_box((caller, settings));
         Ok(())
     }
 }
@@ -76,8 +76,12 @@ fn report(name: &str, sorted: &[u64]) -> u64 {
     p95
 }
 
+/// Times the SDK call overhead against OWNER Q4, run on demand on a named Mac condition:
+/// `OVERHEAD_MAC=quiet cargo test --release -p crazyagent-bus-gateway --lib overhead_tests:: -- --ignored --nocapture`
+/// (`OVERHEAD_MAC=loaded` on the loaded Mac). Prints p50, p95 and p99 ns per call for the
+/// direct call, the SDK call and their difference; fails when the difference's p95 is over.
 #[test]
-#[ignore = "timing row, run on demand: OVERHEAD_MAC=quiet|loaded cargo test --release -p crazyagent-bus-gateway --test overhead -- --ignored --nocapture"]
+#[ignore = "timing row, run on demand with OVERHEAD_MAC=quiet or OVERHEAD_MAC=loaded"]
 fn overhead_per_sdk_call() {
     let (budget, condition) = budget();
     let grants = Grants::new(&[(PLUGIN, Tier::T2, &["settings.write"])]).unwrap();
@@ -90,7 +94,7 @@ fn overhead_per_sdk_call() {
         left_running: LeftRunning::Never,
         hours: 12,
     };
-    let mut direct_call = || black_box(provider.save_quit(black_box(input))).unwrap();
+    let mut direct_call = || black_box(provider.save_quit(PLUGIN, black_box(input))).unwrap();
     let mut sdk_call = || black_box(settings::save_quit(&bound, black_box(input))).unwrap();
     for _ in 0..ROUNDS / 10 {
         batch(&mut direct_call);

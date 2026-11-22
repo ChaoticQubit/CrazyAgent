@@ -1,6 +1,8 @@
 use super::Piece::{Hex, Plain};
-use super::{SECRET_BYTES_MAX, SecretString, Store, StoreError, checked_name, parts, reference};
+use super::{Store, checked_name, parts, reference};
 use crate::protocol::CredentialRef;
+use kernel_security::error::StoreError;
+use kernel_security::secret::{SECRET_BYTES_MAX, SecretString};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -117,7 +119,7 @@ impl Store for Keychain {
         ])
         .ok_or_else(|| StoreError::code("credential_secret_invalid"))?;
         let ran = run(&["-i".as_ref()], Some(&line), None);
-        crate::credentials::wipe(&mut line);
+        kernel_security::secret::wipe(&mut line);
         if ran?.code != Some(0) {
             return Err(unavailable());
         }
@@ -149,7 +151,7 @@ impl Store for Keychain {
             Some(ITEM_MISSING) => Err(StoreError::code("credential_missing")),
             _ => Err(unavailable()),
         };
-        crate::credentials::wipe(&mut ran.stdout);
+        kernel_security::secret::wipe(&mut ran.stdout);
         found
     }
 
@@ -249,7 +251,7 @@ fn run(
     if let Some(home) = home {
         command.env("HOME", home);
     }
-    let mut child = crate::spawn_gate::spawn(&mut command).map_err(|_| unavailable())?;
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).map_err(|_| unavailable())?;
     if let Some(input) = input {
         let mut stdin = child.stdin.take().ok_or_else(unavailable)?;
         let written = stdin.write_all(input);
@@ -283,7 +285,7 @@ fn run(
     };
     let (read, mut stdout) = reader.join().map_err(|_| unavailable())?;
     if read.is_err() || stdout.len() > OUTPUT_BYTES_MAX {
-        crate::credentials::wipe(&mut stdout);
+        kernel_security::secret::wipe(&mut stdout);
         return Err(unavailable());
     }
     Ok(Ran {

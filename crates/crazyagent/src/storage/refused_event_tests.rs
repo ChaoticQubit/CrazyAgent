@@ -152,8 +152,10 @@ fn a_first_refusal_is_logged_once_per_run() {
         vec![(KIND_CALL_REFUSED.to_owned(), 1, BODY.to_vec())]
     );
     assert_eq!(
-        sdk_slice::drain_refusals(&mut s.db, &s.started.host, &sink).unwrap(),
-        0
+        sdk_slice::drain_refusals(&mut s.db, &s.started.host, &sink)
+            .unwrap()
+            .map(|drained| drained.appended),
+        None
     );
 }
 
@@ -187,8 +189,10 @@ fn a_refusal_event_survives_the_refused_requests_rollback() {
     );
     assert_eq!(revision(&s.db), before + 1, "only the event's own revision");
     assert_eq!(
-        sdk_slice::drain_refusals(&mut s.db, &s.started.host, &sink).unwrap(),
-        0
+        sdk_slice::drain_refusals(&mut s.db, &s.started.host, &sink)
+            .unwrap()
+            .map(|drained| drained.appended),
+        None
     );
 }
 
@@ -205,8 +209,10 @@ fn no_projection_replays_the_plugins_aggregate() {
     let sink = EngineRefusals::new();
     refuse(&sink);
     assert_eq!(
-        sdk_slice::drain_refusals(&mut s.db, &s.started.host, &sink).unwrap(),
-        1
+        sdk_slice::drain_refusals(&mut s.db, &s.started.host, &sink)
+            .unwrap()
+            .map(|drained| drained.appended),
+        Some(1)
     );
     let tx = s.db.transaction().unwrap();
     crate::settings_log::rebuild(&tx).unwrap();
@@ -258,8 +264,10 @@ fn a_refusal_queued_before_a_committed_request_is_logged() {
         vec![(KIND_CALL_REFUSED.to_owned(), 1, BODY.to_vec())]
     );
     assert_eq!(
-        sdk_slice::drain_refusals(&mut s.db, &s.started.host, &sink).unwrap(),
-        0
+        sdk_slice::drain_refusals(&mut s.db, &s.started.host, &sink)
+            .unwrap()
+            .map(|drained| drained.appended),
+        None
     );
 }
 
@@ -326,4 +334,26 @@ fn the_next_mutation_after_a_refused_request_is_not_stale() {
     let applied =
         owner_apply_draining(&mut s.db, &s.config, &s.path, admission, &next, None, &sink).unwrap();
     assert_eq!(applied.result, OwnerResult::Applied);
+}
+
+#[test]
+fn a_drain_returns_the_revision_its_own_commit_made() {
+    let mut s = store();
+    let before = revision(&s.db);
+    let sink = EngineRefusals::new();
+    refuse(&sink);
+    let drained = sdk_slice::drain_refusals(&mut s.db, &s.started.host, &sink)
+        .unwrap()
+        .expect("one refusal was queued");
+    assert_eq!(drained.appended, 1);
+    assert_eq!(
+        revision(&s.db),
+        before + 1,
+        "the drain commits one revision"
+    );
+    assert_eq!(
+        i64::try_from(drained.revision.value()).unwrap(),
+        revision(&s.db),
+        "the drain names the revision it committed, with no read after its commit"
+    );
 }

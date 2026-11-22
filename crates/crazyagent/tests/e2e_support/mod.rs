@@ -33,7 +33,7 @@ const PANES_MAX: usize = 16;
 /// Reports whether a process with this id still exists.
 /// Input: a process id. Output: true while `kill -0` succeeds for it.
 pub fn alive(pid: u32) -> bool {
-    crazyagent::spawn_gate::status(
+    kernel_processes::spawn_gate::status(
         Command::new("/bin/kill")
             .args(["-0", &pid.to_string()])
             .stdin(Stdio::null())
@@ -47,7 +47,7 @@ pub fn alive(pid: u32) -> bool {
 /// Input: the tmux binary and server socket. Output: at most 16 pane process ids;
 /// none when the server is already gone.
 pub fn pane_pids(tmux: &Path, socket: &Path) -> Vec<u32> {
-    crazyagent::spawn_gate::output(
+    kernel_processes::spawn_gate::output(
         Command::new(tmux)
             .arg("-S")
             .arg(socket)
@@ -81,7 +81,7 @@ impl Drop for Survivors {
             std::thread::sleep(Duration::from_millis(50));
         }
         for pid in self.0.iter().copied().filter(|pid| alive(*pid)) {
-            let command = crazyagent::spawn_gate::output(
+            let command = kernel_processes::spawn_gate::output(
                 Command::new("ps")
                     .args(["-o", "command=", "-p", &pid.to_string()])
                     .stdin(Stdio::null())
@@ -94,7 +94,7 @@ impl Drop for Survivors {
                 continue;
             }
             eprintln!("test process {pid} outlived its terminal; killing it: {command}");
-            let _ = crazyagent::spawn_gate::status(
+            let _ = kernel_processes::spawn_gate::status(
                 Command::new("/bin/kill")
                     .args(["-KILL", &pid.to_string()])
                     .stdin(Stdio::null())
@@ -114,7 +114,7 @@ impl Drop for Survivors {
 /// survive the hang-up are killed by `Survivors`.
 pub fn stop_tmux(tmux: &Path, socket: &Path) {
     let _survivors = Survivors(pane_pids(tmux, socket));
-    let _ = crazyagent::spawn_gate::status(
+    let _ = kernel_processes::spawn_gate::status(
         Command::new(tmux)
             .arg("-S")
             .arg(socket)
@@ -200,7 +200,7 @@ impl Engine {
     pub fn launch(&mut self) {
         assert!(self.child.is_none());
         let mut command = self.command();
-        let mut child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
+        let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
         let stdout = child.stdout.take().unwrap();
         let (send, ready) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
@@ -268,7 +268,7 @@ impl Engine {
     /// Output: its stderr text.
     pub fn stop(&mut self) -> String {
         let mut child = self.child.take().expect("the engine is running");
-        let signalled = crazyagent::spawn_gate::status(Command::new("/bin/kill").args([
+        let signalled = kernel_processes::spawn_gate::status(Command::new("/bin/kill").args([
             "-s",
             "TERM",
             &child.id().to_string(),
@@ -480,7 +480,7 @@ pub fn profile() -> OwnerProfile {
 /// settings never change the result. Inputs: the folder and arguments.
 /// Output: git's output; a failed git fails the test with its stderr.
 pub fn git(folder: &Path, args: &[&str]) -> Output {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("git")
             .args(args)
             .current_dir(folder)

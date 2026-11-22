@@ -16,7 +16,7 @@ fn scratch() -> tempfile::TempDir {
 }
 
 fn written(lines: Vec<Vec<u8>>) -> (io::PipeReader, std::thread::JoinHandle<()>) {
-    let (reader, mut writer) = crate::spawn_gate::guarded(io::pipe).unwrap();
+    let (reader, mut writer) = kernel_processes::spawn_gate::guarded(io::pipe).unwrap();
     let feeding = std::thread::spawn(move || {
         for line in lines {
             writer.write_all(&line).unwrap();

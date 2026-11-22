@@ -474,7 +474,7 @@ pub fn download(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = crate::spawn_gate::spawn(&mut command).map_err(|error| {
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).map_err(|error| {
         fail(
             "update_download_failed",
             format!("Can't start curl: {error}"),
@@ -656,7 +656,7 @@ fn run_bounded(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = crate::spawn_gate::spawn(command)
+    let mut child = kernel_processes::spawn_gate::spawn(command)
         .map_err(|error| fail(code, format!("Can't start {command:?}: {error}")))?;
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());

@@ -51,7 +51,7 @@ fn wait_for(account: &GitHub, done: impl Fn(&GitHubStatus) -> bool) -> GitHubSta
 }
 
 fn git(args: &[&str], directory: &Path) {
-    let status = crate::spawn_gate::status(
+    let status = kernel_processes::spawn_gate::status(
         Command::new("/usr/bin/git")
             .args(args)
             .current_dir(directory)
@@ -1489,7 +1489,7 @@ fn a_repository_record_is_found_in_any_case_and_a_tampered_one_is_refused() {
 }
 
 fn git_out(args: &[&str], directory: &Path) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .args(args)
             .current_dir(directory)
@@ -1529,7 +1529,7 @@ fn http_backend(served: &Path, seen: &Seen) -> Answer {
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
-    let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
     let mut stdin = child.stdin.take().unwrap();
     let body = seen.body.clone();
     let writer = std::thread::spawn(move || {

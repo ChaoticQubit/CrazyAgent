@@ -599,7 +599,7 @@ async fn main() -> std::process::ExitCode {
     }
     let token: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
     assert_eq!(token.len(), TOKEN_BYTES * 2);
-    let listener = match crazyagent::spawn_gate::bind_tcp("127.0.0.1:0").await {
+    let listener = match kernel_processes::spawn_gate::bind_tcp("127.0.0.1:0").await {
         Ok(listener) => listener,
         Err(_) => {
             eprintln!("cannot listen on 127.0.0.1");
@@ -625,7 +625,7 @@ async fn main() -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     }
     loop {
-        let Ok((stream, peer)) = crazyagent::spawn_gate::accept_tcp(&listener).await else {
+        let Ok((stream, peer)) = kernel_processes::spawn_gate::accept_tcp(&listener).await else {
             continue;
         };
         if !peer.ip().is_loopback() {

@@ -706,7 +706,7 @@ pub async fn run(root: &Path) -> io::Result<()> {
             .ok_or_else(|| invalid("unrecognized_control_endpoint"))?;
         remove_endpoint(&path, recorded)?;
     }
-    let listener = crate::spawn_gate::bind_unix(&path)
+    let listener = kernel_processes::spawn_gate::bind_unix(&path)
         .map_err(|error| invalid(format!("runner_bind: {error}")))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     let metadata = std::fs::symlink_metadata(&path)?;
@@ -755,7 +755,7 @@ async fn serve(listener: UnixListener, state: Arc<Mutex<State>>) -> io::Result<(
             result = tokio::signal::ctrl_c() => { result?; break; }
             _ = shutdown.notified() => break,
             Some(result) = clients.join_next(), if !clients.is_empty() => { result.map_err(invalid)?; }
-            incoming = crate::spawn_gate::accept_unix(&listener), if clients.len() < CONNECTIONS_MAX => {
+            incoming = kernel_processes::spawn_gate::accept_unix(&listener), if clients.len() < CONNECTIONS_MAX => {
                 let (stream, _) = incoming?;
                 let state = state.clone();
                 let shutdown = shutdown.clone();

@@ -43,7 +43,7 @@ fn registered_cat_fixture_reports_actual_exit_and_stderr() {
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
     let registered = RegisteredNativeAuthHost::capture(&executable).unwrap();
     let digest = registered.verified_sha256().unwrap();
-    let mut child = crate::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         Command::new(registered.verified_path().unwrap())
             .env_clear()
             .current_dir(&home)

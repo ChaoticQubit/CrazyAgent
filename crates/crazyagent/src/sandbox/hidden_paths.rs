@@ -464,7 +464,7 @@ fn any_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<bool, &'stati
         .args(["ls-files", "-z", "--"])
         .args(&pathspecs)
         .stdout(Stdio::piped());
-    let mut child = crate::spawn_gate::spawn(&mut command).map_err(|_| unchecked)?;
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).map_err(|_| unchecked)?;
     let mut stdout = child.stdout.take().ok_or(unchecked)?;
     let reader = std::thread::spawn(move || {
         let mut buffer = Vec::new();
@@ -692,7 +692,7 @@ mod tests {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        let status = crate::spawn_gate::status(&mut command).unwrap();
+        let status = kernel_processes::spawn_gate::status(&mut command).unwrap();
         assert!(status.success(), "git {args:?}");
     }
 
@@ -914,7 +914,11 @@ mod tests {
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
-            assert!(crate::spawn_gate::status(&mut command).unwrap().success());
+            assert!(
+                kernel_processes::spawn_gate::status(&mut command)
+                    .unwrap()
+                    .success()
+            );
         };
         git(&["init", "-q"]);
         let marker = path.join("pwned");
@@ -976,7 +980,11 @@ mod tests {
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
-            assert!(crate::spawn_gate::status(&mut command).unwrap().success());
+            assert!(
+                kernel_processes::spawn_gate::status(&mut command)
+                    .unwrap()
+                    .success()
+            );
         };
         git(&["init", "-q"]);
         let folder = path.join("bulk");

@@ -2322,7 +2322,7 @@ fn apply(
             | Command::ProposeBaseline { .. }
             | Command::OwnerVerification { .. }
     ) {
-        bytes = format!("sha256:{}", crate::memory::hash(&bytes)).into_bytes();
+        bytes = format!("sha256:{}", kernel_common::hash(&bytes)).into_bytes();
     }
     let transaction = connection
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -3200,7 +3200,7 @@ fn owner_apply_with(
 
 /// Runs one owner request, then, after its commit or rollback, appends the refusals queued
 /// in a sink as `CallRefused` events in a transaction of their own; a receipt then names
-/// the revision after them, its provenance kept. Inputs: as [`owner_apply_request`], plus
+/// the revision that transaction committed, its provenance kept. Inputs: as [`owner_apply_request`], plus
 /// the sink. Output: the request's result.
 fn owner_apply_draining(
     db: &mut Connection,
@@ -3217,25 +3217,14 @@ fn owner_apply_draining(
         engine_epoch: a.engine_epoch.clone(),
     };
     match crate::sdk_slice::drain_refusals(db, &host, refusals) {
-        Ok(0) => {}
-        Ok(_) => {
+        Ok(None) => {}
+        Ok(Some(drained)) => {
             if let Ok(applied) = result.as_mut() {
-                let read = db
-                    .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
-                        row.get::<_, i64>(0)
-                    })
-                    .ok()
-                    .and_then(|revision| u64::try_from(revision).ok());
-                match read {
-                    Some(revision) => {
-                        assert!(
-                            revision > applied.current_revision.value(),
-                            "the drain moved it"
-                        );
-                        applied.current_revision = Cursor::new(revision);
-                    }
-                    None => eprintln!("plugin_call_refused_revision_unread"),
-                }
+                assert!(
+                    drained.revision.value() > applied.current_revision.value(),
+                    "the drain commits after the request"
+                );
+                applied.current_revision = drained.revision;
             }
         }
         Err(refused) => eprintln!("plugin_call_refused_not_logged code={}", refused.0),
@@ -3465,7 +3454,7 @@ fn owner_control_in(
 ) -> Result<OwnerControlReply, EngineError> {
     let (owner_id, owner_epoch, _) = owner_identity(tx, control.target)?;
     let bytes = serde_json::to_vec(control).map_err(error)?;
-    let hash_text = crate::memory::hash(&bytes);
+    let hash_text = kernel_common::hash(&bytes);
     if let Some((_, result)) = owner_lookup(
         tx,
         "trusted_host",
@@ -3718,7 +3707,7 @@ fn owner_control_reconcile(
     let tx = db.transaction().map_err(error)?;
     check_owner_host(&tx, host)?;
     let registration = owner_registration(&tx, host, control.target)?;
-    let hash = crate::memory::hash(&serde_json::to_vec(control).map_err(error)?);
+    let hash = kernel_common::hash(&serde_json::to_vec(control).map_err(error)?);
     owner_lookup(
         &tx,
         "trusted_host",
@@ -4077,7 +4066,7 @@ pub(crate) fn latest_sign_in_authenticated(
     let crate::config::ModelAuthentication::NativeManaged { profile_ref } = &model.auth else {
         return Ok(false);
     };
-    let key = crate::memory::hash(profile_ref.as_str().as_bytes());
+    let key = kernel_common::hash(profile_ref.as_str().as_bytes());
     let fact: Option<Option<Vec<u8>>> = connection
         .query_row(
             "SELECT CASE WHEN length(fact)<=16384 THEN fact END FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",

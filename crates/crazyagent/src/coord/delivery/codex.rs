@@ -349,7 +349,7 @@ mod wire {
 
     impl Wire {
         fn open(socket: &Path, pane: u32) -> Result<Self, &'static str> {
-            let stream = crate::spawn_gate::connect_unix_std(socket)
+            let stream = kernel_processes::spawn_gate::connect_unix_std(socket)
                 .map_err(|_| "codex_bridge_not_running")?;
             let (uid, _) =
                 nix::unistd::getpeereid(&stream).map_err(|_| "codex_bridge_peer_unknown")?;

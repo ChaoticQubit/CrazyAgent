@@ -99,7 +99,7 @@ pub fn start(path: &Path, token: &str) -> io::Result<PipeWriter> {
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
     log.set_permissions(fs::Permissions::from_mode(0o600))?;
-    let (reader, writer) = crate::spawn_gate::guarded(io::pipe)?;
+    let (reader, writer) = kernel_processes::spawn_gate::guarded(io::pipe)?;
     let token = token.to_owned();
     let _detached = std::thread::Builder::new()
         .name("ide-server-log".to_owned())

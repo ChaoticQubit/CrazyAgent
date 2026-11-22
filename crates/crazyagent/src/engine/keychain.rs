@@ -25,7 +25,7 @@ fn failure() -> EngineError {
 /// Inputs: the home and the arguments, which name the keychain file. Output: the exit code,
 /// or a failure when it cannot start, is killed or runs past its time.
 fn exit_code(home: &Path, args: &[&std::ffi::OsStr]) -> Result<i32, EngineError> {
-    let mut child = crate::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         Command::new(SECURITY)
             .args(args)
             .env_clear()
@@ -564,7 +564,7 @@ mod tests {
     use crate::credentials::test_keychain::TestKeychain;
 
     fn read(home: &Path, args: &[&str]) -> String {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new(SECURITY)
                 .args(args)
                 .env_clear()
@@ -580,7 +580,7 @@ mod tests {
     }
 
     fn shown(home: &Path, args: &[&str]) -> String {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new(SECURITY)
                 .args(args)
                 .env_clear()
@@ -902,7 +902,7 @@ mod tests {
             "add-generic-password -U -a \"probe\" -s \"crazyagent-unnamed-test\" -X {}\n",
             hex("unnamed")
         );
-        let mut child = crate::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             Command::new(SECURITY)
                 .arg("-i")
                 .env_clear()

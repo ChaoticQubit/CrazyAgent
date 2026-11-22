@@ -62,14 +62,14 @@ pub fn record(folder: &Path, ports: Ports) -> io::Result<()> {
 /// this user included, is not free (rv-ds241 L1). Input: the port. Output: the answer.
 pub fn free(port: u16) -> bool {
     let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
-    port != 0 && crate::spawn_gate::bind_tcp_std_exclusive(address).is_ok()
+    port != 0 && kernel_processes::spawn_gate::bind_tcp_std_exclusive(address).is_ok()
 }
 
 /// Chooses a loopback port that is free now and is not `taken`. Input: a port already in
 /// use by this project. Output: the port the system handed out.
 pub fn pick(taken: u16) -> io::Result<u16> {
     for _ in 0..8 {
-        let port = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0))?
+        let port = kernel_processes::spawn_gate::bind_tcp_std(("127.0.0.1", 0))?
             .local_addr()?
             .port();
         if port != 0 && port != taken {

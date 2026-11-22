@@ -126,9 +126,9 @@ fn a_listed_pane_is_handed_its_keyless_account_and_refuses_one_for_another_addre
 /// hand-over a key is refused.
 #[test]
 fn a_keyed_listed_pane_is_handed_its_relay_and_token_and_never_the_key() {
-    use crate::credentials::SecretString;
     use crate::harnesses::launch::Secret;
     use crate::model_gateway::relay::Relay;
+    use kernel_security::secret::SecretString;
     use std::ffi::OsStr;
     let (_folder, home) = harness_home("standin-jsonl-append");
     let scratch = tempfile::tempdir().unwrap();
@@ -176,7 +176,7 @@ fn a_keyed_listed_pane_is_handed_its_relay_and_token_and_never_the_key() {
     let bridge = &built.argv[at + 1..at + 6];
     let file = key_file.to_str().unwrap();
     assert_eq!(bridge[2..], ["file", file, "OPENAI_API_KEY"]);
-    let shown = crate::spawn_gate::collected(
+    let shown = kernel_processes::spawn_gate::collected(
         std::process::Command::new("/bin/sh")
             .arg("-c")
             .args(bridge)
@@ -329,7 +329,7 @@ fn a_handed_over_pane_passes_the_host_guard_and_its_bridge_exports_the_names() {
     assert_eq!(built.argv[6..10], words);
     assert_eq!(built.argv[10..12], ["/usr/bin/true", "--home"]);
     let bridge = &built.argv[5..10];
-    let shown = crate::spawn_gate::collected(
+    let shown = kernel_processes::spawn_gate::collected(
         std::process::Command::new("/bin/sh")
             .arg("-c")
             .args(bridge)

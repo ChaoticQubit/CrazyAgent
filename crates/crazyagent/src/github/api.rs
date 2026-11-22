@@ -3,8 +3,8 @@ use super::{
     GitHubCreated, GitHubDeviceCode, GitHubNewRepo, GitHubOwner, GitHubOwners, GitHubRepo,
     GitHubRepoPage, REPO_PAGE_MAX, REPOS_PER_PAGE, SCOPES,
 };
-use crate::credentials::SecretString;
 use crate::engine::EngineError;
+use kernel_security::secret::SecretString;
 use serde::Deserialize;
 use std::io::Read;
 use std::path::Path;
@@ -718,7 +718,7 @@ pub fn find_cli() -> Option<&'static Path> {
 /// (at least `HOME`). Output: the token, or `github_cli_not_signed_in`.
 pub fn cli_token(gh: &Path, env: &[(&str, &std::ffi::OsStr)]) -> Result<SecretString, EngineError> {
     let unavailable = || failure("github_cli_not_signed_in");
-    let mut child = crate::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         Command::new(gh)
             .args(["auth", "token", "--hostname", "github.com"])
             .env_clear()
@@ -751,7 +751,7 @@ pub fn cli_token(gh: &Path, env: &[(&str, &std::ffi::OsStr)]) -> Result<SecretSt
     };
     let (read, mut bytes) = reader.join().map_err(|_| unavailable())?;
     if read.is_err() || !status.success() {
-        crate::credentials::wipe(&mut bytes);
+        kernel_security::secret::wipe(&mut bytes);
         return Err(unavailable());
     }
     while bytes.last().is_some_and(u8::is_ascii_whitespace) {

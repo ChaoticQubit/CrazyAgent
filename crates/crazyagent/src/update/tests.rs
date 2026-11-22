@@ -52,11 +52,11 @@ fn read_request(stream: &mut TcpStream) {
 }
 
 fn serve(responses: Vec<Vec<u8>>, hold: Duration) -> (String, std::thread::JoinHandle<()>) {
-    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
     let server = std::thread::spawn(move || {
         for response in responses {
-            let (mut stream, _) = crate::spawn_gate::accept_tcp_std(&listener).unwrap();
+            let (mut stream, _) = kernel_processes::spawn_gate::accept_tcp_std(&listener).unwrap();
             read_request(&mut stream);
             std::thread::sleep(hold);
             let _ = stream.write_all(&response);
@@ -557,7 +557,7 @@ fn download_and_manifest_failures_never_quote_curl_or_the_server() {
     );
     server.join().unwrap();
 
-    let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let address = format!("127.0.0.1:{port}");
     let mut received = Vec::new();
     assert_eq!(

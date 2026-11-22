@@ -2,19 +2,28 @@
 
 /// The most bytes one `.cap` source may hold.
 pub const SOURCE_BYTES_MAX: usize = 262_144;
-/// The most items (enums, types and capabilities together) one `.cap` source may hold.
+/// The most items (enums, types, handles and capabilities together) one `.cap` source may hold.
 pub const ITEMS_MAX: usize = 256;
 /// The most entries one list may hold: enum variants, type fields, inputs, emits, event fields.
 pub const FIELDS_MAX: usize = 64;
 /// The most bytes one name may hold, a dotted name counted whole.
 pub const NAME_BYTES_MAX: usize = 64;
+/// The most `list` and `option` wrappers one field type may nest.
+pub const TYPE_DEPTH_MAX: usize = 4;
 
-/// One parsed `.cap` file: its enums, types and capabilities, each in source order.
+/// One parsed `.cap` file: its enums, types, handles and capabilities, each in source order.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct File {
     pub enums: Vec<Enum>,
     pub types: Vec<Type>,
+    pub handles: Vec<Handle>,
     pub capabilities: Vec<Capability>,
+}
+
+/// A handle: a Pascal-case name for a kernel-held value a plugin refers to by id only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Handle {
+    pub name: String,
 }
 
 /// An enum: its Pascal-case name and its snake-case variants in source order.
@@ -38,13 +47,18 @@ pub struct Field {
     pub ty: TypeRef,
 }
 
-/// A field's type: a built-in scalar or an enum or type declared in the same file.
+/// A field's type: a built-in scalar, text or bytes, a list or option of a type, or an
+/// enum, type or handle declared in the same file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeRef {
     U16,
     U32,
     U64,
     Bool,
+    Text,
+    Bytes,
+    List(Box<TypeRef>),
+    Option(Box<TypeRef>),
     Named(String),
 }
 
@@ -91,7 +105,10 @@ pub fn parse(source: &str) -> Result<File, ParseError> {
     let tokens = lex::lex(source)?;
     let (file, spots) = parse::file(tokens)?;
     check::check(&file, &spots)?;
-    assert!(file.enums.len() + file.types.len() + file.capabilities.len() <= ITEMS_MAX);
+    assert!(
+        file.enums.len() + file.types.len() + file.handles.len() + file.capabilities.len()
+            <= ITEMS_MAX
+    );
     Ok(file)
 }
 

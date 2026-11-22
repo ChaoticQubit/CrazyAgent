@@ -1,7 +1,7 @@
 use super::api::{self, Endpoints};
 use super::http::{Reply, Verb};
-use crate::credentials::SecretString;
 use crate::engine::EngineError;
+use kernel_security::secret::SecretString;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};

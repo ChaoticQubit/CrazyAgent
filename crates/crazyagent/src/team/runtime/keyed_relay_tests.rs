@@ -283,12 +283,12 @@ fn a_keyed_live_master_is_stopped_at_quit_so_nothing_dials_its_ended_relay_port(
     assert!(crate::sandbox::model_proxy::RELAY_PORTS.contains(&port));
 
     let left = team.shutdown().unwrap();
-    let listener = crate::spawn_gate::bind_tcp_std(("127.0.0.1", port)).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std(("127.0.0.1", port)).unwrap();
     listener.set_nonblocking(true).unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
     let mut reached = 0;
     while Instant::now() < deadline {
-        reached += usize::from(crate::spawn_gate::accept_tcp_std(&listener).is_ok());
+        reached += usize::from(kernel_processes::spawn_gate::accept_tcp_std(&listener).is_ok());
         std::thread::sleep(Duration::from_millis(50));
     }
     let pane = AgentId::team(master).unwrap();
@@ -367,7 +367,7 @@ fn a_native_lead_on_a_keyed_endpoint_is_refused_before_any_server_starts() {
     assert_eq!(host.server_keepers(&lead), Vec::new());
     let socket = crate::terminal::harness_socket(&fixture.base, &lead).unwrap();
     assert!(
-        crate::spawn_gate::connect_unix_std(&socket).is_err(),
+        kernel_processes::spawn_gate::connect_unix_std(&socket).is_err(),
         "a refused lead's own server runs"
     );
     assert!(

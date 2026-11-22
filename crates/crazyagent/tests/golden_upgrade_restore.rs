@@ -258,7 +258,7 @@ fn settled(screen: &str) -> bool {
 /// Input: the command.
 /// Output: its output.
 fn run(command: &mut Command) -> std::io::Result<Output> {
-    crazyagent::spawn_gate::output(
+    kernel_processes::spawn_gate::output(
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())

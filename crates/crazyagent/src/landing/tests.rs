@@ -24,7 +24,7 @@ struct Case {
 /// Runs git as the owner would in a test: an isolated home, no system config, in `dir`.
 /// Inputs: the owner home, the folder and the arguments. Output: standard output.
 fn git_in(home: &Path, dir: &Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -163,7 +163,7 @@ impl Case {
         std::fs::write(&content, text).unwrap();
         let _ = std::fs::remove_file(&index);
         let git = |args: &[&OsStr]| -> String {
-            let output = crate::spawn_gate::output(
+            let output = kernel_processes::spawn_gate::output(
                 Command::new("/usr/bin/git")
                     .env_clear()
                     .env("PATH", "/usr/bin:/bin")
@@ -2227,7 +2227,7 @@ fn a_fifo_planted_in_the_agent_git_folder_is_refused_without_waiting_on_it() {
         let case = Case::new();
         let fifo = |path: &Path| {
             let _ = std::fs::remove_file(path);
-            let output = crate::spawn_gate::output(
+            let output = kernel_processes::spawn_gate::output(
                 Command::new("/usr/bin/mkfifo")
                     .arg(path)
                     .stdin(Stdio::null())
@@ -4947,7 +4947,7 @@ impl Case {
     /// Tells whether the owner repository's object store holds an object, read as the
     /// owner's git reads it. Input: the id. Output: the answer.
     fn owner_has(&self, id: &str) -> bool {
-        crate::spawn_gate::output(
+        kernel_processes::spawn_gate::output(
             Command::new("/usr/bin/git")
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
@@ -12833,8 +12833,8 @@ fn a_lockfile_tool_never_listens_on_a_configured_model_port_and_unread_settings_
     let mut case = Case::new();
     cargo_workspace(&mut case);
     let (kept, other) = {
-        let first = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-        let second = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let first = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let second = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         (
             first.local_addr().unwrap().port(),
             second.local_addr().unwrap().port(),
@@ -13031,7 +13031,7 @@ fn holds_blob(case: &Case, bytes: &str) -> bool {
     let probe = case.repo.parent().unwrap().join("probe-blob");
     write(&probe, bytes);
     let id = case.owner(&["hash-object", "--", probe.to_str().unwrap()]);
-    crate::spawn_gate::status(
+    kernel_processes::spawn_gate::status(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -13050,7 +13050,7 @@ fn holds_blob(case: &Case, bytes: &str) -> bool {
 /// case and the two commits. Output: the answer.
 #[cfg(target_os = "macos")]
 fn is_ancestor(case: &Case, older: &str, newer: &str) -> bool {
-    crate::spawn_gate::status(
+    kernel_processes::spawn_gate::status(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -13068,7 +13068,7 @@ fn is_ancestor(case: &Case, older: &str, newer: &str) -> bool {
 fn survivors(token: &str) -> Vec<String> {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        let found = crate::spawn_gate::output(
+        let found = kernel_processes::spawn_gate::output(
             Command::new("/usr/bin/pgrep")
                 .args(["-f", token])
                 .stdin(Stdio::null())
@@ -13456,7 +13456,7 @@ struct RealTool {
 /// Output: the answer.
 #[cfg(target_os = "macos")]
 fn runs_for_the_engine(program: &str) -> bool {
-    crate::spawn_gate::status(
+    kernel_processes::spawn_gate::status(
         Command::new("/usr/bin/env")
             .env_clear()
             .env(
@@ -16262,7 +16262,7 @@ fn index_plants(outside: &Path) -> Vec<Plant> {
     plants.push((
         "a FIFO",
         Box::new(|path: &Path| {
-            let made = crate::spawn_gate::status(
+            let made = kernel_processes::spawn_gate::status(
                 Command::new("/usr/bin/mkfifo")
                     .arg(path)
                     .stdin(Stdio::null())

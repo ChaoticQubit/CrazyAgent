@@ -73,7 +73,7 @@ fn the_engine_binary_serves_the_delegate_tool_to_an_mcp_client() {
         ],
         "a conversation master's server leaves propose_github_rule and wake out"
     );
-    let unknown = crazyagent::spawn_gate::output(
+    let unknown = kernel_processes::spawn_gate::output(
         Command::new(engine)
             .args(&remembering)
             .arg("forget")
@@ -88,7 +88,7 @@ fn the_engine_binary_serves_the_delegate_tool_to_an_mcp_client() {
             .contains("usage: crazyagent team-mcp DROP_FILE [MAILBOX_DIR [OFF_TOOL ...]]")
     );
 
-    let mut server = crazyagent::spawn_gate::spawn(
+    let mut server = kernel_processes::spawn_gate::spawn(
         Command::new(engine)
             .args(&arguments)
             .env_clear()
@@ -133,7 +133,7 @@ fn the_engine_binary_serves_the_delegate_tool_to_an_mcp_client() {
         }]
     );
 
-    let wrong = crazyagent::spawn_gate::output(
+    let wrong = kernel_processes::spawn_gate::output(
         Command::new(engine)
             .arg(SERVER_COMMAND)
             .stdin(Stdio::null())
@@ -172,7 +172,7 @@ fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
             .collect::<Vec<_>>(),
     );
 
-    let mut server = crazyagent::spawn_gate::spawn(
+    let mut server = kernel_processes::spawn_gate::spawn(
         Command::new(engine)
             .args(&arguments)
             .env_clear()
@@ -263,7 +263,7 @@ fn the_engine_binary_serves_the_live_team_tools_with_the_engine_answer() {
         "every call and answer was taken"
     );
 
-    let wrong = crazyagent::spawn_gate::output(
+    let wrong = kernel_processes::spawn_gate::output(
         Command::new(engine)
             .arg(LIVE_SERVER_COMMAND)
             .arg(directory.path().join("missing"))
@@ -284,7 +284,7 @@ struct TmuxServer {
 #[cfg(unix)]
 impl TmuxServer {
     fn run(&self, arguments: &[&str]) -> String {
-        let output = crazyagent::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -308,7 +308,7 @@ impl TmuxServer {
 #[cfg(unix)]
 impl Drop for TmuxServer {
     fn drop(&mut self) {
-        let _ = crazyagent::spawn_gate::output(
+        let _ = kernel_processes::spawn_gate::output(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -478,7 +478,7 @@ fn both_live_servers_refuse_an_unknown_tool_to_switch_off_with_their_usage() {
     let mailbox = directory.path().canonicalize().unwrap();
     for command in [LIVE_SERVER_COMMAND, AGENT_SERVER_COMMAND] {
         for off in [&["status"][..], &["stop", "Stop"][..]] {
-            let ran = crazyagent::spawn_gate::output(
+            let ran = kernel_processes::spawn_gate::output(
                 Command::new(env!("CARGO_BIN_EXE_crazyagent"))
                     .arg(command)
                     .arg(&mailbox)
@@ -589,7 +589,7 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        let mut server = crazyagent::spawn_gate::spawn(&mut command).unwrap();
+        let mut server = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
         let mut input = server.stdin.take().unwrap();
         let opening = [
             json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}}}),

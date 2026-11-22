@@ -536,7 +536,7 @@ async fn native_auth_channel_bootstrap_writes_exact_token_length_and_closes_chil
     channel_case(|case| async move {
         let (_, launch) = case.launch("bootstrap-token-pipe").await;
         let before = case.snapshot();
-        let mut child = crate::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             ProcessCommand::new("/usr/bin/wc")
                 .arg("-c")
                 .env_clear()
@@ -1176,7 +1176,7 @@ async fn native_auth_channel_any_real_child_effect_forbids_no_effect_retirement(
         let guard = case.guard(&fact, NativeProfileUsePurpose::Authentication);
         assert!(channel.revalidate(&guard).await.is_ok());
         let mut session = CustodySession::new(guard);
-        let mut child = crate::spawn_gate::spawn(
+        let mut child = kernel_processes::spawn_gate::spawn(
             ProcessCommand::new("/usr/bin/true")
                 .env_clear()
                 .stdin(Stdio::null())

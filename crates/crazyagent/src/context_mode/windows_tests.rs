@@ -310,7 +310,7 @@ fn local_tarball(folder: &Path) -> PathBuf {
     fs::write(package.join(PROGRAM), "").unwrap();
     let tarball = folder.join(format!("{PACKAGE}-{VERSION}.tgz"));
     let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
-    let packed = crate::spawn_gate::status(
+    let packed = kernel_processes::spawn_gate::status(
         std::process::Command::new(system.join("tar.exe"))
             .arg("-czf")
             .arg(&tarball)
@@ -348,7 +348,7 @@ fn install_output(
             "--no-save",
         ])
         .arg(tarball);
-    crate::spawn_gate::collected(&mut command).unwrap()
+    kernel_processes::spawn_gate::collected(&mut command).unwrap()
 }
 
 /// npm's exit and the first 4 KiB of each of its streams, for a failed assertion. Input:
@@ -368,7 +368,7 @@ fn shown(output: &std::process::Output) -> String {
 /// folders. Inputs: npm's folder and the staging folders' parent. Output: the text.
 fn granted(bin: &Path, npm: &Path) -> String {
     let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
-    let listed = crate::spawn_gate::collected(
+    let listed = kernel_processes::spawn_gate::collected(
         std::process::Command::new(system.join("icacls.exe")).arg(bin),
     )
     .unwrap();
@@ -520,7 +520,7 @@ fn an_agent_launch_whose_node_folder_this_user_cannot_change_says_so() {
     let case = case();
     let user = std::env::var("USERNAME").unwrap();
     let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
-    let locked = crate::spawn_gate::collected(
+    let locked = kernel_processes::spawn_gate::collected(
         std::process::Command::new(system.join("icacls.exe"))
             .arg(&case.bin)
             .args(["/inheritance:r", "/grant:r", "*S-1-3-4:(OI)(CI)(RX)"])
@@ -544,7 +544,7 @@ fn an_agent_launch_whose_node_folder_this_user_cannot_change_says_so() {
 /// the farm runs rows side by side. Input: the folder. Output: the list.
 fn entries(folder: &Path) -> String {
     let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
-    let listed = crate::spawn_gate::collected(
+    let listed = kernel_processes::spawn_gate::collected(
         std::process::Command::new(system.join("icacls.exe")).arg(folder),
     )
     .unwrap();
@@ -624,7 +624,7 @@ fn the_release_takes_back_what_the_npm_job_was_granted() {
     let home = crate::sandbox::canonical(&work).unwrap().join("home");
     let (record, package) = container_files(&crate::sandbox::windows::container_for(&job, &home));
     let mut command = npm_command(&case.root, &staged, &work, &case.bin, VERSION).unwrap();
-    let ran = crate::spawn_gate::collected(&mut command).unwrap();
+    let ran = kernel_processes::spawn_gate::collected(&mut command).unwrap();
     assert!(!ran.status.success(), "{}", shown(&ran));
     assert_ne!(entries(&staged), before, "{}", shown(&ran));
     assert!(record.is_file(), "{}", shown(&ran));
@@ -682,7 +682,7 @@ fn crashed_probe(case: &Case) -> (PathBuf, PathBuf, PathBuf) {
     let name = crate::sandbox::windows::container_for(&base.join("project"), &base.join("home"));
     let (record, package) = container_files(&name);
     let mut command = node_command(&case.root, &scratch, &case.bin).unwrap();
-    let ran = crate::spawn_gate::collected(&mut command).unwrap();
+    let ran = kernel_processes::spawn_gate::collected(&mut command).unwrap();
     assert!(record.is_file(), "{}", shown(&ran));
     assert!(package.is_dir(), "{}", shown(&ran));
     (scratch, record, package)
@@ -758,7 +758,7 @@ fn an_npm_install_releases_the_container_a_crashed_install_left() {
     let home = crate::sandbox::canonical(&work).unwrap().join("home");
     let (record, package) = container_files(&crate::sandbox::windows::container_for(&job, &home));
     let mut command = npm_command(&case.root, &staged, &work, &case.bin, VERSION).unwrap();
-    let ran = crate::spawn_gate::collected(&mut command).unwrap();
+    let ran = kernel_processes::spawn_gate::collected(&mut command).unwrap();
     assert!(record.is_file(), "{}", shown(&ran));
     assert!(package.is_dir(), "{}", shown(&ran));
     assert_ne!(entries(&case.bin), before);

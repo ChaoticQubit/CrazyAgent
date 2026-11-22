@@ -87,11 +87,11 @@ pub fn configuration_defaults() -> serde_json::Value {
 /// the system picks. Input: the recorded port, if any. Output: the listener and its port.
 pub async fn bind(recorded: Option<u16>) -> io::Result<(TcpListener, u16)> {
     if let Some(port) = recorded.filter(|port| *port != 0)
-        && let Ok(listener) = crate::spawn_gate::bind_tcp(("127.0.0.1", port)).await
+        && let Ok(listener) = kernel_processes::spawn_gate::bind_tcp(("127.0.0.1", port)).await
     {
         return Ok((listener, port));
     }
-    let listener = crate::spawn_gate::bind_tcp(("127.0.0.1", 0)).await?;
+    let listener = kernel_processes::spawn_gate::bind_tcp(("127.0.0.1", 0)).await?;
     let port = listener.local_addr()?.port();
     assert_ne!(port, 0);
     Ok((listener, port))
@@ -114,7 +114,7 @@ pub async fn serve(listener: TcpListener, site: Site) {
     let mut connections = tokio::task::JoinSet::new();
     loop {
         while connections.try_join_next().is_some() {}
-        let stream = match crate::spawn_gate::accept_tcp(&listener).await {
+        let stream = match kernel_processes::spawn_gate::accept_tcp(&listener).await {
             Ok((stream, _)) => stream,
             Err(_) => {
                 tokio::time::sleep(ACCEPT_BACKOFF).await;
@@ -559,7 +559,7 @@ async fn upstream(site: &Site) -> io::Result<TcpStream> {
     };
     let server = tokio::time::timeout(
         CONNECT_TIME,
-        crate::spawn_gate::connect_tcp(("127.0.0.1", site.upstream)),
+        kernel_processes::spawn_gate::connect_tcp(("127.0.0.1", site.upstream)),
     )
     .await
     .map_err(|_| io::Error::other("ide_proxy_upstream_timeout"))??;

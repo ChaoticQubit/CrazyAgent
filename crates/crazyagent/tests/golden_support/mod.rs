@@ -232,10 +232,12 @@ pub fn git_text(folder: &Path, args: &[&str]) -> String {
 /// listening and no model is asked. Input: none. Output: the port; its thread stays blocked
 /// on the listener until the test process ends.
 pub fn silent_provider() -> u16 {
-    let listener = crazyagent::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
+    let listener = kernel_processes::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     assert!(port > 0);
-    std::thread::spawn(move || crazyagent::spawn_gate::incoming_tcp_std(&listener).for_each(drop));
+    std::thread::spawn(move || {
+        kernel_processes::spawn_gate::incoming_tcp_std(&listener).for_each(drop)
+    });
     port
 }
 

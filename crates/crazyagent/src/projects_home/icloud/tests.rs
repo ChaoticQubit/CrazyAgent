@@ -1109,7 +1109,7 @@ impl Probe {
     fn evict(&self, files: &[PathBuf]) {
         assert!(files.iter().all(|file| file.starts_with(&self.0)));
         let asked = |file: &PathBuf| {
-            crate::spawn_gate::status(
+            kernel_processes::spawn_gate::status(
                 Command::new(BRCTL)
                     .arg("evict")
                     .arg(file)

@@ -1,7 +1,7 @@
 use crate::credentials::Piece::{Escaped, Plain};
-use crate::credentials::SecretString;
 use crate::engine::EngineError;
-use crate::platform::fd_wait::{self, Wake};
+use kernel_processes::fd_wait::{self, Wake};
+use kernel_security::secret::SecretString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -263,7 +263,11 @@ fn relay_listener() -> std::io::Result<TcpListener> {
     let start = NEXT_RELAY_PORT
         .fetch_add(1, Ordering::SeqCst)
         .wrapping_add(usize::try_from(std::process::id()).unwrap_or(0));
-    let listener = first_bound(&ports, start, crate::spawn_gate::bind_tcp_std_exclusive)?;
+    let listener = first_bound(
+        &ports,
+        start,
+        kernel_processes::spawn_gate::bind_tcp_std_exclusive,
+    )?;
     assert!(block.contains(&listener.local_addr()?.port()));
     Ok(listener)
 }
@@ -459,7 +463,7 @@ fn accept_loop(listener: &TcpListener, shared: &Arc<Shared>, woken: &Wake) {
     while !shared.stop.load(Ordering::Acquire) {
         #[cfg(test)]
         shared.accept_passes.fetch_add(1, Ordering::SeqCst);
-        let (stream, peer) = match crate::spawn_gate::accept_tcp_std(listener) {
+        let (stream, peer) = match kernel_processes::spawn_gate::accept_tcp_std(listener) {
             Ok(accepted) => accepted,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 let until = Instant::now() + WAIT_MAX;
@@ -583,12 +587,12 @@ fn exchange(
     let input = child.stdin.take();
     let output = child.stdout.take();
     if let Err(mut child) = shared.attach(id, child) {
-        crate::credentials::wipe(&mut config);
+        kernel_security::secret::wipe(&mut config);
         stop(&mut child);
         return Err(502);
     }
     let written = input.map(|mut input| input.write_all(&config));
-    crate::credentials::wipe(&mut config);
+    kernel_security::secret::wipe(&mut config);
     let sent = match (written, body) {
         (Some(Ok(())), Some(mut body)) => body.write_all(&incoming.body).is_ok(),
         (Some(Ok(())), None) => true,
@@ -645,7 +649,7 @@ fn upstream_child(
     let pipe = if incoming.body.is_empty() {
         None
     } else {
-        Some(crate::spawn_gate::guarded(std::io::pipe).map_err(|_| 500_u16)?)
+        Some(kernel_processes::spawn_gate::guarded(std::io::pipe).map_err(|_| 500_u16)?)
     };
     let handed = pipe.as_ref().map(|(reader, _)| handed_path(reader));
     let mut config = match credential {
@@ -664,12 +668,12 @@ fn upstream_child(
     let mut command = upstream_command(&shared.upstream);
     let (spawned, body) = match pipe {
         Some((reader, writer)) => (spawn_holding(&mut command, reader), Some(writer)),
-        None => (crate::spawn_gate::spawn(&mut command), None),
+        None => (kernel_processes::spawn_gate::spawn(&mut command), None),
     };
     match spawned {
         Ok(child) => Ok((child, config, body)),
         Err(_) => {
-            crate::credentials::wipe(&mut config);
+            kernel_security::secret::wipe(&mut config);
             Err(502)
         }
     }
@@ -694,7 +698,7 @@ fn handed_path(_reader: &std::io::PipeReader) -> PathBuf {
 /// no other child ever holds it. Inputs: the curl command and the read end. Output: curl.
 #[cfg(unix)]
 fn spawn_holding(command: &mut Command, reader: std::io::PipeReader) -> std::io::Result<Child> {
-    crate::spawn_gate::spawn_handing(command, reader.into())
+    kernel_processes::spawn_gate::spawn_handing(command, reader.into())
 }
 
 /// Never reached: [`Relay::start`] refuses where curl cannot inherit the body pipe.

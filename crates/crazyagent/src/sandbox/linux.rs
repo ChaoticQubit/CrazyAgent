@@ -462,7 +462,7 @@ pub(crate) fn git_step_policy(read: &[PathBuf], write: &[PathBuf]) -> LandlockPo
 pub(crate) fn holds_file_rules(helper: &Path) -> bool {
     clean_absolute(helper)
         && helper.is_file()
-        && crate::spawn_gate::status(
+        && kernel_processes::spawn_gate::status(
             Command::new(helper)
                 .arg(PROBE)
                 .env_clear()
@@ -1435,21 +1435,22 @@ fn probe_supervisor(folder: &Path) -> ExitCode {
     if nix::sys::prctl::set_no_new_privs().is_err() || !private_empty(folder) {
         return ExitCode::from(1);
     }
-    let checked = crate::spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).and_then(|listener| {
-        let port = listener.local_addr()?.port();
-        let mut check = Command::new("/proc/self/exe");
-        check
-            .arg(PROBE_SUPERVISED)
-            .arg(port.to_string())
-            .arg(folder);
-        let all = Guard {
-            loopback: vec![port],
-            git: Some(GitOwn::default()),
-            signals: true,
-            held: None,
-        };
-        serve::run(all.supervised(&[port]), &mut check)
-    });
+    let checked =
+        kernel_processes::spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).and_then(|listener| {
+            let port = listener.local_addr()?.port();
+            let mut check = Command::new("/proc/self/exe");
+            check
+                .arg(PROBE_SUPERVISED)
+                .arg(port.to_string())
+                .arg(folder);
+            let all = Guard {
+                loopback: vec![port],
+                git: Some(GitOwn::default()),
+                signals: true,
+                held: None,
+            };
+            serve::run(all.supervised(&[port]), &mut check)
+        });
     match checked {
         Ok(0) => ExitCode::SUCCESS,
         _ => ExitCode::from(1),
@@ -1478,8 +1479,9 @@ fn probe_supervised(port: u16, folder: &Path) -> ExitCode {
     let refused = |error: std::io::Error| error.kind() == std::io::ErrorKind::PermissionDenied;
     let elsewhere = SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), port));
     let made = folder.join("made");
-    let here = crate::spawn_gate::connect_tcp_std((Ipv4Addr::LOCALHOST, port));
-    let there = crate::spawn_gate::connect_tcp_std_timeout(&elsewhere, Duration::from_secs(2));
+    let here = kernel_processes::spawn_gate::connect_tcp_std((Ipv4Addr::LOCALHOST, port));
+    let there =
+        kernel_processes::spawn_gate::connect_tcp_std_timeout(&elsewhere, Duration::from_secs(2));
     let written = fs::write(&made, b"made").and_then(|()| fs::read(&made));
     let git = fs::create_dir(folder.join(".git"));
     let supervisor = rustix::process::getppid();
@@ -1961,7 +1963,7 @@ fn passes_within(probe: &mut Command, time_max: Duration) -> bool {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let Ok(mut child) = crate::spawn_gate::spawn(quiet) else {
+    let Ok(mut child) = kernel_processes::spawn_gate::spawn(quiet) else {
         return false;
     };
     loop {
@@ -2052,7 +2054,7 @@ fn probe_failure(probe: &mut Command, log: &mut impl Write) -> Option<String> {
 /// Input: the probe command. Output: none when it ran and exited 0, else its stderr and how
 /// it ended.
 fn probe_said(probe: &mut Command) -> Option<(String, String)> {
-    let started = crate::spawn_gate::spawn(
+    let started = kernel_processes::spawn_gate::spawn(
         probe
             .env_clear()
             .stdin(Stdio::null())
@@ -2121,7 +2123,7 @@ fn probe_refusal(reason: &str) -> Option<String> {
 /// Runs a probe with no environment and no input or output. Input: the probe command.
 /// Output: true only when it ran and exited 0.
 fn passes(probe: &mut Command) -> bool {
-    crate::spawn_gate::status(
+    kernel_processes::spawn_gate::status(
         probe
             .env_clear()
             .stdin(Stdio::null())
@@ -3404,7 +3406,7 @@ mod tests {
             .args(["-c", "commit.gpgsign=false"])
             .args(args)
             .stdout(Stdio::null());
-        let status = crate::spawn_gate::status(&mut command).unwrap();
+        let status = kernel_processes::spawn_gate::status(&mut command).unwrap();
         assert!(status.success(), "git {args:?}");
     }
 

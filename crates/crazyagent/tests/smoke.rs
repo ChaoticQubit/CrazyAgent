@@ -36,7 +36,7 @@ struct Server {
 
 impl Server {
     fn run(&self, args: &[&str]) -> Output {
-        crazyagent::spawn_gate::output(
+        kernel_processes::spawn_gate::output(
             Command::new(&self.tmux)
                 .arg("-S")
                 .arg(&self.socket)
@@ -71,7 +71,7 @@ impl Drop for Server {
 }
 
 fn processes(root: &Path) -> Vec<String> {
-    let output = crazyagent::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("ps")
             .args(["axww", "-o", "pid=,command="])
             .stdin(Stdio::null())
@@ -97,7 +97,7 @@ fn settled(what: &str, check: impl Fn() -> bool) {
 }
 
 fn running(pid: u32) -> bool {
-    crazyagent::spawn_gate::status(
+    kernel_processes::spawn_gate::status(
         Command::new("/bin/kill")
             .args(["-0", &pid.to_string()])
             .stdout(Stdio::null())
@@ -194,7 +194,7 @@ async fn the_engine_starts_answers_a_plain_read_and_stops_with_nothing_left() {
         );
     }
     assert!(generations(&root).is_empty(), "{:?}", generations(&root));
-    assert!(crazyagent::spawn_gate::connect_unix_std(root.join("engine.sock")).is_err());
+    assert!(kernel_processes::spawn_gate::connect_unix_std(root.join("engine.sock")).is_err());
     settled("no process runs from the engine root after stop", || {
         processes(&root).is_empty()
     });
@@ -251,7 +251,7 @@ async fn the_engine_private_tmux_server_runs_a_pane_and_never_touches_the_defaul
 
     let private = server.checked(&["list-panes", "-a", "-F", "#{pane_start_command}"]);
     assert!(private.contains(&marker), "{private}");
-    let default = crazyagent::spawn_gate::output(
+    let default = kernel_processes::spawn_gate::output(
         Command::new(&server.tmux)
             .args(["list-panes", "-a", "-F", "#{pane_start_command}"])
             .env_remove("TMUX")

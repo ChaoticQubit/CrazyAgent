@@ -5,7 +5,7 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::process::{Command, Stdio};
 
 fn git(root: &Path, args: &[&str]) -> String {
-    let output = crate::spawn_gate::output(
+    let output = kernel_processes::spawn_gate::output(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -111,7 +111,8 @@ fn within_five_seconds<T: Send + 'static>(
 }
 
 fn fifo_at(path: &Path) {
-    let made = crate::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(path)).unwrap();
+    let made =
+        kernel_processes::spawn_gate::status(Command::new("/usr/bin/mkfifo").arg(path)).unwrap();
     assert!(made.success());
     assert!(
         std::fs::symlink_metadata(path)

@@ -73,7 +73,7 @@ fn a_real_tools_on_claude_team_agent_keeps_its_default_tools_but_no_built_in_sub
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+    let mut child = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
     child
         .stdin
         .take()
@@ -157,7 +157,7 @@ fn the_installed_codex_reads_a_tools_on_team_agent_with_its_own_sub_agents_off()
         .current_dir(&launch.work)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let output = crate::spawn_gate::output(&mut features).unwrap();
+    let output = kernel_processes::spawn_gate::output(&mut features).unwrap();
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(
         output.status.success(),
@@ -335,7 +335,7 @@ fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_of
         "[user]\n\tname = Repo Owner\n\temail = owner@example.invalid\n",
     )
     .unwrap();
-    let initialized = crate::spawn_gate::status(
+    let initialized = kernel_processes::spawn_gate::status(
         Command::new("/usr/bin/git")
             .env_clear()
             .env("HOME", &owner)
@@ -378,7 +378,7 @@ fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_of
         .filter_map(|(name, value)| Some((name.to_owned(), value?.to_owned())))
         .collect();
     let git = |args: &[&str]| -> String {
-        let output = crate::spawn_gate::output(
+        let output = kernel_processes::spawn_gate::output(
             Command::new("/usr/bin/git")
                 .env_clear()
                 .envs(env.iter().map(|(name, value)| (name, value)))
@@ -614,7 +614,7 @@ fn a_launch_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it()
 #[cfg(unix)]
 fn group_leader(program: &str, args: &[&str]) -> (std::process::Child, rustix::process::Pid) {
     use std::os::unix::process::CommandExt;
-    let child = crate::spawn_gate::spawn(
+    let child = kernel_processes::spawn_gate::spawn(
         std::process::Command::new(program)
             .args(args)
             .process_group(0)
@@ -782,7 +782,7 @@ fn handed(lines: std::sync::mpsc::Receiver<super::Line>) -> Vec<String> {
 #[cfg(unix)]
 #[test]
 fn a_stdout_line_past_the_line_bound_is_skipped_and_the_next_line_arrives() {
-    let mut child = crate::spawn_gate::spawn(
+    let mut child = kernel_processes::spawn_gate::spawn(
         std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(format!(
@@ -1281,8 +1281,8 @@ fn a_keyed_piped_harness_ends_when_the_engine_holding_its_relay_dies() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_listed_harness_on_its_own_relay_holds_the_engine_s_lifeline_and_a_keyless_one_none() {
-    use crate::credentials::SecretString;
     use crate::model_gateway::relay::Relay;
+    use kernel_security::secret::SecretString;
     use std::os::unix::fs::PermissionsExt;
     const URL: &str = "http://127.0.0.1:9/v1";
     for keyed in [true, false] {

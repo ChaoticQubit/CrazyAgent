@@ -44,7 +44,7 @@ fn custodian_bootstrap_pipe_never_reaches_a_child_started_at_the_same_time() {
         .unwrap();
     std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let group = Group(
-        crate::spawn_gate::spawn(
+        kernel_processes::spawn_gate::spawn(
             Command::new("/bin/sleep")
                 .arg("600")
                 .env_clear()
@@ -71,7 +71,7 @@ fn custodian_bootstrap_pipe_never_reaches_a_child_started_at_the_same_time() {
         command.stderr(Stdio::piped());
         barrier.wait();
         let started = Instant::now();
-        let mut custodian = crate::spawn_gate::spawn(&mut command).unwrap();
+        let mut custodian = kernel_processes::spawn_gate::spawn(&mut command).unwrap();
         let mut input = custodian.stdin.take().unwrap();
         input.write_all(&[0xff; 32]).unwrap();
         drop(input);

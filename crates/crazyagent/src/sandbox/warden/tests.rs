@@ -67,13 +67,13 @@ fn unarmed_run(run: &DetachingRun) -> (std::process::Child, std::os::unix::net::
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    let (engine, warden) = crate::spawn_gate::unix_pair_std().unwrap();
+    let (engine, warden) = kernel_processes::spawn_gate::unix_pair_std().unwrap();
     let handed = std::os::fd::OwnedFd::from(warden);
     command.env(
         WARDEN_FD,
         std::os::fd::AsRawFd::as_raw_fd(&handed).to_string(),
     );
-    let child = crate::spawn_gate::spawn_handing(&mut command, handed).unwrap();
+    let child = kernel_processes::spawn_gate::spawn_handing(&mut command, handed).unwrap();
     (child, engine)
 }
 
@@ -119,7 +119,7 @@ fn a_warden_stops_its_run_when_the_engine_holding_its_end_is_killed() {
     let (mut child, warden) = spawn(&mut run.command(&run.profile)).unwrap();
     let processes = run.processes();
     let Warden { engine, .. } = warden.unwrap();
-    let mut engine_process = crate::spawn_gate::spawn_handing(
+    let mut engine_process = kernel_processes::spawn_gate::spawn_handing(
         Command::new("/bin/sleep")
             .arg("30")
             .stdin(Stdio::null())
@@ -227,7 +227,7 @@ fn each_warden_ends_only_its_own_run(runs: [&DetachingRun; 3]) {
     standing("spared after the fire", &mut spared, spared_processes);
 
     let Warden { engine, .. } = orphaned_warden;
-    let mut engine_process = crate::spawn_gate::spawn_handing(
+    let mut engine_process = kernel_processes::spawn_gate::spawn_handing(
         Command::new("/bin/sleep")
             .arg("30")
             .stdin(Stdio::null())
@@ -287,7 +287,7 @@ fn heard_with(
     peer: impl FnOnce(std::os::unix::net::UnixStream) + Send + 'static,
     wait: Duration,
 ) -> (Heard, usize) {
-    let (engine, warden) = crate::spawn_gate::unix_pair_std().unwrap();
+    let (engine, warden) = kernel_processes::spawn_gate::unix_pair_std().unwrap();
     engine.set_nonblocking(true).unwrap();
     let acting = std::thread::spawn(move || peer(warden));
     let before = HEARD.get();

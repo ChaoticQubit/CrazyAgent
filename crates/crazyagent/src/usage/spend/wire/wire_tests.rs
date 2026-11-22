@@ -1,7 +1,7 @@
 use super::super::{Outcome, attempt_key};
 use super::*;
-use crate::credentials::SecretString;
 use crate::github::test_server::{Answer, Server};
+use kernel_security::secret::SecretString;
 
 fn secret() -> String {
     let mut bytes = [0_u8; 12];
@@ -151,7 +151,7 @@ fn codex_spend_failures_become_plain_codes() {
             codex_consume(consume_at(&server), &credential(&secret()), &key, true).unwrap_err();
         assert_eq!(problem.0, code, "status {status}");
     }
-    let (_held, port) = crate::spawn_gate::refusing_tcp_port().unwrap();
+    let (_held, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
     let gone = url::Url::parse(&format!(
         "http://127.0.0.1:{port}/backend-api/wham/rate-limit-reset-credits/consume"
     ))

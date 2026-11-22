@@ -102,7 +102,7 @@ async fn a_bind_in_a_root_that_is_not_private_is_refused() {
     let (temp, engine, config, _) = engine_at_a_private_root().await;
     let plain = temp.path().join("plain");
     std::fs::create_dir(&plain).unwrap();
-    let granted = crate::spawn_gate::collected(
+    let granted = kernel_processes::spawn_gate::collected(
         std::process::Command::new("icacls")
             .arg(&plain)
             .args(["/grant", "*S-1-5-32-545:(OI)(CI)(RX)"]),
