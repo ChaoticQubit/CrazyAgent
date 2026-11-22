@@ -1,7 +1,7 @@
 use super::stub::*;
 use super::*;
 
-use kernel_processes::batch::{batch_file, cmd_shim_real, fixed_program};
+use crate::batch::{batch_file, cmd_shim_real, fixed_program};
 
 /// A folder with a stand-in `node.exe` (a copy of the `where.exe` Windows ships, a real
 /// program) and places that look there. Input: none. Output: the folder guard, its real
@@ -32,7 +32,7 @@ fn an_npm_cmd_shim_runs_as_node_and_the_script_it_names() {
     std::fs::create_dir_all(&package).unwrap();
     std::fs::write(package.join("codex.js"), "#!/usr/bin/env node\n").unwrap();
     let shim = real.join("codex.cmd");
-    std::fs::write(&shim, kernel_processes::batch::CODEX).unwrap();
+    std::fs::write(&shim, crate::batch::CODEX).unwrap();
 
     let resolved = resolve_entry(&shim, &places).unwrap();
     assert_eq!(resolved.entry, shim);
@@ -83,11 +83,7 @@ fn npx_runs_by_its_layout_and_every_other_batch_file_is_refused() {
     let lone_npx = other.join("npx.cmd");
     std::fs::copy(&npx, &lone_npx).unwrap();
     let tool = other.join("tool.cmd");
-    std::fs::write(
-        &tool,
-        kernel_processes::batch::CODEX.replace("CALL", "calc & CALL"),
-    )
-    .unwrap();
+    std::fs::write(&tool, crate::batch::CODEX.replace("CALL", "calc & CALL")).unwrap();
     let script = other.join("tool.BAT");
     std::fs::write(&script, "@ECHO off\r\n").unwrap();
     for file in [lone_npx, tool, script] {
@@ -168,8 +164,7 @@ fn no_batch_file_is_ever_started_on_windows() {
     let marker = folder.path().join("ran");
     let script = folder.path().join("x.cmd");
     std::fs::write(&script, format!("@echo ran> \"{}\"\r\n", marker.display())).unwrap();
-    let refused =
-        kernel_processes::spawn_gate::spawn(&mut std::process::Command::new(&script)).unwrap_err();
+    let refused = crate::spawn_gate::spawn(&mut std::process::Command::new(&script)).unwrap_err();
     assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
     assert!(!marker.exists());
 }

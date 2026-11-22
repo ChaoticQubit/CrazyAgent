@@ -1068,7 +1068,7 @@ fn resolve_at(name: &str, places: &Places, depth: usize) -> Result<Resolved, Mis
     })
 }
 
-fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Missing> {
+pub(crate) fn entry_at(entry: &Path, places: &Places, depth: usize) -> Result<Resolved, Missing> {
     let tool = entry
         .file_name()
         .and_then(OsStr::to_str)
