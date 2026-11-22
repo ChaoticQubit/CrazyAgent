@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 mod e2e_support;
 mod full_access_support;
 mod keychain_support;
+mod owner_support;
 
 #[path = "snapshot_v242/caseless.rs"]
 mod caseless;
