@@ -3,15 +3,15 @@ use super::settings::SettingsSources;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use kernel_storage::StorageError;
+use kernel_storage::migrations::V24_VERSION_MAX;
 /// Forwards to kernel_storage::migrations::backup_failure until Task 3b repoints storage.rs
 /// and deletes it (POD-B exception). Input and output as the kernel's.
 pub use kernel_storage::migrations::backup_failure;
 #[cfg(unix)]
 use kernel_storage::migrations::{
-    BACKUPS, PINNED_DAYS, backup_time, backups_folder, backups_in, check_copy, fill, mark_checked,
-    pinned, private_file, stamp, stamp_time,
+    BACKUPS, DATABASE, PINNED_DAYS, backup_time, backups_folder, backups_in, check_copy, fill,
+    mark_checked, pinned, private_file, schema, stamp, stamp_time,
 };
-use kernel_storage::migrations::{DATABASE, V24_VERSION_MAX, schema};
 pub(crate) use kernel_storage::upgrade::Step;
 #[cfg(unix)]
 use kernel_storage::upgrade::{restore, version};
@@ -20,10 +20,11 @@ use rusqlite::OpenFlags;
 use rusqlite::{Connection, Transaction};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 #[cfg(unix)]
-use std::time::Duration;
-use std::time::SystemTime;
+use std::path::PathBuf;
+#[cfg(unix)]
+use std::time::{Duration, SystemTime};
 
 mod landing_step;
 mod memory_step;
