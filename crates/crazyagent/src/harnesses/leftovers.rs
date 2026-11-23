@@ -1,6 +1,8 @@
 use crate::protocol::CredentialRef;
 use crate::sandbox::LineageCheck;
-use kernel_sandbox::profile::env::{LINEAGE_VARIABLE, LineageToken};
+#[cfg(any(target_os = "macos", all(test, unix)))]
+use kernel_sandbox::profile::env::LINEAGE_VARIABLE;
+use kernel_sandbox::profile::env::LineageToken;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
