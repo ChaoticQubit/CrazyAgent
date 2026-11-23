@@ -271,14 +271,14 @@ impl Control {
         }
     }
 
+    /// Ends the client at once: marks it closed, kills and reaps the child, then drops the
+    /// input. The child goes first, since a write blocked on a full pipe holds the input
+    /// until the child's end of the pipe closes.
     pub(super) fn stop(&self) {
         if let Ok(mut state) = self.state.lock() {
             state.closed = true;
             state.pending.clear();
             state.viewers.clear();
-        }
-        if let Ok(mut input) = self.input.lock() {
-            *input = None;
         }
         if let Ok(mut child) = self.child.lock()
             && let Some(mut child) = child.take()
@@ -286,11 +286,19 @@ impl Control {
             let _ = child.kill();
             let _ = child.wait();
         }
-    }
-
-    pub(super) fn close(&self) {
         if let Ok(mut input) = self.input.lock() {
             *input = None;
+        }
+    }
+
+    /// Ends the client gently: drops the input so tmux sees the end of its commands and
+    /// waits up to `CLOSE_TIME` for it to exit, then stops it. A write that holds the input
+    /// is blocked on a full pipe, so then the client is stopped at once.
+    pub(super) fn close(&self) {
+        match self.input.try_lock() {
+            Ok(mut input) => *input = None,
+            Err(std::sync::TryLockError::Poisoned(_)) => {}
+            Err(std::sync::TryLockError::WouldBlock) => return self.stop(),
         }
         let deadline = Instant::now() + CLOSE_TIME;
         if let Ok(mut slot) = self.child.lock()
