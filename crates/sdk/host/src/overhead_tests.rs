@@ -52,6 +52,40 @@ impl sdk::net::Provide for NoNet {
     }
 }
 
+/// A service provider the row never reaches: it times only the quit save.
+struct NoService;
+
+impl sdk::generated::service::Provide for NoService {
+    fn status(&self, _: &'static str) -> Result<sdk::generated::service::ServiceState, Refusal> {
+        unreachable!("the overhead row calls only settings.save_quit")
+    }
+
+    fn repair(&self, _: &'static str) -> Result<(), Refusal> {
+        unreachable!("the overhead row calls only settings.save_quit")
+    }
+
+    fn install(&self, _: &'static str) -> Result<(), Refusal> {
+        unreachable!("the overhead row calls only settings.save_quit")
+    }
+
+    fn uninstall(&self, _: &'static str) -> Result<(), Refusal> {
+        unreachable!("the overhead row calls only settings.save_quit")
+    }
+}
+
+/// An update provider the row never reaches: it times only the quit save.
+struct NoUpdate;
+
+impl sdk::generated::update::Provide for NoUpdate {
+    fn set_channel(
+        &self,
+        _: &'static str,
+        _: sdk::generated::update::UpdateChannel,
+    ) -> Result<(), Refusal> {
+        unreachable!("the overhead row calls only settings.save_quit")
+    }
+}
+
 /// A refusal sink the row never reaches: the bound plugin holds its grant.
 struct Unreached;
 
@@ -121,6 +155,8 @@ fn overhead_per_sdk_call() {
         net: &NoNet,
         secrets: &NoSecrets,
         settings: &provider,
+        service: &NoService,
+        update: &NoUpdate,
     };
     let bound = Bound::new(gateway.bind(PLUGIN), &providers);
     let input = QuitSettings {
@@ -199,6 +235,8 @@ fn gateway_secrets_call_p95() {
         net: &NoNet,
         secrets: &Found,
         settings: &Noop,
+        service: &NoService,
+        update: &NoUpdate,
     };
     let bound = Bound::new(gateway.bind(PLUGIN), &providers);
     let mut direct_call = || {
