@@ -27,7 +27,7 @@ pub const HOOKS: FindingHooks = FindingHooks {
     data_twin: crate::projects_home::data_twin,
     one_spelling: kernel_sandbox::paths::one_spelling,
     canonical: kernel_sandbox::paths::canonical,
-    in_agent_tmp: crate::sandbox::toolchains::in_agent_tmp,
+    in_agent_tmp: kernel_sandbox::toolchains::in_agent_tmp,
     harness_prefix: crate::setup::harness_prefix,
     gate_root,
 };

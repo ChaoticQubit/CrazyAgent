@@ -185,7 +185,7 @@ fn assert_full_access_claude_keychain(fixture: &Fixture, reach: TeamReach, keyed
     assert!(keychain.setting("default-keychain").contains(text));
     assert!(keychain.setting("list-keychains").contains(text));
     drop(keychain);
-    let _ = crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home);
+    let _ = kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home);
 }
 
 /// A Full access Claude Code agent on a URL account runs unsandboxed under its engine-made

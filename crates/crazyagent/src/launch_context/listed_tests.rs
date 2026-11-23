@@ -955,14 +955,14 @@ fn a_listed_install_with_a_tool_home_writes_the_agents_getconf_there() {
     impl Drop for TmpRemoved {
         fn drop(&mut self) {
             let _ =
-                crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
+                kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let (folder, home) = harness_home("standin-acp");
     let base = folder.path().canonicalize().unwrap();
     let _removed = TmpRemoved(base.clone());
     let scratch =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &base).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &base).unwrap();
 
     let installed = context()
         .with_tool_home(&base)
@@ -975,7 +975,7 @@ fn a_listed_install_with_a_tool_home_writes_the_agents_getconf_there() {
         script.contains(&scratch.display().to_string()),
         "{getconf:?}: {script}"
     );
-    let path = crate::sandbox::toolchains::with_agent_git(
+    let path = kernel_sandbox::toolchains::with_agent_git(
         &crate::sandbox::TOOLCHAIN_HOOKS,
         &base,
         "/usr/bin:/bin".to_owned(),

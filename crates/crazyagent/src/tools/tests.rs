@@ -417,7 +417,7 @@ impl Drop for Removed {
 #[test]
 fn a_file_in_an_agent_short_temp_folder_is_refused_even_through_an_owner_link() {
     let (_folder, home) = scratch();
-    let agent_temp = crate::sandbox::toolchains::tmp_path(&home);
+    let agent_temp = kernel_sandbox::toolchains::tmp_path(&home);
     std::fs::create_dir(&agent_temp).unwrap();
     let _removed = Removed(agent_temp.clone());
     let planted = program(&agent_temp.join("bin/tmux"), NODE);

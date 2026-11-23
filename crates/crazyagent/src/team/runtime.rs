@@ -37,7 +37,6 @@ use crate::research::runner::{
     confined_unavailable, endpoint_model_host, ensure_repository, model_remote,
 };
 use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
-use crate::sandbox::toolchains;
 use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 use crate::terminal::PANES_PER_PROJECT_MAX;
 use kernel_processes::terminal::{AgentId, Host};
@@ -47,6 +46,7 @@ use kernel_sandbox::policy::{
     AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing,
 };
 use kernel_sandbox::settings::LinuxStrict;
+use kernel_sandbox::toolchains;
 use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};

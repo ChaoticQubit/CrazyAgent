@@ -77,7 +77,7 @@ fn a_process_launched_the_ide_way_reads_its_capability_but_no_owner_key_or_engin
         fs::write(path, text).unwrap();
     }
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let (capability, token) = (mine.join("capability"), mine.join("token"));
     let grants = Grants {
         data: &data,
@@ -154,7 +154,7 @@ fn a_process_launched_the_ide_way_reads_its_capability_but_no_owner_key_or_engin
     };
     assert!(connect(socket.as_path()));
     assert!(!connect(stray.as_path()));
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
 }
 
 #[test]
@@ -171,7 +171,7 @@ fn an_ide_profile_refuses_a_project_inside_the_engine_data_root() {
         folder(path);
     }
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -205,7 +205,7 @@ fn an_ide_profile_refuses_a_project_inside_the_engine_data_root() {
             .0,
         "ide_sandbox_invalid"
     );
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
 }
 
 /// B5 r2 (rv-sec3 F1, rv-code4 F1): a project folder named with long runs of `s` and `f`
@@ -231,7 +231,7 @@ fn an_ide_profile_builds_for_a_project_folder_named_with_long_fold_runs() {
         folder(path);
     }
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -250,7 +250,7 @@ fn an_ide_profile_builds_for_a_project_folder_named_with_long_fold_runs() {
     let text = profile(&grants, PORT, closed(), &[], rule).unwrap();
     let spelled = kernel_sandbox::paths::any_case(root.to_str().unwrap());
     assert!(text.contains(&format!("(regex #\"^{spelled}")), "{text}");
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
 }
 
 /// Moves `from` to `to` under the profile, the way a server would rename one of its data
@@ -302,7 +302,7 @@ fn the_remote_settings_folder_is_read_only_to_the_ide_server() {
     let engine = "{\"chat.disableAIFeatures\": true}\n";
     fs::write(&settings, engine).unwrap();
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -365,7 +365,7 @@ fn the_remote_settings_folder_is_read_only_to_the_ide_server() {
         1,
         "nothing was added next to the engine's settings"
     );
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
 }
 
 /// The server's data folder and its other writable folders are granted after the base
@@ -393,7 +393,7 @@ fn the_ide_data_folders_keep_the_git_launch_file_and_root_denies_after_their_gra
         folder(path);
     }
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -446,7 +446,7 @@ fn the_ide_data_folders_keep_the_git_launch_file_and_root_denies_after_their_gra
         );
     }
     assert!(!home.join("settings.json").exists() && !home.join("agents").exists());
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
 }
 
 /// Whether any entry named `.git` in any ASCII letter case is at or below `top`, links not
@@ -485,7 +485,7 @@ fn the_ide_server_data_folder_takes_no_git_in_any_form_and_keeps_its_root() {
     let token = mine.join("token");
     fs::write(&token, "token").unwrap();
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -571,7 +571,7 @@ fn the_ide_server_data_folder_takes_no_git_in_any_form_and_keeps_its_root() {
     assert!(!sh(&profile, r#"/bin/rmdir "$1""#, &spare));
     assert!(!renamed(&profile, &spare, &root.join("spare-moved")));
     assert!(spare.is_dir() && !root.join("spare-moved").exists());
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
 }
 
 /// A lock outside every writable folder, a read-only folder inside a writable one, and a
@@ -594,7 +594,7 @@ fn an_ide_profile_refuses_locks_and_read_only_folders_a_writable_grant_would_ove
         folder(path);
     }
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let machine = home.join("data").join("Machine");
     let grants = Grants {
         data: &data,
@@ -649,7 +649,7 @@ fn an_ide_profile_refuses_locks_and_read_only_folders_a_writable_grant_would_ove
             read_only.display()
         );
     }
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
 }
 
 /// DEC-098 addendum 9: the server cannot read an agent's IDE config, any `.vscode` folder
@@ -716,7 +716,7 @@ fn the_ide_server_cannot_read_agent_ide_config() {
         inner.join(".vscode").join("launch.json"),
     ];
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -759,7 +759,7 @@ fn the_ide_server_cannot_read_agent_ide_config() {
         (true, planted.to_owned()),
         "a link is refused for its name, not for being a link"
     );
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
 }
 
 const REAL_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
@@ -1053,7 +1053,7 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
     }
 
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -1285,7 +1285,7 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
             "{name}'s planted filter runs where git reaches it"
         );
     }
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
 }
 
 /// IN1-R1 under the installed IDE profile: in an older-layout project, whose agents sit at
@@ -1334,7 +1334,7 @@ fn stage_all_in_an_older_layout_project_stages_no_agent_file() {
     );
 
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -1413,7 +1413,7 @@ fn stage_all_in_an_older_layout_project_stages_no_agent_file() {
         !inside && no_repository(&said, &agent),
         "the older layout's agents root stops the IDE's git: {said}"
     );
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
 }
 
 /// INT1-R3-1 under the installed IDE profile: an older-layout project keeps an agent's
@@ -1461,7 +1461,7 @@ fn an_older_agent_keeps_its_git_stop_after_the_project_gains_a_crazyagent_folder
     );
 
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -1530,7 +1530,7 @@ fn an_older_agent_keeps_its_git_stop_after_the_project_gains_a_crazyagent_folder
         String::from_utf8_lossy(&own.stdout).trim(),
         root.to_str().unwrap()
     );
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
 }
 
 /// INT1R3-L1 under the installed IDE profile: an older-layout project ran a research job,
@@ -1588,7 +1588,7 @@ fn a_research_worktree_keeps_its_git_stop_after_the_project_gains_a_crazyagent_f
     );
 
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -1643,7 +1643,7 @@ fn a_research_worktree_keeps_its_git_stop_after_the_project_gains_a_crazyagent_f
         String::from_utf8_lossy(&own.stdout).trim(),
         root.to_str().unwrap()
     );
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
 }
 
 /// IN1-FN1 under the installed IDE profile: the IDE cannot read an agent worktree's `.git`,
@@ -1692,7 +1692,7 @@ fn ide_git_never_prunes_an_agent_worktree() {
         .unwrap();
 
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -1769,7 +1769,7 @@ fn ide_git_never_prunes_an_agent_worktree() {
     assert!(collected.status.success(), "{}", said(&collected));
     assert!(registered(), "a gc in the IDE keeps the agent worktree");
     assert_eq!(setup(&agent, &["status", "--porcelain"]), "");
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
 }
 
 /// FZ-7 under the installed IDE profile with the engine's own PATH, `/usr/bin` first: the
@@ -1797,7 +1797,7 @@ fn ide_git_runs_no_xcrun_shim_under_the_profile_with_the_engines_path() {
     setup(&root, &["add", "a.txt"]);
     setup(&root, &["commit", "-q", "-m", "base"]);
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -1858,7 +1858,7 @@ fn ide_git_runs_no_xcrun_shim_under_the_profile_with_the_engines_path() {
             assert!(text.contains(&run), "the shim runs the engine's git: {run}");
         }
     }
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
 }
 
 /// A listener on a free loopback port, with nothing behind it. Output: the listener, held
@@ -1892,7 +1892,7 @@ fn kept_profile(network: SandboxNetwork, kept_ports: &[u16]) -> (tempfile::TempD
         folder(path);
     }
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -2038,7 +2038,7 @@ fn server_with(agent_files: AgentFilesRule) -> Server {
     setup(&root, &["add", "a.txt"]);
     setup(&root, &["commit", "-q", "-m", "base"]);
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -2241,7 +2241,7 @@ fn the_server_reaches_the_real_index_and_the_program_carrying_files_by_no_door()
     let private = s.home.join(crate::ide::git::PRIVATE_INDEX).join("written");
     assert!(sh(&s.profile, r#"printf x > "$1""#, &private));
     fs::remove_file(private).unwrap();
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
 }
 
 /// A git the shim does not run, as an extension or anything else in the server can start,
@@ -2262,7 +2262,7 @@ fn a_git_outside_the_shim_cannot_stage() {
     );
     assert_eq!(fs::read(s.index()).unwrap(), before);
     assert!(!s.root.join(".git/index.lock").exists());
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
 }
 
 /// Source Control keeps working through the private index, with the real shim under the
@@ -2324,7 +2324,7 @@ fn source_control_works_through_the_private_index() {
     staged(&["add", "a.txt"]);
     staged(&["commit", "-q", "--no-edit"]);
     assert_eq!(s.status(), "");
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
 }
 
 /// A new checkout keeps its own index: `git worktree add` runs a child `reset --hard` and
@@ -2371,7 +2371,7 @@ fn a_worktree_and_a_clone_through_the_shim_keep_their_own_index() {
         "cloned",
         "cloned/.git/index",
     );
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
 }
 
 /// A read-only command runs on the real index, so Source Control sees what is staged, and
@@ -2393,7 +2393,7 @@ fn a_read_only_git_sees_the_real_index_and_copies_nothing() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "M  a.txt\n");
     assert!(s.no_private_files());
     assert!(!s.home.join(FORWARD_REQUEST).exists());
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
 }
 
 /// A git command that cannot reach the engine fails before git runs, with a plain line:
@@ -2430,7 +2430,7 @@ fn a_git_that_cannot_reach_the_engine_fails_before_it_runs() {
     let read = s.task("git branch --show-current");
     assert!(read.status.success(), "{read:?}");
     assert_eq!(String::from_utf8_lossy(&read.stdout), "main\n");
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
 }
 
 /// A rebase from the IDE stops with a plain line and leaves no state folder, since the
@@ -2446,7 +2446,7 @@ fn a_rebase_from_the_ide_stops_with_a_plain_line() {
     );
     assert!(!s.root.join(".git/rebase-merge").exists());
     assert!(s.no_private_files());
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
 }
 
 /// SECAUDIT ide-git-commondir-case-variant-config-redirect: IDE-sandboxed code cannot plant a
@@ -2472,7 +2472,7 @@ fn ide_sandboxed_code_cannot_plant_a_case_variant_commondir() {
         folder(path);
     }
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     setup(&root, &["init", "-q"]);
     let grants = Grants {
         data: &data,
@@ -2535,7 +2535,7 @@ fn an_intent_to_add_from_the_ide_stops_with_a_plain_line() {
         "a path after -- is a path: {said}"
     );
     assert!(!ran, "git finds no file named -N: {said}");
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
 }
 
 /// git takes any unique prefix of a long option, so every prefix of `--intent-to-add` that
@@ -2553,7 +2553,7 @@ fn a_reset_with_a_prefix_of_intent_to_add_from_the_ide_stops_with_a_plain_line()
         );
     }
     assert!(s.no_private_files());
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
 }
 
 /// apply reads `--int` and `--inte` as `--intent-to-add`, so both stop from the IDE in the
@@ -2574,7 +2574,7 @@ fn an_apply_with_a_prefix_of_intent_to_add_from_the_ide_stops_with_a_plain_line(
     assert!(!said.contains("intent to add"), "--index: {said}");
     assert!(!ran, "git finds no none.patch: {said}");
     assert!(s.no_private_files());
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
 }
 
 /// A git option before the verb does not hide an intent-to-add from the shim: it stops from
@@ -2600,7 +2600,7 @@ fn an_intent_to_add_after_a_global_option_from_the_ide_stops_with_a_plain_line()
         );
     }
     assert!(s.no_private_files());
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
 }
 
 /// A git option before the verb does not hide a rebase from the shim: it stops from the IDE
@@ -2622,7 +2622,7 @@ fn a_rebase_after_a_global_option_from_the_ide_stops_with_a_plain_line() {
     }
     assert!(!s.root.join(".git/rebase-merge").exists());
     assert!(s.no_private_files());
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
 }
 
 /// One linked agent and its teammate under a [`Server`]'s agents root, as the team runtime
@@ -3135,7 +3135,7 @@ fn the_ide_writes_nothing_under_an_agent_s_git_admin_folders() {
     assert!(!removed, "{said}");
     assert_eq!(read(&heads), before);
     assert!(s.no_private_files());
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
 }
 
 /// IDE-SANDBOX-AGENT-FOLDERS (a) r1 M1 under the installed `server.sb`: in a project with
@@ -3168,7 +3168,7 @@ fn the_ide_plants_no_admin_root_under_a_kelvin_or_long_s_spelling() {
         );
         assert!(!git.join("worktrees").exists(), "{}", planted.display());
     }
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
 }
 
 /// SA vid 202 and the ligature half of vid 11 under the installed `server.sb`: the IDE
@@ -3216,7 +3216,7 @@ fn the_ide_plants_no_git_config_or_instructions_under_a_ligature_or_hfs_ignored_
             kept.display()
         );
     }
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &s.home).unwrap();
 }
 
 /// r1 M1 for a locked folder: the Remote settings lock holds against a path spelled with
@@ -3242,7 +3242,7 @@ fn the_remote_settings_lock_holds_against_a_long_s_spelling() {
     let engine = "{\"chat.disableAIFeatures\": true}\n";
     fs::write(&settings, engine).unwrap();
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -3273,7 +3273,7 @@ fn the_remote_settings_lock_holds_against_a_long_s_spelling() {
     }
     assert_eq!(fs::read_to_string(&settings).unwrap(), engine);
     assert_eq!(fs::read_dir(&machine).unwrap().count(), 1);
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
 }
 
 /// The project instructions file every later agent and the master get as the owner's text
@@ -3298,7 +3298,7 @@ fn the_project_instructions_file_is_read_only_to_the_ide_server() {
         folder(path);
     }
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let grants = Grants {
         data: &data,
         root: &root,
@@ -3354,7 +3354,7 @@ fn the_project_instructions_file_is_read_only_to_the_ide_server() {
         assert!(!staged.exists());
         assert!(sh(&profile, write, &root.join("notes.txt")), "{choice:?}");
     }
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
 }
 
 /// V243-FARM2-PRODUCT-SMALL: no regex the IDE profile adds for its locks, the agents' IDE

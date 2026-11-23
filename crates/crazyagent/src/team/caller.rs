@@ -68,7 +68,7 @@ pub fn socket_for_mailbox(mailbox: &Path) -> Option<PathBuf> {
         return None;
     }
     let home = tmp.parent()?.join("home");
-    Some(crate::sandbox::toolchains::tmp_path(&home).join(CALLER_SOCKET))
+    Some(kernel_sandbox::toolchains::tmp_path(&home).join(CALLER_SOCKET))
 }
 
 /// The name in the same folder that a caller socket is bound at before one rename moves it
@@ -361,7 +361,7 @@ impl Callers {
     pub fn bind(path: &Path, pinned: Option<(u64, u64)>) -> std::io::Result<Self> {
         let folder = path
             .parent()
-            .and_then(crate::sandbox::toolchains::private_folder_pin)
+            .and_then(kernel_sandbox::toolchains::private_folder_pin)
             .filter(|folder| pinned.is_none_or(|pinned| pinned == *folder))
             .ok_or_else(|| {
                 std::io::Error::new(
@@ -650,7 +650,7 @@ impl Drop for Callers {
         let folder = self
             .path
             .parent()
-            .and_then(crate::sandbox::toolchains::private_folder_pin);
+            .and_then(kernel_sandbox::toolchains::private_folder_pin);
         if folder != Some(self.folder) {
             eprintln!("team_caller_folder_changed");
         }

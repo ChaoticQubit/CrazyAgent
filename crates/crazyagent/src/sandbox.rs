@@ -44,7 +44,8 @@ pub mod shared_folders;
 pub(crate) mod test_agent;
 #[cfg(target_os = "macos")]
 pub mod tool_cache;
-pub mod toolchains;
+#[cfg(all(test, unix))]
+mod toolchains_tests;
 pub mod warden;
 #[cfg(target_os = "windows")]
 pub mod windows;
@@ -2305,7 +2306,7 @@ impl ProjectSandbox {
         (read_only && !writable && program.is_file()).then_some(program)
     }
 
-    /// Adds the agent's short writable temp folder (see [`toolchains::make_tmp`]), which
+    /// Adds the agent's short writable temp folder (see [`kernel_sandbox::toolchains::make_tmp`]), which
     /// becomes its `TMPDIR`. Input: a canonical existing folder clear of
     /// [`Self::secret_paths`]. Output: the widened sandbox, or `Invalid` for an unsafe or
     /// second folder.
@@ -2671,7 +2672,7 @@ impl ProjectSandbox {
     /// run in their own home and only read the lead's, except the team folders Claude Code
     /// shares, where they make no link or folder but a lock, and never write the `git` on the
     /// lead's path (TPH-2 C). They neither read nor write the lead's own temp folder in the
-    /// short temp folder they share ([`toolchains::native_lead_tmp`], TPH-2 residual), so no
+    /// short temp folder they share ([`kernel_sandbox::toolchains::native_lead_tmp`], TPH-2 residual), so no
     /// teammate reads, races or plants a file the lead stages there. Both are shut out of the
     /// name the engine binds the caller socket at before it moves it over `callers`, so
     /// neither swaps its own listener in there (rv-secreview RH2R2-1). The lead's part of the
@@ -2728,7 +2729,7 @@ impl ProjectSandbox {
         let lead_tmp = teammates
             .scratch
             .as_deref()
-            .map(toolchains::native_lead_tmp)
+            .map(kernel_sandbox::toolchains::native_lead_tmp)
             .ok_or_else(|| invalid("a native team needs the agent temp folder"))?;
         teammates = teammates.hide(&lead_tmp)?;
         teammates.agent_home = mates_home.to_path_buf();
@@ -3806,7 +3807,7 @@ impl ProjectSandbox {
     /// temp folder when granted, else the temp dir), PATH with the owner's rust proxies after
     /// any [`Self::allow_node_for`] folder, the C locale and [`kernel_sandbox::toolchains::agent_env`]. Only a
     /// harness's PATH starts with the agent's own `getconf` and `git`
-    /// ([`toolchains::with_agent_git`]). Takes whether it is a harness. Returns the variables.
+    /// ([`kernel_sandbox::toolchains::with_agent_git`]). Takes whether it is a harness. Returns the variables.
     fn base_env(&self, harness: bool) -> Vec<(&'static str, OsString)> {
         let homes = kernel_sandbox::toolchains::ToolHomes::at(&self.owner_home);
         let tmp = self
@@ -3820,7 +3821,11 @@ impl ProjectSandbox {
             None => path,
         };
         let path = if harness {
-            toolchains::with_agent_git(&crate::sandbox::TOOLCHAIN_HOOKS, &self.agent_home, path)
+            kernel_sandbox::toolchains::with_agent_git(
+                &crate::sandbox::TOOLCHAIN_HOOKS,
+                &self.agent_home,
+                path,
+            )
         } else {
             path
         };

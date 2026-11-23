@@ -1138,7 +1138,7 @@ impl AgentContext {
     /// jsonl-rpc drivers and an unknown harness get `launch_harness_unsupported`, and Codex
     /// or Claude Code given an account hand-over `launch_account_handover_mismatch`. On macOS
     /// the files hold the agent's own `getconf`
-    /// ([`crate::sandbox::toolchains::write_getconf`]). On Windows it is refused with
+    /// ([`kernel_sandbox::toolchains::write_getconf`]). On Windows it is refused with
     /// `launch_context_unavailable` once H1's check passes, before it takes the lock or
     /// changes the home, until S9b writes its files handle-relative (CodeRabbit CR-1140).
     /// Output: the guard holding the files and the harness arguments, or `launch_home_busy`
@@ -1383,7 +1383,7 @@ impl AgentContext {
             ]);
         }
         #[cfg(target_os = "macos")]
-        crate::sandbox::toolchains::write_getconf(
+        kernel_sandbox::toolchains::write_getconf(
             &crate::sandbox::TOOLCHAIN_HOOKS,
             home,
             installed.native.is_some(),
@@ -1508,7 +1508,7 @@ impl AgentContext {
         #[cfg(target_os = "macos")]
         if let Some(tools) = &self.tool_home {
             directory(&tools.join(STATE), false)?;
-            crate::sandbox::toolchains::write_getconf(
+            kernel_sandbox::toolchains::write_getconf(
                 &crate::sandbox::TOOLCHAIN_HOOKS,
                 tools,
                 false,

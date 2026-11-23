@@ -20,7 +20,6 @@ use crate::project_setup::links::LinkedText;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::provider_reach::ProviderReach;
 use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
-use crate::sandbox::toolchains;
 use crate::sandbox::warden::Warden;
 use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 #[cfg(unix)]
@@ -31,6 +30,7 @@ use kernel_sandbox::hidden_paths::HiddenRun;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::policy::{AgentAccess, Narrowing, narrowing};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
+use kernel_sandbox::toolchains;
 use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};

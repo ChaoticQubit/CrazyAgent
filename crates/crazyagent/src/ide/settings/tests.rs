@@ -547,7 +547,7 @@ fn sandboxed(case: &Case, script: &str) -> bool {
         std::fs::create_dir_all(folder).unwrap();
     }
     let tmp =
-        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &case.server_data)
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &case.server_data)
             .unwrap();
     let locked = case.folder.join(LOCKED_FILE);
     let machine = machine_folder(&case.server_data);
@@ -582,7 +582,7 @@ fn sandboxed(case: &Case, script: &str) -> bool {
     let ran = kernel_processes::spawn_gate::status(&mut shell)
         .unwrap()
         .success();
-    crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &case.server_data)
+    kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &case.server_data)
         .unwrap();
     ran
 }

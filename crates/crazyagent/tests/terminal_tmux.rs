@@ -1830,8 +1830,7 @@ impl Lead {
         let team = path.join("team");
         let home = crazyagent::team::runtime::agent_home(&team, 1);
         std::fs::create_dir_all(&home).unwrap();
-        crazyagent::sandbox::toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &home)
-            .unwrap();
+        kernel_sandbox::toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
         let profile = crazyagent::team::runtime::agent_profile(&team, 1);
         std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
         std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
@@ -1917,7 +1916,7 @@ impl Drop for Lead {
                     .stderr(Stdio::null()),
             );
         }
-        let _ = crazyagent::sandbox::toolchains::remove_tmp(
+        let _ = kernel_sandbox::toolchains::remove_tmp(
             &crazyagent::sandbox::TOOLCHAIN_HOOKS,
             &self.home,
         );
@@ -2629,7 +2628,7 @@ fn a_refused_lead_does_not_stop_the_close_of_the_next_lead_and_the_engine() {
     let (refused, next) = (AgentId::team(1).unwrap(), AgentId::team(2).unwrap());
     let next_home = crazyagent::team::runtime::agent_home(&team, 2);
     std::fs::create_dir_all(&next_home).unwrap();
-    crazyagent::sandbox::toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &next_home)
+    kernel_sandbox::toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &next_home)
         .unwrap();
     for profile in [
         crazyagent::team::runtime::agent_profile(&team, 2),
@@ -2684,7 +2683,7 @@ fn a_refused_lead_does_not_stop_the_close_of_the_next_lead_and_the_engine() {
     );
     let after = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     assert_eq!(after.alive().unwrap(), Vec::<AgentId>::new());
-    crazyagent::sandbox::toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &next_home)
+    kernel_sandbox::toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &next_home)
         .unwrap();
 }
 

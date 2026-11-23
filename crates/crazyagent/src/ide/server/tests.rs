@@ -1400,7 +1400,7 @@ fn a_git_moved_into_the_old_server_temp_folder_is_outside_the_next_confined_star
     let root = fs::canonicalize(checkout.path()).unwrap();
     let id = project("moved-to-tmp");
     let folder = servers.prepare(&id).unwrap();
-    let tmp = crate::sandbox::toolchains::make_tmp(
+    let tmp = kernel_sandbox::toolchains::make_tmp(
         &crate::sandbox::TOOLCHAIN_HOOKS,
         &folder.join(SERVER_DATA),
     )
@@ -1483,7 +1483,7 @@ fn moved_aside(tmp: &Path) -> Vec<PathBuf> {
     let mut prefix = tmp.file_name().unwrap().to_os_string();
     prefix.push(TMP_GONE);
     let prefix = prefix.into_string().unwrap();
-    fs::read_dir(crate::sandbox::toolchains::TMP_PARENT)
+    fs::read_dir(kernel_sandbox::toolchains::TMP_PARENT)
         .unwrap()
         .flatten()
         .filter(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
@@ -1524,7 +1524,7 @@ fn the_next_confined_start_removes_an_earlier_temp_folder_its_session_shut_and_p
 #[test]
 fn the_engine_start_sweep_removes_a_left_temp_folder_that_was_shut_and_pinned() {
     let home = scratch();
-    let tmp = crate::sandbox::toolchains::make_tmp(
+    let tmp = kernel_sandbox::toolchains::make_tmp(
         &crate::sandbox::TOOLCHAIN_HOOKS,
         &home.path().join("left"),
     )
@@ -1532,7 +1532,7 @@ fn the_engine_start_sweep_removes_a_left_temp_folder_that_was_shut_and_pinned() 
     shut_and_pin(&tmp);
     let gone = retire(&tmp).expect("the temp folder moves aside");
     assert!(retired(&gone), "{}", gone.display());
-    let entries = fs::read_dir(crate::sandbox::toolchains::TMP_PARENT)
+    let entries = fs::read_dir(kernel_sandbox::toolchains::TMP_PARENT)
         .unwrap()
         .count();
     let removed = sweep_retired(entries + GONE_SCAN_MAX)
@@ -1629,7 +1629,7 @@ fn the_next_start_removes_the_temp_folder_a_crash_left_recorded() {
     let root = fs::canonicalize(checkout.path()).unwrap();
     let id = project("crash-left-tmp");
     let folder = servers.prepare(&id).unwrap();
-    let left = crate::sandbox::toolchains::make_tmp(
+    let left = kernel_sandbox::toolchains::make_tmp(
         &crate::sandbox::TOOLCHAIN_HOOKS,
         &keys.path().join("crashed"),
     )
@@ -1659,9 +1659,9 @@ fn a_recorded_path_that_is_not_an_own_short_temp_folder_is_left_alone() {
     let root = fs::canonicalize(checkout.path()).unwrap();
     let keep = outside.path().join("keep");
     fs::write(&keep, "owner data\n").unwrap();
-    let link = crate::sandbox::toolchains::tmp_path(&keys.path().join("link"));
+    let link = kernel_sandbox::toolchains::tmp_path(&keys.path().join("link"));
     std::os::unix::fs::symlink(outside.path(), &link).unwrap();
-    let open = crate::sandbox::toolchains::make_tmp(
+    let open = kernel_sandbox::toolchains::make_tmp(
         &crate::sandbox::TOOLCHAIN_HOOKS,
         &keys.path().join("open"),
     )
@@ -1715,7 +1715,7 @@ fn removing_a_recorded_temp_folder_never_follows_a_link_in_it() {
     fs::write(&file, "owner data\n").unwrap();
     fs::create_dir_all(inner.parent().unwrap()).unwrap();
     fs::write(&inner, "owner data\n").unwrap();
-    let left = crate::sandbox::toolchains::make_tmp(
+    let left = kernel_sandbox::toolchains::make_tmp(
         &crate::sandbox::TOOLCHAIN_HOOKS,
         &keys.path().join("links"),
     )
@@ -3301,7 +3301,7 @@ fn a_recorded_temp_folder_is_moved_aside_at_once_and_removed_off_the_stop_path()
     let (data, keys) = (scratch(), scratch());
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let folder = servers.prepare(&project("tmp-aside")).unwrap();
-    let left = crate::sandbox::toolchains::make_tmp(
+    let left = kernel_sandbox::toolchains::make_tmp(
         &crate::sandbox::TOOLCHAIN_HOOKS,
         &keys.path().join("aside"),
     )
@@ -3348,7 +3348,7 @@ fn the_start_sweep_removes_only_temp_folders_an_earlier_engine_moved_aside() {
         tmp.with_file_name(format!("{short}{TMP_GONE}{suffix}"))
     };
     let aside = |key: &str, suffix: &str| {
-        let tmp = crate::sandbox::toolchains::make_tmp(
+        let tmp = kernel_sandbox::toolchains::make_tmp(
             &crate::sandbox::TOOLCHAIN_HOOKS,
             &keys.path().join(key),
         )
@@ -3365,7 +3365,7 @@ fn the_start_sweep_removes_only_temp_folders_an_earlier_engine_moved_aside() {
     let keep = outside.path().join("keep");
     fs::write(&keep, "owner data\n").unwrap();
     let link = gone_name(
-        &crate::sandbox::toolchains::tmp_path(&keys.path().join("link")),
+        &kernel_sandbox::toolchains::tmp_path(&keys.path().join("link")),
         "2123456789abcdef",
     );
     std::os::unix::fs::symlink(outside.path(), &link).unwrap();
