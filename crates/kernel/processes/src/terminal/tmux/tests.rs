@@ -3871,7 +3871,8 @@ fn a_pane_view_types_keys_into_its_attached_pane_with_no_pane_listing() {
     let host = Arc::new(Tmux::open(
         Some(tmux.clone()),
         &folder,
-        test_confinement(), test_hooks(),
+        test_confinement(),
+        test_hooks(),
     ));
     let socket = host.socket();
     let _server = Server {

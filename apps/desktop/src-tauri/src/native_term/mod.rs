@@ -27,7 +27,9 @@ mod view_text;
 mod windows;
 
 #[cfg(unix)]
-use crazyagent::terminal::{FOLDER, tmux::SOCKET};
+use crazyagent::terminal::FOLDER;
+#[cfg(unix)]
+use kernel_processes::terminal::tmux::SOCKET;
 #[cfg(unix)]
 use std::ffi::OsStr;
 #[cfg(unix)]
