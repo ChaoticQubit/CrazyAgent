@@ -40,7 +40,9 @@ impl Fixture {
     fn host(&self) -> Arc<dyn Host> {
         Arc::new(Tmux::open(
             Some(self.tmux.clone()),
-            &self.root.path().join(FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks(),
+            &self.root.path().join(FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
         ))
     }
 

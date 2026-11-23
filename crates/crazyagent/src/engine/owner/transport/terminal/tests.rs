@@ -6,8 +6,8 @@ use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::team::master::{OwnerTyping, owner_key_ms};
 use crate::terminal::FOLDER;
 use crate::terminal::tmux::installed;
-use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use kernel_processes::terminal::Host;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -136,7 +136,12 @@ async fn attach_sized_mid_session_is_refused() {
     let _launcher = {
         let (agent, folder) = (agent.clone(), folder.clone());
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder, crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks());
+            let launcher = Tmux::open(
+                Some(tmux),
+                &folder,
+                crate::sandbox::confinement(),
+                crate::terminal::tmux::tmux_hooks(),
+            );
             launcher
                 .spawn(
                     &agent,
@@ -239,7 +244,7 @@ async fn a_pane_attach_on_a_lead_whose_servers_ended_is_refused_as_its_teammates
     };
     let record = crate::team::runtime::agent_teammates_socket_name(&root.join("team"), 1);
     private(record.parent().unwrap());
-    let socket = crate::terminal::renew_teammates_socket(root, &lead).unwrap();
+    let socket = crate::terminal::tmux::renew_teammates_socket(root, &lead).unwrap();
     private(socket.parent().unwrap());
     drop(kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap());
 
@@ -609,7 +614,12 @@ async fn fifty_typed_keys_echo_back_within_budget() {
     let _launcher = {
         let (agent, folder) = (agent.clone(), folder.clone());
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder, crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks());
+            let launcher = Tmux::open(
+                Some(tmux),
+                &folder,
+                crate::sandbox::confinement(),
+                crate::terminal::tmux::tmux_hooks(),
+            );
             launcher
                 .spawn(
                     &agent,
@@ -1070,7 +1080,12 @@ async fn an_input_only_view_types_and_pastes_without_sending_output() {
     let _launcher = {
         let (agent, folder) = (agent.clone(), folder.clone());
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder, crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks());
+            let launcher = Tmux::open(
+                Some(tmux),
+                &folder,
+                crate::sandbox::confinement(),
+                crate::terminal::tmux::tmux_hooks(),
+            );
             launcher
                 .spawn(
                     &agent,
@@ -1172,7 +1187,12 @@ fn window_size(tmux: &Path, socket: &Path, agent: &AgentId) -> Option<(u16, u16)
         Command::new(tmux)
             .arg("-S")
             .arg(socket)
-            .args(["list-windows", "-t", kernel_processes::terminal::tmux::SESSION, "-F"])
+            .args([
+                "list-windows",
+                "-t",
+                kernel_processes::terminal::tmux::SESSION,
+                "-F",
+            ])
             .arg("#{window_name} #{window_width} #{window_height}")
             .env_clear(),
     )
@@ -1278,7 +1298,12 @@ async fn a_follower_sizes_its_window_only_while_no_sizer_is_open() {
     let _launcher = {
         let (agent, folder) = (agent.clone(), folder.clone());
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder, crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks());
+            let launcher = Tmux::open(
+                Some(tmux),
+                &folder,
+                crate::sandbox::confinement(),
+                crate::terminal::tmux::tmux_hooks(),
+            );
             launcher
                 .spawn(
                     &agent,
@@ -1491,7 +1516,12 @@ async fn an_input_only_view_never_moves_to_a_new_terminal_under_its_agents_name(
     let launcher = {
         let (agent, folder) = (agent.clone(), folder.clone());
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder, crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks());
+            let launcher = Tmux::open(
+                Some(tmux),
+                &folder,
+                crate::sandbox::confinement(),
+                crate::terminal::tmux::tmux_hooks(),
+            );
             launcher
                 .spawn(
                     &agent,
@@ -1856,7 +1886,12 @@ async fn a_prompt_through_an_input_only_view_lands_in_a_real_tmux_pane() {
     let launcher = {
         let (agent, folder) = (agent.clone(), folder.clone());
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder, crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks());
+            let launcher = Tmux::open(
+                Some(tmux),
+                &folder,
+                crate::sandbox::confinement(),
+                crate::terminal::tmux::tmux_hooks(),
+            );
             launcher
                 .spawn(
                     &agent,

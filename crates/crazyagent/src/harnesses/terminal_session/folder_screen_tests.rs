@@ -79,7 +79,12 @@ pub(crate) fn start(name: &str, first: &str, then: Option<&str>, codex_folder: b
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &folder, crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks()));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        Some(tmux),
+        &folder,
+        crate::sandbox::confinement(),
+        crate::terminal::tmux::tmux_hooks(),
+    ));
     let (home, work, bin) = (base.join("home"), base.join("work"), base.join("bin"));
     for path in [&home, &work, &bin] {
         private(path);

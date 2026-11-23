@@ -53,7 +53,9 @@ impl Pane {
         let tmux = installed(&base).expect("tmux must be installed on this machine");
         let host: Arc<dyn Host> = Arc::new(Tmux::open(
             Some(tmux.clone()),
-            &base.join(crate::terminal::FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks(),
+            &base.join(crate::terminal::FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
         ));
         let recorded = base.join("typed.txt");
         let target = match typed {

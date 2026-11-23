@@ -1971,9 +1971,10 @@ impl Lead {
         )
         .unwrap();
         let socket =
-            crazyagent::terminal::harness_socket(&path, &AgentId::team(1).unwrap()).unwrap();
-        let mates = crazyagent::terminal::renew_teammates_socket(&path, &AgentId::team(1).unwrap())
-            .unwrap();
+            crazyagent::terminal::tmux::harness_socket(&path, &AgentId::team(1).unwrap()).unwrap();
+        let mates =
+            crazyagent::terminal::tmux::renew_teammates_socket(&path, &AgentId::team(1).unwrap())
+                .unwrap();
         Self {
             root,
             tmux,
@@ -2202,7 +2203,7 @@ fn a_native_lead_runs_in_its_own_server_and_every_call_reaches_it_by_name() {
         std::io::ErrorKind::ConnectionRefused
     );
     assert_ne!(
-        crazyagent::terminal::renew_teammates_socket(&root, &leader).unwrap(),
+        crazyagent::terminal::tmux::renew_teammates_socket(&root, &leader).unwrap(),
         lead.mates,
         "the lead's next start names a new teammates' socket"
     );
@@ -2771,11 +2772,11 @@ fn a_refused_lead_does_not_stop_the_close_of_the_next_lead_and_the_engine() {
     }
     let _next_own = Server {
         tmux: lead.tmux.clone(),
-        socket: crazyagent::terminal::harness_socket(&root, &next).unwrap(),
+        socket: crazyagent::terminal::tmux::harness_socket(&root, &next).unwrap(),
     };
     let _next_mates = Server {
         tmux: lead.tmux.clone(),
-        socket: crazyagent::terminal::renew_teammates_socket(&root, &next).unwrap(),
+        socket: crazyagent::terminal::tmux::renew_teammates_socket(&root, &next).unwrap(),
     };
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     host.spawn_own_server(

@@ -40,7 +40,12 @@ impl EngineResearch {
         owner.record_run(&db);
         drop(db);
         let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
-        let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux.clone()), &base.join(FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks()));
+        let host: Arc<dyn Host> = Arc::new(Tmux::open(
+            Some(tmux.clone()),
+            &base.join(FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        ));
         let (state, projects) = (base.join("research"), base.join("projects"));
         for directory in [&state, &projects] {
             match fs::DirBuilder::new().mode(0o700).create(directory) {

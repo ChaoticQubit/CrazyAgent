@@ -169,7 +169,12 @@ mod own_turns {
             tmux: tmux.clone(),
             socket: folder.join(SOCKET),
         };
-        let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &folder, crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks()));
+        let host: Arc<dyn Host> = Arc::new(Tmux::open(
+            Some(tmux),
+            &folder,
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        ));
         let (home, work, bin) = (base.join("home"), base.join("work"), base.join("bin"));
         for path in [&home, &work, &bin] {
             private(path);

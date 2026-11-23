@@ -5,8 +5,8 @@ use crate::landing::{AgentKind, ChangeAgent};
 use crate::project_setup::{StoredSetup, TeamPlan};
 use crate::terminal::FOLDER;
 use crate::terminal::tmux::installed;
-use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use kernel_processes::terminal::AgentId;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -100,7 +100,12 @@ impl Terminals {
     }
 
     fn host(&self) -> Arc<dyn Host> {
-        Arc::new(Tmux::open(Some(self.tmux.clone()), &self.base.join(FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks()))
+        Arc::new(Tmux::open(
+            Some(self.tmux.clone()),
+            &self.base.join(FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        ))
     }
 
     /// Starts team agent 7's terminal: it reads one typed line and moves it into `heard`

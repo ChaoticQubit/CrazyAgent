@@ -86,7 +86,7 @@ pub fn engine_socket(root: &Path) -> Result<PathBuf, &'static str> {
 pub fn own_server(root: &Path, name: &str) -> Result<bool, &'static str> {
     assert!(root.is_absolute());
     let agent = crate::bridge::terminal::agent(name).map_err(|_| "native_terminal_name_invalid")?;
-    let socket = crazyagent::terminal::harness_socket(root, &agent)
+    let socket = crazyagent::terminal::tmux::harness_socket(root, &agent)
         .map_err(|_| "native_terminal_own_server_unknown")?;
     assert!(socket.is_absolute());
     assert!(!socket.starts_with(root.join(FOLDER)));
@@ -262,7 +262,7 @@ mod tests {
         let root = root.path();
         assert_eq!(own_server(root, "team-1"), Ok(false));
         let agent = crate::bridge::terminal::agent("team-1").expect("agent");
-        let socket = crazyagent::terminal::harness_socket(root, &agent).expect("socket path");
+        let socket = crazyagent::terminal::tmux::harness_socket(root, &agent).expect("socket path");
         let folder = socket.parent().expect("socket folder").to_path_buf();
         let made = !folder.exists();
         std::fs::create_dir_all(&folder).expect("folder");

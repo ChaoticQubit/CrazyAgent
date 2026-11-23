@@ -49,7 +49,12 @@ impl Fixture {
     pub(super) fn host(&mut self) -> Tmux {
         let tmux = installed(&self.base).expect("tmux must be installed on this machine");
         self.tmux = Some(tmux.clone());
-        Tmux::open(Some(tmux), &self.base.join(crate::terminal::FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks())
+        Tmux::open(
+            Some(tmux),
+            &self.base.join(crate::terminal::FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        )
     }
 
     pub(super) fn agent(

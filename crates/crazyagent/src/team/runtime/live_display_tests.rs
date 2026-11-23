@@ -69,7 +69,12 @@ fn watched_turn(display: TerminalDisplay) -> (String, TurnEnd, Option<String>, S
         .unwrap();
     let base = root.path().canonicalize().unwrap();
     let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &base.join(FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks()));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        Some(tmux),
+        &base.join(FOLDER),
+        crate::sandbox::confinement(),
+        crate::terminal::tmux::tmux_hooks(),
+    ));
     let agent = ManagedAgent::in_pane_with_display(
         "claude-code",
         &claude(),

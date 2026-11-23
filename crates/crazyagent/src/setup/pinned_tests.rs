@@ -211,7 +211,10 @@ fn a_tmux_only_on_the_login_path_is_the_one_setup_shows_and_the_terminal_starts(
     std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.7a'\n").unwrap();
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
     let before = crate::tools::tools_new(Vec::new(), None);
-    assert_eq!(kernel_processes::terminal::tmux::installed_at(&before), None);
+    assert_eq!(
+        kernel_processes::terminal::tmux::installed_at(&before),
+        None
+    );
     let installer = PinnedInstaller::with_places(root.path(), Vec::new(), before.clone());
     assert_eq!(installer.locate(Dependency::Tmux), None);
     let places = before.with_probed(vec![login]);

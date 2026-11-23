@@ -133,7 +133,12 @@ impl Case {
     fn host(&mut self) -> Arc<dyn Host> {
         let tmux = installed(&self.base).expect("tmux must be installed on this machine");
         self.tmux = Some(tmux.clone());
-        Arc::new(Tmux::open(Some(tmux), &self.base.join(FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks()))
+        Arc::new(Tmux::open(
+            Some(tmux),
+            &self.base.join(FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        ))
     }
 
     fn pane(&self, host: &Arc<dyn Host>, id: i64) {

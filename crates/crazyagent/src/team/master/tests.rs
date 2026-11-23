@@ -2,8 +2,8 @@ use super::*;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::project_setup::{HarnessSlot, TeamPlan};
 use crate::terminal::tmux::installed;
-use kernel_processes::terminal::tmux::{SESSION, SOCKET, Tmux};
 use crate::{landing_log::seeded, terminal::FOLDER};
+use kernel_processes::terminal::tmux::{SESSION, SOCKET, Tmux};
 use serde_json::{Value, json};
 use std::io::Cursor;
 use std::os::unix::fs::PermissionsExt;
@@ -102,7 +102,12 @@ impl Fixture {
     fn host(&mut self) -> Arc<dyn Host> {
         let tmux = installed(&self.base).expect("tmux must be installed on this machine");
         self.tmux = Some(tmux.clone());
-        Arc::new(Tmux::open(Some(tmux), &self.base.join(FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks()))
+        Arc::new(Tmux::open(
+            Some(tmux),
+            &self.base.join(FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        ))
     }
 }
 

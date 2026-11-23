@@ -132,7 +132,10 @@ fn the_tmux_hooks_name_every_team_path_as_the_kernel_test_layout_does() {
     let (lead, lead_copy) = (tmux::lead_paths(), test_lead_paths());
     for state in [Path::new("/private/tmp/team"), Path::new("/a b/team")] {
         for id in [1, 42, i64::MAX] {
-            assert_eq!((real.agent_profile)(state, id), (copy.agent_profile)(state, id));
+            assert_eq!(
+                (real.agent_profile)(state, id),
+                (copy.agent_profile)(state, id)
+            );
             assert_eq!(
                 (real.agent_teammates_profile)(state, id),
                 (copy.agent_teammates_profile)(state, id)
@@ -143,7 +146,10 @@ fn the_tmux_hooks_name_every_team_path_as_the_kernel_test_layout_does() {
                     (copy.agent_servers_state)(state, id, mates)
                 );
             }
-            assert_eq!((lead.agent_home)(state, id), (lead_copy.agent_home)(state, id));
+            assert_eq!(
+                (lead.agent_home)(state, id),
+                (lead_copy.agent_home)(state, id)
+            );
             assert_eq!(
                 (lead.agent_teammates_socket_name)(state, id),
                 (lead_copy.agent_teammates_socket_name)(state, id)
@@ -178,8 +184,14 @@ fn the_confinement_value_matches_the_sandbox_constants() {
         assert_eq!(copy.keeper, crate::sandbox::KEEPER);
         assert_eq!(real.pane_shim, crate::sandbox::PANE_SHIM);
         assert_eq!(copy.pane_shim, crate::sandbox::PANE_SHIM);
-        assert_eq!(real.keeper_deadline_variable, crate::sandbox::KEEPER_DEADLINE);
-        assert_eq!(copy.keeper_deadline_variable, crate::sandbox::KEEPER_DEADLINE);
+        assert_eq!(
+            real.keeper_deadline_variable,
+            crate::sandbox::KEEPER_DEADLINE
+        );
+        assert_eq!(
+            copy.keeper_deadline_variable,
+            crate::sandbox::KEEPER_DEADLINE
+        );
         assert_eq!(real.keeper_state_variable, crate::sandbox::KEEPER_STATE);
         assert_eq!(copy.keeper_state_variable, crate::sandbox::KEEPER_STATE);
     }
@@ -216,14 +228,23 @@ fn the_kernel_keeper_copy_keeps_and_unkeeps_as_the_sandbox_does() {
     let argvs = [
         plain("/private/tmp/lead.sb"),
         plain("/private/tmp/other.sb"),
-        vec!["/bin/sh".into(), "-f".into(), "/p.sb".into(), "/bin/x".into()],
+        vec![
+            "/bin/sh".into(),
+            "-f".into(),
+            "/p.sb".into(),
+            "/bin/x".into(),
+        ],
         plain("/private/tmp/lead.sb")[..3].to_vec(),
     ];
     for argv in &argvs {
         for record in records {
             let record = record.map(Path::new);
             let kept = crate::sandbox::kept_pane(argv.clone(), record);
-            assert_eq!(kept, copy::kept_pane(argv.clone(), record), "{argv:?} {record:?}");
+            assert_eq!(
+                kept,
+                copy::kept_pane(argv.clone(), record),
+                "{argv:?} {record:?}"
+            );
             if let Some(kept) = kept {
                 assert_eq!(
                     crate::sandbox::unkept_pane(&kept),

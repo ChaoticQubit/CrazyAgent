@@ -576,7 +576,12 @@ done
         }
 
         fn host(&self) -> Arc<dyn Host> {
-            Arc::new(Tmux::open(Some(self.tmux.clone()), &self.base.join(FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks()))
+            Arc::new(Tmux::open(
+                Some(self.tmux.clone()),
+                &self.base.join(FOLDER),
+                crate::sandbox::confinement(),
+                crate::terminal::tmux::tmux_hooks(),
+            ))
         }
 
         fn runtime(&self, host: &Arc<dyn Host>) -> TeamRuntime {
@@ -1372,7 +1377,12 @@ mod live {
     ) {
         let agent = ManagedAgent::new(harness, executable);
         let tmux = installed(&agent.base).expect("tmux must be installed on this machine");
-        let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &agent.base.join(FOLDER), crate::sandbox::confinement(), crate::terminal::tmux::tmux_hooks()));
+        let host: Arc<dyn Host> = Arc::new(Tmux::open(
+            Some(tmux),
+            &agent.base.join(FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        ));
         let counter = agent.working_dir.join("ran.txt");
         let prompt = "Run this exact shell command once with your shell tool and wait for it to finish: printf 'ran\\n' >> ran.txt && sleep 300\nThen reply with the word DONE.".to_owned();
 

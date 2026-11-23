@@ -117,7 +117,8 @@ const AGENT_TAG: &str = "@crazyagent";
 const APP_MARK: &str = "@crazyagent-app";
 const TERMINAL_TYPE: &str = "xterm-256color";
 const TERMINAL_DEFAULTS: [(&str, &str); 2] = [("TERM", TERMINAL_TYPE), ("COLORTERM", "truecolor")];
-const VERSION_MIN: (u32, u32) = (3, 7);
+/// The lowest tmux version, major and minor, the host takes.
+pub const VERSION_MIN: (u32, u32) = (3, 7);
 const CAPTURE_WRITTEN: &str = "-p -e -N -T";
 /// The most bytes one `send-keys -H` command types. tmux parses a command's arguments in time
 /// that grows faster than their count and answers nothing else meanwhile: 4096 hex keys held
@@ -1317,13 +1318,13 @@ fn release(version: &str) -> Option<(u32, u32)> {
 /// Whether agent terminals support a tmux version, the second word of `tmux -V`: 3.7 or
 /// later ([`VERSION_MIN`]). Input: the version. Output: the answer, or none when it is not
 /// a release number.
-pub(crate) fn supported(version: &str) -> Option<bool> {
+pub fn supported(version: &str) -> Option<bool> {
     release(version).map(|found| found >= VERSION_MIN)
 }
 
 /// The oldest tmux version agent terminals support, as setup names it. Output: the
 /// version, such as "3.7".
-pub(crate) fn version_needed() -> String {
+pub fn version_needed() -> String {
     format!("{}.{}", VERSION_MIN.0, VERSION_MIN.1)
 }
 

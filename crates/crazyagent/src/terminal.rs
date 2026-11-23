@@ -1,14 +1,14 @@
 use crate::engine::EngineError;
-use kernel_processes::terminal::kept::{KEPT_MAX, LastScreenHost};
+use kernel_processes::terminal::kept::LastScreenHost;
 #[cfg(unix)]
 use kernel_processes::terminal::tmux::{Servers, Tmux};
 use kernel_processes::terminal::{
-    APP_PANE_UNKNOWN, AgentId, CHUNK_BYTES_MAX, CONNECTIONS_MAX, Host, HostError, INPUT_BYTES_MAX,
-    OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PASTE_BYTES_MAX, PASTE_SETTLE, PINS_UNSUPPORTED,
-    PROMPT_BYTES_MAX, PaneAt, PaneCommand, PaneInfo, PaneRef, RENEW_EVERY, RUN_CUT_BACK_BYTES_MAX,
-    SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN, TEAMMATES_SERVER_ENDED, TEAMMATES_SERVER_REPLACED,
-    TerminalStream, VIEWER_BUFFER_BYTES_MAX, VIEWERS_MAX, buffer, end_except, input_runs,
-    input_runs_max, pane_id_valid,
+    APP_PANE_UNKNOWN, AgentId, CHUNK_BYTES_MAX, Host, HostError, PROMPT_BYTES_MAX, PaneAt,
+    PaneCommand, PaneInfo, PaneRef, RENEW_EVERY, TerminalStream,
+};
+#[cfg(target_os = "windows")]
+use kernel_processes::terminal::{
+    INPUT_BYTES_MAX, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN, VIEWERS_MAX, buffer,
 };
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -43,6 +43,7 @@ fn kept_clock() -> String {
     clock(now_ms(), local_offset())
 }
 
+#[cfg(target_os = "windows")]
 fn failure(code: &str) -> HostError {
     HostError(code.into())
 }
