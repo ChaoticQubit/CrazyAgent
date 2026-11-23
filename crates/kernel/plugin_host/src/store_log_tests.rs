@@ -3,7 +3,10 @@ use rusqlite::types::Value;
 
 use crate::generated::permissions::BUNDLED_GRANTS;
 use crate::store::initialize;
-use crate::store_log::{Event, KINDS, REFUSED, SCHEMA, Source, apply};
+use crate::store_log::{Event, KINDS, REFUSED, SCHEMA, Source, apply, capture, record};
+
+/// The refusal of a store change made outside a capture.
+const UNLOGGED: &str = "app_plugin_store_unlogged";
 
 /// The agent-quit plugin's id, a bundled code plugin.
 const QUIT: &str = BUNDLED_GRANTS[0].plugin;
@@ -255,4 +258,40 @@ fn apply_writes_each_kind_as_the_old_statements_did() {
             vec![text("near"), Value::Integer(0)],
         ]
     );
+}
+
+/// A store change made outside a capture is refused and writes nothing, also when a
+/// capture's work hands the change to another thread, so no store row ever misses the
+/// log; inside a capture the change is written and kept.
+#[test]
+fn a_write_outside_a_capture_is_refused_and_leaves_no_row() {
+    let db = Connection::open_in_memory().unwrap();
+    initialize(&db).unwrap();
+    let off = || Event::Switched {
+        plugin: "ollama".into(),
+        enabled: false,
+    };
+    assert_eq!(code(record(&db, off())), Some(UNLOGGED));
+    assert!(rows(&db, "app_plugin_state").is_empty());
+
+    let (other, captured) = capture(|| {
+        std::thread::spawn(move || {
+            let db = Connection::open_in_memory().unwrap();
+            initialize(&db).unwrap();
+            let written = code(record(&db, off()));
+            (written, rows(&db, "app_plugin_state").len())
+        })
+        .join()
+        .unwrap()
+    });
+    assert_eq!(
+        other,
+        (Some(UNLOGGED), 0),
+        "another thread holds no capture"
+    );
+    assert!(captured.events.is_empty());
+
+    let ((), captured) = capture(|| record(&db, off()).unwrap());
+    assert_eq!(captured.events, [off()]);
+    assert_eq!(rows(&db, "app_plugin_state").len(), 1);
 }
