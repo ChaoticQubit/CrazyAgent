@@ -140,13 +140,51 @@ fn a_pending_record_holds_starts_only_while_its_engine_process_still_runs() {
     record(dir.path(), "pending", 0o600);
     assert_eq!(blocks_start(dir.path(), true), Some(ENGINE_RESTORING));
     assert_eq!(blocks_start(dir.path(), false), None);
-    assert!(holds_restart(dir.path(), true));
-    assert!(!holds_restart(dir.path(), false));
+    assert_eq!(restart_refusal(dir.path(), true), Some(ENGINE_RESTORING));
+    assert_eq!(restart_refusal(dir.path(), false), None);
     record(dir.path(), "restored replaced-20261117T001500000Z", 0o600);
-    assert!(
-        !holds_restart(dir.path(), true),
+    assert_eq!(
+        restart_refusal(dir.path(), true),
+        None,
         "restart is the owner's way back to 2.5"
     );
+}
+
+/// The owner's explicit restart is refused in every restore state a start would break: a
+/// restore still copying, and one that did not finish, whose start the engine refuses and
+/// whose login service must never be started into a loop; it runs with no record, after a
+/// restore that failed cleanly and after one that brought the 2.4 data back.
+#[test]
+fn a_restart_is_refused_in_every_restore_state_a_start_would_break() {
+    let dir = root();
+    assert_eq!(restart_refusal(dir.path(), true), None);
+    assert_eq!(restart_refusal(dir.path(), false), None);
+    let cases: [(&str, Option<&str>, Option<&str>); 7] = [
+        ("pending", Some(ENGINE_RESTORING), None),
+        ("restoring", Some(ENGINE_RESTORING), Some(ENGINE_RESTORE_BROKEN)),
+        (
+            "restoring replaced-20261117T001500000Z",
+            Some(ENGINE_RESTORING),
+            Some(ENGINE_RESTORE_BROKEN),
+        ),
+        (
+            "failed storage_restore_rollback_failed",
+            Some(ENGINE_RESTORE_BROKEN),
+            Some(ENGINE_RESTORE_BROKEN),
+        ),
+        (
+            "failed storage_restore_rollback_failed replaced-20261117T001500000Z",
+            Some(ENGINE_RESTORE_BROKEN),
+            Some(ENGINE_RESTORE_BROKEN),
+        ),
+        ("failed storage_restore_busy", None, None),
+        ("restored replaced-20261117T001500000Z", None, None),
+    ];
+    for (text, running, stopped) in cases {
+        record(dir.path(), text, 0o600);
+        assert_eq!(restart_refusal(dir.path(), true), running, "{text}");
+        assert_eq!(restart_refusal(dir.path(), false), stopped, "{text}");
+    }
 }
 
 #[test]
@@ -205,8 +243,8 @@ fn a_broken_or_abandoned_restore_holds_every_start_for_the_recovery_screen() {
         record(dir.path(), text, 0o600);
         assert_eq!(blocks_start(dir.path(), true), Some(ENGINE_RESTORING));
         assert_eq!(blocks_start(dir.path(), false), Some(ENGINE_RESTORE_BROKEN));
-        assert!(holds_restart(dir.path(), true));
-        assert!(!holds_restart(dir.path(), false));
+        assert_eq!(restart_refusal(dir.path(), true), Some(ENGINE_RESTORING));
+        assert_eq!(restart_refusal(dir.path(), false), Some(ENGINE_RESTORE_BROKEN));
     }
 }
 
@@ -241,4 +279,25 @@ fn recovery_refuses_every_action_while_the_engine_service_runs() {
             copy: Some("replaced-20261117T001500000Z".into())
         })
     );
+}
+
+/// A recovery refusal reaches a client as its known code, whatever text follows it, and any
+/// other text as the restore's plain failure; the backups folder sits beside engine.db.
+#[test]
+fn a_recovery_refusal_reaches_a_client_as_its_known_code() {
+    for code in [
+        "storage_putback_busy",
+        "storage_putback_copy_missing",
+        "storage_putback_copy_failed",
+        "storage_putback_check_failed",
+        "storage_restore_busy",
+        "storage_restore_unavailable",
+    ] {
+        assert_eq!(recovery_code(code), code);
+        assert_eq!(recovery_code(&format!("{code}: more")), code);
+    }
+    assert_eq!(recovery_code("disk I/O error"), "storage_restore_failed");
+    assert_eq!(recovery_code("storage_putback_bogus"), "storage_restore_failed");
+    let dir = root();
+    assert_eq!(backups(dir.path()), dir.path().join("backups"));
 }
