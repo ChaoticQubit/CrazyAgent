@@ -873,7 +873,8 @@ fn unavailable<E>(_: E) -> EngineError {
 
 fn read(url: &url::Url, limit: u64) -> Result<Vec<u8>, EngineError> {
     let mut bytes = Vec::new();
-    crate::update::download(url.as_str(), &mut bytes, limit, READ_TIME).map_err(fetch_failure)?;
+    kernel_processes::update::download(url.as_str(), &mut bytes, limit, READ_TIME)
+        .map_err(fetch_failure)?;
     Ok(bytes)
 }
 
@@ -883,7 +884,7 @@ fn download_to(url: &str, path: &Path) -> Result<String, EngineError> {
         file,
         hasher: Sha256::new(),
     };
-    crate::update::download(url, &mut hashing, VSIX_BYTES_MAX, DOWNLOAD_TIME)
+    kernel_processes::update::download(url, &mut hashing, VSIX_BYTES_MAX, DOWNLOAD_TIME)
         .map_err(fetch_failure)?;
     hashing
         .file
@@ -892,7 +893,7 @@ fn download_to(url: &str, path: &Path) -> Result<String, EngineError> {
     Ok(format!("{:x}", hashing.hasher.finalize()))
 }
 
-fn fetch_failure(error: crate::update::UpdateError) -> EngineError {
+fn fetch_failure(error: kernel_processes::update::UpdateError) -> EngineError {
     failure(match error.code {
         "update_url_refused" => "ide_extension_source_refused",
         "update_too_large" => "ide_extension_too_large",

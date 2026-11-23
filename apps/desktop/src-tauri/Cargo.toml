@@ -84,6 +84,8 @@ windows-sys = { version = "=0.61.2", features = [
 ] }
 
 [dev-dependencies]
+base64 = "=0.22.1"
+minisign = "=0.10.0"
 tauri = { version = "=2.12.4", features = ["test"] }
 rusqlite = { version = "=0.40.2", default-features = false, features = ["backup"] }
 tempfile = "=3.27.0"

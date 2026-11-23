@@ -1,6 +1,6 @@
 use crate::bridge::BridgeError;
 use crazyagent::service::StartWait;
-use crazyagent::update::{self, Channel, UpdateError};
+use kernel_processes::update::{self, Channel, UpdateError};
 use serde::Serialize;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -116,7 +116,7 @@ pub fn set_channel<R: Runtime>(
 ) -> Result<UpdateSettings, BridgeError> {
     let channel = Channel::parse(channel).ok_or_else(|| refused("update_channel_invalid"))?;
     let mut found = hold(state)?;
-    update::save_channel(&root()?, channel).map_err(bridged)?;
+    crazyagent::update::save_channel(&root()?, channel).map_err(bridged)?;
     *found = None;
     settings(app)
 }
@@ -156,17 +156,29 @@ pub async fn check<R: Runtime>(
         .desktop_manifest_url()
         .parse()
         .map_err(|_| refused("update_check_failed"))?;
+    check_at(app, &mut found, channel, endpoint).await
+}
+
+/// Checks one manifest endpoint for a newer release and keeps what it finds in the held
+/// state, as `check` does for the channel's published endpoint. Inputs: the app, the held
+/// update lock, the channel and the endpoint. Output: as `check`.
+async fn check_at<R: Runtime>(
+    app: &AppHandle<R>,
+    found: &mut MutexGuard<'_, Option<Update>>,
+    channel: Channel,
+    endpoint: tauri::Url,
+) -> Result<Option<AvailableUpdate>, BridgeError> {
     let updater = app
         .updater_builder()
         .endpoints(vec![endpoint])
         .and_then(|builder| builder.timeout(CHECK_TIMEOUT).build())
         .map_err(|_| refused("update_check_failed"))?;
-    *found = match updater.check().await {
+    **found = match updater.check().await {
         Ok(found) => found,
         Err(tauri_plugin_updater::Error::ReleaseNotFound) => return Err(unpublished(channel).await),
         Err(_) => return Err(refused("update_check_failed")),
     };
-    Ok(found.as_ref().map(|update| AvailableUpdate {
+    Ok((**found).as_ref().map(|update| AvailableUpdate {
         version: update.version.clone(),
         current_version: update.current_version.clone(),
         notes: update
@@ -215,6 +227,17 @@ fn download_failure(error: tauri_plugin_updater::Error) -> BridgeError {
 pub async fn install(
     state: &UpdateState,
     events: Events<UpdateProgress>,
+) -> Result<InstallOutcome, BridgeError> {
+    install_with(state, events, sidecar).await
+}
+
+/// Runs `install` with the bundled `crazyagent` found by `sidecar`, looked up after the lock
+/// and the checked update, as `install` does. Inputs: the state, the progress channel and
+/// the sidecar lookup. Output: as `install`.
+async fn install_with(
+    state: &UpdateState,
+    events: Events<UpdateProgress>,
+    sidecar: impl FnOnce() -> Result<PathBuf, BridgeError>,
 ) -> Result<InstallOutcome, BridgeError> {
     let mut found = hold(state)?;
     let update = found
@@ -318,6 +341,115 @@ pub async fn link_cli() -> Result<String, BridgeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
+    use std::io::{Read, Write};
+
+    fn key_pair() -> (minisign::KeyPair, String) {
+        let pair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let key = STANDARD.encode(pair.pk.to_box().unwrap().into_string());
+        (pair, key)
+    }
+
+    fn signed(pair: &minisign::KeyPair, bytes: &[u8], trusted: &str) -> String {
+        let signature = minisign::sign(
+            Some(&pair.pk),
+            &pair.sk,
+            std::io::Cursor::new(bytes),
+            Some(trusted),
+            None,
+        )
+        .unwrap();
+        STANDARD.encode(signature.into_string())
+    }
+
+    fn answer(listener: &std::net::TcpListener, body: &[u8]) {
+        let (mut stream, _) = kernel_processes::spawn_gate::accept_tcp_std(listener).unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+            request.push(byte[0]);
+        }
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.write_all(body);
+    }
+
+    /// The desktop app installs only a release the updater verified: a manifest and archive
+    /// signed with a key other than the app's are found by the check, then refused at
+    /// download with `update_signature_invalid`, and the sidecar never stops the engine.
+    #[test]
+    fn desktop_install_refuses_a_bad_signature_through_the_updater() {
+        let (_release, release_key) = key_pair();
+        let (other, _) = key_pair();
+        let archive = b"desktop release archive".to_vec();
+        let trusted = "timestamp:1761400000\tfile:CrazyAgent.app.tar.gz\tversion:0.2.0";
+        let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let target = tauri_plugin_updater::target().expect("an updater target for this build");
+        let mut platforms = serde_json::Map::new();
+        platforms.insert(
+            target,
+            serde_json::json!({
+                "url": format!("{base}/archive"),
+                "signature": signed(&other, &archive, trusted),
+            }),
+        );
+        let manifest = serde_json::json!({ "version": "0.2.0", "platforms": platforms });
+        let manifest = serde_json::to_vec(&manifest).unwrap();
+        let served = archive.clone();
+        let server = std::thread::spawn(move || {
+            answer(&listener, &manifest);
+            answer(&listener, &served);
+        });
+
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().plugins.0.insert(
+            "updater".to_owned(),
+            serde_json::json!({ "pubkey": release_key, "dangerousInsecureTransportProtocol": true }),
+        );
+        let app = tauri::test::mock_builder()
+            .plugin(tauri_plugin_updater::Builder::new().build())
+            .build(context)
+            .unwrap();
+        let state = UpdateState::default();
+        let folder = tempfile::tempdir().unwrap();
+        let stub = folder.path().join("crazyagent");
+        let ran = folder.path().join("service-ran");
+        std::fs::write(&stub, format!("#!/bin/sh\ntouch '{}'\n", ran.display())).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let outcome = tauri::async_runtime::block_on(async {
+            let endpoint: tauri::Url = format!("{base}/latest.json").parse().unwrap();
+            let mut found = hold(&state).unwrap();
+            let available = check_at(app.handle(), &mut found, Channel::Stable, endpoint)
+                .await
+                .unwrap()
+                .expect("the check finds the newer release");
+            assert_eq!(available.version, "0.2.0");
+            drop(found);
+            let events = Events::new(|_| Ok(()));
+            install_with(&state, events, || Ok(stub.clone())).await
+        });
+        server.join().unwrap();
+        assert_eq!(
+            outcome.err().map(|refusal| refusal.code),
+            Some("update_signature_invalid")
+        );
+        assert!(!ran.exists(), "the sidecar ran a service step");
+        assert_eq!(
+            std::fs::read_dir(folder.path()).unwrap().count(),
+            1,
+            "nothing but the stub sidecar is in its folder"
+        );
+    }
 
     #[test]
     fn an_engine_restart_and_an_update_step_never_hold_the_update_lock_together() {
