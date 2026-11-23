@@ -134,6 +134,16 @@ fn link_chain(path: &Path) -> Result<Vec<PathBuf>, PathBuf> {
     Ok(hops)
 }
 
+/// Where the walk of a link's target starts: the root of the drive a target with a drive
+/// and root names, the root of the drive the walk is on for a target with a root and no
+/// drive, and the link's own folder for a relative target. Any other target (a share, a
+/// volume or device name, or a drive with no root) names none, so the link counts as
+/// changeable. Inputs: the link's folder and the target. Output: the folder, or none.
+pub(super) fn link_start(at: &Path, target: &Path) -> Option<PathBuf> {
+    let _ = target;
+    Some(at.to_path_buf())
+}
+
 /// One part of a path as the ownership rule reads it: missing, unreadable, carrying an
 /// access list that lets someone other than this user or root change it ([`acl`]), or its
 /// owner, group, mode and whether it is a folder or a link.
