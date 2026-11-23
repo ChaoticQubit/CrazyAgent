@@ -122,3 +122,53 @@ fn link_cli_keeps_the_user_path_kind_and_its_unexpanded_references() {
         assert_eq!(key.path(), after, "{kind}");
     }
 }
+
+/// While another install holds the PATH lock past the wait, link_cli is refused with a
+/// try-again line and the PATH value stays as it was.
+#[cfg(windows)]
+#[test]
+fn link_cli_refuses_while_another_install_holds_the_path_lock() {
+    let before = ("ExpandString", r"C:\Windows");
+    let key = ScratchKey::new("locked", Some(before));
+    let lock = cli_link::path_lock_name(&key.name);
+    let mut holder = powershell_command(
+        "$ErrorActionPreference='Stop'; \
+$m=[System.Threading.Mutex]::new($true, $env:CRAZYAGENT_TEST_LOCK); \
+[Console]::Out.WriteLine('held'); [Console]::Out.Flush(); \
+Start-Sleep -Seconds 15; $m.ReleaseMutex()",
+        &[("CRAZYAGENT_TEST_LOCK", &lock)],
+    );
+    let mut child = crate::spawn_gate::spawn(holder.stdout(std::process::Stdio::piped())).unwrap();
+    let mut held = String::new();
+    let mut reader = std::io::BufReader::new(child.stdout.take().unwrap());
+    std::io::BufRead::read_line(&mut reader, &mut held).unwrap();
+    assert_eq!(held.trim(), "held");
+    let root = tempfile::tempdir().unwrap();
+    let linked = link_cli_under(&root.path().join("crazyagent.exe"), &key.name);
+    let refusal = linked.unwrap_err().to_string();
+    assert!(refusal.contains("try again"), "{refusal}");
+    assert_eq!(key.path(), (before.0.to_owned(), before.1.to_owned()));
+    assert!(child.wait().unwrap().success());
+}
+
+/// Eight installs adding eight folders under one key at once all land in its PATH value.
+#[cfg(windows)]
+#[test]
+fn link_cli_from_eight_installs_at_once_keeps_every_folder() {
+    let key = ScratchKey::new("eight", None);
+    let root = tempfile::tempdir().unwrap();
+    let folders: Vec<PathBuf> = (0..8)
+        .map(|index| root.path().join(format!("bin{index}")))
+        .collect();
+    std::thread::scope(|scope| {
+        for folder in &folders {
+            let name = &key.name;
+            scope.spawn(move || link_cli_under(&folder.join("crazyagent.exe"), name).unwrap());
+        }
+    });
+    let (_, value) = key.path();
+    let entries: Vec<&str> = value.split(';').collect();
+    for folder in &folders {
+        assert!(entries.contains(&folder.to_str().unwrap()), "{value}");
+    }
+}
