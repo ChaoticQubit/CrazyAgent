@@ -63,19 +63,36 @@ fn base64(bytes: &[u8]) -> String {
     text
 }
 
+/// One request the loopback server read: its method, path, query, the headers the routes
+/// read and the body.
+struct Request {
+    method: String,
+    path: String,
+    query: String,
+    authorization: Option<String>,
+    content_type: Option<String>,
+    content_encoding: Option<String>,
+    git_protocol: Option<String>,
+    body: Vec<u8>,
+}
+
+/// What the loopback server answers: `/user` stands in for the account API, and every other
+/// path goes, behind the Basic `x-access-token` check, to the real `git http-backend`.
+/// Inputs: the request, the served folder, the token and the backend. Output: the status
+/// line, the extra header lines and the body.
 fn route(
-    path: &str,
-    authorization: Option<&str>,
+    request: &Request,
     served: &Path,
     token: &str,
-) -> (&'static str, String, Vec<u8>) {
+    backend: &Backend,
+) -> (String, String, Vec<u8>) {
     let json = "Content-Type: application/json\r\n".to_owned();
-    if path == "/user" {
-        return if authorization == Some(format!("Bearer {token}").as_str()) {
-            ("200 OK", json, br#"{"login":"octo-cat"}"#.to_vec())
+    if request.path == "/user" {
+        return if request.authorization.as_deref() == Some(format!("Bearer {token}").as_str()) {
+            ("200 OK".into(), json, br#"{"login":"octo-cat"}"#.to_vec())
         } else {
             (
-                "401 Unauthorized",
+                "401 Unauthorized".into(),
                 json,
                 br#"{"message":"Bad credentials"}"#.to_vec(),
             )
@@ -85,27 +102,130 @@ fn route(
         "Basic {}",
         base64(format!("x-access-token:{token}").as_bytes())
     );
-    if authorization != Some(basic.as_str()) {
+    if request.authorization.as_deref() != Some(basic.as_str()) {
         return (
-            "401 Unauthorized",
+            "401 Unauthorized".into(),
             "WWW-Authenticate: Basic realm=\"git\"\r\n".into(),
             Vec::new(),
         );
     }
-    let relative = path.trim_start_matches('/');
-    if relative
+    if request
+        .path
+        .trim_start_matches('/')
         .split('/')
         .any(|part| part == ".." || part.is_empty())
     {
-        return ("404 Not Found", String::new(), Vec::new());
+        return ("404 Not Found".into(), String::new(), Vec::new());
     }
-    match std::fs::read(served.join(relative)) {
-        Ok(bytes) => ("200 OK", String::new(), bytes),
-        Err(_) => ("404 Not Found", String::new(), Vec::new()),
+    backend.answer(request, served)
+}
+
+/// The most bytes one `git http-backend` reply may carry.
+const BACKEND_BYTES_MAX: u64 = 16 * 1024 * 1024;
+
+/// The real `git http-backend` beside the `git` the rows run, found through
+/// `git --exec-path`, and that folder, which its own `git upload-pack` needs on PATH.
+struct Backend {
+    program: PathBuf,
+    exec_path: PathBuf,
+}
+
+impl Backend {
+    /// Finds the backend. Output: it, or a panic naming what `git --exec-path` printed.
+    fn find() -> Self {
+        let output = kernel_processes::spawn_gate::collected(
+            std::process::Command::new("git").arg("--exec-path"),
+        )
+        .expect("git --exec-path starts");
+        assert!(output.status.success(), "git --exec-path: {output:?}");
+        let exec_path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        let program = exec_path.join("git-http-backend");
+        assert!(
+            exec_path.is_absolute() && program.is_file(),
+            "no git-http-backend in {}",
+            exec_path.display()
+        );
+        Self { program, exec_path }
+    }
+
+    /// Runs one request through the backend as CGI on a cleared environment holding only
+    /// what it reads, the body on its standard input. Inputs: the request and the served
+    /// folder. Output: the status line, the header lines it set and the body.
+    fn answer(&self, request: &Request, served: &Path) -> (String, String, Vec<u8>) {
+        let mut command = std::process::Command::new(&self.program);
+        command
+            .env_clear()
+            .env("GIT_PROJECT_ROOT", served)
+            .env("GIT_HTTP_EXPORT_ALL", "1")
+            .env("GIT_EXEC_PATH", &self.exec_path)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", self.exec_path.display()),
+            )
+            .env("REQUEST_METHOD", &request.method)
+            .env("PATH_INFO", &request.path)
+            .env("QUERY_STRING", &request.query)
+            .env("CONTENT_LENGTH", request.body.len().to_string())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        for (name, value) in [
+            ("CONTENT_TYPE", &request.content_type),
+            ("HTTP_CONTENT_ENCODING", &request.content_encoding),
+            ("HTTP_GIT_PROTOCOL", &request.git_protocol),
+        ] {
+            if let Some(value) = value {
+                command.env(name, value);
+            }
+        }
+        let mut child = kernel_processes::spawn_gate::spawn(&mut command)
+            .unwrap_or_else(|error| panic!("{}: {error}", self.program.display()));
+        let mut input = child.stdin.take().expect("the backend's stdin");
+        let _ = input.write_all(&request.body);
+        drop(input);
+        let mut reply = Vec::new();
+        let read = child
+            .stdout
+            .take()
+            .expect("the backend's stdout")
+            .take(BACKEND_BYTES_MAX)
+            .read_to_end(&mut reply);
+        let ended = child.wait();
+        assert!(read.is_ok() && ended.is_ok(), "{read:?} {ended:?}");
+        cgi_reply(&reply)
     }
 }
 
-fn answer(mut stream: TcpStream, served: &Path, token: &str) {
+/// Splits a CGI reply into the HTTP status line, the header lines to pass on and the body.
+/// Input: the reply. Output: its parts, `200 OK` when it names no `Status`, or a 502 when it
+/// holds no end of headers.
+fn cgi_reply(reply: &[u8]) -> (String, String, Vec<u8>) {
+    let Some(end) = reply.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return ("502 Bad Gateway".into(), String::new(), Vec::new());
+    };
+    let head = String::from_utf8_lossy(&reply[..end]);
+    let mut status = "200 OK".to_owned();
+    let mut extra = String::new();
+    for line in head.split("\r\n") {
+        match line.split_once(':') {
+            Some((name, value)) if name.eq_ignore_ascii_case("status") => {
+                status = value.trim().to_owned();
+            }
+            Some(_) => {
+                extra.push_str(line);
+                extra.push_str("\r\n");
+            }
+            None => {}
+        }
+    }
+    (status, extra, reply[end + 4..].to_vec())
+}
+
+/// Reads one request, at most [`REQUEST_BYTES_MAX`] bytes with its body, and writes the
+/// route's answer. Inputs: the connection, the served folder, the token and the backend.
+fn answer(mut stream: TcpStream, served: &Path, token: &str, backend: &Backend) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let Ok(copy) = stream.try_clone() else {
         return;
@@ -115,27 +235,46 @@ fn answer(mut stream: TcpStream, served: &Path, token: &str) {
     if reader.read_line(&mut line).is_err() {
         return;
     }
-    let path = line
-        .split(' ')
-        .nth(1)
-        .unwrap_or("/")
-        .split('?')
-        .next()
-        .unwrap_or("/")
-        .to_owned();
-    let mut authorization = None;
+    let mut words = line.split(' ');
+    let method = words.next().unwrap_or("GET").to_owned();
+    let target = words.next().unwrap_or("/");
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let mut request = Request {
+        method,
+        path: path.to_owned(),
+        query: query.to_owned(),
+        authorization: None,
+        content_type: None,
+        content_encoding: None,
+        git_protocol: None,
+        body: Vec::new(),
+    };
+    let mut length = 0_usize;
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
             break;
         }
-        if let Some((name, value)) = header.split_once(':')
-            && name.eq_ignore_ascii_case("authorization")
-        {
-            authorization = Some(value.trim().to_owned());
+        let Some((name, value)) = header.split_once(':') else {
+            continue;
+        };
+        let value = Some(value.trim().to_owned());
+        match name.to_ascii_lowercase().as_str() {
+            "authorization" => request.authorization = value,
+            "content-type" => request.content_type = value,
+            "content-encoding" => request.content_encoding = value,
+            "git-protocol" => request.git_protocol = value,
+            "content-length" => length = value.and_then(|v| v.parse().ok()).unwrap_or(0),
+            _ => {}
         }
     }
-    let (status, extra, body) = route(&path, authorization.as_deref(), served, token);
+    request
+        .body
+        .resize(length.min(REQUEST_BYTES_MAX as usize), 0);
+    if reader.read_exact(&mut request.body).is_err() {
+        return;
+    }
+    let (status, extra, body) = route(&request, served, token, backend);
     let head = format!(
         "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n",
         body.len()
@@ -144,12 +283,16 @@ fn answer(mut stream: TcpStream, served: &Path, token: &str) {
     let _ = stream.write_all(&body);
 }
 
+/// Starts the loopback server on a free port: the account stand-in and, behind the token,
+/// the real `git http-backend` serving the bare repositories under `served`. Inputs: the
+/// served folder and the token. Output: the port.
 fn stand_in(served: PathBuf, token: String) -> u16 {
+    let backend = Backend::find();
     let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener).flatten() {
-            answer(stream, &served, &token);
+            answer(stream, &served, &token, &backend);
         }
     });
     port
@@ -210,7 +353,6 @@ async fn a_sign_in_kept_for_the_engine_clones_through_the_credential_helper_and_
             bare.to_str().unwrap(),
         ],
     );
-    git(&bare, &["update-server-info"]);
     let token = format!("gho_e2e{}", hex(18));
     let port = stand_in(served, token.clone());
 
