@@ -1185,7 +1185,9 @@ pub fn own_group_private() -> bool {
             .ok()
             .flatten();
         let group = nix::unistd::Group::from_gid(gid).ok().flatten();
-        let primary = local_accounts().and_then(|text| primary_users(&text, gid.as_raw()));
+        let primary = local_accounts()
+            .filter(|_| accounts_complete(Path::new("/etc")))
+            .and_then(|text| primary_users(&text, gid.as_raw()));
         match (user, group, primary) {
             (Some(user), Some(group), Some(primary)) => {
                 private_group(&group.name, &group.mem, &primary, &user.name)
@@ -1207,6 +1209,14 @@ fn local_accounts() -> Option<String> {
         .read_to_string(&mut text)
         .ok()?;
     (text.len() as u64 <= ACCOUNTS_BYTES_MAX).then_some(text)
+}
+
+/// Whether the local account file holds every account the system's user lookup can give a
+/// primary group. Input: the folder holding `nsswitch.conf` and `sssd`, `/etc` outside
+/// rows. Output: the answer.
+#[cfg(any(test, all(unix, not(target_os = "macos"))))]
+fn accounts_complete(_etc: &Path) -> bool {
+    true
 }
 
 /// Whether a group named `name`, listing `members`, is the user private group of the user

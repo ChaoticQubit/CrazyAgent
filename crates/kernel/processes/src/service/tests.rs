@@ -1196,6 +1196,96 @@ fn a_group_another_account_has_as_its_primary_group_is_not_private() {
     );
 }
 
+/// Writes a user lookup configuration into a scratch `etc` folder. Inputs: the folder and
+/// the file's text.
+#[cfg(unix)]
+fn lookup_config(etc: &Path, text: &str) {
+    std::fs::write(etc.join("nsswitch.conf"), text).unwrap();
+}
+
+/// A default Ubuntu desktop lists SSSD without configuring it, so its local account file
+/// still holds every account that can have a primary group; comments and action items on
+/// the line are not sources.
+#[cfg(unix)]
+#[test]
+fn an_unconfigured_sssd_leaves_the_account_file_complete() {
+    let etc = tempfile::tempdir().unwrap();
+    for line in [
+        "passwd: files sss systemd",
+        "passwd:\tfiles sss",
+        "passwd: compat",
+        "passwd: files [NOTFOUND=return] systemd # sss is set up later",
+        "passwd: files [ NOTFOUND=return ] sss\ngroup: files ldap",
+    ] {
+        lookup_config(etc.path(), line);
+        assert!(
+            accounts_complete(etc.path()),
+            "{line:?} with no sssd folder"
+        );
+    }
+    let drop_ins = etc.path().join("sssd").join("conf.d");
+    std::fs::create_dir_all(&drop_ins).unwrap();
+    std::fs::write(drop_ins.join("README"), "").unwrap();
+    lookup_config(etc.path(), "passwd: files sss systemd");
+    assert!(
+        accounts_complete(etc.path()),
+        "a drop-in folder with no .conf"
+    );
+}
+
+/// SSSD with a configuration file or a `.conf` drop-in can serve directory accounts the
+/// local account file never lists.
+#[cfg(unix)]
+#[test]
+fn a_configured_sssd_leaves_the_account_file_incomplete() {
+    let etc = tempfile::tempdir().unwrap();
+    lookup_config(etc.path(), "passwd: files sss systemd");
+    let sssd = etc.path().join("sssd");
+    std::fs::create_dir_all(sssd.join("conf.d")).unwrap();
+    std::fs::write(sssd.join("sssd.conf"), "").unwrap();
+    assert!(!accounts_complete(etc.path()), "sssd.conf");
+    std::fs::remove_file(sssd.join("sssd.conf")).unwrap();
+    std::fs::write(sssd.join("conf.d").join("ad.conf"), "").unwrap();
+    assert!(!accounts_complete(etc.path()), "a .conf drop-in");
+}
+
+/// An SSSD folder this user cannot look into reads as configured, since a configuration
+/// there cannot be ruled out.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_sssd_folder_leaves_the_account_file_incomplete() {
+    use std::os::unix::fs::PermissionsExt;
+    if rustix::process::geteuid().is_root() {
+        return;
+    }
+    let etc = tempfile::tempdir().unwrap();
+    lookup_config(etc.path(), "passwd: files sss systemd");
+    let sssd = shared_folder(&etc.path().join("sssd"), 0o000);
+    let complete = accounts_complete(etc.path());
+    std::fs::set_permissions(&sssd, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(!complete);
+}
+
+/// Any other account source, a missing `passwd` line or a missing configuration leaves the
+/// local account file incomplete.
+#[cfg(unix)]
+#[test]
+fn a_directory_source_or_no_lookup_line_leaves_the_account_file_incomplete() {
+    let etc = tempfile::tempdir().unwrap();
+    assert!(!accounts_complete(etc.path()), "no nsswitch.conf");
+    for line in [
+        "passwd: files ldap",
+        "passwd: files systemd sss nis",
+        "passwd: winbind files",
+        "passwd: files altfiles systemd",
+        "group: files",
+        "",
+    ] {
+        lookup_config(etc.path(), line);
+        assert!(!accounts_complete(etc.path()), "{line:?}");
+    }
+}
+
 /// The accounts whose primary group is a gid are read from the local account
 /// file's fourth field; comments and blank lines are skipped, and a line that cannot be read
 /// or that pulls accounts in from elsewhere (`+` or `-`) gives none, the stricter rule.
