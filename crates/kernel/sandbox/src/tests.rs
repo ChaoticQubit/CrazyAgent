@@ -178,3 +178,12 @@ fn the_linux_helper_entry_lives_in_the_kernel() {
     let main: fn(Vec<std::ffi::OsString>) -> std::process::ExitCode = crate::linux::helper::main;
     let _ = main;
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_linux_launch_and_its_host_read_live_in_the_kernel() {
+    let read: fn(&std::path::Path, Option<&std::path::Path>) -> crate::host::LinuxHost =
+        crate::linux::launch::host::read_host;
+    let _ = read;
+    let _: Option<crate::linux::launch::LinuxSandbox> = None;
+}
