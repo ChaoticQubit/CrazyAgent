@@ -1,6 +1,6 @@
 use super::*;
 use crate::sdk_slice::{EngineRefusals, bundled_grants};
-use bus_gateway::{Gateway, Grants};
+use bus_gateway::{AllOn, Gateway, Grants};
 use kernel_plugin_host::generated::permissions::BUNDLED_GRANTS;
 use sdk::Tier;
 use sdk::process::Provide;
@@ -339,7 +339,7 @@ fn no_bundled_plugin_holds_process_install() {
 #[test]
 fn agent_quit_calling_process_install_is_refused_and_logs_one_call_refused() {
     let refusals = EngineRefusals::new();
-    let gateway = Gateway::new(bundled_grants(), &refusals);
+    let gateway = Gateway::new(bundled_grants(), &refusals, &AllOn);
     let provider = InstallCaps::with(never_run);
     let providers = Providers {
         net: &crate::security_caps::Absent,
@@ -368,7 +368,7 @@ fn agent_quit_calling_process_install_is_refused_and_logs_one_call_refused() {
 fn a_test_grant_table_reaches_the_install_provider() {
     let grants = Grants::new(&[("installer-test", Tier::T1, &["process.install"])]).unwrap();
     let refusals = EngineRefusals::new();
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let provider = InstallCaps::with(answered);
     let providers = Providers {
         net: &crate::security_caps::Absent,
