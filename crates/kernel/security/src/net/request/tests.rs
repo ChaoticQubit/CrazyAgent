@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use super::*;
 use crate::exposure::holds;
 use crate::net::capture::CaptureRules;
-use crate::secrets::{HANDLES_MAX, Handles, Scopes, Secrets};
+use crate::secrets::{Handles, PLUGIN_HANDLES_MAX, Scopes, Secrets};
 use crate::store::{SecretRef, Store, reference};
 
 const NAMESPACE: &str = "dev.crazyagent.e0123456789ab";
@@ -173,7 +173,7 @@ impl Rig {
             NAMESPACE,
             &self.scopes,
             &self.handles,
-            Some(paste),
+            Some(("github", paste)),
         )
     }
 
@@ -827,9 +827,9 @@ fn a_host_with_a_port_is_captured_by_its_port_key() {
 #[test]
 fn a_full_handle_table_refuses_a_capture_before_send() {
     let rig = Rig::new(&token_reply());
-    for index in 0..HANDLES_MAX {
-        let found = reference(&format!("{NAMESPACE}.notes"), &format!("n{index}")).unwrap();
-        rig.handles.lock().unwrap().mint("notes", found).unwrap();
+    for index in 0..PLUGIN_HANDLES_MAX {
+        let found = reference(&format!("{NAMESPACE}.github"), &format!("n{index}")).unwrap();
+        rig.handles.lock().unwrap().mint("github", found).unwrap();
     }
     let secrets = rig.secrets();
     let requests = Requests::new(&secrets, &rig.egress, &rig.rules);

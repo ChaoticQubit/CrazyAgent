@@ -7,6 +7,12 @@ use crate::store::{NAME_BYTES_MAX, SecretRef, Store, checked_name, reference};
 
 /// The most handles one engine holds at once, over every plugin.
 pub const HANDLES_MAX: usize = 4_096;
+/// The most handles one plugin holds at once: its own share of `HANDLES_MAX`.
+pub const PLUGIN_HANDLES_MAX: usize = 256;
+/// The most plugins that hold handles at once, so every one of them gets its full share.
+pub const PLUGINS_MAX: usize = HANDLES_MAX / PLUGIN_HANDLES_MAX;
+
+const _: () = assert!(PLUGINS_MAX * PLUGIN_HANDLES_MAX == HANDLES_MAX);
 /// The most bytes of one plugin's scope leaf, so `<namespace>.<leaf>` stays a store name.
 pub const SCOPE_LEAF_BYTES_MAX: usize = 34;
 /// The most bytes of an engine namespace: `dev.crazyagent.e<12 hex>` is exactly this.
@@ -61,11 +67,18 @@ enum Entry {
     Held(SecretString),
 }
 
-/// The handles minted so far: each id names one stored reference or one held value for
-/// the one plugin it was minted for; both kinds share one id space and one bound.
+/// The handles minted so far: each plugin has its own ids, counted from 1, and its own share
+/// of `PLUGIN_HANDLES_MAX`, so no plugin can use up another's handles or learn from its ids
+/// how many another holds. Each id names one stored reference or one held value.
 pub struct Handles {
+    shares: BTreeMap<&'static str, Share>,
+    total: usize,
+}
+
+/// One plugin's handles: the next id and the entries by id.
+struct Share {
     next: u64,
-    by_id: BTreeMap<u64, (&'static str, Entry)>,
+    by_id: BTreeMap<u64, Entry>,
 }
 
 impl Default for Handles {
@@ -75,11 +88,11 @@ impl Default for Handles {
 }
 
 impl Handles {
-    /// An empty table whose first id is 1. Output: the table.
+    /// An empty table. Output: the table.
     pub fn new() -> Self {
         Self {
-            next: 1,
-            by_id: BTreeMap::new(),
+            shares: BTreeMap::new(),
+            total: 0,
         }
     }
 
@@ -87,8 +100,11 @@ impl Handles {
     /// holds for that reference. Inputs: the plugin and the reference. Output: the id, or
     /// `secret_handles_full` when `HANDLES_MAX` handles are held.
     pub fn mint(&mut self, caller: &'static str, reference: SecretRef) -> Result<u64, StoreError> {
-        let held = self.by_id.iter().find(|(_, (plugin, found))| {
-            *plugin == caller && matches!(found, Entry::Stored(stored) if *stored == reference)
+        let held = self.shares.get(caller).and_then(|share| {
+            share
+                .by_id
+                .iter()
+                .find(|(_, found)| matches!(found, Entry::Stored(stored) if *stored == reference))
         });
         if let Some((id, _)) = held {
             return Ok(*id);
@@ -102,25 +118,50 @@ impl Handles {
         self.insert(caller, Entry::Held(value))
     }
 
-    /// The number of handles that may still be minted. Output: the count.
-    pub fn free(&self) -> usize {
-        assert!(self.by_id.len() <= HANDLES_MAX);
-        HANDLES_MAX - self.by_id.len()
+    /// The number of handles one plugin may still be given: what is left of its share, or 0
+    /// for a new plugin once `PLUGINS_MAX` plugins have been given handles. Input: the
+    /// plugin. Output: the count.
+    pub fn free(&self, caller: &'static str) -> usize {
+        assert!(self.total <= HANDLES_MAX && self.shares.len() <= PLUGINS_MAX);
+        match self.shares.get(caller) {
+            Some(share) => PLUGIN_HANDLES_MAX - share.by_id.len(),
+            None if self.shares.len() < PLUGINS_MAX => PLUGIN_HANDLES_MAX,
+            None => 0,
+        }
     }
 
-    /// Adds one entry under the next id. Inputs: the plugin and the entry. Output: the id,
-    /// or `secret_handles_full` when `HANDLES_MAX` handles are held.
+    /// The handles held over every plugin. Output: the count.
+    pub fn total(&self) -> usize {
+        assert_eq!(
+            self.total,
+            self.shares
+                .values()
+                .map(|share| share.by_id.len())
+                .sum::<usize>()
+        );
+        self.total
+    }
+
+    /// Adds one entry under the plugin's next id. Inputs: the plugin and the entry. Output:
+    /// the id, or `secret_handles_full` when the plugin's share is used up or `PLUGINS_MAX`
+    /// other plugins hold handles.
     fn insert(&mut self, caller: &'static str, entry: Entry) -> Result<u64, StoreError> {
-        if self.by_id.len() >= HANDLES_MAX {
+        if self.free(caller) == 0 {
             return Err(StoreError::code("secret_handles_full"));
         }
-        let id = self.next;
-        self.next = self
+        let share = self.shares.entry(caller).or_insert(Share {
+            next: 1,
+            by_id: BTreeMap::new(),
+        });
+        let id = share.next;
+        share.next = share
             .next
             .checked_add(1)
             .expect("handle ids never run out of u64");
-        assert!(self.by_id.insert(id, (caller, entry)).is_none());
-        assert!(self.by_id.len() <= HANDLES_MAX);
+        assert!(share.by_id.insert(id, entry).is_none());
+        assert!(share.by_id.len() <= PLUGIN_HANDLES_MAX);
+        self.total += 1;
+        assert!(self.total <= HANDLES_MAX && self.shares.len() <= PLUGINS_MAX);
         Ok(id)
     }
 
@@ -132,17 +173,17 @@ impl Handles {
         caller: &'static str,
         reference: &SecretRef,
     ) -> Result<(u64, bool), StoreError> {
-        let before = self.by_id.len();
+        let before = self.total;
         let id = self.mint(caller, reference.clone())?;
-        Ok((id, self.by_id.len() > before))
+        Ok((id, self.total > before))
     }
 
     /// The stored reference behind a handle id, only for the plugin it was minted for.
     /// Output: the reference, or `secret_handle_refused` for an unknown id, another
     /// plugin's, or a held value.
     pub fn resolve(&self, caller: &'static str, id: u64) -> Result<&SecretRef, StoreError> {
-        match self.by_id.get(&id) {
-            Some((plugin, Entry::Stored(found))) if *plugin == caller => Ok(found),
+        match self.entry(caller, id) {
+            Some(Entry::Stored(found)) => Ok(found),
             _ => Err(StoreError::code("secret_handle_refused")),
         }
     }
@@ -150,8 +191,8 @@ impl Handles {
     /// Whether a handle id is a held value of the calling plugin. Output: the answer, or
     /// `secret_handle_refused` for an unknown id or another plugin's.
     fn is_held(&self, caller: &'static str, id: u64) -> Result<bool, StoreError> {
-        match self.by_id.get(&id) {
-            Some((plugin, entry)) if *plugin == caller => Ok(matches!(entry, Entry::Held(_))),
+        match self.entry(caller, id) {
+            Some(entry) => Ok(matches!(entry, Entry::Held(_))),
             _ => Err(StoreError::code("secret_handle_refused")),
         }
     }
@@ -159,17 +200,30 @@ impl Handles {
     /// A copy of a held value of the calling plugin. Output: the value, or
     /// `secret_handle_refused`.
     fn held_value(&self, caller: &'static str, id: u64) -> Result<SecretString, StoreError> {
-        match self.by_id.get(&id) {
-            Some((plugin, Entry::Held(value))) if *plugin == caller => {
-                SecretString::bearer(value.expose().as_bytes().to_vec())
-            }
+        match self.entry(caller, id) {
+            Some(Entry::Held(value)) => SecretString::bearer(value.expose().as_bytes().to_vec()),
             _ => Err(StoreError::code("secret_handle_refused")),
         }
     }
 
-    /// Drops one handle. Input: its id. Output: none.
-    fn drop_id(&mut self, id: u64) {
-        self.by_id.remove(&id);
+    /// The entry behind one id of one plugin. Inputs: the plugin and the id. Output: the
+    /// entry, or none for an id the plugin was never given.
+    fn entry(&self, caller: &'static str, id: u64) -> Option<&Entry> {
+        self.shares
+            .get(caller)
+            .and_then(|share| share.by_id.get(&id))
+    }
+
+    /// Drops one handle of one plugin. The plugin keeps its share and its counter, so an id
+    /// is never given twice. Inputs: the plugin and the id. Output: none.
+    fn drop_id(&mut self, caller: &'static str, id: u64) {
+        let Some(share) = self.shares.get_mut(caller) else {
+            return;
+        };
+        if share.by_id.remove(&id).is_some() {
+            assert!(self.total > 0);
+            self.total -= 1;
+        }
     }
 }
 
@@ -180,18 +234,19 @@ pub struct Secrets<'r> {
     namespace: &'r str,
     scopes: &'r Scopes,
     handles: &'r Mutex<Handles>,
-    owner_entry: Mutex<Option<SecretString>>,
+    owner_entry: Mutex<Option<(&'static str, SecretString)>>,
 }
 
 impl<'r> Secrets<'r> {
-    /// Builds the secrets module for one owner request; `owner_entry` is the value the owner
-    /// pasted in that request, moved from the client to here and never to a plugin.
+    /// Builds the secrets module for one owner request; `owner_entry` is the plugin the owner
+    /// addressed and the value pasted for it, moved from the client to here and never to a
+    /// plugin; only that plugin's `put_from_owner` may save it.
     pub fn for_request(
         store: &'r dyn Store,
         namespace: &'r str,
         scopes: &'r Scopes,
         handles: &'r Mutex<Handles>,
-        owner_entry: Option<SecretString>,
+        owner_entry: Option<(&'static str, SecretString)>,
     ) -> Self {
         assert!(!namespace.is_empty() && namespace.len() <= NAMESPACE_BYTES_MAX);
         Self {
@@ -225,11 +280,15 @@ impl<'r> Secrets<'r> {
             .owner_entry
             .lock()
             .expect("the owner entry lock is never poisoned");
-        if owner.is_none() {
+        if !owner
+            .as_ref()
+            .is_some_and(|(addressed, _)| *addressed == caller)
+        {
             return Err(StoreError::code("secret_owner_entry_missing"));
         }
         let (id, fresh) = self.lock().reserve(caller, &found)?;
-        let entry = owner.take().expect("the entry was checked just above");
+        let (addressed, entry) = owner.take().expect("the entry was checked just above");
+        assert_eq!(addressed, caller);
         drop(owner);
         self.save(caller, (&service, name, &found), (id, fresh), &entry)
     }
@@ -274,9 +333,10 @@ impl<'r> Secrets<'r> {
         self.store.get(&found)
     }
 
-    /// The handles this module may still mint. Output: the count.
-    pub fn free_handles(&self) -> usize {
-        self.lock().free()
+    /// The handles the calling plugin may still be given. Input: the plugin. Output: the
+    /// count.
+    pub fn free_handles(&self, caller: &'static str) -> usize {
+        self.lock().free(caller)
     }
 
     /// Writes one value under a reserved handle, dropping a fresh handle when the write
@@ -297,7 +357,7 @@ impl<'r> Secrets<'r> {
             }
             Err(error) => {
                 if fresh {
-                    self.lock().drop_id(id);
+                    self.lock().drop_id(caller, id);
                 }
                 Err(error)
             }
@@ -322,13 +382,13 @@ impl<'r> Secrets<'r> {
         self.scopes.service(self.namespace, caller)?;
         let mut handles = self.lock();
         if handles.is_held(caller, id)? {
-            handles.drop_id(id);
+            handles.drop_id(caller, id);
             return Ok(());
         }
         let found = handles.resolve(caller, id)?.clone();
         drop(handles);
         self.store.delete(&found)?;
-        self.lock().drop_id(id);
+        self.lock().drop_id(caller, id);
         Ok(())
     }
 

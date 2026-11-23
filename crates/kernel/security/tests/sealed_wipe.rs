@@ -130,7 +130,7 @@ fn the_sealed_config_is_wiped_on_drop() {
         "dev.crazyagent.e0123456789ab",
         &scopes,
         &handles,
-        Some(paste),
+        Some(("github", paste)),
     );
     let token = secrets.put_from_owner("github", "token").unwrap();
     let egress = DroppingEgress {
