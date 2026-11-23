@@ -1228,10 +1228,13 @@ pub const ACCESS_HOOKS: AccessHooks = AccessHooks {
 };
 
 /// The engine's real agent toolchain hooks, the only [`ToolchainHooks`] production code
-/// passes: the cargo home entry removal of [`toolchain_remove_home_entry`].
+/// passes: the cargo home entry removal of [`toolchain_remove_home_entry`] and the real git
+/// the research runner resolved.
 pub const TOOLCHAIN_HOOKS: ToolchainHooks = ToolchainHooks {
     #[cfg(unix)]
     remove_home_entry: toolchain_remove_home_entry,
+    #[cfg(unix)]
+    sandboxed_git: crate::research::runner::sandboxed_git,
 };
 
 /// Removes one entry of an agent's own cargo home as the engine's home cleanup does, with

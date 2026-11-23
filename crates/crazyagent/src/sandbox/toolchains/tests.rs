@@ -182,7 +182,7 @@ fn the_free_copy_merges_another_branch_that_the_worker_copy_refuses() {
     );
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("git merge is refused"));
-    free_git(&tmp).unwrap();
+    free_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp).unwrap();
     let merged = git_run(
         &wrapper,
         repo.path(),
@@ -225,7 +225,7 @@ fn the_worker_copy_merges_crazyagent_main_and_still_refuses_any_other_branch() {
     }
     let tmp = make_tmp(home.path()).unwrap();
     let _removed = Removed(home.path().to_path_buf());
-    catch_up_git(&tmp).unwrap();
+    catch_up_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp).unwrap();
     let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
     let merged = git_run(
         &wrapper,
@@ -293,7 +293,7 @@ fn a_leads_copy_merges_main_and_its_own_workers_and_names_the_main_merge_when_re
         }
         let tmp = make_tmp(home.path()).unwrap();
         let _removed = Removed(home.path().to_path_buf());
-        lead_git(&tmp, catch_up).unwrap();
+        lead_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp, catch_up).unwrap();
         let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
         let main = git_run(
             &wrapper,
@@ -364,7 +364,7 @@ fn a_workers_refused_merge_of_its_leads_branch_names_update_on_its_change_set() 
         let tmp = make_tmp(home.path()).unwrap();
         let _removed = Removed(home.path().to_path_buf());
         if catch_up {
-            catch_up_git(&tmp).unwrap();
+            catch_up_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp).unwrap();
         }
         let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
         let before = git_run(git, repo.path(), home.path(), &["rev-parse", "HEAD"]);
@@ -415,7 +415,7 @@ fn the_worker_copy_refuses_a_crazyagent_main_that_is_not_the_engine_s_ref() {
     }
     let tmp = make_tmp(home.path()).unwrap();
     let _removed = Removed(home.path().to_path_buf());
-    catch_up_git(&tmp).unwrap();
+    catch_up_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp).unwrap();
     let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
     let before = git_run(git, repo.path(), home.path(), &["rev-parse", "HEAD"]);
     for name in ["crazyagent/main", "refs/crazyagent/main"] {

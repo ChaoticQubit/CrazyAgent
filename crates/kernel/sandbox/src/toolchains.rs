@@ -50,6 +50,10 @@ pub struct ToolchainHooks {
     #[cfg(unix)]
     pub remove_home_entry:
         fn(std::os::fd::BorrowedFd<'_>, &str, &'static str) -> Result<(), &'static str>,
+    /// The real git the engine resolved, which an agent's own `git` runs. Takes nothing.
+    /// Returns the path.
+    #[cfg(unix)]
+    pub sandboxed_git: fn() -> &'static Path,
 }
 
 /// The folders the owner's toolchains live in: the owner's home, rustup's home and cargo's

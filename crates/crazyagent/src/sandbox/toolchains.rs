@@ -1,3 +1,4 @@
+use kernel_sandbox::toolchains::ToolchainHooks;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io;
@@ -441,15 +442,11 @@ fn getconf_folder(home: &Path) -> PathBuf {
 /// Rewrites the agent's own `git` in its short temp folder as a lead's copy, which lets the
 /// lead merge its own workers' branches (DEC-107 rule 2), and `crazyagent/main` while
 /// "Catch up with main" is on, after [`make_tmp`] wrote the copy every agent gets. Inputs:
-/// the folder `make_tmp` returned and the setting. Output: Ok, also when git is the shim
-/// and no copy is written, or the write failure.
+/// the hooks naming the real git, the folder `make_tmp` returned and the setting. Output:
+/// Ok, also when git is the shim and no copy is written, or the write failure.
 #[cfg(unix)]
-pub fn lead_git(tmp: &Path, catch_up: bool) -> io::Result<()> {
-    match git_script(
-        crate::research::runner::sandboxed_git(),
-        GitCopy::Lead,
-        catch_up,
-    ) {
+pub fn lead_git(hooks: &ToolchainHooks, tmp: &Path, catch_up: bool) -> io::Result<()> {
+    match git_script((hooks.sandboxed_git)(), GitCopy::Lead, catch_up) {
         Some(script) => write_git(tmp, &script),
         None => Ok(()),
     }
@@ -457,15 +454,12 @@ pub fn lead_git(tmp: &Path, catch_up: bool) -> io::Result<()> {
 
 /// Rewrites the agent's own `git` in its short temp folder as the free copy, which runs
 /// every git command as is: the master's at Full access (DEC-117 Q2), after [`make_tmp`]
-/// wrote the worker copy. Input: the folder `make_tmp` returned. Output: Ok, also when
-/// git is the shim and no copy is written, or the write failure.
+/// wrote the worker copy. Inputs: the hooks naming the real git and the folder `make_tmp`
+/// returned. Output: Ok, also when git is the shim and no copy is written, or the write
+/// failure.
 #[cfg(unix)]
-pub fn free_git(tmp: &Path) -> io::Result<()> {
-    match git_script(
-        crate::research::runner::sandboxed_git(),
-        GitCopy::Free,
-        true,
-    ) {
+pub fn free_git(hooks: &ToolchainHooks, tmp: &Path) -> io::Result<()> {
+    match git_script((hooks.sandboxed_git)(), GitCopy::Free, true) {
         Some(script) => write_git(tmp, &script),
         None => Ok(()),
     }
@@ -473,15 +467,12 @@ pub fn free_git(tmp: &Path) -> io::Result<()> {
 
 /// Rewrites the agent's own `git` in its short temp folder as the worker copy that merges
 /// `crazyagent/main`, for a project with "Catch up with main" on, after [`make_tmp`] wrote
-/// the copy that refuses it. Input: the folder `make_tmp` returned. Output: Ok, also when
-/// git is the shim and no copy is written, or the write failure.
+/// the copy that refuses it. Inputs: the hooks naming the real git and the folder
+/// `make_tmp` returned. Output: Ok, also when git is the shim and no copy is written, or the
+/// write failure.
 #[cfg(unix)]
-pub fn catch_up_git(tmp: &Path) -> io::Result<()> {
-    match git_script(
-        crate::research::runner::sandboxed_git(),
-        GitCopy::Worker,
-        true,
-    ) {
+pub fn catch_up_git(hooks: &ToolchainHooks, tmp: &Path) -> io::Result<()> {
+    match git_script((hooks.sandboxed_git)(), GitCopy::Worker, true) {
         Some(script) => write_git(tmp, &script),
         None => Ok(()),
     }
@@ -804,19 +795,19 @@ pub fn fresh_native_lead_tmp(_scratch: &Path) -> io::Result<PathBuf> {
 /// No agent `git` outside Unix. Takes the agent temp folder and the setting, unused.
 /// Returns `Unsupported`.
 #[cfg(not(unix))]
-pub fn lead_git(_tmp: &Path, _catch_up: bool) -> io::Result<()> {
+pub fn lead_git(_hooks: &ToolchainHooks, _tmp: &Path, _catch_up: bool) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
 /// No agent `git` outside Unix. Takes the agent temp folder, unused. Returns `Unsupported`.
 #[cfg(not(unix))]
-pub fn free_git(_tmp: &Path) -> io::Result<()> {
+pub fn free_git(_hooks: &ToolchainHooks, _tmp: &Path) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
 /// No agent `git` outside Unix. Takes the agent temp folder, unused. Returns `Unsupported`.
 #[cfg(not(unix))]
-pub fn catch_up_git(_tmp: &Path) -> io::Result<()> {
+pub fn catch_up_git(_hooks: &ToolchainHooks, _tmp: &Path) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 

@@ -46,6 +46,7 @@ fn a_cargo_cache_name_that_will_not_give_way_refuses_with_the_hooks_code() {
     }
     let hooks = ToolchainHooks {
         remove_home_entry: refuse,
+        sandboxed_git: || Path::new("/usr/bin/git"),
     };
     let scratch = tempfile::tempdir().unwrap();
     let root = canonical(scratch.path()).unwrap();
