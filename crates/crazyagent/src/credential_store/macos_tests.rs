@@ -315,3 +315,14 @@ fn keychain_uses_the_test_home_in_lib_tests() {
         store.path().display()
     );
 }
+
+#[test]
+fn a_namespace_outside_the_engine_root_is_refused_before_any_home_is_looked_up() {
+    for namespace in ["dev", "dev.crazyagent.", "com.example.app"] {
+        assert_eq!(
+            super::keychain(namespace).map(drop),
+            Err(StoreError::code("credential_namespace_refused")),
+            "{namespace}"
+        );
+    }
+}
