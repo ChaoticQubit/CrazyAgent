@@ -1772,7 +1772,7 @@ fn logged_ready(layout: &Layout, since: u64) -> bool {
 /// engine leaves beside its database says (F36), read without an engine. Input: the layout.
 /// Output: the backup code, or none.
 pub fn backup_failure(layout: &Layout) -> Option<&'static str> {
-    crate::storage::backup_failure(layout.root())
+    kernel_storage::migrations::backup_failure(layout.root())
 }
 
 /// The code the TUI and the desktop show for an engine start that did not answer

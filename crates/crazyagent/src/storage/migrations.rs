@@ -6,9 +6,6 @@ use kernel_storage::StorageError;
 #[cfg(unix)]
 use kernel_storage::migrations::DATABASE;
 use kernel_storage::migrations::V24_VERSION_MAX;
-/// Forwards to kernel_storage::migrations::backup_failure until Task 3b repoints storage.rs
-/// and deletes it (POD-B exception). Input and output as the kernel's.
-pub use kernel_storage::migrations::backup_failure;
 #[cfg(unix)]
 use kernel_storage::restore::restore_failed;
 pub(crate) use kernel_storage::upgrade::Step;
@@ -320,13 +317,6 @@ fn adopt_user_version(tx: &Transaction<'_>) -> Result<(), StorageError> {
         return Err(error("owner_meta_layout_unknown").into());
     }
     Ok(())
-}
-
-/// Refuses a read-only open of engine.db that a newer engine wrote or that still needs
-/// an upgrade, through [`kernel_storage::upgrade::check`]. Input: the read-only connection
-/// and the steps. Output: Ok when the database is empty or at the newest version.
-pub(crate) fn check(db: &Connection, steps: &[Step]) -> Result<(), EngineError> {
-    Ok(kernel_storage::upgrade::check(db, steps)?)
 }
 
 /// Brings engine.db to the newest version before anything else writes to it, through
