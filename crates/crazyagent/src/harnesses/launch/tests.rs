@@ -559,7 +559,7 @@ fn a_headless_harness_inside_a_project_is_refused_with_the_resolvers_line() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_launch_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it() {
-    use crate::sandbox::toolchains::{self};
+    use crate::sandbox::toolchains;
     use kernel_sandbox::toolchains::ToolHomes;
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::Builder::new()

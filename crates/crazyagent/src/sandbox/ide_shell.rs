@@ -135,7 +135,7 @@ pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> 
 /// shell runs.
 #[cfg(target_os = "macos")]
 pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
-    use super::toolchains::{self};
+    use super::toolchains;
     use super::{
         ProjectSandbox, SANDBOX_EXEC, agent_variable_allowed, borrowed, owner_terminal_env,
     };

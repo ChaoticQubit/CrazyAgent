@@ -1,4 +1,6 @@
-use kernel_sandbox::toolchains::{CARGO_SHARED, ToolHomes, Toolchains, below, existing};
+#[cfg(unix)]
+use kernel_sandbox::toolchains::{CARGO_SHARED, existing};
+use kernel_sandbox::toolchains::{ToolHomes, below};
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::fs;

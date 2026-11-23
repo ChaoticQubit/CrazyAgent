@@ -10,7 +10,7 @@ use super::records::{self, Reader};
 use crate::coord::settings::{HarnessKind, TerminalDisplay};
 use crate::harnesses::accounts::Handover;
 use crate::launch_context::{Installed, NativeTeam};
-use crate::sandbox::toolchains::{self};
+use crate::sandbox::toolchains;
 use kernel_sandbox::toolchains::ToolHomes;
 use std::ffi::{OsStr, OsString};
 #[cfg(unix)]

@@ -1,5 +1,6 @@
 use kernel_sandbox::elf;
 use kernel_sandbox::error::{SandboxError, invalid};
+use kernel_sandbox::host::LinuxHost;
 use kernel_sandbox::lines::*;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::paths::{
@@ -44,7 +45,6 @@ pub mod toolchains;
 pub mod warden;
 #[cfg(target_os = "windows")]
 pub mod windows;
-use kernel_sandbox::host::LinuxHost;
 #[cfg(target_os = "windows")]
 pub use windows::owner_git::OwnerGit;
 

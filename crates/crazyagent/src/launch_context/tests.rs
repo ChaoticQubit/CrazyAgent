@@ -4441,7 +4441,7 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
 #[test]
 fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
     use crate::sandbox::ProjectSandbox;
-    use crate::sandbox::toolchains::{self};
+    use crate::sandbox::toolchains;
     use kernel_sandbox::net::SandboxNetwork;
     use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
     const MARKER: &str = "ctx-execute-4471";
@@ -4716,7 +4716,7 @@ fn tools_on_profile(
 ) -> PathBuf {
     use crate::sandbox::ProjectSandbox;
     use crate::sandbox::policy::AgentPolicy;
-    use crate::sandbox::toolchains::{self};
+    use crate::sandbox::toolchains;
     use kernel_sandbox::net::SandboxRemote;
     use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
     let policy = AgentPolicy::default();

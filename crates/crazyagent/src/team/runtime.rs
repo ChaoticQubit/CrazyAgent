@@ -40,7 +40,7 @@ use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
 use crate::sandbox::policy::{
     AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing,
 };
-use crate::sandbox::toolchains::{self};
+use crate::sandbox::toolchains;
 use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 use crate::terminal::PANES_PER_PROJECT_MAX;
 use kernel_processes::terminal::{AgentId, Host};

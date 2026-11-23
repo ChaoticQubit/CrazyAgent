@@ -9,7 +9,7 @@ use crazyagent::harnesses::{HarnessEntry, Search, catalog, specs};
 use crazyagent::model_gateway::relay::TOKEN_PREFIX;
 use crazyagent::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
 use crazyagent::rcli_host::{RcliMasterBinding, RcliMasterLaunch};
-use crazyagent::sandbox::toolchains::{self};
+use crazyagent::sandbox::toolchains;
 use kernel_sandbox::toolchains::ToolHomes;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};

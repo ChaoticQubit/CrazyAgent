@@ -22,7 +22,7 @@ use crate::provider_reach::ProviderReach;
 use crate::sandbox::hidden_paths::HiddenRun;
 use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
 use crate::sandbox::policy::{AgentAccess, Narrowing, narrowing};
-use crate::sandbox::toolchains::{self};
+use crate::sandbox::toolchains;
 use crate::sandbox::warden::Warden;
 use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 #[cfg(unix)]

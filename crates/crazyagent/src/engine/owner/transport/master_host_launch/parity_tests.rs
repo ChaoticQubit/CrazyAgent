@@ -5,7 +5,7 @@ use crate::credentials::test_keychain::TestKeychain;
 use crate::engine::bootstrap::{NativeProfileCustody, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::protocol::{ConfigId, CredentialRef, Cursor};
-use crate::sandbox::toolchains::{self};
+use crate::sandbox::toolchains;
 use base64::Engine;
 use kernel_sandbox::toolchains::ToolHomes;
 use serde_json::{Map, Value, json};

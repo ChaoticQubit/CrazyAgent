@@ -5,7 +5,7 @@ use super::store::{self, Intent, Record};
 use super::{AfterRegeneration, AgentKind, ChangeSetId, ChangeState, diff};
 use crate::engine::EngineError;
 use crate::sandbox::ProjectSandbox;
-use crate::sandbox::toolchains::{self};
+use crate::sandbox::toolchains;
 use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
 use rusqlite::Connection;
 use std::collections::{BTreeMap, BTreeSet};

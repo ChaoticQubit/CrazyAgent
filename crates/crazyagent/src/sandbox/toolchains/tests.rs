@@ -1,5 +1,5 @@
 use super::*;
-use kernel_sandbox::toolchains::Toolchain;
+use kernel_sandbox::toolchains::{Toolchain, Toolchains};
 
 #[test]
 fn the_agent_git_script_is_refused_for_the_xcrun_shim_and_any_path_that_is_not_plain() {

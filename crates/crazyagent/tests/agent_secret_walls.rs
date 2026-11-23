@@ -6,7 +6,7 @@ use kernel_security::store::{Store, reference};
 
 use crazyagent::credentials::Keychain;
 use crazyagent::model_gateway::relay::{LOCAL_PLACEHOLDER, TOKEN_PREFIX};
-use crazyagent::sandbox::toolchains::{self};
+use crazyagent::sandbox::toolchains;
 use crazyagent::sandbox::{
     AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, ProjectSandbox, agent_command, agent_env_refused,
     agent_variable_allowed,

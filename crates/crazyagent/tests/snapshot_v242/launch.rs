@@ -13,7 +13,7 @@ use crazyagent::engine::owner::{
 use crazyagent::project_setup::{HarnessSlot, ProjectSetup, TeamPlan};
 use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec};
 use crazyagent::sandbox::policy::AgentAccess;
-use crazyagent::sandbox::toolchains::{self};
+use crazyagent::sandbox::toolchains;
 use crazyagent::team::{AgentRole, TeamAction, TeamStatus};
 use crazyagent::terminal::FOLDER;
 use crazyagent::terminal::tmux::{SOCKET, installed};

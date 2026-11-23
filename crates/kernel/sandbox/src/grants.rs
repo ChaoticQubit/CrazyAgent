@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use crate::paths::canonical;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
