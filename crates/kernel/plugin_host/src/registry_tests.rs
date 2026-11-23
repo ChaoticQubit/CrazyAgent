@@ -919,6 +919,66 @@ fn remove_deletes_a_user_plugin_with_its_keys_and_refuses_bundled_and_unknown_on
     assert_eq!(plugin(&listing, "acme").secrets[0].binding, Binding::None);
 }
 
+/// A plugin whose folder cannot be moved aside is not removed: its rows, its key and its
+/// folder all stay, so it is listed as it was, and the next removal goes through.
+#[test]
+fn a_removal_whose_folder_cannot_move_keeps_the_rows_and_the_key() {
+    let case = case();
+    add_text(&case, ACME, false, 1).unwrap();
+    set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"sk-test-key-0001".to_vec(),
+    )
+    .unwrap();
+    let folder = plugins_folder(&case);
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let removed = remove(&case.db, &case.engine(), "acme");
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(removed.is_err(), "the folder could not move aside");
+    assert_eq!(plugin_keys(&case).len(), 1);
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert_eq!(plugin(&listing, "acme").status, PluginStatus::Ready);
+    remove(&case.db, &case.engine(), "acme").unwrap();
+    assert!(plugin_keys(&case).is_empty());
+    assert!(!folder.join("acme").exists());
+}
+
+/// A removal whose rows cannot be deleted puts the folder back under its name and keeps the
+/// key, leaving no retired folder behind.
+#[test]
+fn a_removal_whose_rows_fail_puts_the_folder_back() {
+    let case = case();
+    add_text(&case, ACME, false, 1).unwrap();
+    set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"sk-test-key-0001".to_vec(),
+    )
+    .unwrap();
+    case.db
+        .execute_batch(
+            "CREATE TEMP TRIGGER held BEFORE DELETE ON app_plugin_trust
+             BEGIN SELECT RAISE(ABORT, 'held'); END;",
+        )
+        .unwrap();
+    assert!(remove(&case.db, &case.engine(), "acme").is_err());
+    let folder = plugins_folder(&case);
+    let names: Vec<String> = std::fs::read_dir(&folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names, ["acme"]);
+    assert_eq!(plugin_keys(&case).len(), 1);
+    case.db.execute_batch("DROP TRIGGER held").unwrap();
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert_eq!(plugin(&listing, "acme").status, PluginStatus::Ready);
+}
+
 /// A plugin entry that is a link is removed as the link itself: the folder it points to
 /// and the plugin.toml inside stay untouched.
 #[test]
