@@ -32,6 +32,7 @@ fn a_valid_manifest_reads_its_five_keys() {
             version: 1,
             permissions: vec!["settings.write".to_owned()],
             net: None,
+            essential: false,
         })
     );
 }
@@ -595,5 +596,39 @@ fn a_hex_or_octal_ip_host_is_refused() {
             "hosts = [\"0xa9.example\", \"api2.example\", \"127.0.0.1\"]\n"
         ))
         .is_ok()
+    );
+}
+
+/// `essential` marks a code plugin the app relies on: true or false reads as written, any
+/// other value is refused at its line, and an embedding plugin, the only kind a user adds,
+/// is refused for holding it at all.
+#[test]
+fn the_essential_key_marks_a_code_plugin_and_is_refused_elsewhere() {
+    for (value, essential) in [("true", true), ("false", false)] {
+        let text = format!("{}essential = {value}\n", manifest_text("agent-quit"));
+        assert_eq!(
+            manifest::parse(&text).map(|read| read.essential),
+            Ok(essential),
+            "{value}"
+        );
+    }
+    for value in ["1", "\"yes\""] {
+        let text = format!("{}essential = {value}\n", manifest_text("agent-quit"));
+        assert_eq!(
+            manifest::parse(&text),
+            Err(Refused {
+                code: "plugin_manifest_invalid",
+                line: 6,
+            }),
+            "{value}"
+        );
+    }
+    let embedding = "plugin = \"near\"\ntier = \"t2\"\nkind = \"embedding\"\nversion = 1\npermissions = []\nessential = true\n";
+    assert_eq!(
+        manifest::parse(embedding),
+        Err(Refused {
+            code: "plugin_manifest_invalid",
+            line: 6,
+        })
     );
 }

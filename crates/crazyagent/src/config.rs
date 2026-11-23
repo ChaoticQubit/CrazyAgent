@@ -2131,4 +2131,33 @@ pools = [{ id = "pool", members = ["codex-connection", "local-connection"], proj
         );
         assert!(resolve_config_bytes(&format!("{version}[plugins]\nother = 1\n"), "").is_err());
     }
+
+    /// `plugins.essential_unlocked` is a working owner setting: absent it reads false and
+    /// adds no descriptor; set true in a file it reads true, takes effect at once, names its
+    /// origin and lists with the other plugin setting; a value that is no bool is refused.
+    #[test]
+    fn plugins_essential_unlocked_is_a_working_setting() {
+        let version = format!("version = {SETTINGS_VERSION}\n");
+        let plain = resolve_config_bytes(&version, "").unwrap();
+        assert!(!plain.settings.plugins.essential_unlocked);
+        assert!(!plain.descriptors.contains_key("plugins.essential_unlocked"));
+        let set = format!("{version}[plugins]\nessential_unlocked = true\n");
+        let config = resolve_config_bytes(&set, "").unwrap();
+        assert!(config.settings.plugins.essential_unlocked);
+        let descriptor = &config.descriptors["plugins.essential_unlocked"];
+        assert_eq!(descriptor.value, serde_json::json!(true));
+        assert_eq!(descriptor.default, serde_json::json!(false));
+        assert_eq!(descriptor.origin, Origin::Global);
+        assert_eq!(descriptor.effect_timing, EffectTiming::Immediate);
+        assert!(config.descriptors.contains_key("plugins.when_turned_off"));
+        assert_ne!(config.id, plain.id);
+        config.validate().unwrap();
+        assert!(
+            resolve_config_bytes(
+                &format!("{version}[plugins]\nessential_unlocked = \"yes\"\n"),
+                ""
+            )
+            .is_err()
+        );
+    }
 }
