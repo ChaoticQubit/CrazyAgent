@@ -1,0 +1,8 @@
+enum Installer { uv_release, uv_tool, node_archive, brew_formula, brew_cask, npm_global, winget, system_package, self_update }
+enum InstallVerb { install, update }
+enum SystemManager { apt_get, dnf }
+type InstallRecipe { installer: Installer, name: text, verb: option<InstallVerb>, version: option<text>, target: option<text>, python: option<text>, lock: option<text>, sha256: option<text>, manager: option<SystemManager>, args: list<text>, flags: list<text> }
+type InstallResult { code: u32, output: bytes }
+capability process.install(recipe: InstallRecipe) -> InstallResult
+  tier: kernel
+  needs: process.install

@@ -53,6 +53,22 @@ impl Refusals for RecordingRefusals {
     }
 }
 
+/// The process provider of rows that never reach it.
+struct UnusedProcess;
+
+/// The one `UnusedProcess` the rows pass.
+const UNUSED_PROCESS: UnusedProcess = UnusedProcess;
+
+impl sdk::process::Provide for UnusedProcess {
+    fn install(
+        &self,
+        caller: &'static str,
+        _: sdk::process::InstallRecipe,
+    ) -> Result<sdk::process::InstallResult, Refusal> {
+        panic!("the process provider was reached by {caller}");
+    }
+}
+
 /// The secrets provider of rows that never reach it.
 struct UnusedSecrets;
 
@@ -167,6 +183,7 @@ fn a_granted_call_reaches_the_provider_once() {
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
         net: &UNUSED_NET,
+        process: &UNUSED_PROCESS,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
     };
@@ -189,6 +206,7 @@ fn an_ungranted_call_is_refused_logged_once_and_never_reaches_the_provider() {
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
         net: &UNUSED_NET,
+        process: &UNUSED_PROCESS,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
     };
@@ -217,6 +235,7 @@ fn an_unknown_plugin_is_refused() {
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
         net: &UNUSED_NET,
+        process: &UNUSED_PROCESS,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
     };
@@ -248,6 +267,7 @@ fn the_provider_rejection_comes_back_unchanged() {
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
         net: &UNUSED_NET,
+        process: &UNUSED_PROCESS,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
     };
@@ -269,6 +289,7 @@ fn the_settings_provider_gets_the_bound_plugin_as_caller() {
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
         net: &UNUSED_NET,
+        process: &UNUSED_PROCESS,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
     };
@@ -290,6 +311,7 @@ fn an_ungranted_secrets_call_never_reaches_the_provider() {
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
         net: &UNUSED_NET,
+        process: &UNUSED_PROCESS,
         secrets: &secrets,
         settings: &provider,
     };
@@ -316,6 +338,7 @@ fn each_secrets_call_needs_its_own_grant() {
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
         net: &UNUSED_NET,
+        process: &UNUSED_PROCESS,
         secrets: &secrets,
         settings: &provider,
     };
@@ -342,6 +365,7 @@ fn the_caller_passed_to_the_secrets_provider_is_the_bound_plugin() {
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
         net: &UNUSED_NET,
+        process: &UNUSED_PROCESS,
         secrets: &secrets,
         settings: &provider,
     };
@@ -371,6 +395,7 @@ fn a_secrets_input_over_its_bound_never_reaches_the_provider() {
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
         net: &UNUSED_NET,
+        process: &UNUSED_PROCESS,
         secrets: &secrets,
         settings: &provider,
     };
@@ -444,6 +469,7 @@ fn an_ungranted_net_request_never_reaches_egress_allows() {
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
         net: &fetch,
+        process: &UNUSED_PROCESS,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
     };
@@ -478,6 +504,7 @@ fn net_inputs_over_their_bounds_are_refused() {
     let gateway = Gateway::new(&grants, &refusals);
     let providers = Providers {
         net: &fetch,
+        process: &UNUSED_PROCESS,
         secrets: &UNUSED_SECRETS,
         settings: &provider,
     };

@@ -3,7 +3,7 @@ use kernel_security::net as kernel_net;
 use kernel_security::secrets::Secrets;
 use sdk::secrets::Secret;
 use sdk::settings::QuitSettings;
-use sdk::{Refusal, net, secrets, settings};
+use sdk::{Refusal, net, process, secrets, settings};
 
 const _: () = assert!(
     kernel_security::net::REPLY_BYTES_MAX == sdk::BYTES_MAX
@@ -168,6 +168,16 @@ impl secrets::Provide for Absent {
 
 impl net::Provide for Absent {
     fn request(&self, _: &'static str, _: net::Request) -> Result<net::Reply, Refusal> {
+        Err(absent())
+    }
+}
+
+impl process::Provide for Absent {
+    fn install(
+        &self,
+        _: &'static str,
+        _: process::InstallRecipe,
+    ) -> Result<process::InstallResult, Refusal> {
         Err(absent())
     }
 }
