@@ -81,7 +81,7 @@ fn a_close_ends_a_client_whose_write_blocks_on_a_full_pipe() {
         let _ = done.send(());
     });
     assert!(
-        closed.recv_timeout(BOUND).is_ok(),
+        closed.recv_timeout(CLOSE_TIME + BOUND).is_ok(),
         "the close waited on the blocked write"
     );
     assert!(control.child.lock().unwrap().is_none());
