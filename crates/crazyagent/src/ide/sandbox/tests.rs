@@ -821,6 +821,15 @@ fn ide_git(
     )
 }
 
+/// Whether git refused a folder as holding no repository it may use: git before 2.54 says
+/// "not a git repository", and Apple git 2.54 stops at the `.git` the profile hides there,
+/// "error reading '<folder>/.git'". Inputs: what git printed and the folder it ran in.
+/// Output: true for either refusal.
+fn no_repository(said: &str, dir: &Path) -> bool {
+    let hidden = format!("error reading '{}'", dir.join(".git").display());
+    said.contains("not a git repository") || said.contains(&hidden)
+}
+
 /// [`ide_git`] with everything git printed. Inputs: as [`ide_git`]. Output: git's output.
 fn ide_git_output(
     profile: &Path,
@@ -1063,12 +1072,12 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
             for args in [&["status", "--porcelain"][..], &["add", "notes.txt"]] {
                 let (worked, said) = ide_git(&profile, &shim, &home, &root, agent, args);
                 assert!(!worked, "{mode}: git {args:?} worked in {name}: {said}");
-                let reason = if *agent == &bare {
-                    "cannot use bare repository"
+                let refused = if *agent == &bare {
+                    said.contains("cannot use bare repository")
                 } else {
-                    "not a git repository"
+                    no_repository(&said, agent)
                 };
-                assert!(said.contains(reason), "{mode}: {name}: {said}");
+                assert!(refused, "{mode}: {name}: {said}");
             }
             assert!(!ran(name), "{mode}: {name}'s filter ran");
         }
@@ -1391,7 +1400,7 @@ fn stage_all_in_an_older_layout_project_stages_no_agent_file() {
         &["status", "--porcelain"],
     );
     assert!(
-        !inside && said.contains("not a git repository"),
+        !inside && no_repository(&said, &agent),
         "the older layout's agents root stops the IDE's git: {said}"
     );
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
@@ -1485,16 +1494,23 @@ fn an_older_agent_keeps_its_git_stop_after_the_project_gains_a_crazyagent_folder
     };
 
     let reached = top(false, &agent);
-    assert!(reached.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&reached.stdout).trim(),
-        root.to_str().unwrap(),
-        "with the new layout's root alone the IDE's git in the agent's folder acts on the project"
-    );
+    if reached.status.success() {
+        assert_eq!(
+            String::from_utf8_lossy(&reached.stdout).trim(),
+            root.to_str().unwrap(),
+            "with the new layout's root alone the IDE's git in the agent's folder acts on the project"
+        );
+    } else {
+        let said = String::from_utf8_lossy(&reached.stderr);
+        assert!(
+            no_repository(&said, &agent),
+            "a git that stops at the hidden .git stops there: {said}"
+        );
+    }
     let stopped = top(true, &agent);
     let said = String::from_utf8_lossy(&stopped.stderr);
     assert!(
-        !stopped.status.success() && said.contains("not a git repository"),
+        !stopped.status.success() && no_repository(&said, &agent),
         "the older root stops the IDE's git in the agent's folder: {said}"
     );
     let own = top(true, &root);
@@ -1606,7 +1622,7 @@ fn a_research_worktree_keeps_its_git_stop_after_the_project_gains_a_crazyagent_f
     let stopped = top(&research);
     let said = String::from_utf8_lossy(&stopped.stderr);
     assert!(
-        !stopped.status.success() && said.contains("not a git repository"),
+        !stopped.status.success() && no_repository(&said, &research),
         "the IDE's git in the research worktree finds no repository: {said}"
     );
     let own = top(&root);

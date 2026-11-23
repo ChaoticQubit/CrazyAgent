@@ -338,8 +338,8 @@ fn a_link_that_climbs_out_through_another_link_is_refused_though_its_words_stay_
     );
 }
 
-fn places(folders: Vec<PathBuf>) -> crate::tools::Places {
-    crate::tools::Places::new(folders, None)
+fn places(folders: Vec<PathBuf>) -> kernel_processes::finding::Places {
+    crate::tools::tools_new(folders, None)
 }
 
 fn npm_launcher(folder: &Path) {
@@ -390,7 +390,7 @@ fn the_resolver_returns_the_engine_node_when_no_system_node_exists() {
     let empty = work.path().join("no-system-node");
     std::fs::create_dir_all(&empty).unwrap();
     let only_engine = places(vec![empty, setup_bin.clone()]);
-    let node = crate::tools::resolve("node", &only_engine).unwrap();
+    let node = kernel_processes::finding::resolve("node", &only_engine).unwrap();
     assert_eq!(node.entry, setup_bin.join("node"));
     assert_eq!(
         node.program,
@@ -403,7 +403,7 @@ fn the_resolver_returns_the_engine_node_when_no_system_node_exists() {
             npm: setup_bin.join("npm"),
         })
     );
-    let engine = crate::tools::Places::engine(Some(root.path()), None, None, None);
+    let engine = crate::tools::tools_engine(Some(root.path()), None, None, None);
     let folders = engine.folders();
     assert_eq!(
         folders[folders.len() - 2..],
@@ -426,7 +426,7 @@ fn an_owner_node_and_the_app_node_both_present_picks_the_owners() {
     let owner = home.join(".local/bin");
     script(&owner.join("node"), "v22.11.0");
     npm_launcher(&owner);
-    let engine = crate::tools::Places::engine(Some(root.path()), None, Some(home), None);
+    let engine = crate::tools::tools_engine(Some(root.path()), None, Some(home), None);
     let setup_bin = root.path().join("setup/bin");
     let prefix_bin = crate::setup::harness_prefix(root.path()).join("bin");
     let both: Vec<PathBuf> = engine
@@ -639,7 +639,7 @@ fn the_node_install_runs_its_programs_with_gzip_on_their_path() {
             .is_ok_and(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
     };
     assert!(folders.iter().any(gzip), "{path:?}");
-    let system: Vec<PathBuf> = crate::tools::SYSTEM_FOLDERS
+    let system: Vec<PathBuf> = kernel_processes::finding::SYSTEM_FOLDERS
         .iter()
         .map(PathBuf::from)
         .collect();

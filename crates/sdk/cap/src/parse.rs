@@ -1,7 +1,9 @@
+use kernel_common::names::{is_dotted, is_snake};
+
 use crate::lex::{Kind, Token};
 use crate::{
-    Capability, Enum, Event, FIELDS_MAX, Field, File, ITEMS_MAX, NAME_BYTES_MAX, ParseError, Tier,
-    Type, TypeRef,
+    Capability, Enum, Event, FIELDS_MAX, Field, File, Handle, ITEMS_MAX, NAME_BYTES_MAX,
+    ParseError, TYPE_DEPTH_MAX, Tier, Type, TypeRef,
 };
 
 /// A name in the source with its position, kept for the checks that run after the parse.
@@ -33,12 +35,14 @@ impl Spot {
 }
 
 /// The positions the checks need: every declared item name in source order, every use of
-/// a named type, and per declared type the named types its fields use.
+/// a named type, per declared type the named types its fields use, and the named types
+/// event bodies use.
 #[derive(Debug, Default)]
 pub(crate) struct Spots {
     pub(crate) declared: Vec<Spot>,
     pub(crate) used: Vec<Spot>,
     pub(crate) fields_of_type: Vec<Vec<Spot>>,
+    pub(crate) emitted: Vec<Spot>,
 }
 
 /// The three name shapes of the grammar.
@@ -49,17 +53,18 @@ enum Shape {
     Dotted,
 }
 
-/// One parsed field with the token of its type, for the spot of a named type.
-struct Parsed<'s> {
+/// One parsed field with the spots of the named types its type uses, wrappers included.
+struct Parsed {
     field: Field,
-    ty: Token<'s>,
+    named: Vec<Spot>,
 }
 
 /// Parses the tokens of one source into its file and the positions the checks need.
-/// Input: the tokens, ending with `End`. Output: the file and its spots, or the first refusal.
-pub(crate) fn file(tokens: Vec<Token<'_>>) -> Result<(File, Spots), ParseError> {
+/// Inputs: the file's stem and the tokens, ending with `End`. Output: the file and its spots, or the first refusal.
+pub(crate) fn file<'s>(stem: &'s str, tokens: Vec<Token<'s>>) -> Result<(File, Spots), ParseError> {
     assert_eq!(tokens.last().map(|token| token.kind), Some(Kind::End));
     let mut parser = Parser {
+        stem,
         tokens,
         at: 0,
         spots: Spots::default(),
@@ -71,7 +76,9 @@ pub(crate) fn file(tokens: Vec<Token<'_>>) -> Result<(File, Spots), ParseError> 
         if token.kind == Kind::End {
             break;
         }
-        if token.kind != Kind::Word || !matches!(token.text, "enum" | "type" | "capability") {
+        if token.kind != Kind::Word
+            || !matches!(token.text, "enum" | "type" | "handle" | "capability")
+        {
             return Err(token.refuse("cap_unexpected_token"));
         }
         if items == ITEMS_MAX {
@@ -82,11 +89,14 @@ pub(crate) fn file(tokens: Vec<Token<'_>>) -> Result<(File, Spots), ParseError> 
         match token.text {
             "enum" => file.enums.push(parser.enumeration()?),
             "type" => file.types.push(parser.record()?),
+            "handle" => file.handles.push(Handle {
+                name: parser.declare(Shape::Pascal)?,
+            }),
             _ => file.capabilities.push(parser.capability()?),
         }
     }
     assert_eq!(
-        file.enums.len() + file.types.len() + file.capabilities.len(),
+        file.enums.len() + file.types.len() + file.handles.len() + file.capabilities.len(),
         items
     );
     assert_eq!(parser.spots.declared.len(), items);
@@ -96,6 +106,7 @@ pub(crate) fn file(tokens: Vec<Token<'_>>) -> Result<(File, Spots), ParseError> 
 
 /// A recursive-descent parser over the tokens of one source.
 struct Parser<'s> {
+    stem: &'s str,
     tokens: Vec<Token<'s>>,
     at: usize,
     spots: Spots,
@@ -193,19 +204,62 @@ impl<'s> Parser<'s> {
         Ok(entries)
     }
 
-    /// Consumes `name: type`. Output: the field with its tokens, or the first refusal.
-    fn field(&mut self) -> Result<(Token<'s>, Parsed<'s>), ParseError> {
+    /// Consumes `name: type`. Output: the field with its name token and the spots of the
+    /// named types it uses, or the first refusal.
+    fn field(&mut self) -> Result<(Token<'s>, Parsed), ParseError> {
         let name = self.name(Shape::Snake)?;
         self.expect(Kind::Colon)?;
-        let ty = self.expect(Kind::Word)?;
+        let mut named = Vec::new();
+        let ty = self.type_ref(0, false, &mut named)?;
         let parsed = Parsed {
             field: Field {
                 name: name.text.to_owned(),
-                ty: type_ref(&ty)?,
+                ty,
             },
-            ty,
+            named,
         };
         Ok((name, parsed))
+    }
+
+    /// Consumes a type: a scalar, `text`, `bytes`, a Pascal name, `stem.Name`, or `list<type>`
+    /// and `option<type>` up to `TYPE_DEPTH_MAX` deep, never an option directly in an option.
+    /// Inputs: the wrappers already open, whether the nearest is an option, and the spots of
+    /// named types found so far. Output: the type, or `cap_type_too_deep`, `cap_nested_option`,
+    /// `cap_name_too_long`, `cap_self_qualified`, `cap_unknown_type`, `cap_unexpected_token`.
+    fn type_ref(
+        &mut self,
+        depth: usize,
+        in_option: bool,
+        named: &mut Vec<Spot>,
+    ) -> Result<TypeRef, ParseError> {
+        assert!(depth <= TYPE_DEPTH_MAX);
+        let token = self.expect(Kind::Word)?;
+        let wrapper = match token.text {
+            "list" => Some(false),
+            "option" => Some(true),
+            _ => None,
+        };
+        let Some(is_option) = wrapper else {
+            let ty = leaf(&token, self.stem)?;
+            if matches!(ty, TypeRef::Named(_)) {
+                named.push(Spot::of(&token));
+            }
+            return Ok(ty);
+        };
+        if is_option && in_option {
+            return Err(token.refuse("cap_nested_option"));
+        }
+        if depth == TYPE_DEPTH_MAX {
+            return Err(token.refuse("cap_type_too_deep"));
+        }
+        self.expect(Kind::OpenAngle)?;
+        let inner = Box::new(self.type_ref(depth + 1, is_option, named)?);
+        self.expect(Kind::CloseAngle)?;
+        Ok(if is_option {
+            TypeRef::Option(inner)
+        } else {
+            TypeRef::List(inner)
+        })
     }
 
     /// Consumes a field list and records every named type it uses. Inputs: the closing
@@ -221,9 +275,7 @@ impl<'s> Parser<'s> {
         let mut named = Vec::new();
         let mut fields = Vec::with_capacity(entries.len());
         for (_, parsed) in entries {
-            if matches!(parsed.field.ty, TypeRef::Named(_)) {
-                named.push(Spot::of(&parsed.ty));
-            }
+            named.extend(parsed.named);
             fields.push(parsed.field);
         }
         self.spots.used.extend(named.iter().cloned());
@@ -262,14 +314,13 @@ impl<'s> Parser<'s> {
         self.expect(Kind::OpenParen)?;
         let (inputs, _) = self.fields(Kind::CloseParen, false, true)?;
         self.expect(Kind::Arrow)?;
-        let output_token = self.expect(Kind::Word)?;
-        let output = if output_token.text == "unit" {
+        let output = if self.peek().kind == Kind::Word && self.peek().text == "unit" {
+            self.next();
             None
         } else {
-            let output = type_ref(&output_token)?;
-            if matches!(output, TypeRef::Named(_)) {
-                self.spots.used.push(Spot::of(&output_token));
-            }
+            let mut named = Vec::new();
+            let output = self.type_ref(0, false, &mut named)?;
+            self.spots.used.extend(named);
             Some(output)
         };
         self.keyword("tier", "cap_missing_tier")?;
@@ -295,7 +346,8 @@ impl<'s> Parser<'s> {
                 return Err(kind.refuse("cap_duplicate_name"));
             }
             self.expect(Kind::OpenBrace)?;
-            let (fields, _) = self.fields(Kind::CloseBrace, false, false)?;
+            let (fields, named) = self.fields(Kind::CloseBrace, false, false)?;
+            self.spots.emitted.extend(named);
             emits.push((
                 kind,
                 Event {
@@ -327,17 +379,28 @@ impl<'s> Parser<'s> {
     }
 }
 
-/// Reads a field's type from its word: a scalar, or a Pascal name of a declared enum or
-/// type. Input: the word token. Output: the type, `cap_name_too_long` or `cap_unknown_type`.
-fn type_ref(token: &Token<'_>) -> Result<TypeRef, ParseError> {
+/// Reads an unwrapped type from its word: a scalar, `text`, `bytes`, a Pascal name of a
+/// declared enum, type or handle, or `stem.Name` of another file's item. Inputs: the word
+/// token and the file's stem. Output: the type, `cap_name_too_long`, `cap_self_qualified`
+/// or `cap_unknown_type`.
+fn leaf(token: &Token<'_>, own: &str) -> Result<TypeRef, ParseError> {
     match token.text {
         "u16" => Ok(TypeRef::U16),
         "u32" => Ok(TypeRef::U32),
         "u64" => Ok(TypeRef::U64),
         "bool" => Ok(TypeRef::Bool),
+        "text" => Ok(TypeRef::Text),
+        "bytes" => Ok(TypeRef::Bytes),
         text if text.len() > NAME_BYTES_MAX => Err(token.refuse("cap_name_too_long")),
         text if is_pascal(text) => Ok(TypeRef::Named(text.to_owned())),
-        _ => Err(token.refuse("cap_unknown_type")),
+        text => match text.split_once('.') {
+            Some((stem, _)) if stem == own => Err(token.refuse("cap_self_qualified")),
+            Some((stem, name)) if is_snake(stem) && is_pascal(name) => Ok(TypeRef::Foreign {
+                stem: stem.to_owned(),
+                name: name.to_owned(),
+            }),
+            _ => Err(token.refuse("cap_unknown_type")),
+        },
     }
 }
 
@@ -347,18 +410,4 @@ fn is_pascal(text: &str) -> bool {
     let mut bytes = text.bytes();
     bytes.next().is_some_and(|first| first.is_ascii_uppercase())
         && bytes.all(|byte| byte.is_ascii_alphanumeric())
-}
-
-/// Whether a word is a snake name: a lower-case letter, then lower-case letters, digits and `_`.
-/// Input: the word. Output: true for a snake name.
-fn is_snake(text: &str) -> bool {
-    let mut bytes = text.bytes();
-    bytes.next().is_some_and(|first| first.is_ascii_lowercase())
-        && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-}
-
-/// Whether a word is a dotted name: two or more snake names joined by `.`.
-/// Input: the word. Output: true for a dotted name.
-fn is_dotted(text: &str) -> bool {
-    text.split('.').count() >= 2 && text.split('.').all(is_snake)
 }

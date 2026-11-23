@@ -353,6 +353,12 @@ mod launch {
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         let base = folder.path().canonicalize().unwrap();
+        let private = std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700));
+        assert!(
+            private.is_ok(),
+            "the turn base takes 0700: {:?}",
+            private.err()
+        );
         let (bin, work) = (base.join("bin"), base.join("work"));
         for place in [&bin, &work] {
             std::fs::create_dir(place).unwrap();
@@ -792,7 +798,7 @@ exec /bin/sleep 60
         let (done, watching) = std::sync::mpsc::channel();
         let group = session.process_group();
         watchdog(group, Duration::from_secs(10), watching);
-        let prompt = "\u{1}".repeat(20_000);
+        let prompt = "\u{1}".repeat(24_000);
         let framed = serde_json::to_string(&prompt).unwrap();
         assert!(framed.len() > 2 * 65_536, "{}", framed.len());
         let began = Instant::now();

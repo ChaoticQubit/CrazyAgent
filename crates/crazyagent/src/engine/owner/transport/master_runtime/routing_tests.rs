@@ -1817,8 +1817,30 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
     );
     assert_eq!(after.registrations, before.registrations);
     assert_eq!(after.captures, before.captures);
-    assert_eq!(after.revision, before.revision + 2);
-    assert_eq!(after.events.len(), before.events.len() + 2);
+    assert_eq!(after.revision, before.revision + 3);
+    assert_eq!(after.events.len(), before.events.len() + 3);
+    let (store, revision) = (database.clone(), before.revision + 1);
+    let started = tokio::task::spawn_blocking(move || {
+        let db = Connection::open_with_flags(
+            store,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        db.busy_timeout(Duration::from_secs(1))?;
+        let revision = i64::try_from(revision)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let mut statement =
+            db.prepare("SELECT aggregate, kind FROM state_log WHERE revision=?1 ORDER BY seq")?;
+        statement
+            .query_map([revision], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<(String, String)>>>()
+    })
+    .await
+    .expect("the state_log read ends");
+    assert_eq!(
+        started,
+        Ok(vec![("landing".to_owned(), "BaseSet".to_owned())]),
+        "the master start's base write is the drive's only other commit (V250-L9)"
+    );
     assert!(matches!(
         custody.acquire_configured_rcli_use(
             &case.runtime().identity(),

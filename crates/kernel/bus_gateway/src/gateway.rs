@@ -65,20 +65,27 @@ impl<'p> Gateway<'p> {
         Ok(())
     }
 
-    /// Runs one call: refuses and reports it once when not admitted, else runs the
-    /// provider. Inputs: the plugin id, the capability and the provider call.
-    /// Output: the provider's result, or the refusal.
+    /// Runs one call: refuses and reports it once when not admitted; else checks the
+    /// inputs' bounds, runs the provider, and checks its output's bounds, dropping an output
+    /// over them whole. A bound refusal goes to the caller only, never to the sink.
+    /// Inputs: the plugin id, the capability, the input check, the provider call and the
+    /// output check. Output: the provider's result, or the refusal.
     pub(crate) fn call<T>(
         &self,
         plugin: &'static str,
         capability: &Capability,
+        check_input: impl FnOnce() -> Result<(), Refusal>,
         provide: impl FnOnce() -> Result<T, Refusal>,
+        check_output: impl FnOnce(&T) -> Result<(), Refusal>,
     ) -> Result<T, Refusal> {
         if let Err(refusal) = self.admit(plugin, capability) {
             self.refusals.refused(plugin, capability, &refusal);
             return Err(refusal);
         }
-        provide()
+        check_input()?;
+        let output = provide()?;
+        check_output(&output)?;
+        Ok(output)
     }
 }
 
@@ -91,8 +98,12 @@ pub struct Bound<'g, 'p> {
 
 impl sdk::Host for Bound<'_, '_> {
     fn settings_save_quit(&self, settings: QuitSettings) -> Result<(), Refusal> {
-        self.gateway.call(self.plugin, &settings::SAVE_QUIT, || {
-            self.gateway.settings.save_quit(settings)
-        })
+        self.gateway.call(
+            self.plugin,
+            &settings::SAVE_QUIT,
+            || Ok(()),
+            || self.gateway.settings.save_quit(self.plugin, settings),
+            |_| Ok(()),
+        )
     }
 }

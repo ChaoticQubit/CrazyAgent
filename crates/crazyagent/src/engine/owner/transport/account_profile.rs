@@ -207,7 +207,7 @@ impl OwnerClient {
                     stream.shutdown().await
                 }
                 .await;
-                crate::credentials::wipe(&mut bytes);
+                kernel_security::secret::wipe(&mut bytes);
                 write.map_err(|_| unknown())?;
                 let result = read_wire(self, &mut stream, None).await?;
                 if reply_epoch(&result).is_some_and(|value| value != engine_epoch) {

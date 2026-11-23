@@ -230,19 +230,23 @@ enum Pending {
 
 /// Finds the tmux program the engine uses, anew on each call, through the one tool resolver:
 /// the app's folder, the owner's own installs, the system folders, then `<root>/setup/bin`
-/// last ([`crate::tools::Places::engine`]).
+/// last ([`kernel_processes::finding::Places::engine`]).
 /// Takes the engine root. Returns the real program, or none when tmux is not installed.
 pub fn installed(engine_root: &Path) -> Option<PathBuf> {
-    installed_at(&crate::tools::Places::from_environment(Some(engine_root)))
+    installed_at(&crate::tools::tools_places(Some(engine_root)))
 }
 
 /// Finds the tmux program the engine uses in the given places, the answer setup shows: the
-/// bundled copy when it runs, else the usual order ([`crate::tools::resolve_tmux`]).
+/// bundled copy when it runs, else the usual order ([`kernel_processes::finding::resolve_tmux`]).
 /// Takes the places. Returns the real program, or none when tmux is not installed.
-pub fn installed_at(places: &crate::tools::Places) -> Option<PathBuf> {
-    crate::tools::resolve_tmux(places, crate::tools::SHIPS_BUNDLED_TMUX, runs)
-        .ok()
-        .map(|(tmux, _)| tmux.program)
+pub fn installed_at(places: &kernel_processes::finding::Places) -> Option<PathBuf> {
+    kernel_processes::finding::resolve_tmux(
+        places,
+        kernel_processes::finding::SHIPS_BUNDLED_TMUX,
+        runs,
+    )
+    .ok()
+    .map(|(tmux, _)| tmux.program)
 }
 
 /// A tmux file as (path, device, inode, size, change seconds and nanoseconds), so a file
@@ -263,13 +267,13 @@ static RAN: Mutex<Vec<RanFile>> = Mutex::new(Vec::new());
 /// reads). A read that runs out of time counts as running, since a new file can wait behind
 /// the system's first-run checks; the version read setup does next reports it. Takes the
 /// tmux. Returns the answer.
-pub fn runs(tmux: &crate::tools::Resolved) -> bool {
+pub fn runs(tmux: &kernel_processes::finding::Resolved) -> bool {
     runs_within(tmux, VERSION_READ_TIME)
 }
 
 /// Answers [`runs`] with the version read bounded by the given time, so a test can let a
 /// read run out of time quickly. Takes the tmux and the bound. Returns the answer.
-fn runs_within(tmux: &crate::tools::Resolved, time: Duration) -> bool {
+fn runs_within(tmux: &kernel_processes::finding::Resolved, time: Duration) -> bool {
     assert!(!time.is_zero() && time <= VERSION_READ_TIME);
     let Ok(metadata) = std::fs::metadata(&tmux.program) else {
         return false;

@@ -9,7 +9,7 @@ use crate::sandbox::toolchains::{self, ToolHomes};
 use base64::Engine;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::process::Command;
 
@@ -178,18 +178,146 @@ fn command_record(command: &Command) -> Value {
 
 /// One master turn as the snapshot holds it: the command, the files of its home, the
 /// folders its boundary lets it write and read, the toolchain folders it grants, which
-/// `tool_placeholders` names, and its tool record. Input: the launch. Output: the record.
+/// `tool_placeholders` names, and its tool record. Input: the launch. Output: the record;
+/// a home whose search list names other keychains than it holds fails the row.
 fn turn_record(launch: &MasterTurnLaunch) -> Value {
     let text = |path: &PathBuf| path.to_str().unwrap().to_owned();
     let rules = launch.sandbox.sandbox();
+    let home = json!(files(&launch.home));
+    keychains_tied(&home);
     json!({
         "command": command_record(&launch.command),
-        "home": files(&launch.home),
+        "home": home,
         "writable": rules.writable_roots().map(text).collect::<Vec<_>>(),
         "read": rules.read_roots().iter().map(text).collect::<Vec<_>>(),
         "tools": rules.tool_roots().iter().map(text).collect::<Vec<_>>(),
         "tool_record": launch.tool_record.as_ref().map(text),
     })
+}
+
+/// A name a build draws at random in a profile home's keychain folder, so two builds of
+/// the same turn differ in it alone: its text before the random hex digits, how many
+/// digits, its text after them and the fixed token it reads as in a record.
+struct RandomName {
+    before: &'static str,
+    digits: usize,
+    after: &'static str,
+    token: &'static str,
+}
+
+/// The only random names a master turn's home holds, in the order they are fixed: the agent
+/// keychain file the engine names `agent-<16 hex>.keychain-db`, the same keychain as the
+/// search-list plist names it, `agent-<16 hex>.keychain`, and the `.fl<8 hex>` lock file
+/// `security` keeps beside it.
+const RANDOM_NAMES: [RandomName; 3] = [KEYCHAIN_FILE, KEYCHAIN_LISTED, KEYCHAIN_LOCK];
+
+/// The agent keychain file the engine creates in a profile home, named
+/// `agent-<16 hex>.keychain-db`, as a home listing's key holds it. It reads as
+/// `<AGENT_KEYCHAIN>` in a record.
+const KEYCHAIN_FILE: RandomName = RandomName {
+    before: "Library/Keychains/agent-",
+    digits: 16,
+    after: ".keychain-db",
+    token: "Library/Keychains/<AGENT_KEYCHAIN>",
+};
+
+/// The same agent keychain as the search-list plist names it, `agent-<16 hex>.keychain`
+/// inside a `<string>`, without the file's `-db`. It reads as `<AGENT_KEYCHAIN_LISTED>` in
+/// a record.
+const KEYCHAIN_LISTED: RandomName = RandomName {
+    before: "Library/Keychains/agent-",
+    digits: 16,
+    after: ".keychain<",
+    token: "Library/Keychains/<AGENT_KEYCHAIN_LISTED><",
+};
+
+/// The `.fl<8 hex>` lock file `security` keeps beside a keychain while it writes one. It
+/// reads as `<KEYCHAIN_LOCK>` in a record, and a home holds at most one, so two would read
+/// as one key and are refused.
+const KEYCHAIN_LOCK: RandomName = RandomName {
+    before: "Library/Keychains/.fl",
+    digits: 8,
+    after: "",
+    token: "Library/Keychains/<KEYCHAIN_LOCK>",
+};
+
+/// The search-list plist of a profile home, as a home listing's key holds it: the file
+/// whose text names the keychains `security` searches, which must be the ones the home
+/// holds.
+const PLIST: &str = "Library/Preferences/com.apple.security.plist";
+
+impl RandomName {
+    /// Replaces each whole occurrence of this name in a text with its token: the hex digits
+    /// must be exactly `digits` long and be followed by `after`. Input: the text. Output: the
+    /// text with every such name fixed, any other text unchanged.
+    fn fixed(&self, text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(at) = rest.find(self.before) {
+            out.push_str(&rest[..at]);
+            let tail = &rest[at + self.before.len()..];
+            let hex = tail
+                .as_bytes()
+                .iter()
+                .take_while(|byte| byte.is_ascii_hexdigit())
+                .count();
+            if hex == self.digits && tail[hex..].starts_with(self.after) {
+                out.push_str(self.token);
+                rest = &tail[hex + self.after.len()..];
+            } else {
+                out.push_str(self.before);
+                rest = tail;
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// The random hex digits of each whole occurrence of this name in a text, as [`fixed`]
+    /// would replace them. Input: the text. Output: the digits of each occurrence, in order.
+    /// A name with other digits, or not followed by `after`, is not one.
+    fn found<'t>(&self, text: &'t str) -> Vec<&'t str> {
+        let mut hexes = Vec::new();
+        let mut rest = text;
+        while let Some(at) = rest.find(self.before) {
+            let tail = &rest[at + self.before.len()..];
+            let hex = tail
+                .as_bytes()
+                .iter()
+                .take_while(|byte| byte.is_ascii_hexdigit())
+                .count();
+            if hex == self.digits && tail[hex..].starts_with(self.after) {
+                hexes.push(&tail[..hex]);
+            }
+            rest = tail;
+        }
+        hexes
+    }
+}
+
+/// The search-list plist of one profile home must name the same agent keychains the home
+/// holds as files, as `security` writes it, checked before the random names are fixed and
+/// the tie can no longer be seen; a home with neither holds none. Input: the home listing.
+/// Output: none; a keychain the plist does not name, or a name with no file, fails the row.
+fn keychains_tied(home: &Value) {
+    let listing = home.as_object().expect("a home listing is an object");
+    let held: BTreeSet<&str> = listing
+        .keys()
+        .flat_map(|key| KEYCHAIN_FILE.found(key))
+        .collect();
+    let listed: BTreeSet<&str> = listing
+        .get(PLIST)
+        .map(|plist| {
+            plist["text"]
+                .as_str()
+                .expect("the search-list plist reads as text")
+        })
+        .map(|text| KEYCHAIN_LISTED.found(text).into_iter().collect())
+        .unwrap_or_default();
+    assert_eq!(
+        listed, held,
+        "the search list names other keychains than the home holds"
+    );
 }
 
 /// Replaces each placeholder's text in every string and key of a record. Inputs: the
@@ -199,7 +327,9 @@ fn normalized(value: Value, pairs: &[(String, String)]) -> Value {
         for (from, to) in pairs {
             text = text.replace(from.as_str(), to);
         }
-        text
+        RANDOM_NAMES
+            .iter()
+            .fold(text, |text, name| name.fixed(&text))
     };
     match value {
         Value::String(text) => Value::String(replaced(text)),
@@ -212,7 +342,10 @@ fn normalized(value: Value, pairs: &[(String, String)]) -> Value {
         Value::Object(fields) => {
             let mut renamed = Map::new();
             for (key, item) in fields {
-                renamed.insert(replaced(key), normalized(item, pairs));
+                let fixed = replaced(key);
+                let shown = fixed.clone();
+                let kept = renamed.insert(fixed, normalized(item, pairs));
+                assert!(kept.is_none(), "two names read as one key: {shown}");
             }
             Value::Object(renamed)
         }
@@ -440,6 +573,71 @@ fn check(name: &str, record: &Value) {
     let kept = std::fs::read_to_string(&path)
         .unwrap_or_else(|_| panic!("no snapshot at {}", path.display()));
     assert_eq!(shown, kept, "{name} differs from its snapshot");
+}
+
+/// Only a whole random keychain or lock name reads as its token; a name with too few or too
+/// many digits, other characters or another folder stays as it was, so a real change to a
+/// keychain name still shows in the record.
+#[test]
+fn only_the_random_keychain_names_read_as_their_tokens() {
+    let fixed = |text: &str| {
+        RANDOM_NAMES
+            .iter()
+            .fold(text.to_owned(), |text, name| name.fixed(&text))
+    };
+    assert_eq!(
+        fixed("~/Library/Keychains/agent-ea6cafb336abf863.keychain-db</string>"),
+        "~/Library/Keychains/<AGENT_KEYCHAIN></string>"
+    );
+    assert_eq!(
+        fixed("<string>~/Library/Keychains/agent-ea6cafb336abf863.keychain</string>"),
+        "<string>~/Library/Keychains/<AGENT_KEYCHAIN_LISTED></string>"
+    );
+    assert_eq!(
+        fixed("Library/Keychains/.fl9CEA45C0"),
+        "Library/Keychains/<KEYCHAIN_LOCK>"
+    );
+    for kept in [
+        "Library/Keychains/agent-ea6cafb336abf86.keychain-db",
+        "Library/Keychains/agent-ea6cafb336abf8631.keychain-db",
+        "Library/Keychains/agent-ea6cafb336abf86g.keychain-db",
+        "Library/Keychains/agent-ea6cafb336abf863.keychain",
+        "Library/Keychains/agent-ea6cafb336abf863.keychains<",
+        "Library/Keychains/login.keychain-db",
+        "Library/Keychains/.fl9CEA45C",
+        "Library/Keychains/.fl9CEA45C01",
+        "Library/Other/.fl9CEA45C0",
+    ] {
+        assert_eq!(fixed(kept), kept);
+    }
+}
+
+/// A home that holds two agent keychains cannot read as a one-keychain record: both names
+/// would fix to the same key, so the listing is refused rather than one entry kept.
+#[test]
+#[should_panic(expected = "two names read as one key")]
+fn a_home_with_two_agent_keychains_is_refused() {
+    let entry = json!({ "mode": "600", "text": null });
+    let home = json!({
+        "Library/Keychains/agent-ea6cafb336abf863.keychain-db": entry,
+        "Library/Keychains/agent-0123456789abcdef.keychain-db": entry,
+    });
+    normalized(home, &[]);
+}
+
+/// A search list that names another keychain than the one the home holds is refused before
+/// both names read as their tokens, which would hide that they differ.
+#[test]
+#[should_panic(expected = "the search list names other keychains than the home holds")]
+fn a_search_list_naming_another_keychain_is_refused() {
+    let plist = "<string>~/Library/Keychains/agent-0123456789abcdef.keychain</string>";
+    let mut home = Map::new();
+    home.insert(
+        "Library/Keychains/agent-ea6cafb336abf863.keychain-db".to_owned(),
+        json!({ "mode": "600", "text": null }),
+    );
+    home.insert(PLIST.to_owned(), json!({ "mode": "600", "text": plist }));
+    keychains_tied(&Value::Object(home));
 }
 
 /// A Codex master turn, tools off and on, equals the snapshot taken at the base commit:

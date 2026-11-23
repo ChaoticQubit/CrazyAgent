@@ -697,12 +697,12 @@ fn moved(to: &Path, rest: &Path) -> Result<String, LaunchError> {
 }
 
 /// The words that start a harness with no search path, as the tool resolver reads its file
-/// ([`crate::tools::Resolved::argv`]): the file itself, or for a script that asks `env` for
+/// ([`kernel_processes::finding::Resolved::argv`]): the file itself, or for a script that asks `env` for
 /// its interpreter, such as an npm-built Codex asking for `node`, that interpreter's
 /// absolute file, its words and then the script. Input: the harness file. Output: the
 /// words, or the resolver's owner line when it cannot run ([`launch_tool`]).
 pub(crate) fn launch_words(executable: &Path) -> Result<Vec<String>, LaunchError> {
-    let places = crate::tools::Places::from_environment(None);
+    let places = crate::tools::tools_places(None);
     let resolved = launch_tool(executable, &places)?;
     let words = start_words(&resolved)
         .iter()
@@ -714,12 +714,14 @@ pub(crate) fn launch_words(executable: &Path) -> Result<Vec<String>, LaunchError
 
 /// The words that start a resolved harness with no search path: the entry itself for a
 /// program or a script the system runs, else its interpreter's words, the first line's words
-/// and the script's real file ([`crate::tools::Resolved::argv`]). Input: the tool. Output:
+/// and the script's real file ([`kernel_processes::finding::Resolved::argv`]). Input: the tool. Output:
 /// the words, at least one.
-pub(crate) fn start_words(resolved: &crate::tools::Resolved) -> Vec<std::ffi::OsString> {
+pub(crate) fn start_words(
+    resolved: &kernel_processes::finding::Resolved,
+) -> Vec<std::ffi::OsString> {
     let entry = || vec![resolved.entry.clone().into_os_string()];
     let words = match resolved.kind {
-        crate::tools::Kind::Native => entry(),
+        kernel_processes::finding::Kind::Native => entry(),
         _ => {
             let argv = resolved.argv();
             if argv.len() > 1 { argv } else { entry() }
@@ -731,40 +733,40 @@ pub(crate) fn start_words(resolved: &crate::tools::Resolved) -> Vec<std::ffi::Os
 
 /// The harness the engine starts for a pinned file ([`found_tool`]), refused when it would
 /// start under a `node` other than its own npm prefix's because the resolver passes that
-/// one over ([`crate::tools::own_node_refused`]). Inputs: the harness file and the places.
+/// one over ([`kernel_processes::finding::own_node_refused`]). Inputs: the harness file and the places.
 /// Output: the tool, or the resolver's owner line for why it cannot run.
 pub(crate) fn launch_tool(
     executable: &Path,
-    places: &crate::tools::Places,
-) -> Result<crate::tools::Resolved, LaunchError> {
-    let refused = |missing: crate::tools::Missing| LaunchError(missing.line(), None);
+    places: &kernel_processes::finding::Places,
+) -> Result<kernel_processes::finding::Resolved, LaunchError> {
+    let refused = |missing: kernel_processes::finding::Missing| LaunchError(missing.line(), None);
     let tool = found_tool(executable, places).map_err(refused)?;
-    match crate::tools::own_node_refused(&tool, places) {
+    match kernel_processes::finding::own_node_refused(&tool, places) {
         Some(missing) => Err(refused(missing)),
         None => Ok(tool),
     }
 }
 
 /// The harness found for a pinned file, after the resolver's entry checks
-/// ([`crate::tools::resolve_entry`]); a version-manager shim gives the real install its name
-/// resolves to, else itself when the resolver would run it ([`crate::tools::check_place`]).
+/// ([`kernel_processes::finding::resolve_entry`]); a version-manager shim gives the real install its name
+/// resolves to, else itself when the resolver would run it ([`kernel_processes::finding::check_place`]).
 /// Inputs: the harness file and the places. Output: the tool, or why it cannot run.
 fn found_tool(
     executable: &Path,
-    places: &crate::tools::Places,
-) -> Result<crate::tools::Resolved, crate::tools::Missing> {
+    places: &kernel_processes::finding::Places,
+) -> Result<kernel_processes::finding::Resolved, kernel_processes::finding::Missing> {
     if !super::is_shim(places.home(), executable) {
-        return crate::tools::resolve_entry(executable, places);
+        return kernel_processes::finding::resolve_entry(executable, places);
     }
     let name = executable
         .file_name()
         .and_then(OsStr::to_str)
         .unwrap_or_default();
-    match crate::tools::resolve(name, places) {
+    match kernel_processes::finding::resolve(name, places) {
         Ok(found) => Ok(found),
         Err(_)
             if executable.is_absolute()
-                && crate::tools::check_place(places, executable) == Some(Ok(())) =>
+                && kernel_processes::finding::check_place(places, executable) == Some(Ok(())) =>
         {
             Ok(as_given(executable))
         }
@@ -774,11 +776,11 @@ fn found_tool(
 
 /// A harness file taken as it is, a native program that is its own entry and real file.
 /// Input: the file. Output: the tool.
-fn as_given(executable: &Path) -> crate::tools::Resolved {
-    crate::tools::Resolved {
+fn as_given(executable: &Path) -> kernel_processes::finding::Resolved {
+    kernel_processes::finding::Resolved {
         entry: executable.to_path_buf(),
         program: executable.to_path_buf(),
-        kind: crate::tools::Kind::Native,
+        kind: kernel_processes::finding::Kind::Native,
     }
 }
 

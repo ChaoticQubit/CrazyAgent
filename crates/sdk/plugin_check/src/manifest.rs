@@ -3,12 +3,9 @@ use std::path::{Path, PathBuf};
 
 use toml::{Table, Value};
 
-use crate::{Bounded, CANONICAL_BUILD_RS, Manifest, Violation, read_bounded};
+use kernel_plugin_host::manifest::{Bounded, MANIFEST_BYTES_MAX, line_of, read_bounded};
 
-/// The most bytes a plugin's `Cargo.toml`, `plugin.toml` or `build.rs` may hold.
-pub(crate) const MANIFEST_BYTES_MAX: usize = 65_536;
-/// The most permissions one `plugin.toml` may ask for.
-pub(crate) const PERMISSIONS_MAX: usize = 64;
+use crate::{CANONICAL_BUILD_RS, Violation};
 
 /// The only dependency a plugin may have: the SDK, by this exact path.
 const SDK_DEPENDENCY: (&str, &str) = ("crazyagent-sdk", "../../../crates/sdk/rust");
@@ -27,8 +24,6 @@ const PACKAGE_KEYS: [&str; 6] = ["name", "version", "edition", "license", "publi
 const LIB_KEYS: [&str; 2] = ["name", "path"];
 /// Folders and files cargo would build as other targets, whose code the scan never reads.
 const TARGETS_NOT_ALLOWED: [&str; 5] = ["tests", "examples", "benches", "src/bin", "src/main.rs"];
-/// The keys of a `plugin.toml`, each required.
-const PLUGIN_KEYS: [&str; 5] = ["plugin", "tier", "kind", "version", "permissions"];
 
 /// Checks a plugin's `Cargo.toml` and the target folders next to it. Inputs: the crate
 /// folder and the violation list. Output: the list grows.
@@ -132,82 +127,6 @@ pub(crate) fn build_script(dir: &Path, out: &mut Vec<Violation>) {
     }
 }
 
-/// The most bytes a plugin id may hold.
-pub(crate) const PLUGIN_ID_MAX: usize = 64;
-
-/// Whether a plugin id is 1 to `PLUGIN_ID_MAX` bytes of lowercase ASCII letters, digits
-/// and hyphens, so it is safe in a log line, an event body and a folder name. Input: the
-/// id. Output: true when it is.
-pub(crate) fn is_plugin_id(id: &str) -> bool {
-    (1..=PLUGIN_ID_MAX).contains(&id.len())
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-}
-
-/// Reads and checks `plugin.toml`: exactly its five keys, a tier word, a positive
-/// version and at most `PERMISSIONS_MAX` permission strings. Input: the crate folder.
-/// Output: the manifest, or `plugin_manifest_invalid` at the first refused key.
-pub(crate) fn plugin(dir: &Path) -> Result<Manifest, Violation> {
-    let mut out = Vec::new();
-    let text = read(dir, "plugin.toml", &mut out, "plugin_manifest_invalid");
-    let invalid = |text: &str, needle: &str| Violation {
-        file: PathBuf::from("plugin.toml"),
-        line: line_of(text, needle),
-        code: "plugin_manifest_invalid",
-    };
-    let Some(text) = text else {
-        return Err(out.remove(0));
-    };
-    let table = text.parse::<Table>().map_err(|_| invalid(&text, ""))?;
-    if let Some(key) = table
-        .keys()
-        .find(|key| !PLUGIN_KEYS.contains(&key.as_str()))
-    {
-        return Err(invalid(&text, key));
-    }
-    let string = |key: &str| {
-        table
-            .get(key)
-            .and_then(Value::as_str)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-            .ok_or_else(|| invalid(&text, key))
-    };
-    let (plugin, tier, kind) = (string("plugin")?, string("tier")?, string("kind")?);
-    if !is_plugin_id(&plugin) {
-        return Err(Violation {
-            code: "plugin_id_invalid",
-            ..invalid(&text, "plugin")
-        });
-    }
-    if !matches!(tier.as_str(), "t1" | "t2" | "t3") {
-        return Err(invalid(&text, "tier"));
-    }
-    let version = table
-        .get("version")
-        .and_then(Value::as_integer)
-        .filter(|version| *version >= 1)
-        .ok_or_else(|| invalid(&text, "version"))?;
-    let permissions = table
-        .get("permissions")
-        .and_then(Value::as_array)
-        .filter(|list| list.len() <= PERMISSIONS_MAX)
-        .and_then(|list| {
-            list.iter()
-                .map(|value| value.as_str().map(str::to_owned))
-                .collect::<Option<Vec<String>>>()
-        })
-        .ok_or_else(|| invalid(&text, "permissions"))?;
-    Ok(Manifest {
-        plugin,
-        tier,
-        kind,
-        version,
-        permissions,
-    })
-}
-
 /// Reads one file of the crate folder, bounded by `MANIFEST_BYTES_MAX`. Inputs: the
 /// folder, the file name, the violation list and the code for a missing or large file.
 /// Output: the text, or `None` with one violation added.
@@ -224,15 +143,4 @@ fn read(dir: &Path, name: &str, out: &mut Vec<Violation>, code: &'static str) ->
         });
     }
     text
-}
-
-/// The 1-based line of the first occurrence of a needle, 1 when absent or empty.
-/// Inputs: the text and the needle. Output: the line.
-fn line_of(text: &str, needle: &str) -> usize {
-    if needle.is_empty() {
-        return 1;
-    }
-    text.lines()
-        .position(|line| line.contains(needle))
-        .map_or(1, |index| index + 1)
 }

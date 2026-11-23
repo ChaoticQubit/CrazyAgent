@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::EngineError;
 use crate::engine::owner::{HostStamp, failure};
-use crate::protocol::Outcome;
+use crate::protocol::{Cursor, Outcome};
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crate::state_log::fence::Fence;
 use crate::state_log::{Aggregate, Appender, Draft};
@@ -52,39 +52,48 @@ pub(crate) fn call_refused_closed(body: &[u8]) -> bool {
 /// One queued first refusal: plugin id, capability name and the permission it needs.
 type Queued = (&'static str, &'static str, &'static str);
 
+/// What one drain committed: the `CallRefused` events it appended and the state revision
+/// its own transaction carries, so a receipt can name it without a read after the commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Drained {
+    pub(crate) appended: usize,
+    pub(crate) revision: Cursor,
+}
+
 /// Appends each first-seen refusal queued in a sink as one `CallRefused` event, in one
 /// engine-fenced transaction of its own, so the event outlives the refused request's
 /// rollback; an empty queue opens no transaction. Inputs: the connection, the engine host
-/// and the sink. Output: the events appended, or the refusal with the queue kept.
+/// and the sink. Output: what the drain committed, `None` for an empty queue, or the
+/// refusal with the queue kept.
 pub(crate) fn drain_refusals(
     connection: &mut Connection,
     host: &HostStamp,
     refusals: &EngineRefusals,
-) -> Result<usize, EngineError> {
+) -> Result<Option<Drained>, EngineError> {
     let queued = refusals.take_queued();
     if queued.is_empty() {
-        return Ok(0);
+        return Ok(None);
     }
     let appended = append_refusals(connection, host, &queued);
     if appended.is_err() {
         refusals.requeue(queued);
     }
-    appended
+    appended.map(Some)
 }
 
 /// Appends queued refusals as `CallRefused` events on the `plugins` aggregate and commits.
-/// Inputs: the connection, the engine host and the refusals. Output: their number, or the
-/// fence's, the log's or SQLite's refusal.
+/// Inputs: the connection, the engine host and the refusals. Output: their number and the
+/// revision the transaction committed, or the fence's, the log's or SQLite's refusal.
 fn append_refusals(
     connection: &mut Connection,
     host: &HostStamp,
     queued: &[Queued],
-) -> Result<usize, EngineError> {
+) -> Result<Drained, EngineError> {
     assert!(!queued.is_empty() && queued.len() <= REFUSALS_PENDING_MAX);
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| failure("plugin_refusal_log_begin"))?;
-    {
+    let revision = {
         let mut appender = Appender::own(&tx, Fence::Engine(host.clone()))?;
         let at_ms = u64::try_from(crate::team::now_ms()).unwrap_or(0);
         for (plugin, capability, needs) in queued {
@@ -106,10 +115,14 @@ fn append_refusals(
                 body: &body,
             })?;
         }
-    }
+        appender.revision()
+    };
     tx.commit()
         .map_err(|_| failure("plugin_refusal_log_commit"))?;
-    Ok(queued.len())
+    Ok(Drained {
+        appended: queued.len(),
+        revision: Cursor::new(revision),
+    })
 }
 
 /// The most first-seen (plugin, capability) refusal pairs one run keeps for the log.
@@ -304,7 +317,11 @@ struct QuitProvider<'t, 'c> {
 }
 
 impl Provide for QuitProvider<'_, '_> {
-    fn save_quit(&self, settings: sdk_settings::QuitSettings) -> Result<(), Refusal> {
+    fn save_quit(
+        &self,
+        _caller: &'static str,
+        settings: sdk_settings::QuitSettings,
+    ) -> Result<(), Refusal> {
         let calls = self.calls.get().saturating_add(1);
         self.calls.set(calls);
         if calls > 1 {

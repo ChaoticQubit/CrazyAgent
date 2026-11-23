@@ -494,7 +494,7 @@ fn an_env_script_harness_starts_headless_through_its_resolved_interpreter_with_t
     };
     let command = super::command(&request).unwrap();
     let interpreter =
-        crate::tools::resolve("sh", &crate::tools::Places::from_environment(None)).unwrap();
+        kernel_processes::finding::resolve("sh", &crate::tools::tools_places(None)).unwrap();
     assert!(interpreter.program.is_absolute());
     let args: Vec<&std::ffi::OsStr> = command.get_args().collect();
     let at = args
@@ -547,7 +547,7 @@ fn a_headless_harness_inside_a_project_is_refused_with_the_resolvers_line() {
         git_identity: None,
         limits: LaunchLimits::default(),
     };
-    let line = crate::tools::resolve_entry(&entry, &crate::tools::Places::from_environment(None))
+    let line = kernel_processes::finding::resolve_entry(&entry, &crate::tools::tools_places(None))
         .unwrap_err()
         .line();
     assert_eq!(
@@ -1281,8 +1281,8 @@ fn a_keyed_piped_harness_ends_when_the_engine_holding_its_relay_dies() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_listed_harness_on_its_own_relay_holds_the_engine_s_lifeline_and_a_keyless_one_none() {
-    use crate::credentials::SecretString;
     use crate::model_gateway::relay::Relay;
+    use kernel_security::secret::SecretString;
     use std::os::unix::fs::PermissionsExt;
     const URL: &str = "http://127.0.0.1:9/v1";
     for keyed in [true, false] {

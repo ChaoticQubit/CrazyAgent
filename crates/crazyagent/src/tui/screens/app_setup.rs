@@ -934,7 +934,8 @@ impl AppSetup {
 
     fn ask_fix(&mut self, ctx: &mut Ctx) {
         if self.refused_tool() == Some(RefusedTool::CommandOnly) {
-            let off = crate::setup::plain_reason(crate::tools::permission_fix::TOOL_FIX_OFF);
+            let off =
+                crate::setup::plain_reason(kernel_processes::finding::permission_fix::TOOL_FIX_OFF);
             ctx.say(Message::warning(off, ""));
             return;
         }

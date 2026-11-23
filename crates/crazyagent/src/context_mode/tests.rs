@@ -859,7 +859,7 @@ fn a_pinned_shaped_npx_the_resolver_does_not_find_is_left_out_and_nothing_of_its
     };
     assert!(pinned(&spec).is_some(), "shaped like the pinned launch");
     assert!(
-        !crate::tools::probe::mark().first_run_pending,
+        !kernel_processes::finding::probe::mark(crate::tools::finding_seed).first_run_pending,
         "unit tests never start a real folder run, so the probes count as ended"
     );
     assert_eq!(
@@ -890,7 +890,7 @@ fn a_pinned_shaped_npx_not_found_while_the_first_folder_probe_runs_is_being_set_
         command: tools.join("npx").to_str().unwrap().to_owned(),
         args: vec!["-y".into(), format!("context-mode@{VERSION}")],
     };
-    let places = crate::tools::Places::from_environment(Some(&case.root));
+    let places = crate::tools::tools_places(Some(&case.root));
     let on = |spec: &ServerSpec, pending| {
         crate::plugins::context_mode_on(spec, &places, pending).map(|found| found.is_some())
     };

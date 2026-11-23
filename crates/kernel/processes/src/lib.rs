@@ -3,6 +3,9 @@
 #[cfg(any(windows, test))]
 pub mod batch;
 pub mod fd_wait;
+/// Program finding: where the engine looks for the tools it runs, which files it refuses
+/// and why, with the engine's own checks passed in ([`finding::FindingHooks`]).
+pub mod finding;
 /// The short address a Unix socket is bound and reached at when its own path is too long
 /// for a socket address.
 #[cfg(unix)]

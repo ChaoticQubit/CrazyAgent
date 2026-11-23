@@ -164,7 +164,7 @@ pub(crate) const PROFILE_IN_USE: &str = "Waiting for the account: another proces
 /// The live master's problem line and one team note when it cannot start because no terminal
 /// program is found, which on macOS and Linux is tmux: the resolver's owner line, naming what
 /// is missing and how to install it, and the views offer Try again. The views show it as is.
-pub(crate) const TERMINAL_MISSING: &str = crate::tools::TMUX_MISSING;
+pub(crate) const TERMINAL_MISSING: &str = kernel_processes::finding::TMUX_MISSING;
 
 /// The live master's problem line and one team note while an owner line has waited longer
 /// than a first screen may take for the master's app to read keys (F2); the line is typed
