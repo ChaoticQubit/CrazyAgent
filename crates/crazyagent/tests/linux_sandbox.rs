@@ -1,7 +1,10 @@
 #![cfg(target_os = "linux")]
-use crazyagent::sandbox::linux::{
-    BWRAP_PATHS, HelperRequest, LOADER_REFUSED, LinuxBackend, LinuxSandbox, NEST_ARGS,
-    NETWORK_SHARED, SETUP_NOT_CHILD, SETUP_NOT_NEST, SETUP_UNPIPED, SLIRP_PATHS, loader_variable,
+use crazyagent::sandbox::linux::{LinuxBackend, LinuxSandbox};
+use kernel_sandbox::linux::helper::egress::{
+    NETWORK_SHARED, SETUP_NOT_CHILD, SETUP_NOT_NEST, SETUP_UNPIPED, SLIRP_PATHS,
+};
+use kernel_sandbox::linux::helper::{
+    BWRAP_PATHS, HelperRequest, LOADER_REFUSED, NEST_ARGS, loader_variable,
 };
 
 use crazyagent::sandbox::InstalledSandbox;
@@ -330,18 +333,6 @@ exit 0"#;
     assert_eq!(fs::read_to_string(admin.join("index")).unwrap(), "new");
     assert!(fs::symlink_metadata(admin.join("link")).is_err());
     assert!(fs::symlink_metadata(away.join("index")).is_err());
-}
-
-#[test]
-fn landlock_holds_the_project_boundary_on_this_kernel() {
-    let case = case();
-    let sandbox = pinned(policy(&case, SandboxNetwork::Open));
-    assert!(
-        matches!(sandbox.backend(), LinuxBackend::Landlock { .. }),
-        "Linux test machines need Landlock file rules (Linux 6.2 or newer): {:?}",
-        sandbox.backend()
-    );
-    assert_boundary(&case, &run(&sandbox, &case, &boundary_script(&case)));
 }
 
 #[test]

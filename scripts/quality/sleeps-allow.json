@@ -260,7 +260,7 @@
   "crates/crazyagent/src/research/runner/live_engine_tests.rs": 1,
   "crates/crazyagent/src/research/runner/warden_tests.rs": 1,
   "crates/crazyagent/src/research/service.rs": 1,
-  "crates/crazyagent/src/sandbox/linux/bridge.rs": 1,
+  "crates/kernel/sandbox/src/linux/helper/bridge.rs": 1,
   "crates/crazyagent/src/sandbox/tool_cache/tests.rs": 1,
   "crates/crazyagent/src/sandbox/warden/fixture.rs": 5,
   "crates/crazyagent/src/sandbox/warden/tests.rs": 7,

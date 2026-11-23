@@ -1,5 +1,5 @@
 use super::{HelperRequest, LandlockPolicy, NEST_ARGS, accepted, die_with_parent, enforce};
-use kernel_sandbox::ports::{BRIDGE_PORT_MIN, REMOTES_MAX};
+use crate::ports::{BRIDGE_PORT_MIN, REMOTES_MAX};
 use nix::errno::Errno;
 use nix::fcntl::{FcntlArg, FdFlag, fcntl};
 use nix::sys::signal::SigSet;
@@ -17,10 +17,10 @@ use std::process::{Command, ExitCode, Stdio};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
-pub(super) const BRIDGE: &str = "--bridge";
-pub(super) const BRIDGE_FD: &str = "--bridge-fd";
+pub const BRIDGE: &str = "--bridge";
+pub const BRIDGE_FD: &str = "--bridge-fd";
 pub(super) const BROKER: &str = "--broker";
-pub(super) const UNSHARE_NET: &str = "--unshare-net";
+pub const UNSHARE_NET: &str = "--unshare-net";
 /// The most ports one bridge carries: every remote a limited network may name.
 const PORTS_MAX: usize = REMOTES_MAX;
 /// One IPv4 and one IPv6 listener for each bridged port.
