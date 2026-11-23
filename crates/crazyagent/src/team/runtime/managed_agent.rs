@@ -14,7 +14,7 @@ use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
 use crate::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy};
 use crate::team::{AgentRole, TaskSource, TeamAccount, TeamReach};
-use crate::terminal::{AgentId, Host};
+use kernel_processes::terminal::{AgentId, Host};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CStr, OsStr, OsString};

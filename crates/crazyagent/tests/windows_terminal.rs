@@ -1,8 +1,10 @@
 #![cfg(target_os = "windows")]
 
-use crazyagent::terminal::buffer::Chunk;
 use crazyagent::terminal::windows::ConptyHost;
-use crazyagent::terminal::{AgentId, Host, INPUT_BYTES_MAX, PaneCommand, SIZE_MAX, TerminalStream};
+use kernel_processes::terminal::buffer::Chunk;
+use kernel_processes::terminal::{
+    AgentId, Host, INPUT_BYTES_MAX, PaneCommand, SIZE_MAX, TerminalStream,
+};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};

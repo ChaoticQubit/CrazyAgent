@@ -954,7 +954,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     let keep = crazyagent::landing::open(&root)
                         .and_then(|db| crazyagent::quit_settings::load(&db))
                         .map_or(true, |settings| settings.keeps_team_agents());
-                    crazyagent::terminal::quit(terminal.as_ref(), keep)
+                    kernel_processes::terminal::quit(terminal.as_ref(), keep)
                 })
                 .await;
                 if let Ok(Err(problem)) = quit {
@@ -1280,7 +1280,7 @@ fn terminal_probe(
 /// agents then run headless until a live master start finds tmux ([`terminal_probe`]).
 fn agent_terminal(
     service: &crazyagent::engine::bootstrap::EngineService,
-) -> Option<std::sync::Arc<dyn crazyagent::terminal::Host>> {
+) -> Option<std::sync::Arc<dyn kernel_processes::terminal::Host>> {
     let host = service.owner_runtime()?.terminal().ok()?;
     match host.alive() {
         Ok(_) => Some(host),

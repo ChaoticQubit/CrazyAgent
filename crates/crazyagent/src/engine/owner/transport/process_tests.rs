@@ -548,7 +548,8 @@ fn stale_agent_instructions_save_is_refused() {
     let tx = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .unwrap();
-    let from_agent = versioned::Writer::Agent(crate::terminal::AgentId::team(agent).unwrap());
+    let from_agent =
+        versioned::Writer::Agent(kernel_processes::terminal::AgentId::team(agent).unwrap());
     assert_eq!(
         agent_text::save(&tx, &project, agent, "Agent edit.\n", 1, &from_agent),
         Err(versioned::Refusal::Stale(versioned::Stale {

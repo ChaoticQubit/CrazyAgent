@@ -170,7 +170,7 @@ impl<H: Host> Host for LastScreenHost<H> {
     fn spawn(
         &self,
         agent: &AgentId,
-        command: &crate::terminal::PaneCommand,
+        command: &kernel_processes::terminal::PaneCommand,
     ) -> Result<PaneRef, HostError> {
         let _turn = self.turns.take(agent);
         let pane = self.inner.spawn(agent, command)?;
@@ -241,7 +241,9 @@ impl<H: Host> Host for LastScreenHost<H> {
     /// resize can land on it and its attach decides. Takes the agent. Returns the key.
     fn unit(&self, agent: &AgentId) -> Result<String, HostError> {
         match self.inner.unit(agent) {
-            Err(problem) if problem.0 == "terminal_agent_unknown" => Ok(super::agent_unit(agent)),
+            Err(problem) if problem.0 == "terminal_agent_unknown" => {
+                Ok(kernel_processes::terminal::agent_unit(agent))
+            }
             named => named,
         }
     }
@@ -317,7 +319,7 @@ impl<H: Host> Host for LastScreenHost<H> {
     fn spawn_own_server(
         &self,
         agent: &AgentId,
-        command: &crate::terminal::PaneCommand,
+        command: &kernel_processes::terminal::PaneCommand,
     ) -> Result<PaneRef, HostError> {
         let _turn = self.turns.take(agent);
         let pane = self.inner.spawn_own_server(agent, command)?;
@@ -432,7 +434,7 @@ mod tests {
         fn spawn(
             &self,
             agent: &AgentId,
-            _: &crate::terminal::PaneCommand,
+            _: &kernel_processes::terminal::PaneCommand,
         ) -> Result<PaneRef, HostError> {
             Ok(PaneRef {
                 agent: agent.clone(),
@@ -505,7 +507,10 @@ mod tests {
                     transcript: crate::harnesses::interactive::Transcript::Unavailable,
                 };
                 let spawned = host
-                    .spawn(&agent(2), &crate::terminal::PaneCommand::from(&command))
+                    .spawn(
+                        &agent(2),
+                        &kernel_processes::terminal::PaneCommand::from(&command),
+                    )
                     .is_ok();
                 let killed = host.kill(&agent(3)).is_ok();
                 let kept = host.kept(&agent(1));
@@ -535,7 +540,7 @@ mod tests {
         fn spawn(
             &self,
             agent: &AgentId,
-            _: &crate::terminal::PaneCommand,
+            _: &kernel_processes::terminal::PaneCommand,
         ) -> Result<PaneRef, HostError> {
             Ok(PaneRef {
                 agent: agent.clone(),
@@ -674,7 +679,7 @@ mod tests {
         };
         host.spawn(
             &named,
-            &crate::terminal::PaneCommand::from(&run("first run")),
+            &kernel_processes::terminal::PaneCommand::from(&run("first run")),
         )
         .unwrap();
         assert_eq!(host.alive().unwrap(), vec![named.clone()]);
@@ -700,8 +705,11 @@ mod tests {
             let (host, named) = (Arc::clone(&host), named.clone());
             let second = run("second run");
             std::thread::spawn(move || {
-                host.spawn(&named, &crate::terminal::PaneCommand::from(&second))
-                    .map(drop)
+                host.spawn(
+                    &named,
+                    &kernel_processes::terminal::PaneCommand::from(&second),
+                )
+                .map(drop)
             })
         };
         std::thread::sleep(Duration::from_millis(500));
@@ -745,7 +753,7 @@ mod tests {
         assert!(!host.kept(&named), "nothing is kept before a run");
         host.spawn(
             &named,
-            &crate::terminal::PaneCommand::from(&run("first run")),
+            &kernel_processes::terminal::PaneCommand::from(&run("first run")),
         )
         .unwrap();
         assert!(!host.kept(&named), "a live terminal keeps no last screen");
@@ -754,7 +762,7 @@ mod tests {
         assert!(!host.kept(&never), "an agent that never ran keeps nothing");
         host.spawn(
             &named,
-            &crate::terminal::PaneCommand::from(&run("second run")),
+            &kernel_processes::terminal::PaneCommand::from(&run("second run")),
         )
         .unwrap();
         assert!(!host.kept(&named), "a new run forgets the screen kept");
@@ -805,7 +813,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(50));
             }
         };
-        host.spawn(&named, &crate::terminal::PaneCommand::from(&run))
+        host.spawn(&named, &kernel_processes::terminal::PaneCommand::from(&run))
             .unwrap();
         assert!(shows(true), "the terminal never showed its answer");
         host.keep_last(&named);

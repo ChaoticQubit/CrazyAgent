@@ -2489,7 +2489,7 @@ fn pane_command_from_an_interactive_command_keeps_every_field() {
         ],
         transcript: Transcript::Unavailable,
     };
-    let pane = crate::terminal::PaneCommand::from(&command);
+    let pane = kernel_processes::terminal::PaneCommand::from(&command);
     assert_eq!(pane.argv, command.argv);
     assert_eq!(pane.cwd, command.cwd);
     assert_eq!(pane.env, command.env);

@@ -15,7 +15,7 @@ test-support = []
 [dependencies]
 crazyagent-kernel-common = { path = "../common" }
 serde = { version = "=1.0.229", features = ["derive"] }
-tokio = { version = "=1.53.2", features = ["net", "time"] }
+tokio = { version = "=1.53.2", features = ["net", "sync", "time"] }
 
 [target.'cfg(unix)'.dependencies]
 getrandom = "=0.4.3"
@@ -29,3 +29,4 @@ crazyagent-win-sandbox = { path = "../../crazyagent-win-sandbox" }
 [dev-dependencies]
 nix = { version = "=0.28.0", default-features = false, features = ["fs"] }
 tempfile = "=3.27.0"
+tokio = { version = "=1.53.2", features = ["rt"] }

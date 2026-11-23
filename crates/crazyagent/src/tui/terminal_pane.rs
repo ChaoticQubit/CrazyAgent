@@ -4,7 +4,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 
-pub(in crate::tui) use crate::terminal::PASTE_CLOSE;
+pub(in crate::tui) use kernel_processes::terminal::PASTE_CLOSE;
 
 const SCROLLBACK_ROWS: usize = 0;
 /// The marker that opens a bracketed paste.

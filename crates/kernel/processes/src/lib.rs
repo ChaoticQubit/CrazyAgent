@@ -16,6 +16,10 @@ pub mod socket_address;
 /// The one place the engine starts child processes and creates sockets, so no child
 /// inherits a pipe or socket another thread has not marked close-on-exec yet.
 pub mod spawn_gate;
+/// The terminal core: pane names, the limits every host keeps, the `Host` trait a
+/// terminal host implements, the bounded output buffer viewers read and the pane views
+/// built on a host.
+pub mod terminal;
 pub mod version;
 
 #[cfg(test)]

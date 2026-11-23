@@ -1200,7 +1200,7 @@ fn a_wide_conversation_shows_the_team_panel_beside_the_master_and_t_opens_the_te
             status_label: None,
             account: None,
             branch: None,
-            terminal: Some(crate::terminal::AgentId::new("team-1").unwrap()),
+            terminal: Some(kernel_processes::terminal::AgentId::new("team-1").unwrap()),
             questions: None,
             agent: Some(1),
             pane: None,

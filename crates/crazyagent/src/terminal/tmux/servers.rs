@@ -4,7 +4,7 @@ use super::super::{
 };
 use super::super::{keep_servers_deadline, teammates_socket};
 use super::{ServerPin, Tmux, harness_socket, renew_socket, user};
-use crate::terminal::PaneCommand;
+use kernel_processes::terminal::PaneCommand;
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
