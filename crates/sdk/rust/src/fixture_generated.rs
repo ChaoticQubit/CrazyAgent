@@ -196,7 +196,7 @@ pub fn check_send_input(request: &Request) -> Result<(), Refusal> {
         Ok(())
     } else {
         Err(Refusal::Rejected {
-            code: alloc::string::String::from("cap_input_too_large"),
+            code: core::convert::From::from("cap_input_too_large"),
         })
     }
 }
@@ -208,7 +208,7 @@ pub fn check_send_output(output: &Reply) -> Result<(), Refusal> {
         Ok(())
     } else {
         Err(Refusal::Failed {
-            code: alloc::string::String::from("cap_output_too_large"),
+            code: core::convert::From::from("cap_output_too_large"),
         })
     }
 }
@@ -231,7 +231,7 @@ pub fn check_reveal_output(
         Ok(())
     } else {
         Err(Refusal::Failed {
-            code: alloc::string::String::from("cap_output_too_large"),
+            code: core::convert::From::from("cap_output_too_large"),
         })
     }
 }
@@ -243,7 +243,7 @@ pub fn check_pair_input(_pair: &Pair, keyed: &Keyed) -> Result<(), Refusal> {
         Ok(())
     } else {
         Err(Refusal::Rejected {
-            code: alloc::string::String::from("cap_input_too_large"),
+            code: core::convert::From::from("cap_input_too_large"),
         })
     }
 }
@@ -261,7 +261,7 @@ pub fn check_count_input(flags: &[bool]) -> Result<(), Refusal> {
         Ok(())
     } else {
         Err(Refusal::Rejected {
-            code: alloc::string::String::from("cap_input_too_large"),
+            code: core::convert::From::from("cap_input_too_large"),
         })
     }
 }
@@ -279,7 +279,7 @@ pub fn check_wrap_input(envelope: &Envelope) -> Result<(), Refusal> {
         Ok(())
     } else {
         Err(Refusal::Rejected {
-            code: alloc::string::String::from("cap_input_too_large"),
+            code: core::convert::From::from("cap_input_too_large"),
         })
     }
 }
@@ -300,7 +300,7 @@ pub fn check_shadow_input(fits_reply: &Reply, fits_header: &[Header]) -> Result<
         Ok(())
     } else {
         Err(Refusal::Rejected {
-            code: alloc::string::String::from("cap_input_too_large"),
+            code: core::convert::From::from("cap_input_too_large"),
         })
     }
 }
