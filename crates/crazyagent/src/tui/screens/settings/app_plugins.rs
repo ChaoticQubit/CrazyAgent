@@ -83,7 +83,7 @@ pub(in crate::tui) fn sentence(code: &str) -> String {
             "That key can't be used: it is empty, too long or has spaces or control characters."
         }
         "app_plugin_key_store_unavailable" => {
-            "CrazyAgent couldn't save the key. Nothing was saved; try again."
+            "CrazyAgent couldn't reach its saved keys. Nothing was changed; try again."
         }
         "app_plugin_setting_unavailable" => {
             "This setting can't be saved while the app has no settings file or is applying a change. Try again."

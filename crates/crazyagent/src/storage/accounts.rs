@@ -68,7 +68,8 @@ pub(crate) const KEY_FOLDERS: [&str; 2] = [ACCOUNT_KEYS, PLUGIN_KEYS];
 mod windows_keys;
 #[cfg(windows)]
 pub(crate) use windows_keys::{
-    open_key_file, read_key_file, remove_key_file, replace_key_file, store_key_file,
+    key_saved_in, open_key_file, read_key_file, read_key_in, remove_key_file, remove_key_in,
+    remove_staged_in, remove_unkept_in, replace_key_file, replace_key_in, store_key_file,
 };
 
 /// Deletes one account key file from the engine root's owner-only key folder, for the start
@@ -304,12 +305,10 @@ fn replace_staged(
 
 /// The name prefix of a key copy a replace stages before renaming it over its key; the
 /// account key writer stages under the same prefix.
-#[cfg(unix)]
 const STAGED_KEY: &str = ".replace-";
 
 /// The most staged key copies one engine start deletes from one key folder; any more wait
 /// for the next start.
-#[cfg(unix)]
 const STAGED_SWEEP_MAX: usize = 64;
 
 /// Deletes the staged key copies a crash between a replace's write and its rename left in
@@ -352,7 +351,6 @@ pub(crate) fn remove_staged_in(root: &Path, folder: &str) -> Result<(), EngineEr
 
 /// The most entries one restore reads from one key folder; any more stay, and the restore
 /// logs `restore_key_sweep_bounded`.
-#[cfg(unix)]
 const KEY_SWEEP_MAX: usize = 10_000;
 
 /// Settles, after a restore to a 2.4 copy (V250-L5-N5), every key in one of the engine
@@ -453,49 +451,6 @@ fn copy_key_folder(copy: &Path, folder: &str) -> Result<std::fs::File, EngineErr
         .and_then(|parent| parent.sync_all())
         .map_err(|_| error("account_key_store_unavailable"))?;
     Ok(made)
-}
-
-/// Refuses to read a key where the Unix owner-only key folders do not exist. Inputs: the
-/// engine root, folder and reference, all unused. Output: `account_key_store_unavailable`.
-#[cfg(not(unix))]
-pub(crate) fn read_key_in(
-    _root: &Path,
-    _folder: &str,
-    _credential: &CredentialRef,
-) -> Result<Option<kernel_security::secret::SecretString>, EngineError> {
-    Err(error("account_key_store_unavailable"))
-}
-
-/// Refuses to check for a key where the Unix owner-only key folders do not exist. Inputs:
-/// the engine root, folder and reference, all unused. Output: `account_key_store_unavailable`.
-#[cfg(not(unix))]
-pub(crate) fn key_saved_in(
-    _root: &Path,
-    _folder: &str,
-    _credential: &CredentialRef,
-) -> Result<bool, EngineError> {
-    Err(error("account_key_store_unavailable"))
-}
-
-/// Refuses to save a key where the Unix owner-only key folders do not exist; the key is
-/// wiped. Inputs: the engine root, folder and reference, unused, and the key. Output:
-/// `account_key_store_unavailable`.
-#[cfg(not(unix))]
-pub(crate) fn replace_key_in(
-    _root: &Path,
-    _folder: &str,
-    _credential: &CredentialRef,
-    mut key: Vec<u8>,
-) -> Result<(), EngineError> {
-    kernel_security::secret::wipe(&mut key);
-    Err(error("account_key_store_unavailable"))
-}
-
-/// Refuses to delete a key where the Unix owner-only key folders do not exist. Inputs: the
-/// engine root, folder and key name, all unused. Output: `account_key_store_unavailable`.
-#[cfg(not(unix))]
-pub(crate) fn remove_key_in(_root: &Path, _folder: &str, _name: &str) -> Result<(), EngineError> {
-    Err(error("account_key_store_unavailable"))
 }
 
 /// The display name and API-key reference of one saved account, for an app plugin secret
