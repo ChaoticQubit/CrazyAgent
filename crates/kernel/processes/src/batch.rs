@@ -243,15 +243,17 @@ pub(crate) fn entry(
             Err(missing) => return Some(Err(missing)),
         };
         let only_beside = places.only_in(folder);
-        return Some(entry_at(&target, &only_beside, depth + 1).map(|script| Resolved {
-            entry: entry.to_path_buf(),
-            program: script.program,
-            kind: Kind::Script {
-                interpreter: Box::new(interpreter),
-                arguments: Vec::new(),
-                by_name: false,
-            },
-        }));
+        return Some(
+            entry_at(&target, &only_beside, depth + 1).map(|script| Resolved {
+                entry: entry.to_path_buf(),
+                program: script.program,
+                kind: Kind::Script {
+                    interpreter: Box::new(interpreter),
+                    arguments: Vec::new(),
+                    by_name: false,
+                },
+            }),
+        );
     }
     Some(entry_at(&target, places, depth + 1).map(|target| Resolved {
         entry: entry.to_path_buf(),
