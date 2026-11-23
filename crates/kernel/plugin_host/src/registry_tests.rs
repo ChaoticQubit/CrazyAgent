@@ -986,6 +986,33 @@ fn a_removal_whose_rows_fail_puts_the_folder_back() {
     assert_eq!(plugin(&listing, "acme").status, PluginStatus::Ready);
 }
 
+/// A retired folder left beside the live plugin of its name, which cannot be deleted, loses
+/// the plugin name on the start sweep, so a later removal never brings it back.
+#[test]
+fn a_retired_folder_beside_its_live_plugin_loses_its_name_on_the_sweep() {
+    let case = case();
+    add_text(&case, ACME, false, 1).unwrap();
+    let folder = plugins_folder(&case);
+    let retired = folder.join(format!(".old-acme.{}", "ab".repeat(32)));
+    std::fs::create_dir_all(retired.join("a/b/c/d/e/f")).unwrap();
+    std::fs::write(retired.join(MANIFEST_FILE), ACME).unwrap();
+    let _ = crate::registry::remove_staged(&case.root);
+    let left: Vec<String> = std::fs::read_dir(&folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert!(
+        !left.iter().any(|name| name.starts_with(".old-acme.")),
+        "{left:?}"
+    );
+    remove(&case.db, &case.engine(), "acme").unwrap();
+    let _ = crate::registry::remove_staged(&case.root);
+    assert!(
+        !folder.join("acme").exists(),
+        "the old folder never comes back"
+    );
+}
+
 /// A plugin entry that is a link is removed as the link itself: the folder it points to
 /// and the plugin.toml inside stay untouched.
 #[test]
