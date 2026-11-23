@@ -99,8 +99,8 @@ pub(crate) fn opening<'a, 'c>(
 }
 
 /// The engine's aggregate names for the kernel writer and replay: only the closed
-/// [`Aggregate`] set, read through its serde name, which [`Aggregate::name`] matches
-/// (CodeRabbit b01 H1). Input: the stored name. Output: its kernel name, none for another.
+/// [`Aggregate`] set, read through its serde name, which [`Aggregate::name`] matches.
+/// Input: the stored name. Output: its kernel name, none for another.
 fn known(name: &str) -> Option<AggregateName> {
     parse(name).map(AggregateName::from)
 }

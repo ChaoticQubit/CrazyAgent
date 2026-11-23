@@ -14,8 +14,7 @@ mod tests;
 /// transaction's borrow. Input: the transaction. Output: Ok, or the engine's refusal.
 pub type FenceCheck = Box<dyn Fn(&Transaction<'_>) -> Result<(), StorageError>>;
 
-/// The engine's set of aggregate names, which the writer and replay share (CodeRabbit b01
-/// H1): the writer refuses a name outside it and replay reads each stored name through it,
+/// The engine's set of aggregate names, which the writer and replay share: the writer refuses a name outside it and replay reads each stored name through it,
 /// so the log never holds a row replay refuses. Input: the name. Output: the engine's own
 /// name for it, or none for a name outside the set.
 pub type KnownName = fn(&str) -> Option<AggregateName>;
