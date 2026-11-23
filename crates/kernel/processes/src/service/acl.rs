@@ -223,10 +223,13 @@ pub(super) fn listed_shared(text: &str, me: Option<&str>) -> Option<bool> {
 
 /// Reads one `ls -lde` listing of several entries block by block: an entry's line, then its
 /// access-list lines, each indented ([`listed_shared`]). A block goes to the one entry its
-/// first line ends with, after a space, the longest when one name ends another. Inputs: the
-/// listing, the entries as listed and this user's name, if known. Output: one answer per
-/// entry, in order; none for an entry with no block or two, or whose block does not read,
-/// and none for every entry when a block names no entry or an access-list line comes first.
+/// first line ends with, after a space, the longest when one name ends another. A block of
+/// one line that reads as not shared takes the answer of `unlisted` for its entry instead,
+/// since `ls` prints a list it could not read exactly as no list. Inputs: the listing, the
+/// entries as listed, this user's name, if known, and the reader asked again by an entry's
+/// index. Output: one answer per entry, in order; none for an entry with no block or two, or
+/// whose block does not read, and none for every entry when a block names no entry or an
+/// access-list line comes first.
 #[cfg(any(test, target_os = "macos"))]
 pub(super) fn listed_shared_all(
     text: &str,
