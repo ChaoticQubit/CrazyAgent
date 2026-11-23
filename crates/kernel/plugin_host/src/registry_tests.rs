@@ -919,100 +919,6 @@ fn remove_deletes_a_user_plugin_with_its_keys_and_refuses_bundled_and_unknown_on
     assert_eq!(plugin(&listing, "acme").secrets[0].binding, Binding::None);
 }
 
-/// A plugin whose folder cannot be moved aside is not removed: its rows, its key and its
-/// folder all stay, so it is listed as it was, and the next removal goes through.
-#[test]
-fn a_removal_whose_folder_cannot_move_keeps_the_rows_and_the_key() {
-    fn no_ref() -> Result<String, &'static str> {
-        Err("app_plugin_folder_unavailable")
-    }
-    const NO_REF: Keys = Keys {
-        new_ref: no_ref,
-        ..KEYS
-    };
-    let case = case();
-    add_text(&case, ACME, false, 1).unwrap();
-    set_key(
-        &case.db,
-        &case.engine(),
-        "acme",
-        "api_key",
-        b"sk-test-key-0001".to_vec(),
-    )
-    .unwrap();
-    let stuck = Engine {
-        keys: &NO_REF,
-        ..case.engine()
-    };
-    assert!(remove(&case.db, &stuck, "acme").is_err());
-    assert_eq!(plugin_keys(&case).len(), 1);
-    let listing = list(&case.db, &case.engine()).unwrap();
-    assert_eq!(plugin(&listing, "acme").status, PluginStatus::Ready);
-    remove(&case.db, &case.engine(), "acme").unwrap();
-    assert!(plugin_keys(&case).is_empty());
-    assert!(!plugins_folder(&case).join("acme").exists());
-}
-
-/// A removal whose rows cannot be deleted puts the folder back under its name and keeps the
-/// key, leaving no retired folder behind.
-#[test]
-fn a_removal_whose_rows_fail_puts_the_folder_back() {
-    let case = case();
-    add_text(&case, ACME, false, 1).unwrap();
-    set_key(
-        &case.db,
-        &case.engine(),
-        "acme",
-        "api_key",
-        b"sk-test-key-0001".to_vec(),
-    )
-    .unwrap();
-    case.db
-        .execute_batch(
-            "CREATE TEMP TRIGGER held BEFORE DELETE ON app_plugin_trust
-             BEGIN SELECT RAISE(ABORT, 'held'); END;",
-        )
-        .unwrap();
-    assert!(remove(&case.db, &case.engine(), "acme").is_err());
-    let folder = plugins_folder(&case);
-    let names: Vec<String> = std::fs::read_dir(&folder)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .collect();
-    assert_eq!(names, ["acme"]);
-    assert_eq!(plugin_keys(&case).len(), 1);
-    case.db.execute_batch("DROP TRIGGER held").unwrap();
-    let listing = list(&case.db, &case.engine()).unwrap();
-    assert_eq!(plugin(&listing, "acme").status, PluginStatus::Ready);
-}
-
-/// A retired folder left beside the live plugin of its name, which cannot be deleted, loses
-/// the plugin name on the start sweep, so a later removal never brings it back.
-#[test]
-fn a_retired_folder_beside_its_live_plugin_loses_its_name_on_the_sweep() {
-    let case = case();
-    add_text(&case, ACME, false, 1).unwrap();
-    let folder = plugins_folder(&case);
-    let retired = folder.join(format!(".old-acme.{}", "ab".repeat(32)));
-    std::fs::create_dir_all(retired.join("a/b/c/d/e/f")).unwrap();
-    std::fs::write(retired.join(MANIFEST_FILE), ACME).unwrap();
-    let _ = crate::registry::remove_staged(&case.root);
-    let left: Vec<String> = std::fs::read_dir(&folder)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .collect();
-    assert!(
-        !left.iter().any(|name| name.starts_with(".old-acme.")),
-        "{left:?}"
-    );
-    remove(&case.db, &case.engine(), "acme").unwrap();
-    let _ = crate::registry::remove_staged(&case.root);
-    assert!(
-        !folder.join("acme").exists(),
-        "the old folder never comes back"
-    );
-}
-
 /// A plugin entry that is a link is removed as the link itself: the folder it points to
 /// and the plugin.toml inside stay untouched.
 #[test]
@@ -1328,3 +1234,97 @@ mod switch;
 
 #[path = "registry_folder_tests.rs"]
 mod folder;
+
+/// A plugin whose folder cannot be moved aside is not removed: its rows, its key and its
+/// folder all stay, so it is listed as it was, and the next removal goes through.
+#[test]
+fn a_removal_whose_folder_cannot_move_keeps_the_rows_and_the_key() {
+    fn no_ref() -> Result<String, &'static str> {
+        Err("app_plugin_folder_unavailable")
+    }
+    const NO_REF: Keys = Keys {
+        new_ref: no_ref,
+        ..KEYS
+    };
+    let case = case();
+    add_text(&case, ACME, false, 1).unwrap();
+    set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"sk-test-key-0001".to_vec(),
+    )
+    .unwrap();
+    let stuck = Engine {
+        keys: &NO_REF,
+        ..case.engine()
+    };
+    assert!(remove(&case.db, &stuck, "acme").is_err());
+    assert_eq!(plugin_keys(&case).len(), 1);
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert_eq!(plugin(&listing, "acme").status, PluginStatus::Ready);
+    remove(&case.db, &case.engine(), "acme").unwrap();
+    assert!(plugin_keys(&case).is_empty());
+    assert!(!plugins_folder(&case).join("acme").exists());
+}
+
+/// A removal whose rows cannot be deleted puts the folder back under its name and keeps the
+/// key, leaving no retired folder behind.
+#[test]
+fn a_removal_whose_rows_fail_puts_the_folder_back() {
+    let case = case();
+    add_text(&case, ACME, false, 1).unwrap();
+    set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"sk-test-key-0001".to_vec(),
+    )
+    .unwrap();
+    case.db
+        .execute_batch(
+            "CREATE TEMP TRIGGER held BEFORE DELETE ON app_plugin_trust
+             BEGIN SELECT RAISE(ABORT, 'held'); END;",
+        )
+        .unwrap();
+    assert!(remove(&case.db, &case.engine(), "acme").is_err());
+    let folder = plugins_folder(&case);
+    let names: Vec<String> = std::fs::read_dir(&folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names, ["acme"]);
+    assert_eq!(plugin_keys(&case).len(), 1);
+    case.db.execute_batch("DROP TRIGGER held").unwrap();
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert_eq!(plugin(&listing, "acme").status, PluginStatus::Ready);
+}
+
+/// A retired folder left beside the live plugin of its name, which cannot be deleted, loses
+/// the plugin name on the start sweep, so a later removal never brings it back.
+#[test]
+fn a_retired_folder_beside_its_live_plugin_loses_its_name_on_the_sweep() {
+    let case = case();
+    add_text(&case, ACME, false, 1).unwrap();
+    let folder = plugins_folder(&case);
+    let retired = folder.join(format!(".old-acme.{}", "ab".repeat(32)));
+    std::fs::create_dir_all(retired.join("a/b/c/d/e/f")).unwrap();
+    std::fs::write(retired.join(MANIFEST_FILE), ACME).unwrap();
+    let _ = crate::registry::remove_staged(&case.root);
+    let left: Vec<String> = std::fs::read_dir(&folder)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert!(
+        !left.iter().any(|name| name.starts_with(".old-acme.")),
+        "{left:?}"
+    );
+    remove(&case.db, &case.engine(), "acme").unwrap();
+    let _ = crate::registry::remove_staged(&case.root);
+    assert!(
+        !folder.join("acme").exists(),
+        "the old folder never comes back"
+    );
+}
