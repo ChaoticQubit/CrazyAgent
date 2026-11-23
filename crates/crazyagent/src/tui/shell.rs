@@ -130,6 +130,12 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
         place: Place::GitHubDefaults,
         pick: Pick::Open,
     });
+    out.push(Target {
+        label: "Settings / App plugins".into(),
+        kind: "Settings",
+        place: Place::AppPlugins,
+        pick: Pick::Open,
+    });
     for (label, place) in [
         ("New project", Place::NewProject),
         ("Add account", Place::AddAccount),

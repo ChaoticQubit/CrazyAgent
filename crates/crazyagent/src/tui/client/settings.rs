@@ -22,6 +22,9 @@ use crate::protocol::CredentialRef;
 use crate::usage::money::MoneyChoice;
 use crate::usage::report::UsageReport;
 use crate::usage::spend::SpendChoice;
+use app_plugins::{AppPluginsEvent, AppPluginsJob};
+
+pub(in crate::tui) mod app_plugins;
 
 const POOL_JOINS_MAX: usize = 64;
 const SUGGESTION_PROJECTS_MAX: usize = 50;
@@ -154,6 +157,7 @@ pub(in crate::tui) enum SettingsJob {
         server: Option<String>,
     },
     AppSetup(AppSetupJob),
+    AppPlugins(Box<AppPluginsJob>),
     Schedule,
     SetSchedule {
         change: crate::scheduling::ScheduleChange,
@@ -288,6 +292,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::SetTool { .. } => "SetTool",
             Self::RestoreTools { .. } => "RestoreTools",
             Self::AppSetup(job) => job.name(),
+            Self::AppPlugins(job) => job.name(),
             Self::Schedule => "Schedule",
             Self::SetSchedule { .. } => "SetSchedule",
             Self::Ranking => "Ranking",
@@ -425,6 +430,7 @@ pub(in crate::tui) enum SettingsEvent {
         result: Result<Vec<ToolView>, String>,
     },
     AppSetup(AppSetupEvent),
+    AppPlugins(AppPluginsEvent),
     Schedule(Result<crate::scheduling::Schedule, String>),
     ScheduleSet(u64, Result<(), String>),
     Ranking(Result<Vec<crate::scheduling::PoolRanking>, String>),
@@ -507,6 +513,7 @@ impl SettingsEvent {
                 result: Err(problem),
             },
             SettingsJob::AppSetup(job) => Self::AppSetup(AppSetupEvent::failed(job, problem)),
+            SettingsJob::AppPlugins(job) => Self::AppPlugins(AppPluginsEvent::failed(job, problem)),
             SettingsJob::Schedule => Self::Schedule(Err(problem)),
             SettingsJob::SetSchedule { generation, .. } => {
                 Self::ScheduleSet(*generation, Err(problem))
@@ -886,6 +893,9 @@ impl NativeOwner {
                 }
             }
             SettingsJob::AppSetup(job) => SettingsEvent::AppSetup(self.app_setup(job, lost).await),
+            SettingsJob::AppPlugins(job) => {
+                SettingsEvent::AppPlugins(self.app_plugins(*job, lost).await)
+            }
             SettingsJob::Schedule => SettingsEvent::Schedule(match self.settings_controller() {
                 Ok(controller) => controller
                     .account_schedule()

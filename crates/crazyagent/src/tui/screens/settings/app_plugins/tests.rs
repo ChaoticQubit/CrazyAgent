@@ -101,7 +101,11 @@ fn listing() -> Listing {
         PluginStatus::Ready,
         true,
     );
-    ollama.runs = Some(http("http://127.0.0.1:11434/api/embed", &["127.0.0.1"], true));
+    ollama.runs = Some(http(
+        "http://127.0.0.1:11434/api/embed",
+        &["127.0.0.1"],
+        true,
+    ));
     let mut dock = plugin(
         "dock-embed",
         "Dock embeddings",
@@ -318,9 +322,7 @@ impl Fake {
                     .ok_or_else(|| "app_plugin_not_found".into()),
             ),
             AppPluginsJob::Review { .. } => AppPluginsEvent::Preview(Ok(self.review.clone())),
-            AppPluginsJob::Add {
-                folder, sha256, ..
-            } => {
+            AppPluginsJob::Add { folder, sha256, .. } => {
                 assert_eq!(sha256, SHA, "the add carries the SHA-256 the review showed");
                 assert_eq!(folder, PathBuf::from(DOCK_TWO));
                 let mut added = plugin(
@@ -524,7 +526,10 @@ fn the_page_reads_then_lists_each_plugin_with_one_label_and_code_plugins_last() 
     assert!(line(&mut shell, "Broken plugin").contains("Refused"));
     assert!(line(&mut shell, "  agent-quit").contains("Essential  On"));
     assert!(line(&mut shell, "  service-kit").contains("Bundled  On"));
-    assert!(shows(&mut shell, "agent-quit, bundled code plugin. 1 permission."));
+    assert!(shows(
+        &mut shell,
+        "agent-quit, bundled code plugin. 1 permission."
+    ));
     assert!(shows(
         &mut shell,
         "service-kit, bundled code plugin. 2 permissions."
@@ -532,7 +537,10 @@ fn the_page_reads_then_lists_each_plugin_with_one_label_and_code_plugins_last() 
     assert!(shows(&mut shell, "Essential, stays on."));
     assert!(shows(&mut shell, "openai, version 1. Bundled."));
     assert!(shows(&mut shell, "dock-embed, version 1. Added by you."));
-    assert!(shows(&mut shell, "Reaches 127.0.0.1 (local, not encrypted)"));
+    assert!(shows(
+        &mut shell,
+        "Reaches 127.0.0.1 (local, not encrypted)"
+    ));
     assert!(shows(
         &mut shell,
         "the URL's host is not in hosts. (app_plugin_host_undeclared, line 7, http.url)"
@@ -581,12 +589,18 @@ fn add_refuses_a_relative_or_long_path_in_the_tui_and_sends_an_absolute_one_as_t
     assert!(shows(&mut shell, "Plugin folder"));
     shell.key(Key::Paste("plugins/dock-two".into()));
     shell.key(Key::Enter);
-    assert!(requests(&mut shell).is_empty(), "a relative path is not sent");
+    assert!(
+        requests(&mut shell).is_empty(),
+        "a relative path is not sent"
+    );
     assert!(shows(&mut shell, ABSOLUTE));
     shell.key(Key::Ctrl('u'));
     shell.key(Key::Paste(format!("/{}", "a".repeat(PATH_CHARS_MAX))));
     shell.key(Key::Enter);
-    assert!(requests(&mut shell).is_empty(), "a path past 1024 characters is not sent");
+    assert!(
+        requests(&mut shell).is_empty(),
+        "a path past 1024 characters is not sent"
+    );
     assert!(shows(&mut shell, PATH_LONG));
     shell.key(Key::Ctrl('u'));
     shell.key(Key::Paste("/Users/owner/plugins/missing".into()));
@@ -594,13 +608,18 @@ fn add_refuses_a_relative_or_long_path_in_the_tui_and_sends_an_absolute_one_as_t
     let job = one(&mut shell);
     answer(&mut shell, &mut fake, job);
     assert!(shows(&mut shell, &sentence("app_plugin_not_found")));
-    assert!(shows(&mut shell, "Add an app plugin"), "the form stays open");
+    assert!(
+        shows(&mut shell, "Add an app plugin"),
+        "the form stays open"
+    );
 
     shell.key(Key::Ctrl('u'));
     shell.key(Key::Paste(DOCK_TWO.into()));
     shell.key(Key::Enter);
     let job = one(&mut shell);
-    assert!(matches!(job, AppPluginsJob::Preview { ref folder } if *folder == PathBuf::from(DOCK_TWO)));
+    assert!(
+        matches!(job, AppPluginsJob::Preview { ref folder } if folder.as_path() == std::path::Path::new(DOCK_TWO))
+    );
     answer(&mut shell, &mut fake, job);
     assert!(shows(&mut shell, "Review Dock two"));
     assert!(shows(&mut shell, "Embeds on the dock machine."));
@@ -611,7 +630,7 @@ fn add_refuses_a_relative_or_long_path_in_the_tui_and_sends_an_absolute_one_as_t
     assert!(matches!(
         job,
         AppPluginsJob::Add { ref folder, ref sha256, replace: false }
-            if *folder == PathBuf::from(DOCK_TWO) && sha256 == SHA
+            if folder.as_path() == std::path::Path::new(DOCK_TWO) && sha256 == SHA
     ));
     answer(&mut shell, &mut fake, job);
     assert!(!shows(&mut shell, "Review Dock two"));
@@ -713,11 +732,17 @@ fn turning_off_confirms_with_the_users_and_the_stored_choice_and_tab_changes_thi
     assert!(shows(&mut shell, "Turn off Dock embeddings?"));
     assert!(shows(&mut shell, "In use by:"));
     assert!(shows(&mut shell, "- Fix the login page"));
-    assert!(shows(&mut shell, "Refuse new calls: running work goes on without it"));
+    assert!(shows(
+        &mut shell,
+        "Refuse new calls: running work goes on without it"
+    ));
     assert!(shows(&mut shell, "This is your setting."));
     assert!(bar(&mut shell).contains("Tab Stop runs instead"));
     shell.key(Key::Tab);
-    assert!(shows(&mut shell, "Stop runs using it: the runs listed above stop."));
+    assert!(shows(
+        &mut shell,
+        "Stop runs using it: the runs listed above stop."
+    ));
     assert!(shows(
         &mut shell,
         "This time only. Your setting stays Refuse new calls."
@@ -730,7 +755,10 @@ fn turning_off_confirms_with_the_users_and_the_stored_choice_and_tab_changes_thi
             if name == "dock-embed"
     ));
     answer(&mut shell, &mut fake, job);
-    assert!(matches!(one(&mut shell), AppPluginsJob::Grants), "grants read after a switch");
+    assert!(
+        matches!(one(&mut shell), AppPluginsJob::Grants),
+        "grants read after a switch"
+    );
     arrive(
         &mut shell,
         SettingsEvent::AppPlugins(AppPluginsEvent::Grants(Ok(fake.grants.clone()))),
@@ -741,7 +769,11 @@ fn turning_off_confirms_with_the_users_and_the_stored_choice_and_tab_changes_thi
     let job = one(&mut shell);
     assert!(matches!(
         job,
-        AppPluginsJob::SetEnabled { enabled: true, when_off: None, .. }
+        AppPluginsJob::SetEnabled {
+            enabled: true,
+            when_off: None,
+            ..
+        }
     ));
     answer(&mut shell, &mut fake, job);
     serve(&mut shell, &mut fake);
@@ -755,7 +787,11 @@ fn turning_off_confirms_with_the_users_and_the_stored_choice_and_tab_changes_thi
     shell.key(Key::Char('y'));
     assert!(matches!(
         one(&mut shell),
-        AppPluginsJob::SetEnabled { enabled: false, when_off: None, .. }
+        AppPluginsJob::SetEnabled {
+            enabled: false,
+            when_off: None,
+            ..
+        }
     ));
 }
 
@@ -764,7 +800,11 @@ fn the_essential_row_has_no_switch_and_enter_sends_nothing() {
     let mut fake = Fake::new();
     let mut shell = page(&mut fake);
     select(&mut shell, 6);
-    assert!(rows(&mut shell).iter().any(|row| row.starts_with("  > agent-quit")));
+    assert!(
+        rows(&mut shell)
+            .iter()
+            .any(|row| row.starts_with("  > agent-quit"))
+    );
     let hints = bar(&mut shell);
     assert!(!hints.contains("Enter"), "{hints}");
     assert!(!hints.contains("Space"), "{hints}");
@@ -801,7 +841,11 @@ fn remove_confirms_naming_the_entered_key_and_bundled_rows_offer_no_x() {
         "an account's key is not deleted"
     );
     shell.key(Key::Esc);
-    assert_eq!(shell.place(), Some(Place::AppPlugins), "Esc closes the confirm only");
+    assert_eq!(
+        shell.place(),
+        Some(Place::AppPlugins),
+        "Esc closes the confirm only"
+    );
     select(&mut shell, 2);
     assert!(bar(&mut shell).contains("x Remove"));
     shell.key(Key::Char('x'));
@@ -826,7 +870,10 @@ fn set_key_names_the_host_it_goes_to_binds_an_api_key_account_or_sends_a_masked_
     shell.key(Key::Char('k'));
     let sent = requests(&mut shell);
     assert!(matches!(sent.as_slice(), [SettingsJob::AllAccounts]));
-    arrive(&mut shell, SettingsEvent::AllAccounts(Ok(fake.accounts.clone())));
+    arrive(
+        &mut shell,
+        SettingsEvent::AllAccounts(Ok(fake.accounts.clone())),
+    );
     assert!(shows(&mut shell, "Key for api_key"));
     assert!(shows(&mut shell, "The key goes only to api.openai.com."));
     assert!(shows(&mut shell, "Key from Work OpenAI"));
@@ -843,13 +890,23 @@ fn set_key_names_the_host_it_goes_to_binds_an_api_key_account_or_sends_a_masked_
 
     shell.key(Key::Char('k'));
     let _ = requests(&mut shell);
-    arrive(&mut shell, SettingsEvent::AllAccounts(Ok(fake.accounts.clone())));
+    arrive(
+        &mut shell,
+        SettingsEvent::AllAccounts(Ok(fake.accounts.clone())),
+    );
     shell.key(Key::Down);
-    assert!(shows(&mut shell, "Sent to the engine once and never shown again."));
+    assert!(shows(
+        &mut shell,
+        "Sent to the engine once and never shown again."
+    ));
     shell.key(Key::Enter);
     assert!(requests(&mut shell).is_empty(), "an empty key is not sent");
     shell.key(Key::Paste(SYNTHETIC_KEY.into()));
-    assert!(!rows(&mut shell).iter().any(|row| row.contains(SYNTHETIC_KEY)));
+    assert!(
+        !rows(&mut shell)
+            .iter()
+            .any(|row| row.contains(SYNTHETIC_KEY))
+    );
     shell.key(Key::Enter);
     let job = one(&mut shell);
     assert!(!format!("{job:?}").contains(SYNTHETIC_KEY));
@@ -894,7 +951,10 @@ fn a_refusal_shows_its_sentence_and_every_app_plugin_code_has_one() {
         .iter()
         .filter(|code| code.starts_with("app_plugin"))
     {
-        assert!(!sentence(code).contains(code), "{code} has its own sentence");
+        assert!(
+            !sentence(code).contains(code),
+            "{code} has its own sentence"
+        );
         checked += 1;
     }
     assert!(checked >= 20, "{checked}");
@@ -916,7 +976,10 @@ fn the_permission_words_shown_are_the_words_the_page_reply_carried() {
     shell.key(Key::Char('r'));
     serve(&mut shell, &mut fake);
     assert!(shows(&mut shell, "- Install a helper service"));
-    assert!(shows(&mut shell, "- service.status"), "a missing word shows the name");
+    assert!(
+        shows(&mut shell, "- service.status"),
+        "a missing word shows the name"
+    );
 }
 
 #[test]
@@ -929,20 +992,32 @@ fn each_change_notice_shows_as_one_line_kept_across_reads() {
     }];
     let mut shell = page(&mut fake);
     let notice = "Cove embeddings changed since you approved it. Review it to use it again.";
-    let count = |shell: &mut Shell| rows(shell).iter().filter(|row| row.contains(notice)).count();
+    let count = |shell: &mut Shell| {
+        rows(shell)
+            .iter()
+            .filter(|row| row.contains(notice))
+            .count()
+    };
     assert_eq!(count(&mut shell), 1);
     shell.key(Key::Char('r'));
     serve(&mut shell, &mut fake);
-    assert_eq!(count(&mut shell), 1, "a drained notice is kept, never doubled");
+    assert_eq!(
+        count(&mut shell),
+        1,
+        "a drained notice is kept, never doubled"
+    );
 }
 
 #[test]
 fn app_plugins_open_from_go_to_only_and_the_settings_tabs_are_unchanged() {
     let mut context = ctx(80, 24);
-    assert!(targets(&context).iter().any(|target| target.label
-        == "Settings / App plugins"
-        && target.kind == "Settings"
-        && target.place == Place::AppPlugins));
+    assert!(
+        targets(&context)
+            .iter()
+            .any(|target| target.label == "Settings / App plugins"
+                && target.kind == "Settings"
+                && target.place == Place::AppPlugins)
+    );
     assert!(
         crate::tui::screens::SettingsSection::ALL
             .iter()
@@ -963,7 +1038,11 @@ fn plugin_text_reaches_the_screen_without_control_or_line_bytes() {
     let mut shell = page(&mut fake);
     let shown = rows(&mut shell);
     assert!(shown.iter().all(|row| !row.contains('\u{1b}')));
-    assert!(shown.iter().any(|row| row.contains("first line second line")));
+    assert!(
+        shown
+            .iter()
+            .any(|row| row.contains("first line second line"))
+    );
 }
 
 /// The key bar rows for one page state at one width and pending count, after checking that
@@ -989,7 +1068,11 @@ fn bar_count(page: &AppPluginsPage, width: u16, pending: u64) -> usize {
         .collect();
     for item in &hints {
         let shown = format!("{} {}", item.key, item.label);
-        assert_eq!(text.matches(&shown).count(), 1, "{width} {pending} {shown}: {text}");
+        assert_eq!(
+            text.matches(&shown).count(),
+            1,
+            "{width} {pending} {shown}: {text}"
+        );
     }
     assert!(text.trim_end().ends_with("? Help"));
     lines.len()
@@ -1078,7 +1161,12 @@ fn the_page_and_its_modals_match_their_frames() {
     shell.key(Key::Enter);
     let job = one(&mut shell);
     answer(&mut shell, &mut fake, job);
-    check("app-plugin-review-80", &render(&mut shell, 80, 24), &[], None);
+    check(
+        "app-plugin-review-80",
+        &render(&mut shell, 80, 24),
+        &[],
+        None,
+    );
     shell.key(Key::Esc);
 
     select(&mut shell, 2);
