@@ -62,13 +62,10 @@ pub fn recover(
     done.map_err(|text| crazyagent::restore::recovery_code(&text))
 }
 
-/// The default engine a recovery call works on, for the main window only, and whether its
-/// login service still runs a process. Refused `storage_restore_unavailable` while
-/// `CRAZYAGENT_DESKTOP_SOCKET` names another engine. Input: the window. Output: the layout.
-pub fn engine(
-    webview: &tauri::Webview,
-) -> Result<(crazyagent::paths::Layout, bool), crate::BridgeError> {
-    crate::main_window(webview)?;
+/// The default engine a recovery call works on and whether its login service still runs a
+/// process. Refused `storage_restore_unavailable` while `CRAZYAGENT_DESKTOP_SOCKET` names
+/// another engine. Input: none. Output: the layout.
+pub fn engine() -> Result<(crazyagent::paths::Layout, bool), crate::BridgeError> {
     if std::env::var_os(crate::SOCKET_OVERRIDE).is_some_and(|socket| !socket.is_empty()) {
         return Err(crate::engine_failure("storage_restore_unavailable"));
     }
