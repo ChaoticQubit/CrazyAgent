@@ -1,5 +1,5 @@
 use super::*;
-use crate::setup::process::{file_sha256, is_sha256};
+use kernel_processes::run::{file_sha256, is_sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
@@ -443,7 +443,8 @@ fn an_owner_node_and_the_app_node_both_present_picks_the_owners() {
 
 #[test]
 fn an_owner_node_or_npm_alone_never_pairs_with_the_app_install_and_the_app_pair_is_used_whole() {
-    use crate::setup::{Dependency, Installer, Version};
+    use crate::setup::{Dependency, Installer};
+    use kernel_processes::run::Version;
     let root = root();
     let work = tempfile::tempdir().unwrap();
     let source = work.path().join("source");
@@ -543,7 +544,8 @@ fn the_engine_npm_prefix_is_made_private_even_with_no_engine_node() {
 
 #[test]
 fn setup_finds_a_usable_node_through_the_resolver_and_installs_the_pinned_archive_only_as_node() {
-    use crate::setup::{Dependency, Installer, Pin, Version};
+    use crate::setup::{Dependency, Installer, Pin};
+    use kernel_processes::run::Version;
     let root = root();
     let work = tempfile::tempdir().unwrap();
     let system = work.path().join("system");
