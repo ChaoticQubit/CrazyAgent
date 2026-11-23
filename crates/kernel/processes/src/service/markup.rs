@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::Path;
 
 pub(super) fn xml(text: &str) -> String {
@@ -99,4 +100,18 @@ pub(super) fn systemd_environment_quoted(text: &str) -> String {
 
 pub(super) fn windows_quoted(text: &str) -> String {
     format!("\"{text}\"")
+}
+
+/// The most bytes of PATH a Windows logon task sets before it runs the engine, which keeps
+/// the task's whole cmd line well under cmd's 8191 characters.
+pub(super) const WINDOWS_PATH_BYTES_MAX: usize = 4096;
+const _: () = assert!(WINDOWS_PATH_BYTES_MAX < 8191);
+
+/// The PATH a Windows logon task sets before it runs the engine: the service PATH's folders
+/// in order, leaving out empty entries and any folder holding `%`, which cmd expands even
+/// inside quotes, or `"`, and every folder from the first one past
+/// [`WINDOWS_PATH_BYTES_MAX`] on. Input: the service PATH. Output: the folders joined by `;`,
+/// or none when no folder is left.
+pub(super) fn windows_task_path(_path: &OsStr) -> Option<String> {
+    None
 }

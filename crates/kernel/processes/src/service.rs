@@ -1,7 +1,7 @@
 use kernel_common::Platform;
 use markup::{
     bounded_text, plist_string, systemd_environment_quoted, systemd_quoted, systemd_specifiers,
-    systemd_unquoted, windows_quoted, xml,
+    systemd_unquoted, windows_quoted, windows_task_path, xml,
 };
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
@@ -399,7 +399,10 @@ WantedBy=default.target\n",
   <Actions Context=\"Author\"><Exec><Command>{WINDOWS_SHELL}</Command><Arguments>{arguments}</Arguments></Exec></Actions>\r\n\
 </Task>\r\n",
                     arguments = xml(&format!(
-                        "/d /s /c \"{} engine --home {} >> {} 2>&1\"",
+                        "/d /s /c \"{}{} engine --home {} >> {} 2>&1\"",
+                        windows_task_path(&self.path)
+                            .map(|path| format!("set \"PATH={path}\" && "))
+                            .unwrap_or_default(),
                         windows_quoted(&executable),
                         windows_quoted(&root),
                         windows_quoted(&log),
@@ -1425,3 +1428,6 @@ pub mod test_support;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod windows_task_tests;
