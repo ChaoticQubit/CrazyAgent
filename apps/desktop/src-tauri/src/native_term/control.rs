@@ -751,7 +751,7 @@ impl Control {
         let folder = socket
             .parent()
             .ok_or_else(|| io::Error::other("socket has no folder"))?;
-        let session = format!("={}", crazyagent::terminal::tmux::SESSION);
+        let session = format!("={}", kernel_processes::terminal::tmux::SESSION);
         let mut command = Command::new(tmux);
         command
             .args(["-u", "-f", "/dev/null", "-N", "-S"])
@@ -801,7 +801,7 @@ impl Control {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
         );
-        let target = format!("{}:={window}", crazyagent::terminal::tmux::SESSION);
+        let target = format!("{}:={window}", kernel_processes::terminal::tmux::SESSION);
         let marker = fresh_marker()?;
         let line = format!(
             "list-panes -t {target} -f '#{{pane_active}}' -F \"{STATE_FORMAT}\" ; \

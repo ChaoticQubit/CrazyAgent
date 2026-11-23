@@ -626,7 +626,7 @@ impl NativeLead {
             .unwrap();
         spawn_ledger::settle(&runtime.connection, &runtime.root, id, true);
         let lead = AgentId::team(id).unwrap();
-        let mates_socket = crate::terminal::teammates_socket(&fixture.base, &lead).unwrap();
+        let mates_socket = crate::terminal::tmux::teammates_socket(&fixture.base, &lead).unwrap();
         let down = LeadServersDown {
             host: host.clone(),
             lead: lead.clone(),
@@ -1072,7 +1072,7 @@ fn an_unrecorded_native_lead_whose_teammates_server_ended_is_ended_by_a_next_eng
         std::thread::sleep(Duration::from_millis(50));
     }
     let agent = AgentId::team(lead.id).unwrap();
-    let mates = crate::terminal::teammates_socket(&lead.fixture.base, &agent).unwrap();
+    let mates = crate::terminal::tmux::teammates_socket(&lead.fixture.base, &agent).unwrap();
     assert!(
         kernel_processes::spawn_gate::connect_unix_std(&mates).is_ok(),
         "the lead's teammates' server listens"

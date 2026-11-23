@@ -6,7 +6,7 @@ pub mod request;
 
 pub use address::address_allowed;
 
-pub use capture::{CAPTURES_MAX, CaptureRules};
+pub use capture::{CAPTURES_MAX, CaptureRules, SEND_HOSTS_MAX, SendRow};
 pub use request::{
     Capture, Captured, Egress, Field, Method, REPLY_BYTES_MAX, REPLY_LIST_MAX,
     REPLY_TEXT_BYTES_MAX, RawReply, Reply, Request, Requests, Sealed, SecretField,

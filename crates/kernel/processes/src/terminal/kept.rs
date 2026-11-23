@@ -7,7 +7,7 @@ use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
 /// How many ended terminals keep their last screen: two full projects of agents. Past it the
 /// screen kept longest ago is forgotten first.
-pub(crate) const KEPT_MAX: usize = 32;
+pub const KEPT_MAX: usize = 32;
 /// The largest last screen, label included, a host keeps; a larger screen is not kept.
 const KEPT_BYTES_MAX: usize = VIEWER_BUFFER_BYTES_MAX;
 
@@ -82,10 +82,10 @@ impl LastScreens {
     }
 }
 
-/// The label over a kept screen: the local time its terminal ended. Output: the label.
-fn finished_label() -> String {
-    use crate::tui::clock::{clock, local_offset, now_ms};
-    format!(" Finished at {} ", clock(now_ms(), local_offset()))
+/// The label over a kept screen: the local time its terminal ended. Input: the clock text
+/// hook. Output: the label.
+fn finished_label(clock: fn() -> String) -> String {
+    format!(" Finished at {} ", clock())
 }
 
 /// The agents with a spawn, kill or keep under way on a host. One agent's steps run one at a
@@ -145,19 +145,22 @@ impl Drop for Turn<'_> {
 /// The kept screens are held only to read or change them, so no other agent waits on that
 /// agent's tmux calls. Screens live only in the engine's memory: a terminal
 /// that exits on its own, or an engine restart, keeps none.
-pub(super) struct LastScreenHost<H> {
+pub struct LastScreenHost<H> {
     inner: H,
     screens: Mutex<LastScreens>,
     turns: Turns,
+    clock: fn() -> String,
 }
 
 impl<H: Host> LastScreenHost<H> {
-    /// Wraps a platform host. Input: the host. Output: the host with nothing kept yet.
-    pub(super) fn new(inner: H) -> Self {
+    /// Wraps a platform host. Inputs: the host and the hook that gives the local clock text
+    /// a kept screen's label shows. Output: the host with nothing kept yet.
+    pub fn new(inner: H, clock: fn() -> String) -> Self {
         Self {
             inner,
             screens: Mutex::new(LastScreens::default()),
             turns: Turns::default(),
+            clock,
         }
     }
 
@@ -170,7 +173,7 @@ impl<H: Host> Host for LastScreenHost<H> {
     fn spawn(
         &self,
         agent: &AgentId,
-        command: &kernel_processes::terminal::PaneCommand,
+        command: &crate::terminal::PaneCommand,
     ) -> Result<PaneRef, HostError> {
         let _turn = self.turns.take(agent);
         let pane = self.inner.spawn(agent, command)?;
@@ -203,8 +206,13 @@ impl<H: Host> Host for LastScreenHost<H> {
     fn keep_last(&self, agent: &AgentId) {
         let _turn = self.turns.take(agent);
         if let Ok(last) = self.inner.snapshot(agent) {
-            self.screens()
-                .keep(agent, &last.screen, last.cols, last.rows, &finished_label());
+            self.screens().keep(
+                agent,
+                &last.screen,
+                last.cols,
+                last.rows,
+                &finished_label(self.clock),
+            );
         }
     }
 
@@ -242,7 +250,7 @@ impl<H: Host> Host for LastScreenHost<H> {
     fn unit(&self, agent: &AgentId) -> Result<String, HostError> {
         match self.inner.unit(agent) {
             Err(problem) if problem.0 == "terminal_agent_unknown" => {
-                Ok(kernel_processes::terminal::agent_unit(agent))
+                Ok(crate::terminal::agent_unit(agent))
             }
             named => named,
         }
@@ -274,8 +282,13 @@ impl<H: Host> Host for LastScreenHost<H> {
         };
         self.inner.kill(agent)?;
         if let Some(last) = last {
-            self.screens()
-                .keep(agent, &last.screen, last.cols, last.rows, &finished_label());
+            self.screens().keep(
+                agent,
+                &last.screen,
+                last.cols,
+                last.rows,
+                &finished_label(self.clock),
+            );
         }
         Ok(())
     }
@@ -319,7 +332,7 @@ impl<H: Host> Host for LastScreenHost<H> {
     fn spawn_own_server(
         &self,
         agent: &AgentId,
-        command: &kernel_processes::terminal::PaneCommand,
+        command: &crate::terminal::PaneCommand,
     ) -> Result<PaneRef, HostError> {
         let _turn = self.turns.take(agent);
         let pane = self.inner.spawn_own_server(agent, command)?;
@@ -357,8 +370,13 @@ impl<H: Host> Host for LastScreenHost<H> {
 
 #[cfg(test)]
 mod tests {
+    /// A fixed clock text for the rows' kept screen labels. Output: the text.
+    fn test_clock() -> String {
+        "10:42".to_owned()
+    }
+
     use super::*;
-    use crate::harnesses::interactive::InteractiveCommand;
+    use crate::terminal::PaneCommand;
 
     fn agent(id: usize) -> AgentId {
         AgentId::team(i64::try_from(id).unwrap()).unwrap()
@@ -434,7 +452,7 @@ mod tests {
         fn spawn(
             &self,
             agent: &AgentId,
-            _: &kernel_processes::terminal::PaneCommand,
+            _: &crate::terminal::PaneCommand,
         ) -> Result<PaneRef, HostError> {
             Ok(PaneRef {
                 agent: agent.clone(),
@@ -484,11 +502,14 @@ mod tests {
         use std::time::Duration;
         let (entered_tx, entered) = mpsc::channel();
         let (release, release_rx) = mpsc::channel();
-        let host = Arc::new(LastScreenHost::new(Stalled {
-            stuck: agent(1),
-            entered: Mutex::new(entered_tx),
-            release: Mutex::new(release_rx),
-        }));
+        let host = Arc::new(LastScreenHost::new(
+            Stalled {
+                stuck: agent(1),
+                entered: Mutex::new(entered_tx),
+                release: Mutex::new(release_rx),
+            },
+            test_clock,
+        ));
         let killer = {
             let host = Arc::clone(&host);
             std::thread::spawn(move || host.kill(&agent(1)))
@@ -500,18 +521,12 @@ mod tests {
         {
             let host = Arc::clone(&host);
             std::thread::spawn(move || {
-                let command = InteractiveCommand {
+                let command = PaneCommand {
                     argv: vec!["/bin/true".into()],
                     cwd: std::env::temp_dir(),
                     env: Vec::new(),
-                    transcript: crate::harnesses::interactive::Transcript::Unavailable,
                 };
-                let spawned = host
-                    .spawn(
-                        &agent(2),
-                        &kernel_processes::terminal::PaneCommand::from(&command),
-                    )
-                    .is_ok();
+                let spawned = host.spawn(&agent(2), &command).is_ok();
                 let killed = host.kill(&agent(3)).is_ok();
                 let kept = host.kept(&agent(1));
                 let _ = done.send((spawned, killed, kept));
@@ -540,7 +555,7 @@ mod tests {
         fn spawn(
             &self,
             agent: &AgentId,
-            _: &kernel_processes::terminal::PaneCommand,
+            _: &crate::terminal::PaneCommand,
         ) -> Result<PaneRef, HostError> {
             Ok(PaneRef {
                 agent: agent.clone(),
@@ -602,11 +617,14 @@ mod tests {
         let (killing_tx, killing) = mpsc::channel();
         let (attaching_tx, attaching) = mpsc::channel();
         let (release, release_rx) = mpsc::channel();
-        let host = Arc::new(LastScreenHost::new(KillingSlowly {
-            killing: Mutex::new(killing_tx),
-            attaching: Mutex::new(attaching_tx),
-            release: Mutex::new(release_rx),
-        }));
+        let host = Arc::new(LastScreenHost::new(
+            KillingSlowly {
+                killing: Mutex::new(killing_tx),
+                attaching: Mutex::new(attaching_tx),
+                release: Mutex::new(release_rx),
+            },
+            test_clock,
+        ));
         let killer = {
             let host = Arc::clone(&host);
             std::thread::spawn(move || host.kill(&agent(1)))
@@ -638,7 +656,7 @@ mod tests {
     #[cfg(unix)]
     impl Drop for Server {
         fn drop(&mut self) {
-            let _ = kernel_processes::spawn_gate::status(
+            let _ = crate::spawn_gate::status(
                 std::process::Command::new(&self.0)
                     .arg("-S")
                     .arg(&self.1)
@@ -654,6 +672,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_respawn_never_slips_between_a_kill_and_the_screen_it_keeps() {
+        use crate::terminal::tmux::test_seams::{test_confinement, test_hooks};
         use crate::terminal::tmux::{SOCKET, Tmux, installed};
         use std::os::unix::fs::PermissionsExt;
         use std::sync::Arc;
@@ -665,9 +684,12 @@ mod tests {
         std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
         let program = installed(home.path()).expect("tmux is required for this test");
         let _server = Server(program.clone(), folder.join(SOCKET));
-        let host = Arc::new(LastScreenHost::new(Tmux::open(Some(program), &folder)));
+        let host = Arc::new(LastScreenHost::new(
+            Tmux::open(Some(program), &folder, test_confinement(), test_hooks()),
+            test_clock,
+        ));
         let named = agent(9);
-        let run = |text: &str| InteractiveCommand {
+        let run = |text: &str| PaneCommand {
             argv: vec![
                 "/bin/sh".into(),
                 "-c".into(),
@@ -675,13 +697,8 @@ mod tests {
             ],
             cwd: home.path().to_path_buf(),
             env: Vec::new(),
-            transcript: crate::harnesses::interactive::Transcript::Unavailable,
         };
-        host.spawn(
-            &named,
-            &kernel_processes::terminal::PaneCommand::from(&run("first run")),
-        )
-        .unwrap();
+        host.spawn(&named, &run("first run")).unwrap();
         assert_eq!(host.alive().unwrap(), vec![named.clone()]);
 
         let held = host.screens();
@@ -704,13 +721,7 @@ mod tests {
         let spawning = {
             let (host, named) = (Arc::clone(&host), named.clone());
             let second = run("second run");
-            std::thread::spawn(move || {
-                host.spawn(
-                    &named,
-                    &kernel_processes::terminal::PaneCommand::from(&second),
-                )
-                .map(drop)
-            })
+            std::thread::spawn(move || host.spawn(&named, &second).map(drop))
         };
         std::thread::sleep(Duration::from_millis(500));
         assert!(
@@ -729,6 +740,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_host_keeps_a_screen_only_between_a_kill_and_the_next_run() {
+        use crate::terminal::tmux::test_seams::{test_confinement, test_hooks};
         use crate::terminal::tmux::{SOCKET, Tmux, installed};
         use std::os::unix::fs::PermissionsExt;
 
@@ -738,9 +750,12 @@ mod tests {
         std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
         let program = installed(home.path()).expect("tmux is required for this test");
         let _server = Server(program.clone(), folder.join(SOCKET));
-        let host = LastScreenHost::new(Tmux::open(Some(program), &folder));
+        let host = LastScreenHost::new(
+            Tmux::open(Some(program), &folder, test_confinement(), test_hooks()),
+            test_clock,
+        );
         let (named, never) = (agent(9), agent(10));
-        let run = |text: &str| InteractiveCommand {
+        let run = |text: &str| PaneCommand {
             argv: vec![
                 "/bin/sh".into(),
                 "-c".into(),
@@ -748,23 +763,14 @@ mod tests {
             ],
             cwd: home.path().to_path_buf(),
             env: Vec::new(),
-            transcript: crate::harnesses::interactive::Transcript::Unavailable,
         };
         assert!(!host.kept(&named), "nothing is kept before a run");
-        host.spawn(
-            &named,
-            &kernel_processes::terminal::PaneCommand::from(&run("first run")),
-        )
-        .unwrap();
+        host.spawn(&named, &run("first run")).unwrap();
         assert!(!host.kept(&named), "a live terminal keeps no last screen");
         host.kill(&named).unwrap();
         assert!(host.kept(&named), "an ended terminal keeps its last screen");
         assert!(!host.kept(&never), "an agent that never ran keeps nothing");
-        host.spawn(
-            &named,
-            &kernel_processes::terminal::PaneCommand::from(&run("second run")),
-        )
-        .unwrap();
+        host.spawn(&named, &run("second run")).unwrap();
         assert!(!host.kept(&named), "a new run forgets the screen kept");
         host.kill(&named).unwrap();
         assert!(host.kept(&named));
@@ -777,6 +783,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_kill_after_the_last_screen_was_kept_never_replaces_it_with_a_later_screen() {
+        use crate::terminal::tmux::test_seams::{test_confinement, test_hooks};
         use crate::terminal::tmux::{SOCKET, Tmux, installed};
         use std::os::unix::fs::PermissionsExt;
         use std::time::{Duration, Instant};
@@ -787,9 +794,12 @@ mod tests {
         std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
         let program = installed(home.path()).expect("tmux is required for this test");
         let _server = Server(program.clone(), folder.join(SOCKET));
-        let host = LastScreenHost::new(Tmux::open(Some(program), &folder));
+        let host = LastScreenHost::new(
+            Tmux::open(Some(program), &folder, test_confinement(), test_hooks()),
+            test_clock,
+        );
         let named = agent(11);
-        let run = InteractiveCommand {
+        let run = PaneCommand {
             argv: vec![
                 "/bin/sh".into(),
                 "-c".into(),
@@ -798,7 +808,6 @@ mod tests {
             ],
             cwd: home.path().to_path_buf(),
             env: Vec::new(),
-            transcript: crate::harnesses::interactive::Transcript::Unavailable,
         };
         let shows = |wanted: bool| {
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -813,8 +822,7 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(50));
             }
         };
-        host.spawn(&named, &kernel_processes::terminal::PaneCommand::from(&run))
-            .unwrap();
+        host.spawn(&named, &run).unwrap();
         assert!(shows(true), "the terminal never showed its answer");
         host.keep_last(&named);
         assert!(host.kept(&named));

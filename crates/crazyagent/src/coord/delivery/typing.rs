@@ -3,7 +3,7 @@ use super::super::store::state;
 use crate::engine::EngineError;
 use crate::team::AgentStatus;
 use crate::team::master::OwnerTyping;
-use crate::terminal::type_prompt;
+use kernel_processes::terminal::type_prompt;
 use kernel_processes::terminal::{Host, HostError, PROMPT_BYTES_MAX};
 use rusqlite::{Connection, OptionalExtension};
 use std::time::Duration;
