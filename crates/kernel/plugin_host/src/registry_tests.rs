@@ -1448,6 +1448,45 @@ fn a_failed_binding_write_keeps_the_old_key_working() {
     assert_eq!(value.expose(), "sk-own-plugin-01");
 }
 
+/// A new key entered for a secret already bound to an entered key replaces that key in
+/// place and writes no binding row, so a failing binding write cannot fail it, and the
+/// plugin reads the new key.
+#[test]
+fn a_new_key_at_the_same_reference_needs_no_binding_write() {
+    let case = case();
+    trusted(&case, ACME);
+    set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"sk-own-plugin-01".to_vec(),
+    )
+    .unwrap();
+    let before = cells(&case.db, "app_plugin_secrets");
+    case.db
+        .execute_batch(
+            "CREATE TEMP TRIGGER refuse_insert BEFORE INSERT ON app_plugin_secrets
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;
+             CREATE TEMP TRIGGER refuse_update BEFORE UPDATE ON app_plugin_secrets
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+        )
+        .unwrap();
+    set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"sk-own-plugin-02".to_vec(),
+    )
+    .unwrap();
+    assert_eq!(cells(&case.db, "app_plugin_secrets"), before);
+    assert_eq!(plugin_keys(&case).len(), 1);
+    let loaded = ready(&case.db, &case.engine(), "acme").unwrap();
+    let value = secret_value(&case.engine(), &loaded.bindings[0]).unwrap();
+    assert_eq!(value.expose(), "sk-own-plugin-02");
+}
+
 /// Turning a plugin off writes the off state first: the next call is refused with
 /// `app_plugin_off`, while a run already holding the plugin keeps it, is not stopped under
 /// the default setting, and stays listed until it ends.
