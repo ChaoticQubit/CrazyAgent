@@ -261,3 +261,50 @@ fn a_step_that_commits_is_refused_and_changes_nothing() {
 fn a_step_that_opens_a_savepoint_is_refused_and_changes_nothing() {
     refused_unchanged(savepoints);
 }
+
+/// Leaves the restore record `line` beside the database. Inputs: the root and the line.
+/// Output: none.
+fn recorded(root: &Path, line: &str) {
+    crate::restore::write_restore_record(root, line).unwrap();
+}
+
+#[test]
+fn a_start_after_a_failed_rollback_refuses_and_leaves_engine_db_unmigrated() {
+    use crate::restore::{ENGINE_RESTORE_BROKEN, RECORD_FAILED, RESTORE_ROLLBACK_FAILED};
+    let (root, path, mut db) = database(true);
+    let line = format!("{RECORD_FAILED} {RESTORE_ROLLBACK_FAILED}");
+    recorded(root.path(), &line);
+    let before = std::fs::read(&path).unwrap();
+
+    let refused = upgrade(&mut db, &path, &no_texts, &steps(&[added]))
+        .unwrap_err()
+        .0;
+
+    assert!(refused.starts_with(ENGINE_RESTORE_BROKEN), "{refused}");
+    assert!(refused.contains("backups"), "{refused}");
+    assert!(!holds(&db, "added"));
+    assert_eq!(version(&db).unwrap(), 0);
+    assert!(backups(root.path()).is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert_eq!(
+        crate::restore::read_restore_record(root.path()).as_deref(),
+        Some(line.as_str())
+    );
+}
+
+#[test]
+fn a_start_after_a_restore_that_rolled_back_still_migrates() {
+    use crate::restore::{RECORD_FAILED, RESTORE_FAILED};
+    let (root, path, mut db) = database(true);
+    let line = format!("{RECORD_FAILED} {RESTORE_FAILED}");
+    recorded(root.path(), &line);
+
+    upgrade(&mut db, &path, &no_texts, &steps(&[added])).unwrap();
+
+    assert!(holds(&db, "added"));
+    assert_eq!(version(&db).unwrap(), 2);
+    assert_eq!(
+        crate::restore::read_restore_record(root.path()).as_deref(),
+        Some(line.as_str())
+    );
+}
