@@ -843,7 +843,8 @@ WantedBy=default.target\n",
     }
 
     /// Writes the definition and registers it, replacing an earlier install of the same
-    /// name, so the engine starts now and at every login. Input: the engine's checks.
+    /// name, so the engine starts now and at every login. A failed registration leaves no
+    /// definition behind ([`Self::unregistered_after`]). Input: the engine's checks.
     /// Output: an error naming the failing step.
     pub fn install(&self, hooks: &Hooks) -> Result<(), ServiceError> {
         if transient(&self.executable) {
@@ -864,7 +865,7 @@ WantedBy=default.target\n",
         }
         write_definition(&self.definition, &text, self.platform)?;
         for command in self.register_commands(current_uid()) {
-            run_checked(&command)?;
+            run_checked(&command).map_err(|refused| self.unregistered_after(refused))?;
         }
         Ok(())
     }
@@ -1279,6 +1280,9 @@ mod acl;
 /// owners, modes, groups and access lists on Unix, access lists on Windows. Input: a path.
 /// Output: the first such entry, or none.
 mod changeable;
+/// Undoing a registration that failed after its definition was written. Inputs: the
+/// service and the error. Output: the error to report.
+mod register;
 #[cfg(test)]
 mod uninstall_tests;
 #[cfg(all(test, unix))]
