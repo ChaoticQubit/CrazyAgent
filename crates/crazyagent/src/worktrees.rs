@@ -1919,17 +1919,18 @@ fn materialize(record: &mut LeaseRecord) -> Result<(), EngineError> {
 }
 
 /// Makes the two submodule-store folders a sandbox profile denies writes to, the common
-/// `.git/modules` and this lease's admin `modules`, through `sandbox::ensure_store`, so every
+/// `.git/modules` and this lease's admin `modules`, through `seatbelt::ensure_store`, so every
 /// platform guards a real folder. A store already there is kept when it is a plain folder;
 /// a file or link there is refused, never trusted. Inputs: the repository and the lease
 /// admin git dir. Output: success, or `submodule_store_invalid` or the filesystem refusal.
 #[cfg(unix)]
 fn ensure_submodule_stores(repository: &Path, admin: &Path) -> Result<(), EngineError> {
+    use kernel_sandbox::profile::seatbelt::ensure_store;
     for store in [
         repository.join(".git").join("modules"),
         admin.join("modules"),
     ] {
-        crate::sandbox::ensure_store(&store).map_err(|problem| match problem.kind() {
+        ensure_store(&store).map_err(|problem| match problem.kind() {
             std::io::ErrorKind::InvalidData => error("submodule_store_invalid"),
             _ => error(problem),
         })?;

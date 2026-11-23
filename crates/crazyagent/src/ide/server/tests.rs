@@ -1,9 +1,9 @@
 use super::*;
 use crate::ide::workspace::{IdePolicy, ide_policy};
-use crate::sandbox::ProjectSandbox;
 use kernel_sandbox::policy::{
     AgentAccess, AgentFilesRule, AgentNetwork, AgentPolicy, IdeAgentFiles,
 };
+use kernel_sandbox::profile::ProjectSandbox;
 use kernel_sandbox::{net::SandboxNetwork, profile::command::SANDBOX_EXEC};
 use std::ffi::OsString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
