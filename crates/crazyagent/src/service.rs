@@ -1,9 +1,11 @@
 use crate::engine::owner::{OwnerClient, OwnerClientKind};
 use crate::paths::{Layout, RootEnvironment};
 use kernel_common::Platform;
+#[cfg(unix)]
+use kernel_processes::service::UNLOAD_TIMEOUT;
 use kernel_processes::service::{
-    Hooks, POLL, Repair, START_TIMEOUT, Service, ServiceError, UNLOAD_TIMEOUT, failure,
-    persistable, retire_old_copies,
+    Hooks, POLL, Repair, START_TIMEOUT, Service, ServiceError, failure, persistable,
+    retire_old_copies,
 };
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

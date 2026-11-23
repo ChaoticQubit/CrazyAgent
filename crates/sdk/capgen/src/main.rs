@@ -4,23 +4,27 @@ use std::path::Path;
 use std::process::ExitCode;
 
 /// Every mode that generates from a caps folder.
-const MODES: [&str; 6] = [
+const MODES: [&str; 8] = [
     "--write",
     "--check",
     "--write-ts",
     "--check-ts",
     "--write-wit",
     "--check-wit",
+    "--write-host",
+    "--check-host",
 ];
 
 /// The usage line for every mode capgen takes.
-const USAGE: &str = "usage: capgen --write|--check|--write-ts|--check-ts|--write-wit|--check-wit \
+const USAGE: &str = "usage: capgen --write|--check|--write-ts|--check-ts|--write-wit|--check-wit\
+                     |--write-host|--check-host \
                      <caps dir> <generated dir>, capgen --write-permissions|--check-permissions \
                      <caps dir> <plugins dir> <generated dir>, or capgen --test-module <cap file> \
                      <out file>";
 
 /// Runs capgen: `--write`/`--check` write or compare the Rust SDK files, `--write-ts`/
-/// `--check-ts` the TS ones and `--write-wit`/`--check-wit` the WIT one, from `<caps dir>`
+/// `--check-ts` the TS ones, `--write-wit`/`--check-wit` the WIT one and `--write-host`/
+/// `--check-host` the SDK host crate's binding, from `<caps dir>`
 /// into `<generated dir>`; `--write-permissions`/`--check-permissions` plugin_host's
 /// permission table from `<caps dir>` and `<plugins dir>`; `--test-module <cap file> <out
 /// file>` writes one test module. Input: the command line. Output: 0 when written or
@@ -94,7 +98,8 @@ fn permissions(mode: &str, caps: &Path, plugins: &Path, generated: &Path) -> Exi
 }
 
 /// Generates the files of one mode's target: Rust for `--write`/`--check`, TS for the
-/// `-ts` modes, WIT for the `-wit` modes. Inputs: one of [`MODES`] and the parsed files.
+/// `-ts` modes, WIT for the `-wit` modes, the SDK host binding for the `-host` modes.
+/// Inputs: one of [`MODES`] and the parsed files.
 /// Output: the generated files, or the refusal.
 fn emit(
     mode: &str,
@@ -104,6 +109,7 @@ fn emit(
         "--write" | "--check" => crazyagent_capgen::rust(files),
         "--write-ts" | "--check-ts" => crazyagent_capgen::ts(files),
         "--write-wit" | "--check-wit" => crazyagent_capgen::wit(files),
+        "--write-host" | "--check-host" => crazyagent_capgen::binding(files),
         _ => unreachable!("{mode} is one of MODES"),
     }
 }

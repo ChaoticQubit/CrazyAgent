@@ -126,21 +126,25 @@ fn the_bundled_tables_build_a_grant_table() {
 
 #[test]
 fn the_unchecked_constructor_is_test_only() {
-    let engine = include_str!("../../../crazyagent/Cargo.toml");
-    let mut table = "";
-    let mut normal = Vec::new();
-    for line in engine.lines() {
-        if line.starts_with('[') {
-            table = line;
+    for manifest in [
+        include_str!("../../../crazyagent/Cargo.toml"),
+        include_str!("../../../sdk/host/Cargo.toml"),
+    ] {
+        let mut table = "";
+        let mut normal = Vec::new();
+        for line in manifest.lines() {
+            if line.starts_with('[') {
+                table = line;
+            }
+            if line.starts_with("crazyagent-bus-gateway") {
+                normal.push((table, line.contains("test-support")));
+            }
         }
-        if line.starts_with("crazyagent-bus-gateway") {
-            normal.push((table, line.contains("test-support")));
-        }
+        assert_eq!(
+            normal,
+            [("[dependencies]", false), ("[dev-dependencies]", true)]
+        );
     }
-    assert_eq!(
-        normal,
-        [("[dependencies]", false), ("[dev-dependencies]", true)]
-    );
     let source = include_str!("grants.rs");
     let gate = "#[cfg(any(test, feature = \"test-support\"))]\n    pub fn new(";
     assert_eq!(source.matches("pub fn new(").count(), 1);

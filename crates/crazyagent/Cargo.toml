@@ -23,6 +23,7 @@ crazyagent-kernel-plugin-host = { path = "../kernel/plugin_host" }
 crazyagent-kernel-sandbox = { path = "../kernel/sandbox" }
 crazyagent-plugin-agent-quit = { path = "../../plugins/t2/agent-quit" }
 crazyagent-sdk = { path = "../sdk/rust" }
+crazyagent-sdk-host = { path = "../sdk/host" }
 crazyagent-win-sandbox = { path = "../crazyagent-win-sandbox" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["raw_value"] }
