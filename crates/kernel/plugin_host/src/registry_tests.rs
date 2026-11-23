@@ -1469,12 +1469,53 @@ fn a_replace_over_an_old_folder_it_cannot_delete_still_succeeds() {
     assert_eq!(std::fs::read_to_string(&old).unwrap(), text);
     let listing = list(&case.db, &case.engine()).unwrap();
     assert_eq!(plugin(&listing, "acme").sha256, sha(&text));
-    let retired: Vec<String> = std::fs::read_dir(plugins_folder(&case))
+    let left = left_over(&case);
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert!(!left[0].starts_with(".old-acme."), "{left:?}");
+
+    remove(&case.db, &case.engine(), "acme").unwrap();
+    sweep_staged(&case.engine());
+
+    assert!(!plugins_folder(&case).join("acme").exists());
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert!(listing.plugins.iter().all(|plugin| plugin.name != "acme"));
+}
+
+/// The staged and retired entries in the plugins folder, by name.
+fn left_over(case: &Case) -> Vec<String> {
+    let mut left: Vec<String> = std::fs::read_dir(plugins_folder(case))
         .unwrap()
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with(".old-acme."))
+        .filter(|name| name.starts_with(".old-") || name.starts_with(".add-"))
         .collect();
-    assert_eq!(retired.len(), 1, "{retired:?}");
+    left.sort();
+    left
+}
+
+/// Removing a plugin whose folder holds more than a delete may take still removes it: its
+/// rows go, and its folder leaves the plugin's name, so it is never listed again, even
+/// after the start sweep.
+#[test]
+fn a_removed_plugin_with_a_folder_it_cannot_delete_stays_removed() {
+    let case = case();
+    trusted(&case, ACME);
+    let mut deep = plugins_folder(&case).join("acme");
+    for level in 0..8 {
+        deep = deep.join(format!("level-{level}"));
+        std::fs::create_dir(&deep).unwrap();
+    }
+
+    remove(&case.db, &case.engine(), "acme").unwrap();
+    sweep_staged(&case.engine());
+
+    assert!(!plugins_folder(&case).join("acme").exists());
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert!(listing.plugins.iter().all(|plugin| plugin.name != "acme"));
+    assert!(
+        left_over(&case)
+            .iter()
+            .all(|name| !name.starts_with(".old-acme."))
+    );
 }
 
 /// A key the owner entered for a plugin is never readable through the plugin
