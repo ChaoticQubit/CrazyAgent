@@ -6,6 +6,8 @@ pub mod generated;
 pub mod wire;
 pub use generated::CAPABILITIES;
 pub use generated::host::Host;
+pub use generated::net;
+pub use generated::process;
 pub use generated::secrets;
 pub use generated::settings;
 
@@ -52,6 +54,8 @@ pub const BYTES_MAX: usize = 4_194_304;
 /// The most items one `list` value of a capability call may hold.
 pub const LIST_ITEMS_MAX: usize = 64;
 
+#[cfg(test)]
+mod events_tests;
 #[cfg(test)]
 pub mod fixture_generated;
 #[cfg(test)]

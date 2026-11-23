@@ -9,5 +9,9 @@ publish.workspace = true
 name = "bus_gateway"
 path = "src/lib.rs"
 
+[features]
+test-support = []
+
 [dependencies]
+crazyagent-kernel-plugin-host = { path = "../plugin_host", default-features = false }
 crazyagent-sdk = { path = "../../sdk/rust" }

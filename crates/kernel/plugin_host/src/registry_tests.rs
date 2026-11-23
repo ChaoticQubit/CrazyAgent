@@ -6,14 +6,15 @@ use rusqlite::OptionalExtension;
 
 use crate::Refused;
 use crate::registry::{
-    Engine, FOLDER, MANIFEST_FILE, USER_PLUGINS_MAX, add, bundled, list, loopback_ports, preview,
-    ready, remove, review, set_enabled,
+    Engine, FOLDER, MANIFEST_FILE, Switch, USER_PLUGINS_MAX, add, bundled, hold, list,
+    loopback_ports, preview, ready, remove, review, set_enabled,
 };
 use crate::store::{
     Bound, KeyFolder, KeyRef, Keys, bind_account, initialize, secret_value, set_key, sweep_staged,
     unbind,
 };
 use crate::trust::trust_file;
+use crate::usage::{ChangeNotice, Holder, TurnOff, Usage};
 use crate::views::{Binding, Listing, Origin, PluginStatus, PluginView, Preview, RunsView};
 
 const ACME: &str = r#"plugin = "acme"
@@ -234,6 +235,29 @@ fn mode(path: &Path) -> u32 {
         & 0o7777
 }
 
+/// Turning a plugin off with the default setting and no run holding it.
+fn off() -> Switch<'static> {
+    static IDLE: std::sync::OnceLock<Usage> = std::sync::OnceLock::new();
+    Switch::Off {
+        usage: IDLE.get_or_init(Usage::default),
+        when_off: TurnOff::RefuseNewCalls,
+    }
+}
+
+fn holder(run: &str) -> Holder {
+    Holder {
+        run_id: run.to_owned(),
+        label: format!("run {run}"),
+    }
+}
+
+fn counted(calls: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Box<dyn FnOnce() + Send> {
+    let calls = std::sync::Arc::clone(calls);
+    Box::new(move || {
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    })
+}
+
 fn code<T: std::fmt::Debug>(result: Result<T, Refused>) -> &'static str {
     result.expect_err("refused").code
 }
@@ -254,12 +278,32 @@ fn trusted(case: &Case, text: &str) {
     add_text(case, text, false, 1).unwrap();
 }
 
+/// Reads a fixture a row checks. Inputs: its path and the read. Output: what the read
+/// returned; a failed read stops the row naming the path and the I/O error.
+fn fixture<'p, T>(path: &'p Path, read: impl FnOnce(&'p Path) -> std::io::Result<T>) -> T {
+    read(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+/// A fixture read that fails stops the row with the path it read and the I/O error.
+#[test]
+#[should_panic(expected = "missing.toml: No such file")]
+fn a_failed_fixture_read_names_its_path_and_error() {
+    let case = case();
+    fixture(&case.root.join("missing.toml"), std::fs::read);
+}
+
 fn plugin_keys(case: &Case) -> Vec<PathBuf> {
     let keys = case.root.join("plugin-keys");
     let Ok(entries) = std::fs::read_dir(&keys) else {
         return Vec::new();
     };
-    let mut files: Vec<PathBuf> = entries.map(|entry| entry.unwrap().path()).collect();
+    let mut files: Vec<PathBuf> = entries
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|error| panic!("{}: {error}", keys.display()))
+                .path()
+        })
+        .collect();
     files.sort();
     files
 }
@@ -343,7 +387,7 @@ fn bundled_plugins_are_trusted_and_start_off() {
         assert_ne!(view.status, PluginStatus::NeedsReview, "{name}");
         assert!(!view.enabled, "{name}");
     }
-    set_enabled(&case.db, &case.engine(), "ollama", true).unwrap();
+    set_enabled(&case.db, &case.engine(), "ollama", Switch::On).unwrap();
     assert!(plugin(&list(&case.db, &case.engine()).unwrap(), "ollama").enabled);
     assert!(cells(&case.db, "app_plugin_trust").is_empty());
 }
@@ -424,12 +468,12 @@ fn add_saves_a_private_file_trusts_it_and_turns_it_on() {
     let folder = case.root.join(FOLDER);
     let plugin_folder = folder.join("acme");
     let file = plugin_folder.join(MANIFEST_FILE);
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), ACME);
+    assert_eq!(fixture(&file, std::fs::read), ACME.as_bytes());
     assert_eq!(
         (mode(&folder), mode(&plugin_folder), mode(&file)),
         (0o700, 0o700, 0o600)
     );
-    assert_eq!(std::fs::read_dir(&plugin_folder).unwrap().count(), 1);
+    assert_eq!(fixture(&plugin_folder, std::fs::read_dir).count(), 1);
     let listing = list(&case.db, &case.engine()).unwrap();
     let acme = plugin(&listing, "acme");
     assert_eq!(
@@ -464,7 +508,7 @@ fn add_refuses_a_changed_text_and_a_taken_name_unless_replacing() {
     let listing = list(&case.db, &case.engine()).unwrap();
     assert_eq!(plugin(&listing, "acme").version, "1.1.0");
     assert_eq!(
-        std::fs::read_dir(case.root.join(FOLDER)).unwrap().count(),
+        fixture(&case.root.join(FOLDER), std::fs::read_dir).count(),
         1,
         "no staged or retired folder is left"
     );
@@ -526,7 +570,10 @@ fn add_copies_only_the_reviewed_content() {
     assert!(!case.root.join(FOLDER).join("acme").exists());
     add(&case.db, &case.engine(), &source, &sha(ACME), false, 5).unwrap();
     assert_eq!(
-        std::fs::read(case.root.join(FOLDER).join("acme").join(MANIFEST_FILE)).unwrap(),
+        fixture(
+            &case.root.join(FOLDER).join("acme").join(MANIFEST_FILE),
+            std::fs::read
+        ),
         ACME.as_bytes()
     );
 }
@@ -588,7 +635,7 @@ fn a_left_over_yaml_plugin_is_listed_refused_and_kept() {
     );
     assert!(legacy.is_file());
     assert_eq!(
-        std::fs::read_to_string(&legacy).unwrap(),
+        fixture(&legacy, std::fs::read_to_string),
         "schema: 1\nkind: embedding\nname: acme\n"
     );
     remove(&case.db, &case.engine(), "acme").unwrap();
@@ -606,7 +653,7 @@ fn a_dropped_in_file_needs_review_until_trusted_and_again_after_a_change() {
         (&PluginStatus::NeedsReview, false)
     );
     assert_eq!(
-        code(set_enabled(&case.db, &case.engine(), "near", true)),
+        code(set_enabled(&case.db, &case.engine(), "near", Switch::On)),
         "app_plugin_needs_review"
     );
     let Preview::Ready { trust } = review(&case.db, &case.engine(), "near").unwrap() else {
@@ -631,7 +678,7 @@ fn a_dropped_in_file_needs_review_until_trusted_and_again_after_a_change() {
     assert_eq!(plugin(&listing, "near").status, PluginStatus::NeedsReview);
     assert_eq!(
         code(ready(&case.db, &case.engine(), "near")),
-        "app_plugin_needs_review"
+        "app_plugin_changed"
     );
 }
 
@@ -647,7 +694,7 @@ fn a_changed_plugin_is_refused_until_approved_again() {
     std::fs::write(&path, &changed).unwrap();
     assert_eq!(
         code(ready(&case.db, &case.engine(), "near")),
-        "app_plugin_needs_review"
+        "app_plugin_changed"
     );
     let listing = list(&case.db, &case.engine()).unwrap();
     assert!(!plugin(&listing, "near").enabled);
@@ -797,6 +844,34 @@ fn the_folder_lists_at_most_its_cap_and_says_there_are_more() {
     assert!(listing.more);
 }
 
+/// An add the listing would not show, or that would push a listed plugin out of it, is
+/// refused before anything is written; replacing a listed plugin still works.
+#[test]
+fn an_add_past_the_folder_cap_is_refused_with_nothing_written() {
+    let case = case();
+    let named = |name: &str| ACME.replace("plugin = \"acme\"", &format!("plugin = \"{name}\""));
+    for index in 0..USER_PLUGINS_MAX {
+        let name = format!("p{index:03}");
+        drop_in(&case, &name, &named(&name));
+    }
+    let trust_before = cells(&case.db, "app_plugin_trust");
+    let state_before = cells(&case.db, "app_plugin_state");
+    for (name, now_ms) in [("p064", 1), ("a000", 2)] {
+        assert_eq!(
+            code(add_text(&case, &named(name), false, now_ms)),
+            "app_plugin_past_cap"
+        );
+        assert!(!case.root.join(FOLDER).join(name).exists());
+    }
+    assert_eq!(cells(&case.db, "app_plugin_trust"), trust_before);
+    assert_eq!(cells(&case.db, "app_plugin_state"), state_before);
+    let newer = named("p010").replace("release = \"1.0.0\"", "release = \"1.1.0\"");
+    add_text(&case, &newer, true, 3).unwrap();
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert_eq!(plugin(&listing, "p010").version, "1.1.0");
+    assert!(!listing.more);
+}
+
 #[test]
 fn remove_deletes_a_user_plugin_with_its_keys_and_refuses_bundled_and_unknown_ones() {
     let case = case();
@@ -838,18 +913,35 @@ fn remove_deletes_a_user_plugin_with_its_keys_and_refuses_bundled_and_unknown_on
     assert_eq!(plugin(&listing, "acme").secrets[0].binding, Binding::None);
 }
 
+/// A plugin entry that is a link is removed as the link itself: the folder it points to
+/// and the plugin.toml inside stay untouched.
+#[test]
+fn remove_deletes_a_link_entry_and_leaves_its_target() {
+    let case = case();
+    let target = picked(&case, "target", NEAR);
+    let linked = plugins_folder(&case).join("linked");
+    std::os::unix::fs::symlink(&target, &linked).unwrap();
+    remove(&case.db, &case.engine(), "linked").unwrap();
+    assert!(std::fs::symlink_metadata(&linked).is_err());
+    let manifest = target.join(MANIFEST_FILE);
+    match std::fs::read_to_string(&manifest) {
+        Ok(text) => assert_eq!(text, NEAR),
+        Err(error) => panic!("{}: {error}", manifest.display()),
+    }
+}
+
 #[test]
 fn bundled_plugins_turn_on_and_off_and_unknown_names_are_refused() {
     let case = case();
-    set_enabled(&case.db, &case.engine(), "ollama", true).unwrap();
-    set_enabled(&case.db, &case.engine(), "voyage", false).unwrap();
+    set_enabled(&case.db, &case.engine(), "ollama", Switch::On).unwrap();
+    set_enabled(&case.db, &case.engine(), "voyage", off()).unwrap();
     let listing = list(&case.db, &case.engine()).unwrap();
     assert!(plugin(&listing, "ollama").enabled);
     assert!(!plugin(&listing, "voyage").enabled);
-    set_enabled(&case.db, &case.engine(), "ollama", false).unwrap();
+    set_enabled(&case.db, &case.engine(), "ollama", off()).unwrap();
     assert!(!plugin(&list(&case.db, &case.engine()).unwrap(), "ollama").enabled);
     assert_eq!(
-        code(set_enabled(&case.db, &case.engine(), "nope", true)),
+        code(set_enabled(&case.db, &case.engine(), "nope", Switch::On)),
         "app_plugin_not_found"
     );
     assert_eq!(
@@ -1022,7 +1114,7 @@ fn a_key_entered_for_a_plugin_is_a_private_file_replaced_in_place_and_deleted_on
     )
     .unwrap();
     assert_eq!(plugin_keys(&case), files);
-    assert_eq!(std::fs::read(&files[0]).unwrap(), b"pa-second-key-002");
+    assert_eq!(fixture(&files[0], std::fs::read), b"pa-second-key-002");
     let listing = list(&case.db, &case.engine()).unwrap();
     assert_eq!(plugin(&listing, "acme").secrets[0].binding, Binding::Key);
     assert_eq!(plugin(&listing, "acme").status, PluginStatus::Ready);
@@ -1059,7 +1151,7 @@ fn a_ready_plugin_loads_with_its_manifest_and_a_needs_key_or_off_one_is_refused(
     let case = case();
     trusted(&case, NEAR);
     add_text(&case, ACME, false, 2).unwrap();
-    set_enabled(&case.db, &case.engine(), "ollama", true).unwrap();
+    set_enabled(&case.db, &case.engine(), "ollama", Switch::On).unwrap();
     let ollama = ready(&case.db, &case.engine(), "ollama").unwrap();
     assert_eq!(
         (ollama.manifest.name.as_str(), ollama.origin),
@@ -1076,13 +1168,13 @@ fn a_ready_plugin_loads_with_its_manifest_and_a_needs_key_or_off_one_is_refused(
         code(ready(&case.db, &case.engine(), "acme")),
         "app_plugin_needs_key"
     );
-    set_enabled(&case.db, &case.engine(), "near", false).unwrap();
+    set_enabled(&case.db, &case.engine(), "near", off()).unwrap();
     assert_eq!(
         code(ready(&case.db, &case.engine(), "near")),
         "app_plugin_off"
     );
     assert_eq!(
-        code(set_enabled(&case.db, &case.engine(), "nope", true)),
+        code(set_enabled(&case.db, &case.engine(), "nope", Switch::On)),
         "app_plugin_not_found"
     );
     assert_eq!(
@@ -1242,6 +1334,38 @@ fn a_plugin_on_a_handed_out_port_is_refused_and_left_out_of_the_kept_ports() {
     }
 }
 
+/// The handed-out range is read again when the owner confirms an add: a port the range
+/// took between the trust screen and the add is refused with nothing written, and a plugin
+/// on a port outside the range installs.
+#[test]
+fn an_add_rechecks_the_handed_out_range_before_writing() {
+    let case = case();
+    let range = 32_768..=60_999;
+    let engine = Engine {
+        handed_out: Some(range.clone()),
+        ..case.engine()
+    };
+    let text = near_on(*range.start());
+    let source = picked(&case, "handed", &text);
+    assert!(matches!(
+        preview(&case.db, &case.engine(), &source).unwrap(),
+        Preview::Ready { .. }
+    ));
+    let trust_before = cells(&case.db, "app_plugin_trust");
+    let state_before = cells(&case.db, "app_plugin_state");
+    assert_eq!(
+        code(add(&case.db, &engine, &source, &sha(&text), false, 1)),
+        "app_plugin_port_handed_out"
+    );
+    assert!(!case.root.join(FOLDER).join("handed").exists());
+    assert_eq!(cells(&case.db, "app_plugin_trust"), trust_before);
+    assert_eq!(cells(&case.db, "app_plugin_state"), state_before);
+    let allowed = near_on(9000);
+    let source = picked(&case, "allowed", &allowed);
+    add(&case.db, &engine, &source, &sha(&allowed), false, 2).unwrap();
+    assert!(case.root.join(FOLDER).join("handed").exists());
+}
+
 /// With no handed-out range (macOS keeps every loopback plugin port free of agents in
 /// its profile), a plugin on any port stays usable and listed for the sandbox.
 #[test]
@@ -1301,7 +1425,7 @@ fn the_start_sweep_deletes_staged_leftovers_and_keeps_saved_keys_and_files() {
         assert!(!leftover.exists(), "{}", leftover.display());
     }
     assert_eq!(plugin_keys(&case), kept);
-    assert_eq!(std::fs::read(&kept[0]).unwrap(), b"sk-kept-key-00001");
+    assert_eq!(fixture(&kept[0], std::fs::read), b"sk-kept-key-00001");
     assert!(plugins.join("acme").join(MANIFEST_FILE).is_file());
     let loaded = ready(&case.db, &case.engine(), "acme").unwrap();
     assert_eq!(loaded.bindings.len(), 1);
@@ -1359,11 +1483,11 @@ fn the_trust_row_binds_the_sha256_of_the_reviewed_text() {
     std::fs::write(&path, &changed).unwrap();
     assert_eq!(
         code(ready(&case.db, &case.engine(), "near")),
-        "app_plugin_needs_review"
+        "app_plugin_changed"
     );
     assert_eq!(
-        code(set_enabled(&case.db, &case.engine(), "near", true)),
-        "app_plugin_needs_review"
+        code(set_enabled(&case.db, &case.engine(), "near", Switch::On)),
+        "app_plugin_changed"
     );
     case.db
         .execute(
@@ -1375,7 +1499,7 @@ fn the_trust_row_binds_the_sha256_of_the_reviewed_text() {
     std::fs::write(&path, NEAR).unwrap();
     assert_eq!(
         code(ready(&case.db, &case.engine(), "near")),
-        "app_plugin_needs_review"
+        "app_plugin_changed"
     );
     assert_eq!(held(), sha(&changed));
 }
@@ -1422,4 +1546,185 @@ fn a_failed_binding_write_keeps_the_old_key_working() {
     assert_eq!(loaded.bindings[0].folder(), KeyFolder::Plugin);
     let value = secret_value(&case.engine(), &loaded.bindings[0]).unwrap();
     assert_eq!(value.expose(), "sk-own-plugin-01");
+}
+
+/// A new key entered for a secret already bound to an entered key replaces that key in
+/// place and writes no binding row, so a failing binding write cannot fail it, and the
+/// plugin reads the new key.
+#[test]
+fn a_new_key_at_the_same_reference_needs_no_binding_write() {
+    let case = case();
+    trusted(&case, ACME);
+    set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"sk-own-plugin-01".to_vec(),
+    )
+    .unwrap();
+    let before = cells(&case.db, "app_plugin_secrets");
+    case.db
+        .execute_batch(
+            "CREATE TEMP TRIGGER refuse_insert BEFORE INSERT ON app_plugin_secrets
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;
+             CREATE TEMP TRIGGER refuse_update BEFORE UPDATE ON app_plugin_secrets
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+        )
+        .unwrap();
+    set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"sk-own-plugin-02".to_vec(),
+    )
+    .unwrap();
+    assert_eq!(cells(&case.db, "app_plugin_secrets"), before);
+    assert_eq!(plugin_keys(&case).len(), 1);
+    let loaded = ready(&case.db, &case.engine(), "acme").unwrap();
+    let value = secret_value(&case.engine(), &loaded.bindings[0]).unwrap();
+    assert_eq!(value.expose(), "sk-own-plugin-02");
+}
+
+/// Turning a plugin off writes the off state first: the next call is refused with
+/// `app_plugin_off`, while a run already holding the plugin keeps it, is not stopped under
+/// the default setting, and stays listed until it ends.
+#[test]
+fn turning_off_refuses_the_next_call_and_lets_a_running_one_finish() {
+    let case = case();
+    trusted(&case, NEAR);
+    let usage = Usage::default();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (loaded, lease) = hold(
+        &case.db,
+        &case.engine(),
+        &usage,
+        "near",
+        holder("r1"),
+        counted(&calls),
+    )
+    .unwrap();
+    assert_eq!(loaded.manifest.name, "near");
+    set_enabled(
+        &case.db,
+        &case.engine(),
+        "near",
+        Switch::Off {
+            usage: &usage,
+            when_off: TurnOff::RefuseNewCalls,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        code(hold(
+            &case.db,
+            &case.engine(),
+            &usage,
+            "near",
+            holder("r2"),
+            counted(&calls)
+        )),
+        "app_plugin_off"
+    );
+    assert_eq!(
+        code(ready(&case.db, &case.engine(), "near")),
+        "app_plugin_off"
+    );
+    assert_eq!(usage.users("near"), [holder("r1")]);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    drop(lease);
+    assert!(usage.users("near").is_empty());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// With `stop_runs`, turning a plugin off stops each run holding it once, after the off
+/// state is written; turning it off again stops none, and other plugins' runs go on.
+#[test]
+fn stop_runs_calls_each_holders_stop_once() {
+    let case = case();
+    trusted(&case, NEAR);
+    add_text(
+        &case,
+        &NEAR.replace("plugin = \"near\"", "plugin = \"far\""),
+        false,
+        2,
+    )
+    .unwrap();
+    let usage = Usage::default();
+    let near_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let far_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let held = |name: &str, run: &str, calls: &std::sync::Arc<std::sync::atomic::AtomicUsize>| {
+        hold(
+            &case.db,
+            &case.engine(),
+            &usage,
+            name,
+            holder(run),
+            counted(calls),
+        )
+        .unwrap()
+        .1
+    };
+    let _first = held("near", "r1", &near_calls);
+    let _second = held("near", "r2", &near_calls);
+    let _far = held("far", "r3", &far_calls);
+    let stop_runs = Switch::Off {
+        usage: &usage,
+        when_off: TurnOff::StopRuns,
+    };
+    set_enabled(&case.db, &case.engine(), "near", stop_runs).unwrap();
+    assert_eq!(near_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        code(ready(&case.db, &case.engine(), "near")),
+        "app_plugin_off"
+    );
+    set_enabled(&case.db, &case.engine(), "near", stop_runs).unwrap();
+    assert_eq!(near_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(far_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(usage.users("far"), [holder("r3")]);
+}
+
+/// A trusted plugin whose plugin.toml changed is refused with `app_plugin_changed` from the
+/// next call, and that change gives one notice naming the trusted and the current SHA-256:
+/// a second call for the same change gives none, a further change gives a new one, and
+/// approving it runs the plugin again.
+#[test]
+fn a_changed_plugin_notifies_once_per_change() {
+    let case = case();
+    trusted(&case, NEAR);
+    let usage = Usage::default();
+    let call = || {
+        hold(
+            &case.db,
+            &case.engine(),
+            &usage,
+            "near",
+            holder("r1"),
+            Box::new(|| {}),
+        )
+    };
+    drop(call().unwrap());
+    assert!(usage.take_notices().is_empty());
+    let path = case.root.join(FOLDER).join("near").join(MANIFEST_FILE);
+    let first = NEAR.replace("dimensions = 128", "dimensions = 256");
+    std::fs::write(&path, &first).unwrap();
+    assert_eq!(code(call()), "app_plugin_changed");
+    assert_eq!(code(call()), "app_plugin_changed");
+    let notice = |current: &str| ChangeNotice {
+        plugin: "near".to_owned(),
+        trusted_sha256: sha(NEAR),
+        current_sha256: sha(current),
+    };
+    assert_eq!(usage.take_notices(), [notice(&first)]);
+    assert_eq!(code(call()), "app_plugin_changed");
+    assert!(usage.take_notices().is_empty());
+    let second = NEAR.replace("dimensions = 128", "dimensions = 512");
+    std::fs::write(&path, &second).unwrap();
+    assert_eq!(code(call()), "app_plugin_changed");
+    assert_eq!(usage.take_notices(), [notice(&second)]);
+    trust_file(&case.db, &case.engine(), "near", &sha(&second), 3).unwrap();
+    drop(call().unwrap());
+    assert!(usage.take_notices().is_empty());
+    assert!(usage.users("near").is_empty());
 }

@@ -213,7 +213,7 @@ pub fn run(
     client: Client,
     stopped: &AtomicBool,
     editor_running: Arc<AtomicBool>,
-    engine: Option<(crate::paths::Layout, crate::service::Service)>,
+    engine: Option<(crate::paths::Layout, kernel_processes::service::Service)>,
 ) -> Result<(), TuiError> {
     let (socket, timeout) = client
         .into_unbound_configuration()

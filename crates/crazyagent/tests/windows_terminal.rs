@@ -1,8 +1,11 @@
 #![cfg(target_os = "windows")]
 
-use crazyagent::terminal::buffer::Chunk;
-use crazyagent::terminal::windows::ConptyHost;
-use crazyagent::terminal::{AgentId, Host, INPUT_BYTES_MAX, PaneCommand, SIZE_MAX, TerminalStream};
+use kernel_processes::terminal::buffer::Chunk;
+use kernel_processes::terminal::windows::ConptyHost;
+use kernel_processes::terminal::{
+    AgentId, Host, INPUT_BYTES_MAX, PaneCommand, SIZE_MAX, TerminalStream,
+};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
@@ -51,7 +54,7 @@ fn read_until(chunks: &Receiver<Vec<u8>>, needle: &str, limit: Duration) -> Stri
 #[test]
 fn a_conpty_terminal_runs_streams_takes_input_and_ends() {
     let temp = tempfile::tempdir().unwrap();
-    let host = ConptyHost::new();
+    let host = ConptyHost::new(crazyagent::sandbox::agent_variable_allowed);
     let agent = AgentId::team(7).unwrap();
     let shell = command(&["/Q", "/K"], temp.path());
     let pane = host.spawn(&agent, &shell).unwrap();
@@ -125,4 +128,39 @@ fn a_conpty_terminal_runs_streams_takes_input_and_ends() {
             .0,
         "terminal_command_invalid"
     );
+}
+
+fn allows_all_but_pane_refused(name: &OsStr, _value: &OsStr) -> bool {
+    name != "PANE_REFUSED"
+}
+
+/// The host asks the filter it was built with about every pane variable: a variable that
+/// filter refuses stops the pane before any program starts, so it never reaches an agent,
+/// and a variable the engine's own filter would refuse passes a filter that allows it.
+#[test]
+fn a_variable_the_host_filter_refuses_never_reaches_the_pane() {
+    let temp = tempfile::tempdir().unwrap();
+    let host = ConptyHost::new(allows_all_but_pane_refused);
+    let agent = AgentId::team(9).unwrap();
+    let mut refused = command(&["/Q", "/K"], temp.path());
+    refused.env.push(("PANE_REFUSED".into(), "planted".into()));
+    assert_eq!(
+        host.spawn(&agent, &refused).unwrap_err().0,
+        "terminal_command_invalid"
+    );
+    assert_eq!(host.pane(&agent), None);
+    assert!(host.alive().unwrap().is_empty());
+    let mut allowed = command(&["/Q", "/K"], temp.path());
+    allowed.env.push(("GH_TOKEN".into(), "allowed-here".into()));
+    host.spawn(&agent, &allowed).unwrap();
+    let chunks = forward(host.attach(&agent).unwrap());
+    host.input(&agent, b"echo [%GH_TOKEN%][%PANE_REFUSED%]\r")
+        .unwrap();
+    read_until(
+        &chunks,
+        "[allowed-here][%PANE_REFUSED%]",
+        Duration::from_secs(30),
+    );
+    host.kill(&agent).unwrap();
+    assert!(host.alive().unwrap().is_empty());
 }

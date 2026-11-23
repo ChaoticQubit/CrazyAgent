@@ -4,26 +4,43 @@ use std::path::Path;
 use std::process::ExitCode;
 
 /// Every mode that generates from a caps folder.
-const MODES: [&str; 6] = [
+const MODES: [&str; 8] = [
     "--write",
     "--check",
     "--write-ts",
     "--check-ts",
     "--write-wit",
     "--check-wit",
+    "--write-host",
+    "--check-host",
 ];
 
 /// The usage line for every mode capgen takes.
-const USAGE: &str = "usage: capgen --write|--check|--write-ts|--check-ts|--write-wit|--check-wit \
-                     <caps dir> <generated dir>, or capgen --test-module <cap file> <out file>";
+const USAGE: &str = "usage: capgen --write|--check|--write-ts|--check-ts|--write-wit|--check-wit\
+                     |--write-host|--check-host \
+                     <caps dir> <generated dir>, capgen --write-permissions|--check-permissions \
+                     <caps dir> <plugins dir> <generated dir>, or capgen --test-module <cap file> \
+                     <out file>";
 
 /// Runs capgen: `--write`/`--check` write or compare the Rust SDK files, `--write-ts`/
-/// `--check-ts` the TS ones and `--write-wit`/`--check-wit` the WIT one, from `<caps dir>`
-/// into `<generated dir>`; `--test-module <cap file> <out file>` writes one test module.
-/// Input: the command line. Output: 0 when written or equal, 1 with each differing path
-/// on drift, 2 on a refusal.
+/// `--check-ts` the TS ones, `--write-wit`/`--check-wit` the WIT one and `--write-host`/
+/// `--check-host` the SDK host crate's binding, from `<caps dir>`
+/// into `<generated dir>`; `--write-permissions`/`--check-permissions` plugin_host's
+/// permission table from `<caps dir>` and `<plugins dir>`; `--test-module <cap file> <out
+/// file>` writes one test module. Input: the command line. Output: 0 when written or
+/// equal, 1 with each differing path on drift, 2 on a refusal.
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let [mode, caps, plugins, generated] = args.as_slice()
+        && (mode == "--write-permissions" || mode == "--check-permissions")
+    {
+        return permissions(
+            mode,
+            Path::new(caps),
+            Path::new(plugins),
+            Path::new(generated),
+        );
+    }
     let [mode, caps, generated] = args.as_slice() else {
         eprintln!("{USAGE}");
         return ExitCode::from(2);
@@ -56,8 +73,33 @@ fn main() -> ExitCode {
     }
 }
 
+/// Writes or compares plugin_host's `permissions.rs`. Inputs: `--write-permissions` or
+/// `--check-permissions`, the caps folder, the plugins folder and the generated folder.
+/// Output: as [`write`] or [`check`], or 2 on a refusal.
+fn permissions(mode: &str, caps: &Path, plugins: &Path, generated: &Path) -> ExitCode {
+    let files = match crazyagent_capgen::load(caps).and_then(|loaded| {
+        let borrowed: Vec<(&str, crazyagent_cap::File)> = loaded
+            .iter()
+            .map(|(stem, file)| (stem.as_str(), file.clone()))
+            .collect();
+        crazyagent_capgen::permissions(&borrowed, plugins)
+    }) {
+        Ok(files) => files,
+        Err(error) => {
+            eprintln!("{} {}: {}", error.code, error.file, error.detail);
+            return ExitCode::from(2);
+        }
+    };
+    if mode == "--write-permissions" {
+        write(generated, &files)
+    } else {
+        check(generated, &files)
+    }
+}
+
 /// Generates the files of one mode's target: Rust for `--write`/`--check`, TS for the
-/// `-ts` modes, WIT for the `-wit` modes. Inputs: one of [`MODES`] and the parsed files.
+/// `-ts` modes, WIT for the `-wit` modes, the SDK host binding for the `-host` modes.
+/// Inputs: one of [`MODES`] and the parsed files.
 /// Output: the generated files, or the refusal.
 fn emit(
     mode: &str,
@@ -67,6 +109,7 @@ fn emit(
         "--write" | "--check" => crazyagent_capgen::rust(files),
         "--write-ts" | "--check-ts" => crazyagent_capgen::ts(files),
         "--write-wit" | "--check-wit" => crazyagent_capgen::wit(files),
+        "--write-host" | "--check-host" => crazyagent_capgen::binding(files),
         _ => unreachable!("{mode} is one of MODES"),
     }
 }

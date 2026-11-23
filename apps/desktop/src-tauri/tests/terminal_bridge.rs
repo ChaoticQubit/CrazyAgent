@@ -7,14 +7,13 @@ use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::project_setup::{HarnessSlot, ProjectSetup, TeamPlan};
 use crazyagent::protocol::ProjectSpec;
 use crazyagent::team::{EdgeState, NodeKind, TaskSource};
-use crazyagent::terminal::{
-    AgentId, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame, TerminalRequest,
-};
+use crazyagent::terminal::{TerminalFrame, TerminalRequest};
 use crazyagent_desktop::bridge::terminal::{
     Session, Terminals, VIEWERS_MAX, ViewKey, agent, channel_message, graph_shows, input_request,
     pane, plain_code, request_valid,
 };
 use crazyagent_desktop::bridge::{ActionOutcome, NativeBridge};
+use kernel_processes::terminal::{AgentId, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, SIZE_MAX, SIZE_MIN};
 use std::error::Error;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;

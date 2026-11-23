@@ -1,6 +1,7 @@
 pub use crate::agent_home::Repeated;
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
+use kernel_sandbox::paths::ASCII_FOLDS;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -53,28 +54,6 @@ const HARNESS_FOLDERS: [&str; 2] = [".claude", ".codex"];
 pub(crate) const HFS_IGNORED: [char; 16] = [
     '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
     '\u{202E}', '\u{206A}', '\u{206B}', '\u{206C}', '\u{206D}', '\u{206E}', '\u{206F}', '\u{FEFF}',
-];
-
-/// The code points outside ASCII that a case-insensitive volume folds onto ASCII, with the
-/// ASCII they fold onto: on APFS the full case fold of their canonical decomposition, each
-/// checked on the volume (probe 2026-10-28), and U+0131 DOTLESS I, which the NTFS upcase
-/// table maps to `I`. The one list the landing checks, the name compares and the Seatbelt
-/// name spellings share (SA vid 202, DS-148 F1).
-pub(crate) const ASCII_FOLDS: [(char, &str); 14] = [
-    ('\u{DF}', "ss"),
-    ('\u{131}', "i"),
-    ('\u{17F}', "s"),
-    ('\u{37E}', ";"),
-    ('\u{1E9E}', "ss"),
-    ('\u{1FEF}', "`"),
-    ('\u{212A}', "k"),
-    ('\u{FB00}', "ff"),
-    ('\u{FB01}', "fi"),
-    ('\u{FB02}', "fl"),
-    ('\u{FB03}', "ffi"),
-    ('\u{FB04}', "ffl"),
-    ('\u{FB05}', "st"),
-    ('\u{FB06}', "st"),
 ];
 
 /// The project's own instruction files an import copies into the project instructions and

@@ -2185,7 +2185,7 @@ mod windows_tests {
     fn a_launch_record_in_a_private_data_root_is_private() {
         use crazyagent_win_sandbox::private;
         let temp = tempfile::tempdir().unwrap();
-        let base = crate::sandbox::canonical(temp.path()).unwrap();
+        let base = kernel_sandbox::paths::canonical(temp.path()).unwrap();
         let data = base.join("data");
         drop(private::dir(&data).unwrap());
         let home = base.join("home");

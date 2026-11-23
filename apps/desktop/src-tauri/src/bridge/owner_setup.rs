@@ -11,7 +11,7 @@ use crazyagent::owner_profile::OwnerProfile;
 use crazyagent::pools::PoolSummary;
 use crazyagent::provider_retry::{ProviderRetry, ProviderRetryView};
 use crazyagent::quit_settings::QuitSettings;
-use crazyagent::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
+use kernel_sandbox::settings::{SandboxSettings, StoredSandboxSettings};
 
 fn profile_code(code: &str) -> &'static str {
     match code {

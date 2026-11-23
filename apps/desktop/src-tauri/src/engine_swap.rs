@@ -22,7 +22,7 @@ pub(crate) fn engine_older(engine: &str, app: &str) -> bool {
 pub(crate) fn swap_on_launch(
     engine: &str,
     app: &str,
-    service: &crazyagent::service::Status,
+    service: &kernel_processes::service::Status,
 ) -> bool {
     service.installed && service.running && engine_older(engine, app)
 }

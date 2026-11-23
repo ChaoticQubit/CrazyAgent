@@ -2,12 +2,13 @@ use super::*;
 use crate::engine::owner::{OwnerMutation, OwnerOperation, OwnerRequest, OwnerResult, Started};
 use crate::protocol::{Cursor, PROTOCOL_VERSION, RequestId};
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
-use crate::sdk_slice::{self, BUNDLED, EngineRefusals, KIND_CALL_REFUSED};
+use crate::sdk_slice::{self, EngineRefusals, KIND_CALL_REFUSED};
 use crate::state_log::Aggregate;
 use crate::state_log::fence;
 use crate::state_log::replay;
 use bus_gateway::{Grants, Refusals};
 use crazyagent_plugin_agent_quit as agent_quit;
+use kernel_plugin_host::generated::permissions::BUNDLED_GRANTS;
 use rusqlite::Connection;
 use sdk::settings::SAVE_QUIT;
 use sdk::{Refusal, Tier};
@@ -126,13 +127,13 @@ fn refuse(sink: &EngineRefusals) {
         capability: SAVE_QUIT.name,
         needs: SAVE_QUIT.needs,
     };
-    sink.refused(BUNDLED[0].0, &SAVE_QUIT, &refusal);
+    sink.refused(BUNDLED_GRANTS[0].plugin, &SAVE_QUIT, &refusal);
 }
 
 #[test]
 fn a_first_refusal_is_logged_once_per_run() {
     let mut s = store();
-    let grants = Grants::new(&[(BUNDLED[0].0, Tier::T2, &[])]).unwrap();
+    let grants = Grants::new(&[(BUNDLED_GRANTS[0].plugin, Tier::T2, &[])]).unwrap();
     let sink = EngineRefusals::new();
     for _ in 0..2 {
         let tx = s.db.transaction().unwrap();
@@ -146,7 +147,7 @@ fn a_first_refusal_is_logged_once_per_run() {
         drop(tx);
         sdk_slice::drain_refusals(&mut s.db, &s.started.host, &sink).unwrap();
     }
-    assert_eq!(sink.count(BUNDLED[0].0), 2);
+    assert_eq!(sink.count(BUNDLED_GRANTS[0].plugin), 2);
     assert_eq!(
         plugin_events(&s.db),
         vec![(KIND_CALL_REFUSED.to_owned(), 1, BODY.to_vec())]

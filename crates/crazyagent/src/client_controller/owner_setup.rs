@@ -8,7 +8,7 @@ use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
 use crate::provider_retry::{ProviderRetry, ProviderRetryView};
 use crate::quit_settings::QuitSettings;
-use crate::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
+use kernel_sandbox::settings::{SandboxSettings, StoredSandboxSettings};
 
 impl OwnerController {
     /// Reads the owner's first-run profile from the engine.

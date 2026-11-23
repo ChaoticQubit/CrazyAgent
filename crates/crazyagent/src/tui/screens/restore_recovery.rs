@@ -248,7 +248,7 @@ fn engine() -> Result<(crate::paths::Layout, bool), String> {
         .and_then(std::fs::canonicalize)
         .map_err(|_| "not_configured".to_owned())?;
     let service =
-        crate::service::Service::current_user(crate::paths::Platform::CURRENT, executable, &layout)
+        crate::service::current_user(kernel_common::Platform::CURRENT, executable, &layout)
             .map_err(|_| "not_configured".to_owned())?;
     let running = crate::restore::service_running(&service);
     Ok((layout, running))

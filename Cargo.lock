@@ -895,17 +895,16 @@ dependencies = [
  "crazyagent-plugin-agent-quit",
  "crazyagent-plugin-check",
  "crazyagent-sdk",
+ "crazyagent-sdk-host",
  "crazyagent-win-sandbox",
  "crossterm",
  "getrandom 0.4.3",
- "keyring-core",
  "landlock",
  "libc",
  "minisign",
  "minisign-verify",
  "nix",
  "notify",
- "portable-pty",
  "ratatui",
  "rusqlite",
  "rustix 1.1.5",
@@ -922,8 +921,6 @@ dependencies = [
  "trash",
  "url",
  "vt100",
- "windows-native-keyring-store",
- "zbus-secret-service-keyring-store",
  "zeroize",
 ]
 
@@ -931,6 +928,7 @@ dependencies = [
 name = "crazyagent-bus-gateway"
 version = "2.4.4"
 dependencies = [
+ "crazyagent-kernel-plugin-host",
  "crazyagent-sdk",
 ]
 
@@ -946,6 +944,7 @@ name = "crazyagent-capgen"
 version = "2.4.4"
 dependencies = [
  "crazyagent-cap",
+ "crazyagent-kernel-plugin-host",
  "wit-parser",
 ]
 
@@ -957,7 +956,9 @@ dependencies = [
  "base64 0.22.1",
  "bytemuck",
  "crazyagent",
+ "crazyagent-kernel-common",
  "crazyagent-kernel-processes",
+ "crazyagent-kernel-sandbox",
  "crazyagent-kernel-security",
  "getrandom 0.4.3",
  "glyphon",
@@ -1019,6 +1020,7 @@ dependencies = [
  "minisign",
  "minisign-verify",
  "nix",
+ "portable-pty",
  "rustix 1.1.5",
  "semver",
  "serde",
@@ -1028,6 +1030,7 @@ dependencies = [
  "tokio",
  "toml 1.1.6+spec-1.1.0",
  "url",
+ "vt100",
 ]
 
 [[package]]
@@ -1035,11 +1038,13 @@ name = "crazyagent-kernel-sandbox"
 version = "2.4.4"
 dependencies = [
  "crazyagent-kernel-processes",
+ "nix",
  "rustix 1.1.5",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "url",
 ]
 
 [[package]]
@@ -1048,9 +1053,12 @@ version = "2.4.4"
 dependencies = [
  "crazyagent-kernel-common",
  "form_urlencoded",
+ "keyring-core",
  "serde",
  "serde_json",
  "url",
+ "windows-native-keyring-store",
+ "zbus-secret-service-keyring-store",
  "zeroize",
 ]
 
@@ -1058,6 +1066,7 @@ dependencies = [
 name = "crazyagent-kernel-storage"
 version = "2.4.4"
 dependencies = [
+ "base64 0.22.1",
  "crazyagent-win-sandbox",
  "rusqlite",
  "rustix 1.1.5",
@@ -1109,9 +1118,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "crazyagent-sdk-host"
+version = "2.4.4"
+dependencies = [
+ "crazyagent-bus-gateway",
+ "crazyagent-sdk",
+]
+
+[[package]]
 name = "crazyagent-win-sandbox"
 version = "2.4.4"
 dependencies = [
+ "crazyagent-kernel-common",
  "tempfile",
  "tokio",
  "windows-sys 0.61.2",

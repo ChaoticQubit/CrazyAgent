@@ -1,7 +1,9 @@
 use super::refused;
-use crate::sandbox::{InstalledSandbox, LinuxSupervisor, ProjectSandbox, SandboxNetwork};
+use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 use kernel_processes::run::InstallError;
 use kernel_processes::run::run_bounded;
+use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::settings::LinuxSupervisor;
 use std::fs::{File, OpenOptions};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -168,10 +170,10 @@ pub(super) fn run_quiet(mut command: Command, limit: Duration) -> Result<bool, I
 /// reads them (DEC-185). Input: the engine root, unread. Output: the defaults.
 pub(super) fn boundary_settings(
     _root: &Path,
-) -> Result<crate::sandbox_settings::SandboxSettings, InstallError> {
-    Ok(crate::sandbox_settings::SandboxSettings {
+) -> Result<kernel_sandbox::settings::SandboxSettings, InstallError> {
+    Ok(kernel_sandbox::settings::SandboxSettings {
         linux_supervisor: LinuxSupervisor::On,
-        linux_strict: crate::sandbox::LinuxStrict::Off,
+        linux_strict: kernel_sandbox::settings::LinuxStrict::Off,
         ..Default::default()
     })
 }
@@ -201,7 +203,7 @@ pub(super) fn npm_wrap(
 ) -> Result<Command, InstallError> {
     let settings = boundary_settings(root)?;
     let (calls, strict) = (settings.linux_supervisor, settings.linux_strict);
-    let real = crate::sandbox::canonical(bin).map_err(refused)?;
+    let real = kernel_sandbox::paths::canonical(bin).map_err(refused)?;
     let sandbox = InstalledSandbox::install(sandbox, profile, calls, strict)
         .map_err(|error| super::boundary_refused(&real, error))?;
     sandbox.wrap(&npm_invocation(bin, cwd)).map_err(refused)

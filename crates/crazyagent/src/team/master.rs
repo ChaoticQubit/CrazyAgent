@@ -5,7 +5,7 @@ use crate::engine::EngineError;
 use crate::harnesses::terminal_session::{Resume, paste};
 use crate::project_setup::StoredSetup;
 use crate::protocol::ProjectId;
-use crate::terminal::{AgentId, Host};
+use kernel_processes::terminal::{AgentId, Host};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
 };
@@ -577,7 +577,7 @@ fn master_input_at_when(
     match host.input_live(&pane) {
         Ok(true) => {}
         Ok(false) => return Err(InputRefused::Unready),
-        Err(problem) if crate::terminal::ended_code(&problem.0) => {
+        Err(problem) if kernel_processes::terminal::ended_code(&problem.0) => {
             return Err(InputRefused::Unready);
         }
         Err(problem) => return Err(InputRefused::Failed(problem.0)),

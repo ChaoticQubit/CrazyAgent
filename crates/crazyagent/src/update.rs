@@ -8,8 +8,19 @@ use std::env::consts::EXE_SUFFIX;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 const USAGE: &str = "usage: crazyagent update [--check] [--channel stable|dev]";
+
+/// The file in an install folder whose lock one `crazyagent update` run holds from staging
+/// to the end of its swap, rollback included. It is never removed.
+const UPDATE_LOCK: &str = ".crazyagent-update.lock";
+
+/// The most time a run waits for another run on the same install folder to finish.
+const UPDATE_LOCK_WAIT_MAX: Duration = Duration::from_secs(10);
+
+/// How often a waiting run tries the install folder's lock again.
+const UPDATE_LOCK_RETRY: Duration = Duration::from_millis(100);
 
 /// Saves the update channel to `<root>/update.toml` (owner-only on Unix), replacing the
 /// file atomically, and creates a missing data folder as the engine does: private to
@@ -46,6 +57,47 @@ impl Drop for Staging {
     }
 }
 
+/// One run's hold on an install folder; dropping it lets go.
+struct InstallLock {
+    _file: std::fs::File,
+}
+
+/// Takes the install folder for one update run through an exclusive lock on its
+/// [`UPDATE_LOCK`] file (owner-only on Unix, never followed through a link), so two runs on
+/// one folder never stage or swap at once. A run that finds it held tries again every
+/// [`UPDATE_LOCK_RETRY`] until `wait_max` has passed. Inputs: the install folder and the
+/// most time to wait. Output: the hold, `update_in_progress` or `update_io`.
+fn lock_install(install: &Path, wait_max: Duration) -> Result<InstallLock, UpdateError> {
+    let failed = |error| io_failure(&format!("Can't write to {}", install.display()), error);
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(install.join(UPDATE_LOCK)).map_err(failed)?;
+    let started = Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(InstallLock { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(error)) => return Err(failed(error)),
+        }
+        let left = wait_max.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            return Err(fail(
+                "update_in_progress",
+                format!(
+                    "Another crazyagent update is running in {}. Try again when it has finished.",
+                    install.display()
+                ),
+            ));
+        }
+        std::thread::sleep(UPDATE_LOCK_RETRY.min(left));
+    }
+}
+
 fn install_release(manifest: &Manifest, install: &Path, key: &str) -> Result<String, UpdateError> {
     let platform = target().ok_or_else(|| {
         fail(
@@ -59,6 +111,7 @@ fn install_release(manifest: &Manifest, install: &Path, key: &str) -> Result<Str
             format!("Release {} has no build for {platform}.", manifest.version),
         )
     })?;
+    let _hold = lock_install(install, UPDATE_LOCK_WAIT_MAX)?;
     let staging = Staging::create(install)?;
     let archive = staging.path.join("release-archive");
     let mut file = std::fs::OpenOptions::new()
@@ -109,12 +162,9 @@ pub fn swap_around_engine(
                 .to_owned(),
         )
     };
-    let engine = crate::service::Service::current_user(
-        crate::paths::Platform::CURRENT,
-        current.clone(),
-        layout,
-    )
-    .map_err(|error| stop_failed(error.0))?;
+    let engine =
+        crate::service::current_user(kernel_common::Platform::CURRENT, current.clone(), layout)
+            .map_err(|error| stop_failed(error.0))?;
     if engine.definition.is_file() {
         let service = |action: &str| {
             service_step(
@@ -160,7 +210,7 @@ pub fn swap_around_engine(
 /// executable. Output: Ok once it answers, or the sentence that says how to start it.
 fn restart_detached(
     layout: &crate::paths::Layout,
-    service: &crate::service::Service,
+    service: &kernel_processes::service::Service,
     executable: &Path,
 ) -> Result<(), String> {
     let again = "The engine didn't start again. Open CrazyAgent to start it: crazyagent tui";
@@ -174,7 +224,7 @@ fn restart_detached(
             service,
             executable,
             std::env::var_os("PATH").as_deref(),
-            crate::service::READY_TIMEOUT,
+            kernel_processes::service::READY_TIMEOUT,
         ))
         .map(|_| ())
         .map_err(|error| format!("{again} ({})", error.0))
@@ -269,5 +319,7 @@ pub fn run(args: &[OsString]) -> Result<String, UpdateError> {
     install_release(&manifest, install, &public_key()?)
 }
 
+#[cfg(test)]
+mod lock_tests;
 #[cfg(test)]
 mod tests;

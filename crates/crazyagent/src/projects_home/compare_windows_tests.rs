@@ -1,7 +1,8 @@
 use super::{
-    AddMode, ProjectId, Registered, check_add, holds_owner_home, move_holds, one_spelling,
-    project_move_check, project_move_holds, project_move_lands,
+    AddMode, ProjectId, Registered, check_add, holds_owner_home, move_holds, project_move_check,
+    project_move_holds, project_move_lands,
 };
+use kernel_sandbox::paths::one_spelling;
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 

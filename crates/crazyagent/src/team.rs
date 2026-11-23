@@ -530,7 +530,7 @@ pub const BUDGET_CHOICES: [u64; 7] = [
 /// The most teammates of one harness its status lists: running ones first, then the newest
 /// that ended.
 pub const TEAMMATES_SHOWN_MAX: usize = 16;
-const _: () = assert!(TEAMMATES_SHOWN_MAX <= crate::terminal::PANES_LISTED_MAX);
+const _: () = assert!(TEAMMATES_SHOWN_MAX <= kernel_processes::terminal::PANES_LISTED_MAX);
 
 pub use caps::Caps;
 pub use wall::{TerminalsPerWindow, terminals_per_window};
@@ -1066,7 +1066,7 @@ impl TeamAction {
             .then_some(())
             .ok_or_else(|| failure("coord_native_unsupported")),
             Self::StopTeammate { agent, pane, .. } => (*agent > 0
-                && crate::terminal::pane_id_valid(pane))
+                && kernel_processes::terminal::pane_id_valid(pane))
             .then_some(())
             .ok_or_else(|| failure("team_teammate_not_found")),
             Self::MessageAgent { agent, text, .. } => (*agent > 0

@@ -3,8 +3,10 @@ use crate::harnesses::codex_folder::{SCREEN_WAIT, Screen, read_screen};
 use crate::harnesses::launch::{
     AccountBinding, LaunchBoundary, LaunchError, LaunchLimits, LaunchRequest,
 };
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
-use crate::terminal::{AgentId, FOLDER, Host, HostError, PaneRef, TerminalStream};
+use crate::terminal::FOLDER;
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
+use kernel_processes::terminal::{AgentId, Host, HostError, PaneRef, TerminalStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -77,7 +79,12 @@ pub(crate) fn start(name: &str, first: &str, then: Option<&str>, codex_folder: b
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &folder));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        Some(tmux),
+        &folder,
+        crate::sandbox::confinement(),
+        crate::terminal::tmux::tmux_hooks(),
+    ));
     let (home, work, bin) = (base.join("home"), base.join("work"), base.join("bin"));
     for path in [&home, &work, &bin] {
         private(path);
@@ -227,7 +234,7 @@ impl Host for FirstLookFails {
     fn spawn(
         &self,
         agent: &AgentId,
-        command: &crate::terminal::PaneCommand,
+        command: &kernel_processes::terminal::PaneCommand,
     ) -> Result<PaneRef, HostError> {
         self.real.spawn(agent, command)
     }
@@ -334,7 +341,7 @@ impl Host for TagRefused {
     fn spawn(
         &self,
         agent: &AgentId,
-        command: &crate::terminal::PaneCommand,
+        command: &kernel_processes::terminal::PaneCommand,
     ) -> Result<PaneRef, HostError> {
         self.real.spawn(agent, command)
     }

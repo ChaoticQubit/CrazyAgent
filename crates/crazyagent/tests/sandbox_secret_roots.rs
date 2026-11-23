@@ -1,6 +1,9 @@
 #![cfg(unix)]
 
-use crazyagent::sandbox::{ProjectSandbox, SECRET_ROOT_REFUSED, SandboxError, SandboxNetwork};
+use crazyagent::sandbox::ProjectSandbox;
+use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::paths::SECRET_ROOT_REFUSED;
 use std::fs;
 use std::path::PathBuf;
 

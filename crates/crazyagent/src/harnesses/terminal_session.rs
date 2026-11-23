@@ -2,8 +2,7 @@ use super::codex_folder::{self, Screen};
 use super::interactive::settings::{STEPS_MAX, Step, TerminalSettings};
 use super::interactive::{self, Run, Support, Transcript};
 use super::launch::{
-    Ending, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, route,
-    validate,
+    LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, route, validate,
 };
 use super::leftovers::{Follower, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
 use super::records::{self, Reader};
@@ -11,8 +10,9 @@ use super::transcript::{TranscriptEvent, TranscriptReader};
 use crate::coord::delivery::typing::APP_QUIET;
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
-use crate::terminal::buffer::Chunk;
-use crate::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX, TerminalStream};
+use kernel_processes::group::Ending;
+use kernel_processes::terminal::buffer::Chunk;
+use kernel_processes::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX, TerminalStream};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -537,7 +537,10 @@ impl TerminalSession {
         };
         let resumed = resume.map(|resume| (resume.record.clone(), reader.start()));
         let pane = host
-            .spawn(&agent, &crate::terminal::PaneCommand::from(&command))
+            .spawn(
+                &agent,
+                &kernel_processes::terminal::PaneCommand::from(&command),
+            )
             .map_err(host_failure)?;
         assert_eq!(pane.agent, agent);
         let unkept = host.unkept(&agent);
@@ -723,10 +726,11 @@ impl TerminalSession {
             self.wait_ready(cancel)?;
         }
         let host = self.host.as_ref();
-        let pin = crate::terminal::request_pin(host, &self.agent).map_err(host_failure)?;
+        let pin =
+            kernel_processes::terminal::request_pin(host, &self.agent).map_err(host_failure)?;
         let typed = |bytes: &[u8]| {
-            let stale = crate::terminal::APP_PANE_UNKNOWN;
-            crate::terminal::type_piece(host, &self.agent, pin.as_ref(), bytes, stale)
+            let stale = kernel_processes::terminal::APP_PANE_UNKNOWN;
+            kernel_processes::terminal::type_piece(host, &self.agent, pin.as_ref(), bytes, stale)
                 .map_err(host_failure)
         };
         for part in paste(prompt) {

@@ -630,7 +630,7 @@ mod run {
         let root = request
             .root
             .canonicalize()
-            .map(crate::projects_home::one_spelling)
+            .map(kernel_sandbox::paths::one_spelling)
             .map_err(|_| UNAVAILABLE)?;
         let stem = run_stem(crate::team::now_ms());
         let _slot = Slot::take(&root, request.project, &stem, request.holds_seat)?;

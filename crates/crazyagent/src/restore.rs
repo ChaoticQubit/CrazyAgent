@@ -203,7 +203,10 @@ pub fn restart_refusal(root: &Path, running: bool) -> Option<&'static str> {
 
 /// [`restart_refusal`] for the engine's login service, as a result a restart path returns
 /// at once. Inputs: the root and the service. Output: Ok, or the refusal's code.
-pub fn refuse_restart(root: &Path, service: &crate::service::Service) -> Result<(), &'static str> {
+pub fn refuse_restart(
+    root: &Path,
+    service: &kernel_processes::service::Service,
+) -> Result<(), &'static str> {
     restart_refusal(root, service_running(service)).map_or(Ok(()), Err)
 }
 
@@ -247,7 +250,7 @@ pub fn backups(root: &Path) -> std::path::PathBuf {
 /// Whether the engine's login service still runs a process, as a restore's pending record is
 /// weighed. A status that can't be read counts as running, so a restore that may still copy
 /// is never stopped. Input: the service. Output: the answer.
-pub fn service_running(service: &crate::service::Service) -> bool {
+pub fn service_running(service: &kernel_processes::service::Service) -> bool {
     service.status().map_or(true, |status| status.running)
 }
 

@@ -1092,7 +1092,7 @@ pub fn catalog(
     pool: Option<&CredentialRef>,
     research: &[ResearchKind],
     signed_in: &BTreeSet<CredentialRef>,
-    calls: Option<crate::sandbox::LinuxSupervisor>,
+    calls: Option<kernel_sandbox::settings::LinuxSupervisor>,
 ) -> Result<ProjectCatalog, &'static str> {
     if pool.is_some_and(|pool| !pool_exists(config, pool)) {
         return Err("pool_missing");

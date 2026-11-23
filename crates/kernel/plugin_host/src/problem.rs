@@ -83,6 +83,14 @@ pub(crate) const PLAIN: &[(&str, &str)] = &[
         "a plugin id is 1 to 64 lowercase letters, digits or hyphens.",
     ),
     (
+        "plugin_manifest_not_allowed",
+        "this plugin's network settings hold a key or a value the app does not take.",
+    ),
+    (
+        "plugin_net_without_permission",
+        "this plugin lists network hosts without asking for network access, or asks for network access without listing its hosts.",
+    ),
+    (
         "app_plugin_schema_unknown",
         "this app reads version = 1 plugin files only.",
     ),
@@ -250,9 +258,13 @@ pub(crate) const PLAIN: &[(&str, &str)] = &[
     ),
     (
         "app_plugin_past_cap",
-        "only the first 64 plugin folders by name are read; remove one to use this plugin.",
+        "the app reads only the first 64 plugins by name, old plugin files included; remove one of them to use this plugin.",
     ),
     ("app_plugin_off", "this plugin is turned off."),
+    (
+        "plugin_holders_capacity",
+        "this plugin is in use by too many runs at once; wait for one to end.",
+    ),
     (
         "app_plugin_needs_key",
         "this plugin needs a key: pick an account or enter a key for it.",

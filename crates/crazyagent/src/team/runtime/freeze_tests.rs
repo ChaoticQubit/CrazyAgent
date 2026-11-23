@@ -143,7 +143,10 @@ impl Proxied {
         let agent = AgentId::team(id).unwrap();
         let since = SystemTime::now();
         let pane = host
-            .spawn(&agent, &crate::terminal::PaneCommand::from(&command))
+            .spawn(
+                &agent,
+                &kernel_processes::terminal::PaneCommand::from(&command),
+            )
             .unwrap();
         let record = PaneRecord {
             access: Some(AgentAccess::Sandboxed),
@@ -623,7 +626,7 @@ impl NativeLead {
             .unwrap();
         spawn_ledger::settle(&runtime.connection, &runtime.root, id, true);
         let lead = AgentId::team(id).unwrap();
-        let mates_socket = crate::terminal::teammates_socket(&fixture.base, &lead).unwrap();
+        let mates_socket = crate::terminal::tmux::teammates_socket(&fixture.base, &lead).unwrap();
         let down = LeadServersDown {
             host: host.clone(),
             lead: lead.clone(),
@@ -921,19 +924,24 @@ impl Host for ListFails {
     fn spawn(
         &self,
         agent: &AgentId,
-        command: &crate::terminal::PaneCommand,
-    ) -> Result<crate::terminal::PaneRef, crate::terminal::HostError> {
+        command: &kernel_processes::terminal::PaneCommand,
+    ) -> Result<kernel_processes::terminal::PaneRef, kernel_processes::terminal::HostError> {
         self.0.spawn(agent, command)
     }
 
     fn attach(
         &self,
         agent: &AgentId,
-    ) -> Result<crate::terminal::TerminalStream, crate::terminal::HostError> {
+    ) -> Result<kernel_processes::terminal::TerminalStream, kernel_processes::terminal::HostError>
+    {
         self.0.attach(agent)
     }
 
-    fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), crate::terminal::HostError> {
+    fn input(
+        &self,
+        agent: &AgentId,
+        bytes: &[u8],
+    ) -> Result<(), kernel_processes::terminal::HostError> {
         self.0.input(agent, bytes)
     }
 
@@ -942,16 +950,18 @@ impl Host for ListFails {
         agent: &AgentId,
         cols: u16,
         rows: u16,
-    ) -> Result<(), crate::terminal::HostError> {
+    ) -> Result<(), kernel_processes::terminal::HostError> {
         self.0.resize(agent, cols, rows)
     }
 
-    fn kill(&self, agent: &AgentId) -> Result<(), crate::terminal::HostError> {
+    fn kill(&self, agent: &AgentId) -> Result<(), kernel_processes::terminal::HostError> {
         self.0.kill(agent)
     }
 
-    fn alive(&self) -> Result<Vec<AgentId>, crate::terminal::HostError> {
-        Err(crate::terminal::HostError("terminal_list_failed".into()))
+    fn alive(&self) -> Result<Vec<AgentId>, kernel_processes::terminal::HostError> {
+        Err(kernel_processes::terminal::HostError(
+            "terminal_list_failed".into(),
+        ))
     }
 }
 
@@ -1062,7 +1072,7 @@ fn an_unrecorded_native_lead_whose_teammates_server_ended_is_ended_by_a_next_eng
         std::thread::sleep(Duration::from_millis(50));
     }
     let agent = AgentId::team(lead.id).unwrap();
-    let mates = crate::terminal::teammates_socket(&lead.fixture.base, &agent).unwrap();
+    let mates = crate::terminal::tmux::teammates_socket(&lead.fixture.base, &agent).unwrap();
     assert!(
         kernel_processes::spawn_gate::connect_unix_std(&mates).is_ok(),
         "the lead's teammates' server listens"
