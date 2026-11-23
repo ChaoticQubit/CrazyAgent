@@ -50,7 +50,7 @@ test("the changed mark shows only away from the engine's default, for a stored v
   const strictMark = (page) => page.evaluate("Fixture.sections()[0]?.rows[2]?.mark ?? null");
   assert.equal(await onTab("sandbox", {}, strictMark), null);
   assert.equal(await onTab("sandbox", { strict: "on" }, strictMark), "changed");
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/sandbox/src/settings.rs", import.meta.url), "utf8");
   assert.match(engine, /pub enum LinuxSockets \{\s*#\[default\]\s*TcpOnly,/, "the mark's default is the engine's default");
   const source = readFileSync(new URL("../src/screens/settings/sandbox.tsx", import.meta.url), "utf8");
   assert.match(source, /LINUX_SOCKETS_DEFAULT: LinuxSockets = "tcp_only"/);

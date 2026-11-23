@@ -9,7 +9,7 @@ use super::new_project_publish::{
 use super::project_access::FULL_ACCESS_WARNING;
 use super::project_markdown::sanitize;
 use crate::project_setup::ResearchKind;
-use crate::sandbox::policy::AgentAccess;
+use kernel_sandbox::policy::AgentAccess;
 #[cfg(all(test, unix))]
 use ratatui::style::Modifier;
 use ratatui::style::Style;

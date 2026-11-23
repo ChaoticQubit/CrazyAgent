@@ -1558,10 +1558,9 @@ async fn an_unclassified_cause_is_kept_as_a_code_and_private_text_is_redacted() 
 /// settings change, and an unreadable policy reads as none.
 #[tokio::test]
 async fn a_running_turn_reads_the_saved_agent_policy_and_an_unreadable_one_as_none() {
-    use crate::sandbox::policy::{
-        AgentAccess, AgentPolicy, Narrowing, ToolchainChoice, narrowing, save,
-    };
-    use crate::sandbox::toolchains::Toolchain;
+    use crate::sandbox::policy_store::save;
+    use kernel_sandbox::policy::{AgentAccess, AgentPolicy, Narrowing, ToolchainChoice, narrowing};
+    use kernel_sandbox::toolchains::Toolchain;
     let case = Fixture::new(MasterBackend::Rcli, true).await;
     let read = || {
         case.command(MasterRuntimeCommand::Policy {
@@ -1587,7 +1586,7 @@ async fn a_running_turn_reads_the_saved_agent_policy_and_an_unreadable_one_as_no
         home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
-        network: crate::sandbox::policy::AgentNetwork::default(),
+        network: kernel_sandbox::policy::AgentNetwork::default(),
         ..Default::default()
     };
     let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
@@ -1625,7 +1624,7 @@ async fn a_running_turn_reads_the_saved_agent_policy_and_an_unreadable_one_as_no
 /// takes it off the list. A project id of its own keeps other tests' turns off this list.
 #[tokio::test]
 async fn a_headless_master_turn_is_on_the_hidden_folders_list_while_it_runs() {
-    use crate::sandbox::hidden_paths::{RunKind, runs_seeing};
+    use kernel_sandbox::hidden_paths::{RunKind, runs_seeing};
     let case = Fixture::new(MasterBackend::Rcli, true).await;
     case.register().await;
     let result = case
@@ -1645,7 +1644,7 @@ async fn a_headless_master_turn_is_on_the_hidden_folders_list_while_it_runs() {
     prepared.session.project_id = project.clone();
     let (hid, later) = (prepared.cwd.join("vault"), prepared.cwd.join("dump"));
     prepared.hidden_paths = vec![hid.clone()];
-    prepared.agent_policy.access = crate::sandbox::policy::AgentAccess::Sandboxed;
+    prepared.agent_policy.access = kernel_sandbox::policy::AgentAccess::Sandboxed;
     let listed = listed_master_turn(&prepared.session.project_id).unwrap();
     assert_eq!(
         runs_seeing(project.as_str(), std::slice::from_ref(&hid)),
@@ -1664,7 +1663,7 @@ async fn a_headless_master_turn_is_on_the_hidden_folders_list_while_it_runs() {
     );
     drop(listed);
     assert!(runs_seeing(project.as_str(), std::slice::from_ref(&later)).is_empty());
-    prepared.agent_policy.access = crate::sandbox::policy::AgentAccess::Full;
+    prepared.agent_policy.access = kernel_sandbox::policy::AgentAccess::Full;
     assert!(
         master_turn_hides(&prepared).is_empty(),
         "a turn that runs unconfined under Full access hides nothing (sec F3)"
@@ -1689,7 +1688,7 @@ async fn a_headless_master_turn_is_on_the_hidden_folders_list_while_it_runs() {
 #[test]
 fn an_uncertain_master_cleanup_keeps_the_turn_listed_after_it_returns() {
     use crate::harnesses::leftovers::{LEFT, SANDBOX_UNCHECKED};
-    use crate::sandbox::hidden_paths::{RunKind, runs_seeing};
+    use kernel_sandbox::hidden_paths::{RunKind, runs_seeing};
     let saved = [std::path::PathBuf::from("/tmp/sa-vid14-master-left/vault")];
     let ended = |cause: &str| Err(EngineError(cause.into()));
     for (project, result, kept) in [
@@ -2974,7 +2973,7 @@ async fn console_claude_master(
             worktree_lease: prepared.worktree_lease.clone(),
         },
         reported: Tokens::default(),
-        access: crate::sandbox::policy::AgentAccess::Sandboxed,
+        access: kernel_sandbox::policy::AgentAccess::Sandboxed,
         toolchains: Vec::new(),
     };
     (fixture, active, record, mailbox)

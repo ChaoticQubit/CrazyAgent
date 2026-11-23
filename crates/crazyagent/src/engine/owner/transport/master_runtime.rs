@@ -113,8 +113,8 @@ pub(super) struct MasterHostLaunch {
     pub(super) capture: File,
     pub(super) folder: super::master_host_launch::MasterRuntimeFolder,
     pub(super) tool_record: Option<std::path::PathBuf>,
-    pub(super) access: crate::sandbox::policy::AgentAccess,
-    pub(super) toolchains: Vec<crate::sandbox::toolchains::Toolchain>,
+    pub(super) access: kernel_sandbox::policy::AgentAccess,
+    pub(super) toolchains: Vec<kernel_sandbox::toolchains::Toolchain>,
 }
 
 pub(super) struct Capture {
@@ -136,8 +136,8 @@ struct ActiveMaster {
     capture_ref: RequestId,
     provenance: Provenance,
     reported: Tokens,
-    access: crate::sandbox::policy::AgentAccess,
-    toolchains: Vec<crate::sandbox::toolchains::Toolchain>,
+    access: kernel_sandbox::policy::AgentAccess,
+    toolchains: Vec<kernel_sandbox::toolchains::Toolchain>,
 }
 
 impl MasterHost {
@@ -411,9 +411,9 @@ impl OwnerRuntimeHandle {
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
-        access: crate::sandbox::policy::AgentAccess,
-        toolchains: &[crate::sandbox::toolchains::Toolchain],
-    ) -> Result<Option<crate::sandbox::policy::Narrowing>, EngineError> {
+        access: kernel_sandbox::policy::AgentAccess,
+        toolchains: &[kernel_sandbox::toolchains::Toolchain],
+    ) -> Result<Option<kernel_sandbox::policy::Narrowing>, EngineError> {
         let saved = match self
             .master_runtime_command(MasterRuntimeCommand::Policy {
                 host: self.identity(),
@@ -426,7 +426,7 @@ impl OwnerRuntimeHandle {
             MasterRuntimeResult::Policy(saved) => *saved,
             _ => return Err(failure("master_runtime_result")),
         };
-        Ok(crate::sandbox::policy::narrowing(
+        Ok(kernel_sandbox::policy::narrowing(
             saved.as_ref(),
             Some(prepared.repository.as_path()),
             Some(access),
@@ -819,7 +819,7 @@ impl OwnerRuntimeHandle {
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
-        listed: crate::sandbox::hidden_paths::HiddenRun,
+        listed: kernel_sandbox::hidden_paths::HiddenRun,
     ) -> Result<MasterTurnView, EngineError> {
         let harness = match prepared.session.selection.backend {
             MasterBackend::Codex => NativeHarness::Codex,
@@ -1473,9 +1473,9 @@ pub(super) fn account_failure(read: &AuthControl) -> Result<(), EngineError> {
 /// `master_sandbox_unavailable` when the list is full.
 fn listed_master_turn(
     project: &ProjectId,
-) -> Result<crate::sandbox::hidden_paths::HiddenRun, EngineError> {
-    crate::sandbox::hidden_paths::starting(
-        crate::sandbox::hidden_paths::RunKind::Master,
+) -> Result<kernel_sandbox::hidden_paths::HiddenRun, EngineError> {
+    kernel_sandbox::hidden_paths::starting(
+        kernel_sandbox::hidden_paths::RunKind::Master,
         project.as_str(),
     )
     .ok_or_else(|| failure("master_sandbox_unavailable"))
@@ -1486,7 +1486,7 @@ fn listed_master_turn(
 /// the turn runs unconfined and hides none (SA-VID14 r1 sec F3). Input: the prepared turn.
 /// Output: the folders.
 fn master_turn_hides(prepared: &PreparedMasterTurn) -> &[std::path::PathBuf] {
-    if prepared.agent_policy.access == crate::sandbox::policy::AgentAccess::Full {
+    if prepared.agent_policy.access == kernel_sandbox::policy::AgentAccess::Full {
         &[]
     } else {
         &prepared.hidden_paths
@@ -1498,7 +1498,7 @@ fn master_turn_hides(prepared: &PreparedMasterTurn) -> &[std::path::PathBuf] {
 /// still run, until the engine starts again (SA-VID14 r1, r2 F1); a native turn asks its
 /// host whether it settled instead (r2 F2). Inputs: the guard and the result.
 pub(super) fn keep_listed_if_uncertain<T>(
-    listed: crate::sandbox::hidden_paths::HiddenRun,
+    listed: kernel_sandbox::hidden_paths::HiddenRun,
     result: &Result<T, EngineError>,
 ) {
     if result.as_ref().is_err_and(|error| {
@@ -1603,7 +1603,7 @@ pub(super) fn reason_for_error(error: &EngineError) -> MasterReason {
         | "master_project_scope_conflict"
         | "master_bootstrap_scope_conflict" => MasterReason::ConnectionChanged,
         "master_bootstrap_uncertain" => MasterReason::WorktreeUncertain,
-        crate::sandbox::HELD_STOP_CAUSE => MasterReason::SandboxStopped,
+        kernel_sandbox::profile::consts::HELD_STOP_CAUSE => MasterReason::SandboxStopped,
         code if code.starts_with("repository_config_refused:") => {
             MasterReason::RepositoryConfigRefused
         }
@@ -2203,7 +2203,7 @@ mod tests {
     /// sandbox as its reason, never the runtime or Unknown.
     #[test]
     fn a_held_name_the_sandbox_could_not_put_back_names_the_sandbox() {
-        let cause = EngineError(crate::sandbox::HELD_STOP_CAUSE.into());
+        let cause = EngineError(kernel_sandbox::profile::consts::HELD_STOP_CAUSE.into());
         assert_eq!(reason_for_error(&cause), MasterReason::SandboxStopped);
     }
 

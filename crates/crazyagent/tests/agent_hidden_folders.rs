@@ -1,7 +1,7 @@
 #![cfg(target_os = "macos")]
 
 use crazyagent::sandbox::ProjectSandbox;
-use crazyagent::sandbox::hidden_paths;
+use crazyagent::sandbox::access_store::hidden;
 use kernel_sandbox::net::SandboxNetwork;
 use rusqlite::Connection;
 use std::fs;
@@ -47,8 +47,8 @@ fn case() -> Case {
 
 fn sandbox_with_hidden(case: &Case, hidden: &[PathBuf]) -> ProjectSandbox {
     let connection = Connection::open_in_memory().unwrap();
-    hidden_paths::save(&connection, "app", hidden).unwrap();
-    let loaded = hidden_paths::load(&connection, "app").unwrap();
+    hidden::save(&connection, "app", hidden).unwrap();
+    let loaded = hidden::load(&connection, "app").unwrap();
     assert_eq!(loaded, hidden);
     let mut sandbox = ProjectSandbox::new(
         &case.project,
@@ -328,7 +328,7 @@ fn with_the_folder_hidden_under_a_confined_worktree_the_agent_cannot_read_it() {
     git(&["worktree", "add", "-q", "worktrees/w"]);
     let worktree = worktree.unwrap_or_else(|| worktrees.join("w").canonicalize().unwrap());
     let connection = Connection::open_in_memory().unwrap();
-    hidden_paths::save(&connection, "app", std::slice::from_ref(&case.secret)).unwrap();
+    hidden::save(&connection, "app", std::slice::from_ref(&case.secret)).unwrap();
     let mut sandbox = ProjectSandbox::new(
         &case.project,
         &case.home,
@@ -338,7 +338,7 @@ fn with_the_folder_hidden_under_a_confined_worktree_the_agent_cannot_read_it() {
     .unwrap()
     .confine_to_worktree(&worktree)
     .unwrap();
-    for folder in hidden_paths::load(&connection, "app").unwrap() {
+    for folder in hidden::load(&connection, "app").unwrap() {
         sandbox = sandbox.hide(&folder).unwrap();
     }
     let notes = case.secret.join("notes.txt");

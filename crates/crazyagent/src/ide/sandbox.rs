@@ -1,10 +1,10 @@
 use crate::engine::EngineError;
-use crate::sandbox::policy::AgentFilesRule;
-use crate::sandbox::toolchains::{ToolHomes, Toolchains};
 use crate::sandbox::{ProjectSandbox, SANDBOX_EXEC, sbpl_overlong, seatbelt_pattern};
 use kernel_sandbox::net::SandboxNetwork;
 use kernel_sandbox::paths::any_case;
 use kernel_sandbox::paths::at_or_below;
+use kernel_sandbox::policy::AgentFilesRule;
+use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -64,7 +64,7 @@ pub fn qualified() -> bool {
 /// lock stay denied: the IDE stages on a private index
 /// the engine carries across ([`super::git::shim_text`], SECAUDIT-IDE-SERVER-INDEX). Network:
 /// listen on 127.0.0.1 at `port`, unix sockets in `tmp`, connect to an owner socket, and
-/// reach what `network` allows ([`crate::sandbox::policy::ide_network`]).
+/// reach what `network` allows ([`kernel_sandbox::policy::ide_network`]).
 /// On the open network it never binds or listens on `kept_ports`, the owner's local model
 /// ports. Inputs: the grants, the server port, the network, the ports kept and the agent
 /// folders rule. Output: the profile text, or `ide_sandbox_invalid` for an unsafe place.

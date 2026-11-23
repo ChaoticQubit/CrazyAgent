@@ -20,12 +20,6 @@ use crazyagent::protocol::ProjectId;
 use crazyagent::provider_retry::ProviderRetry;
 use crazyagent::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crazyagent::roadmap_status::Refresh;
-use crazyagent::sandbox::policy::{
-    AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles,
-    ToolCacheScope, ToolchainChoice,
-};
-use crazyagent::sandbox::shared_folders::{SharedAccess, SharedFolders, SharedScope};
-use crazyagent::sandbox::toolchains::Toolchain;
 use crazyagent::setup::RefusedTool;
 use crazyagent::team::agent_messages::{KEPT_CHOICES, MessageSettings, PAGE_CHOICES, ResultsShown};
 use crazyagent::team::master_limits::{ROUND_CHOICES, RUN_CHOICES_SECS};
@@ -35,8 +29,14 @@ use crazyagent::team::{
     DEPTH_CHOICES, IDLE_CHOICES_SECS, LIMIT_CHOICES_SECS, LandingMode, MasterIdleStop, MasterLands,
     NEW_FOLDER_FILES_CHOICES, ReuseIdle, SwitchMode, TeamAction,
 };
+use kernel_sandbox::policy::{
+    AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles,
+    ToolCacheScope, ToolchainChoice,
+};
 use kernel_sandbox::settings::SandboxSettings;
 use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
+use kernel_sandbox::shared_folders::{SharedAccess, SharedFolders, SharedScope};
+use kernel_sandbox::toolchains::Toolchain;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Map, Value, json};

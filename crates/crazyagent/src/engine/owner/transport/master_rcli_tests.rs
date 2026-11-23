@@ -255,7 +255,7 @@ fn real_exit_categories_never_qualify_a_provider_reply_or_authentication() {
 /// it could not take back an entry read as a held name, names the sandbox, not the runtime.
 #[test]
 fn an_rcli_master_the_sandbox_stopped_names_the_sandbox() {
-    let named = reason(crate::sandbox::HELD_STOP_CAUSE);
+    let named = reason(kernel_sandbox::profile::consts::HELD_STOP_CAUSE);
     assert_eq!(named, MasterReason::SandboxStopped);
 }
 

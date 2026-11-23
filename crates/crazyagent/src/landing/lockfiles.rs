@@ -5,7 +5,8 @@ use super::store::{self, Intent, Record};
 use super::{AfterRegeneration, AgentKind, ChangeSetId, ChangeState, diff};
 use crate::engine::EngineError;
 use crate::sandbox::ProjectSandbox;
-use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
+use kernel_sandbox::toolchains;
+use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
 use rusqlite::Connection;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
@@ -619,24 +620,31 @@ fn confined(
     scratch: &Scratch,
     settings: Option<&(PathBuf, PathBuf)>,
     uv_clash: bool,
-) -> Result<(ProjectSandbox, crate::sandbox::hidden_paths::HiddenRun), &'static str> {
+) -> Result<(ProjectSandbox, kernel_sandbox::hidden_paths::HiddenRun), &'static str> {
     let kept = match settings {
         Some((global, project)) => crate::sandbox::settings_owner_ports(global, project)?,
         None => Vec::new(),
     };
     let project = record.project.as_str();
-    let policy = crate::sandbox::policy::load(db, project).map_err(|_| "agent_access_unread")?;
-    let listed = crate::sandbox::hidden_paths::starting(
-        crate::sandbox::hidden_paths::RunKind::Lockfiles,
+    let policy =
+        crate::sandbox::policy_store::load(db, project).map_err(|_| "agent_access_unread")?;
+    let listed = kernel_sandbox::hidden_paths::starting(
+        kernel_sandbox::hidden_paths::RunKind::Lockfiles,
         project,
     )
     .ok_or("hidden_paths_unread")?;
-    let hidden =
-        crate::sandbox::hidden_paths::load(db, project).map_err(|_| "hidden_paths_unread")?;
+    let hidden = crate::sandbox::access_store::hidden::load(db, project)
+        .map_err(|_| "hidden_paths_unread")?;
     listed.hid(&hidden);
     let homes = ToolHomes::owner().map_err(|_| "tool_homes_unread")?;
-    let tmp = toolchains::make_tmp(&scratch.home).map_err(|_| "tmp_unmade")?;
-    toolchains::prepare_cargo_home(&scratch.home, &homes).map_err(|_| "cargo_home_unmade")?;
+    let tmp = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &scratch.home)
+        .map_err(|_| "tmp_unmade")?;
+    kernel_sandbox::toolchains::prepare_cargo_home(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
+        &scratch.home,
+        &homes,
+    )
+    .map_err(|_| "cargo_home_unmade")?;
     let mut sandbox = ProjectSandbox::new(
         root,
         &scratch.home,
@@ -654,7 +662,8 @@ fn confined(
     #[cfg(target_os = "macos")]
     if uv_clash && let Some(uv) = sandbox.tool_program("uv") {
         let project = root.to_str().ok_or("tool_cache_project_name")?;
-        let cache = crate::sandbox::tool_cache::prepare(
+        let cache = kernel_sandbox::tool_cache::prepare(
+            &crate::sandbox::TOOL_CACHE_HOOKS,
             &scratch.folder,
             project,
             REGENERATE_CACHE,
@@ -887,7 +896,7 @@ impl<'a> Scratch<'a> {
         }
         let _ = std::fs::remove_dir_all(&self.worktree);
         let _ = std::fs::remove_dir_all(&self.admin);
-        let _ = toolchains::remove_tmp(&self.home);
+        let _ = toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.home);
         let _ = std::fs::remove_dir_all(&self.folder);
         if let Some(parent) = self.folder.parent() {
             let _ = std::fs::remove_dir(parent);

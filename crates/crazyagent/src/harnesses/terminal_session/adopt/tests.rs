@@ -447,7 +447,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     let zero = text.replace("\"proxy\":49152", "\"proxy\":0");
     assert_eq!(PaneRecord::decode(&zero), None);
     let started = PaneRecord {
-        access: Some(crate::sandbox::policy::AgentAccess::OwnBranch),
+        access: Some(kernel_sandbox::policy::AgentAccess::OwnBranch),
         ..record.clone()
     };
     let leveled = started.encode().unwrap();
@@ -456,8 +456,8 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     assert!(!text.contains("toolchains"), "{text}");
     let granted = PaneRecord {
         toolchains: Some(vec![
-            crate::sandbox::toolchains::Toolchain::Rust,
-            crate::sandbox::toolchains::Toolchain::Node,
+            kernel_sandbox::toolchains::Toolchain::Rust,
+            kernel_sandbox::toolchains::Toolchain::Node,
         ]),
         ..record.clone()
     };
@@ -473,7 +473,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     );
     assert_eq!(PaneRecord::decode(&too_many), None);
     let narrowed = PaneRecord {
-        network: Some(crate::sandbox::policy::AgentNetwork::None),
+        network: Some(kernel_sandbox::policy::AgentNetwork::None),
         ..record.clone()
     };
     let networked = narrowed.encode().unwrap();
@@ -481,7 +481,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     assert_eq!(PaneRecord::decode(&networked), Some(narrowed));
     assert!(!text.contains("hidden"), "{text}");
     let secrets =
-        crate::sandbox::hidden_paths::digest(std::path::Path::new("/private/tmp/project/secrets"));
+        kernel_sandbox::hidden_paths::digest(std::path::Path::new("/private/tmp/project/secrets"));
     let hid = PaneRecord {
         hidden: Some(vec![secrets.clone()]),
         ..record.clone()
@@ -501,7 +501,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     let nine = PaneRecord {
         hidden: Some(vec![
             secrets.clone();
-            crate::sandbox::hidden_paths::HIDDEN_PATHS_MAX + 1
+            kernel_sandbox::hidden_paths::HIDDEN_PATHS_MAX + 1
         ]),
         ..record.clone()
     };

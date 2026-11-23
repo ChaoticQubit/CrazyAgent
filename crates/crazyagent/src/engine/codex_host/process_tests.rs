@@ -75,7 +75,10 @@ async fn codex_host_process_the_sandbox_stopped_ends_with_the_sandbox_cause() {
     })
     .await
     .unwrap();
-    assert_eq!(ended.as_deref(), Some(crate::sandbox::HELD_STOP_CAUSE));
+    assert_eq!(
+        ended.as_deref(),
+        Some(kernel_sandbox::profile::consts::HELD_STOP_CAUSE)
+    );
     let closed = process.close().await.map(|status| status.code());
     assert_eq!(closed.map_err(|error| error.0), Ok(Some(122)));
     assert_eq!(process.operation_result().map_err(|error| error.0), Ok(()));

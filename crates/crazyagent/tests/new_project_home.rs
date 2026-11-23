@@ -833,7 +833,7 @@ async fn the_demo_lands_once_as_a_seeded_project_with_the_engines_own_question()
     let policy = owner.project_agent_policy(demo.clone()).await.unwrap();
     assert_eq!(
         policy.access,
-        crazyagent::sandbox::policy::AgentAccess::Sandboxed
+        kernel_sandbox::policy::AgentAccess::Sandboxed
     );
     assert!(
         owner

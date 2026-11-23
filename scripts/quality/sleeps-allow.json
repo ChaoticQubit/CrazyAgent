@@ -261,7 +261,6 @@
   "crates/crazyagent/src/research/runner/warden_tests.rs": 1,
   "crates/crazyagent/src/research/service.rs": 1,
   "crates/crazyagent/src/sandbox/linux/bridge.rs": 1,
-  "crates/crazyagent/src/sandbox/model_proxy/tests.rs": 3,
   "crates/crazyagent/src/sandbox/tool_cache/tests.rs": 1,
   "crates/crazyagent/src/sandbox/warden/fixture.rs": 5,
   "crates/crazyagent/src/sandbox/warden/tests.rs": 7,
@@ -399,6 +398,7 @@
   "crates/kernel/processes/src/terminal/tmux/servers/refused_tests.rs": 1,
   "crates/kernel/processes/src/terminal/tmux/tests.rs": 23,
   "crates/kernel/processes/src/update/tests.rs": 1,
+  "crates/kernel/sandbox/src/model_proxy/tests.rs": 3,
   "scripts/rcli/host.test.ts": 1,
   "scripts/trial/report.test.mjs": 2,
   "scripts/trial/run.test.mjs": 3

@@ -174,11 +174,13 @@ pub(crate) fn update(
             },
         ));
     };
-    if let Err(code) = crate::sandbox::hidden_paths::none_tracked(repo, hidden) {
+    if let Err(code) =
+        kernel_sandbox::hidden_paths::none_tracked(&crate::sandbox::ACCESS_HOOKS, repo, hidden)
+    {
         return Ok(GraphEnding::Failed(code));
     }
     let kept = kept_paths(repo, &kept_out);
-    if kept.len() > crate::sandbox::KEPT_OUT_MAX
+    if kept.len() > kernel_sandbox::profile::consts::KEPT_OUT_MAX
         || !kept.iter().all(|path| ProjectSandbox::keepable(path))
     {
         return Ok(GraphEnding::Failed(GRAPH_KEEP_OUT_REFUSED));

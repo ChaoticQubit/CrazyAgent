@@ -12,11 +12,13 @@ use crate::launch_context::{AgentContext, EngineServer, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 use crate::sandbox::InstalledSandbox;
-#[cfg(not(windows))]
-use crate::sandbox::toolchains::{self, ToolHomes};
 use crate::usage::capture::Tokens;
 #[cfg(unix)]
 use kernel_processes::group::Ending;
+#[cfg(not(windows))]
+use kernel_sandbox::toolchains;
+#[cfg(not(windows))]
+use kernel_sandbox::toolchains::ToolHomes;
 use kernel_security::secret::SecretString;
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, Mode, OFlags};
@@ -948,7 +950,7 @@ fn confined<'a>(
     }
     let mut owned = launch_base(home, tool_home, request.tools)?;
     let proxy = installed.and_then(Installed::model_proxy);
-    let proxy = proxy.map(crate::sandbox::model_proxy::variables);
+    let proxy = proxy.map(kernel_sandbox::model_proxy::variables);
     owned.extend(
         proxy
             .into_iter()
@@ -1093,9 +1095,10 @@ fn launch_base(
 ) -> Result<Vec<(&'static str, OsString)>, LaunchError> {
     let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
     let path = toolchains::with_agent_git(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
         tool_home,
         if tools {
-            toolchains::agent_path(&homes, TOOLS_ON_PATH)
+            kernel_sandbox::toolchains::agent_path(&homes, TOOLS_ON_PATH)
         } else {
             TOOLS_OFF_PATH.to_owned()
         },
@@ -1109,7 +1112,7 @@ fn launch_base(
         ("LC_ALL", OsString::from("C")),
     ];
     if tools {
-        base.extend(toolchains::agent_env(tool_home, &homes));
+        base.extend(kernel_sandbox::toolchains::agent_env(tool_home, &homes));
     }
     assert_eq!(base[0].0, "HOME");
     assert_eq!(base[2].0, "PATH");

@@ -10,7 +10,8 @@ use super::records::{self, Reader};
 use crate::coord::settings::{HarnessKind, TerminalDisplay};
 use crate::harnesses::accounts::Handover;
 use crate::launch_context::{Installed, NativeTeam};
-use crate::sandbox::toolchains::{self, ToolHomes};
+use kernel_sandbox::toolchains;
+use kernel_sandbox::toolchains::ToolHomes;
 use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
 use std::io::{Read, Write};
@@ -393,9 +394,10 @@ pub fn command_with(
         (
             "PATH".to_owned(),
             toolchains::with_agent_git(
+                &crate::sandbox::TOOLCHAIN_HOOKS,
                 tool_home,
                 if request.tools {
-                    toolchains::agent_path(&homes, TOOLS_ON_PATH)
+                    kernel_sandbox::toolchains::agent_path(&homes, TOOLS_ON_PATH)
                 } else {
                     TOOLS_OFF_PATH.to_owned()
                 },
@@ -533,7 +535,7 @@ pub fn command_with(
             Transcript::Unavailable
         }
     };
-    for (name, value) in toolchains::agent_env(tool_home, &homes) {
+    for (name, value) in kernel_sandbox::toolchains::agent_env(tool_home, &homes) {
         env.push((name.to_owned(), text(Path::new(&value))?));
     }
     if let Some(tmp) = toolchains::existing_tmp(tool_home) {
@@ -546,7 +548,7 @@ pub fn command_with(
     }
     if let Some(port) = installed.and_then(Installed::model_proxy) {
         env.extend(
-            crate::sandbox::model_proxy::variables(port)
+            kernel_sandbox::model_proxy::variables(port)
                 .map(|(name, value)| (name.to_owned(), value)),
         );
     }
@@ -630,7 +632,7 @@ pub(crate) fn catalog_settings(harness: &str) -> Result<TerminalSettings, Launch
 /// process's, with a listed harness's home block variables and account hand-over after them
 /// as its piped launch has them, the hand-over's placeholder the one exception to the guard.
 /// Inputs: the variables, the home block's and the hand-over. Output: the variables with
-/// [`crate::sandbox::AGENT_GIT_ENV`] appended, or `launch_environment_refused`.
+/// [`kernel_sandbox::profile::consts::AGENT_GIT_ENV`] appended, or `launch_environment_refused`.
 fn agent_env(
     env: &[(String, String)],
     listed: &[(OsString, OsString)],

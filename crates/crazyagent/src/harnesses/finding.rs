@@ -73,7 +73,7 @@ pub(crate) const AGENT_TABLES: [(&str, Names, &str); 4] = [
 /// the agents' temp grant gives them; none where agents get no such grant. Output: the
 /// absolute folders, at most two.
 fn owner_temp() -> Vec<PathBuf> {
-    match crate::sandbox::grants::owner_temp_folder() {
+    match kernel_sandbox::grants::owner_temp_folder() {
         Ok(real) => vec![std::env::temp_dir(), real],
         Err(_) => Vec::new(),
     }
@@ -93,7 +93,7 @@ pub(crate) enum Names {
 /// The folders agents can write, where no harness file may come from: the engine folder
 /// outside its `setup` folder ([`kernel_processes::finding::in_engine_data`]) with every agent home, the
 /// agents' temp folders, the engine's own temp folder, which the agents' temp grant gives
-/// them ([`crate::sandbox::grants::owner_temp_folder`]), any `.crazyagent` folder with its
+/// them ([`kernel_sandbox::grants::owner_temp_folder`]), any `.crazyagent` folder with its
 /// agent worktrees, and each project folder, declared repository and agent worktree the
 /// engine database names, each kept as stored and as its real path. A folder holding the
 /// owner's home is left out.

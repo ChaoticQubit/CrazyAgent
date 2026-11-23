@@ -1,4 +1,11 @@
 use crate::error::SandboxError;
+use crate::ports::BRIDGE_PORT_MIN;
+
+/// The Linux helper's exit code when its call supervisor could not take back an entry a
+/// case-folding folder read as a held name, and so stopped the run. The supervisor crate
+/// keeps its own copy, tied to this one in the Linux sandbox; 125 is its other stops, and
+/// 126 and up are the shell's and the signals'.
+pub const HELD_NOT_PUT_BACK_EXIT: i32 = 122;
 
 /// Why `InstalledSandbox::install` refuses a Linux launch under `LinuxStrict::On`: it
 /// does not hold the full Linux sandbox (`linux_holds_fully`).
@@ -80,3 +87,13 @@ pub const LINUX_DNS_ANY_HOST_LINE: &str =
 /// the process or signals line it explains, with the deb package that adds the profile
 /// allowing it (DEC-179 SBX-3, addendum 7).
 pub const LINUX_APPARMOR_LINE: &str = "On this Linux, AppArmor keeps agents from getting a process space of their own. CrazyAgent's .deb package adds the AppArmor profile that allows it: install it, or if it is installed, run sudo dpkg-reconfigure crazy-agent.";
+
+/// What the owner is told when a port below [`BRIDGE_PORT_MIN`] keeps agents on this
+/// computer's network on a Linux that could give them one of their own: on the project's
+/// Agent access page and in the agent's messages at its launch. Input: the port. Output:
+/// the sentences, the port named.
+pub fn linux_unbridged_line(port: u16) -> String {
+    format!(
+        "On this Linux, port {port} is below {BRIDGE_PORT_MIN}, so agents that may reach it share this computer's network: every port they may reach on this computer is open to them on every host. CrazyAgent keeps agents to this computer only for ports {BRIDGE_PORT_MIN} and up."
+    )
+}

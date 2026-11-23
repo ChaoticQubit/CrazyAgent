@@ -71,10 +71,10 @@ pub(super) fn refuse_outside_merges(
     }
     known.extend(worker_tips(db, workspace, shared)?);
     if workspace.agent.kind == AgentKind::Master
-        && crate::sandbox::policy::load(db, workspace.project.as_str())
+        && crate::sandbox::policy_store::load(db, workspace.project.as_str())
             .map_err(|_| failure("changes_unavailable"))?
             .access
-            == crate::sandbox::policy::AgentAccess::Full
+            == kernel_sandbox::policy::AgentAccess::Full
     {
         for head in store::open_heads(db, &workspace.project)? {
             if shared.commit_of(&head)?.as_deref() == Some(head.as_str()) {

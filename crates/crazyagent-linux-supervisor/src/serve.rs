@@ -28,7 +28,7 @@ pub const STOPPED_EXIT: i32 = 125;
 /// The exit code when an entry read as `.git` or a held name could not be taken back, so
 /// the engine can say why the run stopped. It is not [`STOPPED_EXIT`], which a failed
 /// listener and a worker that ends also use; the engine keeps the same value as
-/// `sandbox::HELD_NOT_PUT_BACK_EXIT` (rv-sec3 F1).
+/// `kernel_sandbox::lines::HELD_NOT_PUT_BACK_EXIT`.
 pub const NOT_PUT_BACK_EXIT: i32 = 122;
 const PATH_BYTES_MAX: usize = 4096;
 const LINK_HOPS_MAX: usize = 40;

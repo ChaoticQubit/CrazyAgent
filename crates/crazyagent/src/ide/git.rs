@@ -132,7 +132,7 @@ const GLOBAL_TEMPORARY: &str = "gitconfig.tmp";
 /// of these ([`super::env::ServerGit`]). Input: the config's absolute path. Output: the variables.
 pub fn global_env(config: &Path) -> [(OsString, OsString); 2] {
     assert!(config.is_absolute());
-    let (name, value) = crate::sandbox::AGENT_GIT_ENV[0];
+    let (name, value) = kernel_sandbox::profile::consts::AGENT_GIT_ENV[0];
     assert_eq!((name, value), ("GIT_CONFIG_NOSYSTEM", "1"));
     [
         (

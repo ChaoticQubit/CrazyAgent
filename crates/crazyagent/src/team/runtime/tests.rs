@@ -484,12 +484,12 @@ fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_st
     let fixture = Fixture::new(1);
     let host = fixture.host();
     let level = |access| {
-        crate::sandbox::policy::save(
+        crate::sandbox::policy_store::save(
             &fixture.connection,
             PROJECT,
-            &crate::sandbox::policy::AgentPolicy {
+            &kernel_sandbox::policy::AgentPolicy {
                 access,
-                network: crate::sandbox::policy::AgentNetwork::default(),
+                network: kernel_sandbox::policy::AgentNetwork::default(),
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
                 tool_cache: Default::default(),
@@ -586,15 +586,15 @@ fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_st
 #[cfg(target_os = "macos")]
 #[test]
 fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_is_stopped() {
-    use crate::sandbox::toolchains::Toolchain;
+    use kernel_sandbox::toolchains::Toolchain;
     let fixture = Fixture::new(1);
     let host = fixture.host();
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &fixture.connection,
         PROJECT,
-        &crate::sandbox::policy::AgentPolicy {
+        &kernel_sandbox::policy::AgentPolicy {
             access: AgentAccess::Sandboxed,
-            toolchains: vec![crate::sandbox::policy::ToolchainChoice {
+            toolchains: vec![kernel_sandbox::policy::ToolchainChoice {
                 toolchain: Toolchain::Rust,
                 allowed: false,
             }],
@@ -603,7 +603,7 @@ fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_
             home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
-            network: crate::sandbox::policy::AgentNetwork::default(),
+            network: kernel_sandbox::policy::AgentNetwork::default(),
             ..Default::default()
         },
     )
@@ -684,11 +684,11 @@ fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_
 fn an_unreadable_agent_access_offers_no_master_landing_and_says_why() {
     use crate::team::MasterLands;
     let fixture = Fixture::new(1);
-    let full = crate::sandbox::policy::AgentPolicy {
+    let full = kernel_sandbox::policy::AgentPolicy {
         access: AgentAccess::Full,
-        ..crate::sandbox::policy::AgentPolicy::default()
+        ..kernel_sandbox::policy::AgentPolicy::default()
     };
-    crate::sandbox::policy::save(&fixture.connection, PROJECT, &full).unwrap();
+    crate::sandbox::policy_store::save(&fixture.connection, PROJECT, &full).unwrap();
     let project = ProjectId::new(PROJECT).unwrap();
     crate::team::set_master_lands(&fixture.connection, &project, MasterLands::Merges).unwrap();
     let status = fixture.status();
@@ -710,7 +710,7 @@ fn an_unreadable_agent_access_offers_no_master_landing_and_says_why() {
         "an unreadable body offers nothing and says so"
     );
     assert!(crate::team::master_lands(&fixture.connection, &project).is_err());
-    crate::sandbox::policy::save(&fixture.connection, PROJECT, &full).unwrap();
+    crate::sandbox::policy_store::save(&fixture.connection, PROJECT, &full).unwrap();
     assert!(!fixture.status().access_unreadable);
 }
 
@@ -722,10 +722,10 @@ fn an_unreadable_agent_access_offers_no_master_landing_and_says_why() {
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_stopped_for_an_unreadable_or_no_longer_allowed_toolchain_is_told_why() {
-    use crate::sandbox::toolchains::Toolchain;
+    use kernel_sandbox::toolchains::Toolchain;
     let fixture = Fixture::new(1);
     let host = fixture.host();
-    let sandboxed = crate::sandbox::policy::AgentPolicy {
+    let sandboxed = kernel_sandbox::policy::AgentPolicy {
         access: AgentAccess::Sandboxed,
         toolchains: Vec::new(),
         ide_git_hooks: false,
@@ -733,10 +733,10 @@ fn an_agent_stopped_for_an_unreadable_or_no_longer_allowed_toolchain_is_told_why
         home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
-        network: crate::sandbox::policy::AgentNetwork::default(),
+        network: kernel_sandbox::policy::AgentNetwork::default(),
         ..Default::default()
     };
-    crate::sandbox::policy::save(&fixture.connection, PROJECT, &sandboxed).unwrap();
+    crate::sandbox::policy_store::save(&fixture.connection, PROJECT, &sandboxed).unwrap();
     fixture
         .connection
         .execute(
@@ -763,7 +763,7 @@ fn an_agent_stopped_for_an_unreadable_or_no_longer_allowed_toolchain_is_told_why
     );
     assert!(team.shutdown().unwrap().is_empty());
 
-    crate::sandbox::policy::save(&fixture.connection, PROJECT, &sandboxed).unwrap();
+    crate::sandbox::policy_store::save(&fixture.connection, PROJECT, &sandboxed).unwrap();
     assert!(
         !Toolchain::Rust.used_by(&fixture.base.join("project")),
         "the project has no Cargo.toml"
@@ -3449,7 +3449,7 @@ fn a_tools_on_launch_whose_settings_do_not_read_is_refused() {
 #[cfg(target_os = "macos")]
 #[test]
 fn the_master_s_own_git_is_the_free_copy_only_at_full_access() {
-    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    use kernel_sandbox::policy::{AgentAccess, AgentPolicy};
     for (access, flag) in [
         (AgentAccess::Full, "free=1"),
         (AgentAccess::Sandboxed, "free=0"),
@@ -3461,7 +3461,7 @@ fn the_master_s_own_git_is_the_free_copy_only_at_full_access() {
         let codex = bin.join("codex");
         std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
         std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
-        crate::sandbox::policy::save(
+        crate::sandbox::policy_store::save(
             &fixture.connection,
             PROJECT,
             &AgentPolicy {
@@ -3505,9 +3505,9 @@ fn the_master_s_own_git_is_the_free_copy_only_at_full_access() {
             )
             .unwrap();
         let home = agent_home(&runtime.state, 1);
-        let scratch = crate::sandbox::toolchains::existing_tmp(&home).unwrap();
+        let scratch = kernel_sandbox::toolchains::existing_tmp(&home).unwrap();
         let script = std::fs::read_to_string(scratch.join("bin").join("git")).unwrap();
-        let _ = crate::sandbox::toolchains::remove_tmp(&home);
+        let _ = kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home);
         assert!(
             script.lines().any(|line| line == flag),
             "the master's git at {access:?} lacks {flag}"
@@ -3568,9 +3568,9 @@ fn a_sub_agent_s_own_git_merges_main_only_while_catch_up_with_main_is_on() {
             )
             .unwrap();
         let home = agent_home(&runtime.state, 1);
-        let scratch = crate::sandbox::toolchains::existing_tmp(&home).unwrap();
+        let scratch = kernel_sandbox::toolchains::existing_tmp(&home).unwrap();
         let script = std::fs::read_to_string(scratch.join("bin").join("git")).unwrap();
-        let _ = crate::sandbox::toolchains::remove_tmp(&home);
+        let _ = kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home);
         assert!(
             script.lines().any(|line| line == flag),
             "the sub-agent's git with {value:?} lacks {flag}"
@@ -3602,13 +3602,13 @@ fn stand_in_runtime(fixture: &Fixture) -> TeamRuntime {
 /// Saves the project's agent access in the fixture's store. Inputs: the fixture and the
 /// access.
 #[cfg(target_os = "macos")]
-fn save_access(fixture: &Fixture, access: crate::sandbox::policy::AgentAccess) {
-    crate::sandbox::policy::save(
+fn save_access(fixture: &Fixture, access: kernel_sandbox::policy::AgentAccess) {
+    crate::sandbox::policy_store::save(
         &fixture.connection,
         PROJECT,
-        &crate::sandbox::policy::AgentPolicy {
+        &kernel_sandbox::policy::AgentPolicy {
             access,
-            ..crate::sandbox::policy::AgentPolicy::default()
+            ..kernel_sandbox::policy::AgentPolicy::default()
         },
     )
     .unwrap();
@@ -3675,7 +3675,7 @@ fn prepared_git(runtime: &TeamRuntime, fixture: &Fixture, id: i64, role: AgentRo
     }
     spawn_ledger::settle(&runtime.connection, &runtime.root, id, false);
     let home = agent_home(&runtime.state, id);
-    let scratch = crate::sandbox::toolchains::existing_tmp(&home).unwrap();
+    let scratch = kernel_sandbox::toolchains::existing_tmp(&home).unwrap();
     std::fs::read_to_string(scratch.join("bin").join("git"))
         .unwrap()
         .lines()
@@ -3689,7 +3689,7 @@ fn prepared_git(runtime: &TeamRuntime, fixture: &Fixture, id: i64, role: AgentRo
 #[cfg(target_os = "macos")]
 #[test]
 fn a_lead_and_a_worker_at_full_access_never_get_the_free_copy_of_their_git() {
-    use crate::sandbox::policy::AgentAccess;
+    use kernel_sandbox::policy::AgentAccess;
     let fixture = Fixture::new(1);
     save_access(&fixture, AgentAccess::Full);
     let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting);
@@ -3704,7 +3704,10 @@ fn a_lead_and_a_worker_at_full_access_never_get_the_free_copy_of_their_git() {
     let runtime = stand_in_runtime(&fixture);
     for (id, copy) in [(lead, "lead=1"), (worker, "lead=0")] {
         let script = prepared_git(&runtime, &fixture, id, AgentRole::Sub);
-        let _ = crate::sandbox::toolchains::remove_tmp(&agent_home(&runtime.state, id));
+        let _ = kernel_sandbox::toolchains::remove_tmp(
+            &crate::sandbox::TOOLCHAIN_HOOKS,
+            &agent_home(&runtime.state, id),
+        );
         for flag in ["free=0", copy] {
             assert!(
                 script.iter().any(|line| line == flag),
@@ -3721,7 +3724,7 @@ fn a_lead_and_a_worker_at_full_access_never_get_the_free_copy_of_their_git() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_master_prepared_again_after_access_drops_below_full_gets_the_worker_copy_back() {
-    use crate::sandbox::policy::AgentAccess;
+    use kernel_sandbox::policy::AgentAccess;
     let fixture = Fixture::new(1);
     let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Starting);
     let runtime = stand_in_runtime(&fixture);
@@ -3736,7 +3739,10 @@ fn a_master_prepared_again_after_access_drops_below_full_gets_the_worker_copy_ba
         let script = prepared_git(&runtime, &fixture, master, AgentRole::Master);
         seen.push((access, script.iter().any(|line| line == "free=1")));
     }
-    let _ = crate::sandbox::toolchains::remove_tmp(&agent_home(&runtime.state, master));
+    let _ = kernel_sandbox::toolchains::remove_tmp(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
+        &agent_home(&runtime.state, master),
+    );
     assert_eq!(
         seen,
         [
@@ -12523,12 +12529,12 @@ fn a_held_task_that_ends_posts_its_change_set_with_its_background_work_and_no_st
 fn a_held_own_branch_task_posts_the_commit_its_agent_made() {
     let fixture = Fixture::new(1);
     choose_background(&fixture, crate::team::BackgroundAtEnd::Wait);
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &fixture.connection,
         PROJECT,
-        &crate::sandbox::policy::AgentPolicy {
-            access: crate::sandbox::policy::AgentAccess::OwnBranch,
-            network: crate::sandbox::policy::AgentNetwork::default(),
+        &kernel_sandbox::policy::AgentPolicy {
+            access: kernel_sandbox::policy::AgentAccess::OwnBranch,
+            network: kernel_sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
@@ -15285,7 +15291,7 @@ fn built() -> i32 {
 /// the project, all output to /dev/null, and records only each exit code. Input: the
 /// level. Output: the run, once the script has finished.
 #[cfg(target_os = "macos")]
-fn agent_at_level(access: crate::sandbox::policy::AgentAccess) -> LevelRun {
+fn agent_at_level(access: kernel_sandbox::policy::AgentAccess) -> LevelRun {
     agent_at_level_running(access, &[])
 }
 
@@ -15295,7 +15301,7 @@ fn agent_at_level(access: crate::sandbox::policy::AgentAccess) -> LevelRun {
 /// finished.
 #[cfg(target_os = "macos")]
 fn agent_at_level_running(
-    access: crate::sandbox::policy::AgentAccess,
+    access: kernel_sandbox::policy::AgentAccess,
     extra: &[String],
 ) -> LevelRun {
     let mut fixture = Fixture::new(1);
@@ -15333,12 +15339,12 @@ fn agent_at_level_running(
         let done = level_git(&project, &home, arguments);
         assert!(done.status.success(), "{done:?}");
     }
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &fixture.connection,
         PROJECT,
-        &crate::sandbox::policy::AgentPolicy {
+        &kernel_sandbox::policy::AgentPolicy {
             access,
-            network: crate::sandbox::policy::AgentNetwork::default(),
+            network: kernel_sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
@@ -15555,17 +15561,17 @@ fn requeued_run(
 #[cfg(target_os = "macos")]
 #[test]
 fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined() {
-    let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::Full);
+    let mut run = agent_at_level(kernel_sandbox::policy::AgentAccess::Full);
     assert_eq!(run.code("outside"), 0, "{:?}", run.codes);
     let planted = run.fixture.base.join("outside").join("planted");
     std::fs::remove_file(&planted).unwrap();
     std::fs::remove_file(run.worktree.join("codes.txt")).unwrap();
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &run.fixture.connection,
         PROJECT,
-        &crate::sandbox::policy::AgentPolicy {
-            access: crate::sandbox::policy::AgentAccess::OwnBranch,
-            network: crate::sandbox::policy::AgentNetwork::default(),
+        &kernel_sandbox::policy::AgentPolicy {
+            access: kernel_sandbox::policy::AgentAccess::OwnBranch,
+            network: kernel_sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
@@ -15617,15 +15623,15 @@ fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined()
 #[cfg(target_os = "macos")]
 #[test]
 fn turning_a_toolchain_off_stops_the_agent_running_with_it_and_its_next_start_goes_without_it() {
-    let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::Sandboxed);
+    let mut run = agent_at_level(kernel_sandbox::policy::AgentAccess::Sandboxed);
     assert_eq!(run.code("build"), 0, "{:?}", run.codes);
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &run.fixture.connection,
         PROJECT,
-        &crate::sandbox::policy::AgentPolicy {
-            access: crate::sandbox::policy::AgentAccess::Sandboxed,
-            toolchains: vec![crate::sandbox::policy::ToolchainChoice {
-                toolchain: crate::sandbox::toolchains::Toolchain::Rust,
+        &kernel_sandbox::policy::AgentPolicy {
+            access: kernel_sandbox::policy::AgentAccess::Sandboxed,
+            toolchains: vec![kernel_sandbox::policy::ToolchainChoice {
+                toolchain: kernel_sandbox::toolchains::Toolchain::Rust,
                 allowed: false,
             }],
             ide_git_hooks: false,
@@ -15633,7 +15639,7 @@ fn turning_a_toolchain_off_stops_the_agent_running_with_it_and_its_next_start_go
             home_caches: Default::default(),
             ide_agent_files: Default::default(),
             shared_folders: Default::default(),
-            network: crate::sandbox::policy::AgentNetwork::default(),
+            network: kernel_sandbox::policy::AgentNetwork::default(),
             ..Default::default()
         },
     )
@@ -15674,14 +15680,14 @@ fn turning_a_toolchain_off_stops_the_agent_running_with_it_and_its_next_start_go
 #[cfg(target_os = "macos")]
 #[test]
 fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_clone() {
-    let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::OwnBranch);
+    let mut run = agent_at_level(kernel_sandbox::policy::AgentAccess::OwnBranch);
     assert_eq!(run.code("commit"), 0, "{:?}", run.codes);
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &run.fixture.connection,
         PROJECT,
-        &crate::sandbox::policy::AgentPolicy {
-            access: crate::sandbox::policy::AgentAccess::Sandboxed,
-            network: crate::sandbox::policy::AgentNetwork::default(),
+        &kernel_sandbox::policy::AgentPolicy {
+            access: kernel_sandbox::policy::AgentAccess::Sandboxed,
+            network: kernel_sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
@@ -15811,7 +15817,7 @@ fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_cl
 #[cfg(target_os = "macos")]
 #[test]
 fn a_task_held_for_an_own_branch_agent_goes_to_the_next_agent_once_the_project_is_sandboxed() {
-    let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::OwnBranch);
+    let mut run = agent_at_level(kernel_sandbox::policy::AgentAccess::OwnBranch);
     assert_eq!(run.code("commit"), 0, "{:?}", run.codes);
     let member = run.member;
     let project = run.fixture.setup.project_id.clone();
@@ -15828,12 +15834,12 @@ fn a_task_held_for_an_own_branch_agent_goes_to_the_next_agent_once_the_project_i
         });
     let (task, _) = task_and_agent(&run.fixture, "Write page.md");
     assert_eq!(pinned_to(&run.fixture, task), Some(member));
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &run.fixture.connection,
         PROJECT,
-        &crate::sandbox::policy::AgentPolicy {
-            access: crate::sandbox::policy::AgentAccess::Sandboxed,
-            network: crate::sandbox::policy::AgentNetwork::default(),
+        &kernel_sandbox::policy::AgentPolicy {
+            access: kernel_sandbox::policy::AgentAccess::Sandboxed,
+            network: kernel_sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
             ide_git_hooks: false,
             tool_cache: Default::default(),
@@ -15927,7 +15933,7 @@ fn assert_full_access(start: Result<LaunchRequest, String>) {
     } else {
         let refused = start.unwrap_err();
         assert!(
-            refused.starts_with(crate::sandbox::FULL_ACCESS_NEEDS_MACOS),
+            refused.starts_with(kernel_sandbox::profile::consts::FULL_ACCESS_NEEDS_MACOS),
             "{refused}"
         );
     }
@@ -15951,7 +15957,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         full_access: full_access.clone(),
         access: AgentAccess::Full,
         toolchains: Vec::new(),
-        network: crate::sandbox::policy::AgentNetwork::Open,
+        network: kernel_sandbox::policy::AgentNetwork::Open,
         grants: Vec::new(),
         layout,
         git_identity: None,
@@ -16107,7 +16113,7 @@ fn a_sandboxed_agent_cannot_move_its_home_or_worktree_away_but_still_works_in_th
     extra.extend(flag_lines("home", "\"$CODEX_HOME\""));
     extra.extend(flag_lines("skills", "\"$CODEX_HOME\"/skills"));
     extra.extend(flag_lines("system", "\"$CODEX_HOME\"/skills/.system"));
-    let mut run = agent_at_level_running(crate::sandbox::policy::AgentAccess::Sandboxed, &extra);
+    let mut run = agent_at_level_running(kernel_sandbox::policy::AgentAccess::Sandboxed, &extra);
     let home = agent_home(&run.fixture.base.join("team"), run.member);
     let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
     let link = std::fs::read_to_string(run.worktree.join(".git")).unwrap();
@@ -16161,7 +16167,7 @@ fn an_own_branch_agent_cannot_move_its_home_or_clone_away_but_still_works_in_the
         format!("{git} worktree prune > /dev/null 2>&1; echo worktree_prune=$? >> codes.txt"),
         format!("{git} status --porcelain > /dev/null 2>&1; echo git_status=$? >> codes.txt"),
     ]);
-    let mut run = agent_at_level_running(crate::sandbox::policy::AgentAccess::OwnBranch, &extra);
+    let mut run = agent_at_level_running(kernel_sandbox::policy::AgentAccess::OwnBranch, &extra);
     let home = agent_home(&run.fixture.base.join("team"), run.member);
     let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
     let alternates = run
@@ -16194,7 +16200,7 @@ fn an_own_branch_agent_cannot_move_its_home_or_clone_away_but_still_works_in_the
 #[cfg(target_os = "macos")]
 #[test]
 fn a_sandboxed_agent_edits_and_builds_but_cannot_commit_or_reach_owner_secrets() {
-    let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::Sandboxed);
+    let mut run = agent_at_level(kernel_sandbox::policy::AgentAccess::Sandboxed);
     assert_eq!(run.code("build"), built(), "{:?}", run.codes);
     assert_eq!(
         run.code("told"),
@@ -16217,7 +16223,7 @@ fn a_sandboxed_agent_edits_and_builds_but_cannot_commit_or_reach_owner_secrets()
 #[cfg(target_os = "macos")]
 #[test]
 fn an_own_branch_agent_commits_and_builds_and_accept_lands_its_commit() {
-    let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::OwnBranch);
+    let mut run = agent_at_level(kernel_sandbox::policy::AgentAccess::OwnBranch);
     assert_eq!(run.code("build"), built(), "{:?}", run.codes);
     assert_eq!(
         run.code("told"),
@@ -16268,7 +16274,7 @@ fn an_own_branch_agent_commits_and_builds_and_accept_lands_its_commit() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_full_access_agent_commits_builds_and_writes_outside_with_no_seatbelt() {
-    let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::Full);
+    let mut run = agent_at_level(kernel_sandbox::policy::AgentAccess::Full);
     assert_eq!(run.code("build"), built(), "{:?}", run.codes);
     assert_eq!(
         run.code("told"),
@@ -17957,7 +17963,7 @@ fn between_turns(
         spawned: Instant::now(),
         handoff: None,
         access: AgentAccess::Sandboxed,
-        network: crate::sandbox::policy::AgentNetwork::Open,
+        network: kernel_sandbox::policy::AgentNetwork::Open,
         toolchains: None,
         access_grants: Vec::new(),
         checked: None,
@@ -20083,7 +20089,7 @@ fn only_a_launch_with_no_conversation_to_continue_starts_its_worker_fresh() {
             }),
             access: AgentAccess::Sandboxed,
             toolchains: Some(Vec::new()),
-            network: crate::sandbox::policy::AgentNetwork::Open,
+            network: kernel_sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
             grants: Vec::new(),
@@ -23452,7 +23458,7 @@ fn a_restarted_engine_binds_no_caller_socket_through_a_swapped_temp_folder() {
         .unwrap();
     team.workers
         .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
-    let scratch = crate::sandbox::toolchains::tmp_path(&agent_home(&team.state, lead));
+    let scratch = kernel_sandbox::toolchains::tmp_path(&agent_home(&team.state, lead));
     let elsewhere = tempfile::Builder::new()
         .prefix("ca-elsewhere-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -23482,7 +23488,8 @@ fn an_unlinked_caller_socket_is_bound_again_on_the_next_tick() {
     struct TmpRemoved(PathBuf);
     impl Drop for TmpRemoved {
         fn drop(&mut self) {
-            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+            let _ =
+                kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let f = Fixture::new(1);
@@ -23499,7 +23506,8 @@ fn an_unlinked_caller_socket_is_bound_again_on_the_next_tick() {
     team.workers
         .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
     let home = agent_home(&team.state, lead);
-    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let scratch =
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let _scratch = TmpRemoved(home);
     let socket = scratch.join(crate::team::caller::CALLER_SOCKET);
     let bound = || {
@@ -23548,7 +23556,8 @@ fn a_caller_socket_blocked_by_an_obstacle_is_bound_once_the_obstacle_is_gone() {
     struct TmpRemoved(PathBuf);
     impl Drop for TmpRemoved {
         fn drop(&mut self) {
-            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+            let _ =
+                kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let f = Fixture::new(1);
@@ -23565,7 +23574,8 @@ fn a_caller_socket_blocked_by_an_obstacle_is_bound_once_the_obstacle_is_gone() {
     team.workers
         .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
     let home = agent_home(&team.state, lead);
-    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let scratch =
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let _scratch = TmpRemoved(home);
     let socket = scratch.join(crate::team::caller::CALLER_SOCKET);
     let bound = || {
@@ -23635,7 +23645,8 @@ fn a_native_lead_without_the_team_tool_still_has_its_caller_socket_answered() {
     struct TmpRemoved(PathBuf);
     impl Drop for TmpRemoved {
         fn drop(&mut self) {
-            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+            let _ =
+                kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let f = Fixture::new(1);
@@ -23649,7 +23660,8 @@ fn a_native_lead_without_the_team_tool_still_has_its_caller_socket_answered() {
     team.workers
         .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
     let home = agent_home(&team.state, lead);
-    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let scratch =
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let _scratch = TmpRemoved(home);
     let socket = scratch.join(crate::team::caller::CALLER_SOCKET);
     team.serve_agent_calls(&f.setup, &f.access);
@@ -23687,7 +23699,8 @@ fn a_teammate_asking_after_its_lead_ended_is_held_not_taken_for_the_lead() {
     struct TmpRemoved(PathBuf);
     impl Drop for TmpRemoved {
         fn drop(&mut self) {
-            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+            let _ =
+                kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let f = Fixture::new(1);
@@ -23700,7 +23713,8 @@ fn a_teammate_asking_after_its_lead_ended_is_held_not_taken_for_the_lead() {
     team.workers
         .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
     let home = agent_home(&team.state, lead);
-    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let scratch =
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let _scratch = TmpRemoved(home);
     let socket = scratch.join(crate::team::caller::CALLER_SOCKET);
     let bound = || {
@@ -23916,7 +23930,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         sandbox_profile: PathBuf::from("/tmp/agent-1.sb"),
         full_access: None,
         access: AgentAccess::OwnBranch,
-        network: crate::sandbox::policy::AgentNetwork::Open,
+        network: kernel_sandbox::policy::AgentNetwork::Open,
         grants: Vec::new(),
         layout: Layout::Linked,
         git_identity: None,
@@ -24384,7 +24398,7 @@ fn endpoint_claude_agent_is_hookless_and_refused_under_wait() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_team_agent_starts_with_the_tool_cache_its_policy_gives() {
-    use crate::sandbox::policy::{AgentPolicy, ToolCacheScope};
+    use kernel_sandbox::policy::{AgentPolicy, ToolCacheScope};
     let fixture = Fixture::new(1);
     let mut runtime = exiting_claude_runtime(&fixture);
     let start = |access: AgentAccess, tool_cache: ToolCacheScope| {
@@ -24393,7 +24407,7 @@ fn a_team_agent_starts_with_the_tool_cache_its_policy_gives() {
             tool_cache,
             ..AgentPolicy::default()
         };
-        crate::sandbox::policy::save(&fixture.connection, PROJECT, &policy).unwrap();
+        crate::sandbox::policy_store::save(&fixture.connection, PROJECT, &policy).unwrap();
         let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
         let (_, plan, _) = runtime
             .prepare(
@@ -24815,7 +24829,7 @@ fn reap_keeps_a_kept_lead_past_its_idle_limit_while_its_teammate_works() {
             }),
             access: AgentAccess::Sandboxed,
             toolchains: Some(Vec::new()),
-            network: crate::sandbox::policy::AgentNetwork::Open,
+            network: kernel_sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
             grants: Vec::new(),
@@ -24897,7 +24911,7 @@ fn kept_lead_with_a_task(fixture: &Fixture) -> (TeamRuntime, i64, i64) {
             }),
             access: AgentAccess::Sandboxed,
             toolchains: Some(Vec::new()),
-            network: crate::sandbox::policy::AgentNetwork::Open,
+            network: kernel_sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
             grants: Vec::new(),
@@ -25154,7 +25168,7 @@ fn a_taken_over_lead_not_proven_gone_reports_an_uncertain_cleanup() {
             }),
             access: AgentAccess::Sandboxed,
             toolchains: Some(Vec::new()),
-            network: crate::sandbox::policy::AgentNetwork::Open,
+            network: kernel_sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
             grants: Vec::new(),
@@ -25220,7 +25234,7 @@ fn wiring_a_native_lead_adopted_without_its_account_is_killed() {
             }),
             access: AgentAccess::Sandboxed,
             toolchains: Some(Vec::new()),
-            network: crate::sandbox::policy::AgentNetwork::Open,
+            network: kernel_sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
             grants: Vec::new(),
@@ -25756,7 +25770,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         sandbox_profile: PathBuf::from("/private/tmp/agent-1.sb"),
         full_access: full_access_boundary(&scratch.path().canonicalize().unwrap()),
         access: AgentAccess::Sandboxed,
-        network: crate::sandbox::policy::AgentNetwork::Open,
+        network: kernel_sandbox::policy::AgentNetwork::Open,
         grants: Vec::new(),
         layout: Layout::Linked,
         git_identity: None,
@@ -25806,8 +25820,8 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
 #[test]
 fn a_tools_on_agent_profile_follows_the_project_network_choice() {
     use crate::sandbox::ProjectSandbox;
-    use crate::sandbox::policy::AgentNetwork;
     use kernel_sandbox::net::SandboxRemote;
+    use kernel_sandbox::policy::AgentNetwork;
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
     let make = |name: &str| {
@@ -25847,7 +25861,7 @@ fn a_tools_on_agent_profile_follows_the_project_network_choice() {
 /// Output: the runtime and a signed-in account on that profile.
 #[cfg(target_os = "macos")]
 fn none_network_runtime(fixture: &Fixture) -> (TeamRuntime, TeamAccount) {
-    use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+    use kernel_sandbox::policy::{AgentNetwork, AgentPolicy};
     let bin = fixture.base.join("bin");
     std::fs::create_dir(&bin).unwrap();
     let codex = bin.join("codex");
@@ -25858,7 +25872,7 @@ fn none_network_runtime(fixture: &Fixture) -> (TeamRuntime, TeamAccount) {
         std::fs::Permissions::from_mode(0o600),
     )
     .unwrap();
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &fixture.connection,
         PROJECT,
         &AgentPolicy {
@@ -26348,7 +26362,7 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
     let free = || {
         let model = ModelHost::new("models.crazyagent.test", 443).unwrap();
         let port = ModelProxy::bind(7, vec![model], None, &[]).unwrap().port();
-        assert!(crate::sandbox::model_proxy::PROXY_PORTS.contains(&port));
+        assert!(kernel_sandbox::ports::PROXY_PORTS.contains(&port));
         port
     };
 
@@ -26419,7 +26433,7 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
         .local_addr()
         .unwrap()
         .port();
-    assert!(!crate::sandbox::model_proxy::PROXY_PORTS.contains(&outside));
+    assert!(!kernel_sandbox::ports::PROXY_PORTS.contains(&outside));
     let record = PaneRecord {
         proxy: Some(outside),
         ..fixture.pane(&host, old)
@@ -26465,11 +26479,11 @@ fn kept_master_with_tools(fixture: &mut Fixture, host: &Arc<dyn Host>) -> i64 {
 /// counts as Open (CS-2).
 #[test]
 fn a_kept_pane_with_tools_started_under_a_wider_network_is_not_taken_over() {
-    use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+    use kernel_sandbox::policy::{AgentNetwork, AgentPolicy};
     let mut fixture = Fixture::new(1);
     let host = fixture.host();
     let kept = kept_master_with_tools(&mut fixture, &host);
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &fixture.connection,
         PROJECT,
         &AgentPolicy {
@@ -26505,7 +26519,7 @@ fn a_kept_pane_with_tools_started_under_a_wider_network_is_not_taken_over() {
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_with_tools_running_under_a_wider_network_than_the_saved_one_is_stopped() {
-    use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+    use kernel_sandbox::policy::{AgentNetwork, AgentPolicy};
     let mut fixture = Fixture::new(1);
     let host = fixture.host();
     let kept = kept_master_with_tools(&mut fixture, &host);
@@ -26513,7 +26527,7 @@ fn an_agent_with_tools_running_under_a_wider_network_than_the_saved_one_is_stopp
     fixture.until(&mut team, "the pane under Open is taken over", |f| {
         f.agent_status(kept) == (AgentStatus::Idle, None)
     });
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &fixture.connection,
         PROJECT,
         &AgentPolicy {
@@ -26546,8 +26560,8 @@ fn an_agent_with_tools_running_under_a_wider_network_than_the_saved_one_is_stopp
 #[ignore = "live qualification: needs a keyless https openai-compatible endpoint named by a host name, CRAZYAGENT_LIVE_HTTPS_ENDPOINT and CRAZYAGENT_LIVE_HTTPS_ENDPOINT_MODEL"]
 fn a_real_endpoint_turn_under_no_network_reaches_only_its_model() {
     use crate::protocol::Outcome;
-    use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
     use crate::team::TeamAction;
+    use kernel_sandbox::policy::{AgentNetwork, AgentPolicy};
     let blocked = |name: &str| {
         std::env::var(name).unwrap_or_else(|_| panic!("BLOCKED: set {name} for the live pass"))
     };
@@ -26568,7 +26582,7 @@ fn a_real_endpoint_turn_under_no_network_reaches_only_its_model() {
             params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
         )
         .unwrap();
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &fixture.connection,
         PROJECT,
         &AgentPolicy {
@@ -27243,16 +27257,16 @@ fn lead_with_worker(
 #[cfg(target_os = "macos")]
 #[test]
 fn a_lead_delegates_and_its_worker_starts_at_the_lead_commit() {
-    for access in [None, Some(crate::sandbox::policy::AgentAccess::OwnBranch)] {
+    for access in [None, Some(kernel_sandbox::policy::AgentAccess::OwnBranch)] {
         let fixture = Fixture::new(2);
         let home = committed_project(&fixture);
         if let Some(access) = access {
-            crate::sandbox::policy::save(
+            crate::sandbox::policy_store::save(
                 &fixture.connection,
                 PROJECT,
-                &crate::sandbox::policy::AgentPolicy {
+                &kernel_sandbox::policy::AgentPolicy {
                     access,
-                    network: crate::sandbox::policy::AgentNetwork::default(),
+                    network: kernel_sandbox::policy::AgentNetwork::default(),
                     toolchains: Vec::new(),
                     ide_git_hooks: false,
                     tool_cache: Default::default(),
@@ -28873,7 +28887,8 @@ fn a_stopped_teammate_unknown_while_its_teammates_socket_stays_is_marked_uncerta
     struct Scratch(std::path::PathBuf);
     impl Drop for Scratch {
         fn drop(&mut self) {
-            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+            let _ =
+                kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let fixture = Fixture::new(1);
@@ -28894,7 +28909,7 @@ fn a_stopped_teammate_unknown_while_its_teammates_socket_stays_is_marked_uncerta
             )
             .unwrap();
         let home = agent_home(&state, lead);
-        std::fs::create_dir_all(crate::sandbox::toolchains::tmp_path(&home)).unwrap();
+        std::fs::create_dir_all(kernel_sandbox::toolchains::tmp_path(&home)).unwrap();
         scratches.push(Scratch(home));
         std::fs::create_dir_all(agent_teammates_socket_name(&state, lead).parent().unwrap())
             .unwrap();
@@ -32002,12 +32017,12 @@ fn native_lead_in(fixture: &Fixture, layout: Layout, adopt: bool) -> (TeamRuntim
 /// Input: the fixture. Output: none.
 #[cfg(target_os = "macos")]
 fn own_branch_access(fixture: &Fixture) {
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &fixture.connection,
         PROJECT,
-        &crate::sandbox::policy::AgentPolicy {
-            access: crate::sandbox::policy::AgentAccess::OwnBranch,
-            ..crate::sandbox::policy::AgentPolicy::default()
+        &kernel_sandbox::policy::AgentPolicy {
+            access: kernel_sandbox::policy::AgentAccess::OwnBranch,
+            ..kernel_sandbox::policy::AgentPolicy::default()
         },
     )
     .unwrap();
@@ -32179,7 +32194,7 @@ fn neither_a_native_lead_nor_a_teammate_moves_its_home_away_but_both_still_work_
 
     let tmp = home.parent().unwrap().join("tmp");
     let mailbox = tmp.join(crate::team::tool::MAILBOX_FOLDER);
-    let teams = home.join(crate::sandbox::CLAUDE_TEAM_SHARED[0]);
+    let teams = home.join(kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED[0]);
     let mut tried = Vec::new();
     for (who, profile, own, folder, pinned) in [
         (
@@ -32326,7 +32341,7 @@ fn a_native_teammate_writes_only_its_own_home_and_the_team_folders_its_lead_shar
     let home = agent_home(&runtime.state, id);
     let mates = home.with_file_name("mates-home");
     let work = plan.working_dir.clone();
-    let scratch = crate::sandbox::toolchains::existing_tmp(&home).unwrap();
+    let scratch = kernel_sandbox::toolchains::existing_tmp(&home).unwrap();
     let inboxes = home.join("teams").join("crazy-team").join("inboxes");
     std::fs::create_dir_all(&inboxes).unwrap();
     std::fs::write(inboxes.join("team-lead.json"), "[]").unwrap();
@@ -32896,8 +32911,9 @@ fn a_native_teammate_cannot_read_or_plant_in_its_lead_s_own_temp_folder() {
     };
     let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
     let home = agent_home(&runtime.state, id);
-    let earlier = crate::sandbox::toolchains::make_tmp(&home).unwrap();
-    let left = crate::sandbox::toolchains::native_lead_tmp(&earlier);
+    let earlier =
+        kernel_sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
+    let left = kernel_sandbox::toolchains::native_lead_tmp(&earlier);
     std::fs::create_dir(&left).unwrap();
     std::fs::write(left.join("left.txt"), "earlier").unwrap();
     let (_, plan, _) = runtime
@@ -32916,9 +32932,9 @@ fn a_native_teammate_cannot_read_or_plant_in_its_lead_s_own_temp_folder() {
     assert!(plan.native, "the lead starts with native teammates");
     let teammates = agent_teammates_profile(&runtime.state, id);
     let work = plan.working_dir.clone();
-    let shared = crate::sandbox::toolchains::existing_tmp(&home).unwrap();
+    let shared = kernel_sandbox::toolchains::existing_tmp(&home).unwrap();
     assert_eq!(shared, earlier);
-    let own = crate::sandbox::toolchains::native_lead_tmp(&shared);
+    let own = kernel_sandbox::toolchains::native_lead_tmp(&shared);
     let metadata = std::fs::symlink_metadata(&own).unwrap();
     assert!(metadata.is_dir() && metadata.permissions().mode() & 0o777 == 0o700);
     assert_eq!(
@@ -33808,8 +33824,8 @@ fn a_project_hold_is_in_the_holding_projects_paused_set_only() {
 fn granted_policy(
     grants: Vec<AccessGrant>,
     apply_changes: AccessApply,
-) -> crate::sandbox::policy::AgentPolicy {
-    crate::sandbox::policy::AgentPolicy {
+) -> kernel_sandbox::policy::AgentPolicy {
+    kernel_sandbox::policy::AgentPolicy {
         grants,
         apply_changes,
         ..Default::default()
@@ -33847,7 +33863,7 @@ fn a_grant_added_under_when_idle_restarts_the_live_master_at_its_next_idle_point
             [PROJECT],
         )
         .unwrap();
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &fixture.connection,
         PROJECT,
         &granted_policy(
@@ -33897,7 +33913,7 @@ fn a_grant_added_under_at_next_start_leaves_running_agents_with_one_note() {
     let mut team = fixture.runtime();
     let (sub, orders) = held_worker(&project, AgentRole::Sub);
     team.workers.insert(8, sub);
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &fixture.connection,
         PROJECT,
         &granted_policy(vec![AccessGrant::TempFolder], AccessApply::NextStart),
@@ -33930,7 +33946,7 @@ fn a_removed_grant_stops_each_agent_holding_it_at_once() {
     let project = ProjectId::new(PROJECT).unwrap();
     let mut team = fixture.runtime();
     let port = AccessGrant::Port { port: 8080 };
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &fixture.connection,
         PROJECT,
         &granted_policy(vec![port.clone()], AccessApply::NextStart),
@@ -33948,7 +33964,7 @@ fn a_removed_grant_stops_each_agent_holding_it_at_once() {
         "a held grant still saved keeps it running"
     );
 
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &fixture.connection,
         PROJECT,
         &granted_policy(Vec::new(), AccessApply::NextStart),

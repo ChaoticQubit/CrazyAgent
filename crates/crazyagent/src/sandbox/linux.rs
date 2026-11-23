@@ -1,16 +1,20 @@
-use super::model_proxy::{PICKED_PORTS_START, PROXY_PORTS, RELAY_PORTS};
-use super::{
-    ADMIN_LINKS, ADMIN_WRITES, GIT_FALLBACK, GIT_STATE_FILES, GIT_STATE_TREES, KEPT_PORTS_MAX,
-    LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK,
-    LINUX_RESOLVER_NEEDS_UDP, MULTI_PACK_INDEX, OWNER_PORTS, ProjectSandbox, REMOTES_MAX, Routed,
-    STORE_ALTERNATES, Sandbox, agent_env,
-};
+use super::{ProjectSandbox, Routed, Sandbox, agent_env};
 use crazyagent_linux_supervisor::rules::{GitOwn, Held, Reach, is_git};
 use crazyagent_linux_supervisor::serve::{self, Supervised};
 use kernel_sandbox::error::{SandboxError, invalid};
+use kernel_sandbox::hidden_paths::HIDDEN_MAX;
+use kernel_sandbox::lines::HELD_NOT_PUT_BACK_EXIT;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::paths::clean_absolute;
 use kernel_sandbox::ports::BRIDGE_PORT_MIN;
+use kernel_sandbox::ports::{
+    KEPT_PORTS_MAX, OWNER_PORTS, PICKED_PORTS_START, PROXY_PORTS, RELAY_PORTS, REMOTES_MAX,
+};
+use kernel_sandbox::profile::consts::{
+    ADMIN_LINKS, ADMIN_WRITES, GIT_FALLBACK, GIT_STATE_FILES, GIT_STATE_TREES,
+    LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK,
+    LINUX_RESOLVER_NEEDS_UDP, MULTI_PACK_INDEX, STORE_ALTERNATES,
+};
 use kernel_sandbox::settings::{LinuxSockets, LinuxSupervisor};
 use landlock::{
     ABI, Access, AccessFs, AccessNet, BitFlags, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
@@ -646,7 +650,7 @@ fn cut_args(covers: Option<&[PathBuf]>) -> Vec<OsString> {
 }
 
 /// Adds one [`COVER`] to a private tree: after [`PRIVATE_MOUNTS`], a clean absolute path
-/// below the root, each once, at most [`crate::sandbox::HIDDEN_MAX`]. Inputs: the covers
+/// below the root, each once, at most [`HIDDEN_MAX`]. Inputs: the covers
 /// so far, when the tree was asked for, and the next word. Output: Ok, or the reason.
 fn cover(covers: Option<&mut Vec<PathBuf>>, value: Option<OsString>) -> Result<(), String> {
     let covers = covers.ok_or_else(|| format!("{COVER} follows {PRIVATE_MOUNTS}"))?;
@@ -657,10 +661,10 @@ fn cover(covers: Option<&mut Vec<PathBuf>>, value: Option<OsString>) -> Result<(
             path.display()
         ));
     }
-    if covers.contains(&path) || covers.len() >= crate::sandbox::HIDDEN_MAX {
+    if covers.contains(&path) || covers.len() >= HIDDEN_MAX {
         return Err(format!(
             "{COVER} names each folder once, at most {}",
-            crate::sandbox::HIDDEN_MAX
+            HIDDEN_MAX
         ));
     }
     covers.push(path);
@@ -793,7 +797,7 @@ fn guard_fits(policy: &LandlockPolicy) -> Result<(), String> {
 }
 
 /// Tells whether what follows [`NEST_ARGS`] is what the engine's own nests write: an
-/// optional `--unshare-net`, at most [`crate::sandbox::HIDDEN_MAX`] `--tmpfs P --remount-ro P`
+/// optional `--unshare-net`, at most [`HIDDEN_MAX`] `--tmpfs P --remount-ro P`
 /// covers (P clean, absolute, below the root), an optional clean absolute `--chdir`, then `--`
 /// and the command, so no caller adds another bubblewrap option (rv-sa241 SBX-2-R2 N2,
 /// rv-code2 N5). Input: the words after the fixed arguments. Output: true when they are.
@@ -817,7 +821,7 @@ fn own_options(words: &[OsString]) -> bool {
         covers += 1;
         words = rest;
     }
-    if covers > crate::sandbox::HIDDEN_MAX {
+    if covers > HIDDEN_MAX {
         return false;
     }
     let words = match words {
@@ -1402,7 +1406,7 @@ fn hold(
 }
 
 const _: () = assert!(
-    serve::NOT_PUT_BACK_EXIT == super::HELD_NOT_PUT_BACK_EXIT
+    serve::NOT_PUT_BACK_EXIT == HELD_NOT_PUT_BACK_EXIT
         && serve::NOT_PUT_BACK_EXIT > 0
         && serve::NOT_PUT_BACK_EXIT < serve::STOPPED_EXIT,
     "the held-stop exit code is the engine's and sits below the supervisor's other stops"
@@ -2361,7 +2365,7 @@ fn restricts(setting: Option<&str>) -> bool {
 /// AppArmor's user namespace restriction, which never covers root, is why nothing nests
 /// ([`restricts`]). Inputs: the helper and the engine's data folder, none where no probe
 /// may run. Output: the facts.
-pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
+pub fn read_host(helper: &Path, data: Option<&Path>) -> kernel_sandbox::host::LinuxHost {
     let usable = clean_absolute(helper) && helper.is_file();
     let scoped = usable && passes(Command::new(helper).arg(SCOPED));
     let held = usable && passes(Command::new(helper).arg(PROBE));
@@ -2382,7 +2386,7 @@ pub fn read_host(helper: &Path, data: Option<&Path>) -> super::LinuxHost {
     assert!(!(root && supervised));
     assert!(!(armored && nested));
     assert!(!(armored && root));
-    super::LinuxHost {
+    kernel_sandbox::host::LinuxHost {
         nested,
         scoped,
         supervised,
@@ -2437,7 +2441,7 @@ pub(crate) fn holds_other_git(project: &Path) -> bool {
 const GIT_SEARCH_ENTRIES_MAX: usize = 4096;
 
 /// What is kept of this machine and when it was read.
-type KeptHost = Mutex<Option<(Instant, super::LinuxHost)>>;
+type KeptHost = Mutex<Option<(Instant, kernel_sandbox::host::LinuxHost)>>;
 
 /// What [`host_within`] last read of this machine, which a launch whose own probe failed
 /// marks unsupervised ([`forget_supervisor`]).
@@ -2448,7 +2452,7 @@ static HOST_READ: KeptHost = Mutex::new(None);
 /// when nothing is kept. The lock is not held while the helper runs, so a reader of what is
 /// kept never waits on it. Input: the age. Output: the facts, each false when it cannot be
 /// asked.
-fn host_within(age_max: Option<Duration>) -> super::LinuxHost {
+fn host_within(age_max: Option<Duration>) -> kernel_sandbox::host::LinuxHost {
     let kept = *HOST_READ.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some((at, host)) = kept
         && age_max.is_none_or(|age_max| at.elapsed() < age_max)
@@ -2479,14 +2483,14 @@ fn forget_supervisor(kept: &KeptHost) {
 /// What this machine holds, read again once what is kept is older than [`HOST_AGE_MAX`]:
 /// it may start the helper and bubblewrap, so it is not for a database transaction. No
 /// input. Output: the facts as [`read_host`] gives them.
-pub(crate) fn host_now() -> super::LinuxHost {
+pub(crate) fn host_now() -> kernel_sandbox::host::LinuxHost {
     host_within(Some(HOST_AGE_MAX))
 }
 
 /// What this machine holds as it was last read, however long ago, read now only when it
 /// never was: after [`host_now`] it starts nothing. No input. Output: the facts as
 /// [`read_host`] gives them.
-pub(crate) fn host_kept() -> super::LinuxHost {
+pub(crate) fn host_kept() -> kernel_sandbox::host::LinuxHost {
     host_within(None)
 }
 
@@ -2688,7 +2692,7 @@ impl Grants {
             hidden.push(path.clone());
         }
         assert_eq!(hidden.len(), sandbox.hidden.len());
-        assert!(hidden.len() <= crate::sandbox::HIDDEN_MAX);
+        assert!(hidden.len() <= HIDDEN_MAX);
         assert!(write.iter().all(|path| {
             sandbox
                 .hidden
@@ -3229,7 +3233,7 @@ fn nest_command(
     assert!(policy.nested);
     assert!(policy.die_with.is_none());
     assert!(routes.len() <= REMOTES_MAX);
-    assert!(hidden.len() <= crate::sandbox::HIDDEN_MAX);
+    assert!(hidden.len() <= HIDDEN_MAX);
     let mut command = Command::new(helper);
     for port in routes {
         command.arg(egress::ROUTE).arg(port.to_string());
@@ -3849,7 +3853,7 @@ mod tests {
         assert!(!policy.limit_network);
         let mut expected = vec![1234, 1455, 8080, 11434];
         expected.extend(PROXY_PORTS);
-        expected.extend(crate::sandbox::model_proxy::RELAY_PORTS);
+        expected.extend(kernel_sandbox::ports::RELAY_PORTS);
         assert_eq!(policy.keep_free, expected);
         assert_eq!(policy.keep_free.len(), 4 + 256);
         assert_eq!(
@@ -3961,7 +3965,7 @@ mod tests {
         assert!(policy.limit_network);
         let mut expected = vec![1455, 8080, 11434];
         expected.extend(PROXY_PORTS);
-        expected.extend(crate::sandbox::model_proxy::RELAY_PORTS);
+        expected.extend(kernel_sandbox::ports::RELAY_PORTS);
         assert_eq!(policy.keep_free, expected);
         assert_eq!(
             HelperRequest::parse(
@@ -4763,9 +4767,9 @@ mod tests {
 
     #[test]
     fn a_launch_left_on_this_network_by_a_low_port_says_so_with_the_port() {
-        use super::super::policy::AgentNetwork;
         use super::super::{LinuxHost, linux_unbridged_line, linux_unbridged_notice_on};
         use SandboxRemote::{AnyHost, Loopback};
+        use kernel_sandbox::policy::AgentNetwork;
         let host = |nested| {
             Some(LinuxHost {
                 nested,
@@ -4826,10 +4830,10 @@ mod tests {
 
     #[test]
     fn every_unrouted_launch_that_could_route_says_why_and_a_low_port_names_itself() {
-        use super::super::policy::AgentNetwork;
         use super::super::{LINUX_UNROUTED_ANY_HOST_LINE, LINUX_UNROUTED_LINE, LinuxHost};
         use super::super::{linux_unbridged_line, linux_unbridged_notice_on};
         use SandboxRemote::{AnyHost, Loopback};
+        use kernel_sandbox::policy::AgentNetwork;
         let host = |routed, supervised| {
             Some(LinuxHost {
                 nested: true,
@@ -5050,9 +5054,9 @@ mod tests {
 
     #[test]
     fn a_launch_that_could_have_a_network_of_its_own_says_why_it_has_none() {
-        use super::super::policy::AgentNetwork;
         use super::super::{LINUX_UNROUTED_LINE, LinuxHost, linux_unbridged_notice_on};
         use SandboxRemote::{AnyHost, Loopback};
+        use kernel_sandbox::policy::AgentNetwork;
         let host = |nested, routed| {
             Some(LinuxHost {
                 nested,
@@ -5283,7 +5287,7 @@ mod tests {
 
     /// A nest also takes the empty read-only folders a hidden folder gets, each as the exact
     /// pair `--tmpfs P --remount-ro P` on one clean absolute path below the root, after the
-    /// network and before the working folder, at most [`crate::sandbox::HIDDEN_MAX`] of
+    /// network and before the working folder, at most [`HIDDEN_MAX`] of
     /// them; any other shape, a lone half, two paths or one more pair is refused.
     #[test]
     fn a_nest_takes_exact_read_only_empty_folder_pairs_before_its_working_folder() {
@@ -5362,7 +5366,7 @@ mod tests {
         ] {
             assert!(nest(refused).is_err(), "{refused:?}");
         }
-        let paths: Vec<String> = (0..=crate::sandbox::HIDDEN_MAX)
+        let paths: Vec<String> = (0..=HIDDEN_MAX)
             .map(|number| format!("/work/hidden-{number}"))
             .collect();
         let pairs = |count: usize| {
@@ -5373,8 +5377,8 @@ mod tests {
             words.extend(["--", helper]);
             nest(&words)
         };
-        assert!(pairs(crate::sandbox::HIDDEN_MAX).is_ok());
-        assert!(pairs(crate::sandbox::HIDDEN_MAX + 1).is_err());
+        assert!(pairs(HIDDEN_MAX).is_ok());
+        assert!(pairs(HIDDEN_MAX + 1).is_err());
     }
 
     /// rv-code4 F1 (#622): a second mount of a hidden folder's disk that shows the folder, a
@@ -5506,7 +5510,7 @@ mod tests {
     }
 
     /// V24x-LINUX-NEST-MOUNT-PROPAGATION: only a nested run, a probe or the socket filter
-    /// asks for a private tree, with at most [`crate::sandbox::HIDDEN_MAX`] distinct clean
+    /// asks for a private tree, with at most [`HIDDEN_MAX`] distinct clean
     /// absolute covers below the root; a cover alone, a flag twice or a nest is refused.
     #[test]
     fn a_private_tree_comes_with_a_nested_run_a_probe_or_the_filter_and_absolute_covers() {
@@ -5614,9 +5618,7 @@ mod tests {
         ] {
             assert!(parse(refused).is_err(), "{refused:?}");
         }
-        let many: Vec<String> = (0..=crate::sandbox::HIDDEN_MAX)
-            .map(|at| format!("/w/h{at}"))
-            .collect();
+        let many: Vec<String> = (0..=HIDDEN_MAX).map(|at| format!("/w/h{at}")).collect();
         let mut words = vec![READ, "/usr", NESTED, PRIVATE_MOUNTS];
         for cover in &many {
             words.extend([COVER, cover.as_str()]);

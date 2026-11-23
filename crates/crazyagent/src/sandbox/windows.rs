@@ -6,7 +6,9 @@ use kernel_sandbox::error::{SandboxError, invalid};
 use kernel_sandbox::lines::MODEL_LOOPBACK_WINDOWS_LINE;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::paths::{canonical, clean_absolute};
-use sha2::{Digest, Sha256};
+use kernel_sandbox::windows::{
+    GRANTS_FOLDER, container_for, existing_helper, helper_beside_engine,
+};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -17,16 +19,6 @@ use std::process::Command;
 /// so a `.git` that points git elsewhere reaches nothing (V244-WIN-GIT-UNC-SIBLINGS).
 pub mod owner_git;
 
-/// The boundary helper's file name. It ships next to the engine's own executable.
-pub const HELPER_NAME: &str = "crazyagent-win-boundary.exe";
-
-/// Why a Windows launch is refused when the boundary helper is missing, in plain words.
-pub const APPCONTAINER_MISSING: &str = "Windows agents start through crazyagent-win-boundary.exe next to the engine, which is missing, so no agent starts unconfined";
-
-/// Why a Seatbelt profile is refused on Windows, in plain words.
-pub const SEATBELT_MISSING: &str =
-    "Windows has no Seatbelt; agents start through the AppContainer boundary";
-
 /// The most processes one agent may run at once inside its job.
 pub const ACTIVE_PROCESSES: u32 = 512;
 /// The lock file git writes beside `.git\config` while it changes the config. The Windows
@@ -36,12 +28,6 @@ pub const ACTIVE_PROCESSES: u32 = 512;
 /// read only, so no agent replaces or deletes it (DEC-193 D6, step 0c).
 const GIT_CONFIG_LOCK: &str = "config.lock";
 
-/// The folder in the engine's data root where the boundary helper records the access entries
-/// it grants each agent's container, so a later, narrower profile can take them back.
-pub const GRANTS_FOLDER: &str = "boundary-grants";
-
-const CONTAINER_PREFIX: &str = "crazyagent.";
-const CONTAINER_HASH_BYTES: usize = 16;
 const PROFILE_NAME_MAX: usize = 128;
 const SYSTEM_ROOT_DEFAULT: &str = r"C:\Windows";
 const PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
@@ -268,29 +254,6 @@ pub fn container_name(sandbox: &ProjectSandbox) -> String {
     container_for(sandbox.project_root(), sandbox.agent_home())
 }
 
-/// The AppContainer name [`container_name`] gives a policy with this project folder and agent
-/// home, for a release whose folders are already gone (V243-WIN-CHECK-PROFILE-BIND).
-/// Inputs: the project folder and the agent's home. Output: the container name.
-pub(crate) fn container_for(project_root: &Path, agent_home: &Path) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(project_root.as_os_str().as_encoded_bytes());
-    hasher.update(b"\n");
-    hasher.update(agent_home.as_os_str().as_encoded_bytes());
-    let digest = hasher.finalize();
-    let name: String = std::iter::once(CONTAINER_PREFIX.to_owned())
-        .chain(
-            digest[..CONTAINER_HASH_BYTES]
-                .iter()
-                .map(|byte| format!("{byte:02x}")),
-        )
-        .collect();
-    assert_eq!(
-        name.len(),
-        CONTAINER_PREFIX.len() + 2 * CONTAINER_HASH_BYTES
-    );
-    name
-}
-
 /// The boundary profile for a policy: container, network capabilities, read and writable
 /// roots, the protected paths kept read-only but git's config lock, and the project's root
 /// `context` while `.crazyagent` is a real folder, since the state folder then holds the
@@ -403,8 +366,9 @@ fn drive_path(path: &Path) -> Result<String, SandboxError> {
         .ok_or_else(|| invalid("a sandbox path is not a plain drive path"))
 }
 
-/// The engine's grants folder, [`GRANTS_FOLDER`] in its data root, made when missing. Output:
-/// the folder, `Unavailable` when the data root is unknown, or the I/O error.
+/// The engine's grants folder, [`kernel_sandbox::windows::GRANTS_FOLDER`] in its data root,
+/// made when missing. Output: the folder, `Unavailable` when the data root is unknown, or the
+/// I/O error.
 pub(super) fn grants_folder() -> Result<PathBuf, SandboxError> {
     let layout =
         crate::paths::Layout::current().map_err(|error| SandboxError::Unavailable(error.0))?;
@@ -412,26 +376,6 @@ pub(super) fn grants_folder() -> Result<PathBuf, SandboxError> {
     fs::create_dir_all(&grants)?;
     assert!(grants.is_dir());
     Ok(grants)
-}
-
-/// Where the boundary helper ships: beside the engine's own executable. Output: the path, or
-/// the error reading the executable's path.
-pub fn helper_beside_engine() -> std::io::Result<PathBuf> {
-    Ok(std::env::current_exe()?.with_file_name(HELPER_NAME))
-}
-
-/// The boundary helper at `helper`, when it is an existing absolute plain file. Output: the
-/// path, `Unavailable` with [`APPCONTAINER_MISSING`] when it is missing, or `Invalid`.
-pub(super) fn existing_helper(helper: &Path) -> Result<PathBuf, SandboxError> {
-    if !helper.is_file() {
-        return Err(SandboxError::Unavailable(APPCONTAINER_MISSING.into()));
-    }
-    if !clean_absolute(helper) {
-        return Err(invalid(
-            "the boundary helper must be an absolute plain file",
-        ));
-    }
-    Ok(helper.to_path_buf())
 }
 
 fn boundary_command(
@@ -465,6 +409,7 @@ mod tests {
     use crazyagent_win_sandbox::profile::check_container;
     use kernel_sandbox::net::SandboxRemote;
     use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
+    use kernel_sandbox::windows::{APPCONTAINER_MISSING, CONTAINER_PREFIX, HELPER_NAME};
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
     use std::sync::mpsc;
@@ -547,7 +492,7 @@ mod tests {
                 "expected the loopback refusal, got {refusal:?}"
             );
         }
-        let model_only = crate::sandbox::policy::AgentNetwork::None
+        let model_only = kernel_sandbox::policy::AgentNetwork::None
             .reach("windows", true, SandboxRemote::AnyHost(443), None)
             .unwrap();
         assert_eq!(capabilities(&model_only).unwrap(), client);

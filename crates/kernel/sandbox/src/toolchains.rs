@@ -1,0 +1,1362 @@
+use crate::error::SandboxError;
+use crate::paths::{canonical, owner_home};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::ffi::OsString;
+use std::fs;
+use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+
+const RUST_MARKERS: &[&str] = &["Cargo.toml", "rust-toolchain", "rust-toolchain.toml"];
+
+const NODE_MARKERS: &[&str] = &["package.json", ".nvmrc", ".node-version"];
+
+const PYTHON_MARKERS: &[&str] = &[
+    "pyproject.toml",
+    "uv.lock",
+    ".python-version",
+    "requirements.txt",
+];
+
+/// The most folders directly in a project that toolchain detection looks into for a marker
+/// file, so a project whose `Cargo.toml` or `package.json` sits one folder down is found.
+const MARKER_FOLDERS_MAX: usize = 64;
+
+/// Folders directly in a project that never hold a project's own marker files.
+const MARKER_SKIPPED: &[&str] = &["node_modules", "target", "worktrees", "graphify-out"];
+
+/// Where `xcode-select` keeps the developer folder the owner picked.
+const XCODE_SELECT_LINK: &str = "/private/var/db/xcode_select_link";
+
+/// Apple's Command Line Tools, whose own compilers, linkers and git an agent runs in place
+/// of the `/usr/bin` xcrun shims (R7-XCRUN).
+const DEVELOPER_TOOLS: &str = "/Library/Developer/CommandLineTools";
+
+const NODE_HOMES: &[&str] = &[".nvm", ".volta", ".local/share/fnm"];
+
+const PYTHON_HOMES: &[&str] = &[".pyenv", ".local/share/uv/python"];
+
+/// The crate caches in cargo's home an agent's own cargo home links to: the registry and
+/// the git checkouts.
+pub const CARGO_SHARED: &[&str] = &["registry", "git"];
+
+/// The engine's parts the agent toolchain setup reaches. Production code passes the engine's
+/// one value; rows pass stand-ins.
+#[derive(Debug)]
+pub struct ToolchainHooks {
+    /// Removes one entry of an agent's own cargo home without following a link, also a
+    /// folder an agent shut. Inputs: the open cargo home, the entry name and the code for a
+    /// refusal the engine has no own code for. Output: done, or the refusal code.
+    #[cfg(unix)]
+    pub remove_home_entry:
+        fn(std::os::fd::BorrowedFd<'_>, &str, &'static str) -> Result<(), &'static str>,
+    /// The real git the engine resolved, which an agent's own `git` runs. Takes nothing.
+    /// Returns the path.
+    #[cfg(unix)]
+    pub sandboxed_git: fn() -> &'static Path,
+    /// The home a native lead's teammates share. Input: the lead's agent home. Output: the
+    /// teammates' home.
+    pub mates_home: fn(&Path) -> PathBuf,
+    /// The name of the engine's own folder in an agent's launch folder, which holds the
+    /// agent's own `getconf`.
+    pub launch_state: &'static str,
+    /// Removes a folder an agent wrote with all it holds, opening up what the agent shut and
+    /// clearing its immutable flags without following a link. Input: the folder. Output: done
+    /// once nothing has its name, or the error naming why it stays.
+    pub remove_agent_tree: fn(&Path) -> std::io::Result<()>,
+}
+
+/// The folders the owner's toolchains live in: the owner's home, rustup's home and cargo's
+/// home inside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolHomes {
+    home: PathBuf,
+    rustup: PathBuf,
+    cargo: PathBuf,
+    developer: PathBuf,
+    xcode: Option<PathBuf>,
+}
+
+impl ToolHomes {
+    /// The owner's tool homes: `~/.rustup` and `~/.cargo` in the account's home folder,
+    /// and the Xcode app `xcode-select` picked, if it picked one (F26). Takes nothing.
+    /// Returns the homes, or the refusal when the owner account is unknown.
+    pub fn owner() -> Result<Self, SandboxError> {
+        let homes = Self::at(&owner_home()?);
+        Ok(match xcode_from_link(Path::new(XCODE_SELECT_LINK)) {
+            Some(xcode) => homes.with_xcode(&xcode),
+            None => homes,
+        })
+    }
+
+    /// The tool homes inside one home folder, with the Command Line Tools at their system
+    /// folder. Input: the home. Output: the homes.
+    pub fn at(home: &Path) -> Self {
+        Self {
+            home: home.to_path_buf(),
+            rustup: home.join(".rustup"),
+            cargo: home.join(".cargo"),
+            developer: PathBuf::from(DEVELOPER_TOOLS),
+            xcode: None,
+        }
+    }
+
+    /// These tool homes with an Xcode app's developer folder, read-only to agents, whose
+    /// compilers and macOS SDK they use when the Command Line Tools lack `cc`. Input: the
+    /// canonical developer folder. Output: the homes.
+    pub fn with_xcode(mut self, developer: &Path) -> Self {
+        self.xcode = Some(developer.to_path_buf());
+        self
+    }
+
+    /// The Xcode app's developer folder agents read, if any.
+    pub fn xcode(&self) -> Option<&Path> {
+        self.xcode.as_deref()
+    }
+
+    /// These tool homes with the Command Line Tools looked for in `developer` instead.
+    /// Input: the folder. Output: the homes.
+    pub fn with_developer(mut self, developer: &Path) -> Self {
+        self.developer = developer.to_path_buf();
+        self
+    }
+
+    /// The folder the Command Line Tools are looked for in.
+    pub fn developer(&self) -> &Path {
+        &self.developer
+    }
+
+    /// The home folder the other tool homes sit in.
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
+    /// Rustup's home, holding the installed toolchains and the default-toolchain setting.
+    pub fn rustup(&self) -> &Path {
+        &self.rustup
+    }
+
+    /// Cargo's home, holding the proxies, the crate registry and the git checkouts.
+    pub fn cargo(&self) -> &Path {
+        &self.cargo
+    }
+}
+
+/// The read-only toolchain grants one project needs: canonical existing folders and files
+/// of the owner's toolchains, never a folder that holds the owner's home or a cargo or
+/// rustup home itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Toolchains {
+    roots: Vec<PathBuf>,
+    files: Vec<PathBuf>,
+}
+
+impl Toolchains {
+    /// Detects the toolchains a project uses from the marker files at its root (see
+    /// [`Toolchain::used_by`]) and grants them as [`Toolchains::grant`] does. Inputs: the
+    /// project folder and tool homes. Output: the grants found.
+    pub fn detect(project: &Path, homes: &ToolHomes) -> Self {
+        let used: Vec<Toolchain> = Toolchain::ALL
+            .into_iter()
+            .filter(|toolchain| toolchain.used_by(project))
+            .collect();
+        Self::grant(homes, &used)
+    }
+
+    /// Grants the chosen toolchains read-only: Rust grants rustup's toolchains and settings
+    /// and cargo's proxies, registry and git checkouts; Node grants nvm, Volta and fnm;
+    /// Python grants pyenv and uv's Pythons. Homebrew is already a system root, and the
+    /// Xcode app `xcode-select` picked is granted with every choice, as the Command Line
+    /// Tools are a system root (F26). Inputs: the tool homes and the chosen toolchains.
+    /// Output: the existing grants.
+    pub fn grant(homes: &ToolHomes, chosen: &[Toolchain]) -> Self {
+        let mut roots: Vec<PathBuf> = homes.xcode.iter().cloned().collect();
+        let mut files = Vec::new();
+        for toolchain in Toolchain::ALL {
+            if chosen.contains(&toolchain) {
+                let (more_roots, more_files) = toolchain.grants(homes);
+                roots.extend(more_roots);
+                files.extend(more_files);
+            }
+        }
+        let holds_home = |root: &PathBuf| {
+            [&homes.home, &homes.rustup, &homes.cargo]
+                .iter()
+                .any(|home| home.starts_with(root))
+        };
+        let detected = Self {
+            roots: roots
+                .iter()
+                .filter_map(|root| existing(root, true))
+                .filter(|root| !holds_home(root))
+                .collect(),
+            files: files
+                .iter()
+                .filter_map(|file| existing(file, false))
+                .collect(),
+        };
+        assert!(detected.roots.iter().all(|root| !holds_home(root)));
+        detected
+    }
+
+    /// The read-only folders, each granted with its credential names carved out.
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
+
+    /// The single read-only files, such as rustup's default-toolchain setting.
+    pub fn files(&self) -> &[PathBuf] {
+        &self.files
+    }
+}
+
+/// One toolchain family whose version managers live in the owner's home: Rust (rustup and
+/// cargo), Node (nvm, Volta, fnm) and Python (pyenv, uv). Toolchains installed system-wide,
+/// such as Homebrew's, are system roots every agent reads anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Toolchain {
+    Rust,
+    Node,
+    Python,
+}
+
+impl Toolchain {
+    /// Every toolchain family, in display order.
+    pub const ALL: [Self; 3] = [Self::Rust, Self::Node, Self::Python];
+
+    /// The name shown to the owner.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rust => "Rust",
+            Self::Node => "Node.js",
+            Self::Python => "Python",
+        }
+    }
+
+    /// Tells whether a project uses this toolchain: one of its marker files (`Cargo.toml` or
+    /// `rust-toolchain*`; `package.json`, `.nvmrc` or `.node-version`; `pyproject.toml`,
+    /// `uv.lock`, `.python-version` or `requirements.txt`) sits at the project root or in
+    /// one of the first [`MARKER_FOLDERS_MAX`] plain folders directly in it (F26). Input: the
+    /// project folder. Output: true when used.
+    pub fn used_by(self, project: &Path) -> bool {
+        let markers = match self {
+            Self::Rust => RUST_MARKERS,
+            Self::Node => NODE_MARKERS,
+            Self::Python => PYTHON_MARKERS,
+        };
+        let holds = |folder: &Path| markers.iter().any(|name| folder.join(name).is_file());
+        if holds(project) {
+            return true;
+        }
+        let Ok(entries) = fs::read_dir(project) else {
+            return false;
+        };
+        entries
+            .flatten()
+            .take(MARKER_FOLDERS_MAX)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| !name.starts_with('.') && !MARKER_SKIPPED.contains(&name))
+            })
+            .any(|entry| holds(&entry.path()))
+    }
+
+    /// Tells whether the owner has this toolchain in their home: one of its version-manager
+    /// folders exists. Input: the tool homes. Output: true when installed.
+    pub fn installed(self, homes: &ToolHomes) -> bool {
+        self.grants(homes).0.iter().any(|root| root.is_dir())
+    }
+
+    fn grants(self, homes: &ToolHomes) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        match self {
+            Self::Rust => {
+                let mut roots = vec![homes.rustup.join("toolchains"), homes.cargo.join("bin")];
+                roots.extend(CARGO_SHARED.iter().map(|name| homes.cargo.join(name)));
+                (roots, vec![homes.rustup.join("settings.toml")])
+            }
+            Self::Node => (
+                NODE_HOMES
+                    .iter()
+                    .map(|path| below(&homes.home, path))
+                    .collect(),
+                Vec::new(),
+            ),
+            Self::Python => (
+                PYTHON_HOMES
+                    .iter()
+                    .map(|path| below(&homes.home, path))
+                    .collect(),
+                Vec::new(),
+            ),
+        }
+    }
+}
+
+/// A path below a folder, from a relative path written with `/`. Inputs: the folder and
+/// the relative path. Output: the joined path.
+pub fn below(home: &Path, relative: &str) -> PathBuf {
+    relative
+        .split('/')
+        .fold(home.to_path_buf(), |at, part| at.join(part))
+}
+
+/// The canonical form of a path when it exists as a folder, or as a file when `folder` is
+/// false. Inputs: the path and the kind wanted. Output: the canonical path, none otherwise.
+pub fn existing(path: &Path, folder: bool) -> Option<PathBuf> {
+    let real = canonical(path).ok()?;
+    let metadata = fs::metadata(&real).ok()?;
+    let kind = if folder {
+        metadata.is_dir()
+    } else {
+        metadata.is_file()
+    };
+    kind.then_some(real)
+}
+
+/// The developer folder of the Xcode app the link `xcode-select` keeps names: its canonical
+/// `<name>.app/Contents/Developer`, never the Command Line Tools, a link that leads nowhere,
+/// or a path with a character a sandbox profile or search path cannot hold. Takes the link.
+/// Returns the folder, none otherwise.
+fn xcode_from_link(link: &Path) -> Option<PathBuf> {
+    let real = canonical(link).ok()?;
+    let in_app = real.ends_with("Contents/Developer")
+        && real
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::extension)
+            .is_some_and(|extension| extension == "app");
+    let plain = real.to_str().is_some_and(|text| {
+        !text
+            .chars()
+            .any(|c| c.is_control() || matches!(c, ':' | '"' | '\\' | '\''))
+    });
+    (in_app && plain && real.is_dir() && real != Path::new(DEVELOPER_TOOLS)).then_some(real)
+}
+
+/// The compilers of an Xcode app, below its developer folder.
+const XCODE_TOOLCHAIN_BIN: &str = "Toolchains/XcodeDefault.xctoolchain/usr/bin";
+
+/// The macOS SDK of an Xcode app, below its developer folder.
+const XCODE_SDK: &str = "Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk";
+
+/// Where the default pack's `uv tool install graphifyy` keeps graphify's own environment.
+const GRAPHIFY_TOOL: &str = ".local/share/uv/tools/graphifyy";
+
+const RUSTUP_BINS: &[&str] = &["/opt/homebrew/opt/rustup/bin", "/usr/local/opt/rustup/bin"];
+
+/// The base path entry holding the xcrun shims the Command Line Tools' folder goes before.
+const SYSTEM_BIN: &str = "/usr/bin";
+
+/// The variables that keep every agent's toolchains from installing themselves: rustup
+/// never fetches a missing toolchain, uv never downloads a Python, Corepack never fetches a
+/// package manager and Homebrew never updates itself.
+pub const AUTO_INSTALL_ENV: [(&str, &str); 4] = [
+    ("RUSTUP_AUTO_INSTALL", "0"),
+    ("UV_PYTHON_DOWNLOADS", "never"),
+    ("COREPACK_ENABLE_NETWORK", "0"),
+    ("HOMEBREW_NO_AUTO_UPDATE", "1"),
+];
+
+/// The toolchain variables every agent process gets: a writable `CARGO_HOME` in the
+/// agent's own home, the owner's rustup home read-only in `RUSTUP_HOME`,
+/// [`AUTO_INSTALL_ENV`], and `SDKROOT` at the macOS SDK of the developer tools
+/// [`developer`] picks, so rustc and the cc crate never ask xcrun. Inputs: the agent home
+/// and the owner's tool homes. Output: the variables in order.
+pub fn agent_env(home: &Path, homes: &ToolHomes) -> Vec<(&'static str, OsString)> {
+    let mut env = vec![
+        ("CARGO_HOME", home.join(".cargo").into_os_string()),
+        ("RUSTUP_HOME", homes.rustup().as_os_str().to_owned()),
+    ];
+    env.extend(
+        AUTO_INSTALL_ENV
+            .iter()
+            .map(|(name, value)| (*name, OsString::from(value))),
+    );
+    env.extend(
+        developer(homes)
+            .map(|(_, sdk)| sdk)
+            .filter(|sdk| sdk.is_dir())
+            .map(|sdk| ("SDKROOT", sdk.into_os_string())),
+    );
+    env
+}
+
+/// The program folder and macOS SDK of the developer tools an agent runs: the Command Line
+/// Tools when their folder holds `cc`, else the picked Xcode app's default toolchain when
+/// it holds `cc` (F26). Every lookup by an xcrun shim under an agent's own home misses
+/// xcrun's cache, whose write in the per-user temp folder the sandbox denies (R7-XCRUN), so
+/// an agent runs these programs directly. Takes the tool homes. Returns the folder and the
+/// SDK path, none when neither has the tools.
+fn developer(homes: &ToolHomes) -> Option<(String, PathBuf)> {
+    let tools = (
+        homes.developer().join("usr").join("bin"),
+        homes.developer().join("SDKs").join("MacOSX.sdk"),
+    );
+    let xcode = homes
+        .xcode()
+        .map(|xcode| (below(xcode, XCODE_TOOLCHAIN_BIN), below(xcode, XCODE_SDK)));
+    let (bin, sdk) = std::iter::once(tools)
+        .chain(xcode)
+        .find(|(bin, _)| bin.join("cc").is_file())?;
+    let text = bin.to_str().filter(|text| !text.contains(':'))?.to_owned();
+    Some((text, sdk))
+}
+
+/// The read-only folders graphify needs in an agent's sandbox when the default pack
+/// installed it with uv (I3): its own environment, holding the `graphify` program, and the
+/// uv Python install its interpreter runs from when that sits in the owner's home. Takes the
+/// tool homes. Returns the canonical folders, none when graphify is not installed there.
+pub fn graphify(homes: &ToolHomes) -> Vec<PathBuf> {
+    let Ok(tool) = below(homes.home(), GRAPHIFY_TOOL).canonicalize() else {
+        return Vec::new();
+    };
+    let inside = |folder: &Path| folder.starts_with(homes.home()) && folder != homes.home();
+    let program = std::fs::symlink_metadata(tool.join("bin").join("graphify"))
+        .is_ok_and(|metadata| metadata.is_file());
+    if !program || !inside(&tool) || !tool.is_dir() {
+        return Vec::new();
+    }
+    let install = tool
+        .join("bin")
+        .join("python3")
+        .canonicalize()
+        .ok()
+        .and_then(|python| python.parent()?.parent().map(Path::to_path_buf))
+        .filter(|install| inside(install) && !tool.starts_with(install));
+    let folders: Vec<PathBuf> = std::iter::once(tool).chain(install).collect();
+    assert!((1..=2).contains(&folders.len()));
+    folders
+}
+
+/// A tools-on agent's search path: the owner's cargo proxies and Homebrew's rustup proxies
+/// where they hold `cargo`, then `base` with [`developer`]'s folder just before its `/usr/bin`,
+/// then graphify's own program folder when the default pack installed it (see
+/// [`graphify`]), last so it never shadows a toolchain's `python3`. Inputs: the tool homes
+/// and the base path. Output: the joined path.
+pub fn agent_path(homes: &ToolHomes, base: &str) -> String {
+    let mut parts: Vec<String> = std::iter::once(homes.cargo().join("bin"))
+        .chain(RUSTUP_BINS.iter().map(PathBuf::from))
+        .filter(|bin| bin.join("cargo").is_file())
+        .filter_map(|bin| {
+            bin.to_str()
+                .filter(|text| !text.contains(':'))
+                .map(str::to_owned)
+        })
+        .collect();
+    let mut developer = developer(homes).map(|(bin, _)| bin);
+    for entry in base.split(':') {
+        if entry == SYSTEM_BIN {
+            parts.extend(developer.take());
+        }
+        parts.push(entry.to_owned());
+    }
+    parts.extend(
+        graphify(homes)
+            .first()
+            .and_then(|tool| tool.join("bin").to_str().map(str::to_owned))
+            .filter(|bin| !bin.contains(':')),
+    );
+    parts.join(":")
+}
+
+/// Makes the agent's own cargo home, `.cargo` in its home with mode 0700, and links its
+/// `registry` and `git` to the owner's, which the sandbox grants read-only, so offline
+/// builds reuse the owner's crates and never change them. Those names hold only that link
+/// (DEC-173): where the owner has the cache, whatever else is there, a folder or a link
+/// elsewhere, gives way to it; where the owner has none, a link there goes, and a folder an
+/// agent made goes at the engine's launch reset, while a folder in
+/// the owner's IDE terminal home stays. A launch that finds the exact link another launch
+/// of the same home made at a name it saw free takes it (RV-DS241-199). Inputs: the agent
+/// home, the hooks the removal goes through and the owner's tool homes. Output: the cargo
+/// home, or a refusal when `.cargo` is
+/// not a plain folder or a name will not give way, whose text is `cleanup_walk_too_long`
+/// when removing the name ran past its walk budget (RESET-WALK-CODE).
+#[cfg(unix)]
+pub fn prepare_cargo_home(
+    hooks: &ToolchainHooks,
+    home: &Path,
+    homes: &ToolHomes,
+) -> io::Result<PathBuf> {
+    use rustix::fs::{CWD, Mode, OFlags};
+    use std::os::fd::AsFd;
+    use std::os::unix::ffi::OsStrExt;
+    let cargo = home.join(".cargo");
+    match fs::DirBuilder::new().mode(0o700).create(&cargo) {
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
+        _ => {}
+    }
+    let folder = rustix::fs::openat(
+        CWD,
+        &cargo,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let remove = |name: &str| {
+        (hooks.remove_home_entry)(folder.as_fd(), name, "cargo cache name will not give way")
+            .map_err(io::Error::other)
+    };
+    let linked = |name: &str, shared: &Path| {
+        rustix::fs::readlinkat(&folder, name, Vec::new())
+            .is_ok_and(|target| target.as_bytes() == shared.as_os_str().as_bytes())
+    };
+    for name in CARGO_SHARED {
+        let found = rustix::fs::readlinkat(&folder, *name, Vec::new());
+        let Some(shared) = existing(&homes.cargo().join(name), true) else {
+            if found.is_ok() {
+                remove(name)?;
+            }
+            continue;
+        };
+        match found {
+            Ok(target) if target.as_bytes() == shared.as_os_str().as_bytes() => continue,
+            Err(rustix::io::Errno::NOENT) => {}
+            _ => remove(name)?,
+        }
+        match rustix::fs::symlinkat(&shared, &folder, *name) {
+            Err(rustix::io::Errno::EXIST) if linked(name, &shared) => {}
+            made => made?,
+        }
+    }
+    Ok(cargo)
+}
+
+/// No agent cargo home outside Unix, where no agent sandbox runs. Takes the hooks, agent
+/// home and tool homes, unused. Returns `Unsupported`.
+#[cfg(not(unix))]
+pub fn prepare_cargo_home(
+    _hooks: &ToolchainHooks,
+    _home: &Path,
+    _homes: &ToolHomes,
+) -> io::Result<PathBuf> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+/// The folder of an agent's short temp folder that holds its own `git`, and that program.
+pub const GIT_FOLDER: &str = "bin";
+
+pub const GIT_PROGRAM: &str = "git";
+
+/// The xcrun shim a Mac has at `/usr/bin/git`, whose cache file write Seatbelt denies (Q73).
+#[cfg(unix)]
+const GIT_SHIM: &str = "/usr/bin/git";
+
+/// Tells whether a git path is the xcrun shim, which only a Mac has: on any other system
+/// `/usr/bin/git` is the real git and the agent's own `git` runs it. Inputs: the git path
+/// and whether this system is a Mac. Output: the answer.
+#[cfg(unix)]
+fn xcrun_shim(git: &Path, macos: bool) -> bool {
+    macos && git == Path::new(GIT_SHIM)
+}
+
+/// The most bytes of an agent's `git` script read to tell whether it is current.
+#[cfg(unix)]
+const GIT_SCRIPT_BYTES_MAX: u64 = 8192;
+
+/// The script an agent's own `git` holds, with `@GIT@` for the real git, `@LEAD@` for 1 in
+/// a lead's copy, `@FREE@` for 1 in the free copy and `@MAIN@` for 1 while "Catch up with
+/// main" is on, else 0. It refuses merge, pull, rebase and cherry-pick, and aliases for
+/// them, with a plain reason (DEC-107 rule 2); with main on any copy merges
+/// `crazyagent/main` only while that name resolves to the commit `refs/crazyagent/main`
+/// holds, a courtesy check, since the copy lets an agent set that ref and the engine's turn
+/// end check is what refuses a merge of anything else, a lead its own workers'
+/// `BRANCH--NAME` branches, telling a lead with main on how to merge main (F19), and the
+/// free copy runs every command as is.
+#[cfg(unix)]
+const GIT_SCRIPT: &str = r##"#!/bin/sh
+git='@GIT@'
+lead=@LEAD@
+free=@FREE@
+main=@MAIN@
+main_reason='You work only on your own branch: never merge, pull, rebase or cherry-pick another agent branch into it (DEC-107). To bring the project main into your branch, run: git merge crazyagent/main. Work from the lead branch reaches yours through Update on your change set: stop and tell your lead what you need; the master tells the owner.'
+worker_reason='You work only on your own branch: never merge, pull, rebase or cherry-pick another branch into it (DEC-107). Work from the lead branch reaches yours through Update on your change set: stop and tell your lead what you need; the master tells the owner.'
+lead_reason='A lead merges only the branches of its own workers, named BRANCH--NAME after its own branch, and never pulls, rebases or cherry-picks other branches (DEC-107). The engine merge tool merges app-spawned workers. If you need other work, stop and tell the master what you need.'
+lead_main_reason='A lead merges only the branches of its own workers, named BRANCH--NAME after its own branch, and the project main, and never pulls, rebases or cherry-picks other branches (DEC-107). To bring the project main into your branch, run: git merge crazyagent/main. The engine merge tool merges app-spawned workers. If you need other work, stop and tell the master what you need.'
+refuse() {
+  printf 'crazyagent: git %s is refused. %s\n' "$1" "$2" >&2
+  exit 1
+}
+reason() {
+  if [ "$lead" = 1 ] && [ "$main" = 1 ]; then
+    printf '%s' "$lead_main_reason"
+  elif [ "$lead" = 1 ]; then
+    printf '%s' "$lead_reason"
+  elif [ "$main" = 1 ]; then
+    printf '%s' "$main_reason"
+  else
+    printf '%s' "$worker_reason"
+  fi
+}
+aliased() {
+  [ "$free" = 1 ] && return 0
+  case "$1" in
+    [Aa][Ll][Ii][Aa][Ss].*) refuse "$2" "Aliases set on the command line are refused. $(reason)" ;;
+  esac
+}
+sub=
+at=0
+skip=
+moved=0
+for word do
+  at=$((at + 1))
+  if [ -n "$skip" ]; then
+    if [ "$skip" = c ]; then
+      aliased "$word" "-c $word"
+    fi
+    skip=
+    continue
+  fi
+  case "$word" in
+    -c|--config-env) skip=c ;;
+    --config-env=*) aliased "${word#--config-env=}" "$word" ;;
+    -C|--git-dir|--work-tree)
+      skip=v
+      moved=1
+      ;;
+    --namespace|--super-prefix) skip=v ;;
+    --git-dir=*|--work-tree=*) moved=1 ;;
+    -*) ;;
+    *)
+      sub=$word
+      break
+      ;;
+  esac
+done
+own_workers() {
+  [ "$moved" = 0 ] || return 1
+  branch=$("$git" symbolic-ref --short -q HEAD) || return 1
+  [ -n "$branch" ] || return 1
+  named=0
+  value=0
+  for word do
+    if [ "$value" = 1 ]; then
+      value=0
+      continue
+    fi
+    case "$word" in
+      -m|-F|-s|-X|--message|--file|--strategy|--strategy-option|--into-name|--cleanup) value=1 ;;
+      -*) ;;
+      *)
+        word=${word#refs/heads/}
+        case "$word" in
+          "$branch"--*) ;;
+          *) return 1 ;;
+        esac
+        name=${word#"$branch"--}
+        case "$name" in
+          ''|*/*|*--*|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+        esac
+        named=1
+        ;;
+    esac
+  done
+  [ "$named" = 1 ]
+}
+only_main() {
+  [ "$moved" = 0 ] || return 1
+  held=$("$git" show-ref --verify --hash refs/crazyagent/main 2>/dev/null) || return 1
+  held=$("$git" rev-parse --verify -q "$held^{commit}" 2>/dev/null) || return 1
+  named=0
+  value=0
+  for word do
+    if [ "$value" = 1 ]; then
+      value=0
+      continue
+    fi
+    case "$word" in
+      -m|-F|-s|-X|--message|--file|--strategy|--strategy-option|--into-name|--cleanup) value=1 ;;
+      -*) ;;
+      crazyagent/main|refs/crazyagent/main)
+        [ "$("$git" rev-parse --verify -q "$word^{commit}" 2>/dev/null)" = "$held" ] || return 1
+        named=1
+        ;;
+      *) return 1 ;;
+    esac
+  done
+  [ "$named" = 1 ]
+}
+gate() {
+  shift "$1"
+  shift
+  if [ "$#" = 1 ]; then
+    case "$1" in
+      --abort|--quit|--continue|--skip) return 0 ;;
+    esac
+  fi
+  [ "$free" = 1 ] && return 0
+  [ "$main" = 1 ] && [ "$sub" = merge ] && only_main "$@" && return 0
+  [ "$lead" = 1 ] && [ "$sub" = merge ] && own_workers "$@"
+}
+case "$sub" in
+  '') ;;
+  merge|pull|rebase|cherry-pick)
+    gate "$at" "$@" || refuse "$sub" "$(reason)"
+    ;;
+  add|am|apply|archive|bisect|blame|branch|bundle|cat-file|checkout|cherry|clean|clone|commit|config|describe|diff|diff-files|diff-index|diff-tree|difftool|fetch|for-each-ref|format-patch|fsck|gc|grep|hash-object|help|init|log|ls-files|ls-remote|ls-tree|merge-base|merge-file|merge-tree|mergetool|mv|name-rev|notes|push|range-diff|reflog|remote|reset|restore|rev-list|rev-parse|revert|rm|shortlog|show|show-ref|sparse-checkout|stash|status|submodule|switch|symbolic-ref|tag|update-index|update-ref|version|worktree) ;;
+  *)
+    if [ "$free" != 1 ]; then
+      expanded=$("$git" config --get "alias.$sub" 2>/dev/null)
+      case "$expanded" in
+        merge|'merge '*|pull|'pull '*|rebase|'rebase '*|cherry-pick|'cherry-pick '*) refuse "$sub" "Aliases for merge, pull, rebase or cherry-pick are refused as those commands are. $(reason)" ;;
+      esac
+    fi
+    ;;
+esac
+exec "$git" "$@"
+"##;
+
+/// Which copy of the agent's own `git` a script is: the worker's, a lead's that may
+/// merge its own workers' branches, or the free copy that runs every command as is.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitCopy {
+    Worker,
+    Lead,
+    Free,
+}
+
+/// The script an agent's own `git` holds: it runs the real git the engine itself resolved,
+/// so the agent's git calls never reach the `/usr/bin/git` xcrun shim, whose `xcrun_db`
+/// cache write Seatbelt denies, and git still finds its helpers beside its real path, which
+/// a link to it would lose; it refuses merges as [`GIT_SCRIPT`] says. Inputs: the real
+/// git, the copy and whether it merges `crazyagent/main`. Output: the script, or none when
+/// git is a Mac's shim ([`xcrun_shim`]) or its path is not plain.
+#[cfg(unix)]
+pub fn git_script(git: &Path, copy: GitCopy, main: bool) -> Option<String> {
+    let text = plain_path(git).filter(|_| !xcrun_shim(git, cfg!(target_os = "macos")))?;
+    let script = GIT_SCRIPT
+        .replace("@GIT@", text)
+        .replace("@LEAD@", if copy == GitCopy::Lead { "1" } else { "0" })
+        .replace("@FREE@", if copy == GitCopy::Free { "1" } else { "0" })
+        .replace("@MAIN@", if main { "1" } else { "0" });
+    assert!(!script.contains("@GIT@") && !script.contains("@LEAD@") && !script.contains("@FREE@"));
+    assert!(!script.contains("@MAIN@"));
+    assert!(script.len() as u64 <= GIT_SCRIPT_BYTES_MAX);
+    Some(script)
+}
+
+/// A path as text a script may hold in single quotes as is: absolute and of letters,
+/// digits, spaces and `/._-+` only. Input: the path. Output: the text, or none.
+#[cfg(unix)]
+pub fn plain_path(path: &Path) -> Option<&str> {
+    let text = path.to_str()?;
+    let plain = path.is_absolute()
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/._-+ ".contains(&byte));
+    plain.then_some(text)
+}
+
+/// Rewrites the agent's own `git` in its short temp folder as a lead's copy, which lets the
+/// lead merge its own workers' branches (DEC-107 rule 2), and `crazyagent/main` while
+/// "Catch up with main" is on, after the engine's `make_tmp` wrote the copy every agent gets. Inputs:
+/// the hooks naming the real git, the folder `make_tmp` returned and the setting. Output:
+/// Ok, also when git is the shim and no copy is written, or the write failure.
+#[cfg(unix)]
+pub fn lead_git(hooks: &ToolchainHooks, tmp: &Path, catch_up: bool) -> io::Result<()> {
+    match git_script((hooks.sandboxed_git)(), GitCopy::Lead, catch_up) {
+        Some(script) => write_git(tmp, &script),
+        None => Ok(()),
+    }
+}
+
+/// Rewrites the agent's own `git` in its short temp folder as the free copy, which runs
+/// every git command as is: the master's at Full access (DEC-117 Q2), after the engine's `make_tmp`
+/// wrote the worker copy. Inputs: the hooks naming the real git and the folder `make_tmp`
+/// returned. Output: Ok, also when git is the shim and no copy is written, or the write
+/// failure.
+#[cfg(unix)]
+pub fn free_git(hooks: &ToolchainHooks, tmp: &Path) -> io::Result<()> {
+    match git_script((hooks.sandboxed_git)(), GitCopy::Free, true) {
+        Some(script) => write_git(tmp, &script),
+        None => Ok(()),
+    }
+}
+
+/// Rewrites the agent's own `git` in its short temp folder as the worker copy that merges
+/// `crazyagent/main`, for a project with "Catch up with main" on, after the engine's `make_tmp` wrote
+/// the copy that refuses it. Inputs: the hooks naming the real git and the folder
+/// `make_tmp` returned. Output: Ok, also when git is the shim and no copy is written, or the
+/// write failure.
+#[cfg(unix)]
+pub fn catch_up_git(hooks: &ToolchainHooks, tmp: &Path) -> io::Result<()> {
+    match git_script((hooks.sandboxed_git)(), GitCopy::Worker, true) {
+        Some(script) => write_git(tmp, &script),
+        None => Ok(()),
+    }
+}
+
+/// Writes the agent's own `git` into `bin` of its short temp folder as a 0700 file of this
+/// user, replacing a copy that differs, through descriptors that never follow a link the
+/// agent left there. Inputs: the temp folder and the script. Output: done, or the refusal.
+#[cfg(unix)]
+pub fn write_git(tmp: &Path, script: &str) -> io::Result<()> {
+    use rustix::fs::{AtFlags, CWD, Mode, OFlags};
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static STAGED: AtomicU64 = AtomicU64::new(0);
+    let folder_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let tmp = rustix::fs::openat(CWD, tmp, folder_flags, Mode::empty())?;
+    match rustix::fs::mkdirat(&tmp, GIT_FOLDER, Mode::from_raw_mode(0o700)) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let folder = rustix::fs::openat(&tmp, GIT_FOLDER, folder_flags, Mode::empty())?;
+    if rustix::fs::fstat(&folder)?.st_uid != nix::unistd::getuid().as_raw() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the agent git folder is not this user's",
+        ));
+    }
+    rustix::fs::fchmod(&folder, Mode::from_raw_mode(0o700))?;
+    let current = rustix::fs::openat(
+        &folder,
+        GIT_PROGRAM,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()
+    .map(fs::File::from)
+    .and_then(|file| {
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file() || metadata.mode() & 0o7777 != 0o700 {
+            return None;
+        }
+        let mut text = String::new();
+        file.take(GIT_SCRIPT_BYTES_MAX + 1)
+            .read_to_string(&mut text)
+            .ok()?;
+        Some(text)
+    });
+    if current.as_deref() == Some(script) {
+        return Ok(());
+    }
+    let staged = format!(
+        ".{GIT_PROGRAM}-{}-{}",
+        std::process::id(),
+        STAGED.fetch_add(1, Ordering::Relaxed)
+    );
+    let file = rustix::fs::openat(
+        &folder,
+        staged.as_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o700),
+    )?;
+    let mut file = fs::File::from(file);
+    let placed = file
+        .write_all(script.as_bytes())
+        .and_then(|()| file.set_permissions(fs::Permissions::from_mode(0o700)))
+        .and_then(|()| {
+            rustix::fs::renameat(&folder, staged.as_str(), &folder, GIT_PROGRAM)
+                .map_err(io::Error::from)
+        });
+    if placed.is_err() {
+        let _ = rustix::fs::unlinkat(&folder, staged.as_str(), AtFlags::empty());
+    }
+    placed
+}
+
+/// No agent `git` outside Unix. Takes the agent temp folder and the setting, unused.
+/// Returns `Unsupported`.
+#[cfg(not(unix))]
+pub fn lead_git(_hooks: &ToolchainHooks, _tmp: &Path, _catch_up: bool) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+/// No agent `git` outside Unix. Takes the agent temp folder, unused. Returns `Unsupported`.
+#[cfg(not(unix))]
+pub fn free_git(_hooks: &ToolchainHooks, _tmp: &Path) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+/// No agent `git` outside Unix. Takes the agent temp folder, unused. Returns `Unsupported`.
+#[cfg(not(unix))]
+pub fn catch_up_git(_hooks: &ToolchainHooks, _tmp: &Path) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+/// The system temp folder by its real path, which the agent short temp folders sit in.
+#[cfg(target_os = "macos")]
+pub const TMP_PARENT: &str = "/private/tmp";
+/// The system temp folder, which the agent short temp folders sit in.
+#[cfg(not(target_os = "macos"))]
+pub const TMP_PARENT: &str = "/tmp";
+const TMP_PREFIX: &str = "ca-";
+const TMP_HASH_BYTES: usize = 8;
+/// The folder of a native lead's short temp folder that is the lead's own temp folder.
+const NATIVE_LEAD_TMP: &str = "lead";
+/// The folder of an agent's launch folder ([`ToolchainHooks::launch_state`]) that holds its
+/// own `getconf` ([`write_getconf`]), and that program.
+const GETCONF_FOLDER: &str = "bin";
+pub const GETCONF_PROGRAM: &str = "getconf";
+/// The most bytes of an agent's `getconf` script.
+#[cfg(target_os = "macos")]
+const GETCONF_SCRIPT_BYTES_MAX: usize = 8192;
+/// The script an agent's own `getconf` holds, with `@MATES@` for a native lead's teammates'
+/// home and `@SHARED@` and `@OWN@` for their temp folder and the agent's own, each quoted,
+/// the folders ending in a slash as the system answer does: DARWIN_USER_TEMP_DIR names the
+/// caller's TMPDIR, where Seatbelt lets it write, and every other call runs the system one.
+#[cfg(target_os = "macos")]
+const GETCONF_SCRIPT: &str = r#"#!/bin/sh
+if [ "$#" -eq 1 ] && [ "$1" = DARWIN_USER_TEMP_DIR ]; then
+  case $HOME in
+    @MATES@) printf '%s\n' @SHARED@ ;;
+    *) printf '%s\n' @OWN@ ;;
+  esac
+  exit 0
+fi
+exec /usr/bin/getconf "$@"
+"#;
+/// The short temp folder of the agent whose home is `home`: `ca-` and 16 hex digits of the
+/// home path's SHA-256 in [`TMP_PARENT`] (`/private/tmp` on macOS, `/tmp` elsewhere), short enough for Unix socket paths. Input: the agent
+/// home. Output: the path, which may not exist.
+pub fn tmp_path(home: &Path) -> PathBuf {
+    let digest = Sha256::digest(home.as_os_str().as_encoded_bytes());
+    let hash: String = digest[..TMP_HASH_BYTES]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let path = Path::new(TMP_PARENT).join(format!("{TMP_PREFIX}{hash}"));
+    assert_eq!(
+        path.as_os_str().len(),
+        TMP_PARENT.len() + 1 + TMP_PREFIX.len() + 2 * TMP_HASH_BYTES
+    );
+    path
+}
+
+/// Whether a path lies in an agent's short temp folder ([`tmp_path`]): the folder in
+/// [`TMP_PARENT`] named `ca-` and 16 lowercase hex digits, which the agent writes though
+/// this user owns it. A folder named otherwise there, such as a test's scratch, is not one.
+/// Input: the path. Output: the answer.
+pub fn in_agent_tmp(path: &Path) -> bool {
+    let Ok(rest) = path.strip_prefix(TMP_PARENT) else {
+        return false;
+    };
+    let Some(std::path::Component::Normal(name)) = rest.components().next() else {
+        return false;
+    };
+    name.to_str()
+        .and_then(|name| name.strip_prefix(TMP_PREFIX))
+        .is_some_and(|hash| {
+            hash.len() == 2 * TMP_HASH_BYTES
+                && hash
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        })
+}
+
+/// Makes the agent's short temp folder with mode 0700, or reuses the one this user already
+/// owns there and makes it private again, and writes the agent's own `git` into it (see
+/// [`with_agent_git`]) as the worker copy that refuses `crazyagent/main` too, which
+/// [`catch_up_git`] widens while "Catch up with main" is on, so a copy that cannot be
+/// widened keeps the refusal; a `git` that cannot be written is logged and the agent keeps
+/// the system one. Input: the agent home. Output: the folder, or a refusal when the path is a
+/// link, a file or another user's folder.
+#[cfg(unix)]
+pub fn make_tmp(hooks: &ToolchainHooks, home: &Path) -> io::Result<PathBuf> {
+    let path = tmp_path(home);
+    match fs::DirBuilder::new().mode(0o700).create(&path) {
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
+        _ => {}
+    }
+    if !own_folder(&path) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the agent temp path is not a folder of this user",
+        ));
+    }
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+    assert!(private_folder(&path));
+    if let Some(script) = git_script((hooks.sandboxed_git)(), GitCopy::Worker, false)
+        && let Err(error) = write_git(&path, &script)
+    {
+        eprintln!("agent_git_not_written kind={:?}", error.kind());
+    }
+    Ok(path)
+}
+
+/// The script of an agent's own `getconf` ([`GETCONF_SCRIPT`]). Inputs: a native lead's
+/// teammates' home, their temp folder and the agent's own. Output: the script, or none when
+/// a path is not plain or the script is too long.
+#[cfg(target_os = "macos")]
+fn getconf_script(mates: &Path, shared: &Path, own: &Path) -> Option<String> {
+    let script = GETCONF_SCRIPT
+        .replace("@MATES@", &format!("'{}'", plain_path(mates)?))
+        .replace("@SHARED@", &format!("'{}/'", plain_path(shared)?))
+        .replace("@OWN@", &format!("'{}/'", plain_path(own)?));
+    assert!(
+        ["@MATES@", "@SHARED@", "@OWN@"]
+            .iter()
+            .all(|mark| !script.contains(mark))
+    );
+    (script.len() <= GETCONF_SCRIPT_BYTES_MAX).then_some(script)
+}
+
+/// Writes the agent's own `getconf` into `bin` of the launch folder the engine has just
+/// made for one launch, which neither the agent nor a native lead's teammates may write
+/// (LL-2, TPH). context-mode makes its script folders under `getconf DARWIN_USER_TEMP_DIR`,
+/// ignoring TMPDIR, and Seatbelt denies the system answer, so this one names where the
+/// caller may write: its short temp folder, or the lead's own one in it for a native lead
+/// (T3-15/18). A research job makes its short temp folder after the install, so it calls this
+/// again then (R7-CTX F1): a launch folder that already holds this same `getconf` is kept,
+/// and one that holds anything else is refused. Inputs: the agent home and whether it leads a
+/// native team. Output: done, also when the agent has no short temp folder or a path is not
+/// plain and none is written, or the write failure.
+#[cfg(target_os = "macos")]
+pub fn write_getconf(hooks: &ToolchainHooks, home: &Path, native_lead: bool) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let Some(shared) = existing_tmp(home) else {
+        return Ok(());
+    };
+    let own = if native_lead {
+        native_lead_tmp(&shared)
+    } else {
+        shared.clone()
+    };
+    let mates = (hooks.mates_home)(home);
+    let Some(script) = getconf_script(&mates, &shared, &own) else {
+        return Ok(());
+    };
+    let folder = getconf_folder(hooks, home);
+    let path = folder.join(GETCONF_PROGRAM);
+    if let Err(error) = fs::DirBuilder::new().mode(0o700).create(&folder) {
+        if error.kind() == io::ErrorKind::AlreadyExists && holds_getconf(&folder, &path, &script) {
+            return Ok(());
+        }
+        return Err(error);
+    }
+    let written = fs::set_permissions(&folder, fs::Permissions::from_mode(0o700))
+        .and_then(|()| {
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o700)
+                .custom_flags(
+                    (rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits() as i32,
+                )
+                .open(&path)
+        })
+        .and_then(|mut file| {
+            file.set_permissions(fs::Permissions::from_mode(0o700))?;
+            file.write_all(script.as_bytes())?;
+            file.sync_all()?;
+            file.metadata()
+        });
+    match written {
+        Ok(metadata)
+            if metadata.mode() & 0o777 == 0o700 && metadata.len() == script.len() as u64 =>
+        {
+            Ok(())
+        }
+        outcome => {
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_dir(&folder);
+            Err(outcome
+                .err()
+                .unwrap_or_else(|| io::Error::other("launch_getconf_unsafe")))
+        }
+    }
+}
+
+/// Whether the launch folder already holds this exact `getconf`: `bin` a real folder and
+/// `getconf` in it a real file of mode 0700 with the script's bytes, opened without following
+/// a link. Inputs: the folder, the file and the script. Output: the answer.
+#[cfg(target_os = "macos")]
+fn holds_getconf(folder: &Path, path: &Path, script: &str) -> bool {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    if !fs::symlink_metadata(folder).is_ok_and(|metadata| metadata.is_dir()) {
+        return false;
+    }
+    let Ok(file) = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits() as i32)
+        .open(path)
+    else {
+        return false;
+    };
+    let plain = file
+        .metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o777 == 0o700);
+    let mut held = Vec::with_capacity(script.len());
+    plain
+        && file
+            .take(GETCONF_SCRIPT_BYTES_MAX as u64 + 1)
+            .read_to_end(&mut held)
+            .is_ok()
+        && held == script.as_bytes()
+}
+
+/// The folder of the agent's launch folder that holds its own `getconf`. Input: the agent
+/// home. Output: the path, which may not exist.
+pub fn getconf_folder(hooks: &ToolchainHooks, home: &Path) -> PathBuf {
+    home.join(hooks.launch_state).join(GETCONF_FOLDER)
+}
+
+/// Puts the agent's own `getconf` (see [`write_getconf`]) and then its own `git` (see
+/// [`make_tmp`]) at the front of a harness's search path, ahead of every toolchain and
+/// system folder, so the agent's git calls under Seatbelt run the real git, not the
+/// `/usr/bin/git` shim, and context-mode makes its temp folders where the agent may write.
+/// Only a harness's own path gets them, never a command the engine runs under the profile,
+/// since the agent can change its `git` folder. Inputs: the agent home and the path.
+/// Output: the path, without each program the agent does not have.
+pub fn with_agent_git(hooks: &ToolchainHooks, home: &Path, path: String) -> String {
+    let path = match existing_tmp(home) {
+        Some(tmp) => in_front(&tmp.join(GIT_FOLDER), GIT_PROGRAM, path),
+        None => path,
+    };
+    in_front(&getconf_folder(hooks, home), GETCONF_PROGRAM, path)
+}
+
+/// Puts a folder at the front of a search path when it holds the program as a file and its
+/// name has no `:`. Inputs: the folder, the program and the path. Output: the path.
+fn in_front(folder: &Path, program: &str, path: String) -> String {
+    let present =
+        fs::symlink_metadata(folder.join(program)).is_ok_and(|metadata| metadata.is_file());
+    match folder.to_str() {
+        Some(text) if present && !text.contains(':') => format!("{text}:{path}"),
+        _ => path,
+    }
+}
+
+/// The agent's short temp folder when it exists as this user's private folder. Input: the
+/// agent home. Output: the folder, or None.
+#[cfg(unix)]
+pub fn existing_tmp(home: &Path) -> Option<PathBuf> {
+    let path = tmp_path(home);
+    private_folder(&path).then_some(path)
+}
+
+/// A native lead's own temp folder, its `TMPDIR`: `lead` in its short temp folder, which its
+/// teammates share for their tmux socket and temp files but never reach inside (TPH-2
+/// residual). Input: the lead's short temp folder. Output: the path, which may not exist.
+pub fn native_lead_tmp(scratch: &Path) -> PathBuf {
+    scratch.join(NATIVE_LEAD_TMP)
+}
+
+/// Makes a native lead's own temp folder empty and private for one start: whatever holds
+/// the name, a link, a file or a folder, is removed without following a link, then the
+/// folder is made with mode 0700, so nothing a teammate left there under an earlier build
+/// reaches the lead. Input: the lead's short temp folder. Output: the folder, or the error,
+/// also when something takes the name in between or the temp folder is not private.
+#[cfg(unix)]
+pub fn fresh_native_lead_tmp(scratch: &Path) -> io::Result<PathBuf> {
+    if !private_folder(scratch) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the agent temp path is not a private folder of this user",
+        ));
+    }
+    let path = native_lead_tmp(scratch);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(&path)?,
+        Ok(_) => fs::remove_file(&path)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    fs::DirBuilder::new().mode(0o700).create(&path)?;
+    seal_new_folder(&path)?;
+    Ok(path)
+}
+
+/// Checks the folder just made at `path` with mode 0700 through one descriptor opened
+/// without following a link: it must be empty and still the private folder the name holds,
+/// so a link or a folder a teammate swaps in meanwhile is refused, never followed, changed
+/// or kept. Input: the new folder's path. Output: done, or the refusal.
+#[cfg(unix)]
+fn seal_new_folder(path: &Path) -> io::Result<()> {
+    use rustix::fs::{CWD, Dir, Mode, OFlags};
+    use rustix::io::Errno;
+    let changed = || {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the lead's own temp folder changed while it was made",
+        )
+    };
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let folder = match rustix::fs::openat(CWD, path, flags, Mode::empty()) {
+        Ok(folder) => fs::File::from(folder),
+        Err(Errno::LOOP | Errno::NOTDIR) => return Err(changed()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in Dir::read_from(&folder)? {
+        if !matches!(entry?.file_name().to_bytes(), b"." | b"..") {
+            return Err(changed());
+        }
+    }
+    let metadata = folder.metadata()?;
+    if private_folder_pin(path) != Some((metadata.dev(), metadata.ino())) {
+        return Err(changed());
+    }
+    Ok(())
+}
+
+/// Removes the agent's short temp folder with everything in it, as Clean up removes an
+/// agent's tree ([`agent_tree_gone`]), so a folder it shut or a file it made immutable does
+/// not keep it. Input: the agent home. Output: done when it is gone or never existed, or a
+/// refusal when the path is not this user's folder.
+#[cfg(unix)]
+pub fn remove_tmp(hooks: &ToolchainHooks, home: &Path) -> io::Result<()> {
+    let path = tmp_path(home);
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+        Ok(_) if !own_folder(&path) => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the agent temp path is not a folder of this user",
+            ));
+        }
+        Ok(_) => {}
+    }
+    agent_tree_gone(hooks, &path)
+}
+
+/// Removes a folder an agent wrote, with all it holds, through
+/// [`ToolchainHooks::remove_agent_tree`], which opens up what the agent shut and clears
+/// its immutable flags without following a link. Input: the folder. Output: done once nothing
+/// has its name, or the error naming why it stays.
+#[cfg(unix)]
+fn agent_tree_gone(hooks: &ToolchainHooks, folder: &Path) -> io::Result<()> {
+    (hooks.remove_agent_tree)(folder)
+}
+
+/// Removes everything in the agent's short temp folder but the socket named `kept`, which
+/// stays there with the folder; with no such socket in this user's folder the folder goes
+/// as [`remove_tmp`] removes it. A native lead's caller socket is kept this way as the lead
+/// ends, so a teammate still running asks a socket no engine answers on and is refused,
+/// never finding no socket (rv-secreview RH2R2-1). Input: the agent home and the kept name.
+/// Output: as [`remove_tmp`].
+#[cfg(unix)]
+pub fn remove_tmp_keeping(hooks: &ToolchainHooks, home: &Path, kept: &str) -> io::Result<()> {
+    let path = tmp_path(home);
+    let keeps = own_folder(&path)
+        && fs::symlink_metadata(path.join(kept))
+            .is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type()));
+    if !keeps {
+        return remove_tmp(hooks, home);
+    }
+    for entry in fs::read_dir(&path)? {
+        let entry = entry?;
+        if entry.file_name() == kept {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            agent_tree_gone(hooks, &entry.path())?;
+        } else {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+/// Whether `path` is itself one short temp folder ([`tmp_path`]) this user owns privately,
+/// so the engine may remove it with all it holds: exactly a `ca-` and 16 lowercase hex
+/// digits name in [`TMP_PARENT`], a real folder, not a link, with no access for others.
+/// Input: the path. Output: the answer.
+#[cfg(unix)]
+pub fn own_short_tmp(path: &Path) -> bool {
+    in_agent_tmp(path)
+        && path.parent() == Some(Path::new(TMP_PARENT))
+        && path.as_os_str().len() == TMP_PARENT.len() + 1 + TMP_PREFIX.len() + 2 * TMP_HASH_BYTES
+        && private_folder(path)
+}
+
+#[cfg(unix)]
+fn own_folder(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() && metadata.uid() == nix::unistd::getuid().as_raw())
+}
+
+#[cfg(unix)]
+fn private_folder(path: &Path) -> bool {
+    private_folder_pin(path).is_some()
+}
+
+/// The (device, inode) of a folder that is this user's own private folder, read in one
+/// look that never follows a link. Input: the path. Output: the pin, or None for a link, a
+/// file, another user's folder or one open to others.
+#[cfg(unix)]
+pub fn private_folder_pin(path: &Path) -> Option<(u64, u64)> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    (metadata.is_dir()
+        && metadata.uid() == nix::unistd::getuid().as_raw()
+        && metadata.mode() & 0o077 == 0)
+        .then(|| (metadata.dev(), metadata.ino()))
+}
+
+/// The short temp folder of one agent run that ends inside a single call, removed with
+/// everything in it when dropped.
+#[derive(Debug)]
+pub struct ScopedTmp {
+    hooks: &'static ToolchainHooks,
+    home: PathBuf,
+    path: PathBuf,
+}
+
+impl ScopedTmp {
+    /// Makes the folder as [`make_tmp`] does. Inputs: the hooks, kept to remove the folder
+    /// when dropped, and the agent home. Output: the scoped folder, or the refusal.
+    pub fn make(hooks: &'static ToolchainHooks, home: &Path) -> io::Result<Self> {
+        let path = make_tmp(hooks, home)?;
+        Ok(Self {
+            hooks,
+            home: home.to_path_buf(),
+            path,
+        })
+    }
+
+    /// The folder, the run's `TMPDIR`.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ScopedTmp {
+    fn drop(&mut self) {
+        let _ = remove_tmp(self.hooks, &self.home);
+    }
+}
+
+/// No short temp folder outside Unix; agents keep the temp dir their launch sets. Takes the
+/// agent home, unused. Returns None.
+#[cfg(not(unix))]
+pub fn existing_tmp(_home: &Path) -> Option<PathBuf> {
+    None
+}
+
+/// No short temp folder outside Unix, where no agent sandbox runs. Takes the agent home,
+/// unused. Returns `Unsupported`.
+#[cfg(not(unix))]
+pub fn make_tmp(_hooks: &ToolchainHooks, _home: &Path) -> io::Result<PathBuf> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+/// No native lead's own temp folder outside Unix, where no native team runs. Takes the
+/// short temp folder, unused. Returns `Unsupported`.
+#[cfg(not(unix))]
+pub fn fresh_native_lead_tmp(_scratch: &Path) -> io::Result<PathBuf> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+/// Nothing to remove outside Unix. Takes the agent home, unused. Returns done.
+#[cfg(not(unix))]
+pub fn remove_tmp(_hooks: &ToolchainHooks, _home: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Nothing to remove outside Unix. Takes the agent home and the kept name, unused. Returns
+/// done.
+#[cfg(not(unix))]
+pub fn remove_tmp_keeping(_hooks: &ToolchainHooks, _home: &Path, _kept: &str) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests;

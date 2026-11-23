@@ -1,11 +1,11 @@
 #![cfg(target_os = "macos")]
 
-use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
-use crazyagent::sandbox::tool_cache::CacheShape;
 use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox, Sandbox, agent_env, tool_cache};
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
+use kernel_sandbox::tool_cache::CacheShape;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs;
@@ -66,7 +66,7 @@ fn run(sandbox: &ProjectSandbox, profile: &Path, script: &str) -> Output {
 }
 
 fn owner_home() -> PathBuf {
-    crazyagent::sandbox::toolchains::ToolHomes::owner()
+    kernel_sandbox::toolchains::ToolHomes::owner()
         .unwrap()
         .home()
         .to_path_buf()
@@ -81,12 +81,19 @@ fn quoted(path: &Path) -> String {
 /// A tool cache prepared under an engine runtime folder beside the case, with the real uv
 /// the agent's PATH finds when `uv` is set. A machine without uv fails the rows that ask
 /// for it instead of skipping them (T8).
-fn tool_cache(case: &Case, uv: bool) -> tool_cache::Prepared {
+fn tool_cache(case: &Case, uv: bool) -> kernel_sandbox::tool_cache::Prepared {
     let runtime = case.root.join("runtime");
     fs::create_dir_all(&runtime).unwrap();
     let base = sandbox(case, SandboxNetwork::Only(Vec::new()));
     let program = uv.then(|| base.tool_program("uv").expect("uv missing"));
-    tool_cache::prepare(&runtime, "project-1", "sandboxed-root", program.as_deref()).unwrap()
+    kernel_sandbox::tool_cache::prepare(
+        &crazyagent::sandbox::TOOL_CACHE_HOOKS,
+        &runtime,
+        "project-1",
+        "sandboxed-root",
+        program.as_deref(),
+    )
+    .unwrap()
 }
 
 /// The variables a sandbox's commands start with, by name.
@@ -1301,8 +1308,8 @@ fn a_tools_on_agent_serves_on_loopback_but_never_listens_on_an_owner_tool_port()
         ("hello".to_owned(), String::new()),
         "an agent's dev server on loopback takes connections"
     );
-    assert_eq!(crazyagent::sandbox::OWNER_PORTS, [1455, 11434]);
-    for port in crazyagent::sandbox::OWNER_PORTS {
+    assert_eq!(kernel_sandbox::ports::OWNER_PORTS, [1455, 11434]);
+    for port in kernel_sandbox::ports::OWNER_PORTS {
         for host in ["127.0.0.1", "0.0.0.0", "::1"] {
             let name = format!("owner-{port}-{}.sb", host.replace([':', '.'], "-"));
             let (got, said) = listen(&open, &case, &name, host, port, false);
@@ -1487,13 +1494,13 @@ fn only_loopback_model_endpoints_name_kept_ports_and_the_count_is_bounded() {
         Err(SandboxError::Invalid(_))
     ));
     let many: Vec<u16> =
-        (20_000..20_000 + crazyagent::sandbox::KEPT_PORTS_MAX as u16 + 1).collect();
+        (20_000..20_000 + kernel_sandbox::ports::KEPT_PORTS_MAX as u16 + 1).collect();
     assert!(matches!(
         open.clone().keep_ports(&many),
         Err(SandboxError::Invalid(_))
     ));
     let kept = open
-        .keep_ports(&many[..crazyagent::sandbox::KEPT_PORTS_MAX])
+        .keep_ports(&many[..kernel_sandbox::ports::KEPT_PORTS_MAX])
         .unwrap()
         .keep_ports(&[1455, 11434, 20_000])
         .unwrap();
@@ -3021,8 +3028,10 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
     let switched = owner_git(&clone, &case.home, &["switch", "-q", "-c", task]);
     assert!(switched.status.success(), "{switched:?}");
     let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
-    let tmp = crazyagent::sandbox::toolchains::make_tmp(&case.home).unwrap();
-    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+    let tmp =
+        kernel_sandbox::toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home)
+            .unwrap();
+    for folder in kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED {
         fs::create_dir_all(case.home.join(folder)).unwrap();
     }
     let mates_home = case.home.with_file_name("mates-home");
@@ -3256,8 +3265,10 @@ fn a_native_lead_s_teammates_never_move_a_lead_branch_of_teammate_shape() {
     let switched = owner_git(&clone, &case.home, &["switch", "-q", "-c", task]);
     assert!(switched.status.success(), "{switched:?}");
     let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
-    let tmp = crazyagent::sandbox::toolchains::make_tmp(&case.home).unwrap();
-    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+    let tmp =
+        kernel_sandbox::toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home)
+            .unwrap();
+    for folder in kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED {
         fs::create_dir_all(case.home.join(folder)).unwrap();
     }
     let mates_home = case.home.with_file_name("mates-home");
@@ -3494,8 +3505,10 @@ fn a_linked_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_worktree()
         assert!(added.status.success(), "{added:?}");
     }
     let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
-    let tmp = crazyagent::sandbox::toolchains::make_tmp(&case.home).unwrap();
-    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+    let tmp =
+        kernel_sandbox::toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home)
+            .unwrap();
+    for folder in kernel_sandbox::profile::consts::CLAUDE_TEAM_SHARED {
         fs::create_dir_all(case.home.join(folder)).unwrap();
     }
     let mates_home = case.home.with_file_name("mates-home");
@@ -4203,7 +4216,7 @@ fn a_confined_shell_lists_its_own_running_child() {
 /// TMPDIR and takes a new file there, and a port grant joins the limited network.
 #[test]
 fn access_grants_reach_one_socket_hand_over_the_temp_folder_and_keep_its_sockets() {
-    use crazyagent::sandbox::policy::AccessGrant;
+    use kernel_sandbox::policy::AccessGrant;
     let case = case();
     let owner_tmp = case.root.join("otmp");
     fs::create_dir_all(&owner_tmp).unwrap();
@@ -4272,9 +4285,10 @@ fn access_grants_reach_one_socket_hand_over_the_temp_folder_and_keep_its_sockets
 /// the first and last open name and a plain file read, an unlisted name stays closed.
 #[test]
 fn a_profile_with_every_grant_kind_parses_and_keeps_its_rules() {
-    use crazyagent::sandbox::policy::AccessGrant;
-    use crazyagent::sandbox::shared_folders::{SharedFolders, apply};
-    use crazyagent::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
+    use crazyagent::sandbox::shared_folders::apply;
+    use kernel_sandbox::policy::AccessGrant;
+    use kernel_sandbox::shared_folders::SharedFolders;
+    use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
     let case = case();
     let own = case.project.join(".crazyagent/worktrees/agent-1");
     let owner_tmp = case.root.join("otmp");
@@ -4387,7 +4401,9 @@ fn a_profile_with_every_grant_kind_parses_and_keeps_its_rules() {
 /// top of the project or deeper, can be read, while a plain file next to them can.
 #[test]
 fn every_secret_name_stays_denied_once_the_secret_rule_is_split() {
-    use crazyagent::sandbox::shared_folders::{SECRET_NAMES, SharedFolders, apply};
+    use crazyagent::sandbox::shared_folders::apply;
+    use kernel_sandbox::shared_folders::SECRET_NAMES;
+    use kernel_sandbox::shared_folders::SharedFolders;
     const SAMPLES: [&str; 25] = [
         ".env",
         ".git-credentials",

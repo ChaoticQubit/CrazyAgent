@@ -1,5 +1,10 @@
 use super::*;
-use std::os::unix::fs::PermissionsExt;
+use kernel_sandbox::policy::{AgentAccess, ToolCacheScope};
+use kernel_sandbox::tool_cache::{
+    FOLDER, MARKER, MARKER_TARGET, PNPM, Prepared, project_folder, remove_agent,
+};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::path::PathBuf;
 
 /// A canonical engine runtime folder and a stand-in uv: a script that makes the cache the
 /// way uv 0.13 does, a `sdists-v10` bucket holding an empty `.git` file beside a
@@ -37,6 +42,7 @@ impl Runtime {
 
     fn prepare(&self) -> Result<Prepared, &'static str> {
         prepare(
+            &crate::sandbox::TOOL_CACHE_HOOKS,
             &self.runtime,
             "project-1",
             "sandboxed-worktree",
@@ -62,61 +68,6 @@ impl Runtime {
 /// The marker path of the stand-in's bucket in a prepared cache.
 fn marker_of(prepared: &Prepared) -> PathBuf {
     prepared.root.join(UV).join("sdists-v10").join(MARKER)
-}
-
-#[test]
-fn a_folder_name_from_uv_is_lowercase_letters_digits_and_dashes_only() {
-    for name in ["sdists-v10", "wheels-v6", "a", &"a".repeat(64)] {
-        assert!(plain_name(name), "{name}");
-    }
-    for name in [
-        "",
-        ".git",
-        ".GIT",
-        ".Git",
-        "..",
-        ".",
-        "Upper",
-        "a/b",
-        "a.b",
-        "a b",
-        &"a".repeat(65),
-    ] {
-        assert!(!plain_name(name), "{name}");
-    }
-}
-
-/// T8 C2 (R2): no two level and shape pairs share a cache, Full access gets none, and under
-/// One per agent each agent gets its own, apart from every shared one.
-#[test]
-fn shared_caches_differ_by_level_and_shape_and_full_access_gets_none() {
-    let mut keys = std::collections::BTreeSet::new();
-    for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
-        for shape in CacheShape::ALL {
-            assert!(keys.insert(key(ToolCacheScope::Shared, access, shape, "35").unwrap()));
-        }
-        for agent in ["35", "52", "master"] {
-            let own = key(
-                ToolCacheScope::PerAgent,
-                access,
-                CacheShape::Worktree,
-                agent,
-            )
-            .unwrap();
-            assert_eq!(
-                own,
-                key(ToolCacheScope::PerAgent, access, CacheShape::Clone, agent).unwrap()
-            );
-            keys.insert(own);
-        }
-    }
-    assert_eq!(keys.len(), 2 * CacheShape::ALL.len() + 6);
-    for scope in [ToolCacheScope::Shared, ToolCacheScope::PerAgent] {
-        assert_eq!(
-            key(scope, AgentAccess::Full, CacheShape::ProjectRoot, "35"),
-            None
-        );
-    }
 }
 
 /// T8 C3 (R3): the priming process starts uv under the priming profile from an environment
@@ -476,7 +427,14 @@ fn clean_up_takes_an_agents_cache_it_pinned_and_closed_inside() {
         "7",
     )
     .unwrap();
-    let prepared = prepare(&runtime.runtime, "project-1", &own, None).unwrap();
+    let prepared = prepare(
+        &crate::sandbox::TOOL_CACHE_HOOKS,
+        &runtime.runtime,
+        "project-1",
+        &own,
+        None,
+    )
+    .unwrap();
     let closed = prepared.root.join(UV).join("closed");
     std::fs::create_dir(&closed).unwrap();
     std::fs::write(closed.join("pinned"), "kept").unwrap();
@@ -484,7 +442,13 @@ fn clean_up_takes_an_agents_cache_it_pinned_and_closed_inside() {
     std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o500)).unwrap();
     let appending = prepared.root.join(PNPM);
     nix::unistd::chflags(appending.as_path(), FileFlag::UF_APPEND).unwrap();
-    remove_agent(&runtime.runtime, "project-1", "7").unwrap();
+    remove_agent(
+        &crate::sandbox::TOOL_CACHE_HOOKS,
+        &runtime.runtime,
+        "project-1",
+        "7",
+    )
+    .unwrap();
     assert!(std::fs::symlink_metadata(&prepared.root).is_err());
     assert!(project_folder(&runtime.runtime, "project-1").is_dir());
 }
@@ -496,35 +460,6 @@ fn an_engine_cache_folder_others_may_enter_fails_closed() {
     let prepared = runtime.prepare().unwrap();
     std::fs::set_permissions(&prepared.root, std::fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(runtime.prepare(), Err("tool_cache_folder_refused"));
-}
-
-/// T8 C3 (R3): a bucket named `.git` or over 64 bytes, or a 17th bucket, refuses the whole
-/// fresh cache, and up to 16 plain buckets pass.
-#[test]
-fn a_bucket_name_or_count_out_of_bounds_refuses_the_cache() {
-    let mark = |cache: &Path, name: &str| {
-        std::fs::create_dir_all(cache.join(name)).unwrap();
-        std::fs::write(cache.join(name).join(MARKER), "").unwrap();
-    };
-    for name in [".git", ".GIT", &"a".repeat(65), "Upper", "a.b"] {
-        let temp = tempfile::tempdir().unwrap();
-        mark(temp.path(), "sdists-v10");
-        mark(temp.path(), name);
-        assert_eq!(
-            buckets_in(temp.path()),
-            Err("tool_cache_bucket_refused"),
-            "{name}"
-        );
-    }
-    let temp = tempfile::tempdir().unwrap();
-    for index in 0..BUCKETS_MAX {
-        mark(temp.path(), &format!("bucket-{index}"));
-    }
-    std::fs::create_dir(temp.path().join("unmarked")).unwrap();
-    std::fs::write(temp.path().join("CACHEDIR.TAG"), "tag").unwrap();
-    assert_eq!(buckets_in(temp.path()).unwrap().len(), BUCKETS_MAX);
-    mark(temp.path(), "bucket-16");
-    assert_eq!(buckets_in(temp.path()), Err("tool_cache_bucket_refused"));
 }
 
 /// T8 C3: a uv that fails, or that names a bad bucket, gives no cache and leaves no priming
@@ -540,7 +475,14 @@ fn a_failed_priming_gives_no_cache_and_no_uv_gives_a_pnpm_cache() {
         assert_eq!(runtime.priming_left(), 0, "{extra}");
     }
     let runtime = Runtime::new("");
-    let prepared = prepare(&runtime.runtime, "project-1", "sandboxed-root", None).unwrap();
+    let prepared = prepare(
+        &crate::sandbox::TOOL_CACHE_HOOKS,
+        &runtime.runtime,
+        "project-1",
+        "sandboxed-root",
+        None,
+    )
+    .unwrap();
     assert!(!prepared.uv && !prepared.primed);
     assert!(prepared.root.join(PNPM).is_dir());
     assert!(!prepared.root.join(UV).join("sdists-v10").exists());
