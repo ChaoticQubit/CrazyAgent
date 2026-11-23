@@ -29,23 +29,30 @@ pub fn changeable_past_sticky(path: &Path) -> Option<PathBuf> {
     changeable(path, true)
 }
 
-/// Reads a path as written and with its links resolved and names its first changeable part
-/// ([`first_changeable_part`]). Inputs: the path and whether world-writable stores pass.
-/// Output: the entry, or none.
+/// Reads a path as written, with its links resolved, and every link and `..` folder its
+/// resolution passes through ([`link_chain`]), and names the first changeable part of
+/// any of them ([`first_changeable_part`]). A link that cannot be read, or a chain past
+/// [`LINK_HOPS_MAX`], counts as changeable. Inputs: the path and whether world-writable
+/// stores pass. Output: the entry, or none.
 #[cfg(unix)]
 fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
     let me = current_uid();
     let resolved = canonical(path);
-    let paths = [path, resolved.as_path()];
+    let hops = match link_chain(path) {
+        Ok(hops) => hops,
+        Err(entry) => return Some(entry),
+    };
+    let mut paths: Vec<&Path> = vec![path, resolved.as_path()];
+    paths.extend(hops.iter().map(PathBuf::as_path));
     let mut entries: Vec<&Path> = Vec::new();
-    for entry in paths.into_iter().flat_map(Path::ancestors) {
+    for entry in paths.iter().flat_map(|path| path.ancestors()) {
         if !entries.contains(&entry) {
             entries.push(entry);
         }
     }
     let read = read_parts(&entries);
     assert_eq!(read.len(), entries.len());
-    for path in paths {
+    for path in &paths {
         let parts: Vec<Part> = path
             .ancestors()
             .filter_map(|entry| entries.iter().position(|seen| *seen == entry))
@@ -59,6 +66,65 @@ fn changeable(path: &Path, open_stores: bool) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Every link a path's resolution passes through, named where it sits, and every folder a
+/// `..` in it leaves, in the order the resolution meets them. A missing part ends the walk,
+/// since nothing past it exists to follow. Input: an absolute path. Output: those places,
+/// or the entry that makes the path changeable: one that cannot be read, or the link past
+/// [`LINK_HOPS_MAX`].
+#[cfg(unix)]
+fn link_chain(path: &Path) -> Result<Vec<PathBuf>, PathBuf> {
+    use std::path::Component;
+    assert!(path.is_absolute());
+    let queue = |pending: &mut Vec<PathBuf>, from: &Path| {
+        for part in from.components().rev() {
+            match part {
+                Component::Normal(name) => pending.push(PathBuf::from(name)),
+                Component::ParentDir => pending.push(PathBuf::from("..")),
+                Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
+            }
+        }
+    };
+    let mut pending = Vec::new();
+    queue(&mut pending, path);
+    let mut at = PathBuf::from("/");
+    let mut hops = Vec::new();
+    let mut links = 0;
+    while let Some(part) = pending.pop() {
+        if part.as_os_str() == ".." {
+            if at.parent().is_some() {
+                hops.push(at.clone());
+            }
+            at.pop();
+            continue;
+        }
+        let next = at.join(&part);
+        let kind = match std::fs::symlink_metadata(&next) {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(_) => return Err(next),
+        };
+        if !kind.is_symlink() {
+            at = next;
+            continue;
+        }
+        if links == LINK_HOPS_MAX {
+            return Err(next);
+        }
+        links += 1;
+        let Ok(target) = std::fs::read_link(&next) else {
+            return Err(next);
+        };
+        hops.push(next);
+        if target.is_absolute() {
+            at = PathBuf::from("/");
+        }
+        queue(&mut pending, &target);
+    }
+    assert!(links <= LINK_HOPS_MAX);
+    assert!(hops.len() >= links);
+    Ok(hops)
 }
 
 /// One part of a path as the ownership rule reads it: missing, unreadable, carrying an
