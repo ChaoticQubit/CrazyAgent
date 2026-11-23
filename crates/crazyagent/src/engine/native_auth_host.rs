@@ -630,7 +630,7 @@ pub(in crate::engine) async fn dispatch(
         drop(launch);
         return Err(EngineError(TOO_OLD.into()));
     }
-    let mut command = custodian_command(
+    let command = custodian_command(
         executable.verified_path()?,
         &runtime_dir,
         harness
