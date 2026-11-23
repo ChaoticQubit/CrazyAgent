@@ -566,7 +566,7 @@ pub fn regex_escape(text: &str) -> String {
 /// The code points a case-insensitive HFS+ volume ignores in names (git's
 /// `core.protectHFS` list), so `HE\u{200c}AD` opens `HEAD` there: the one list every name
 /// compare that must match such a volume leaves out (RV-DS241-148).
-pub(crate) const HFS_IGNORED: [char; 16] = [
+pub const HFS_IGNORED: [char; 16] = [
     '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
     '\u{202E}', '\u{206A}', '\u{206B}', '\u{206C}', '\u{206D}', '\u{206E}', '\u{206F}', '\u{FEFF}',
 ];
