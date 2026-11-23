@@ -5942,6 +5942,7 @@ fn admit_pages<R: Runtime>(
 /// The name a window calls a command by: the last part of its path in `native_commands!`, so
 /// `restore::desktop_restore_status` and `desktop_status` give the bare function name.
 /// Input: a command function, bare or one module deep. Output: its name as a string literal.
+#[cfg(test)]
 macro_rules! command_name {
     ($module:ident :: $command:ident) => {
         stringify!($command)
