@@ -1,6 +1,7 @@
 use super::*;
 use crate::state_log::replay::replay;
-use crate::state_log::{Aggregate, Appender, Chunk, Draft, fence};
+use crate::state_log::{Aggregate, fence};
+use kernel_storage::state_log::{Chunk, Draft};
 use std::time::Instant;
 
 /// Samples of the one-event owner append, the call the engine makes most.
@@ -46,7 +47,7 @@ fn log_store(folder: &Path) -> Connection {
 /// Output: the draft.
 fn draft() -> Draft<'static> {
     Draft {
-        aggregate: Aggregate::Worktrees,
+        aggregate: Aggregate::Worktrees.into(),
         kind: "WorktreeAllocated",
         schema: 1,
         at_ms: 7,
@@ -64,7 +65,7 @@ fn append_call(folder: &Path) -> Call {
         run: Box::new(move || {
             let tx = db.transaction().unwrap();
             let start = Instant::now();
-            let mut log = Appender::own(&tx, fence::engine()).unwrap();
+            let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
             log.append(&draft()).unwrap();
             drop(log);
             tx.commit().unwrap();
@@ -89,7 +90,7 @@ fn snapshot_call(folder: &Path) -> Call {
                 .collect();
             let tx = db.transaction().unwrap();
             let start = Instant::now();
-            let mut log = Appender::own(&tx, fence::engine()).unwrap();
+            let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
             log.snapshot(Aggregate::Worktrees, 9, chunks).unwrap();
             drop(log);
             tx.commit().unwrap();
@@ -103,7 +104,7 @@ fn snapshot_call(folder: &Path) -> Call {
 fn replay_call(folder: &Path) -> Call {
     let mut db = log_store(folder);
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     for _ in 0..REPLAY_EVENTS {
         log.append(&draft()).unwrap();
     }

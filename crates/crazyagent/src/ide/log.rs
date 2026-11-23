@@ -3,9 +3,10 @@ use crate::engine::owner::{HostStamp, failure};
 use crate::ide::bridge::Decision;
 use crate::ide::bridge::run_command::RunMode;
 use crate::protocol::{ProjectId, RequestId};
+use crate::state_log::Aggregate;
 use crate::state_log::fence::Fence;
 use crate::state_log::replay::{self, Logged};
-use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
+use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -221,9 +222,9 @@ pub fn record(
         "every ide event names its project"
     );
     let body = change.body()?;
-    let mut appender = Appender::own(tx, Fence::Engine(host.clone()))?;
+    let mut appender = crate::state_log::own(tx, Fence::Engine(host.clone()))?;
     let seq = appender.append(&Draft {
-        aggregate: Aggregate::Ide,
+        aggregate: Aggregate::Ide.into(),
         kind: change.kind(),
         schema: SCHEMA,
         at_ms,

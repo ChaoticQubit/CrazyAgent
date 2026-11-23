@@ -507,7 +507,7 @@ fn a_removal_tombstones_its_project_s_admissions_and_their_replay_brings_none_ba
     let mut s = store();
     let engine = || fence::Fence::Engine(s.started.host.clone());
     let tx = s.db.transaction().unwrap();
-    let mut appender = crate::state_log::Appender::own(&tx, engine()).unwrap();
+    let mut appender = crate::state_log::own(&tx, engine()).unwrap();
     for project in [REMOVED, OTHER] {
         let project_id = ProjectId::new(project).unwrap();
         let admitted = log::admitted_for_test(&project_id, &format!("/repo/{project}"));
@@ -515,7 +515,7 @@ fn a_removal_tombstones_its_project_s_admissions_and_their_replay_brings_none_ba
     }
     tx.commit().unwrap();
     let tx = s.db.transaction().unwrap();
-    let mut appender = crate::state_log::Appender::own(&tx, engine()).unwrap();
+    let mut appender = crate::state_log::own(&tx, engine()).unwrap();
     log::snapshot(&mut appender, 2).unwrap();
     tx.commit().unwrap();
 
@@ -531,11 +531,11 @@ fn a_removal_tombstones_its_project_s_admissions_and_their_replay_brings_none_ba
         .map(|(_, _, _, _, body)| body)
         .collect();
     assert_eq!(admitted.len(), 2);
-    assert_eq!(admitted[0].as_slice(), crate::state_log::TOMBSTONE);
+    assert_eq!(admitted[0].as_slice(), kernel_storage::state_log::TOMBSTONE);
     assert!(String::from_utf8_lossy(admitted[1]).contains("/repo/other"));
     let (_, _, kind, _, body) = events.last().unwrap();
     assert_eq!(kind, event::KIND, "the removal keeps its own event");
-    assert_ne!(body.as_slice(), crate::state_log::TOMBSTONE);
+    assert_ne!(body.as_slice(), kernel_storage::state_log::TOMBSTONE);
 
     let live = rows(&s.db, "repository_admissions").unwrap();
     assert_eq!(live.len(), 1, "only the other project's admission stands");
@@ -553,7 +553,7 @@ fn a_cleared_ids_admissions_are_tombstoned_and_their_replay_brings_none_back() {
     let mut s = store();
     let engine = || fence::Fence::Engine(s.started.host.clone());
     let tx = s.db.transaction().unwrap();
-    let mut appender = crate::state_log::Appender::own(&tx, engine()).unwrap();
+    let mut appender = crate::state_log::own(&tx, engine()).unwrap();
     for project in [REMOVED, OTHER] {
         let project_id = ProjectId::new(project).unwrap();
         let admitted = log::admitted_for_test(&project_id, &format!("/repo/{project}"));
@@ -576,7 +576,7 @@ fn a_cleared_ids_admissions_are_tombstoned_and_their_replay_brings_none_back() {
     assert_eq!(admitted.len(), 2);
     assert_eq!(
         admitted[0].as_slice(),
-        crate::state_log::TOMBSTONE,
+        kernel_storage::state_log::TOMBSTONE,
         "the cleared id's admission is redacted"
     );
     assert!(String::from_utf8_lossy(&admitted[1]).contains("/repo/other"));

@@ -1,10 +1,11 @@
 use super::*;
 use crate::protocol::{ProjectId, SessionId, TaskId};
+use crate::state_log::Aggregate;
 use crate::state_log::fence::{engine, seed};
 use crate::state_log::replay::{Logged, redact, rows};
-use crate::state_log::{Aggregate, Appender, SNAPSHOT_CHUNK};
 use crate::storage::opening::Opening;
 use crate::worktrees::{Admission, Identity, LeaseRecord, LeaseState, WorktreeLease};
+use kernel_storage::state_log::SNAPSHOT_CHUNK;
 use rusqlite::types::Value;
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
@@ -117,7 +118,7 @@ fn saved(task: &str, repository: &str, state: LeaseState) -> Event {
 /// the events. Output: each event's seq.
 fn write(db: &mut Connection, events: &[Event]) -> Vec<u64> {
     let tx = db.transaction().unwrap();
-    let mut appender = Appender::own(&tx, engine()).unwrap();
+    let mut appender = crate::state_log::own(&tx, engine()).unwrap();
     let seqs = events
         .iter()
         .map(|event| record(&mut appender, 5, event).unwrap())
@@ -199,13 +200,13 @@ fn a_snapshot_run_and_the_events_after_it_replay_to_the_same_rows() {
     )
     .unwrap();
     let tx = db.transaction().unwrap();
-    let mut appender = Appender::own(&tx, engine()).unwrap();
+    let mut appender = crate::state_log::own(&tx, engine()).unwrap();
     let done = snapshot(&mut appender, 9).unwrap();
     record(&mut appender, 9, &saved("t3", "/r1", LeaseState::Ready)).unwrap();
     record(&mut appender, 9, &admitted("p2", "/r2")).unwrap();
     drop(appender);
     tx.commit().unwrap();
-    crate::state_log::verify_snapshot(&db, done).unwrap();
+    kernel_storage::state_log::verify_snapshot(&db, done).unwrap();
     let chunks: i64 = db
         .query_row(
             "SELECT COUNT(*) FROM state_log WHERE kind=?1",

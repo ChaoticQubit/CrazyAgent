@@ -2,10 +2,13 @@ use crate::engine::EngineError;
 use crate::engine::owner::HostStamp;
 use crate::project_setup::removed::event as removed;
 use crate::protocol::{ProjectId, TaskId};
+use crate::state_log::Aggregate;
 use crate::state_log::fence::Fence;
-use crate::state_log::replay::{self, Clock, Logged};
-use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
+use crate::state_log::replay::{self, Logged};
 use crate::storage::opening::Opening;
+use kernel_storage::state_log::Appender;
+use kernel_storage::state_log::Clock;
+use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -218,21 +221,21 @@ pub fn record(
     let aggregate = Aggregate::Worktrees;
     let seq = match event {
         Event::Admitted(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_ADMITTED,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Reserved(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_RESERVED,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Saved(_) => appender.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_SAVED,
             schema: SCHEMA,
             at_ms,
@@ -364,7 +367,7 @@ pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, Engi
     }
     assert!(chunks.len() >= 2, "one chunk or more per table");
     assert_eq!(chunks[0].table, ADMISSIONS.0);
-    appender.snapshot(Aggregate::Worktrees, at_ms, chunks)
+    Ok(appender.snapshot(Aggregate::Worktrees, at_ms, chunks)?)
 }
 
 /// The open-time sweep of both worktree tables in one transaction: every lease is settled
@@ -384,7 +387,7 @@ pub(crate) fn sweep(db: &Connection, opening: Opening) -> Result<bool, EngineErr
     let changed = live(&tx)? != before;
     if changed {
         let at_ms = opening.at_ms();
-        let mut appender = Appender::opening(&tx, opening)?;
+        let mut appender = crate::state_log::opening(&tx, opening)?;
         snapshot(&mut appender, at_ms)?;
     }
     tx.commit().map_err(error)?;
@@ -422,7 +425,7 @@ pub(crate) fn first_run(tx: &Transaction<'_>, opening: Opening) -> Result<bool, 
         return Ok(false);
     }
     let at_ms = opening.at_ms();
-    let mut appender = Appender::opening(tx, opening)?;
+    let mut appender = crate::state_log::opening(tx, opening)?;
     let done = snapshot(&mut appender, at_ms)?;
     assert!(done > 0, "a run closes at a seq");
     assert_eq!(present, 3);
@@ -626,7 +629,7 @@ pub(crate) fn store_fence(tx: &Transaction<'_>) -> Result<Fence, EngineError> {
 /// writer's checks passed. Inputs: the transaction and the event. Output: the revision it
 /// moved to, or the first refusal, which the caller rolls back.
 pub(crate) fn record_own(tx: &Transaction<'_>, event: &Event) -> Result<u64, EngineError> {
-    let mut appender = Appender::own(tx, store_fence(tx)?)?;
+    let mut appender = crate::state_log::own(tx, store_fence(tx)?)?;
     let seq = record(&mut appender, Clock::System.now_ms(), event)?;
     let revision = appender.revision();
     assert!(seq > 0, "a recorded event has a seq");
@@ -654,7 +657,7 @@ pub(crate) fn record_at(tx: &Transaction<'_>, next: u64, event: &Event) -> Resul
     if moved != 1 {
         return Err(stale());
     }
-    let mut appender = Appender::owner(tx, next, store_fence(tx)?)?;
+    let mut appender = crate::state_log::owner(tx, next, store_fence(tx)?)?;
     let seq = record(&mut appender, Clock::System.now_ms(), event)?;
     assert!(seq > 0, "a recorded event has a seq");
     assert_eq!(appender.revision(), next);

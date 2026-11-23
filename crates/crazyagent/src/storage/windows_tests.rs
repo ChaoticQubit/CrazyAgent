@@ -200,7 +200,7 @@ async fn a_data_root_the_channel_save_made_first_still_labels_the_database() {
     const MEDIUM_FULL: Option<(u32, u32)> = Some((0x2000, 0x7));
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("data");
-    crate::update::save_channel(&data, crate::update::Channel::Dev).unwrap();
+    crate::update::save_channel(&data, kernel_processes::update::Channel::Dev).unwrap();
     let layout = crate::paths::Layout::new(data.clone()).unwrap();
     layout.prepare().unwrap();
     let config =

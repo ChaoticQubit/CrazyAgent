@@ -754,7 +754,7 @@ WantedBy=default.target\n",
         let built = own
             .ancestors()
             .any(|folder| folder.join("CACHEDIR.TAG").is_file());
-        if built || !crate::update::inside_app_bundle(&own) {
+        if built || !kernel_processes::update::inside_app_bundle(&own) {
             return false;
         }
         [
@@ -1151,7 +1151,7 @@ fn persisted(executable: &Path) -> Result<(), ServiceError> {
 /// The engine executable a login service or the command line link may keep naming: the
 /// bundled `executable` itself, unless it sits inside the running AppImage's mount folder
 /// `appdir`, which goes away when the app exits. Then it is a copy, private to this user,
-/// of the release executables beside it ([`crate::update::BINARIES`]) in
+/// of the release executables beside it ([`kernel_processes::update::BINARIES`]) in
 /// `<data root>/setup/bin`, which the tool resolver trusts so the bundled tmux there is used
 /// (leader 20:15), one stable path across versions, each file refreshed by an atomic rename
 /// whenever it differs. The copy an older version kept in `<data root>/bin` stays, since a
@@ -1177,7 +1177,7 @@ pub fn persistable(
     let (Some(source), Some(main)) = (executable.parent(), executable.file_name()) else {
         return Err(failure("the engine executable has no folder"));
     };
-    let names: Vec<String> = crate::update::BINARIES
+    let names: Vec<String> = kernel_processes::update::BINARIES
         .iter()
         .map(|name| format!("{name}{}", std::env::consts::EXE_SUFFIX))
         .filter(|name| source.join(name).is_file())
@@ -1237,7 +1237,9 @@ fn copy_version_file(root: &Path) -> PathBuf {
 fn newer_engine_at(root: &Path) -> bool {
     let recorded = bounded_text(&copy_version_file(root))
         .map(|text| text.trim().to_owned())
-        .filter(|known| crate::update::is_newer(known, kernel_processes::version::VERSION).is_ok());
+        .filter(|known| {
+            kernel_processes::update::is_newer(known, kernel_processes::version::VERSION).is_ok()
+        });
     [
         crate::engine::bootstrap::reported_engine_version(root),
         recorded,
@@ -1250,7 +1252,8 @@ fn newer_engine_at(root: &Path) -> bool {
 /// Whether a known engine version is newer than this engine, or cannot be read as a version,
 /// so this engine never takes its place. Input: the known version. Output: the answer.
 fn newer_than_this(known: &str) -> bool {
-    !crate::update::is_newer(known, kernel_processes::version::VERSION).is_ok_and(|newer| !newer)
+    !kernel_processes::update::is_newer(known, kernel_processes::version::VERSION)
+        .is_ok_and(|newer| !newer)
 }
 
 /// Retires the copy an older version kept in `<data root>/bin` once the login service names
@@ -1286,7 +1289,7 @@ fn retire_old_copies_with(layout: &Layout, installed: &Path, cli: Option<&Path>)
     {
         return;
     }
-    for name in crate::update::BINARIES {
+    for name in kernel_processes::update::BINARIES {
         let file = old.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
         if std::fs::symlink_metadata(&file).is_ok_and(|metadata| metadata.is_file()) {
             let _ = std::fs::remove_file(&file);
@@ -1772,7 +1775,7 @@ fn logged_ready(layout: &Layout, since: u64) -> bool {
 /// engine leaves beside its database says (F36), read without an engine. Input: the layout.
 /// Output: the backup code, or none.
 pub fn backup_failure(layout: &Layout) -> Option<&'static str> {
-    crate::storage::backup_failure(layout.root())
+    kernel_storage::migrations::backup_failure(layout.root())
 }
 
 /// The code the TUI and the desktop show for an engine start that did not answer
