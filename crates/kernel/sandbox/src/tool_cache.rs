@@ -132,15 +132,31 @@ fn plain_name(name: &str) -> bool {
 /// agent's worktree, since a removed agent never runs again. A shared cache stays, since
 /// other agents of its level use it. No link is followed: a link in a cache's place is
 /// unlinked, the `/dev/null` markers are unlinked, and a folder the agent closed or a file
-/// it pinned in its cache is opened and unpinned first (T8 r1 L3). Inputs: the hooks, the
-/// engine runtime, the project as [`project_folder`] names it and the agent's id. Output: Ok once
-/// none is left.
+/// it pinned in its cache is opened and unpinned first (T8 r1 L3). The folders from the
+/// runtime down to the project's are opened one part at a time with no link followed and
+/// accepted only as the engine's own, as [`prepare`] opens them, so a link or another
+/// user's folder above the caches fails with its plain code and removes nothing. Inputs:
+/// the hooks, the engine runtime, the project as [`project_folder`] names it and the
+/// agent's id. Output: Ok once none is left, also when the folders were never made.
 pub fn remove_agent(
     hooks: &ToolCacheHooks,
     runtime: &Path,
     project: &str,
     agent: &str,
 ) -> std::io::Result<()> {
+    let base = match rustix::fs::open(runtime, OPEN_FOLDER, Mode::empty()) {
+        Ok(base) => base,
+        Err(Errno::NOENT) => return Ok(()),
+        Err(_) => return Err(std::io::Error::other("tool_cache_link")),
+    };
+    let Some(tools) = existing_engine_folder(&base, FOLDER).map_err(std::io::Error::other)? else {
+        return Ok(());
+    };
+    let Some(owned) =
+        existing_engine_folder(&tools, &digest(project, 32)).map_err(std::io::Error::other)?
+    else {
+        return Ok(());
+    };
     let folder = project_folder(runtime, project);
     for own in [agent.to_owned(), format!("{agent}-teammates")] {
         for access in AgentAccess::ALL {
@@ -149,14 +165,17 @@ pub fn remove_agent(
                 continue;
             };
             for name in [format!("{key}.primed"), key] {
-                let path = folder.join(name);
-                match std::fs::symlink_metadata(&path) {
-                    Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(problem) => return Err(problem),
-                    Ok(found) if found.is_dir() => (hooks.remove_agent_tree)(&path)?,
-                    Ok(_) => std::fs::remove_file(&path)?,
+                match rustix::fs::statat(&owned, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+                    Err(Errno::NOENT) => {}
+                    Err(problem) => return Err(problem.into()),
+                    Ok(found) if FileType::from_raw_mode(found.st_mode) == FileType::Directory => {
+                        (hooks.remove_agent_tree)(&folder.join(&name))?
+                    }
+                    Ok(_) => rustix::fs::unlinkat(&owned, name.as_str(), AtFlags::empty())?,
                 }
-                assert!(std::fs::symlink_metadata(&path).is_err());
+                assert!(
+                    rustix::fs::statat(&owned, name.as_str(), AtFlags::SYMLINK_NOFOLLOW).is_err()
+                );
             }
         }
     }
@@ -222,7 +241,25 @@ pub fn prepare(
 /// accepts it only as a folder of this user that nobody else may enter. Inputs: the open
 /// parent and the name. Output: the open folder, or the plain code that refused it.
 fn engine_folder(parent: &OwnedFd, name: &str) -> Result<OwnedFd, &'static str> {
-    let folder = open_folder(parent, name)?;
+    engine_owned(open_folder(parent, name)?)
+}
+
+/// Opens one of the engine's own folders below `parent` that is already there, with no link
+/// followed, by the rule [`engine_folder`] applies, and makes none. Inputs: the open parent
+/// and a plain name. Output: the open folder, None when nothing has the name, else
+/// `tool_cache_link`, `tool_cache_unmade` or `tool_cache_folder_refused`.
+fn existing_engine_folder(parent: &OwnedFd, name: &str) -> Result<Option<OwnedFd>, &'static str> {
+    assert!(plain_name(name), "{name}");
+    match rustix::fs::openat(parent, name, OPEN_FOLDER, Mode::empty()) {
+        Ok(folder) => engine_owned(folder).map(Some),
+        Err(Errno::NOENT) => Ok(None),
+        Err(_) => Err("tool_cache_link"),
+    }
+}
+
+/// Accepts an open folder only as one of this user's that nobody else may enter. Input: the
+/// open folder. Output: the folder, else `tool_cache_unmade` or `tool_cache_folder_refused`.
+fn engine_owned(folder: OwnedFd) -> Result<OwnedFd, &'static str> {
     let stat = rustix::fs::fstat(&folder).map_err(|_| "tool_cache_unmade")?;
     if stat.st_uid != rustix::process::geteuid().as_raw() || u32::from(stat.st_mode) & 0o077 != 0 {
         return Err("tool_cache_folder_refused");

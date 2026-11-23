@@ -107,7 +107,7 @@ fn a_team_agent_of_a_listed_harness_starts_with_its_accounts_hand_over() {
     let handed = context.handover();
     assert!(handed.is_some(), "a listed agent is handed its account");
     let handed = handed.unwrap();
-    let local = kernel_sandbox::profile::env::LOCAL_PLACEHOLDER;
+    let local = kernel_security::relay_token::LOCAL_PLACEHOLDER;
     assert_eq!(handed.base_url(), "http://127.0.0.1:11434/v1");
     assert_eq!(handed.token(), local);
     assert_eq!(

@@ -711,7 +711,7 @@ fn the_sandboxed_terminals_git_answers_in_the_project() {
 #[test]
 fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {
     use crate::harnesses::launch::Secret;
-    use kernel_sandbox::profile::env::TOKEN_PREFIX;
+    use kernel_security::relay_token::TOKEN_PREFIX;
     let case = Case::new();
     let pool_text = "pool-account-key-7c41d9e0b2";
     let capability_text = "a1".repeat(32);

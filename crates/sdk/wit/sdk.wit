@@ -72,6 +72,56 @@ interface net {
   request: func(request: net-request) -> result<reply, refusal>;
 }
 
+interface process-types {
+  enum installer {
+    uv-release,
+    uv-tool,
+    node-archive,
+    brew-formula,
+    brew-cask,
+    npm-global,
+    winget,
+    system-package,
+    self-update,
+  }
+
+  enum install-verb {
+    install,
+    update,
+  }
+
+  enum system-manager {
+    apt-get,
+    dnf,
+  }
+
+  record install-recipe {
+    installer: installer,
+    name: string,
+    verb: option<install-verb>,
+    version: option<string>,
+    target: option<string>,
+    python: option<string>,
+    lock: option<string>,
+    sha256: option<string>,
+    manager: option<system-manager>,
+    args: list<string>,
+    %flags: list<string>,
+  }
+
+  record install-result {
+    code: u32,
+    output: list<u8>,
+  }
+}
+
+interface process {
+  use sdk-types.{refusal};
+  use process-types.{install-recipe, install-result};
+
+  install: func(recipe: install-recipe) -> result<install-result, refusal>;
+}
+
 interface secrets-types {
   type secret = u64;
 }
@@ -85,6 +135,27 @@ interface secrets {
   find: func(name: string) -> result<option<secret>, refusal>;
 
   forget: func(secret: secret) -> result<_, refusal>;
+}
+
+interface service-types {
+  record service-state {
+    installed: bool,
+    running: bool,
+    current: bool,
+  }
+}
+
+interface service {
+  use sdk-types.{refusal};
+  use service-types.{service-state};
+
+  status: func() -> result<service-state, refusal>;
+
+  repair: func() -> result<_, refusal>;
+
+  install: func() -> result<_, refusal>;
+
+  uninstall: func() -> result<_, refusal>;
 }
 
 interface settings-types {
@@ -116,8 +187,25 @@ interface settings {
   save-quit: func(settings: quit-settings) -> result<_, refusal>;
 }
 
+interface update-types {
+  enum update-channel {
+    stable,
+    dev,
+  }
+}
+
+interface update {
+  use sdk-types.{refusal};
+  use update-types.{update-channel};
+
+  set-channel: func(channel: update-channel) -> result<_, refusal>;
+}
+
 world plugin {
   import net;
+  import process;
   import secrets;
+  import service;
   import settings;
+  import update;
 }

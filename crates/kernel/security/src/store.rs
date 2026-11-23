@@ -64,8 +64,7 @@ pub trait Store: Send + Sync {
 
 /// Checks one service or account name with [`kernel_common::names::is_store_name`]: 1 to
 /// 63 bytes of lowercase ASCII letters, digits, `.`, `-` and `_`, not starting with `.` or
-/// `-`, no trailing dot and no Windows device name. Output: the name, or
-/// `credential_name_invalid`.
+/// `-`. Output: the name, or `credential_name_invalid`.
 pub fn checked_name(name: &str) -> Result<&str, StoreError> {
     if kernel_common::names::is_store_name(name) {
         Ok(name)
@@ -74,17 +73,23 @@ pub fn checked_name(name: &str) -> Result<&str, StoreError> {
     }
 }
 
-/// Names one stored item as `<service>:<account>`, both checked by [`checked_name`], so the
-/// join has no trailing `.` or space and no Windows device stem, and refusing a one-letter
-/// service, which reads as a drive on Windows, on every OS. Inputs: the service and account.
-/// Output: the reference, which holds no secret, or `credential_name_invalid`.
+/// Names one stored item as `<service>:<account>`, refusing the shapes the engine's wire
+/// identity refuses, before any store writes: an account ending in `.`
+/// ([`kernel_common::names::is_store_account`]), a Windows device name as the stem of the
+/// joined reference, and a one-letter service, which reads as a drive on Windows and is
+/// refused on every OS. Inputs: the service and account. Output: the reference, which holds
+/// no secret, or `credential_name_invalid`.
 pub fn reference(service: &str, account: &str) -> Result<SecretRef, StoreError> {
+    let invalid = || StoreError::code("credential_name_invalid");
+    if !kernel_common::names::is_store_account(account) {
+        return Err(invalid());
+    }
     let joined = format!("{}:{}", checked_name(service)?, checked_name(account)?);
     let drive = service.len() == 1 && service.as_bytes()[0].is_ascii_lowercase();
-    if drive {
-        return Err(StoreError::code("credential_name_invalid"));
+    if kernel_common::windows_device(&joined) || drive {
+        return Err(invalid());
     }
-    assert!(!joined.ends_with(['.', ' ']) && !kernel_common::windows_device(&joined));
+    assert!(!joined.ends_with(['.', ' ']));
     assert!(joined.len() <= REFERENCE_BYTES_MAX);
     Ok(SecretRef(joined))
 }
@@ -101,6 +106,29 @@ pub fn parts(reference: &SecretRef) -> Result<(&str, &str), StoreError> {
         checked_name(service).map_err(|_| invalid())?,
         checked_name(account).map_err(|_| invalid())?,
     ))
+}
+
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+pub mod macos;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub mod os_keyring;
+#[cfg(target_os = "windows")]
+mod windows;
+
+/// Opens this computer's OS keyring, Linux Secret Service or Windows Credential Manager,
+/// for one engine namespace under `dev.crazyagent.`, with a git helper that runs this
+/// executable's `git-credential` command. Input: the namespace. Output: the shared store,
+/// or `credential_namespace_refused` / `credential_store_unavailable`.
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub fn open_os_keyring(namespace: &str) -> Result<std::sync::Arc<dyn Store>, StoreError> {
+    let executable =
+        std::env::current_exe().map_err(|_| StoreError::code("credential_store_unavailable"))?;
+    Ok(std::sync::Arc::new(os_keyring::OsKeyring::open(
+        namespace,
+        &executable,
+    )?))
 }
 
 #[cfg(test)]

@@ -93,7 +93,7 @@ pub const fn input_runs_max(length: usize, run_bytes_max: usize) -> usize {
 /// Splits typed bytes into runs of at most `run_bytes_max` bytes, in order. A run ends between
 /// tokens, never inside a UTF-8 character or an escape sequence (a key, a mouse report, a
 /// reply or a closing paste marker), so a program that reads per read never sees half of one
-/// and takes a lone ESC for the Escape key (RV-DS241-69, #359). Inputs: the bytes and the run
+/// and takes a lone ESC for the Escape key. Inputs: the bytes and the run
 /// size, over the back-off. Output: the runs, none for no bytes.
 pub fn input_runs(bytes: &[u8], run_bytes_max: usize) -> Vec<&[u8]> {
     assert!(run_bytes_max > RUN_CUT_BACK_BYTES_MAX);
@@ -525,7 +525,7 @@ pub trait Host: Send + Sync {
     }
 
     /// Reads how long an agent terminal's app has drawn nothing: a working harness redraws
-    /// its spinner every second, so a quiet terminal means its app waits (DEC-104 Q13).
+    /// its spinner every second, so a quiet terminal means its app waits.
     /// Takes the name. Returns the time, or none when this host cannot tell, which keeps
     /// the engine from typing into that terminal.
     fn quiet(&self, _agent: &AgentId) -> Result<Option<Duration>, HostError> {
@@ -595,7 +595,7 @@ pub trait Host: Send + Sync {
         Err(failure("terminal_paste_unsupported"))
     }
 
-    /// Gives a native teammate's pane its own name (DEC-104 K5a), so later calls by that
+    /// Gives a native teammate's pane its own name, so later calls by that
     /// name, `kill` included, reach that one pane of its lead's own server. Calling it again
     /// for the same pane changes nothing, so discovery may repeat it each pass and an engine
     /// restart relearns the name. Takes the teammate, its lead and a pane id the lead's
@@ -647,7 +647,7 @@ pub trait Host: Send + Sync {
 
     /// The keepers of a native lead's own and teammates' servers this host started, each as
     /// its process id and whether it keeps the teammates' server, so a quitting engine can
-    /// freeze both (DEC-158). Takes the name. Returns them, own first; none for a host that
+    /// freeze both. Takes the name. Returns them, own first; none for a host that
     /// started no server for the agent.
     fn server_keepers(&self, _agent: &AgentId) -> Vec<(u32, bool)> {
         Vec::new()
@@ -691,12 +691,12 @@ pub fn ended_code(code: &str) -> bool {
 }
 
 /// What a host with no pane ids answers for an agent's app pane, so its prompts type by name.
-/// No tmux host answers it, so a failed connect fails the prompt instead (#686 r1 sec F1).
+/// No tmux host answers it, so a failed connect fails the prompt instead.
 pub const PINS_UNSUPPORTED: &str = "terminal_pins_unsupported";
 
 /// The refusal for a prompt to an agent whose app pane is not known while its window lives: a
 /// split window with no tag, an app pane gone beside a teammate, or a request's pin gone
-/// stale. Not an ended terminal, so a view stays and coord holds the message (#686 r1 F2).
+/// stale. Not an ended terminal, so a view stays and coord holds the message.
 pub const APP_PANE_UNKNOWN: &str = "terminal_app_pane_unknown";
 
 /// The refusal for a native lead's teammates' socket answered by a server under another pid
@@ -901,7 +901,7 @@ pub fn paste_keys(text: &str) -> Vec<u8> {
 
 /// Types one prompt into an agent's app as one submission: a paste when the app turned
 /// bracketed paste on, then Enter once the paste settled, all into the app's own pane, found
-/// once (V243-PASTE-INTERLEAVE-N0), or by name on a host with no pane ids. Takes the host, the
+/// once, or by name on a host with no pane ids. Takes the host, the
 /// terminal name and the text. Returns whether it was typed; blank or oversized text types
 /// nothing.
 pub fn type_prompt(host: &dyn Host, agent: &AgentId, text: &str) -> Result<bool, HostError> {
@@ -949,8 +949,8 @@ fn prompt_pinned(
     })
 }
 
-/// The pane one engine prompt goes to, found once so every piece of it lands in one pane
-/// (V243-PASTE-INTERLEAVE-N0): the agent's app pane, or none only on a host that answers
+/// The pane one engine prompt goes to, found once so every piece of it lands in one pane:
+/// the agent's app pane, or none only on a host that answers
 /// `PINS_UNSUPPORTED`, which types by name. Takes the host and the name. Returns the pin,
 /// none, or the host's error, such as `APP_PANE_UNKNOWN` or a failed connect.
 pub fn request_pin(host: &dyn Host, agent: &AgentId) -> Result<Option<PaneAt>, HostError> {
@@ -1078,6 +1078,20 @@ pub fn teammates_socket(
         return Err(unavailable());
     }
     lead_temp_socket(engine_root, lead, &name, paths)
+}
+
+/// Whether a lead's start never named a teammates' socket: no record of the name is kept, or
+/// the agent is no team agent and so never has one. A record that is present but cannot be
+/// read or trusted is not absent ([`teammates_socket`] refuses it). Takes the engine root
+/// and the lead. Returns the answer.
+#[cfg(unix)]
+pub fn teammates_record_absent(engine_root: &Path, lead: &AgentId, paths: &LeadPaths) -> bool {
+    let Some(id) = lead.team_agent() else {
+        return true;
+    };
+    let kept = (paths.agent_teammates_socket_name)(&engine_root.join("team"), id);
+    std::fs::symlink_metadata(&kept)
+        .is_err_and(|problem| problem.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Names a new socket for a native lead's teammates' server as the lead starts and keeps

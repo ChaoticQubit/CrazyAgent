@@ -1001,7 +1001,7 @@ impl Shell {
     }
 
     /// Takes a lost or refused connection: before the first connect, or once a restore
-    /// brought the 2.4 data back, the engine-down screen shows it, with the restore's
+    /// brought the 2.4 data back or did not finish, the engine-down screen shows it, with the restore's
     /// sentence and `r` as the desktop's engine-down view (L5 F1); otherwise the TUI retries
     /// every 3 s, saying a restore that still runs in its sentence. Input: the problem code.
     /// Output: none.
@@ -1012,7 +1012,12 @@ impl Shell {
             .first()
             .and_then(|screen| screen.place())
             .is_some();
-        if started && problem == crate::restore::ENGINE_RESTORED {
+        let ends = [
+            crate::restore::ENGINE_RESTORED,
+            crate::restore::ENGINE_RESTORE_BROKEN,
+        ]
+        .contains(&problem);
+        if started && ends {
             self.overlay = None;
             self.stack.clear();
             self.stack.push(Box::new(Startup::new()));
@@ -1021,7 +1026,7 @@ impl Shell {
             }
             assert_eq!(self.stack.len(), 1);
         }
-        if !started || problem == crate::restore::ENGINE_RESTORED {
+        if !started || ends {
             self.ctx.link = Link::Down(problem.to_owned());
             return;
         }

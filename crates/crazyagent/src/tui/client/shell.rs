@@ -23,6 +23,13 @@ struct PoolBasis {
 }
 
 impl Connection {
+    /// Names the restore that holds the TUI's own engine in a failed connect, the first
+    /// connect included, as the desktop's connect does; any other event is unchanged.
+    /// Input: the event. Output: the event to show.
+    pub(in crate::tui) fn held(&self, event: OwnerEvent) -> OwnerEvent {
+        restore_held(event, self.engine.as_deref())
+    }
+
     /// Queues one shell request on the paired owner worker.
     /// Input: the request. Output: queued, or why not while another request
     /// is pending.

@@ -210,7 +210,7 @@ pub fn agent_env_refused(name: &OsStr) -> bool {
 /// other owner processes can read, save a launch's own token in [`Handed`] names on macOS only
 /// (its profile denies those reads; Linux is refused). Inputs: name, value. Output: allowed.
 pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
-    let token = kernel_sandbox::profile::env::TOKEN_PREFIX.as_bytes();
+    let token = kernel_security::relay_token::TOKEN_PREFIX.as_bytes();
     if value
         .as_encoded_bytes()
         .windows(token.len())
@@ -234,7 +234,7 @@ pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
         .to_str()
         .is_some_and(|name| AGENT_KEY_VARIABLES.contains(&name))
     {
-        return value == kernel_sandbox::profile::env::LOCAL_PLACEHOLDER;
+        return value == kernel_security::relay_token::LOCAL_PLACEHOLDER;
     }
     !agent_env_refused(name)
 }
@@ -277,8 +277,8 @@ impl<'a> Handed<'a> {
     /// hold. Output: the exception, or `Invalid` for a value that is neither a relay token
     /// nor the keyless placeholder, a name refused for more than a key suffix, and off macOS.
     pub fn new(names: &'a [&'a str], value: &'a str) -> Result<Self, SandboxError> {
-        let handed = kernel_sandbox::profile::env::is_relay_token(value)
-            || value == kernel_sandbox::profile::env::LOCAL_PLACEHOLDER;
+        let handed = kernel_security::relay_token::is_relay_token(value)
+            || value == kernel_security::relay_token::LOCAL_PLACEHOLDER;
         if !cfg!(target_os = "macos") || !handed {
             return Err(invalid("a launch hands only its own relay token"));
         }
@@ -292,7 +292,7 @@ impl<'a> Handed<'a> {
         if names.iter().any(other) {
             return Err(invalid("a launch hands its value only under a key name"));
         }
-        assert!(kernel_sandbox::profile::env::is_placeholder(value));
+        assert!(kernel_security::relay_token::is_placeholder(value));
         Ok(Self { names, value })
     }
 
@@ -4610,7 +4610,7 @@ fn node_package(prefix: &Path, program: &Path) -> Option<PathBuf> {
 #[cfg(all(test, target_os = "macos"))]
 mod handed_tests {
     use super::*;
-    use kernel_sandbox::profile::env::LOCAL_PLACEHOLDER;
+    use kernel_security::relay_token::LOCAL_PLACEHOLDER;
 
     const NAMES: [&str; 1] = ["OPENAI_API_KEY"];
 

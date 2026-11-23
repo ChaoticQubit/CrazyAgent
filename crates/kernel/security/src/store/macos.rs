@@ -1,8 +1,8 @@
-use kernel_security::error::StoreError;
-use kernel_security::secret::Piece::{Hex, Plain};
-use kernel_security::secret::sized;
-use kernel_security::secret::{SECRET_BYTES_MAX, SecretString};
-use kernel_security::store::{SecretRef, Store, checked_name, parts, reference};
+use super::{SecretRef, Store, checked_name, parts, reference};
+use crate::error::StoreError;
+use crate::secret::Piece::{Hex, Plain};
+use crate::secret::sized;
+use crate::secret::{STORED_BYTES_MAX, SecretString};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -13,6 +13,16 @@ const STEP_TIME: Duration = Duration::from_secs(10);
 const OUTPUT_BYTES_MAX: usize = 4096;
 const ITEM_MISSING: i32 = 44;
 const NAMESPACE_ROOT: &str = "dev.crazyagent.";
+/// The most bytes of the keychain file path a store names.
+const KEYCHAIN_PATH_BYTES_MAX: usize = 512;
+/// The longest line `security -i` takes on stdin.
+const SECURITY_LINE_MAX: usize = 4_096;
+/// The longest `add-generic-password` line `put` writes: the fixed words, a service and
+/// account of 63 bytes each, the item as hex, and the keychain path.
+const PUT_LINE_MAX: usize =
+    28 + 63 + 6 + 63 + 5 + 2 * STORED_BYTES_MAX + 2 + KEYCHAIN_PATH_BYTES_MAX + 2;
+
+const _: () = assert!(PUT_LINE_MAX <= SECURITY_LINE_MAX);
 
 /// The macOS Keychain as a credential store. Every item lives in one keychain file, the
 /// owner's default unless the store was opened with `at`, under services that start with
@@ -30,16 +40,19 @@ struct Ran {
 }
 
 impl Keychain {
-    /// Opens the store for one namespace under `dev.crazyagent.`. Input: the namespace,
-    /// such as `dev.crazyagent.e1a2b3`. Output: the store bound to the owner's default
-    /// keychain file, or `credential_namespace_refused` / `credential_store_unavailable`.
-    pub fn new(namespace: &str) -> Result<Self, StoreError> {
+    /// Opens the store for one namespace in the default keychain of `home`, read with
+    /// `security default-keychain -d user` and only `HOME` set to it. Inputs: the namespace,
+    /// such as `dev.crazyagent.e1a2b3`, and an absolute home. Output: the store, or
+    /// `credential_namespace_refused` / `credential_store_unavailable`.
+    pub fn in_home(namespace: &str, home: &Path) -> Result<Self, StoreError> {
         let namespace = owned_namespace(namespace)?;
-        let home = store_home(namespace)?;
+        if !home.is_absolute() {
+            return Err(unavailable());
+        }
         let ran = run(
             &["default-keychain".as_ref(), "-d".as_ref(), "user".as_ref()],
             None,
-            Some(&home),
+            Some(home),
         )?;
         if ran.code != Some(0) {
             return Err(unavailable());
@@ -56,6 +69,7 @@ impl Keychain {
         let namespace = owned_namespace(namespace)?;
         let shown = keychain.to_str().ok_or_else(unavailable)?;
         if !keychain.is_absolute()
+            || shown.len() > KEYCHAIN_PATH_BYTES_MAX
             || shown.contains(['\'', '"', '\\', '\n', '\r'])
             || !keychain.is_file()
         {
@@ -65,6 +79,11 @@ impl Keychain {
             namespace: namespace.to_owned(),
             keychain: keychain.to_path_buf(),
         })
+    }
+
+    /// The keychain file this store reads and writes. Output: the absolute path.
+    pub fn path(&self) -> &Path {
+        &self.keychain
     }
 
     fn owned<'a>(&self, service: &'a str) -> Result<&'a str, StoreError> {
@@ -97,7 +116,7 @@ impl Store for Keychain {
         account: &str,
         secret: &SecretString,
     ) -> Result<SecretRef, StoreError> {
-        if secret.expose().len() > SECRET_BYTES_MAX {
+        if secret.expose().len() > STORED_BYTES_MAX {
             return Err(StoreError::code("credential_secret_invalid"));
         }
         let service = self.owned(service)?;
@@ -115,8 +134,9 @@ impl Store for Keychain {
             Plain("\"\n"),
         ])
         .ok_or_else(|| StoreError::code("credential_secret_invalid"))?;
+        assert!(line.len() <= PUT_LINE_MAX);
         let ran = run(&["-i".as_ref()], Some(&line), None);
-        kernel_security::secret::wipe(&mut line);
+        crate::secret::wipe(&mut line);
         if ran?.code != Some(0) {
             return Err(unavailable());
         }
@@ -143,12 +163,12 @@ impl Store for Keychain {
                 if ran.stdout.last() == Some(&b'\n') {
                     ran.stdout.pop();
                 }
-                SecretString::new(std::mem::take(&mut ran.stdout))
+                SecretString::stored(std::mem::take(&mut ran.stdout))
             }
             Some(ITEM_MISSING) => Err(StoreError::code("credential_missing")),
             _ => Err(unavailable()),
         };
-        kernel_security::secret::wipe(&mut ran.stdout);
+        crate::secret::wipe(&mut ran.stdout);
         found
     }
 
@@ -203,28 +223,6 @@ fn owned_namespace(namespace: &str) -> Result<&str, StoreError> {
         return Err(StoreError::code("credential_namespace_refused"));
     }
     Ok(namespace)
-}
-
-/// The home whose default keychain holds the store: the owner's `HOME`. Input: the
-/// namespace, unused here. Output: the absolute home, or `credential_store_unavailable`.
-#[cfg(not(test))]
-fn store_home(_namespace: &str) -> Result<PathBuf, StoreError> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|home| home.is_absolute())
-        .ok_or_else(unavailable)
-}
-
-/// The home whose default keychain holds the store in lib tests: the temporary home a
-/// test keychain serves for the namespace, never the owner's. Input: the namespace.
-/// Output: that home; a namespace no test keychain serves is refused with a panic.
-#[cfg(test)]
-fn store_home(namespace: &str) -> Result<PathBuf, StoreError> {
-    Ok(
-        super::test_keychain::home_for(namespace).unwrap_or_else(|| {
-            panic!("{namespace} has no temporary test keychain; lib tests never open the owner's")
-        }),
-    )
 }
 
 fn run(
@@ -282,7 +280,7 @@ fn run(
     };
     let (read, mut stdout) = reader.join().map_err(|_| unavailable())?;
     if read.is_err() || stdout.len() > OUTPUT_BYTES_MAX {
-        kernel_security::secret::wipe(&mut stdout);
+        crate::secret::wipe(&mut stdout);
         return Err(unavailable());
     }
     Ok(Ran {
@@ -290,7 +288,3 @@ fn run(
         stdout,
     })
 }
-
-#[cfg(test)]
-#[path = "macos_tests.rs"]
-mod tests;

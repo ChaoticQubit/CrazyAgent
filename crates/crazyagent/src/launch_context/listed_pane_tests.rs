@@ -291,7 +291,7 @@ fn a_listed_pane_for_another_harness_than_its_settings_trips_its_assert() {
 /// bridge its sandboxed command starts with, which exports them as the harness starts.
 #[test]
 fn a_handed_over_pane_passes_the_host_guard_and_its_bridge_exports_the_names() {
-    use kernel_sandbox::profile::env::LOCAL_PLACEHOLDER;
+    use kernel_security::relay_token::LOCAL_PLACEHOLDER;
     use std::ffi::OsStr;
     let (_folder, home) = harness_home("standin-jsonl-append");
     let scratch = tempfile::tempdir().unwrap();
@@ -347,7 +347,7 @@ fn a_handed_over_pane_passes_the_host_guard_and_its_bridge_exports_the_names() {
 /// of the pane's own variables.
 #[test]
 fn a_pane_s_bridge_takes_only_the_names_its_hand_over_lists() {
-    use kernel_sandbox::profile::env::LOCAL_PLACEHOLDER;
+    use kernel_security::relay_token::LOCAL_PLACEHOLDER;
     let line = "    STANDIN_APPEND_CONFIG: \"{home}/config\"\n";
     let both = format!("{line}    STANDIN_APPEND_MODE: \"{LOCAL_PLACEHOLDER}\"\n");
     let text = APPEND.replacen(line, &both, 1);

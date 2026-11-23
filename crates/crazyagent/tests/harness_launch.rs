@@ -10,7 +10,7 @@ use crazyagent::harnesses::launch::{
 use crazyagent::harnesses::leftovers::{LEFT, UNCHECKED, Unstopped};
 use crazyagent::harnesses::{HarnessStatus, Search, catalog};
 use crazyagent::protocol::CredentialRef;
-use kernel_sandbox::profile::env::{TOKEN_PREFIX, is_placeholder};
+use kernel_security::relay_token::{TOKEN_PREFIX, is_placeholder};
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

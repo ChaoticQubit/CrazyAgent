@@ -2,6 +2,9 @@ use kernel_processes::finding::{FindingHooks, FindingSeed, Places};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
+mod last_good;
+#[cfg(all(test, unix))]
+mod last_good_tests;
 #[cfg(all(test, unix))]
 mod permission_fix_tests;
 #[cfg(all(test, unix))]
@@ -23,6 +26,8 @@ pub const HOOKS: FindingHooks = FindingHooks {
     is_shim: crate::harnesses::is_shim,
     npm_prefix: crate::harnesses::npm_prefix,
     registered_projects,
+    last_good_load: last_good::load,
+    last_good_store: last_good::store,
     projects_marker: crate::projects_home::CRAZYAGENT_DIRECTORY,
     data_twin: crate::projects_home::data_twin,
     one_spelling: kernel_sandbox::paths::one_spelling,

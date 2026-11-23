@@ -9,17 +9,14 @@ fn scratch() -> (tempfile::TempDir, PathBuf) {
         .prefix("tools-resolve-")
         .tempdir()
         .unwrap();
-    let home = folder.path().canonicalize().unwrap();
+    let home = or_named(folder.path().canonicalize(), folder.path());
     (folder, home)
 }
 
 /// Writes an executable file with the given text, its folders made first.
 /// Inputs: the file and the text. Output: the file.
 fn program(file: &Path, text: &str) -> PathBuf {
-    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    std::fs::write(file, text).unwrap();
-    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
-    file.to_path_buf()
+    script_at(file, text.as_bytes())
 }
 
 /// A stand-in `node`: a shell script that says it ran the file it was given.
@@ -54,10 +51,12 @@ fn the_newest_node_version_of_a_manager_is_found_first() {
 /// Writes a script with the given bytes and mode into the scratch HOME's `scripts` folder.
 /// Inputs: HOME, the script's name, its bytes and its mode. Output: the script.
 fn script(home: &Path, name: &str, bytes: &[u8], mode: u32) -> PathBuf {
-    let script = home.join("scripts").join(name);
-    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
-    std::fs::write(&script, bytes).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(mode)).unwrap();
+    let folder = home.join("scripts");
+    or_named(std::fs::create_dir_all(&folder), &folder);
+    let script = folder.join(name);
+    or_named(std::fs::write(&script, bytes), &script);
+    let permissions = std::fs::Permissions::from_mode(mode);
+    or_named(std::fs::set_permissions(&script, permissions), &script);
     script
 }
 
@@ -71,7 +70,7 @@ fn refusal_of(entry: &Path, places: &Places) -> Option<(PathBuf, Refusal)> {
         .map(|refused| (refused.file, refused.why))
 }
 
-/// rv-sec2 F2 (B11): a script whose first line the resolver cannot read the way the system and
+/// A script whose first line the resolver cannot read the way the system and
 /// `env` run it is refused, never taken for a program with no interpreter: `env` with a
 /// setting or a flag other than -S, an `env` other than /usr/bin/env, a relative interpreter,
 /// one with a `..` part, a line that is not UTF-8, a line longer than the part read, and
@@ -178,7 +177,7 @@ fn an_env_split_argument_holding_a_quote_escape_or_dollar_is_refused() {
     assert!(resolve_entry(&plain, &places).is_ok());
 }
 
-/// rv-sec2 B11 r2 F3: the system ends a first line at its first `#`, so the words the reader
+/// The system ends a first line at its first `#`, so the words the reader
 /// would keep past it are not the ones that run: a line holding `#` anywhere after `#!` is
 /// refused as [`Refusal::FirstLine`], an `env` program named `node#x` with an owner file of
 /// that name in the places included.
@@ -203,7 +202,7 @@ fn a_first_line_holding_a_hash_is_refused() {
     }
 }
 
-/// rv-sec2 B11 r2 F4: the system reads a script's first line whatever its read bit says, so an
+/// The system reads a script's first line whatever its read bit says, so an
 /// executable file the engine cannot read is refused as [`Refusal::FirstLine`], never taken
 /// for a program with no interpreter; the same file readable resolves.
 #[test]
@@ -219,7 +218,7 @@ fn an_executable_file_the_engine_cannot_read_is_refused() {
     assert!(resolve_entry(&locked, &places).is_ok());
 }
 
-/// V243-OWN-PREFIX-NODE-REFUSE trip row: [`own_node_refused`] holds only a tool whose real
+/// [`own_node_refused`] holds only a tool whose real
 /// file is absolute, as every tool [`entry_at`] gives is.
 #[test]
 #[should_panic(expected = "assertion failed: tool.program.is_absolute()")]
@@ -233,7 +232,7 @@ fn the_own_prefix_node_check_trips_on_a_tool_whose_file_is_relative() {
     let _ = own_node_refused(&tool, &home_only(&home));
 }
 
-/// V243-OWN-PREFIX-NODE-REFUSE trip row: [`own_node`] judges only a script named by its
+/// [`own_node`] judges only a script named by its
 /// absolute real file.
 #[test]
 #[should_panic(expected = "assertion failed: script.is_absolute()")]
@@ -246,7 +245,7 @@ fn the_own_prefix_node_trips_on_a_relative_script() {
     );
 }
 
-/// V243-OWN-PREFIX-NODE-REFUSE trip row: [`own_node`] never judges a `node` past
+/// [`own_node`] never judges a `node` past
 /// [`INTERPRETER_DEPTH_MAX`].
 #[test]
 #[should_panic(expected = "assertion failed: depth <= INTERPRETER_DEPTH_MAX")]
@@ -432,7 +431,7 @@ fn a_tool_in_an_own_folder_under_the_shared_temp_folder_is_used() {
 }
 
 /// The app's folder as a release lays it out, holding the engine and the bundled
-/// `crazyagent-tmux` beside it (DEC-157), plus a Homebrew-like folder with its own `tmux`.
+/// `crazyagent-tmux` beside it, plus a Homebrew-like folder with its own `tmux`.
 /// The places look only in that folder, past the app's folder, so no row reads the host's
 /// own tmux. Input: HOME. Output: the places, the sidecar and the Homebrew-like tmux.
 fn bundled_layout(home: &Path) -> (Places, PathBuf, PathBuf) {
@@ -670,10 +669,9 @@ fn the_release_build_sees_the_bundled_tmux_flag() {
 
 #[test]
 fn release_yml_sets_the_flag_for_the_kernel_crate() {
-    let text = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../.github/workflows/release.yml"),
-    )
-    .unwrap();
+    let release =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../.github/workflows/release.yml");
+    let text = or_named(std::fs::read_to_string(&release), &release);
     let build = "cargo build --release --locked --target \"$TARGET\" -p crazyagent --bins";
     let build_at = text
         .find(build)
@@ -751,10 +749,20 @@ fn with_canonical(
 /// another prefix's `bin` as that prefix's `Cellar` file. Input: the path. Output: its one
 /// spelling.
 fn cellar(path: &Path) -> std::io::Result<PathBuf> {
-    let text = path.to_str().unwrap();
-    Ok(match text.rsplit_once("/bin/") {
-        Some((prefix, name)) => PathBuf::from(format!("{prefix}/Cellar/{name}/1/bin/{name}")),
-        None => path.to_path_buf(),
+    let parts: Vec<_> = path.components().collect();
+    let bin = parts.iter().rposition(|part| part.as_os_str() == "bin");
+    Ok(match bin {
+        Some(at) if at + 1 < parts.len() => {
+            let prefix: PathBuf = parts[..at].iter().collect();
+            let name: PathBuf = parts[at + 1..].iter().collect();
+            prefix
+                .join("Cellar")
+                .join(&name)
+                .join("1")
+                .join("bin")
+                .join(&name)
+        }
+        _ => path.to_path_buf(),
     })
 }
 
@@ -802,9 +810,10 @@ fn a_nix_darwin_profile_tool_stays_usable_while_the_projects_cannot_be_read() {
     }
 }
 
-/// The failed-read fallback never trusts more than a successful read with no project
-/// does: every path agents can write with the projects read is agents' to write without
-/// them, so the fallback only adds refusals.
+/// The failed-read fallback never trusts more than a successful read that registers no
+/// project: every listed path agents can write after a read of an empty project list is
+/// agents' to write without the read. A read that registers a project is compared in
+/// [`a_first_failed_read_trusts_a_registered_repository_under_an_install_root`].
 #[test]
 fn the_failed_read_fallback_never_trusts_a_path_the_normal_path_refuses() {
     let (_folder, home) = scratch();
@@ -832,6 +841,138 @@ fn the_failed_read_fallback_never_trusts_a_path_the_normal_path_refuses() {
     assert!(read.agent_writable(&marked.join("bin/tool")));
     assert!(!read.agent_writable(Path::new("/srv/repo/bin/tool")));
     assert!(unread.agent_writable(Path::new("/srv/repo/bin/tool")));
+}
+
+/// The stand-in for the engine's last good store: each data folder's stored list, in
+/// memory, so a row sees what the kernel stored and plants what it loads.
+static STORED: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Vec<PathBuf>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The stored list of a data folder ([`FindingHooks::last_good_load`]). Input: the data
+/// folder. Output: the list, or none.
+fn stored_load(data_root: &Path) -> Option<Vec<PathBuf>> {
+    STORED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(data_root)
+        .cloned()
+}
+
+/// Stores a data folder's list ([`FindingHooks::last_good_store`]). Inputs: the data folder
+/// and the list.
+fn stored_store(data_root: &Path, roots: &[PathBuf]) {
+    STORED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(data_root.to_path_buf(), roots.to_vec());
+}
+
+/// A fresh data folder's real path. Output: the folder, kept alive by the caller, and its
+/// path.
+fn data_folder() -> (tempfile::TempDir, PathBuf) {
+    let folder = tempfile::tempdir().unwrap_or_else(|error| panic!("temp folder: {error}"));
+    let root = or_named(folder.path().canonicalize(), folder.path());
+    (folder, root)
+}
+
+/// A data folder's last good read of the set-up projects outlives the engine process that
+/// made it: the good read goes to the engine's store, and once a new process (here, the
+/// data folder's in-memory entry dropped) reads engine.db and fails on its first read, it
+/// takes what the store holds, so a repository the earlier read registered under an install
+/// root still counts as agents' to write and a tool planted there is refused.
+#[test]
+fn a_last_good_read_outlives_the_engine_process_that_made_it() {
+    let tool = Path::new("/usr/local/src/repo/bin/tool");
+    let read = FindingSeed {
+        hooks: FindingHooks {
+            registered_projects: |_| Some(vec![PathBuf::from("/usr/local/src/repo")]),
+            last_good_load: stored_load,
+            last_good_store: stored_store,
+            ..STUB_HOOKS
+        },
+        ..stub_seed()
+    };
+    let failed = FindingSeed {
+        hooks: FindingHooks {
+            registered_projects: |_| None,
+            last_good_load: stored_load,
+            last_good_store: stored_store,
+            ..STUB_HOOKS
+        },
+        ..stub_seed()
+    };
+    let (_data, root) = data_folder();
+    assert!(Places::at_roots(Some(&root), None, read).agent_writable(tool));
+    assert_eq!(
+        stored_load(&root),
+        Some(vec![PathBuf::from("/usr/local/src/repo")])
+    );
+    super::test_support::forget_last_good(&root);
+    assert!(Places::at_roots(Some(&root), None, failed).agent_writable(tool));
+    super::test_support::forget_last_good(&root);
+    STORED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&root);
+}
+
+/// A last good read can only add refusals: one that names a folder makes a tool under it
+/// agents' to write while engine.db cannot be read, and every path agents can write with no
+/// last good read stays agents' to write with that one, a forged stored entry included.
+#[test]
+fn a_forged_last_good_entry_only_adds_refusals() {
+    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set for the rows"));
+    let failed = FindingSeed {
+        hooks: FindingHooks {
+            registered_projects: |_| None,
+            last_good_load: stored_load,
+            last_good_store: stored_store,
+            ..STUB_HOOKS
+        },
+        ..stub_seed()
+    };
+    let (_bare, bare_root) = data_folder();
+    let (_forged, forged_root) = data_folder();
+    stored_store(&forged_root, &[PathBuf::from("/usr/bin")]);
+    let without = Places::at_roots(Some(&bare_root), None, failed.clone());
+    let with = Places::at_roots(Some(&forged_root), None, failed);
+    let paths = [
+        PathBuf::from("/usr/bin/env"),
+        PathBuf::from("/usr/local/bin/tmux"),
+        PathBuf::from("/opt/homebrew/bin/node"),
+        PathBuf::from("/srv/repo/bin/tool"),
+        home.join(".local/bin/tool"),
+    ];
+    for path in &paths {
+        if without.agent_writable(path) {
+            assert!(with.agent_writable(path), "{}", path.display());
+        }
+    }
+    assert!(!without.agent_writable(Path::new("/usr/bin/env")));
+    assert!(with.agent_writable(Path::new("/usr/bin/env")));
+    super::test_support::forget_last_good(&forged_root);
+    STORED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&forged_root);
+}
+
+/// A repository the engine registered under `/usr/local` or `/opt/homebrew` is agents' to
+/// write after a good read, and should stay so when the first read of engine.db fails with
+/// no last good read. Today the fallback reads every path under an install root as
+/// installed, so a tool in such a repository is trusted until one read succeeds.
+#[test]
+#[ignore = "known gap: a first failed read with no last good read trusts a repository registered under an install root"]
+fn a_first_failed_read_trusts_a_registered_repository_under_an_install_root() {
+    let (_folder, home) = scratch();
+    let canonical: fn(&Path) -> std::io::Result<PathBuf> = |path| Ok(path.to_path_buf());
+    for repo in ["/usr/local/src/repo", "/opt/homebrew/src/repo"] {
+        let tool = Path::new(repo).join("bin/tool");
+        let read = with_canonical(&home, canonical, Some(vec![PathBuf::from(repo)]));
+        let unread = with_canonical(&home, canonical, None);
+        assert!(read.agent_writable(&tool), "{}", tool.display());
+        assert!(unread.agent_writable(&tool), "{}", tool.display());
+    }
 }
 
 /// When the set-up projects cannot be read, a repository the engine may have
@@ -912,9 +1053,13 @@ fn the_first_copys_refusal_is_kept_when_no_copy_resolves() {
 /// Writes an executable script with the given bytes, its folders made first. Inputs: the
 /// file and the bytes. Output: the file.
 fn script_at(file: &Path, bytes: &[u8]) -> PathBuf {
-    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    std::fs::write(file, bytes).unwrap();
-    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let folder = file
+        .parent()
+        .unwrap_or_else(|| panic!("{} has a parent folder", file.display()));
+    or_named(std::fs::create_dir_all(folder), folder);
+    or_named(std::fs::write(file, bytes), file);
+    let permissions = std::fs::Permissions::from_mode(0o755);
+    or_named(std::fs::set_permissions(file, permissions), file);
     file.to_path_buf()
 }
 

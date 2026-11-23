@@ -126,7 +126,9 @@ fn the_npm_prefix_bin_comes_from_the_found_npm_asked_with_a_cleared_environment(
         "#!/bin/sh\necho \"$HOME/p-$1-$2-${CARGO_PKG_NAME:-clear}\"\n",
     );
     let places = crate::finding::stub::stub_new(Vec::new(), Some(home.clone()));
-    let resolved = crate::finding::resolve_entry(&npm, &places).expect("a script npm resolves");
+    let resolved = crate::finding::resolve_entry(&npm, &places).unwrap_or_else(|missing| {
+        panic!("{} did not resolve: {:?}", npm.display(), missing.reason)
+    });
     assert_eq!(
         npm_bin(&resolved, &home, "owner", NPM_LIMIT),
         Some(home.join("p-prefix--g-clear/bin")),

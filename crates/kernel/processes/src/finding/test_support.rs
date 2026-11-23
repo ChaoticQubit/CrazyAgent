@@ -23,6 +23,15 @@ pub fn at_roots(engine_root: Option<&Path>, recorded: Option<&Path>, seed: Findi
     Places::at_roots(engine_root, recorded, seed)
 }
 
+/// Drops a data folder's in-memory last good read of the set-up projects, as a new engine
+/// process starts with none ([`super::LAST_GOOD`]). Input: the data folder.
+pub fn forget_last_good(data_root: &Path) {
+    super::LAST_GOOD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(data_root);
+}
+
 /// The PATH folders a child keeps ([`super::probe::kept`]). Inputs: the hooks, the PATH and
 /// HOME. Output: the folders.
 pub fn kept(hooks: &FindingHooks, path: &OsStr, home: Option<&Path>) -> Vec<PathBuf> {

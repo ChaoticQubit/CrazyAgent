@@ -14479,7 +14479,7 @@ fn listed_handover(
                 Some(&error.0),
             )
         })?;
-    assert!(kernel_sandbox::profile::env::is_placeholder(
+    assert!(kernel_security::relay_token::is_placeholder(
         handover.token()
     ));
     Ok(Some(handover))

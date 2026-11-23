@@ -9,11 +9,9 @@ use super::records::{self, Reader};
 use super::transcript::{TranscriptEvent, TranscriptReader};
 use crate::coord::delivery::typing::APP_QUIET;
 use crate::launch_context::{AgentContext, Installed};
-use crate::model_gateway::relay::Relay;
 use kernel_processes::group::Ending;
 use kernel_processes::terminal::buffer::Chunk;
 use kernel_processes::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX, TerminalStream};
-use kernel_sandbox::profile::env::is_placeholder;
 use kernel_sandbox::profile::env::{LINEAGE_VARIABLE, LineageToken};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, VecDeque};
@@ -22,6 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc::error::TryRecvError;
+use {crate::model_gateway::relay::Relay, kernel_security::relay_token::is_placeholder};
 
 mod adopt;
 pub use adopt::{KEEPERS_MAX, KeeperPin, PaneRecord, RecordSource};
@@ -129,7 +128,7 @@ pub struct TerminalSession {
 }
 
 /// The most bytes a key file the engine reads back may hold: the longest key it writes.
-const KEY_FILE_BYTES_MAX: u64 = crate::model_gateway::relay::KEY_BYTES_MAX as u64;
+const KEY_FILE_BYTES_MAX: u64 = kernel_security::relay_token::KEY_BYTES_MAX as u64;
 
 /// How far a launch Codex opens behind its folder access screen has got.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -625,7 +624,7 @@ impl TerminalSession {
         let relayed = request
             .account
             .key()
-            .is_some_and(|key| kernel_sandbox::profile::env::is_relay_token(key.reveal()));
+            .is_some_and(|key| kernel_security::relay_token::is_relay_token(key.reveal()));
         if relayed {
             let lifeline = crate::research::runner::Lifeline::watch(self.pid)
                 .map_err(|_| failure("launch_spawn_failed"))?;

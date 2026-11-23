@@ -1,5 +1,5 @@
 use super::*;
-use kernel_sandbox::profile::env::is_placeholder;
+use kernel_security::relay_token::is_placeholder;
 
 const PROVIDER_KEY: &str = "sk-provider-key-never-in-the-agent";
 
