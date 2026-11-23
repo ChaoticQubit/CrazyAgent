@@ -1,7 +1,7 @@
 use super::*;
 use crate::landing_log::RULE_REQUEST_SAVED;
 use crate::project_setup::removed::event::{KIND, ProjectRemoved};
-use crate::state_log::{Aggregate, Appender};
+use crate::state_log::Aggregate;
 use kernel_storage::state_log::Draft;
 
 /// Every logged rule request body, in seq order. Input: the store. Output: the bodies.
@@ -115,7 +115,7 @@ fn remove(case: &Case, kept: bool) {
     let behavior = TransactionBehavior::Immediate;
     let tx = Transaction::new_unchecked(&case.db, behavior).unwrap();
     let fence = crate::worktrees::log::store_fence(&tx).unwrap();
-    let mut log = Appender::own(&tx, fence).unwrap();
+    let mut log = crate::state_log::own(&tx, fence).unwrap();
     let removed = ProjectRemoved {
         project: case.project.clone(),
         kept,

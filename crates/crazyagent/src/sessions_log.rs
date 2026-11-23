@@ -4,11 +4,12 @@ use crate::engine::owner::Admission;
 use crate::master_session::{MasterSessionView, SESSION_DELETED, SessionDeleted};
 use crate::owner_texts::TextDigest;
 use crate::protocol::{Outcome, ProjectId, SessionId};
+use crate::state_log::Aggregate;
 use crate::state_log::fence::Fence;
 use crate::state_log::replay::{self, Logged};
-use crate::state_log::{Aggregate, Appender};
 use crate::storage::opening::Opening;
 use crate::storage::versioned::{Refusal, Writer};
+use kernel_storage::state_log::Appender;
 use kernel_storage::state_log::Clock;
 use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -94,7 +95,7 @@ const MARKS_MAX: usize = 16_384;
 const SNAPSHOT_ROWS_MAX: usize = 262_144;
 /// The bytes of a chunk body kept for its envelope (aggregate, table, index) around rows.
 const CHUNK_ENVELOPE_BYTES: usize = 1_024;
-/// The code `Appender::owner` refuses with when its revision is logged already.
+/// The code `state_log::owner` refuses with when its revision is logged already.
 const NOT_NEWER: &str = "state_log_revision_not_newer";
 /// The code the store fence refuses with before an owner runtime is active.
 const RUNTIME_STALE: &str = "owner_runtime_stale";
@@ -433,7 +434,7 @@ fn close_own(tx: &Transaction<'_>) -> Result<usize, EngineError> {
         return Ok(0);
     }
     let fence = crate::worktrees::log::store_fence(tx)?;
-    let mut log = Appender::own(tx, fence)?;
+    let mut log = crate::state_log::own(tx, fence)?;
     close(&mut log)
 }
 
@@ -444,7 +445,7 @@ fn close_at(tx: &Transaction<'_>, revision: u64, fence: Fence) -> Result<usize, 
     if !touched(tx)? {
         return Ok(0);
     }
-    let mut log = match Appender::owner(tx, revision, fence) {
+    let mut log = match crate::state_log::owner(tx, revision, fence) {
         Ok(log) => log,
         Err(refused) if refused.0 == NOT_NEWER => return Ok(0),
         Err(refused) => return Err(refused),
@@ -1020,7 +1021,7 @@ pub fn snapshot(log: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineErr
     }
     assert!(chunks.len() >= TABLES.len(), "one chunk or more per table");
     assert_eq!(chunks[0].table, TABLES[0]);
-    log.snapshot(Aggregate::Sessions, at_ms, chunks)
+    Ok(log.snapshot(Aggregate::Sessions, at_ms, chunks)?)
 }
 
 /// The first snapshot run of the seven tables, for the schema step that puts sessions on
@@ -1070,7 +1071,7 @@ fn stored_rows(tx: &Transaction<'_>, tables: &[&str]) -> Result<i64, EngineError
 /// step's transaction and the proof. Output: true once the run closed, or the refusal.
 fn run_once(tx: &Transaction<'_>, opening: Opening) -> Result<bool, EngineError> {
     let at_ms = opening.at_ms();
-    let mut log = Appender::opening(tx, opening)?;
+    let mut log = crate::state_log::opening(tx, opening)?;
     let done = snapshot(&mut log, at_ms)?;
     assert!(done > 0, "a run closes at a seq");
     Ok(true)

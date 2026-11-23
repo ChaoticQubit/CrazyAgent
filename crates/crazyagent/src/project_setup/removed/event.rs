@@ -2,8 +2,8 @@ use crate::engine::EngineError;
 use crate::engine::owner::Admission;
 use crate::project_setup::SetupAction;
 use crate::protocol::{Command, ProjectId};
+use crate::state_log::Aggregate;
 use crate::state_log::fence::Fence;
-use crate::state_log::{Aggregate, Appender};
 use kernel_storage::state_log::Clock;
 use kernel_storage::state_log::Draft;
 use rusqlite::Transaction;
@@ -112,7 +112,7 @@ pub(crate) fn append(
     removed: &ProjectRemoved,
 ) -> Result<u64, EngineError> {
     let body = removed.body()?;
-    let mut log = Appender::owner(tx, revision, Fence::Owner(admission.clone()))?;
+    let mut log = crate::state_log::owner(tx, revision, Fence::Owner(admission.clone()))?;
     let seq = log.append(&Draft {
         aggregate: Aggregate::Projects.into(),
         kind: KIND,

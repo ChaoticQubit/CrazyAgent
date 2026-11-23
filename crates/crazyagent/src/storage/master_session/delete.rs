@@ -1,8 +1,8 @@
 use super::*;
 use crate::master_session::{SESSION_DELETED, SessionDeleted};
+use crate::state_log::Aggregate;
 use crate::state_log::fence::Fence;
 use crate::state_log::replay::{Logged, redact_matching};
-use crate::state_log::{Aggregate, Appender};
 use kernel_storage::state_log::Draft;
 
 /// Deletes a project's master session that is not live, for the owner's Delete: first the
@@ -69,7 +69,7 @@ pub(super) fn log_deleted(
     session: &SessionId,
 ) -> Result<usize, EngineError> {
     let fence = Fence::Owner(admission.clone());
-    let mut log = Appender::owner(tx, revision, fence.clone())?;
+    let mut log = crate::state_log::owner(tx, revision, fence.clone())?;
     let body = serde_json::to_vec(&SessionDeleted {
         project: project.clone(),
         session: session.clone(),

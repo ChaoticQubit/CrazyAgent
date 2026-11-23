@@ -65,7 +65,6 @@ pub mod projects_home;
 pub mod protocol;
 pub mod provider_reach;
 pub mod provider_retry;
-pub mod qualification;
 pub mod questions;
 pub mod quit_settings;
 pub mod rcli_host;
@@ -80,6 +79,9 @@ pub mod scheduling;
 /// The capability SDK slice: the owner's quit save runs through the generated SDK, the bus
 /// gateway's grant check and the bundled agent-quit plugin.
 mod sdk_slice;
+/// The SDK providers the kernel security crate backs: the secrets capabilities over the
+/// OS store, and `Absent`, which fails every call without opening anything.
+pub mod security_caps;
 pub mod service;
 pub mod sessions_log;
 pub mod settings_log;

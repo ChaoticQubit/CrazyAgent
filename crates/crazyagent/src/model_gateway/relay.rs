@@ -100,30 +100,20 @@ pub(crate) struct Upstream {
     scheme: &'static str,
 }
 
-/// Checks a provider base URL a relay may forward to: https anywhere, or plain http only
-/// to a loopback server, with no user, password, query or fragment.
-/// Input: the base URL. Output: the upstream, or `model_relay_upstream_invalid`.
+/// Checks a provider base URL a relay may forward to with the kernel's shared target rule
+/// (https anywhere, plain http only to loopback, no user, password, query or fragment),
+/// then confines the base path. Input: the base URL. Output: the upstream, or
+/// `model_relay_upstream_invalid`.
 pub(crate) fn upstream(base_url: &str) -> Result<Upstream, EngineError> {
     let invalid = || failure("model_relay_upstream_invalid");
-    let url = url::Url::parse(base_url).map_err(|_| invalid())?;
-    let loopback = match url.host() {
-        Some(url::Host::Ipv4(address)) => address.is_loopback(),
-        Some(url::Host::Ipv6(address)) => address.is_loopback(),
-        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
-        None => return Err(invalid()),
-    };
+    let url = kernel_security::net::target(base_url, kernel_security::net::Query::Refused)
+        .map_err(|_| invalid())?
+        .url;
     let scheme = match url.scheme() {
         "https" => "https",
-        "http" if loopback => "http",
-        _ => return Err(invalid()),
+        "http" => "http",
+        _ => unreachable!("the target rule allows only https and http"),
     };
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(invalid());
-    }
     let path = url.path().trim_end_matches('/').to_owned();
     if path.len() > TARGET_BYTES_MAX / 2 || !path.bytes().all(target_byte) {
         return Err(invalid());
