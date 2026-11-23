@@ -75,3 +75,32 @@ fn policy_load_p95() {
         assert_eq!(loaded, saved);
     });
 }
+
+/// Building one agent's Linux boundary for a fixed project, as a Linux launch does: the
+/// project sandbox, the backend [`LinuxSandbox::detect`] picks with the Landlock helper,
+/// and the wrapped harness command, which carries the Landlock policy to the helper as
+/// arguments; Linux writes no policy file (E0, leader L10, PM C1). Prints
+/// `budget linux_policy_write_p95 p95_us=<n> runs=200`.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "budget row, run with --ignored --nocapture --test-threads=1"]
+fn linux_policy_write_p95() {
+    use crazyagent::sandbox::linux::LinuxSandbox;
+    use crazyagent::sandbox::{ProjectSandbox, Sandbox, SandboxNetwork};
+    use std::path::Path;
+    use std::process::Command;
+    let helper = Path::new(env!("CARGO_BIN_EXE_crazyagent-landlock"));
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let (project, home, tmp) = (root.join("project"), root.join("home"), root.join("tmp"));
+    for folder in [&project, &home, &tmp] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    let harness = Command::new("/bin/true");
+    timed("linux_policy_write_p95", || {
+        let sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Open).unwrap();
+        let linux = LinuxSandbox::detect(sandbox, helper).unwrap();
+        let command = linux.wrap(&harness).unwrap();
+        assert_ne!(command.get_program(), harness.get_program());
+    });
+}
