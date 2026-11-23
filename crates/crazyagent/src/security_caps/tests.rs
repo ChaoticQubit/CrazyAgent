@@ -180,6 +180,7 @@ fn the_quit_gateway_never_opens_the_store() {
     let gateway = Gateway::new(&grants, &Unreached);
     let providers = Providers {
         net: &Absent,
+        process: &Absent,
         secrets: &Absent,
         settings: &Absent,
         service: &Absent,
