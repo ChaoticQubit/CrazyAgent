@@ -15896,7 +15896,7 @@ fn full_access_boundary(scratch: &Path) -> Option<Arc<InstalledSandbox>> {
         let installed = InstalledSandbox::install(
             sandbox,
             &scratch.join("full-access.sb"),
-            crate::sandbox::LinuxSupervisor::On,
+            kernel_sandbox::settings::LinuxSupervisor::On,
             LinuxStrict::Off,
         )
         .unwrap();
@@ -20898,7 +20898,7 @@ fn native_lead_clone_in_the_project(fixture: &Fixture) -> (i64, String, PathBuf)
         &repository,
         &home,
         &tmp,
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap()
     .confine_to_clone(&clone)
@@ -25797,8 +25797,9 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
 #[cfg(target_os = "macos")]
 #[test]
 fn a_tools_on_agent_profile_follows_the_project_network_choice() {
+    use crate::sandbox::ProjectSandbox;
     use crate::sandbox::policy::AgentNetwork;
-    use crate::sandbox::{ProjectSandbox, SandboxRemote};
+    use kernel_sandbox::net::SandboxRemote;
     let dir = tempfile::tempdir().unwrap();
     let base = dir.path().canonicalize().unwrap();
     let make = |name: &str| {

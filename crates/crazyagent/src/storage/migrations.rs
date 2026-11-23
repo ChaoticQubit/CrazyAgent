@@ -95,6 +95,10 @@ pub(crate) const STEPS: &[Step] = &[
         to: 18,
         run: settings_step::session_turns_on_the_log,
     },
+    Step {
+        to: 19,
+        run: plugin_records,
+    },
 ];
 
 /// The widest engine file name step 11 lets `projects_delete_files` hold, kept as that step
@@ -105,6 +109,18 @@ const _: () = assert!(
     crate::projects_home::RECORDED_NAME_BYTES_MAX == STEP_11_NAME_BYTES_MAX,
     "a wider delete record needs a migration step that widens projects_delete_files"
 );
+
+/// Step 19: the plugin namespaces' table, empty on an upgrade, filled only by namespace
+/// events of the Plugins aggregate; a new database gets it when the engine opens it. Input:
+/// the open upgrade transaction. Output: Ok, or the store's refusal.
+fn plugin_records(tx: &Transaction<'_>) -> Result<(), StorageError> {
+    assert_eq!(
+        kernel_storage::state_log::AggregateName::from(crate::state_log::Aggregate::Plugins),
+        kernel_storage::namespace::PLUGINS,
+        "namespace events log under the engine's Plugins aggregate"
+    );
+    kernel_storage::namespace::initialize(tx)
+}
 
 /// Step 12 (V250-H2): the app plugin store's trust records, switches and secret bindings.
 /// An upgrade from 2.4 makes the three empty tables under its pinned backup; a new database

@@ -4385,8 +4385,9 @@ fn shared_context_mode(base: &Path) -> (AgentContext, rusqlite::Connection, Path
 #[cfg(target_os = "macos")]
 #[test]
 fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandboxed_home() {
+    use crate::sandbox::ProjectSandbox;
     use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
-    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+    use kernel_sandbox::net::SandboxNetwork;
     const CLAUDE_CONNECT_LIMIT: Duration = Duration::from_secs(30);
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
@@ -4439,8 +4440,9 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
+    use crate::sandbox::ProjectSandbox;
     use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
-    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+    use kernel_sandbox::net::SandboxNetwork;
     const MARKER: &str = "ctx-execute-4471";
     const CALL_LIMIT: Duration = Duration::from_secs(60);
     let directory = tempfile::tempdir().unwrap();
@@ -4512,8 +4514,9 @@ fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_cannot_change_its_launch_getconf() {
+    use crate::sandbox::ProjectSandbox;
     use crate::sandbox::toolchains;
-    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+    use kernel_sandbox::net::SandboxNetwork;
     const CHANGE: &str = r#"printf x 2>/dev/null >> "$1/getconf" && echo changed
 printf x 2>/dev/null > "$1/getconf.new" && mv "$1/getconf.new" "$1/getconf" 2>/dev/null && echo replaced
 mkdir "$1/planted" 2>/dev/null && echo planted
@@ -4710,9 +4713,10 @@ fn tools_on_profile(
     port: u16,
     installs: &[&Path],
 ) -> PathBuf {
+    use crate::sandbox::ProjectSandbox;
     use crate::sandbox::policy::AgentPolicy;
     use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
-    use crate::sandbox::{ProjectSandbox, SandboxRemote};
+    use kernel_sandbox::net::SandboxRemote;
     let policy = AgentPolicy::default();
     let homes = ToolHomes::owner().unwrap();
     let tmp = private_folder(&base.join("tmp"));

@@ -186,3 +186,53 @@ fn a_record_holding_a_handle_gets_a_mirror_rebuilt_through_from_kernel() {
         assert!(net.contains(fragment), "{fragment}\n{net}");
     }
 }
+
+/// The `.cap` source of the row that names a type `From`: a mirrored record, an enum and a
+/// capability that takes and returns the record, so every conversion kind is written.
+const FROM_CAP: &str = "type From { at: u64, data: bytes, items: list<u64> }\n\
+                                   capability conv.round(value: From, more: option<From>) -> From \
+                                   tier: t1 needs: conv.use\n\
+                                   capability conv.many(values: list<From>) -> list<From> \
+                                   tier: t1 needs: conv.use";
+
+/// Finds each `::from(` call in generated text that does not name `core::convert::From`.
+/// Input: the text. Output: the lines holding a bare call or a bare `impl From<`.
+fn bare_from(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter(|line| {
+            let line = line.trim_start();
+            let bare_call = line.match_indices("::from(").any(|(at, _)| {
+                let before = &line[..at];
+                !before.ends_with(">") && !before.ends_with("core::convert::From")
+            });
+            bare_call || line.contains("impl From<")
+        })
+        .collect()
+}
+
+#[test]
+fn a_cap_type_named_from_still_compiles() {
+    let files = rust_of(&[("conv", FROM_CAP)]).expect("a type named From generates");
+    let envelope = files
+        .iter()
+        .find(|(path, _)| path == "envelope/conv.rs")
+        .expect("the envelope is written");
+    assert!(envelope.1.contains("pub struct From {"), "{}", envelope.1);
+    for (path, text) in &files {
+        assert_eq!(bare_from(text), Vec::<&str>::new(), "{path}");
+    }
+    for (path, text) in rust_of_folder("caps")
+        .iter()
+        .chain(rust_of_folder("capgen/fixture_wire").iter())
+    {
+        assert_eq!(bare_from(text), Vec::<&str>::new(), "{path}");
+    }
+    assert_eq!(
+        bare_from("impl From<A> for B {}\nlet s = alloc::string::String::from(x);\n").len(),
+        2
+    );
+    assert!(
+        bare_from("<T as core::convert::From<_>>::from(x)\ncore::convert::From::from(x)\n")
+            .is_empty()
+    );
+}

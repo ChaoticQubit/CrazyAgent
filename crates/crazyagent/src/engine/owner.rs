@@ -272,7 +272,7 @@ pub enum OwnerMutation {
         profile: crate::owner_profile::OwnerProfile,
     },
     SetSandboxSettings {
-        settings: crate::sandbox_settings::SandboxSettings,
+        settings: kernel_sandbox::settings::SandboxSettings,
         version: u64,
     },
     SetCleanupSettings {
@@ -1308,7 +1308,7 @@ pub enum OwnerData {
         profile: Option<crate::owner_profile::OwnerProfile>,
     },
     SandboxSettings {
-        settings: crate::sandbox_settings::SandboxSettings,
+        settings: kernel_sandbox::settings::SandboxSettings,
         version: u64,
     },
     CleanupSettings {

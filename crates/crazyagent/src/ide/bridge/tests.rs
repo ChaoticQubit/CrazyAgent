@@ -2066,7 +2066,7 @@ fn an_ide_capability_write_cut_short_leaves_no_capability_file() {
 /// the terminal shows, and any other sandbox failure keeps its own code.
 #[test]
 fn an_ide_terminal_whose_cargo_name_walk_ran_past_its_budget_stops_with_the_walk_code() {
-    use crate::sandbox::SandboxError;
+    use kernel_sandbox::error::SandboxError;
     let refused = |error| terminal::shell_refusal(error).0;
     let walked = std::io::Error::other(crate::team::cleanup::WALK_TOO_LONG);
     let missing = std::io::Error::from(std::io::ErrorKind::NotFound);

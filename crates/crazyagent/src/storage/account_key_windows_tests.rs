@@ -2,8 +2,9 @@ use super::{ACCOUNT_KEYS, read_key_file, remove_key_file, replace_key_file, stor
 use crate::harnesses::launch::low_probe::{Try, low_probe, probe};
 use crate::protocol::CredentialRef;
 use crate::sandbox::windows::{HELPER_NAME, WindowsSandbox};
-use crate::sandbox::{ProjectSandbox, Sandbox, SandboxNetwork};
+use crate::sandbox::{ProjectSandbox, Sandbox};
 use crazyagent_win_sandbox::{dacl, private};
+use kernel_sandbox::net::SandboxNetwork;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
