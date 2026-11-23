@@ -244,7 +244,7 @@ fn a_drive_prefixed_name_never_reaches_a_file_outside_the_searched_folders() {
         .join("System32")
         .join("where.exe");
     std::fs::copy(shipped, &planted).unwrap();
-    let found = resolve(&format!("{drive}:{stem}"), &places);
+    let found = resolve(&format!("{drive}:{stem}.exe"), &places);
     std::fs::remove_file(&planted).unwrap();
     let missing = found.unwrap_err();
     assert_eq!(missing.reason, Reason::NotFound);
