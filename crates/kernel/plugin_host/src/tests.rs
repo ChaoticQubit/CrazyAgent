@@ -261,8 +261,9 @@ fn dependency_names(text: &str) -> Vec<(String, String, String)> {
     names
 }
 
-/// The crates plugin_host may depend on, each in the one table it may sit in: no SDK crate
-/// and no engine crate (R4).
+/// The crates plugin_host may depend on, each in the one table it may sit in, sorted: no
+/// SDK crate and no engine crate. rustix is the unix no-follow open of manifests and assets;
+/// tempfile is for test rows.
 const ALLOWED: [(&str, &str); 9] = [
     ("dependencies", "crazyagent-kernel-common"),
     ("dependencies", "crazyagent-kernel-security"),
