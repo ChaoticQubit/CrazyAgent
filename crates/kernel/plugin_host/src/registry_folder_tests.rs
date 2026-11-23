@@ -176,7 +176,8 @@ fn replacing_a_plugin_whose_folder_holds_a_subfolder_succeeds_and_settles_trust(
     );
     let left = left_over(&case);
     assert!(
-        left.iter().all(|name| !name.starts_with(".old-acme.") && !name.starts_with(".add-")),
+        left.iter()
+            .all(|name| !name.starts_with(".old-acme.") && !name.starts_with(".add-")),
         "{left:?}"
     );
 }
