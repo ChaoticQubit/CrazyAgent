@@ -888,3 +888,20 @@ fn drift_reports_an_unreadable_folder() {
     assert_eq!(found, vec!["envelope (unreadable)".to_owned()]);
     fs::remove_dir_all(&folder).expect("the scratch folder is removed");
 }
+
+#[test]
+fn write_restores_files_into_an_empty_expected_folder() {
+    let folder = load_scratch("drift-empty-expected");
+    let files = vec![
+        ("envelope/mod.rs".to_owned(), "pub mod a;\n".to_owned()),
+        ("mod.rs".to_owned(), "pub mod envelope;\n".to_owned()),
+    ];
+    fs::write(folder.join("mod.rs"), "pub mod envelope;\n").expect("mod.rs writes");
+    fs::create_dir(folder.join("envelope")).expect("the expected folder is made");
+    fs::create_dir(folder.join("stray")).expect("the stray folder is made");
+    assert_eq!(
+        drift(&folder, &files),
+        vec!["envelope/mod.rs".to_owned(), "stray".to_owned()]
+    );
+    fs::remove_dir_all(&folder).expect("the scratch folder is removed");
+}
