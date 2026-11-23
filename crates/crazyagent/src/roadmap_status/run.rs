@@ -192,7 +192,7 @@ pub(super) fn answer(
     let failed = |words: &str| Unchecked::Failed(words.to_owned());
     let hidden = crate::sandbox::hidden_paths::load(db, project.as_str())
         .map_err(|_| failed(HIDDEN_UNREADABLE))?;
-    crate::sandbox::hidden_paths::none_tracked(root, &hidden)
+    crate::sandbox::hidden_paths::none_tracked(&crate::sandbox::ACCESS_HOOKS, root, &hidden)
         .map_err(|_| failed(HIDDEN_UNREADABLE))?;
     let check = prepare(db, project, root).map_err(failed)?;
     let name = run_name(project, crate::team::now_ms());

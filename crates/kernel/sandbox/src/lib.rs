@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+/// What the project access lists read from the engine that runs them.
+pub mod access;
 /// The ELF reader: whether a Linux program is loaded by glibc, and so resolves names over
 /// TCP when the sandbox asks it to, judged from its program headers alone.
 pub mod elf;

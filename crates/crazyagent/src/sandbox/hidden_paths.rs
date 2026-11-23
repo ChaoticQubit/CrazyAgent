@@ -1,3 +1,4 @@
+use kernel_sandbox::access::AccessHooks;
 use kernel_sandbox::paths::canonical;
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
@@ -412,8 +413,11 @@ const CHECK_BYTES_MAX: u64 = 64 * 1024;
 /// `:(literal,icase)`, killed after 5 s; a tracked file lives in every agent's worktree and in
 /// history. Inputs: the project root and the folders. Output: [`answer`]'s, `Ok(false)` with no
 /// folder inside the root or no `.git`, else unchecked when a folder or git cannot be read.
-fn any_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<bool, &'static str> {
-    use crate::project_files::NoOwnerGit;
+fn any_tracked(
+    hooks: &AccessHooks,
+    project_root: &Path,
+    folders: &[PathBuf],
+) -> Result<bool, &'static str> {
     use std::io::Read;
     use std::path::Component;
     use std::process::Stdio;
@@ -443,11 +447,10 @@ fn any_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<bool, &'stati
     if specs.is_empty() {
         return Ok(false);
     }
-    let git = crate::project_files::engine_git();
-    let mut command = match crate::project_files::owner_git(&root, git) {
-        Ok(command) => command,
-        Err(NoOwnerGit::Absent) => return Ok(false),
-        Err(NoOwnerGit::Refused | NoOwnerGit::Unavailable) => return Err(unchecked),
+    let mut command = match (hooks.owner_git)(&root) {
+        Ok(Some(command)) => command,
+        Ok(None) => return Ok(false),
+        Err(()) => return Err(unchecked),
     };
     if cfg!(any(windows, target_os = "macos")) && !specs.iter().all(|spec| spec.is_ascii()) {
         return Err("hidden_path_name_unchecked");
@@ -529,8 +532,12 @@ fn answer(bytes: &[u8], specs: &[String], clean: bool) -> Result<bool, &'static 
 /// cannot answer for it, with one git run for the whole list (`any_tracked`). Inputs: the
 /// project root and the checked folders. Output: ok, `hidden_path_tracked`,
 /// `hidden_path_unchecked` or `hidden_path_name_unchecked`.
-pub fn none_tracked(project_root: &Path, folders: &[PathBuf]) -> Result<(), &'static str> {
-    if any_tracked(project_root, folders)? {
+pub fn none_tracked(
+    hooks: &AccessHooks,
+    project_root: &Path,
+    folders: &[PathBuf],
+) -> Result<(), &'static str> {
+    if any_tracked(hooks, project_root, folders)? {
         Err("hidden_path_tracked")
     } else {
         Ok(())
@@ -642,7 +649,11 @@ mod tests {
     /// The check for one folder, as a list of one. Inputs: the project root and the folder.
     /// Output: what [`any_tracked`] answers.
     fn git_tracks(project_root: &Path, folder: &Path) -> Result<bool, &'static str> {
-        any_tracked(project_root, &[folder.to_path_buf()])
+        any_tracked(
+            &crate::sandbox::ACCESS_HOOKS,
+            project_root,
+            &[folder.to_path_buf()],
+        )
     }
 
     /// V243-WIN-HIDDEN-GIT (leader 09:21, #590): git's answer counts only when every line is
@@ -774,7 +785,10 @@ mod tests {
         let renamed = path.join("Secret");
         std::fs::rename(&tracked, &renamed).unwrap();
         assert_eq!(git_tracks(&path, &renamed), Ok(true));
-        assert_eq!(none_tracked(&path, &[renamed]), Err("hidden_path_tracked"));
+        assert_eq!(
+            none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &[renamed]),
+            Err("hidden_path_tracked")
+        );
     }
 
     /// #590 (leader 10:34): git's `icase` folds ASCII letters only, while Windows and macOS
@@ -800,7 +814,10 @@ mod tests {
             Ok(false)
         };
         assert_eq!(git_tracks(&path, &folder), wanted);
-        assert_eq!(none_tracked(&path, &[folder]), wanted.map(|_| ()));
+        assert_eq!(
+            none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &[folder]),
+            wanted.map(|_| ())
+        );
     }
 
     /// V243-WIN-HIDDEN-GIT (leader 09:21): a saved list of several folders costs one git run,
@@ -817,16 +834,25 @@ mod tests {
             folders.push(folder);
         }
         let runs = crate::project_files::owner_git_runs(|| {
-            assert_eq!(none_tracked(&path, &folders), Ok(()));
+            assert_eq!(
+                none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &folders),
+                Ok(())
+            );
         });
         assert_eq!(runs, 1, "four untracked folders");
         folders.push(tracked);
         let runs = crate::project_files::owner_git_runs(|| {
-            assert_eq!(none_tracked(&path, &folders), Err("hidden_path_tracked"));
+            assert_eq!(
+                none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &folders),
+                Err("hidden_path_tracked")
+            );
         });
         assert_eq!(runs, 1, "the tracked folder last of five");
         let runs = crate::project_files::owner_git_runs(|| {
-            assert_eq!(none_tracked(&path, &[]), Ok(()));
+            assert_eq!(
+                none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &[]),
+                Ok(())
+            );
         });
         assert_eq!(runs, 0, "no folder");
     }
@@ -841,7 +867,10 @@ mod tests {
         let root = project();
         let path = canonical(root.path()).unwrap();
         let (tracked, untracked) = tracked_and_untracked(&path);
-        assert_eq!(none_tracked(&path, &[tracked]), Err("hidden_path_tracked"));
+        assert_eq!(
+            none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &[tracked]),
+            Err("hidden_path_tracked")
+        );
         let mut full = vec![untracked.clone()];
         for n in 1..HIDDEN_PATHS_MAX {
             let folder = path.join(format!("plain-{n}"));
@@ -853,7 +882,10 @@ mod tests {
             let mut times: Vec<std::time::Duration> = (0..20)
                 .map(|_| {
                     let start = std::time::Instant::now();
-                    assert_eq!(none_tracked(&path, folders), Ok(()));
+                    assert_eq!(
+                        none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, folders),
+                        Ok(())
+                    );
                     start.elapsed()
                 })
                 .collect();
@@ -883,10 +915,17 @@ mod tests {
         assert_eq!(git_tracks(&path, &tracked), Ok(true));
         assert_eq!(git_tracks(&path, &untracked), Ok(false));
         assert_eq!(
-            none_tracked(&path, &[tracked.clone(), untracked.clone()]),
+            none_tracked(
+                &crate::sandbox::ACCESS_HOOKS,
+                &path,
+                &[tracked.clone(), untracked.clone()]
+            ),
             Err("hidden_path_tracked")
         );
-        assert_eq!(none_tracked(&path, &[untracked]), Ok(()));
+        assert_eq!(
+            none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &[untracked]),
+            Ok(())
+        );
     }
 
     #[test]
@@ -896,7 +935,10 @@ mod tests {
         let folder = path.join("plain");
         std::fs::create_dir(&folder).unwrap();
         assert_eq!(git_tracks(&path, &folder), Ok(false));
-        assert_eq!(none_tracked(&path, &[folder]), Ok(()));
+        assert_eq!(
+            none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &[folder]),
+            Ok(())
+        );
     }
 
     #[cfg(unix)]
@@ -950,7 +992,10 @@ mod tests {
         git(&["add", "secret/key.txt"]);
         std::fs::write(path.join(".git").join("index"), b"not a git index\n").unwrap();
         assert_eq!(git_tracks(&path, &folder), Err("hidden_path_unchecked"));
-        assert_eq!(none_tracked(&path, &[folder]), Err("hidden_path_unchecked"));
+        assert_eq!(
+            none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &[folder]),
+            Err("hidden_path_unchecked")
+        );
     }
 
     #[test]
@@ -962,7 +1007,10 @@ mod tests {
         std::fs::write(folder.join("key.txt"), "k\n").unwrap();
         std::fs::write(path.join(".git"), b"gitdir: /elsewhere/.git/worktrees/x\n").unwrap();
         assert_eq!(git_tracks(&path, &folder), Err("hidden_path_unchecked"));
-        assert_eq!(none_tracked(&path, &[folder]), Err("hidden_path_unchecked"));
+        assert_eq!(
+            none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &[folder]),
+            Err("hidden_path_unchecked")
+        );
     }
 
     #[cfg(unix)]
@@ -999,7 +1047,10 @@ mod tests {
         }
         git(&["add", "bulk"]);
         assert_eq!(git_tracks(&path, &folder), Ok(true));
-        assert_eq!(none_tracked(&path, &[folder]), Err("hidden_path_tracked"));
+        assert_eq!(
+            none_tracked(&crate::sandbox::ACCESS_HOOKS, &path, &[folder]),
+            Err("hidden_path_tracked")
+        );
     }
 
     #[test]

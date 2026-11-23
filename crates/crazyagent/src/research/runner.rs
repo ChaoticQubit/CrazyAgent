@@ -1333,7 +1333,11 @@ impl ResearchRunner {
                 .hidden_paths(&project)
                 .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?;
             listed.hid(if unconfined { &[] } else { &hidden });
-            if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&root, &hidden) {
+            if let Err(code) = crate::sandbox::hidden_paths::none_tracked(
+                &crate::sandbox::ACCESS_HOOKS,
+                &root,
+                &hidden,
+            ) {
                 return Err(RunError::Invalid(code.into()));
             }
             for folder in &hidden {
@@ -2091,7 +2095,11 @@ impl ResearchRunner {
         if let Some(listed) = &listed {
             listed.hid(&hidden);
         }
-        if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&folder, &hidden) {
+        if let Err(code) = crate::sandbox::hidden_paths::none_tracked(
+            &crate::sandbox::ACCESS_HOOKS,
+            &folder,
+            &hidden,
+        ) {
             return Err(RunError::Invalid(code.into()));
         }
         for sub in hidden.iter().filter(|path| path.starts_with(&folder)) {

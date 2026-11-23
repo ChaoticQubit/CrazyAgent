@@ -2716,7 +2716,9 @@ fn set_hidden_paths(
         Ok(checked) => checked,
         Err(code) => return Ok(rejected(code)),
     };
-    if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&folder, &checked) {
+    if let Err(code) =
+        crate::sandbox::hidden_paths::none_tracked(&crate::sandbox::ACCESS_HOOKS, &folder, &checked)
+    {
         return Ok(rejected(code));
     }
     let item = crate::storage::versioned::hidden_paths_item(project_id);

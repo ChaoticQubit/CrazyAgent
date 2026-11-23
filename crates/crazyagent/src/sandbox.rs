@@ -1,3 +1,4 @@
+use kernel_sandbox::access::AccessHooks;
 use kernel_sandbox::elf;
 use kernel_sandbox::error::{SandboxError, invalid};
 use kernel_sandbox::host::LinuxHost;
@@ -1209,6 +1210,25 @@ pub const POLICY_HOOKS: PolicyHooks = PolicyHooks {
     linux_other_git,
     local_folders: shared_folders::local_folders,
 };
+
+/// The engine's real project access hooks, the only [`AccessHooks`] production code passes:
+/// the owner's git for a project folder ([`access_owner_git`]).
+pub const ACCESS_HOOKS: AccessHooks = AccessHooks {
+    owner_git: access_owner_git,
+};
+
+/// The owner's git for the project folder `root` as the access lists run it, with the
+/// engine's own git when it has one. Input: the canonical project folder. Output: the
+/// command, `Ok(None)` when the folder holds no repository, or `Err(())` when the owner's
+/// git is refused or unavailable.
+fn access_owner_git(root: &Path) -> Result<Option<std::process::Command>, ()> {
+    use crate::project_files::NoOwnerGit;
+    match crate::project_files::owner_git(root, crate::project_files::engine_git()) {
+        Ok(command) => Ok(Some(command)),
+        Err(NoOwnerGit::Absent) => Ok(None),
+        Err(NoOwnerGit::Refused | NoOwnerGit::Unavailable) => Err(()),
+    }
+}
 
 /// Tells whether a project may hold a git repository besides its own top-level `.git`,
 /// which an agent may still change under the call supervisor: on Linux what a bounded read
