@@ -201,3 +201,18 @@ fn a_program_is_fixed_only_when_absolute_or_a_bare_file_name() {
         assert!(!fixed_program(Path::new(name)), "{name}");
     }
 }
+
+/// C2-H8: on Windows, while the set-up projects cannot be read, a tool in a repository on
+/// another drive is agents' to write, and a tool under `ProgramFiles` is not.
+#[test]
+fn a_repository_on_another_drive_is_agent_writable_while_its_projects_cannot_be_read() {
+    let home = tempfile::tempdir().unwrap();
+    let places = Places {
+        projects: None,
+        ..stub_new(Vec::new(), Some(home.path().canonicalize().unwrap()))
+    };
+    assert!(places.agent_writable(Path::new(r"D:\repo\bin\tool.exe")));
+    let programs = PathBuf::from(std::env::var_os("ProgramFiles").unwrap());
+    let kept = programs.join("Git").join("cmd").join("git.exe");
+    assert!(!places.agent_writable(&kept), "{}", kept.display());
+}
