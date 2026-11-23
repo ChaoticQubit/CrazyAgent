@@ -75,6 +75,9 @@ fn side_bytes(folders: &[&Path]) -> Vec<u8> {
     bytes
 }
 
+/// One way a row plants a side file at a path.
+type Plant<'a> = Box<dyn Fn(&Path) + 'a>;
+
 /// Writes a file with the given bytes and mode. Inputs: the file, the bytes and the mode.
 fn plant(file: &Path, bytes: &[u8], mode: u32) {
     std::fs::write(file, bytes).unwrap_or_else(|error| panic!("{}: {error}", file.display()));
@@ -148,7 +151,7 @@ fn an_unsafe_or_malformed_side_file_is_ignored() {
     let relative = side_bytes(&[Path::new(REPO), Path::new("usr/local/src/repo")]);
     let mut empty = good.clone();
     empty.push(0);
-    let cases: Vec<(&str, Box<dyn Fn(&Path)>)> = vec![
+    let cases: Vec<(&str, Plant)> = vec![
         (
             "link",
             Box::new(|side: &Path| {
