@@ -760,7 +760,7 @@ fn an_acp_launch_on_a_keyless_account_is_handed_its_address_and_the_local_placeh
     );
     assert_eq!(
         set.get("OPENAI_API_KEY").map(String::as_str),
-        Some(kernel_security::relay_token::LOCAL_PLACEHOLDER)
+        Some(kernel_common::relay_names::LOCAL_PLACEHOLDER)
     );
     assert_eq!(
         set.get("STANDIN_MODEL").map(String::as_str),

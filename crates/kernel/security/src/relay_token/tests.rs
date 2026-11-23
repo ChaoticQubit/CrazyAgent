@@ -1,4 +1,5 @@
 use super::*;
+use kernel_common::relay_names::{KEY_BYTES_MAX, LOCAL_PLACEHOLDER, is_placeholder};
 
 #[test]
 fn a_minted_token_is_a_relay_token() {
@@ -26,33 +27,4 @@ fn matches_is_true_only_for_the_same_token() {
     assert!(!token.matches(&token.as_str()[..KEY_BYTES_MAX - 1]));
     assert!(!token.matches(&format!("{}0", token.as_str())));
     assert!(!token.matches(LOCAL_PLACEHOLDER));
-}
-
-#[test]
-fn the_local_placeholder_is_a_placeholder_and_not_a_token() {
-    assert!(is_placeholder(LOCAL_PLACEHOLDER));
-    assert!(!is_relay_token(LOCAL_PLACEHOLDER));
-    assert!(!is_placeholder("sk-ant-real-key"));
-    assert!(!is_placeholder(""));
-}
-
-#[test]
-fn a_token_with_upper_hex_is_refused() {
-    let lower = format!("{TOKEN_PREFIX}{}", "a".repeat(TOKEN_HEX));
-    let upper = format!("{TOKEN_PREFIX}{}", "A".repeat(TOKEN_HEX));
-    assert!(is_relay_token(&lower));
-    assert!(!is_relay_token(&upper));
-    assert!(!is_placeholder(&upper));
-    assert!(!is_relay_token(&format!(
-        "{TOKEN_PREFIX}{}",
-        "a".repeat(TOKEN_HEX - 1)
-    )));
-    assert!(!is_relay_token(&format!(
-        "{TOKEN_PREFIX}{}",
-        "a".repeat(TOKEN_HEX + 1)
-    )));
-    assert!(!is_relay_token(&format!(
-        "{TOKEN_PREFIX}{}g",
-        "a".repeat(TOKEN_HEX - 1)
-    )));
 }

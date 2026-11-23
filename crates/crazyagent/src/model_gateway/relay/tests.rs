@@ -1,5 +1,5 @@
 use super::*;
-use kernel_security::relay_token::{KEY_BYTES_MAX, LOCAL_PLACEHOLDER, TOKEN_PREFIX};
+use kernel_common::relay_names::{KEY_BYTES_MAX, LOCAL_PLACEHOLDER, TOKEN_PREFIX};
 use std::ffi::OsStr;
 use std::io::Cursor;
 use std::sync::Mutex;

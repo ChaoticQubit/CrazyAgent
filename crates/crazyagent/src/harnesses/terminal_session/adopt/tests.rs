@@ -695,7 +695,7 @@ fn key_folder() -> tempfile::TempDir {
 fn longest_key() -> String {
     format!(
         "{}{}",
-        kernel_security::relay_token::TOKEN_PREFIX,
+        kernel_common::relay_names::TOKEN_PREFIX,
         "a".repeat(64)
     )
 }
@@ -770,7 +770,7 @@ fn an_adopted_key_file_that_is_a_fifo_is_not_taken_and_never_blocks_adopt() {
 
 #[test]
 fn a_pane_record_keeps_its_lineage_token_and_refuses_a_malformed_one() {
-    let token = crate::harnesses::leftovers::LineageToken::new().unwrap();
+    let token = kernel_sandbox::profile::env::LineageToken::new().unwrap();
     let record = PaneRecord {
         lineage: Some(token.clone()),
         ..keyed(std::path::Path::new("/private/tmp/home/.key"))

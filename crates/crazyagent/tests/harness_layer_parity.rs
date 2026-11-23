@@ -8,8 +8,8 @@ use crazyagent::harnesses::launch::{
 use crazyagent::harnesses::{HarnessEntry, Search, catalog, specs};
 use crazyagent::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
 use crazyagent::rcli_host::{RcliMasterBinding, RcliMasterLaunch};
+use kernel_common::relay_names::TOKEN_PREFIX;
 use kernel_sandbox::toolchains::ToolHomes;
-use kernel_security::relay_token::TOKEN_PREFIX;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
