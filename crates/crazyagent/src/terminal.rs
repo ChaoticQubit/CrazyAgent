@@ -403,7 +403,7 @@ pub(crate) fn tmux_host_checking(
 pub fn platform(_engine_root: &Path) -> (bool, Arc<dyn Host>) {
     let host: Arc<dyn Host> = Arc::new(LastScreenHost::new(
         kernel_processes::terminal::windows::ConptyHost::new(
-            crate::sandbox::agent_variable_allowed,
+            kernel_sandbox::profile::env::agent_variable_allowed,
         ),
         kept_clock,
     ));

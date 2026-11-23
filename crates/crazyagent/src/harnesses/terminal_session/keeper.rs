@@ -8,7 +8,7 @@ use std::time::Instant;
 
 /// Asks a pane's first process to stop with terminate and waits up to `KEEPER_WAIT` for the
 /// pane to end, after the host kept its last screen, since the pane ends before any kill.
-/// A [`crate::sandbox::KEEPER`] then has the run's warden kill every process in the sandbox
+/// A [`kernel_sandbox::profile::command::KEEPER`] then has the run's warden kill every process in the sandbox
 /// and ends only once the warden confirmed that or found signals not confined, so the pane
 /// ending in time confirms it. Inputs: the host, the pane and its first process, proven the
 /// pane's within `GROUP_FRESH`. Output: whether the pane is gone.
@@ -44,7 +44,7 @@ pub enum Hold {
     Thaw,
 }
 
-/// Asks a [`crate::sandbox::KEEPER`] given a freeze record to have its warden stop or
+/// Asks a [`kernel_sandbox::profile::command::KEEPER`] given a freeze record to have its warden stop or
 /// continue every process in the run's sandbox, and waits up to `KEEPER_WAIT` for the
 /// keeper to write the warden's answer to that record (DEC-158). The record is removed
 /// first, so only this answer confirms. Inputs: the keeper's process id, which the caller

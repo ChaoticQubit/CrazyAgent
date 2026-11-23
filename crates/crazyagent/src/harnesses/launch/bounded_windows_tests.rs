@@ -3,10 +3,11 @@ use super::{
     claude_invocation, codex_invocation,
 };
 use crate::sandbox::windows::container_name;
-use crate::sandbox::{InstalledSandbox, LineageCheck, ProjectSandbox};
+use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 use crazyagent_win_sandbox::private;
 use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
 use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::profile::command::LineageCheck;
 use kernel_sandbox::profile::consts::{AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV};
 use kernel_sandbox::settings::LinuxSupervisor;
 use kernel_sandbox::windows::HELPER_NAME;

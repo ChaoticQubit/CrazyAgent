@@ -356,7 +356,7 @@ impl LeadServers {
     /// when the read was refused.
     fn read_as_lead(&self, socket: &Path, pane: &str) -> String {
         kernel_processes::spawn_gate::output(
-            Command::new(crate::sandbox::SANDBOX_EXEC)
+            Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
                 .arg("-f")
                 .arg(&self.profile)
                 .arg(&self.tmux)
@@ -650,7 +650,7 @@ fn live_a_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot() {
     );
     let marker = team.home.join("snapshot-planted.txt");
     let planted = kernel_processes::spawn_gate::output(
-        Command::new(crate::sandbox::SANDBOX_EXEC)
+        Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
             .arg("-f")
             .arg(&teammates)
             .arg("/bin/sh")

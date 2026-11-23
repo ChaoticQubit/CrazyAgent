@@ -615,7 +615,9 @@ fn npm_starts_through_the_same_launcher_as_the_node_check() {
     if cfg!(target_os = "linux") {
         assert_ne!(
             npm.as_deref().ok(),
-            Some(std::ffi::OsStr::new(crate::sandbox::SANDBOX_EXEC))
+            Some(std::ffi::OsStr::new(
+                kernel_sandbox::profile::command::SANDBOX_EXEC
+            ))
         );
     }
 }

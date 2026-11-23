@@ -209,7 +209,7 @@ fn check_env(env: &Value, path: &str) -> Result<(), Refused> {
 /// code-loading runtimes and the engine's own) nor the owner's toolchain names (the
 /// compiler, its flags and paths, the developer tools), to text that holds no placeholder but
 /// `{relay_url}`, `{token}` and `{model}`. That rule runs at load time and is not the launch
-/// guard: `sandbox::agent_env` sets the engine's pins (git, home, TLS and the zsh temp
+/// guard: `agent_process_env` sets the engine's pins (git, home, TLS and the zsh temp
 /// prefix) after the harness's own variables, so an entry never replaces one. A harness on a
 /// shared driver lists each wire format by its full name and has an entry for every one; the
 /// engine's own adapters need none. Input: the manifest. Output: Ok, or a refusal that names

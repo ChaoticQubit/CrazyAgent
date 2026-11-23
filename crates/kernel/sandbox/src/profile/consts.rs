@@ -224,41 +224,6 @@ pub const AGENT_KEY_VARIABLES: &[&str] = &["ANTHROPIC_API_KEY"];
 
 pub const AGENT_ENV_MAX: usize = 128;
 
-pub const REFUSED_VARIABLES: &[&str] = &[
-    "GIT_ASKPASS",
-    "SSH_ASKPASS",
-    "SSH_AUTH_SOCK",
-    "GIT_CONFIG_PARAMETERS",
-    "GIT_CONFIG_COUNT",
-    "GIT_CONFIG_GLOBAL",
-    "GIT_CONFIG_SYSTEM",
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "PERL5LIB",
-    "PERL5OPT",
-    "PERLLIB",
-    "PERL5DB",
-];
-
-pub const REFUSED_PREFIXES: &[&str] = &[
-    "GH_",
-    "GITHUB_",
-    "GIT_CONFIG_KEY_",
-    "GIT_CONFIG_VALUE_",
-    "AWS_",
-    "AZURE_",
-    "CRAZYAGENT_",
-];
-
-pub const REFUSED_SUFFIXES: &[&str] = &[
-    "_API_KEY",
-    "_TOKEN",
-    "_SECRET",
-    "_SECRET_KEY",
-    "_PASSWORD",
-    "_ACCESS_KEY",
-    "_CREDENTIALS",
-];
-
 /// The git settings every agent process gets, sandboxed or at Full access: no system git
 /// config (whose `credential.helper=osxkeychain` would ask the owner's Keychain), no
 /// credential helper at all, no terminal prompt, and no bare repository found by

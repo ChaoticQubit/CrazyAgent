@@ -499,11 +499,14 @@ impl TerminalSession {
         let kept_freeze = false;
         #[cfg(target_os = "macos")]
         let command = if request.boundary.is_unconfined() {
-            assert_ne!(command.argv[0], crate::sandbox::SANDBOX_EXEC);
+            assert_ne!(
+                command.argv[0],
+                kernel_sandbox::profile::command::SANDBOX_EXEC
+            );
             command
         } else {
             interactive::InteractiveCommand {
-                argv: crate::sandbox::kept_pane(
+                argv: kernel_sandbox::profile::command::kept_pane(
                     command.argv,
                     freeze_record.filter(|_| kept_freeze),
                 )
