@@ -25,8 +25,9 @@ pub fn redact(output: &[u8], secrets: &[&[u8]], env: &[&[u8]]) -> Vec<u8> {
 
 /// Redacts as [`redact`] does, and at a cut edge also the part of a value the cut left:
 /// with `front` the longest opening run that equals an end of a value, with `back` the
-/// longest closing run that equals a start of one. Inputs: as [`redact`], plus whether
-/// the output was cut before its first byte and after its last. Output: the redacted bytes.
+/// longest closing run that equals a start of one, and with both the whole output when it
+/// lies inside one value. Inputs: as [`redact`], plus whether the output was cut before its
+/// first byte and after its last. Output: the redacted bytes.
 pub fn redact_edges(
     output: &[u8],
     secrets: &[&[u8]],
@@ -42,6 +43,9 @@ pub fn redact_edges(
     let mut covered = vec![false; output.len()];
     let length = output.len();
     for value in values {
+        if front && back && holds(output, value) {
+            covered.fill(true);
+        }
         let parts = (1..value.len().min(length + 1)).rev();
         if let Some(part) = parts
             .clone()
