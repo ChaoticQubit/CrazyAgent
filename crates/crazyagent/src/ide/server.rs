@@ -1097,7 +1097,8 @@ fn command(
         record_tmp(folder, &tmp);
         tmp
     } else {
-        crate::sandbox::toolchains::make_tmp(&home).map_err(|_| failure("ide_state_unavailable"))?
+        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home)
+            .map_err(|_| failure("ide_state_unavailable"))?
     };
     let hooks = (confined && policy.hooks).then_some(launch.root);
     let index_project = confined.then_some(launch.root);
@@ -1213,7 +1214,8 @@ fn fresh_tmp(home: &Path) -> Result<PathBuf, EngineError> {
     if fs::symlink_metadata(crate::sandbox::toolchains::tmp_path(&key)).is_ok() {
         return Err(failure("ide_state_unavailable"));
     }
-    crate::sandbox::toolchains::make_tmp(&key).map_err(|_| failure("ide_state_unavailable"))
+    crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &key)
+        .map_err(|_| failure("ide_state_unavailable"))
 }
 
 /// Records the temp folder a confined start made in the project's IDE folder, never through

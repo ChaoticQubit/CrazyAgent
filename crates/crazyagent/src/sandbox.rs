@@ -1228,14 +1228,24 @@ pub const ACCESS_HOOKS: AccessHooks = AccessHooks {
 };
 
 /// The engine's real agent toolchain hooks, the only [`ToolchainHooks`] production code
-/// passes: the cargo home entry removal of [`toolchain_remove_home_entry`] and the real git
-/// the research runner resolved.
+/// passes: the cargo home entry removal of [`toolchain_remove_home_entry`], the real git
+/// the research runner resolved, a native lead's teammates' home, the launch folder's
+/// engine folder name and the agent tree removal of [`toolchain_remove_agent_tree`].
 pub const TOOLCHAIN_HOOKS: ToolchainHooks = ToolchainHooks {
     #[cfg(unix)]
     remove_home_entry: toolchain_remove_home_entry,
     #[cfg(unix)]
     sandboxed_git: crate::research::runner::sandboxed_git,
+    mates_home: crate::launch_context::mates_home,
+    launch_state: crate::launch_context::STATE,
+    remove_agent_tree: toolchain_remove_agent_tree,
 };
+
+/// Removes a folder an agent wrote as Clean up removes an agent's tree, with the engine's
+/// refusal text as the error. Input: the folder. Output: done, or the error.
+fn toolchain_remove_agent_tree(folder: &Path) -> std::io::Result<()> {
+    crate::team::cleanup::remove_agent_tree(folder).map_err(|error| std::io::Error::other(error.0))
+}
 
 /// Removes one entry of an agent's own cargo home as the engine's home cleanup does, with
 /// its walk budget code kept and every other refusal given as `otherwise`. Inputs: the open
@@ -3810,7 +3820,7 @@ impl ProjectSandbox {
             None => path,
         };
         let path = if harness {
-            toolchains::with_agent_git(&self.agent_home, path)
+            toolchains::with_agent_git(&crate::sandbox::TOOLCHAIN_HOOKS, &self.agent_home, path)
         } else {
             path
         };

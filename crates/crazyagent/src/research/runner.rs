@@ -1290,9 +1290,9 @@ impl ResearchRunner {
         private_directory(&tmp)?;
         let unconfined = policy.access == AgentAccess::Full;
         let homes = ToolHomes::owner()?;
-        let scratch = toolchains::ScopedTmp::make(&home)?;
+        let scratch = toolchains::ScopedTmp::make(&crate::sandbox::TOOLCHAIN_HOOKS, &home)?;
         #[cfg(target_os = "macos")]
-        toolchains::write_getconf(&home, false)?;
+        toolchains::write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, &home, false)?;
         kernel_sandbox::toolchains::prepare_cargo_home(
             &crate::sandbox::TOOLCHAIN_HOOKS,
             &home,

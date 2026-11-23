@@ -3500,7 +3500,7 @@ fn the_master_s_own_git_is_the_free_copy_only_at_full_access() {
         let home = agent_home(&runtime.state, 1);
         let scratch = crate::sandbox::toolchains::existing_tmp(&home).unwrap();
         let script = std::fs::read_to_string(scratch.join("bin").join("git")).unwrap();
-        let _ = crate::sandbox::toolchains::remove_tmp(&home);
+        let _ = crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home);
         assert!(
             script.lines().any(|line| line == flag),
             "the master's git at {access:?} lacks {flag}"
@@ -3563,7 +3563,7 @@ fn a_sub_agent_s_own_git_merges_main_only_while_catch_up_with_main_is_on() {
         let home = agent_home(&runtime.state, 1);
         let scratch = crate::sandbox::toolchains::existing_tmp(&home).unwrap();
         let script = std::fs::read_to_string(scratch.join("bin").join("git")).unwrap();
-        let _ = crate::sandbox::toolchains::remove_tmp(&home);
+        let _ = crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home);
         assert!(
             script.lines().any(|line| line == flag),
             "the sub-agent's git with {value:?} lacks {flag}"
@@ -3697,7 +3697,10 @@ fn a_lead_and_a_worker_at_full_access_never_get_the_free_copy_of_their_git() {
     let runtime = stand_in_runtime(&fixture);
     for (id, copy) in [(lead, "lead=1"), (worker, "lead=0")] {
         let script = prepared_git(&runtime, &fixture, id, AgentRole::Sub);
-        let _ = crate::sandbox::toolchains::remove_tmp(&agent_home(&runtime.state, id));
+        let _ = crate::sandbox::toolchains::remove_tmp(
+            &crate::sandbox::TOOLCHAIN_HOOKS,
+            &agent_home(&runtime.state, id),
+        );
         for flag in ["free=0", copy] {
             assert!(
                 script.iter().any(|line| line == flag),
@@ -3729,7 +3732,10 @@ fn a_master_prepared_again_after_access_drops_below_full_gets_the_worker_copy_ba
         let script = prepared_git(&runtime, &fixture, master, AgentRole::Master);
         seen.push((access, script.iter().any(|line| line == "free=1")));
     }
-    let _ = crate::sandbox::toolchains::remove_tmp(&agent_home(&runtime.state, master));
+    let _ = crate::sandbox::toolchains::remove_tmp(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
+        &agent_home(&runtime.state, master),
+    );
     assert_eq!(
         seen,
         [
@@ -23474,7 +23480,8 @@ fn an_unlinked_caller_socket_is_bound_again_on_the_next_tick() {
     struct TmpRemoved(PathBuf);
     impl Drop for TmpRemoved {
         fn drop(&mut self) {
-            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+            let _ =
+                crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let f = Fixture::new(1);
@@ -23491,7 +23498,8 @@ fn an_unlinked_caller_socket_is_bound_again_on_the_next_tick() {
     team.workers
         .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
     let home = agent_home(&team.state, lead);
-    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let scratch =
+        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let _scratch = TmpRemoved(home);
     let socket = scratch.join(crate::team::caller::CALLER_SOCKET);
     let bound = || {
@@ -23540,7 +23548,8 @@ fn a_caller_socket_blocked_by_an_obstacle_is_bound_once_the_obstacle_is_gone() {
     struct TmpRemoved(PathBuf);
     impl Drop for TmpRemoved {
         fn drop(&mut self) {
-            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+            let _ =
+                crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let f = Fixture::new(1);
@@ -23557,7 +23566,8 @@ fn a_caller_socket_blocked_by_an_obstacle_is_bound_once_the_obstacle_is_gone() {
     team.workers
         .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
     let home = agent_home(&team.state, lead);
-    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let scratch =
+        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let _scratch = TmpRemoved(home);
     let socket = scratch.join(crate::team::caller::CALLER_SOCKET);
     let bound = || {
@@ -23627,7 +23637,8 @@ fn a_native_lead_without_the_team_tool_still_has_its_caller_socket_answered() {
     struct TmpRemoved(PathBuf);
     impl Drop for TmpRemoved {
         fn drop(&mut self) {
-            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+            let _ =
+                crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let f = Fixture::new(1);
@@ -23641,7 +23652,8 @@ fn a_native_lead_without_the_team_tool_still_has_its_caller_socket_answered() {
     team.workers
         .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
     let home = agent_home(&team.state, lead);
-    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let scratch =
+        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let _scratch = TmpRemoved(home);
     let socket = scratch.join(crate::team::caller::CALLER_SOCKET);
     team.serve_agent_calls(&f.setup, &f.access);
@@ -23679,7 +23691,8 @@ fn a_teammate_asking_after_its_lead_ended_is_held_not_taken_for_the_lead() {
     struct TmpRemoved(PathBuf);
     impl Drop for TmpRemoved {
         fn drop(&mut self) {
-            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+            let _ =
+                crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let f = Fixture::new(1);
@@ -23692,7 +23705,8 @@ fn a_teammate_asking_after_its_lead_ended_is_held_not_taken_for_the_lead() {
     team.workers
         .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
     let home = agent_home(&team.state, lead);
-    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let scratch =
+        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let _scratch = TmpRemoved(home);
     let socket = scratch.join(crate::team::caller::CALLER_SOCKET);
     let bound = || {
@@ -28860,7 +28874,8 @@ fn a_stopped_teammate_unknown_while_its_teammates_socket_stays_is_marked_uncerta
     struct Scratch(std::path::PathBuf);
     impl Drop for Scratch {
         fn drop(&mut self) {
-            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+            let _ =
+                crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let fixture = Fixture::new(1);
@@ -32881,7 +32896,8 @@ fn a_native_teammate_cannot_read_or_plant_in_its_lead_s_own_temp_folder() {
     };
     let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
     let home = agent_home(&runtime.state, id);
-    let earlier = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let earlier =
+        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let left = crate::sandbox::toolchains::native_lead_tmp(&earlier);
     std::fs::create_dir(&left).unwrap();
     std::fs::write(left.join("left.txt"), "earlier").unwrap();

@@ -390,13 +390,15 @@ fn a_listed_pane_takes_its_temp_folder_and_tools_from_its_tool_home() {
     struct TmpRemoved(PathBuf);
     impl Drop for TmpRemoved {
         fn drop(&mut self) {
-            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+            let _ =
+                crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let (folder, home) = harness_home("standin-jsonl-append");
     let base = folder.path().canonicalize().unwrap();
     let _removed = TmpRemoved(base.clone());
-    let made = crate::sandbox::toolchains::make_tmp(&base).unwrap();
+    let made =
+        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &base).unwrap();
     let scratch = tempfile::tempdir().unwrap();
     let work = scratch.path().canonicalize().unwrap();
     let profile = work.join("project.sb");

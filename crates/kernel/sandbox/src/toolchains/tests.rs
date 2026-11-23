@@ -47,6 +47,9 @@ fn a_cargo_cache_name_that_will_not_give_way_refuses_with_the_hooks_code() {
     let hooks = ToolchainHooks {
         remove_home_entry: refuse,
         sandboxed_git: || Path::new("/usr/bin/git"),
+        mates_home: |home| home.join("mates"),
+        launch_state: "crazyagent",
+        remove_agent_tree: |_folder| Ok(()),
     };
     let scratch = tempfile::tempdir().unwrap();
     let root = canonical(scratch.path()).unwrap();
@@ -208,6 +211,9 @@ fn a_leads_copy_runs_the_git_the_hooks_name() {
     let hooks = ToolchainHooks {
         remove_home_entry: refuse,
         sandboxed_git: || Path::new("/opt/stand-in/bin/git"),
+        mates_home: |home| home.join("mates"),
+        launch_state: "crazyagent",
+        remove_agent_tree: |_folder| Ok(()),
     };
     let scratch = tempfile::tempdir().unwrap();
     let tmp = canonical(scratch.path()).unwrap();
@@ -306,7 +312,10 @@ fn the_agent_getconf_is_looked_for_in_the_launch_folder_the_hooks_name() {
     let home = canonical(scratch.path()).unwrap();
     let named = home.join("stand-in").join("bin");
     fs::create_dir_all(&named).unwrap();
-    assert_eq!(with_agent_git(&hooks, &home, "/usr/bin".to_owned()), "/usr/bin");
+    assert_eq!(
+        with_agent_git(&hooks, &home, "/usr/bin".to_owned()),
+        "/usr/bin"
+    );
     fs::write(named.join("getconf"), "").unwrap();
     assert_eq!(
         with_agent_git(&hooks, &home, "/usr/bin".to_owned()),
@@ -316,5 +325,8 @@ fn the_agent_getconf_is_looked_for_in_the_launch_folder_the_hooks_name() {
     fs::create_dir_all(&other).unwrap();
     fs::write(other.join("getconf"), "").unwrap();
     fs::remove_file(named.join("getconf")).unwrap();
-    assert_eq!(with_agent_git(&hooks, &home, "/usr/bin".to_owned()), "/usr/bin");
+    assert_eq!(
+        with_agent_git(&hooks, &home, "/usr/bin".to_owned()),
+        "/usr/bin"
+    );
 }

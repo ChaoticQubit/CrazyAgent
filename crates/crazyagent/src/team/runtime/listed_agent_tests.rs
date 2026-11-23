@@ -202,7 +202,8 @@ fn a_tools_on_listed_team_agent_launches_with_the_agent_homes_temp_folder_and_ca
     struct TmpRemoved(PathBuf);
     impl Drop for TmpRemoved {
         fn drop(&mut self) {
-            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+            let _ =
+                crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let fixture = Fixture::new(1);

@@ -600,14 +600,14 @@ fn a_launch_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it()
         kernel_sandbox::toolchains::agent_path(&ToolHomes::owner().unwrap(), super::TOOLS_ON_PATH);
     assert_eq!(path_of(true), tools_on);
     assert_eq!(path_of(false), super::TOOLS_OFF_PATH);
-    let tmp = toolchains::make_tmp(&home).unwrap();
+    let tmp = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let bin = tmp.join("bin");
     assert_eq!(path_of(true), format!("{}:{tools_on}", bin.display()));
     assert_eq!(
         path_of(false),
         format!("{}:{}", bin.display(), super::TOOLS_OFF_PATH)
     );
-    toolchains::remove_tmp(&home).unwrap();
+    toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     assert_eq!(path_of(false), super::TOOLS_OFF_PATH);
 }
 

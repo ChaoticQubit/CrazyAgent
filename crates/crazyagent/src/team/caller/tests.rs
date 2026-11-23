@@ -562,7 +562,8 @@ fn a_hook_asking_while_the_socket_is_bound_again_never_reads_alone() {
     struct TmpRemoved(PathBuf);
     impl Drop for TmpRemoved {
         fn drop(&mut self) {
-            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+            let _ =
+                crate::sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     const REBINDS: usize = 2000;
@@ -571,7 +572,8 @@ fn a_hook_asking_while_the_socket_is_bound_again_never_reads_alone() {
     let mailbox = agent.join("tmp").join(crate::team::tool::MAILBOX_FOLDER);
     std::fs::create_dir_all(&mailbox).unwrap();
     let home = agent.join("home");
-    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let scratch =
+        crate::sandbox::toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let _scratch = TmpRemoved(home);
     let socket = socket_for_mailbox(&mailbox).unwrap();
     assert_eq!(socket, scratch.join(CALLER_SOCKET));

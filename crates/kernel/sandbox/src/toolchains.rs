@@ -43,6 +43,7 @@ pub const CARGO_SHARED: &[&str] = &["registry", "git"];
 
 /// The engine's parts the agent toolchain setup reaches. Production code passes the engine's
 /// one value; rows pass stand-ins.
+#[derive(Debug)]
 pub struct ToolchainHooks {
     /// Removes one entry of an agent's own cargo home without following a link, also a
     /// folder an agent shut. Inputs: the open cargo home, the entry name and the code for a
@@ -54,6 +55,16 @@ pub struct ToolchainHooks {
     /// Returns the path.
     #[cfg(unix)]
     pub sandboxed_git: fn() -> &'static Path,
+    /// The home a native lead's teammates share. Input: the lead's agent home. Output: the
+    /// teammates' home.
+    pub mates_home: fn(&Path) -> PathBuf,
+    /// The name of the engine's own folder in an agent's launch folder, which holds the
+    /// agent's own `getconf`.
+    pub launch_state: &'static str,
+    /// Removes a folder an agent wrote with all it holds, opening up what the agent shut and
+    /// clearing its immutable flags without following a link. Input: the folder. Output: done
+    /// once nothing has its name, or the error naming why it stays.
+    pub remove_agent_tree: fn(&Path) -> std::io::Result<()>,
 }
 
 /// The folders the owner's toolchains live in: the owner's home, rustup's home and cargo's

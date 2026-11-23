@@ -1383,8 +1383,12 @@ impl AgentContext {
             ]);
         }
         #[cfg(target_os = "macos")]
-        crate::sandbox::toolchains::write_getconf(home, installed.native.is_some())
-            .map_err(|_| failure("launch_context_unwritable"))?;
+        crate::sandbox::toolchains::write_getconf(
+            &crate::sandbox::TOOLCHAIN_HOOKS,
+            home,
+            installed.native.is_some(),
+        )
+        .map_err(|_| failure("launch_context_unwritable"))?;
         assert!(installed.files.as_ref().is_some_and(|files| {
             files.home == home && files.removals().iter().all(|path| path.starts_with(home))
         }));
@@ -1504,8 +1508,12 @@ impl AgentContext {
         #[cfg(target_os = "macos")]
         if let Some(tools) = &self.tool_home {
             directory(&tools.join(STATE), false)?;
-            crate::sandbox::toolchains::write_getconf(tools, false)
-                .map_err(|_| failure("launch_context_unwritable"))?;
+            crate::sandbox::toolchains::write_getconf(
+                &crate::sandbox::TOOLCHAIN_HOOKS,
+                tools,
+                false,
+            )
+            .map_err(|_| failure("launch_context_unwritable"))?;
         }
         Ok(installed)
     }

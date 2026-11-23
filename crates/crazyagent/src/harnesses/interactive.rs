@@ -394,6 +394,7 @@ pub fn command_with(
         (
             "PATH".to_owned(),
             toolchains::with_agent_git(
+                &crate::sandbox::TOOLCHAIN_HOOKS,
                 tool_home,
                 if request.tools {
                     kernel_sandbox::toolchains::agent_path(&homes, TOOLS_ON_PATH)

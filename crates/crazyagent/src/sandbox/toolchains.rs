@@ -1,6 +1,6 @@
 #[cfg(target_os = "macos")]
 use kernel_sandbox::toolchains::plain_path;
-use kernel_sandbox::toolchains::{GIT_FOLDER, GIT_PROGRAM};
+use kernel_sandbox::toolchains::{GIT_FOLDER, GIT_PROGRAM, ToolchainHooks};
 #[cfg(unix)]
 use kernel_sandbox::toolchains::{GitCopy, git_script, write_git};
 use sha2::{Digest, Sha256};
@@ -88,7 +88,7 @@ pub(crate) fn in_agent_tmp(path: &Path) -> bool {
 /// the system one. Input: the agent home. Output: the folder, or a refusal when the path is a
 /// link, a file or another user's folder.
 #[cfg(unix)]
-pub fn make_tmp(home: &Path) -> io::Result<PathBuf> {
+pub fn make_tmp(hooks: &ToolchainHooks, home: &Path) -> io::Result<PathBuf> {
     let path = tmp_path(home);
     match fs::DirBuilder::new().mode(0o700).create(&path) {
         Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
@@ -102,11 +102,8 @@ pub fn make_tmp(home: &Path) -> io::Result<PathBuf> {
     }
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
     assert!(private_folder(&path));
-    if let Some(script) = git_script(
-        crate::research::runner::sandboxed_git(),
-        GitCopy::Worker,
-        false,
-    ) && let Err(error) = write_git(&path, &script)
+    if let Some(script) = git_script((hooks.sandboxed_git)(), GitCopy::Worker, false)
+        && let Err(error) = write_git(&path, &script)
     {
         eprintln!("agent_git_not_written kind={:?}", error.kind());
     }
@@ -141,7 +138,11 @@ fn getconf_script(mates: &Path, shared: &Path, own: &Path) -> Option<String> {
 /// native team. Output: done, also when the agent has no short temp folder or a path is not
 /// plain and none is written, or the write failure.
 #[cfg(target_os = "macos")]
-pub(crate) fn write_getconf(home: &Path, native_lead: bool) -> io::Result<()> {
+pub(crate) fn write_getconf(
+    hooks: &ToolchainHooks,
+    home: &Path,
+    native_lead: bool,
+) -> io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
     let Some(shared) = existing_tmp(home) else {
@@ -152,11 +153,11 @@ pub(crate) fn write_getconf(home: &Path, native_lead: bool) -> io::Result<()> {
     } else {
         shared.clone()
     };
-    let mates = crate::launch_context::mates_home(home);
+    let mates = (hooks.mates_home)(home);
     let Some(script) = getconf_script(&mates, &shared, &own) else {
         return Ok(());
     };
-    let folder = getconf_folder(home);
+    let folder = getconf_folder(hooks, home);
     let path = folder.join(GETCONF_PROGRAM);
     if let Err(error) = fs::DirBuilder::new().mode(0o700).create(&folder) {
         if error.kind() == io::ErrorKind::AlreadyExists && holds_getconf(&folder, &path, &script) {
@@ -228,8 +229,8 @@ fn holds_getconf(folder: &Path, path: &Path, script: &str) -> bool {
 
 /// The folder of the agent's launch folder that holds its own `getconf`. Input: the agent
 /// home. Output: the path, which may not exist.
-fn getconf_folder(home: &Path) -> PathBuf {
-    home.join(crate::launch_context::STATE).join(GETCONF_FOLDER)
+fn getconf_folder(hooks: &ToolchainHooks, home: &Path) -> PathBuf {
+    home.join(hooks.launch_state).join(GETCONF_FOLDER)
 }
 
 /// Puts the agent's own `getconf` (see [`write_getconf`]) and then its own `git` (see
@@ -239,12 +240,12 @@ fn getconf_folder(home: &Path) -> PathBuf {
 /// Only a harness's own path gets them, never a command the engine runs under the profile,
 /// since the agent can change its `git` folder. Inputs: the agent home and the path.
 /// Output: the path, without each program the agent does not have.
-pub fn with_agent_git(home: &Path, path: String) -> String {
+pub fn with_agent_git(hooks: &ToolchainHooks, home: &Path, path: String) -> String {
     let path = match existing_tmp(home) {
         Some(tmp) => in_front(&tmp.join(GIT_FOLDER), GIT_PROGRAM, path),
         None => path,
     };
-    in_front(&getconf_folder(home), GETCONF_PROGRAM, path)
+    in_front(&getconf_folder(hooks, home), GETCONF_PROGRAM, path)
 }
 
 /// Puts a folder at the front of a search path when it holds the program as a file and its
@@ -335,7 +336,7 @@ fn seal_new_folder(path: &Path) -> io::Result<()> {
 /// not keep it. Input: the agent home. Output: done when it is gone or never existed, or a
 /// refusal when the path is not this user's folder.
 #[cfg(unix)]
-pub fn remove_tmp(home: &Path) -> io::Result<()> {
+pub fn remove_tmp(hooks: &ToolchainHooks, home: &Path) -> io::Result<()> {
     let path = tmp_path(home);
     match fs::symlink_metadata(&path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -348,7 +349,7 @@ pub fn remove_tmp(home: &Path) -> io::Result<()> {
         }
         Ok(_) => {}
     }
-    agent_tree_gone(&path)
+    agent_tree_gone(hooks, &path)
 }
 
 /// Removes a folder an agent wrote, with all it holds, through
@@ -356,8 +357,8 @@ pub fn remove_tmp(home: &Path) -> io::Result<()> {
 /// its immutable flags without following a link. Input: the folder. Output: done once nothing
 /// has its name, or the error naming why it stays.
 #[cfg(unix)]
-fn agent_tree_gone(folder: &Path) -> io::Result<()> {
-    crate::team::cleanup::remove_agent_tree(folder).map_err(|error| io::Error::other(error.0))
+fn agent_tree_gone(hooks: &ToolchainHooks, folder: &Path) -> io::Result<()> {
+    (hooks.remove_agent_tree)(folder)
 }
 
 /// Removes everything in the agent's short temp folder but the socket named `kept`, which
@@ -367,13 +368,13 @@ fn agent_tree_gone(folder: &Path) -> io::Result<()> {
 /// never finding no socket (rv-secreview RH2R2-1). Input: the agent home and the kept name.
 /// Output: as [`remove_tmp`].
 #[cfg(unix)]
-pub fn remove_tmp_keeping(home: &Path, kept: &str) -> io::Result<()> {
+pub fn remove_tmp_keeping(hooks: &ToolchainHooks, home: &Path, kept: &str) -> io::Result<()> {
     let path = tmp_path(home);
     let keeps = own_folder(&path)
         && fs::symlink_metadata(path.join(kept))
             .is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type()));
     if !keeps {
-        return remove_tmp(home);
+        return remove_tmp(hooks, home);
     }
     for entry in fs::read_dir(&path)? {
         let entry = entry?;
@@ -381,7 +382,7 @@ pub fn remove_tmp_keeping(home: &Path, kept: &str) -> io::Result<()> {
             continue;
         }
         if entry.file_type()?.is_dir() {
-            agent_tree_gone(&entry.path())?;
+            agent_tree_gone(hooks, &entry.path())?;
         } else {
             fs::remove_file(entry.path())?;
         }
@@ -428,16 +429,18 @@ pub fn private_folder_pin(path: &Path) -> Option<(u64, u64)> {
 /// everything in it when dropped.
 #[derive(Debug)]
 pub struct ScopedTmp {
+    hooks: &'static ToolchainHooks,
     home: PathBuf,
     path: PathBuf,
 }
 
 impl ScopedTmp {
-    /// Makes the folder as [`make_tmp`] does. Input: the agent home. Output: the scoped
-    /// folder, or the refusal.
-    pub fn make(home: &Path) -> io::Result<Self> {
-        let path = make_tmp(home)?;
+    /// Makes the folder as [`make_tmp`] does. Inputs: the hooks, kept to remove the folder
+    /// when dropped, and the agent home. Output: the scoped folder, or the refusal.
+    pub fn make(hooks: &'static ToolchainHooks, home: &Path) -> io::Result<Self> {
+        let path = make_tmp(hooks, home)?;
         Ok(Self {
+            hooks,
             home: home.to_path_buf(),
             path,
         })
@@ -451,7 +454,7 @@ impl ScopedTmp {
 
 impl Drop for ScopedTmp {
     fn drop(&mut self) {
-        let _ = remove_tmp(&self.home);
+        let _ = remove_tmp(self.hooks, &self.home);
     }
 }
 
@@ -465,7 +468,7 @@ pub fn existing_tmp(_home: &Path) -> Option<PathBuf> {
 /// No short temp folder outside Unix, where no agent sandbox runs. Takes the agent home,
 /// unused. Returns `Unsupported`.
 #[cfg(not(unix))]
-pub fn make_tmp(_home: &Path) -> io::Result<PathBuf> {
+pub fn make_tmp(_hooks: &ToolchainHooks, _home: &Path) -> io::Result<PathBuf> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
@@ -478,14 +481,14 @@ pub fn fresh_native_lead_tmp(_scratch: &Path) -> io::Result<PathBuf> {
 
 /// Nothing to remove outside Unix. Takes the agent home, unused. Returns done.
 #[cfg(not(unix))]
-pub fn remove_tmp(_home: &Path) -> io::Result<()> {
+pub fn remove_tmp(_hooks: &ToolchainHooks, _home: &Path) -> io::Result<()> {
     Ok(())
 }
 
 /// Nothing to remove outside Unix. Takes the agent home and the kept name, unused. Returns
 /// done.
 #[cfg(not(unix))]
-pub fn remove_tmp_keeping(_home: &Path, _kept: &str) -> io::Result<()> {
+pub fn remove_tmp_keeping(_hooks: &ToolchainHooks, _home: &Path, _kept: &str) -> io::Result<()> {
     Ok(())
 }
 

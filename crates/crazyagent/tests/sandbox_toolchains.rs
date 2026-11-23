@@ -347,13 +347,16 @@ fn owner_credential_locations_are_always_secret_and_never_grantable() {
 #[test]
 fn the_agent_temp_folder_is_short_private_writable_and_removed() {
     let case = case();
-    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let tmp = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     assert!(tmp.starts_with("/private/tmp"));
     assert!(tmp.as_os_str().len() <= 40, "{}", tmp.display());
     let metadata = fs::symlink_metadata(&tmp).unwrap();
     assert!(metadata.is_dir());
     assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
-    assert_eq!(toolchains::make_tmp(&case.home).unwrap(), tmp);
+    assert_eq!(
+        toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap(),
+        tmp
+    );
     assert_eq!(toolchains::existing_tmp(&case.home), Some(tmp.clone()));
 
     let sandbox = ProjectSandbox::new(
@@ -379,17 +382,17 @@ fn the_agent_temp_folder_is_short_private_writable_and_removed() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(stdout, format!("scratch\n{}\n", tmp.display()));
 
-    toolchains::remove_tmp(&case.home).unwrap();
+    toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     assert!(!tmp.exists());
     assert_eq!(toolchains::existing_tmp(&case.home), None);
-    toolchains::remove_tmp(&case.home).unwrap();
+    toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
 
     let squatter = case.home.join("squatter");
     let squatted = toolchains::tmp_path(&squatter);
     std::os::unix::fs::symlink(&case.tmp, &squatted).unwrap();
-    assert!(toolchains::make_tmp(&squatter).is_err());
+    assert!(toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &squatter).is_err());
     assert_eq!(toolchains::existing_tmp(&squatter), None);
-    assert!(toolchains::remove_tmp(&squatter).is_err());
+    assert!(toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &squatter).is_err());
     assert!(
         fs::symlink_metadata(&squatted)
             .unwrap()
@@ -399,15 +402,18 @@ fn the_agent_temp_folder_is_short_private_writable_and_removed() {
     fs::remove_file(&squatted).unwrap();
 
     let widened = case.home.join("widened");
-    let opened = toolchains::make_tmp(&widened).unwrap();
+    let opened = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &widened).unwrap();
     fs::set_permissions(&opened, fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(toolchains::existing_tmp(&widened), None);
-    assert_eq!(toolchains::make_tmp(&widened).unwrap(), opened);
+    assert_eq!(
+        toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &widened).unwrap(),
+        opened
+    );
     assert_eq!(
         fs::symlink_metadata(&opened).unwrap().permissions().mode() & 0o777,
         0o700
     );
-    toolchains::remove_tmp(&widened).unwrap();
+    toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &widened).unwrap();
     assert!(!opened.exists());
 }
 
@@ -417,7 +423,7 @@ fn the_agent_temp_folder_is_short_private_writable_and_removed() {
 #[test]
 fn an_agent_cannot_open_remove_or_replace_its_temp_folder() {
     let case = case();
-    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let tmp = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     let sandbox = ProjectSandbox::new(
         &case.project,
         &case.home,
@@ -460,7 +466,7 @@ fn an_agent_cannot_open_remove_or_replace_its_temp_folder() {
         "no access list was added: {listed}"
     );
     assert_eq!(toolchains::existing_tmp(&case.home), Some(tmp));
-    toolchains::remove_tmp(&case.home).unwrap();
+    toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
 }
 
 #[test]
@@ -476,7 +482,7 @@ fn an_agent_builds_and_tests_a_tiny_crate_offline_with_the_owner_toolchain() {
         &case.project.join("src/lib.rs"),
         "pub fn add(a: u32, b: u32) -> u32 {\n    a + b\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn adds() {\n        assert_eq!(super::add(2, 3), 5);\n    }\n}\n",
     );
-    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let tmp = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     kernel_sandbox::toolchains::prepare_cargo_home(
         &crazyagent::sandbox::TOOLCHAIN_HOOKS,
         &case.home,
@@ -532,7 +538,7 @@ fn an_agent_builds_and_tests_a_tiny_crate_offline_with_the_owner_toolchain() {
     assert!(case.project.join("target/debug").is_dir());
     assert!(!case.home.join(".rustup").exists());
     assert_eq!(names(&homes.rustup().join("toolchains")), toolchains_before);
-    toolchains::remove_tmp(&case.home).unwrap();
+    toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
 }
 
 #[test]
@@ -551,7 +557,7 @@ fn an_agent_compiles_links_and_runs_git_without_an_xcrun_cache_error() {
         &case.project.join("hello.c"),
         "int main(void) {\n    return 0;\n}\n",
     );
-    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let tmp = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     kernel_sandbox::toolchains::prepare_cargo_home(
         &crazyagent::sandbox::TOOLCHAIN_HOOKS,
         &case.home,
@@ -584,7 +590,7 @@ fn an_agent_compiles_links_and_runs_git_without_an_xcrun_cache_error() {
     for refused in ["couldn't create cache file", "xcrun: error"] {
         assert!(!stderr.contains(refused), "{refused}: {stderr}");
     }
-    toolchains::remove_tmp(&case.home).unwrap();
+    toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
 }
 
 #[test]
@@ -626,7 +632,7 @@ fn a_missing_toolchain_is_never_installed_by_an_agent() {
 #[test]
 fn a_heredoc_works_in_every_agent_shell() {
     let case = case();
-    let scratch = toolchains::make_tmp(&case.home).unwrap();
+    let scratch = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     let granted = ProjectSandbox::new(
         &case.project,
         &case.home,
@@ -663,7 +669,7 @@ fn a_heredoc_works_in_every_agent_shell() {
             );
         }
     }
-    toolchains::remove_tmp(&case.home).unwrap();
+    toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
 }
 
 #[test]
@@ -790,7 +796,7 @@ struct AgentGit {
 impl AgentGit {
     fn new(lead: bool) -> Self {
         let case = case();
-        let tmp = toolchains::make_tmp(&case.home).unwrap();
+        let tmp = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
         if lead {
             kernel_sandbox::toolchains::lead_git(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &tmp, true)
                 .unwrap();
@@ -864,7 +870,7 @@ impl AgentGit {
 
 impl Drop for AgentGit {
     fn drop(&mut self) {
-        let _ = toolchains::remove_tmp(&self.case.home);
+        let _ = toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &self.case.home);
     }
 }
 
@@ -958,7 +964,7 @@ fn real_git_of(script: &str) -> PathBuf {
 fn make_tmp_writes_the_agent_git_once_replaces_a_changed_copy_and_never_follows_a_planted_link() {
     use std::os::unix::fs::MetadataExt;
     let case = case();
-    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let tmp = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     let git = tmp.join("bin/git");
     let script = agent_git_script(&tmp);
     assert!(script.starts_with("#!/bin/sh\ngit='/"), "{script}");
@@ -978,18 +984,18 @@ fn make_tmp_writes_the_agent_git_once_replaces_a_changed_copy_and_never_follows_
         0o700
     );
 
-    toolchains::make_tmp(&case.home).unwrap();
+    toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     assert_eq!(fs::symlink_metadata(&git).unwrap().ino(), first.ino());
 
     fs::write(&git, "#!/bin/sh\nexit 7\n").unwrap();
-    toolchains::make_tmp(&case.home).unwrap();
+    toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     assert_eq!(agent_git_script(&tmp), script);
     assert_ne!(fs::symlink_metadata(&git).unwrap().ino(), first.ino());
 
     kernel_sandbox::toolchains::lead_git(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &tmp, true)
         .unwrap();
     assert!(agent_git_script(&tmp).contains("\nlead=1\n"));
-    toolchains::make_tmp(&case.home).unwrap();
+    toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     assert_eq!(agent_git_script(&tmp), script);
 
     fs::remove_file(&git).unwrap();
@@ -997,7 +1003,10 @@ fn make_tmp_writes_the_agent_git_once_replaces_a_changed_copy_and_never_follows_
     let elsewhere = case.tmp.join("elsewhere");
     fs::create_dir(&elsewhere).unwrap();
     std::os::unix::fs::symlink(&elsewhere, tmp.join("bin")).unwrap();
-    assert_eq!(toolchains::make_tmp(&case.home).unwrap(), tmp);
+    assert_eq!(
+        toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap(),
+        tmp
+    );
     assert!(names(&elsewhere).is_empty());
     assert!(
         fs::symlink_metadata(tmp.join("bin"))
@@ -1011,10 +1020,14 @@ fn make_tmp_writes_the_agent_git_once_replaces_a_changed_copy_and_never_follows_
     );
     assert!(names(&elsewhere).is_empty());
     assert_eq!(
-        toolchains::with_agent_git(&case.home, "/usr/bin:/bin".to_owned()),
+        toolchains::with_agent_git(
+            &crazyagent::sandbox::TOOLCHAIN_HOOKS,
+            &case.home,
+            "/usr/bin:/bin".to_owned()
+        ),
         "/usr/bin:/bin"
     );
-    toolchains::remove_tmp(&case.home).unwrap();
+    toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
 }
 
 /// A native lead's own temp folder starts empty and private on every start (TPH-2
@@ -1025,7 +1038,7 @@ fn make_tmp_writes_the_agent_git_once_replaces_a_changed_copy_and_never_follows_
 fn a_native_lead_s_own_temp_folder_starts_empty_and_private_and_never_follows_a_planted_link() {
     use std::os::unix::fs::MetadataExt;
     let case = case();
-    let shared = toolchains::make_tmp(&case.home).unwrap();
+    let shared = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     let own = toolchains::fresh_native_lead_tmp(&shared).unwrap();
     assert_eq!(own, toolchains::native_lead_tmp(&shared));
     assert_eq!(own.parent(), Some(shared.as_path()));
@@ -1067,7 +1080,7 @@ fn a_native_lead_s_own_temp_folder_starts_empty_and_private_and_never_follows_a_
     );
     assert!(private(&own));
     fs::set_permissions(&shared, fs::Permissions::from_mode(0o700)).unwrap();
-    toolchains::remove_tmp(&case.home).unwrap();
+    toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
 }
 
 #[test]
@@ -1298,7 +1311,7 @@ fn a_node_prefix_in_the_project_an_agent_worktree_or_the_agent_home_gives_no_pat
 #[test]
 fn a_sandboxed_harness_runs_git_through_the_agent_copy_without_the_xcrun_shim() {
     let case = case();
-    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let tmp = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     let agent_bin = tmp.join("bin");
     let sandbox = ProjectSandbox::new(
         &case.project,
@@ -1376,13 +1389,13 @@ fn a_sandboxed_harness_runs_git_through_the_agent_copy_without_the_xcrun_shim() 
         String::from_utf8_lossy(&output.stdout),
         format!("{}\none\n", agent_bin.join("git").display())
     );
-    toolchains::remove_tmp(&case.home).unwrap();
+    toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
 }
 
 #[test]
 fn a_sandboxed_harness_git_runs_its_helpers_from_its_own_toolchain_not_the_xcrun_shims() {
     let case = case();
-    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let tmp = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     let sandbox = ProjectSandbox::new(
         &case.project,
         &case.home,
@@ -1461,7 +1474,7 @@ fn a_sandboxed_harness_git_runs_its_helpers_from_its_own_toolchain_not_the_xcrun
         !stderr.contains("start_command: /usr/bin/") && !stderr.contains("xcrun"),
         "{stderr}"
     );
-    toolchains::remove_tmp(&case.home).unwrap();
+    toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
 }
 
 fn tmux_at(tmux: &Path, socket: &Path, args: &[&str]) -> Output {
@@ -1500,7 +1513,7 @@ fn a_lead_may_read_and_start_only_the_bundled_tmux_file_never_its_app_folder() {
         fs::set_permissions(macos.join(name), fs::Permissions::from_mode(0o755)).unwrap();
     }
     let tmux = macos.join("crazyagent-tmux");
-    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let tmp = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     let sandbox = ProjectSandbox::new(
         &case.project,
         &case.home,
@@ -1513,7 +1526,7 @@ fn a_lead_may_read_and_start_only_the_bundled_tmux_file_never_its_app_folder() {
     .allow_tmux_server(&tmp.join("tmux.sock"), &tmux)
     .unwrap();
     let text = sandbox.profile();
-    toolchains::remove_tmp(&case.home).unwrap();
+    toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     let file = format!("(literal \"{}\")", tmux.display());
     assert!(
         text.contains(&format!("(allow process-exec\n  {file}")),
@@ -1540,7 +1553,7 @@ fn a_lead_may_read_and_start_only_the_bundled_tmux_file_never_its_app_folder() {
 fn a_lead_profile_runs_its_own_tmux_server_and_never_reaches_another() {
     let case = case();
     let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
-    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let tmp = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     let own = tmp.join("tmux.sock");
     let engine = tmp.parent().unwrap().join(format!(
         "ca-engine-{}.sock",
@@ -1595,7 +1608,7 @@ fn a_lead_profile_runs_its_own_tmux_server_and_never_reaches_another() {
     let _ = tmux_at(&tmux, &own, &["kill-server"]);
     let _ = tmux_at(&tmux, &engine, &["kill-server"]);
     let _ = fs::remove_file(&engine);
-    toolchains::remove_tmp(&case.home).unwrap();
+    toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(stdout, "lead\n", "{stderr}");
@@ -1846,7 +1859,7 @@ fn native_teammates_never_move_the_folders_holding_the_leads_part_of_the_relay_m
 fn a_native_team_starts_in_a_project_hiding_as_many_folders_as_it_may() {
     let case = case();
     let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
-    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let tmp = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     let mates_home = team_homes(&case.home);
     let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
     fs::create_dir(&mailbox).unwrap();
@@ -1954,7 +1967,7 @@ fn status_of(text: &str, name: &str) -> String {
 fn a_teammates_profile_serves_its_tmux_socket_but_never_reaches_unlinks_or_takes_the_leads() {
     let case = case();
     let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
-    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let tmp = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     let own = tmp.join("tmux.sock");
     let mates = tmp.join("teammates-0123456789abcdef.sock");
     let scratch = || {
@@ -2014,7 +2027,7 @@ fn a_teammates_profile_serves_its_tmux_socket_but_never_reaches_unlinks_or_takes
         .is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type()));
     let _ = tmux_at(&tmux, &mates, &["kill-server"]);
     let _ = fs::remove_file(&mates);
-    toolchains::remove_tmp(&case.home).unwrap();
+    toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
 
     let served_text = String::from_utf8_lossy(&served.stdout).into_owned();
     let served_errors = String::from_utf8_lossy(&served.stderr);
@@ -2060,7 +2073,7 @@ impl LiveTeam {
     fn start() -> Self {
         let case = case();
         let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
-        let tmp = toolchains::make_tmp(&case.home).unwrap();
+        let tmp = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
         let own = tmp.join("tmux.sock");
         let mates = tmp.join("teammates-0123456789abcdef.sock");
         let callers = tmp.join(crazyagent::team::caller::CALLER_SOCKET);
@@ -2164,7 +2177,7 @@ impl Drop for LiveTeam {
         for socket in [&self.own, &self.mates, &self.callers, &self.other] {
             let _ = tmux_at(&self.tmux, socket, &["kill-server"]);
         }
-        let _ = toolchains::remove_tmp(&self.case.home);
+        let _ = toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &self.case.home);
     }
 }
 
@@ -2319,7 +2332,7 @@ fn team_homes(home: &Path) -> PathBuf {
 fn native_team_refuses_a_teammates_home_in_the_lead_s_or_a_lead_home_the_project_holds() {
     let case = case();
     let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
-    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let tmp = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
     fs::create_dir(&mailbox).unwrap();
     fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
@@ -2363,7 +2376,7 @@ fn native_team_refuses_a_teammates_home_in_the_lead_s_or_a_lead_home_the_project
         "a teammates' writable root holds the lead's home"
     );
     assert!(team(&case.home, &beside).is_ok());
-    toolchains::remove_tmp(&case.home).unwrap();
+    toolchains::remove_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
 }
 
 /// SECAUDIT team-mailbox-reply-forgery-shared-native-lead: no agent of a native team makes or

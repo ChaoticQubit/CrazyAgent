@@ -48,17 +48,17 @@ fn a_folder_swapped_in_for_the_lead_s_new_temp_folder_is_refused_with_what_it_ho
 #[test]
 fn a_launch_getconf_written_again_is_kept_and_one_that_changed_is_refused() {
     let home = tempfile::tempdir().unwrap();
-    let _scratch = ScopedTmp::make(home.path()).unwrap();
+    let _scratch = ScopedTmp::make(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
     fs::create_dir(home.path().join(crate::launch_context::STATE)).unwrap();
     let getconf = getconf_folder(home.path()).join(GETCONF_PROGRAM);
-    write_getconf(home.path(), false).unwrap();
+    write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, home.path(), false).unwrap();
     let written = fs::read(&getconf).unwrap();
-    let again = write_getconf(home.path(), false);
+    let again = write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, home.path(), false);
     assert!(again.is_ok(), "the same getconf written again: {again:?}");
     assert_eq!(fs::read(&getconf).unwrap(), written);
     let changed = [written.as_slice(), b"exit 0\n"].concat();
     fs::write(&getconf, &changed).unwrap();
-    let refused = write_getconf(home.path(), false);
+    let refused = write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, home.path(), false);
     assert!(
         matches!(&refused, Err(error) if error.kind() == io::ErrorKind::AlreadyExists),
         "a changed getconf: {refused:?}"
@@ -94,7 +94,7 @@ fn the_free_copy_merges_another_branch_that_the_worker_copy_refuses() {
     struct Removed(PathBuf);
     impl Drop for Removed {
         fn drop(&mut self) {
-            let _ = remove_tmp(&self.0);
+            let _ = remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let home = tempfile::tempdir().unwrap();
@@ -110,7 +110,7 @@ fn the_free_copy_merges_another_branch_that_the_worker_copy_refuses() {
         let done = git_run(git, repo.path(), home.path(), args);
         assert!(done.status.success(), "{args:?} {done:?}");
     }
-    let tmp = make_tmp(home.path()).unwrap();
+    let tmp = make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
     let _removed = Removed(home.path().to_path_buf());
     let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
     let refused = git_run(
@@ -143,7 +143,7 @@ fn the_worker_copy_merges_crazyagent_main_and_still_refuses_any_other_branch() {
     struct Removed(PathBuf);
     impl Drop for Removed {
         fn drop(&mut self) {
-            let _ = remove_tmp(&self.0);
+            let _ = remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let home = tempfile::tempdir().unwrap();
@@ -162,7 +162,7 @@ fn the_worker_copy_merges_crazyagent_main_and_still_refuses_any_other_branch() {
         let done = git_run(git, repo.path(), home.path(), args);
         assert!(done.status.success(), "{args:?} {done:?}");
     }
-    let tmp = make_tmp(home.path()).unwrap();
+    let tmp = make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
     let _removed = Removed(home.path().to_path_buf());
     catch_up_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp).unwrap();
     let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
@@ -208,7 +208,7 @@ fn a_leads_copy_merges_main_and_its_own_workers_and_names_the_main_merge_when_re
     struct Removed(PathBuf);
     impl Drop for Removed {
         fn drop(&mut self) {
-            let _ = remove_tmp(&self.0);
+            let _ = remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let git = crate::research::runner::sandboxed_git();
@@ -230,7 +230,7 @@ fn a_leads_copy_merges_main_and_its_own_workers_and_names_the_main_merge_when_re
             let done = git_run(git, repo.path(), home.path(), args);
             assert!(done.status.success(), "{args:?} {done:?}");
         }
-        let tmp = make_tmp(home.path()).unwrap();
+        let tmp = make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
         let _removed = Removed(home.path().to_path_buf());
         lead_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp, catch_up).unwrap();
         let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
@@ -281,7 +281,7 @@ fn a_workers_refused_merge_of_its_leads_branch_names_update_on_its_change_set() 
     struct Removed(PathBuf);
     impl Drop for Removed {
         fn drop(&mut self) {
-            let _ = remove_tmp(&self.0);
+            let _ = remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let git = crate::research::runner::sandboxed_git();
@@ -300,7 +300,7 @@ fn a_workers_refused_merge_of_its_leads_branch_names_update_on_its_change_set() 
             let done = git_run(git, repo.path(), home.path(), args);
             assert!(done.status.success(), "{args:?} {done:?}");
         }
-        let tmp = make_tmp(home.path()).unwrap();
+        let tmp = make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
         let _removed = Removed(home.path().to_path_buf());
         if catch_up {
             catch_up_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp).unwrap();
@@ -336,7 +336,7 @@ fn the_worker_copy_refuses_a_crazyagent_main_that_is_not_the_engine_s_ref() {
     struct Removed(PathBuf);
     impl Drop for Removed {
         fn drop(&mut self) {
-            let _ = remove_tmp(&self.0);
+            let _ = remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let home = tempfile::tempdir().unwrap();
@@ -352,7 +352,7 @@ fn the_worker_copy_refuses_a_crazyagent_main_that_is_not_the_engine_s_ref() {
         let done = git_run(git, repo.path(), home.path(), args);
         assert!(done.status.success(), "{args:?} {done:?}");
     }
-    let tmp = make_tmp(home.path()).unwrap();
+    let tmp = make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
     let _removed = Removed(home.path().to_path_buf());
     catch_up_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp).unwrap();
     let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
@@ -380,7 +380,7 @@ fn the_copy_every_agent_gets_first_refuses_crazyagent_main() {
     struct Removed(PathBuf);
     impl Drop for Removed {
         fn drop(&mut self) {
-            let _ = remove_tmp(&self.0);
+            let _ = remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let home = tempfile::tempdir().unwrap();
@@ -397,7 +397,7 @@ fn the_copy_every_agent_gets_first_refuses_crazyagent_main() {
         let done = git_run(git, repo.path(), home.path(), args);
         assert!(done.status.success(), "{args:?} {done:?}");
     }
-    let tmp = make_tmp(home.path()).unwrap();
+    let tmp = make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
     let _removed = Removed(home.path().to_path_buf());
     let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
     let done = git_run(
@@ -423,7 +423,7 @@ fn the_strict_copy_refuses_crazyagent_main_with_the_plain_reason() {
     struct Removed(PathBuf);
     impl Drop for Removed {
         fn drop(&mut self) {
-            let _ = remove_tmp(&self.0);
+            let _ = remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let home = tempfile::tempdir().unwrap();
@@ -440,7 +440,7 @@ fn the_strict_copy_refuses_crazyagent_main_with_the_plain_reason() {
         let done = git_run(git, repo.path(), home.path(), args);
         assert!(done.status.success(), "{args:?} {done:?}");
     }
-    let tmp = make_tmp(home.path()).unwrap();
+    let tmp = make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
     let _removed = Removed(home.path().to_path_buf());
     let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
     let refused = git_run(
@@ -580,11 +580,11 @@ fn a_launch_getconf_written_under_a_narrow_umask_in_its_own_process() {
         return;
     };
     let home = tempfile::tempdir().unwrap();
-    let _scratch = ScopedTmp::make(home.path()).unwrap();
+    let _scratch = ScopedTmp::make(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
     fs::create_dir(home.path().join(crate::launch_context::STATE)).unwrap();
     rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o277));
     let getconf_folder = getconf_folder(home.path());
-    let outcome = match write_getconf(home.path(), false) {
+    let outcome = match write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, home.path(), false) {
         Ok(()) => format!(
             "ok {:o} {:o}",
             fs::metadata(&getconf_folder).unwrap().mode() & 0o777,
@@ -649,9 +649,9 @@ fn shut_and_pin(tmp: &Path) {
 #[test]
 fn removing_an_agent_temp_folder_removes_what_the_agent_shut_and_pinned() {
     let home = tempfile::tempdir().unwrap();
-    let tmp = make_tmp(home.path()).unwrap();
+    let tmp = make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
     shut_and_pin(&tmp);
-    let removed = remove_tmp(home.path());
+    let removed = remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path());
     let left = fs::symlink_metadata(&tmp).is_ok();
     let _ = crate::team::cleanup::remove_agent_tree(&tmp);
     assert!(removed.is_ok(), "{removed:?}");
@@ -664,11 +664,11 @@ fn removing_an_agent_temp_folder_removes_what_the_agent_shut_and_pinned() {
 #[test]
 fn removing_all_but_the_kept_socket_removes_what_the_agent_shut_and_pinned() {
     let home = tempfile::tempdir().unwrap();
-    let tmp = make_tmp(home.path()).unwrap();
+    let tmp = make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
     let socket = tmp.join("kept.sock");
     let _listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
     shut_and_pin(&tmp);
-    let removed = remove_tmp_keeping(home.path(), "kept.sock");
+    let removed = remove_tmp_keeping(&crate::sandbox::TOOLCHAIN_HOOKS, home.path(), "kept.sock");
     let names: Vec<_> = fs::read_dir(&tmp)
         .unwrap()
         .flatten()

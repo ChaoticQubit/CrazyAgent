@@ -1160,6 +1160,7 @@ fn launch_base(
 ) -> Result<Vec<(&'static str, OsString)>, LaunchError> {
     let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
     let path = toolchains::with_agent_git(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
         tool_home,
         if tools {
             kernel_sandbox::toolchains::agent_path(&homes, TOOLS_ON_PATH)

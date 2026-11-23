@@ -9577,7 +9577,7 @@ impl TeamRuntime {
             .reach(os, tools, remote, proxy.as_ref().map(|proxy| proxy.port()))
             .map_err(sandboxed)?;
         let homes = ToolHomes::owner().map_err(sandboxed)?;
-        let scratch = toolchains::make_tmp(&home)
+        let scratch = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home)
             .map_err(|e| with_code("the agent temp folder could not be made", Some(io_code(&e))))?;
         #[cfg(unix)]
         let scratch_pin = toolchains::private_folder_pin(&scratch);
@@ -10716,6 +10716,7 @@ impl TeamRuntime {
                 }
                 #[cfg(unix)]
                 let _ = toolchains::remove_tmp_keeping(
+                    &crate::sandbox::TOOLCHAIN_HOOKS,
                     &self.agent_folder(id).join("home"),
                     super::caller::CALLER_SOCKET,
                 );
