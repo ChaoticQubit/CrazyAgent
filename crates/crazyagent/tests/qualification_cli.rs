@@ -1,4 +1,4 @@
-use crazyagent::qualification::{Artifact, Capability, Outcome, QualificationReport};
+use kernel_sandbox::qualification::{Artifact, Capability, Outcome, QualificationReport};
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};

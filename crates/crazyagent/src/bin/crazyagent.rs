@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use crazyagent::qualification::{
+use kernel_sandbox::qualification::{
     AdmissionContext, Capability, Outcome, QualificationReport, admit, load_report,
 };
 use std::collections::BTreeMap;

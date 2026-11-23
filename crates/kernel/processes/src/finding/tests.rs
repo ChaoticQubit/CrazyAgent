@@ -640,3 +640,112 @@ fn a_gate_root_hook_that_names_none_remaps_nothing() {
         closed.folders()
     );
 }
+
+/// Places on the stub seed with the canonical hook given, HOME in a scratch folder and the
+/// set-up projects read as given. Inputs: HOME, the hook and the projects. Output: the places.
+fn with_canonical(
+    home: &Path,
+    canonical: fn(&Path) -> std::io::Result<PathBuf>,
+    projects: Option<Vec<PathBuf>>,
+) -> Places {
+    let mut seed = stub_seed();
+    seed.hooks.canonical = canonical;
+    Places {
+        projects,
+        ..Places::new(Vec::new(), Some(home.to_path_buf()), seed)
+    }
+}
+
+/// A canonical hook that reads a Homebrew-style link as its `Cellar` file, and a link from
+/// another prefix's `bin` as that prefix's `Cellar` file. Input: the path. Output: its one
+/// spelling.
+fn cellar(path: &Path) -> std::io::Result<PathBuf> {
+    let text = path.to_str().unwrap();
+    Ok(match text.rsplit_once("/bin/") {
+        Some((prefix, name)) => PathBuf::from(format!("{prefix}/Cellar/{name}/1/bin/{name}")),
+        None => path.to_path_buf(),
+    })
+}
+
+/// C2-H8: a Homebrew tool, whose one spelling lies in its prefix's `Cellar`, stays usable
+/// while the set-up projects cannot be read; a link from a prefix outside the install roots
+/// whose every form lies there is agents' to write.
+#[test]
+fn a_cellar_linked_tool_stays_usable_while_the_projects_cannot_be_read() {
+    let (_folder, home) = scratch();
+    let places = with_canonical(&home, cellar, None);
+    assert!(!places.agent_writable(Path::new("/opt/homebrew/bin/tmux")));
+    assert!(places.agent_writable(Path::new("/opt/elsewhere/bin/tmux")));
+}
+
+/// C2-H8: the system's tools stay usable while the set-up projects cannot be read.
+#[test]
+fn a_system_tool_stays_usable_while_the_projects_cannot_be_read() {
+    let (_folder, home) = scratch();
+    let places = with_canonical(&home, |path| Ok(path.to_path_buf()), None);
+    for tool in [
+        "/usr/bin/env",
+        "/bin/sh",
+        "/usr/local/bin/tmux",
+        "/sbin/mount",
+    ] {
+        assert!(!places.agent_writable(Path::new(tool)), "{tool}");
+    }
+}
+
+/// C2-H8: the failed-read fallback never trusts more than a successful read with no project
+/// does: every path agents can write with the projects read is agents' to write without
+/// them, so the fallback only adds refusals.
+#[test]
+fn the_failed_read_fallback_never_trusts_a_path_the_normal_path_refuses() {
+    let (_folder, home) = scratch();
+    let marked = home.join("work/marked");
+    std::fs::create_dir_all(marked.join(".crazyagent")).unwrap();
+    let paths = [
+        PathBuf::from("/usr/bin/env"),
+        PathBuf::from("/usr/local/bin/tmux"),
+        PathBuf::from("/opt/homebrew/bin/node"),
+        PathBuf::from("/opt/homebrew/Cellar/node/1/bin/node"),
+        PathBuf::from("/opt/elsewhere/bin/tool"),
+        PathBuf::from("/srv/repo/bin/tool"),
+        home.join("work/app/bin/tool"),
+        marked.join("bin/tool"),
+        home.join(".local/bin/tool"),
+    ];
+    let canonical: fn(&Path) -> std::io::Result<PathBuf> = |path| Ok(path.to_path_buf());
+    let read = with_canonical(&home, canonical, Some(Vec::new()));
+    let unread = with_canonical(&home, canonical, None);
+    for path in &paths {
+        if read.agent_writable(path) {
+            assert!(unread.agent_writable(path), "{}", path.display());
+        }
+    }
+    assert!(read.agent_writable(&marked.join("bin/tool")));
+    assert!(!read.agent_writable(Path::new("/srv/repo/bin/tool")));
+    assert!(unread.agent_writable(Path::new("/srv/repo/bin/tool")));
+}
+
+/// C2-H8: when the set-up projects cannot be read, a repository the engine may have
+/// registered outside HOME still counts as agent-writable, so a tool in it is refused, while
+/// a system folder's tool does not.
+#[test]
+fn a_registered_repository_outside_home_is_agent_writable_while_its_projects_cannot_be_read() {
+    let (_folder, home) = scratch();
+    let outside = tempfile::Builder::new()
+        .prefix("tools-h8-repo-")
+        .tempdir()
+        .unwrap();
+    let repo = outside.path().canonicalize().unwrap();
+    assert!(!repo.starts_with(&home));
+    let tool = program(&repo.join("bin/tool"), "#!/bin/sh\n");
+    let places = Places {
+        projects: None,
+        ..stub_new(Vec::new(), Some(home.clone()))
+    };
+    assert!(places.agent_writable(&tool), "{}", tool.display());
+    assert_eq!(
+        check_place(&places, &tool),
+        Some(Err(Refusal::AgentsCanWrite))
+    );
+    assert!(!places.agent_writable(Path::new("/bin/sh")));
+}

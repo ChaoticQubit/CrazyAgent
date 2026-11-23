@@ -111,7 +111,7 @@ fn boundary_denies_escape_and_trusted_writes() {
     assert!(!evidence.admissible());
     assert_eq!(
         evidence.confinement_outcome(),
-        crazyagent::qualification::Outcome::Unavailable
+        kernel_sandbox::qualification::Outcome::Unavailable
     );
     assert!(evidence.unenforced.iter().any(|v| v == "memory-bytes"));
 }
