@@ -1379,3 +1379,47 @@ fn the_trust_row_binds_the_sha256_of_the_reviewed_text() {
     );
     assert_eq!(held(), sha(&changed));
 }
+
+/// A binding change whose database write fails leaves the old binding and its entered key
+/// file in place, so the plugin still loads and reads the key it had.
+#[test]
+fn a_failed_binding_write_keeps_the_old_key_working() {
+    let case = case();
+    trusted(&case, ACME);
+    saved_account(&case, "acct-work", Some("key-acct-work"));
+    test_replace(
+        &case.root,
+        KeyFolder::Account,
+        &KeyRef::new("key-acct-work").unwrap(),
+        b"sk-account-key-01".to_vec(),
+    )
+    .unwrap();
+    set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"sk-own-plugin-01".to_vec(),
+    )
+    .unwrap();
+    let before = cells(&case.db, "app_plugin_secrets");
+    assert_eq!(plugin_keys(&case).len(), 1);
+    case.db
+        .execute_batch(
+            "CREATE TEMP TRIGGER refuse_insert BEFORE INSERT ON app_plugin_secrets
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;
+             CREATE TEMP TRIGGER refuse_update BEFORE UPDATE ON app_plugin_secrets
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;
+             CREATE TEMP TRIGGER refuse_delete BEFORE DELETE ON app_plugin_secrets
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+        )
+        .unwrap();
+    assert!(bind_account(&case.db, &case.engine(), "acme", "api_key", "acct-work").is_err());
+    assert!(unbind(&case.db, &case.engine(), "acme", "api_key").is_err());
+    assert_eq!(cells(&case.db, "app_plugin_secrets"), before);
+    assert_eq!(plugin_keys(&case).len(), 1);
+    let loaded = ready(&case.db, &case.engine(), "acme").unwrap();
+    assert_eq!(loaded.bindings[0].folder(), KeyFolder::Plugin);
+    let value = secret_value(&case.engine(), &loaded.bindings[0]).unwrap();
+    assert_eq!(value.expose(), "sk-own-plugin-01");
+}
