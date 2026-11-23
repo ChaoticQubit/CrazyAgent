@@ -112,14 +112,5 @@ fn check_permissions_reports_drift_and_write_permissions_clears_it() {
 
 #[test]
 fn check_host_reports_drift_and_write_host_clears_it() {
-    let copy = copied(&sdk("host/src/generated"), "host");
-    corrupt(&copy.join("mod.rs"));
-    let check = capgen("--check-host", &copy);
-    assert_eq!(check.status.code(), Some(1), "{check:?}");
-    assert_eq!(String::from_utf8_lossy(&check.stdout), "mod.rs\n");
-    let write = capgen("--write-host", &copy);
-    assert_eq!(write.status.code(), Some(0), "{write:?}");
-    let again = capgen("--check-host", &copy);
-    assert_eq!(again.status.code(), Some(0), "{again:?}");
-    assert!(again.stdout.is_empty());
+    drift_then_write("host", "host/src/generated", "mod.rs");
 }
