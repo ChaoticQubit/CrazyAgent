@@ -121,9 +121,9 @@ fn no_route_port_rule_reaches_the_slirp_network_or_loopback_and_only_dns_reaches
     }
 }
 
-/// V243-LINUX-EGRESS-REJECT: every rule that refuses a packet answers it, so an agent's
-/// refused connect fails at once instead of waiting out its SYN retries, about 127 s
-/// each. A last rule answers whatever no rule let out, and the DROP policy stays behind it.
+/// Every rule that refuses a packet answers it, so an agent's refused connect fails at once
+/// instead of waiting out its SYN retries, about 127 s each. A last rule answers whatever no
+/// rule let out, and the DROP policy stays behind it.
 #[test]
 fn a_refused_packet_is_answered_so_a_refused_connect_fails_at_once() {
     for (rules, refuse) in [
@@ -474,9 +474,9 @@ fn a_routed_nest_names_its_go_descriptor_to_this_helper_alone_after_the_bridge_f
     assert!(asked(outer).is_err(), "stage 1 takes no go descriptor");
 }
 
-/// V243 linux routed: slirp4netns runs confined to the files it needs, so a read and a
-/// write in a folder outside them are refused, while the loader cache it needs still
-/// reads. The rules go on a thread of the row's own, so no other row runs under them.
+/// slirp4netns runs confined to the files it needs, so a read and a write in a folder
+/// outside them are refused, while the loader cache it needs still reads. The rules go on a
+/// thread of the row's own, so no other row runs under them.
 #[test]
 fn slirp_reads_and_writes_only_the_files_it_needs() {
     let outside = tempfile::tempdir().unwrap();
@@ -513,10 +513,10 @@ fn slirp_reads_and_writes_only_the_files_it_needs() {
     );
 }
 
-/// V243 linux routed r2, rv-sec3 F1: slirp4netns runs in this computer's mount namespace,
-/// where Landlock does not mediate a pathname socket connect, so a confined slirp must
-/// not reach a socket such as the engine's tmux server's. A socket pair, which carries
-/// its tap descriptor, and a UDP socket, which carries the agent's traffic, still open.
+/// slirp4netns runs in this computer's mount namespace, where Landlock does not mediate a
+/// pathname socket connect, so a confined slirp must not reach a socket such as the
+/// engine's tmux server's. A socket pair, which carries its tap descriptor, and a UDP
+/// socket, which carries the agent's traffic, still open.
 #[test]
 fn slirp_connects_to_no_unix_socket() {
     let folder = tempfile::tempdir().unwrap();
