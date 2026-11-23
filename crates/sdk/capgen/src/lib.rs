@@ -2,9 +2,10 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{ErrorKind, Write};
-use std::path::Path;
+use std::io::{ErrorKind, Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crazyagent_cap::File;
 
@@ -91,26 +92,52 @@ pub fn rust_test_module(stem: &str, file: &File) -> Result<String, CapgenError> 
     rustfmt(&format!("{stem}.rs"), &text)
 }
 
-/// Lays one generated file out with `RUSTFMT` when set, else the toolchain's `rustfmt`
-/// on the path. Inputs: the file's path, for refusals, and its text. Output: as
-/// [`rustfmt_with`].
-fn rustfmt(path: &str, text: &str) -> Result<String, CapgenError> {
-    let program = std::env::var_os("RUSTFMT").unwrap_or_else(|| OsString::from("rustfmt"));
-    rustfmt_with(&program, path, text)
+/// How long capgen waits for one rustfmt run before it stops the process.
+pub(crate) const RUSTFMT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long capgen sleeps between two checks of a running rustfmt.
+const RUSTFMT_POLL: Duration = Duration::from_millis(2);
+
+/// The empty rustfmt config every run uses, checked in beside capgen, so a `rustfmt.toml`
+/// in the caller's working folder never changes the generated layout. Output: its path.
+pub(crate) fn rustfmt_config() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("rustfmt.toml")
 }
 
-/// Lays one generated file out with a rustfmt program, edition 2024, text in on stdin and
-/// out on stdout. Inputs: the program, the file's path, for refusals, and its text.
-/// Output: the formatted text, or `capgen_rustfmt_missing` (no such program) or
-/// `capgen_rustfmt_refused`, never the raw text.
-fn rustfmt_with(program: &OsStr, path: &str, text: &str) -> Result<String, CapgenError> {
+/// Lays one generated file out with `RUSTFMT` when set, else the toolchain's `rustfmt`
+/// on the path, with capgen's empty config and a 30 s bound. Inputs: the file's path, for
+/// refusals, and its text. Output: as [`rustfmt_with`].
+fn rustfmt(path: &str, text: &str) -> Result<String, CapgenError> {
+    let program = std::env::var_os("RUSTFMT").unwrap_or_else(|| OsString::from("rustfmt"));
+    rustfmt_with(&program, &rustfmt_config(), path, text, RUSTFMT_DEADLINE)
+}
+
+/// Lays one generated file out with a rustfmt program, edition 2024 and `--config-path`,
+/// text in on stdin and out on stdout, stopping it past the deadline. Inputs: the program,
+/// the config, the file's path, for refusals, its text and the deadline. Output: the
+/// formatted text, or `capgen_rustfmt_missing` (no program or config),
+/// `capgen_rustfmt_timeout` or `capgen_rustfmt_refused`, never the raw text.
+pub(crate) fn rustfmt_with(
+    program: &OsStr,
+    config: &Path,
+    path: &str,
+    text: &str,
+    deadline: Duration,
+) -> Result<String, CapgenError> {
     let refuse = |code: &'static str, detail: String| CapgenError {
         file: path.to_owned(),
         code,
         detail,
     };
+    if !config.is_file() {
+        return Err(refuse(
+            "capgen_rustfmt_missing",
+            format!("{} is missing", config.display()),
+        ));
+    }
     let mut child = Command::new(program)
-        .args(["--edition", "2024", "--emit", "stdout"])
+        .args(["--edition", "2024", "--emit", "stdout", "--config-path"])
+        .arg(config)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -126,29 +153,74 @@ fn rustfmt_with(program: &OsStr, path: &str, text: &str) -> Result<String, Capge
             };
             refuse("capgen_rustfmt_missing", detail)
         })?;
-    let mut stdin = child.stdin.take().expect("stdin is piped");
+    let pipes = (child.stdin.take(), child.stdout.take(), child.stderr.take());
+    let (Some(mut stdin), Some(stdout), Some(stderr)) = pipes else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(refuse(
+            "capgen_rustfmt_refused",
+            "a pipe is missing".to_owned(),
+        ));
+    };
     let input = text.to_owned();
     let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
-    let output = child
-        .wait_with_output()
-        .map_err(|error| refuse("capgen_rustfmt_refused", error.to_string()))?;
-    let written = writer.join().expect("the stdin writer does not panic");
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let out = drain(stdout);
+    let err = drain(stderr);
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if started.elapsed() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(refuse(
+                    "capgen_rustfmt_timeout",
+                    format!("no answer within {} ms", deadline.as_millis()),
+                ));
+            }
+            Ok(None) => std::thread::sleep(RUSTFMT_POLL),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(refuse("capgen_rustfmt_refused", error.to_string()));
+            }
+        }
+    };
+    let joined = |name: &str| {
+        refuse(
+            "capgen_rustfmt_refused",
+            format!("the {name} thread panicked"),
+        )
+    };
+    let written = writer.join().map_err(|_| joined("stdin"))?;
+    let stdout = out.join().map_err(|_| joined("stdout"))?;
+    let stderr = err.join().map_err(|_| joined("stderr"))?;
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned();
         let first = stderr.lines().next().unwrap_or("").to_owned();
         return Err(refuse(
             "capgen_rustfmt_refused",
-            format!("{}: {first}", output.status),
+            format!("{status}: {first}"),
         ));
     }
+    let stdout = stdout.map_err(|error| refuse("capgen_rustfmt_refused", error.to_string()))?;
+    if stdout.is_empty() && !text.trim().is_empty() {
+        return Err(refuse("capgen_rustfmt_refused", "empty output".to_owned()));
+    }
     written.map_err(|error| refuse("capgen_rustfmt_refused", error.to_string()))?;
-    let formatted = String::from_utf8(output.stdout)
-        .map_err(|_| refuse("capgen_rustfmt_refused", "output is not UTF-8".to_owned()))?;
-    assert!(
-        !formatted.is_empty() || text.trim().is_empty(),
-        "rustfmt kept the file"
-    );
-    Ok(formatted)
+    String::from_utf8(stdout)
+        .map_err(|_| refuse("capgen_rustfmt_refused", "output is not UTF-8".to_owned()))
+}
+
+/// Reads one child pipe to its end on its own thread, so neither pipe can fill and stall
+/// the child while capgen waits. Input: the pipe. Output: the thread, which gives the bytes.
+fn drain<R: Read + Send + 'static>(
+    mut pipe: R,
+) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        pipe.read_to_end(&mut bytes).map(|_| bytes)
+    })
 }
 
 /// Reads and parses every `.cap` file of a folder. Each must be a regular file, never a
@@ -211,7 +283,6 @@ pub fn load(caps: &Path) -> Result<Vec<(String, File)>, CapgenError> {
 /// bound one byte past it, so a file that grows between the two steps is still refused.
 /// Input: the path. Output: the UTF-8 source, or the refusal code with its detail.
 fn read_bounded(path: &Path) -> Result<String, (&'static str, String)> {
-    use std::io::Read;
     let max = crazyagent_cap::SOURCE_BYTES_MAX;
     let too_large = || ("cap_source_too_large", "line 1 column 1".to_owned());
     let meta = fs::symlink_metadata(path).map_err(|error| ("capgen_read", error.to_string()))?;
