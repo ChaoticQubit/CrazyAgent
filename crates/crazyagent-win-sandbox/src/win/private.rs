@@ -32,10 +32,11 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateDirectoryW, CreateFileW, DELETE,
-    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_FLAG_DELETE,
+    FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_BASIC_INFO, FILE_DISPOSITION_FLAG_DELETE,
     FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
     FILE_FLAG_OPEN_REPARSE_POINT, FILE_FULL_DIR_INFO, FILE_ID_INFO, FILE_LIST_DIRECTORY,
-    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileBasicInfo,
     FileDispositionInfoEx, FileFullDirectoryInfo, FileFullDirectoryRestartInfo, FileIdInfo,
     GetFileInformationByHandle, GetFileInformationByHandleEx, LOCKFILE_EXCLUSIVE_LOCK,
     LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, OPEN_EXISTING, READ_CONTROL, SetFileInformationByHandle,
@@ -451,6 +452,47 @@ pub fn delete(file: &File) -> io::Result<()> {
         )
     };
     if marked == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Clears the read-only attribute of the object a held handle names, never by path, so a
+/// following [`delete`] is not refused for it; every other attribute and every time stays.
+/// The handle must carry write-attributes access. Input: the held handle. Output: Ok, or
+/// the Windows error.
+pub fn clear_read_only(file: &File) -> io::Result<()> {
+    let mut basic = FILE_BASIC_INFO::default();
+    let read = unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileBasicInfo,
+            std::ptr::from_mut(&mut basic).cast(),
+            size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    };
+    if read == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let attributes = basic.FileAttributes & !FILE_ATTRIBUTE_READONLY;
+    let cleared = FILE_BASIC_INFO {
+        FileAttributes: if attributes == 0 {
+            FILE_ATTRIBUTE_NORMAL
+        } else {
+            attributes
+        },
+        ..FILE_BASIC_INFO::default()
+    };
+    assert_eq!(cleared.FileAttributes & FILE_ATTRIBUTE_READONLY, 0);
+    let written = unsafe {
+        SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileBasicInfo,
+            std::ptr::from_ref(&cleared).cast(),
+            size_of::<FILE_BASIC_INFO>() as u32,
+        )
+    };
+    if written == 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
