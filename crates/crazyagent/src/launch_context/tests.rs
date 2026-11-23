@@ -4441,8 +4441,8 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
 #[test]
 fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
     use crate::sandbox::ProjectSandbox;
-    use crate::sandbox::toolchains;
     use kernel_sandbox::net::SandboxNetwork;
+    use kernel_sandbox::toolchains;
     use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
     const MARKER: &str = "ctx-execute-4471";
     const CALL_LIMIT: Duration = Duration::from_secs(60);
@@ -4450,7 +4450,7 @@ fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
     let base = directory.path().canonicalize().unwrap();
     let (context, _connection, _install) = shared_context_mode(&base);
     let home = private_folder(&base.join("home"));
-    let scratch = toolchains::make_tmp(&home).unwrap();
+    let scratch = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let installed = context.install("claude-code", &home, true).unwrap();
     let mcp: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(home.join(STATE).join("mcp.json")).unwrap())
@@ -4506,7 +4506,7 @@ fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
         "ctx_execute runs with its temp folder in the agent's own: {reply}"
     );
     drop(installed);
-    toolchains::remove_tmp(&home).unwrap();
+    toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
 }
 
 /// T3-15/18: under the deny-default agent profile with its short temp folder, the agent can
@@ -4516,8 +4516,8 @@ fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
 #[test]
 fn an_agent_cannot_change_its_launch_getconf() {
     use crate::sandbox::ProjectSandbox;
-    use crate::sandbox::toolchains;
     use kernel_sandbox::net::SandboxNetwork;
+    use kernel_sandbox::toolchains;
     const CHANGE: &str = r#"printf x 2>/dev/null >> "$1/getconf" && echo changed
 printf x 2>/dev/null > "$1/getconf.new" && mv "$1/getconf.new" "$1/getconf" 2>/dev/null && echo replaced
 mkdir "$1/planted" 2>/dev/null && echo planted
@@ -4527,7 +4527,7 @@ exit 0"#;
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let home = private_folder(&root.join("home"));
-    let scratch = toolchains::make_tmp(&home).unwrap();
+    let scratch = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
     let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
         .install("claude-code", &home, true)
         .unwrap();
@@ -4558,7 +4558,7 @@ exit 0"#;
     assert!(written.is_some());
     assert_eq!(fs::read(bin.join("getconf")).ok(), written);
     drop(installed);
-    toolchains::remove_tmp(&home).unwrap();
+    toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home).unwrap();
 }
 
 /// T3-15/18: the `getconf` each launch writes into its own folder answers
@@ -4570,7 +4570,7 @@ exit 0"#;
 #[cfg(target_os = "macos")]
 #[test]
 fn each_launch_getconf_answers_its_agent_temp_folder_first_on_the_path() {
-    use crate::sandbox::toolchains;
+    use kernel_sandbox::toolchains;
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let worktree = root.join("lead-worktree");
@@ -4578,8 +4578,8 @@ fn each_launch_getconf_answers_its_agent_temp_folder_first_on_the_path() {
     let tmux = root.join("bin").join("tmux");
     let agent = private_home(&root, "agent");
     let lead = private_home(&root, "lead");
-    let agent_tmp = toolchains::make_tmp(&agent).unwrap();
-    let lead_tmp = toolchains::make_tmp(&lead).unwrap();
+    let agent_tmp = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &agent).unwrap();
+    let lead_tmp = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &lead).unwrap();
     let plain = context_with(&root, LaunchPlugins::default(), Vec::new())
         .install("claude-code", &agent, true)
         .unwrap();
@@ -4630,16 +4630,24 @@ fn each_launch_getconf_answers_its_agent_temp_folder_first_on_the_path() {
         system.stdout
     );
     let bin = agent.join(STATE).join("bin");
-    let path = toolchains::with_agent_git(&agent, "/usr/bin:/bin".to_owned());
+    let path = toolchains::with_agent_git(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
+        &agent,
+        "/usr/bin:/bin".to_owned(),
+    );
     let entries: Vec<&str> = path.split(':').collect();
     assert_eq!(entries.first().copied(), bin.to_str(), "{path}");
     assert_eq!(entries[entries.len() - 2..], ["/usr/bin", "/bin"], "{path}");
     drop(plain);
     drop(native);
-    let path = toolchains::with_agent_git(&agent, "/usr/bin:/bin".to_owned());
+    let path = toolchains::with_agent_git(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
+        &agent,
+        "/usr/bin:/bin".to_owned(),
+    );
     assert!(!path.contains(bin.to_str().unwrap()), "{path}");
-    toolchains::remove_tmp(&agent).unwrap();
-    toolchains::remove_tmp(&lead).unwrap();
+    toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &agent).unwrap();
+    toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &lead).unwrap();
 }
 
 #[test]
@@ -4715,14 +4723,14 @@ fn tools_on_profile(
     installs: &[&Path],
 ) -> PathBuf {
     use crate::sandbox::ProjectSandbox;
-    use crate::sandbox::toolchains;
     use kernel_sandbox::net::SandboxRemote;
     use kernel_sandbox::policy::AgentPolicy;
+    use kernel_sandbox::toolchains;
     use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
     let policy = AgentPolicy::default();
     let homes = ToolHomes::owner().unwrap();
     let tmp = private_folder(&base.join("tmp"));
-    let scratch = toolchains::make_tmp(home).unwrap();
+    let scratch = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home).unwrap();
     let network = policy.network.sandbox(Some(SandboxRemote::Loopback(port)));
     let (mut sandbox, _) = ProjectSandbox::new(project, home, &tmp, network)
         .unwrap()

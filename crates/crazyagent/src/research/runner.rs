@@ -19,7 +19,6 @@ use crate::project_setup::ResearchKind;
 use crate::project_setup::links::LinkedText;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::provider_reach::ProviderReach;
-use crate::sandbox::toolchains;
 use crate::sandbox::warden::Warden;
 use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 #[cfg(unix)]
@@ -31,6 +30,7 @@ use kernel_sandbox::model_proxy::{ModelHost, ModelProxy};
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::policy::{AgentAccess, Narrowing, narrowing};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
+use kernel_sandbox::toolchains;
 use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -1290,9 +1290,9 @@ impl ResearchRunner {
         private_directory(&tmp)?;
         let unconfined = policy.access == AgentAccess::Full;
         let homes = ToolHomes::owner()?;
-        let scratch = toolchains::ScopedTmp::make(&home)?;
+        let scratch = toolchains::ScopedTmp::make(&crate::sandbox::TOOLCHAIN_HOOKS, &home)?;
         #[cfg(target_os = "macos")]
-        toolchains::write_getconf(&home, false)?;
+        toolchains::write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, &home, false)?;
         kernel_sandbox::toolchains::prepare_cargo_home(
             &crate::sandbox::TOOLCHAIN_HOOKS,
             &home,

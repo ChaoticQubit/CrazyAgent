@@ -619,7 +619,7 @@ fn lead_temp_socket(engine_root: &Path, lead: &AgentId, name: &str) -> Result<Pa
         .team_agent()
         .ok_or_else(|| failure("terminal_agent_invalid"))?;
     let home = crate::team::runtime::agent_home(&engine_root.join("team"), id);
-    let socket = crate::sandbox::toolchains::tmp_path(&home).join(name);
+    let socket = kernel_sandbox::toolchains::tmp_path(&home).join(name);
     assert!(socket.is_absolute() && socket.as_os_str().len() <= HARNESS_SOCKET_BYTES_MAX);
     Ok(socket)
 }

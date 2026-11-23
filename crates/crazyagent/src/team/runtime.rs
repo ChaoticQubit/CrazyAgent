@@ -36,7 +36,6 @@ use crate::research::runner::{
     CLAUDE_MODEL_HOSTS, CODEX_MODEL_HOSTS, ResearchAccount, RunError, add_worktree_at,
     confined_unavailable, endpoint_model_host, ensure_repository, model_remote,
 };
-use crate::sandbox::toolchains;
 use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 use crate::terminal::PANES_PER_PROJECT_MAX;
 use kernel_processes::terminal::{AgentId, Host};
@@ -47,6 +46,7 @@ use kernel_sandbox::policy::{
     AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing,
 };
 use kernel_sandbox::settings::LinuxStrict;
+use kernel_sandbox::toolchains;
 use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
@@ -9577,7 +9577,7 @@ impl TeamRuntime {
             .reach(os, tools, remote, proxy.as_ref().map(|proxy| proxy.port()))
             .map_err(sandboxed)?;
         let homes = ToolHomes::owner().map_err(sandboxed)?;
-        let scratch = toolchains::make_tmp(&home)
+        let scratch = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home)
             .map_err(|e| with_code("the agent temp folder could not be made", Some(io_code(&e))))?;
         #[cfg(unix)]
         let scratch_pin = toolchains::private_folder_pin(&scratch);
@@ -10721,6 +10721,7 @@ impl TeamRuntime {
                 }
                 #[cfg(unix)]
                 let _ = toolchains::remove_tmp_keeping(
+                    &crate::sandbox::TOOLCHAIN_HOOKS,
                     &self.agent_folder(id).join("home"),
                     super::caller::CALLER_SOCKET,
                 );

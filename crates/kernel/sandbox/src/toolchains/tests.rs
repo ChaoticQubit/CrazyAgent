@@ -47,6 +47,9 @@ fn a_cargo_cache_name_that_will_not_give_way_refuses_with_the_hooks_code() {
     let hooks = ToolchainHooks {
         remove_home_entry: refuse,
         sandboxed_git: || Path::new("/usr/bin/git"),
+        mates_home: |home| home.join("mates"),
+        launch_state: "crazyagent",
+        remove_agent_tree: |_folder| Ok(()),
     };
     let scratch = tempfile::tempdir().unwrap();
     let root = canonical(scratch.path()).unwrap();
@@ -208,6 +211,9 @@ fn a_leads_copy_runs_the_git_the_hooks_name() {
     let hooks = ToolchainHooks {
         remove_home_entry: refuse,
         sandboxed_git: || Path::new("/opt/stand-in/bin/git"),
+        mates_home: |home| home.join("mates"),
+        launch_state: "crazyagent",
+        remove_agent_tree: |_folder| Ok(()),
     };
     let scratch = tempfile::tempdir().unwrap();
     let tmp = canonical(scratch.path()).unwrap();
@@ -281,4 +287,87 @@ fn the_agent_git_script_is_refused_for_the_xcrun_shim_and_any_path_that_is_not_p
     assert_eq!(worker.replace("\nlead=0\n", "\nlead=1\n"), lead);
     assert_eq!(worker.replace("\nfree=0\n", "\nfree=1\n"), free);
     assert_eq!(worker.replace("\nmain=1\n", "\nmain=0\n"), strict);
+}
+
+/// The agent's own `getconf` is looked for in the launch folder the hooks name: a harness's
+/// search path gets that folder's `bin` at its front when it holds `getconf`, and nothing
+/// when only another folder does.
+#[test]
+fn the_agent_getconf_is_looked_for_in_the_launch_folder_the_hooks_name() {
+    fn refuse(
+        _folder: std::os::fd::BorrowedFd<'_>,
+        _name: &str,
+        otherwise: &'static str,
+    ) -> Result<(), &'static str> {
+        Err(otherwise)
+    }
+    let hooks = ToolchainHooks {
+        remove_home_entry: refuse,
+        sandboxed_git: || Path::new("/usr/bin/git"),
+        mates_home: |home| home.join("mates"),
+        launch_state: "stand-in",
+        remove_agent_tree: |_folder| Ok(()),
+    };
+    let scratch = tempfile::tempdir().unwrap();
+    let home = canonical(scratch.path()).unwrap();
+    let named = home.join("stand-in").join("bin");
+    fs::create_dir_all(&named).unwrap();
+    assert_eq!(
+        with_agent_git(&hooks, &home, "/usr/bin".to_owned()),
+        "/usr/bin"
+    );
+    fs::write(named.join("getconf"), "").unwrap();
+    assert_eq!(
+        with_agent_git(&hooks, &home, "/usr/bin".to_owned()),
+        format!("{}:/usr/bin", named.display())
+    );
+    let other = home.join("crazyagent").join("bin");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("getconf"), "").unwrap();
+    fs::remove_file(named.join("getconf")).unwrap();
+    assert_eq!(
+        with_agent_git(&hooks, &home, "/usr/bin".to_owned()),
+        "/usr/bin"
+    );
+}
+
+#[test]
+fn a_link_swapped_in_for_the_lead_s_new_temp_folder_is_refused_and_never_followed() {
+    let scratch = tempfile::tempdir().unwrap();
+    let victim = scratch.path().join("victim");
+    fs::create_dir(&victim).unwrap();
+    fs::set_permissions(&victim, fs::Permissions::from_mode(0o755)).unwrap();
+    let lead = native_lead_tmp(scratch.path());
+    std::os::unix::fs::symlink(&victim, &lead).unwrap();
+    let sealed = std::panic::catch_unwind(|| seal_new_folder(&lead))
+        .expect("a link swapped in for the new folder panicked instead of being refused");
+    assert!(
+        matches!(&sealed, Err(error) if error.kind() == io::ErrorKind::PermissionDenied),
+        "{sealed:?}"
+    );
+    assert_eq!(
+        fs::symlink_metadata(&victim).unwrap().mode() & 0o7777,
+        0o755
+    );
+    assert!(
+        fs::symlink_metadata(&lead)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn a_folder_swapped_in_for_the_lead_s_new_temp_folder_is_refused_with_what_it_holds() {
+    let scratch = tempfile::tempdir().unwrap();
+    let lead = native_lead_tmp(scratch.path());
+    fs::create_dir(&lead).unwrap();
+    fs::write(lead.join("planted"), "earlier").unwrap();
+    fs::set_permissions(&lead, fs::Permissions::from_mode(0o777)).unwrap();
+    let sealed = std::panic::catch_unwind(|| seal_new_folder(&lead))
+        .expect("a folder swapped in for the new folder panicked instead of being refused");
+    assert!(
+        matches!(&sealed, Err(error) if error.kind() == io::ErrorKind::PermissionDenied),
+        "{sealed:?}"
+    );
 }

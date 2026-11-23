@@ -5,7 +5,7 @@ use super::store::{self, Intent, Record};
 use super::{AfterRegeneration, AgentKind, ChangeSetId, ChangeState, diff};
 use crate::engine::EngineError;
 use crate::sandbox::ProjectSandbox;
-use crate::sandbox::toolchains;
+use kernel_sandbox::toolchains;
 use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
 use rusqlite::Connection;
 use std::collections::{BTreeMap, BTreeSet};
@@ -637,7 +637,8 @@ fn confined(
         .map_err(|_| "hidden_paths_unread")?;
     listed.hid(&hidden);
     let homes = ToolHomes::owner().map_err(|_| "tool_homes_unread")?;
-    let tmp = toolchains::make_tmp(&scratch.home).map_err(|_| "tmp_unmade")?;
+    let tmp = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &scratch.home)
+        .map_err(|_| "tmp_unmade")?;
     kernel_sandbox::toolchains::prepare_cargo_home(
         &crate::sandbox::TOOLCHAIN_HOOKS,
         &scratch.home,
@@ -894,7 +895,7 @@ impl<'a> Scratch<'a> {
         }
         let _ = std::fs::remove_dir_all(&self.worktree);
         let _ = std::fs::remove_dir_all(&self.admin);
-        let _ = toolchains::remove_tmp(&self.home);
+        let _ = toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.home);
         let _ = std::fs::remove_dir_all(&self.folder);
         if let Some(parent) = self.folder.parent() {
             let _ = std::fs::remove_dir(parent);

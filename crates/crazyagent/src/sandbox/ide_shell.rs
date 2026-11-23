@@ -135,12 +135,12 @@ pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> 
 /// shell runs.
 #[cfg(target_os = "macos")]
 pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
-    use super::toolchains;
     use super::{
         ProjectSandbox, SANDBOX_EXEC, agent_variable_allowed, borrowed, owner_terminal_env,
     };
     use kernel_sandbox::error::invalid;
     use kernel_sandbox::paths::{canonical, clean_absolute};
+    use kernel_sandbox::toolchains;
     use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
     if launch.level == AgentAccess::Full {
         return Err(invalid("a Full access terminal runs in the IDE server"));
@@ -169,7 +169,7 @@ pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
     crate::agent_home::remove_shell_startup(&home, &root)
         .map_err(|_| invalid("the terminal home keeps a shell startup file"))?;
     let homes = ToolHomes::owner()?;
-    let scratch = toolchains::make_tmp(&home)?;
+    let scratch = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &home)?;
     kernel_sandbox::toolchains::prepare_cargo_home(&super::TOOLCHAIN_HOOKS, &home, &homes)?;
     let network = kernel_sandbox::policy::ide_network(launch.level, launch.network);
     let (sandbox, _) = ProjectSandbox::new(launch.folder, &home, &tmp, network)?

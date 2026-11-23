@@ -10,7 +10,7 @@ use super::records::{self, Reader};
 use crate::coord::settings::{HarnessKind, TerminalDisplay};
 use crate::harnesses::accounts::Handover;
 use crate::launch_context::{Installed, NativeTeam};
-use crate::sandbox::toolchains;
+use kernel_sandbox::toolchains;
 use kernel_sandbox::toolchains::ToolHomes;
 use std::ffi::{OsStr, OsString};
 #[cfg(unix)]
@@ -394,6 +394,7 @@ pub fn command_with(
         (
             "PATH".to_owned(),
             toolchains::with_agent_git(
+                &crate::sandbox::TOOLCHAIN_HOOKS,
                 tool_home,
                 if request.tools {
                     kernel_sandbox::toolchains::agent_path(&homes, TOOLS_ON_PATH)

@@ -202,7 +202,8 @@ fn a_tools_on_listed_team_agent_launches_with_the_agent_homes_temp_folder_and_ca
     struct TmpRemoved(PathBuf);
     impl Drop for TmpRemoved {
         fn drop(&mut self) {
-            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+            let _ =
+                kernel_sandbox::toolchains::remove_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, &self.0);
         }
     }
     let fixture = Fixture::new(1);
@@ -241,13 +242,13 @@ fn a_tools_on_listed_team_agent_launches_with_the_agent_homes_temp_folder_and_ca
             .and_then(|(_, value)| value)
             .map(PathBuf::from)
     };
-    let scratch = crate::sandbox::toolchains::existing_tmp(&own);
+    let scratch = kernel_sandbox::toolchains::existing_tmp(&own);
     assert!(scratch.is_some(), "prepare made the agent's temp folder");
     let scratch = scratch.unwrap();
     assert_eq!(env("HOME"), Some(own.join("standin-acp").join(ENDPOINT)));
     assert_eq!(env("TMPDIR").as_deref(), Some(scratch.as_path()));
     assert_eq!(
-        crate::sandbox::toolchains::private_folder_pin(&scratch),
+        kernel_sandbox::toolchains::private_folder_pin(&scratch),
         plan.scratch_pin
     );
     assert_eq!(env("CARGO_HOME"), Some(own.join(".cargo")));

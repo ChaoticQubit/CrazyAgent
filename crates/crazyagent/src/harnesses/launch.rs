@@ -12,9 +12,9 @@ use crate::launch_context::{AgentContext, EngineServer, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 use crate::sandbox::InstalledSandbox;
-#[cfg(not(windows))]
-use crate::sandbox::toolchains;
 use crate::usage::capture::Tokens;
+#[cfg(not(windows))]
+use kernel_sandbox::toolchains;
 #[cfg(not(windows))]
 use kernel_sandbox::toolchains::ToolHomes;
 use kernel_security::secret::SecretString;
@@ -1160,6 +1160,7 @@ fn launch_base(
 ) -> Result<Vec<(&'static str, OsString)>, LaunchError> {
     let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
     let path = toolchains::with_agent_git(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
         tool_home,
         if tools {
             kernel_sandbox::toolchains::agent_path(&homes, TOOLS_ON_PATH)
