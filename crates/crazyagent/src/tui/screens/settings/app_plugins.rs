@@ -85,6 +85,15 @@ pub(in crate::tui) fn sentence(code: &str) -> String {
         "app_plugin_key_store_unavailable" => {
             "CrazyAgent couldn't save the key. Nothing was saved; try again."
         }
+        "app_plugin_setting_unavailable" => {
+            "This setting can't be saved while the app has no settings file or is applying a change. Try again."
+        }
+        "app_plugin_setting_unreadable" => {
+            "Your settings file couldn't be read, so CrazyAgent didn't change it. Fix the file and try again."
+        }
+        "app_plugin_setting_unsafe" => {
+            "Your settings file is a link or shared with another name, so CrazyAgent won't write it."
+        }
         "owner_entropy_unavailable" => {
             "This computer couldn't make a random value for the request. Nothing changed; try again."
         }
@@ -278,6 +287,7 @@ enum Pending {
     Check,
     Save,
     Users,
+    Setting,
     Accounts,
 }
 
@@ -332,7 +342,8 @@ enum Open {
 /// from and, for a code plugin, its permissions in plain words. `a` adds a plugin folder
 /// by path only after its review is approved with `y`; Enter reviews an unapproved or
 /// changed plugin, shows a bundled one read-only, or switches an approved or code plugin;
-/// turning off always confirms, listing the runs holding it. One request runs at a time.
+/// turning off always confirms, listing the runs holding it; `w` switches the stored
+/// choice for runs holding a plugin turned off. One request runs at a time.
 pub(in crate::tui) struct AppPluginsPage {
     state: State,
     grants: Grants,
@@ -396,6 +407,13 @@ impl AppPluginsPage {
             );
         }
         entries
+    }
+
+    fn stored(&self) -> TurnOff {
+        match &self.state {
+            State::Ready(page) => page.when_turned_off.value,
+            _ => TurnOff::default(),
+        }
     }
 
     fn current(&self) -> Option<Entry<'_>> {
@@ -695,6 +713,13 @@ impl AppPluginsPage {
                 if pending == Some(Pending::Save) {
                     ctx.say(Message::success("Saved.", saved_line(&was)));
                 }
+                if pending == Some(Pending::Setting) {
+                    let now = choice_words(page.when_turned_off.value);
+                    ctx.say(Message::success(
+                        "Saved.",
+                        &format!("When turned off: {now}."),
+                    ));
+                }
                 self.note(page);
                 self.state = State::Ready(page.clone());
                 self.selected = self.selected.min(self.entries().len().saturating_sub(1));
@@ -726,7 +751,8 @@ impl AppPluginsPage {
             }
             AppPluginsEvent::Preview(result) => self.previewed(result, ctx),
             AppPluginsEvent::Users { name, result } => match result {
-                Ok((users, stored)) => {
+                Ok(users) => {
+                    let stored = self.stored();
                     let title = self
                         .entries()
                         .iter()
@@ -736,8 +762,8 @@ impl AppPluginsPage {
                         name: name.clone(),
                         title,
                         users: users.clone(),
-                        stored: *stored,
-                        choice: *stored,
+                        stored,
+                        choice: stored,
                     }));
                 }
                 Err(code) => ctx.say(Message::error("Not turned off.", &sentence(code))),
@@ -895,6 +921,23 @@ impl AppPluginsPage {
                 .collect()
         };
         let mut lines = muted(INTRO);
+        if let State::Ready(page) = &self.state {
+            let setting = &page.when_turned_off;
+            lines.extend(muted(&format!(
+                "When turned off: {}",
+                choice_words(setting.value)
+            )));
+            if setting.project_override {
+                lines.extend(
+                    wrap(
+                        "A project settings file sets this, and it wins over what you save here.",
+                        limit,
+                    )
+                    .into_iter()
+                    .map(|part| styled(part, Role::Warning, theme)),
+                );
+            }
+        }
         lines.push(Line::default());
         let page = match &self.state {
             State::Loading => {
@@ -1099,6 +1142,7 @@ impl AppPluginsPage {
             }
         }
         hints.push(hint("a", "Add plugin"));
+        hints.push(hint("w", "When turned off"));
         hints.push(hint(vertical, "Move"));
         hints.push(hint("r", "Read again"));
         hints.push(hint("Esc", "Back"));
@@ -1277,6 +1321,14 @@ impl Screen for AppPluginsPage {
             Key::Char('x') if idle => self.remove(ctx),
             Key::Char('k') if idle => self.key_form(ctx),
             Key::Char('u') if idle => self.unbind(ctx),
+            Key::Char('w') if matches!(self.state, State::Ready(_)) && self.pending.is_none() => {
+                let when_off = other(self.stored());
+                self.ask(
+                    AppPluginsJob::SetWhenOff { when_off },
+                    Pending::Setting,
+                    ctx,
+                );
+            }
             _ => return Flow::Ignored,
         }
         Flow::Handled

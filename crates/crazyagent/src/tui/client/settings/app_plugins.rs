@@ -33,6 +33,9 @@ pub(in crate::tui) enum AppPluginsJob {
     Users {
         name: String,
     },
+    SetWhenOff {
+        when_off: TurnOff,
+    },
     Remove {
         name: String,
     },
@@ -60,8 +63,8 @@ impl std::fmt::Debug for AppPluginsJob {
 
 /// The engine's answer to one App plugins request. Every plugin change answers with the
 /// new page; a folder check and a review answer with a trust screen; a users read answers
-/// with the runs holding the named plugin and the stored turn-off choice; the grants read
-/// answers with every plugin's granted capabilities and essential mark.
+/// with the runs holding the named plugin; the grants read answers with every plugin's
+/// granted capabilities and essential mark.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum AppPluginsEvent {
     Page(Result<AppPluginsPage, String>),
@@ -69,24 +72,8 @@ pub(in crate::tui) enum AppPluginsEvent {
     Grants(Result<Vec<PluginGrants>, String>),
     Users {
         name: String,
-        result: Result<(Vec<PluginUser>, TurnOff), String>,
+        result: Result<Vec<PluginUser>, String>,
     },
-}
-
-/// The owner setting naming what turning a plugin off does to runs holding it.
-const WHEN_OFF_SETTING: &str = "plugins.when_turned_off";
-
-/// The stored turn-off choice from one setting read: the read value, or the default when no
-/// settings file sets the plugins group. Input: the read. Output: the choice or the code.
-fn when_off(read: Result<OwnerData, crate::engine::EngineError>) -> Result<TurnOff, String> {
-    match read {
-        Ok(OwnerData::Setting { descriptor }) if descriptor.name == WHEN_OFF_SETTING => {
-            serde_json::from_value(descriptor.value).map_err(|_| "unexpected_reply".to_owned())
-        }
-        Ok(_) => Err("unexpected_reply".into()),
-        Err(error) if error.0 == "owner_setting_not_found" => Ok(TurnOff::default()),
-        Err(error) => Err(error.0),
-    }
 }
 
 impl AppPluginsJob {
@@ -102,6 +89,7 @@ impl AppPluginsJob {
             Self::Trust { .. } => "AppPluginTrust",
             Self::SetEnabled { .. } => "AppPluginSetEnabled",
             Self::Users { .. } => "AppPluginUsers",
+            Self::SetWhenOff { .. } => "AppPluginSetWhenOff",
             Self::Remove { .. } => "AppPluginRemove",
             Self::BindAccount { .. } => "AppPluginBindAccount",
             Self::SetKey { .. } => "AppPluginSetKey",
@@ -127,6 +115,7 @@ impl AppPluginsEvent {
             | AppPluginsJob::Add { .. }
             | AppPluginsJob::Trust { .. }
             | AppPluginsJob::SetEnabled { .. }
+            | AppPluginsJob::SetWhenOff { .. }
             | AppPluginsJob::Remove { .. }
             | AppPluginsJob::BindAccount { .. }
             | AppPluginsJob::SetKey { .. }
@@ -193,27 +182,14 @@ impl NativeOwner {
                 lost,
             ),
             AppPluginsJob::Users { name } => {
-                let users = match controller.app_plugin_users(name.clone()).await {
-                    Ok(users) => users,
-                    Err(error) => {
-                        let result = Err(problem(&error, lost));
-                        return AppPluginsEvent::Users { name, result };
-                    }
-                };
-                let read = controller
-                    .read(OwnerRead::Setting {
-                        name: WHEN_OFF_SETTING.into(),
-                    })
+                let result = controller
+                    .app_plugin_users(name.clone())
                     .await
-                    .map(|reply| reply.data);
-                if let Err(error) = &read
-                    && error.0 != "owner_setting_not_found"
-                {
-                    let result = Err(problem(error, lost));
-                    return AppPluginsEvent::Users { name, result };
-                }
-                let result = when_off(read).map(|choice| (users, choice));
+                    .map_err(|error| problem(&error, lost));
                 AppPluginsEvent::Users { name, result }
+            }
+            AppPluginsJob::SetWhenOff { when_off } => {
+                page(controller.app_plugin_set_when_off(when_off).await, lost)
             }
             AppPluginsJob::Remove { name } => page(controller.app_plugin_remove(name).await, lost),
             AppPluginsJob::BindAccount {
@@ -269,54 +245,6 @@ mod tests {
         assert_eq!(
             AppPluginsEvent::failed(&folder, "app_plugin_request_invalid".into()),
             AppPluginsEvent::Preview(Err("app_plugin_request_invalid".into()))
-        );
-    }
-
-    #[test]
-    fn the_turn_off_confirm_reads_the_stored_choice_and_no_file_means_the_default() {
-        let setting = |name: &str, value: serde_json::Value| {
-            Ok(OwnerData::Setting {
-                descriptor: Box::new(crate::config::SettingDescriptor {
-                    name: name.into(),
-                    default: serde_json::json!("refuse_new_calls"),
-                    value,
-                    origin: crate::config::Origin::Global,
-                    scope: crate::config::SettingScope::Global,
-                    effect_timing: crate::config::EffectTiming::Immediate,
-                }),
-            })
-        };
-        assert_eq!(
-            when_off(setting(WHEN_OFF_SETTING, serde_json::json!("stop_runs"))),
-            Ok(TurnOff::StopRuns)
-        );
-        assert_eq!(
-            when_off(setting(
-                WHEN_OFF_SETTING,
-                serde_json::json!("refuse_new_calls")
-            )),
-            Ok(TurnOff::RefuseNewCalls)
-        );
-        assert_eq!(
-            when_off(Err(crate::engine::EngineError(
-                "owner_setting_not_found".into()
-            ))),
-            Ok(TurnOff::RefuseNewCalls)
-        );
-        assert_eq!(
-            when_off(Err(crate::engine::EngineError("owner_busy".into()))),
-            Err("owner_busy".into())
-        );
-        assert_eq!(
-            when_off(setting(
-                "plugins.essential_unlocked",
-                serde_json::json!(false)
-            )),
-            Err("unexpected_reply".into())
-        );
-        assert_eq!(
-            when_off(setting(WHEN_OFF_SETTING, serde_json::json!("pause"))),
-            Err("unexpected_reply".into())
         );
     }
 }
