@@ -1,29 +1,12 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { nativeSources } from "../native-commands.mjs";
 
 export const LIB = fileURLToPath(new URL("../../src-tauri/src/lib.rs", import.meta.url));
 export const ROUTES = fileURLToPath(new URL("../../src-tauri/e2e_bridge/routes.rs", import.meta.url));
 export const BRIDGE = fileURLToPath(new URL("../../src-tauri/src/bridge", import.meta.url));
-const SRC = fileURLToPath(new URL("../../src-tauri/src", import.meta.url));
-
-/** Reads a module file of lib.rs by name. Input: the module name. Output: its text, or null
- * when lib.rs has no such file. */
-function moduleFile(name) {
-  const path = join(SRC, `${name}.rs`);
-  return existsSync(path) ? readFileSync(path, "utf8") : null;
-}
-
-/** Puts each module file of lib.rs that holds Tauri commands in place of its `mod` line, so its
- * commands are read in source order with the rest. Inputs: the lib.rs source and a reader of a
- * module file by name. Output: the joined source; a module without commands keeps its line. */
-export function withCommandFiles(source, read = moduleFile) {
-  return source.replace(/^mod (\w+);$/gm, (line, name) => {
-    const text = read(name);
-    return text !== null && text.includes("#[tauri::command]") ? text : line;
-  });
-}
 
 const NATIVE_ONLY = /\bbridge::|\bupdates::|\bterminals\b|\bapp\b|NativeBridge::|Arc::|default_engine\(|SOCKET_OVERRIDE|state\.0/;
 const NATIVE_PARAM = /State<|AppHandle|Channel<|\bWebview\b/;
@@ -109,7 +92,7 @@ export function commandArgs(source) {
 export function commands(source) {
   const custom = commandArgs(source);
   const found = [];
-  const head = /#\[tauri::command\]\s*(?:pub\s+)?(?:async\s+)?fn\s+(desktop_\w+)\s*(?:<[^>]*>)?\(/g;
+  const head = /#\[tauri::command\]\s*(?:pub(?:\(crate\))?\s+)?(?:async\s+)?fn\s+(desktop_\w+)\s*(?:<[^>]*>)?\(/g;
   for (let match = head.exec(source); match; match = head.exec(source)) {
     let index = head.lastIndex;
     let depth = 1;
@@ -260,7 +243,7 @@ function imports(source) {
     const base = brace === -1 ? text.slice(0, text.lastIndexOf("::")) : text.slice(0, brace).replace(/::$/, "");
     const leaves = brace === -1 ? [text.slice(text.lastIndexOf("::") + 2)] : splitTop(text.slice(brace + 1, text.lastIndexOf("}")));
     const root = base.startsWith("bridge") ? `crazyagent_desktop::${base}` : base;
-    if (!/^(crazyagent|crazyagent_desktop|std)\b/.test(root)) continue;
+    if (!/^(crazyagent|crazyagent_desktop|std|kernel_\w+)\b/.test(root)) continue;
     for (const leaf of leaves) if (/^\w+$/.test(leaf)) paths.set(leaf, `${root}::${leaf}`);
   }
   return paths;
@@ -272,8 +255,7 @@ function imports(source) {
  * field from the key the app reads, flattened so those keys sit beside the other arguments.
  * Inputs: the lib.rs source and `methods` output, the app's bridge when omitted. Output: the
  * routes.rs text. */
-export function render(lib, impls = bridgeMethods()) {
-  const source = withCommandFiles(lib);
+export function render(source, impls = bridgeMethods()) {
   const routes = commands(source).map((command) => plan(command, impls)).filter((planned) => planned.route).map((planned) => planned.route);
   const arms = routes.map(({ name, args, body }) => {
     const structs = args.filter((arg) => arg.keys).map((arg) => `            #[derive(serde::Deserialize)]
@@ -311,5 +293,5 @@ ${arms}        _ => Routed::Unknown,
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   mkdirSync(dirname(ROUTES), { recursive: true });
-  writeFileSync(ROUTES, render(readFileSync(LIB, "utf8"), methods(bridgeSource())));
+  writeFileSync(ROUTES, render(nativeSources(), methods(bridgeSource())));
 }

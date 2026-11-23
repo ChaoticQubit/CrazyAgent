@@ -3,7 +3,7 @@ use crazyagent::engine::owner::{AppPluginsPage, PluginGrants, PluginUser, Previe
 use tauri::{State, Webview};
 
 #[tauri::command]
-pub async fn desktop_app_plugins(
+pub(crate) async fn desktop_app_plugins(
     webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<AppPluginsPage, BridgeError> {
@@ -13,7 +13,7 @@ pub async fn desktop_app_plugins(
 }
 
 #[tauri::command]
-pub async fn desktop_app_plugin_grants(
+pub(crate) async fn desktop_app_plugin_grants(
     webview: Webview,
     state: State<'_, NativeState>,
 ) -> Result<Vec<PluginGrants>, BridgeError> {
@@ -22,7 +22,7 @@ pub async fn desktop_app_plugin_grants(
 }
 
 #[tauri::command]
-pub async fn desktop_app_plugin_preview(
+pub(crate) async fn desktop_app_plugin_preview(
     webview: Webview,
     state: State<'_, NativeState>,
     folder: String,
@@ -33,7 +33,7 @@ pub async fn desktop_app_plugin_preview(
 }
 
 #[tauri::command]
-pub async fn desktop_app_plugin_review(
+pub(crate) async fn desktop_app_plugin_review(
     webview: Webview,
     state: State<'_, NativeState>,
     name: String,
@@ -44,7 +44,7 @@ pub async fn desktop_app_plugin_review(
 }
 
 #[tauri::command]
-pub async fn desktop_app_plugin_add(
+pub(crate) async fn desktop_app_plugin_add(
     webview: Webview,
     state: State<'_, NativeState>,
     folder: String,
@@ -59,7 +59,7 @@ pub async fn desktop_app_plugin_add(
 }
 
 #[tauri::command]
-pub async fn desktop_app_plugin_trust(
+pub(crate) async fn desktop_app_plugin_trust(
     webview: Webview,
     state: State<'_, NativeState>,
     name: String,
@@ -71,7 +71,7 @@ pub async fn desktop_app_plugin_trust(
 }
 
 #[tauri::command]
-pub async fn desktop_app_plugin_set_enabled(
+pub(crate) async fn desktop_app_plugin_set_enabled(
     webview: Webview,
     state: State<'_, NativeState>,
     name: String,
@@ -86,7 +86,7 @@ pub async fn desktop_app_plugin_set_enabled(
 }
 
 #[tauri::command]
-pub async fn desktop_app_plugin_users(
+pub(crate) async fn desktop_app_plugin_users(
     webview: Webview,
     state: State<'_, NativeState>,
     name: String,
@@ -97,7 +97,7 @@ pub async fn desktop_app_plugin_users(
 }
 
 #[tauri::command]
-pub async fn desktop_app_plugin_remove(
+pub(crate) async fn desktop_app_plugin_remove(
     webview: Webview,
     state: State<'_, NativeState>,
     name: String,
@@ -108,7 +108,7 @@ pub async fn desktop_app_plugin_remove(
 }
 
 #[tauri::command]
-pub async fn desktop_app_plugin_bind_account(
+pub(crate) async fn desktop_app_plugin_bind_account(
     webview: Webview,
     state: State<'_, NativeState>,
     name: String,
@@ -123,7 +123,7 @@ pub async fn desktop_app_plugin_bind_account(
 }
 
 #[tauri::command]
-pub async fn desktop_app_plugin_set_key(
+pub(crate) async fn desktop_app_plugin_set_key(
     webview: Webview,
     state: State<'_, NativeState>,
     name: String,
@@ -136,7 +136,7 @@ pub async fn desktop_app_plugin_set_key(
 }
 
 #[tauri::command]
-pub async fn desktop_app_plugin_unbind(
+pub(crate) async fn desktop_app_plugin_unbind(
     webview: Webview,
     state: State<'_, NativeState>,
     name: String,
@@ -148,7 +148,7 @@ pub async fn desktop_app_plugin_unbind(
 }
 
 #[tauri::command]
-pub async fn desktop_app_plugin_set_when_off(
+pub(crate) async fn desktop_app_plugin_set_when_off(
     webview: Webview,
     state: State<'_, NativeState>,
     when_off: TurnOff,

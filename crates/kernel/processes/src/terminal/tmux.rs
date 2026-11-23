@@ -7,7 +7,7 @@ use super::{
 use super::{LeadPaths, PaneCommand};
 use crate::group::Ending;
 use control::*;
-#[cfg(test)]
+#[cfg(all(test, target_os = "macos"))]
 use groups::*;
 use lines::*;
 pub use servers::Servers;

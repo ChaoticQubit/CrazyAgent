@@ -704,9 +704,10 @@ fn acp_request(
         tools: true,
         boundary: match profile {
             Some(profile) => crate::harnesses::launch::LaunchBoundary::Profile(profile),
-            None => {
-                crate::harnesses::launch::full_access_for_test(working, working.parent().unwrap())
-            }
+            None => crate::harnesses::launch::tests::full_access_for_test(
+                working,
+                working.parent().unwrap(),
+            ),
         },
         git_identity: None,
         limits: crate::harnesses::launch::LaunchLimits::default(),

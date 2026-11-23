@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 import { assertWindowGrants } from "./window-grants.mjs";
+import { commandFn, nativeSources } from "./native-commands.mjs";
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
 
@@ -29,7 +30,7 @@ function called() {
  * Output: lib.rs, every name, the names the window calls and the trial names.
  */
 function registered() {
-  const lib = read("src-tauri/src/lib.rs") + read("src-tauri/src/app_plugin_commands.rs");
+  const lib = read("src-tauri/src/lib.rs");
   const handler = lib.slice(lib.indexOf("native_commands! {"));
   const groups = handler.slice(0, handler.indexOf("\n}")).split(/\n\s*;\s*\n/)
     .map((group) => [...group.matchAll(/\b(desktop_[a-z_]+)\b/g)].map((match) => match[1]));
@@ -58,14 +59,15 @@ function specCalls() {
 
 test("every command any window file calls, through invoke or call, is registered in all four native places", () => {
   const build = read("src-tauri/build.rs");
-  const { lib, list } = registered();
+  const { list } = registered();
+  const native = nativeSources();
   const commands = called();
   assert.ok(commands.size > 100);
   assertWindowGrants(commands);
   for (const command of commands) {
     assert.ok(list.includes(command), `${command} missing from invoke_handler`);
     assert.ok(build.includes(`"${command}"`), `${command} missing from build.rs`);
-    assert.match(lib, new RegExp(`#\\[tauri::command\\]\\s*(?:pub )?(?:async )?fn ${command}(?:<[^>]*>)?\\(`), `${command} has no tauri command`);
+    assert.match(native, commandFn(command), `${command} has no tauri command`);
   }
 });
 

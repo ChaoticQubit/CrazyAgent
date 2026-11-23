@@ -685,7 +685,8 @@ mod launch {
         let mut open = turn(false);
         let work = open.request.working_dir.clone();
         let scratch = work.parent().unwrap().to_path_buf();
-        open.request.boundary = crate::harnesses::launch::full_access_for_test(&work, &scratch);
+        open.request.boundary =
+            crate::harnesses::launch::tests::full_access_for_test(&work, &scratch);
         let refused = launched(harness, &open, &handover).err();
         let code = refused.map(|error| error.0);
         assert_eq!(code.as_deref(), Some("launch_environment_refused"));
