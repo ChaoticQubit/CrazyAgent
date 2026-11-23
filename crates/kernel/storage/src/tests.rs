@@ -82,6 +82,80 @@ fn test_support_is_turned_on_only_by_dev_dependencies() {
     );
 }
 
+/// The places a manifest text turns storage's `test-support` on outside dev-dependencies.
+/// Input: the text. Output: the places.
+fn refused_in(text: &str) -> Vec<String> {
+    refused_places(std::path::Path::new("other/Cargo.toml"), text)
+}
+
+#[test]
+fn another_crates_own_test_support_definition_passes() {
+    let text = "[package]\nname = \"other\"\n\n[features]\ntest-support = [\"dep:tempfile\"]\n\n[dependencies]\ncrazyagent-kernel-storage = { path = \"../storage\" }\ntempfile = { version = \"1\", optional = true }\n";
+    assert_eq!(refused_in(text), Vec::<String>::new());
+}
+
+#[test]
+fn a_dev_dependency_turning_test_support_on_passes() {
+    let text = "[dev-dependencies]\ncrazyagent-kernel-storage = { path = \"../storage\", features = [\"test-support\"] }\n\n[target.'cfg(unix)'.dev-dependencies.store]\npackage = \"crazyagent-kernel-storage\"\npath = \"../storage\"\nfeatures = [\"test-support\"]\n";
+    assert_eq!(refused_in(text), Vec::<String>::new());
+}
+
+#[test]
+fn a_dependency_table_of_its_own_with_a_wrapped_features_list_is_caught() {
+    let text = "[dependencies.crazyagent-kernel-storage]\npath = \"../storage\"\nfeatures = [\n    \"test-support\",\n]\n";
+    assert_eq!(refused_in(text), ["dependencies"]);
+}
+
+#[test]
+fn a_target_or_build_dependency_turning_test_support_on_is_caught() {
+    let text = "[target.'cfg(unix)'.dependencies]\nstore = { package = \"crazyagent-kernel-storage\", path = \"../storage\", features = [\"test-support\"] }\n\n[build-dependencies]\ncrazyagent-kernel-storage = { path = \"../storage\", features = [\"test-support\"] }\n";
+    assert_eq!(
+        refused_in(text),
+        ["build-dependencies", "target.cfg(unix).dependencies"]
+    );
+}
+
+#[test]
+fn a_feature_that_turns_test_support_on_through_a_dependency_is_caught() {
+    let text = "[dependencies]\nstore = { package = \"crazyagent-kernel-storage\", path = \"../storage\", optional = true }\n\n[features]\nextra = [\"store?/test-support\"]\nother = [\"crazyagent-kernel-storage/test-support\"]\nplain = [\"dep:store\"]\n";
+    assert_eq!(refused_in(text), ["features.extra"]);
+}
+
+#[cfg(unix)]
+#[test]
+fn files_leaves_out_a_folder_link() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("real")).unwrap();
+    std::fs::write(root.path().join("real/Cargo.toml"), "").unwrap();
+    std::os::unix::fs::symlink(root.path().join("real"), root.path().join("linked")).unwrap();
+
+    let found = files(root.path(), "Cargo.toml");
+
+    assert_eq!(found, [root.path().join("real/Cargo.toml")]);
+}
+
+#[cfg(unix)]
+#[test]
+fn files_panics_naming_a_folder_it_cannot_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let shut = root.path().join("shut");
+    std::fs::create_dir(&shut).unwrap();
+    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let readable = std::fs::read_dir(&shut).is_ok();
+
+    let walked = std::panic::catch_unwind(|| files(root.path(), "Cargo.toml"));
+
+    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        !readable,
+        "this user reads a 000 folder, so the row proves nothing"
+    );
+    let cause = walked.unwrap_err();
+    let said = cause.downcast_ref::<String>().cloned().unwrap_or_default();
+    assert!(said.contains(&format!("{shut:?}")), "{said}");
+}
+
 #[test]
 fn for_test_names_stay_in_test_files() {
     let root = workspace();
