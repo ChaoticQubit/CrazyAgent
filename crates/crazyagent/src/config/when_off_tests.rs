@@ -39,7 +39,10 @@ fn a_project_file_that_sets_the_choice_still_wins() {
     let project = "[plugins]\nwhen_turned_off = \"refuse_new_calls\"\n";
     let (bytes, config) = edit_when_turned_off("", project, TurnOff::StopRuns).unwrap();
     assert!(bytes.contains("when_turned_off = \"stop_runs\""), "{bytes}");
-    assert_eq!(config.settings.plugins.when_turned_off, TurnOff::RefuseNewCalls);
+    assert_eq!(
+        config.settings.plugins.when_turned_off,
+        TurnOff::RefuseNewCalls
+    );
     assert_eq!(
         config.descriptors["plugins.when_turned_off"].origin,
         Origin::Project

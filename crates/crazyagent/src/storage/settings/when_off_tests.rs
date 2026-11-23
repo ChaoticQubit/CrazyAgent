@@ -2,6 +2,7 @@ use super::*;
 use crate::config::edit_when_turned_off;
 use kernel_plugin_host::usage::TurnOff;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+use std::path::Path;
 
 const GLOBAL: &str = "# owner notes\ntimeout_ms = 1000 # keep\n";
 
@@ -45,9 +46,10 @@ impl Fixture {
     }
 
     fn write(&self, when_off: TurnOff) -> Result<EffectiveConfig, EngineError> {
-        self.sources.write_global(&|global: &str, project: &str| {
-            edit_when_turned_off(global, project, when_off)
-        })
+        self.sources
+            .write_global(&move |global: &str, project: &str| {
+                edit_when_turned_off(global, project, when_off)
+            })
     }
 
     fn staged_left(&self) -> bool {
@@ -156,10 +158,16 @@ fn setting_refusals_map_to_listed_app_plugin_codes() {
         ("settings_metadata_invalid", "app_plugin_setting_unsafe"),
         ("settings_source_replaced", "app_plugin_setting_unsafe"),
         ("settings_parent_replaced", "app_plugin_setting_unsafe"),
-        ("invalid_configuration_format", "app_plugin_setting_unreadable"),
+        (
+            "invalid_configuration_format",
+            "app_plugin_setting_unreadable",
+        ),
         ("settings_file_bounds", "app_plugin_setting_unreadable"),
         ("settings_source_conflict", "app_plugin_setting_unavailable"),
-        ("settings_publication_pending", "app_plugin_setting_unavailable"),
+        (
+            "settings_publication_pending",
+            "app_plugin_setting_unavailable",
+        ),
     ] {
         assert_eq!(setting_refusal(error(raw)).0, mapped, "{raw}");
         assert!(

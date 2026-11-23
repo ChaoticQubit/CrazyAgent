@@ -19,10 +19,13 @@ pub use native_auth::{
     NativeAuthScope, NativeAuthStart, SignInWay, ends_operation,
 };
 
+pub use kernel_plugin_host::grants::PluginGrants;
+pub use kernel_plugin_host::usage::TurnOff;
+pub use kernel_plugin_host::views::{Listing, Preview};
 pub use transport::accounts::{AccountCheck, AccountPage};
 pub use transport::agents::{AGENT_CONTROL_CODES, AGENTS_PAGE, AgentPage, RELEASE_WAIT};
 pub use transport::app_plugins::{
-    APP_PLUGINS_CODES, AppPluginsPage, PermissionWords, PluginChanged, PluginUser,
+    APP_PLUGINS_CODES, AppPluginsPage, PermissionWords, PluginChanged, PluginUser, WhenTurnedOff,
 };
 pub use transport::changes::CHANGES_CODES;
 pub use transport::cleanup::CLEANUP_CODES;

@@ -911,7 +911,7 @@ impl Storage {
                             let result = if readonly {
                                 Err(error("app_plugins_readonly"))
                             } else {
-                                crate::app_plugins::execute(&connection, &config.settings.plugins, command)
+                                settings::app_plugins(&connection, &mut config, sources.as_ref(), command)
                             };
                             let _ = reply.send(result);
                         }
