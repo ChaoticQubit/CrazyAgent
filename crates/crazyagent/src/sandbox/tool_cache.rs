@@ -479,7 +479,7 @@ fn run_priming(folder: &Path, uv: &Path) -> Result<(), &'static str> {
 /// [`PRIMING_ENV`], in its own process group with no input or output. Inputs: the priming
 /// folder and the canonical uv binary. Output: the unspawned command.
 pub fn priming_command(folder: &Path, uv: &Path) -> Command {
-    let mut command = Command::new(super::SANDBOX_EXEC);
+    let mut command = Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC);
     command
         .arg("-p")
         .arg(super::priming_profile(folder, uv))

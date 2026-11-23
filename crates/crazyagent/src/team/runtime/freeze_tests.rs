@@ -120,9 +120,9 @@ impl Proxied {
             .mode(0o700)
             .create(state.parent().unwrap())
             .unwrap();
-        let argv = crate::sandbox::kept_pane(
+        let argv = kernel_sandbox::profile::command::kept_pane(
             vec![
-                crate::sandbox::SANDBOX_EXEC.to_owned(),
+                kernel_sandbox::profile::command::SANDBOX_EXEC.to_owned(),
                 "-f".to_owned(),
                 profile.display().to_string(),
                 "/bin/sh".to_owned(),

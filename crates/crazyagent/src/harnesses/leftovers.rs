@@ -1,5 +1,5 @@
 use crate::protocol::CredentialRef;
-use crate::sandbox::LineageCheck;
+use kernel_sandbox::profile::command::LineageCheck;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;

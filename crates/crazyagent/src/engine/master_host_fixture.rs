@@ -240,13 +240,18 @@ impl MasterFixture {
     /// `Sandboxed` where the Linux backend leaves such a process running, `Unneeded` where a
     /// process namespace or the platform ends it. Takes nothing. Returns the check.
     #[cfg(not(target_os = "macos"))]
-    pub(in crate::engine) fn lineage_check(&mut self) -> crate::sandbox::LineageCheck {
+    pub(in crate::engine) fn lineage_check(
+        &mut self,
+    ) -> kernel_sandbox::profile::command::LineageCheck {
         let profile = self.lease("fixture-lineage-check", 1).unwrap();
         let home = profile.profile_path().unwrap();
         let readable = self.root.path().join("bin");
         fs::create_dir_all(&readable).unwrap();
         let check = self.sandbox(&home, &readable).lineage_check();
-        assert_ne!(check, crate::sandbox::LineageCheck::FullAccess);
+        assert_ne!(
+            check,
+            kernel_sandbox::profile::command::LineageCheck::FullAccess
+        );
         check
     }
 }
@@ -304,11 +309,11 @@ impl HarnessProcesses {
     #[cfg(not(target_os = "macos"))]
     pub(in crate::engine) fn assert_stopped_by(
         &self,
-        check: crate::sandbox::LineageCheck,
+        check: kernel_sandbox::profile::command::LineageCheck,
         stopped: Result<(), String>,
         uncertain: &str,
     ) {
-        if check == crate::sandbox::LineageCheck::Sandboxed {
+        if check == kernel_sandbox::profile::command::LineageCheck::Sandboxed {
             assert_eq!(stopped, Err(uncertain.to_owned()));
             self.assert_harness_gone();
             assert_eq!(rustix::process::test_kill_process(self.descendant), Ok(()));

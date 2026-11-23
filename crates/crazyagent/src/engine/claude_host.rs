@@ -593,7 +593,9 @@ impl ClaudeHost {
             group: Arc::clone(&group),
             diagnostic: Arc::clone(&kept),
             close_time: limits.cleanup_time
-                + if sandbox.lineage_check() != crate::sandbox::LineageCheck::Unneeded {
+                + if sandbox.lineage_check()
+                    != kernel_sandbox::profile::command::LineageCheck::Unneeded
+                {
                     crate::harnesses::leftovers::STOP_TIME
                 } else {
                     Duration::ZERO

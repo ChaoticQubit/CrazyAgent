@@ -1312,7 +1312,7 @@ fn the_attach_history_fills_a_fresh_view_scrollback_and_leaves_the_screen_to_red
 #[cfg(target_os = "macos")]
 #[test]
 fn a_confined_lead_line_takes_only_the_engines_own_keeper_back_out() {
-    use crate::sandbox::{KEEPER, PANE_SHIM, SANDBOX_EXEC, kept_pane};
+    use kernel_sandbox::profile::command::{KEEPER, PANE_SHIM, SANDBOX_EXEC, kept_pane};
     let agent = AgentId::team(4).unwrap();
     let profile = Path::new("/private/tmp/lead.sb");
     let plain = |profile: &str| -> Vec<String> {
@@ -1424,7 +1424,7 @@ fn a_pane_command_with_a_perl_load_variable_is_refused() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_kept_pane_hands_its_keeper_the_freeze_record_as_an_argument() {
-    use crate::sandbox::{KEEPER, PANE_SHIM, SANDBOX_EXEC, kept_pane};
+    use kernel_sandbox::profile::command::{KEEPER, PANE_SHIM, SANDBOX_EXEC, kept_pane};
     let agent = AgentId::team(4).unwrap();
     let plain: Vec<String> = [
         SANDBOX_EXEC,
@@ -1481,7 +1481,7 @@ fn a_pane_command_with_the_keeper_state_variable_is_still_refused() {
         argv: vec!["/usr/local/bin/claude".into()],
         cwd: PathBuf::from("/private/tmp/project"),
         env: vec![(
-            crate::sandbox::KEEPER_STATE.into(),
+            kernel_sandbox::profile::command::KEEPER_STATE.into(),
             "/private/tmp/state".into(),
         )],
         transcript: crate::harnesses::interactive::Transcript::Unavailable,

@@ -154,7 +154,7 @@ async fn flood_then_count(root: &Path, output_bytes: u64) -> CodexHostProcess {
         &limits,
         None,
         None,
-        crate::sandbox::LineageCheck::Unneeded,
+        kernel_sandbox::profile::command::LineageCheck::Unneeded,
     )
     .await
     .unwrap();

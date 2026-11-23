@@ -726,7 +726,7 @@ fn a_full_access_pane_runs_its_harness_as_its_first_process_and_stops_without_a_
         "the harness is the pane's first process: {first}"
     );
     assert!(
-        !first.starts_with(crazyagent::sandbox::KEEPER[0]),
+        !first.starts_with(kernel_sandbox::profile::command::KEEPER[0]),
         "no keeper runs first: {first}"
     );
 
@@ -776,7 +776,7 @@ fn a_sandboxed_pane_runs_its_harness_under_the_keeper_inside_the_profile() {
     );
     let group = Pid::from_raw(i32::try_from(pane.session.process_group()).unwrap()).unwrap();
     let first = command_of(group);
-    let keeper = crazyagent::sandbox::KEEPER[..4].join(" ");
+    let keeper = kernel_sandbox::profile::command::KEEPER[..4].join(" ");
     assert!(
         first.starts_with(&keeper),
         "the keeper is the pane's first process: {first}"

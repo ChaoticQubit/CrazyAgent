@@ -263,9 +263,9 @@ impl Servers {
     }
 
     /// Starts a native lead's own server, or with `mates` its teammates' server, under the
-    /// [`crate::sandbox::KEEPER`] when none listens at its socket (KEEPER (b)): `tmux -D`, in
+    /// [`kernel_sandbox::profile::command::KEEPER`] when none listens at its socket (KEEPER (b)): `tmux -D`, in
     /// the foreground inside the lead's or the teammates' profile, after the
-    /// [`crate::sandbox::PANE_SHIM`] forked the run's warden, so the keeper's stop has the
+    /// [`kernel_sandbox::profile::command::PANE_SHIM`] forked the run's warden, so the keeper's stop has the
     /// warden kill every process in that sandbox. The keeper runs outside the sandbox with a
     /// fixed argv, `PATH` and the reads of the lead's deadline record, so it also ends the
     /// server at the quit limit whatever runs inside it (FBTMUX-P1-R1-L1). A server already listening, as one
@@ -317,7 +317,10 @@ impl Servers {
             &self.root.join("team"),
             id,
         ));
-        assert!(crate::sandbox::KEEPER[4].contains(crate::sandbox::KEEPER_DEADLINE));
+        assert!(
+            kernel_sandbox::profile::command::KEEPER[4]
+                .contains(kernel_sandbox::profile::command::KEEPER_DEADLINE)
+        );
         if let Ok(metadata) = std::fs::symlink_metadata(socket)
             && (!metadata.file_type().is_socket() || metadata.uid() != user())
         {
@@ -373,20 +376,20 @@ impl Servers {
             keep_servers_deadline(&self.root, lead, until)?;
         }
         let mut keeper = kernel_processes::spawn_gate::spawn(
-            std::process::Command::new(crate::sandbox::KEEPER[0])
-                .args(&crate::sandbox::KEEPER[1..])
-                .arg(crate::sandbox::SANDBOX_EXEC)
+            std::process::Command::new(kernel_sandbox::profile::command::KEEPER[0])
+                .args(&kernel_sandbox::profile::command::KEEPER[1..])
+                .arg(kernel_sandbox::profile::command::SANDBOX_EXEC)
                 .arg("-f")
                 .arg(&profile)
-                .args(crate::sandbox::PANE_SHIM)
+                .args(kernel_sandbox::profile::command::PANE_SHIM)
                 .arg(program)
                 .args(["-D", "-u", "-f", "/dev/null", "-S"])
                 .arg(socket)
                 .env_clear()
                 .env("PATH", super::SERVER_PATH)
-                .env(crate::sandbox::KEEPER_DEADLINE, &deadline)
+                .env(kernel_sandbox::profile::command::KEEPER_DEADLINE, &deadline)
                 .env(
-                    crate::sandbox::KEEPER_STATE,
+                    kernel_sandbox::profile::command::KEEPER_STATE,
                     crate::team::runtime::agent_servers_state(&self.root.join("team"), id, mates),
                 )
                 .current_dir(folder)

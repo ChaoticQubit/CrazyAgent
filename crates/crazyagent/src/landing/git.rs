@@ -890,7 +890,7 @@ impl Repo {
             confined.args(&self.confinement[1..]);
             confined
         } else {
-            let mut confined = Command::new(crate::sandbox::SANDBOX_EXEC);
+            let mut confined = Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC);
             confined.args(&self.confinement);
             confined
         };

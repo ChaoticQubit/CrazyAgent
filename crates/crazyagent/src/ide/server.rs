@@ -1148,7 +1148,7 @@ fn command(
     assert!(command.get_envs().count() <= env::ENV_MAX);
     assert_eq!(
         policy.access == AgentAccess::Full,
-        command.get_program() != crate::sandbox::SANDBOX_EXEC
+        command.get_program() != kernel_sandbox::profile::command::SANDBOX_EXEC
     );
     Ok(command)
 }

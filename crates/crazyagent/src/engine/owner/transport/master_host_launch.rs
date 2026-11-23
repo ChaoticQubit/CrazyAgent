@@ -2352,13 +2352,16 @@ mod tests {
         )
         .unwrap();
         let wrapped = sandbox.wrap(&master).unwrap();
-        assert_eq!(wrapped.get_program(), crate::sandbox::SANDBOX_EXEC);
+        assert_eq!(
+            wrapped.get_program(),
+            kernel_sandbox::profile::command::SANDBOX_EXEC
+        );
         let args = wrapped
             .get_args()
             .map(|arg| arg.to_str().unwrap())
             .collect::<Vec<_>>();
         let mut start = vec!["-f", sandbox.profile().to_str().unwrap()];
-        start.extend(crate::sandbox::SESSION_SHIM);
+        start.extend(kernel_sandbox::profile::command::SESSION_SHIM);
         start.push(executable.to_str().unwrap());
         assert_eq!(args[..start.len()], start);
         assert!(
@@ -2417,13 +2420,16 @@ mod tests {
         )
         .unwrap();
         let claude = sandbox.wrap(&claude).unwrap();
-        assert_eq!(claude.get_program(), crate::sandbox::SANDBOX_EXEC);
+        assert_eq!(
+            claude.get_program(),
+            kernel_sandbox::profile::command::SANDBOX_EXEC
+        );
         let claude_args = claude
             .get_args()
             .map(|arg| arg.to_str().unwrap())
             .collect::<Vec<_>>();
         let mut start = vec!["-f", sandbox.profile().to_str().unwrap()];
-        start.extend(crate::sandbox::SESSION_SHIM);
+        start.extend(kernel_sandbox::profile::command::SESSION_SHIM);
         start.push(executable.to_str().unwrap());
         assert_eq!(claude_args[..start.len()], start);
         assert!(claude_args.windows(2).any(|pair| pair == ["--tools", ""]));

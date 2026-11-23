@@ -781,7 +781,10 @@ fn sandboxed_ide_shell_cannot_read_pool_credentials_or_the_ide_token() {
         agent_files: Default::default(),
     };
     let mut command = ide_shell::command(&launch).unwrap();
-    assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
+    assert_eq!(
+        command.get_program(),
+        kernel_sandbox::profile::command::SANDBOX_EXEC
+    );
     let pane = ide_shell::interactive(&launch, AgentAccess::Sandboxed).unwrap();
     let argv: Vec<&std::ffi::OsStr> = std::iter::once(command.get_program())
         .chain(command.get_args())

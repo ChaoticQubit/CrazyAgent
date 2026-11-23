@@ -1872,7 +1872,11 @@ impl Lead {
     /// runtime starts a native lead. Takes the prompt and the argv. Returns the command.
     fn confined(&self, prompt: &str, argv: &[&str]) -> InteractiveCommand {
         let profile = self.profile.to_str().unwrap();
-        let mut confined = vec![crazyagent::sandbox::SANDBOX_EXEC, "-f", profile];
+        let mut confined = vec![
+            kernel_sandbox::profile::command::SANDBOX_EXEC,
+            "-f",
+            profile,
+        ];
         confined.extend_from_slice(argv);
         self.shell(prompt, &confined)
     }
@@ -2655,7 +2659,7 @@ fn a_refused_lead_does_not_stop_the_close_of_the_next_lead_and_the_engine() {
     let next_command = lead.shell(
         "two$ ",
         &[
-            crazyagent::sandbox::SANDBOX_EXEC,
+            kernel_sandbox::profile::command::SANDBOX_EXEC,
             "-f",
             next_profile.to_str().unwrap(),
             "/bin/sh",

@@ -2,7 +2,6 @@ use super::*;
 
 /// A confined pane command the keeper wraps reads back as the same command, and the
 /// boundary program is the sandbox runner.
-#[cfg(target_os = "macos")]
 #[test]
 fn a_kept_pane_reads_back_as_the_command_it_wrapped() {
     let plain: Vec<String> = [SANDBOX_EXEC, "-f", "/tmp/agent.sb", "/bin/zsh", "-l"]

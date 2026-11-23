@@ -561,7 +561,7 @@ fn confined(
     let git = Path::new(crate::research::runner::TOOLS_GIT);
     let tools = Path::new(crate::research::runner::TOOLS_ROOT);
     let helpers = tools.join("usr/libexec/git-core");
-    let mut command = Command::new(crate::sandbox::SANDBOX_EXEC);
+    let mut command = Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC);
     for (name, value) in [
         ("GIT", git),
         ("HELPERS", helpers.as_path()),

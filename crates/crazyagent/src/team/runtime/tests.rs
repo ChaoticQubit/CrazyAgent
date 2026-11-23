@@ -3815,7 +3815,7 @@ fn a_team_agent_starts_the_delegation_engine_from_its_app_bundle_but_no_other_bu
             .unwrap();
         for (program, starts) in [(&engine, true), (&other, false)] {
             let output = kernel_processes::spawn_gate::output(
-                Command::new(crate::sandbox::SANDBOX_EXEC)
+                Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
                     .arg("-f")
                     .arg(&plan.sandbox_profile)
                     .arg(program)
@@ -30382,7 +30382,7 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
     std::fs::write(&session, format!("{TURN_OPEN}\n")).unwrap();
     let command = InteractiveCommand {
         argv: vec![
-            crate::sandbox::SANDBOX_EXEC.into(),
+            kernel_sandbox::profile::command::SANDBOX_EXEC.into(),
             "-f".into(),
             plan.sandbox_profile.to_str().unwrap().into(),
             "/bin/sh".into(),
@@ -31104,7 +31104,7 @@ fn ended_native_lead_on<T>(
                 .unwrap();
         }
         let started = kernel_processes::spawn_gate::status(
-            Command::new(crate::sandbox::SANDBOX_EXEC)
+            Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
                 .arg("-f")
                 .arg(crate::team::runtime::agent_profile(
                     &fixture.base.join("team"),
@@ -31760,7 +31760,7 @@ fn a_native_lead_s_teammate_starts_through_the_command_its_lead_s_app_runs() {
         .iter()
         .map(|pane| {
             let shown = kernel_processes::spawn_gate::output(
-                Command::new(crate::sandbox::SANDBOX_EXEC)
+                Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
                     .arg("-f")
                     .arg(&plan.sandbox_profile)
                     .arg(&fixture.tmux)
@@ -31889,7 +31889,7 @@ fn a_native_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot_or_sess
     )
     .unwrap();
     let mated = kernel_processes::spawn_gate::output(
-        Command::new(crate::sandbox::SANDBOX_EXEC)
+        Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
             .arg("-f")
             .arg(&teammates)
             .arg("/bin/sh")
@@ -31905,7 +31905,7 @@ fn a_native_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot_or_sess
     .unwrap();
     let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
     let ran = kernel_processes::spawn_gate::output(
-        Command::new(crate::sandbox::SANDBOX_EXEC)
+        Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
             .arg("-f")
             .arg(&plan.sandbox_profile)
             .arg("/bin/sh")
@@ -32216,7 +32216,7 @@ fn neither_a_native_lead_nor_a_teammate_moves_its_home_away_but_both_still_work_
             lines.extend(flag_lines(name, &quoted(path.as_path())));
         }
         let output = kernel_processes::spawn_gate::output(
-            Command::new(crate::sandbox::SANDBOX_EXEC)
+            Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
                 .arg("-f")
                 .arg(&profile)
                 .arg("/bin/sh")
@@ -32371,7 +32371,7 @@ fn a_native_teammate_writes_only_its_own_home_and_the_team_folders_its_lead_shar
     )
     .unwrap();
     let mated = kernel_processes::spawn_gate::output(
-        Command::new(crate::sandbox::SANDBOX_EXEC)
+        Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
             .arg("-f")
             .arg(&teammates)
             .arg("/bin/sh")
@@ -32387,7 +32387,7 @@ fn a_native_teammate_writes_only_its_own_home_and_the_team_folders_its_lead_shar
     .unwrap();
     let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
     let ran = kernel_processes::spawn_gate::output(
-        Command::new(crate::sandbox::SANDBOX_EXEC)
+        Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
             .arg("-f")
             .arg(&plan.sandbox_profile)
             .arg("/bin/zsh")
@@ -32554,7 +32554,7 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
     )
     .unwrap();
     let planted = kernel_processes::spawn_gate::output(
-        Command::new(crate::sandbox::SANDBOX_EXEC)
+        Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
             .arg("-f")
             .arg(&plan.sandbox_profile)
             .arg("/bin/sh")
@@ -32591,7 +32591,7 @@ fn an_agent_leaves_no_shell_code_in_its_own_home_for_its_next_start() {
         ("/bin/bash", &["-l", "-c", "true"][..]),
     ] {
         let ran = kernel_processes::spawn_gate::output(
-            Command::new(crate::sandbox::SANDBOX_EXEC)
+            Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
                 .arg("-f")
                 .arg(&plan.sandbox_profile)
                 .arg(shell)
@@ -32753,7 +32753,7 @@ fn an_agent_leaves_no_cargo_or_git_config_and_no_file_flag_in_its_own_home() {
     )
     .unwrap();
     let planted = kernel_processes::spawn_gate::output(
-        Command::new(crate::sandbox::SANDBOX_EXEC)
+        Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
             .arg("-f")
             .arg(&plan.sandbox_profile)
             .arg("/bin/sh")
@@ -32930,7 +32930,7 @@ fn a_native_teammate_cannot_read_or_plant_in_its_lead_s_own_temp_folder() {
 
     let staged = own.join("staged.txt");
     let staging = kernel_processes::spawn_gate::output(
-        Command::new(crate::sandbox::SANDBOX_EXEC)
+        Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
             .arg("-f")
             .arg(&plan.sandbox_profile)
             .arg("/bin/sh")
@@ -32983,7 +32983,7 @@ fn a_native_teammate_cannot_read_or_plant_in_its_lead_s_own_temp_folder() {
     )
     .unwrap();
     let mated = kernel_processes::spawn_gate::output(
-        Command::new(crate::sandbox::SANDBOX_EXEC)
+        Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
             .arg("-f")
             .arg(&teammates)
             .arg("/bin/sh")
@@ -33174,7 +33174,7 @@ fn a_native_teammate_cannot_change_a_hook_its_lead_runs() {
     )
     .unwrap();
     let mated = kernel_processes::spawn_gate::output(
-        Command::new(crate::sandbox::SANDBOX_EXEC)
+        Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
             .arg("-f")
             .arg(&teammates)
             .arg("/bin/sh")
@@ -33190,7 +33190,7 @@ fn a_native_teammate_cannot_change_a_hook_its_lead_runs() {
     .unwrap();
     let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
     let ran = kernel_processes::spawn_gate::output(
-        Command::new(crate::sandbox::SANDBOX_EXEC)
+        Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
             .arg("-f")
             .arg(&plan.sandbox_profile)
             .arg("/bin/sh")
@@ -33361,7 +33361,7 @@ fn a_native_teammate_cannot_move_or_replace_its_lead_s_home() {
     )
     .unwrap();
     let mated = kernel_processes::spawn_gate::output(
-        Command::new(crate::sandbox::SANDBOX_EXEC)
+        Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
             .arg("-f")
             .arg(agent_teammates_profile(&runtime.state, id))
             .arg("/bin/sh")
@@ -33377,7 +33377,7 @@ fn a_native_teammate_cannot_move_or_replace_its_lead_s_home() {
     .unwrap();
     let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
     let ran = kernel_processes::spawn_gate::output(
-        Command::new(crate::sandbox::SANDBOX_EXEC)
+        Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
             .arg("-f")
             .arg(&plan.sandbox_profile)
             .arg("/bin/sh")
@@ -33544,7 +33544,7 @@ fn a_native_teammate_cannot_change_its_lead_s_skills_or_relay_plugin() {
     )
     .unwrap();
     let mated = kernel_processes::spawn_gate::output(
-        Command::new(crate::sandbox::SANDBOX_EXEC)
+        Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC)
             .arg("-f")
             .arg(agent_teammates_profile(&runtime.state, id))
             .arg("/bin/sh")

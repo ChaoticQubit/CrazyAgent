@@ -325,9 +325,9 @@ impl LaunchBoundary {
     /// What a stop checks of the processes a run left outside its group: the installed
     /// sandbox's own check, or nothing for a Seatbelt profile, which ends them all. Output:
     /// the check.
-    pub fn lineage_check(&self) -> crate::sandbox::LineageCheck {
+    pub fn lineage_check(&self) -> kernel_sandbox::profile::command::LineageCheck {
         match self {
-            Self::Profile(_) => crate::sandbox::LineageCheck::Unneeded,
+            Self::Profile(_) => kernel_sandbox::profile::command::LineageCheck::Unneeded,
             Self::Installed(boundary) => boundary.lineage_check(),
         }
     }
@@ -1052,7 +1052,7 @@ fn confined<'a>(
     );
     #[cfg(target_os = "macos")]
     assert_eq!(
-        crate::sandbox::starts_at_boundary(command.get_program()),
+        kernel_sandbox::profile::command::starts_at_boundary(command.get_program()),
         !request.boundary.is_unconfined()
     );
     assert!(command.get_args().all(|argument| {

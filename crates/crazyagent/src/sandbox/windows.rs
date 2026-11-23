@@ -1,4 +1,4 @@
-use super::{ProjectSandbox, Sandbox, agent_env};
+use super::{ProjectSandbox, agent_env};
 use crazyagent_win_sandbox::plan::plan;
 use crazyagent_win_sandbox::profile::{BoundaryProfile, Capability, Guard, Guarded, check_path};
 use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
@@ -6,6 +6,7 @@ use kernel_sandbox::error::{SandboxError, invalid};
 use kernel_sandbox::lines::MODEL_LOOPBACK_WINDOWS_LINE;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::paths::{canonical, clean_absolute};
+use kernel_sandbox::profile::command::Sandbox;
 use kernel_sandbox::windows::{
     GRANTS_FOLDER, container_for, existing_helper, helper_beside_engine,
 };
@@ -756,14 +757,16 @@ mod tests {
         let beside = tests.with_file_name(HELPER_NAME);
         let elsewhere = tests.parent().unwrap().with_file_name(HELPER_NAME);
         assert_ne!(beside, elsewhere);
-        assert!(crate::sandbox::starts_at_boundary(beside.as_os_str()));
+        assert!(kernel_sandbox::profile::command::starts_at_boundary(
+            beside.as_os_str()
+        ));
         for program in [
             cmd(),
             elsewhere,
-            PathBuf::from(crate::sandbox::SANDBOX_EXEC),
+            PathBuf::from(kernel_sandbox::profile::command::SANDBOX_EXEC),
         ] {
             assert!(
-                !crate::sandbox::starts_at_boundary(program.as_os_str()),
+                !kernel_sandbox::profile::command::starts_at_boundary(program.as_os_str()),
                 "{}",
                 program.display()
             );

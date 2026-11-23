@@ -620,7 +620,7 @@ impl Tmux {
         }
         let mut command = match &self.confined {
             Some(profile) => {
-                let mut command = Command::new(crate::sandbox::SANDBOX_EXEC);
+                let mut command = Command::new(kernel_sandbox::profile::command::SANDBOX_EXEC);
                 command.arg("-f").arg(profile).arg(executable);
                 command
             }
@@ -1406,7 +1406,7 @@ fn spawn_line(agent: &AgentId, command: &PaneCommand) -> Result<String, HostErro
 /// The lead's window becomes the session's current one, since tmux puts a split the lead's
 /// app runs without a target into the current window, which would otherwise be the holder.
 /// A command the engine put under its pane keeper is taken back out of it first
-/// (`crate::sandbox::unkept_pane`): the keeper cannot run inside the server's sandbox.
+/// (`kernel_sandbox::profile::command::unkept_pane`): the keeper cannot run inside the server's sandbox.
 /// Takes the agent, the command, the server's profile and those variables. Returns the line,
 /// or `terminal_command_invalid` for any other command or a variable name not plain.
 fn confined_line(
@@ -1418,12 +1418,16 @@ fn confined_line(
     let invalid = || failure("terminal_command_invalid");
     let cwd = checked(command)?;
     #[cfg(target_os = "macos")]
-    let unkept = crate::sandbox::unkept_pane(&command.argv);
+    let unkept = kernel_sandbox::profile::command::unkept_pane(&command.argv);
     #[cfg(not(target_os = "macos"))]
     let unkept: Option<Vec<String>> = None;
     let argv = unkept.as_deref().unwrap_or(&command.argv);
     let profile = profile.to_str().ok_or_else(invalid)?;
-    let confined = [crate::sandbox::SANDBOX_EXEC, "-f", profile];
+    let confined = [
+        kernel_sandbox::profile::command::SANDBOX_EXEC,
+        "-f",
+        profile,
+    ];
     if argv.len() <= confined.len()
         || argv[..confined.len()]
             .iter()
