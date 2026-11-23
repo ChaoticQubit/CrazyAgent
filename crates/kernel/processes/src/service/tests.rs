@@ -1319,6 +1319,12 @@ mod access_list;
 /// none; each row asserts on the written text.
 mod launchd;
 
+/// The CLI link publish rows: an absent name gets the link, a link there is replaced, and a
+/// regular file another installer writes after the name is checked keeps its bytes while
+/// the publish is refused. Inputs: real bin folders and the step between check and publish.
+/// Output: none.
+mod cli_link_publish;
+
 /// The Windows link rows: a junction chain through a folder others can change is
 /// changeable though both its ends are private, and a link's target walks from a drive root
 /// or counts as changeable. Inputs: real junctions made with mklink and literal targets.

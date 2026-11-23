@@ -23,11 +23,32 @@ pub fn link_cli(executable: &Path, bin: &Path) -> Result<PathBuf, ServiceError> 
             link.display()
         )));
     }
+    #[cfg(test)]
+    BEFORE_PUBLISH.with(|step| {
+        if let Some(step) = step.borrow_mut().take() {
+            step(&link);
+        }
+    });
     let staged = bin.join(format!(".crazyagent.link.{}", std::process::id()));
     let _ = std::fs::remove_file(&staged);
     std::os::unix::fs::symlink(executable, &staged).map_err(|error| fail(&staged, error))?;
     std::fs::rename(&staged, &link).map_err(|error| fail(&link, error))?;
     Ok(link)
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    /// A step one test row runs on the link's name after [`link_cli`] checks it and before
+    /// it publishes the link.
+    static BEFORE_PUBLISH: std::cell::RefCell<Option<Box<dyn FnOnce(&Path)>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Sets the step the next [`link_cli`] on this test thread runs on the link's name between
+/// its check and its publish. Input: the step.
+#[cfg(all(test, unix))]
+pub(super) fn before_publish(step: impl FnOnce(&Path) + 'static) {
+    BEFORE_PUBLISH.with(|slot| *slot.borrow_mut() = Some(Box::new(step)));
 }
 
 /// Adds the folder holding `crazyagent.exe` to the user's PATH on Windows through
