@@ -357,5 +357,9 @@ fn the_low_port_block_is_unchanged() {
 #[should_panic(expected = "spawn_gate::tests::no_row_has_this_name")]
 fn a_row_alone_under_a_name_no_row_has_fails_naming_it() {
     let folder = tempfile::tempdir().unwrap();
-    super::row_alone("spawn_gate::tests::no_row_has_this_name", ":", folder.path());
+    super::row_alone(
+        "spawn_gate::tests::no_row_has_this_name",
+        ":",
+        folder.path(),
+    );
 }
