@@ -1365,8 +1365,8 @@ fn dropping_an_idle_relay_stops_its_accept_thread_at_once() {
     assert!(took < Duration::from_millis(50), "dropping took {took:?}");
 }
 
-/// Today's `upstream` as it stood at the D-N0 base (0be313a5e), kept unchanged so the row
-/// below compares the shared kernel parse against it. Input: the base URL. Output: the
+/// The relay's upstream check as it was before the shared kernel target rule, kept unchanged
+/// so the row below compares the new parse against it. Input: the base URL. Output: the
 /// upstream, or `model_relay_upstream_invalid`.
 fn upstream_at_ticket_base(base_url: &str) -> Result<Upstream, EngineError> {
     let invalid = || failure("model_relay_upstream_invalid");
