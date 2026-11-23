@@ -234,7 +234,9 @@ fn target(text: &str) -> bool {
 fn python(text: &str) -> bool {
     !text.is_empty()
         && text.len() <= PYTHON_BYTES_MAX
-        && text.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.')
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.')
 }
 
 /// The download fields of a uv release or a Node archive. Inputs: the fields. Output:
@@ -315,7 +317,10 @@ pub fn validate(recipe: &InstallRecipe) -> Result<(), &'static str> {
             }
             Ok(())
         }
-        InstallRecipe::Winget { id, version: pinned } => {
+        InstallRecipe::Winget {
+            id,
+            version: pinned,
+        } => {
             if !winget_id(id) {
                 return Err(NAME_INVALID);
             }

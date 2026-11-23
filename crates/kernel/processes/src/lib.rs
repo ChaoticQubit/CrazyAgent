@@ -9,6 +9,9 @@ pub mod finding;
 /// One path's hold on ending a process group, so a pane's stop and the terminal host's
 /// close never both signal one group and no path claims a number a new group may lead.
 pub mod group;
+/// Pinned installer recipes: the typed fields of each installer the engine runs, and the
+/// checks that keep every field to its bounds and the bundled lists.
+pub mod install;
 /// Setup's process helpers: bounded command runs, version reads, file hashes and the
 /// private folders setup stages into, with the error code and version types they return.
 pub mod run;
@@ -27,9 +30,6 @@ pub mod spawn_gate;
 /// terminal host implements, the bounded output buffer viewers read and the pane views
 /// built on a host.
 pub mod terminal;
-/// Pinned installer recipes: the typed fields of each installer the engine runs, and the
-/// checks that keep every field to its bounds and the bundled lists.
-pub mod install;
 /// App self-update: release channel, signed download, verification and the executable swap
 /// that `crazyagent update` runs, with every engine stop and start left to the caller.
 pub mod update;

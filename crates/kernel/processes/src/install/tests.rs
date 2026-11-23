@@ -40,14 +40,31 @@ const HASH: &str = "743f85035a1996ecb350659e01cd9faea9709829be09b1b4b03c73eaf3c9
 #[test]
 fn a_recipe_with_an_extra_argument_is_refused() {
     assert_eq!(
-        validate(&uv_tool("graphifyy --index-url=http://x", "1.0", "3.12", 10)),
+        validate(&uv_tool(
+            "graphifyy --index-url=http://x",
+            "1.0",
+            "3.12",
+            10
+        )),
         Err(NAME_INVALID)
     );
-    assert_eq!(validate(&uv_tool("-graphifyy", "1.0", "3.12", 10)), Err(NAME_INVALID));
-    assert_eq!(validate(&uv_tool("graphifyy", "-1.0", "3.12", 10)), Err(VERSION_INVALID));
-    assert_eq!(validate(&uv_tool("graphifyy", "1.0", "-3.12", 10)), Err(TARGET_INVALID));
+    assert_eq!(
+        validate(&uv_tool("-graphifyy", "1.0", "3.12", 10)),
+        Err(NAME_INVALID)
+    );
+    assert_eq!(
+        validate(&uv_tool("graphifyy", "-1.0", "3.12", 10)),
+        Err(VERSION_INVALID)
+    );
+    assert_eq!(
+        validate(&uv_tool("graphifyy", "1.0", "-3.12", 10)),
+        Err(TARGET_INVALID)
+    );
     assert_eq!(validate(&npm("-codex", &[])), Err(NAME_INVALID));
-    assert_eq!(validate(&release("-1", "aarch64-apple-darwin", HASH)), Err(VERSION_INVALID));
+    assert_eq!(
+        validate(&release("-1", "aarch64-apple-darwin", HASH)),
+        Err(VERSION_INVALID)
+    );
     assert_eq!(validate(&release("1", "-x", HASH)), Err(TARGET_INVALID));
     let brew = InstallRecipe::BrewFormula {
         name: "-tmux".to_owned(),
@@ -72,18 +89,27 @@ fn a_recipe_with_an_extra_argument_is_refused() {
 fn an_unlisted_self_update_arg_list_is_refused() {
     assert_eq!(validate(&update(&["update"])), Ok(()));
     assert_eq!(validate(&update(&["upgrade"])), Err(TEMPLATE_MISMATCH));
-    assert_eq!(validate(&update(&["update", "now"])), Err(TEMPLATE_MISMATCH));
+    assert_eq!(
+        validate(&update(&["update", "now"])),
+        Err(TEMPLATE_MISMATCH)
+    );
 }
 
 /// A well-shaped npm flag not on the bundled list is refused as unlisted.
 #[test]
 fn an_unlisted_npm_flag_is_refused() {
-    assert_eq!(validate(&npm("@openai/codex", &["--ignore-scripts"])), Ok(()));
+    assert_eq!(
+        validate(&npm("@openai/codex", &["--ignore-scripts"])),
+        Ok(())
+    );
     assert_eq!(
         validate(&npm("@openai/codex", &["--foreground-scripts"])),
         Err(FLAG_UNLISTED)
     );
-    assert_eq!(validate(&npm("@openai/codex", &["-x"])), Err(TEMPLATE_MISMATCH));
+    assert_eq!(
+        validate(&npm("@openai/codex", &["-x"])),
+        Err(TEMPLATE_MISMATCH)
+    );
 }
 
 /// A name of `NAME_BYTES_MAX` bytes passes and one byte more is refused.
@@ -92,7 +118,10 @@ fn a_name_past_its_bound_is_refused() {
     let at = "a".repeat(NAME_BYTES_MAX);
     let past = "a".repeat(NAME_BYTES_MAX + 1);
     assert_eq!(validate(&uv_tool(&at, "1.0", "3.12", 10)), Ok(()));
-    assert_eq!(validate(&uv_tool(&past, "1.0", "3.12", 10)), Err(NAME_INVALID));
+    assert_eq!(
+        validate(&uv_tool(&past, "1.0", "3.12", 10)),
+        Err(NAME_INVALID)
+    );
 }
 
 /// A version of `VERSION_BYTES_MAX` bytes passes and one byte more is refused.
@@ -101,13 +130,19 @@ fn a_version_past_its_bound_is_refused() {
     let at = "1".repeat(VERSION_BYTES_MAX);
     let past = "1".repeat(VERSION_BYTES_MAX + 1);
     assert_eq!(validate(&uv_tool("graphifyy", &at, "3.12", 10)), Ok(()));
-    assert_eq!(validate(&uv_tool("graphifyy", &past, "3.12", 10)), Err(VERSION_INVALID));
+    assert_eq!(
+        validate(&uv_tool("graphifyy", &past, "3.12", 10)),
+        Err(VERSION_INVALID)
+    );
 }
 
 /// A lock of `LOCK_BYTES_MAX` bytes passes and one byte more is refused.
 #[test]
 fn a_lock_past_its_bound_is_refused() {
-    assert_eq!(validate(&uv_tool("graphifyy", "1.0", "3.12", LOCK_BYTES_MAX)), Ok(()));
+    assert_eq!(
+        validate(&uv_tool("graphifyy", "1.0", "3.12", LOCK_BYTES_MAX)),
+        Ok(())
+    );
     assert_eq!(
         validate(&uv_tool("graphifyy", "1.0", "3.12", LOCK_BYTES_MAX + 1)),
         Err(LOCK_TOO_LARGE)
@@ -119,8 +154,14 @@ fn a_lock_past_its_bound_is_refused() {
 fn a_hash_not_64_lower_hex_is_refused() {
     let triple = "aarch64-apple-darwin";
     assert_eq!(validate(&release("1", triple, HASH)), Ok(()));
-    assert_eq!(validate(&release("1", triple, &HASH[1..])), Err(HASH_INVALID));
-    assert_eq!(validate(&release("1", triple, &format!("{HASH}0"))), Err(HASH_INVALID));
+    assert_eq!(
+        validate(&release("1", triple, &HASH[1..])),
+        Err(HASH_INVALID)
+    );
+    assert_eq!(
+        validate(&release("1", triple, &format!("{HASH}0"))),
+        Err(HASH_INVALID)
+    );
     assert_eq!(
         validate(&release("1", triple, &HASH.to_ascii_uppercase())),
         Err(HASH_INVALID)
@@ -130,8 +171,14 @@ fn a_hash_not_64_lower_hex_is_refused() {
 /// A target past `TARGET_BYTES_MAX` bytes, or one no setup download names, is refused.
 #[test]
 fn a_target_past_its_bound_or_unnamed_is_refused() {
-    assert_eq!(validate(&release("1", &"a".repeat(TARGET_BYTES_MAX + 1), HASH)), Err(TARGET_INVALID));
-    assert_eq!(validate(&release("1", "riscv64-unknown-linux-gnu", HASH)), Err(TARGET_INVALID));
+    assert_eq!(
+        validate(&release("1", &"a".repeat(TARGET_BYTES_MAX + 1), HASH)),
+        Err(TARGET_INVALID)
+    );
+    assert_eq!(
+        validate(&release("1", "riscv64-unknown-linux-gnu", HASH)),
+        Err(TARGET_INVALID)
+    );
     for triple in TARGETS {
         assert!(triple.len() <= TARGET_BYTES_MAX);
         assert_eq!(validate(&release("1", triple, HASH)), Ok(()));
@@ -144,7 +191,10 @@ fn a_python_past_its_bound_is_refused() {
     let at = "3".repeat(PYTHON_BYTES_MAX);
     let past = "3".repeat(PYTHON_BYTES_MAX + 1);
     assert_eq!(validate(&uv_tool("graphifyy", "1.0", &at, 10)), Ok(()));
-    assert_eq!(validate(&uv_tool("graphifyy", "1.0", &past, 10)), Err(TARGET_INVALID));
+    assert_eq!(
+        validate(&uv_tool("graphifyy", "1.0", &past, 10)),
+        Err(TARGET_INVALID)
+    );
 }
 
 /// A self-update of more than `ARGS_MAX` arguments is refused, and every bundled list fits.
