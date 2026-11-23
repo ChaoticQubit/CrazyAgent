@@ -1,10 +1,10 @@
 use super::*;
 #[cfg(all(test, unix))]
 mod barrier_tests;
-#[cfg(all(test, unix))]
-mod dispatch_identity_tests;
 #[cfg(unix)]
 mod dispatch_git;
+#[cfg(all(test, unix))]
+mod dispatch_identity_tests;
 pub(crate) mod master_activity;
 #[cfg(all(test, unix))]
 mod master_auto_dispatch_tests;
@@ -3454,31 +3454,31 @@ async fn observe_dispatch(
     let metadata = dispatch_files(&snapshot.seal)?;
     let mut command = std::process::Command::new("/usr/bin/git");
     command
-                .env_clear()
-                .env("PATH", "/usr/bin:/bin")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .envs(crate::research::runner::GIT_SAFE_ENV)
-                .env("GIT_OPTIONAL_LOCKS", "0")
-                .args([
-                    "--no-replace-objects",
-                    "--no-optional-locks",
-                    "-c",
-                    "core.hooksPath=/dev/null",
-                    "-c",
-                    "core.fsmonitor=false",
-                    "-c",
-                    "core.pager=cat",
-                    "-c",
-                    "protocol.allow=never",
-                ])
-                .arg("--git-dir")
-                .arg(&metadata)
-                .arg("--work-tree")
-                .arg(&snapshot.seal.path)
-                .args(["rev-parse", "--verify", "HEAD"])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null());
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .envs(crate::research::runner::GIT_SAFE_ENV)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args([
+            "--no-replace-objects",
+            "--no-optional-locks",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.pager=cat",
+            "-c",
+            "protocol.allow=never",
+        ])
+        .arg("--git-dir")
+        .arg(&metadata)
+        .arg("--work-tree")
+        .arg(&snapshot.seal.path)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
     let (mut child, started) = dispatch_git::spawn_within(command, timeout).await?;
     let mut output = child
         .0

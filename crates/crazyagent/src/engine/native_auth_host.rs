@@ -40,6 +40,8 @@ pub(crate) fn sign_in_command(executable: &Path) -> Result<std::process::Command
 /// identity, and from then on the identity check alone sees every write.
 #[cfg(any(test, not(target_os = "macos")))]
 const SETTLE_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+/// How long a custodian that never reached its handover gets to end once it is cleaned up.
+const HANDOVER_CLEANUP: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Whether a matching hash proves a harness's bytes for good: it started [`SETTLE_AFTER`]
 /// past the first look at the identity by the monotonic clock and past the identity's change
@@ -579,7 +581,7 @@ impl Drop for Starting {
         if let Some(mut child) = self.0.take() {
             let _ = custody::cleanup_direct_child(
                 &mut child,
-                std::time::Instant::now() + std::time::Duration::from_secs(2),
+                std::time::Instant::now() + HANDOVER_CLEANUP,
             );
         }
     }
@@ -588,7 +590,9 @@ impl Drop for Starting {
 /// Starts the custodian through the spawn gate on a blocking thread, so a start held at the
 /// gate never blocks a runtime worker. Input: the configured command. Output: the child, or
 /// the start's own error.
-async fn spawn_custodian(mut command: std::process::Command) -> Result<std::process::Child, EngineError> {
+async fn spawn_custodian(
+    mut command: std::process::Command,
+) -> Result<std::process::Child, EngineError> {
     let mut started = tokio::task::spawn_blocking(move || {
         kernel_processes::spawn_gate::spawn(&mut command).map(|child| Starting(Some(child)))
     })
@@ -645,7 +649,7 @@ pub(in crate::engine) async fn dispatch(
         Err(error) => {
             custody::cleanup_direct_child(
                 &mut child,
-                std::time::Instant::now() + std::time::Duration::from_secs(2),
+                std::time::Instant::now() + HANDOVER_CLEANUP,
             )
             .map_err(io_error)?;
             return Err(error);
@@ -654,7 +658,7 @@ pub(in crate::engine) async fn dispatch(
     if let Err((error, mut child)) = host.retain_child(child) {
         custody::cleanup_direct_child(
             &mut child,
-            std::time::Instant::now() + std::time::Duration::from_secs(2),
+            std::time::Instant::now() + HANDOVER_CLEANUP,
         )
         .map_err(io_error)?;
         return Err(error);
