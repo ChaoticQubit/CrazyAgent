@@ -1069,17 +1069,32 @@ impl Tmux {
         self.settle(&control, agent, control.run(&line))
     }
 
-    /// Reads where a new agent window's pane runs from the reply that made it, or asks tmux
-    /// when the reply holds no whole line, then checks the pane is served and tags it as the
-    /// agent's app. Takes the control, the agent and the reply. Returns the pane, or
-    /// `terminal_command_failed`, the lookup's code or the reply's error.
+    /// Settles the agent window a spawn asked for: on any error, from the reply that made it
+    /// on, it kills that window, so a failed spawn leaves none. Takes the control, the agent
+    /// and the reply. Returns the pane, or the code `placed` or the reply failed with.
     fn settle(
         &self,
         control: &Control,
         agent: &AgentId,
         made: Result<Vec<Vec<u8>>, HostError>,
     ) -> Result<PaneRef, HostError> {
-        let lines = made?;
+        let settled = made.and_then(|lines| self.placed(control, agent, &lines));
+        if settled.is_err() {
+            let _ = control.run(&format!("kill-window -t {}", target(agent)));
+        }
+        settled
+    }
+
+    /// Reads where a new agent window's pane runs from the reply that made it, or asks tmux
+    /// when the reply holds no whole line, then checks the pane is served and tags it as the
+    /// agent's app. Takes the control, the agent and the reply lines. Returns the pane, or
+    /// `terminal_command_failed` or the lookup's code.
+    fn placed(
+        &self,
+        control: &Control,
+        agent: &AgentId,
+        lines: &[Vec<u8>],
+    ) -> Result<PaneRef, HostError> {
         let placed = match lines.first().and_then(|line| whole(line)) {
             Some(placed) => placed.to_vec(),
             None => control
@@ -1105,13 +1120,8 @@ impl Tmux {
             pid,
             dead: false,
         };
-        if self.served(&[first]).is_empty() {
-            let _ = control.run(&format!("kill-window -t {}", target(agent)));
-            return Err(failure("terminal_command_failed"));
-        }
-        let tagged = pane_id_valid(pane) && Self::mark_app(&control, pane, agent).is_ok();
-        if !tagged {
-            let _ = control.run(&format!("kill-window -t {}", target(agent)));
+        let untagged = || !pane_id_valid(pane) || Self::mark_app(control, pane, agent).is_err();
+        if self.served(&[first]).is_empty() || untagged() {
             return Err(failure("terminal_command_failed"));
         }
         Ok(PaneRef {
