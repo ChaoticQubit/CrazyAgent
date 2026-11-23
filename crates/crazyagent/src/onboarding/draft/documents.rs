@@ -250,7 +250,7 @@ pub(super) fn screen(repo: &Path, evidence: &mut Evidence, hidden: &[String]) {
     });
     let root = repo
         .canonicalize()
-        .map(crate::projects_home::one_spelling)
+        .map(kernel_sandbox::paths::one_spelling)
         .unwrap_or_else(|_| repo.to_path_buf());
     let twin = crate::projects_home::data_twin(&root);
     let hidden_absolute = |path: &str| {

@@ -1,10 +1,11 @@
-use super::{ProjectSandbox, Sandbox, agent_env, canonical, clean_absolute};
+use super::{ProjectSandbox, Sandbox, agent_env};
 use crazyagent_win_sandbox::plan::plan;
 use crazyagent_win_sandbox::profile::{BoundaryProfile, Capability, Guard, Guarded, check_path};
 use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
 use kernel_sandbox::error::{SandboxError, invalid};
 use kernel_sandbox::lines::MODEL_LOOPBACK_WINDOWS_LINE;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::paths::{canonical, clean_absolute};
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};

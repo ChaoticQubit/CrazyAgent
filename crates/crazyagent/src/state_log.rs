@@ -2,7 +2,7 @@ use crate::engine::EngineError;
 use fence::Fence;
 use kernel_storage::StorageError;
 use kernel_storage::state_log::replay::Logged;
-use kernel_storage::state_log::{AggregateName, Appender, FenceCheck};
+use kernel_storage::state_log::{AggregateName, Appender, Chunk, FenceCheck};
 use rusqlite::{Connection, Transaction};
 use serde::{Deserialize, Serialize};
 
@@ -63,6 +63,36 @@ impl From<Aggregate> for AggregateName {
     fn from(aggregate: Aggregate) -> Self {
         AggregateName::new(aggregate.name())
     }
+}
+
+/// After an aggregate's append, runs the kernel compaction under the owner's switch: a build
+/// that is not a dev build and the Plugins aggregate pass Off before any read; a stored
+/// choice that does not read is Off, with the cause on stderr. Inputs: the appender, the
+/// aggregate, the writer's clock and its chunk builder. Output: the tombstoned row count.
+pub(crate) fn compact_after(
+    appender: &mut Appender<'_, '_>,
+    aggregate: Aggregate,
+    at_ms: u64,
+    chunks: impl FnOnce(&Transaction<'_>) -> Result<Vec<Chunk>, EngineError>,
+) -> Result<u64, EngineError> {
+    let dev = crate::log_compaction::this_build_is_dev();
+    if !dev || aggregate == Aggregate::Plugins {
+        return Ok(0);
+    }
+    let stored = appender.project(|tx| {
+        Ok::<_, EngineError>(crate::log_compaction::load(tx).unwrap_or_else(|problem| {
+            eprintln!("log_compaction_unread cause={}", problem.0);
+            crate::log_compaction::LogCompaction::Off
+        }))
+    })?;
+    let compaction = crate::log_compaction::compaction_for(aggregate, dev, stored);
+    kernel_storage::state_log::compact::compact(
+        appender,
+        compaction,
+        aggregate.into(),
+        at_ms,
+        chunks,
+    )
 }
 
 /// Starts appending in an owner request's transaction behind its fence, which the kernel

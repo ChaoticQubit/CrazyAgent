@@ -295,3 +295,20 @@ fn a_failed_connect_names_the_restore_that_holds_the_engine() {
         "2.5 runs again after a failure"
     );
 }
+
+#[test]
+fn restore_page_shows_the_compaction_row_only_in_a_dev_build() {
+    let view = |choice, dev_build| LogCompactionView { choice, dev_build };
+
+    assert!(compaction_lines(None).is_empty(), "nothing before the read");
+    assert!(compaction_lines(Some(&view(LogCompaction::On, false))).is_empty());
+    assert_eq!(
+        compaction_lines(Some(&view(LogCompaction::Off, true))),
+        [format!("{LABEL}: Off"), HELP.to_owned()]
+    );
+    assert_eq!(
+        compaction_lines(Some(&view(LogCompaction::On, true)))[0],
+        "Compact the event log: On"
+    );
+    assert!(HELP.starts_with("Dev builds only."));
+}

@@ -138,7 +138,7 @@ fn a_handle_crosses_the_adapter_as_the_kernel_id() {
         NAMESPACE,
         &scopes,
         &handles,
-        Some(paste),
+        Some(("github", paste)),
     ));
     let put = caps.put_from_owner("github", "token".to_owned()).unwrap();
     let found = caps.find("github", "token".to_owned()).unwrap();

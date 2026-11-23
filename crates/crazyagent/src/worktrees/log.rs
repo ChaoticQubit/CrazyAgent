@@ -247,6 +247,7 @@ pub fn record(
         body.len() <= BODY_BYTES_MAX,
         "the log bounds what it appended"
     );
+    crate::state_log::compact_after(appender, Aggregate::Worktrees, at_ms, chunks)?;
     Ok(seq)
 }
 
@@ -360,14 +361,20 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
 /// closing event, or `worktrees_log_snapshot_rows`, `worktrees_log_row_too_large` or the
 /// log's refusal.
 pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineError> {
+    let chunks = appender.project(|tx| chunks(tx))?;
+    Ok(appender.snapshot(Aggregate::Worktrees, at_ms, chunks)?)
+}
+
+/// The chunks of a snapshot run of both worktree tables as they stand, for [`snapshot`]
+/// and for compaction. Input: the transaction. Output: the chunks, or the first refusal.
+fn chunks(db: &rusqlite::Transaction<'_>) -> Result<Vec<Chunk>, EngineError> {
     let mut chunks = Vec::new();
     for (table, columns) in [ADMISSIONS, LEASES] {
-        let rows = appender.project(|tx| table_rows(tx, table, columns))?;
-        chunks.extend(pack(table, rows)?);
+        chunks.extend(pack(table, table_rows(db, table, columns)?)?);
     }
     assert!(chunks.len() >= 2, "one chunk or more per table");
     assert_eq!(chunks[0].table, ADMISSIONS.0);
-    Ok(appender.snapshot(Aggregate::Worktrees, at_ms, chunks)?)
+    Ok(chunks)
 }
 
 /// The open-time sweep of both worktree tables in one transaction: every lease is settled

@@ -1,9 +1,10 @@
 use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
 use crate::project_setup::{CONTEXT_DIRECTORY, ProjectSetup};
-use crate::projects_home::{CRAZYAGENT_DIRECTORY, holds_owner_home, one_spelling};
+use crate::projects_home::{CRAZYAGENT_DIRECTORY, holds_owner_home};
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
 use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+use kernel_sandbox::paths::one_spelling;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -373,6 +374,7 @@ fn project_folder(path: &Path, database: &Path) -> Result<PathBuf, &'static str>
     if let Some(home) = owner_home().map(one_spelling)
         && (holds_owner_home(&repo, &home)
             || crate::sandbox::harness_folders()
+                .into_iter()
                 .any(|private| repo.starts_with(home.join(private))))
     {
         return Err("onboarding_folder_unsafe");
