@@ -448,8 +448,8 @@ fn an_ungranted_bounded_call_runs_no_check() {
     );
 }
 
-/// The owned input of the SA1 rows: never `Copy`, so a check before the provider holds the
-/// very value the provider then gets.
+/// An owned capability input: never `Copy`, so a check before the provider holds the very
+/// value the provider then gets.
 struct Request {
     url: String,
 }
