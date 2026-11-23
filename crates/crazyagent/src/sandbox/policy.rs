@@ -31,6 +31,18 @@ pub const SANDBOX_FULL_UNAVAILABLE_WINDOWS: &str = "sandbox_full_unavailable_win
 /// no host or port, and it cannot reach this computer's own network.
 pub const WINDOWS_NETWORK_WIDE_LINE: &str = "On Windows, network limits can't hold hosts or ports in this version: with Port 443 only or None, agents reach the whole internet, and a model on this computer, such as a local server or the relay, can't be reached.";
 
+/// What the agent policy reads from the machine and the engine, which the engine passes in:
+/// what this Linux holds, read again and as last kept, whether a project may hold another
+/// git repository, and the top-level folders a project offers to share. Inputs: the fields.
+/// Output: a value every view, level list and refresh takes.
+#[derive(Clone, Copy)]
+pub struct PolicyHooks {
+    pub linux_host: fn() -> Option<kernel_sandbox::host::LinuxHost>,
+    pub linux_host_kept: fn() -> Option<kernel_sandbox::host::LinuxHost>,
+    pub linux_other_git: fn(&Path) -> bool,
+    pub local_folders: fn(&Path) -> Vec<String>,
+}
+
 /// How free one project's agents are (DEC-102): Sandboxed writes only the agent's own
 /// worktree and never git; Own branch adds full git in the agent's own git folder and
 /// lands its commits only on Accept; Full access runs agents with the owner's user
@@ -605,9 +617,11 @@ impl AgentPolicy {
     /// choice with the top-level folders it can pick, and the policy's version, which a save
     /// names. Inputs: the project folder, the owner's tool homes, the version, the owner's
     /// sandbox settings, none when unreadable, and whether the project may hold another git
-    /// repository ([`LevelView::other_git`]). Output: the view.
+    /// repository ([`LevelView::other_git`]); the engine's hooks read this Linux and the
+    /// project's local folders. Output: the view.
     pub fn view(
         &self,
+        hooks: &PolicyHooks,
         project: &Path,
         homes: &ToolHomes,
         version: u64,
@@ -628,7 +642,7 @@ impl AgentPolicy {
             .collect();
         assert!(toolchains.len() <= Toolchain::ALL.len());
         let calls = settings.map(|settings| settings.linux_supervisor);
-        let host = crate::sandbox::linux_host_kept().map(|host| host.under(calls));
+        let host = (hooks.linux_host_kept)().map(|host| host.under(calls));
         let sockets = settings.map(|settings| settings.linux_sockets);
         PolicyView {
             access: self.access,
@@ -692,7 +706,7 @@ impl AgentPolicy {
             },
             grant_log: Vec::new(),
             shared_folders: self.shared_folders.clone(),
-            local_folders: super::shared_folders::local_folders(project),
+            local_folders: (hooks.local_folders)(project),
         }
     }
 
@@ -972,10 +986,13 @@ impl LevelView {
     /// confined, each with the reason it cannot run agents on this computer, from what
     /// [`LevelView::refresh`] last read of it under the owner's call supervisor setting; a
     /// repository may be anywhere in a project not made yet. Input: the setting, none when
-    /// unreadable. Output: one view for each level.
-    pub fn all(calls: Option<kernel_sandbox::settings::LinuxSupervisor>) -> Vec<Self> {
+    /// unreadable, and the engine's hooks. Output: one view for each level.
+    pub fn all(
+        hooks: &PolicyHooks,
+        calls: Option<kernel_sandbox::settings::LinuxSupervisor>,
+    ) -> Vec<Self> {
         Self::on(
-            crate::sandbox::linux_host_kept().map(|host| host.under(calls)),
+            (hooks.linux_host_kept)().map(|host| host.under(calls)),
             true,
         )
     }
@@ -983,9 +1000,9 @@ impl LevelView {
     /// Reads again what this computer holds once it is a minute old, which on Linux may
     /// start the sandbox helper and bubblewrap. A reader calls it before it opens its
     /// database transaction, so [`LevelView::all`] inside never waits on a program.
-    /// Takes nothing. Returns nothing.
-    pub fn refresh() {
-        crate::sandbox::linux_host();
+    /// Takes the engine's hooks. Returns nothing.
+    pub fn refresh(hooks: &PolicyHooks) {
+        (hooks.linux_host)();
     }
 
     /// Every access level as [`LevelView::all`] gives them, for a computer that holds
@@ -1011,11 +1028,16 @@ impl LevelView {
 
     /// Tells whether a project may hold a git repository besides its own, as its Agent
     /// access lines need where the call supervisor runs: a bounded read of its folder
-    /// ([`crate::sandbox::linux_other_git`]), made only for a supervised host. A reader
+    /// ([`PolicyHooks::linux_other_git`]), made only for a supervised host. A reader
     /// calls it before its database transaction, so that read never holds one. Inputs:
-    /// what this Linux holds under the setting, none elsewhere, and the folder.
-    pub fn other_git(host: Option<kernel_sandbox::host::LinuxHost>, project: &Path) -> bool {
-        host.is_some_and(|host| host.supervised) && crate::sandbox::linux_other_git(project)
+    /// the engine's hooks, what this Linux holds under the setting, none elsewhere, and
+    /// the folder.
+    pub fn other_git(
+        hooks: &PolicyHooks,
+        host: Option<kernel_sandbox::host::LinuxHost>,
+        project: &Path,
+    ) -> bool {
+        host.is_some_and(|host| host.supervised) && (hooks.linux_other_git)(project)
     }
 }
 

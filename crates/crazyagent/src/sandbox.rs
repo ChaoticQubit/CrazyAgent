@@ -10,6 +10,7 @@ use kernel_sandbox::paths::{
 };
 use kernel_sandbox::ports::BRIDGE_PORT_MIN;
 use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
+use policy::PolicyHooks;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 #[cfg(unix)]
@@ -1196,6 +1197,17 @@ pub fn linux_host_kept() -> Option<LinuxHost> {
         None
     }
 }
+
+/// The engine's real agent policy hooks, the only [`PolicyHooks`] production code passes:
+/// this Linux read again ([`linux_host`]) and as last kept ([`linux_host_kept`]), the
+/// bounded read for another repository ([`linux_other_git`]) and a project's local folders
+/// ([`shared_folders::local_folders`]).
+pub const POLICY_HOOKS: PolicyHooks = PolicyHooks {
+    linux_host,
+    linux_host_kept,
+    linux_other_git,
+    local_folders: shared_folders::local_folders,
+};
 
 /// Tells whether a project may hold a git repository besides its own top-level `.git`,
 /// which an agent may still change under the call supervisor: on Linux what a bounded read

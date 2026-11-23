@@ -1,5 +1,12 @@
 use super::*;
 
+const HOOKS: PolicyHooks = PolicyHooks {
+    linux_host: || None,
+    linux_host_kept: || None,
+    linux_other_git: |_| false,
+    local_folders: |_| Vec::new(),
+};
+
 #[test]
 fn no_network_grants_a_model_only_on_loopback_and_never_a_host_port() {
     use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
@@ -44,7 +51,14 @@ fn a_policy_saved_before_the_tool_cache_setting_reads_shared_and_the_view_lists_
     );
     let saved = serde_json::to_string(&own).unwrap();
     assert!(saved.contains(r#""tool_cache":"per_agent""#), "{saved}");
-    let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1, None, true);
+    let view = own.view(
+        &HOOKS,
+        folder.path(),
+        &ToolHomes::at(folder.path()),
+        1,
+        None,
+        true,
+    );
     assert_eq!(view.tool_cache, ToolCacheScope::PerAgent);
     let listed: Vec<(&str, &str)> = view
         .tool_caches
@@ -84,7 +98,14 @@ fn a_policy_saved_before_the_home_caches_setting_clears_when_access_is_raised() 
         let read = load(&connection, "p").unwrap();
         assert_eq!(read.home_caches, choice);
         assert_eq!(read.pinned(folder.path()).home_caches, choice);
-        let view = read.view(folder.path(), &ToolHomes::at(folder.path()), 1, None, true);
+        let view = read.view(
+            &crate::sandbox::POLICY_HOOKS,
+            folder.path(),
+            &ToolHomes::at(folder.path()),
+            1,
+            None,
+            true,
+        );
         assert_eq!(view.home_caches, choice);
         let listed: Vec<(&str, &str)> = view
             .home_cache_choices
@@ -132,7 +153,14 @@ fn a_policy_saved_before_the_access_change_settings_reads_when_idle_and_no_grant
     assert!(saved.contains(r#""apply_changes":"next_start""#), "{saved}");
     assert!(saved.contains(r#"{"kind":"port","port":47821}"#), "{saved}");
     assert!(saved.contains(r#"{"kind":"temp_folder"}"#), "{saved}");
-    let view = own.view(folder.path(), &ToolHomes::at(folder.path()), 1, None, true);
+    let view = own.view(
+        &HOOKS,
+        folder.path(),
+        &ToolHomes::at(folder.path()),
+        1,
+        None,
+        true,
+    );
     let listed: Vec<(&str, &str)> = view
         .apply_choices
         .iter()
@@ -615,6 +643,7 @@ fn a_saved_policy_round_trips_and_a_missing_or_tampered_one_is_never_wider() {
     save(&connection, "p", &policy).unwrap();
     assert_eq!(load(&connection, "p").unwrap(), policy);
     let view = policy.view(
+        &crate::sandbox::POLICY_HOOKS,
         Path::new("/nonexistent"),
         &ToolHomes::at(Path::new("/nonexistent")),
         0,
@@ -698,8 +727,15 @@ fn a_saved_agent_folders_choice_reads_back_and_an_older_policy_reads_allow_all()
         assert_eq!(read.ide_agent_files, choice);
         assert_eq!(read.pinned(nowhere).ide_agent_files, choice);
         assert_eq!(
-            read.view(nowhere, &ToolHomes::at(nowhere), 0, None, true)
-                .ide_agent_files,
+            read.view(
+                &crate::sandbox::POLICY_HOOKS,
+                nowhere,
+                &ToolHomes::at(nowhere),
+                0,
+                None,
+                true
+            )
+            .ide_agent_files,
             choice
         );
     }
@@ -1059,7 +1095,11 @@ fn a_supervised_linux_says_its_narrower_lines_and_root_says_why_none_of_them_hol
         [kept, said],
         "the catalog has no project to rule one out"
     );
-    let unread = LevelView::other_git(Some(held(true, false)), Path::new("/nonexistent"));
+    let unread = LevelView::other_git(
+        &crate::sandbox::POLICY_HOOKS,
+        Some(held(true, false)),
+        Path::new("/nonexistent"),
+    );
     assert!(unread, "a folder that cannot be read rules out none");
     let quiet = LevelView::on(Some(held(true, false)), false);
     let told: Vec<&str> = quiet[0].gaps.iter().map(String::as_str).collect();
@@ -1152,11 +1192,25 @@ fn only_a_supervised_host_reads_the_project_for_another_repository_and_the_view_
         armored: false,
         routed: false,
     };
-    assert!(LevelView::other_git(Some(host(true)), &project));
-    assert!(LevelView::other_git(Some(host(true)), &missing));
+    assert!(LevelView::other_git(
+        &crate::sandbox::POLICY_HOOKS,
+        Some(host(true)),
+        &project
+    ));
+    assert!(LevelView::other_git(
+        &crate::sandbox::POLICY_HOOKS,
+        Some(host(true)),
+        &missing
+    ));
     for unread in [Some(host(false)), None] {
-        assert!(!LevelView::other_git(unread, &project), "{unread:?}");
-        assert!(!LevelView::other_git(unread, &missing), "{unread:?}");
+        assert!(
+            !LevelView::other_git(&crate::sandbox::POLICY_HOOKS, unread, &project),
+            "{unread:?}"
+        );
+        assert!(
+            !LevelView::other_git(&crate::sandbox::POLICY_HOOKS, unread, &missing),
+            "{unread:?}"
+        );
     }
     let lines = |other_git| LevelView::on(Some(host(true)), other_git).remove(0).gaps;
     assert!(lines(true).contains(&LINUX_KEPT_GIT_LINE.to_owned()));

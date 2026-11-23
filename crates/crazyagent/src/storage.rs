@@ -3739,7 +3739,7 @@ fn project_other_git(
     let host = crate::sandbox::linux_host_kept().map(|host| host.under(calls));
     let other_git = crate::sandbox::policy::LevelView::other_git;
     let folder = setup.map(|setup| setup.project_folder());
-    Ok(folder.is_none_or(|folder| other_git(host, &folder)))
+    Ok(folder.is_none_or(|folder| other_git(&crate::sandbox::POLICY_HOOKS, host, &folder)))
 }
 
 fn owner_read(
@@ -3753,7 +3753,7 @@ fn owner_read(
         query,
         OwnerRead::ProjectCatalog { .. } | OwnerRead::ProjectAgentPolicy { .. }
     ) {
-        crate::sandbox::policy::LevelView::refresh();
+        crate::sandbox::policy::LevelView::refresh(&crate::sandbox::POLICY_HOOKS);
     }
     let other_git = match query {
         OwnerRead::ProjectAgentPolicy { project_id } => project_other_git(db, a, project_id)?,
@@ -3841,6 +3841,7 @@ fn owner_read(
             let mut policy = crate::sandbox::policy::load(&tx, project_id.as_str())
                 .map_err(error)?
                 .view(
+                    &crate::sandbox::POLICY_HOOKS,
                     &setup.project_folder(),
                     &homes,
                     versioned::current(&tx, &versioned::agent_policy_item(project_id))?.version,
