@@ -337,7 +337,8 @@ impl LaunchBoundary {
 /// folders. Output: the boundary.
 #[cfg(all(test, unix))]
 pub(crate) fn full_access_for_test(project: &Path, scratch: &Path) -> LaunchBoundary {
-    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+    use crate::sandbox::ProjectSandbox;
+    use kernel_sandbox::net::SandboxNetwork;
     use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     let home = scratch.join("full-access-home");
     let tmp = scratch.join("full-access-tmp");
@@ -1125,7 +1126,9 @@ fn bounded<'a>(
             };
         }
         let command = boundary.wrap(&bare).map_err(|error| match error {
-            crate::sandbox::SandboxError::Invalid(_) => failure("launch_environment_refused"),
+            kernel_sandbox::error::SandboxError::Invalid(_) => {
+                failure("launch_environment_refused")
+            }
             error => failure(
                 crate::sandbox::refusal_code(&error).unwrap_or("launch_sandbox_unavailable"),
             ),

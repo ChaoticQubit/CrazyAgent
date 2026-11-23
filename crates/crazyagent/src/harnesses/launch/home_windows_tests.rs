@@ -1,9 +1,10 @@
 use super::low_probe::{Try, low_probe, probe};
 use super::{judge_home, validate_home, validate_home_for};
 use crate::sandbox::windows::{HELPER_NAME, WindowsSandbox};
-use crate::sandbox::{ProjectSandbox, Sandbox, SandboxNetwork};
+use crate::sandbox::{ProjectSandbox, Sandbox};
 use crazyagent_win_sandbox::dacl;
 use crazyagent_win_sandbox::private::{self, Facts};
+use kernel_sandbox::net::SandboxNetwork;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 

@@ -7,8 +7,10 @@ use crazyagent::model_gateway::relay::{LOCAL_PLACEHOLDER, TOKEN_PREFIX};
 use crazyagent::sandbox::toolchains::{self, ToolHomes};
 use crazyagent::sandbox::{
     AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, ProjectSandbox, SECRET_ROOT_REFUSED,
-    SandboxError, SandboxNetwork, agent_command, agent_env_refused, agent_variable_allowed,
+    agent_command, agent_env_refused, agent_variable_allowed,
 };
+use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::net::SandboxNetwork;
 use kernel_security::secret::SecretString;
 use keychain_support::TemporaryKeychain;
 use std::collections::BTreeMap;

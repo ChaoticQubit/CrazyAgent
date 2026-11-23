@@ -5386,7 +5386,7 @@ fn merge_from_a_lead_merges_its_finished_worker_and_closes_its_change_set() {
         &clones.project,
         &home,
         &tmp,
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap()
     .confine_to_clone(&clones.lead)

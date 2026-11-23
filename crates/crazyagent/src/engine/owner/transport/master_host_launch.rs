@@ -12,16 +12,18 @@ use crate::master_step_limit::StepLimit;
 use crate::protocol::RequestId;
 use crate::sandbox::InstalledSandbox;
 #[cfg(unix)]
+use crate::sandbox::ProjectSandbox;
+#[cfg(unix)]
 use crate::sandbox::policy::AgentAccess;
 #[cfg(unix)]
 use crate::sandbox::policy::AgentNetwork;
 use crate::sandbox::policy::AgentPolicy;
 #[cfg(unix)]
 use crate::sandbox::toolchains::{ToolHomes, Toolchains};
-#[cfg(unix)]
-use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::storage::PreparedMasterTurn;
 use crate::worktrees::LeaseState;
+use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 #[cfg(unix)]
 use rustix::fs::{AtFlags, Mode};
 use std::fs::File;

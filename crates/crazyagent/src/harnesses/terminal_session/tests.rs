@@ -184,7 +184,7 @@ mod own_turns {
                 &work,
                 &home,
                 &tmp,
-                crate::sandbox::SandboxNetwork::Open,
+                kernel_sandbox::net::SandboxNetwork::Open,
             )
             .unwrap();
             let installed = crate::sandbox::InstalledSandbox::install(

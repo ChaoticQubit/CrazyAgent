@@ -355,7 +355,7 @@ fn an_engine_terminal_launch_at_full_access_is_refused() {
     };
     let refused = ide_shell::command(&launch).unwrap_err();
     assert!(
-        matches!(refused, crate::sandbox::SandboxError::Invalid(_)),
+        matches!(refused, kernel_sandbox::error::SandboxError::Invalid(_)),
         "{refused:?}"
     );
     assert!(!case.root.join("ide-shell").exists());
@@ -876,13 +876,13 @@ fn ide_shell_reports_unavailable_where_the_sandbox_is_not_qualified() {
         agent_files: Default::default(),
     };
     match ide_shell::command(&launch) {
-        Err(crate::sandbox::SandboxError::Unavailable(reason)) => {
+        Err(kernel_sandbox::error::SandboxError::Unavailable(reason)) => {
             assert_eq!(reason, ide_shell::UNAVAILABLE)
         }
         other => panic!("expected the unavailable refusal, got {other:?}"),
     }
     match ide_shell::interactive(&launch, AgentAccess::Sandboxed) {
-        Err(crate::sandbox::SandboxError::Unavailable(reason)) => {
+        Err(kernel_sandbox::error::SandboxError::Unavailable(reason)) => {
             assert_eq!(reason, ide_shell::UNAVAILABLE)
         }
         other => panic!("expected the unavailable refusal, got {other:?}"),

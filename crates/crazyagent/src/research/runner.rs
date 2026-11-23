@@ -24,12 +24,12 @@ use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
 use crate::sandbox::policy::{AgentAccess, Narrowing, narrowing};
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
 use crate::sandbox::warden::Warden;
-use crate::sandbox::{
-    InstalledSandbox, ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote,
-};
+use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 #[cfg(unix)]
 use crate::setup::AGENT_GIT_NEEDS_TOOLS;
 use crate::terminal::{AgentId, Host};
+use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -2405,9 +2405,9 @@ fn launch_failure(error: &RunError, attempts_max: u32) -> (String, u32) {
             attempts_max,
         ),
         RunError::Uncertain(_) => (crate::sandbox::warden::CLEANUP_UNCERTAIN.to_owned(), 1),
-        RunError::Sandbox(refusal) if crate::sandbox::model_loopback_windows(refusal) => (
-            crate::config::plain_problem(crate::sandbox::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS)
-                .unwrap_or(crate::sandbox::MODEL_LOOPBACK_WINDOWS_LINE)
+        RunError::Sandbox(refusal) if kernel_sandbox::lines::model_loopback_windows(refusal) => (
+            crate::config::plain_problem(kernel_sandbox::lines::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS)
+                .unwrap_or(kernel_sandbox::lines::MODEL_LOOPBACK_WINDOWS_LINE)
                 .to_owned(),
             1,
         ),
@@ -4994,7 +4994,7 @@ mod tests {
             for tools in [true, false] {
                 let refused = job_reach("windows", &policy, tools, &local, 41, &[]);
                 assert!(
-                    matches!(&refused, Err(RunError::Sandbox(error)) if crate::sandbox::model_loopback_windows(error)),
+                    matches!(&refused, Err(RunError::Sandbox(error)) if kernel_sandbox::lines::model_loopback_windows(error)),
                     "{network:?} tools {tools}: {:?}",
                     refused.as_ref().map(|(reach, _)| reach)
                 );
@@ -5007,10 +5007,10 @@ mod tests {
             }
         }
         let refusal = RunError::Sandbox(SandboxError::Unavailable(
-            crate::sandbox::MODEL_LOOPBACK_WINDOWS_LINE.into(),
+            kernel_sandbox::lines::MODEL_LOOPBACK_WINDOWS_LINE.into(),
         ));
         let sentence =
-            crate::config::plain_problem(crate::sandbox::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS)
+            crate::config::plain_problem(kernel_sandbox::lines::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS)
                 .unwrap();
         assert_eq!(launch_failure(&refusal, 2), (sentence.to_owned(), 1));
         let other = RunError::Sandbox(SandboxError::Unavailable("another refusal".into()));

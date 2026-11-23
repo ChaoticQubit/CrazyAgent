@@ -1,10 +1,10 @@
-use super::{
-    MODEL_LOOPBACK_WINDOWS_LINE, ProjectSandbox, Sandbox, SandboxError, SandboxNetwork,
-    SandboxRemote, agent_env, canonical, clean_absolute, invalid,
-};
+use super::{ProjectSandbox, Sandbox, agent_env, canonical, clean_absolute};
 use crazyagent_win_sandbox::plan::plan;
 use crazyagent_win_sandbox::profile::{BoundaryProfile, Capability, Guard, Guarded, check_path};
 use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
+use kernel_sandbox::error::{SandboxError, invalid};
+use kernel_sandbox::lines::MODEL_LOOPBACK_WINDOWS_LINE;
+use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use sha2::{Digest, Sha256};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
@@ -460,8 +460,9 @@ fn system_root() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::{InstalledSandbox, SandboxRemote};
+    use crate::sandbox::InstalledSandbox;
     use crazyagent_win_sandbox::profile::check_container;
+    use kernel_sandbox::net::SandboxRemote;
     use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
@@ -541,7 +542,7 @@ mod tests {
         ] {
             let refusal = capabilities(&SandboxNetwork::Only(remotes)).unwrap_err();
             assert!(
-                crate::sandbox::model_loopback_windows(&refusal),
+                kernel_sandbox::lines::model_loopback_windows(&refusal),
                 "expected the loopback refusal, got {refusal:?}"
             );
         }
@@ -661,7 +662,7 @@ mod tests {
             &folders.grants,
         ) {
             Err(error) => assert!(
-                crate::sandbox::model_loopback_windows(&error),
+                kernel_sandbox::lines::model_loopback_windows(&error),
                 "expected the loopback refusal, got {error:?}"
             ),
             Ok(_) => panic!("a loopback port is refused on Windows"),

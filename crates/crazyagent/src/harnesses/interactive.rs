@@ -641,7 +641,7 @@ fn agent_env(
         .filter(|(_, value)| handover.is_some_and(|handover| value == handover.token()))
         .map(|(name, _)| name.as_str())
         .collect();
-    let refused = |_: crate::sandbox::SandboxError| failure("launch_environment_refused");
+    let refused = |_: kernel_sandbox::error::SandboxError| failure("launch_environment_refused");
     let built = match handover {
         Some(handover) => {
             let handed = crate::sandbox::Handed::new(&names, handover.token()).map_err(refused)?;

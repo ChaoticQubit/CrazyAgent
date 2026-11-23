@@ -116,7 +116,7 @@ fn npm_runs_through_node_exe_and_npm_cli_never_npm_cmd() {
 /// step only, while `node --version` keeps no network (leader 04:22 and 04:36, answer A).
 #[test]
 fn the_install_step_gets_the_open_network_on_windows() {
-    assert_eq!(os::npm_network(), crate::sandbox::SandboxNetwork::Open);
+    assert_eq!(os::npm_network(), kernel_sandbox::net::SandboxNetwork::Open);
 }
 
 /// WIN-CONTEXT-MODE: the program hash never reads through a link at the program path, and a
@@ -658,7 +658,7 @@ fn a_refused_release_reports_false_and_keeps_the_profile() {
         &folders[0],
         &folders[1],
         &folders[2],
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap();
     let mut forged = crate::sandbox::windows::boundary_profile(&sandbox, &grants).unwrap();
@@ -813,7 +813,7 @@ fn a_left_pair_the_profile_does_not_name_is_refused_and_still_removed() {
         &job,
         &home,
         &tmp,
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap();
     let mut forged = crate::sandbox::windows::boundary_profile(&sandbox, &grants).unwrap();

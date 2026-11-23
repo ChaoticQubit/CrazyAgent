@@ -1,8 +1,8 @@
 #![cfg(target_os = "macos")]
 
-use crazyagent::sandbox::{
-    HIDDEN_MAX, InstalledSandbox, ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote,
-};
+use crazyagent::sandbox::{HIDDEN_MAX, InstalledSandbox, ProjectSandbox};
+use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 use std::fs;
 use std::path::{Path, PathBuf};
