@@ -12,7 +12,7 @@ use kernel_sandbox::net::SandboxRemote;
 #[cfg(target_os = "windows")]
 use kernel_sandbox::paths::clean_absolute;
 #[cfg(all(test, target_os = "macos"))]
-use kernel_sandbox::paths::{any_case, canonical, fold_case};
+use kernel_sandbox::paths::{any_case, fold_case};
 use kernel_sandbox::policy::PolicyHooks;
 #[cfg(all(test, target_os = "macos"))]
 use kernel_sandbox::ports::REMOTES_MAX;
@@ -29,6 +29,8 @@ use kernel_sandbox::profile::{ProfileHooks, ProjectSandbox, linux_unbridged_noti
 #[cfg(all(test, unix))]
 use kernel_sandbox::settings::LinuxSockets;
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
+#[cfg(all(test, target_os = "macos"))]
+use kernel_sandbox::shared_folders::OPEN_TOPS_MAX;
 #[cfg(target_os = "macos")]
 use kernel_sandbox::tool_cache::ToolCacheHooks;
 use kernel_sandbox::toolchains::ToolchainHooks;
