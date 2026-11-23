@@ -653,7 +653,12 @@ fn a_dropped_in_file_needs_review_until_trusted_and_again_after_a_change() {
     );
     std::fs::write(&path, NEAR.replace("dimensions = 128", "dimensions = 256")).unwrap();
     let listing = list(&case.db, &case.engine()).unwrap();
-    assert_eq!(plugin(&listing, "near").status, PluginStatus::NeedsReview);
+    assert_eq!(
+        plugin(&listing, "near").status,
+        PluginStatus::Changed {
+            trusted_sha256: sha(NEAR)
+        }
+    );
     assert_eq!(
         code(ready(&case.db, &case.engine(), "near")),
         "app_plugin_changed"
@@ -689,6 +694,43 @@ fn a_changed_plugin_is_refused_until_approved_again() {
             .dimensions,
         256
     );
+}
+
+/// A trusted plugin whose plugin.toml changed lists as Changed with the SHA-256 it was
+/// trusted at, and noting the listing keeps one notice per change: listing it again adds
+/// none, and once it runs again a later change notifies again.
+#[test]
+fn a_changed_plugin_lists_as_changed_and_notifies_once_per_change() {
+    let case = case();
+    trusted(&case, NEAR);
+    let usage = Usage::default();
+    let path = case.root.join(FOLDER).join("near").join(MANIFEST_FILE);
+    let changed = NEAR.replace("dimensions = 128", "dimensions = 256");
+    std::fs::write(&path, &changed).unwrap();
+
+    let listing = list(&case.db, &case.engine()).unwrap();
+    usage.note_listed(&listing);
+    usage.note_listed(&list(&case.db, &case.engine()).unwrap());
+
+    assert_eq!(
+        usage.take_notices(),
+        [ChangeNotice {
+            plugin: "near".into(),
+            trusted_sha256: sha(NEAR),
+            current_sha256: sha(&changed),
+        }]
+    );
+    assert!(usage.take_notices().is_empty());
+    usage.note_listed(&list(&case.db, &case.engine()).unwrap());
+    assert!(usage.take_notices().is_empty());
+
+    trust_file(&case.db, &case.engine(), "near", &sha(&changed), 2).unwrap();
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert_eq!(plugin(&listing, "near").status, PluginStatus::Ready);
+    usage.note_listed(&listing);
+    std::fs::write(&path, NEAR).unwrap();
+    usage.note_listed(&list(&case.db, &case.engine()).unwrap());
+    assert_eq!(usage.take_notices().len(), 1);
 }
 
 /// A re-review says the text changed and lists the hosts the trusted version did not
