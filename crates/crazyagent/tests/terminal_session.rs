@@ -10,7 +10,8 @@ use crazyagent::harnesses::leftovers::Unstopped;
 use crazyagent::harnesses::terminal_session::TerminalSession;
 use crazyagent::research::runner::{ResearchLimits, ResearchRunner};
 use crazyagent::terminal::FOLDER;
-use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
+use crazyagent::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use kernel_processes::terminal::{AgentId, Host};
 use rustix::process::{
     Pid, Signal, getpgid, kill_process, test_kill_process, test_kill_process_group,
@@ -87,7 +88,12 @@ fn wiring_a_shell_stand_in_in_a_real_tmux_pane_gets_the_prompt_as_one_paste_and_
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &folder));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        Some(tmux),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    ));
     let home = root_path.join("home");
     let work = root_path.join("work");
     let bin = root_path.join("bin");
@@ -177,7 +183,12 @@ fn wiring_the_first_prompt_waits_until_the_app_reads_keys_itself() {
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &folder));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        Some(tmux),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    ));
     let home = root_path.join("home");
     let work = root_path.join("work");
     let bin = root_path.join("bin");
@@ -273,7 +284,12 @@ fn stand_in_on(script: &str, name: &str, profile_text: Option<&str>, keeps: bool
     let host: Arc<dyn Host> = if keeps {
         crazyagent::terminal::tmux_host(&root_path, Some(tmux))
     } else {
-        Arc::new(Tmux::open(Some(tmux), &folder))
+        Arc::new(Tmux::open(
+            Some(tmux),
+            &folder,
+            crazyagent::sandbox::confinement(),
+            crazyagent::terminal::tmux::tmux_hooks(),
+        ))
     };
     let home = root_path.join("home");
     let work = root_path.join("work");
@@ -602,7 +618,12 @@ fn stopping_a_full_access_pane_names_what_it_left_running() {
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &folder));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        Some(tmux),
+        &folder,
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    ));
     let home = root_path.join("home");
     let work = root_path.join("work");
     let bin = root_path.join("bin");

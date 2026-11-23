@@ -1,7 +1,8 @@
 use super::*;
 use crate::coord::{NewMessage, QuestionFor, Severity, Waiting};
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -48,7 +49,12 @@ impl Fixture {
     pub(super) fn host(&mut self) -> Tmux {
         let tmux = installed(&self.base).expect("tmux must be installed on this machine");
         self.tmux = Some(tmux.clone());
-        Tmux::open(Some(tmux), &self.base.join(crate::terminal::FOLDER))
+        Tmux::open(
+            Some(tmux),
+            &self.base.join(crate::terminal::FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        )
     }
 
     pub(super) fn agent(

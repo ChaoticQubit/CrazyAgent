@@ -2,6 +2,7 @@ use crate::cleanup_settings::CleanupSettings;
 use crate::engine::EngineError;
 use crate::harnesses::update::UpdateSettings;
 use crate::instruction_files::{AppSettings, Settings};
+use crate::log_compaction::LogCompaction;
 use crate::master_frame_limit::MasterFrameSettings;
 use crate::master_step_limit::MasterStepSettings;
 use crate::master_time_limit::MasterTimeSettings;
@@ -50,10 +51,12 @@ pub const KIND_STEPS: &str = "MasterStepsSaved";
 pub const KIND_TIME: &str = "MasterTimeSaved";
 /// The kind of the event an owner master frame limit save appends.
 pub const KIND_FRAMES: &str = "MasterFramesSaved";
+/// The kind of the event an owner event log compaction switch save appends.
+pub const KIND_COMPACTION: &str = "LogCompactionSaved";
 /// The kind of the event an owner profile save appends, carrying its kept text's digest.
 pub const KIND_PROFILE: &str = "UserProfileSaved";
 /// Every settings kind, in [`TABLES`] order, then the profile's.
-pub const KINDS: [&str; 12] = [
+pub const KINDS: [&str; 13] = [
     KIND_SANDBOX,
     KIND_CLEANUP,
     KIND_QUIT,
@@ -65,12 +68,13 @@ pub const KINDS: [&str; 12] = [
     KIND_STEPS,
     KIND_TIME,
     KIND_FRAMES,
+    KIND_COMPACTION,
     KIND_PROFILE,
 ];
 /// The schema every settings event is written and read at.
 const SCHEMA: u16 = 1;
 /// Every settings table in snapshot order, each with its columns in key order.
-const TABLES: [(&str, &str); 11] = [
+const TABLES: [(&str, &str); 12] = [
     (
         "sandbox_settings",
         "singleton,linux_sockets,linux_supervisor,linux_strict",
@@ -94,6 +98,7 @@ const TABLES: [(&str, &str); 11] = [
     ("configured_master_steps", "singleton,step_limit"),
     ("configured_master_time", "singleton,time_limit"),
     ("configured_master_frames", "singleton,frame_limit"),
+    ("log_compaction_settings", "singleton,choice"),
 ];
 /// The owner profile table (Q5). Its text stays in owner_texts, so its snapshot rows are
 /// `[1, digest]` and it is kept out of [`TABLES`], whose rows carry their columns.
@@ -152,6 +157,7 @@ pub enum Event {
     Steps(Saved<MasterStepSettings>),
     Time(Saved<MasterTimeSettings>),
     Frames(Saved<MasterFrameSettings>),
+    Compaction(Saved<LogCompaction>),
     Profile(Kept),
 }
 
@@ -170,6 +176,7 @@ impl Event {
             Self::Steps(_) => KIND_STEPS,
             Self::Time(_) => KIND_TIME,
             Self::Frames(_) => KIND_FRAMES,
+            Self::Compaction(_) => KIND_COMPACTION,
             Self::Profile(_) => KIND_PROFILE,
         }
     }
@@ -188,6 +195,7 @@ impl Event {
             Self::Steps(event) => serde_json::to_vec(event),
             Self::Time(event) => serde_json::to_vec(event),
             Self::Frames(event) => serde_json::to_vec(event),
+            Self::Compaction(event) => serde_json::to_vec(event),
             Self::Profile(event) => serde_json::to_vec(event),
         }
         .map_err(error)
@@ -285,6 +293,13 @@ pub fn record(
             at_ms,
             body: &body,
         }),
+        Event::Compaction(_) => appender.append(&Draft {
+            aggregate: aggregate.into(),
+            kind: KIND_COMPACTION,
+            schema: SCHEMA,
+            at_ms,
+            body: &body,
+        }),
         Event::Profile(_) => appender.append(&Draft {
             aggregate: aggregate.into(),
             kind: KIND_PROFILE,
@@ -298,6 +313,7 @@ pub fn record(
         body.len() <= BODY_BYTES_MAX,
         "the log bounds what it appended"
     );
+    crate::state_log::compact_after(appender, Aggregate::Settings, at_ms, chunks)?;
     Ok(seq)
 }
 
@@ -371,6 +387,10 @@ pub fn apply(db: &Connection, event: &Event) -> Result<(), EngineError> {
             "INSERT INTO configured_master_frames(singleton,frame_limit) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET frame_limit=excluded.frame_limit",
             [word(row.settings.limit)?],
         ),
+        Event::Compaction(row) => db.execute(
+            "INSERT INTO log_compaction_settings(singleton,choice) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET choice=excluded.choice",
+            [word(row.settings)?],
+        ),
         Event::Profile(row) => return profile(db, &row.body),
     }
     .map_err(error)?;
@@ -421,6 +441,7 @@ pub fn decode(logged: &Logged) -> Result<Event, EngineError> {
         KIND_STEPS => serde_json::from_slice(body).map(Event::Steps),
         KIND_TIME => serde_json::from_slice(body).map(Event::Time),
         KIND_FRAMES => serde_json::from_slice(body).map(Event::Frames),
+        KIND_COMPACTION => serde_json::from_slice(body).map(Event::Compaction),
         KIND_PROFILE => serde_json::from_slice(body).map(Event::Profile),
         _ => return Err(invalid()),
     }
@@ -469,16 +490,22 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
 /// writer's clock. Output: the `seq` of the run's closing event, or
 /// `settings_log_snapshot_rows`, `settings_log_row_too_large` or the log's refusal.
 pub fn snapshot(appender: &mut Appender<'_, '_>, at_ms: u64) -> Result<u64, EngineError> {
+    let chunks = appender.project(|tx| chunks(tx))?;
+    Ok(appender.snapshot(Aggregate::Settings, at_ms, chunks)?)
+}
+
+/// The chunks of a snapshot run of every settings table as it stands, the profile's last,
+/// for [`snapshot`] and for compaction. Input: the transaction. Output: the chunks, or the
+/// first refusal.
+fn chunks(db: &rusqlite::Transaction<'_>) -> Result<Vec<Chunk>, EngineError> {
     let mut chunks = Vec::new();
     for (table, columns) in TABLES {
-        let rows = appender.project(|tx| table_rows(tx, table, columns))?;
-        chunks.extend(pack(table, rows)?);
+        chunks.extend(pack(table, table_rows(db, table, columns)?)?);
     }
-    let profile = appender.project(|tx| profile_rows(tx))?;
-    chunks.extend(pack(PROFILE, profile)?);
+    chunks.extend(pack(PROFILE, profile_rows(db)?)?);
     assert!(chunks.len() > TABLES.len(), "one chunk or more per table");
     assert_eq!(chunks[0].table, TABLES[0].0);
-    Ok(appender.snapshot(Aggregate::Settings, at_ms, chunks)?)
+    Ok(chunks)
 }
 
 /// The profile's snapshot rows: none with no stored profile, else `[1, digest]`, its body
@@ -519,6 +546,7 @@ pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
     crate::master_step_limit::initialize(db)?;
     crate::master_time_limit::initialize(db)?;
     crate::master_frame_limit::initialize(db)?;
+    crate::log_compaction::initialize(db)?;
     crate::owner_profile::initialize(db)?;
     Ok(())
 }
@@ -590,6 +618,7 @@ pub(crate) fn owner(
             return crate::sdk_slice::save_quit(tx, revision, settings);
         }
         Command::OwnerProviderRetry { choice } => Event::Retry(Saved { settings: *choice }),
+        Command::OwnerLogCompaction { choice } => Event::Compaction(Saved { settings: *choice }),
         Command::OwnerMasterSteps { settings } => Event::Steps(Saved {
             settings: *settings,
         }),

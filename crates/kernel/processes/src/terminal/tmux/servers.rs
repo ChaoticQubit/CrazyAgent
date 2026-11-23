@@ -1,10 +1,9 @@
+use super::super::PaneCommand;
 use super::super::{
     AgentId, Host, HostError, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneAt, PaneInfo, PaneRef,
     TEAMMATES_SERVER_ENDED, TerminalStream, failure,
 };
-use super::super::{keep_servers_deadline, teammates_socket};
-use super::{ServerPin, Tmux, harness_socket, renew_socket, user};
-use kernel_processes::terminal::PaneCommand;
+use super::{ServerPin, Tmux, TmuxHooks, renew_socket, user};
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
@@ -70,7 +69,7 @@ fn listening(socket: &Path) -> bool {
 /// path. Returns the answer.
 fn refused(socket: &Path) -> bool {
     matches!(
-        kernel_processes::spawn_gate::connect_unix_std(socket),
+        crate::spawn_gate::connect_unix_std(socket),
         Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused
     )
 }
@@ -103,8 +102,8 @@ fn missed_look() -> bool {
 /// keeper held for it decides nothing. Takes the engine root and the lead. Returns the
 /// answer; a lead whose start named no socket counts.
 #[cfg(target_os = "macos")]
-fn teammates_socket_gone(root: &Path, lead: &AgentId) -> bool {
-    !teammates_socket(root, lead).is_ok_and(|socket| listening(&socket))
+fn teammates_socket_gone(root: &Path, lead: &AgentId, hooks: &TmuxHooks) -> bool {
+    !super::super::teammates_socket(root, lead, &hooks.lead).is_ok_and(|socket| listening(&socket))
 }
 
 /// How the keeper an engine holds for one of a lead's servers stands: none when none is held,
@@ -141,24 +140,25 @@ fn ended_cleanly(keeper: &mut Child) -> bool {
 /// The installed Seatbelt profile of a team agent, which its own server and every engine
 /// client on it run inside. Takes the engine root and the agent. Returns the profile path,
 /// or `terminal_own_server_unavailable` when it is not this user's plain file.
-fn profile_of(root: &Path, agent: &AgentId) -> Result<PathBuf, HostError> {
+fn profile_of(root: &Path, agent: &AgentId, hooks: &TmuxHooks) -> Result<PathBuf, HostError> {
     let id = agent
         .team_agent()
         .ok_or_else(|| failure("terminal_agent_invalid"))?;
-    plain_profile(crate::team::runtime::agent_profile(&root.join("team"), id))
+    plain_profile((hooks.agent_profile)(&root.join("team"), id))
 }
 
 /// The installed Seatbelt profile of a native lead's teammates, which their own server runs
 /// inside. Takes the engine root and the lead. Returns the profile path, or
 /// `terminal_own_server_unavailable` when it is not this user's plain file.
-fn teammates_profile_of(root: &Path, lead: &AgentId) -> Result<PathBuf, HostError> {
+fn teammates_profile_of(
+    root: &Path,
+    lead: &AgentId,
+    hooks: &TmuxHooks,
+) -> Result<PathBuf, HostError> {
     let id = lead
         .team_agent()
         .ok_or_else(|| failure("terminal_agent_invalid"))?;
-    plain_profile(crate::team::runtime::agent_teammates_profile(
-        &root.join("team"),
-        id,
-    ))
+    plain_profile((hooks.agent_teammates_profile)(&root.join("team"), id))
 }
 
 /// Checks that an installed profile is this user's plain file, read without following a
@@ -232,6 +232,11 @@ fn keeper_runs(keeper: &mut Child) -> bool {
 }
 
 impl Servers {
+    /// The team hooks this host was opened with, those of its engine server. Output: them.
+    fn hooks(&self) -> &TmuxHooks {
+        &self.engine.hooks
+    }
+
     /// Opens the host on the engine's own server and finds lead servers by name. Takes the
     /// engine's server host, the engine root and the tmux program. Returns the host; nothing
     /// starts until the first call.
@@ -255,17 +260,17 @@ impl Servers {
     /// Has every lead server this host opens read its deadline every `loops` holder loops
     /// and end after `late` passed reads, so a row sees the bound within seconds. Takes the
     /// spacing and the count. Returns the host.
-    #[cfg(all(test, target_os = "macos"))]
-    pub(crate) fn with_deadline_checks(mut self, loops: u32, late: u32) -> Self {
+    #[cfg(all(any(test, feature = "test-support"), target_os = "macos"))]
+    pub fn with_deadline_checks(mut self, loops: u32, late: u32) -> Self {
         assert!(loops >= 1 && late >= 1);
         self.deadline_checks = (loops, late);
         self
     }
 
     /// Starts a native lead's own server, or with `mates` its teammates' server, under the
-    /// [`crate::sandbox::KEEPER`] when none listens at its socket (KEEPER (b)): `tmux -D`, in
+    /// `Confinement::keeper` when none listens at its socket (KEEPER (b)): `tmux -D`, in
     /// the foreground inside the lead's or the teammates' profile, after the
-    /// [`crate::sandbox::PANE_SHIM`] forked the run's warden, so the keeper's stop has the
+    /// `Confinement::pane_shim` forked the run's warden, so the keeper's stop has the
     /// warden kill every process in that sandbox. The keeper runs outside the sandbox with a
     /// fixed argv, `PATH` and the reads of the lead's deadline record, so it also ends the
     /// server at the quit limit whatever runs inside it (FBTMUX-P1-R1-L1). A server already listening, as one
@@ -302,9 +307,9 @@ impl Servers {
             .parent()
             .ok_or_else(|| failure("terminal_folder_unsafe"))?;
         let profile = if mates {
-            teammates_profile_of(&self.root, lead)?
+            teammates_profile_of(&self.root, lead, &self.engine.hooks)?
         } else {
-            profile_of(&self.root, lead)?
+            profile_of(&self.root, lead, &self.engine.hooks)?
         };
         let id = lead
             .team_agent()
@@ -313,11 +318,12 @@ impl Servers {
         let every = loops * super::HOLDER_LOOP_SECONDS;
         assert!((1..=9_999).contains(&every) && (1..=999).contains(&late));
         let mut deadline = std::ffi::OsString::from(format!("{every} {late} "));
-        deadline.push(crate::team::runtime::agent_servers_deadline(
+        deadline.push((self.engine.hooks.lead.agent_servers_deadline)(
             &self.root.join("team"),
             id,
         ));
-        assert!(crate::sandbox::KEEPER[4].contains(crate::sandbox::KEEPER_DEADLINE));
+        let confinement = self.engine.confinement;
+        assert!(confinement.keeper[4].contains(confinement.keeper_deadline_variable));
         if let Ok(metadata) = std::fs::symlink_metadata(socket)
             && (!metadata.file_type().is_socket() || metadata.uid() != user())
         {
@@ -332,7 +338,7 @@ impl Servers {
             .starts
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match kernel_processes::spawn_gate::connect_unix_std(socket) {
+        match crate::spawn_gate::connect_unix_std(socket) {
             Ok(_) => return Ok(false),
             Err(error) if mates && error.kind() != std::io::ErrorKind::NotFound => {
                 return Err(failure("terminal_unavailable"));
@@ -357,7 +363,7 @@ impl Servers {
                     let spent = ended_cleanly(keeper)
                         || (mates
                             && !keeper_runs(keeper)
-                            && teammates_socket_gone(&self.root, known));
+                            && teammates_socket_gone(&self.root, known, &self.engine.hooks));
                     !spent
                 });
             }
@@ -370,24 +376,24 @@ impl Servers {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(until) = renewed {
-            keep_servers_deadline(&self.root, lead, until)?;
+            super::super::keep_servers_deadline(&self.root, lead, until, &self.hooks().lead)?;
         }
-        let mut keeper = kernel_processes::spawn_gate::spawn(
-            std::process::Command::new(crate::sandbox::KEEPER[0])
-                .args(&crate::sandbox::KEEPER[1..])
-                .arg(crate::sandbox::SANDBOX_EXEC)
+        let mut keeper = crate::spawn_gate::spawn(
+            std::process::Command::new(confinement.keeper[0])
+                .args(&confinement.keeper[1..])
+                .arg(confinement.sandbox_exec)
                 .arg("-f")
                 .arg(&profile)
-                .args(crate::sandbox::PANE_SHIM)
+                .args(confinement.pane_shim)
                 .arg(program)
                 .args(["-D", "-u", "-f", "/dev/null", "-S"])
                 .arg(socket)
                 .env_clear()
                 .env("PATH", super::SERVER_PATH)
-                .env(crate::sandbox::KEEPER_DEADLINE, &deadline)
+                .env(confinement.keeper_deadline_variable, &deadline)
                 .env(
-                    crate::sandbox::KEEPER_STATE,
-                    crate::team::runtime::agent_servers_state(&self.root.join("team"), id, mates),
+                    confinement.keeper_state_variable,
+                    (self.engine.hooks.agent_servers_state)(&self.root.join("team"), id, mates),
                 )
                 .current_dir(folder)
                 .stdin(std::process::Stdio::null())
@@ -397,7 +403,7 @@ impl Servers {
         )
         .map_err(|_| failure("terminal_unavailable"))?;
         let ready = Instant::now() + KEEPER_READY;
-        while kernel_processes::spawn_gate::connect_unix_std(socket).is_err() {
+        while crate::spawn_gate::connect_unix_std(socket).is_err() {
             if !keeper_runs(&mut keeper) || Instant::now() >= ready {
                 if !end_keeper(&mut keeper) && keeper_runs(&mut keeper) {
                     match kept.lock() {
@@ -480,7 +486,7 @@ impl Servers {
     /// here takes no keeper lock. Takes the agent. Returns the server host or the failure to
     /// open one.
     fn own(&self, agent: &AgentId) -> Result<Option<Arc<Tmux>>, HostError> {
-        let Ok(socket) = harness_socket(&self.root, agent) else {
+        let Ok(socket) = super::super::harness_socket(&self.root, agent, &self.hooks().lead) else {
             return Ok(None);
         };
         let present = listening(&socket);
@@ -532,10 +538,16 @@ impl Servers {
         if leads.len() >= LEADS_KEPT_MAX {
             return Err(failure("terminal_unavailable"));
         }
-        let profile = profile_of(&self.root, lead)?;
+        let profile = profile_of(&self.root, lead, &self.engine.hooks)?;
         let server = Arc::new(Tmux {
             deadline_checks: self.deadline_checks,
-            ..Tmux::confined(self.program.clone(), socket, &profile)?
+            ..Tmux::confined(
+                self.program.clone(),
+                socket,
+                &profile,
+                self.engine.confinement,
+                self.engine.hooks,
+            )?
         });
         leads.insert(lead.clone(), server.clone());
         assert!(leads.len() <= LEADS_KEPT_MAX);
@@ -571,9 +583,11 @@ impl Servers {
             ..Tmux::teammates(
                 self.program.clone(),
                 socket,
-                &profile_of(&self.root, lead)?,
-                &teammates_profile_of(&self.root, lead)?,
+                &profile_of(&self.root, lead, &self.engine.hooks)?,
+                &teammates_profile_of(&self.root, lead, &self.engine.hooks)?,
                 self.pin(lead, socket)?,
+                self.engine.confinement,
+                self.engine.hooks,
             )?
         });
         mates.insert(lead.clone(), server.clone());
@@ -601,7 +615,8 @@ impl Servers {
         pins.remove(lead);
         if pins.len() >= LEADS_KEPT_MAX {
             pins.retain(|known, _| {
-                harness_socket(&self.root, known).is_ok_and(|socket| listening(&socket))
+                super::super::harness_socket(&self.root, known, &self.hooks().lead)
+                    .is_ok_and(|socket| listening(&socket))
             });
             if pins.len() >= LEADS_KEPT_MAX {
                 return Err(failure("terminal_unavailable"));
@@ -612,6 +627,7 @@ impl Servers {
             lead: lead.clone(),
             socket: socket.to_path_buf(),
             pid: Mutex::new(None),
+            hooks: self.engine.hooks,
         });
         pins.insert(lead.clone(), pin.clone());
         assert!(pins.len() <= LEADS_KEPT_MAX);
@@ -623,7 +639,8 @@ impl Servers {
     /// client, looks, since an ended server's socket stays. Takes the agent. Returns the
     /// server host or the failure to open one.
     fn mates(&self, lead: &AgentId) -> Result<Option<Arc<Tmux>>, HostError> {
-        let Ok(socket) = teammates_socket(&self.root, lead) else {
+        let Ok(socket) = super::super::teammates_socket(&self.root, lead, &self.hooks().lead)
+        else {
             return Ok(None);
         };
         if missed_look() || !listening(&socket) || self.mates_gone(lead, &socket) {
@@ -644,7 +661,7 @@ impl Servers {
     /// socket. Returns the answer.
     fn mates_gone(&self, lead: &AgentId, socket: &Path) -> bool {
         match keeper_ended(&self.mates_keepers, lead) {
-            None => kernel_processes::spawn_gate::connect_unix_std(socket).is_err(),
+            None => crate::spawn_gate::connect_unix_std(socket).is_err(),
             Some(true) => refused(socket),
             Some(false) => false,
         }
@@ -656,7 +673,7 @@ impl Servers {
     /// the lead. Returns the server, none for a lead started without one, whose team panes
     /// are on its own server, or `terminal_teammates_server_ended`.
     fn team_mates(&self, lead: &AgentId) -> Result<Option<Arc<Tmux>>, HostError> {
-        if teammates_socket(&self.root, lead).is_err() {
+        if super::super::teammates_socket(&self.root, lead, &self.hooks().lead).is_err() {
             return Ok(None);
         }
         self.mates(lead)?
@@ -695,7 +712,10 @@ impl Servers {
                 let id = name.to_str()?.strip_prefix("agent-")?.parse::<i64>().ok()?;
                 AgentId::team(id).ok()
             })
-            .filter(|lead| harness_socket(&self.root, lead).is_ok_and(|socket| listening(&socket)))
+            .filter(|lead| {
+                super::super::harness_socket(&self.root, lead, &self.hooks().lead)
+                    .is_ok_and(|socket| listening(&socket))
+            })
             .collect();
         leads.sort();
         assert!(leads.len() <= LEADS_SCAN_MAX);
@@ -747,7 +767,8 @@ impl Servers {
             .map_err(|_| failure("terminal_unavailable"))?;
         if members.len() >= MEMBERS_KEPT_MAX && !members.contains_key(agent) {
             members.retain(|_, known| {
-                harness_socket(&self.root, known).is_ok_and(|socket| listening(&socket))
+                super::super::harness_socket(&self.root, known, &self.hooks().lead)
+                    .is_ok_and(|socket| listening(&socket))
             });
             if members.len() >= MEMBERS_KEPT_MAX {
                 return Err(failure("terminal_unavailable"));
@@ -884,12 +905,12 @@ impl Host for Servers {
         if self.engine.alive()?.contains(agent) {
             return Err(failure("terminal_agent_running"));
         }
-        let socket = harness_socket(&self.root, agent)?;
+        let socket = super::super::harness_socket(&self.root, agent, &self.hooks().lead)?;
         let server = self.server(agent, &socket)?;
         if server.alive()?.contains(agent) {
             return Err(failure("terminal_agent_running"));
         }
-        let mates_socket = teammates_socket(&self.root, agent)?;
+        let mates_socket = super::super::teammates_socket(&self.root, agent, &self.hooks().lead)?;
         let mates_started = self.keep_server(agent, &mates_socket, true)?;
         let spawned = self
             .mates_host(agent, &mates_socket)
@@ -1159,12 +1180,14 @@ impl Host for Servers {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(until);
         let mut first = self.engine.renew(until).err();
         for lead in self.leads_listening() {
-            if let Err(problem) = keep_servers_deadline(&self.root, &lead, until) {
+            if let Err(problem) =
+                super::super::keep_servers_deadline(&self.root, &lead, until, &self.hooks().lead)
+            {
                 first = first.or(Some(problem));
             }
             let sockets = [
-                harness_socket(&self.root, &lead).ok(),
-                teammates_socket(&self.root, &lead).ok(),
+                super::super::harness_socket(&self.root, &lead, &self.hooks().lead).ok(),
+                super::super::teammates_socket(&self.root, &lead, &self.hooks().lead).ok(),
             ];
             for socket in sockets.into_iter().flatten() {
                 if let Err(problem) = renew_socket(&socket, until) {

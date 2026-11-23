@@ -5,6 +5,12 @@ use sdk::secrets::Secret;
 use sdk::settings::QuitSettings;
 use sdk::{Refusal, net, secrets, settings};
 
+const _: () = assert!(
+    kernel_security::net::REPLY_BYTES_MAX == sdk::BYTES_MAX
+        && kernel_security::net::REPLY_TEXT_BYTES_MAX == sdk::TEXT_BYTES_MAX
+        && kernel_security::net::REPLY_LIST_MAX == sdk::LIST_ITEMS_MAX
+);
+
 /// The store codes a plugin's input or handle caused; any other code is a store failure.
 const REJECTED_CODES: [&str; 10] = [
     "credential_name_invalid",

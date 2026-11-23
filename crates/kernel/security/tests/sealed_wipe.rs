@@ -1,7 +1,7 @@
 use kernel_security::error::StoreError;
 use kernel_security::net::{CaptureRules, Egress, Method, RawReply, Request, Requests, Sealed};
 use kernel_security::secret::SecretString;
-use kernel_security::secrets::{Handles, Scopes, Secrets};
+use kernel_security::secrets::{Handles, OwnerEntry, Scopes, Secrets};
 use kernel_security::store::{SecretRef, Store, reference};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::BTreeMap;
@@ -130,7 +130,11 @@ fn the_sealed_config_is_wiped_on_drop() {
         "dev.crazyagent.e0123456789ab",
         &scopes,
         &handles,
-        Some(paste),
+        Some(OwnerEntry {
+            plugin: "github",
+            hosts: vec!["api.github.com".to_owned()],
+            value: paste,
+        }),
     );
     let token = secrets.put_from_owner("github", "token").unwrap();
     let egress = DroppingEgress {

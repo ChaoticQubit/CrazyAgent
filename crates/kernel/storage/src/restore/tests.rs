@@ -4,12 +4,12 @@ use std::cell::Cell;
 use std::os::unix::fs::PermissionsExt;
 
 /// No settings texts. Input: none. Output: an empty list.
-fn no_texts() -> Result<Vec<(&'static str, String)>, StorageError> {
+pub(super) fn no_texts() -> Result<Vec<(&'static str, String)>, StorageError> {
     Ok(Vec::new())
 }
 
 /// No agent runs. Input: the connection. Output: false.
-fn idle(_: &Connection) -> Result<bool, StorageError> {
+pub(super) fn idle(_: &Connection) -> Result<bool, StorageError> {
     Ok(false)
 }
 
@@ -17,7 +17,7 @@ fn idle(_: &Connection) -> Result<bool, StorageError> {
 /// checked `11-to-12` backup holds `kept` = ["one"] at version 11, and engine.db now holds
 /// ["two"] at version 12. Input: whether to take the pinned backup. Output: the root and
 /// the database path.
-fn upgraded(pinned: bool) -> (tempfile::TempDir, PathBuf) {
+pub(super) fn upgraded(pinned: bool) -> (tempfile::TempDir, PathBuf) {
     let root = tempfile::Builder::new()
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
@@ -40,7 +40,7 @@ fn upgraded(pinned: bool) -> (tempfile::TempDir, PathBuf) {
 }
 
 /// The values in `kept` and the version of a database. Input: its path. Output: both.
-fn read(path: &Path) -> (Vec<String>, i64) {
+pub(super) fn read(path: &Path) -> (Vec<String>, i64) {
     let db = Connection::open(path).unwrap();
     let values = db
         .prepare("SELECT value FROM kept ORDER BY value")
@@ -57,7 +57,7 @@ fn read(path: &Path) -> (Vec<String>, i64) {
 
 /// The dated copies a restore kept of the data it replaced. Input: the engine root.
 /// Output: their folders.
-fn replaced(root: &Path) -> Vec<PathBuf> {
+pub(super) fn replaced(root: &Path) -> Vec<PathBuf> {
     std::fs::read_dir(root.join(BACKUPS))
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -226,7 +226,7 @@ fn fails_the_pinned_copy(db: &Connection, copy: &Path) -> Result<(), StorageErro
 
 /// A check after the restore wrote that refuses every copy, so the rollback fails as well.
 /// Inputs: the connection and the copy. Output: `check_forced`.
-fn always_fails(_: &Connection, _: &Path) -> Result<(), StorageError> {
+pub(super) fn always_fails(_: &Connection, _: &Path) -> Result<(), StorageError> {
     Err(error("check_forced"))
 }
 
@@ -346,7 +346,7 @@ fn a_record_write_that_fails_keeps_the_old_record_and_leaves_no_temp_file() {
 }
 
 /// The folder of the pinned backup [`upgraded`] took. Input: the engine root. Output: it.
-fn pinned_folder(root: &Path) -> PathBuf {
+pub(super) fn pinned_folder(root: &Path) -> PathBuf {
     std::fs::read_dir(root.join(BACKUPS))
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -472,34 +472,7 @@ fn a_pin_with_no_digest_that_fails_its_integrity_check_is_refused_before_any_wri
     let (root, path) = upgraded(true);
     let pinned = pinned_folder(root.path());
     std::fs::write(pinned.join(crate::migrations::CHECKED), b"").unwrap();
-    let copy = Connection::open(pinned.join(DATABASE)).unwrap();
-    copy.execute_batch("CREATE TABLE spare (value TEXT); INSERT INTO spare VALUES ('x');")
-        .unwrap();
-    let journal: String = copy
-        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(journal, "delete", "every page is in the file");
-    let (root_page, page_size): (i64, i64) = copy
-        .query_row(
-            "SELECT rootpage, (SELECT page_size FROM pragma_page_size)
-            FROM sqlite_master WHERE name = 'spare'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    drop(copy);
-    assert!(root_page > 1, "page 1 keeps the schema readable");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .open(pinned.join(DATABASE))
-        .unwrap();
-    std::io::Seek::seek(
-        &mut file,
-        std::io::SeekFrom::Start(((root_page - 1) * page_size) as u64),
-    )
-    .unwrap();
-    std::io::Write::write_all(&mut file, &[0xff]).unwrap();
-    drop(file);
+    damage(&pinned.join(DATABASE));
     let before = std::fs::read(&path).unwrap();
 
     let refused = restore_pinned(&path, &refusing_hooks()).unwrap_err().0;
@@ -508,4 +481,34 @@ fn a_pin_with_no_digest_that_fails_its_integrity_check_is_refused_before_any_wri
     assert!(refused.contains("integrity"), "{refused}");
     assert!(replaced(root.path()).is_empty());
     assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// Damages a database so SQLite still opens it but its integrity check fails: a new table
+/// `spare` gets one row, and the first byte of its root page, the page type, is overwritten.
+/// The schema on page 1 stays readable. Input: the database path. Output: none.
+pub(super) fn damage(path: &Path) {
+    let db = Connection::open(path).unwrap();
+    db.execute_batch("CREATE TABLE spare (value TEXT); INSERT INTO spare VALUES ('x');")
+        .unwrap();
+    let journal: String = db
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(journal, "delete", "every page is in the file");
+    let (root_page, page_size): (i64, i64) = db
+        .query_row(
+            "SELECT rootpage, (SELECT page_size FROM pragma_page_size)
+            FROM sqlite_master WHERE name = 'spare'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    drop(db);
+    assert!(root_page > 1, "page 1 keeps the schema readable");
+    let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    std::io::Seek::seek(
+        &mut file,
+        std::io::SeekFrom::Start(((root_page - 1) * page_size) as u64),
+    )
+    .unwrap();
+    std::io::Write::write_all(&mut file, &[0xff]).unwrap();
 }

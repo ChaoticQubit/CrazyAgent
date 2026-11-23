@@ -24,15 +24,15 @@ pub enum Compaction {
 /// since its newest `SnapshotDone`, writes a snapshot run from `rows` at `at_ms`, verifies it
 /// and the second-newest run, then tombstones that aggregate's bodies behind the
 /// second-newest run, zeroed, so seq and the replay gap check stay whole. Inputs: the
-/// appender, the switch, the aggregate, the time and its rows. Output: the tombstoned row
-/// count, 0 when Off, not due or with one run only.
-pub fn compact(
+/// appender, the switch, the aggregate, the time and its rows, read in the appender's
+/// transaction. Output: the tombstoned row count, 0 when Off, not due or with one run only.
+pub fn compact<E: From<StorageError>>(
     appender: &mut Appender<'_, '_>,
     compaction: Compaction,
     aggregate: AggregateName,
     at_ms: u64,
-    rows: impl FnOnce() -> Result<Vec<Chunk>, StorageError>,
-) -> Result<u64, StorageError> {
+    rows: impl FnOnce(&Transaction<'_>) -> Result<Vec<Chunk>, E>,
+) -> Result<u64, E> {
     if compaction == Compaction::Off {
         return Ok(0);
     }
@@ -41,7 +41,8 @@ pub fn compact(
     if events_after(tx, aggregate, newest.unwrap_or(0))? < COMPACT_EVERY {
         return Ok(0);
     }
-    let done = appender.snapshot(aggregate, at_ms, rows()?)?;
+    let chunks = rows(tx)?;
+    let done = appender.snapshot(aggregate, at_ms, chunks)?;
     assert!(newest.is_none_or(|newest| done > newest));
     verify_snapshot(tx, done)?;
     let Some(second) = newest_done(tx, aggregate, 1)? else {
@@ -64,7 +65,7 @@ pub fn compact(
         )
         .map_err(error)?;
     assert_ne!(kept.as_slice(), TOMBSTONE, "the second-newest run is kept");
-    u64::try_from(pruned).map_err(error)
+    Ok(u64::try_from(pruned).map_err(error)?)
 }
 
 /// The seq of one of an aggregate's `SnapshotDone` events, counted from the newest. Inputs:

@@ -470,7 +470,7 @@ impl Drop for Mac {
         let socket = self
             .root
             .join(crazyagent::terminal::FOLDER)
-            .join(crazyagent::terminal::tmux::SOCKET);
+            .join(kernel_processes::terminal::tmux::SOCKET);
         let _ = kernel_processes::spawn_gate::status(
             Command::new(&self.tmux)
                 .arg("-S")
