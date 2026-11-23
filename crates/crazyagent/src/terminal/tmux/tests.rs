@@ -107,7 +107,7 @@ fn a_close_leaves_a_pane_group_another_path_holds_to_that_path() {
     let host = Tmux::open(
         Some(tmux.clone()),
         &folder,
-        crate::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         super::tmux_hooks(),
     );
     let _server = Server {
@@ -191,7 +191,7 @@ impl StandIn {
         let host = Tmux::open(
             Some(forging_tmux(home.path(), &agent, pid)),
             &folder,
-            crate::sandbox::confinement(),
+            kernel_sandbox::confinement(),
             super::tmux_hooks(),
         );
         let address = kernel_processes::socket_address::address(&host.socket()).unwrap();

@@ -52,7 +52,7 @@ impl Fixture {
         Tmux::open(
             Some(tmux),
             &self.base.join(crate::terminal::FOLDER),
-            crate::sandbox::confinement(),
+            kernel_sandbox::confinement(),
             crate::terminal::tmux::tmux_hooks(),
         )
     }

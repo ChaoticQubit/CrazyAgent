@@ -54,7 +54,7 @@ impl Pane {
         let host: Arc<dyn Host> = Arc::new(Tmux::open(
             Some(tmux.clone()),
             &base.join(crate::terminal::FOLDER),
-            crate::sandbox::confinement(),
+            kernel_sandbox::confinement(),
             crate::terminal::tmux::tmux_hooks(),
         ));
         let recorded = base.join("typed.txt");

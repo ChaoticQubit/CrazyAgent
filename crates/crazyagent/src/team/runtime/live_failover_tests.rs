@@ -487,7 +487,7 @@ impl Team {
         let host_terminal: Arc<dyn Host> = Arc::new(Tmux::open(
             Some(tmux.clone()),
             &base.join(FOLDER),
-            crate::sandbox::confinement(),
+            kernel_sandbox::confinement(),
             crate::terminal::tmux::tmux_hooks(),
         ));
         let mut runtime = TeamRuntime::open(

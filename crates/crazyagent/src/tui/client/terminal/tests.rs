@@ -206,7 +206,7 @@ fn spawn_shell(tmux: PathBuf, folder: &Path, root: &Path, agent: &AgentId) -> Tm
     let launcher = Tmux::open(
         Some(tmux),
         folder,
-        crate::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         crate::terminal::tmux::tmux_hooks(),
     );
     launcher

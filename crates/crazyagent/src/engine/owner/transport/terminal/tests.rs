@@ -139,7 +139,7 @@ async fn attach_sized_mid_session_is_refused() {
             let launcher = Tmux::open(
                 Some(tmux),
                 &folder,
-                crate::sandbox::confinement(),
+                kernel_sandbox::confinement(),
                 crate::terminal::tmux::tmux_hooks(),
             );
             launcher
@@ -617,7 +617,7 @@ async fn fifty_typed_keys_echo_back_within_budget() {
             let launcher = Tmux::open(
                 Some(tmux),
                 &folder,
-                crate::sandbox::confinement(),
+                kernel_sandbox::confinement(),
                 crate::terminal::tmux::tmux_hooks(),
             );
             launcher
@@ -1083,7 +1083,7 @@ async fn an_input_only_view_types_and_pastes_without_sending_output() {
             let launcher = Tmux::open(
                 Some(tmux),
                 &folder,
-                crate::sandbox::confinement(),
+                kernel_sandbox::confinement(),
                 crate::terminal::tmux::tmux_hooks(),
             );
             launcher
@@ -1301,7 +1301,7 @@ async fn a_follower_sizes_its_window_only_while_no_sizer_is_open() {
             let launcher = Tmux::open(
                 Some(tmux),
                 &folder,
-                crate::sandbox::confinement(),
+                kernel_sandbox::confinement(),
                 crate::terminal::tmux::tmux_hooks(),
             );
             launcher
@@ -1519,7 +1519,7 @@ async fn an_input_only_view_never_moves_to_a_new_terminal_under_its_agents_name(
             let launcher = Tmux::open(
                 Some(tmux),
                 &folder,
-                crate::sandbox::confinement(),
+                kernel_sandbox::confinement(),
                 crate::terminal::tmux::tmux_hooks(),
             );
             launcher
@@ -1889,7 +1889,7 @@ async fn a_prompt_through_an_input_only_view_lands_in_a_real_tmux_pane() {
             let launcher = Tmux::open(
                 Some(tmux),
                 &folder,
-                crate::sandbox::confinement(),
+                kernel_sandbox::confinement(),
                 crate::terminal::tmux::tmux_hooks(),
             );
             launcher

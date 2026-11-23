@@ -80,27 +80,6 @@ impl OwnerGit {
     }
 }
 
-/// How the tmux host wraps a confined pane, built from this module's sandbox values: the
-/// runner, the keeper and pane shim words and variables, and which variables reach a pane.
-/// Output: the value the kernel tmux host is opened with.
-#[cfg(unix)]
-pub fn confinement() -> kernel_processes::terminal::tmux::Confinement {
-    kernel_processes::terminal::tmux::Confinement {
-        sandbox_exec: SANDBOX_EXEC,
-        #[cfg(target_os = "macos")]
-        keeper: KEEPER,
-        #[cfg(target_os = "macos")]
-        keeper_deadline_variable: KEEPER_DEADLINE,
-        #[cfg(target_os = "macos")]
-        keeper_state_variable: KEEPER_STATE,
-        #[cfg(target_os = "macos")]
-        pane_shim: PANE_SHIM,
-        variable_allowed: agent_variable_allowed,
-        #[cfg(target_os = "macos")]
-        unkept_pane,
-    }
-}
-
 /// The loopback ports the owner's configured model endpoints listen on, which a tools-on
 /// agent must not bind before the owner's model server does. An endpoint URL that does not
 /// parse names no port. Input: the model access settings. Output: the ports, sorted, once
@@ -200,7 +179,9 @@ pub fn refusal_code(error: &SandboxError) -> Option<&'static str> {
         #[cfg(target_os = "linux")]
         linux::HIDDEN_MOUNTED_AGAIN => Some(LINUX_HIDDEN_MOUNTED_AGAIN),
         #[cfg(target_os = "linux")]
-        kernel_sandbox::linux::helper::HIDDEN_MOUNTS_NOT_PRIVATE => Some(LINUX_HIDDEN_MOUNTS_NOT_PRIVATE),
+        kernel_sandbox::linux::helper::HIDDEN_MOUNTS_NOT_PRIVATE => {
+            Some(LINUX_HIDDEN_MOUNTS_NOT_PRIVATE)
+        }
         _ => None,
     }
 }
