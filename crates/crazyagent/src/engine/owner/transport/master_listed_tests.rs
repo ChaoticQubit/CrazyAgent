@@ -353,7 +353,12 @@ mod launch {
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
             .unwrap();
         let base = folder.path().canonicalize().unwrap();
-        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let private = std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700));
+        assert!(
+            private.is_ok(),
+            "the turn base takes 0700: {:?}",
+            private.err()
+        );
         let (bin, work) = (base.join("bin"), base.join("work"));
         for place in [&bin, &work] {
             std::fs::create_dir(place).unwrap();
