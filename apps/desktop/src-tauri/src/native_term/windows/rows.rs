@@ -54,7 +54,7 @@ use super::super::event::{MouseKind, ViewEvent};
 use super::super::host::windows as platform;
 use super::super::host::{Command, command};
 use super::super::pane::{CONTROL, Input, Named, Pane};
-use super::super::render::{GPU_FAULT, RELEASE_STALL_MAX, Shared};
+use super::super::render::{GPU_FAULT, Shared};
 use super::super::screen::{self, Frame};
 use super::super::style::{Style, Theme, font_for};
 use super::draw;
@@ -631,7 +631,7 @@ fn faults_on_a_loss_after_the_wait_and_a_new_view_draws(parent: HWND, webview: H
         .place(Some((420.0, 40.0, 200.0, 100.0)))
         .expect("a third box");
     await_present("a view after the loss draws on a new device", fresh);
-    released_within_the_bound();
+    device_lost::released_within_the_bound(1);
     assert_eq!(
         draw::trial_shared_made(),
         made,
@@ -650,19 +650,6 @@ fn faults_on_a_loss_after_the_wait_and_a_new_view_draws(parent: HWND, webview: H
         "h5a row: a loss faulted views 2 and 4, view 3 drew on a new device, presents {}",
         presents()
     );
-}
-
-/// Checks the render thread released a lost device rather than forgetting it, and that no
-/// release held it past `RELEASE_STALL_MAX`. Read once a view made after the loss drew,
-/// since making that view's surface retires the lost device first.
-fn released_within_the_bound() {
-    let (releases, longest) = draw::trial_releases();
-    assert!(releases >= 1, "the lost device was released, not forgotten");
-    assert!(
-        longest < RELEASE_STALL_MAX,
-        "a release held the render thread {longest:?}, past {RELEASE_STALL_MAX:?}"
-    );
-    println!("device-lost row: {releases} releases, the longest {longest:?}");
 }
 
 #[test]

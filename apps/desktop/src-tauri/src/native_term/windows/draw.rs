@@ -142,10 +142,10 @@ pub fn trial_removals() -> u64 {
     super::super::render::trial_removals()
 }
 
-/// Test builds only: how many lost devices or frames the render thread released, and the
-/// longest release. Output: the count and the time.
+/// Test builds only: how many lost devices and frames the render thread released, and the
+/// longest release. Output: the device count, the frame count and the time.
 #[cfg(test)]
-pub fn trial_releases() -> (u64, Duration) {
+pub fn trial_releases() -> (u64, u64, Duration) {
     super::super::render::trial_releases()
 }
 

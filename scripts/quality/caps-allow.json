@@ -4,7 +4,7 @@
   "apps/desktop/src-tauri/src/bridge/terminal.rs": 1874,
   "apps/desktop/src-tauri/src/ide.rs": 1882,
   "apps/desktop/src-tauri/src/lib.rs": 6471,
-  "apps/desktop/src-tauri/src/native_term/windows/rows.rs": 2703,
+  "apps/desktop/src-tauri/src/native_term/windows/rows.rs": 2690,
   "apps/desktop/src-tauri/tests/native_auth.rs": 1564,
   "apps/desktop/src/api-intake.ts": 604,
   "apps/desktop/src/api-process.ts": 644,

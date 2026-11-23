@@ -546,7 +546,7 @@ impl Shared {
         if self.device.as_ref().is_some_and(Device::is_lost) {
             let lost = self.device.take();
             #[cfg(windows)]
-            release(lost);
+            release(lost, Released::Device);
             #[cfg(not(windows))]
             std::mem::forget(lost);
             self.attempts_left.get_or_insert(DEVICE_REPLACE_MAX);
@@ -946,7 +946,7 @@ impl Shared {
         let Some(lost) = self.device.take_if(|device| device.is_lost()) else {
             return false;
         };
-        release(lost);
+        release(lost, Released::Device);
         true
     }
 
@@ -999,7 +999,7 @@ impl Shared {
         assert!(output.texture.width() <= set.side_max);
         if set.is_lost() {
             #[cfg(windows)]
-            release(output);
+            release(output, Released::Frame);
             #[cfg(not(windows))]
             std::mem::forget(output);
             return Err(GPU_FAULT);
@@ -1117,7 +1117,7 @@ fn hand_back(
     assert!(output.texture.height() <= set.side_max);
     if set.is_lost() {
         #[cfg(windows)]
-        release(output);
+        release(output, Released::Frame);
         #[cfg(not(windows))]
         std::mem::forget(output);
         return Err(GPU_FAULT.to_owned());
@@ -1145,40 +1145,55 @@ fn guarded<T>(lost: &AtomicBool, call: impl FnOnce() -> T) -> Result<T, &'static
 /// Drops a lost device, or a frame acquired on one, on the Windows render thread instead of
 /// forgetting it: D3D12 keeps one device per adapter and refuses a new one while a removed
 /// one is still held. It runs only after a reported loss, within `RELEASE_STALL_MAX`; a
-/// panic inside wgpu's drop is caught and logged, so the render thread goes on. Input: what
-/// to drop.
+/// panic inside wgpu's drop is caught and logged, so the render thread goes on. Inputs:
+/// what to drop and which kind it is.
 #[cfg(windows)]
-fn release<T>(lost: T) {
+fn release<T>(lost: T, kind: Released) {
     let started = Instant::now();
     let dropped = panic::catch_unwind(AssertUnwindSafe(move || drop(lost)));
     if dropped.is_err() {
         eprintln!("{GPU_FAULT}: releasing a lost device panicked");
     }
-    released(started.elapsed());
+    released(kind, started.elapsed());
+}
+
+/// What `release` drops: a lost device, or a frame acquired on one.
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+enum Released {
+    Device,
+    Frame,
 }
 
 #[cfg(all(windows, test))]
-static RELEASES: AtomicU64 = AtomicU64::new(0);
+static RELEASED_DEVICES: AtomicU64 = AtomicU64::new(0);
+#[cfg(all(windows, test))]
+static RELEASED_FRAMES: AtomicU64 = AtomicU64::new(0);
 #[cfg(all(windows, test))]
 static RELEASE_LONGEST_US: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(all(windows, test))]
-fn released(took: Duration) {
+fn released(kind: Released, took: Duration) {
     let micros = u64::try_from(took.as_micros()).unwrap_or(u64::MAX);
-    RELEASES.fetch_add(1, Ordering::SeqCst);
+    let count = match kind {
+        Released::Device => &RELEASED_DEVICES,
+        Released::Frame => &RELEASED_FRAMES,
+    };
+    count.fetch_add(1, Ordering::SeqCst);
     RELEASE_LONGEST_US.fetch_max(micros, Ordering::SeqCst);
     assert!(RELEASE_LONGEST_US.load(Ordering::SeqCst) >= micros);
 }
 
 #[cfg(all(windows, not(test)))]
-fn released(_: Duration) {}
+fn released(_: Released, _: Duration) {}
 
-/// Test builds only: how many lost devices or frames the render thread released, and the
-/// longest release. Output: the count and the time.
+/// Test builds only: how many lost devices and frames the render thread released, and the
+/// longest release. Output: the device count, the frame count and the time.
 #[cfg(all(windows, test))]
-pub fn trial_releases() -> (u64, Duration) {
+pub fn trial_releases() -> (u64, u64, Duration) {
     let longest = Duration::from_micros(RELEASE_LONGEST_US.load(Ordering::SeqCst));
-    (RELEASES.load(Ordering::SeqCst), longest)
+    let devices = RELEASED_DEVICES.load(Ordering::SeqCst);
+    (devices, RELEASED_FRAMES.load(Ordering::SeqCst), longest)
 }
 
 #[cfg(all(windows, test))]

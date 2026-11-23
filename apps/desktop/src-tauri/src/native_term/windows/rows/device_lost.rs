@@ -1,3 +1,4 @@
+use super::super::super::render::RELEASE_STALL_MAX;
 use super::*;
 
 /// Draws a view once, then removes the D3D12 device right before its next present and
@@ -56,7 +57,7 @@ fn the_render_thread_answers_a_view_placed_after_a_removal_inside_present() {
         !later.faulted() && presents() > before,
         "a replacement device comes up after a removal: the later view presents and has not faulted"
     );
-    released_within_the_bound();
+    released_within_the_bound(0);
     println!(
         "device-lost row: a replacement device after the removal came up, presents {}",
         presents()
@@ -64,4 +65,24 @@ fn the_render_thread_answers_a_view_placed_after_a_removal_inside_present() {
     dropped_within_the_bound(later, "the later view");
     dropped_within_the_bound(removed, "the removed view");
     assert_ne!(unsafe { DestroyWindow(parent) }, 0, "the parent goes last");
+}
+
+/// Checks the render thread released a lost device, and at least `frames` frames acquired on
+/// one, rather than forgetting them, and that no release held it past `RELEASE_STALL_MAX`.
+/// Read once a view made after the loss drew, since making that view's surface retires the
+/// lost device first. Input: the fewest frame releases the row's loss makes.
+pub(super) fn released_within_the_bound(frames: u64) {
+    let (devices, released, longest) = draw::trial_releases();
+    assert!(devices >= 1, "the lost device was released, not forgotten");
+    assert!(
+        released >= frames,
+        "{released} frames released, the loss makes {frames}"
+    );
+    assert!(
+        longest < RELEASE_STALL_MAX,
+        "a release held the render thread {longest:?}, past {RELEASE_STALL_MAX:?}"
+    );
+    println!(
+        "device-lost row: {devices} devices, {released} frames released, the longest {longest:?}"
+    );
 }
