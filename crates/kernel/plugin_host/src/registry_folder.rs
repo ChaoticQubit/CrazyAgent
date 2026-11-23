@@ -1,17 +1,25 @@
 use super::{
-    FOLDER, MANIFEST_FILE, Problem, RETIRED, STAGED, TREE_DEPTH_MAX, TREE_ENTRIES_MAX,
-    USER_PLUGINS_MAX, UserFile, left_over, retired, retired_name,
+    MANIFEST_FILE, Problem, RETIRED, STAGED, TREE_DEPTH_MAX, TREE_ENTRIES_MAX, USER_PLUGINS_MAX,
+    UserFile, left_over, retired, retired_name,
 };
 
 use crate::Refused;
 use crate::embedding::valid_name;
 use crate::manifest::MANIFEST_BYTES_MAX;
 use crate::store::refused;
-use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use std::collections::BTreeMap;
-use std::ffi::CStr;
-use std::os::unix::fs::MetadataExt;
+use std::ffi::{OsStr, OsString};
 use std::path::Path;
+
+#[cfg(unix)]
+#[path = "registry_folder_unix.rs"]
+mod os;
+
+#[cfg(windows)]
+#[path = "registry_folder_windows.rs"]
+mod os;
+
+use os::{Dir, Kind};
 
 const LEGACY_SUFFIX: &str = ".yaml";
 
@@ -39,33 +47,8 @@ fn legacy() -> Problem {
     Problem::new("app_plugin_format_old", None, None)
 }
 
-fn open(root: &Path, create: bool) -> Result<Option<std::fs::File>, Refused> {
-    if create {
-        match rustix::fs::mkdir(root.join(FOLDER), Mode::from_raw_mode(0o700)) {
-            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-            Err(_) => return Err(unavailable()),
-        }
-    }
-    let directory = match rustix::fs::open(
-        root.join(FOLDER),
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    ) {
-        Ok(fd) => std::fs::File::from(fd),
-        Err(rustix::io::Errno::NOENT) => return Ok(None),
-        Err(rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR) => {
-            return Err(refused("app_plugin_folder_unsafe"));
-        }
-        Err(_) => return Err(unavailable()),
-    };
-    let metadata = directory.metadata().map_err(|_| unavailable())?;
-    if !metadata.is_dir()
-        || metadata.uid() != rustix::process::getuid().as_raw()
-        || metadata.mode() & 0o7777 != 0o700
-    {
-        return Err(refused("app_plugin_folder_unsafe"));
-    }
-    Ok(Some(directory))
+fn open(root: &Path, create: bool) -> Result<Option<Dir>, Refused> {
+    os::open_plugins(root, create)
 }
 
 fn entry_of(file: &[u8]) -> Option<(&str, Entry)> {
@@ -78,44 +61,27 @@ fn entry_of(file: &[u8]) -> Option<(&str, Entry)> {
 
 /// Reads a plugin folder's plugin.toml: the folder opened without following a link,
 /// holding that one entry, the file a plain file read without following a link or
-/// waiting on a FIFO, at most `MANIFEST_BYTES_MAX` + 1 bytes. Inputs: the folder and
-/// whether it must be owned by this user. Output: the bytes, or the refusal.
-fn read_dir(directory: std::fs::File, owned: bool) -> Result<Vec<u8>, Problem> {
+/// waiting on a FIFO, at most `MANIFEST_BYTES_MAX` + 1 bytes. Inputs: the opened folder
+/// and whether its plugin.toml must be owned by this user. Output: the bytes, or the
+/// refusal.
+fn read_dir(directory: Dir, owned: bool) -> Result<Vec<u8>, Problem> {
     use std::io::Read;
-    let uid = rustix::process::getuid().as_raw();
-    let metadata = directory.metadata().map_err(|_| unsafe_entry())?;
-    if !metadata.is_dir() || (owned && metadata.uid() != uid) {
-        return Err(unsafe_entry());
-    }
     let mut seen = 0;
-    for entry in rustix::fs::Dir::read_from(&directory).map_err(|_| unsafe_entry())? {
-        let entry = entry.map_err(|_| unsafe_entry())?;
-        let name = entry.file_name().to_bytes();
-        if name == b"." || name == b".." {
-            continue;
-        }
+    let mut extra = false;
+    os::each(&directory, |name| {
         seen += 1;
-        if name != MANIFEST_FILE.as_bytes() || seen >= ENTRIES_MAX {
-            return Err(Problem::new("plugin_folder_extra_entry", None, None));
-        }
+        extra = name != MANIFEST_FILE || seen >= ENTRIES_MAX;
+        !extra
+    })
+    .map_err(|()| unsafe_entry())?;
+    if extra {
+        return Err(Problem::new("plugin_folder_extra_entry", None, None));
     }
     assert!(seen < ENTRIES_MAX);
-    let file = std::fs::File::from(
-        rustix::fs::openat(
-            &directory,
-            MANIFEST_FILE,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-            Mode::empty(),
-        )
-        .map_err(|error| match error {
-            rustix::io::Errno::NOENT => Problem::new("plugin_manifest_invalid", Some(1), None),
-            _ => unsafe_entry(),
-        })?,
-    );
-    let metadata = file.metadata().map_err(|_| unsafe_entry())?;
-    if !metadata.is_file() || (owned && metadata.uid() != uid) {
-        return Err(unsafe_entry());
-    }
+    let file = os::open_manifest(&directory, owned)
+        .map_err(|()| unsafe_entry())?
+        .ok_or_else(|| Problem::new("plugin_manifest_invalid", Some(1), None))?;
+    drop(directory);
     let mut bytes = Vec::new();
     file.take(MANIFEST_BYTES_MAX as u64 + 1)
         .read_to_end(&mut bytes)
@@ -124,41 +90,25 @@ fn read_dir(directory: std::fs::File, owned: bool) -> Result<Vec<u8>, Problem> {
     Ok(bytes)
 }
 
-fn read_in(directory: &std::fs::File, name: &str) -> Result<Vec<u8>, Problem> {
-    let folder = rustix::fs::openat(
-        directory,
-        name,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|_| unsafe_entry())?;
-    read_dir(std::fs::File::from(folder), true)
+fn read_in(directory: &Dir, name: &str) -> Result<Vec<u8>, Problem> {
+    let folder = os::open_folder(directory, name.as_ref(), true).map_err(|()| unsafe_entry())?;
+    read_dir(folder, true)
 }
 
 /// Reads a folder the owner picked to add: not a link itself, opened without following
 /// one, holding its plugin.toml only. Input: the folder. Output: the
 /// plugin.toml bytes, or the refusal.
 pub(super) fn read_source(source: &Path) -> Result<Vec<u8>, Problem> {
-    let metadata = std::fs::symlink_metadata(source).map_err(|_| unsafe_entry())?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(unsafe_entry());
-    }
-    let folder = rustix::fs::open(
-        source,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|_| unsafe_entry())?;
-    read_dir(std::fs::File::from(folder), false)
+    let folder = os::open_picked(source).map_err(|()| unsafe_entry())?;
+    read_dir(folder, false)
 }
 
-fn names(directory: &std::fs::File) -> Result<(BTreeMap<String, Entry>, bool), Refused> {
+fn names(directory: &Dir) -> Result<(BTreeMap<String, Entry>, bool), Refused> {
     let mut names = BTreeMap::new();
     let mut more = false;
-    for entry in rustix::fs::Dir::read_from(directory).map_err(|_| unavailable())? {
-        let entry = entry.map_err(|_| unavailable())?;
-        let Some((name, kind)) = entry_of(entry.file_name().to_bytes()) else {
-            continue;
+    os::each(directory, |file| {
+        let Some((name, kind)) = entry_of(file.as_encoded_bytes()) else {
+            return true;
         };
         let kept = names.entry(name.to_owned()).or_insert(kind);
         if kind == Entry::Folder {
@@ -168,7 +118,9 @@ fn names(directory: &std::fs::File) -> Result<(BTreeMap<String, Entry>, bool), R
             names.pop_last();
             more = true;
         }
-    }
+        true
+    })
+    .map_err(|()| unavailable())?;
     assert!(names.len() <= USER_PLUGINS_MAX);
     Ok((names, more))
 }
@@ -220,12 +172,10 @@ pub(super) fn fits(root: &Path, name: &str) -> Result<bool, Refused> {
     Ok(names.contains_key(name) || names.len() < USER_PLUGINS_MAX)
 }
 
-fn exists(directory: &std::fs::File, name: &str) -> Result<bool, Refused> {
-    match rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(_) => Ok(true),
-        Err(rustix::io::Errno::NOENT) => Ok(false),
-        Err(_) => Err(unavailable()),
-    }
+fn exists(directory: &Dir, name: &str) -> Result<bool, Refused> {
+    os::kind(directory, name.as_ref())
+        .map(|kind| kind.is_some())
+        .map_err(|()| unavailable())
 }
 
 /// One user plugin. Inputs: the engine root and a valid plugin name. Output: none when
@@ -244,69 +194,47 @@ pub(super) fn read(root: &Path, name: &str) -> Result<Option<Result<Vec<u8>, Pro
     Ok(None)
 }
 
-/// What one entry is, read without following a link. Inputs: its folder and name.
-/// Output: its type, none when it is missing, or `app_plugin_folder_unavailable`.
-fn kind(directory: &std::fs::File, name: &CStr) -> Result<Option<FileType>, Refused> {
-    match rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(stat) => Ok(Some(FileType::from_raw_mode(stat.st_mode))),
-        Err(rustix::io::Errno::NOENT) => Ok(None),
-        Err(_) => Err(unavailable()),
-    }
-}
-
-fn unlink(directory: &std::fs::File, name: &CStr) -> Result<(), Refused> {
-    match rustix::fs::unlinkat(directory, name, AtFlags::empty()) {
-        Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
-        Err(_) => Err(unavailable()),
-    }
-}
-
 /// Deletes one plugin folder and what it holds, never following a link: a link in it is
 /// unlinked itself, so nothing outside the plugin is touched. Inputs: the plugins folder
 /// and the entry name. Output: Ok once it is gone, or `app_plugin_folder_unavailable`
 /// past `TREE_DEPTH_MAX` levels or `TREE_ENTRIES_MAX` entries in one folder.
-fn remove_tree(directory: &std::fs::File, name: &str) -> Result<(), Refused> {
-    let name = std::ffi::CString::new(name).map_err(|_| unavailable())?;
-    remove_level(directory, &name, TREE_DEPTH_MAX)
+fn remove_tree(directory: &Dir, name: &str) -> Result<(), Refused> {
+    remove_level(directory, name.as_ref(), TREE_DEPTH_MAX)
 }
 
-fn remove_level(directory: &std::fs::File, name: &CStr, depth: usize) -> Result<(), Refused> {
-    let folder = std::fs::File::from(
-        rustix::fs::openat(
-            directory,
-            name,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|_| unavailable())?,
-    );
-    let mut inside = Vec::new();
-    for entry in rustix::fs::Dir::read_from(&folder).map_err(|_| unavailable())? {
-        let entry = entry.map_err(|_| unavailable())?;
-        let file = entry.file_name();
-        if file.to_bytes() == b"." || file.to_bytes() == b".." {
-            continue;
-        }
-        inside.push(file.to_owned());
-        if inside.len() > TREE_ENTRIES_MAX {
-            return Err(unavailable());
-        }
+/// Deletes one folder level by level, each folder's own handle closed before the folder
+/// itself is deleted. Inputs: the folder holding it, its name and the levels left below
+/// it. Output: Ok once it is gone, or `app_plugin_folder_unavailable`.
+fn remove_level(directory: &Dir, name: &OsStr, depth: usize) -> Result<(), Refused> {
+    assert!(depth <= TREE_DEPTH_MAX);
+    let folder = os::open_folder(directory, name, false).map_err(|()| unavailable())?;
+    let mut inside: Vec<OsString> = Vec::new();
+    os::each(&folder, |file| {
+        inside.push(file.to_os_string());
+        inside.len() <= TREE_ENTRIES_MAX
+    })
+    .map_err(|()| unavailable())?;
+    if inside.len() > TREE_ENTRIES_MAX {
+        return Err(unavailable());
     }
     for file in &inside {
-        match kind(&folder, file)? {
-            Some(FileType::Directory) if depth == 0 => return Err(unavailable()),
-            Some(FileType::Directory) => remove_level(&folder, file, depth - 1)?,
-            Some(_) => unlink(&folder, file)?,
+        match os::kind(&folder, file).map_err(|()| unavailable())? {
+            Some(Kind::Folder) if depth == 0 => return Err(unavailable()),
+            Some(Kind::Folder) => remove_level(&folder, file, depth - 1)?,
+            Some(Kind::Other) => {
+                os::unlink(&folder, file).map_err(|()| unavailable())?;
+            }
             None => {}
         }
     }
-    rustix::fs::unlinkat(directory, name, AtFlags::REMOVEDIR).map_err(|_| unavailable())
+    drop(folder);
+    os::remove_dir(directory, name).map_err(|()| unavailable())
 }
 
-/// Writes a user plugin as a staged 0700 folder holding a 0600 plugin.toml, renamed into
-/// place, creating the 0700 plugins folder when missing. An older folder of that name is
-/// moved aside first and moved back when the new one cannot take its place; once the
-/// new one is in place it moves to a retired name with no plugin name in it and is
+/// Writes a user plugin as a staged private folder holding a private plugin.toml, renamed
+/// into place, creating the private plugins folder when missing. An older folder of that
+/// name is moved aside first and moved back when the new one cannot take its place; once
+/// the new one is in place it moves to a retired name with no plugin name in it and is
 /// deleted, and one it cannot delete stays aside for the start sweep. Inputs: the engine
 /// root, a valid name, the bytes and the random id source. Output: Ok with the folder
 /// synced, or the folder's refusal with nothing staged left.
@@ -319,47 +247,23 @@ pub(super) fn write(
     let directory = open(root, true)?.ok_or_else(unavailable)?;
     let id = new_ref().map_err(refused)?;
     let staged = format!("{STAGED}{id}");
-    rustix::fs::mkdirat(&directory, staged.as_str(), Mode::from_raw_mode(0o700))
-        .map_err(|_| unavailable())?;
+    os::make_folder(&directory, staged.as_ref()).map_err(|()| unavailable())?;
     let written = (|| {
-        let folder = std::fs::File::from(
-            rustix::fs::openat(
-                &directory,
-                staged.as_str(),
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|_| unavailable())?,
-        );
-        let mut file = std::fs::File::from(
-            rustix::fs::openat(
-                &folder,
-                MANIFEST_FILE,
-                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::from_raw_mode(0o600),
-            )
-            .map_err(|_| unavailable())?,
-        );
-        std::io::Write::write_all(&mut file, bytes)
-            .and_then(|()| file.sync_all())
-            .and_then(|()| folder.sync_all())
-            .map_err(|_| unavailable())?;
+        os::write_manifest(&directory, staged.as_ref(), bytes).map_err(|()| unavailable())?;
         let retired = retired(name, &id);
         let replaced = exists(&directory, name)?;
         if replaced {
-            rustix::fs::renameat(&directory, name, &directory, retired.as_str())
-                .map_err(|_| unavailable())?;
+            os::rename(&directory, name.as_ref(), retired.as_ref()).map_err(|()| unavailable())?;
         }
-        if rustix::fs::renameat(&directory, staged.as_str(), &directory, name).is_err() {
+        if os::rename(&directory, staged.as_ref(), name.as_ref()).is_err() {
             if replaced {
-                let _ = rustix::fs::renameat(&directory, retired.as_str(), &directory, name);
+                let _ = os::rename(&directory, retired.as_ref(), name.as_ref());
             }
             return Err(unavailable());
         }
         if replaced {
             let aside = format!("{RETIRED}{id}");
-            let nameless =
-                rustix::fs::renameat(&directory, retired.as_str(), &directory, aside.as_str());
+            let nameless = os::rename(&directory, retired.as_ref(), aside.as_ref());
             let _ = remove_tree(&directory, if nameless.is_ok() { &aside } else { &retired });
         }
         Ok(())
@@ -368,7 +272,7 @@ pub(super) fn write(
         let _ = remove_tree(&directory, &staged);
     }
     written?;
-    directory.sync_all().map_err(|_| unavailable())
+    os::sync(&directory).map_err(|()| unavailable())
 }
 
 /// Sweeps the staged and retired entries a crash between a write and its rename left, at
@@ -379,16 +283,14 @@ pub(super) fn remove_staged(root: &Path) -> Result<(), Refused> {
     let Some(directory) = open(root, false)? else {
         return Ok(());
     };
-    let mut left = Vec::new();
-    for entry in rustix::fs::Dir::read_from(&directory).map_err(|_| unavailable())? {
-        let entry = entry.map_err(|_| unavailable())?;
-        if left_over(entry.file_name().to_bytes()) {
-            left.push(entry.file_name().to_owned());
-            if left.len() == USER_PLUGINS_MAX {
-                break;
-            }
+    let mut left: Vec<OsString> = Vec::new();
+    os::each(&directory, |file| {
+        if left_over(file.as_encoded_bytes()) {
+            left.push(file.to_os_string());
         }
-    }
+        left.len() < USER_PLUGINS_MAX
+    })
+    .map_err(|()| unavailable())?;
     assert!(left.len() <= USER_PLUGINS_MAX);
     left.sort();
     let mut first = None;
@@ -397,7 +299,7 @@ pub(super) fn remove_staged(root: &Path) -> Result<(), Refused> {
             first.get_or_insert(refusal);
         }
     }
-    directory.sync_all().map_err(|_| unavailable())?;
+    os::sync(&directory).map_err(|()| unavailable())?;
     first.map_or(Ok(()), Err)
 }
 
@@ -405,19 +307,20 @@ pub(super) fn remove_staged(root: &Path) -> Result<(), Refused> {
 /// plugin name when that name is missing, any other folder is deleted, and a file or
 /// link is unlinked. Inputs: the plugins folder and the entry. Output: Ok, or the
 /// refusal.
-fn sweep(directory: &std::fs::File, file: &CStr) -> Result<(), Refused> {
-    match kind(directory, file)? {
+fn sweep(directory: &Dir, file: &OsStr) -> Result<(), Refused> {
+    match os::kind(directory, file).map_err(|()| unavailable())? {
         None => Ok(()),
-        Some(FileType::Directory) => {
-            if let Some(name) = file.to_str().ok().and_then(retired_name)
+        Some(Kind::Folder) => {
+            if let Some(name) = file.to_str().and_then(retired_name)
                 && !exists(directory, name)?
             {
-                return rustix::fs::renameat(directory, file, directory, name)
-                    .map_err(|_| unavailable());
+                return os::rename(directory, file, name.as_ref()).map_err(|()| unavailable());
             }
             remove_level(directory, file, TREE_DEPTH_MAX)
         }
-        Some(_) => unlink(directory, file),
+        Some(Kind::Other) => os::unlink(directory, file)
+            .map(|_| ())
+            .map_err(|()| unavailable()),
     }
 }
 
@@ -435,33 +338,20 @@ pub(super) fn remove(
     let Some(directory) = open(root, false)? else {
         return Ok(false);
     };
-    let kind = match rustix::fs::statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(stat) => Some(rustix::fs::FileType::from_raw_mode(stat.st_mode)),
-        Err(rustix::io::Errno::NOENT) => None,
-        Err(_) => return Err(unavailable()),
-    };
+    let kind = os::kind(&directory, name.as_ref()).map_err(|()| unavailable())?;
     match kind {
-        Some(rustix::fs::FileType::Directory) => {
+        Some(Kind::Folder) => {
             let aside = format!("{RETIRED}{}", new_ref().map_err(refused)?);
-            rustix::fs::renameat(&directory, name, &directory, aside.as_str())
-                .map_err(|_| unavailable())?;
+            os::rename(&directory, name.as_ref(), aside.as_ref()).map_err(|()| unavailable())?;
             let _ = remove_tree(&directory, &aside);
         }
-        Some(_) => match rustix::fs::unlinkat(&directory, name, AtFlags::empty()) {
-            Ok(()) | Err(rustix::io::Errno::NOENT) => {}
-            Err(_) => return Err(unavailable()),
-        },
+        Some(Kind::Other) => {
+            os::unlink(&directory, name.as_ref()).map_err(|()| unavailable())?;
+        }
         None => {}
     }
     let folder = kind.is_some();
-    let legacy = match rustix::fs::unlinkat(
-        &directory,
-        format!("{name}{LEGACY_SUFFIX}").as_str(),
-        AtFlags::empty(),
-    ) {
-        Ok(()) => true,
-        Err(rustix::io::Errno::NOENT) => false,
-        Err(_) => return Err(unavailable()),
-    };
+    let legacy = os::unlink(&directory, format!("{name}{LEGACY_SUFFIX}").as_ref())
+        .map_err(|()| unavailable())?;
     Ok(folder || legacy)
 }

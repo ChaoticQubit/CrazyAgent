@@ -78,7 +78,7 @@ export const APP_PLUGIN_REFUSALS: Record<string, string> = {
   app_plugin_past_cap: "You have as many plugins as CrazyAgent holds. Remove one before you add another.",
   app_plugin_port_handed_out: "Another plugin already uses that local port. Change the port and try again.",
   app_plugin_folder_unsafe: "Your plugins folder isn't private to you, so CrazyAgent won't read it. Make it yours alone and try again.",
-  app_plugin_folder_unavailable: "CrazyAgent can't use a plugins folder on this computer yet, so plugins can't be added here.",
+  app_plugin_folder_unavailable: "CrazyAgent couldn't open your plugins folder. Try again.",
   app_plugin_secret_not_declared: "This plugin doesn't declare that secret.",
   app_plugin_account_not_found: "That account is gone. Pick another one or enter a key.",
   app_plugin_account_has_no_key: "That account has no saved API key to share. Pick another one or enter a key.",
