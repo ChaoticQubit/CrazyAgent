@@ -7,7 +7,8 @@ use crazyagent::team::{
     TeamStatus,
 };
 use crazyagent::terminal::FOLDER;
-use crazyagent::terminal::tmux::{SOCKET, installed};
+use crazyagent::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::SOCKET;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::PermissionsExt;

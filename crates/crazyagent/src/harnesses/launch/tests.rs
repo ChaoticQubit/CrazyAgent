@@ -647,7 +647,7 @@ fn a_pane_group_that_answered_esrch_is_never_signalled() {
     let calls = std::cell::RefCell::new(Vec::new());
 
     let gone = super::end_pane_group_with(
-        super::Ending::claim(ended.id()),
+        kernel_processes::group::Ending::claim(ended.id()),
         std::time::Duration::from_secs(1),
         || {
             let answer = rustix::process::test_kill_process_group(group);
@@ -673,13 +673,13 @@ fn a_pane_group_another_path_holds_is_only_watched() {
     use std::os::unix::process::ExitStatusExt;
     let (mut survivor, group) = group_leader("/bin/sleep", &["120"]);
     let id = survivor.id();
-    let other = super::Ending::claim(id).expect("no path holds a new group");
+    let other = kernel_processes::group::Ending::claim(id).expect("no path holds a new group");
     assert!(
-        super::Ending::claim(id).is_none(),
+        kernel_processes::group::Ending::claim(id).is_none(),
         "a held group has one holder"
     );
     assert!(
-        super::Ending::claim(id).is_none(),
+        kernel_processes::group::Ending::claim(id).is_none(),
         "a refused claim leaves the holder's hold in place"
     );
     let reaped = std::thread::spawn(move || survivor.wait());
@@ -692,7 +692,7 @@ fn a_pane_group_another_path_holds_is_only_watched() {
         || kills.set(kills.get() + 1),
     );
     drop(other);
-    let ended = super::end_pane_group(id, super::Ending::claim(id));
+    let ended = super::end_pane_group(id, kernel_processes::group::Ending::claim(id));
     if !ended {
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
     }
@@ -719,11 +719,11 @@ fn a_group_its_holder_saw_end_stays_refused_to_later_paths() {
     use std::os::unix::process::ExitStatusExt;
     let (mut survivor, _) = group_leader("/bin/sleep", &["120"]);
     let id = survivor.id();
-    let held = super::Ending::claim(id).expect("no path holds a new group");
+    let held = kernel_processes::group::Ending::claim(id).expect("no path holds a new group");
     let reaped = std::thread::spawn(move || survivor.wait());
 
     let ended = super::end_pane_group(id, Some(held));
-    let later = super::Ending::claim(id);
+    let later = kernel_processes::group::Ending::claim(id);
     let status = reaped.join().unwrap().unwrap();
     assert!(ended, "the holder ends its group");
     assert_eq!(status.signal(), Some(9), "the group ended by KILL");

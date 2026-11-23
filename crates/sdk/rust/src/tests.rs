@@ -238,19 +238,23 @@ fn ambient_power(source: &str) -> Option<String> {
     None
 }
 
+/// What a row that reads files gives back: nothing, or the first error with its path.
+type Checked = Result<(), Box<dyn core::error::Error>>;
+
+/// Names the path in a filesystem error. Input: the path. Output: the error mapper.
+fn at_path(path: &Path) -> impl Fn(std::io::Error) -> Box<dyn core::error::Error> + '_ {
+    move |error| format!("{}: {error}", path.display()).into()
+}
+
 /// Lists the SDK's shipped Rust files: every `.rs` under `src`, its subfolders included,
 /// except the test rows and the `cfg(test)` fixture trees. Inputs: the folder and its depth.
-/// Output: the files grow.
-fn shipped_sources(folder: &Path, depth: usize, files: &mut Vec<std::path::PathBuf>) {
+/// Output: the files grow, or the first folder or entry that does not read.
+fn shipped_sources(folder: &Path, depth: usize, files: &mut Vec<std::path::PathBuf>) -> Checked {
     assert!(depth <= 3, "the SDK tree is shallow");
-    let mut entries: Vec<_> = fs::read_dir(folder)
-        .unwrap_or_else(|error| panic!("{}: {error}", folder.display()))
-        .map(|entry| {
-            entry
-                .unwrap_or_else(|error| panic!("{}: {error}", folder.display()))
-                .path()
-        })
-        .collect();
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(folder).map_err(at_path(folder))? {
+        entries.push(entry.map_err(at_path(folder))?.path());
+    }
     entries.sort();
     for path in entries {
         let name = path
@@ -261,21 +265,22 @@ fn shipped_sources(folder: &Path, depth: usize, files: &mut Vec<std::path::PathB
             continue;
         }
         if path.is_dir() {
-            shipped_sources(&path, depth + 1, files);
+            shipped_sources(&path, depth + 1, files)?;
         } else if name.ends_with(".rs") {
             files.push(path);
         }
     }
+    Ok(())
 }
 
 #[test]
-fn the_sdk_re_exports_no_ambient_power() {
+fn the_sdk_re_exports_no_ambient_power() -> Checked {
     let mut files = Vec::new();
     shipped_sources(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
         0,
         &mut files,
-    );
+    )?;
     assert!(files.len() >= 9, "{files:?}");
     assert!(files.iter().any(|file| file.ends_with("src/lib.rs")));
     assert!(
@@ -284,10 +289,10 @@ fn the_sdk_re_exports_no_ambient_power() {
             .any(|file| file.ends_with("generated/envelope/settings.rs"))
     );
     for file in files {
-        let text =
-            fs::read_to_string(&file).unwrap_or_else(|error| panic!("{}: {error}", file.display()));
+        let text = fs::read_to_string(&file).map_err(at_path(&file))?;
         assert_eq!(ambient_power(&text), None, "{}", file.display());
     }
+    Ok(())
 }
 
 #[test]
@@ -337,7 +342,7 @@ fn the_ambient_power_scan_catches_each_disguise() {
 }
 
 #[test]
-fn the_host_and_free_functions_take_no_caller() -> Result<(), Box<dyn std::error::Error>> {
+fn the_host_and_free_functions_take_no_caller() -> Checked {
     let generated = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/generated");
     let read = |name: &str| {
         let path = generated.join(name);
