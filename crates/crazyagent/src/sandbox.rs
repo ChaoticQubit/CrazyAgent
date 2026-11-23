@@ -862,6 +862,7 @@ pub const PROFILE_HOOKS: ProfileHooks = ProfileHooks {
     linked_prefix: crate::agent_git::LINKED_PREFIX,
     teammates_folder: crate::agent_git::TEAMMATES_FOLDER,
     is_agent_branch: crate::agent_git::is_agent_branch,
+    #[cfg(unix)]
     claude_bash_preludes: &crate::agent_home::CLAUDE_BASH_PRELUDES,
     project_file: crate::agent_home::PROJECT_FILE,
     claude_instruction_file: crate::agent_home::Harness::Claude.instruction_file(),

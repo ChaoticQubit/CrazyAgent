@@ -22,6 +22,7 @@ pub struct ProfileHooks {
     /// Tells whether a branch name is an agent branch. Input: the name. Output: the answer.
     pub is_agent_branch: fn(&str) -> bool,
     /// The folders in an agent home where Claude Code keeps its bash state.
+    #[cfg(unix)]
     pub claude_bash_preludes: &'static [&'static str],
     /// The instructions file the engine writes in an agent's project state folder.
     pub project_file: &'static str,
