@@ -530,6 +530,14 @@ fn a_folder_link_mid_path_through_a_shared_folder_is_changeable() {
 
 #[cfg(unix)]
 #[test]
+fn a_relative_path_is_changeable_rather_than_a_crash() {
+    let relative = Path::new("crazyagent").join("engine");
+    assert_eq!(changeable_by_others(&relative), Some(relative.clone()));
+    assert_eq!(changeable_past_sticky(&relative), Some(relative));
+}
+
+#[cfg(unix)]
+#[test]
 fn a_link_chain_through_private_folders_only_still_passes() {
     let temp = durable_folder();
     let private = temp.path().join("private");
