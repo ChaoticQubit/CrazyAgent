@@ -62,7 +62,7 @@ pub const APP_PLUGINS_CODES: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Action {
-    List,
+    List {},
     Preview {
         folder: PathBuf,
     },
@@ -187,7 +187,7 @@ impl OwnerClient {
     /// Reads the App plugins page: bundled plugins, then the owner's, with the permission
     /// words and the change notices not yet shown. Output: the page.
     pub async fn app_plugins(&self) -> Result<AppPluginsPage, EngineError> {
-        self.app_plugins_page(Action::List, None).await
+        self.app_plugins_page(Action::List {}, None).await
     }
 
     /// Reads the trust screen of a folder the owner picked, saving nothing; the engine reads
@@ -488,7 +488,7 @@ async fn handle(
 /// came with a `set_key`. Output: the command.
 fn command(action: Action, key: Option<Vec<u8>>) -> Command {
     match action {
-        Action::List => Command::List,
+        Action::List {} => Command::List,
         Action::Preview { folder } => Command::Preview { folder },
         Action::Review { name } => Command::Review { name },
         Action::Add {
@@ -556,7 +556,7 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
         Action::BindAccount { name, secret, .. }
         | Action::SetKey { name, secret }
         | Action::Unbind { name, secret } => vec![name, secret],
-        Action::List | Action::Preview { .. } | Action::Add { .. } | Action::SetWhenOff { .. } => {
+        Action::List {} | Action::Preview { .. } | Action::Add { .. } | Action::SetWhenOff { .. } => {
             Vec::new()
         }
     };

@@ -20,7 +20,7 @@ fn folder() -> String {
 fn every_action_reads_from_its_json_shape() {
     let folder = folder();
     let cases = [
-        (r#"{"kind":"list"}"#.to_string(), Action::List),
+        (r#"{"kind":"list"}"#.to_string(), Action::List {}),
         (
             format!(r#"{{"kind":"preview","folder":"{folder}"}}"#),
             Action::Preview {
