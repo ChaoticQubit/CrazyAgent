@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use kernel_common::names::{is_dotted, is_snake};
 use toml::{Table, Value};
 
 use crate::Refused;
@@ -12,7 +13,13 @@ pub const PERMISSIONS_MAX: usize = 64;
 /// The most bytes a plugin id may hold.
 pub const PLUGIN_ID_MAX: usize = 64;
 
+/// The most bytes a kind word or one permission may hold.
+pub const NAME_BYTES_MAX: usize = 64;
+
 const PLUGIN_KEYS: [&str; 5] = ["plugin", "tier", "kind", "version", "permissions"];
+/// The keys only an embedding plugin's `plugin.toml` holds; the embedding reader judges
+/// their values.
+pub const EMBEDDING_KEYS: [&str; 4] = ["title", "release", "description", "http"];
 
 /// A plugin's `plugin.toml`: its id, tier word, kind, manifest version and the
 /// permissions it asks the kernel for.
@@ -77,24 +84,38 @@ pub fn line_of(text: &str, needle: &str) -> usize {
         .map_or(1, |index| index + 1)
 }
 
-/// Reads and checks a plugin folder's `plugin.toml`: exactly its five keys, a tier word,
-/// a positive version and at most `PERMISSIONS_MAX` permission strings. Input: the
-/// folder. Output: the manifest, or `plugin_manifest_invalid` (missing, over the bound,
-/// or at the first refused key) or `plugin_id_invalid`, each with its line.
+/// Reads and checks a plugin folder's `plugin.toml` with [`parse`]. Input: the folder.
+/// Output: the manifest, or `plugin_manifest_invalid` (missing, over the bound, or at the
+/// first refused key) or `plugin_id_invalid`, each with its line.
 pub fn read(dir: &Path) -> Result<Manifest, Refused> {
-    let invalid = |text: &str, needle: &str| Refused {
+    let Bounded::Text(text) = read_bounded(&dir.join("plugin.toml"), MANIFEST_BYTES_MAX) else {
+        return Err(Refused {
+            code: "plugin_manifest_invalid",
+            line: 1,
+        });
+    };
+    parse(&text)
+}
+
+/// Checks one `plugin.toml` text: exactly its five keys, plus [`EMBEDDING_KEYS`] when the
+/// kind is `embedding`, a tier word, a snake kind, a positive version and at most
+/// `PERMISSIONS_MAX` distinct dotted permissions. Input: the text. Output: the manifest, or
+/// `plugin_manifest_invalid` or `plugin_id_invalid` with the line of the refused key.
+pub fn parse(text: &str) -> Result<Manifest, Refused> {
+    let invalid = |needle: &str| Refused {
         code: "plugin_manifest_invalid",
         line: line_of(text, needle),
     };
-    let Bounded::Text(text) = read_bounded(&dir.join("plugin.toml"), MANIFEST_BYTES_MAX) else {
-        return Err(invalid("", ""));
-    };
-    let table = text.parse::<Table>().map_err(|_| invalid(&text, ""))?;
-    if let Some(key) = table
-        .keys()
-        .find(|key| !PLUGIN_KEYS.contains(&key.as_str()))
-    {
-        return Err(invalid(&text, key));
+    if text.len() > MANIFEST_BYTES_MAX {
+        return Err(invalid(""));
+    }
+    let table = text.parse::<Table>().map_err(|_| invalid(""))?;
+    let embedding = table.get("kind").and_then(Value::as_str) == Some("embedding");
+    if let Some(key) = table.keys().find(|key| {
+        !PLUGIN_KEYS.contains(&key.as_str())
+            && !(embedding && EMBEDDING_KEYS.contains(&key.as_str()))
+    }) {
+        return Err(invalid(key));
     }
     let string = |key: &str| {
         table
@@ -102,23 +123,26 @@ pub fn read(dir: &Path) -> Result<Manifest, Refused> {
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
-            .ok_or_else(|| invalid(&text, key))
+            .ok_or_else(|| invalid(key))
     };
     let (plugin, tier, kind) = (string("plugin")?, string("tier")?, string("kind")?);
     if !is_plugin_id(&plugin) {
         return Err(Refused {
             code: "plugin_id_invalid",
-            ..invalid(&text, "plugin")
+            ..invalid("plugin")
         });
     }
     if !matches!(tier.as_str(), "t1" | "t2" | "t3") {
-        return Err(invalid(&text, "tier"));
+        return Err(invalid("tier"));
+    }
+    if kind.len() > NAME_BYTES_MAX || !is_snake(&kind) {
+        return Err(invalid("kind"));
     }
     let version = table
         .get("version")
         .and_then(Value::as_integer)
         .filter(|version| *version >= 1)
-        .ok_or_else(|| invalid(&text, "version"))?;
+        .ok_or_else(|| invalid("version"))?;
     let permissions = table
         .get("permissions")
         .and_then(Value::as_array)
@@ -128,8 +152,14 @@ pub fn read(dir: &Path) -> Result<Manifest, Refused> {
                 .map(|value| value.as_str().map(str::to_owned))
                 .collect::<Option<Vec<String>>>()
         })
-        .ok_or_else(|| invalid(&text, "permissions"))?;
-    assert!(is_plugin_id(&plugin) && permissions.len() <= PERMISSIONS_MAX);
+        .filter(|list| {
+            list.iter().enumerate().all(|(index, permission)| {
+                permission.len() <= NAME_BYTES_MAX
+                    && is_dotted(permission)
+                    && !list[..index].contains(permission)
+            })
+        })
+        .ok_or_else(|| invalid("permissions"))?;
     Ok(Manifest {
         plugin,
         tier,

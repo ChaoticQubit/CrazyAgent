@@ -1,0 +1,161 @@
+{
+  "tools-off": {
+    "command": {
+      "args": [
+        "-c",
+        "model=\"parity-model\"",
+        "-c",
+        "model_provider=\"openai\"",
+        "-c",
+        "cli_auth_credentials_store=\"file\"",
+        "-c",
+        "sandbox_mode=\"read-only\"",
+        "-c",
+        "approval_policy=\"never\"",
+        "-c",
+        "features.shell_tool=false",
+        "-c",
+        "features.apply_patch_freeform=false",
+        "-c",
+        "features.unified_exec=false",
+        "-c",
+        "features.view_image=false",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.code_mode=false",
+        "-c",
+        "features.apps=false",
+        "-c",
+        "features.plugins=false",
+        "-c",
+        "features.goals=false",
+        "-c",
+        "web_search=\"disabled\"",
+        "-c",
+        "mcp_servers={}",
+        "-c",
+        "project_doc_max_bytes=0",
+        "-c",
+        "features.unbounded_connection_retries=false",
+        "-c",
+        "projects={\"<BASE>/worktrees/lease\"={trust_level=\"untrusted\"},\"<BASE>/worktrees\"={trust_level=\"untrusted\"},\"<BASE>\"={trust_level=\"untrusted\"},\"/private/tmp\"={trust_level=\"untrusted\"},\"/private\"={trust_level=\"untrusted\"},\"/\"={trust_level=\"untrusted\"}}",
+        "app-server",
+        "--listen",
+        "stdio://"
+      ],
+      "cwd": "<BASE>/worktrees/lease",
+      "env": {
+        "CODEX_HOME": "<BASE>/state/runtime/master-runtime-<tools-off-turn>/home",
+        "HOME": "<BASE>/state/runtime/master-runtime-<tools-off-turn>/home",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+        "TMPDIR": "<BASE>/state/runtime/master-runtime-<tools-off-turn>/home"
+      },
+      "program": "<BASE>/install/codex"
+    },
+    "home": {
+      ".cargo/": {
+        "mode": "700"
+      },
+      ".config/": {
+        "mode": "700"
+      },
+      "auth.json": {
+        "mode": "600",
+        "text": "{\"OPENAI_API_KEY\":null,\"last_refresh\":\"2026-10-26T00:00:00Z\",\"tokens\":{\"access_token\":\"parity-header.eyJleHAiOjQxMDI0NDQ4MDB9.parity-signature\",\"account_id\":\"parity-account\",\"id_token\":\"parity-header.eyJleHAiOjQxMDI0NDQ4MDB9.unexchangeable\",\"refresh_token\":\"\"}}"
+      }
+    },
+    "read": [
+      "<BASE>/repository",
+      "<BASE>/install",
+      "<BASE>/state/runtime/master-runtime-<tools-off-turn>"
+    ],
+    "tool_record": null,
+    "tools": [
+      "<XCODE_DEVELOPER>"
+    ],
+    "writable": [
+      "<BASE>/worktrees/lease",
+      "<BASE>/state/runtime/master-runtime-<tools-off-turn>/home",
+      "<BASE>/state/runtime/master-runtime-<tools-off-turn>/tmp",
+      "<BASE>/state/tool-cache/<REPOSITORY_TOOL_CACHE>/sandboxed-worktree"
+    ]
+  },
+  "tools-on": {
+    "command": {
+      "args": [
+        "-c",
+        "model=\"parity-model\"",
+        "-c",
+        "model_provider=\"openai\"",
+        "-c",
+        "cli_auth_credentials_store=\"file\"",
+        "-c",
+        "sandbox_mode=\"danger-full-access\"",
+        "-c",
+        "approval_policy=\"never\"",
+        "-c",
+        "features.apps=false",
+        "-c",
+        "features.plugins=false",
+        "-c",
+        "features.goals=false",
+        "-c",
+        "features.multi_agent=false",
+        "-c",
+        "features.multi_agent_v2=false",
+        "-c",
+        "project_doc_max_bytes=0",
+        "-c",
+        "features.unbounded_connection_retries=false",
+        "-c",
+        "projects={\"<BASE>/worktrees/lease\"={trust_level=\"untrusted\"},\"<BASE>/worktrees\"={trust_level=\"untrusted\"},\"<BASE>\"={trust_level=\"untrusted\"},\"/private/tmp\"={trust_level=\"untrusted\"},\"/private\"={trust_level=\"untrusted\"},\"/\"={trust_level=\"untrusted\"}}",
+        "-c",
+        "mcp_servers={crazyagent-team={command=\"<BASE>/install/crazyagent\",args=[\"team-mcp\",\"<BASE>/state/runtime/master-runtime-<tools-on-turn>/tmp/crazyagent-delegations.jsonl\",\"<BASE>/state/runtime/master-runtime-<tools-on-turn>/tmp/crazyagent-team-calls\",\"wake\"]}}",
+        "app-server",
+        "--listen",
+        "stdio://"
+      ],
+      "cwd": "<BASE>/worktrees/lease",
+      "env": {
+        "CODEX_HOME": "<BASE>/state/runtime/master-runtime-<tools-on-turn>/home",
+        "HOME": "<BASE>/state/runtime/master-runtime-<tools-on-turn>/home",
+        "LANG": "C",
+        "LC_ALL": "C",
+        "PATH": "/usr/bin:/bin",
+        "TMPDIR": "<BASE>/state/runtime/master-runtime-<tools-on-turn>/home"
+      },
+      "program": "<BASE>/install/codex"
+    },
+    "home": {
+      ".cargo/": {
+        "mode": "700"
+      },
+      ".config/": {
+        "mode": "700"
+      },
+      "auth.json": {
+        "mode": "600",
+        "text": "{\"OPENAI_API_KEY\":null,\"last_refresh\":\"2026-10-26T00:00:00Z\",\"tokens\":{\"access_token\":\"parity-header.eyJleHAiOjQxMDI0NDQ4MDB9.parity-signature\",\"account_id\":\"parity-account\",\"id_token\":\"parity-header.eyJleHAiOjQxMDI0NDQ4MDB9.unexchangeable\",\"refresh_token\":\"\"}}"
+      }
+    },
+    "read": [
+      "<BASE>/repository",
+      "<BASE>/install",
+      "<BASE>/install",
+      "<BASE>/state/runtime/master-runtime-<tools-on-turn>"
+    ],
+    "tool_record": "<BASE>/state/runtime/master-runtime-<tools-on-turn>/tmp/crazyagent-delegations.jsonl",
+    "tools": [
+      "<XCODE_DEVELOPER>"
+    ],
+    "writable": [
+      "<BASE>/worktrees/lease",
+      "<BASE>/state/runtime/master-runtime-<tools-on-turn>/home",
+      "<BASE>/state/runtime/master-runtime-<tools-on-turn>/tmp",
+      "<BASE>/state/tool-cache/<REPOSITORY_TOOL_CACHE>/sandboxed-worktree"
+    ]
+  }
+}
