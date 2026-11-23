@@ -2,6 +2,8 @@ use super::*;
 #[cfg(all(test, unix))]
 mod barrier_tests;
 #[cfg(unix)]
+mod dispatch_fs;
+#[cfg(unix)]
 mod dispatch_git;
 #[cfg(all(test, unix))]
 mod dispatch_identity_tests;
@@ -33,6 +35,8 @@ use crate::storage::worker_dispatch::{
 use crate::worker_dispatch::*;
 use deferral::Deferral;
 #[cfg(unix)]
+use dispatch_fs::{dispatch_directory, dispatch_file};
+#[cfg(unix)]
 use rustix::fs::{Mode, OFlags};
 use std::fs::File;
 use std::io::Read;
@@ -49,6 +53,7 @@ use tokio::time::Instant;
 mod account_profile;
 pub(crate) mod accounts;
 pub(crate) mod agents;
+pub(crate) mod app_plugins;
 pub(crate) mod changes;
 pub(crate) mod cleanup;
 mod deferral;
@@ -2597,6 +2602,7 @@ enum Protocol {
     Ide,
     IdeTab,
     Icloud,
+    AppPlugins,
     Watch,
     Owner,
     #[cfg(test)]
@@ -2633,6 +2639,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("ide", Protocol::Ide),
         ("ide_tab", Protocol::IdeTab),
         ("icloud", Protocol::Icloud),
+        ("app_plugins", Protocol::AppPlugins),
         ("watch", Protocol::Watch),
     ];
     Ok(named
@@ -2727,6 +2734,11 @@ async fn serve_admitted(
             Protocol::IdeTab => return Ok(Some(Deferred::IdeTab(a))),
             Protocol::Icloud => {
                 return icloud::serve(stream, engine, authority, auth, &a, body)
+                    .await
+                    .map(|()| None);
+            }
+            Protocol::AppPlugins => {
+                return app_plugins::serve(stream, engine, authority, auth, &a, body)
                     .await
                     .map(|()| None);
             }
@@ -3052,6 +3064,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Ide => ide::refusal(code)?,
         Protocol::IdeTab => ide_tab::refusal(code)?,
         Protocol::Icloud => icloud::refusal(code)?,
+        Protocol::AppPlugins => app_plugins::refusal(code)?,
         Protocol::Watch => watch::refusal(code)?,
         #[cfg(test)]
         Protocol::TestPanic => accounts::refusal(code)?,
@@ -3222,92 +3235,6 @@ async fn runner_control(
     })
     .await
     .map_err(|_| failure("runner_control_outcome_unknown"))?
-}
-
-/// Opens a sealed dispatch folder without following links and checks its owner and mode.
-/// Input: the canonical folder path. Output: its live (device, inode) pair, which the
-/// caller compares with the seal under the whole-volume renumber rule.
-#[cfg(unix)]
-fn dispatch_directory(path: &Path) -> Result<(u64, u64), EngineError> {
-    if !path.is_absolute()
-        || path.components().count() > 64
-        || std::fs::canonicalize(path).map_err(io_error)? != path
-    {
-        return Err(failure("dispatch_path_not_canonical"));
-    }
-    for ancestor in path.ancestors() {
-        if std::fs::symlink_metadata(ancestor)
-            .map_err(io_error)?
-            .file_type()
-            .is_symlink()
-        {
-            return Err(failure("dispatch_symlink_path"));
-        }
-    }
-    let file = File::from(
-        rustix::fs::open(
-            path,
-            OFlags::RDONLY
-                | OFlags::DIRECTORY
-                | OFlags::NOFOLLOW
-                | OFlags::NONBLOCK
-                | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(io_error)?,
-    );
-    let metadata = file.metadata().map_err(io_error)?;
-    if !metadata.is_dir()
-        || metadata.uid() != rustix::process::getuid().as_raw()
-        || metadata.mode() & 0o022 != 0
-    {
-        return Err(failure("dispatch_filesystem_identity_changed"));
-    }
-    Ok((metadata.dev(), metadata.ino()))
-}
-
-/// Reads one small file of a leased worktree or its git folder that an agent may have
-/// replaced: opened without following a link and without waiting on a FIFO or device, kept
-/// only when it is this user's own regular file with one name, not group or world
-/// writable, within `limit` bytes and unchanged while it was read. Inputs: the path and
-/// the limit. Output: the bytes, or the refusal.
-#[cfg(unix)]
-fn dispatch_file(path: &Path, limit: usize) -> Result<Vec<u8>, EngineError> {
-    let file = File::from(
-        rustix::fs::open(
-            path,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(io_error)?,
-    );
-    let before = file.metadata().map_err(io_error)?;
-    if !before.is_file()
-        || before.uid() != rustix::process::getuid().as_raw()
-        || before.mode() & 0o022 != 0
-        || before.nlink() != 1
-        || before.len() > limit as u64
-    {
-        return Err(failure("dispatch_file_untrusted_or_capacity"));
-    }
-    let mut bytes = Vec::new();
-    (&file)
-        .take((limit + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(io_error)?;
-    let after = file.metadata().map_err(io_error)?;
-    let linked = std::fs::symlink_metadata(path).map_err(io_error)?;
-    if bytes.len() > limit
-        || Identity::of(&after) != Identity::of(&before)
-        || Identity::of(&linked) != Identity::of(&before)
-        || after.len() != before.len()
-        || after.mtime() != before.mtime()
-        || after.mtime_nsec() != before.mtime_nsec()
-    {
-        return Err(failure("dispatch_file_changed"));
-    }
-    assert!(bytes.len() <= limit);
-    Ok(bytes)
 }
 
 /// The most bytes of a repository's `.git/config` a dispatch reads: the bound the

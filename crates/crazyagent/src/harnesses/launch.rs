@@ -336,40 +336,6 @@ impl LaunchBoundary {
     }
 }
 
-/// Builds the Full access boundary a unit row starts in (DEC-102): the project sandbox over
-/// `project`, installed with its home, temp folder and profile in `scratch`, then marked
-/// unconfined, as the integration rows' `full_access` does. Inputs: two canonical, existing
-/// folders. Output: the boundary.
-#[cfg(all(test, unix))]
-pub(crate) fn full_access_for_test(project: &Path, scratch: &Path) -> LaunchBoundary {
-    use crate::sandbox::ProjectSandbox;
-    use kernel_sandbox::net::SandboxNetwork;
-    use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
-    let home = scratch.join("full-access-home");
-    let tmp = scratch.join("full-access-tmp");
-    for folder in [&home, &tmp] {
-        std::fs::create_dir_all(folder).unwrap();
-    }
-    let sandbox = ProjectSandbox::new(
-        &crate::sandbox::PROFILE_HOOKS,
-        project,
-        &home,
-        &tmp,
-        SandboxNetwork::Open,
-    )
-    .unwrap();
-    let installed = InstalledSandbox::install(
-        sandbox,
-        &scratch.join("full-access.sb"),
-        LinuxSupervisor::On,
-        LinuxStrict::Off,
-    )
-    .unwrap();
-    let boundary = LaunchBoundary::Installed(Arc::new(installed.unconfined()));
-    assert!(boundary.is_unconfined());
-    boundary
-}
-
 const GIT_IDENTITY_BYTES_MAX: usize = 256;
 
 /// The git author and committer an agent's own commits carry: the owner's `user.name`
@@ -2801,7 +2767,7 @@ mod turn_session;
 pub use turn_session::TurnSession;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(all(test, windows))]
 pub(crate) mod low_probe;

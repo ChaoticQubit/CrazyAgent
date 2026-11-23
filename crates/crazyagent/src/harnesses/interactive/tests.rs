@@ -2328,7 +2328,7 @@ fn a_manifest_command_refuses_a_keyed_account_tools_off_and_full_access() {
     assert_eq!(refused.err(), Some(failure("launch_tools_off_unsupported")));
     let mut full = case.request("standin-jsonl-append", keyless(&case), true);
     let scratch = full.working_dir.parent().unwrap().to_path_buf();
-    full.boundary = crate::harnesses::launch::full_access_for_test(&full.working_dir, &scratch);
+    full.boundary = super::super::launch::tests::full_access_for_test(&full.working_dir, &scratch);
     let refused = command_with(&full, None, &run(None), Some(&settings));
     assert_eq!(refused.err(), Some(failure("launch_harness_unsupported")));
 }
