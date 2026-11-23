@@ -27,6 +27,9 @@ pub mod spawn_gate;
 /// terminal host implements, the bounded output buffer viewers read and the pane views
 /// built on a host.
 pub mod terminal;
+/// Pinned installer recipes: the typed fields of each installer the engine runs, and the
+/// checks that keep every field to its bounds and the bundled lists.
+pub mod install;
 /// App self-update: release channel, signed download, verification and the executable swap
 /// that `crazyagent update` runs, with every engine stop and start left to the caller.
 pub mod update;
