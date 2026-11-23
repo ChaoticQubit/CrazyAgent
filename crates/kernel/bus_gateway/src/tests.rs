@@ -703,32 +703,48 @@ fn net_get(url: String) -> net::Request {
 
 #[test]
 fn an_ungranted_net_request_never_reaches_egress_allows() {
-    let (grants, provider, refusals) = (grants(), CountingProvider::answering(Ok(())), RecordingRefusals::default());
+    let (grants, provider, refusals) = (
+        grants(),
+        CountingProvider::answering(Ok(())),
+        RecordingRefusals::default(),
+    );
     let fetch = CountingNet::default();
     let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &fetch, &refusals);
     for plugin in ["keeper", "low", "agent-quit", "unknown"] {
-        let refused = gateway
-            .bind(plugin)
-            .net_request(net_get("https://api.github.com/user".to_owned()));
-        assert!(matches!(refused, Err(Refusal::NotGranted { .. })), "{plugin}");
+        let refused = net::request(
+            &gateway.bind(plugin),
+            net_get("https://api.github.com/user".to_owned()),
+        );
+        assert!(
+            matches!(refused, Err(Refusal::NotGranted { .. })),
+            "{plugin}"
+        );
     }
     assert!(fetch.callers.borrow().is_empty());
-    let reply = gateway
-        .bind("fetcher")
-        .net_request(net_get("https://api.github.com/user".to_owned()))
-        .unwrap();
+    let reply = net::request(
+        &gateway.bind("fetcher"),
+        net_get("https://api.github.com/user".to_owned()),
+    )
+    .unwrap();
     assert_eq!(reply.status, 200);
     assert_eq!(*fetch.callers.borrow(), vec!["fetcher"]);
 }
 
 #[test]
 fn net_inputs_over_their_bounds_are_refused() {
-    let (grants, provider, refusals) = (grants(), CountingProvider::answering(Ok(())), RecordingRefusals::default());
+    let (grants, provider, refusals) = (
+        grants(),
+        CountingProvider::answering(Ok(())),
+        RecordingRefusals::default(),
+    );
     let fetch = CountingNet::default();
     let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &fetch, &refusals);
     let host = gateway.bind("fetcher");
     let long = format!("https://api.github.com/{}", "a".repeat(TEXT_BYTES_MAX));
-    assert!(matches!(host.net_request(net_get(long)), Err(Refusal::Rejected { .. })));
+    assert!(matches!(
+        net::request(&host, net_get(long)),
+        Err(Refusal::Rejected { .. })
+    ));
     let mut headers = net_get("https://api.github.com/user".to_owned());
     headers.headers = vec![
         net::Field {
@@ -737,9 +753,15 @@ fn net_inputs_over_their_bounds_are_refused() {
         };
         sdk::LIST_ITEMS_MAX + 1
     ];
-    assert!(matches!(host.net_request(headers), Err(Refusal::Rejected { .. })));
+    assert!(matches!(
+        net::request(&host, headers),
+        Err(Refusal::Rejected { .. })
+    ));
     let mut json = net_get("https://api.github.com/user".to_owned());
     json.json = Some(vec![b'a'; sdk::BYTES_MAX + 1]);
-    assert!(matches!(host.net_request(json), Err(Refusal::Rejected { .. })));
+    assert!(matches!(
+        net::request(&host, json),
+        Err(Refusal::Rejected { .. })
+    ));
     assert!(fetch.callers.borrow().is_empty());
 }

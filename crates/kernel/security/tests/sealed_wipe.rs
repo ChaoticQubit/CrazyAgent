@@ -101,9 +101,14 @@ impl Egress for DroppingEgress {
         Ok(())
     }
 
+    fn resolve(&self, _: &str, _: u16) -> Result<Vec<std::net::IpAddr>, StoreError> {
+        Ok(vec!["140.82.112.4".parse().unwrap()])
+    }
+
     fn send(&self, sealed: Sealed) -> Result<RawReply, StoreError> {
         let config = sealed.config();
-        *self.held_token.lock().unwrap() = config.windows(TOKEN.len()).any(|window| window == TOKEN);
+        *self.held_token.lock().unwrap() =
+            config.windows(TOKEN.len()).any(|window| window == TOKEN);
         WATCHED.store(config.as_ptr() as usize, Ordering::SeqCst);
         drop(sealed);
         Ok(RawReply {

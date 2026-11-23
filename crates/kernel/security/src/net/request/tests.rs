@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
 use super::*;
@@ -10,6 +11,9 @@ use crate::store::{SecretRef, Store, reference};
 const NAMESPACE: &str = "dev.crazyagent.e0123456789ab";
 const TOKEN: &[u8] = b"ghp_owner-paste-0123456789";
 const CAPTURED: &str = "gho_captured-access-token-0123456789";
+
+/// One change a row makes to a request.
+type Change = Box<dyn Fn(&mut Request)>;
 
 /// The order of calls the rows record across the store and egress.
 type Events = Arc<Mutex<Vec<String>>>;
@@ -64,6 +68,7 @@ impl Store for FakeStore {
 /// was handed, and answers one fixed reply.
 struct FakeEgress {
     refused: Vec<&'static str>,
+    resolved: BTreeMap<&'static str, Vec<IpAddr>>,
     events: Events,
     configs: Mutex<Vec<Vec<u8>>>,
     reply_headers: Mutex<Vec<Vec<String>>>,
@@ -88,6 +93,14 @@ impl Egress for FakeEgress {
             return Err(StoreError::code("net_host_refused"));
         }
         Ok(())
+    }
+
+    fn resolve(&self, host: &str, _port: u16) -> Result<Vec<IpAddr>, StoreError> {
+        Ok(self
+            .resolved
+            .get(host)
+            .cloned()
+            .unwrap_or_else(|| vec!["140.82.112.4".parse().unwrap()]))
     }
 
     fn send(&self, sealed: Sealed) -> Result<RawReply, StoreError> {
@@ -127,6 +140,16 @@ impl Rig {
             handles: Mutex::new(Handles::new()),
             egress: FakeEgress {
                 refused: vec!["refused.example"],
+                resolved: BTreeMap::from([
+                    ("localhost", vec!["127.0.0.1".parse().unwrap()]),
+                    ("private.example", vec!["10.0.0.5".parse().unwrap()]),
+                    (
+                        "mixed.example",
+                        vec!["140.82.112.4".parse().unwrap(), "10.0.0.5".parse().unwrap()],
+                    ),
+                    ("unresolved.example", Vec::new()),
+                    ("v6.example", vec!["2606:4700::1111".parse().unwrap()]),
+                ]),
                 events,
                 configs: Mutex::new(Vec::new()),
                 reply_headers: Mutex::new(Vec::new()),
@@ -145,7 +168,13 @@ impl Rig {
     /// The secrets module of one owner request holding the owner's token. Output: it.
     fn secrets(&self) -> Secrets<'_> {
         let paste = SecretString::new(TOKEN.to_vec()).unwrap();
-        Secrets::for_request(&self.store, NAMESPACE, &self.scopes, &self.handles, Some(paste))
+        Secrets::for_request(
+            &self.store,
+            NAMESPACE,
+            &self.scopes,
+            &self.handles,
+            Some(paste),
+        )
     }
 
     /// The events recorded so far. Output: them.
@@ -300,7 +329,11 @@ fn a_request_cannot_remove_a_manifest_capture() {
     let mut request = get("https://github.com/login/oauth/access_token");
     request.capture = vec![capture("scope", None)];
     let reply = requests.request("github", request).unwrap();
-    let fields: Vec<&str> = reply.captured.iter().map(|found| found.field.as_str()).collect();
+    let fields: Vec<&str> = reply
+        .captured
+        .iter()
+        .map(|found| found.field.as_str())
+        .collect();
     assert_eq!(fields, ["access_token", "scope"]);
     assert!(!holds(CAPTURED.as_bytes(), &reply.body));
 }
@@ -309,14 +342,32 @@ fn a_request_cannot_remove_a_manifest_capture() {
 fn capture_rules_refuse_a_duplicate_row_and_too_many_fields() {
     let refused = Err(StoreError::code("net_capture_rules_invalid"));
     let rules = |rows: &[(&'static str, &str, &[&str])]| CaptureRules::new(rows).map(|_| ());
-    assert_eq!(rules(&[("github", "github.com", &["a"]), ("github", "github.com", &["b"])]), refused);
-    assert_eq!(rules(&[("github", "github.com", &["a", "b", "c", "d", "e"])]), refused);
+    assert_eq!(
+        rules(&[
+            ("github", "github.com", &["a"]),
+            ("github", "github.com", &["b"])
+        ]),
+        refused
+    );
+    assert_eq!(
+        rules(&[("github", "github.com", &["a", "b", "c", "d", "e"])]),
+        refused
+    );
     assert_eq!(rules(&[("github", "github.com", &["a", "a"])]), refused);
     assert_eq!(rules(&[("github", "github.com", &["a b"])]), refused);
     assert_eq!(rules(&[("github", "github.com", &[""])]), refused);
     let long = "a".repeat(capture::FIELD_BYTES_MAX + 1);
-    assert_eq!(rules(&[("github", "github.com", &[long.as_str()])]), refused);
-    assert!(rules(&[("github", "github.com", &["a", "b", "c", "d"]), ("notes", "github.com", &["a"])]).is_ok());
+    assert_eq!(
+        rules(&[("github", "github.com", &[long.as_str()])]),
+        refused
+    );
+    assert!(
+        rules(&[
+            ("github", "github.com", &["a", "b", "c", "d"]),
+            ("notes", "github.com", &["a"])
+        ])
+        .is_ok()
+    );
 }
 
 #[test]
@@ -347,7 +398,9 @@ fn a_non_json_reply_with_a_capture_returns_no_body() {
     let rig = Rig::new(form.as_bytes());
     let secrets = rig.secrets();
     let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
-    let reply = requests.request("github", get("https://api.github.com/user")).unwrap();
+    let reply = requests
+        .request("github", get("https://api.github.com/user"))
+        .unwrap();
     assert_eq!(reply.body, form.as_bytes());
 }
 
@@ -430,7 +483,9 @@ fn http_to_a_non_loopback_host_is_refused() {
         );
     }
     assert!(rig.events().is_empty());
-    requests.request("github", get("http://127.0.0.1:8080/v1?q=a")).unwrap();
+    requests
+        .request("github", get("http://127.0.0.1:8080/v1?q=a"))
+        .unwrap();
     assert_eq!(rig.events()[0], "allows http 127.0.0.1 8080");
 }
 
@@ -452,14 +507,39 @@ fn a_newline_quote_or_backslash_in_any_plugin_text_adds_no_config_line() {
     }];
     requests.request("github", base.clone()).unwrap();
     let plain = lines(&rig.config());
-    for bad in ["a\nheader = \"X: y\"", "a\"\nurl = \"https://evil", "a\\\"b", "a\rb"] {
-        let cases: [(&str, Box<dyn Fn(&mut Request)>); 6] = [
-            ("path", Box::new(move |r: &mut Request| r.url = format!("https://api.github.com/{bad}"))),
-            ("query", Box::new(move |r: &mut Request| r.url = format!("https://api.github.com/user?q={bad}"))),
-            ("header value", Box::new(move |r: &mut Request| r.headers[0].value = bad.to_owned())),
-            ("form name", Box::new(move |r: &mut Request| r.form[0].name = bad.to_owned())),
-            ("form value", Box::new(move |r: &mut Request| r.form[0].value = bad.to_owned())),
-            ("reply header", Box::new(move |r: &mut Request| r.reply_headers = vec![bad.to_owned()])),
+    for bad in [
+        "a\nheader = \"X: y\"",
+        "a\"\nurl = \"https://evil",
+        "a\\\"b",
+        "a\rb",
+    ] {
+        let cases: [(&str, Change); 6] = [
+            (
+                "path",
+                Box::new(move |r: &mut Request| r.url = format!("https://api.github.com/{bad}")),
+            ),
+            (
+                "query",
+                Box::new(move |r: &mut Request| {
+                    r.url = format!("https://api.github.com/user?q={bad}")
+                }),
+            ),
+            (
+                "header value",
+                Box::new(move |r: &mut Request| r.headers[0].value = bad.to_owned()),
+            ),
+            (
+                "form name",
+                Box::new(move |r: &mut Request| r.form[0].name = bad.to_owned()),
+            ),
+            (
+                "form value",
+                Box::new(move |r: &mut Request| r.form[0].value = bad.to_owned()),
+            ),
+            (
+                "reply header",
+                Box::new(move |r: &mut Request| r.reply_headers = vec![bad.to_owned()]),
+            ),
         ];
         for (kind, change) in cases {
             let rig = Rig::new(b"{}");
@@ -471,8 +551,12 @@ fn a_newline_quote_or_backslash_in_any_plugin_text_adds_no_config_line() {
                 Ok(_) => assert_eq!(lines(&rig.config()), plain, "{kind} {bad:?}"),
                 Err(error) => {
                     assert!(
-                        ["net_request_invalid", "net_header_name_invalid", "net_url_invalid"]
-                            .contains(&error.0.as_str()),
+                        [
+                            "net_request_invalid",
+                            "net_header_name_invalid",
+                            "net_url_invalid"
+                        ]
+                        .contains(&error.0.as_str()),
                         "{kind} {bad:?}: {error}"
                     );
                     assert!(!rig.events().contains(&"send".to_owned()), "{kind}");
@@ -497,7 +581,9 @@ fn a_header_name_outside_token_characters_is_refused() {
     let rig = Rig::new(b"{}");
     let secrets = rig.secrets();
     let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
-    for name in ["", "X Y", "X:Y", "X%{url}", "X{a}", "Host", "host", "X\u{e9}"] {
+    for name in [
+        "", "X Y", "X:Y", "X%{url}", "X{a}", "Host", "host", "X\u{e9}",
+    ] {
         let mut request = get("https://api.github.com/user");
         request.headers = vec![Field {
             name: name.to_owned(),
@@ -531,9 +617,18 @@ fn a_header_name_outside_token_characters_is_refused() {
 fn the_config_url_is_built_from_the_parsed_host() {
     for (raw, written) in [
         ("https://API.GitHub.com/user", "https://api.github.com/user"),
-        ("https://api.github.com:443/user", "https://api.github.com/user"),
-        ("https://api.github.com/a/../user", "https://api.github.com/user"),
-        ("https://api%2egithub.com/user", "https://api.github.com/user"),
+        (
+            "https://api.github.com:443/user",
+            "https://api.github.com/user",
+        ),
+        (
+            "https://api.github.com/a/../user",
+            "https://api.github.com/user",
+        ),
+        (
+            "https://api%2egithub.com/user",
+            "https://api.github.com/user",
+        ),
         ("https:api.github.com/user", "https://api.github.com/user"),
     ] {
         let rig = Rig::new(b"{}");
@@ -557,9 +652,15 @@ fn the_config_url_is_built_from_the_parsed_host() {
     let backslash = Rig::new(b"{}");
     let secrets = backslash.secrets();
     let requests = Requests::new(&secrets, &backslash.egress, &backslash.rules);
-    requests.request("github", get("https://evil.example\\api.github.com/user")).unwrap();
+    requests
+        .request("github", get("https://evil.example\\api.github.com/user"))
+        .unwrap();
     assert_eq!(backslash.events()[0], "allows https evil.example 443");
-    assert!(backslash.config().starts_with("url = \"https://evil.example/api.github.com/user\"\n"));
+    assert!(
+        backslash
+            .config()
+            .starts_with("url = \"https://evil.example/api.github.com/user\"\n")
+    );
 }
 
 #[test]
@@ -584,7 +685,16 @@ fn the_config_never_follows_redirects() {
         .collect();
     for key in &keys {
         assert!(
-            ["url", "user-agent", "header", "data", "request", "data-raw"].contains(&key.as_str()),
+            [
+                "url",
+                "resolve",
+                "user-agent",
+                "header",
+                "data",
+                "request",
+                "data-raw"
+            ]
+            .contains(&key.as_str()),
             "{key}"
         );
     }
@@ -616,7 +726,7 @@ fn the_config_is_the_pinned_format() {
     assert_eq!(
         rig.config(),
         format!(
-            "url = \"https://github.com/login/device/code\"\nuser-agent = \"CrazyAgent\"\nheader = \"Authorization: Bearer {token}\"\nheader = \"Accept: application/json\"\ndata = \"client_id=Iv1.a+b%26c&client_secret={token}\"\n"
+            "url = \"https://github.com/login/device/code\"\nresolve = \"github.com:443:140.82.112.4\"\nuser-agent = \"CrazyAgent\"\nheader = \"Authorization: Bearer {token}\"\nheader = \"Accept: application/json\"\ndata = \"client_id=Iv1.a+b%26c&client_secret={token}\"\n"
         )
     );
     for (method, json, tail) in [
@@ -637,7 +747,9 @@ fn the_config_is_the_pinned_format() {
         requests.request("github", request).unwrap();
         assert_eq!(
             rig.config(),
-            format!("url = \"https://api.github.com/repos/o/r\"\nuser-agent = \"CrazyAgent\"\n{tail}")
+            format!(
+                "url = \"https://api.github.com/repos/o/r\"\nresolve = \"api.github.com:443:140.82.112.4\"\nuser-agent = \"CrazyAgent\"\n{tail}"
+            )
         );
     }
 }
@@ -683,7 +795,10 @@ fn only_the_named_reply_headers_come_back() {
             value: "repo".to_owned(),
         }]
     );
-    assert_eq!(rig.egress.reply_headers.lock().unwrap()[0], ["x-oauth-scopes"]);
+    assert_eq!(
+        rig.egress.reply_headers.lock().unwrap()[0],
+        ["x-oauth-scopes"]
+    );
 }
 
 #[test]
@@ -693,12 +808,18 @@ fn a_host_with_a_port_is_captured_by_its_port_key() {
     let secrets = rig.secrets();
     let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
     let reply = requests
-        .request("github", get("https://ghe.example:8443/login/oauth/access_token"))
+        .request(
+            "github",
+            get("https://ghe.example:8443/login/oauth/access_token"),
+        )
         .unwrap();
     assert_eq!(reply.captured.len(), 1);
     assert!(!holds(CAPTURED.as_bytes(), &reply.body));
     let other = requests
-        .request("github", get("https://ghe.example/login/oauth/access_token"))
+        .request(
+            "github",
+            get("https://ghe.example/login/oauth/access_token"),
+        )
         .unwrap();
     assert!(other.captured.is_empty());
 }
@@ -739,4 +860,158 @@ fn a_held_capture_fills_a_later_bearer_without_a_store_read() {
         secrets.value("notes", held).map(|_| ()),
         Err(StoreError::code("secret_handle_refused"))
     );
+}
+
+/// Runs one GET whose URL names a refused address, directly or through the fake
+/// resolver, and checks it is refused before any secret is read or anything is sent.
+/// Input: the URL.
+fn refused_address(url: &str) {
+    let rig = Rig::new(b"{}");
+    let secrets = rig.secrets();
+    let token = secrets.put_from_owner("github", "token").unwrap();
+    rig.egress.events.lock().unwrap().clear();
+    let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
+    let mut request = get(url);
+    request.bearer = Some(token);
+    assert_eq!(
+        requests.request("github", request),
+        Err(StoreError::code("net_url_invalid")),
+        "{url}"
+    );
+    let events = rig.events();
+    assert!(!events.contains(&"get".to_owned()), "{url}: {events:?}");
+    assert!(!events.contains(&"send".to_owned()), "{url}: {events:?}");
+}
+
+#[test]
+fn a_10_8_address_is_refused() {
+    refused_address("https://10.0.0.1/v1");
+}
+
+#[test]
+fn a_172_16_12_address_is_refused() {
+    refused_address("https://172.16.0.1/v1");
+    refused_address("https://172.31.255.254/v1");
+}
+
+#[test]
+fn a_192_168_16_address_is_refused() {
+    refused_address("https://192.168.1.10/v1");
+}
+
+#[test]
+fn the_v4_metadata_address_is_refused() {
+    refused_address("https://169.254.169.254/latest/meta-data/");
+    refused_address("https://169.254.1.1/v1");
+}
+
+#[test]
+fn a_v6_metadata_address_is_refused() {
+    refused_address("https://[fd00:ec2::254]/latest/meta-data/");
+    refused_address("https://[fe80::1]/v1");
+}
+
+#[test]
+fn the_v4_unspecified_address_is_refused() {
+    refused_address("https://0.0.0.0/v1");
+    refused_address("http://0.0.0.0:8080/v1");
+}
+
+#[test]
+fn the_v6_unspecified_address_is_refused() {
+    refused_address("https://[::]/v1");
+}
+
+#[test]
+fn a_v4_mapped_form_of_a_refused_address_is_refused() {
+    refused_address("https://[::ffff:10.0.0.1]/v1");
+    refused_address("https://[::ffff:169.254.169.254]/v1");
+    refused_address("https://[::10.0.0.1]/v1");
+    refused_address("https://[64:ff9b::a00:1]/v1");
+}
+
+#[test]
+fn a_v6_unique_local_address_is_refused() {
+    refused_address("https://[fc00::1]/v1");
+    refused_address("https://[fd12:3456::1]/v1");
+}
+
+#[test]
+fn a_name_resolving_to_a_private_address_is_refused() {
+    refused_address("https://private.example/v1");
+    refused_address("https://mixed.example/v1");
+    refused_address("https://unresolved.example/v1");
+}
+
+#[test]
+fn localhost_relaxes_no_address_rule() {
+    let mut rebound = Rig::new(b"{}");
+    rebound
+        .egress
+        .resolved
+        .insert("localhost", vec!["192.168.0.5".parse().unwrap()]);
+    let secrets = rebound.secrets();
+    let requests = Requests::new(&secrets, &rebound.egress, &rebound.rules);
+    assert_eq!(
+        requests.request("github", get("http://localhost:8080/v1")),
+        Err(StoreError::code("net_url_invalid"))
+    );
+    assert!(!rebound.events().contains(&"send".to_owned()));
+    let rig = Rig::new(b"{}");
+    let secrets = rig.secrets();
+    let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
+    requests
+        .request("github", get("http://localhost:8080/v1"))
+        .unwrap();
+    assert!(
+        rig.config()
+            .contains("resolve = \"localhost:8080:127.0.0.1\"\n")
+    );
+}
+
+#[test]
+fn a_public_or_loopback_address_is_a_target() {
+    for (url, allowed) in [
+        ("https://140.82.112.4/v1", "allows https 140.82.112.4 443"),
+        (
+            "https://[2606:4700::1111]/v1",
+            "allows https [2606:4700::1111] 443",
+        ),
+        ("http://127.0.0.1:8080/v1", "allows http 127.0.0.1 8080"),
+        ("http://[::1]:8080/v1", "allows http [::1] 8080"),
+        (
+            "https://[::ffff:140.82.112.4]/v1",
+            "allows https [::ffff:8c52:7004] 443",
+        ),
+    ] {
+        let rig = Rig::new(b"{}");
+        let secrets = rig.secrets();
+        let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
+        requests.request("github", get(url)).unwrap();
+        assert_eq!(rig.events()[0], allowed, "{url}");
+        assert!(!rig.config().contains("resolve = "), "{url}");
+    }
+}
+
+#[test]
+fn the_curl_config_pins_the_checked_address() {
+    for (url, line) in [
+        (
+            "https://api.github.com/user",
+            "resolve = \"api.github.com:443:140.82.112.4\"\n",
+        ),
+        (
+            "https://v6.example:8443/user",
+            "resolve = \"v6.example:8443:[2606:4700::1111]\"\n",
+        ),
+    ] {
+        let rig = Rig::new(b"{}");
+        let secrets = rig.secrets();
+        let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
+        requests.request("github", get(url)).unwrap();
+        let config = rig.config();
+        let lines: Vec<&str> = config.lines().collect();
+        assert_eq!(format!("{}\n", lines[1]), line, "{url}");
+        assert_eq!(config.matches("resolve = ").count(), 1, "{url}");
+    }
 }

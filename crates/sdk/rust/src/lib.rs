@@ -5,6 +5,7 @@ extern crate alloc;
 pub mod generated;
 pub use generated::CAPABILITIES;
 pub use generated::host::Host;
+pub use generated::net;
 pub use generated::secrets;
 pub use generated::settings;
 

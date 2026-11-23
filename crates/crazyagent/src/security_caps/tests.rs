@@ -194,7 +194,11 @@ fn a_net_refusal_keeps_its_code_and_kind() {
             }
         );
     }
-    for code in ["net_capture_not_json", "credential_secret_invalid", "curl_failed"] {
+    for code in [
+        "net_capture_not_json",
+        "credential_secret_invalid",
+        "curl_failed",
+    ] {
         assert_eq!(
             super::refusal(StoreError::code(code)),
             Refusal::Failed {
@@ -221,4 +225,57 @@ fn a_net_refusal_keeps_its_code_and_kind() {
         absent,
         Err(Refusal::Failed { code }) if code == "cap_provider_absent"
     ));
+}
+
+/// The source files under `crates/crazyagent/src`, each with whether it is a test file:
+/// named `tests.rs`, ending `_tests.rs`, or under a `tests` folder. Output: path, flag and
+/// text per file.
+fn crate_sources() -> Vec<(std::path::PathBuf, bool, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut pending = vec![root.clone()];
+    let mut found = Vec::new();
+    while let Some(folder) = pending.pop() {
+        for entry in std::fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let relative = path
+                    .strip_prefix(&root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                let test = name == "tests.rs"
+                    || name.ends_with("_tests.rs")
+                    || relative.split(['/', '\\']).any(|part| part == "tests");
+                found.push((path.clone(), test, std::fs::read_to_string(&path).unwrap()));
+            }
+        }
+    }
+    assert!(found.len() > 100);
+    found
+}
+
+#[test]
+fn nothing_outside_tests_reaches_secrets_for_request_or_secrets_caps() {
+    let sources = crate_sources();
+    let count = |pattern: &str, test: bool| -> usize {
+        sources
+            .iter()
+            .filter(|(_, is_test, _)| *is_test == test)
+            .map(|(_, _, text)| text.matches(pattern).count())
+            .sum()
+    };
+    for pattern in ["for_request(", "SecretsCaps(", "NetCaps("] {
+        let outside: Vec<_> = sources
+            .iter()
+            .filter(|(_, test, text)| !*test && text.contains(pattern))
+            .map(|(path, _, _)| path.display().to_string())
+            .collect();
+        assert!(outside.is_empty(), "{pattern} outside tests: {outside:?}");
+    }
+    assert!(count("for_request(", true) > 0);
+    assert!(count("SecretsCaps(", true) > 0);
+    assert!(count("pub struct NetCaps<'r>(", false) == 1);
 }
