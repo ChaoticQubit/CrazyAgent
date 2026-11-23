@@ -122,6 +122,38 @@ fn a_first_line_the_resolver_cannot_read_as_the_system_runs_it_is_refused() {
     }
 }
 
+/// Under `env -S` the system splits the arguments itself, honouring quotes, escapes and
+/// `$` expansions, so words split on spaces alone are not the ones that run: an `-S`
+/// argument holding `$`, `\`, `"` or `'` is refused as [`Refusal::FirstLine`], as the
+/// program is, while plain arguments still resolve.
+#[test]
+fn an_env_split_argument_holding_a_quote_escape_or_dollar_is_refused() {
+    let (_folder, home) = scratch();
+    program(&home.join(".local/bin/node"), NODE);
+    let places = home_only(&home);
+    let lines: Vec<(&str, &[u8])> = vec![
+        ("double", b"#!/usr/bin/env -S node --opt \"a b\"\n"),
+        ("single", b"#!/usr/bin/env -S node --opt 'a b'\n"),
+        ("escaped", b"#!/usr/bin/env -S node a\\ b\n"),
+        ("dollar", b"#!/usr/bin/env -S node ${HOME}\n"),
+    ];
+    for (name, line) in lines {
+        let script = script(&home, name, line, 0o755);
+        assert_eq!(
+            refusal_of(&script, &places),
+            Some((script, Refusal::FirstLine)),
+            "{name}"
+        );
+    }
+    let plain = script(
+        &home,
+        "plain",
+        b"#!/usr/bin/env -S node --no-warnings\n",
+        0o755,
+    );
+    assert!(resolve_entry(&plain, &places).is_ok());
+}
+
 /// rv-sec2 B11 r2 F3: the system ends a first line at its first `#`, so the words the reader
 /// would keep past it are not the ones that run: a line holding `#` anywhere after `#!` is
 /// refused as [`Refusal::FirstLine`], an `env` program named `node#x` with an owner file of
