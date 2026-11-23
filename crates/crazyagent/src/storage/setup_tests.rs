@@ -2382,7 +2382,7 @@ fn a_restore_names_its_copy_or_its_code_and_a_failed_rollback_is_recorded_as_fai
     );
 }
 
-/// F1 (rv-b01, leader 23:3x): the restore writes `restoring` before it starts and does not
+/// The restore writes `restoring` before it starts and does not
 /// start when that write fails, so no restore runs that a crash could leave unmarked: here
 /// the record's temp file is a folder, and no backups folder is ever made.
 #[cfg(unix)]
