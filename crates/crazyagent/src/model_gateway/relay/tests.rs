@@ -1364,3 +1364,98 @@ fn dropping_an_idle_relay_stops_its_accept_thread_at_once() {
     let took = started.elapsed();
     assert!(took < Duration::from_millis(50), "dropping took {took:?}");
 }
+
+/// Today's `upstream` as it stood at the D-N0 base (0be313a5e), kept unchanged so the row
+/// below compares the shared kernel parse against it. Input: the base URL. Output: the
+/// upstream, or `model_relay_upstream_invalid`.
+fn upstream_at_ticket_base(base_url: &str) -> Result<Upstream, EngineError> {
+    let invalid = || failure("model_relay_upstream_invalid");
+    let url = url::Url::parse(base_url).map_err(|_| invalid())?;
+    let loopback = match url.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        None => return Err(invalid()),
+    };
+    let scheme = match url.scheme() {
+        "https" => "https",
+        "http" if loopback => "http",
+        _ => return Err(invalid()),
+    };
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(invalid());
+    }
+    let path = url.path().trim_end_matches('/').to_owned();
+    if path.len() > TARGET_BYTES_MAX / 2 || !path.bytes().all(target_byte) {
+        return Err(invalid());
+    }
+    Ok(Upstream {
+        origin: url.origin().ascii_serialization(),
+        path,
+        scheme,
+    })
+}
+
+#[test]
+fn the_relay_parse_is_byte_equal_on_todays_inputs() {
+    let long_path = format!("https://api.example.test/{}", "a".repeat(TARGET_BYTES_MAX / 2));
+    let fitting_path = format!("https://api.example.test/{}", "a".repeat(TARGET_BYTES_MAX / 2 - 1));
+    let inputs = [
+        "https://api.openai.com/v1/",
+        "https://api.openai.com/v1",
+        "https://api.openai.com",
+        "https://api.anthropic.com",
+        "https://api.anthropic.com/v1/",
+        "https://openrouter.ai/api/v1",
+        "https://openrouter.ai/api",
+        "https://generativelanguage.googleapis.com",
+        "https://chatgpt.com/backend-api/codex",
+        "https://chatgpt.com",
+        "https://models.example.invalid:8443/v1",
+        "https://models.example.invalid:988/v1",
+        "https://gateway.example.invalid/anthropic/v1/",
+        "https://api.example.test/v1",
+        "https://LOCALHOST/v1",
+        "https://API.OpenAI.com/V1",
+        "https://api.example.test:443/v1",
+        "http://127.0.0.1:80/v1",
+        "http://127.0.0.1:8080/v1",
+        "http://127.0.0.1:11434/v1",
+        "http://127.0.0.1:9",
+        "http://127.0.0.1:0/v1",
+        "http://127.0.0.1:8080/limited/v1",
+        "http://[::1]:11434/v1",
+        "http://localhost:8080",
+        "http://localhost:1234/v1",
+        "http://LOCALHOST",
+        "http://api.openai.com/v1",
+        "http://192.168.1.10:8080",
+        "http://10.0.0.1:11434/v1",
+        "http://0.0.0.0:8080/v1",
+        "http://example.com:11434/v1",
+        "http://user:pw@127.0.0.1/v1",
+        "https://user:pass@api.openai.com/v1",
+        "https://token@github.com/v1",
+        "https://api.openai.com/v1?key=x",
+        "https://api.openai.com/v1?",
+        "https://api.openai.com/v1#x",
+        "https://host.invalid/has space",
+        "https://host.invalid/a\"b",
+        "https://host.invalid/a\\b",
+        "https://host.invalid/a%22b",
+        "ftp://127.0.0.1/v1",
+        "file:///etc/passwd",
+        "ws://127.0.0.1/v1",
+        "not a url",
+        "",
+        &long_path,
+        &fitting_path,
+    ];
+    for input in inputs {
+        assert_eq!(upstream(input), upstream_at_ticket_base(input), "{input:?}");
+    }
+}
