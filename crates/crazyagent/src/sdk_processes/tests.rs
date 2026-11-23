@@ -49,6 +49,7 @@ fn agent_quit_calling_each_update_and_service_capability_is_refused_once_each() 
     let refusals = EngineRefusals::new();
     let gateway = Gateway::new(crate::sdk_slice::bundled_grants(), &refusals, &AllOn);
     let providers = Providers {
+        editor: &Absent,
         net: &Absent,
         process: &Absent,
         secrets: &Absent,
@@ -101,6 +102,7 @@ fn a_test_grant_reaches_the_update_provider() {
     let refusals = EngineRefusals::new();
     let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
+        editor: &Absent,
         net: &Absent,
         process: &Absent,
         secrets: &Absent,

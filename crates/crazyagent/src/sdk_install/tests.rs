@@ -342,6 +342,7 @@ fn agent_quit_calling_process_install_is_refused_and_logs_one_call_refused() {
     let gateway = Gateway::new(bundled_grants(), &refusals, &AllOn);
     let provider = InstallCaps::with(never_run);
     let providers = Providers {
+        editor: &crate::security_caps::Absent,
         net: &crate::security_caps::Absent,
         process: &provider,
         secrets: &crate::security_caps::Absent,
@@ -371,6 +372,7 @@ fn a_test_grant_table_reaches_the_install_provider() {
     let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let provider = InstallCaps::with(answered);
     let providers = Providers {
+        editor: &crate::security_caps::Absent,
         net: &crate::security_caps::Absent,
         process: &provider,
         secrets: &crate::security_caps::Absent,

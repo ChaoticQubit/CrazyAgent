@@ -185,7 +185,9 @@ pub(crate) fn save_quit_with(
         refused: Cell::new(false),
     };
     let gateway = Gateway::new(grants, &record, switches);
+    let editor = crate::sdk_editor::EditorCaps::unregistered(tx);
     let providers = Providers {
+        editor: &editor,
         net: &crate::security_caps::Absent,
         process: &crate::sdk_install::InstallCaps::UNREGISTERED,
         secrets: &crate::security_caps::Absent,
