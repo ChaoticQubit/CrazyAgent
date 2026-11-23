@@ -7,7 +7,7 @@ use sdk::process::{self, InstallRecipe, InstallResult, InstallVerb, Installer, S
 use std::ffi::OsString;
 
 #[cfg(unix)]
-const _: () = assert!(kernel_processes::run::OUTPUT_BYTES_MAX <= exposure::OUTPUT_MAX);
+const _: () = assert!(kernel_processes::run::OUTPUT_BYTES_MAX == exposure::OUTPUT_MAX);
 
 /// An install call that reached no executor: the engine has none registered for plugins.
 pub(crate) const INSTALLER_MISSING: &str = "install_installer_missing";
@@ -187,8 +187,9 @@ fn engine_values() -> Vec<OsString> {
 
 /// The output a plugin sees: at most `exposure::OUTPUT_MAX` bytes read, every run value and
 /// engine value redacted, then cut to `exposure::OUTPUT_MAX` again, since a redaction can
-/// grow it. A value cut at the read edge keeps its prefix. Inputs: what ran and the engine
-/// values. Output: the result.
+/// grow it. A full kept tail may have lost its front and any output its back, so the part
+/// of a value either cut left is redacted too. Inputs: what ran and the engine values.
+/// Output: the result.
 pub(crate) fn bounded(ran: Ran, engine: &[OsString]) -> InstallResult {
     let read = &ran.output[..ran.output.len().min(exposure::OUTPUT_MAX)];
     let values: Vec<&[u8]> = ran
@@ -197,7 +198,8 @@ pub(crate) fn bounded(ran: Ran, engine: &[OsString]) -> InstallResult {
         .chain(engine)
         .map(|value| value.as_encoded_bytes())
         .collect();
-    let mut output = exposure::redact(read, &[], &values);
+    let front = ran.output.len() >= exposure::OUTPUT_MAX;
+    let mut output = exposure::redact_edges(read, &[], &values, front, true);
     output.truncate(exposure::OUTPUT_MAX);
     assert!(output.len() <= exposure::OUTPUT_MAX);
     InstallResult {

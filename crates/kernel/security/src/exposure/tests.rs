@@ -1,4 +1,4 @@
-use super::{ENV_VALUE_MIN, OUTPUT_MAX, holds, redact};
+use super::{ENV_VALUE_MIN, OUTPUT_MAX, holds, redact, redact_edges};
 
 #[test]
 fn a_value_inside_the_text_is_held() {
@@ -98,4 +98,38 @@ fn output_at_its_bound_is_redacted() {
     let redacted = redact(&output, &[b"s3cret"], &[]);
     assert!(redacted.ends_with(b"x[REDACTED]"));
     assert_eq!(redacted.len(), OUTPUT_MAX - 6 + 10);
+}
+
+#[test]
+fn only_a_cut_edge_redacts_the_part_of_a_value_it_left() {
+    let output = b"value-1 mid TOKEN-abc";
+    let env: &[&[u8]] = &[b"secret-value-1", b"TOKEN-abcdef"];
+    assert_eq!(
+        redact_edges(output, &[], env, false, false),
+        output.to_vec()
+    );
+    assert_eq!(
+        redact_edges(output, &[], env, true, true),
+        b"[REDACTED] mid [REDACTED]".to_vec()
+    );
+    assert_eq!(redact(output, &[], env), output.to_vec());
+}
+
+#[test]
+fn an_edge_part_and_a_whole_value_it_touches_become_one_marker() {
+    let env: &[&[u8]] = &[b"/opt/tools/bin", b"/bin/python3"];
+    assert_eq!(
+        redact_edges(b"ols/bin/python3 ok", &[], env, true, false),
+        b"[REDACTED] ok".to_vec()
+    );
+}
+
+#[test]
+fn a_short_environment_value_is_not_redacted_at_an_edge() {
+    let short = "v".repeat(ENV_VALUE_MIN - 1);
+    let output = String::from("vv end v");
+    assert_eq!(
+        redact_edges(output.as_bytes(), &[], &[short.as_bytes()], true, true),
+        output.into_bytes()
+    );
 }

@@ -395,6 +395,21 @@ fn a_value_cut_at_the_back_of_a_short_output_is_hidden() {
     );
 }
 
+/// The back edge is always taken as cut, so even one closing byte that starts a value is
+/// redacted: an output ending in `/` is marked when a value starts with `/`.
+#[test]
+fn one_closing_byte_that_starts_a_value_is_redacted() {
+    let ran = Ran {
+        code: 0,
+        output: b"installed to /".to_vec(),
+        env: vec![OsString::from("/e/setup/npm")],
+    };
+    assert_eq!(
+        bounded(ran, &[]).output,
+        b"installed to [REDACTED]".to_vec()
+    );
+}
+
 /// An output shorter than a full tail was not cut at its front, so text that matches the
 /// end of a value there stays, and a whole value is still redacted.
 #[test]
