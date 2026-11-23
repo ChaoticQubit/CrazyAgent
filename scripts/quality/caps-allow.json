@@ -94,7 +94,7 @@
   "crates/crazyagent/src/sandbox.rs": 5050,
   "crates/crazyagent/src/sandbox/linux.rs": 6273,
   "crates/crazyagent/src/scheduling/tests.rs": 1970,
-  "crates/crazyagent/src/storage.rs": 4331,
+  "crates/crazyagent/src/storage.rs": 4323,
   "crates/crazyagent/src/storage/master_session.rs": 5664,
   "crates/crazyagent/src/storage/master_session/sessions_tests.rs": 2204,
   "crates/crazyagent/src/storage/native_auth.rs": 2005,
