@@ -381,6 +381,20 @@ fn the_engine_down_screen_says_a_restore_holds_the_engine() {
     }
 }
 
+/// A restore that did not finish shows the recovery screen in place of the engine-down one:
+/// its sentence, and no key that starts the engine, whose start the restore refuses.
+#[test]
+fn the_engine_down_screen_for_a_broken_restore_is_the_recovery_screen() {
+    for (width, height) in [(120, 36), (80, 24)] {
+        let mut shell = Shell::new(ctx(width, height));
+        shell.ctx.link = Link::Down(crate::restore::ENGINE_RESTORE_BROKEN.into());
+        let text = render(&mut shell, width, height).join("\n");
+        assert!(text.contains("Restore did not finish."), "{text}");
+        assert!(!text.contains("press r to try again"), "{text}");
+        assert!(!text.contains("Press r to start it"), "{text}");
+    }
+}
+
 /// DS-118: on a TUI with the default engine the engine-down screen says `r` starts it, and
 /// `r` asks for the start with its reconnect, as the desktop's Try again starts it; with no
 /// engine of its own `r` only reconnects.

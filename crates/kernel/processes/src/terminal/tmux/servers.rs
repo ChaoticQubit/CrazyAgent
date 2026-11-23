@@ -670,11 +670,16 @@ impl Servers {
     /// The teammates' server a native lead's team panes are on (PLC d): the one its latest
     /// start named, which must still accept connections, so a pane id read there is never
     /// resolved on the lead's own server, which numbers its panes from the same `%0`. Takes
-    /// the lead. Returns the server, none for a lead started without one, whose team panes
-    /// are on its own server, or `terminal_teammates_server_ended`.
+    /// the lead. Returns the server, none only for a lead whose start kept no record of one
+    /// ([`super::super::teammates_record_absent`]), whose team panes are on its own server,
+    /// the refusal of a record kept but not trusted, or `terminal_teammates_server_ended`.
     fn team_mates(&self, lead: &AgentId) -> Result<Option<Arc<Tmux>>, HostError> {
-        if super::super::teammates_socket(&self.root, lead, &self.hooks().lead).is_err() {
-            return Ok(None);
+        let paths = &self.hooks().lead;
+        if let Err(problem) = super::super::teammates_socket(&self.root, lead, paths) {
+            if super::super::teammates_record_absent(&self.root, lead, paths) {
+                return Ok(None);
+            }
+            return Err(problem);
         }
         self.mates(lead)?
             .map(Some)

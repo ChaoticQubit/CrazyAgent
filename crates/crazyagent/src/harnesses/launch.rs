@@ -2,19 +2,19 @@ use super::accounts::Handover;
 use super::drivers::acp::Acp;
 use super::drivers::{self, Piped};
 use super::interactive::KEY_FILE;
-use super::leftovers::{Follower, LINEAGE_VARIABLE, LineageToken, Unstopped};
+use super::leftovers::{Follower, Unstopped};
 use super::terminal_session::{KeyFile, write_key_file};
 use crate::adapters::claude::{ClaudeProtocol, State as ClaudeState};
 use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexState, TurnStatus};
 use crate::adapters::events::{EventKind, RateLimitStatus, TurnOutcome};
 use crate::adapters::{NativeAction, NativeHarness};
 use crate::launch_context::{AgentContext, EngineServer, Installed};
-use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 use crate::sandbox::InstalledSandbox;
 use crate::usage::capture::Tokens;
 #[cfg(unix)]
 use kernel_processes::group::Ending;
+use kernel_sandbox::profile::env::{LINEAGE_VARIABLE, LineageToken};
 #[cfg(not(windows))]
 use kernel_sandbox::toolchains;
 #[cfg(not(windows))]
@@ -36,6 +36,7 @@ use std::process::{Child, ChildStdout, Command, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::time::{Duration, Instant};
+use {crate::model_gateway::relay::Relay, kernel_common::relay_names::is_placeholder};
 
 pub(super) const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 const LINE_BYTES_MAX: usize = crate::adapters::LINE_BYTES_MAX;
@@ -53,7 +54,7 @@ const INPUT_RETRY: Duration = Duration::from_millis(20);
 pub(super) const TOOLS_OFF_PATH: &str = "/usr/bin:/bin";
 pub(super) const TOOLS_ON_PATH: &str =
     "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin";
-pub(super) const LOCAL_PLACEHOLDER_KEY: &str = crate::model_gateway::relay::LOCAL_PLACEHOLDER;
+pub(super) const LOCAL_PLACEHOLDER_KEY: &str = kernel_common::relay_names::LOCAL_PLACEHOLDER;
 const CODEX_DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const CLAUDE_DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 pub const DURABLE_INPUT: &str = "input";
@@ -2320,7 +2321,7 @@ impl Session {
             || request
                 .account
                 .key()
-                .is_some_and(|key| crate::model_gateway::relay::is_relay_token(key.reveal()));
+                .is_some_and(|key| kernel_common::relay_names::is_relay_token(key.reveal()));
         let mut session = Self {
             child,
             warden,
@@ -2839,70 +2840,6 @@ fn forward_logged(stdout: ChildStdout, sender: SyncSender<Line>, mut log: Option
     }
 }
 
-/// Hands each line a durable harness writes to its output file to the session until the
-/// holder of the file is gone and the file is read to its end. A line longer than
-/// `LINE_BYTES_MAX` is passed over to its newline and reported once as skipped. A log read
-/// to its end past `DURABLE_OUTPUT_KEPT_MAX` is emptied at a line boundary, so the log on
-/// disk stays bounded and the agent runs on. Takes the output file, open for reading and
-/// writing, the holder probe and the sender.
-fn tail(output: File, probe: File, sender: SyncSender<Line>) {
-    let mut reader = BufReader::new(output);
-    let mut line = Vec::new();
-    let mut skipping = false;
-    let mut draining = false;
-    loop {
-        assert!(line.len() <= LINE_BYTES_MAX);
-        let limit = u64::try_from(LINE_BYTES_MAX + 1 - line.len()).unwrap_or(1);
-        let count = match reader.by_ref().take(limit).read_until(b'\n', &mut line) {
-            Ok(count) => count,
-            Err(_) => {
-                let _ = sender.send(Line::Closed);
-                return;
-            }
-        };
-        let ended = line.last() == Some(&b'\n');
-        if line.len() > LINE_BYTES_MAX && !ended {
-            line.clear();
-            if !skipping && sender.send(Line::Skipped).is_err() {
-                return;
-            }
-            skipping = true;
-            continue;
-        }
-        if ended {
-            let whole = std::mem::take(&mut line);
-            if std::mem::take(&mut skipping) {
-                continue;
-            }
-            if sender.send(Line::Bytes(whole)).is_err() {
-                return;
-            }
-            continue;
-        }
-        if count > 0 {
-            continue;
-        }
-        if draining {
-            if !skipping
-                && !line.is_empty()
-                && sender.send(Line::Bytes(std::mem::take(&mut line))).is_err()
-            {
-                return;
-            }
-            let _ = sender.send(Line::Closed);
-            return;
-        }
-        if holder_alive(&probe) {
-            if (line.is_empty() || skipping) && trim_read_output(&mut reader) {
-                eprintln!("launch_output_trimmed over={DURABLE_OUTPUT_KEPT_MAX}");
-            }
-            std::thread::sleep(TAIL_POLL);
-        } else {
-            draining = true;
-        }
-    }
-}
-
 mod turn_session;
 pub use turn_session::TurnSession;
 
@@ -2917,3 +2854,6 @@ mod home_windows_tests;
 
 #[cfg(all(test, windows))]
 mod bounded_windows_tests;
+
+mod output_tail;
+use output_tail::tail;

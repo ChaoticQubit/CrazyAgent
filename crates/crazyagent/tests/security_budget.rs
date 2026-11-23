@@ -16,7 +16,7 @@ const _: () = assert!(SAMPLES >= SAMPLES_MIN && PERCENTILE < 100);
 #[cfg(target_os = "macos")]
 fn scratch(namespace: &str) -> (Box<dyn Store>, keychain_support::TemporaryKeychain) {
     let keychain = keychain_support::TemporaryKeychain::create();
-    let store = crazyagent::credentials::Keychain::at(namespace, keychain.path()).unwrap();
+    let store = kernel_security::store::macos::Keychain::at(namespace, keychain.path()).unwrap();
     (Box::new(store), keychain)
 }
 
@@ -26,7 +26,7 @@ fn scratch(namespace: &str) -> (Box<dyn Store>, keychain_support::TemporaryKeych
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 fn scratch(namespace: &str) -> (Box<dyn Store>, ()) {
     let engine = std::path::Path::new(env!("CARGO_BIN_EXE_crazyagent"));
-    let store = crazyagent::credentials::OsKeyring::open(namespace, engine).unwrap();
+    let store = kernel_security::store::os_keyring::OsKeyring::open(namespace, engine).unwrap();
     (Box::new(store), ())
 }
 

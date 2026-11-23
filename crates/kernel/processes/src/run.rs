@@ -23,6 +23,8 @@ const POLL: Duration = Duration::from_millis(50);
 const PAUSE_MIN: Duration = Duration::from_millis(1);
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+#[cfg(target_os = "windows")]
+const CREATE_SUSPENDED: u32 = 0x0000_0004;
 
 /// A plain reason setup could not find or install something, as a stable code such as
 /// `setup_checksum_mismatch`. `plain_reason` turns the code into the sentence setup shows.
@@ -89,7 +91,9 @@ impl From<Version> for String {
 /// still open there, or `setup_install_failed` when it cannot start or exits with a failure.
 /// On Unix the command leads its own process group, and every path that stops it at the
 /// limit or on a failure, a failed exit included, kills that group, so a process it left
-/// behind ends too; a clean exit inside the limit leaves the group alone.
+/// behind ends too; a clean exit inside the limit leaves the group alone. On Windows it
+/// starts suspended in a kill-on-close job of its own, which ends on every return, a clean
+/// exit included, so nothing it started outlives the call.
 pub fn run_bounded(
     command: &mut Command,
     limit: Duration,
@@ -106,7 +110,7 @@ pub fn run_bounded(
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(CREATE_NO_WINDOW);
+        command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
     }
     #[cfg(unix)]
     {
@@ -115,6 +119,15 @@ pub fn run_bounded(
     }
     let mut child =
         crate::spawn_gate::spawn(command).map_err(|_| InstallError("setup_install_failed"))?;
+    #[cfg(target_os = "windows")]
+    let _tree = match crazyagent_win_sandbox::ProcessTree::hold(&child) {
+        Ok(tree) => tree,
+        Err(_) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(InstallError("setup_install_failed"));
+        }
+    };
     #[cfg(unix)]
     let pid = child.id();
     let deadline = Instant::now() + limit;

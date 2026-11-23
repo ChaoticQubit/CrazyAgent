@@ -231,7 +231,7 @@ impl Places {
             .map(Path::to_path_buf)
             .or_else(|| seed.layout_root.clone());
         let (projects, last_good) = match engine_root {
-            Some(root) => last_good_read(root, (hooks.registered_projects)(root)),
+            Some(root) => last_good_read(&hooks, root, (hooks.registered_projects)(root)),
             None => (Some(Vec::new()), Vec::new()),
         };
         Self {
@@ -308,9 +308,9 @@ impl Places {
     }
 
     /// The copy of a tool the app ships beside the engine, looked at before every folder and
-    /// checked as any file found: [`BUNDLED_TMUX`] in the app's folder for the name `tmux`
-    /// (DEC-157), none for any other name or with no app folder. Input: the program name.
-    /// Output: the file, which may not exist.
+    /// checked as any file found: [`BUNDLED_TMUX`] in the app's folder for the name `tmux`,
+    /// none for any other name or with no app folder. Input: the program name. Output: the
+    /// file, which may not exist.
     pub fn bundled(&self, name: &str) -> Option<PathBuf> {
         let file = match name {
             "tmux" => BUNDLED_TMUX,
@@ -351,7 +351,7 @@ impl Places {
     /// would trust its files: an absolute folder that exists, none agents can write
     /// ([`Places::agent_writable`]) or another user or group can change, no link on its way
     /// another can move ([`Places::link_hops_kept`]) and, on the engine's places, none in a
-    /// temp folder (RV-DS241-157). Input: the folder. Output: the answer.
+    /// temp folder. Input: the folder. Output: the answer.
     pub fn kept_for_children(&self, folder: &Path) -> bool {
         folder.is_absolute()
             && folder.is_dir()
@@ -456,10 +456,14 @@ impl Places {
 
 /// Keeps one data folder's read of the set-up projects as its last good read, or takes that
 /// read back when this one failed, so a folder the engine named stays one agents can write
-/// while engine.db cannot be read. A good read replaces the folder's entry; past
-/// [`LAST_GOOD_ROOTS_MAX`] folders a new one is not kept. Inputs: the data folder and this
-/// read, none when it failed. Output: the read, and the last good folders when it failed.
+/// while engine.db cannot be read, after the engine restarts too. A good read that differs
+/// from the kept one goes to the engine's store ([`FindingHooks::last_good_store`]) and
+/// replaces the folder's entry; a failed read with no entry takes what the store holds
+/// ([`FindingHooks::last_good_load`]). Past [`LAST_GOOD_ROOTS_MAX`] folders a new one is not
+/// kept in memory. Inputs: the hooks, the data folder and this read, none when it failed.
+/// Output: the read, and the last good folders when it failed.
 fn last_good_read(
+    hooks: &FindingHooks,
     data_root: &Path,
     read: Option<Vec<PathBuf>>,
 ) -> (Option<Vec<PathBuf>>, Vec<PathBuf>) {
@@ -468,9 +472,21 @@ fn last_good_read(
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     assert!(kept.len() <= LAST_GOOD_ROOTS_MAX);
     let Some(roots) = read else {
-        return (None, kept.get(data_root).cloned().unwrap_or_default());
+        if let Some(last) = kept.get(data_root) {
+            return (None, last.clone());
+        }
+        let stored = (hooks.last_good_load)(data_root).unwrap_or_default();
+        assert!(stored.len() <= PROJECT_ROOTS_MAX);
+        assert!(stored.iter().all(|root| root.is_absolute()));
+        if !stored.is_empty() && kept.len() < LAST_GOOD_ROOTS_MAX {
+            kept.insert(data_root.to_path_buf(), stored.clone());
+        }
+        return (None, stored);
     };
     assert!(roots.len() <= PROJECT_ROOTS_MAX);
+    if kept.get(data_root) != Some(&roots) {
+        (hooks.last_good_store)(data_root, &roots);
+    }
     if kept.contains_key(data_root) || kept.len() < LAST_GOOD_ROOTS_MAX {
         kept.insert(data_root.to_path_buf(), roots.clone());
     }

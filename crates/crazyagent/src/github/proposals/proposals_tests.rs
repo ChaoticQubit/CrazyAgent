@@ -1,5 +1,4 @@
 use super::*;
-use crate::credentials::Keychain;
 use crate::credentials::test_keychain::TestKeychain;
 use crate::github::test_server::{Answer, Server};
 use crate::github::{
@@ -450,7 +449,7 @@ fn the_apply_uses_the_owners_sign_in_on_the_recorded_repository_and_tells_the_ag
     let namespace = format!("dev.crazyagent.test-{suffix}");
     let mut keychain = TestKeychain::temporary();
     keychain.serve(&namespace);
-    let store = Arc::new(Keychain::new(&namespace).unwrap());
+    let store = Arc::new(crate::credentials::keychain(&namespace).unwrap());
     let server = Server::start(|seen, _| {
         if seen.method == "GET" && seen.path == "/user" {
             let mut answer = Answer::json(200, json!({"login": "octo-cat"}));

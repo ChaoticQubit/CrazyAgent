@@ -91,3 +91,15 @@ fn a_problem_round_trips_through_serde() {
         problem
     );
 }
+
+#[test]
+fn the_past_cap_sentence_names_the_cap_and_old_plugin_files() {
+    let past = Problem::new("app_plugin_past_cap", None, None);
+    assert_eq!(
+        past.message,
+        format!(
+            "The app reads only the first {} plugins by name, old plugin files included; remove one of them to use this plugin.",
+            crate::registry::USER_PLUGINS_MAX
+        )
+    );
+}

@@ -185,7 +185,7 @@ fn marking_host(id: i64) -> (tempfile::TempDir, Servers, AgentId, PathBuf, PathB
     (root, host, lead, socket, started)
 }
 
-/// v242 (GB-7 row 4 class): a native lead's teammates' socket whose connect is refused
+/// A native lead's teammates' socket whose connect is refused
 /// counts as no teammates' server, while this engine holds a keeper for that server, only
 /// once that keeper exited cleanly: on macOS a live server whose accept queue is full also
 /// refuses, and a teammate can stop the server it runs under. A refused one whose keeper
@@ -278,7 +278,7 @@ fn a_refused_teammates_socket_is_no_server_only_once_its_held_keeper_ended_clean
     std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
 }
 
-/// v242: a native lead an earlier engine started, whose teammates' server ended while this
+/// A native lead an earlier engine started, whose teammates' server ended while this
 /// engine holds no keeper for it, still ends here. A kill of the lead finds no server and
 /// gives `terminal_agent_unknown`, which the next engine's thaw of a refused frozen lead
 /// (`TeamRuntime::attach_terminal`) and its sweep both take as ended, rather than failing on
@@ -420,7 +420,7 @@ fn an_unlinked_own_socket_is_no_server_only_once_its_held_keeper_ended_cleanly()
     std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
 }
 
-/// v242 MR-1 (rv-code2): a lead's server start, which waits up to `KEEPER_READY` for its
+/// A lead's server start, which waits up to `KEEPER_READY` for its
 /// socket to accept, holds neither keeper map while it waits, so a call on another lead,
 /// which reads those maps in `own()` and `mates()`, never waits on that start. A stand-in
 /// server program that never binds its socket keeps each start waiting until its keeper
@@ -473,7 +473,7 @@ fn a_lead_server_start_waiting_for_its_socket_holds_no_keeper_map() {
     std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
 }
 
-/// v242 (rv-sec2 LOW): a lead server start keeps every other lead's keeper, also one that
+/// A lead server start keeps every other lead's keeper, also one that
 /// exited cleanly, so that lead's own server is still read through its keeper: a refused own
 /// socket whose keeper ended cleanly stays no own server rather than falling back to the
 /// socket file and becoming the lead's own again. The start here fails, since its server
@@ -522,7 +522,7 @@ fn a_lead_server_start_keeps_another_leads_cleanly_exited_keeper() {
     }
 }
 
-/// v242 MRR2-1 (rv-code2 r2): a kill of a native lead takes its teammates' keeper out of this
+/// A kill of a native lead takes its teammates' keeper out of this
 /// engine's map whatever the kill answers, as the lead's end takes its own keeper out
 /// (`end_kept_server`), so a keeper that exited without confirming the end, which no later
 /// start replaces once its lead ended, never stays for the engine's life. Here the kill fails
@@ -568,7 +568,7 @@ fn a_killed_leads_teammates_keeper_leaves_the_map_whatever_the_kill_answers() {
     std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
 }
 
-/// v242 MRR2-1 (rv-code2 r2): a 257th lead's teammates' server still starts after 256 leads
+/// A 257th lead's teammates' server still starts after 256 leads
 /// ended whose teammates' keepers all exited without confirming the end, which no later start
 /// replaces, since an ended lead's id does not start again. First those leads were killed, as
 /// a lead's end kills it, at the refused sockets their ended servers left; then, with no
@@ -663,7 +663,7 @@ fn a_teammates_server_start_after_256_ended_leads_still_runs() {
     std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
 }
 
-/// v242 SEC2-R2 F1: a Stop of an adopted teammate whose teammates' server missed one look,
+/// A Stop of an adopted teammate whose teammates' server missed one look,
 /// while its lead's own server listens, looks at that server again before it answers
 /// `terminal_agent_unknown`, which a Stop takes as ended, so one failed connect never marks
 /// a running teammate stopped. Both looks are armed to miss, so the kill still answers
@@ -699,7 +699,7 @@ fn a_stop_of_a_teammate_whose_teammates_server_missed_one_look_looks_again() {
     }
 }
 
-/// v242 check-a-open sec r1 F1: once a remembered teammate's teammates' server missed a look,
+/// Once a remembered teammate's teammates' server missed a look,
 /// its Stop looks again only at its own lead's teammates' server, never at another lead's own
 /// server, where that lead may tag a decoy pane with the teammate's name so the Stop ends the
 /// decoy and answers Ok. Lead 9 has no teammates' server and its own socket listens; the Stop
@@ -735,4 +735,76 @@ fn a_stop_of_a_remembered_teammate_after_a_missed_look_never_opens_another_leads
     ]) {
         std::fs::remove_dir_all(folder).unwrap();
     }
+}
+
+/// The record a lead's start keeps of its teammates' socket name on a host. Takes the host
+/// and the lead's id. Returns the record's path.
+fn teammates_record(host: &Servers, id: i64) -> PathBuf {
+    crate::terminal::tmux::test_seams::test_layout::agent_teammates_socket_name(
+        &host.root.join("team"),
+        id,
+    )
+}
+
+/// One way a row spoils a lead's teammates' socket record. Takes the record.
+type Spoil = fn(&Path);
+
+/// A lead whose teammates' socket record is present but cannot be trusted is refused team
+/// routing, never read as a lead with no teammates' server, whose team panes the host would
+/// then resolve on the lead's own server: a record no one can read, one of the wrong size, a
+/// link, a folder, or one whose name is not a teammates' socket name. No case starts a
+/// server.
+#[test]
+fn a_lead_whose_teammates_record_cannot_be_trusted_is_refused_team_routing() {
+    use std::os::unix::fs::PermissionsExt;
+    let cases: [(&str, Spoil); 5] = [
+        ("unreadable", |record| {
+            std::fs::set_permissions(record, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }),
+        ("wrong size", |record| {
+            std::fs::write(record, "teammates-0.sock").unwrap();
+        }),
+        ("a link", |record| {
+            let held = record.with_extension("held");
+            std::fs::rename(record, &held).unwrap();
+            std::os::unix::fs::symlink(&held, record).unwrap();
+        }),
+        ("a folder", |record| {
+            std::fs::remove_file(record).unwrap();
+            std::fs::create_dir(record).unwrap();
+        }),
+        ("not a socket name", |record| {
+            let length = std::fs::metadata(record).unwrap().len();
+            let name = format!("teammates-{}.sock", "g".repeat(16));
+            assert_eq!(name.len() as u64, length);
+            std::fs::write(record, name).unwrap();
+        }),
+    ];
+    for (case, spoil) in cases {
+        let (_root, host, lead, _socket) = lead_with_teammates_socket();
+        spoil(&teammates_record(&host, 7));
+        assert_eq!(
+            host.team_mates(&lead).map(|server| server.is_some()),
+            Err(failure(OWN_SERVER_UNAVAILABLE)),
+            "{case}"
+        );
+    }
+}
+
+/// A lead whose start named no teammates' socket has no teammates' server, so its team panes
+/// are on its own server: no record, with or without the records' folder made.
+#[test]
+fn a_lead_with_no_teammates_record_has_no_teammates_server() {
+    let (_root, host, lead) = fresh_host();
+    assert_eq!(
+        host.team_mates(&lead).map(|server| server.is_some()),
+        Ok(false)
+    );
+    let record = teammates_record(&host, 7);
+    private_folder(record.parent().unwrap());
+    assert!(!record.exists());
+    assert_eq!(
+        host.team_mates(&lead).map(|server| server.is_some()),
+        Ok(false)
+    );
 }

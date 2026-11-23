@@ -1536,41 +1536,6 @@ fn work_that_starts_between_the_plan_and_the_disk_work_refuses_the_move() {
     assert_eq!(case.stored_folder(), case.target());
 }
 
-/// While a project move is pending, a master session cannot take a working copy of the
-/// repository in the folder being moved; it can once the move is finished or forgotten.
-#[test]
-fn a_pending_project_move_refuses_a_master_working_copy_of_its_repository() {
-    use crate::protocol::{Outcome, SessionId, TaskId};
-    let case = Case::new();
-    let project = ProjectId::new(PROJECT).unwrap();
-    let reserve = |case: &Case| {
-        let tx = case.db.unchecked_transaction().unwrap();
-        crate::worktrees::reserve_master_bootstrap(
-            &tx,
-            &case.engine,
-            &project,
-            &TaskId::new("task-1").unwrap(),
-            &SessionId::new("session-1").unwrap(),
-            text(&case.repo),
-        )
-        .unwrap()
-    };
-    case.plan(AddMode::Move, &[]).unwrap();
-    assert_eq!(
-        reserve(&case),
-        Outcome::Rejected {
-            code: "move_project_in_progress".into()
-        }
-    );
-    assert_eq!(case.finish(false), Some(Finished::Left));
-    assert_eq!(
-        reserve(&case),
-        Outcome::Rejected {
-            code: "repository_not_admitted".into()
-        }
-    );
-}
-
 #[test]
 fn landing_work_in_flight_holds_the_folder_and_the_move_holds_it_until_its_record() {
     let case = Case::new();
@@ -1644,3 +1609,5 @@ fn a_stop_while_a_move_waits_for_its_agents_ends_it_with_nothing_moved() {
     assert_eq!(case.finish(false), Some(Finished::Left));
     assert_eq!(case.stored_folder(), case.repo);
 }
+
+mod master_copy;

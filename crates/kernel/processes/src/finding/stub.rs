@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::{ffi::OsStr, path::Path};
 
 /// Hooks that answer nothing, for the kernel's own rows: no links, shims, prefixes,
-/// projects, twins, agent temp folders or gate root; a path is
+/// projects, stored last good reads, twins, agent temp folders or gate root; a path is
 /// its one spelling and canonical as std reads it. No row whose answer needs an engine
 /// check runs on these; those rows run in crazyagent on its real hooks.
 pub(crate) const STUB_HOOKS: FindingHooks = FindingHooks {
@@ -14,6 +14,8 @@ pub(crate) const STUB_HOOKS: FindingHooks = FindingHooks {
     is_shim: |_, _| false,
     npm_prefix: |_| None,
     registered_projects: |_| Some(Vec::new()),
+    last_good_load: |_| None,
+    last_good_store: |_, _| {},
     projects_marker: ".crazyagent",
     data_twin: |_| None,
     one_spelling: |path| path,
@@ -49,4 +51,11 @@ pub(crate) fn stub_engine(
     path: Option<&OsStr>,
 ) -> Places {
     Places::engine(engine_root, app_folder, home, path, stub_seed())
+}
+
+/// The value of a file operation a row's setup made, or a panic naming the path it touched.
+/// Inputs: the operation's result and its path. Output: the value.
+#[cfg(test)]
+pub(crate) fn or_named<T>(done: std::io::Result<T>, path: &std::path::Path) -> T {
+    done.unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }

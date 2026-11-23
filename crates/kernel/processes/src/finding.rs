@@ -16,8 +16,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 /// The engine answers program finding needs without naming the engine crate: harness
-/// shims and prefixes, the projects the engine registered, and the folder checks that live
-/// with the sandbox until its own move. Built once by crazyagent
+/// shims and prefixes, the projects the engine registered and where their last good read is
+/// kept, and the folder checks that live with the sandbox until its own move. Built once by crazyagent
 /// (crazyagent's `HOOKS`). Inputs: the fields. Output: a value carried on [`Places`].
 #[derive(Clone, Copy)]
 pub struct FindingHooks {
@@ -27,6 +27,8 @@ pub struct FindingHooks {
     pub is_shim: fn(Option<&Path>, &Path) -> bool,
     pub npm_prefix: for<'a> fn(&'a Path) -> Option<&'a Path>,
     pub registered_projects: fn(&Path) -> Option<Vec<PathBuf>>,
+    pub last_good_load: fn(&Path) -> Option<Vec<PathBuf>>,
+    pub last_good_store: fn(&Path, &[PathBuf]),
     pub projects_marker: &'static str,
     pub data_twin: fn(&Path) -> Option<PathBuf>,
     pub one_spelling: fn(PathBuf) -> PathBuf,
@@ -146,8 +148,8 @@ const INSTALL_ROOTS: [&str; 8] = [
     "/run/current-system/sw",
     "/nix/var/nix/profiles/default",
 ];
-/// The file name of the tmux the app ships beside the engine (DEC-157), which the name
-/// `tmux` finds before every folder ([`Places::bundled`]).
+/// The file name of the tmux the app ships beside the engine, which the name `tmux` finds
+/// before every folder ([`Places::bundled`]).
 pub const BUNDLED_TMUX: &str = "crazyagent-tmux";
 /// Linux package folders often missing from the engine's PATH: Linuxbrew, where setup
 /// installs tmux, and the NixOS system and default profiles. They are looked in before the
@@ -627,8 +629,8 @@ pub const SHIPS_BUNDLED_TMUX: bool = match option_env!("CRAZYAGENT_BUNDLES_TMUX"
     None => false,
 };
 
-/// Why the engine runs another tmux than the one the app ships (DEC-157 15:41): the bundled
-/// file is not there, or it is there but cannot run (refused, or no supported version read).
+/// Why the engine runs another tmux than the one the app ships: the bundled file is not
+/// there, or it is there but cannot run (refused, or no supported version read).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BundleNote {
     Missing,
@@ -959,8 +961,7 @@ fn own_node(
 
 /// Why a resolved script whose first line asks `env` for `node` would start under a `node`
 /// other than its own npm prefix's: why the resolver passes that one over, named for the
-/// tool, so a harness launch refuses where npm falls back (V243-OWN-PREFIX-NODE-REFUSE). The
-/// tool is resolved at depth 0, so its `node` is judged at depth 1, as [`named_interpreter`]
+/// tool, so a harness launch refuses where npm falls back. The tool is resolved at depth 0, so its `node` is judged at depth 1, as [`named_interpreter`]
 /// judges it. Inputs: the tool and the places. Output: why, or none.
 pub fn own_node_refused(tool: &Resolved, places: &Places) -> Option<Missing> {
     assert!(tool.program.is_absolute());
@@ -1017,12 +1018,11 @@ fn log_own_node_passed_over(node: &Path, passed: &Missing) -> bool {
 
 /// Whether a name is one of a launcher that starts the program it is given looked up by name
 /// in its own PATH, such as `env`, `nice`, `arch` or `nohup`, so a first line running it
-/// starts a copy the resolver never judged (rv-sec2 B11 r2 F2). [`entry_at`] asks it of the
-/// interpreter's real file name and of the name the line runs it as, its program word for
-/// `env` or the file name as written, since a multi-call binary such as coreutils or busybox
-/// picks its tool by that name (rv-code4 B18 F1). On Windows the name is read as Windows
-/// finds a program, ASCII case ignored and a trailing `.exe` dropped (#333 r1 sec F1).
-/// Input: the name. Output: the answer.
+/// starts a copy the resolver never judged. [`entry_at`] asks it of the interpreter's real
+/// file name and of the name the line runs it as, its program word for `env` or the file
+/// name as written, since a multi-call binary such as coreutils or busybox picks its tool by
+/// that name. On Windows the name is read as Windows finds a program, ASCII case ignored and
+/// a trailing `.exe` dropped. Input: the name. Output: the answer.
 fn launches_by_name(name: &str) -> bool {
     #[cfg(windows)]
     let lower = name.to_ascii_lowercase();
@@ -1064,8 +1064,8 @@ struct Unreadable;
 /// here, and one whose real file launches by name by the resolver ([`entry_at`]). A file
 /// it cannot read, which the system still runs, a line holding `#`, where the system
 /// ends it, and an `-S` line with a word holding `$`, `\`, `"` or `'`, which `env` splits
-/// otherwise, are [`Unreadable`] (rv-sec2 B11 r2 F3, F4). Input: the real file. Output: the
-/// line, none for a file that is not a script, or [`Unreadable`] for any other first line.
+/// otherwise, are [`Unreadable`]. Input: the real file. Output: the line, none for a file
+/// that is not a script, or [`Unreadable`] for any other first line.
 fn shebang(file: &Path) -> Result<Option<Shebang>, Unreadable> {
     use std::io::Read;
     let mut head = Vec::with_capacity(SCRIPT_HEAD_BYTES_MAX);
@@ -1351,8 +1351,7 @@ fn below(base: &Path, relative: &str) -> PathBuf {
 
 /// Whether a path is a file the run's user can execute, as the system decides at exec, so a
 /// candidate or interpreter the engine's user cannot start never resolves, and a copy `env`
-/// passes over is never one a walk takes and passes (rv-sec3 B18 F1). Input: the path.
-/// Output: the answer.
+/// passes over is never one a walk takes and passes. Input: the path. Output: the answer.
 #[cfg(unix)]
 fn executable_file(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file())

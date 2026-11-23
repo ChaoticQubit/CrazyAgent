@@ -1,9 +1,8 @@
-use super::platform_store;
-use kernel_security::error::StoreError;
-use kernel_security::secret::Piece::Plain;
-use kernel_security::secret::SecretString;
-use kernel_security::secret::sized;
-use kernel_security::store::{SecretRef, Store, checked_name, parts, reference};
+use super::{SecretRef, Store, checked_name, open_os_keyring, parts, reference};
+use crate::error::StoreError;
+use crate::secret::Piece::Plain;
+use crate::secret::SecretString;
+use crate::secret::sized;
 use keyring_core::{CredentialStore, Entry};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -76,7 +75,7 @@ impl Store for OsKeyring {
         let account = checked_name(account)?;
         let found = reference(service, account)?;
         let entry = self.entry(service, account)?;
-        let copy = SecretString::new(secret.expose().as_bytes().to_vec())?;
+        let copy = SecretString::stored(secret.expose().as_bytes().to_vec())?;
         bounded(self.step_time, move || {
             entry.set_secret(copy.expose().as_bytes()).map_err(failure)
         })?;
@@ -86,7 +85,7 @@ impl Store for OsKeyring {
     fn get(&self, reference: &SecretRef) -> Result<SecretString, StoreError> {
         let entry = self.owned_entry(reference)?;
         bounded(self.step_time, move || {
-            SecretString::new(entry.get_secret().map_err(failure)?)
+            SecretString::stored(entry.get_secret().map_err(failure)?)
         })
     }
 
@@ -143,12 +142,12 @@ pub fn answer_git_credential(
     parts(&reference)?;
     let mut request = Vec::new();
     let read = input.take(GIT_REQUEST_BYTES_MAX).read_to_end(&mut request);
-    kernel_security::secret::wipe(&mut request);
+    crate::secret::wipe(&mut request);
     read.map_err(|_| StoreError::code("credential_helper_io_failed"))?;
     if operation != "get" {
         return Ok(());
     }
-    let secret = platform_store(namespace)?.get(&reference)?;
+    let secret = open_os_keyring(namespace)?.get(&reference)?;
     let mut answer = sized(&[
         Plain("username="),
         Plain(username),
@@ -158,7 +157,7 @@ pub fn answer_git_credential(
     ])
     .ok_or_else(|| StoreError::code("credential_helper_io_failed"))?;
     let written = output.write_all(&answer).and_then(|()| output.flush());
-    kernel_security::secret::wipe(&mut answer);
+    crate::secret::wipe(&mut answer);
     written.map_err(|_| StoreError::code("credential_helper_io_failed"))
 }
 
@@ -223,3 +222,6 @@ fn failure(error: keyring_core::Error) -> StoreError {
 fn unavailable() -> StoreError {
     StoreError::code("credential_store_unavailable")
 }
+
+#[cfg(test)]
+mod tests;

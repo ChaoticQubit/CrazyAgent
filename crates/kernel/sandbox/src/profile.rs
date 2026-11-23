@@ -1,6 +1,8 @@
 /// The limits, the Seatbelt lists, the notices and refusal codes, and the variables the
 /// engine itself sets in every agent's environment.
 pub mod consts;
+/// The names that tell an agent's own lineage: the lineage variable and token.
+pub mod env;
 
 /// The Seatbelt rule writers: the denies for app launches, a clone's object store and a
 /// lead's clone, the root pins and nested git denies, and the packing and bound checks of

@@ -1,6 +1,5 @@
 use super::super::state;
 use super::*;
-use crate::credentials::Keychain;
 use crate::credentials::test_keychain::TestKeychain;
 use crate::github::test_server::{Answer, Seen, Server};
 use crate::github::{
@@ -8,6 +7,7 @@ use crate::github::{
     GitHubRuleState,
 };
 use kernel_security::secret::SecretString;
+use kernel_security::store::macos::Keychain;
 use kernel_security::store::{Store, reference};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
@@ -36,7 +36,7 @@ impl Scratch {
         keychain.serve(&namespace);
         Self {
             root: tempfile::tempdir().unwrap(),
-            store: Arc::new(Keychain::new(&namespace).unwrap()),
+            store: Arc::new(crate::credentials::keychain(&namespace).unwrap()),
             namespace,
             _keychain: keychain,
         }

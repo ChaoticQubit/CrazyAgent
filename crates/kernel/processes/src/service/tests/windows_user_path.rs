@@ -2,7 +2,7 @@
 use super::*;
 
 /// A registry key of one row's own that stands in for the user's environment key, so no row
-/// writes the PATH of the machine running it or reads another row's (V244-WIN-LINK-CLI-NEXTEST):
+/// writes the PATH of the machine running it or reads another row's:
 /// `HKCU:\Software\CrazyAgent-test-<tag>-<pid>`, removed with its values when dropped.
 #[cfg(windows)]
 struct ScratchKey {

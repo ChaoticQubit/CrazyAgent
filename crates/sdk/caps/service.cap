@@ -1,0 +1,13 @@
+type ServiceState { installed: bool, running: bool, current: bool }
+capability service.status() -> ServiceState
+  tier: kernel
+  needs: service.read
+capability service.repair() -> unit
+  tier: kernel
+  needs: service.write
+capability service.install() -> unit
+  tier: kernel
+  needs: service.write
+capability service.uninstall() -> unit
+  tier: kernel
+  needs: service.write
