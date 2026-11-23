@@ -14,6 +14,7 @@ use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
 use crate::storage::accounts::{self, ACCOUNT_KEYS, PLUGIN_KEYS};
 
+pub mod log;
 pub mod words;
 pub mod yaml;
 
@@ -375,6 +376,10 @@ fn sweep_unnamed_keys(db: &Connection, root: &Path) {
 #[cfg(all(test, unix))]
 #[path = "app_plugins/host_tests.rs"]
 mod host_tests;
+
+#[cfg(all(test, unix))]
+#[path = "app_plugins/log_tests.rs"]
+mod log_tests;
 
 #[cfg(test)]
 #[path = "app_plugins/switch_tests.rs"]
