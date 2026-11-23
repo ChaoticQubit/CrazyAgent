@@ -695,7 +695,7 @@ fn key_folder() -> tempfile::TempDir {
 fn longest_key() -> String {
     format!(
         "{}{}",
-        kernel_security::relay_token::TOKEN_PREFIX,
+        kernel_common::relay_names::TOKEN_PREFIX,
         "a".repeat(64)
     )
 }

@@ -1,4 +1,7 @@
 use super::*;
+use kernel_common::relay_names::{
+    LOCAL_PLACEHOLDER, TOKEN_HEX, TOKEN_PREFIX, is_placeholder, is_relay_token,
+};
 
 /// A drawn lineage token and a relay token are each told by their shape, the local
 /// placeholder is a placeholder but no relay token, and text of another shape is neither.

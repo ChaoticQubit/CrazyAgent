@@ -1,6 +1,7 @@
 use crate::engine::EngineError;
+use kernel_common::relay_names::is_placeholder;
 use kernel_processes::fd_wait::{self, Wake};
-use kernel_security::relay_token::{RelayToken, is_placeholder};
+use kernel_security::relay_token::RelayToken;
 use kernel_security::secret::Piece::{Escaped, Plain};
 use kernel_security::secret::SecretString;
 use std::io::{BufRead, BufReader, Read, Write};
