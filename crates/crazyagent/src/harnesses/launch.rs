@@ -13,12 +13,12 @@ use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::protocol::{CredentialRef, RequestId, SessionId};
 use crate::sandbox::InstalledSandbox;
 use crate::usage::capture::Tokens;
+#[cfg(unix)]
+use kernel_processes::group::Ending;
 #[cfg(not(windows))]
 use kernel_sandbox::toolchains;
 #[cfg(not(windows))]
 use kernel_sandbox::toolchains::ToolHomes;
-#[cfg(unix)]
-use kernel_processes::group::Ending;
 use kernel_security::secret::SecretString;
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, Mode, OFlags};
