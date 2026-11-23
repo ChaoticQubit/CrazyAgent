@@ -180,7 +180,7 @@ impl Fixtures {
     }
 
     fn update_verify(&self) {
-        crate::update::verify_file(
+        kernel_processes::update::verify_file(
             &self.archive,
             &self.sha256,
             &self.signature,
