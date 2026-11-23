@@ -524,7 +524,7 @@ pub fn never_written(hooks: &AccessHooks, root: &Path, name: &str) -> bool {
 /// `.crazyagent` and `graphify-out`, and in a project made before the projects home, the
 /// state it keeps there.
 /// Takes the hooks and the project folder. Returns the names.
-fn engine_names(hooks: &AccessHooks, root: &Path) -> Vec<&'static str> {
+pub fn engine_names(hooks: &AccessHooks, root: &Path) -> Vec<&'static str> {
     let mut names = ENGINE_NAMES.to_vec();
     if (hooks.state_folder)(root) == root {
         names.extend(LEGACY_STATE_NAMES);

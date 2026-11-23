@@ -1,5 +1,6 @@
 use super::*;
 use kernel_sandbox::shared_folders::*;
+use std::path::PathBuf;
 fn chosen(names: &[&str]) -> SharedFolders {
     SharedFolders {
         scope: SharedScope::Chosen,

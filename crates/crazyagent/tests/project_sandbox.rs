@@ -4274,7 +4274,6 @@ fn access_grants_reach_one_socket_hand_over_the_temp_folder_and_keep_its_sockets
 fn a_profile_with_every_grant_kind_parses_and_keeps_its_rules() {
     use crazyagent::sandbox::shared_folders::apply;
     use kernel_sandbox::policy::AccessGrant;
-    use kernel_sandbox::shared_folders::SECRET_NAMES;
     use kernel_sandbox::shared_folders::SharedFolders;
     use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
     let case = case();
