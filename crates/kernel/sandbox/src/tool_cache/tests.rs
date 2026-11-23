@@ -116,3 +116,52 @@ fn a_bucket_name_or_count_out_of_bounds_refuses_the_cache() {
     mark(temp.path(), "bucket-16");
     assert_eq!(buckets_in(temp.path()), Err("tool_cache_bucket_refused"));
 }
+
+/// A link in place of a folder above the agent's cache, to a folder outside holding a cache
+/// of the same name with a decoy in it, makes removing the agent's caches fail and removes
+/// nothing there, whether the link stands for the tool cache folder or the project's.
+#[test]
+fn a_linked_folder_above_the_cache_removes_nothing_through_it() {
+    use std::os::unix::fs::PermissionsExt;
+    fn unpin(_parent: std::os::fd::BorrowedFd<'_>, _name: &str) {}
+    fn removed(folder: &Path) -> std::io::Result<()> {
+        std::fs::remove_dir_all(folder)
+    }
+    fn priming(_folder: &Path, _uv: &Path) -> Command {
+        Command::new("/usr/bin/false")
+    }
+    let hooks = ToolCacheHooks {
+        unpin,
+        remove_agent_tree: removed,
+        priming_command: priming,
+    };
+    let key = key(
+        ToolCacheScope::PerAgent,
+        AgentAccess::Sandboxed,
+        CacheShape::Worktree,
+        "mate",
+    )
+    .unwrap();
+    for linked_project in [false, true] {
+        let runtime = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let owned = project_folder(outside.path(), "project");
+        let decoy = owned.join(&key).join("decoy");
+        std::fs::create_dir_all(&decoy).unwrap();
+        for folder in [outside.path().join(FOLDER), owned.clone(), owned.join(&key)] {
+            std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        if linked_project {
+            let tools = runtime.path().join(FOLDER);
+            std::fs::create_dir(&tools).unwrap();
+            std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let name = owned.file_name().unwrap();
+            std::os::unix::fs::symlink(&owned, tools.join(name)).unwrap();
+        } else {
+            std::os::unix::fs::symlink(outside.path().join(FOLDER), runtime.path().join(FOLDER))
+                .unwrap();
+        }
+        assert!(remove_agent(&hooks, runtime.path(), "project", "mate").is_err());
+        assert!(decoy.is_dir(), "linked project folder: {linked_project}");
+    }
+}

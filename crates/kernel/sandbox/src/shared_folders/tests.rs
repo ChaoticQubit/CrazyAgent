@@ -245,3 +245,66 @@ fn the_secret_names_hold_every_kind_the_owner_asked_for() {
         assert!(joined.contains(kind), "{kind}");
     }
 }
+
+/// A part naming a Windows drive, or anything after a colon, is not a plain name, so no
+/// picked folder or shared-back secret path can name another drive or replace the project
+/// folder it is joined onto.
+#[test]
+fn a_drive_or_colon_part_is_not_a_plain_name() {
+    for name in ["C:", "C:foo", "c:", "D:secret", "file:stream", ":"] {
+        assert!(!plain_name(name), "{name}");
+    }
+    for path in ["C:/secret", "keys/C:secret", "D:", "keys/file:stream"] {
+        let shared = SharedFolders {
+            secrets: vec![path.to_owned()],
+            ..SharedFolders::default()
+        };
+        assert_eq!(shared.validate(), Err(INVALID), "{path}");
+    }
+    assert_eq!(chosen(&["C:"]).validate(), Err(INVALID));
+}
+
+/// On Windows a shared-back secret path either is refused or joins to a path under the
+/// project folder made of plain parts only, never one a drive part sends elsewhere.
+#[cfg(windows)]
+#[test]
+fn a_joined_secret_path_stays_under_the_project_folder_on_windows() {
+    fn owner_git(_root: &Path) -> Result<Option<std::process::Command>, ()> {
+        Ok(None)
+    }
+    fn harness_folders() -> Vec<&'static str> {
+        Vec::new()
+    }
+    fn state_folder(root: &Path) -> PathBuf {
+        root.to_path_buf()
+    }
+    fn untracked(_root: &Path) -> Option<Vec<String>> {
+        Some(Vec::new())
+    }
+    let hooks = crate::access::AccessHooks {
+        owner_git,
+        harness_folders,
+        state_folder,
+        untracked,
+    };
+    let root = tempfile::tempdir().unwrap();
+    for path in ["keys/.env", "C:/secret", "keys/C:secret", "D:"] {
+        let shared = SharedFolders {
+            secrets: vec![path.to_owned()],
+            ..SharedFolders::default()
+        };
+        if shared.validate().is_err() {
+            continue;
+        }
+        let made = plan(&hooks, root.path(), &shared).unwrap();
+        for revealed in &made.revealed {
+            let below = revealed.strip_prefix(root.path()).unwrap();
+            assert!(
+                below
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_))),
+                "{path}"
+            );
+        }
+    }
+}
