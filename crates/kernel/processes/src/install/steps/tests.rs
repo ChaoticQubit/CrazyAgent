@@ -1,5 +1,5 @@
 use super::*;
-use crate::install::{InstallRecipe, SystemManager, TEMPLATE_MISMATCH, Verb};
+use crate::install::{InstallRecipe, InstallResult, SystemManager, TEMPLATE_MISMATCH, Verb};
 
 const HASH: &str = "743f85035a1996ecb350659e01cd9faea9709829be09b1b4b03c73eaf3c9cd73";
 
@@ -122,7 +122,7 @@ fn uv_tool_runs_todays_argument_vector() {
         lock: "x".to_owned(),
     };
     let paths = InstallPaths {
-        program: at(if cfg!(windows) { "/e/uv.exe" } else { "/e/uv" }),
+        program: at("/e/uv"),
         venv: at("/e/env/venv"),
         venv_python: at("/e/env/venv/bin/python"),
         requirements: at("/e/env/requirements.txt"),
@@ -403,7 +403,6 @@ fn a_relative_engine_path_is_never_built_on() {
 
 /// One step runs with only the base and step environment, and reports its exit as 0 or 1
 /// with its standard output.
-#[cfg(unix)]
 #[test]
 fn a_step_runs_with_only_its_environment() {
     let step = Step {

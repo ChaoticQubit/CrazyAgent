@@ -255,8 +255,8 @@ fn download(version_text: &str, target_text: &str, hash: &str) -> Result<(), &'s
 }
 
 /// Checks every field of a recipe against its variant's bounds and the bundled lists, so no
-/// field can add an argument, start an option or name a file. Input: the recipe. Output:
-/// nothing, or the refusal code.
+/// field can add an argument, start an option or name a file. An npm recipe with an empty
+/// version is a bare spec. Input: the recipe. Output: nothing, or the refusal code.
 pub fn validate(recipe: &InstallRecipe) -> Result<(), &'static str> {
     match recipe {
         InstallRecipe::UvRelease {
@@ -303,7 +303,7 @@ pub fn validate(recipe: &InstallRecipe) -> Result<(), &'static str> {
             if !npm_package(package) {
                 return Err(NAME_INVALID);
             }
-            if !(version(pinned) && part(pinned)) {
+            if !(pinned.is_empty() || (version(pinned) && part(pinned))) {
                 return Err(VERSION_INVALID);
             }
             if flags.len() > NPM_FLAGS_MAX || !flags.iter().all(|flag| option(flag)) {
@@ -346,7 +346,10 @@ pub fn validate(recipe: &InstallRecipe) -> Result<(), &'static str> {
 mod steps;
 #[cfg(unix)]
 pub use steps::run;
-pub use steps::{InstallPaths, SOURCE_BYTES_MAX, Step, steps};
+pub use steps::{
+    ARCHIVE_BYTES_MAX, CURL, DOWNLOAD_SECS, InstallPaths, MEMBER_BYTES_MAX, SOURCE_BYTES_MAX, Step,
+    TAR, steps,
+};
 
 #[cfg(test)]
 mod tests;
