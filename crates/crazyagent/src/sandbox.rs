@@ -5,23 +5,37 @@ use kernel_sandbox::error::invalid;
 use kernel_sandbox::grants::GrantHooks;
 use kernel_sandbox::host::LinuxHost;
 use kernel_sandbox::lines::*;
+#[cfg(test)]
+use kernel_sandbox::net::SandboxNetwork;
+#[cfg(all(test, unix))]
+use kernel_sandbox::net::SandboxRemote;
 #[cfg(target_os = "windows")]
 use kernel_sandbox::paths::clean_absolute;
 #[cfg(all(test, target_os = "macos"))]
-use kernel_sandbox::paths::{any_case, fold_case};
+use kernel_sandbox::paths::{any_case, canonical, fold_case};
 use kernel_sandbox::policy::PolicyHooks;
 #[cfg(all(test, target_os = "macos"))]
 use kernel_sandbox::ports::REMOTES_MAX;
 use kernel_sandbox::profile::command::*;
 use kernel_sandbox::profile::consts::*;
 use kernel_sandbox::profile::env::*;
+#[cfg(all(test, unix))]
+use kernel_sandbox::profile::linux_holds_fully;
+#[cfg(test)]
+use kernel_sandbox::profile::seatbelt::credential_places;
+#[cfg(all(test, target_os = "macos"))]
+use kernel_sandbox::profile::seatbelt::*;
 use kernel_sandbox::profile::{ProfileHooks, ProjectSandbox, linux_unbridged_notice_on};
+#[cfg(all(test, unix))]
+use kernel_sandbox::settings::LinuxSockets;
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 #[cfg(target_os = "macos")]
 use kernel_sandbox::tool_cache::ToolCacheHooks;
 use kernel_sandbox::toolchains::ToolchainHooks;
 #[cfg(target_os = "windows")]
 use std::ffi::OsStr;
+#[cfg(all(test, unix))]
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
