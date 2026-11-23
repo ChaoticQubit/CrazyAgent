@@ -85,12 +85,12 @@ fn wardable(command: &Command) -> io::Result<bool> {
     use std::io::Read;
 
     let arguments: Vec<&std::ffi::OsStr> = command.get_args().collect();
-    let shim = arguments.get(2..2 + kernel_sandbox::profile::command::SESSION_SHIM.len());
-    if command.get_program() != kernel_sandbox::profile::command::SANDBOX_EXEC
+    let shim = arguments.get(2..2 + crate::profile::command::SESSION_SHIM.len());
+    if command.get_program() != crate::profile::command::SANDBOX_EXEC
         || arguments.first().copied() != Some(std::ffi::OsStr::new("-f"))
         || shim.is_none_or(|shim| {
             shim.iter()
-                .zip(kernel_sandbox::profile::command::SESSION_SHIM)
+                .zip(crate::profile::command::SESSION_SHIM)
                 .any(|(at, part)| *at != part)
         })
     {
