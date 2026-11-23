@@ -174,7 +174,7 @@ fn the_tmux_hooks_name_every_team_path_as_the_kernel_test_layout_does() {
 #[cfg(unix)]
 #[test]
 fn the_confinement_value_matches_the_sandbox_constants() {
-    let real = crate::sandbox::confinement();
+    let real = kernel_sandbox::confinement();
     let copy = kernel_processes::terminal::tmux::test_seams::test_confinement();
     assert_eq!(
         real.sandbox_exec,

@@ -72,7 +72,7 @@ fn watched_turn(display: TerminalDisplay) -> (String, TurnEnd, Option<String>, S
     let host: Arc<dyn Host> = Arc::new(Tmux::open(
         Some(tmux),
         &base.join(FOLDER),
-        crate::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         crate::terminal::tmux::tmux_hooks(),
     ));
     let agent = ManagedAgent::in_pane_with_display(

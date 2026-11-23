@@ -362,7 +362,7 @@ pub fn tmux_host(engine_root: &Path, program: Option<PathBuf>) -> Arc<dyn Host> 
     let engine = Tmux::open(
         program.clone(),
         &engine_root.join(FOLDER),
-        crate::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         tmux::tmux_hooks(),
     );
     Arc::new(LastScreenHost::new(
@@ -385,7 +385,7 @@ pub(crate) fn tmux_host_checking(
     let engine = Tmux::open(
         program.clone(),
         &engine_root.join(FOLDER),
-        crate::sandbox::confinement(),
+        kernel_sandbox::confinement(),
         tmux::tmux_hooks(),
     )
     .with_deadline_checks(loops, late);

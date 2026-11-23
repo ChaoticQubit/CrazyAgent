@@ -169,7 +169,7 @@ impl Fixture {
         Arc::new(Tmux::open(
             Some(self.tmux.clone()),
             &self.base.join(FOLDER),
-            crate::sandbox::confinement(),
+            kernel_sandbox::confinement(),
             crate::terminal::tmux::tmux_hooks(),
         ))
     }
