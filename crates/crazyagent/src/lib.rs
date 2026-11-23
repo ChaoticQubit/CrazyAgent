@@ -43,6 +43,7 @@ pub mod landing_turns;
 pub mod launch_context;
 pub mod learning;
 pub mod ledger;
+pub mod log_compaction;
 pub mod master_frame_limit;
 pub mod master_session;
 pub mod master_sessions;
