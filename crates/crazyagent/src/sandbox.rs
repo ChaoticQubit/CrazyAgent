@@ -175,6 +175,18 @@ pub fn agent_command<'a>(
     windows::agent_command(profile, program, base, harness)
 }
 
+/// [`agent_command`] for the profile hooks, which take the harness variables as a list.
+/// Inputs and output as [`agent_command`].
+#[cfg(target_os = "windows")]
+fn windows_agent_command_hook(
+    profile: &Path,
+    program: &Path,
+    base: &[(&str, &OsStr)],
+    harness: Vec<(&OsStr, Option<&OsStr>)>,
+) -> Result<Command, SandboxError> {
+    windows::agent_command(profile, program, base, harness)
+}
+
 /// Tells whether a launch holds the full Linux sandbox (DEC-185): a process space of its own
 /// (the nested backend), the call supervisor running, and its network limits held, so none
 /// of the gap lines would show for it. An open network has no limit to hold; a limited one
@@ -393,6 +405,8 @@ pub const PROFILE_HOOKS: ProfileHooks = ProfileHooks {
     answer_part_suffix: crate::team::tool::ANSWER_PART_SUFFIX,
     key_folders: &crate::storage::accounts::KEY_FOLDERS,
     engine_secret_folders: ENGINE_SECRET_FOLDERS,
+    #[cfg(target_os = "windows")]
+    windows_agent_command: windows_agent_command_hook,
 };
 
 /// Tells whether a folder holds no sign-in's record, as a listed master session's slot home
@@ -3078,7 +3092,15 @@ impl ProjectSandbox {
     pub fn wrap(&self, profile: &Path, harness: &Command) -> Result<Command, SandboxError> {
         let (program, cwd) = self.harness_start(harness)?;
         let base = self.base_env(true);
+        #[cfg(unix)]
         let mut command = agent_command(profile, program, &borrowed(&base), harness.get_envs())?;
+        #[cfg(target_os = "windows")]
+        let mut command = (self.hooks.windows_agent_command)(
+            profile,
+            program,
+            &borrowed(&base),
+            harness.get_envs().collect(),
+        )?;
         command.args(harness.get_args()).current_dir(cwd);
         assert!(starts_at_boundary(command.get_program()));
         Ok(command)

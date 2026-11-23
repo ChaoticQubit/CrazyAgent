@@ -13,8 +13,14 @@ pub mod env;
 pub mod seatbelt;
 
 use crate::access::AccessHooks;
+#[cfg(target_os = "windows")]
+use crate::error::SandboxError;
 use crate::toolchains::ToolchainHooks;
+#[cfg(target_os = "windows")]
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "windows")]
+use std::process::Command;
 
 /// What an agent's profile reads from the engine that builds it: the engine's own folder
 /// and file names, the agent home lists and the engine checks the Seatbelt rules name, so
@@ -95,6 +101,16 @@ pub struct ProfileHooks {
     pub key_folders: &'static [&'static str],
     /// The engine runtime folders that are engine secrets as a whole.
     pub engine_secret_folders: &'static [&'static str],
+    /// Builds a Windows agent's command through the engine's boundary helper. Inputs: the
+    /// installed profile, the absolute program, the base and the harness variables (None
+    /// removes one). Output: the command, or the engine's refusal.
+    #[cfg(target_os = "windows")]
+    pub windows_agent_command: fn(
+        &Path,
+        &Path,
+        &[(&str, &OsStr)],
+        Vec<(&OsStr, Option<&OsStr>)>,
+    ) -> Result<Command, SandboxError>,
 }
 
 #[cfg(all(test, target_os = "macos"))]
