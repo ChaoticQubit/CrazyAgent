@@ -262,6 +262,10 @@ pub(crate) const PLAIN: &[(&str, &str)] = &[
     ),
     ("app_plugin_off", "this plugin is turned off."),
     (
+        "plugin_holders_capacity",
+        "this plugin is in use by too many runs at once; wait for one to end.",
+    ),
+    (
         "app_plugin_needs_key",
         "this plugin needs a key: pick an account or enter a key for it.",
     ),

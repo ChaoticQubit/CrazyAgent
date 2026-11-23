@@ -3952,6 +3952,7 @@ fn owner_read(
         OwnerRead::SandboxSettings => crate::sandbox_settings::read(&tx)?,
         OwnerRead::CleanupSettings => crate::cleanup_settings::read(&tx)?,
         OwnerRead::QuitSettings => crate::quit_settings::read(&tx)?,
+        OwnerRead::PluginGrants => crate::app_plugins::grants(&tx)?,
         OwnerRead::ProviderRetry => crate::provider_retry::read(&tx)?,
         OwnerRead::MasterStepSettings => crate::master_step_limit::read(&tx)?,
         OwnerRead::MasterTimeSettings => crate::master_time_limit::read(&tx)?,

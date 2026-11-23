@@ -77,7 +77,7 @@ pub(crate) fn sweep_at_start(
 
 /// Names the engine root, the folder that holds the engine database.
 /// Input: the engine connection. Output: the root, or `file_trash_root_unknown`.
-fn engine_root(connection: &Connection) -> Result<&Path, EngineError> {
+pub(crate) fn engine_root(connection: &Connection) -> Result<&Path, EngineError> {
     connection
         .path()
         .and_then(|path| Path::new(path).parent())

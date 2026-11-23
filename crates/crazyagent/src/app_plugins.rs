@@ -79,7 +79,7 @@ pub(crate) const KEYS: Keys = Keys {
     new_ref,
 };
 
-/// The ports this machine hands out by itself (Q-8): Linux reads
+/// The ports this machine hands out by itself: Linux reads
 /// net.ipv4.ip_local_port_range; macOS keeps every plugin port free of agents in its
 /// profile, so none there. Output: the range, or none.
 #[cfg(target_os = "linux")]
@@ -115,6 +115,16 @@ pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
 /// engine root. Output: none.
 pub(crate) fn sweep_staged(root: &Path) {
     kernel_plugin_host::store::sweep_staged(&engine(root));
+}
+
+/// The owner read of every plugin with the capabilities it is granted, for the engine root
+/// the database sits in. Input: the engine connection. Output: the listing as owner data,
+/// or the plugin host's refusal code, or `file_trash_root_unknown` for an in-memory database.
+pub(crate) fn grants(db: &Connection) -> Result<crate::engine::owner::OwnerData, EngineError> {
+    let root = crate::storage::trash::engine_root(db)?;
+    let plugins = kernel_plugin_host::grants::list(db, &engine(root)).map_err(error)?;
+    assert!(plugins.len() <= kernel_plugin_host::grants::GRANTS_MAX);
+    Ok(crate::engine::owner::OwnerData::PluginGrants { plugins })
 }
 
 #[cfg(all(test, unix))]

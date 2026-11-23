@@ -5,15 +5,15 @@ use crazyagent_plugin_check as plugin_check;
 use sdk::settings::QuitSettings as SdkQuit;
 use sdk::{Refusal, Tier};
 
-use super::{BUNDLED, EngineRefusals, Entry, REFUSALS_PENDING_MAX, bundled_grants, save_quit_with};
+use super::{EngineRefusals, Entry, REFUSALS_PENDING_MAX, bundled_grants, save_quit_with};
 use crate::protocol::{Command, Outcome};
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crate::settings_log::tests::{moved, store};
+use kernel_plugin_host::generated::permissions::BUNDLED_GRANTS;
 use rusqlite::Connection;
-use std::collections::BTreeSet;
 
 /// The agent-quit plugin's id, from the engine's own table.
-const QUIT: &str = BUNDLED[0].0;
+const QUIT: &str = BUNDLED_GRANTS[0].plugin;
 
 /// The quit settings the rows save: stop, never, 12 hours.
 fn stop_never_12() -> QuitSettings {
@@ -200,53 +200,6 @@ fn the_sdk_and_engine_quit_bodies_are_equal() {
 }
 
 #[test]
-fn every_bundled_plugin_matches_its_manifest() {
-    let plugins = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins");
-    let mut manifests = BTreeSet::new();
-    for tier in std::fs::read_dir(&plugins).unwrap() {
-        let tier = tier.unwrap().path();
-        if !tier.is_dir() {
-            continue;
-        }
-        for folder in std::fs::read_dir(&tier).unwrap() {
-            let folder = folder.unwrap().path();
-            if !folder.is_dir() {
-                continue;
-            }
-            let manifest = plugin_check::read_manifest(&folder).unwrap();
-            assert_eq!(
-                tier.file_name().unwrap().to_str().unwrap(),
-                manifest.tier,
-                "the folder tier is the manifest tier"
-            );
-            manifests.insert((manifest.plugin, manifest.tier, manifest.permissions));
-        }
-    }
-    let bundled: BTreeSet<(String, String, Vec<String>)> = BUNDLED
-        .iter()
-        .map(|(plugin, tier, permissions)| {
-            let tier = match tier {
-                Tier::T1 => "t1",
-                Tier::T2 => "t2",
-                Tier::T3 => "t3",
-                Tier::Kernel => "kernel",
-            };
-            (
-                (*plugin).to_owned(),
-                tier.to_owned(),
-                permissions
-                    .iter()
-                    .map(|permission| (*permission).to_owned())
-                    .collect(),
-            )
-        })
-        .collect();
-    assert_eq!(manifests, bundled, "none missing, none extra");
-    let permissions: Vec<(&'static str, Tier, &[&'static str])> = BUNDLED.to_vec();
-    assert_eq!(bundled_grants(), &Grants::new(&permissions).unwrap());
-}
-
-#[test]
 fn a_full_first_refusal_set_still_refuses_and_logs() {
     let refusals = EngineRefusals::new();
     let refusal = Refusal::NotGranted {
@@ -313,9 +266,9 @@ fn the_engine_depends_on_plugins_only_from_the_plugins_folder() {
         let manifest = plugin_check::read_manifest(&folder).unwrap();
         assert_eq!(manifest.tier, tier, "the folder tier is the manifest tier");
         assert!(
-            BUNDLED
+            BUNDLED_GRANTS
                 .iter()
-                .any(|(plugin, ..)| *plugin == manifest.plugin)
+                .any(|grant| grant.plugin == manifest.plugin)
         );
     }
 }

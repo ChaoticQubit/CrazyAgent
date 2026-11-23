@@ -54,7 +54,7 @@ fn the_engine_key_store_backs_the_plugin_host() {
     assert_eq!((KEYS.account)(&db, &unknown), Ok(None));
 }
 
-/// Q-8: on Linux the adapter hands the plugin host the range this Linux hands out by
+/// On Linux the adapter hands the plugin host the range this Linux hands out by
 /// itself, read where the sandbox reads it, so a plugin on such a port is refused.
 #[cfg(target_os = "linux")]
 #[test]
@@ -63,4 +63,66 @@ fn on_linux_the_adapter_passes_the_handed_out_range() {
     let engine = super::engine(temp.path());
     let range = crate::sandbox::linux::read_picked_ports().expect("this Linux names its range");
     assert_eq!(engine.handed_out, Some(range));
+}
+
+/// The engine's capability reply keeps exactly its six handshake flags: the plugin grant
+/// listing is a read of its own, and naming every field without a rest pattern fails to
+/// compile if one is added or removed.
+#[test]
+fn the_handshake_flags_are_unchanged() {
+    use crate::engine::owner::{OwnerData, OwnerRead};
+    let reply = OwnerData::Capabilities {
+        authenticated_owner_transport: true,
+        native_worker_admission: false,
+        human_consent_proven: true,
+        native_input: false,
+        merge_execution: true,
+        settings_persistence: false,
+    };
+    let OwnerData::Capabilities {
+        authenticated_owner_transport,
+        native_worker_admission,
+        human_consent_proven,
+        native_input,
+        merge_execution,
+        settings_persistence,
+    } = reply
+    else {
+        panic!("capabilities");
+    };
+    assert_eq!(
+        [
+            authenticated_owner_transport,
+            native_worker_admission,
+            human_consent_proven,
+            native_input,
+            merge_execution,
+            settings_persistence,
+        ],
+        [true, false, true, false, true, false]
+    );
+    assert_ne!(OwnerRead::PluginGrants, OwnerRead::Capabilities);
+    assert!(OwnerRead::Capabilities.command().unwrap().is_none());
+    assert!(OwnerRead::PluginGrants.command().unwrap().is_none());
+}
+
+/// The owner read of plugin grants lists the plugins of the engine root its database sits
+/// in: the bundled code plugin with its granted capability, the bundled data plugins off.
+#[test]
+fn the_owner_read_lists_plugin_grants() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    initialize(&db).unwrap();
+    let crate::engine::owner::OwnerData::PluginGrants { plugins } = super::grants(&db).unwrap()
+    else {
+        panic!("plugin grants");
+    };
+    let ids: Vec<&str> = plugins
+        .iter()
+        .map(|grants| grants.plugin.as_str())
+        .collect();
+    assert_eq!(ids, ["agent-quit", "ollama", "openai", "voyage"]);
+    assert_eq!(plugins[0].capabilities[0].name, "settings.save_quit");
 }
