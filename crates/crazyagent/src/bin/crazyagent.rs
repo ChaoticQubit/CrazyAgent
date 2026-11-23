@@ -563,7 +563,7 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
     }
     .map_err(|e| e.to_string())?;
     layout.prepare().map_err(|e| e.to_string())?;
-    crazyagent::tools::record_engine_root(layout.root());
+    kernel_processes::finding::record_engine_root(layout.root());
     let executable = current_executable()?;
     let found_on_path = [
         explicit.codex.is_none(),
@@ -605,7 +605,7 @@ fn default_engine_start(args: &[OsString]) -> Result<EngineStart, String> {
             .or_else(|| found("claude-code")),
         rcli: crazyagent::paths::rcli_entry(
             explicit.rcli,
-            &crazyagent::tools::Places::from_environment(Some(layout.root())),
+            &crazyagent::tools::tools_places(Some(layout.root())),
             executable.parent(),
         ),
     };

@@ -224,7 +224,7 @@ fn follow_saved_levels(authority: &Arc<Authority>) {
 fn follow_saved_levels(_authority: &Arc<Authority>) {}
 
 fn start_check(root: &Path) {
-    let mark = crate::tools::probe::mark();
+    let mark = kernel_processes::finding::probe::mark(crate::tools::finding_seed);
     let begin = progress::with(root, |state| {
         let stale = progress::check_due(state.checked.as_ref(), mark, std::time::Instant::now());
         let begin = stale && !state.checking;
@@ -261,7 +261,7 @@ fn look(
     installer: &dyn Installer,
 ) -> (
     Vec<(Dependency, crate::setup::Lookup)>,
-    std::collections::BTreeMap<Dependency, crate::tools::permission_fix::Target>,
+    std::collections::BTreeMap<Dependency, kernel_processes::finding::permission_fix::Target>,
 ) {
     let found: Vec<_> = Dependency::ALL
         .iter()
@@ -378,7 +378,7 @@ pub(super) fn begin_run(root: &Path, entries: &[PackManifestEntry]) -> bool {
         true
     });
     if begun {
-        crate::tools::probe::refresh_now();
+        kernel_processes::finding::probe::refresh_now(crate::tools::finding_seed);
     }
     begun
 }
@@ -500,7 +500,9 @@ async fn fix_dependency(
         fixed
     })
     .await
-    .unwrap_or(Err(crate::tools::permission_fix::TOOL_FIX_FAILED));
+    .unwrap_or(Err(
+        kernel_processes::finding::permission_fix::TOOL_FIX_FAILED,
+    ));
     match outcome {
         Ok(report) => eprintln!(
             "tool_fix_done tool={} tree={shown:?} changed={} shared={} skipped_foreign={} skipped_links={} skipped_other={}",
@@ -591,7 +593,9 @@ fn install_now(installer: &dyn Installer, root: &Path, dep: Dependency) -> Optio
     Some(match installed {
         Ok(version) => DependencyState::Installed { version },
         Err(code) if code.0 == "setup_version_unreadable" => match installer.lookup(dep) {
-            Ok(Err(missing)) if missing.reason == crate::tools::Reason::WrongVersion => {
+            Ok(Err(missing))
+                if missing.reason == kernel_processes::finding::Reason::WrongVersion =>
+            {
                 DependencyState::Missing {
                     line: missing.line(),
                 }
@@ -861,7 +865,7 @@ async fn run_setup(
 mod install_tests {
     use super::*;
     use crate::setup::Version;
-    use crate::tools::permission_fix::{Report, TOOL_FIX_CHANGED, Target};
+    use kernel_processes::finding::permission_fix::{Report, TOOL_FIX_CHANGED, Target};
     use std::collections::BTreeSet;
 
     /// V243-SETUP-PARALLEL (DEC-199): a lone install or fix of one tool clears only that
@@ -917,9 +921,9 @@ mod install_tests {
         }
 
         fn lookup(&self, dep: Dependency) -> crate::setup::Lookup {
-            Ok(Err(crate::tools::Missing {
+            Ok(Err(kernel_processes::finding::Missing {
                 tool: dep.program().to_owned(),
-                reason: crate::tools::Reason::WrongVersion,
+                reason: kernel_processes::finding::Reason::WrongVersion,
                 needs: Some("3.7".to_owned()),
                 found: Some("3.2a".to_owned()),
                 looked: vec![PathBuf::from("/usr/bin")],
@@ -980,7 +984,7 @@ mod install_tests {
             Err(InstallError("setup_install_failed"))
         }
 
-        fn fix_target(&self, missing: &crate::tools::Missing) -> Option<Target> {
+        fn fix_target(&self, missing: &kernel_processes::finding::Missing) -> Option<Target> {
             (missing.tool == Dependency::Graphify.program()).then(|| Target {
                 path: PathBuf::from("/h/t"),
                 recursive: true,
@@ -1026,7 +1030,7 @@ mod install_tests {
             state.checked = Some(progress::Checked {
                 at: std::time::Instant::now(),
                 found: Vec::new(),
-                probe: crate::tools::probe::mark(),
+                probe: kernel_processes::finding::probe::mark(crate::tools::finding_seed),
             });
         });
         let guard = begin_one(root.clone(), Dependency::Graphify).unwrap();
