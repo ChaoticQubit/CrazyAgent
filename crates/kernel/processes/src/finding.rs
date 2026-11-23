@@ -117,6 +117,23 @@ const TEMP_FOLDERS: [&str; 7] = [
 ];
 const HOMEBREW_FOLDERS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
 pub const SYSTEM_FOLDERS: [&str; 4] = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+/// The folders whose tools stay usable while the set-up projects cannot be read
+/// ([`Places::agent_writable`]): the system's, the Homebrew prefixes with their `Cellar` and
+/// `opt` folders (`/usr/local` lies under `/usr`), and on Linux Linuxbrew's prefix, the Nix
+/// store and the NixOS profiles. The normal path trusts every one of them too.
+#[cfg(not(target_os = "linux"))]
+const INSTALL_ROOTS: [&str; 4] = ["/usr", "/bin", "/sbin", "/opt/homebrew"];
+#[cfg(target_os = "linux")]
+const INSTALL_ROOTS: [&str; 8] = [
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/opt/homebrew",
+    "/home/linuxbrew/.linuxbrew",
+    "/nix/store",
+    "/run/current-system/sw",
+    "/nix/var/nix/profiles/default",
+];
 /// The file name of the tmux the app ships beside the engine (DEC-157), which the name
 /// `tmux` finds before every folder ([`Places::bundled`]).
 pub const BUNDLED_TMUX: &str = "crazyagent-tmux";
@@ -615,17 +632,35 @@ impl Places {
 
     /// Whether a path lies in a folder the engine names for agents ([`FindingHooks::registered_projects`]),
     /// which they can write whole. When those could not be read it fails closed: every path
-    /// under HOME outside the engine's data folder counts. Inputs: HOME's names
+    /// outside the engine's data folder counts, under HOME and, on Unix, outside HOME too
+    /// unless it lies under an install root ([`INSTALL_ROOTS`]) or the app's folder, since a
+    /// repository the engine registered may lie anywhere (C2-H8). Inputs: HOME's names
     /// ([`home_names`]) and the path. Output: the answer.
     fn in_set_up_project(&self, homes: &[PathBuf], path: &Path) -> bool {
         assert!(homes.len() <= 4);
-        match &self.projects {
-            Some(roots) => roots.iter().any(|root| path.starts_with(root)),
-            None => {
-                homes.iter().any(|home| path.starts_with(home))
-                    && !self.engine_roots.iter().any(|root| path.starts_with(root))
+        let Some(roots) = &self.projects else {
+            if self.engine_roots.iter().any(|root| path.starts_with(root)) {
+                return false;
             }
-        }
+            return homes.iter().any(|home| path.starts_with(home))
+                || (cfg!(unix) && !self.installed(path));
+        };
+        roots.iter().any(|root| path.starts_with(root))
+    }
+
+    /// Whether a path lies under an install root ([`INSTALL_ROOTS`]), in either of its
+    /// macOS names ([`FindingHooks::data_twin`]), or in the app's folder. Input: the path.
+    /// Output: the answer.
+    fn installed(&self, path: &Path) -> bool {
+        let under = |root: &Path| {
+            path.starts_with(root)
+                || (self.seed.hooks.data_twin)(root).is_some_and(|twin| path.starts_with(twin))
+        };
+        INSTALL_ROOTS.iter().any(|root| under(Path::new(root)))
+            || self
+                .app_folder
+                .as_deref()
+                .is_some_and(|folder| path.starts_with(folder))
     }
 }
 

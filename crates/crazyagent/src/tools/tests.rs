@@ -1562,6 +1562,28 @@ fn unread_projects_count_every_place_under_home_under_either_data_volume_name() 
     }
 }
 
+/// C2-H8: when the set-up projects cannot be read, a repository the engine may have
+/// registered outside HOME still counts as agent-writable, so a tool in it is refused, while
+/// a system folder's tool does not.
+#[test]
+fn a_registered_repository_outside_home_is_agent_writable_while_its_projects_cannot_be_read() {
+    let (_folder, home) = scratch();
+    let outside = tempfile::Builder::new()
+        .prefix("tools-h8-repo-")
+        .tempdir()
+        .unwrap();
+    let repo = outside.path().canonicalize().unwrap();
+    assert!(!repo.starts_with(&home));
+    let tool = program(&repo.join("bin/tool"), "#!/bin/sh\n");
+    let places = with_projects(tools_new(Vec::new(), Some(home.clone())), None);
+    assert!(places.agent_writable(&tool), "{}", tool.display());
+    assert_eq!(
+        check_place(&places, &tool),
+        Some(Err(Refusal::AgentsCanWrite))
+    );
+    assert!(!places.agent_writable(Path::new("/bin/sh")));
+}
+
 /// V243-FIRMLINK-AGENT-WRITABLE r2: a set-up project the engine recorded through the data
 /// volume is agent-writable under either name of the place, the short one included.
 #[cfg(target_os = "macos")]
