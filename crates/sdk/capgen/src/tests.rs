@@ -405,10 +405,11 @@ fn a_capability_named_like_a_generated_check_is_refused() {
     );
 }
 
-/// Fields of the type below on each level of [`chain`] above the first, so a walk that
-/// does not share finished types visits `FIELDS_PER_LEVEL^(RECORD_DEPTH_MAX - 1)` paths,
-/// 16^7 or about 268 million, where shared work is one pass over about 113 fields.
-const FIELDS_PER_LEVEL: usize = 16;
+/// Fields of the type below on each level of [`chain`] above the first, as many as one
+/// record may hold, so a walk that does not share finished types visits
+/// `FIELDS_PER_LEVEL^(RECORD_DEPTH_MAX - 1)` paths, 64^7 or about 4.4 * 10^12 (more than the
+/// 2^40 of the chain this row once built), where shared work is one pass over 449 fields.
+const FIELDS_PER_LEVEL: usize = crazyagent_cap::FIELDS_MAX;
 
 /// A chain of record types as deep as the parser accepts: `T0` holds one `leaf` field and
 /// each of the `RECORD_DEPTH_MAX - 1` levels above holds [`FIELDS_PER_LEVEL`] fields of
