@@ -1,0 +1,24 @@
+ [◆▪◆▪] CrazyAgent  /  Settings  /  App plugins                                 
+────────────────────────────────────────────────────────────────────────────────
+  Plugins CrazyAgent itself runs, such as the embedding models search ranks     
+  with. Each one shows what it reaches before you approve it.                   
+  When turned off: Refuse new calls                                             
+                                                                                
+    OpenAI embeddings                                             Bundled  Off  
+      openai, version 1. Bundled.                                               
+      R┌─ Turn off Dock embeddings? ────────────────────────────────────┐       
+      S│ In use by:                                                     │       
+      a│ - Fix the login page                                           │       
+    Oll│ Refuse new calls: running work goes on without it, and each    │d  On  
+      o│ new call is refused.                                           │       
+      R│ This is your setting.                                          │       
+  > Doc└────────────────────────────────────────────────────────────────┘d  On  
+      dock-embed, version 1. Added by you.                                      
+      Reaches 127.0.0.1 (local, not encrypted)                                  
+      api_key: Key you entered                                                  
+    Harbor embeddings                                             Not approved  
+      harbor, version 1. Added by you.                                          
+      Reaches api.harbor.invalid                                                
+      Review this plugin before it runs.                                        
+                                                                                
+ y Turn off  Tab Stop runs instead  Esc Keep on                          ? Help 

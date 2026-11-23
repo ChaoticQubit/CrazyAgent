@@ -119,7 +119,7 @@
   "crates/crazyagent/src/tools/tests.rs": 1791,
   "crates/crazyagent/src/tui/client.rs": 3340,
   "crates/crazyagent/src/tui/client/project_setup.rs": 1701,
-  "crates/crazyagent/src/tui/client/settings.rs": 2587,
+  "crates/crazyagent/src/tui/client/settings.rs": 1611,
   "crates/crazyagent/src/tui/master_session.rs": 3718,
   "crates/crazyagent/src/tui/model_access.rs": 1934,
   "crates/crazyagent/src/tui/native_auth/tests.rs": 1966,
