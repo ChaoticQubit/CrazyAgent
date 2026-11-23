@@ -1,0 +1,44 @@
+package crazyagent:sdk;
+
+interface sdk-types {
+  record not-granted {
+    capability: string,
+    needs: string,
+  }
+
+  variant refusal {
+    not-granted(not-granted),
+    tier-too-high(string),
+    rejected(string),
+    failed(string),
+  }
+}
+
+interface settings-types {
+  enum on-quit {
+    keep-running,
+    stop,
+  }
+
+  enum left-running {
+    after-hours,
+    never,
+  }
+
+  record quit-settings {
+    on-quit: on-quit,
+    left-running: left-running,
+    hours: u16,
+  }
+}
+
+interface settings {
+  use sdk-types.{refusal};
+  use settings-types.{quit-settings};
+
+  save-quit: func(settings: quit-settings) -> result<_, refusal>;
+}
+
+world plugin {
+  import settings;
+}

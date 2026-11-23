@@ -390,6 +390,35 @@ fn wit_only_name_lines_pass_100_columns() {
     parses("long names", &text);
 }
 
+#[test]
+fn wit_caps_generate_the_checked_in_file() {
+    let loaded = load(&sdk("caps")).expect("caps/ loads");
+    let borrowed: Vec<(&str, File)> = loaded
+        .iter()
+        .map(|(stem, file)| (stem.as_str(), file.clone()))
+        .collect();
+    let files = wit(&borrowed).expect("caps/ generates");
+    assert_eq!(files.len(), 1);
+    assert_eq!(crate::drift(&sdk("wit"), &files), Vec::<String>::new());
+}
+
+#[test]
+fn wit_wire_covers_lists_nested_options_and_a_foreign_alias() {
+    let text = folder_wit("capgen/fixture_wire");
+    for held in [
+        "\ninterface wire {\n  use sdk-types.{refusal};\n  use wire-types.{blob, mode, plain};\n  use modes-types.{mode as modes-mode};\n\n",
+        "\n  blobs: func(plain: plain) -> result<list<blob>, refusal>;\n",
+        "\n  nested: func(values: list<option<u64>>) -> result<list<option<u64>>, refusal>;\n",
+        "\n  swap: func(here: mode, there: modes-mode) -> result<modes-mode, refusal>;\n",
+        "\ninterface modes-types {\n",
+        "\nworld plugin {\n  import wire;\n}\n",
+    ] {
+        assert!(text.contains(held), "{held:?} in {text}");
+    }
+    assert!(!text.contains("\ninterface modes {\n"), "{text}");
+    parses("fixture_wire", &text);
+}
+
 /// Times 1000 runs of `wit` over the three fixtures and the in-test settings source and
 /// checks the p95 against the budget of the `OVERHEAD_MAC` condition (quiet 1 ms, loaded
 /// 5 ms). Run it as

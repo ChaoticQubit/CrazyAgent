@@ -14,6 +14,13 @@ interface sdk-types {
   }
 }
 
+interface modes-types {
+  enum mode {
+    read,
+    write,
+  }
+}
+
 interface wire-types {
   enum mode {
     read,
@@ -35,11 +42,24 @@ interface wire-types {
 
 interface wire {
   use sdk-types.{refusal};
-  use wire-types.{blob, plain};
+  use wire-types.{blob, mode, plain};
+  use modes-types.{mode as modes-mode};
 
   store: func(blob: blob, plain: plain, at: u64) -> result<blob, refusal>;
 
   peek: func(plain: plain) -> result<option<u64>, refusal>;
+
+  blobs: func(plain: plain) -> result<list<blob>, refusal>;
+
+  nested: func(values: list<option<u64>>) -> result<list<option<u64>>, refusal>;
+
+  archive: func(
+    first: blob,
+    second: blob,
+    values: list<option<u64>>,
+  ) -> result<option<blob>, refusal>;
+
+  swap: func(here: mode, there: modes-mode) -> result<modes-mode, refusal>;
 }
 
 world plugin {

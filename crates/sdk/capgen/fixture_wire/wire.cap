@@ -7,3 +7,15 @@ capability wire.store(blob: Blob, plain: Plain, at: u64) -> Blob
 capability wire.peek(plain: Plain) -> option<u64>
   tier: t1
   needs: wire.store
+capability wire.blobs(plain: Plain) -> list<Blob>
+  tier: t1
+  needs: wire.store
+capability wire.nested(values: list<option<u64>>) -> list<option<u64>>
+  tier: t1
+  needs: wire.store
+capability wire.archive(first: Blob, second: Blob, values: list<option<u64>>) -> option<Blob>
+  tier: t1
+  needs: wire.store
+capability wire.swap(here: Mode, there: modes.Mode) -> modes.Mode
+  tier: t1
+  needs: wire.store

@@ -464,6 +464,41 @@ fn ts_imports_name_only_what_the_file_uses() {
     assert!(!net.contains("Wire"), "{net}");
 }
 
+#[test]
+fn ts_caps_generate_the_checked_in_files() {
+    let loaded = load(&sdk("caps")).expect("caps/ loads");
+    let borrowed: Vec<(&str, File)> = loaded
+        .iter()
+        .map(|(stem, file)| (stem.as_str(), file.clone()))
+        .collect();
+    let files = ts(&borrowed).expect("caps/ generates");
+    assert!(files.iter().any(|(path, _)| path == "index.ts"));
+    assert_eq!(files.len(), loaded.len() + 1);
+    assert_eq!(
+        crate::drift(&sdk("ts/src/generated"), &files),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn ts_wire_covers_lists_nested_options_vertical_calls_and_foreign_inputs() {
+    let files = fixture_ts("fixture_wire");
+    let wire = text(&files, "wire.ts");
+    for held in [
+        "\nimport type * as modes from \"./modes.ts\";\n",
+        "export function blobs(host: Host, plain: Plain): Promise<Result<readonly Blob[]>> {",
+        "(value) => (value as readonly Wire[]).map(decodeBlob)",
+        "values: values.map((item) => item === null ? null : encodeU64(item))",
+        "(value) => (value as readonly Wire[]).map((item) => item === null ? null : decodeU64(item))",
+        "  return call(\n    host,\n    ARCHIVE,\n    {\n      first: encodeBlob(first),\n",
+        "export function swap(host: Host, here: Mode, there: modes.Mode): Promise<Result<modes.Mode>> {",
+        "  return call(host, SWAP, { here, there }, (value) => value as modes.Mode);",
+    ] {
+        assert!(wire.contains(held), "{held:?} in {wire}");
+    }
+    assert!(text(&files, "modes.ts").contains("export type Mode = \"read\" | \"write\";"));
+}
+
 /// Times 1000 runs of `ts` over the three fixtures and the in-test settings source and
 /// checks the p95 against the budget of the `OVERHEAD_MAC` condition (quiet 1 ms, loaded
 /// 5 ms). Run it as
