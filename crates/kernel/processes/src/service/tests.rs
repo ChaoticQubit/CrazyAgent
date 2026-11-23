@@ -492,6 +492,57 @@ fn changeable_by_others_names_a_world_writable_folder_on_the_path_or_behind_a_li
     assert_eq!(changeable_by_others(&gone), None);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_link_chain_through_a_shared_folder_is_changeable_though_both_ends_are_private() {
+    let temp = durable_folder();
+    let private = temp.path().join("private");
+    write_mode(&private.join("real"), "engine", 0o755);
+    let shared = shared_folder(&temp.path().join("shared"), 0o777);
+    let middle = shared.join("l2");
+    std::os::unix::fs::symlink(private.join("real"), &middle).unwrap();
+    let first = private.join("l1");
+    std::os::unix::fs::symlink(&middle, &first).unwrap();
+    assert_eq!(changeable_by_others(&private.join("real")), None);
+    assert_eq!(changeable_by_others(&first), Some(shared.clone()));
+    assert_eq!(changeable_past_sticky(&first), Some(shared));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_chain_through_private_folders_only_still_passes() {
+    let temp = durable_folder();
+    let private = temp.path().join("private");
+    write_mode(&private.join("real"), "engine", 0o755);
+    let other = shared_folder(&temp.path().join("other"), 0o755);
+    let middle = other.join("l2");
+    std::os::unix::fs::symlink(private.join("real"), &middle).unwrap();
+    let first = private.join("l1");
+    std::os::unix::fs::symlink(&middle, &first).unwrap();
+    assert_eq!(changeable_by_others(&first), None);
+    assert_eq!(changeable_past_sticky(&first), None);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_loop_or_a_chain_past_the_hop_cap_is_changeable() {
+    let temp = durable_folder();
+    let private = temp.path().join("private");
+    write_mode(&private.join("real"), "engine", 0o755);
+    let (one, two) = (private.join("loop-1"), private.join("loop-2"));
+    std::os::unix::fs::symlink(&two, &one).unwrap();
+    std::os::unix::fs::symlink(&one, &two).unwrap();
+    assert!(changeable_by_others(&one).is_some());
+    let mut next = private.join("real");
+    for hop in 0..=changeable::LINK_HOPS_MAX {
+        let link = private.join(format!("hop-{hop}"));
+        std::os::unix::fs::symlink(&next, &link).unwrap();
+        next = link;
+    }
+    assert!(changeable_by_others(&next).is_some());
+    assert!(changeable_past_sticky(&next).is_some());
+}
+
 /// Changes who may write `path` with icacls. Inputs: the path and the icacls arguments.
 #[cfg(windows)]
 fn icacls(path: &Path, change: &[&str]) {

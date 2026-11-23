@@ -3,6 +3,11 @@ use super::canonical;
 use super::{current_uid, trusted_group};
 use std::path::{Path, PathBuf};
 
+/// The most links one path's resolution may pass through before the path counts as
+/// changeable, as an unreadable entry does.
+#[cfg(unix)]
+pub(crate) const LINK_HOPS_MAX: usize = 32;
+
 /// The first entry on a path that someone other than this user or root can change: an
 /// entry another user owns, a world-writable entry such as `/tmp`, a file or folder an
 /// untrusted group can write ([`trusted_group`]), or one whose access list lets someone else
