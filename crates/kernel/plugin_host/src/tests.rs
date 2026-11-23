@@ -106,9 +106,14 @@ fn a_fifo_plugin_toml_is_refused_without_waiting() {
         .status()
         .expect("mkfifo runs");
     assert!(made.success(), "the fifo is made");
-    let started = std::time::Instant::now();
-    assert_eq!(read_bounded(&file, MANIFEST_BYTES_MAX), Bounded::Unreadable);
-    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(read_bounded(&file, MANIFEST_BYTES_MAX));
+    });
+    let read = receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("the read returns before the deadline instead of waiting on the fifo");
+    assert_eq!(read, Bounded::Unreadable);
 }
 
 /// A `plugin.toml` that is a link is refused, even to a valid file.
