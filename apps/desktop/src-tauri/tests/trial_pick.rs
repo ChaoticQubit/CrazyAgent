@@ -44,6 +44,7 @@ fn a_waiting_answer_picks_its_purpose_once_and_leaves_the_other_purposes_to_the_
         (FolderPurpose::ProjectsHome, "projects_home"),
         (FolderPurpose::Memory, "memory"),
         (FolderPurpose::Plugin, "plugin"),
+        (FolderPurpose::AppPlugin, "app_plugin"),
     ] {
         answer(&picks, name, &repo);
         assert_eq!(
