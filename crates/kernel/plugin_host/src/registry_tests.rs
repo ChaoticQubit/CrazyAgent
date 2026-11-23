@@ -278,6 +278,14 @@ fn trusted(case: &Case, text: &str) {
     add_text(case, text, false, 1).unwrap();
 }
 
+/// A fixture read that fails stops the row with the path it read and the I/O error.
+#[test]
+#[should_panic(expected = "missing.toml: No such file")]
+fn a_failed_fixture_read_names_its_path_and_error() {
+    let case = case();
+    fixture(&case.root.join("missing.toml"), std::fs::read);
+}
+
 fn plugin_keys(case: &Case) -> Vec<PathBuf> {
     let keys = case.root.join("plugin-keys");
     let Ok(entries) = std::fs::read_dir(&keys) else {
