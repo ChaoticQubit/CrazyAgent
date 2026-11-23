@@ -411,7 +411,10 @@ pub(in crate::team) fn request_reply(
         ),
         Ok(Requested::AlreadyAllowed) => (REQUEST_HELD.to_owned(), false),
         Err(code) => (
-            format!("Not requested: {}", kernel_sandbox::grants::refusal_text(&code)),
+            format!(
+                "Not requested: {}",
+                kernel_sandbox::grants::refusal_text(&code)
+            ),
             true,
         ),
     }
