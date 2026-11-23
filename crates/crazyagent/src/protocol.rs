@@ -809,7 +809,7 @@ mod tests {
         assert_eq!(kernel(&wire(&found)).unwrap(), found);
         let saved = CredentialRef::new("dev.crazyagent.x.github:token".to_string()).unwrap();
         assert_eq!(kernel(&saved).unwrap().as_str(), saved.as_str());
-        let foreign = CredentialRef::new("a:b:c".to_string()).unwrap();
+        let foreign = CredentialRef::new("ab:c:d".to_string()).unwrap();
         assert_eq!(
             kernel(&foreign).unwrap_err(),
             kernel_security::error::StoreError::code("credential_reference_invalid")
