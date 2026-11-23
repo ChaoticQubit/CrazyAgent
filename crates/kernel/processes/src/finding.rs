@@ -1284,12 +1284,18 @@ pub fn check_place(places: &Places, candidate: &Path) -> Option<Result<(), Refus
     })
 }
 
+/// Whether a program name may be looked up in a folder: not empty, bounded, not `.` or `..`,
+/// holding no `/`, `\` or NUL, and not starting like a Windows drive (one ASCII letter then
+/// `:`), which on Windows replaces the folder it is joined to. One rule on every OS; a `:`
+/// later in the name stays. Input: the name. Output: the answer.
 fn valid_name(name: &str) -> bool {
+    let drive = matches!(name.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic());
     !name.is_empty()
         && name.len() <= NAME_BYTES_MAX
         && name != "."
         && name != ".."
         && !name.contains(['/', '\\', '\0'])
+        && !drive
 }
 
 /// Whether a path may name a place: absolute, bounded, not `/` and plain, with no `.` or
