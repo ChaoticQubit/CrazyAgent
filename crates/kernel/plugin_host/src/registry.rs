@@ -8,7 +8,9 @@ use crate::embedding::{self, Manifest};
 use crate::generated::permissions::BUNDLED_GRANTS;
 use crate::manifest::MANIFEST_BYTES_MAX;
 use crate::problem::{PORT_HANDED_OUT, Problem};
-use crate::store::{Keys, Loaded, binding_rows, drop_binding, refused, resolve, sqlite};
+use crate::store::{
+    Keys, Loaded, binding_rows, drop_binding, forget_key_file, refused, resolve, sqlite,
+};
 use crate::trust;
 use crate::usage::{ChangeNotice, Holder, Lease, TurnOff, Usage};
 use crate::views::{
@@ -548,11 +550,12 @@ pub fn off_code_plugins(db: &Connection) -> Result<std::collections::BTreeSet<St
         .collect())
 }
 
-/// Removes a user plugin: its folder (or the .yaml file an older version left), trust
-/// record, state, bindings and the keys entered for it. Account keys stay. Under a bundled
-/// plugin's name it removes only what the owner's folder still holds, which the bundled
-/// plugin shadows. Inputs: database, engine facts and name. Output: Ok, or
-/// `app_plugin_bundled`, `app_plugin_not_found`, or the folder's refusal.
+/// Removes a user plugin: its bindings, trust record and state in one savepoint first, then,
+/// once those rows are gone, the keys entered for it and its folder (or the .yaml file an
+/// older version left). A failed row write changes nothing. Account keys stay. Under a
+/// bundled plugin's name it removes only what the owner's folder still holds, which the
+/// bundled plugin shadows. Inputs: database, engine facts and name. Output: Ok, or
+/// `app_plugin_bundled`, `app_plugin_not_found`, the database's or the folder's refusal.
 pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Refused> {
     prepare(db, engine)?;
     if is_bundled(name) {
@@ -565,7 +568,7 @@ pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Re
     if !embedding::valid_name(name) {
         return Err(refused("app_plugin_not_found"));
     }
-    let removed = folder::remove(engine.root, name)?;
+    let present = folder::read(engine.root, name)?.is_some();
     let known: bool = db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM app_plugin_trust WHERE name=?1)
@@ -575,16 +578,29 @@ pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Re
             |row| row.get(0),
         )
         .map_err(sqlite)?;
-    if !removed && !known {
+    if !present && !known {
         return Err(refused("app_plugin_not_found"));
     }
-    for (secret, source, reference) in binding_rows(db, name)? {
-        drop_binding(db, engine, name, &secret, &source, &reference)?;
+    let bindings = binding_rows(db, name)?;
+    db.execute_batch("SAVEPOINT app_plugin_remove")
+        .map_err(sqlite)?;
+    let written = [
+        "DELETE FROM app_plugin_secrets WHERE plugin=?1",
+        "DELETE FROM app_plugin_trust WHERE name=?1",
+        "DELETE FROM app_plugin_state WHERE name=?1",
+    ]
+    .iter()
+    .try_for_each(|sql| db.execute(sql, [name]).map(|_| ()));
+    if let Err(error) = written {
+        let _ = db.execute_batch("ROLLBACK TO app_plugin_remove; RELEASE app_plugin_remove");
+        return Err(sqlite(error));
     }
-    db.execute("DELETE FROM app_plugin_trust WHERE name=?1", [name])
+    db.execute_batch("RELEASE app_plugin_remove")
         .map_err(sqlite)?;
-    db.execute("DELETE FROM app_plugin_state WHERE name=?1", [name])
-        .map_err(sqlite)?;
+    for (_, source, reference) in &bindings {
+        forget_key_file(db, engine, source, reference);
+    }
+    folder::remove(engine.root, name)?;
     Ok(())
 }
 

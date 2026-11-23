@@ -233,7 +233,7 @@ pub(crate) fn drop_binding(
 /// committed: when the connection holds no open transaction. Under an open transaction, or
 /// when the delete fails, the file stays and the start sweep deletes it once no row names
 /// it. Inputs: database, engine facts and the old row's source and reference. Output: none.
-fn forget_key_file(db: &Connection, engine: &Engine<'_>, source: &str, reference: &str) {
+pub(crate) fn forget_key_file(db: &Connection, engine: &Engine<'_>, source: &str, reference: &str) {
     if source == KEY
         && db.is_autocommit()
         && let Some(key) = plugin_key(reference)
