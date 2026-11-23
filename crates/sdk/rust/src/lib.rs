@@ -3,8 +3,10 @@
 extern crate alloc;
 
 pub mod generated;
+pub mod wire;
 pub use generated::CAPABILITIES;
 pub use generated::host::Host;
+pub use generated::secrets;
 pub use generated::settings;
 
 /// Why the bus did not complete a call: no grant, a tier above the caller's, the provider's
@@ -54,5 +56,7 @@ pub const LIST_ITEMS_MAX: usize = 64;
 pub mod fixture_generated;
 #[cfg(test)]
 pub mod fixture_two;
+#[cfg(test)]
+pub mod fixture_wire;
 #[cfg(test)]
 mod tests;

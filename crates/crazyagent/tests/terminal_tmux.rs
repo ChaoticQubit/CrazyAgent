@@ -150,11 +150,15 @@ fn an_agent_terminal_takes_input_resizes_and_survives_a_new_engine_client() {
         &["/bin/sh"],
     );
 
-    let pane = host.spawn(&agent, &command).unwrap();
+    let pane = host
+        .spawn(&agent, &crazyagent::terminal::PaneCommand::from(&command))
+        .unwrap();
     assert_eq!(pane.agent, agent);
     assert!(pane.pane.starts_with('%') && pane.pid > 0, "{pane:?}");
     assert_eq!(
-        host.spawn(&agent, &command).unwrap_err().0,
+        host.spawn(&agent, &crazyagent::terminal::PaneCommand::from(&command))
+            .unwrap_err()
+            .0,
         "terminal_agent_running"
     );
     assert_eq!(host.alive().unwrap(), std::slice::from_ref(&agent));
@@ -249,7 +253,8 @@ fn arguments_and_environment_reach_the_agent_exactly() {
             tricky,
         ],
     );
-    host.spawn(&agent, &command).unwrap();
+    host.spawn(&agent, &crazyagent::terminal::PaneCommand::from(&command))
+        .unwrap();
     let mut stream = host.attach(&agent).unwrap();
     let mut seen = stream.screen.clone();
     assert!(
@@ -260,8 +265,11 @@ fn arguments_and_environment_reach_the_agent_exactly() {
     assert!(contains(&seen, b"a\"b\\c $HOME #x ~y'z;"));
 
     let other = AgentId::new("research-8").unwrap();
-    host.spawn(&other, &shell(root.path(), Vec::new(), &["/bin/sh"]))
-        .unwrap();
+    host.spawn(
+        &other,
+        &crazyagent::terminal::PaneCommand::from(&shell(root.path(), Vec::new(), &["/bin/sh"])),
+    )
+    .unwrap();
     assert_eq!(host.alive().unwrap(), [agent.clone(), other.clone()]);
     host.input(&other, b"echo only-other\r").unwrap();
     host.input(&agent, b"typed\r").unwrap();
@@ -285,7 +293,9 @@ fn a_host_without_tmux_reports_every_call_unavailable() {
         Tmux::open(Some(PathBuf::from("tmux")), &folder),
     ] {
         assert_eq!(
-            host.spawn(&agent, &command).unwrap_err().0,
+            host.spawn(&agent, &crazyagent::terminal::PaneCommand::from(&command))
+                .unwrap_err()
+                .0,
             "terminal_unavailable"
         );
         assert_eq!(host.attach(&agent).unwrap_err().0, "terminal_unavailable");
@@ -322,7 +332,8 @@ fn a_terminal_folder_too_long_for_a_socket_address_still_runs_agents() {
     let _closing = Closing(&host);
     let agent = AgentId::team(1).unwrap();
     let command = shell(root.path(), Vec::new(), &["/bin/sh"]);
-    host.spawn(&agent, &command).unwrap();
+    host.spawn(&agent, &crazyagent::terminal::PaneCommand::from(&command))
+        .unwrap();
     assert_eq!(host.alive().unwrap(), std::slice::from_ref(&agent));
     let metadata = std::fs::symlink_metadata(&socket).unwrap();
     assert!(metadata.file_type().is_socket());
@@ -352,7 +363,9 @@ fn a_shared_terminal_folder_is_refused() {
     let agent = AgentId::team(1).unwrap();
     let command = shell(root.path(), Vec::new(), &["/bin/sh"]);
     assert_eq!(
-        host.spawn(&agent, &command).unwrap_err().0,
+        host.spawn(&agent, &crazyagent::terminal::PaneCommand::from(&command))
+            .unwrap_err()
+            .0,
         "terminal_folder_unsafe"
     );
 }
@@ -386,7 +399,11 @@ fn panes_have_a_scrollback_cap_and_close_when_their_process_ends() {
     let agent = AgentId::team(3).unwrap();
     host.spawn(
         &agent,
-        &shell(root.path(), Vec::new(), &["/bin/sh", "-c", "exec cat"]),
+        &crazyagent::terminal::PaneCommand::from(&shell(
+            root.path(),
+            Vec::new(),
+            &["/bin/sh", "-c", "exec cat"],
+        )),
     )
     .unwrap();
     assert_eq!(
@@ -426,8 +443,11 @@ fn a_viewer_that_falls_behind_reads_behind_and_a_fresh_view_draws_the_screen_now
     };
     let host = Tmux::open(Some(tmux), &folder);
     let agent = AgentId::team(4).unwrap();
-    host.spawn(&agent, &shell(root.path(), Vec::new(), &["/bin/sh"]))
-        .unwrap();
+    host.spawn(
+        &agent,
+        &crazyagent::terminal::PaneCommand::from(&shell(root.path(), Vec::new(), &["/bin/sh"])),
+    )
+    .unwrap();
     let mut stream = host.attach(&agent).unwrap();
     let flood = VIEWER_BUFFER_BYTES_MAX * 3;
     host.input(
@@ -475,11 +495,11 @@ fn the_screen_on_attach_keeps_the_spaces_the_program_wrote() {
     let agent = AgentId::team(6).unwrap();
     host.spawn(
         &agent,
-        &shell(
+        &crazyagent::terminal::PaneCommand::from(&shell(
             root.path(),
             vec![("PS1".into(), "spaced$ ".into())],
             &["/bin/sh"],
-        ),
+        )),
     )
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -524,7 +544,7 @@ fn the_screen_on_attach_turns_on_the_input_modes_the_agent_app_set() {
     let moded = AgentId::team(7).unwrap();
     host.spawn(
         &moded,
-        &shell(
+        &crazyagent::terminal::PaneCommand::from(&shell(
             root.path(),
             Vec::new(),
             &[
@@ -532,17 +552,17 @@ fn the_screen_on_attach_turns_on_the_input_modes_the_agent_app_set() {
                 "-c",
                 "printf '\\033[?2004h\\033[?1hmodes-set'; exec cat",
             ],
-        ),
+        )),
     )
     .unwrap();
     let plain = AgentId::team(8).unwrap();
     host.spawn(
         &plain,
-        &shell(
+        &crazyagent::terminal::PaneCommand::from(&shell(
             root.path(),
             Vec::new(),
             &["/bin/sh", "-c", "printf 'modes-off'; exec cat"],
-        ),
+        )),
     )
     .unwrap();
 
@@ -578,8 +598,11 @@ fn closing_the_host_ends_every_terminal_and_the_server_unless_one_is_kept() {
     let master = AgentId::team(1).unwrap();
     let sub = AgentId::team(2).unwrap();
     for agent in [&master, &sub] {
-        host.spawn(agent, &shell(root.path(), Vec::new(), &["/bin/sh"]))
-            .unwrap();
+        host.spawn(
+            agent,
+            &crazyagent::terminal::PaneCommand::from(&shell(root.path(), Vec::new(), &["/bin/sh"])),
+        )
+        .unwrap();
     }
     host.close(std::slice::from_ref(&master)).unwrap();
     assert_eq!(
@@ -719,8 +742,12 @@ fn ending_a_gone_leftover_pane_kills_no_other_pane() {
         Vec::new(),
         &["/bin/sh", "-c", "exec /bin/sleep 300"],
     );
-    host.spawn(&gone, &sleeper).unwrap();
-    let other_pid = host.spawn(&other, &sleeper).unwrap().pid;
+    host.spawn(&gone, &crazyagent::terminal::PaneCommand::from(&sleeper))
+        .unwrap();
+    let other_pid = host
+        .spawn(&other, &crazyagent::terminal::PaneCommand::from(&sleeper))
+        .unwrap()
+        .pid;
     let holder_pid: u32 = tmux_reply(
         &tmux,
         &socket,
@@ -804,7 +831,11 @@ fn ending_a_leftover_pane_through_the_engine_host_ends_what_it_started() {
     let first = host
         .spawn(
             &agent,
-            &shell(&path, Vec::new(), &["/bin/sh", "-c", &script]),
+            &crazyagent::terminal::PaneCommand::from(&shell(
+                &path,
+                Vec::new(),
+                &["/bin/sh", "-c", &script],
+            )),
         )
         .unwrap()
         .pid;
@@ -843,7 +874,11 @@ fn the_engine_host_names_the_first_pane_of_a_split_agent_window() {
     let first = host
         .spawn(
             &agent,
-            &shell(&path, Vec::new(), &["/bin/sh", "-c", "exec /bin/sleep 300"]),
+            &crazyagent::terminal::PaneCommand::from(&shell(
+                &path,
+                Vec::new(),
+                &["/bin/sh", "-c", "exec /bin/sleep 300"],
+            )),
         )
         .unwrap()
         .pid;
@@ -883,7 +918,10 @@ fn a_server_whose_engine_home_is_deleted_ends_with_its_agents() {
     let host = Tmux::open(Some(tmux.clone()), &folder);
     let agent = AgentId::team(1).unwrap();
     let pane = host
-        .spawn(&agent, &shell(root.path(), Vec::new(), &["/bin/sh"]))
+        .spawn(
+            &agent,
+            &crazyagent::terminal::PaneCommand::from(&shell(root.path(), Vec::new(), &["/bin/sh"])),
+        )
         .unwrap();
     let server = server_pid(&tmux, &socket);
     let _orphan = Orphan {
@@ -919,7 +957,14 @@ fn an_engine_stop_keeps_the_server_only_while_a_team_agent_lives_on() {
     let mut panes = Vec::new();
     for agent in [&team, &research] {
         let pane = host
-            .spawn(agent, &shell(root.path(), Vec::new(), &["/bin/sh"]))
+            .spawn(
+                agent,
+                &crazyagent::terminal::PaneCommand::from(&shell(
+                    root.path(),
+                    Vec::new(),
+                    &["/bin/sh"],
+                )),
+            )
             .unwrap();
         panes.push(pane.pid);
     }
@@ -968,7 +1013,14 @@ fn an_engine_stop_set_to_stop_team_agents_ends_them_and_the_server() {
     let mut pids = Vec::new();
     for agent in [&team, &research] {
         let pane = host
-            .spawn(agent, &shell(root.path(), Vec::new(), &["/bin/sh"]))
+            .spawn(
+                agent,
+                &crazyagent::terminal::PaneCommand::from(&shell(
+                    root.path(),
+                    Vec::new(),
+                    &["/bin/sh"],
+                )),
+            )
             .unwrap();
         pids.push(pane.pid);
     }
@@ -1005,8 +1057,11 @@ fn renewing_moves_the_server_deadline_to_the_time_given() {
     host.renew(until).unwrap();
     assert!(!socket.exists(), "renewing starts no server");
     let team = AgentId::team(1).unwrap();
-    host.spawn(&team, &shell(root.path(), Vec::new(), &["/bin/sh"]))
-        .unwrap();
+    host.spawn(
+        &team,
+        &crazyagent::terminal::PaneCommand::from(&shell(root.path(), Vec::new(), &["/bin/sh"])),
+    )
+    .unwrap();
     for deadline in [until, until + Duration::from_secs(60 * 60)] {
         host.renew(deadline).unwrap();
         let modified = std::fs::symlink_metadata(&socket)
@@ -1034,8 +1089,11 @@ fn an_unreadable_quitting_setting_renews_with_the_default_limit() {
     };
     let host = Tmux::open(Some(tmux.clone()), &folder);
     let team = AgentId::team(1).unwrap();
-    host.spawn(&team, &shell(root.path(), Vec::new(), &["/bin/sh"]))
-        .unwrap();
+    host.spawn(
+        &team,
+        &crazyagent::terminal::PaneCommand::from(&shell(root.path(), Vec::new(), &["/bin/sh"])),
+    )
+    .unwrap();
     let engine = root.path().join("engine");
     std::fs::create_dir(&engine).unwrap();
     let db = rusqlite::Connection::open(engine.join("engine.db")).unwrap();
@@ -1117,7 +1175,11 @@ fn pane_rows_shaped_like_control_replies_stay_screen_text() {
     for agent in [&forger, &sibling] {
         host.spawn(
             agent,
-            &shell(root.path(), Vec::new(), &["/bin/sh", "-c", "sleep 600"]),
+            &crazyagent::terminal::PaneCommand::from(&shell(
+                root.path(),
+                Vec::new(),
+                &["/bin/sh", "-c", "sleep 600"],
+            )),
         )
         .unwrap();
     }
@@ -1209,7 +1271,8 @@ fn a_pane_printing_guard_rows_while_its_history_grows_attaches_every_time_and_fo
         Vec::new(),
         &["/bin/sh", "-c", "/bin/sleep 600"],
     );
-    host.spawn(&sibling, &still).unwrap();
+    host.spawn(&sibling, &crazyagent::terminal::PaneCommand::from(&still))
+        .unwrap();
     let mut viewer = host.attach(&sibling).unwrap();
     let target = format!("crazyagent:={sibling}");
     let pane = tmux_reply(
@@ -1234,7 +1297,11 @@ fn a_pane_printing_guard_rows_while_its_history_grows_attaches_every_time_and_fo
     );
     host.spawn(
         &forger,
-        &shell(root.path(), Vec::new(), &["/bin/sh", "-c", &script]),
+        &crazyagent::terminal::PaneCommand::from(&shell(
+            root.path(),
+            Vec::new(),
+            &["/bin/sh", "-c", &script],
+        )),
     )
     .unwrap();
     let target = format!("crazyagent:={forger}");
@@ -1417,7 +1484,11 @@ fn engine_process_with_planted_variables_spawns_a_pane() {
             "1",
         ],
     );
-    host.spawn(&AgentId::team(9).unwrap(), &command).unwrap();
+    host.spawn(
+        &AgentId::team(9).unwrap(),
+        &crazyagent::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
 }
 
 #[test]
@@ -1443,7 +1514,11 @@ fn an_agent_between_runs_shows_its_last_screen_labeled_finished_until_it_runs_ag
         )
     };
 
-    host.spawn(&agent, &run("first run output")).unwrap();
+    host.spawn(
+        &agent,
+        &crazyagent::terminal::PaneCommand::from(&run("first run output")),
+    )
+    .unwrap();
     let mut live = host.attach(&agent).unwrap();
     let mut seen = live.screen.clone();
     assert!(read_until(&mut live, &mut seen, b"first run output"));
@@ -1468,7 +1543,11 @@ fn an_agent_between_runs_shows_its_last_screen_labeled_finished_until_it_runs_ag
     );
     assert_eq!(host.kill(&agent).unwrap_err().0, "terminal_agent_unknown");
 
-    host.spawn(&agent, &run("second run output")).unwrap();
+    host.spawn(
+        &agent,
+        &crazyagent::terminal::PaneCommand::from(&run("second run output")),
+    )
+    .unwrap();
     let mut live = host.attach(&agent).unwrap();
     assert_eq!((live.cols, live.rows), (80, 24));
     let mut seen = live.screen.clone();
@@ -1495,7 +1574,7 @@ fn a_screen_read_of_an_ended_agent_is_unknown_though_its_viewers_get_the_last_sc
     let agent = AgentId::team(6).unwrap();
     host.spawn(
         &agent,
-        &shell(
+        &crazyagent::terminal::PaneCommand::from(&shell(
             root.path(),
             Vec::new(),
             &[
@@ -1503,7 +1582,7 @@ fn a_screen_read_of_an_ended_agent_is_unknown_though_its_viewers_get_the_last_sc
                 "-c",
                 "printf 'Allow this edit? (y/n)\\n'; exec sleep 600",
             ],
-        ),
+        )),
     )
     .unwrap();
     let mut live = host.attach(&agent).unwrap();
@@ -1539,7 +1618,7 @@ fn a_screen_read_and_an_ending_take_no_viewer_slot() {
     let agent = AgentId::team(5).unwrap();
     host.spawn(
         &agent,
-        &shell(
+        &crazyagent::terminal::PaneCommand::from(&shell(
             root.path(),
             Vec::new(),
             &[
@@ -1547,7 +1626,7 @@ fn a_screen_read_and_an_ending_take_no_viewer_slot() {
                 "-c",
                 "printf 'busy agent output\\n'; exec sleep 600",
             ],
-        ),
+        )),
     )
     .unwrap();
     let mut viewers: Vec<TerminalStream> = (0..VIEWERS_MAX)
@@ -1594,7 +1673,11 @@ fn a_history_past_the_reply_bound_opens_without_it_and_every_other_terminal_keep
     let quiet = AgentId::team(3).unwrap();
     host.spawn(
         &quiet,
-        &shell(root.path(), Vec::new(), &["/bin/sh", "-c", "exec /bin/cat"]),
+        &crazyagent::terminal::PaneCommand::from(&shell(
+            root.path(),
+            Vec::new(),
+            &["/bin/sh", "-c", "exec /bin/cat"],
+        )),
     )
     .unwrap();
     let mut watching = host.attach(&quiet).unwrap();
@@ -1608,7 +1691,7 @@ fn a_history_past_the_reply_bound_opens_without_it_and_every_other_terminal_keep
     let loud = AgentId::team(4).unwrap();
     host.spawn(
         &loud,
-        &shell(
+        &crazyagent::terminal::PaneCommand::from(&shell(
             root.path(),
             Vec::new(),
             &[
@@ -1616,7 +1699,7 @@ fn a_history_past_the_reply_bound_opens_without_it_and_every_other_terminal_keep
                 "-c",
                 "while [ ! -f go ]; do /bin/sleep 0.05; done; /usr/bin/perl colourful.pl; exec /bin/sleep 600",
             ],
-        ),
+        )),
     )
     .unwrap();
     host.resize(&loud, 1000, 50).unwrap();
@@ -1826,15 +1909,19 @@ fn a_native_lead_runs_in_its_own_server_and_every_call_reaches_it_by_name() {
     let leader = AgentId::team(1).unwrap();
     let engine_agent = AgentId::team(2).unwrap();
     let command = lead.confined("lead$ ", &["/bin/sh"]);
-    host.spawn_own_server(&leader, &command).unwrap();
+    host.spawn_own_server(&leader, &crazyagent::terminal::PaneCommand::from(&command))
+        .unwrap();
     assert!(
         std::fs::symlink_metadata(&lead.socket)
             .unwrap()
             .file_type()
             .is_socket()
     );
-    host.spawn(&engine_agent, &lead.shell("engine$ ", &["/bin/sh"]))
-        .unwrap();
+    host.spawn(
+        &engine_agent,
+        &crazyagent::terminal::PaneCommand::from(&lead.shell("engine$ ", &["/bin/sh"])),
+    )
+    .unwrap();
     let engine_only = Tmux::open(Some(lead.tmux.clone()), &root.join(FOLDER));
     assert_eq!(
         engine_only.alive().unwrap(),
@@ -1845,13 +1932,18 @@ fn a_native_lead_runs_in_its_own_server_and_every_call_reaches_it_by_name() {
         [leader.clone(), engine_agent.clone()]
     );
     assert_eq!(
-        host.spawn(&leader, &command).unwrap_err().0,
+        host.spawn(&leader, &crazyagent::terminal::PaneCommand::from(&command))
+            .unwrap_err()
+            .0,
         "terminal_agent_running"
     );
     assert_eq!(
-        host.spawn_own_server(&engine_agent, &command)
-            .unwrap_err()
-            .0,
+        host.spawn_own_server(
+            &engine_agent,
+            &crazyagent::terminal::PaneCommand::from(&command)
+        )
+        .unwrap_err()
+        .0,
         "terminal_agent_running"
     );
     let own_pane = host.panes(&leader).unwrap();
@@ -1930,8 +2022,11 @@ fn an_adopted_teammate_pane_is_reached_and_ended_by_its_own_name_even_after_a_re
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     let leader = AgentId::team(1).unwrap();
     let [ann, bob, missing] = [2, 3, 9].map(|id| AgentId::team(id).unwrap());
-    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
-        .unwrap();
+    host.spawn_own_server(
+        &leader,
+        &crazyagent::terminal::PaneCommand::from(&lead.confined("lead$ ", &["/bin/sh"])),
+    )
+    .unwrap();
     let own_pane = host.panes(&leader).unwrap()[0].id.clone();
     let ann_out = root.join("ann.txt");
     let ann_pane = lead.new_pane(
@@ -2000,8 +2095,11 @@ fn a_native_lead_and_each_adopted_teammate_name_their_own_first_process() {
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     let leader = AgentId::team(1).unwrap();
     let [ann, bob] = [2, 3].map(|id| AgentId::team(id).unwrap());
-    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
-        .unwrap();
+    host.spawn_own_server(
+        &leader,
+        &crazyagent::terminal::PaneCommand::from(&lead.confined("lead$ ", &["/bin/sh"])),
+    )
+    .unwrap();
     let ann_pane = lead.new_pane(host.as_ref(), &leader, "split-window -d", "sleep 600");
     let bob_pane = lead.new_pane(host.as_ref(), &leader, "split-window -d", "sleep 601");
     host.adopt_pane(&ann, &leader, &ann_pane).unwrap();
@@ -2047,8 +2145,11 @@ fn a_native_lead_s_team_pane_calls_never_reach_its_own_server_once_its_teammates
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     let leader = AgentId::team(1).unwrap();
     let [ann, bob] = [2, 3].map(|id| AgentId::team(id).unwrap());
-    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
-        .unwrap();
+    host.spawn_own_server(
+        &leader,
+        &crazyagent::terminal::PaneCommand::from(&lead.confined("lead$ ", &["/bin/sh"])),
+    )
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !contains(&host.snapshot(&leader).unwrap().screen, b"lead$") {
         assert!(Instant::now() < deadline, "the lead's shell never prompted");
@@ -2132,8 +2233,11 @@ fn an_adopted_teammate_s_calls_never_reach_its_lead_s_own_server_once_its_teamma
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     let leader = AgentId::team(1).unwrap();
     let ann = AgentId::team(2).unwrap();
-    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
-        .unwrap();
+    host.spawn_own_server(
+        &leader,
+        &crazyagent::terminal::PaneCommand::from(&lead.confined("lead$ ", &["/bin/sh"])),
+    )
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while !contains(&host.snapshot(&leader).unwrap().screen, b"lead$") {
         assert!(Instant::now() < deadline, "the lead's shell never prompted");
@@ -2197,8 +2301,11 @@ fn an_adopted_teammate_s_calls_never_reach_its_lead_s_own_server_once_its_teamma
     };
     reads_as_gone(host.as_ref());
     let bob = AgentId::team(3).unwrap();
-    host.spawn(&bob, &lead.shell("bob$ ", &["/bin/sh"]))
-        .unwrap();
+    host.spawn(
+        &bob,
+        &crazyagent::terminal::PaneCommand::from(&lead.shell("bob$ ", &["/bin/sh"])),
+    )
+    .unwrap();
     reads_as_gone(host.as_ref());
     assert_eq!(host.kill(&ann).err().map(|problem| problem.0), gone);
     let restarted = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
@@ -2236,8 +2343,11 @@ fn an_adopted_teammate_survives_one_failed_connect_to_its_teammates_server() {
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     let leader = AgentId::team(1).unwrap();
     let ann = AgentId::team(2).unwrap();
-    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
-        .unwrap();
+    host.spawn_own_server(
+        &leader,
+        &crazyagent::terminal::PaneCommand::from(&lead.confined("lead$ ", &["/bin/sh"])),
+    )
+    .unwrap();
     let ann_out = root.join("ann.txt");
     let ann_pane = lead.new_pane(
         host.as_ref(),
@@ -2321,7 +2431,8 @@ fn a_server_started_at_a_native_lead_s_teammates_socket_after_its_own_ended_is_r
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     let leader = AgentId::team(1).unwrap();
     let command = lead.confined("lead$ ", &["/bin/sh"]);
-    host.spawn_own_server(&leader, &command).unwrap();
+    host.spawn_own_server(&leader, &crazyagent::terminal::PaneCommand::from(&command))
+        .unwrap();
     assert_eq!(host.panes(&leader).unwrap().len(), 1);
     for socket in [&lead.socket, &lead.mates] {
         let killed = kernel_processes::spawn_gate::status(
@@ -2395,8 +2506,11 @@ fn a_server_started_at_a_native_lead_s_teammates_socket_after_the_lead_was_kille
     let root = lead.path();
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     let leader = AgentId::team(1).unwrap();
-    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
-        .unwrap();
+    host.spawn_own_server(
+        &leader,
+        &crazyagent::terminal::PaneCommand::from(&lead.confined("lead$ ", &["/bin/sh"])),
+    )
+    .unwrap();
     assert_eq!(host.panes(&leader).unwrap().len(), 1);
     host.kill(&leader).unwrap();
     for socket in [&lead.socket, &lead.mates] {
@@ -2418,8 +2532,11 @@ fn a_restarted_engine_refuses_a_teammates_server_whose_pin_record_is_gone() {
     let root = lead.path();
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
     let leader = AgentId::team(1).unwrap();
-    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
-        .unwrap();
+    host.spawn_own_server(
+        &leader,
+        &crazyagent::terminal::PaneCommand::from(&lead.confined("lead$ ", &["/bin/sh"])),
+    )
+    .unwrap();
     assert_eq!(host.panes(&leader).unwrap().len(), 1);
     std::fs::remove_file(crazyagent::team::runtime::agent_teammates_server_pid(
         &root.join("team"),
@@ -2464,8 +2581,11 @@ fn a_refused_lead_does_not_stop_the_close_of_the_next_lead_and_the_engine() {
         socket: crazyagent::terminal::renew_teammates_socket(&root, &next).unwrap(),
     };
     let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
-    host.spawn_own_server(&refused, &lead.confined("one$ ", &["/bin/sh"]))
-        .unwrap();
+    host.spawn_own_server(
+        &refused,
+        &crazyagent::terminal::PaneCommand::from(&lead.confined("one$ ", &["/bin/sh"])),
+    )
+    .unwrap();
     let next_profile = crazyagent::team::runtime::agent_profile(&team, 2);
     let next_command = lead.shell(
         "two$ ",
@@ -2476,10 +2596,14 @@ fn a_refused_lead_does_not_stop_the_close_of_the_next_lead_and_the_engine() {
             "/bin/sh",
         ],
     );
-    host.spawn_own_server(&next, &next_command).unwrap();
+    host.spawn_own_server(
+        &next,
+        &crazyagent::terminal::PaneCommand::from(&next_command),
+    )
+    .unwrap();
     host.spawn(
         &AgentId::team(3).unwrap(),
-        &lead.shell("three$ ", &["/bin/sh"]),
+        &crazyagent::terminal::PaneCommand::from(&lead.shell("three$ ", &["/bin/sh"])),
     )
     .unwrap();
     std::fs::remove_file(crazyagent::team::runtime::agent_teammates_server_pid(
@@ -2508,8 +2632,11 @@ fn quiet_through_the_engine_host_answers_for_an_agent_on_the_engine_server() {
     };
     let host = crazyagent::terminal::tmux_host(&path, Some(tmux));
     let agent = AgentId::team(4).unwrap();
-    host.spawn(&agent, &shell(&path, Vec::new(), &["/bin/sh"]))
-        .unwrap();
+    host.spawn(
+        &agent,
+        &crazyagent::terminal::PaneCommand::from(&shell(&path, Vec::new(), &["/bin/sh"])),
+    )
+    .unwrap();
     let quiet = host.quiet(&agent).unwrap();
     assert!(
         quiet.is_some_and(|quiet| quiet < Duration::from_secs(60)),

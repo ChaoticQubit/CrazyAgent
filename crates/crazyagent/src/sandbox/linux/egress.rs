@@ -803,7 +803,7 @@ fn stop(parent: u32, child: u32) {
 /// The IPv4 rules inside the agent's network, as `iptables-restore` reads them and
 /// `iptables-save` prints them: loopback for the bridged ports, TCP 53 to slirp's resolver,
 /// each fenced network refused ([`SLIRP_NETWORK`], [`LOOPBACK_NETWORK`] off `lo`,
-/// [`LINK_LOCAL_NETWORK`], each IPv4 [`crate::sandbox::CLOUD_METADATA`]), then `tap0` to each
+/// [`LINK_LOCAL_NETWORK`], each IPv4 [`kernel_common::net::CLOUD_METADATA`]), then `tap0` to each
 /// port and every other packet answered ([`REFUSE`]). Input: the ports. Output: the rules.
 fn egress_rules(any: &[u16]) -> String {
     assert!(!any.is_empty() && any.len() <= REMOTES_MAX);
@@ -817,7 +817,7 @@ fn egress_rules(any: &[u16]) -> String {
     let _ = writeln!(rules, "-A OUTPUT -d {LOOPBACK_NETWORK} {REFUSE}");
     let _ = writeln!(rules, "-A OUTPUT -d {LINK_LOCAL_NETWORK} {REFUSE}");
     let mut metadata = 0;
-    for address in crate::sandbox::CLOUD_METADATA {
+    for address in kernel_common::net::CLOUD_METADATA {
         if let std::net::IpAddr::V4(address) = address {
             let _ = writeln!(rules, "-A OUTPUT -d {address}/32 {REFUSE}");
             metadata += 1;

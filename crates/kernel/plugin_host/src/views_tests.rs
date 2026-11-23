@@ -91,11 +91,15 @@ fn a_preview_keeps_the_shape_the_bridge_reads() {
             secrets: vec!["api_key".into()],
             sha256: "ab".into(),
             replaces: true,
+            changed: true,
+            grew_hosts: vec!["api.new.example".into()],
         },
     };
     let shown = serde_json::to_value(&ready).unwrap();
     assert_eq!(shown["kind"], "ready");
     assert_eq!(shown["trust"]["replaces"], true);
+    assert_eq!(shown["trust"]["changed"], true);
+    assert_eq!(shown["trust"]["grew_hosts"][0], "api.new.example");
     assert_eq!(serde_json::from_value::<Preview>(shown).unwrap(), ready);
     let refused = Preview::Refused {
         problem: Problem::new("app_plugin_field_missing", None, Some("http.url")),

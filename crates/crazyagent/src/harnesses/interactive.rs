@@ -118,6 +118,19 @@ pub struct InteractiveCommand {
     pub transcript: Transcript,
 }
 
+impl From<&InteractiveCommand> for crate::terminal::PaneCommand {
+    /// The fields the terminal host reads, byte-equal: the argument vector, the working
+    /// folder and the environment; the session record stays with the harness. Input: the
+    /// command. Output: the pane command.
+    fn from(command: &InteractiveCommand) -> Self {
+        Self {
+            argv: command.argv.clone(),
+            cwd: command.cwd.clone(),
+            env: command.env.clone(),
+        }
+    }
+}
+
 /// Where a harness writes its own session record, which the engine reads for status,
 /// replies and task blocks instead of reading the screen: a Codex rollout, a Claude Code
 /// transcript, or the record a manifest harness's terminal settings name.

@@ -72,7 +72,7 @@ test("each target ships the engine, the rcli host and its own helpers, and macOS
 });
 
 test("every release target's CLI finds its own update entry: update.rs target() returns each TARGETS triple (DEC-195 Q8)", async () => {
-  const source = await readFile(join(REPO, "crates/crazyagent/src/update.rs"), "utf8");
+  const source = await readFile(join(REPO, "crates/kernel/processes/src/update.rs"), "utf8");
   const start = source.indexOf("pub fn target() -> Option<&'static str> {\n");
   assert(start >= 0, "update.rs has target()");
   const body = source.slice(start, source.indexOf("\n}\n", start));

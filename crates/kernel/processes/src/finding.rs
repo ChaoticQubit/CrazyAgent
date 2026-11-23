@@ -698,35 +698,42 @@ fn resolve_at(name: &str, places: &Places, depth: usize) -> Result<Resolved, Mis
                 why,
             })
         });
-    let found = places
+    let mut unresolved: Option<Missing> = None;
+    let candidates = places
         .bundled(name)
         .into_iter()
-        .chain(places.folders.iter().map(|folder| folder.join(name)))
-        .find(|candidate| match check_candidate(places, candidate) {
-            Some(Ok(())) => true,
+        .chain(places.folders.iter().map(|folder| folder.join(name)));
+    for candidate in candidates {
+        match check_candidate(places, &candidate) {
+            Some(Ok(())) => match entry_at(&candidate, places, depth) {
+                Ok(resolved) => return Ok(resolved),
+                Err(missing) => {
+                    unresolved.get_or_insert(missing);
+                }
+            },
             Some(Err(why)) => {
                 refused.get_or_insert_with(|| Refused {
                     file: candidate.clone(),
                     why,
                 });
-                false
             }
-            None => false,
+            None => {}
+        }
+    }
+    if let Some(missing) = unresolved {
+        return Err(Missing {
+            tool: name.to_owned(),
+            ..missing
         });
-    let Some(found) = found else {
-        probe::missed(|| places.seed.clone());
-        return Err(match refused {
-            Some(refused) => Missing {
-                reason: Reason::Refused,
-                refused: Some(Box::new(refused)),
-                ..not_found()
-            },
-            None => not_found(),
-        });
-    };
-    entry_at(&found, places, depth).map_err(|missing| Missing {
-        tool: name.to_owned(),
-        ..missing
+    }
+    probe::missed(|| places.seed.clone());
+    Err(match refused {
+        Some(refused) => Missing {
+            reason: Reason::Refused,
+            refused: Some(Box::new(refused)),
+            ..not_found()
+        },
+        None => not_found(),
     })
 }
 

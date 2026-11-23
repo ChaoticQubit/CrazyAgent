@@ -1,5 +1,4 @@
 use crate::engine::EngineError;
-use crate::harnesses::interactive::InteractiveCommand;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -73,6 +72,17 @@ const _: () = assert!(PANES_PER_PROJECT_MAX == 15);
 
 /// A terminal host failure as a stable lowercase code clients show in plain words.
 /// `terminal_unavailable` means the host cannot run at all, such as tmux missing.
+/// One program a pane runs, free of harness types: its argument vector, its working folder
+/// and its environment, the fields of `InteractiveCommand` the host reads. Built by
+/// crazyagent from an `InteractiveCommand`. Inputs: the fields. Output: a value tmux and the
+/// Windows host launch unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneCommand {
+    pub argv: Vec<String>,
+    pub cwd: PathBuf,
+    pub env: Vec<(String, String)>,
+}
+
 /// The unit key of a terminal that is the agent's own alone, as a host with no shared window
 /// sizes it. Takes the agent. Returns the key, which no tmux window key equals, since those
 /// start with a socket path.
@@ -438,7 +448,7 @@ pub trait Host: Send + Sync {
     /// Starts one agent's command in a new terminal named after the agent.
     /// Takes the name and the sandboxed command; fails with `terminal_agent_running` for a live name.
     /// Returns where it runs.
-    fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError>;
+    fn spawn(&self, agent: &AgentId, command: &PaneCommand) -> Result<PaneRef, HostError>;
 
     /// Opens one viewer on a live agent terminal.
     /// Takes the name; fails with `terminal_agent_unknown` when no such terminal runs.
@@ -640,7 +650,7 @@ pub trait Host: Send + Sync {
     fn spawn_own_server(
         &self,
         _agent: &AgentId,
-        _command: &InteractiveCommand,
+        _command: &PaneCommand,
     ) -> Result<PaneRef, HostError> {
         Err(failure(OWN_SERVER_UNAVAILABLE))
     }
@@ -742,7 +752,7 @@ pub fn own_server(host: Arc<dyn Host>) -> Arc<dyn Host> {
 }
 
 impl Host for OwnServer {
-    fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError> {
+    fn spawn(&self, agent: &AgentId, command: &PaneCommand) -> Result<PaneRef, HostError> {
         self.0.spawn_own_server(agent, command)
     }
 
@@ -868,7 +878,7 @@ impl Host for OwnServer {
     fn spawn_own_server(
         &self,
         agent: &AgentId,
-        command: &InteractiveCommand,
+        command: &PaneCommand,
     ) -> Result<PaneRef, HostError> {
         self.0.spawn_own_server(agent, command)
     }
@@ -908,7 +918,7 @@ pub fn pane_view(host: Arc<dyn Host>, pane: &str) -> Result<Arc<dyn Host>, HostE
 }
 
 impl Host for PaneView {
-    fn spawn(&self, _agent: &AgentId, _command: &InteractiveCommand) -> Result<PaneRef, HostError> {
+    fn spawn(&self, _agent: &AgentId, _command: &PaneCommand) -> Result<PaneRef, HostError> {
         Err(failure("terminal_unavailable"))
     }
 

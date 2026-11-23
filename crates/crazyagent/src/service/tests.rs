@@ -960,7 +960,7 @@ fn a_first_start_retires_the_old_appimage_copy_and_repoints_the_command_line_lin
         std::fs::read_link(cli.join("crazyagent")).unwrap(),
         installed
     );
-    for name in crate::update::BINARIES {
+    for name in kernel_processes::update::BINARIES {
         assert!(
             std::fs::symlink_metadata(old.join(name)).is_err(),
             "{name} is retired"
