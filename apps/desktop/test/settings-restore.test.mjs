@@ -60,3 +60,19 @@ test("Restore 2.4 is listed under App, and the TUI says the same confirm and lin
     assert.ok(tui.includes(`"${line}"`), `the TUI says ${line}`);
   }
 });
+
+test("restore page shows the compaction row only in a dev build", () => {
+  const row = (value) => renderToStaticMarkup(createElement(restore.CompactionRowView,
+    { compaction: ok(value), saving: false, problem: "", onSwitch() {} }));
+  assert.equal(row({ choice: "on", dev_build: false }), "");
+  assert.equal(renderToStaticMarkup(createElement(restore.CompactionRowView,
+    { compaction: { kind: "loading" }, saving: false, problem: "", onSwitch() {} })), "");
+  const off = row({ choice: "off", dev_build: true });
+  assert.ok(off.includes(restore.COMPACTION_LABEL), off);
+  assert.ok(off.includes(restore.COMPACTION_HELP), off);
+  assert.match(off, /role="switch"[^>]*aria-checked="false"/);
+  assert.match(row({ choice: "on", dev_build: true }), /role="switch"[^>]*aria-checked="true"/);
+  const engine = read("../../../crates/crazyagent/src/log_compaction.rs");
+  assert.ok(engine.includes(`"${restore.COMPACTION_LABEL}"`), "the TUI and engine say the same label");
+  assert.ok(engine.includes(`"${restore.COMPACTION_HELP}"`), "the TUI and engine say the same help");
+});

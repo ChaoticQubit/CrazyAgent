@@ -196,6 +196,10 @@ pub enum Command {
         choice: crate::provider_retry::ProviderRetry,
     },
     #[serde(skip_deserializing)]
+    OwnerLogCompaction {
+        choice: crate::log_compaction::LogCompaction,
+    },
+    #[serde(skip_deserializing)]
     OwnerMasterSteps {
         settings: crate::master_step_limit::MasterStepSettings,
     },
@@ -437,6 +441,7 @@ impl Command {
             | Self::OwnerAgentCleanup { .. }
             | Self::OwnerAgentQuit { .. }
             | Self::OwnerProviderRetry { .. }
+            | Self::OwnerLogCompaction { .. }
             | Self::OwnerMasterSteps { .. }
             | Self::OwnerMasterTime { .. }
             | Self::OwnerMasterFrames { .. }
