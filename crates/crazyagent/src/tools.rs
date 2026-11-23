@@ -83,6 +83,11 @@ fn harness_locations() -> Vec<&'static str> {
         .collect()
 }
 
+const _: () = assert!(
+    kernel_processes::finding::PROJECT_ROOTS_MAX
+        == 3 * crate::harnesses::finding::NAMED_FOLDERS_MAX
+);
+
 /// Every folder `engine.db` names that agents write whole (set-up projects, declared
 /// repositories, team and leased worktrees with their repositories), as recorded, real and in
 /// one spelling, read through [`crate::harnesses::finding::named_folders`]. No database names
