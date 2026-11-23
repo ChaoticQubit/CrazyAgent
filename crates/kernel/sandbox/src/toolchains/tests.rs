@@ -282,3 +282,39 @@ fn the_agent_git_script_is_refused_for_the_xcrun_shim_and_any_path_that_is_not_p
     assert_eq!(worker.replace("\nfree=0\n", "\nfree=1\n"), free);
     assert_eq!(worker.replace("\nmain=1\n", "\nmain=0\n"), strict);
 }
+
+/// The agent's own `getconf` is looked for in the launch folder the hooks name: a harness's
+/// search path gets that folder's `bin` at its front when it holds `getconf`, and nothing
+/// when only another folder does.
+#[test]
+fn the_agent_getconf_is_looked_for_in_the_launch_folder_the_hooks_name() {
+    fn refuse(
+        _folder: std::os::fd::BorrowedFd<'_>,
+        _name: &str,
+        otherwise: &'static str,
+    ) -> Result<(), &'static str> {
+        Err(otherwise)
+    }
+    let hooks = ToolchainHooks {
+        remove_home_entry: refuse,
+        sandboxed_git: || Path::new("/usr/bin/git"),
+        mates_home: |home| home.join("mates"),
+        launch_state: "stand-in",
+        remove_agent_tree: |_folder| Ok(()),
+    };
+    let scratch = tempfile::tempdir().unwrap();
+    let home = canonical(scratch.path()).unwrap();
+    let named = home.join("stand-in").join("bin");
+    fs::create_dir_all(&named).unwrap();
+    assert_eq!(with_agent_git(&hooks, &home, "/usr/bin".to_owned()), "/usr/bin");
+    fs::write(named.join("getconf"), "").unwrap();
+    assert_eq!(
+        with_agent_git(&hooks, &home, "/usr/bin".to_owned()),
+        format!("{}:/usr/bin", named.display())
+    );
+    let other = home.join("crazyagent").join("bin");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("getconf"), "").unwrap();
+    fs::remove_file(named.join("getconf")).unwrap();
+    assert_eq!(with_agent_git(&hooks, &home, "/usr/bin".to_owned()), "/usr/bin");
+}
