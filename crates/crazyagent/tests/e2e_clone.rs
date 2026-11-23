@@ -20,6 +20,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 #[cfg(not(target_os = "macos"))]
@@ -223,9 +224,16 @@ fn cgi_reply(reply: &[u8]) -> (String, String, Vec<u8>) {
     (status, extra, reply[end + 4..].to_vec())
 }
 
-/// Reads one request, at most [`REQUEST_BYTES_MAX`] bytes with its body, and writes the
-/// route's answer. Inputs: the connection, the served folder, the token and the backend.
-fn answer(mut stream: TcpStream, served: &Path, token: &str, backend: &Backend) {
+/// Reads one request, at most [`REQUEST_BYTES_MAX`] bytes with its body, writes the route's
+/// answer and counts each smart-HTTP fetch answered `200`. Inputs: the connection, the
+/// served folder, the token, the backend and the fetch count.
+fn answer(
+    mut stream: TcpStream,
+    served: &Path,
+    token: &str,
+    backend: &Backend,
+    fetches: &AtomicUsize,
+) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
     let Ok(copy) = stream.try_clone() else {
         return;
@@ -275,6 +283,12 @@ fn answer(mut stream: TcpStream, served: &Path, token: &str, backend: &Backend) 
         return;
     }
     let (status, extra, body) = route(&request, served, token, backend);
+    if request.method == "POST"
+        && request.path.ends_with("/git-upload-pack")
+        && status.starts_with("200")
+    {
+        fetches.fetch_add(1, Ordering::SeqCst);
+    }
     let head = format!(
         "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n{extra}\r\n",
         body.len()
@@ -285,17 +299,19 @@ fn answer(mut stream: TcpStream, served: &Path, token: &str, backend: &Backend) 
 
 /// Starts the loopback server on a free port: the account stand-in and, behind the token,
 /// the real `git http-backend` serving the bare repositories under `served`. Inputs: the
-/// served folder and the token. Output: the port.
-fn stand_in(served: PathBuf, token: String) -> u16 {
+/// served folder and the token. Output: the port and the count of smart-HTTP fetches.
+fn stand_in(served: PathBuf, token: String) -> (u16, Arc<AtomicUsize>) {
     let backend = Backend::find();
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&fetches);
     let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         for stream in kernel_processes::spawn_gate::incoming_tcp_std(&listener).flatten() {
-            answer(stream, &served, &token, &backend);
+            answer(stream, &served, &token, &backend, &counted);
         }
     });
-    port
+    (port, fetches)
 }
 
 fn holds(folder: &Path, needle: &[u8]) -> bool {
@@ -354,7 +370,7 @@ async fn a_sign_in_kept_for_the_engine_clones_through_the_credential_helper_and_
         ],
     );
     let token = format!("gho_e2e{}", hex(18));
-    let port = stand_in(served, token.clone());
+    let (port, fetches) = stand_in(served, token.clone());
 
     let mut owner = Owner::attach(&engine).await;
     assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
@@ -409,6 +425,10 @@ async fn a_sign_in_kept_for_the_engine_clones_through_the_credential_helper_and_
     drop(client);
 
     let receipt = account.clone_repo(&home, "octo-cat/tool").unwrap();
+    assert!(
+        fetches.load(Ordering::SeqCst) >= 1,
+        "the clone fetched over smart HTTP through git http-backend"
+    );
     let project = home.join("tool");
     assert_eq!(receipt.full_name, "octo-cat/tool");
     assert_eq!(receipt.path, project.to_str().unwrap());
