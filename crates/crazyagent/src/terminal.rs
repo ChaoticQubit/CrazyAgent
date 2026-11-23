@@ -1,4 +1,6 @@
 use crate::engine::EngineError;
+#[cfg(unix)]
+use kernel_processes::terminal::RENEW_EVERY;
 use kernel_processes::terminal::kept::LastScreenHost;
 #[cfg(unix)]
 use kernel_processes::terminal::tmux::{Servers, Tmux};
@@ -6,10 +8,10 @@ use kernel_processes::terminal::{
     APP_PANE_UNKNOWN, AgentId, CHUNK_BYTES_MAX, Host, HostError, PROMPT_BYTES_MAX, PaneAt,
     PaneCommand, PaneInfo, PaneRef, TerminalStream,
 };
-#[cfg(unix)]
-use kernel_processes::terminal::RENEW_EVERY;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::sync::Arc;
 #[cfg(unix)]
 use std::sync::{Condvar, Mutex};

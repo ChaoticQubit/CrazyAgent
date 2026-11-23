@@ -720,7 +720,7 @@ fn the_picker_offers_top_level_real_folders_without_engine_folders_or_links() {
 #[test]
 fn the_secret_names_hold_every_kind_the_owner_asked_for() {
     for name in SECRET_NAMES {
-        let folded = crate::sandbox::fold_case(name);
+        let folded = kernel_sandbox::paths::fold_case(name);
         assert_eq!(
             folded.matches('[').count(),
             folded.matches(']').count(),

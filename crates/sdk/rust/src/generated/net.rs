@@ -91,7 +91,7 @@ pub fn check_request_input(request: &Request) -> Result<(), Refusal> {
         Ok(())
     } else {
         Err(Refusal::Rejected {
-            code: alloc::string::String::from("cap_input_too_large"),
+            code: core::convert::From::from("cap_input_too_large"),
         })
     }
 }
@@ -103,7 +103,7 @@ pub fn check_request_output(output: &Reply) -> Result<(), Refusal> {
         Ok(())
     } else {
         Err(Refusal::Failed {
-            code: alloc::string::String::from("cap_output_too_large"),
+            code: core::convert::From::from("cap_output_too_large"),
         })
     }
 }
