@@ -1,8 +1,6 @@
 use super::policy::AccessGrant;
-use super::{
-    ADMIN_LINKS, ADMIN_WRITES, ProjectSandbox, SandboxNetwork, any_case, sbpl_overlong,
-    seatbelt_pattern,
-};
+use super::{ADMIN_LINKS, ADMIN_WRITES, ProjectSandbox, any_case, sbpl_overlong, seatbelt_pattern};
+use kernel_sandbox::net::SandboxNetwork;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};

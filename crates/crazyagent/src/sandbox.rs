@@ -1,5 +1,10 @@
+use kernel_sandbox::elf;
+use kernel_sandbox::error::{SandboxError, invalid};
+use kernel_sandbox::lines::*;
+use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::ports::BRIDGE_PORT_MIN;
+use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use std::ffi::{OsStr, OsString};
-use std::fmt;
 use std::fs;
 #[cfg(unix)]
 use std::fs::OpenOptions;
@@ -13,7 +18,6 @@ use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
-pub mod elf;
 pub mod extra_paths;
 #[cfg(all(test, target_os = "macos"))]
 mod git_deny_tests;
@@ -977,100 +981,8 @@ pub fn agent_command<'a>(
     windows::agent_command(profile, program, base, harness)
 }
 
-/// Network reach of a sandboxed agent: open when the agent's tools are on, except that
-/// it never binds or listens on an [`OWNER_PORTS`] port, one [`ProjectSandbox::keep_ports`]
-/// keeps or one of [`model_proxy::PROXY_PORTS`] or [`model_proxy::RELAY_PORTS`], otherwise
-/// only the listed remotes, each one port on loopback or on any host.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SandboxNetwork {
-    Open,
-    Only(Vec<SandboxRemote>),
-}
-
-/// One outbound TCP destination a tools-off agent may still reach. Seatbelt
-/// filters by port only, either on loopback or on any host, so `accounts::account_url`
-/// refuses an endpoint on another machine on a port a cloud metadata service answers on
-/// when it is saved (MACOS-ANYHOST-METADATA).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SandboxRemote {
-    Loopback(u16),
-    AnyHost(u16),
-}
-
-impl SandboxRemote {
-    /// The destination a tools-off agent needs for one model endpoint: the URL's port on
-    /// loopback for a local server, otherwise that port on any host. Input: an http or
-    /// https URL. Output: the remote, or a refusal for another scheme, host or port.
-    pub fn for_endpoint(url: &str) -> Result<Self, SandboxError> {
-        let parsed = url::Url::parse(url).map_err(|_| invalid("endpoint URL is invalid"))?;
-        if !matches!(parsed.scheme(), "http" | "https") {
-            return Err(invalid("endpoint URL must be http or https"));
-        }
-        let port = parsed
-            .port_or_known_default()
-            .filter(|port| *port != 0)
-            .ok_or_else(|| invalid("endpoint port is missing"))?;
-        let loopback = match parsed.host() {
-            Some(url::Host::Ipv4(address)) => address.is_loopback(),
-            Some(url::Host::Ipv6(address)) => address.is_loopback(),
-            Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
-            None => return Err(invalid("endpoint host is missing")),
-        };
-        assert_ne!(port, 0);
-        Ok(if loopback {
-            Self::Loopback(port)
-        } else {
-            Self::AnyHost(port)
-        })
-    }
-}
-
-/// How a limited-network agent's sockets are held on Linux, the owner's setting "Linux
-/// limited-network sockets". Landlock limits outbound TCP by port only, so a UDP, ping or
-/// other socket would reach any host. `TcpOnly` (the default) refuses every socket but TCP
-/// and has names looked up over TCP, `Refuse` starts no limited-network agent, and
-/// `TcpPorts` keeps only Landlock's TCP port rules. Other systems ignore it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LinuxSockets {
-    #[default]
-    TcpOnly,
-    Refuse,
-    TcpPorts,
-}
-
-/// Whether a Linux agent runs under the call supervisor where this Linux holds it, the
-/// owner's setting "Linux call supervisor" (DEC-179 addendum 2). `On` (the default) adds
-/// the guards a launch needs: ports on this computer only, no new `.git` outside the
-/// agent's own git folders, signals only to programs it started. `Off` keeps the launch
-/// and every line as they were before the supervisor. Other systems ignore it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LinuxSupervisor {
-    #[default]
-    On,
-    Off,
-}
-
-/// Whether a Linux launch that does not hold the full Linux sandbox is refused, the owner's
-/// setting "Refuse agents without the full Linux sandbox" (DEC-185). `Off` (the default)
-/// starts it with what this Linux holds and the lines that say what it cannot; `On` refuses
-/// it unless [`linux_holds_fully`] does. Team agents need the full sandbox whatever it says.
-/// Other systems ignore it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LinuxStrict {
-    #[default]
-    Off,
-    On,
-}
-
 /// The engine refusal code of a Linux launch the strict setting refuses ([`LinuxStrict`]).
 pub const LINUX_NOT_FULL: &str = "linux_sandbox_not_full";
-
-/// Why [`InstalledSandbox::install`] refuses a Linux launch under [`LinuxStrict::On`]: it
-/// does not hold the full Linux sandbox ([`linux_holds_fully`]).
-pub const LINUX_NOT_FULL_LINE: &str = "this Linux does not hold the full sandbox for this launch, and the setting 'Refuse agents without the full Linux sandbox' is on";
 
 /// Tells whether a launch holds the full Linux sandbox (DEC-185): a process space of its own
 /// (the nested backend), the call supervisor running, and its network limits held, so none
@@ -1100,21 +1012,6 @@ pub fn linux_holds_fully(
         SandboxRemote::Loopback(port) => *port >= BRIDGE_PORT_MIN,
         SandboxRemote::AnyHost(_) => routed,
     })
-}
-
-/// The engine refusal code of a Windows launch whose limited network names a loopback port
-/// (DESIGN-0256 O2a).
-pub const MODEL_LOOPBACK_UNAVAILABLE_WINDOWS: &str = "model_loopback_unavailable_windows";
-
-/// Why a Windows launch is refused when its network names a loopback port: the AppContainer
-/// cannot reach this computer's own network without an admin exemption (probe P6).
-pub const MODEL_LOOPBACK_WINDOWS_LINE: &str = "a Windows agent cannot reach a port on this computer, such as a local model server or the relay, because its AppContainer has no way to this computer's own network";
-
-/// Tells whether a launch refusal is the Windows loopback one ([`MODEL_LOOPBACK_WINDOWS_LINE`]),
-/// so a caller can give it its own code ([`MODEL_LOOPBACK_UNAVAILABLE_WINDOWS`]). Input: the
-/// refusal. Output: the answer.
-pub fn model_loopback_windows(error: &SandboxError) -> bool {
-    matches!(error, SandboxError::Unavailable(reason) if reason == MODEL_LOOPBACK_WINDOWS_LINE)
 }
 
 /// The engine refusal code of a Linux launch whose project hides folders on a computer
@@ -1223,10 +1120,6 @@ pub const GIT_FALLBACK: &str = ".git.git";
 /// (DEC-185 S2b).
 pub const MULTI_PACK_INDEX: &str = "multi-pack-index";
 
-/// The lowest port a loopback bridge carries on Linux: inside a network namespace of its
-/// own an agent's helper has no capability to listen below it.
-pub const BRIDGE_PORT_MIN: u16 = 1024;
-
 /// What the owner is told when a port below [`BRIDGE_PORT_MIN`] keeps agents on this
 /// computer's network on a Linux that could give them one of their own: on the project's
 /// Agent access page and in the agent's messages at its launch. Input: the port. Output:
@@ -1302,68 +1195,6 @@ pub fn linux_unbridged_notice(
     let host = linux_host_kept().map(|host| host.under(calls));
     linux_unbridged_notice_on(host, choice, sandbox)
 }
-
-/// What a launch tells the owner in the agent's messages when this Linux nests agents but
-/// could not give this one the network of its own its ports allow (DEC-179 SBX-2): why it
-/// has none, the AppArmor profile and root included (rv-sa241 NOTE-2, NOTE-3), and what
-/// that leaves open.
-pub const LINUX_UNROUTED_LINE: &str = "On this Linux, this agent has no network of its own: slirp4netns or the nf_tables iptables is missing here, did not start or is kept out by this computer's AppArmor profile, or CrazyAgent runs as root, so every port it may reach is open to it on every host, this computer included.";
-
-/// [`LINUX_UNROUTED_LINE`] for an agent with no loopback port, or one the call supervisor
-/// keeps to this computer (rv-sa241 7b LOW-1 and N1): its ports on any host then reach
-/// this computer too.
-pub const LINUX_UNROUTED_ANY_HOST_LINE: &str = "On this Linux, this agent has no network of its own: slirp4netns or the nf_tables iptables is missing here, did not start or is kept out by this computer's AppArmor profile, or CrazyAgent runs as root, so the ports it may reach on any host include this computer's own.";
-
-/// What a limited network cannot hold on Linux, shown there only, under the network choice
-/// in the desktop and the TUI (RV-DS241-83): Landlock limits outbound TCP by port, not by
-/// host, so a port an agent may reach on this computer is open to it on every host.
-pub const LINUX_PORTS_ANY_HOST_LINE: &str = "On Linux, network limits hold ports, not hosts: a port agents may reach on this computer, such as the model's proxy port or a port you allow, is open to them on every host.";
-
-/// What a writable project folder cannot hold on a Linux where no call supervisor runs,
-/// among the engine's lines under the access level in the desktop and the TUI (RV-DS241-85,
-/// DEC-179 T4c): no Landlock rule stops an agent from making a git repository inside a
-/// folder it may change.
-pub const LINUX_NESTED_GIT_LINE: &str = "On Linux, agents can make a git repository inside any project folder they may change, and your own git or IDE runs its settings when you open that folder. Check agent-made folders for a .git before you open them.";
-
-/// What a Linux agent can still do to the owner's other programs where this machine gives
-/// it neither a process namespace of its own nor the Landlock signal scope (Linux before
-/// 6.12 without usable user namespaces), shown there only, under the access level in the
-/// desktop and the TUI (SA vid 4, DEC-089).
-pub const LINUX_SIGNALS_LINE: &str = "On this Linux, agents can see which programs you run and stop or signal them, such as a dev server or CrazyAgent itself. Linux 6.12 or newer stops the signals.";
-
-/// What a Linux agent can still see where the kernel scopes its signals but this machine
-/// gives it no process namespace of its own, shown there only, under the access level in
-/// the desktop and the TUI (RV-DS241-86).
-pub const LINUX_PROCESS_LIST_LINE: &str =
-    "On this Linux, agents can see which programs you run and how they were started.";
-
-/// What a writable project folder still cannot hold where the call supervisor runs: it
-/// refuses every new `.git` entry but the agent's own, yet an agent may change a git
-/// repository already in the project. Shown under the access level when the project may
-/// hold one ([`linux_other_git`]) and in the New Project catalog (DEC-179 T4c).
-pub const LINUX_KEPT_GIT_LINE: &str = "On Linux, agents can change a git repository already inside a project folder they may change, and your own git or IDE runs its settings when you open that folder. Check folders with a .git inside the project before you open them.";
-
-/// What the call supervisor changes for agents where it runs (DEC-179 T4c): it makes the
-/// calls it guards for them, so a program's own Landlock limits do not hold for those
-/// (QUESTION-16:21), and it refuses a create, even of a file already there, under a `.git`
-/// the agent did not make (rv-sec3 N3).
-pub const LINUX_SUPERVISED_LINE: &str = "On this Linux, CrazyAgent makes some calls for agents, such as making a file or folder or connecting, so a program an agent starts can't narrow those with limits of its own. In a .git folder CrazyAgent didn't make, agents can't create files and some writes to files already there are refused, so git commands that write fail in a repository nested in the project.";
-
-/// Why no call supervisor runs where CrazyAgent runs as root (rv-sec3 N1): dumpability does
-/// not keep a root agent away from it, so none starts and the lines after this one hold.
-pub const LINUX_ROOT_LINE: &str = "CrazyAgent runs as root on this Linux, so it starts no call supervisor and agents can do what the lines below say. Run CrazyAgent as your own user to turn it on.";
-
-/// What a limited network that reaches websites still cannot hold where the call supervisor
-/// keeps ports on this computer to it (DEC-179 T4c): agents look up names over TCP, so port
-/// 53 is open to them on every host.
-pub const LINUX_DNS_ANY_HOST_LINE: &str =
-    "On this Linux, agents can also reach port 53, used to look up names, on every host.";
-
-/// Why agents share the owner's process space where AppArmor keeps unprivileged programs
-/// out of user namespaces (Ubuntu 23.10 and newer) and this machine nests none, shown before
-/// the process or signals line it explains, with the deb package that adds the profile
-/// allowing it (DEC-179 SBX-3, addendum 7).
-pub const LINUX_APPARMOR_LINE: &str = "On this Linux, AppArmor keeps agents from getting a process space of their own. CrazyAgent's .deb package adds the AppArmor profile that allows it: install it, or if it is installed, run sudo dpkg-reconfigure crazy-agent.";
 
 /// What this Linux holds for an agent beyond its Landlock file and network rules: `nested`
 /// when it starts agents in a process namespace of their own, `scoped` when the kernel
@@ -1452,49 +1283,6 @@ pub fn linux_other_git(project: &Path) -> bool {
     {
         let _ = project;
         true
-    }
-}
-
-/// Refusal to build or install a project sandbox: `Invalid` for an unsafe path or policy,
-/// `Unavailable` with a plain reason, such as a missing Windows helper or loopback limit,
-/// `Unreadable` for a Windows read root no app container may read and this user cannot change
-/// (V244-WIN-NPM), or `Io`.
-#[derive(Debug)]
-pub enum SandboxError {
-    Invalid(String),
-    Unavailable(String),
-    Unreadable(PathBuf),
-    Io(io::Error),
-}
-
-impl fmt::Display for SandboxError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Invalid(reason) => write!(f, "sandbox refused: {reason}"),
-            Self::Unavailable(reason) => write!(f, "sandbox unavailable: {reason}"),
-            Self::Unreadable(folder) => {
-                write!(f, "sandbox unavailable: {}", unreadable_reason(folder))
-            }
-            Self::Io(error) => write!(f, "sandbox I/O: {error}"),
-        }
-    }
-}
-
-/// Why a Windows read root refuses a launch, in plain words naming the folder: no app
-/// container may read it and this Windows user cannot change who may. Input: the folder.
-/// Output: the reason.
-pub fn unreadable_reason(folder: &Path) -> String {
-    format!(
-        "Windows does not let sandboxed programs read {}, and this Windows user cannot change who reads it",
-        folder.display()
-    )
-}
-
-impl std::error::Error for SandboxError {}
-
-impl From<io::Error> for SandboxError {
-    fn from(value: io::Error) -> Self {
-        Self::Io(value)
     }
 }
 
@@ -4820,10 +4608,6 @@ pub(crate) fn priming_profile(folder: &Path, uv: &Path) -> String {
     text
 }
 
-fn invalid(reason: &str) -> SandboxError {
-    SandboxError::Invalid(reason.into())
-}
-
 /// Makes sure a store a profile keeps read-only is a plain folder the engine made: creates
 /// it empty, mode 0700 on unix, or keeps an entry already there only when it is a real
 /// folder, never a file or a link. Disk state is input here, so a wrong entry is an error.
@@ -5716,7 +5500,7 @@ mod windows_path_tests {
 #[cfg(all(test, unix))]
 mod linux_sockets_tests {
     use super::*;
-    use crate::sandbox::elf::tests::executable;
+    use kernel_sandbox::elf::test_support::executable;
 
     struct Case {
         _temp: tempfile::TempDir,

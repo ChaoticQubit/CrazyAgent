@@ -1,7 +1,8 @@
 #![cfg(target_os = "macos")]
 
+use crazyagent::sandbox::ProjectSandbox;
 use crazyagent::sandbox::hidden_paths;
-use crazyagent::sandbox::{ProjectSandbox, SandboxNetwork};
+use kernel_sandbox::net::SandboxNetwork;
 use rusqlite::Connection;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

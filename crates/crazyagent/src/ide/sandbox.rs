@@ -2,9 +2,9 @@ use crate::engine::EngineError;
 use crate::sandbox::policy::AgentFilesRule;
 use crate::sandbox::toolchains::{ToolHomes, Toolchains};
 use crate::sandbox::{
-    ProjectSandbox, SANDBOX_EXEC, SandboxNetwork, any_case, at_or_below, sbpl_overlong,
-    seatbelt_pattern,
+    ProjectSandbox, SANDBOX_EXEC, any_case, at_or_below, sbpl_overlong, seatbelt_pattern,
 };
+use kernel_sandbox::net::SandboxNetwork;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;

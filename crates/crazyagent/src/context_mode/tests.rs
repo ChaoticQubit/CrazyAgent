@@ -1230,8 +1230,8 @@ fn an_agent_launch_runs_the_checked_shared_install_or_no_context_mode_never_npx(
 /// Linux; off Linux they take the defaults, strict off, which those boundaries ignore.
 #[test]
 fn the_install_steps_take_the_owners_stored_strict_choice_on_linux() {
-    use crate::sandbox::{LinuxStrict, LinuxSupervisor};
-    use crate::sandbox_settings::SandboxSettings;
+    use kernel_sandbox::settings::SandboxSettings;
+    use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     let case = case("/usr/bin/false");
     #[cfg(target_os = "linux")]
     assert_eq!(
@@ -1263,8 +1263,8 @@ fn the_install_steps_take_the_owners_stored_strict_choice_on_linux() {
 /// Off Linux strict changes nothing.
 #[test]
 fn the_node_check_and_npm_refuse_under_stored_strict_when_linux_cannot_hold_fully() {
-    use crate::sandbox::{LinuxStrict, LinuxSupervisor};
-    use crate::sandbox_settings::SandboxSettings;
+    use kernel_sandbox::settings::SandboxSettings;
+    use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     let case = case("/usr/bin/false");
     let connection = rusqlite::Connection::open(case.root.join("engine.db")).unwrap();
     crate::sandbox_settings::initialize(&connection).unwrap();

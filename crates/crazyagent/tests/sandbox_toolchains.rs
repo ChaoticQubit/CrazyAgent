@@ -1,7 +1,9 @@
 #![cfg(target_os = "macos")]
 
 use crazyagent::sandbox::toolchains::{self, ToolHomes, Toolchains};
-use crazyagent::sandbox::{ProjectSandbox, SECRET_ROOT_REFUSED, SandboxError, SandboxNetwork};
+use crazyagent::sandbox::{ProjectSandbox, SECRET_ROOT_REFUSED};
+use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::net::SandboxNetwork;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};

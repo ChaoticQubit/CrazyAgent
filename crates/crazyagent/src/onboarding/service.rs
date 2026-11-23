@@ -17,7 +17,7 @@ use crate::research::runner::{
     RUN_NAME_USED, ReadOnlyEnding, ReadOnlyRun, ResearchHarness, ResearchRunner, RunError,
     confined_unavailable,
 };
-use crate::sandbox::SandboxError;
+use kernel_sandbox::error::SandboxError;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use std::cell::Cell;
 #[cfg(unix)]
