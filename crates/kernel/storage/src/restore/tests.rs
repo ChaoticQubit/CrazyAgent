@@ -166,7 +166,7 @@ fn a_restore_brings_the_2_4_data_back_and_keeps_the_replaced_data() {
         },
     };
 
-    let kept = restore_pinned(&path, &hooks).unwrap();
+    let kept = restore_pinned(&path, &hooks).unwrap().kept;
 
     assert_eq!(read(&path), (vec!["one".to_owned()], 11));
     assert_eq!(replaced(root.path()), std::slice::from_ref(&kept));
@@ -443,7 +443,11 @@ fn a_pinned_copy_changed_after_its_backup_is_refused_before_any_write() {
 #[test]
 fn a_pin_with_no_digest_restores_after_its_integrity_check_as_unverified() {
     let (root, path) = upgraded(true);
-    std::fs::write(pinned_folder(root.path()).join(crate::migrations::CHECKED), b"").unwrap();
+    std::fs::write(
+        pinned_folder(root.path()).join(crate::migrations::CHECKED),
+        b"",
+    )
+    .unwrap();
 
     let restored = restore_pinned(
         &path,

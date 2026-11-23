@@ -2403,6 +2403,14 @@ fn a_restore_whose_restoring_line_cannot_be_written_never_starts() {
     .0;
 
     assert!(refused.starts_with("storage_restore_failed"), "{refused}");
-    assert!(!root.path().join(kernel_storage::migrations::BACKUPS).exists());
-    assert_eq!(kernel_storage::restore::read_restore_record(root.path()), None);
+    assert!(
+        !root
+            .path()
+            .join(kernel_storage::migrations::BACKUPS)
+            .exists()
+    );
+    assert_eq!(
+        kernel_storage::restore::read_restore_record(root.path()),
+        None
+    );
 }

@@ -15,6 +15,7 @@ test-support = []
 [dependencies]
 rusqlite = { version = "=0.40.2", default-features = false, features = ["backup", "hooks", "limits"] }
 serde = { version = "=1.0.229", features = ["derive"] }
+sha2 = "=0.10.9"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "=1.1.5", features = ["fs", "process"] }

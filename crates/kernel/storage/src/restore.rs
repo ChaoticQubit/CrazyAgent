@@ -1,8 +1,8 @@
 use crate::StorageError;
 use crate::migrations::{
-    BACKUPS, CopyCheck, DATABASE, PINNED_DAYS, Texts, V24_VERSION_MAX, backup_time, backups_folder,
-    backups_in, check_copy, error, fill, mark_checked, pinned, private_file, schema, stamp,
-    stamp_time,
+    BACKUPS, CHECKED, CopyCheck, DATABASE, DIGEST_HEX_BYTES, PINNED_DAYS, Texts, V24_VERSION_MAX,
+    backup_time, backups_folder, backups_in, check_copy, error, file_digest, fill, mark_checked,
+    pinned, private_file, schema, stamp, stamp_time,
 };
 use crate::upgrade::{restore, version};
 use rusqlite::{Connection, OpenFlags};
@@ -25,6 +25,24 @@ pub struct Hooks<'a> {
 /// The name a restore gives the dated copy it keeps of the data it replaces (DEC-192), before
 /// `-<UTC time>`. It holds no `-to-`, so neither the rotation nor the pin ever counts it.
 pub const REPLACED: &str = "replaced";
+
+/// How a restore knew the pinned copy was the one its upgrade checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PinCheck {
+    /// The copy's sha256 matched the digest its `checked` marker holds.
+    Digest,
+    /// The marker holds no digest, as a 2.4 build writes it, so the copy passed
+    /// `PRAGMA integrity_check` and the schema and row checks alone.
+    Unverified,
+}
+
+/// A restore that brought the pinned 2.4 data back: the folder of the copy kept of the data
+/// it replaced, and how the pinned copy was checked before any write.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Restored {
+    pub kept: PathBuf,
+    pub pin: PinCheck,
+}
 
 /// The code a restore starts with once no pinned 2.4 backup is left, after PINNED_DAYS.
 pub const RESTORE_UNAVAILABLE: &str = "storage_restore_unavailable";
@@ -59,7 +77,7 @@ pub fn restorable_until(root: &Path, now: SystemTime) -> Option<SystemTime> {
 
 /// Brings back the pinned 2.4 backup the owner asked for (L5, DEC-192), at the time now.
 /// Inputs: the database path and the engine's hooks. Output: as [`restore_pinned_at`].
-pub fn restore_pinned(path: &Path, hooks: &Hooks<'_>) -> Result<PathBuf, StorageError> {
+pub fn restore_pinned(path: &Path, hooks: &Hooks<'_>) -> Result<Restored, StorageError> {
     restore_pinned_at(path, hooks, SystemTime::now(), check_copy)
 }
 
@@ -70,7 +88,7 @@ pub fn restore_pinned_at_for_test(
     path: &Path,
     hooks: &Hooks<'_>,
     now: SystemTime,
-) -> Result<PathBuf, StorageError> {
+) -> Result<Restored, StorageError> {
     restore_pinned_at(path, hooks, now, check_copy)
 }
 
@@ -79,13 +97,14 @@ pub fn restore_pinned_at_for_test(
 /// dated 0700 copy of the data it replaces, then restores the pinned copy, checks every table
 /// against it and hands the result to the engine's after-restore hook. Inputs: the database
 /// path, the hooks, the time and the check of the live database against a copy once the
-/// restore wrote it. Output: the folder of the copy it kept.
+/// restore wrote it. The pinned copy is checked against its digest, or without one by its
+/// integrity check, before any write. Output: the kept copy's folder and that pin check.
 fn restore_pinned_at(
     path: &Path,
     hooks: &Hooks<'_>,
     now: SystemTime,
     check: CopyCheck,
-) -> Result<PathBuf, StorageError> {
+) -> Result<Restored, StorageError> {
     let root = path
         .parent()
         .ok_or_else(|| restore_failed("the database has no folder"))?;
@@ -98,8 +117,9 @@ fn restore_pinned_at(
         return Err(error(RESTORE_AGENTS_RUNNING));
     }
     let pinned_copy = source.join(DATABASE);
+    let pin = pin_check(&source)?;
     let (version_pinned, schema_pinned) =
-        shape(&pinned_copy).map_err(|cause| restore_failed(cause.0))?;
+        shape(&pinned_copy, pin).map_err(|cause| restore_failed(cause.0))?;
     let (version_live, schema_live) = (version(&db)?, schema(&db)?);
     let kept = keep_replaced(&db, &folder, hooks.texts, now)?;
     let restored = restore(&mut db, &source, version_pinned, &schema_pinned).and_then(|()| {
@@ -118,7 +138,26 @@ fn restore_pinned_at(
     }
     (hooks.after_restore)(&db, root, &kept);
     assert!(kept.starts_with(&folder));
-    Ok(kept)
+    Ok(Restored { kept, pin })
+}
+
+/// Checks a pinned backup against the digest its `checked` marker holds (leader 11-22, H11):
+/// a match passes as [`PinCheck::Digest`], an empty marker, as a 2.4 build writes it, passes
+/// as [`PinCheck::Unverified`] for [`shape`] to run the integrity check, and anything else is
+/// refused. Input: the backup folder. Output: the check, or `storage_restore_failed`.
+fn pin_check(source: &Path) -> Result<PinCheck, StorageError> {
+    let marker = std::fs::read(source.join(CHECKED)).map_err(restore_failed)?;
+    if marker.is_empty() {
+        return Ok(PinCheck::Unverified);
+    }
+    let found = file_digest(&source.join(DATABASE)).map_err(|cause| restore_failed(cause.0))?;
+    assert_eq!(found.len(), DIGEST_HEX_BYTES);
+    if marker != found.as_bytes() {
+        return Err(restore_failed(
+            "the pinned copy does not match the digest its backup recorded",
+        ));
+    }
+    Ok(PinCheck::Digest)
 }
 
 /// Brings the replaced data back into engine.db from the copy kept of it, after a restore
@@ -209,13 +248,24 @@ fn keep_replaced(
 }
 
 /// The version and schema rows of the pinned copy, which the restored database must read.
-/// The copy is opened as `check_copy` opens it. Input: the copy's path. Output: both, or
-/// `storage_restore_failed` for a copy that is not 2.4 data.
-fn shape(copy: &Path) -> Result<(i64, Vec<String>), StorageError> {
+/// The copy is opened as `check_copy` opens it; one with no digest must also pass
+/// `PRAGMA integrity_check`. Inputs: the copy's path and its pin check. Output: both, or
+/// `storage_restore_failed` for a copy that is not 2.4 data or fails that check.
+fn shape(copy: &Path, pin: PinCheck) -> Result<(i64, Vec<String>), StorageError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_NOFOLLOW;
     let opened = Connection::open_with_flags(copy, flags).map_err(restore_failed)?;
+    if pin == PinCheck::Unverified {
+        let integrity: String = opened
+            .query_row("PRAGMA integrity_check(1)", [], |row| row.get(0))
+            .map_err(restore_failed)?;
+        if integrity != "ok" {
+            return Err(restore_failed(
+                "the pinned copy with no digest failed its integrity check",
+            ));
+        }
+    }
     let found = version(&opened)?;
     if found > V24_VERSION_MAX {
         return Err(restore_failed("the pinned copy is not 2.4 data"));
@@ -229,6 +279,11 @@ fn shape(copy: &Path) -> Result<(i64, Vec<String>), StorageError> {
 pub const RESTORE_RECORD_FILE: &str = "restore-record";
 /// The record of a restore the engine stops for.
 pub const RECORD_PENDING: &str = "pending";
+/// The record a restore writes before it starts, which its outcome replaces; left behind by a
+/// crash or a failed outcome write, it refuses the next start (H10).
+pub const RECORD_RESTORING: &str = "restoring";
+/// The word a restored record ends with when the pinned copy had no digest to check.
+pub const RECORD_UNVERIFIED_PIN: &str = "unverified_pin";
 /// The first word of the record of a restore that brought the 2.4 data back.
 pub const RECORD_RESTORED: &str = "restored";
 /// The first word of the record of a restore that did not finish.
@@ -277,14 +332,20 @@ fn write_record_with(
 }
 
 /// Refuses an engine start while the restore record says a restore wrote engine.db and could
-/// not roll it back, so data that did not pass its check is never migrated. Input: the
-/// database path. Output: Ok, or `engine_restore_broken`.
+/// not roll it back, or started and never recorded how it ended, or cannot be read, so data
+/// that did not pass its check is never migrated. Input: the database path. Output: Ok, or
+/// `engine_restore_broken`.
 pub(crate) fn refuse_broken(path: &Path) -> Result<(), StorageError> {
     let Some(root) = path.parent() else {
         return Ok(());
     };
     let broken = format!("{RECORD_FAILED} {RESTORE_ROLLBACK_FAILED}");
-    if read_restore_record(root).as_deref() == Some(broken.as_str()) {
+    let refused = match read_record_strict(root) {
+        Ok(None) => false,
+        Ok(Some(line)) => line == broken || line == RECORD_RESTORING,
+        Err(()) => true,
+    };
+    if refused {
         return Err(error(format!(
             "{ENGINE_RESTORE_BROKEN}: the engine data did not pass its check after a failed \
              restore; the replaced 2.5 data stays in the {BACKUPS} folder"
@@ -295,31 +356,42 @@ pub(crate) fn refuse_broken(path: &Path) -> Result<(), StorageError> {
 
 /// Reads the restore record of the engine at `root`, without an engine and without following
 /// a link: only a private regular file of this user counts. Input: the root. Output: its line,
-/// or none.
+/// or none, for a missing record and for one that cannot be read alike.
 pub fn read_restore_record(root: &Path) -> Option<String> {
+    read_record_strict(root).ok().flatten()
+}
+
+/// [`read_restore_record`] that tells a missing record from one that exists but cannot be
+/// read as a private regular file of this user (H9). Input: the root. Output: Ok(None) when
+/// it is missing, Ok(Some) with its line, or Err for any other failure.
+fn read_record_strict(root: &Path) -> Result<Option<String>, ()> {
     use std::io::Read;
-    let file = std::fs::OpenOptions::new()
+    let opened = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
-        .open(root.join(RESTORE_RECORD_FILE))
-        .ok()?;
-    let metadata = file.metadata().ok()?;
+        .open(root.join(RESTORE_RECORD_FILE));
+    let file = match opened {
+        Ok(file) => file,
+        Err(cause) if cause.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    let metadata = file.metadata().map_err(|_| ())?;
     if !metadata.is_file()
         || metadata.uid() != rustix::process::getuid().as_raw()
         || metadata.mode() & 0o077 != 0
     {
-        return None;
+        return Err(());
     }
     let mut text = String::new();
-    let limit = u64::try_from(RESTORE_RECORD_BYTES_MAX).ok()?;
-    file.take(limit).read_to_string(&mut text).ok()?;
+    let limit = u64::try_from(RESTORE_RECORD_BYTES_MAX).map_err(|_| ())?;
+    file.take(limit).read_to_string(&mut text).map_err(|_| ())?;
     assert!(text.len() <= RESTORE_RECORD_BYTES_MAX);
-    Some(text)
+    Ok(Some(text))
 }
 
 /// Removes a pending or restored record as the engine starts, so a stale one never keeps a
-/// client from starting the engine after a crash or a return to 2.5; a failed one stays for
-/// the restore screen until the next request. Input: the database path. Output: none; a
+/// client from starting the engine after a crash or a return to 2.5; a failed or restoring
+/// one stays for the restore screen until the next request. Input: the database path. Output: none; a
 /// record that cannot be removed is logged.
 pub(crate) fn forget_restore(path: &Path) {
     let Some(root) = path.parent() else {
@@ -328,7 +400,7 @@ pub(crate) fn forget_restore(path: &Path) {
     let Some(line) = read_restore_record(root) else {
         return;
     };
-    if line.split(' ').next() == Some(RECORD_FAILED) {
+    if line == RECORD_RESTORING || line.split(' ').next() == Some(RECORD_FAILED) {
         return;
     }
     if std::fs::remove_file(root.join(RESTORE_RECORD_FILE)).is_err() {
