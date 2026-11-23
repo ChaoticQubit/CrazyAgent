@@ -693,7 +693,7 @@ fn a_pinned_prompt_reads_the_paste_mode_of_its_own_pane_not_the_active_one() {
     assert_eq!(typed[1], b"#");
 }
 
-/// V243-PASTE-INTERLEAVE-N0 R5 (leader 08:52): a prompt to a lead by name reaches the lead's
+/// A prompt to a lead by name reaches the lead's
 /// own app pane while a teammate split off the lead's window is the active pane, so the
 /// lead's prompt never goes to the teammate.
 #[cfg(target_os = "macos")]
@@ -761,7 +761,7 @@ fn a_split_window_with_no_app_tag_takes_no_prompt_until_its_app_pane_is_tagged()
     assert_eq!(typed[1], b"#", "the refused prompt typed nothing anywhere");
 }
 
-/// V243-PASTE-INTERLEAVE-N0 R7 (leader 08:55): a one-pane window whose pane an older engine
+/// A one-pane window whose pane an older engine
 /// left with no tag holds only the agent's app, so a prompt by name reaches that pane and
 /// tags it as the app pane.
 #[cfg(target_os = "macos")]
@@ -827,7 +827,7 @@ fn a_window_whose_tagged_app_pane_closed_hands_its_teammate_no_prompt() {
     assert_eq!(typed[0], b"#", "the teammate gets only the mark");
 }
 
-/// CR-0351 F1 (#16 CodeRabbit major): an older engine's one-pane window whose app splits a
+/// An older engine's one-pane window whose app splits a
 /// teammate and closes between the two option commands of its first tagging. The window's
 /// mark is set first, so the teammate left alone is refused as an unknown app pane and is
 /// never tagged as the app, as it would be if only the pane tag had landed.
