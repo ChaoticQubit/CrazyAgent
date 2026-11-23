@@ -1,6 +1,6 @@
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
-use crate::terminal::AgentId;
+use kernel_processes::terminal::AgentId;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;

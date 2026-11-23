@@ -147,14 +147,14 @@ impl AgentSpace {
         let mut engine: Vec<PathBuf> =
             kernel_processes::finding::engine_roots(&crate::tools::HOOKS, Some(root))
                 .into_iter()
-                .chain(crate::sandbox::canonical(root).ok())
+                .chain(kernel_sandbox::paths::canonical(root).ok())
                 .filter(usable)
                 .collect();
         engine.sort();
         engine.dedup();
         let mut folders = Vec::new();
         for folder in named {
-            let real = crate::sandbox::canonical(&folder).ok();
+            let real = kernel_sandbox::paths::canonical(&folder).ok();
             folders.extend(std::iter::once(folder).chain(real).filter(usable));
         }
         folders.sort();
@@ -181,10 +181,10 @@ impl AgentSpace {
     pub fn holds(&self, path: &Path) -> bool {
         let placed = path
             .parent()
-            .and_then(|folder| crate::sandbox::canonical(folder).ok())
+            .and_then(|folder| kernel_sandbox::paths::canonical(folder).ok())
             .zip(path.file_name())
             .map(|(folder, name)| folder.join(name));
-        let real = crate::sandbox::canonical(path).ok();
+        let real = kernel_sandbox::paths::canonical(path).ok();
         [Some(path.to_path_buf()), placed, real]
             .into_iter()
             .flatten()
@@ -471,7 +471,7 @@ pub(crate) fn out_of_reach(path: &Path, space: &AgentSpace) -> Result<(), Engine
     }
     if std::iter::once(path)
         .chain(hops.iter().map(PathBuf::as_path))
-        .any(|part| crate::service::changeable_by_others(part).is_some())
+        .any(|part| kernel_processes::service::changeable_by_others(part).is_some())
     {
         return Err(failure(PATH_CHANGEABLE));
     }
@@ -645,7 +645,7 @@ pub(crate) fn owner_folder(prefix: &str) -> tempfile::TempDir {
 
 /// The folder a row's own temp folders go in, which no other user can change: on macOS the
 /// temp folder, this user's own; elsewhere, where it is the shared `/tmp` that
-/// [`crate::service::changeable_by_others`] rightly counts, this user's cache folder
+/// [`kernel_processes::service::changeable_by_others`] rightly counts, this user's cache folder
 /// ([`user_caches`]). Output: the folder, real.
 #[cfg(all(test, unix))]
 pub(crate) fn private_root() -> PathBuf {
@@ -655,7 +655,7 @@ pub(crate) fn private_root() -> PathBuf {
         user_caches()
     };
     assert!(folder.is_absolute());
-    let changeable = crate::service::changeable_by_others(&folder);
+    let changeable = kernel_processes::service::changeable_by_others(&folder);
     assert_eq!(changeable, None, "others can change {}", folder.display());
     folder
 }
@@ -694,7 +694,7 @@ pub(crate) fn outside_temp(prefix: &str) -> tempfile::TempDir {
         .unwrap();
     let place = folder.path().canonicalize().unwrap();
     assert_eq!(
-        crate::service::changeable_by_others(&place),
+        kernel_processes::service::changeable_by_others(&place),
         None,
         "others can change the cache folder: {}",
         place.display()

@@ -12,16 +12,20 @@ use crate::master_step_limit::StepLimit;
 use crate::protocol::RequestId;
 use crate::sandbox::InstalledSandbox;
 #[cfg(unix)]
+use crate::sandbox::ProjectSandbox;
+#[cfg(unix)]
 use crate::sandbox::policy::AgentAccess;
 #[cfg(unix)]
 use crate::sandbox::policy::AgentNetwork;
 use crate::sandbox::policy::AgentPolicy;
 #[cfg(unix)]
 use crate::sandbox::toolchains::{ToolHomes, Toolchains};
-#[cfg(unix)]
-use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::storage::PreparedMasterTurn;
 use crate::worktrees::LeaseState;
+#[cfg(unix)]
+use kernel_sandbox::error::SandboxError;
+#[cfg(unix)]
+use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 #[cfg(unix)]
 use rustix::fs::{AtFlags, Mode};
 use std::fs::File;
@@ -1000,8 +1004,8 @@ fn turn_sandbox(
     if let Some((_, code)) = policy.access.refusal() {
         return Err(failure(code));
     }
-    let repository = &crate::projects_home::one_spelling(repository.to_path_buf());
-    let worktree = &crate::projects_home::one_spelling(worktree.to_path_buf());
+    let repository = &kernel_sandbox::paths::one_spelling(repository.to_path_buf());
+    let worktree = &kernel_sandbox::paths::one_spelling(worktree.to_path_buf());
     crate::sandbox::hidden_paths::none_tracked(repository, hidden).map_err(failure)?;
     let refused = |_: SandboxError| failure("master_sandbox_unavailable");
     let remote = match endpoint {
@@ -1083,8 +1087,8 @@ fn turn_sandbox(
     };
     #[cfg(not(target_os = "linux"))]
     let (calls, strict) = (
-        crate::sandbox::LinuxSupervisor::On,
-        crate::sandbox::LinuxStrict::Off,
+        kernel_sandbox::settings::LinuxSupervisor::On,
+        kernel_sandbox::settings::LinuxStrict::Off,
     );
     let profile = runtime.path.join(MASTER_PROFILE);
     let installed =
@@ -1123,7 +1127,7 @@ fn turn_sandbox(
 #[cfg(any(target_os = "linux", all(test, unix)))]
 fn stored_sandbox_settings(
     root: &Root,
-) -> Result<crate::sandbox_settings::SandboxSettings, EngineError> {
+) -> Result<kernel_sandbox::settings::SandboxSettings, EngineError> {
     let engine = root
         .engine_root()
         .map_err(|_| failure("master_sandbox_unavailable"))?;
@@ -1448,8 +1452,8 @@ mod tests {
         crate::sandbox_settings::initialize(&connection).unwrap();
         crate::sandbox_settings::save(
             &connection,
-            &crate::sandbox_settings::SandboxSettings {
-                linux_sockets: crate::sandbox::LinuxSockets::TcpPorts,
+            &kernel_sandbox::settings::SandboxSettings {
+                linux_sockets: kernel_sandbox::settings::LinuxSockets::TcpPorts,
                 ..Default::default()
             },
         )
@@ -1557,7 +1561,7 @@ mod tests {
         let settings = stored_sandbox_settings(&root).unwrap();
         assert_eq!(
             settings.linux_sockets,
-            crate::sandbox::LinuxSockets::TcpPorts
+            kernel_sandbox::settings::LinuxSockets::TcpPorts
         );
         assert!(!base.join("engine.db").exists());
     }
@@ -3445,70 +3449,7 @@ mod tests {
         assert!(!run(&stray, &[]));
     }
 
-    #[test]
-    fn capture_allocates_distinct_actual_private_artifacts() {
-        let temporary = private_root();
-        let root = Root::open(temporary.path()).unwrap();
-        let (first_runtime, first_capture, first) = allocate_master_capture(&root).unwrap();
-        let (second_runtime, second_capture, second) = allocate_master_capture(&root).unwrap();
-        assert_ne!(first_runtime, second_runtime);
-        assert_ne!(first_capture, second_capture);
-        assert_ne!(first_runtime, first_capture);
-        assert_ne!(
-            first.metadata().unwrap().ino(),
-            second.metadata().unwrap().ino()
-        );
-        for (runtime_ref, capture_ref, capture) in [
-            (first_runtime, first_capture, first),
-            (second_runtime, second_capture, second),
-        ] {
-            let runtime = temporary
-                .path()
-                .join(format!("master-runtime-{}", runtime_ref.as_str()));
-            let path = runtime.join(format!("capture-{}.jsonl", capture_ref.as_str()));
-            let named = std::fs::symlink_metadata(path).unwrap();
-            let held = capture.metadata().unwrap();
-            assert_eq!(
-                std::fs::symlink_metadata(runtime).unwrap().mode() & 0o7777,
-                0o700
-            );
-            assert_eq!(named.ino(), held.ino());
-            assert_eq!(named.dev(), held.dev());
-            assert_eq!(held.mode() & 0o7777, 0o600);
-            assert_eq!(held.nlink(), 1);
-            assert_eq!(held.len(), 0);
-            assert_eq!(held.uid(), rustix::process::geteuid().as_raw());
-        }
-    }
-
-    #[test]
-    fn capture_refuses_replaced_owner_root_without_writing_replacement() {
-        let temporary = private_root();
-        let path = temporary.path().join("runtime");
-        std::fs::create_dir(&path).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let root = Root::open(&path).unwrap();
-        std::fs::rename(&path, temporary.path().join("retained")).unwrap();
-        std::fs::create_dir(&path).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(allocate_master_capture(&root).is_err());
-        assert_eq!(std::fs::read_dir(path).unwrap().count(), 0);
-        assert_eq!(
-            std::fs::read_dir(temporary.path().join("retained"))
-                .unwrap()
-                .count(),
-            0
-        );
-    }
-
-    #[test]
-    fn capture_refuses_owner_root_permission_drift() {
-        let temporary = private_root();
-        let root = Root::open(temporary.path()).unwrap();
-        std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(allocate_master_capture(&root).is_err());
-        assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
-    }
+    mod capture_tests;
 }
 
 #[cfg(all(test, windows))]

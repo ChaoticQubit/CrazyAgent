@@ -56,6 +56,11 @@ interface fixture-types {
     extra: option<header>,
     grid: list<list<string>>,
   }
+
+  record fixture-sent {
+    status: u16,
+    url: string,
+  }
 }
 
 interface fixture {

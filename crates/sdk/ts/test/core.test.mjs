@@ -45,7 +45,7 @@ test("u64 round trips 0, 2^53 + 1 and 2^64 - 1 and refuses 2^64, -1, \"01\", \"1
 
 test("call returns a refusal value and never throws", async () => {
   const refused = { kind: "not_granted", capability: "settings.save_quit", needs: "settings.write" };
-  const host = { call: async () => ({ refused }) };
+  const host = { call: async () => ({ refused }), subscribe: () => () => {} };
   const result = await call(host, COUNT, {}, () => assert.fail("no output to decode"));
   assert.deepEqual(result, { ok: false, refusal: refused });
 });
@@ -55,6 +55,7 @@ test("call maps a throwing transport to failed sdk_transport_failed", async () =
     call: async () => {
       throw new Error("pipe closed");
     },
+    subscribe: () => () => {},
   };
   const result = await call(host, COUNT, {}, () => null);
   assert.deepEqual(result, { ok: false, refusal: { kind: "failed", code: "sdk_transport_failed" } });
@@ -67,6 +68,7 @@ test("count sends the exact envelope", async () => {
       sent.push([capability, input]);
       return { ok: 3 };
     },
+    subscribe: () => () => {},
   };
   const result = await count(host, [true, false]);
   assert.deepEqual(sent, [["fixture.count", { flags: [true, false] }]]);

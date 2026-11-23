@@ -35,14 +35,15 @@ impl Spot {
 }
 
 /// The positions the checks need: every declared item name in source order, every use of
-/// a named type, per declared type the named types its fields use, and the named types
-/// event bodies use.
+/// a named type, per declared type the named types its fields use, the named types event
+/// bodies use, and every event kind.
 #[derive(Debug, Default)]
 pub(crate) struct Spots {
     pub(crate) declared: Vec<Spot>,
     pub(crate) used: Vec<Spot>,
     pub(crate) fields_of_type: Vec<Vec<Spot>>,
     pub(crate) emitted: Vec<Spot>,
+    pub(crate) kinds: Vec<Spot>,
 }
 
 /// The three name shapes of the grammar.
@@ -345,6 +346,7 @@ impl<'s> Parser<'s> {
             if emits.iter().any(|(seen, _)| seen.text == kind.text) {
                 return Err(kind.refuse("cap_duplicate_name"));
             }
+            self.spots.kinds.push(Spot::of(&kind));
             self.expect(Kind::OpenBrace)?;
             let (fields, named) = self.fields(Kind::CloseBrace, false, false)?;
             self.spots.emitted.extend(named);

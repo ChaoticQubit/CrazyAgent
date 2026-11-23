@@ -252,7 +252,7 @@ fn main() -> ExitCode {
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     if args
         .first()
-        .is_some_and(|arg| arg == crazyagent::credentials::GIT_HELPER_COMMAND)
+        .is_some_and(|arg| arg == kernel_security::store::os_keyring::GIT_HELPER_COMMAND)
     {
         return match run_git_credential(&args) {
             Ok(()) => ExitCode::SUCCESS,
@@ -292,7 +292,7 @@ fn run_git_credential(args: &[OsString]) -> Result<(), String> {
     let [_, namespace, reference, username, operation] = args else {
         return Err(format!(
             "usage: crazyagent {} NAMESPACE REFERENCE USERNAME OPERATION",
-            crazyagent::credentials::GIT_HELPER_COMMAND
+            kernel_security::store::os_keyring::GIT_HELPER_COMMAND
         ));
     };
     let text = |arg: &OsString| {
@@ -300,7 +300,7 @@ fn run_git_credential(args: &[OsString]) -> Result<(), String> {
             .map(str::to_owned)
             .ok_or_else(|| "credential_name_invalid".to_owned())
     };
-    crazyagent::credentials::answer_git_credential(
+    kernel_security::store::os_keyring::answer_git_credential(
         &text(namespace)?,
         &text(reference)?,
         &text(username)?,
@@ -957,7 +957,7 @@ fn run_engine(args: &[OsString]) -> Result<(), String> {
                     let keep = crazyagent::landing::open(&root)
                         .and_then(|db| crazyagent::quit_settings::load(&db))
                         .map_or(true, |settings| settings.keeps_team_agents());
-                    crazyagent::terminal::quit(terminal.as_ref(), keep)
+                    kernel_processes::terminal::quit(terminal.as_ref(), keep)
                 })
                 .await;
                 if let Ok(Err(problem)) = quit {
@@ -1016,7 +1016,7 @@ fn run_tui_command(args: &[OsString]) -> Result<(), String> {
 /// Inputs: the layout and the login service. Output: the code, or none.
 fn refused(
     layout: &crazyagent::paths::Layout,
-    service: &crazyagent::service::Service,
+    service: &kernel_processes::service::Service,
 ) -> Option<&'static str> {
     let running = crazyagent::restore::service_running(service);
     crazyagent::restore::restart_refusal(layout.root(), running)
@@ -1024,9 +1024,9 @@ fn refused(
 
 fn default_service(
     layout: &crazyagent::paths::Layout,
-) -> Result<crazyagent::service::Service, String> {
-    crazyagent::service::Service::current_user(
-        crazyagent::paths::Platform::CURRENT,
+) -> Result<kernel_processes::service::Service, String> {
+    crazyagent::service::current_user(
+        kernel_common::Platform::CURRENT,
         current_executable()?,
         layout,
     )
@@ -1054,7 +1054,7 @@ async fn prepare_engine(
             service,
             &service.executable,
             std::env::var_os("PATH").as_deref(),
-            crazyagent::service::READY_TIMEOUT,
+            kernel_processes::service::READY_TIMEOUT,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -1079,7 +1079,7 @@ async fn prepare_engine(
 async fn offer_restart(
     message: &str,
     layout: Option<&crazyagent::paths::Layout>,
-    service: Option<&crazyagent::service::Service>,
+    service: Option<&kernel_processes::service::Service>,
 ) -> Result<(), String> {
     use std::io::BufRead;
     eprintln!("{message}");
@@ -1103,9 +1103,14 @@ async fn offer_restart(
     service.stop().map_err(|e| e.to_string())?;
     let since = crazyagent::service::log_length(layout);
     service.start().map_err(|e| e.to_string())?;
-    crazyagent::service::wait_started(layout, service, crazyagent::service::READY_TIMEOUT, since)
-        .await
-        .map_err(|e| e.to_string())?;
+    crazyagent::service::wait_started(
+        layout,
+        service,
+        kernel_processes::service::READY_TIMEOUT,
+        since,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     match crazyagent::service::check_engine(
         layout.root(),
         crazyagent::engine::owner::OwnerClientKind::Tui,
@@ -1138,9 +1143,14 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
             .ok_or("HOME is not set")?;
         let layout = crazyagent::paths::Layout::current().map_err(|e| e.to_string())?;
         let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
-        let target = crazyagent::service::persistable(&executable, &layout, appdir.as_deref())
-            .map_err(|e| e.to_string())?;
-        let link = crazyagent::service::link_cli(&target, &home.join(".local").join("bin"))
+        let target = kernel_processes::service::persistable(
+            &executable,
+            layout.root(),
+            appdir.as_deref(),
+            &crazyagent::service::HOOKS,
+        )
+        .map_err(|e| e.to_string())?;
+        let link = kernel_processes::service::link_cli(&target, &home.join(".local").join("bin"))
             .map_err(|e| e.to_string())?;
         println!("Linked {} to {}", link.display(), target.display());
         return Ok(());
@@ -1155,7 +1165,7 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
             .block_on(crazyagent::service::wait_started(
                 layout,
                 &service,
-                crazyagent::service::READY_TIMEOUT,
+                kernel_processes::service::READY_TIMEOUT,
                 since,
             ))
             .map_err(|e| e.to_string())
@@ -1170,7 +1180,9 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
                 ));
             }
             let since = crazyagent::service::log_length(&layout);
-            service.install().map_err(|e| e.to_string())?;
+            service
+                .install(&crazyagent::service::HOOKS)
+                .map_err(|e| e.to_string())?;
             wait(&layout, since)?;
             println!(
                 "Installed {} ({}); it runs {}",
@@ -1191,24 +1203,30 @@ fn run_service(args: &[OsString]) -> Result<(), String> {
             let since = crazyagent::service::log_length(&layout);
             let another = service.runs_another_program();
             let installed = service.definition.is_file();
-            let repair = service.repair(&service.executable, installed, false);
-            if installed && repair == crazyagent::service::Repair::Refuse {
+            let repair = service.repair(
+                &service.executable,
+                installed,
+                false,
+                &crazyagent::service::HOOKS,
+            );
+            if installed && repair == kernel_processes::service::Repair::Refuse {
                 return Err(service.refuse().0);
             }
-            if installed && repair == crazyagent::service::Repair::Install {
+            if installed && repair == kernel_processes::service::Repair::Install {
                 let appdir = std::env::var_os("APPDIR").map(PathBuf::from);
-                let executable = crazyagent::service::persistable(
+                let executable = kernel_processes::service::persistable(
                     &service.executable,
-                    &layout,
+                    layout.root(),
                     appdir.as_deref(),
+                    &crazyagent::service::HOOKS,
                 )
                 .map_err(|e| e.to_string())?;
-                crazyagent::service::Service {
+                kernel_processes::service::Service {
                     executable: executable.clone(),
                     ..service.clone()
                 }
-                .install()
-                .map(|()| crazyagent::service::retire_old_copies(&layout, &executable))
+                .install(&crazyagent::service::HOOKS)
+                .map(|()| kernel_processes::service::retire_old_copies(layout.root(), &executable, &crazyagent::service::HOOKS))
             } else {
                 if another {
                     eprintln!(
@@ -1287,7 +1305,7 @@ fn terminal_probe(
 /// agents then run headless until a live master start finds tmux ([`terminal_probe`]).
 fn agent_terminal(
     service: &crazyagent::engine::bootstrap::EngineService,
-) -> Option<std::sync::Arc<dyn crazyagent::terminal::Host>> {
+) -> Option<std::sync::Arc<dyn kernel_processes::terminal::Host>> {
     let host = service.owner_runtime()?.terminal().ok()?;
     match host.alive() {
         Ok(_) => Some(host),

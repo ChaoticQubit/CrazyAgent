@@ -241,7 +241,7 @@ pub fn backups(root: &Path) -> std::path::PathBuf {
 /// Whether the engine's login service still runs a process, as a restore's pending record is
 /// weighed. A status that can't be read counts as running, so a restore that may still copy
 /// is never stopped. Input: the service. Output: the answer.
-pub fn service_running(service: &crate::service::Service) -> bool {
+pub fn service_running(service: &kernel_processes::service::Service) -> bool {
     service.status().map_or(true, |status| status.running)
 }
 

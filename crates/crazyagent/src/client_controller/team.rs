@@ -2,7 +2,7 @@ use super::*;
 use crate::engine::owner::TerminalSession;
 use crate::protocol::ProjectId;
 use crate::team::{TeamAction, TeamGraph, TeamStatus};
-use crate::terminal::AgentId;
+use kernel_processes::terminal::AgentId;
 
 impl OwnerController {
     /// Reads a project's team: harness plan, agents, tasks and the master conversation.

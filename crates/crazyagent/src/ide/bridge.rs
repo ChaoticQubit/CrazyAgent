@@ -5,7 +5,7 @@ use crate::ipc::Stream;
 use crate::landing::ChangeSetId;
 use crate::protocol::{ProjectId, RequestId, encode_frame, plain_code};
 use crate::sandbox::policy::AgentAccess;
-use crate::terminal::{AgentId, SIZE_MAX, SIZE_MIN};
+use kernel_processes::terminal::{AgentId, SIZE_MAX, SIZE_MIN};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

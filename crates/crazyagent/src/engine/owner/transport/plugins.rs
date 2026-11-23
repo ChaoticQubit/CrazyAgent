@@ -1485,9 +1485,11 @@ fn boundary_check(
     args: &[String],
     secrets: &[(String, Vec<u8>)],
     kept: &[u16],
-    network: crate::sandbox::SandboxNetwork,
+    network: kernel_sandbox::net::SandboxNetwork,
 ) -> Result<Vec<String>, String> {
-    use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxError, canonical};
+    use crate::sandbox::{InstalledSandbox, ProjectSandbox};
+    use kernel_sandbox::error::SandboxError;
+    use kernel_sandbox::paths::canonical;
     assert!(valid_id(id));
     use crate::context_mode::ForCheck;
     let approved = ServerSpec::Stdio {
@@ -1561,7 +1563,7 @@ fn boundary_check(
             crate::plugins::check_refused(&reason)
         }
         SandboxError::Unreadable(folder) => {
-            let reason = crate::sandbox::unreadable_reason(&folder);
+            let reason = kernel_sandbox::error::unreadable_reason(&folder);
             eprintln!("plugin_check_boundary_refused cause={reason}");
             if reason.len() <= crate::plugins::CHECK_REASON_BYTES_MAX {
                 crate::plugins::check_refused(&reason)
@@ -1595,8 +1597,8 @@ fn boundary_check(
     };
     #[cfg(not(target_os = "linux"))]
     let (calls, strict) = (
-        crate::sandbox::LinuxSupervisor::On,
-        crate::sandbox::LinuxStrict::Off,
+        kernel_sandbox::settings::LinuxSupervisor::On,
+        kernel_sandbox::settings::LinuxStrict::Off,
     );
     let profile = check_profile(&checks, id);
     if let Some(problem) = crate::plugins::check_network_refused(std::env::consts::OS, &network) {

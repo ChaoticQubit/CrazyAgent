@@ -1,7 +1,8 @@
 use super::*;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::terminal::FOLDER;
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -68,7 +69,12 @@ impl Fixture {
     }
 
     fn host(&self) -> Arc<dyn Host> {
-        Arc::new(Tmux::open(Some(self.tmux.clone()), &self.base.join(FOLDER)))
+        Arc::new(Tmux::open(
+            Some(self.tmux.clone()),
+            &self.base.join(FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        ))
     }
 
     fn agent(&self, project: &str, role: &str, harness: &str, status: &str) -> i64 {
@@ -107,7 +113,7 @@ impl Fixture {
         };
         host.spawn(
             &AgentId::team(agent).unwrap(),
-            &crate::terminal::PaneCommand::from(&command),
+            &kernel_processes::terminal::PaneCommand::from(&command),
         )
         .unwrap();
     }
@@ -317,7 +323,8 @@ fn the_watch_reads_only_the_visible_screen_of_an_agent_with_long_scrollback_and_
     );
     until("the long output", || printed.exists());
     let name = AgentId::team(agent).unwrap();
-    let viewers: Vec<crate::terminal::TerminalStream> = (0..crate::terminal::VIEWERS_MAX)
+    let viewers: Vec<kernel_processes::terminal::TerminalStream> = (0
+        ..kernel_processes::terminal::VIEWERS_MAX)
         .map(|_| host.attach(&name).unwrap())
         .collect();
     assert!(

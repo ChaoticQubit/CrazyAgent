@@ -2,8 +2,10 @@ use super::*;
 use crate::agent_git::Layout;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::team::runtime::{TeamLimits, TeamRuntime};
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
-use crate::terminal::{AgentId, FOLDER, Host};
+use crate::terminal::FOLDER;
+use crate::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
+use kernel_processes::terminal::{AgentId, Host};
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
@@ -131,7 +133,12 @@ impl Case {
     fn host(&mut self) -> Arc<dyn Host> {
         let tmux = installed(&self.base).expect("tmux must be installed on this machine");
         self.tmux = Some(tmux.clone());
-        Arc::new(Tmux::open(Some(tmux), &self.base.join(FOLDER)))
+        Arc::new(Tmux::open(
+            Some(tmux),
+            &self.base.join(FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        ))
     }
 
     fn pane(&self, host: &Arc<dyn Host>, id: i64) {
@@ -145,7 +152,7 @@ impl Case {
         };
         host.spawn(
             &AgentId::team(id).unwrap(),
-            &crate::terminal::PaneCommand::from(&command),
+            &kernel_processes::terminal::PaneCommand::from(&command),
         )
         .unwrap();
     }

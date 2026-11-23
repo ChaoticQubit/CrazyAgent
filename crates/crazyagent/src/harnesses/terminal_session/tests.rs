@@ -86,8 +86,10 @@ mod own_turns {
         AccountBinding, LaunchBoundary, LaunchEvent, LaunchLimits, LaunchRequest, Secret,
         group_alive,
     };
-    use crate::terminal::tmux::{SOCKET, Tmux, installed};
-    use crate::terminal::{AgentId, FOLDER, Host};
+    use crate::terminal::FOLDER;
+    use crate::terminal::tmux::installed;
+    use kernel_processes::terminal::tmux::{SOCKET, Tmux};
+    use kernel_processes::terminal::{AgentId, Host};
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
@@ -167,7 +169,12 @@ mod own_turns {
             tmux: tmux.clone(),
             socket: folder.join(SOCKET),
         };
-        let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &folder));
+        let host: Arc<dyn Host> = Arc::new(Tmux::open(
+            Some(tmux),
+            &folder,
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        ));
         let (home, work, bin) = (base.join("home"), base.join("work"), base.join("bin"));
         for path in [&home, &work, &bin] {
             private(path);
@@ -184,14 +191,14 @@ mod own_turns {
                 &work,
                 &home,
                 &tmp,
-                crate::sandbox::SandboxNetwork::Open,
+                kernel_sandbox::net::SandboxNetwork::Open,
             )
             .unwrap();
             let installed = crate::sandbox::InstalledSandbox::install(
                 sandbox,
                 &base.join("full-access.sb"),
-                crate::sandbox::LinuxSupervisor::On,
-                crate::sandbox::LinuxStrict::Off,
+                kernel_sandbox::settings::LinuxSupervisor::On,
+                kernel_sandbox::settings::LinuxStrict::Off,
             )
             .unwrap();
             LaunchBoundary::Installed(Arc::new(installed.unconfined()))
@@ -303,7 +310,10 @@ mod own_turns {
             server,
             &["list-panes", "-a", "-f", &own, "-F", "#{pane_id}"],
         );
-        assert!(crate::terminal::pane_id_valid(&app), "one app pane: {app}");
+        assert!(
+            kernel_processes::terminal::pane_id_valid(&app),
+            "one app pane: {app}"
+        );
         let theirs = pane.home.join("teammate");
         let mate = split_teammate(server, &app, &theirs);
         let moved = format!("select-pane -t {mate}");
@@ -365,7 +375,7 @@ mod own_turns {
         ];
         let mate = tmux_on(server, &[&split[..], &["/bin/sh", "-c", &script]].concat());
         assert!(
-            crate::terminal::pane_id_valid(&mate),
+            kernel_processes::terminal::pane_id_valid(&mate),
             "the split names its pane: {mate}"
         );
         let until = Instant::now() + Duration::from_secs(10);

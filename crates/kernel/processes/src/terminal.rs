@@ -1,0 +1,1293 @@
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+pub mod buffer;
+/// The host wrapper that keeps the last screen of a terminal the engine ended, read by
+/// a view that opens after it.
+pub mod kept;
+/// The engine's tmux terminal host on macOS and Linux and its native-lead servers.
+#[cfg(unix)]
+pub mod tmux;
+#[cfg(target_os = "windows")]
+pub mod windows;
+
+pub const AGENT_ID_BYTES_MAX: usize = 64;
+pub const INPUT_BYTES_MAX: usize = 4096;
+/// The marker that closes a bracketed paste. A program may read typed bytes per read, so
+/// no split of them cuts it (RV-DS241-69).
+pub const PASTE_CLOSE: &[u8] = b"\x1b[201~";
+pub const PROMPT_BYTES_MAX: usize = 4096;
+/// The most bytes one owner paste may hold once the engine gathered its `Paste` chunks, the
+/// most a native view copies.
+pub const PASTE_BYTES_MAX: usize = 1 << 20;
+const _: () = assert!(PASTE_BYTES_MAX.is_multiple_of(INPUT_BYTES_MAX));
+pub const CHUNK_BYTES_MAX: usize = 8192;
+pub const SIZE_MIN: u16 = 2;
+pub const SIZE_MAX: u16 = 1000;
+pub const STREAM_CHUNKS_MAX: usize = 256;
+pub const VIEWERS_MAX: usize = 8;
+/// The most terminal views the desktop holds at once over every window, its main window and
+/// the terminal wall windows together.
+pub const DESKTOP_VIEWS_MAX: usize = 32;
+/// The most terminal views the engine serves at once over every agent and client: the
+/// desktop's views plus `VIEWERS_MAX` for the terminal app and other clients.
+pub const CONNECTIONS_MAX: usize = VIEWERS_MAX + DESKTOP_VIEWS_MAX;
+pub const VIEWER_BUFFER_BYTES_MAX: usize = 1024 * 1024;
+pub const SCROLLBACK_LINES: u32 = 5000;
+pub const PASTE_SETTLE: Duration = Duration::from_millis(200);
+
+const _: () = assert!(VIEWER_BUFFER_BYTES_MAX >= CHUNK_BYTES_MAX * 16);
+
+/// One program a pane runs, free of harness types: its argument vector, its working folder
+/// and its environment, the fields of `InteractiveCommand` the host reads. Built by
+/// crazyagent from an `InteractiveCommand`. Inputs: the fields. Output: a value tmux and the
+/// Windows host launch unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneCommand {
+    pub argv: Vec<String>,
+    pub cwd: PathBuf,
+    pub env: Vec<(String, String)>,
+}
+
+/// The unit key of a terminal that is the agent's own alone, as a host with no shared window
+/// sizes it. Takes the agent. Returns the key, which no tmux window key equals, since those
+/// start with a socket path.
+pub fn agent_unit(agent: &AgentId) -> String {
+    format!("agent {agent}")
+}
+
+/// A terminal host failure as a stable lowercase code clients show in plain words.
+/// `terminal_unavailable` means the host cannot run at all, such as tmux missing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostError(pub String);
+
+impl std::fmt::Display for HostError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for HostError {}
+
+/// The most bytes a UTF-8 character holds after its first byte.
+const CHARACTER_TAIL_BYTES_MAX: usize = 3;
+/// The most bytes `input_runs` moves a run's end back to keep an escape sequence, such as a
+/// key, a mouse report or a closing paste marker, or a UTF-8 character whole. A sequence that
+/// starts further back is cut at the run size.
+pub const RUN_CUT_BACK_BYTES_MAX: usize = 64;
+const ESC: u8 = 0x1b;
+const BEL: u8 = 0x07;
+const _: () = assert!(RUN_CUT_BACK_BYTES_MAX >= PASTE_CLOSE.len());
+const _: () = assert!(RUN_CUT_BACK_BYTES_MAX > CHARACTER_TAIL_BYTES_MAX);
+
+/// The most runs `input_runs` cuts `length` bytes into at `run_bytes_max` bytes a run: every
+/// run but the last keeps at least `run_bytes_max - RUN_CUT_BACK_BYTES_MAX` bytes. Inputs:
+/// the length and the run size, over the back-off. Output: the bound.
+pub const fn input_runs_max(length: usize, run_bytes_max: usize) -> usize {
+    assert!(run_bytes_max > RUN_CUT_BACK_BYTES_MAX);
+    length.div_ceil(run_bytes_max - RUN_CUT_BACK_BYTES_MAX)
+}
+
+/// Splits typed bytes into runs of at most `run_bytes_max` bytes, in order. A run ends between
+/// tokens, never inside a UTF-8 character or an escape sequence (a key, a mouse report, a
+/// reply or a closing paste marker), so a program that reads per read never sees half of one
+/// and takes a lone ESC for the Escape key. Inputs: the bytes and the run
+/// size, over the back-off. Output: the runs, none for no bytes.
+pub fn input_runs(bytes: &[u8], run_bytes_max: usize) -> Vec<&[u8]> {
+    assert!(run_bytes_max > RUN_CUT_BACK_BYTES_MAX);
+    let mut runs = Vec::new();
+    let mut start = 0;
+    while start < bytes.len() {
+        let limit = start + run_bytes_max;
+        let end = if limit >= bytes.len() {
+            bytes.len()
+        } else {
+            run_end(&bytes[..=limit], start)
+        };
+        assert!(end > start);
+        assert!(end <= limit);
+        runs.push(&bytes[start..end]);
+        start = end;
+    }
+    assert!(runs.iter().all(|run| run.len() <= run_bytes_max));
+    assert!(runs.len() <= input_runs_max(bytes.len(), run_bytes_max));
+    assert_eq!(runs.concat(), bytes);
+    runs
+}
+
+/// Where a run that starts at `start` ends, given the bytes up to one past its size: at the
+/// last token end at most `RUN_CUT_BACK_BYTES_MAX` bytes back, else at the size moved back to
+/// a UTF-8 character's first byte. Inputs: that window and the start, where tokens are read
+/// from. Output: the end, past the start and at most the size.
+fn run_end(window: &[u8], start: usize) -> usize {
+    let limit = window.len() - 1;
+    assert!(limit > start + RUN_CUT_BACK_BYTES_MAX);
+    let mut boundary = start;
+    while boundary < limit {
+        let next = token_end(window, boundary);
+        if next > limit {
+            break;
+        }
+        boundary = next;
+    }
+    let end = if boundary + RUN_CUT_BACK_BYTES_MAX >= limit {
+        boundary
+    } else {
+        (limit - CHARACTER_TAIL_BYTES_MAX..=limit)
+            .rev()
+            .find(|&at| window[at] & 0xc0 != 0x80)
+            .unwrap_or(limit)
+    };
+    assert!(end > start);
+    assert!(end <= limit);
+    end
+}
+
+/// Where the typed token that starts at `at` ends: one UTF-8 character, or one escape
+/// sequence (CSI, an X10 mouse report, SS3 and one character, OSC or DCS up to BEL or ESC \,
+/// or ESC and one character). A sequence the bytes stop inside runs to their end. Inputs:
+/// the bytes and a position in them. Output: the end, past `at`.
+fn token_end(bytes: &[u8], at: usize) -> usize {
+    assert!(at < bytes.len());
+    let end = match (bytes[at], bytes.get(at + 1)) {
+        (ESC, Some(b'[')) => csi_end(bytes, at + 2),
+        (ESC, Some(b'O')) if at + 2 < bytes.len() => character_end(bytes, at + 2),
+        (ESC, Some(b'O')) => at + 2,
+        (ESC, Some(b']' | b'P')) => string_end(bytes, at + 2),
+        (ESC, Some(&ESC) | None) => at + 1,
+        (ESC, Some(_)) => character_end(bytes, at + 1),
+        _ => character_end(bytes, at),
+    };
+    assert!(end > at);
+    assert!(end <= bytes.len());
+    end
+}
+
+/// The end of a CSI whose parameters start at `from`: past its final byte, three bytes on
+/// for an X10 mouse report (`ESC [ M` and three raw bytes, as xterm.js sends them, never
+/// UTF-8), or before a byte no CSI holds. Inputs: the bytes and the position after `ESC [`.
+/// Output: the end.
+fn csi_end(bytes: &[u8], from: usize) -> usize {
+    let Some(tail) = bytes[from..]
+        .iter()
+        .position(|byte| !(0x20..=0x3f).contains(byte))
+    else {
+        return bytes.len();
+    };
+    let last = from + tail;
+    match bytes[last] {
+        b'M' if tail == 0 => (last + 4).min(bytes.len()),
+        0x40..=0x7e => last + 1,
+        _ => last,
+    }
+}
+
+/// The end of an OSC or DCS string whose body starts at `from`: past its BEL or its ESC \,
+/// or before any other ESC, which ends the string and starts the next sequence. Inputs: the
+/// bytes and the position after `ESC ]` or `ESC P`. Output: the end.
+fn string_end(bytes: &[u8], from: usize) -> usize {
+    let Some(stop) = bytes[from..]
+        .iter()
+        .position(|&byte| byte == BEL || byte == ESC)
+    else {
+        return bytes.len();
+    };
+    let at = from + stop;
+    match (bytes[at], bytes.get(at + 1)) {
+        (BEL, _) | (_, None) => at + 1,
+        (_, Some(b'\\')) => at + 2,
+        _ => at,
+    }
+}
+
+/// The end of the UTF-8 character that starts at `at`: past its continuation bytes, at most
+/// `CHARACTER_TAIL_BYTES_MAX` of them; a byte that is not UTF-8 ends alone. Inputs: the bytes
+/// and a position in them. Output: the end.
+fn character_end(bytes: &[u8], at: usize) -> usize {
+    let tail = bytes[at + 1..]
+        .iter()
+        .take(CHARACTER_TAIL_BYTES_MAX)
+        .take_while(|&&byte| byte & 0xc0 == 0x80)
+        .count();
+    at + 1 + tail
+}
+
+fn failure(code: &str) -> HostError {
+    HostError(code.into())
+}
+
+/// Names one agent's terminal: lowercase letters, digits and inner dashes, at most 64 bytes.
+/// A team agent is `team-<id>`; other engine parts choose their own prefix.
+/// The name survives engine restarts, so the host maps live terminals back to agents.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct AgentId(String);
+
+impl AgentId {
+    /// Checks a terminal name. Takes the text.
+    /// Returns the id, or `terminal_agent_invalid` for an empty, long or unsafe name.
+    pub fn new(text: &str) -> Result<Self, HostError> {
+        let bytes = text.as_bytes();
+        let valid = !bytes.is_empty()
+            && bytes.len() <= AGENT_ID_BYTES_MAX
+            && bytes
+                .iter()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+            && bytes[0] != b'-'
+            && bytes[bytes.len() - 1] != b'-';
+        if !valid {
+            return Err(failure("terminal_agent_invalid"));
+        }
+        Ok(Self(text.to_owned()))
+    }
+
+    /// Names a team agent's terminal. Takes the team agent id.
+    /// Returns `team-<id>`, or `terminal_agent_invalid` for an id below one.
+    pub fn team(agent: i64) -> Result<Self, HostError> {
+        if agent <= 0 {
+            return Err(failure("terminal_agent_invalid"));
+        }
+        Self::new(&format!("team-{agent}"))
+    }
+
+    /// Reads the team agent behind a terminal name. Takes the id.
+    /// Returns the team agent id for a `team-<id>` name, none for anything else.
+    pub fn team_agent(&self) -> Option<i64> {
+        let digits = self.0.strip_prefix("team-")?;
+        let agent: i64 = digits.parse().ok()?;
+        (agent > 0 && agent.to_string() == digits).then_some(agent)
+    }
+
+    /// Gives the name as text. Takes the id.
+    /// Returns the checked name.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for AgentId {
+    type Error = HostError;
+
+    fn try_from(text: String) -> Result<Self, HostError> {
+        Self::new(&text)
+    }
+}
+
+impl From<AgentId> for String {
+    fn from(id: AgentId) -> Self {
+        id.0
+    }
+}
+
+impl std::fmt::Display for AgentId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Where one spawned agent runs: its name, the host's own pane reference and the process id.
+/// The pane reference is opaque to callers, such as `%3` for tmux.
+/// The process id is the pane's first process, the harness or its sandbox wrapper.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneRef {
+    pub agent: AgentId,
+    pub pane: String,
+    pub pid: u32,
+}
+
+/// The most panes `Host::panes` lists for one agent terminal: the agent's own pane and the
+/// panes its app split off, such as Claude Code agent team teammates.
+pub const PANES_LISTED_MAX: usize = 32;
+const PANE_ID_DIGITS_MAX: usize = 9;
+
+/// One pane of an agent terminal's own window: the host's pane id, such as `%12`, the pane's
+/// first process id and whether its process already ended while the pane stays open.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneInfo {
+    pub id: String,
+    pub pid: u32,
+    pub dead: bool,
+}
+
+/// Tells whether a text is a host pane id: `%` and one to nine digits. Takes the text,
+/// which may come from a client. Returns true for a well formed id.
+pub fn pane_id_valid(id: &str) -> bool {
+    id.strip_prefix('%').is_some_and(|digits| {
+        (1..=PANE_ID_DIGITS_MAX).contains(&digits.len())
+            && digits.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+const VIEW_RESET: &[u8] =
+    b"\x1b[?1049l\x1b[?2004l\x1b[?1l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l";
+
+/// One viewer's live view of an agent's terminal: its size, the screen at attach, then output.
+/// `history`, written first, fills a fresh view's scrollback (empty when the host keeps none);
+/// `screen` then redraws the whole screen in a fresh `cols` by `rows` terminal. `next` gives
+/// later output in order, `Chunk::Behind` once the viewer lost output (the viewer then attaches
+/// again and writes that stream's `redraw`), and none once the terminal ends.
+#[derive(Debug)]
+pub struct TerminalStream {
+    pub agent: AgentId,
+    pub cols: u16,
+    pub rows: u16,
+    pub history: Vec<u8>,
+    pub screen: Vec<u8>,
+    pub chunks: buffer::Chunks,
+    #[cfg(unix)]
+    pub at: Option<PaneAt>,
+}
+
+/// The pane a view was attached to and the serial of the host connection that found it, so
+/// the view's keys can go straight to that pane while that same connection still serves it.
+/// Fields: the pane id and the connection serial, unique within the process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneAt {
+    pub pane: String,
+    pub serial: u64,
+}
+
+/// Types a view's keys: straight into the pane its stream was attached to when the host can
+/// still use it, else by the agent's name as `input` does. Takes the host the view was
+/// attached through, the view's pane, the agent and at most `INPUT_BYTES_MAX` bytes.
+/// Returns as `input`.
+#[cfg(unix)]
+pub fn type_into(
+    host: &dyn Host,
+    at: Option<&PaneAt>,
+    agent: &AgentId,
+    bytes: &[u8],
+) -> Result<(), HostError> {
+    if let Some(at) = at
+        && host.input_at(agent, at, bytes)?
+    {
+        return Ok(());
+    }
+    host.input(agent, bytes)
+}
+
+impl TerminalStream {
+    /// Waits for the next read. Takes the stream. Returns output of at most
+    /// `CHUNK_BYTES_MAX` bytes, `Chunk::Behind` once output was lost, or none once the
+    /// terminal ended.
+    pub async fn next(&mut self) -> Option<buffer::Chunk> {
+        self.chunks.recv().await
+    }
+
+    /// Waits for the next read outside an async runtime. Takes the stream. Returns as `next`.
+    pub fn next_blocking(&mut self) -> Option<buffer::Chunk> {
+        self.chunks.blocking_recv()
+    }
+
+    /// The bytes that bring a view that was already drawing this terminal back to its screen
+    /// now, after it fell behind: every mode a screen can turn on is turned off, then `screen`
+    /// redraws the whole screen with the modes the agent uses. Takes the stream. Returns them.
+    pub fn redraw(&self) -> Vec<u8> {
+        let mut bytes = VIEW_RESET.to_vec();
+        bytes.extend_from_slice(&self.screen);
+        bytes
+    }
+}
+
+/// Opens a fresh viewer in place of one that read `Chunk::Behind`, on a blocking thread, so
+/// the view goes on from the screen as it is now with nothing lost or repeated after it.
+/// Takes the host the old viewer came from and the terminal name. Returns the new stream,
+/// whose `redraw` the view writes first, or the host's code, such as `terminal_agent_unknown`.
+pub async fn attach_again(
+    host: Arc<dyn Host>,
+    agent: AgentId,
+) -> Result<TerminalStream, HostError> {
+    tokio::task::spawn_blocking(move || host.attach(&agent))
+        .await
+        .map_err(|_| failure("terminal_unavailable"))?
+}
+
+/// Runs every agent's interactive app in a real terminal that outlives the engine and its viewers.
+/// macOS and Linux use the engine's private tmux server; Windows has its own host behind this trait.
+/// Every method fails with `terminal_unavailable` when the host cannot run on this machine.
+pub trait Host: Send + Sync {
+    /// Starts one agent's command in a new terminal named after the agent.
+    /// Takes the name and the sandboxed command; fails with `terminal_agent_running` for a live name.
+    /// Returns where it runs.
+    fn spawn(&self, agent: &AgentId, command: &PaneCommand) -> Result<PaneRef, HostError>;
+
+    /// Opens one viewer on a live agent terminal.
+    /// Takes the name; fails with `terminal_agent_unknown` when no such terminal runs.
+    /// Returns the screen and the live output after it, with nothing lost or repeated between them.
+    fn attach(&self, agent: &AgentId) -> Result<TerminalStream, HostError>;
+
+    /// Reads the visible screen of a live agent terminal without opening a viewer and
+    /// without its scrollback. Takes the name; fails like `attach` for an unknown name.
+    /// Returns the screen as `attach` draws it.
+    fn screen(&self, agent: &AgentId) -> Result<Vec<u8>, HostError> {
+        self.snapshot(agent).map(|stream| stream.screen)
+    }
+
+    /// Reads the size and visible screen of a live agent terminal without opening a viewer
+    /// and without its scrollback. Takes the name; fails like `attach` for an unknown name.
+    /// Returns them as a stream; a host that reads only through a viewer returns that viewer.
+    fn snapshot(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
+        self.attach(agent)
+    }
+
+    /// Tells whether this host still keeps the last screen of an agent terminal it ended,
+    /// which `attach` then opens as a finished view with no live output after it. Takes the
+    /// name. Returns false for a live or unknown name and always for a host that keeps none.
+    fn kept(&self, _agent: &AgentId) -> bool {
+        false
+    }
+
+    /// Keeps the last screen of an agent terminal that is about to end some other way than
+    /// `kill`, as when its keeper empties its sandbox first, so `attach` still opens how it
+    /// finished. Takes the name. Returns nothing; a host that keeps no screens, or a
+    /// terminal already gone, keeps none.
+    fn keep_last(&self, _agent: &AgentId) {}
+
+    /// Types bytes into an agent terminal exactly as given, control keys included.
+    /// Takes the name and at most `INPUT_BYTES_MAX` bytes.
+    /// Returns once the host accepted them.
+    fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError>;
+
+    /// Types bytes straight into the pane a view of this agent was attached to, with no
+    /// lookup, while the connection that found that pane still serves it. Takes the name,
+    /// the pane from the view's stream and at most `INPUT_BYTES_MAX` bytes. Returns true
+    /// once typed, false when this host cannot use that pane and the caller types by name.
+    fn input_at(&self, _agent: &AgentId, _at: &PaneAt, _bytes: &[u8]) -> Result<bool, HostError> {
+        Ok(false)
+    }
+
+    /// The pane an input-only view of an agent stays on: the agent's own pane now, the one
+    /// `attach` would view, and the serial of the connection that found it. Takes the name.
+    /// Returns the pane, `terminal_agent_unknown` once the terminal is gone, or
+    /// `terminal_unavailable` for a host with no pane ids, whose views type by name.
+    fn own_pane_at(&self, _agent: &AgentId) -> Result<PaneAt, HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
+    /// Marks the pane of an agent's window whose first process is `pid` as the agent's app
+    /// pane, the one its prompts go to, for a pane an older engine started without that mark.
+    /// Takes the name and the pid its pane record kept. Returns Ok once marked, at once on a
+    /// host with no pane ids, or `APP_PANE_UNKNOWN` when no live pane has that pid.
+    fn tag_app(&self, _agent: &AgentId, _pid: u32) -> Result<(), HostError> {
+        Ok(())
+    }
+
+    /// The pane an agent's prompts go to: its app's own pane, never a teammate split off its
+    /// window, and the serial of the connection that found it. Takes the name. Returns the
+    /// pane, `APP_PANE_UNKNOWN` when no pane is known to be the app's, or `PINS_UNSUPPORTED`
+    /// for a host with no pane ids, whose prompts type by name.
+    fn app_pane_at(&self, _agent: &AgentId) -> Result<PaneAt, HostError> {
+        Err(failure(PINS_UNSUPPORTED))
+    }
+
+    /// Pastes keys straight into the pane a view stays on, as `paste` does by name, while the
+    /// connection that found that pane still serves it. Takes the name, the pane and 1 to
+    /// `PASTE_BYTES_MAX` keys. Returns true once pasted, false when this host cannot use it.
+    fn paste_at(&self, _agent: &AgentId, _at: &PaneAt, _keys: &[u8]) -> Result<bool, HostError> {
+        Ok(false)
+    }
+
+    /// Sizes the window of the pane a view stays on, as `resize` does by name, while the
+    /// connection that found that pane still serves it. Takes the name, the pane and the
+    /// size. Returns true once sized, false when this host cannot use that pane.
+    fn resize_at(
+        &self,
+        _agent: &AgentId,
+        _at: &PaneAt,
+        _size: (u16, u16),
+    ) -> Result<bool, HostError> {
+        Ok(false)
+    }
+
+    /// Names what a resize of the agent sizes, one key for every view whose resize sizes the
+    /// same thing, so the engine counts them together: by default the agent's own terminal.
+    /// Takes the name. Returns the unit's key.
+    fn unit(&self, agent: &AgentId) -> Result<String, HostError> {
+        Ok(agent_unit(agent))
+    }
+
+    /// Tells whether the app in an agent terminal reads keys itself yet: interactive apps
+    /// turn on bracketed paste once their own input is live, and keys typed before that
+    /// go through the terminal's line editing, which turns Enter into a newline.
+    /// Takes the name. Returns true once it is on, and always for a host that cannot tell.
+    fn input_live(&self, _agent: &AgentId) -> Result<bool, HostError> {
+        Ok(true)
+    }
+
+    /// Tells whether bracketed paste is on in the pane a view or a prompt stays on, as
+    /// `input_live` tells it by name, while the connection that found that pane still serves
+    /// it. Takes the name and the pane. Returns the answer, none when this host cannot use
+    /// that pane, or the answer by name on a host with no pane ids.
+    fn input_live_at(&self, agent: &AgentId, _at: &PaneAt) -> Result<Option<bool>, HostError> {
+        self.input_live(agent).map(Some)
+    }
+
+    /// Reads how long an agent terminal's app has drawn nothing: a working harness redraws
+    /// its spinner every second, so a quiet terminal means its app waits.
+    /// Takes the name. Returns the time, or none when this host cannot tell, which keeps
+    /// the engine from typing into that terminal.
+    fn quiet(&self, _agent: &AgentId) -> Result<Option<Duration>, HostError> {
+        Ok(None)
+    }
+
+    /// Sets an agent terminal's size for its app and every viewer.
+    /// Takes the name, columns and rows, each from `SIZE_MIN` to `SIZE_MAX`.
+    /// Returns once the host applied it.
+    fn resize(&self, agent: &AgentId, cols: u16, rows: u16) -> Result<(), HostError>;
+
+    /// Ends an agent terminal and the processes in it.
+    /// Takes the name; an unknown name fails with `terminal_agent_unknown`.
+    /// Returns once the terminal is gone.
+    fn kill(&self, agent: &AgentId) -> Result<(), HostError>;
+
+    /// Lists the panes of an agent terminal's own window, at most `PANES_LISTED_MAX`, in
+    /// the host's order. Takes the name; an unknown name fails with `terminal_agent_unknown`.
+    /// Returns the panes; a host without split panes fails with `terminal_unavailable`.
+    fn panes(&self, _agent: &AgentId) -> Result<Vec<PaneInfo>, HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
+    /// Ends one pane of an agent terminal's own window and the processes in it, never the
+    /// window's last pane. Takes the name and a pane id `panes` listed; a pane of another
+    /// window fails with `terminal_pane_unknown`. Returns once the pane is gone.
+    fn kill_pane(&self, _agent: &AgentId, _pane: &str) -> Result<(), HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
+    /// Opens one viewer on one pane of an agent terminal's own window, such as a teammate
+    /// its app split off. Takes the name and a pane id `panes` lists; a pane of another
+    /// window fails with `terminal_pane_unknown`. Returns the stream as `attach` does.
+    fn attach_pane(&self, _agent: &AgentId, _pane: &str) -> Result<TerminalStream, HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
+    /// Reads one pane's size and visible screen without opening a viewer. Takes the name and
+    /// the pane id. Returns them as `snapshot` does, or fails as `attach_pane` does.
+    fn snapshot_pane(&self, _agent: &AgentId, _pane: &str) -> Result<TerminalStream, HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
+    /// Types bytes into one pane exactly as given. Takes the name, the pane id and at most
+    /// `INPUT_BYTES_MAX` bytes. Returns once the host accepted them.
+    fn input_pane(&self, _agent: &AgentId, _pane: &str, _bytes: &[u8]) -> Result<(), HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
+    /// Tells whether the app in one pane reads keys itself yet, as `input_live` does for the
+    /// agent's own pane. Takes the name and the pane id. Returns the answer.
+    fn input_live_pane(&self, _agent: &AgentId, _pane: &str) -> Result<bool, HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
+    /// Pastes the owner's keys into the agent's own pane as one paste, bracketed only when
+    /// its app turned bracketed paste on. Takes the name and keys from `paste_keys`, 1 to
+    /// `PASTE_BYTES_MAX` bytes. Returns once the host took them all, or
+    /// `terminal_paste_unsupported` from a host that cannot paste.
+    fn paste(&self, _agent: &AgentId, _keys: &[u8]) -> Result<(), HostError> {
+        Err(failure("terminal_paste_unsupported"))
+    }
+
+    /// Pastes the owner's keys into one pane as `paste` does into the agent's own pane.
+    /// Takes the name, the pane id and the keys. Returns as `paste`.
+    fn paste_pane(&self, _agent: &AgentId, _pane: &str, _keys: &[u8]) -> Result<(), HostError> {
+        Err(failure("terminal_paste_unsupported"))
+    }
+
+    /// Gives a native teammate's pane its own name, so later calls by that
+    /// name, `kill` included, reach that one pane of its lead's own server. Calling it again
+    /// for the same pane changes nothing, so discovery may repeat it each pass and an engine
+    /// restart relearns the name. Takes the teammate, its lead and a pane id the lead's
+    /// `panes` lists other than the lead's own. Returns Ok, `terminal_pane_unknown`, or
+    /// `terminal_own_server_unavailable` when the lead has no server of its own.
+    fn adopt_pane(&self, _agent: &AgentId, _lead: &AgentId, _pane: &str) -> Result<(), HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
+    /// Starts a native-mode lead in a tmux server of its own, started inside the Seatbelt
+    /// profile its sandboxed command names, so every pane it splits off for a teammate runs
+    /// under that profile and the lead never reaches the engine's own server. Takes the
+    /// name and the command. Returns where it runs, or `terminal_own_server_unavailable`
+    /// where no such server can run.
+    fn spawn_own_server(
+        &self,
+        _agent: &AgentId,
+        _command: &PaneCommand,
+    ) -> Result<PaneRef, HostError> {
+        Err(failure(OWN_SERVER_UNAVAILABLE))
+    }
+    /// Names the first process of a live agent terminal's own pane as the host reads it while
+    /// the terminal runs, so a caller holding no session for it can end what its harness left:
+    /// on a lead's server the pane tagged with the agent's name, else its window's first pane.
+    /// Takes the name; an unknown name fails with `terminal_agent_unknown`. Returns the
+    /// process id, or none for a host that cannot tell.
+    fn pane_pid(&self, _agent: &AgentId) -> Result<Option<u32>, HostError> {
+        Ok(None)
+    }
+
+    /// Whether this host runs an agent's pane without a keeper, as a native lead's own server
+    /// does that runs inside the lead's sandbox with no server keeper, such as one an earlier
+    /// engine started: no warden then ends what the pane's agent started, so its stop is
+    /// judged by the processes still found. Takes the name. Returns the answer; false for a
+    /// host that runs each pane as given or knows the keeper of the agent's server.
+    fn unkept(&self, _agent: &AgentId) -> bool {
+        false
+    }
+
+    /// Ends an agent's own server through the keeper this host started it under, as a native
+    /// lead's own server runs (KEEPER (b)): the keeper's warden kills every process in the
+    /// agent's sandbox, the server and its panes included, and the keeper exits only once the
+    /// warden confirmed that. Takes the name. Returns whether the keeper confirmed in time,
+    /// or none when the host knows no keeper for the agent, as for a server an earlier engine
+    /// started.
+    fn end_kept_server(&self, _agent: &AgentId) -> Option<bool> {
+        None
+    }
+
+    /// The keepers of a native lead's own and teammates' servers this host started, each as
+    /// its process id and whether it keeps the teammates' server, so a quitting engine can
+    /// freeze both. Takes the name. Returns them, own first; none for a host that
+    /// started no server for the agent.
+    fn server_keepers(&self, _agent: &AgentId) -> Vec<(u32, bool)> {
+        Vec::new()
+    }
+
+    /// Lists the agent terminals still running, reconnecting to the host first when needed.
+    /// Takes nothing; after an engine restart this maps surviving terminals back to their agents.
+    /// Returns the names in order.
+    fn alive(&self) -> Result<Vec<AgentId>, HostError>;
+
+    /// Ends every terminal except `keep`, as the engine quits.
+    /// Takes the terminals that stay running, such as a master the owner keeps alive.
+    /// Returns once the rest ended; with nothing kept, the host leaves nothing behind.
+    fn close(&self, keep: &[AgentId]) -> Result<(), HostError> {
+        end_except(self, keep)
+    }
+
+    /// Moves the time each server of this host ends at once no engine renews it (FBTMUX-P1),
+    /// so a server whose engine never comes back does not run forever. Takes the deadline.
+    /// Returns the first failure; a host with no server outliving the engine has nothing to
+    /// renew.
+    fn renew(&self, _until: SystemTime) -> Result<(), HostError> {
+        Ok(())
+    }
+}
+
+/// The refusal for a native-mode lead on a host that cannot start a tmux server inside the
+/// lead's sandbox: Linux, Windows, or a missing tmux.
+pub const OWN_SERVER_UNAVAILABLE: &str = "terminal_own_server_unavailable";
+
+/// The refusal for a team pane call on a native lead whose latest start named a teammates'
+/// server that no longer accepts connections; its pane ids are never read on another server.
+pub const TEAMMATES_SERVER_ENDED: &str = "terminal_teammates_server_ended";
+
+/// Whether a host's code says the terminal a view or a call asked for ended for good: no
+/// server holds the agent (`terminal_agent_unknown`), or the teammates' server a native
+/// lead's team panes were on ended ([`TEAMMATES_SERVER_ENDED`]), as once both of that lead's
+/// servers ended. Takes the code. Returns the answer.
+pub fn ended_code(code: &str) -> bool {
+    matches!(code, "terminal_agent_unknown" | TEAMMATES_SERVER_ENDED)
+}
+
+/// What a host with no pane ids answers for an agent's app pane, so its prompts type by name.
+/// No tmux host answers it, so a failed connect fails the prompt instead.
+pub const PINS_UNSUPPORTED: &str = "terminal_pins_unsupported";
+
+/// The refusal for a prompt to an agent whose app pane is not known while its window lives: a
+/// split window with no tag, an app pane gone beside a teammate, or a request's pin gone
+/// stale. Not an ended terminal, so a view stays and coord holds the message.
+pub const APP_PANE_UNKNOWN: &str = "terminal_app_pane_unknown";
+
+/// The refusal for a native lead's teammates' socket answered by a server under another pid
+/// than the one the engine first reached there (PLC c).
+pub const TEAMMATES_SERVER_REPLACED: &str = "terminal_teammates_server_replaced";
+
+/// A view of one pane of an agent terminal's own window, such as a native teammate's, as a
+/// terminal of its own: viewing, typing and reading go to that pane, a resize sizes the
+/// window the pane sits in, and ending it ends only that pane, never the window's last.
+struct PaneView {
+    host: Arc<dyn Host>,
+    pane: String,
+}
+
+/// Opens a view of one pane of an agent terminal's own window as a terminal of its own, so
+/// a viewer attaches, types and resizes it as it would an agent's terminal. Takes the host
+/// and a pane id. Returns the view, or `terminal_pane_unknown` for a malformed id.
+pub fn pane_view(host: Arc<dyn Host>, pane: &str) -> Result<Arc<dyn Host>, HostError> {
+    if !pane_id_valid(pane) {
+        return Err(failure("terminal_pane_unknown"));
+    }
+    Ok(Arc::new(PaneView {
+        host,
+        pane: pane.to_owned(),
+    }))
+}
+
+impl Host for PaneView {
+    fn spawn(&self, _agent: &AgentId, _command: &PaneCommand) -> Result<PaneRef, HostError> {
+        Err(failure("terminal_unavailable"))
+    }
+
+    fn attach(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
+        self.host.attach_pane(agent, &self.pane)
+    }
+
+    fn snapshot(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
+        self.host.snapshot_pane(agent, &self.pane)
+    }
+
+    fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
+        self.host.input_pane(agent, &self.pane, bytes)
+    }
+    fn input_at(&self, agent: &AgentId, at: &PaneAt, bytes: &[u8]) -> Result<bool, HostError> {
+        if at.pane != self.pane {
+            return Ok(false);
+        }
+        self.host.input_at(agent, at, bytes)
+    }
+
+    fn input_live(&self, agent: &AgentId) -> Result<bool, HostError> {
+        self.host.input_live_pane(agent, &self.pane)
+    }
+
+    fn input_live_at(&self, agent: &AgentId, at: &PaneAt) -> Result<Option<bool>, HostError> {
+        if at.pane != self.pane {
+            return Ok(None);
+        }
+        self.host.input_live_at(agent, at)
+    }
+
+    fn paste(&self, agent: &AgentId, keys: &[u8]) -> Result<(), HostError> {
+        self.host.paste_pane(agent, &self.pane, keys)
+    }
+
+    fn quiet(&self, agent: &AgentId) -> Result<Option<Duration>, HostError> {
+        self.host.quiet(agent)
+    }
+
+    fn resize(&self, agent: &AgentId, cols: u16, rows: u16) -> Result<(), HostError> {
+        self.host.resize(agent, cols, rows)
+    }
+
+    fn unit(&self, agent: &AgentId) -> Result<String, HostError> {
+        self.host.unit(agent)
+    }
+
+    fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
+        self.host.kill_pane(agent, &self.pane)
+    }
+
+    fn unkept(&self, agent: &AgentId) -> bool {
+        self.host.unkept(agent)
+    }
+
+    fn alive(&self) -> Result<Vec<AgentId>, HostError> {
+        self.host.alive()
+    }
+
+    fn close(&self, _keep: &[AgentId]) -> Result<(), HostError> {
+        Ok(())
+    }
+}
+
+/// Ends every live terminal of a host that is not in `keep`.
+/// Takes the host and the names to keep; a terminal that ended meanwhile is skipped.
+/// Returns the first other failure.
+pub fn end_except(host: &(impl Host + ?Sized), keep: &[AgentId]) -> Result<(), HostError> {
+    for agent in host.alive()? {
+        if keep.contains(&agent) {
+            continue;
+        }
+        match host.kill(&agent) {
+            Ok(()) => {}
+            Err(problem) if problem.0 == "terminal_agent_unknown" => {}
+            Err(problem) => return Err(problem),
+        }
+    }
+    Ok(())
+}
+
+/// Leaves the host as the engine stops: while the owner keeps team agents running when
+/// CrazyAgent quits, their terminals keep running for the next engine to take over and every
+/// other terminal ends; otherwise every terminal ends. With no team agent kept the host
+/// leaves nothing behind. Takes the host, one that cannot run having nothing to end, and
+/// whether team agents keep running (the owner's quit settings). Returns the
+/// host's first failure.
+pub fn quit(host: &(impl Host + ?Sized), keep_team_agents: bool) -> Result<(), HostError> {
+    let alive = match host.alive() {
+        Ok(alive) => alive,
+        Err(problem) if problem.0 == "terminal_unavailable" => return Ok(()),
+        Err(problem) => return Err(problem),
+    };
+    let keep: Vec<AgentId> = alive
+        .into_iter()
+        .filter(|agent| keep_team_agents && agent.team_agent().is_some())
+        .collect();
+    host.close(&keep)
+}
+
+/// Types one prompt's keys as one submission through the given typing: the keys in chunks of
+/// at most `INPUT_BYTES_MAX`, a settle when they went as a paste, then Enter. Takes the text,
+/// whether the app turned bracketed paste on and the typing. Returns whether it was typed;
+/// blank or oversized text types nothing.
+fn prompt_into(
+    text: &str,
+    bracketed: bool,
+    mut typing: impl FnMut(&[u8]) -> Result<(), HostError>,
+) -> Result<bool, HostError> {
+    let Some(keys) = prompt_keys(text, bracketed) else {
+        return Ok(false);
+    };
+    for chunk in keys.chunks(INPUT_BYTES_MAX) {
+        typing(chunk)?;
+    }
+    if bracketed {
+        std::thread::sleep(PASTE_SETTLE);
+    }
+    typing(b"\r")?;
+    Ok(true)
+}
+
+/// The keys that type one owner prompt into an agent's app, before its Enter. Control
+/// characters other than newline and tab are dropped, so the prompt cannot press keys or end
+/// a paste. With bracketed paste on, the text goes as one paste with carriage returns between
+/// lines, as a terminal pastes; with it off every line break would be an Enter, so lines join
+/// with spaces. Takes the text and whether the app turned bracketed paste on.
+/// Returns the keys, or none for blank text or text over `PROMPT_BYTES_MAX` bytes.
+pub fn prompt_keys(text: &str, bracketed: bool) -> Option<Vec<u8>> {
+    if text.len() > PROMPT_BYTES_MAX {
+        return None;
+    }
+    let clean: String = text
+        .replace("\r\n", "\n")
+        .chars()
+        .map(|character| if character == '\r' { '\n' } else { character })
+        .filter(|character| matches!(character, '\n' | '\t') || !character.is_control())
+        .collect();
+    let clean = clean.trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let keys = if bracketed {
+        format!("\x1b[200~{}\x1b[201~", clean.replace('\n', "\r"))
+    } else {
+        clean
+            .split('\n')
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    assert!(!keys.contains('\n'));
+    Some(keys.into_bytes())
+}
+
+/// The keys one owner paste types, filtered here at the trust boundary as the desktop's
+/// `pasteText` filters it: every control character (C0, DEL and C1) is dropped except tab,
+/// line feed and carriage return, then CR LF and LF become CR, as a terminal sends Enter, so
+/// a paste can never press Escape, end a bracketed paste or send a Ctrl key. Takes the
+/// pasted text. Returns the keys, empty when nothing is left.
+pub fn paste_keys(text: &str) -> Vec<u8> {
+    let kept: String = text
+        .chars()
+        .filter(|character| matches!(character, '\t' | '\n' | '\r') || !character.is_control())
+        .collect();
+    let keys = kept.replace("\r\n", "\r").replace('\n', "\r");
+    assert!(!keys.contains('\x1b') && !keys.contains('\n') && !keys.contains('\0'));
+    assert!(keys.len() <= text.len());
+    keys.into_bytes()
+}
+
+/// Types one prompt into an agent's app as one submission: a paste when the app turned
+/// bracketed paste on, then Enter once the paste settled, all into the app's own pane, found
+/// once, or by name on a host with no pane ids. Takes the host, the
+/// terminal name and the text. Returns whether it was typed; blank or oversized text types
+/// nothing.
+pub fn type_prompt(host: &dyn Host, agent: &AgentId, text: &str) -> Result<bool, HostError> {
+    if let Some(at) = request_pin(host, agent)? {
+        return prompt_pinned(host, agent, &at, text, APP_PANE_UNKNOWN);
+    }
+    let bracketed = host.input_live(agent)?;
+    prompt_into(text, bracketed, |keys| host.input(agent, keys))
+}
+
+/// Types one prompt into a view's pinned pane, as `type_prompt` does, never by name. Takes the
+/// host, the terminal name, the pane and the text. Returns as `type_prompt`, or
+/// `terminal_agent_unknown` once that pane is no longer one the host can type into, which ends
+/// the view so it opens again with a fresh pin, as its other pinned sends do.
+#[cfg(unix)]
+pub fn type_prompt_at(
+    host: &dyn Host,
+    agent: &AgentId,
+    at: &PaneAt,
+    text: &str,
+) -> Result<bool, HostError> {
+    prompt_pinned(host, agent, at, text, "terminal_agent_unknown")
+}
+
+/// Types one prompt's keys and Enter into a pinned pane, the paste mode read from that pane.
+/// Takes the host, the name, the pin, the text and the code a stale pin answers. Returns as
+/// `type_prompt`, or that code once the pin is stale.
+fn prompt_pinned(
+    host: &dyn Host,
+    agent: &AgentId,
+    at: &PaneAt,
+    text: &str,
+    stale: &'static str,
+) -> Result<bool, HostError> {
+    assert!(pane_id_valid(&at.pane), "a pin is a pane id");
+    assert!(
+        at.serial > 0,
+        "a pin names the control connection that found it"
+    );
+    let Some(bracketed) = host.input_live_at(agent, at)? else {
+        return Err(failure(stale));
+    };
+    prompt_into(text, bracketed, |keys| {
+        type_piece(host, agent, Some(at), keys, stale)
+    })
+}
+
+/// The pane one engine prompt goes to, found once so every piece of it lands in one pane:
+/// the agent's app pane, or none only on a host that answers
+/// `PINS_UNSUPPORTED`, which types by name. Takes the host and the name. Returns the pin,
+/// none, or the host's error, such as `APP_PANE_UNKNOWN` or a failed connect.
+pub fn request_pin(host: &dyn Host, agent: &AgentId) -> Result<Option<PaneAt>, HostError> {
+    match host.app_pane_at(agent) {
+        Ok(at) => Ok(Some(at)),
+        Err(problem) if problem.0 == PINS_UNSUPPORTED => Ok(None),
+        Err(problem) => Err(problem),
+    }
+}
+
+/// Types one piece of a request into the pane the request was pinned to, or by name with no
+/// pin. Takes the host, the name, the pin, at most `INPUT_BYTES_MAX` bytes and the code a
+/// stale pin answers: `APP_PANE_UNKNOWN` for a request's pin, `terminal_agent_unknown` for a
+/// view's. Returns once typed, or that code, never typing by name instead.
+pub fn type_piece(
+    host: &dyn Host,
+    agent: &AgentId,
+    pin: Option<&PaneAt>,
+    bytes: &[u8],
+    stale: &'static str,
+) -> Result<(), HostError> {
+    assert!(
+        bytes.len() <= INPUT_BYTES_MAX,
+        "a piece fits one input request"
+    );
+    assert!(
+        matches!(stale, APP_PANE_UNKNOWN | "terminal_agent_unknown"),
+        "a stale pin refuses the request or ends the view"
+    );
+    let Some(at) = pin else {
+        return host.input(agent, bytes);
+    };
+    assert!(pane_id_valid(&at.pane), "a pin is a pane id");
+    match host.input_at(agent, at, bytes)? {
+        true => Ok(()),
+        false => Err(failure(stale)),
+    }
+}
+
+#[cfg(unix)]
+/// How often a running engine moves its terminal servers' deadlines ahead (FBTMUX-P1).
+pub const RENEW_EVERY: Duration = Duration::from_secs(60);
+
+/// Where a native lead's sockets and records live, as the team's state layout names them:
+/// the agent's home, its short temp folder, and the teammates' socket name, the teammates'
+/// server pid and the servers' deadline records. Built once by crazyagent. Inputs: the
+/// fields. Output: a value the lead socket and record functions read.
+#[derive(Clone, Copy)]
+pub struct LeadPaths {
+    pub agent_home: fn(&Path, i64) -> PathBuf,
+    pub tmp_path: fn(&Path) -> PathBuf,
+    pub agent_teammates_socket_name: fn(&Path, i64) -> PathBuf,
+    pub agent_teammates_server_pid: fn(&Path, i64) -> PathBuf,
+    pub agent_servers_deadline: fn(&Path, i64) -> PathBuf,
+}
+
+pub const HARNESS_SOCKET: &str = "tmux.sock";
+/// The start of a native lead's teammates' socket name: each lead start names a new one,
+/// `teammates-` and 16 hex digits then `.sock`, beside the lead's own.
+pub const TEAMMATES_SOCKET_PREFIX: &str = "teammates-";
+#[cfg(unix)]
+const TEAMMATES_SOCKET_SUFFIX: &str = ".sock";
+#[cfg(unix)]
+const TEAMMATES_NONCE_BYTES: usize = 8;
+#[cfg(unix)]
+const TEAMMATES_NAME_BYTES: usize =
+    TEAMMATES_SOCKET_PREFIX.len() + 2 * TEAMMATES_NONCE_BYTES + TEAMMATES_SOCKET_SUFFIX.len();
+/// The most bytes a teammates' server pid record holds: the socket's name, a space and the
+/// ten digits of the largest pid.
+#[cfg(unix)]
+const TEAMMATES_PIN_BYTES_MAX: usize = TEAMMATES_NAME_BYTES + 1 + 10;
+/// What a teammates' server pid record holds after the socket's name until the server first
+/// answers.
+#[cfg(unix)]
+const TEAMMATES_PIN_PENDING: &str = "pending";
+/// The most digits a lead's servers' deadline record holds, as a server keeper
+/// reads it: every time a system clock gives fits (FBTMUX-P1-R1-L1).
+#[cfg(unix)]
+const SERVERS_DEADLINE_DIGITS_MAX: usize = 19;
+const HARNESS_SOCKET_BYTES_MAX: usize = 104;
+
+/// The socket of a native-mode lead's own tmux server: `tmux.sock` in the lead's short private
+/// temp folder, which only that lead's sandbox may bind or reach, never the engine's server.
+/// The engine reaches it only through a tmux client started inside the lead's own profile,
+/// since a tmux server can make any client run a command; never connect a plain client.
+/// Takes the engine root and the lead. Returns the path, or `terminal_agent_invalid` for a
+/// name that is not a team agent.
+pub fn harness_socket(
+    engine_root: &Path,
+    lead: &AgentId,
+    paths: &LeadPaths,
+) -> Result<PathBuf, HostError> {
+    lead_temp_socket(engine_root, lead, HARNESS_SOCKET, paths)
+}
+
+/// The socket of a native lead's teammates' own tmux server (rv-audit S1 F1), in the lead's
+/// short private temp folder under the name its latest start chose (see
+/// [`renew_teammates_socket`]). That server and every teammate pane it forks run in the
+/// teammates' profile, which serves this socket but never reaches or unlinks it, nor the
+/// lead's own; the lead and the engine's clients reach it inside the lead's profile. Takes
+/// the engine root and the lead. Returns the path, `terminal_agent_invalid` for a name that
+/// is not a team agent, or `terminal_own_server_unavailable` when no plain name is kept.
+#[cfg(unix)]
+pub fn teammates_socket(
+    engine_root: &Path,
+    lead: &AgentId,
+    paths: &LeadPaths,
+) -> Result<PathBuf, HostError> {
+    use std::os::unix::fs::MetadataExt;
+    let id = lead
+        .team_agent()
+        .ok_or_else(|| failure("terminal_agent_invalid"))?;
+    let kept = (paths.agent_teammates_socket_name)(&engine_root.join("team"), id);
+    let unavailable = || failure(OWN_SERVER_UNAVAILABLE);
+    let plain = std::fs::symlink_metadata(&kept).is_ok_and(|metadata| {
+        metadata.is_file()
+            && metadata.uid() == rustix::process::getuid().as_raw()
+            && u64::try_from(TEAMMATES_NAME_BYTES).is_ok_and(|bytes| metadata.len() == bytes)
+    });
+    if !plain {
+        return Err(unavailable());
+    }
+    let name = std::fs::read_to_string(&kept).map_err(|_| unavailable())?;
+    if !teammates_name_valid(&name) {
+        return Err(unavailable());
+    }
+    lead_temp_socket(engine_root, lead, &name, paths)
+}
+
+/// Names a new socket for a native lead's teammates' server as the lead starts and keeps
+/// the name in the engine's own profiles folder, so no path a teammate's profile ever
+/// served is reused: a teammate still running from an earlier start cannot bind a listener
+/// where the lead's tmux clients now connect. The pin record is marked pending for the new
+/// name in the same step, so one that later goes missing or names another socket is refused
+/// (PLCC-L1). Takes the engine root and the lead, whose profiles folder must exist. Returns
+/// the new path, or a plain code.
+#[cfg(unix)]
+pub fn renew_teammates_socket(
+    engine_root: &Path,
+    lead: &AgentId,
+    paths: &LeadPaths,
+) -> Result<PathBuf, HostError> {
+    let id = lead
+        .team_agent()
+        .ok_or_else(|| failure("terminal_agent_invalid"))?;
+    let mut nonce = [0_u8; TEAMMATES_NONCE_BYTES];
+    getrandom::fill(&mut nonce).map_err(|_| failure(OWN_SERVER_UNAVAILABLE))?;
+    let digits: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let name = format!("{TEAMMATES_SOCKET_PREFIX}{digits}{TEAMMATES_SOCKET_SUFFIX}");
+    assert!(teammates_name_valid(&name));
+    keep_record(
+        &(paths.agent_teammates_socket_name)(&engine_root.join("team"), id),
+        &name,
+    )?;
+    let pending = format!("{name} {TEAMMATES_PIN_PENDING}");
+    assert!(pending.len() <= TEAMMATES_PIN_BYTES_MAX);
+    keep_record(
+        &(paths.agent_teammates_server_pid)(&engine_root.join("team"), id),
+        &pending,
+    )?;
+    lead_temp_socket(engine_root, lead, &name, paths)
+}
+
+/// Writes one engine record in the profiles folder no agent writes, in place of any earlier
+/// one: a staged file only this user reads, under a random name of its own so no other
+/// writer's staged file is met or removed (RV-DS241-22), renamed over the record so no
+/// reader sees part of it. Takes the record path and its text. Returns Ok, or
+/// `terminal_own_server_unavailable`.
+#[cfg(unix)]
+fn keep_record(kept: &Path, text: &str) -> Result<(), HostError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    const STAGING_NONCE_BYTES: usize = 16;
+    let mut nonce = [0_u8; STAGING_NONCE_BYTES];
+    getrandom::fill(&mut nonce).map_err(|_| failure(OWN_SERVER_UNAVAILABLE))?;
+    let digits: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    assert_eq!(digits.len(), 2 * STAGING_NONCE_BYTES);
+    let staging = kept.with_extension(format!("{digits}.tmp"));
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(&staging)
+    else {
+        return Err(failure(OWN_SERVER_UNAVAILABLE));
+    };
+    let written = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| std::fs::rename(&staging, kept));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&staging);
+        return Err(failure(OWN_SERVER_UNAVAILABLE));
+    }
+    Ok(())
+}
+
+/// The pid a native lead's teammates' server at one socket was pinned to (PLC c, PC-L1),
+/// read without following a link from the record beside the socket's name, which outlives
+/// the engine and a kill of the lead. Takes the engine root, the lead and the socket.
+/// Returns the pid, none while the record is pending for this socket, or
+/// `terminal_own_server_unavailable` for a record that is missing, names another socket or
+/// is not this user's plain file as [`renew_teammates_socket`] and
+/// [`keep_teammates_server_pid`] write one, so such a record refuses every server (PLCC-L1).
+#[cfg(unix)]
+pub(crate) fn teammates_server_pid(
+    engine_root: &Path,
+    lead: &AgentId,
+    socket: &Path,
+    paths: &LeadPaths,
+) -> Result<Option<u32>, HostError> {
+    use std::os::unix::fs::MetadataExt;
+    let id = lead
+        .team_agent()
+        .ok_or_else(|| failure("terminal_agent_invalid"))?;
+    let kept = (paths.agent_teammates_server_pid)(&engine_root.join("team"), id);
+    let unavailable = || failure(OWN_SERVER_UNAVAILABLE);
+    let metadata = std::fs::symlink_metadata(&kept).map_err(|_| unavailable())?;
+    let plain = metadata.is_file()
+        && metadata.uid() == rustix::process::getuid().as_raw()
+        && u64::try_from(TEAMMATES_PIN_BYTES_MAX).is_ok_and(|bytes| metadata.len() <= bytes);
+    if !plain {
+        return Err(unavailable());
+    }
+    let text = std::fs::read_to_string(&kept).map_err(|_| unavailable())?;
+    let (name, value) = text
+        .split_once(' ')
+        .filter(|(name, value)| {
+            teammates_name_valid(name)
+                && (*value == TEAMMATES_PIN_PENDING
+                    || (!value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())))
+        })
+        .ok_or_else(unavailable)?;
+    if socket.file_name().and_then(|kept| kept.to_str()) != Some(name) {
+        return Err(unavailable());
+    }
+    if value == TEAMMATES_PIN_PENDING {
+        return Ok(None);
+    }
+    let pid = value
+        .parse::<u32>()
+        .ok()
+        .filter(|pid| *pid > 0)
+        .ok_or_else(unavailable)?;
+    Ok(Some(pid))
+}
+
+/// Records the pid a native lead's teammates' server at one socket first answered with
+/// (PLC c, PC-L1), beside the socket's name in the engine's profiles folder, in place of
+/// the pending mark its start left. Takes the engine root, the lead, the socket and the
+/// pid. Returns Ok, or `terminal_own_server_unavailable`.
+#[cfg(unix)]
+pub(crate) fn keep_teammates_server_pid(
+    engine_root: &Path,
+    lead: &AgentId,
+    socket: &Path,
+    pid: u32,
+    paths: &LeadPaths,
+) -> Result<(), HostError> {
+    assert!(pid > 0);
+    let id = lead
+        .team_agent()
+        .ok_or_else(|| failure("terminal_agent_invalid"))?;
+    let name = socket
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| teammates_name_valid(name))
+        .ok_or_else(|| failure(OWN_SERVER_UNAVAILABLE))?;
+    let text = format!("{name} {pid}");
+    assert!(text.len() <= TEAMMATES_PIN_BYTES_MAX);
+    keep_record(
+        &(paths.agent_teammates_server_pid)(&engine_root.join("team"), id),
+        &text,
+    )
+}
+
+/// Moves a native lead's servers' deadline (FBTMUX-P1-R1-L1): keeps it, in whole seconds
+/// since the epoch, in the record beside the lead's profiles that no agent writes and that
+/// each of its servers' keepers reads outside the sandboxes. Takes the engine root, the lead
+/// and the deadline. Returns Ok, `terminal_unavailable` for a time before the epoch, or
+/// `terminal_own_server_unavailable` when the record cannot be kept.
+#[cfg(unix)]
+pub(crate) fn keep_servers_deadline(
+    engine_root: &Path,
+    lead: &AgentId,
+    until: SystemTime,
+    paths: &LeadPaths,
+) -> Result<(), HostError> {
+    let id = lead
+        .team_agent()
+        .ok_or_else(|| failure("terminal_agent_invalid"))?;
+    let seconds = until
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| failure("terminal_unavailable"))?
+        .as_secs();
+    let text = seconds.to_string();
+    assert!(!text.is_empty() && text.len() <= SERVERS_DEADLINE_DIGITS_MAX);
+    keep_record(
+        &(paths.agent_servers_deadline)(&engine_root.join("team"), id),
+        &text,
+    )
+}
+
+/// Whether a text is a teammates' socket name as [`renew_teammates_socket`] makes one.
+/// Takes the text, read from a file. Returns the answer.
+#[cfg(unix)]
+fn teammates_name_valid(name: &str) -> bool {
+    name.len() == TEAMMATES_NAME_BYTES
+        && name
+            .strip_prefix(TEAMMATES_SOCKET_PREFIX)
+            .and_then(|rest| rest.strip_suffix(TEAMMATES_SOCKET_SUFFIX))
+            .is_some_and(|digits| {
+                digits.len() == 2 * TEAMMATES_NONCE_BYTES
+                    && digits
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+}
+
+/// One named socket in a team agent's short private temp folder. Takes the engine root, the
+/// agent and the socket name. Returns the path, or `terminal_agent_invalid` for a name that
+/// is not a team agent.
+fn lead_temp_socket(
+    engine_root: &Path,
+    lead: &AgentId,
+    name: &str,
+    paths: &LeadPaths,
+) -> Result<PathBuf, HostError> {
+    let id = lead
+        .team_agent()
+        .ok_or_else(|| failure("terminal_agent_invalid"))?;
+    let home = (paths.agent_home)(&engine_root.join("team"), id);
+    let socket = (paths.tmp_path)(&home).join(name);
+    assert!(socket.is_absolute() && socket.as_os_str().len() <= HARNESS_SOCKET_BYTES_MAX);
+    Ok(socket)
+}
+
+#[cfg(test)]
+mod tests;

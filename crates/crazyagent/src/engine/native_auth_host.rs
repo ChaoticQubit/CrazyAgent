@@ -40,6 +40,8 @@ pub(crate) fn sign_in_command(executable: &Path) -> Result<std::process::Command
 /// identity, and from then on the identity check alone sees every write.
 #[cfg(any(test, not(target_os = "macos")))]
 const SETTLE_AFTER: std::time::Duration = std::time::Duration::from_secs(3);
+/// How long a custodian that never reached its handover gets to end once it is cleaned up.
+const HANDOVER_CLEANUP: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Whether a matching hash proves a harness's bytes for good: it started [`SETTLE_AFTER`]
 /// past the first look at the identity by the monotonic clock and past the identity's change
@@ -569,6 +571,39 @@ async fn handed(
     }
 }
 
+/// A custodian child between its start on a blocking thread and its handover to the
+/// dispatch: if the dispatch is dropped while the start is awaited, the child is cleaned up
+/// as a failed handover is, never left running.
+struct Starting(Option<std::process::Child>);
+
+impl Drop for Starting {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = custody::cleanup_direct_child(
+                &mut child,
+                std::time::Instant::now() + HANDOVER_CLEANUP,
+            );
+        }
+    }
+}
+
+/// Starts the custodian through the spawn gate on a blocking thread, so a start held at the
+/// gate never blocks a runtime worker. Input: the configured command. Output: the child, or
+/// the start's own error.
+async fn spawn_custodian(
+    mut command: std::process::Command,
+) -> Result<std::process::Child, EngineError> {
+    let mut started = tokio::task::spawn_blocking(move || {
+        kernel_processes::spawn_gate::spawn(&mut command).map(|child| Starting(Some(child)))
+    })
+    .await
+    .map_err(io_error)?
+    .map_err(io_error)?;
+    let child = started.0.take();
+    assert!(child.is_some());
+    child.ok_or_else(|| EngineError("native_auth_host_child_missing".into()))
+}
+
 pub(in crate::engine) async fn dispatch(
     work: crate::storage::NativeAuthWork,
     host: crate::engine::owner::transport::NativeAuthDispatchHost,
@@ -595,14 +630,14 @@ pub(in crate::engine) async fn dispatch(
         drop(launch);
         return Err(EngineError(TOO_OLD.into()));
     }
-    let mut command = custodian_command(
+    let command = custodian_command(
         executable.verified_path()?,
         &runtime_dir,
         harness
             .as_ref()
             .map(|(harness, words)| (kind.as_str(), harness.as_ref(), words.as_slice())),
     )?;
-    let mut child = kernel_processes::spawn_gate::spawn(&mut command).map_err(io_error)?;
+    let mut child = spawn_custodian(command).await?;
     let cause = child.stderr.take().map(CustodianCause::new).transpose();
     let streams = match (child.stdin.take(), cause) {
         (Some(input), Ok(cause)) => Ok((input, cause)),
@@ -612,20 +647,14 @@ pub(in crate::engine) async fn dispatch(
     let (input, mut cause) = match streams {
         Ok(streams) => streams,
         Err(error) => {
-            custody::cleanup_direct_child(
-                &mut child,
-                std::time::Instant::now() + std::time::Duration::from_secs(2),
-            )
-            .map_err(io_error)?;
+            custody::cleanup_direct_child(&mut child, std::time::Instant::now() + HANDOVER_CLEANUP)
+                .map_err(io_error)?;
             return Err(error);
         }
     };
     if let Err((error, mut child)) = host.retain_child(child) {
-        custody::cleanup_direct_child(
-            &mut child,
-            std::time::Instant::now() + std::time::Duration::from_secs(2),
-        )
-        .map_err(io_error)?;
+        custody::cleanup_direct_child(&mut child, std::time::Instant::now() + HANDOVER_CLEANUP)
+            .map_err(io_error)?;
         return Err(error);
     }
     launch.write_bootstrap(input)?;

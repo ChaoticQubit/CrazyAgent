@@ -8,7 +8,7 @@ fn a_batch_file_server_is_left_out_of_a_launch_by_name() {
     use super::{Command, ResultValue, execute};
     use crate::plugins::{Scope, ServerSpec};
     let directory = tempfile::tempdir().unwrap();
-    let root = crate::sandbox::canonical(directory.path()).unwrap();
+    let root = kernel_sandbox::paths::canonical(directory.path()).unwrap();
     let mut connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     super::initialize(&connection).unwrap();
     connection

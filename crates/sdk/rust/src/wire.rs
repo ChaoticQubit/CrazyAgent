@@ -26,6 +26,46 @@ pub struct Bytes(pub Vec<u8>);
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Id(pub u64);
 
+/// The most bytes one stored event body may hold, the kernel event log's own bound,
+/// checked before any JSON is read.
+pub const EVENT_BODY_BYTES_MAX: usize = 65_536;
+
+/// Why a stored event body did not convert to its wire form: `sdk_event_body_bounds` (over
+/// [`EVENT_BODY_BYTES_MAX`]), `sdk_event_undecodable` (not JSON) or `sdk_event_schema`
+/// (JSON, but not the stored shape of its kind: an unknown, missing or mistyped field, as a
+/// body written under another schema of the kind is), with the decoder's message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventError {
+    pub code: &'static str,
+    pub reason: String,
+}
+
+/// Converts one stored event body to its wire JSON through the kind's two generated forms.
+/// A body of another schema is refused with `sdk_event_schema`, never decoded with fields
+/// dropped. Input: the stored body bytes. Output: the wire JSON, or the [`EventError`],
+/// the bound checked before any decoding; never a panic.
+pub fn event_body<S, W>(body: &[u8]) -> Result<serde_json::Value, EventError>
+where
+    S: serde::de::DeserializeOwned,
+    W: Serialize + From<S>,
+{
+    let refuse = |error: serde_json::Error| EventError {
+        code: match error.classify() {
+            serde_json::error::Category::Data => "sdk_event_schema",
+            _ => "sdk_event_undecodable",
+        },
+        reason: alloc::string::ToString::to_string(&error),
+    };
+    if body.len() > EVENT_BODY_BYTES_MAX {
+        return Err(EventError {
+            code: "sdk_event_body_bounds",
+            reason: alloc::format!("{} bytes, over {EVENT_BODY_BYTES_MAX}", body.len()),
+        });
+    }
+    let stored: S = serde_json::from_slice(body).map_err(refuse)?;
+    serde_json::to_value(W::from(stored)).map_err(refuse)
+}
+
 /// Writes a `u64` as its decimal string. Input: the value. Output: the string.
 pub fn encode_u64(value: u64) -> String {
     alloc::format!("{value}")

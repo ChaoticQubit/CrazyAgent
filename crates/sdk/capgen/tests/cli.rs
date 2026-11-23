@@ -80,3 +80,37 @@ fn write_ts_refuses_an_extra_file() {
 fn check_wit_reports_drift_and_write_wit_clears_it() {
     drift_then_write("wit", "wit", "sdk.wit");
 }
+
+/// Runs the capgen binary's permission modes over `crates/sdk/caps` and the repository's
+/// `plugins` folder. Inputs: the mode and the output folder. Output: the process output.
+fn capgen_permissions(mode: &str, out: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_capgen"))
+        .arg(mode)
+        .arg(sdk("caps"))
+        .arg(sdk("../../plugins"))
+        .arg(out)
+        .output()
+        .expect("capgen runs")
+}
+
+#[test]
+fn check_permissions_reports_drift_and_write_permissions_clears_it() {
+    let copy = copied(&sdk("../kernel/plugin_host/src/generated"), "permissions");
+    corrupt(&copy.join("permissions.rs"));
+    let check = capgen_permissions("--check-permissions", &copy);
+    assert_eq!(check.status.code(), Some(1), "{check:?}");
+    assert_eq!(String::from_utf8_lossy(&check.stdout), "permissions.rs\n");
+    let write = capgen_permissions("--write-permissions", &copy);
+    assert_eq!(write.status.code(), Some(0), "{write:?}");
+    let again = capgen_permissions("--check-permissions", &copy);
+    assert_eq!(again.status.code(), Some(0), "{again:?}");
+    assert!(again.stdout.is_empty());
+    let short = capgen("--check-permissions", &copy);
+    assert_eq!(short.status.code(), Some(2), "{short:?}");
+    fs::remove_dir_all(&copy).expect("the copy is removed");
+}
+
+#[test]
+fn check_host_reports_drift_and_write_host_clears_it() {
+    drift_then_write("host", "host/src/generated", "mod.rs");
+}

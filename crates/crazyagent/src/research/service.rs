@@ -552,7 +552,7 @@ pub fn start_for_engine(
     project: &Path,
     codex: Option<&Path>,
     claude: Option<&Path>,
-    terminal: Option<Arc<dyn crate::terminal::Host>>,
+    terminal: Option<Arc<dyn kernel_processes::terminal::Host>>,
     probe: Option<crate::team::runtime::TerminalProbe>,
     agents: Option<Arc<crate::agents::Agents>>,
     lookup: Option<crate::paths::HarnessLookup>,
@@ -560,7 +560,7 @@ pub fn start_for_engine(
 ) -> Result<ResearchService, String> {
     let runtime = runtime
         .canonicalize()
-        .map(crate::projects_home::one_spelling)
+        .map(kernel_sandbox::paths::one_spelling)
         .map_err(|error| format!("research runtime: {error}"))?;
     let state = runtime.join("research");
     let projects = runtime.join("projects");
@@ -631,7 +631,7 @@ pub fn start_for_engine(
     _project: &Path,
     _codex: Option<&Path>,
     _claude: Option<&Path>,
-    _terminal: Option<Arc<dyn crate::terminal::Host>>,
+    _terminal: Option<Arc<dyn kernel_processes::terminal::Host>>,
     _probe: Option<crate::team::runtime::TerminalProbe>,
     _agents: Option<Arc<crate::agents::Agents>>,
     _lookup: Option<crate::paths::HarnessLookup>,

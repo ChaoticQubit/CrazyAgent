@@ -33,7 +33,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
     use crazyagent::protocol::ProjectSpec;
     use crazyagent::quit_settings::QuitSettings;
     use crazyagent::roadmap_status::Refresh;
-    use crazyagent::sandbox_settings::SandboxSettings;
+    use kernel_sandbox::settings::SandboxSettings;
     use crazyagent::scheduling::ScheduleChange;
     use crazyagent::team::TerminalsPerWindow;
     use crazyagent::usage::money::MoneyChoice;

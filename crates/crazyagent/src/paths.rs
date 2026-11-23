@@ -1,3 +1,4 @@
+use kernel_common::Platform;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
@@ -24,24 +25,6 @@ impl std::error::Error for PathsError {}
 
 fn problem(path: &Path, what: impl std::fmt::Display) -> PathsError {
     PathsError(format!("{}: {what}", path.display()))
-}
-
-/// The three desktop platforms the data root and services are defined for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Platform {
-    MacOs,
-    Linux,
-    Windows,
-}
-
-impl Platform {
-    pub const CURRENT: Self = if cfg!(target_os = "macos") {
-        Self::MacOs
-    } else if cfg!(windows) {
-        Self::Windows
-    } else {
-        Self::Linux
-    };
 }
 
 /// The environment values that choose the data root, read once so the choice is testable

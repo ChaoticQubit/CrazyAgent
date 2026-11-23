@@ -1457,7 +1457,7 @@ fn a_global_server_check_uses_the_strictest_network_among_projects_that_enable_i
     else {
         panic!("check value required");
     };
-    assert_eq!(network, crate::sandbox::SandboxNetwork::Only(vec![]));
+    assert_eq!(network, kernel_sandbox::net::SandboxNetwork::Only(vec![]));
 }
 #[test]
 fn a_case_variant_project_id_is_refused_and_keeps_the_first_projects_skills() {

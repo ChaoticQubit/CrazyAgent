@@ -245,7 +245,7 @@ fn an_ide_profile_builds_for_a_project_folder_named_with_long_fold_runs() {
         older_agents: true,
     };
     let text = profile(&grants, PORT, closed(), &[], rule).unwrap();
-    let spelled = crate::sandbox::any_case(root.to_str().unwrap());
+    let spelled = kernel_sandbox::paths::any_case(root.to_str().unwrap());
     assert!(text.contains(&format!("(regex #\"^{spelled}")), "{text}");
     crate::sandbox::toolchains::remove_tmp(&home).unwrap();
 }

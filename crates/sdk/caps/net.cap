@@ -1,0 +1,10 @@
+enum Method { get, post, put, patch, delete }
+type Field { name: text, value: text }
+type SecretField { name: text, secret: secrets.Secret }
+type Capture { field: text, keep_as: option<text> }
+type Request { method: Method, url: text, headers: list<Field>, bearer: option<secrets.Secret>, form: list<Field>, secret_form: list<SecretField>, json: option<bytes>, reply_headers: list<text>, capture: list<Capture> }
+type Captured { field: text, secret: secrets.Secret }
+type Reply { status: u16, body: bytes, headers: list<Field>, captured: list<Captured> }
+capability net.request(request: Request) -> Reply
+  tier: kernel
+  needs: net.request

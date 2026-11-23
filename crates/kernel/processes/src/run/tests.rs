@@ -110,3 +110,206 @@ fn a_report_held_open_by_a_background_process_stops_at_the_limit() {
     );
     assert!(started.elapsed() < Duration::from_secs(3));
 }
+
+/// A process a setup command leaves holding its report past the limit is stopped with the
+/// command's process group: the call returns `setup_timeout` within 3 s and the holder is
+/// gone soon after, not left to run out its 30 s. A shell loop bounded by `run_bounded`
+/// watches the holder, so no row sleeps.
+#[cfg(unix)]
+#[test]
+fn a_report_holder_past_the_limit_is_stopped_with_its_group() {
+    let folder = tempfile::tempdir().unwrap();
+    let holder = folder.path().join("holder");
+    let started = Instant::now();
+    assert_eq!(
+        run_bounded(
+            Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    r#"/bin/sleep 30 & echo $! > "$1"; echo tmux 3.4"#,
+                    "sh"
+                ])
+                .arg(&holder),
+            Duration::from_millis(500),
+            true
+        ),
+        Err(InstallError("setup_timeout"))
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let pid = std::fs::read_to_string(&holder).unwrap();
+    let pid = pid.trim();
+    assert!(pid.parse::<u32>().is_ok_and(|pid| pid > 1), "{pid}");
+    let gone = r#"while kill -0 "$1" 2>/dev/null && ! ps -o stat= -p "$1" | grep -q Z; do /bin/sleep 0.05; done"#;
+    assert_eq!(
+        run_bounded(
+            Command::new("/bin/sh").args(["-c", gone, "sh", pid]),
+            Duration::from_secs(5),
+            false
+        ),
+        Ok(Vec::new()),
+        "the holder {pid} outlived its command's process group"
+    );
+}
+
+/// A process a failing setup command leaves behind is stopped with the command's process
+/// group, with or without a kept report: the call returns `setup_install_failed` and the
+/// holder is gone soon after, not left to run out its 30 s.
+#[cfg(unix)]
+#[test]
+fn a_holder_left_by_a_failed_setup_command_is_stopped_with_its_group() {
+    for capture in [true, false] {
+        let folder = tempfile::tempdir().unwrap();
+        let holder = folder.path().join("holder");
+        let started = Instant::now();
+        assert_eq!(
+            run_bounded(
+                Command::new("/bin/sh")
+                    .args(["-c", r#"/bin/sleep 30 & echo $! > "$1"; exit 1"#, "sh"])
+                    .arg(&holder),
+                Duration::from_secs(5),
+                capture
+            ),
+            Err(InstallError("setup_install_failed")),
+            "capture {capture}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "capture {capture}"
+        );
+        let pid = std::fs::read_to_string(&holder).unwrap();
+        let pid = pid.trim();
+        assert!(pid.parse::<u32>().is_ok_and(|pid| pid > 1), "{pid}");
+        let gone = r#"while kill -0 "$1" 2>/dev/null && ! ps -o stat= -p "$1" | grep -q Z; do /bin/sleep 0.05; done"#;
+        assert_eq!(
+            run_bounded(
+                Command::new("/bin/sh").args(["-c", gone, "sh", pid]),
+                Duration::from_secs(5),
+                false
+            ),
+            Ok(Vec::new()),
+            "the holder {pid} outlived its failed command's process group, capture {capture}"
+        );
+    }
+}
+
+/// Windows PowerShell under the `SystemRoot` folder. Input: none. Output: its path.
+#[cfg(windows)]
+fn powershell() -> std::path::PathBuf {
+    let root = std::env::var_os("SystemRoot").expect("the SystemRoot variable is set");
+    std::path::PathBuf::from(root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe")
+}
+
+/// On Windows, a process a setup command starts that holds the report past the limit is
+/// ended with the command: the call returns `setup_timeout` and the holder, a `PING.EXE`
+/// that inherits the report pipe, is gone soon after, not left to run out its 60 s. A
+/// PowerShell loop bounded by `run_bounded` watches the holder, so no row sleeps.
+#[cfg(windows)]
+#[test]
+fn a_report_holder_past_the_limit_is_ended_with_its_command_on_windows() {
+    let folder = tempfile::tempdir().unwrap();
+    let holder = folder.path().join("holder");
+    let quoted = holder.display().to_string().replace('\'', "''");
+    let start = format!(
+        "$i = New-Object System.Diagnostics.ProcessStartInfo \
+         ([IO.Path]::Combine($env:SystemRoot, 'System32', 'PING.EXE')), '-n 60 127.0.0.1'; \
+         $i.UseShellExecute = $false; \
+         $p = [System.Diagnostics.Process]::Start($i); \
+         Set-Content -LiteralPath '{quoted}' -Value $p.Id; \
+         'tmux 3.4'"
+    );
+    let started = Instant::now();
+    assert_eq!(
+        run_bounded(
+            Command::new(powershell()).args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                start.as_str()
+            ]),
+            Duration::from_secs(10),
+            true
+        ),
+        Err(InstallError("setup_timeout"))
+    );
+    assert!(started.elapsed() < Duration::from_secs(20));
+    let pid = std::fs::read_to_string(&holder)
+        .unwrap_or_else(|error| panic!("{}: {error}", holder.display()));
+    let pid = pid.trim();
+    assert!(pid.parse::<u32>().is_ok_and(|pid| pid > 4), "{pid}");
+    let gone = format!(
+        "while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) \
+         {{ Start-Sleep -Milliseconds 50 }}"
+    );
+    assert_eq!(
+        run_bounded(
+            Command::new(powershell()).args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                gone.as_str()
+            ]),
+            Duration::from_secs(10),
+            false
+        ),
+        Ok(Vec::new()),
+        "the holder {pid} outlived its command"
+    );
+}
+
+/// On Windows, a process a setup command starts is ended with the command even when the
+/// command exits cleanly inside its limit: the call returns its empty report and the
+/// `PING.EXE` it started, which would run 60 s, is gone soon after. A PowerShell loop
+/// bounded by `run_bounded` watches it, so no row sleeps.
+#[cfg(windows)]
+#[test]
+fn a_process_left_by_a_clean_setup_command_is_ended_with_it_on_windows() {
+    let folder = tempfile::tempdir().unwrap();
+    let holder = folder.path().join("holder");
+    let quoted = holder.display().to_string().replace('\'', "''");
+    let start = format!(
+        "$i = New-Object System.Diagnostics.ProcessStartInfo \
+         ([IO.Path]::Combine($env:SystemRoot, 'System32', 'PING.EXE')), '-n 60 127.0.0.1'; \
+         $i.UseShellExecute = $false; \
+         $p = [System.Diagnostics.Process]::Start($i); \
+         Set-Content -LiteralPath '{quoted}' -Value $p.Id"
+    );
+    assert_eq!(
+        run_bounded(
+            Command::new(powershell()).args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                start.as_str()
+            ]),
+            Duration::from_secs(10),
+            false
+        ),
+        Ok(Vec::new())
+    );
+    let pid = std::fs::read_to_string(&holder)
+        .unwrap_or_else(|error| panic!("{}: {error}", holder.display()));
+    let pid = pid.trim();
+    assert!(pid.parse::<u32>().is_ok_and(|pid| pid > 4), "{pid}");
+    let gone = format!(
+        "while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) \
+         {{ Start-Sleep -Milliseconds 50 }}"
+    );
+    assert_eq!(
+        run_bounded(
+            Command::new(powershell()).args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                gone.as_str()
+            ]),
+            Duration::from_secs(10),
+            false
+        ),
+        Ok(Vec::new()),
+        "the process {pid} outlived its clean command"
+    );
+}

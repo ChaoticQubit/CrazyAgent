@@ -1,0 +1,14 @@
+[Unit]
+Description=CrazyAgent engine
+
+[Service]
+ExecStart="/Applications/CrazyAgent.app/Contents/MacOS/crazyagent" engine --home "/Users/owner/Library/Application Support/CrazyAgent/engine"
+Environment="PATH=/Users/owner/.local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+StandardOutput=append:/Users/owner/Library/Application Support/CrazyAgent/engine/logs/engine.log
+StandardError=append:/Users/owner/Library/Application Support/CrazyAgent/engine/logs/engine.log
+
+[Install]
+WantedBy=default.target

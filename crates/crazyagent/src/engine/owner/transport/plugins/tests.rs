@@ -119,7 +119,7 @@ fn the_context_mode_check_names_why_no_shared_install_can_run_and_never_starts_n
             &["-y".to_owned(), format!("context-mode@{version}")],
             &[],
             &[],
-            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+            kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         )
         .unwrap_err()
     };
@@ -186,7 +186,7 @@ fn the_context_mode_check_on_a_node_older_than_22_5_says_so_and_never_starts_npx
         &["-y".to_owned(), "context-mode@1.0.169".to_owned()],
         &[],
         &[],
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap_err();
     assert_eq!(refused, "server_node_too_old");
@@ -242,7 +242,7 @@ fn the_context_mode_check_of_an_npx_the_resolver_does_not_find_says_so_and_never
         &["-y".to_owned(), "context-mode@1.0.169".to_owned()],
         &[],
         &[],
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap_err();
     assert_eq!(refused, "server_npx_not_found");
@@ -323,7 +323,7 @@ fn the_context_mode_check_runs_the_shared_install_agents_launch_and_never_npx() 
         &args,
         &[],
         &[],
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     );
     let tools = checked.unwrap_or_else(|problem| {
         panic!("the check runs the shared install agents launch, not npx: {problem}")
@@ -339,7 +339,7 @@ fn the_context_mode_check_runs_the_shared_install_agents_launch_and_never_npx() 
 fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
     const ID: &str = "mcp-0123456789abcdef01234567";
     let directory = tempfile::tempdir().unwrap();
-    let root = crate::sandbox::canonical(directory.path())
+    let root = kernel_sandbox::paths::canonical(directory.path())
         .unwrap()
         .join("engine");
     std::fs::create_dir_all(&root).unwrap();
@@ -351,7 +351,7 @@ fn a_windows_command_server_check_runs_in_its_boundary_or_says_why_not() {
             &["--list".to_owned()],
             &[],
             &[],
-            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+            kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         )
         .unwrap_err()
     };
@@ -406,7 +406,7 @@ fn access_list(folder: &Path) -> String {
 async fn a_removed_servers_check_grants_and_container_are_taken_back() {
     const ID: &str = "mcp-0123456789abcdef01234568";
     let directory = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(directory.path()).unwrap();
     let root = base.join("engine");
     let folder = base.join("server");
     std::fs::create_dir_all(&root).unwrap();
@@ -422,7 +422,7 @@ async fn a_removed_servers_check_grants_and_container_are_taken_back() {
         &["--list".to_owned()],
         &[],
         &[],
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap_err();
     let helper = std::env::current_exe()
@@ -471,7 +471,7 @@ fn a_check_container_with_no_stored_server_is_released_at_engine_start() {
     const DEAD: &str = "mcp-0123456789abcdef0123456b";
     const LIVE: &str = "mcp-0123456789abcdef0123456c";
     let directory = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(directory.path()).unwrap();
     let root = base.join("engine");
     std::fs::create_dir_all(&root).unwrap();
     let entries = access_list;
@@ -492,7 +492,7 @@ fn a_check_container_with_no_stored_server_is_released_at_engine_start() {
             &["--list".to_owned()],
             &[],
             &[],
-            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+            kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         )
         .unwrap_err();
         if !helper.is_file() {
@@ -611,7 +611,7 @@ fn a_check_profile_naming_another_container_is_kept_and_nothing_of_it_is_release
     const BOUND: &str = "mcp-0123456789abcdef0123456f";
     const FORGED: &str = "mcp-0123456789abcdef01234570";
     let directory = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(directory.path()).unwrap();
     let checks = base.join("engine").join(CHECK_FOLDER);
     let grants = base.join("grants");
     std::fs::create_dir_all(checks.join(CHECK_PROFILES)).unwrap();
@@ -627,7 +627,7 @@ fn a_check_profile_naming_another_container_is_kept_and_nothing_of_it_is_release
             &folders[0],
             &folders[1],
             &folders[2],
-            crate::sandbox::SandboxNetwork::Only(Vec::new()),
+            kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         )
         .unwrap();
         let mut profile = crate::sandbox::windows::boundary_profile(&sandbox, &grants).unwrap();

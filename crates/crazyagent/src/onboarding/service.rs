@@ -17,7 +17,7 @@ use crate::research::runner::{
     RUN_NAME_USED, ReadOnlyEnding, ReadOnlyRun, ResearchHarness, ResearchRunner, RunError,
     confined_unavailable,
 };
-use crate::sandbox::SandboxError;
+use kernel_sandbox::error::SandboxError;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use std::cell::Cell;
 #[cfg(unix)]
@@ -1352,7 +1352,7 @@ pub fn start_for_engine(
 ) -> Result<OnboardingService, String> {
     let runtime = runtime
         .canonicalize()
-        .map(crate::projects_home::one_spelling)
+        .map(kernel_sandbox::paths::one_spelling)
         .map_err(|error| format!("onboarding runtime: {error}"))?;
     let state = runtime.join("onboarding");
     let projects = runtime.join(crate::project_setup::PROJECTS_DIRECTORY);

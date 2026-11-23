@@ -625,7 +625,7 @@ impl Team {
             .filter(|_| target.kind == NodeKind::Teammate && target.agent.is_none());
         if teammate
             .as_deref()
-            .is_some_and(|pane| !crate::terminal::pane_id_valid(pane))
+            .is_some_and(|pane| !kernel_processes::terminal::pane_id_valid(pane))
         {
             ctx.say(Message::warning(
                 "This teammate's pane can't be opened.",
