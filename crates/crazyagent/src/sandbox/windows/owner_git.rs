@@ -208,7 +208,7 @@ impl OwnerGit {
         }
         for (name, value) in git.get_envs() {
             if name.eq_ignore_ascii_case(GLOBAL_CONFIG) {
-                if value != Some(OsStr::new(crate::github::NULL_DEVICE)) {
+                if value != Some(OsStr::new(kernel_common::names::NULL_DEVICE)) {
                     return Err(invalid("owner git reads no global git config"));
                 }
                 continue;
@@ -578,7 +578,7 @@ mod tests {
         let places = places(&folder, &made.project);
         let mut git = Command::new(&made.git);
         git.env("LC_ALL", "C")
-            .env(GLOBAL_CONFIG, crate::github::NULL_DEVICE)
+            .env(GLOBAL_CONFIG, kernel_common::names::NULL_DEVICE)
             .env("GIT_COMMON_DIR", made.project.join(".git"))
             .envs(crate::research::runner::GIT_SAFE_ENV)
             .env("HOME", made.root.join("publish-home"))
@@ -783,7 +783,7 @@ pub(crate) mod farm {
         version
             .arg("--version")
             .current_dir(kernel_sandbox::paths::canonical(project).unwrap())
-            .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE);
+            .env("GIT_CONFIG_GLOBAL", kernel_common::names::NULL_DEVICE);
         let mut wrapped = owner.wrap(&version).unwrap_or_else(|refused| {
             panic!(
                 "owner git wrap for {} with {}: {refused:?}",

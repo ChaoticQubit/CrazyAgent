@@ -33,7 +33,7 @@ fn git_in(path: &Path, args: &[&str]) {
     let mut command = std::process::Command::new(program);
     command
         .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE)
+        .env("GIT_CONFIG_GLOBAL", kernel_common::names::NULL_DEVICE)
         .current_dir(path)
         .args(args)
         .stdin(std::process::Stdio::null())

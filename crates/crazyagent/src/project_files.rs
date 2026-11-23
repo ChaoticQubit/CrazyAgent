@@ -183,13 +183,16 @@ pub(crate) fn owner_git(
     command
         .env_clear()
         .env("LC_ALL", "C")
-        .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE)
+        .env("GIT_CONFIG_GLOBAL", kernel_common::names::NULL_DEVICE)
         .env("GIT_COMMON_DIR", git_root.join(".git"))
         .envs(crate::research::runner::GIT_SAFE_ENV)
         .arg("--no-optional-locks")
         .args(crate::research::runner::git_safe())
         .args(["-c", "core.untrackedCache=false", "-c"])
-        .arg(format!("core.excludesFile={}", crate::github::NULL_DEVICE))
+        .arg(format!(
+            "core.excludesFile={}",
+            kernel_common::names::NULL_DEVICE
+        ))
         .arg("--git-dir")
         .arg(git_root.join(".git"))
         .arg("--work-tree")

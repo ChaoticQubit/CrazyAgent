@@ -20,7 +20,7 @@ fn owner_git(folder: &Path, args: &[&str]) -> String {
             .args(args)
             .current_dir(folder)
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE),
+            .env("GIT_CONFIG_GLOBAL", kernel_common::names::NULL_DEVICE),
     )
     .unwrap();
     assert!(
@@ -553,7 +553,7 @@ fn a_contained_windows_publish_reads_no_git_folder_or_gitfile_planted_below_the_
                         .current_dir(&inner)
                         .env("GIT_DIR", ".git")
                         .env("GIT_CONFIG_NOSYSTEM", "1")
-                        .env("GIT_CONFIG_GLOBAL", crate::github::NULL_DEVICE),
+                        .env("GIT_CONFIG_GLOBAL", kernel_common::names::NULL_DEVICE),
                 )
                 .unwrap();
                 assert_eq!(
