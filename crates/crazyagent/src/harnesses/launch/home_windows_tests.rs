@@ -350,8 +350,14 @@ fn a_granted_home_passes_and_a_low_integrity_process_cannot_change_it() {
     }
     drop(private::dir(&home).unwrap());
     drop(private::dir(&tmp).unwrap());
-    let sandbox =
-        ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        &project,
+        &home,
+        &tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
     let installed =
         WindowsSandbox::install(sandbox, &helper(), &profiles.join("agent.sb"), &grants).unwrap();
     let written = home.join("boxed.txt");

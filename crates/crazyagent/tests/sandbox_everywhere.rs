@@ -46,6 +46,7 @@ fn case() -> Case {
 
 fn sandbox(case: &Case) -> ProjectSandbox {
     ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -159,6 +160,7 @@ fn worktrees_are_checked_bounded_and_kept_out_of_the_profile_location() {
 
     let base = || {
         ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
             &case.project,
             &case.home,
             &case.tmp,

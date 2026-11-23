@@ -232,6 +232,7 @@ fn a_sandboxed_agent_cannot_read_a_credential_planted_inside_a_granted_tool_root
     write(&case.project.join("package.json"), "{}\n");
     let detected = Toolchains::detect(&case.project, &homes);
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -301,6 +302,7 @@ fn owner_credential_locations_are_always_secret_and_never_grantable() {
     let case = case();
     let owner = owner_home();
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -331,6 +333,7 @@ fn owner_credential_locations_are_always_secret_and_never_grantable() {
         );
     }
     match ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -360,6 +363,7 @@ fn the_agent_temp_folder_is_short_private_writable_and_removed() {
     assert_eq!(toolchains::existing_tmp(&case.home), Some(tmp.clone()));
 
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -425,6 +429,7 @@ fn an_agent_cannot_open_remove_or_replace_its_temp_folder() {
     let case = case();
     let tmp = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -490,6 +495,7 @@ fn an_agent_builds_and_tests_a_tiny_crate_offline_with_the_owner_toolchain() {
     )
     .unwrap();
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -565,6 +571,7 @@ fn an_agent_compiles_links_and_runs_git_without_an_xcrun_cache_error() {
     )
     .unwrap();
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -613,10 +620,16 @@ fn a_missing_toolchain_is_never_installed_by_an_agent() {
         &homes,
     )
     .unwrap();
-    let sandbox = ProjectSandbox::new(&case.project, &case.home, &case.tmp, SandboxNetwork::Open)
-        .unwrap()
-        .allow_tools(&Toolchains::detect(&case.project, &homes))
-        .unwrap();
+    let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Open,
+    )
+    .unwrap()
+    .allow_tools(&Toolchains::detect(&case.project, &homes))
+    .unwrap();
     let output = run(
         &sandbox,
         &case.profiles.join("pinned.sb"),
@@ -634,6 +647,7 @@ fn a_heredoc_works_in_every_agent_shell() {
     let case = case();
     let scratch = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     let granted = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -643,6 +657,7 @@ fn a_heredoc_works_in_every_agent_shell() {
     .allow_scratch(&scratch)
     .unwrap();
     let plain = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -684,6 +699,7 @@ fn an_agent_never_writes_the_owner_toolchains_or_reads_their_credentials() {
     )
     .unwrap();
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -754,6 +770,7 @@ fn a_toolchain_the_owner_switched_off_is_unreadable_and_one_switched_on_is_reada
     assert_eq!(used, [Toolchain::Rust]);
     let probe = |chosen: &[Toolchain], name: &str| {
         let sandbox = ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
             &case.project,
             &case.home,
             &case.tmp,
@@ -1097,6 +1114,7 @@ fn a_node_script_harness_runs_with_the_node_beside_it_inside_the_sandbox() {
     let bin = prefix.join("bin");
     let bin = bin.to_str().unwrap();
     let plain = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -1110,6 +1128,7 @@ fn a_node_script_harness_runs_with_the_node_beside_it_inside_the_sandbox() {
     assert!(!path_of(&plain.command(&profile, Path::new("/bin/sh"))).contains(bin));
 
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -1180,6 +1199,7 @@ fn a_node_harness_reads_its_node_and_package_but_no_npm_credential_or_other_pack
         write(path, &format!("FIXTURE-NODE-SECRET-{index}\n"));
     }
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -1243,6 +1263,7 @@ fn a_node_harness_in_the_engine_prefix_runs_with_the_node_it_was_installed_with(
     write(&script, "#!/usr/bin/env node\n");
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -1287,6 +1308,7 @@ fn a_node_prefix_in_the_project_an_agent_worktree_or_the_agent_home_gives_no_pat
     ] {
         let script = node_harness(&prefix);
         let sandbox = ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
             &case.project,
             &case.home,
             &case.tmp,
@@ -1314,6 +1336,7 @@ fn a_sandboxed_harness_runs_git_through_the_agent_copy_without_the_xcrun_shim() 
     let tmp = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     let agent_bin = tmp.join("bin");
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -1397,6 +1420,7 @@ fn a_sandboxed_harness_git_runs_its_helpers_from_its_own_toolchain_not_the_xcrun
     let case = case();
     let tmp = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -1515,6 +1539,7 @@ fn a_lead_may_read_and_start_only_the_bundled_tmux_file_never_its_app_folder() {
     let tmux = macos.join("crazyagent-tmux");
     let tmp = toolchains::make_tmp(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home).unwrap();
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -1561,6 +1586,7 @@ fn a_lead_profile_runs_its_own_tmux_server_and_never_reaches_another() {
     ));
     let base = || {
         ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
             &case.project,
             &case.home,
             &case.tmp,
@@ -1865,6 +1891,7 @@ fn a_native_team_starts_in_a_project_hiding_as_many_folders_as_it_may() {
     fs::create_dir(&mailbox).unwrap();
     fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
     let mut sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -1972,6 +1999,7 @@ fn a_teammates_profile_serves_its_tmux_socket_but_never_reaches_unlinks_or_takes
     let mates = tmp.join("teammates-0123456789abcdef.sock");
     let scratch = || {
         ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
             &case.project,
             &case.home,
             &case.tmp,
@@ -2082,6 +2110,7 @@ impl LiveTeam {
         fs::create_dir(&mailbox).unwrap();
         fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
         let (lead, teammates) = ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
             &case.project,
             &case.home,
             &case.tmp,
@@ -2338,6 +2367,7 @@ fn native_team_refuses_a_teammates_home_in_the_lead_s_or_a_lead_home_the_project
     fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
     let team = |home: &Path, mates_home: &Path| {
         ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
             &case.project,
             home,
             &case.tmp,
@@ -2570,6 +2600,7 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
     let elsewhere = case.project.join("elsewhere");
     fs::create_dir(&elsewhere).unwrap();
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -2843,6 +2874,7 @@ fn a_confined_agent_never_links_removes_or_replaces_its_homes_launch_lock() {
     let lock = case.home.join("crazyagent.lock");
     write(&lock, "");
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,

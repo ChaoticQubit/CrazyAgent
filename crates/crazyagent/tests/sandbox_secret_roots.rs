@@ -40,6 +40,7 @@ fn case() -> Case {
 
 fn sandbox(case: &Case) -> ProjectSandbox {
     ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,
@@ -78,6 +79,7 @@ fn a_root_that_holds_an_owner_secret_is_refused_as_read_root_worktree_and_projec
         walled(sandbox(&case).allow_read(&root));
         walled(sandbox(&case).allow_worktree(&root));
         walled(ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
             &root,
             &case.home,
             &case.tmp,
@@ -100,6 +102,7 @@ fn a_root_inside_an_owner_secret_is_refused() {
         walled(sandbox(&case).allow_read(&root));
         walled(sandbox(&case).allow_worktree(&root));
         walled(ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
             &case.project,
             &root,
             &case.tmp,
@@ -127,6 +130,7 @@ fn a_root_that_holds_engine_secrets_is_refused_in_either_order() {
     );
     walled(
         ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
             &case.root,
             &case.home,
             &case.tmp,
@@ -154,6 +158,7 @@ fn a_root_inside_an_engine_secret_is_refused_in_either_order() {
     }
     walled(
         ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
             &case.project,
             &inner,
             &case.tmp,
@@ -233,6 +238,7 @@ fn the_backups_folder_is_an_engine_secret_no_root_may_cover() {
         );
         walled(
             ProjectSandbox::new(
+                &crazyagent::sandbox::PROFILE_HOOKS,
                 root,
                 &case.home,
                 &case.tmp,
@@ -268,6 +274,7 @@ fn the_configured_sdk_homes_folder_is_an_engine_secret_no_root_may_cover() {
     walled(guarded(&case).allow_read(&case.runtime));
     walled(
         ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
             &case.project,
             &home,
             &case.tmp,

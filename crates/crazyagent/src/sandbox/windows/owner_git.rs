@@ -90,6 +90,7 @@ pub fn policy(
         ));
     }
     ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         project,
         &places.home,
         &places.tmp,
@@ -353,9 +354,14 @@ mod tests {
         let (agent_home, agent_tmp) = (made.root.join("agent-home"), made.root.join("agent-tmp"));
         fs::create_dir_all(&agent_home).unwrap();
         fs::create_dir_all(&agent_tmp).unwrap();
-        let agent =
-            ProjectSandbox::new(&made.project, &agent_home, &agent_tmp, SandboxNetwork::Open)
-                .unwrap();
+        let agent = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &made.project,
+            &agent_home,
+            &agent_tmp,
+            SandboxNetwork::Open,
+        )
+        .unwrap();
         assert_ne!(container_name(&agent), profile.container);
         let again = installed(&made, &made.project);
         assert_eq!(again.profile(), owner.profile());

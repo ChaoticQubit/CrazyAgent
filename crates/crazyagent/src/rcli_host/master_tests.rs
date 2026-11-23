@@ -74,6 +74,7 @@ fn sandbox(case: &Case, project: &Path) -> InstalledSandbox {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
     }
     let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         project,
         &case.launch.home_dir,
         &tmp,

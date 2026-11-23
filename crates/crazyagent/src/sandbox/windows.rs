@@ -455,7 +455,14 @@ mod tests {
     }
 
     fn policy(folders: &Folders, network: SandboxNetwork) -> ProjectSandbox {
-        ProjectSandbox::new(&folders.project, &folders.home, &folders.tmp, network).unwrap()
+        ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &folders.project,
+            &folders.home,
+            &folders.tmp,
+            network,
+        )
+        .unwrap()
     }
 
     fn cmd() -> PathBuf {
@@ -530,6 +537,7 @@ mod tests {
         let other_home = folders.home.with_file_name("other");
         fs::create_dir_all(&other_home).unwrap();
         let other = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
             &folders.project,
             &other_home,
             &folders.tmp,

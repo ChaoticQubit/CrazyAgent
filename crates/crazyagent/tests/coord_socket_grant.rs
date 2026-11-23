@@ -38,6 +38,7 @@ fn case() -> Case {
 
 fn sandbox(case: &Case) -> ProjectSandbox {
     ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,

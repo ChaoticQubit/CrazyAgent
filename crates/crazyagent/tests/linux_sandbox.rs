@@ -105,7 +105,14 @@ fn case() -> Case {
 }
 
 fn policy(case: &Case, network: SandboxNetwork) -> ProjectSandbox {
-    ProjectSandbox::new(&case.project, &case.home, &case.tmp, network).unwrap()
+    ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
+        &case.project,
+        &case.home,
+        &case.tmp,
+        network,
+    )
+    .unwrap()
 }
 
 /// The plain Landlock backend for a policy: detection with no bubblewrap to look for, so a
@@ -1665,6 +1672,7 @@ fn checkouts() -> Checkouts {
 
 fn confined(checkouts: &Checkouts) -> ProjectSandbox {
     ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &checkouts.project,
         &checkouts.home,
         &checkouts.tmp,

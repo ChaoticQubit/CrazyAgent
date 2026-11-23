@@ -385,43 +385,6 @@ pub fn tool_lock(package: &str, version: &str) -> Option<ToolLock<'static>> {
         .copied()
 }
 
-/// The two uv commands that install a locked tool into a fresh virtual environment: the
-/// first creates it with the pinned Python, only one uv manages itself and never one it
-/// would find on the PATH, which another account may have planted (RV-DS241-200); the
-/// second installs exactly the lock's wheels and refuses any file whose SHA-256 the lock
-/// lacks and any source build. Both ignore uv configuration files. Inputs: the Python
-/// version, the environment folder, its Python and the lock file. Output: each command's
-/// arguments.
-pub fn locked_tool_args(
-    python: &str,
-    venv: &std::path::Path,
-    venv_python: &std::path::Path,
-    requirements: &std::path::Path,
-) -> [Vec<std::ffi::OsString>; 2] {
-    [
-        vec![
-            "venv".into(),
-            "--no-project".into(),
-            "--no-config".into(),
-            "--managed-python".into(),
-            "--python".into(),
-            python.into(),
-            venv.into(),
-        ],
-        vec![
-            "pip".into(),
-            "install".into(),
-            "--no-config".into(),
-            "--python".into(),
-            venv_python.into(),
-            "--require-hashes".into(),
-            "--no-build".into(),
-            "--requirements".into(),
-            requirements.into(),
-        ],
-    ]
-}
-
 /// Finds and installs the app's system dependencies on one platform. `find` returns the
 /// installed version or none; `install` installs exactly the pin and returns the version
 /// now present; `install_tool` installs one pinned Python tool an MCP server needs into
@@ -957,12 +920,22 @@ mod tests {
     /// another account may have planted one (RV-DS241-200).
     #[test]
     fn a_locked_tool_installs_with_required_hashes_and_no_source_builds() {
-        let [venv, install] = locked_tool_args(
-            "3.12",
-            std::path::Path::new("/e/venv"),
-            std::path::Path::new("/e/venv/bin/python"),
-            std::path::Path::new("/e/requirements.txt"),
-        );
+        let recipe = kernel_processes::install::InstallRecipe::UvTool {
+            package: GRAPHIFY_PACKAGE.to_owned(),
+            version: GRAPHIFY_VERSION.to_owned(),
+            python: "3.12".to_owned(),
+            lock: "x".to_owned(),
+        };
+        let paths = kernel_processes::install::InstallPaths {
+            program: Some(std::path::PathBuf::from("/e/uv")),
+            venv: Some(std::path::PathBuf::from("/e/venv")),
+            venv_python: Some(std::path::PathBuf::from("/e/venv/bin/python")),
+            requirements: Some(std::path::PathBuf::from("/e/requirements.txt")),
+            ..Default::default()
+        };
+        let steps = kernel_processes::install::steps(&recipe, &paths).unwrap();
+        let [venv, install] = [&steps[0].args, &steps[1].args];
+        assert_eq!(steps.len(), 2);
         assert!(venv.iter().eq([
             "venv",
             "--no-project",

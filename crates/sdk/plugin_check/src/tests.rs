@@ -113,6 +113,7 @@ fn a_manifest_permission_list_is_read() {
             version: 1,
             permissions: vec!["settings.write".to_owned()],
             net: None,
+            essential: true,
         })
     );
     assert_eq!(

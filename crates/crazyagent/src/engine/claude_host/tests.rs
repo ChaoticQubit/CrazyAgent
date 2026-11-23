@@ -502,6 +502,7 @@ async fn real_claude_master_host_without_sign_in_reports_it_is_not_signed_in() {
     fs::create_dir(&tmp).unwrap();
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700)).unwrap();
     let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &fs::canonicalize(&project).unwrap(),
         &fs::canonicalize(&home).unwrap(),
         &fs::canonicalize(&tmp).unwrap(),

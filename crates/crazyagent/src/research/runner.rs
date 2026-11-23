@@ -1298,7 +1298,9 @@ impl ResearchRunner {
             &home,
             &homes,
         )?;
-        let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)?.keep_ports(&kept)?;
+        let mut sandbox =
+            ProjectSandbox::new(&crate::sandbox::PROFILE_HOOKS, &root, &home, &tmp, network)?
+                .keep_ports(&kept)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime)?;
         }
@@ -2070,6 +2072,7 @@ impl ResearchRunner {
         let tmp = agent.join("tmp");
         private_directory(&tmp)?;
         let mut sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
             &work,
             &home,
             &tmp,
@@ -4821,6 +4824,7 @@ mod tests {
                 .proxied("macos", tools, model)
                 .then_some(41_300);
             ProjectSandbox::new(
+                &crate::sandbox::PROFILE_HOOKS,
                 &make("project"),
                 &make("home"),
                 &make("tmp"),
@@ -5514,8 +5518,14 @@ mod tests {
                 .unwrap_err()
                 .line();
         assert!(matches!(harness_words(&program), Err(RunError::Invalid(code)) if code == line));
-        let sandbox =
-            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
         assert!(matches!(
             allow_harness(sandbox, &program),
             Err(RunError::Invalid(code)) if code == line
@@ -7359,8 +7369,14 @@ mod tests {
         )
         .unwrap();
         assert!(configured.success());
-        let sandbox =
-            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
         let profile = profiles.join("agent.sb");
         sandbox.install(&profile).unwrap();
         let worktree = project.join("worktrees").join("agent-one");
@@ -7415,8 +7431,14 @@ mod tests {
                 .status
                 .success()
         );
-        let sandbox =
-            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
         let profile = profiles.join("agent.sb");
         sandbox.install(&profile).unwrap();
         let worktree = project.join("worktrees").join("agent-one");
@@ -7503,8 +7525,14 @@ mod tests {
             fs::create_dir_all(folder).unwrap();
         }
         ensure_repository(&project, &tmp).unwrap();
-        let sandbox =
-            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
         let profile = profiles.join("agent.sb");
         sandbox.install(&profile).unwrap();
         let printed = kernel_processes::spawn_gate::output(
@@ -7593,8 +7621,14 @@ mod tests {
                 assert!(engine_git(&project, &tmp, &["config", &key, &value]).unwrap());
             }
         }
-        let sandbox =
-            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
         let profile = profiles.join("agent.sb");
         sandbox.install(&profile).unwrap();
         let refused = add_worktree(&sandbox, &profile, &worktrees.join("agent-1")).unwrap_err();
@@ -7628,9 +7662,14 @@ mod tests {
                 fs::create_dir_all(folder).unwrap();
             }
             ensure_repository(&project, &tmp).unwrap();
-            let sandbox =
-                ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
-                    .unwrap();
+            let sandbox = ProjectSandbox::new(
+                &crate::sandbox::PROFILE_HOOKS,
+                &project,
+                &home,
+                &tmp,
+                SandboxNetwork::Only(Vec::new()),
+            )
+            .unwrap();
             let profile = profiles.join("agent.sb");
             sandbox.install(&profile).unwrap();
             setups.push((sandbox, profile, project));
@@ -7672,8 +7711,14 @@ mod tests {
         for folder in [&project, &home, &tmp] {
             fs::create_dir_all(folder).unwrap();
         }
-        let sandbox =
-            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
         let profile = base.join("agent.sb");
         sandbox.install(&profile).unwrap();
         let refused = std::sync::Mutex::new(Vec::new());
@@ -7793,8 +7838,14 @@ mod tests {
             fs::create_dir_all(folder).unwrap();
         }
         repository_git(&project, &["init", "-q", "--template="]);
-        let sandbox =
-            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
         let profile = base.join("agent.sb");
         sandbox.install(&profile).unwrap();
         let worktree = crate::projects_home::state_folder(&project)
@@ -7838,8 +7889,14 @@ mod tests {
             .unwrap();
         config.write_all(sections.as_bytes()).unwrap();
         drop(config);
-        let sandbox =
-            ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+        let sandbox = ProjectSandbox::new(
+            &crate::sandbox::PROFILE_HOOKS,
+            &project,
+            &home,
+            &tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap();
         let profile = base.join("agent.sb");
         sandbox.install(&profile).unwrap();
         let worktree = crate::projects_home::state_folder(&project)
@@ -8045,9 +8102,14 @@ mod tests {
                 }
                 other => panic!("no setup for {other}"),
             }
-            let sandbox =
-                ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
-                    .unwrap();
+            let sandbox = ProjectSandbox::new(
+                &crate::sandbox::PROFILE_HOOKS,
+                &project,
+                &home,
+                &tmp,
+                SandboxNetwork::Only(Vec::new()),
+            )
+            .unwrap();
             let profile = profiles.join("agent.sb");
             sandbox.install(&profile).unwrap();
             let worktree = project.join("worktrees").join("agent-one");

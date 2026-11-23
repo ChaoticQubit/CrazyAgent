@@ -186,8 +186,14 @@ fn an_app_container_agent_cannot_read_a_key_inside_its_project() {
     let plain = root.join("plain.txt");
     std::fs::write(&plain, "plain").unwrap();
     store_key_file(&root, &reference(NAME), b"sk-ant-box").unwrap();
-    let sandbox =
-        ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new())).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        &project,
+        &home,
+        &tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
     let installed =
         WindowsSandbox::install(sandbox, &helper(), &profiles.join("agent.sb"), &grants).unwrap();
     let key = root.join(ACCOUNT_KEYS).join(NAME);

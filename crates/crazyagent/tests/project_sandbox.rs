@@ -50,7 +50,14 @@ fn case() -> Case {
 }
 
 fn sandbox(case: &Case, network: SandboxNetwork) -> ProjectSandbox {
-    ProjectSandbox::new(&case.project, &case.home, &case.tmp, network).unwrap()
+    ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
+        &case.project,
+        &case.home,
+        &case.tmp,
+        network,
+    )
+    .unwrap()
 }
 
 fn run(sandbox: &ProjectSandbox, profile: &Path, script: &str) -> Output {
@@ -1516,11 +1523,39 @@ fn only_loopback_model_endpoints_name_kept_ports_and_the_count_is_bounded() {
 fn sandbox_refuses_unsafe_roots_and_profile_locations() {
     let case = case();
     let network = || SandboxNetwork::Only(Vec::new());
-    assert!(ProjectSandbox::new(Path::new("relative"), &case.home, &case.tmp, network()).is_err());
-    assert!(ProjectSandbox::new(&owner_home(), &case.home, &case.tmp, network()).is_err());
-    assert!(ProjectSandbox::new(Path::new("/"), &case.home, &case.tmp, network()).is_err());
     assert!(
         ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
+            Path::new("relative"),
+            &case.home,
+            &case.tmp,
+            network()
+        )
+        .is_err()
+    );
+    assert!(
+        ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
+            &owner_home(),
+            &case.home,
+            &case.tmp,
+            network()
+        )
+        .is_err()
+    );
+    assert!(
+        ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
+            Path::new("/"),
+            &case.home,
+            &case.tmp,
+            network()
+        )
+        .is_err()
+    );
+    assert!(
+        ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
             &case.project,
             &owner_home().join(".codex"),
             &case.tmp,
@@ -1530,9 +1565,19 @@ fn sandbox_refuses_unsafe_roots_and_profile_locations() {
     );
     let quote = case.root.join("bad\"name");
     fs::create_dir_all(&quote).unwrap();
-    assert!(ProjectSandbox::new(&quote, &case.home, &case.tmp, network()).is_err());
     assert!(
         ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
+            &quote,
+            &case.home,
+            &case.tmp,
+            network()
+        )
+        .is_err()
+    );
+    assert!(
+        ProjectSandbox::new(
+            &crazyagent::sandbox::PROFILE_HOOKS,
             &case.project.join("missing"),
             &case.home,
             &case.tmp,
@@ -4045,6 +4090,7 @@ fn an_agent_starts_in_a_project_named_with_long_fold_runs_and_runs_no_app_plante
     fs::create_dir_all(&bundle).unwrap();
     fs::copy("/usr/bin/true", bundle.join("Python")).unwrap();
     let sandbox = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &project,
         &case.home,
         &case.tmp,
@@ -4328,6 +4374,7 @@ fn a_profile_with_every_grant_kind_parses_and_keeps_its_rules() {
         .chain(open.iter().cloned())
         .collect();
     let base = ProjectSandbox::new(
+        &crazyagent::sandbox::PROFILE_HOOKS,
         &own,
         &case.home,
         &case.tmp,

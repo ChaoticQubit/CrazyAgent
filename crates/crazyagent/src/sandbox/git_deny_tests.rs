@@ -1,8 +1,9 @@
-use super::{ProjectSandbox, sbpl_overlong, seatbelt_pattern};
+use super::ProjectSandbox;
 use kernel_sandbox::net::SandboxNetwork;
 use kernel_sandbox::paths::any_case;
 use kernel_sandbox::policy::AccessGrant;
 use kernel_sandbox::profile::consts::{ADMIN_LINKS, ADMIN_WRITES};
+use kernel_sandbox::profile::seatbelt::{sbpl_overlong, seatbelt_pattern};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
@@ -63,6 +64,7 @@ fn case_in(temp: tempfile::TempDir, root: PathBuf) -> Case {
 /// The project-root sandbox of the case, as the IDE server and IDE shell build it.
 fn sandbox(case: &Case) -> ProjectSandbox {
     ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
         &case.project,
         &case.home,
         &case.tmp,

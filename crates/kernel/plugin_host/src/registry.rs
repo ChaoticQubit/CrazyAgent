@@ -5,6 +5,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::Refused;
 use crate::embedding::{self, Manifest};
+use crate::generated::permissions::BUNDLED_GRANTS;
 use crate::manifest::MANIFEST_BYTES_MAX;
 use crate::problem::{PORT_HANDED_OUT, Problem};
 use crate::store::{Keys, Loaded, binding_rows, drop_binding, refused, resolve, sqlite};
@@ -65,6 +66,19 @@ pub(crate) fn is_bundled(name: &str) -> bool {
     BUNDLED.iter().any(|(bundled, _)| *bundled == name)
 }
 
+/// Whether a name is a bundled code plugin's id from the generated grant table. Input:
+/// the name. Output: the answer.
+pub(crate) fn is_code_plugin(name: &str) -> bool {
+    BUNDLED_GRANTS.iter().any(|grant| grant.plugin == name)
+}
+
+/// Whether a user plugin may not take a name: a bundled plugin or a bundled code plugin
+/// already holds it, and with it that plugin's on and off state. Input: the name. Output:
+/// the answer.
+fn name_taken(name: &str) -> bool {
+    is_bundled(name) || is_code_plugin(name)
+}
+
 fn bundled_found(name: &str, text: &str) -> Found {
     let manifest = embedding::parse(text).expect("a bundled plugin parses");
     assert_eq!(
@@ -103,7 +117,7 @@ pub(crate) fn user_found(stem: String, read: Result<Vec<u8>, Problem>) -> Found 
                         None,
                         Some("plugin"),
                     ))
-                } else if is_bundled(&manifest.name) {
+                } else if name_taken(&manifest.name) {
                     Err(Problem::new("app_plugin_name_taken", None, Some("plugin")))
                 } else {
                     Ok(manifest)
@@ -185,15 +199,18 @@ pub(crate) fn found(engine: &Engine<'_>, name: &str) -> Result<Found, Refused> {
     find(engine, name)?.ok_or_else(|| refused("app_plugin_not_found"))
 }
 
-/// Drops what an older plugin of the owner's left under a name a bundled plugin now has:
-/// its secret bindings with the keys entered for it, its switch and its trust record. A
-/// bundled plugin never gets a trust record, so one is the mark of such a leftover, and it
-/// goes last so an interrupted pass runs again. Each key is deleted before its binding
-/// row, so a key that cannot be deleted stops the pass with its row still there. Inputs:
-/// database and engine facts. Output: Ok, `app_plugins_unavailable`, or
-/// `app_plugin_key_store_unavailable`.
+/// Drops what an older plugin of the owner's left under a name a bundled plugin or a
+/// bundled code plugin now has: its secret bindings with the keys entered for it, its switch
+/// and its trust record. Neither kind ever gets a trust record, so one is the mark of such a
+/// leftover, and it goes last so an interrupted pass runs again. Each binding row goes
+/// before its key file, as [`drop_binding`] does. Inputs: database and engine facts.
+/// Output: Ok, or `app_plugins_unavailable`.
 pub(crate) fn prepare(db: &Connection, engine: &Engine<'_>) -> Result<(), Refused> {
-    for (name, _) in BUNDLED {
+    let reserved = BUNDLED
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(BUNDLED_GRANTS.iter().map(|grant| grant.plugin));
+    for name in reserved {
         let leftover: bool = db
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM app_plugin_trust WHERE name=?1)",
@@ -365,7 +382,7 @@ pub fn preview(db: &Connection, engine: &Engine<'_>, source: &Path) -> Result<Pr
         Ok(manifest) => manifest,
         Err(problem) => return Ok(Preview::Refused { problem }),
     };
-    if is_bundled(&manifest.name) {
+    if name_taken(&manifest.name) {
         return Ok(Preview::Refused {
             problem: Problem::new("app_plugin_name_taken", None, Some("plugin")),
         });
@@ -416,7 +433,7 @@ pub fn add(
     }
     let manifest = parse_file(&bytes).map_err(|_| refused("app_plugin_refused"))?;
     assert_eq!(manifest.sha256, sha256);
-    if is_bundled(&manifest.name) {
+    if name_taken(&manifest.name) {
         return Err(refused("app_plugin_name_taken"));
     }
     if !replace && folder::read(engine.root, &manifest.name)?.is_some() {
@@ -432,11 +449,16 @@ pub fn add(
     trust::settle(db, engine, &manifest, now_ms)
 }
 
-/// Turning a plugin on, or off with what the off does to runs holding it.
+/// Turning a plugin on, or off with what the off does to runs holding it and whether the
+/// owner lifted the lock on essential bundled code plugins.
 #[derive(Debug, Clone, Copy)]
 pub enum Switch<'u> {
     On,
-    Off { usage: &'u Usage, when_off: TurnOff },
+    Off {
+        usage: &'u Usage,
+        when_off: TurnOff,
+        essential_unlocked: bool,
+    },
 }
 
 /// Turns a plugin on or off. A user plugin turns on only while its trusted text is
@@ -451,6 +473,9 @@ pub fn set_enabled(
     switch: Switch<'_>,
 ) -> Result<(), Refused> {
     prepare(db, engine)?;
+    if is_code_plugin(name) {
+        return switch_code_plugin(db, name, switch);
+    }
     let found = found(engine, name)?;
     match switch {
         Switch::On => {
@@ -458,7 +483,9 @@ pub fn set_enabled(
             trust::check(db, found.origin, &manifest)?;
             set_flag(db, name, true)
         }
-        Switch::Off { usage, when_off } => {
+        Switch::Off {
+            usage, when_off, ..
+        } => {
             set_flag(db, name, false)?;
             if when_off == TurnOff::StopRuns {
                 usage.stop_runs(name);
@@ -467,6 +494,58 @@ pub fn set_enabled(
             Ok(())
         }
     }
+}
+
+/// Turns a bundled code plugin on or off by its plugin id in the switch table, where no row
+/// reads as on. An essential one is refused with `app_plugin_essential` while the
+/// `plugins.essential_unlocked` setting is false; turning off with `stop_runs` stops each
+/// run holding it once the off state is written. Inputs: database, plugin id and switch.
+/// Output: Ok, `app_plugin_essential`, or `app_plugins_unavailable`.
+fn switch_code_plugin(db: &Connection, name: &str, switch: Switch<'_>) -> Result<(), Refused> {
+    let grant = BUNDLED_GRANTS
+        .iter()
+        .find(|grant| grant.plugin == name)
+        .expect("only a bundled code plugin id switches here");
+    match switch {
+        Switch::On => set_flag(db, name, true),
+        Switch::Off {
+            usage,
+            when_off,
+            essential_unlocked,
+        } => {
+            if grant.essential && !essential_unlocked {
+                return Err(refused("app_plugin_essential"));
+            }
+            set_flag(db, name, false)?;
+            if when_off == TurnOff::StopRuns {
+                usage.stop_runs(name);
+            }
+            assert!(off_code_plugins(db)?.contains(name));
+            Ok(())
+        }
+    }
+}
+
+/// The bundled code plugins turned off, by plugin id, for the engine's in-memory off set.
+/// A switch row under a code plugin id that also has a trust record belongs to an older
+/// plugin of the owner's and is left out. Input: the database. Output: the ids, or
+/// `app_plugins_unavailable`.
+pub fn off_code_plugins(db: &Connection) -> Result<std::collections::BTreeSet<String>, Refused> {
+    let mut statement = db
+        .prepare(
+            "SELECT name FROM app_plugin_state WHERE enabled=0
+             AND NOT EXISTS (SELECT 1 FROM app_plugin_trust WHERE app_plugin_trust.name=app_plugin_state.name)",
+        )
+        .map_err(sqlite)?;
+    let names: Vec<String> = statement
+        .query_map([], |row| row.get(0))
+        .map_err(sqlite)?
+        .collect::<Result<_, _>>()
+        .map_err(sqlite)?;
+    Ok(names
+        .into_iter()
+        .filter(|name| is_code_plugin(name))
+        .collect())
 }
 
 /// Removes a user plugin: its folder (or the .yaml file an older version left), trust

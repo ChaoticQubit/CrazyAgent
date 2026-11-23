@@ -4408,13 +4408,19 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
 
     let project = private_folder(&base.join("project"));
     let tmp = private_folder(&base.join("tmp"));
-    let mut sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
-        .unwrap()
-        .allow_tools(&Toolchains::grant(
-            &ToolHomes::owner().unwrap(),
-            &[Toolchain::Node],
-        ))
-        .unwrap();
+    let mut sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        &project,
+        &home,
+        &tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_tools(&Toolchains::grant(
+        &ToolHomes::owner().unwrap(),
+        &[Toolchain::Node],
+    ))
+    .unwrap();
     for read in context.read_paths() {
         sandbox = sandbox.allow_read(read.parent().unwrap()).unwrap();
     }
@@ -4471,15 +4477,21 @@ fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
 
     let project = private_folder(&base.join("project"));
     let tmp = private_folder(&base.join("tmp"));
-    let mut sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
-        .unwrap()
-        .allow_tools(&Toolchains::grant(
-            &ToolHomes::owner().unwrap(),
-            &[Toolchain::Node],
-        ))
-        .unwrap()
-        .allow_scratch(&scratch)
-        .unwrap();
+    let mut sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        &project,
+        &home,
+        &tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_tools(&Toolchains::grant(
+        &ToolHomes::owner().unwrap(),
+        &[Toolchain::Node],
+    ))
+    .unwrap()
+    .allow_scratch(&scratch)
+    .unwrap();
     for read in context.read_paths() {
         sandbox = sandbox.allow_read(read.parent().unwrap()).unwrap();
     }
@@ -4539,10 +4551,16 @@ exit 0"#;
         .unwrap();
     let project = private_folder(&root.join("work"));
     let tmp = private_folder(&root.join("tmp"));
-    let sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
-        .unwrap()
-        .allow_scratch(&scratch)
-        .unwrap();
+    let sandbox = ProjectSandbox::new(
+        &crate::sandbox::PROFILE_HOOKS,
+        &project,
+        &home,
+        &tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_scratch(&scratch)
+    .unwrap();
     let profile = root.join("agent.sb");
     sandbox.install(&profile).unwrap();
     let bin = home.join(STATE).join("bin");
@@ -4738,14 +4756,15 @@ fn tools_on_profile(
     let tmp = private_folder(&base.join("tmp"));
     let scratch = toolchains::make_tmp(&crate::sandbox::TOOLCHAIN_HOOKS, home).unwrap();
     let network = policy.network.sandbox(Some(SandboxRemote::Loopback(port)));
-    let (mut sandbox, _) = ProjectSandbox::new(project, home, &tmp, network)
-        .unwrap()
-        .allow_tools(&Toolchains::grant(&homes, &policy.allowed(project)))
-        .unwrap()
-        .allow_scratch(&scratch)
-        .unwrap()
-        .allow_extra_reads(&kernel_sandbox::toolchains::graphify(&homes))
-        .unwrap();
+    let (mut sandbox, _) =
+        ProjectSandbox::new(&crate::sandbox::PROFILE_HOOKS, project, home, &tmp, network)
+            .unwrap()
+            .allow_tools(&Toolchains::grant(&homes, &policy.allowed(project)))
+            .unwrap()
+            .allow_scratch(&scratch)
+            .unwrap()
+            .allow_extra_reads(&kernel_sandbox::toolchains::graphify(&homes))
+            .unwrap();
     for install in installs {
         sandbox = sandbox.allow_read(install).unwrap();
     }
