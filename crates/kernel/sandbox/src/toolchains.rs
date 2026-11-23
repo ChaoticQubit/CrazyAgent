@@ -308,5 +308,5 @@ fn xcode_from_link(link: &Path) -> Option<PathBuf> {
     (in_app && plain && real.is_dir() && real != Path::new(DEVELOPER_TOOLS)).then_some(real)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
