@@ -79,7 +79,51 @@ fn rust_event_to_wire_refuses_a_body_over_the_cap_before_decoding() {
     assert_eq!(
         settings("AgentQuitSaved", &over).expect("settings emits AgentQuitSaved"),
         Err(crate::wire::EventError {
-            reason: "sdk_event_body_bounds".to_owned()
+            code: "sdk_event_body_bounds",
+            reason: "65537 bytes, over 65536".to_owned()
         })
     );
+}
+
+/// The refusal code `event_to_wire` gives one stored `AgentQuitSaved` body. Input: the
+/// body. Output: the code; panics when the body converts.
+fn settings_code(body: &[u8]) -> &'static str {
+    crate::generated::envelope::settings::event_to_wire("AgentQuitSaved", body)
+        .expect("settings emits AgentQuitSaved")
+        .expect_err("the body is refused")
+        .code
+}
+
+#[test]
+fn rust_event_to_wire_names_a_schema_mismatch() {
+    for body in [
+        &br#"{"settings":{"on_quit":"stop","left_running":"never","hours":12},"extra":1}"#[..],
+        br#"{"settings":{"on_quit":"stop","left_running":"never"}}"#,
+        br#"{"settings":{"on_quit":"stop","left_running":"never","hours":-1}}"#,
+        br#"{}"#,
+    ] {
+        assert_eq!(
+            settings_code(body),
+            "sdk_event_schema",
+            "{}",
+            String::from_utf8_lossy(body)
+        );
+    }
+}
+
+#[test]
+fn rust_event_to_wire_names_a_body_that_is_not_json() {
+    for body in [&b"not json"[..], b"", br#"{"settings":"#] {
+        assert_eq!(
+            settings_code(body),
+            "sdk_event_undecodable",
+            "{}",
+            String::from_utf8_lossy(body)
+        );
+    }
+    let refused = crate::generated::envelope::settings::event_to_wire("AgentQuitSaved", b"nope")
+        .expect("emitted")
+        .expect_err("refused");
+    assert!(!refused.reason.is_empty());
+    assert!(!refused.reason.starts_with("sdk_"), "{}", refused.reason);
 }
