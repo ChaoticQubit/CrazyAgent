@@ -53,3 +53,14 @@ fn the_engine_key_store_backs_the_plugin_host() {
     let unknown = KeyRef::new("acct-gone").unwrap();
     assert_eq!((KEYS.account)(&db, &unknown), Ok(None));
 }
+
+/// Q-8: on Linux the adapter hands the plugin host the range this Linux hands out by
+/// itself, read where the sandbox reads it, so a plugin on such a port is refused.
+#[cfg(target_os = "linux")]
+#[test]
+fn on_linux_the_adapter_passes_the_handed_out_range() {
+    let temp = tempfile::tempdir().unwrap();
+    let engine = super::engine(temp.path());
+    let range = crate::sandbox::linux::read_picked_ports().expect("this Linux names its range");
+    assert_eq!(engine.handed_out, Some(range));
+}
