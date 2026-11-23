@@ -1,3 +1,4 @@
+use sdk::secrets::{self, Secret};
 use sdk::settings::{self, QuitSettings};
 use sdk::{Capability, Refusal, Tier};
 
@@ -15,20 +16,23 @@ pub trait Refusals {
 pub struct Gateway<'p> {
     grants: &'p Grants,
     settings: &'p dyn settings::Provide,
+    secrets: &'p dyn secrets::Provide,
     refusals: &'p dyn Refusals,
 }
 
 impl<'p> Gateway<'p> {
-    /// Builds a gateway. Inputs: the grant table, the settings provider and the refusal
-    /// sink. Output: the gateway.
+    /// Builds a gateway. Inputs: the grant table, the settings and secrets providers and
+    /// the refusal sink. Output: the gateway.
     pub fn new(
         grants: &'p Grants,
         settings: &'p dyn settings::Provide,
+        secrets: &'p dyn secrets::Provide,
         refusals: &'p dyn Refusals,
     ) -> Self {
         Self {
             grants,
             settings,
+            secrets,
             refusals,
         }
     }
@@ -66,24 +70,26 @@ impl<'p> Gateway<'p> {
     }
 
     /// Runs one call: refuses and reports it once when not admitted; else checks the
-    /// inputs' bounds, runs the provider, and checks its output's bounds, dropping an output
-    /// over them whole. A bound refusal goes to the caller only, never to the sink.
-    /// Inputs: the plugin id, the capability, the input check, the provider call and the
-    /// output check. Output: the provider's result, or the refusal.
-    pub(crate) fn call<T>(
+    /// input's bounds, hands that same input to the provider, and checks its output's
+    /// bounds, dropping an output over them whole. A bound refusal goes to the caller only,
+    /// never to the sink. Several inputs travel as one tuple. Inputs: the plugin id, the
+    /// capability, the input, its check, the provider call and the output check. Output:
+    /// the provider's result, or the refusal.
+    pub(crate) fn call<I, T>(
         &self,
         plugin: &'static str,
         capability: &Capability,
-        check_input: impl FnOnce() -> Result<(), Refusal>,
-        provide: impl FnOnce() -> Result<T, Refusal>,
+        input: I,
+        check_input: impl FnOnce(&I) -> Result<(), Refusal>,
+        provide: impl FnOnce(I) -> Result<T, Refusal>,
         check_output: impl FnOnce(&T) -> Result<(), Refusal>,
     ) -> Result<T, Refusal> {
         if let Err(refusal) = self.admit(plugin, capability) {
             self.refusals.refused(plugin, capability, &refusal);
             return Err(refusal);
         }
-        check_input()?;
-        let output = provide()?;
+        check_input(&input)?;
+        let output = provide(input)?;
         check_output(&output)?;
         Ok(output)
     }
@@ -101,9 +107,43 @@ impl sdk::Host for Bound<'_, '_> {
         self.gateway.call(
             self.plugin,
             &settings::SAVE_QUIT,
-            || Ok(()),
-            || self.gateway.settings.save_quit(self.plugin, settings),
-            |_| Ok(()),
+            settings,
+            settings::check_save_quit_input,
+            |settings| self.gateway.settings.save_quit(self.plugin, settings),
+            settings::check_save_quit_output,
+        )
+    }
+
+    fn secrets_put_from_owner(&self, name: String) -> Result<Secret, Refusal> {
+        self.gateway.call(
+            self.plugin,
+            &secrets::PUT_FROM_OWNER,
+            name,
+            |name| secrets::check_put_from_owner_input(name),
+            |name| self.gateway.secrets.put_from_owner(self.plugin, name),
+            secrets::check_put_from_owner_output,
+        )
+    }
+
+    fn secrets_find(&self, name: String) -> Result<Option<Secret>, Refusal> {
+        self.gateway.call(
+            self.plugin,
+            &secrets::FIND,
+            name,
+            |name| secrets::check_find_input(name),
+            |name| self.gateway.secrets.find(self.plugin, name),
+            secrets::check_find_output,
+        )
+    }
+
+    fn secrets_forget(&self, secret: Secret) -> Result<(), Refusal> {
+        self.gateway.call(
+            self.plugin,
+            &secrets::FORGET,
+            secret,
+            secrets::check_forget_input,
+            |secret| self.gateway.secrets.forget(self.plugin, secret),
+            secrets::check_forget_output,
         )
     }
 }

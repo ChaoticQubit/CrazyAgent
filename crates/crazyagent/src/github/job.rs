@@ -689,7 +689,9 @@ impl GitHub {
         let repo = new_repo(plan);
         match self.create_repo(&repo) {
             Err(error) if error.0 == "github_repo_name_taken" => {
-                let token = self.store.get(&self.saved()?.credential)?;
+                let token = self
+                    .store
+                    .get(&crate::protocol::kernel(&self.saved()?.credential)?)?;
                 api::made_since(&self.endpoints, &token, &repo, sent_at)?.ok_or(error)
             }
             made => made,
@@ -709,7 +711,9 @@ impl GitHub {
         let home = publish::GitHome::new(&self.root)?;
         let workflows = publish::has_workflows(&git, home.path(), project, &committed.commit)?;
         if workflows {
-            let token = self.store.get(&self.saved()?.credential)?;
+            let token = self
+                .store
+                .get(&crate::protocol::kernel(&self.saved()?.credential)?)?;
             if api::scopes(&self.endpoints, &token)?
                 .is_some_and(|scopes| !api::grants(&scopes, &WORKFLOW))
             {

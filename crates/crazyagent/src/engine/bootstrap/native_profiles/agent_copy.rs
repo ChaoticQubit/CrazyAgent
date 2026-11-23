@@ -703,7 +703,7 @@ fn codex_copy(record: &[u8]) -> Result<Record, EngineError> {
     let identity = claims_only(filled(tokens.id_token.as_ref()).ok_or_else(codex_unreadable)?)?;
     let expires = Duration::from_secs(token_expiry(access)?);
     let null = Value::Null;
-    let copy = crate::credentials::sized_json(&CodexCopy {
+    let copy = kernel_security::secret::sized_json(&CodexCopy {
         api_key: (),
         last_refresh: record.last_refresh.as_ref().unwrap_or(&null),
         tokens: CodexCopyTokens {
@@ -986,7 +986,7 @@ fn claude_copy(record: &[u8]) -> Result<Record, EngineError> {
         .as_ref()
         .and_then(Value::as_u64)
         .ok_or_else(unavailable)?;
-    let copy = crate::credentials::sized_json(&ClaudeCopy {
+    let copy = kernel_security::secret::sized_json(&ClaudeCopy {
         oauth: ClaudeCopyOauth {
             access_token: access,
             expires_at: expires_ms,

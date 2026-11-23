@@ -1,8 +1,8 @@
-use super::run::{reported_version, run_bounded};
 use super::{
     Dependency, InstallError, Installer, LOCK_FILE, Pin, UV_WINGET_ID, Version, keep_only,
     locked_tool_args, tool_lock,
 };
+use kernel_processes::run::{reported_version, run_bounded};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;

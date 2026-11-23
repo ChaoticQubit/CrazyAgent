@@ -13,8 +13,6 @@ pub(crate) use kernel_storage::upgrade::Step;
 use rusqlite::OpenFlags;
 use rusqlite::{Connection, Transaction};
 use std::path::Path;
-#[cfg(unix)]
-use std::path::PathBuf;
 
 mod landing_step;
 mod memory_step;
@@ -354,12 +352,12 @@ fn settings_texts(
 /// Brings back the pinned 2.4 backup the owner asked for (L5, DEC-192) through
 /// [`kernel_storage::restore::restore_pinned`], with this engine's hooks. Inputs: the
 /// database path and the settings sources. Output: the folder of the copy kept of the 2.5
-/// data, or the failure.
+/// data with how the pin was checked, or the failure.
 #[cfg(unix)]
 pub(crate) fn restore_pinned(
     path: &Path,
     settings: Option<&SettingsSources>,
-) -> Result<PathBuf, EngineError> {
+) -> Result<kernel_storage::restore::Restored, EngineError> {
     with_hooks(settings, |hooks| {
         Ok(kernel_storage::restore::restore_pinned(path, hooks)?)
     })

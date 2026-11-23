@@ -1,6 +1,6 @@
-use super::InstallError;
 use super::pinned::{PinnedInstaller, link, runnable};
-use super::process::{is_sha256, private_folder, run, staging_folder};
+use kernel_processes::run::InstallError;
+use kernel_processes::run::{is_sha256, private_folder, run, staging_folder};
 use std::ffi::OsString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
@@ -222,7 +222,9 @@ pub(crate) fn install_pin(engine_root: &Path, pin: &NodePin) -> Result<NodeRunti
     let installer = installer(engine_root);
     let setup = installer.setup_folder().to_path_buf();
     private_folder(&setup)?;
-    let staging = staging_folder(&setup, "node")?;
+    let id =
+        crate::engine::owner::random_id().map_err(|_| InstallError("setup_store_unavailable"))?;
+    let staging = staging_folder(&setup, "node", &id)?;
     let result = (|| {
         let archive = staging.join("node.tar.gz");
         installer.download(&pin.url, &pin.sha256, &archive, &staging)?;

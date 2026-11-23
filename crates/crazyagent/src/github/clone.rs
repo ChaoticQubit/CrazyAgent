@@ -1,8 +1,8 @@
 use super::CloneReceipt;
 use super::api::Endpoints;
-use crate::credentials::Store;
 use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
+use kernel_security::store::Store;
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -213,7 +213,7 @@ pub(super) fn clone_repo(
     if std::fs::symlink_metadata(&destination).is_ok() {
         return Err(failure("clone_destination_exists"));
     }
-    let helper = store.git_credential_helper(credential, GIT_USER)?;
+    let helper = store.git_credential_helper(&crate::protocol::kernel(credential)?, GIT_USER)?;
     let git = git_program(std::env::var_os("PATH").as_deref())
         .ok_or_else(|| failure("github_git_missing"))?;
     let mut token = [0u8; 8];

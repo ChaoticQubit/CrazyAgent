@@ -9,6 +9,8 @@ pub struct Refused {
 }
 
 #[cfg(feature = "store")]
+pub mod assets;
+#[cfg(feature = "store")]
 pub mod embedding;
 pub mod manifest;
 pub mod problem;

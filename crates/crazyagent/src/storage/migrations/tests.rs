@@ -19,6 +19,7 @@ use kernel_storage::restore::{
 use kernel_storage::upgrade::{Backup, StepRun, upgrade_at_for_test};
 use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+use std::path::PathBuf;
 use std::time::UNIX_EPOCH;
 use std::time::{Duration, SystemTime};
 use tokio::sync::oneshot;
@@ -302,7 +303,7 @@ fn restore_pinned_at(
     now: SystemTime,
 ) -> Result<PathBuf, EngineError> {
     with_hooks(settings, |hooks| {
-        Ok(restore_pinned_at_for_test(path, hooks, now)?)
+        Ok(restore_pinned_at_for_test(path, hooks, now)?.kept)
     })
 }
 
