@@ -5342,7 +5342,7 @@ mod tests {
         fn spawn(
             &self,
             _agent: &AgentId,
-            _command: &crate::harnesses::interactive::InteractiveCommand,
+            _command: &crate::terminal::PaneCommand,
         ) -> Result<crate::terminal::PaneRef, crate::terminal::HostError> {
             Err(crate::terminal::HostError("terminal_unavailable".into()))
         }

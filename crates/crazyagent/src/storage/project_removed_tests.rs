@@ -3,8 +3,9 @@ use crate::engine::owner::{OwnerMutation, OwnerOperation, OwnerRequest, OwnerRes
 use crate::project_setup::SetupAction;
 use crate::project_setup::removed::event::{self, ProjectRemoved};
 use crate::protocol::{Command, Cursor, PROTOCOL_VERSION, ProjectId, RequestId};
-use crate::state_log::replay::{replay, rows};
+use crate::state_log::replay;
 use crate::state_log::{Aggregate, fence};
+use kernel_storage::state_log::replay::rows;
 use rusqlite::{Connection, params};
 use std::collections::BTreeSet;
 use std::os::unix::fs::PermissionsExt;
@@ -507,7 +508,7 @@ fn a_removal_tombstones_its_project_s_admissions_and_their_replay_brings_none_ba
     let mut s = store();
     let engine = || fence::Fence::Engine(s.started.host.clone());
     let tx = s.db.transaction().unwrap();
-    let mut appender = crate::state_log::Appender::own(&tx, engine()).unwrap();
+    let mut appender = crate::state_log::own(&tx, engine()).unwrap();
     for project in [REMOVED, OTHER] {
         let project_id = ProjectId::new(project).unwrap();
         let admitted = log::admitted_for_test(&project_id, &format!("/repo/{project}"));
@@ -515,7 +516,7 @@ fn a_removal_tombstones_its_project_s_admissions_and_their_replay_brings_none_ba
     }
     tx.commit().unwrap();
     let tx = s.db.transaction().unwrap();
-    let mut appender = crate::state_log::Appender::own(&tx, engine()).unwrap();
+    let mut appender = crate::state_log::own(&tx, engine()).unwrap();
     log::snapshot(&mut appender, 2).unwrap();
     tx.commit().unwrap();
 
@@ -553,7 +554,7 @@ fn a_cleared_ids_admissions_are_tombstoned_and_their_replay_brings_none_back() {
     let mut s = store();
     let engine = || fence::Fence::Engine(s.started.host.clone());
     let tx = s.db.transaction().unwrap();
-    let mut appender = crate::state_log::Appender::own(&tx, engine()).unwrap();
+    let mut appender = crate::state_log::own(&tx, engine()).unwrap();
     for project in [REMOVED, OTHER] {
         let project_id = ProjectId::new(project).unwrap();
         let admitted = log::admitted_for_test(&project_id, &format!("/repo/{project}"));

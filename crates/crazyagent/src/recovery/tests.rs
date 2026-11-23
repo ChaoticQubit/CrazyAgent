@@ -225,7 +225,12 @@ impl Fixture {
             transcript: Transcript::ClaudeSession { file },
         };
         let since = SystemTime::now();
-        let pane = host.spawn(&AgentId::team(id).unwrap(), &command).unwrap();
+        let pane = host
+            .spawn(
+                &AgentId::team(id).unwrap(),
+                &crate::terminal::PaneCommand::from(&command),
+            )
+            .unwrap();
         let record = PaneRecord {
             access: Some(AgentAccess::Sandboxed),
             toolchains: Some(Vec::new()),
@@ -557,7 +562,12 @@ fn a_codex_agent_interrupted_mid_turn_names_its_own_rollout_file() {
             sessions: sessions.clone(),
         },
     };
-    let pane = host.spawn(&AgentId::team(sub).unwrap(), &command).unwrap();
+    let pane = host
+        .spawn(
+            &AgentId::team(sub).unwrap(),
+            &crate::terminal::PaneCommand::from(&command),
+        )
+        .unwrap();
     let record = PaneRecord::new(&command.transcript, &worktree, since, pane.pid, None).unwrap();
     fixture
         .connection
