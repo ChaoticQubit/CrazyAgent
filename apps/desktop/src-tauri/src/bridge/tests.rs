@@ -230,6 +230,13 @@ fn every_code_the_engine_refuses_an_owner_change_with_reaches_the_window_by_name
             quoted_after(text, mark, &mut codes);
         }
     }
+    let plugin_host = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../crates/kernel/plugin_host/src");
+    let mut kernel_files = Vec::new();
+    sources(&plugin_host, &mut kernel_files);
+    for text in &kernel_files {
+        quoted_after(text, "Failure::Refused(", &mut codes);
+    }
     let selection = std::fs::read_to_string(engine.join("master_session.rs")).unwrap();
     let start = selection.find("pub(crate) fn validate_selection(").unwrap();
     let end = start + selection[start..].find("\n}\n").unwrap();
