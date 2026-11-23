@@ -1826,6 +1826,8 @@ async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_gu
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         db.busy_timeout(Duration::from_secs(1))?;
+        let revision = i64::try_from(revision)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         let mut statement =
             db.prepare("SELECT aggregate, kind FROM state_log WHERE revision=?1 ORDER BY seq")?;
         statement
