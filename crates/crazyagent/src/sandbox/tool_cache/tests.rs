@@ -3,7 +3,7 @@ use kernel_sandbox::policy::{AgentAccess, ToolCacheScope};
 use kernel_sandbox::tool_cache::{
     FOLDER, MARKER, MARKER_TARGET, PNPM, Prepared, project_folder, remove_agent,
 };
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::PathBuf;
 
 /// A canonical engine runtime folder and a stand-in uv: a script that makes the cache the
