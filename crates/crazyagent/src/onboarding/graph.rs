@@ -3,6 +3,7 @@ use crate::research::runner::RunError;
 use crate::research::runner::{AgentProcess, drain, private_directory};
 #[cfg(unix)]
 use crate::sandbox::ProjectSandbox;
+#[cfg(unix)]
 use kernel_sandbox::net::SandboxNetwork;
 #[cfg(unix)]
 use std::fs::OpenOptions;
