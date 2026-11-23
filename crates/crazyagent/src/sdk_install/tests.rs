@@ -346,6 +346,8 @@ fn agent_quit_calling_process_install_is_refused_and_logs_one_call_refused() {
         process: &provider,
         secrets: &crate::security_caps::Absent,
         settings: &crate::security_caps::Absent,
+        service: &crate::security_caps::Absent,
+        update: &crate::security_caps::Absent,
     };
     let plugin = BUNDLED_GRANTS[0].plugin;
     let host = Bound::new(gateway.bind(plugin), &providers);
@@ -373,6 +375,8 @@ fn a_test_grant_table_reaches_the_install_provider() {
         process: &provider,
         secrets: &crate::security_caps::Absent,
         settings: &crate::security_caps::Absent,
+        service: &crate::security_caps::Absent,
+        update: &crate::security_caps::Absent,
     };
     let host = Bound::new(gateway.bind("installer-test"), &providers);
     assert_eq!(
