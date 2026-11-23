@@ -199,7 +199,7 @@ pub fn compose(ime: &mut Ime, active: bool, read: Read) -> Composed {
 mod tests {
     use super::super::text_inputs;
     use super::*;
-    use crazyagent::terminal::INPUT_BYTES_MAX;
+    use kernel_processes::terminal::INPUT_BYTES_MAX;
 
     fn marked(text: &str, caret: usize) -> Ime {
         let mut ime = Ime::default();

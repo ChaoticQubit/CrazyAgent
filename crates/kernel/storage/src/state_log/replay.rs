@@ -123,6 +123,24 @@ pub fn redact(tx: &Transaction<'_>, seq: u64, fence: &FenceCheck) -> Result<(), 
         Some(SNAPSHOT_CHUNK | SNAPSHOT_DONE) => return Err(error("state_log_redact_snapshot")),
         Some(_) => {}
     }
+    securely(tx, || {
+        tx.execute(
+            "UPDATE state_log SET body=?1 WHERE seq=?2",
+            params![TOMBSTONE, seq],
+        )
+        .map_err(error)
+    })
+    .map(|_| ())
+}
+
+/// Runs one write with `secure_delete` on, so the bytes it overwrites are zeroed, then puts
+/// back the mode it found by its keyword, since SQLite reads the number 2 as ON and not
+/// FAST. Inputs: the transaction and the write. Output: the write's result, or
+/// `state_log_redact_secure_delete` for a mode SQLite does not name.
+pub(super) fn securely<T>(
+    tx: &Transaction<'_>,
+    write: impl FnOnce() -> Result<T, StorageError>,
+) -> Result<T, StorageError> {
     let secure: i64 = tx
         .query_row("PRAGMA secure_delete", [], |row| row.get(0))
         .map_err(error)?;
@@ -134,15 +152,10 @@ pub fn redact(tx: &Transaction<'_>, seq: u64, fence: &FenceCheck) -> Result<(), 
     };
     tx.execute_batch("PRAGMA secure_delete=ON;")
         .map_err(error)?;
-    let updated = tx
-        .execute(
-            "UPDATE state_log SET body=?1 WHERE seq=?2",
-            params![TOMBSTONE, seq],
-        )
-        .map_err(error);
+    let written = write();
     tx.execute_batch(&format!("PRAGMA secure_delete={mode};"))
         .map_err(error)?;
-    updated.map(|_| ())
+    written
 }
 
 /// Moves every WAL frame into the database file and empties the WAL after a redact

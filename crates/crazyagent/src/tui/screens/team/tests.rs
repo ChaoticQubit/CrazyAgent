@@ -2,7 +2,7 @@ use crate::engine::owner::AgentInstructions;
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::team::graph::{LiveAction, Relation, RelationEdge};
 use crate::team::{AgentStatus, EdgeState, GraphEdge, GraphNode, NodeKind, TaskSource, TeamGraph};
-use crate::terminal::{AgentId, INPUT_BYTES_MAX, TerminalFrame};
+use crate::terminal::TerminalFrame;
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
 use crate::tui::ctx::{Ctx, Link, Load};
@@ -13,6 +13,7 @@ use crate::tui::seam::{AccountRow, Arrival, NOT_READY, Request};
 use crate::tui::shell::Shell;
 use crate::tui::terminal_pane::LEADER;
 use crate::tui::theme::{Appearance, Colors, Depth};
+use kernel_processes::terminal::{AgentId, INPUT_BYTES_MAX};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -1022,7 +1023,7 @@ fn an_attach_refused_as_its_teammates_server_ended_says_it_stopped() {
     shell.arrive(Arrival::Terminal {
         agent: terminal("team-1"),
         frame: TerminalFrame::Rejected {
-            code: crate::terminal::TEAMMATES_SERVER_ENDED.into(),
+            code: kernel_processes::terminal::TEAMMATES_SERVER_ENDED.into(),
         },
     });
     let rows = render(&mut shell);

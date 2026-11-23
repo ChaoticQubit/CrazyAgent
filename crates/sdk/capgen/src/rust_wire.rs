@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crazyagent_cap::{Capability, File, TypeRef};
+use crazyagent_cap::{Capability, Event, File, TypeRef};
 
 use crate::CapgenError;
 use crate::rust::pascal;
@@ -15,8 +15,9 @@ const CALLER_INPUTS: [&str; 3] = ["plugin", "caller", "host"];
 /// Writes the call envelopes: `envelope/mod.rs` and one `envelope/<stem>.rs` per file with
 /// a capability, nothing when no file has one. Input: every file, sorted by stem, after
 /// the Rust checks passed. Output: the files with their paths, or `capgen_reserved_name`
-/// (the stem `envelope`, a caller input) or `capgen_name_collision`.
+/// (the stem `envelope`, a caller input), `capgen_name_collision` or `capgen_event_shape`.
 pub(crate) fn files(sorted: &[&(&str, File)]) -> Result<Vec<(String, String)>, CapgenError> {
+    check_events(sorted)?;
     for (stem, file) in sorted {
         if *stem == FOLDER {
             return Err(refuse(stem, "capgen_reserved_name", FOLDER.to_owned()));
@@ -48,6 +49,61 @@ pub(crate) fn files(sorted: &[&(&str, File)]) -> Result<Vec<(String, String)>, C
     out.sort();
     assert_eq!(out.len(), called.len() + 1);
     Ok(out)
+}
+
+/// Refuses an event kind named like an enum, handle or type of its file
+/// (`capgen_name_collision`), a kind emitted again in its file with other fields, and a
+/// kind emitted by two files (`capgen_event_shape`, detail `<kind>: <first>, <second>`).
+/// Input: every file, sorted by stem. Output: nothing, or the first refusal.
+fn check_events(sorted: &[&(&str, File)]) -> Result<(), CapgenError> {
+    let mut owners: BTreeMap<&str, &str> = BTreeMap::new();
+    for (stem, file) in sorted {
+        let items: BTreeSet<&str> = file
+            .enums
+            .iter()
+            .map(|item| item.name.as_str())
+            .chain(file.handles.iter().map(|item| item.name.as_str()))
+            .chain(file.types.iter().map(|item| item.name.as_str()))
+            .collect();
+        let mut shapes: BTreeMap<&str, &Event> = BTreeMap::new();
+        for capability in &file.capabilities {
+            for event in &capability.emits {
+                let kind = event.kind.as_str();
+                if items.contains(kind) {
+                    return Err(refuse(stem, "capgen_name_collision", kind.to_owned()));
+                }
+                if let Some(first) = owners.get(kind)
+                    && first != stem
+                {
+                    let detail = format!("{kind}: {first}, {stem}");
+                    return Err(refuse(stem, "capgen_event_shape", detail));
+                }
+                if shapes
+                    .get(kind)
+                    .is_some_and(|seen| seen.fields != event.fields)
+                {
+                    return Err(refuse(stem, "capgen_event_shape", kind.to_owned()));
+                }
+                shapes.entry(kind).or_insert(event);
+                owners.insert(kind, stem);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The events a file emits, each kind once, in first-emitted order; a repeat has the same
+/// fields once [`check_events`] passed. Input: the file. Output: the events.
+pub(crate) fn events(file: &File) -> Vec<&Event> {
+    let mut seen = BTreeSet::new();
+    let events: Vec<&Event> = file
+        .capabilities
+        .iter()
+        .flat_map(|capability| capability.emits.iter())
+        .filter(|event| seen.insert(event.kind.as_str()))
+        .collect();
+    assert_eq!(events.len(), seen.len());
+    events
 }
 
 /// Builds a refusal of a file. Inputs: the stem, the code and the detail. Output: the refusal.
@@ -293,8 +349,9 @@ fn named_in(ty: &TypeRef) -> Option<&str> {
     }
 }
 
-/// Writes one file's envelope module: a mirror per mirrored type, then per capability its
-/// `<Fn>Input` and `<Fn>Output`. Inputs: the stem, the file and every loaded file.
+/// Writes one file's envelope module: a mirror per mirrored type, per capability its
+/// `<Fn>Input` and `<Fn>Output`, per event its `<Kind>Stored` and `<Kind>Wire`, then
+/// `event_to_wire`. Inputs: the stem, the file and every loaded file.
 /// Output: the text, or `capgen_name_collision` when two items take one name.
 fn module(stem: &str, file: &File, all: &[&(&str, File)]) -> Result<String, CapgenError> {
     let index = Index::of(stem, file, all);
@@ -320,8 +377,101 @@ fn module(stem: &str, file: &File, all: &[&(&str, File)]) -> Result<String, Capg
         input(&mut text, stem, &index, capability, &pascal);
         output(&mut text, stem, &index, capability, &pascal);
     }
-    assert!(taken.len() >= file.capabilities.len() * 2);
+    let events = events(file);
+    for event in &events {
+        take(stem, &mut taken, &format!("{}Stored", event.kind))?;
+        take(stem, &mut taken, &format!("{}Wire", event.kind))?;
+        event_bodies(&mut text, stem, &index, event);
+    }
+    event_to_wire(&mut text, stem, &events);
+    assert!(taken.len() >= file.capabilities.len() * 2 + events.len() * 2);
     Ok(text)
+}
+
+/// Writes one event's stored body, read with the SDK types' own serde exactly as the log
+/// keeps it, and its wire body, built from it with `u64`, `bytes` and mirrored types in
+/// their wire forms. Inputs: the text, the stem, the index and the event. Output: the
+/// text grows.
+fn event_bodies(text: &mut String, stem: &str, index: &Index<'_>, event: &Event) {
+    let kind = &event.kind;
+    assert!(!event.fields.is_empty());
+    text.push_str(&format!(
+        "\n/// Generated by capgen from {stem}.cap: the body of event {kind} as the log stores it.\n"
+    ));
+    text.push_str("#[derive(Deserialize)]\n#[serde(deny_unknown_fields)]\n");
+    text.push_str(&format!("pub struct {kind}Stored {{\n"));
+    for field in &event.fields {
+        text.push_str(&format!(
+            "    pub {}: {},\n",
+            field.name,
+            index.sdk_type(&field.ty)
+        ));
+    }
+    text.push_str("}\n");
+    text.push_str(&format!(
+        "\n/// Generated by capgen from {stem}.cap: the body of event {kind} as the wire carries it.\n"
+    ));
+    text.push_str("#[derive(Serialize)]\n");
+    text.push_str(&format!("pub struct {kind}Wire {{\n"));
+    for field in &event.fields {
+        text.push_str(&format!(
+            "    pub {}: {},\n",
+            field.name,
+            index.wire_type(&field.ty)
+        ));
+    }
+    text.push_str("}\n");
+    text.push_str(&format!(
+        "\n/// Generated by capgen from {stem}.cap: converts one {kind} body to its wire form.\n"
+    ));
+    text.push_str(&format!("impl From<{kind}Stored> for {kind}Wire {{\n"));
+    text.push_str("    /// Input: the stored body. Output: the same body in its wire form.\n");
+    text.push_str(&format!(
+        "    fn from(value: {kind}Stored) -> Self {{\n        Self {{\n"
+    ));
+    for field in &event.fields {
+        let place = format!("value.{}", field.name);
+        text.push_str(&format!(
+            "            {}: {},\n",
+            field.name,
+            index.convert(&field.ty, &place, true, 0)
+        ));
+    }
+    text.push_str("        }\n    }\n}\n");
+}
+
+/// Writes `event_to_wire`, which turns one stored event body of this file into its wire
+/// JSON by kind. Inputs: the text, the stem and the file's events. Output: the text grows.
+fn event_to_wire(text: &mut String, stem: &str, events: &[&Event]) {
+    let answer =
+        "core::option::Option<core::result::Result<serde_json::Value, crate::wire::EventError>>";
+    text.push_str(&format!(
+        "\n/// Generated by capgen from {stem}.cap: converts one stored event body to its wire JSON.\n"
+    ));
+    if events.is_empty() {
+        text.push_str(
+            "/// Inputs: the event kind and the stored body. Output: always `None`, since this file\n\
+             /// emits no event.\n",
+        );
+        text.push_str(&format!(
+            "pub fn event_to_wire(_kind: &str, _body: &[u8]) -> {answer} {{\n    None\n}}\n"
+        ));
+        return;
+    }
+    text.push_str(
+        "/// Inputs: the event kind and the stored body. Output: `None` for a kind this file does\n\
+         /// not emit, else the wire JSON or why the body does not decode, never a panic.\n",
+    );
+    text.push_str(&format!(
+        "pub fn event_to_wire(kind: &str, body: &[u8]) -> {answer} {{\n    match kind {{\n"
+    ));
+    for event in events {
+        let kind = &event.kind;
+        text.push_str(&format!(
+            "        \"{kind}\" => Some(crate::wire::event_body::<{kind}Stored, {kind}Wire>(body)),\n"
+        ));
+    }
+    text.push_str("        _ => None,\n    }\n}\n");
 }
 
 /// Takes one envelope item name. Inputs: the stem, the names taken and the name. Output:

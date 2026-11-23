@@ -7,7 +7,7 @@ use crate::landing::{self, AgentKind, ChangeSetId, ChangeState, FileStatus};
 use crate::protocol::{Outcome, ProjectId};
 use crate::team::events::{SEND_BYTES_MAX, Said, send_to_agent};
 use crate::team::{AgentStatus, MESSAGE_BYTES_MAX, TeamAction};
-use crate::terminal::Host;
+use kernel_processes::terminal::Host;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use std::path::PathBuf;
 use std::sync::Arc;

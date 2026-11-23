@@ -6,8 +6,9 @@ use crazyagent::harnesses::launch::{
     AccountBinding, LaunchEvent, LaunchLimits, LaunchRequest, Session,
 };
 use crazyagent::harnesses::terminal_session::{Resume, TerminalSession};
+use crazyagent::terminal::FOLDER;
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
-use crazyagent::terminal::{AgentId, FOLDER, Host};
+use kernel_processes::terminal::{AgentId, Host};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;

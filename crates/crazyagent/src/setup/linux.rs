@@ -69,7 +69,7 @@ pub fn tmux_command(
         return Err(InstallError("setup_pin_invalid"));
     }
     if let Some(brew) = brew.filter(|_| !root) {
-        if crate::service::changeable_past_sticky(brew).is_some() {
+        if kernel_processes::service::changeable_past_sticky(brew).is_some() {
             return Err(InstallError("setup_homebrew_unsafe"));
         }
         let mut command = kept_environment(brew);

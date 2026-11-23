@@ -1776,7 +1776,7 @@ impl OwnerServer {
             while let Some(result) = tasks.terminals.try_join_next() {
                 log_panic(&result, "owner_terminal_panicked");
             }
-            if tasks.terminals.len() >= crate::terminal::CONNECTIONS_MAX {
+            if tasks.terminals.len() >= kernel_processes::terminal::CONNECTIONS_MAX {
                 self.refuse_terminal(stream, auth, deadline, &mut tasks.refusals);
                 return;
             }
@@ -1987,7 +1987,7 @@ impl OwnerServer {
             assert!(handshakes.len() <= HANDSHAKES_MAX);
             assert!(tasks.refusals.len() <= REFUSALS_MAX);
             assert!(tasks.custody.len() <= 1);
-            assert!(tasks.terminals.len() <= crate::terminal::CONNECTIONS_MAX);
+            assert!(tasks.terminals.len() <= kernel_processes::terminal::CONNECTIONS_MAX);
             assert!(tasks.ides.len() <= crate::ide::bridge::CONNECTIONS_MAX);
         };
         drop(upkeep_stop);

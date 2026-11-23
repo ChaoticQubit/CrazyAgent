@@ -54,11 +54,18 @@ impl Scopes {
     }
 }
 
-/// The handles minted so far: each id names one reference for the one plugin it was
-/// minted for.
+/// What one handle stands for: an item in the store, or a value held for this engine
+/// run only, sent and never stored.
+enum Entry {
+    Stored(SecretRef),
+    Held(SecretString),
+}
+
+/// The handles minted so far: each id names one stored reference or one held value for
+/// the one plugin it was minted for; both kinds share one id space and one bound.
 pub struct Handles {
     next: u64,
-    by_id: BTreeMap<u64, (&'static str, SecretRef)>,
+    by_id: BTreeMap<u64, (&'static str, Entry)>,
 }
 
 impl Default for Handles {
@@ -80,13 +87,30 @@ impl Handles {
     /// holds for that reference. Inputs: the plugin and the reference. Output: the id, or
     /// `secret_handles_full` when `HANDLES_MAX` handles are held.
     pub fn mint(&mut self, caller: &'static str, reference: SecretRef) -> Result<u64, StoreError> {
-        let held = self
-            .by_id
-            .iter()
-            .find(|(_, (plugin, found))| *plugin == caller && *found == reference);
+        let held = self.by_id.iter().find(|(_, (plugin, found))| {
+            *plugin == caller && matches!(found, Entry::Stored(stored) if *stored == reference)
+        });
         if let Some((id, _)) = held {
             return Ok(*id);
         }
+        self.insert(caller, Entry::Stored(reference))
+    }
+
+    /// Holds one value for one plugin for this engine run, never in the store. Inputs: the
+    /// plugin and the value. Output: a new id, or `secret_handles_full`.
+    pub fn hold(&mut self, caller: &'static str, value: SecretString) -> Result<u64, StoreError> {
+        self.insert(caller, Entry::Held(value))
+    }
+
+    /// The number of handles that may still be minted. Output: the count.
+    pub fn free(&self) -> usize {
+        assert!(self.by_id.len() <= HANDLES_MAX);
+        HANDLES_MAX - self.by_id.len()
+    }
+
+    /// Adds one entry under the next id. Inputs: the plugin and the entry. Output: the id,
+    /// or `secret_handles_full` when `HANDLES_MAX` handles are held.
+    fn insert(&mut self, caller: &'static str, entry: Entry) -> Result<u64, StoreError> {
         if self.by_id.len() >= HANDLES_MAX {
             return Err(StoreError::code("secret_handles_full"));
         }
@@ -95,7 +119,7 @@ impl Handles {
             .next
             .checked_add(1)
             .expect("handle ids never run out of u64");
-        assert!(self.by_id.insert(id, (caller, reference)).is_none());
+        assert!(self.by_id.insert(id, (caller, entry)).is_none());
         assert!(self.by_id.len() <= HANDLES_MAX);
         Ok(id)
     }
@@ -113,11 +137,32 @@ impl Handles {
         Ok((id, self.by_id.len() > before))
     }
 
-    /// The reference behind a handle id, only for the plugin it was minted for.
-    /// Output: the reference, or `secret_handle_refused` for an unknown id or another plugin's.
+    /// The stored reference behind a handle id, only for the plugin it was minted for.
+    /// Output: the reference, or `secret_handle_refused` for an unknown id, another
+    /// plugin's, or a held value.
     pub fn resolve(&self, caller: &'static str, id: u64) -> Result<&SecretRef, StoreError> {
         match self.by_id.get(&id) {
-            Some((plugin, found)) if *plugin == caller => Ok(found),
+            Some((plugin, Entry::Stored(found))) if *plugin == caller => Ok(found),
+            _ => Err(StoreError::code("secret_handle_refused")),
+        }
+    }
+
+    /// Whether a handle id is a held value of the calling plugin. Output: the answer, or
+    /// `secret_handle_refused` for an unknown id or another plugin's.
+    fn is_held(&self, caller: &'static str, id: u64) -> Result<bool, StoreError> {
+        match self.by_id.get(&id) {
+            Some((plugin, entry)) if *plugin == caller => Ok(matches!(entry, Entry::Held(_))),
+            _ => Err(StoreError::code("secret_handle_refused")),
+        }
+    }
+
+    /// A copy of a held value of the calling plugin. Output: the value, or
+    /// `secret_handle_refused`.
+    fn held_value(&self, caller: &'static str, id: u64) -> Result<SecretString, StoreError> {
+        match self.by_id.get(&id) {
+            Some((plugin, Entry::Held(value))) if *plugin == caller => {
+                SecretString::bearer(value.expose().as_bytes().to_vec())
+            }
             _ => Err(StoreError::code("secret_handle_refused")),
         }
     }
@@ -186,9 +231,68 @@ impl<'r> Secrets<'r> {
         let (id, fresh) = self.lock().reserve(caller, &found)?;
         let entry = owner.take().expect("the entry was checked just above");
         drop(owner);
-        match self.store.put(&service, name, &entry) {
+        self.save(caller, (&service, name, &found), (id, fresh), &entry)
+    }
+
+    /// Checks that a name fits the calling plugin's scope, without touching the store.
+    /// Inputs: the plugin and the name. Output: nothing, or the scope or name refusal.
+    pub fn check_name(&self, caller: &'static str, name: &str) -> Result<(), StoreError> {
+        self.reference_of(caller, name).map(|_| ())
+    }
+
+    /// Keeps a value the kernel captured under a name of the calling plugin. Inputs: the
+    /// plugin, the name and the value. Output: the handle id, or a refusal; a refused scope,
+    /// name or full handle table comes before the store write.
+    pub fn keep(
+        &self,
+        caller: &'static str,
+        name: &str,
+        value: &SecretString,
+    ) -> Result<u64, StoreError> {
+        let (service, found) = self.reference_of(caller, name)?;
+        let reserved = self.lock().reserve(caller, &found)?;
+        self.save(caller, (&service, name, &found), reserved, value)
+    }
+
+    /// Holds a captured value for the calling plugin for this engine run, never stored.
+    /// Inputs: the plugin and the value. Output: the handle id, or `secret_handles_full`.
+    pub fn hold(&self, caller: &'static str, value: SecretString) -> Result<u64, StoreError> {
+        self.scopes.service(self.namespace, caller)?;
+        self.lock().hold(caller, value)
+    }
+
+    /// The value behind a handle of the calling plugin, read from the store or the held
+    /// values, for the kernel to send only. Inputs: the plugin and the id. Output: the
+    /// value, or a refusal; another plugin's handle is refused before any store read.
+    pub fn value(&self, caller: &'static str, id: u64) -> Result<SecretString, StoreError> {
+        let handles = self.lock();
+        if handles.is_held(caller, id)? {
+            return handles.held_value(caller, id);
+        }
+        let found = handles.resolve(caller, id)?.clone();
+        drop(handles);
+        self.store.get(&found)
+    }
+
+    /// The handles this module may still mint. Output: the count.
+    pub fn free_handles(&self) -> usize {
+        self.lock().free()
+    }
+
+    /// Writes one value under a reserved handle, dropping a fresh handle when the write
+    /// fails. Inputs: the plugin, the service, name and reference, the reservation and the
+    /// value. Output: the id, or the store's refusal.
+    fn save(
+        &self,
+        caller: &'static str,
+        (service, name, found): (&str, &str, &SecretRef),
+        (id, fresh): (u64, bool),
+        value: &SecretString,
+    ) -> Result<u64, StoreError> {
+        match self.store.put(service, name, value) {
             Ok(saved) => {
-                assert_eq!(saved, found);
+                assert_eq!(&saved, found);
+                assert!(self.lock().resolve(caller, id).is_ok());
                 Ok(id)
             }
             Err(error) => {
@@ -216,7 +320,13 @@ impl<'r> Secrets<'r> {
     /// handle is refused and its item kept.
     pub fn forget(&self, caller: &'static str, id: u64) -> Result<(), StoreError> {
         self.scopes.service(self.namespace, caller)?;
-        let found = self.lock().resolve(caller, id)?.clone();
+        let mut handles = self.lock();
+        if handles.is_held(caller, id)? {
+            handles.drop_id(id);
+            return Ok(());
+        }
+        let found = handles.resolve(caller, id)?.clone();
+        drop(handles);
         self.store.delete(&found)?;
         self.lock().drop_id(id);
         Ok(())

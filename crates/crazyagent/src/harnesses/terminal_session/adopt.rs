@@ -10,7 +10,7 @@ use crate::harnesses::transcript::{READ_BYTES_MAX, TranscriptEvent, TranscriptRe
 use crate::launch_context::{Installed, InstalledFiles};
 use crate::sandbox::policy::{AgentAccess, AgentNetwork};
 use crate::sandbox::toolchains::Toolchain;
-use crate::terminal::{AgentId, Host};
+use kernel_processes::terminal::{AgentId, Host};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};

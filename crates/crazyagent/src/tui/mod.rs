@@ -158,7 +158,7 @@ fn force_exit() -> ! {
 /// Output: Ok after a clean exit, or the terminal or connection error.
 pub fn run_tui(
     client: Client,
-    engine: Option<(crate::paths::Layout, crate::service::Service)>,
+    engine: Option<(crate::paths::Layout, kernel_processes::service::Service)>,
 ) -> Result<(), TuiError> {
     if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
         return Err(TuiError("TUI requires terminal stdin and stdout".into()));

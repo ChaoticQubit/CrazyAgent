@@ -9,8 +9,9 @@ use crazyagent::harnesses::launch::{
 use crazyagent::harnesses::leftovers::Unstopped;
 use crazyagent::harnesses::terminal_session::TerminalSession;
 use crazyagent::research::runner::{ResearchLimits, ResearchRunner};
+use crazyagent::terminal::FOLDER;
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
-use crazyagent::terminal::{AgentId, FOLDER, Host};
+use kernel_processes::terminal::{AgentId, Host};
 use rustix::process::{
     Pid, Signal, getpgid, kill_process, test_kill_process, test_kill_process_group,
 };

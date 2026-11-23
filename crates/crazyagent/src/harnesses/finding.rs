@@ -471,7 +471,7 @@ pub(crate) fn out_of_reach(path: &Path, space: &AgentSpace) -> Result<(), Engine
     }
     if std::iter::once(path)
         .chain(hops.iter().map(PathBuf::as_path))
-        .any(|part| crate::service::changeable_by_others(part).is_some())
+        .any(|part| kernel_processes::service::changeable_by_others(part).is_some())
     {
         return Err(failure(PATH_CHANGEABLE));
     }
@@ -645,7 +645,7 @@ pub(crate) fn owner_folder(prefix: &str) -> tempfile::TempDir {
 
 /// The folder a row's own temp folders go in, which no other user can change: on macOS the
 /// temp folder, this user's own; elsewhere, where it is the shared `/tmp` that
-/// [`crate::service::changeable_by_others`] rightly counts, this user's cache folder
+/// [`kernel_processes::service::changeable_by_others`] rightly counts, this user's cache folder
 /// ([`user_caches`]). Output: the folder, real.
 #[cfg(all(test, unix))]
 pub(crate) fn private_root() -> PathBuf {
@@ -655,7 +655,7 @@ pub(crate) fn private_root() -> PathBuf {
         user_caches()
     };
     assert!(folder.is_absolute());
-    let changeable = crate::service::changeable_by_others(&folder);
+    let changeable = kernel_processes::service::changeable_by_others(&folder);
     assert_eq!(changeable, None, "others can change {}", folder.display());
     folder
 }
@@ -694,7 +694,7 @@ pub(crate) fn outside_temp(prefix: &str) -> tempfile::TempDir {
         .unwrap();
     let place = folder.path().canonicalize().unwrap();
     assert_eq!(
-        crate::service::changeable_by_others(&place),
+        kernel_processes::service::changeable_by_others(&place),
         None,
         "others can change the cache folder: {}",
         place.display()

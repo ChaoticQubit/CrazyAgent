@@ -28,8 +28,6 @@ pub const HOOKS: FindingHooks = FindingHooks {
     one_spelling: kernel_sandbox::paths::one_spelling,
     canonical: kernel_sandbox::paths::canonical,
     in_agent_tmp: crate::sandbox::toolchains::in_agent_tmp,
-    changeable_past_sticky: crate::service::changeable_past_sticky,
-    changeable_by_others: crate::service::changeable_by_others,
     harness_prefix: crate::setup::harness_prefix,
     gate_root,
 };
