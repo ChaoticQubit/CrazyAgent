@@ -5,6 +5,7 @@ extern crate alloc;
 pub mod generated;
 pub use generated::CAPABILITIES;
 pub use generated::host::Host;
+pub use generated::secrets;
 pub use generated::settings;
 
 /// Why the bus did not complete a call: no grant, a tier above the caller's, the provider's
