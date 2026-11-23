@@ -50,7 +50,8 @@ fn a_launch_getconf_written_again_is_kept_and_one_that_changed_is_refused() {
     let home = tempfile::tempdir().unwrap();
     let _scratch = ScopedTmp::make(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
     fs::create_dir(home.path().join(crate::launch_context::STATE)).unwrap();
-    let getconf = getconf_folder(home.path()).join(GETCONF_PROGRAM);
+    let getconf =
+        getconf_folder(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).join(GETCONF_PROGRAM);
     write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, home.path(), false).unwrap();
     let written = fs::read(&getconf).unwrap();
     let again = write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, home.path(), false);
@@ -583,7 +584,7 @@ fn a_launch_getconf_written_under_a_narrow_umask_in_its_own_process() {
     let _scratch = ScopedTmp::make(&crate::sandbox::TOOLCHAIN_HOOKS, home.path()).unwrap();
     fs::create_dir(home.path().join(crate::launch_context::STATE)).unwrap();
     rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o277));
-    let getconf_folder = getconf_folder(home.path());
+    let getconf_folder = getconf_folder(&crate::sandbox::TOOLCHAIN_HOOKS, home.path());
     let outcome = match write_getconf(&crate::sandbox::TOOLCHAIN_HOOKS, home.path(), false) {
         Ok(()) => format!(
             "ok {:o} {:o}",
