@@ -53,6 +53,37 @@ pub fn wit(files: &[(&str, File)]) -> Result<Vec<(String, String)>, CapgenError>
     wit::files(files)
 }
 
+/// Writes the SDK host crate's generated binding, `mod.rs` (`Providers`, `Bound` and
+/// `impl sdk::Host for Bound` over the bus gateway's `Caller`), after every check the Rust
+/// SDK runs, laid out by rustfmt. Input: stems with parsed files, any order. Output: the one
+/// file, or the first refusal (`capgen_no_capability`, ...).
+pub fn binding(files: &[(&str, File)]) -> Result<Vec<(String, String)>, CapgenError> {
+    rust::binding(files)?
+        .into_iter()
+        .map(|(path, text)| {
+            let formatted = rustfmt(&path, &text)?;
+            Ok((path, formatted))
+        })
+        .collect()
+}
+
+/// Writes plugin_host's permission table and bundled grants, `permissions.rs`, after every
+/// check the Rust SDK runs, laid out by rustfmt. Inputs: stems with parsed files, any
+/// order, and the plugins folder of `t1`/`t2`/`t3` tier folders. Output: the one file, or
+/// the first refusal (`capgen_plugin_tier`, `capgen_plugin_folder`, a manifest refusal, ...).
+pub fn permissions(
+    files: &[(&str, File)],
+    plugins: &Path,
+) -> Result<Vec<(String, String)>, CapgenError> {
+    permissions::files(files, plugins)?
+        .into_iter()
+        .map(|(path, text)| {
+            let formatted = rustfmt(&path, &text)?;
+            Ok((path, formatted))
+        })
+        .collect()
+}
+
 /// Writes one `.cap` file as a single test module with its own `Host` trait, laid out by
 /// rustfmt, for the SDK's tests to compile every emitter. Inputs: the stem and the parsed
 /// file. Output: the module text, or the first refusal.
@@ -329,7 +360,12 @@ fn entries(folder: &Path) -> Vec<(String, bool)> {
 }
 
 #[cfg(test)]
+mod binding_tests;
+#[cfg(test)]
 mod events_tests;
+mod permissions;
+#[cfg(test)]
+mod permissions_tests;
 mod rust;
 mod rust_wire;
 #[cfg(test)]

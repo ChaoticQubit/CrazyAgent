@@ -573,15 +573,10 @@ pub(crate) fn remove_staged(root: &Path) -> Result<(), Refused> {
 /// refusal that kept it unread.
 type UserFile = (String, Result<Vec<u8>, Problem>);
 
-const STAGED: &str = ".add-";
-const RETIRED: &str = ".old-";
-const LEGACY_SUFFIX: &str = ".yaml";
-
 #[cfg(unix)]
 mod folder {
-    use super::{
-        FOLDER, LEGACY_SUFFIX, MANIFEST_FILE, Problem, RETIRED, STAGED, USER_PLUGINS_MAX, UserFile,
-    };
+    use super::{FOLDER, MANIFEST_FILE, Problem, USER_PLUGINS_MAX, UserFile};
+
     use crate::Refused;
     use crate::embedding::valid_name;
     use crate::manifest::MANIFEST_BYTES_MAX;
@@ -590,6 +585,10 @@ mod folder {
     use std::collections::BTreeMap;
     use std::os::unix::fs::MetadataExt;
     use std::path::Path;
+
+    const STAGED: &str = ".add-";
+    const RETIRED: &str = ".old-";
+    const LEGACY_SUFFIX: &str = ".yaml";
 
     /// The most entries read from one plugin folder before it is refused for holding more
     /// than its plugin.toml.
