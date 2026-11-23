@@ -14,7 +14,9 @@ use crate::team::status;
 
 use crate::terminal::FOLDER;
 
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::installed;
+
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 
 use std::process::{Command, Stdio};
 
@@ -169,7 +171,12 @@ impl Fixture {
     }
 
     fn host(&self) -> Arc<dyn Host> {
-        Arc::new(Tmux::open(Some(self.tmux.clone()), &self.base.join(FOLDER)))
+        Arc::new(Tmux::open(
+            Some(self.tmux.clone()),
+            &self.base.join(FOLDER),
+            crate::sandbox::confinement(),
+            crate::terminal::tmux::tmux_hooks(),
+        ))
     }
 
     fn runtime(&self) -> TeamRuntime {
@@ -23222,7 +23229,8 @@ fn a_native_lead_whose_tmux_socket_file_is_gone_still_names_no_unstamped_caller(
     f.connection
         .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [lead])
         .unwrap();
-    let socket = crate::terminal::harness_socket(&f.base, &AgentId::team(lead).unwrap()).unwrap();
+    let socket =
+        crate::terminal::tmux::harness_socket(&f.base, &AgentId::team(lead).unwrap()).unwrap();
     assert!(std::fs::symlink_metadata(&socket).is_err());
     let caller = |pane: Option<&str>| {
         team_caller(
@@ -28653,7 +28661,12 @@ fn a_panicking_teammate_end_leaves_no_id_behind_and_reads_as_uncertain() {
 fn a_failed_teammate_end_leaves_the_team_loop_to_its_tick() {
     const PASSES: u64 = 40;
     let fixture = Fixture::new(1);
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(None, &fixture.base.join(FOLDER)));
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(
+        None,
+        &fixture.base.join(FOLDER),
+        crate::sandbox::confinement(),
+        crate::terminal::tmux::tmux_hooks(),
+    ));
     let mut team = fixture.runtime();
     team.terminal = Some(host);
     let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Stopped);
@@ -28915,9 +28928,11 @@ fn a_stopped_teammate_unknown_while_its_teammates_socket_stays_is_marked_uncerta
         scratches.push(Scratch(home));
         std::fs::create_dir_all(agent_teammates_socket_name(&state, lead).parent().unwrap())
             .unwrap();
-        let socket =
-            crate::terminal::renew_teammates_socket(&fixture.base, &AgentId::team(lead).unwrap())
-                .unwrap();
+        let socket = crate::terminal::tmux::renew_teammates_socket(
+            &fixture.base,
+            &AgentId::team(lead).unwrap(),
+        )
+        .unwrap();
         match shape {
             "refuses" => {
                 drop(kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap());
@@ -30385,7 +30400,7 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
     assert!(plan.native, "the lead starts with native teammates");
     assert_eq!(plan.sandbox_profile, agent_profile(&runtime.state, id));
     let lead = AgentId::team(id).unwrap();
-    let socket = crate::terminal::harness_socket(&fixture.base, &lead).unwrap();
+    let socket = crate::terminal::tmux::harness_socket(&fixture.base, &lead).unwrap();
     let _down = LeadServersDown {
         host: host.clone(),
         lead: lead.clone(),
@@ -31100,7 +31115,7 @@ fn ended_native_lead_on<T>(
         .unwrap();
     assert!(plan.native, "the lead starts with native teammates");
     let lead = AgentId::team(id).unwrap();
-    let mates_socket = crate::terminal::teammates_socket(&fixture.base, &lead).unwrap();
+    let mates_socket = crate::terminal::tmux::teammates_socket(&fixture.base, &lead).unwrap();
     let _down = LeadServersDown {
         host: host.clone(),
         lead: lead.clone(),
@@ -31109,7 +31124,7 @@ fn ended_native_lead_on<T>(
     };
     if earlier {
         use std::os::unix::fs::DirBuilderExt;
-        let socket = crate::terminal::harness_socket(&fixture.base, &lead).unwrap();
+        let socket = crate::terminal::tmux::harness_socket(&fixture.base, &lead).unwrap();
         let folder = socket.parent().unwrap();
         if !folder.exists() {
             std::fs::DirBuilder::new()
@@ -31305,8 +31320,8 @@ fn native_lead_past_its_deadline(
         },
         |session, host, lead| {
             let root: &PathBuf = root.get().expect("the host was opened on the engine root");
-            let own = crate::terminal::harness_socket(root, lead).unwrap();
-            let mates = crate::terminal::teammates_socket(root, lead).unwrap();
+            let own = crate::terminal::tmux::harness_socket(root, lead).unwrap();
+            let mates = crate::terminal::tmux::teammates_socket(root, lead).unwrap();
             if !renewed_first {
                 host.renew(SystemTime::now() + Duration::from_secs(4))
                     .unwrap();
@@ -31736,7 +31751,7 @@ fn a_native_lead_s_teammate_starts_through_the_command_its_lead_s_app_runs() {
         .unwrap();
     assert!(plan.native, "the lead starts with native teammates");
     let lead = AgentId::team(id).unwrap();
-    let mates_socket = crate::terminal::teammates_socket(&fixture.base, &lead).unwrap();
+    let mates_socket = crate::terminal::tmux::teammates_socket(&fixture.base, &lead).unwrap();
     let _down = LeadServersDown {
         host: host.clone(),
         lead: lead.clone(),

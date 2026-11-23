@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use bus_gateway::{Gateway, Grants, Refusals};
 use kernel_security::error::StoreError;
 use kernel_security::secret::SecretString;
-use kernel_security::secrets::{Handles, Scopes, Secrets};
+use kernel_security::secrets::{Handles, OwnerEntry, Scopes, Secrets};
 use kernel_security::store::{SecretRef, Store, reference};
 use sdk::secrets::{self, Provide, Secret};
 use sdk::{Capability, Refusal, Tier};
@@ -137,7 +137,11 @@ fn a_handle_crosses_the_adapter_as_the_kernel_id() {
         NAMESPACE,
         &scopes,
         &handles,
-        Some(paste),
+        Some(OwnerEntry {
+            plugin: "github",
+            hosts: vec!["api.github.com".to_owned()],
+            value: paste,
+        }),
     ));
     let put = caps.put_from_owner("github", "token".to_owned()).unwrap();
     let found = caps.find("github", "token".to_owned()).unwrap();

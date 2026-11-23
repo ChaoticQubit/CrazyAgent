@@ -8,7 +8,8 @@ use crazyagent::research::jobs::ResearchJobs;
 #[cfg(target_os = "macos")]
 use crazyagent::research::jobs::ResearchStatus;
 use crazyagent::terminal::FOLDER;
-use crazyagent::terminal::tmux::{SOCKET, installed};
+use crazyagent::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::SOCKET;
 use research_support::{claude, codex};
 #[cfg(target_os = "macos")]
 use research_support::{counted_hanging_endpoint, processes_with};

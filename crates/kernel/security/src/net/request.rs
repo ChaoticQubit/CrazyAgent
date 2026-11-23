@@ -10,6 +10,12 @@ use std::net::IpAddr;
 pub const USER_AGENT: &str = "CrazyAgent";
 /// The most reply headers one request may ask for.
 pub const REPLY_HEADERS_MAX: usize = 16;
+/// The most bytes of the reply body a plugin gets, equal to the SDK's bytes bound.
+pub const REPLY_BYTES_MAX: usize = 4_194_304;
+/// The most bytes of one reply header name or value, equal to the SDK's text bound.
+pub const REPLY_TEXT_BYTES_MAX: usize = 8_192;
+/// The most reply headers and captured fields a plugin gets, equal to the SDK's list bound.
+pub const REPLY_LIST_MAX: usize = 64;
 
 /// The HTTP method of one request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,35 +186,36 @@ impl<'r> Requests<'r> {
             .host_str()
             .expect("a target always has a host")
             .to_owned();
+        if matches!(parsed.host(), Some(url::Host::Ipv4(_)))
+            && written_host(&request.url) != Some(&host)
+        {
+            return Err(StoreError::code("net_url_invalid"));
+        }
         let port = parsed
             .port_or_known_default()
             .expect("https and http always have a port");
         self.egress.allows(caller, parsed.scheme(), &host, port)?;
         let pinned = pinned(self.egress, &parsed, port)?;
         check_shape(&request)?;
-        let fields = capture::fields(
-            self.rules,
-            caller,
-            &capture::host_key(&parsed),
-            &request.capture,
-        )?;
+        let host_key = capture::host_key(&parsed);
+        let fields = capture::fields(self.rules, caller, &host_key, &request.capture)?;
         for wanted in &fields {
             if let Some(name) = &wanted.keep_as {
                 self.secrets.check_name(caller, name)?;
             }
         }
-        if fields.len() > self.secrets.free_handles() {
+        if fields.len() > self.secrets.free_handles(caller) {
             return Err(StoreError::code("secret_handles_full"));
         }
         let bearer = match request.bearer {
-            Some(id) => Some(self.secrets.value(caller, id)?),
+            Some(id) => Some(self.secrets.value(caller, id, &host_key)?),
             None => None,
         };
         let mut secret_form = Vec::with_capacity(request.secret_form.len());
         for field in &request.secret_form {
             secret_form.push((
                 field.name.as_str(),
-                self.secrets.value(caller, field.secret)?,
+                self.secrets.value(caller, field.secret, &host_key)?,
             ));
         }
         let config = config(
@@ -230,7 +237,21 @@ impl<'r> Requests<'r> {
         };
         let raw = self.egress.send(sealed)?;
         let headers = named_headers(&request.reply_headers, raw.headers);
-        let (body, captured) = capture::take(self.secrets, caller, &fields, raw.body)?;
+        let fits = headers.len() <= REPLY_LIST_MAX
+            && headers.iter().all(|field| {
+                field.name.len() <= REPLY_TEXT_BYTES_MAX
+                    && field.value.len() <= REPLY_TEXT_BYTES_MAX
+            });
+        if !fits {
+            return Err(StoreError::code("cap_output_too_large"));
+        }
+        let (body, captured) = capture::take(
+            self.secrets,
+            caller,
+            (self.rules, &host_key),
+            &fields,
+            raw.body,
+        )?;
         Ok(Reply {
             status: raw.status,
             body,
@@ -238,6 +259,23 @@ impl<'r> Requests<'r> {
             captured,
         })
     }
+}
+
+/// The host as the plugin wrote it in a URL: after `://`, before the path, query or
+/// fragment, without user info or port. A URL parser reads hex, octal, short and integer
+/// IPv4 forms as an address; comparing this with the parsed host refuses all of them, so
+/// only the dotted decimal form is a target. Input: the raw URL. Output: the host text, or
+/// none when the URL has no `://`.
+fn written_host(url: &str) -> Option<&str> {
+    let (_, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#', '\\']).next().unwrap_or(rest);
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    Some(match host.rsplit_once(':') {
+        Some((name, port)) if port.bytes().all(|byte| byte.is_ascii_digit()) => name,
+        _ => host,
+    })
 }
 
 /// Checks the address a request may connect to: an IP literal host directly, a host name
