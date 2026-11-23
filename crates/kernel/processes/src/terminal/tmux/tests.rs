@@ -3223,13 +3223,13 @@ fn a_view_of_a_closed_pane_ends_though_its_window_stays() {
     assert_eq!(host.panes(&lead).unwrap().len(), 1);
 }
 
-const MARKER: &str = "5f0c1d2e3a4b59687766554433221100";
+pub(super) const MARKER: &str = "5f0c1d2e3a4b59687766554433221100";
 
 const LOCATED: &[u8] = b"2 0 %9 @1 0 1 80 0 0 0 0 0 0 0 0 end";
 
 /// Feeds the control reader `text` as tmux's output, from a file through `cat`, so a line
 /// longer than the argument limit reaches it whole. Takes the text and the reader's state.
-fn read_text(text: &[u8], state: &Mutex<State>) {
+pub(super) fn read_text(text: &[u8], state: &Mutex<State>) {
     let folder = tempfile::tempdir().unwrap();
     let file = folder.path().join("output");
     std::fs::write(&file, text).unwrap();
@@ -3247,7 +3247,7 @@ fn read_text(text: &[u8], state: &Mutex<State>) {
 
 /// An attach waiting at the front of the reader's queue. Takes what its located reply read,
 /// if it came yet, and whether it opens a view. Returns the request and its answer.
-fn attach(
+pub(super) fn attach(
     located: Option<&[u8]>,
     view: bool,
 ) -> (Pending, Receiver<Result<TerminalStream, HostError>>) {
@@ -3265,7 +3265,7 @@ fn attach(
 
 /// What an attach answered: the size of the screen it opened, or the code it failed with,
 /// none while it has no answer. Takes its answer.
-fn attached(
+pub(super) fn attached(
     answer: &Receiver<Result<TerminalStream, HostError>>,
 ) -> Option<Result<(u16, u16), String>> {
     answer.try_recv().ok().map(|opened| {
@@ -3276,7 +3276,7 @@ fn attached(
 }
 
 /// What a plain request answered, none while it has no answer. Takes its answer.
-fn replied(answer: &Receiver<Answer>) -> Option<Result<Lines, String>> {
+pub(super) fn replied(answer: &Receiver<Answer>) -> Option<Result<Lines, String>> {
     answer
         .try_recv()
         .ok()
@@ -3284,7 +3284,7 @@ fn replied(answer: &Receiver<Answer>) -> Option<Result<Lines, String>> {
 }
 
 /// The output bytes a view read before its stream ended. Takes the view's end.
-fn output_of(chunks: &mut super::super::buffer::Chunks) -> Vec<u8> {
+pub(super) fn output_of(chunks: &mut super::super::buffer::Chunks) -> Vec<u8> {
     let mut output = Vec::new();
     while let Ok(chunk) = chunks.try_recv() {
         if let super::super::buffer::Chunk::Output(bytes) = chunk {

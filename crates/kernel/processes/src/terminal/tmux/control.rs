@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(test)]
+mod read_tests;
+
 pub(super) struct Control {
     pub(super) child: Mutex<Option<Child>>,
     pub(super) input: Mutex<Option<ChildStdin>>,
