@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use kernel_common::names::{is_dotted, is_snake};
+use kernel_common::names::{is_dotted, is_snake, is_store_name};
 use toml::{Table, Value};
 
 use crate::Refused;
@@ -32,7 +32,7 @@ pub const CAPTURE_FIELD_BYTES_MAX: usize = 64;
 /// The most hosts one `[net.send]` row names.
 pub const SEND_HOSTS_MAX: usize = 16;
 /// The most bytes of one `keep_as` name, the secret store's name bound.
-pub const KEEP_AS_BYTES_MAX: usize = 63;
+pub const KEEP_AS_BYTES_MAX: usize = kernel_common::names::STORE_NAME_BYTES_MAX;
 /// The keys only an embedding plugin's `plugin.toml` holds; the embedding reader judges
 /// their values.
 pub const EMBEDDING_KEYS: [&str; 4] = ["title", "release", "description", "http"];
@@ -371,7 +371,7 @@ fn net(section: &Value) -> Option<Net> {
 
 /// Reads a `[net.send]` table: each key a field some `[net.capture]` row names, each
 /// value a table of `hosts`, 1 to `SEND_HOSTS_MAX` distinct listed hosts, and an optional
-/// `keep_as` [`keep_as_fits`] name used by no other row. Inputs: the table, the listed
+/// `keep_as` store name ([`is_store_name`]) used by no other row. Inputs: the table, the listed
 /// hosts and the capture rows. Output: the rows, or none for any other key, type or value.
 fn net_send(
     table: &Value,
@@ -395,7 +395,7 @@ fn net_send(
             })
             .collect::<Option<Vec<String>>>()?;
         let keep_as = match row.get("keep_as") {
-            Some(name) => Some(name.as_str().filter(|name| keep_as_fits(name))?.to_owned()),
+            Some(name) => Some(name.as_str().filter(|name| is_store_name(name))?.to_owned()),
             None => None,
         };
         let distinct = to
@@ -406,9 +406,10 @@ fn net_send(
         let name_taken = keep_as
             .as_ref()
             .is_some_and(|name| send.iter().any(|row| row.keep_as.as_ref() == Some(name)));
-        if !captured || to.is_empty() || to.len() > SEND_HOSTS_MAX || !distinct || name_taken {
+        if !captured || to.is_empty() || !distinct || name_taken {
             return None;
         }
+        assert!(to.len() <= hosts.len() && hosts.len() <= HOSTS_MAX && HOSTS_MAX <= SEND_HOSTS_MAX);
         send.push(NetSend {
             field: field.clone(),
             hosts: to,
@@ -416,19 +417,6 @@ fn net_send(
         });
     }
     Some(send)
-}
-
-/// Whether a `keep_as` name fits the secret store's name rule: 1 to `KEEP_AS_BYTES_MAX`
-/// bytes of lowercase letters, digits, `.`, `-` or `_`, not starting with `.` or `-` and
-/// without `..`. Input: the name. Output: the answer.
-fn keep_as_fits(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= KEEP_AS_BYTES_MAX
-        && !name.starts_with(['.', '-'])
-        && !name.contains("..")
-        && name.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".-_".contains(&byte)
-        })
 }
 
 /// Whether one `[net]` host fits: a lowercase DNS name of at most `HOST_BYTES_MAX` bytes
