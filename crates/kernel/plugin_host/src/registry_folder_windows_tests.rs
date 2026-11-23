@@ -439,3 +439,65 @@ fn windows_the_sweep_restores_a_retired_folder_cut_between_renames() {
         "{near:?}"
     );
 }
+
+/// Leaves read-only as the one attribute of a file or folder, as an unzipped or copied
+/// plugin can carry it, with `attrib`, the path with backslashes only.
+fn read_only(path: &Path) {
+    assert!(!path.to_string_lossy().contains('/'));
+    let status = Command::new("attrib")
+        .args(["-A", "+R"])
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "attrib {}", path.display());
+    assert!(std::fs::metadata(path).unwrap().permissions().readonly());
+}
+
+/// Puts a read-only file in a plugin folder and a read-only folder holding a read-only
+/// file below it. Input: the plugin folder.
+fn read_only_entries(folder: &Path) {
+    std::fs::write(folder.join("notes.txt"), b"copied").unwrap();
+    read_only(&folder.join("notes.txt"));
+    let lib = folder.join("lib");
+    std::fs::create_dir(&lib).unwrap();
+    std::fs::write(lib.join("data.bin"), b"copied").unwrap();
+    read_only(&lib.join("data.bin"));
+    read_only(&lib);
+}
+
+/// Removing a plugin whose folder holds read-only files and a read-only folder deletes
+/// the whole folder: nothing stays aside, and the start sweep finds nothing to retry.
+#[test]
+fn windows_a_read_only_file_does_not_block_removing_a_plugin() {
+    let case = case();
+    add_text(&case, NEAR, false, 1).unwrap();
+    let plugins = case.root.join(FOLDER);
+    read_only_entries(&plugins.join("near"));
+
+    remove(&case.db, &case.engine(), "near").unwrap();
+
+    assert!(names(&plugins).is_empty(), "{:?}", names(&plugins));
+    remove_staged(&case.root).unwrap();
+    assert!(names(&plugins).is_empty(), "{:?}", names(&plugins));
+}
+
+/// A replace over a plugin folder that holds read-only files and a read-only folder
+/// keeps one folder with the new text and leaves no retired folder aside.
+#[test]
+fn windows_a_replace_over_a_folder_with_a_read_only_file_leaves_nothing_aside() {
+    let case = case();
+    add_text(&case, NEAR, false, 1).unwrap();
+    let plugins = case.root.join(FOLDER);
+    read_only_entries(&plugins.join("near"));
+    let text = NEAR.replace("title = \"Near\"", "title = \"Near two\"");
+
+    add_text(&case, &text, true, 2).unwrap();
+
+    assert_eq!(names(&plugins), ["near"]);
+    assert_eq!(
+        std::fs::read_to_string(plugins.join("near").join(MANIFEST_FILE)).unwrap(),
+        text
+    );
+    remove_staged(&case.root).unwrap();
+    assert_eq!(names(&plugins), ["near"]);
+}
