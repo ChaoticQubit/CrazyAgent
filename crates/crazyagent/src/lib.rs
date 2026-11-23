@@ -65,7 +65,6 @@ pub mod projects_home;
 pub mod protocol;
 pub mod provider_reach;
 pub mod provider_retry;
-pub mod qualification;
 pub mod questions;
 pub mod quit_settings;
 pub mod rcli_host;

@@ -886,6 +886,7 @@ dependencies = [
  "crazyagent-cap",
  "crazyagent-kernel-common",
  "crazyagent-kernel-processes",
+ "crazyagent-kernel-sandbox",
  "crazyagent-kernel-security",
  "crazyagent-kernel-storage",
  "crazyagent-linux-supervisor",
@@ -1012,6 +1013,18 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "crazyagent-kernel-sandbox"
+version = "2.4.4"
+dependencies = [
+ "crazyagent-kernel-processes",
+ "rustix 1.1.5",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
 ]
 
 [[package]]
