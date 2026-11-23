@@ -2,7 +2,7 @@ use super::bridge::UNSHARE_NET;
 use super::{
     BWRAP_PATHS, FS_ABI, HelperRequest, NEST_ARGS, accepted, die_with_parent, trusted_file,
 };
-use kernel_sandbox::ports::REMOTES_MAX;
+use crate::ports::REMOTES_MAX;
 use landlock::{
     Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetError, path_beneath_rules,
 };
@@ -20,7 +20,7 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use std::str::FromStr;
 use std::time::Duration;
 
-pub(super) const ROUTE: &str = "--route";
+pub const ROUTE: &str = "--route";
 pub(super) const EGRESS: &str = "--egress";
 pub(super) const SLIRP: &str = "--slirp";
 /// What slirp4netns reads and executes under its rules ([`confine_slirp`]), Landlock's read
@@ -46,14 +46,14 @@ const RO_BIND_DATA: &str = "--ro-bind-data";
 const RESOLV_CONF: &str = "/etc/resolv.conf";
 /// The bubblewrap flags stage 1 writes itself, each with a descriptor it opened, in this
 /// order and right after `--unshare-net`, so the engine never names one ([`placed`]).
-pub(super) const DESCRIPTOR_FLAGS: [&str; 3] = [INFO_FD, BLOCK_FD, RO_BIND_DATA];
+pub const DESCRIPTOR_FLAGS: [&str; 3] = [INFO_FD, BLOCK_FD, RO_BIND_DATA];
 /// Where the setup child takes slirp4netns from, and only from there: no flag or variable
 /// names another program, which would then run with network capabilities in the agent's
 /// user namespace (DEC-179 SBX-2).
 pub const SLIRP_PATHS: &[&str] = &["/usr/bin/slirp4netns"];
 /// Where the setup child takes the nf_tables `iptables` programs from, and only from
 /// there: the IPv4 restore and save, then the IPv6 restore and save.
-pub(super) const IPTABLES_PATHS: [&str; 4] = [
+pub const IPTABLES_PATHS: [&str; 4] = [
     "/usr/sbin/iptables-restore",
     "/usr/sbin/iptables-save",
     "/usr/sbin/ip6tables-restore",
