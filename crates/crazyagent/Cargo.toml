@@ -23,6 +23,7 @@ crazyagent-kernel-plugin-host = { path = "../kernel/plugin_host" }
 crazyagent-kernel-sandbox = { path = "../kernel/sandbox" }
 crazyagent-plugin-agent-quit = { path = "../../plugins/t2/agent-quit" }
 crazyagent-sdk = { path = "../sdk/rust" }
+crazyagent-sdk-host = { path = "../sdk/host" }
 crazyagent-win-sandbox = { path = "../crazyagent-win-sandbox" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["raw_value"] }
@@ -71,8 +72,10 @@ sha2 = { version = "=0.10.9", features = ["asm"] }
 crazyagent-plugin-check = { path = "../sdk/plugin_check" }
 
 [dev-dependencies]
+crazyagent-bus-gateway = { path = "../kernel/bus_gateway", features = ["test-support"] }
 crazyagent-kernel-storage = { path = "../kernel/storage", features = ["test-support"] }
 crazyagent-kernel-processes = { path = "../kernel/processes", features = ["test-support"] }
+crazyagent-kernel-sandbox = { path = "../kernel/sandbox", features = ["test-support"] }
 crazyagent-cap = { path = "../sdk/cap" }
 crazyagent-plugin-check = { path = "../sdk/plugin_check" }
 tempfile = "=3.27.0"

@@ -1,7 +1,7 @@
-use super::SandboxError;
 use super::policy::{AgentAccess, AgentFilesRule, AgentNetwork, IdeAgentFiles};
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::protocol::ProjectId;
+use kernel_sandbox::error::SandboxError;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -138,8 +138,9 @@ pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
     use super::toolchains::{self, ToolHomes, Toolchains};
     use super::{
         ProjectSandbox, SANDBOX_EXEC, agent_variable_allowed, borrowed, canonical, clean_absolute,
-        invalid, owner_terminal_env,
+        owner_terminal_env,
     };
+    use kernel_sandbox::error::invalid;
     if launch.level == AgentAccess::Full {
         return Err(invalid("a Full access terminal runs in the IDE server"));
     }
@@ -232,10 +233,9 @@ pub fn interactive(
 ) -> Result<InteractiveCommand, SandboxError> {
     let command = command(launch)?;
     let text = |value: &OsStr| {
-        value
-            .to_str()
-            .map(str::to_owned)
-            .ok_or_else(|| super::invalid("the Sandboxed terminal command is not plain text"))
+        value.to_str().map(str::to_owned).ok_or_else(|| {
+            kernel_sandbox::error::invalid("the Sandboxed terminal command is not plain text")
+        })
     };
     let mut argv = vec![text(command.get_program())?];
     for arg in command.get_args() {
@@ -243,13 +243,16 @@ pub fn interactive(
     }
     let mut env = Vec::new();
     for (name, value) in command.get_envs() {
-        let value =
-            value.ok_or_else(|| super::invalid("the Sandboxed terminal unsets a variable"))?;
+        let value = value.ok_or_else(|| {
+            kernel_sandbox::error::invalid("the Sandboxed terminal unsets a variable")
+        })?;
         env.push((text(name)?, text(value)?));
     }
     let cwd = command
         .get_current_dir()
-        .ok_or_else(|| super::invalid("the Sandboxed terminal has no working folder"))?
+        .ok_or_else(|| {
+            kernel_sandbox::error::invalid("the Sandboxed terminal has no working folder")
+        })?
         .to_path_buf();
     assert_eq!(argv.len(), command.get_args().count() + 1);
     assert_eq!(env.len(), command.get_envs().count());
@@ -294,7 +297,9 @@ pub fn owner_shell() -> Result<PathBuf, String> {
 fn listed_shell(shell: &Path) -> Result<(), SandboxError> {
     use std::io::Read;
     if !super::clean_absolute(shell) {
-        return Err(super::invalid("the shell must be an absolute plain path"));
+        return Err(kernel_sandbox::error::invalid(
+            "the shell must be an absolute plain path",
+        ));
     }
     let mut text = String::new();
     std::fs::File::open(SHELLS)?
@@ -305,7 +310,9 @@ fn listed_shell(shell: &Path) -> Result<(), SandboxError> {
         .map(str::trim)
         .any(|line| Path::new(line) == shell);
     if !listed {
-        return Err(super::invalid("the shell is not listed in /etc/shells"));
+        return Err(kernel_sandbox::error::invalid(
+            "the shell is not listed in /etc/shells",
+        ));
     }
     Ok(())
 }
@@ -321,7 +328,9 @@ fn private_folder(path: &Path) -> Result<(), SandboxError> {
         .create(path)?;
     let metadata = std::fs::symlink_metadata(path)?;
     if !metadata.is_dir() {
-        return Err(super::invalid("the terminal folder must be a real folder"));
+        return Err(kernel_sandbox::error::invalid(
+            "the terminal folder must be a real folder",
+        ));
     }
     Ok(())
 }

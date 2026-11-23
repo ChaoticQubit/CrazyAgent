@@ -1,9 +1,11 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use crate::{Gateway, Grants, Refusals};
+use bus_gateway::{Gateway, Grants, Refusals};
 use sdk::settings::{self, LeftRunning, OnQuit, Provide, QuitSettings};
 use sdk::{Capability, Refusal, Tier};
+
+use crate::{Bound, Providers};
 
 /// The timed batches per path.
 const ROUNDS: usize = 1_000;
@@ -59,7 +61,7 @@ impl Refusals for Unreached {
     }
 }
 
-/// The OWNER Q4 budget for the overhead p95 in picoseconds, by the Mac's condition the
+/// The budget for the overhead p95 in picoseconds, by the Mac's condition the
 /// caller names in `OVERHEAD_MAC`: 1 us quiet, 5 us loaded. Output: the budget and the
 /// condition; panics when the condition is not named.
 fn budget() -> (u64, &'static str) {
@@ -102,8 +104,9 @@ fn report(name: &str, sorted: &[u64]) -> u64 {
     p95
 }
 
-/// Times the SDK call overhead against OWNER Q4, run on demand on a named Mac condition:
-/// `OVERHEAD_MAC=quiet cargo test --release -p crazyagent-bus-gateway --lib overhead_tests:: -- --ignored --nocapture`
+/// Times the SDK call overhead through the generated binding and the gateway core against
+/// its budget, run on demand on a named Mac condition:
+/// `OVERHEAD_MAC=quiet cargo test --release -p crazyagent-sdk-host --lib overhead_tests:: -- --ignored --nocapture`
 /// (`OVERHEAD_MAC=loaded` on the loaded Mac). Prints p50, p95 and p99 ns per call for the
 /// direct call, the SDK call and their difference; fails when the difference's p95 is over.
 #[test]
@@ -113,8 +116,13 @@ fn overhead_per_sdk_call() {
     let grants = Grants::new(&[(PLUGIN, Tier::T2, &["settings.write"])]).unwrap();
     let provider = Noop;
     let refusals = Unreached;
-    let gateway = Gateway::new(&grants, &provider, &NoSecrets, &NoNet, &refusals);
-    let bound = gateway.bind(PLUGIN);
+    let gateway = Gateway::new(&grants, &refusals);
+    let providers = Providers {
+        net: &NoNet,
+        secrets: &NoSecrets,
+        settings: &provider,
+    };
+    let bound = Bound::new(gateway.bind(PLUGIN), &providers);
     let input = QuitSettings {
         on_quit: OnQuit::Stop,
         left_running: LeftRunning::Never,
@@ -174,9 +182,10 @@ impl sdk::secrets::Provide for Found {
     }
 }
 
-/// Times one `secrets.find` call's gateway overhead against the overhead budget the way the
-/// quit save row does: the SDK call through a bound host minus the direct provider call. Run:
-/// `OVERHEAD_MAC=quiet cargo test --release -p crazyagent-bus-gateway --lib overhead_tests::gateway_secrets_call_p95 -- --ignored --nocapture`
+/// Times one `secrets.find` call's overhead through the generated binding and the gateway
+/// core against its budget, the way the quit save row does: the SDK call through a bound
+/// host minus the direct provider call. Run:
+/// `OVERHEAD_MAC=quiet cargo test --release -p crazyagent-sdk-host --lib overhead_tests::gateway_secrets_call_p95 -- --ignored --nocapture`
 /// (`OVERHEAD_MAC=loaded` on the loaded Mac).
 #[test]
 #[ignore = "timing row, run on demand with OVERHEAD_MAC=quiet or OVERHEAD_MAC=loaded"]
@@ -185,8 +194,13 @@ fn gateway_secrets_call_p95() {
     let (budget, condition) = budget();
     let grants = Grants::new(&[(PLUGIN, Tier::T1, &["secrets.find"])]).unwrap();
     let refusals = Unreached;
-    let gateway = Gateway::new(&grants, &Noop, &Found, &NoNet, &refusals);
-    let bound = gateway.bind(PLUGIN);
+    let gateway = Gateway::new(&grants, &refusals);
+    let providers = Providers {
+        net: &NoNet,
+        secrets: &Found,
+        settings: &Noop,
+    };
+    let bound = Bound::new(gateway.bind(PLUGIN), &providers);
     let mut direct_call = || {
         black_box(Found.find(PLUGIN, black_box("token".to_owned()))).unwrap();
     };

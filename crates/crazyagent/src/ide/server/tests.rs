@@ -1,9 +1,10 @@
 use super::*;
 use crate::ide::workspace::{IdePolicy, ide_policy};
+use crate::sandbox::ProjectSandbox;
 use crate::sandbox::policy::{
     AgentAccess, AgentFilesRule, AgentNetwork, AgentPolicy, IdeAgentFiles,
 };
-use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+use kernel_sandbox::net::SandboxNetwork;
 use std::ffi::OsString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

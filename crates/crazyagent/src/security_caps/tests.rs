@@ -8,6 +8,7 @@ use kernel_security::secrets::{Handles, Scopes, Secrets};
 use kernel_security::store::{SecretRef, Store, reference};
 use sdk::secrets::{self, Provide, Secret};
 use sdk::{Capability, Refusal, Tier};
+use sdk_host::{Bound, Providers};
 
 use super::*;
 
@@ -172,9 +173,15 @@ fn the_quit_gateway_never_opens_the_store() {
         Err(absent.clone())
     );
     let grants = Grants::new(&[("github", Tier::T1, &["secrets.find"])]).unwrap();
-    let gateway = Gateway::new(&grants, &Absent, &Absent, &Absent, &Unreached);
+    let gateway = Gateway::new(&grants, &Unreached);
+    let providers = Providers {
+        net: &Absent,
+        secrets: &Absent,
+        settings: &Absent,
+    };
+    let host = Bound::new(gateway.bind("github"), &providers);
     assert_eq!(
-        secrets::find(&gateway.bind("github"), "token".to_owned()).map(|found| found.is_some()),
+        secrets::find(&host, "token".to_owned()).map(|found| found.is_some()),
         Err(absent)
     );
 }

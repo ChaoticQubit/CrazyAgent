@@ -41,11 +41,12 @@ use crate::sandbox::policy::{
     AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing,
 };
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
-use crate::sandbox::{
-    InstalledSandbox, LinuxStrict, ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote,
-};
+use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 use crate::terminal::PANES_PER_PROJECT_MAX;
 use kernel_processes::terminal::{AgentId, Host};
+use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::settings::LinuxStrict;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(unix)]
@@ -13889,8 +13890,8 @@ fn model_hosts(launch: &str, reach: &TeamReach) -> Result<Vec<ModelHost>, String
 fn sandbox_code(error: &SandboxError) -> &'static str {
     match error {
         SandboxError::Invalid(_) => "sandbox_refused",
-        SandboxError::Unavailable(_) if crate::sandbox::model_loopback_windows(error) => {
-            crate::sandbox::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS
+        SandboxError::Unavailable(_) if kernel_sandbox::lines::model_loopback_windows(error) => {
+            kernel_sandbox::lines::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS
         }
         SandboxError::Unavailable(_) | SandboxError::Unreadable(_) => "sandbox_unavailable",
         SandboxError::Io(error) => io_code(error),
