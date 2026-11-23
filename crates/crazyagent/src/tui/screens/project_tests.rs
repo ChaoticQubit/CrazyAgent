@@ -810,7 +810,7 @@ fn every_engine_refusal_for_agent_access_reads_its_own_sentence() {
     ];
     let mut missing = Vec::new();
     for source in [
-        include_str!("../../sandbox/policy.rs"),
+        include_str!("../../../../kernel/sandbox/src/policy.rs"),
         include_str!("../../project_setup.rs"),
         include_str!("../../storage.rs"),
     ] {
