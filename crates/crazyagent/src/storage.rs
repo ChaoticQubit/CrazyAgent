@@ -181,6 +181,7 @@ mod projects_home;
 #[cfg(all(test, unix))]
 mod projects_home_tests;
 mod settings;
+pub(crate) use settings::store_config;
 #[cfg(all(test, windows))]
 mod windows_tests;
 pub(crate) mod worker_dispatch;
@@ -2821,22 +2822,6 @@ fn migrate_task(
     assert_eq!(&context.config_id, config_id);
     assert!(context.allowed_destinations.len() <= 64);
     Ok(Outcome::Applied)
-}
-
-pub(crate) fn store_config(
-    connection: &Connection,
-    config: &EffectiveConfig,
-) -> Result<(), EngineError> {
-    connection
-        .execute(
-            "INSERT OR IGNORE INTO configs VALUES (?1,?2)",
-            params![
-                config.id.as_str(),
-                serde_json::to_string(config).map_err(error)?
-            ],
-        )
-        .map_err(error)?;
-    Ok(())
 }
 
 const OWNER_META: &str = "CREATE TABLE owner_meta (

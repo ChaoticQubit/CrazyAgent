@@ -782,7 +782,7 @@ pub(super) fn app_plugins(
                     crate::config::edit_when_turned_off(global, project, when_off)
                 })
                 .map_err(setting_refusal)?;
-            super::store_config(db, &next)?;
+            store_config(db, &next)?;
             *config = next;
             crate::app_plugins::Command::List
         }
@@ -1472,6 +1472,22 @@ pub(super) fn read(
         return Err(error("model_access_record_bounds"));
     }
     Ok(reply)
+}
+
+pub(crate) fn store_config(
+    connection: &Connection,
+    config: &EffectiveConfig,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO configs VALUES (?1,?2)",
+            params![
+                config.id.as_str(),
+                serde_json::to_string(config).map_err(error)?
+            ],
+        )
+        .map_err(error)?;
+    Ok(())
 }
 
 #[cfg(all(test, unix))]
