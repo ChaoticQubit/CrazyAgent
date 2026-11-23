@@ -15,6 +15,9 @@ test-principals = []
 name = "crazyagent-win-boundary"
 path = "src/bin/crazyagent-win-boundary.rs"
 
+[dependencies]
+crazyagent-kernel-common = { path = "../kernel/common" }
+
 [target.'cfg(windows)'.dependencies]
 tokio = { version = "=1.53.2", features = ["net"] }
 windows-sys = { version = "=0.61.2", features = [

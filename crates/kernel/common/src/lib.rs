@@ -36,24 +36,39 @@ pub fn hash(bytes: &[u8]) -> String {
     digest
 }
 
-const WINDOWS_DEVICE_NAMES: [&str; 22] = [
-    "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
-    "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
-];
+/// The device names Windows opens alone, in upper case.
+const WINDOWS_DEVICE_NAMES: [&str; 6] = ["AUX", "CON", "CONIN$", "CONOUT$", "NUL", "PRN"];
+
+/// The device names Windows opens with one digit after them, in upper case.
+const WINDOWS_NUMBERED_DEVICES: [&str; 2] = ["COM", "LPT"];
+
+/// The superscript digits one, two and three, which Windows takes after COM and LPT.
+const SUPERSCRIPT_DIGITS: [char; 3] = ['\u{b9}', '\u{b2}', '\u{b3}'];
 
 /// True when Windows opens the name as a device instead of a file: CON, PRN, AUX, NUL,
-/// COM1 to COM9 or LPT1 to LPT9 in any case, alone, before an extension or before one
-/// trailing colon, with or without spaces before the dot. Input: one path component.
-/// Output: whether it is reserved on Windows.
+/// CONIN$, CONOUT$, or COM or LPT followed by one ASCII digit or a superscript one, two or
+/// three. Case is compared on the Unicode upper case, so a dotless i counts as an I. The
+/// name may stand alone, before an extension or before one trailing colon, with or without
+/// spaces before the dot. Input: one path component. Output: whether it is reserved on
+/// Windows.
 pub fn windows_device(name: &str) -> bool {
     let name = name.strip_suffix(':').unwrap_or(name);
     let stem = name
         .split_once('.')
         .map_or(name, |(stem, _)| stem)
-        .trim_end_matches(' ');
-    WINDOWS_DEVICE_NAMES
-        .iter()
-        .any(|device| stem.eq_ignore_ascii_case(device))
+        .trim_end_matches(' ')
+        .to_uppercase();
+    let numbered = WINDOWS_NUMBERED_DEVICES.iter().any(|prefix| {
+        stem.strip_prefix(prefix).is_some_and(|tail| {
+            let mut tail = tail.chars();
+            matches!(
+                (tail.next(), tail.next()),
+                (Some(digit), None)
+                    if digit.is_ascii_digit() || SUPERSCRIPT_DIGITS.contains(&digit)
+            )
+        })
+    });
+    numbered || WINDOWS_DEVICE_NAMES.contains(&stem.as_str())
 }
 
 #[cfg(test)]
