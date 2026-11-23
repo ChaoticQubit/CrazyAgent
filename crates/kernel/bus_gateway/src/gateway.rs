@@ -39,11 +39,7 @@ pub struct Gateway<'p> {
 impl<'p> Gateway<'p> {
     /// Builds a gateway. Inputs: the grant table, the refusal sink and the owner's plugin
     /// switches. Output: the gateway.
-    pub fn new(
-        grants: &'p Grants,
-        refusals: &'p dyn Refusals,
-        switches: &'p dyn Switches,
-    ) -> Self {
+    pub fn new(grants: &'p Grants, refusals: &'p dyn Refusals, switches: &'p dyn Switches) -> Self {
         Self {
             grants,
             refusals,

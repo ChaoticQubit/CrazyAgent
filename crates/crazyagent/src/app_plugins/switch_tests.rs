@@ -54,14 +54,20 @@ fn the_off_set_changes_only_after_the_switch_commits() {
         code(set.switch(&db, &engine(temp.path()), QUIT, off(true, &usage))),
         Some("app_plugins_unavailable".to_owned())
     );
-    assert!(set.is_on(QUIT), "a switch inside an open transaction is refused");
+    assert!(
+        set.is_on(QUIT),
+        "a switch inside an open transaction is refused"
+    );
     db.execute_batch("ROLLBACK").unwrap();
     set.switch(&db, &engine(temp.path()), QUIT, off(true, &usage))
         .unwrap();
     assert!(!set.is_on(QUIT));
     let fresh = OffSet::new();
     fresh.load(&db);
-    assert!(!fresh.is_on(QUIT), "the committed off loads at the next start");
+    assert!(
+        !fresh.is_on(QUIT),
+        "the committed off loads at the next start"
+    );
     set.switch(&db, &engine(temp.path()), QUIT, Switch::On)
         .unwrap();
     assert!(set.is_on(QUIT));

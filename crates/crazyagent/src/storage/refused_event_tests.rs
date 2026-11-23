@@ -138,8 +138,15 @@ fn a_first_refusal_is_logged_once_per_run() {
     for _ in 0..2 {
         let tx = s.db.transaction().unwrap();
         let at = owner_revision(&tx).unwrap();
-        let result =
-            sdk_slice::save_quit_with(agent_quit::save, &grants, &AllOn, &sink, &tx, at, &stop_never_12());
+        let result = sdk_slice::save_quit_with(
+            agent_quit::save,
+            &grants,
+            &AllOn,
+            &sink,
+            &tx,
+            at,
+            &stop_never_12(),
+        );
         assert_eq!(
             result.err().map(|error| error.0).as_deref(),
             Some("plugin_call_refused")

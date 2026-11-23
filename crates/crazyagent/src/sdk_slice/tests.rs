@@ -284,7 +284,15 @@ fn shape(entry: Entry, grants: &Grants, refusals: &EngineRefusals) -> String {
     let before = moved(&db);
     let revision = u64::try_from(before.0).unwrap();
     let tx = db.transaction().unwrap();
-    let result = save_quit_with(entry, grants, &AllOn, refusals, &tx, revision, &stop_never_12());
+    let result = save_quit_with(
+        entry,
+        grants,
+        &AllOn,
+        refusals,
+        &tx,
+        revision,
+        &stop_never_12(),
+    );
     tx.rollback().unwrap();
     assert_eq!(moved(&db), before, "the store's revision is unchanged");
     assert!(!quit_row(&db), "no agent_quit_settings change");
@@ -444,7 +452,11 @@ fn the_quit_save_of_an_off_plugin_is_refused_and_queues_no_missing_permission() 
         result.err().map(|error| error.0),
         Some("plugin_call_refused".to_owned())
     );
-    assert_eq!(moved(&tx), before, "an off plugin's save moves and logs nothing");
+    assert_eq!(
+        moved(&tx),
+        before,
+        "an off plugin's save moves and logs nothing"
+    );
     assert!(!quit_row(&tx));
     assert!(logged(&tx).is_empty());
     assert_eq!(refusals.count(QUIT), 1);
