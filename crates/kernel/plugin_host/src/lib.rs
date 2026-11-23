@@ -39,6 +39,8 @@ mod grants_tests;
 mod permission_tests;
 #[cfg(all(test, feature = "store"))]
 mod problem_tests;
+#[cfg(all(test, feature = "store", windows))]
+mod registry_folder_windows_tests;
 #[cfg(all(test, feature = "store", unix))]
 mod registry_tests;
 #[cfg(all(test, feature = "store"))]

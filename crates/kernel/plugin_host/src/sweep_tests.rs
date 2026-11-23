@@ -6,6 +6,9 @@ const ID: &str = "00000000000000000000000000000000000000000000000000000000000000
 
 fn plugins_folder(root: &Path) -> PathBuf {
     let folder = root.join(FOLDER);
+    #[cfg(windows)]
+    drop(crazyagent_win_sandbox::private::dir(&folder).unwrap());
+    #[cfg(not(windows))]
     std::fs::create_dir_all(&folder).unwrap();
     #[cfg(unix)]
     {
