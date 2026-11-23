@@ -6,6 +6,7 @@ import type { EngineState } from "./ui/shell";
 import type { Route } from "./ui/router";
 import { watchUnconfirmed, leavesProfileUnconfirmed } from "./engine-client";
 import type { ActionReceipt, FoundProject, IntakeJob, IntentReceipt, PendingIntent, ProjectPage } from "./engine-client";
+import { changedLine, loadAppPlugins } from "./api-app-plugins";
 import { loadFoundProjects, loadIntakeJobs } from "./api-intake";
 import { notifyIntake } from "./notify";
 import { foundPollMs, intakePollMs, jobEnds, jobLine } from "./screens/intake/intake";
@@ -459,6 +460,16 @@ export function useSession(home: boolean): Session {
     void read();
     return () => { live = false; clearTimeout(timer); };
   }, [engine, intakeTick]);
+
+  useEffect(() => {
+    if (engine !== "running") return;
+    let live = true;
+    void loadAppPlugins().then((result) => {
+      const line = live && result.kind === "ok" ? changedLine(result.value) : null;
+      if (line) showToast(line, { name: "settings", tab: "app-plugins" });
+    });
+    return () => { live = false; };
+  }, [engine]);
 
   useEffect(() => {
     if (engine !== "running") return;
