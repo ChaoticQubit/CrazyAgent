@@ -368,7 +368,7 @@ fn refusing_hooks() -> Hooks<'static> {
     }
 }
 
-/// H9 (CodeRabbit b01): a start whose restore record exists but cannot be read as a private
+/// A start whose restore record exists but cannot be read as a private
 /// regular file of this user refuses, since it may say a restore did not finish; only a
 /// missing record lets the start go on.
 #[test]
@@ -388,7 +388,7 @@ fn a_start_whose_restore_record_cannot_be_read_refuses() {
     assert!(folder.starts_with(ENGINE_RESTORE_BROKEN), "{folder}");
 }
 
-/// H11 (leader 23:3x): a pin carries the sha256 of its checked engine.db in its `checked`
+/// A pin carries the sha256 of its checked engine.db in its `checked`
 /// marker, and a copy that still matches it restores as checked by its digest.
 #[test]
 fn a_pinned_copy_that_matches_its_digest_restores_as_checked() {
@@ -418,7 +418,7 @@ fn a_pinned_copy_that_matches_its_digest_restores_as_checked() {
     assert_eq!(read(&path), (vec!["one".to_owned()], 11));
 }
 
-/// H11: a pinned copy whose bytes changed after its backup, here a row with the same
+/// A pinned copy whose bytes changed after its backup, here a row with the same
 /// version, schema and counts, is refused before any write: engine.db byte-equal and no
 /// `replaced-*` copy.
 #[test]
@@ -438,7 +438,7 @@ fn a_pinned_copy_changed_after_its_backup_is_refused_before_any_write() {
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
-/// H11 (leader 23:3x): a pin written before digests, with an empty `checked` marker, still
+/// A pin written before digests, with an empty `checked` marker, still
 /// restores once `PRAGMA integrity_check` reads ok, and says so as unverified.
 #[test]
 fn a_pin_with_no_digest_restores_after_its_integrity_check_as_unverified() {
@@ -464,7 +464,7 @@ fn a_pin_with_no_digest_restores_after_its_integrity_check_as_unverified() {
     assert_eq!(replaced(root.path()), std::slice::from_ref(&restored.kept));
 }
 
-/// H11: a pin with no digest whose integrity check fails (a page no table owns) is refused
+/// A pin with no digest whose integrity check fails (a page no table owns) is refused
 /// before any write: engine.db byte-equal and no `replaced-*` copy.
 #[test]
 fn a_pin_with_no_digest_that_fails_its_integrity_check_is_refused_before_any_write() {

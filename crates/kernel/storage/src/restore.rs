@@ -141,7 +141,7 @@ fn restore_pinned_at(
     Ok(Restored { kept, pin })
 }
 
-/// Checks a pinned backup against the digest its `checked` marker holds (leader 11-22, H11):
+/// Checks a pinned backup against the digest its `checked` marker holds:
 /// a match passes as [`PinCheck::Digest`], an empty marker, as a 2.4 build writes it, passes
 /// as [`PinCheck::Unverified`] for [`shape`] to run the integrity check, and anything else is
 /// refused. Input: the backup folder. Output: the check, or `storage_restore_failed`.
@@ -280,7 +280,7 @@ pub const RESTORE_RECORD_FILE: &str = "restore-record";
 /// The record of a restore the engine stops for.
 pub const RECORD_PENDING: &str = "pending";
 /// The record a restore writes before it starts, which its outcome replaces; left behind by a
-/// crash or a failed outcome write, it refuses the next start (H10).
+/// crash or a failed outcome write, it refuses the next start.
 pub const RECORD_RESTORING: &str = "restoring";
 /// The word a restored record ends with when the pinned copy had no digest to check.
 pub const RECORD_UNVERIFIED_PIN: &str = "unverified_pin";
@@ -362,7 +362,7 @@ pub fn read_restore_record(root: &Path) -> Option<String> {
 }
 
 /// [`read_restore_record`] that tells a missing record from one that exists but cannot be
-/// read as a private regular file of this user (H9). Input: the root. Output: Ok(None) when
+/// read as a private regular file of this user. Input: the root. Output: Ok(None) when
 /// it is missing, Ok(Some) with its line, or Err for any other failure.
 fn read_record_strict(root: &Path) -> Result<Option<String>, ()> {
     use std::io::Read;

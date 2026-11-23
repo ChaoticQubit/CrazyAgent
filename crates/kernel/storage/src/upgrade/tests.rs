@@ -292,7 +292,7 @@ fn a_start_after_a_failed_rollback_refuses_and_leaves_engine_db_unmigrated() {
     );
 }
 
-/// H10 (CodeRabbit b01, leader 23:3x): a record left at `restoring`, by a crash or a failed
+/// A record left at `restoring`, by a crash or a failed
 /// outcome write after the restore started, refuses the next start without migrating, and
 /// the start keeps the record.
 #[test]
