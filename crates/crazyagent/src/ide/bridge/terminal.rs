@@ -4,7 +4,6 @@ use crate::engine::owner::{OwnerRuntimeHandle, failure};
 use crate::harnesses::interactive::InteractiveCommand;
 use crate::ipc::{OwnedWriteHalf, Stream};
 use crate::protocol::{ProjectId, encode_frame};
-use crate::sandbox::SandboxError;
 use crate::sandbox::ide_shell::{self, Launch, TERMINAL_VARIABLES};
 use crate::sandbox::policy::AgentAccess;
 use crate::terminal::{TerminalFrame, TerminalRequest};
@@ -13,6 +12,7 @@ use kernel_processes::terminal::buffer::Chunk;
 use kernel_processes::terminal::{
     AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalStream,
 };
+use kernel_sandbox::error::SandboxError;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

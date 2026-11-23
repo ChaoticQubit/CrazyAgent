@@ -176,7 +176,7 @@ async fn an_anchor_given_as_a_short_name_or_another_case_opens_at_its_plain_long
         assert_eq!(anchor.path, path, "the stored path is the plain long name");
         anchor.verify().unwrap();
         assert!(
-            crate::sandbox::windows_clean_text(anchor.path.to_str().unwrap()),
+            kernel_sandbox::paths::windows_clean_text(anchor.path.to_str().unwrap()),
             "the stored path is plain text the sandbox accepts"
         );
     }

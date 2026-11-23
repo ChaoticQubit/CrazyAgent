@@ -73,11 +73,13 @@ fn reference_refuses_the_shapes_a_credential_ref_refuses() {
     assert_eq!(reference("svc.", "a").unwrap().as_str(), "svc.:a");
     assert_eq!(reference("svc", "aux.x").unwrap().as_str(), "svc:aux.x");
     assert_eq!(reference("console", "a").unwrap().as_str(), "console:a");
-    if cfg!(windows) {
-        assert_eq!(reference("c", "token").unwrap_err(), invalid);
-    } else {
-        assert_eq!(reference("c", "token").unwrap().as_str(), "c:token");
-    }
+    assert_eq!(reference("c", "token").unwrap_err(), invalid);
+    assert_eq!(reference("a", "x").unwrap_err(), invalid);
+    assert_eq!(reference("ab", "x").unwrap().as_str(), "ab:x");
+    assert_eq!(
+        SecretRef::try_from("a:x").unwrap_err(),
+        StoreError::code("credential_reference_invalid")
+    );
     assert_eq!(reference("cd", "token").unwrap().as_str(), "cd:token");
 }
 

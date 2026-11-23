@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn no_network_grants_a_model_only_on_loopback_and_never_a_host_port() {
-    use crate::sandbox::{SandboxNetwork, SandboxRemote};
+    use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
     assert_eq!(
         AgentNetwork::None.sandbox(Some(SandboxRemote::AnyHost(443))),
         SandboxNetwork::Only(vec![])
@@ -339,7 +339,7 @@ fn full_access_on_windows_is_refused_with_its_own_reason_and_code() {
 
 #[test]
 fn a_windows_model_only_agent_with_tools_starts_no_proxy_and_reaches_the_models_port_on_any_host() {
-    use crate::sandbox::{SandboxNetwork, SandboxRemote};
+    use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
     let hosted = SandboxRemote::AnyHost(443);
     let local = SandboxRemote::Loopback(11_434);
     assert!(!AgentNetwork::None.proxied("windows", true, hosted));
@@ -382,7 +382,7 @@ fn a_windows_model_only_agent_with_tools_starts_no_proxy_and_reaches_the_models_
 
 #[test]
 fn a_loopback_model_on_windows_is_refused_under_every_network_choice() {
-    use crate::sandbox::SandboxRemote;
+    use kernel_sandbox::net::SandboxRemote;
     let local = SandboxRemote::Loopback(11_434);
     for network in AgentNetwork::ALL {
         for tools in [true, false] {
@@ -390,7 +390,7 @@ fn a_loopback_model_on_windows_is_refused_under_every_network_choice() {
             assert!(
                 refusal
                     .as_ref()
-                    .is_err_and(crate::sandbox::model_loopback_windows),
+                    .is_err_and(kernel_sandbox::lines::model_loopback_windows),
                 "{network:?} tools={tools}: {refusal:?}"
             );
         }
@@ -756,18 +756,21 @@ fn an_agent_folders_rule_holds_the_agents_root_in_any_letter_case() {
     };
     assert_eq!(rule(IdeAgentFiles::AllowAll, false), "");
     assert_eq!(rule(IdeAgentFiles::AllowAll, true), "");
-    let root_text = super::super::any_case("/tmp/ca-proj");
+    let root_text = kernel_sandbox::paths::any_case("/tmp/ca-proj");
     let new = format!(
         "^{root_text}{}/{}",
-        super::super::any_case("/.crazyagent"),
-        super::super::any_case("worktrees")
+        kernel_sandbox::paths::any_case("/.crazyagent"),
+        kernel_sandbox::paths::any_case("worktrees")
     );
     let both = format!(
         "^{root_text}({})?/{}",
-        super::super::any_case("/.crazyagent"),
-        super::super::any_case("worktrees")
+        kernel_sandbox::paths::any_case("/.crazyagent"),
+        kernel_sandbox::paths::any_case("worktrees")
     );
-    let state = format!("^{root_text}{}$", super::super::any_case("/.crazyagent"));
+    let state = format!(
+        "^{root_text}{}$",
+        kernel_sandbox::paths::any_case("/.crazyagent")
+    );
     for (older_agents, agents) in [(false, &new), (true, &both)] {
         let keep_root = format!("(deny file-write-unlink\n  (regex #\"{agents}$\"))\n");
         assert_eq!(
@@ -789,7 +792,9 @@ fn an_agent_folders_rule_holds_the_agents_root_in_any_letter_case() {
 
 #[test]
 fn only_a_none_network_this_linux_bridges_drops_the_ports_line() {
-    use crate::sandbox::{LINUX_PORTS_ANY_HOST_LINE, LinuxHost, LinuxSockets};
+    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::lines::LINUX_PORTS_ANY_HOST_LINE;
+    use kernel_sandbox::settings::LinuxSockets;
     let host = |nested| {
         Some(LinuxHost {
             nested,
@@ -845,9 +850,9 @@ fn only_a_none_network_this_linux_bridges_drops_the_ports_line() {
 
 #[test]
 fn a_supervised_linux_under_tcp_only_drops_the_ports_line_but_names_port_53_for_https() {
-    use crate::sandbox::{
-        LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE, LinuxHost, LinuxSockets,
-    };
+    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::lines::{LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE};
+    use kernel_sandbox::settings::LinuxSockets;
     let host = |nested| {
         Some(LinuxHost {
             nested,
@@ -884,9 +889,9 @@ fn a_supervised_linux_under_tcp_only_drops_the_ports_line_but_names_port_53_for_
 
 #[test]
 fn a_routed_linux_drops_the_port_443_line_with_or_without_the_supervisor() {
-    use crate::sandbox::{
-        LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE, LinuxHost, LinuxSockets,
-    };
+    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::lines::{LINUX_DNS_ANY_HOST_LINE, LINUX_PORTS_ANY_HOST_LINE};
+    use kernel_sandbox::settings::LinuxSockets;
     let host = |supervised, routed| {
         Some(LinuxHost {
             nested: true,
@@ -945,8 +950,9 @@ fn a_routed_linux_drops_the_port_443_line_with_or_without_the_supervisor() {
 
 #[test]
 fn a_level_says_what_this_linux_cannot_hold_for_it_and_nothing_elsewhere() {
-    use crate::sandbox::{
-        LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE, LinuxHost,
+    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::lines::{
+        LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE,
     };
     let host = |nested, scoped| {
         Some(LinuxHost {
@@ -992,10 +998,12 @@ fn a_level_says_what_this_linux_cannot_hold_for_it_and_nothing_elsewhere() {
 
 #[test]
 fn a_supervised_linux_says_its_narrower_lines_and_root_says_why_none_of_them_hold() {
-    use crate::sandbox::{
+    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::lines::{
         LINUX_KEPT_GIT_LINE, LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE, LINUX_ROOT_LINE,
-        LINUX_SIGNALS_LINE, LINUX_SUPERVISED_LINE, LinuxHost, LinuxSupervisor,
+        LINUX_SIGNALS_LINE, LINUX_SUPERVISED_LINE,
     };
+    use kernel_sandbox::settings::LinuxSupervisor;
     let held = |nested, scoped| LinuxHost {
         nested,
         scoped,
@@ -1065,9 +1073,10 @@ fn a_supervised_linux_says_its_narrower_lines_and_root_says_why_none_of_them_hol
 /// does not cover, says nothing of AppArmor (DEC-179 SBX-3, addendum 7, rv-ds241 nit).
 #[test]
 fn an_apparmor_blocked_linux_says_why_agents_share_your_process_space() {
-    use crate::sandbox::{
+    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::lines::{
         LINUX_APPARMOR_LINE, LINUX_KEPT_GIT_LINE, LINUX_NESTED_GIT_LINE, LINUX_PROCESS_LIST_LINE,
-        LINUX_ROOT_LINE, LINUX_SIGNALS_LINE, LINUX_SUPERVISED_LINE, LinuxHost,
+        LINUX_ROOT_LINE, LINUX_SIGNALS_LINE, LINUX_SUPERVISED_LINE,
     };
     let host = |scoped, supervised, root| LinuxHost {
         nested: false,
@@ -1129,7 +1138,8 @@ fn an_apparmor_blocked_linux_says_why_agents_share_your_process_space() {
 /// answer (rv-secreview linux-t4c note 1, rv-code4 linux-t4c N2, DEC-179 T4d).
 #[test]
 fn only_a_supervised_host_reads_the_project_for_another_repository_and_the_view_takes_it() {
-    use crate::sandbox::{LINUX_KEPT_GIT_LINE, LinuxHost};
+    use crate::sandbox::LinuxHost;
+    use kernel_sandbox::lines::LINUX_KEPT_GIT_LINE;
     let temp = tempfile::tempdir().unwrap();
     let project = temp.path().join("project");
     std::fs::create_dir_all(project.join("vendor/.git")).unwrap();

@@ -1,5 +1,6 @@
 use super::*;
 use crate::cleanup_settings::CleanupSettings;
+use crate::log_compaction::{LogCompaction, LogCompactionView};
 use crate::master_frame_limit::MasterFrameSettings;
 use crate::master_step_limit::MasterStepSettings;
 use crate::master_time_limit::MasterTimeSettings;
@@ -7,7 +8,7 @@ use crate::owner_profile::OwnerProfile;
 use crate::pools::PoolSummary;
 use crate::provider_retry::{ProviderRetry, ProviderRetryView};
 use crate::quit_settings::QuitSettings;
-use crate::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
+use kernel_sandbox::settings::{SandboxSettings, StoredSandboxSettings};
 
 impl OwnerController {
     /// Reads the owner's first-run profile from the engine.
@@ -143,6 +144,30 @@ impl OwnerController {
         }
         self.read(OwnerRead::ProviderRetry).await?;
         self.begin_mutation(OwnerMutation::SetProviderRetry { choice }, generation)?;
+        self.send_pending().await
+    }
+
+    /// Reads the event log compaction switch: the stored choice and whether this build is a
+    /// dev build. Input: none. Output: the view, Off before the first save.
+    pub async fn log_compaction(&mut self) -> Result<LogCompactionView, EngineError> {
+        match self.read(OwnerRead::LogCompaction).await?.data {
+            OwnerData::LogCompaction { settings } => Ok(settings),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
+    /// Saves the event log compaction switch as one retained owner mutation. Input: the
+    /// choice and a nonzero client generation. Output: the engine response.
+    pub async fn set_log_compaction(
+        &mut self,
+        choice: LogCompaction,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        if self.pending.is_some() || self.pending_account_profile.is_some() {
+            return Err(EngineError("controller_pending_intent".into()));
+        }
+        self.read(OwnerRead::LogCompaction).await?;
+        self.begin_mutation(OwnerMutation::SetLogCompaction { choice }, generation)?;
         self.send_pending().await
     }
 

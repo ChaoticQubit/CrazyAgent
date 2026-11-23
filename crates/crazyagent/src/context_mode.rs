@@ -1,7 +1,7 @@
 use crate::plugins::{ContextModeOff, ServerSpec, exact_version};
-use crate::sandbox::SandboxError;
 use base64::Engine;
 use kernel_processes::run::InstallError;
+use kernel_sandbox::error::SandboxError;
 use os::{
     NODE, lock, lock_shared, npm_ready, open_plain, private_folder, run_command, run_quiet,
     runnable, staging_folder, try_lock,
@@ -381,7 +381,7 @@ fn node_supported(root: &Path, bin: &Path) -> Result<bool, InstallError> {
     }
     let _probing = lock_shared(&checks)?;
     let scratch = staging_folder(&parent, NODE_CHECK)?;
-    let Ok(base) = crate::sandbox::canonical(&scratch) else {
+    let Ok(base) = kernel_sandbox::paths::canonical(&scratch) else {
         let _ = std::fs::remove_dir_all(&scratch);
         return Err(InstallError("setup_store_unavailable"));
     };
@@ -421,7 +421,7 @@ fn end_left_checks(parent: &Path) {
             continue;
         }
         let scratch = entry.path();
-        match crate::sandbox::canonical(&scratch) {
+        match kernel_sandbox::paths::canonical(&scratch) {
             Ok(base) => end_check(&scratch, &base),
             Err(_) => {
                 let _ = std::fs::remove_dir_all(&scratch);
@@ -441,8 +441,9 @@ fn node_command(
     bin: &Path,
 ) -> Result<std::process::Command, InstallError> {
     use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
-    use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork};
-    let canonical = |path: &Path| crate::sandbox::canonical(path).map_err(refused);
+    use crate::sandbox::{InstalledSandbox, ProjectSandbox};
+    use kernel_sandbox::net::SandboxNetwork;
+    let canonical = |path: &Path| kernel_sandbox::paths::canonical(path).map_err(refused);
     let mut folders = Vec::with_capacity(3);
     for name in ["project", "home", "tmp"] {
         private_folder(&scratch.join(name))?;
@@ -663,8 +664,8 @@ fn work_folder(staged: &Path, prefix: &str) -> Result<PathBuf, InstallError> {
 /// folder and the work folder's `home`. Inputs: the staging and work folders. Output: both,
 /// or `setup_store_unavailable`.
 fn npm_job(staged: &Path, work: &Path) -> Result<(PathBuf, PathBuf), InstallError> {
-    crate::sandbox::canonical(staged)
-        .and_then(|folder| Ok((folder, crate::sandbox::canonical(work)?.join("home"))))
+    kernel_sandbox::paths::canonical(staged)
+        .and_then(|folder| Ok((folder, kernel_sandbox::paths::canonical(work)?.join("home"))))
         .map_err(|_| InstallError("setup_store_unavailable"))
 }
 
@@ -788,7 +789,7 @@ fn npm_command(
     let tmp = work.join("tmp");
     private_folder(&home)?;
     private_folder(&tmp)?;
-    let canonical = |path: &Path| crate::sandbox::canonical(path).map_err(refused);
+    let canonical = |path: &Path| kernel_sandbox::paths::canonical(path).map_err(refused);
     let homes = ToolHomes::owner().map_err(refused)?;
     let sandbox = ProjectSandbox::new(
         &canonical(staged)?,

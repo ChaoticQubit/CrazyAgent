@@ -1,9 +1,11 @@
+use super::OWNER_PORTS;
 use super::policy::{AccessGrant, AgentAccess, AgentPolicy, GRANT_PORTS_MAX, GRANT_SOCKETS_MAX};
-use super::{OWNER_PORTS, canonical, owner_home, owner_secrets};
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::protocol::ProjectId;
 use crate::questions::{Ask, Asker, EngineSource, QuestionKind};
+use kernel_sandbox::paths::owner_secrets;
+use kernel_sandbox::paths::{canonical, owner_home};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -232,7 +234,9 @@ pub fn checked(grant: &AccessGrant, data_root: &Path) -> Result<AccessGrant, &'s
             }
             let real = socket_path(grant, path)?;
             let owner = owner_home().map_err(|_| "grant_socket_secret")?;
-            if owner_secrets(&owner).any(|secret| real.starts_with(&secret)) {
+            if owner_secrets(&owner, &super::harness_folders())
+                .any(|secret| real.starts_with(&secret))
+            {
                 return Err("grant_socket_secret");
             }
             let data = canonical(data_root).unwrap_or_else(|_| data_root.to_path_buf());

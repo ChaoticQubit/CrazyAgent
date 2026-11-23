@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 /// is in its real spelling, sorted, once. Inputs: the command and the roots. Output: the
 /// folders.
 pub(super) fn folders(fixed: &Fixed, roots: &Roots) -> Vec<PathBuf> {
-    let real = |path: &Path| crate::sandbox::canonical(path).unwrap_or_else(|_| path.to_path_buf());
+    let real =
+        |path: &Path| kernel_sandbox::paths::canonical(path).unwrap_or_else(|_| path.to_path_buf());
     let homebrew = roots
         .brew_prefixes
         .iter()
@@ -73,7 +74,7 @@ fn key(folder: &Path) -> PathBuf {
     folder
         .ancestors()
         .find_map(|base| {
-            let real = crate::sandbox::canonical(base).ok()?;
+            let real = kernel_sandbox::paths::canonical(base).ok()?;
             Some(real.join(folder.strip_prefix(base).ok()?))
         })
         .unwrap_or_else(|| folder.to_path_buf())

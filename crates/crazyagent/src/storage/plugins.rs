@@ -183,7 +183,7 @@ pub(crate) enum ResultValue {
     Check(
         Box<ServerSpec>,
         Vec<EffectiveSecret>,
-        crate::sandbox::SandboxNetwork,
+        kernel_sandbox::net::SandboxNetwork,
     ),
     Effective(Box<EffectivePlugins>),
     Launch(Box<LaunchPlugins>),
@@ -856,7 +856,7 @@ fn switched_off(tx: &Transaction<'_>, project: &ProjectId) -> Result<Vec<String>
 fn global_check_network(
     tx: &Transaction<'_>,
     id: &str,
-) -> Result<crate::sandbox::SandboxNetwork, EngineError> {
+) -> Result<kernel_sandbox::net::SandboxNetwork, EngineError> {
     use crate::sandbox::policy::AgentNetwork;
     let mut ids: Vec<String> = Vec::new();
     {
@@ -890,7 +890,7 @@ fn global_check_network(
     }
     Ok(strictest
         .map(|network| network.sandbox(None))
-        .unwrap_or(crate::sandbox::SandboxNetwork::Open))
+        .unwrap_or(kernel_sandbox::net::SandboxNetwork::Open))
 }
 
 fn visible(scope: &Scope, project: Option<&ProjectId>) -> bool {

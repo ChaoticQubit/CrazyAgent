@@ -323,7 +323,7 @@ impl Team {
             &self.project,
             &home,
             &tmp,
-            crazyagent::sandbox::SandboxNetwork::Only(Vec::new()),
+            kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         )
         .unwrap()
         .confine_to_clone(&self.lead.worktree)

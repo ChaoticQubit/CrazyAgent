@@ -2,14 +2,15 @@ use super::settings::{applied, problem};
 use super::*;
 use crate::cleanup_settings::CleanupSettings;
 use crate::github::GitHubStatus;
+use crate::log_compaction::{LogCompaction, LogCompactionView};
 use crate::master_frame_limit::MasterFrameSettings;
 use crate::master_step_limit::MasterStepSettings;
 use crate::master_time_limit::MasterTimeSettings;
 use crate::projects_home::ProjectsHome;
 use crate::provider_retry::{ProviderRetry, ProviderRetryView};
 use crate::quit_settings::QuitSettings;
-use crate::sandbox_settings::{SandboxSettings, StoredSandboxSettings};
 use crate::setup::SetupStatus;
+use kernel_sandbox::settings::{SandboxSettings, StoredSandboxSettings};
 
 /// One request from the setup page: setup status and runs, one tool installed alone, a refused
 /// tool's confirmed permission fix and what setup offers for one (DEC-162), default-pack
@@ -80,6 +81,11 @@ pub(in crate::tui) enum AppSetupJob {
         choice: ProviderRetry,
         generation: u64,
     },
+    LogCompaction,
+    SetLogCompaction {
+        choice: LogCompaction,
+        generation: u64,
+    },
     FixPermissions {
         name: crate::setup::Dependency,
         tree: String,
@@ -128,6 +134,8 @@ pub(in crate::tui) enum AppSetupEvent {
     MasterFramesSet(Result<(), String>),
     ProviderRetry(Result<ProviderRetryView, String>),
     ProviderRetrySet(Result<(), String>),
+    LogCompaction(Result<LogCompactionView, String>),
+    LogCompactionSet(Result<(), String>),
     FixSet(Result<(), String>),
     RefusedToolSet(Result<(), String>),
     Restored(Result<(), String>),
@@ -161,6 +169,8 @@ impl AppSetupJob {
             Self::SetMasterFrames { .. } => "SetMasterFrames",
             Self::ProviderRetry => "ProviderRetry",
             Self::SetProviderRetry { .. } => "SetProviderRetry",
+            Self::LogCompaction => "LogCompaction",
+            Self::SetLogCompaction { .. } => "SetLogCompaction",
             Self::FixPermissions { .. } => "FixPermissions",
             Self::SetRefusedTool { .. } => "SetRefusedTool",
             Self::Restore { .. } => "Restore",
@@ -196,6 +206,8 @@ impl AppSetupEvent {
             AppSetupJob::SetMasterFrames { .. } => Self::MasterFramesSet(Err(problem)),
             AppSetupJob::ProviderRetry => Self::ProviderRetry(Err(problem)),
             AppSetupJob::SetProviderRetry { .. } => Self::ProviderRetrySet(Err(problem)),
+            AppSetupJob::LogCompaction => Self::LogCompaction(Err(problem)),
+            AppSetupJob::SetLogCompaction { .. } => Self::LogCompactionSet(Err(problem)),
             AppSetupJob::FixPermissions { .. } => Self::FixSet(Err(problem)),
             AppSetupJob::SetRefusedTool { .. } => Self::RefusedToolSet(Err(problem)),
             AppSetupJob::Restore { .. } => Self::Restored(Err(problem)),
@@ -380,6 +392,19 @@ impl NativeOwner {
                 AppSetupEvent::ProviderRetrySet(applied(
                     controller.set_provider_retry(choice, generation).await,
                     "provider_retry_outcome_unknown",
+                    lost,
+                ))
+            }
+            AppSetupJob::LogCompaction => AppSetupEvent::LogCompaction(
+                controller
+                    .log_compaction()
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+            ),
+            AppSetupJob::SetLogCompaction { choice, generation } => {
+                AppSetupEvent::LogCompactionSet(applied(
+                    controller.set_log_compaction(choice, generation).await,
+                    "log_compaction_outcome_unknown",
                     lost,
                 ))
             }
@@ -568,13 +593,13 @@ mod tests {
         };
         assert_eq!(
             sandbox.settings.linux_sockets,
-            crate::sandbox::LinuxSockets::TcpOnly
+            kernel_sandbox::settings::LinuxSockets::TcpOnly
         );
         let mut version = sandbox.version;
         for (generation, linux_sockets) in [
-            (3, crate::sandbox::LinuxSockets::TcpPorts),
-            (4, crate::sandbox::LinuxSockets::Refuse),
-            (5, crate::sandbox::LinuxSockets::TcpOnly),
+            (3, kernel_sandbox::settings::LinuxSockets::TcpPorts),
+            (4, kernel_sandbox::settings::LinuxSockets::Refuse),
+            (5, kernel_sandbox::settings::LinuxSockets::TcpOnly),
         ] {
             let settings = SandboxSettings {
                 linux_sockets,

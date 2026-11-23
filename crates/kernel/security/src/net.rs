@@ -1,5 +1,17 @@
 use crate::error::StoreError;
 
+pub mod address;
+pub mod capture;
+pub mod request;
+
+pub use address::address_allowed;
+
+pub use capture::{CAPTURES_MAX, CaptureRules};
+pub use request::{
+    Capture, Captured, Egress, Field, Method, REPLY_BYTES_MAX, REPLY_LIST_MAX,
+    REPLY_TEXT_BYTES_MAX, RawReply, Reply, Request, Requests, Sealed, SecretField,
+};
+
 /// Whether a target URL may carry a query: the relay refuses one, net.request allows one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Query {
