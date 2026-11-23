@@ -320,6 +320,8 @@ pub fn run(args: &[OsString]) -> Result<String, UpdateError> {
 }
 
 #[cfg(test)]
+mod install_tests;
+#[cfg(test)]
 mod lock_tests;
 #[cfg(test)]
 mod tests;
