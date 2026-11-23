@@ -13,10 +13,10 @@ use crate::roadmap_status::Refresh;
 use crate::sandbox_settings::SandboxSettings;
 use crate::state_log::Aggregate;
 use crate::state_log::fence::Fence;
-use crate::state_log::replay::{self, Logged};
 use crate::storage::opening::Opening;
 use kernel_storage::state_log::Appender;
 use kernel_storage::state_log::Clock;
+use kernel_storage::state_log::replay::{self, Logged};
 use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use rusqlite::types::Value as Column;
 use rusqlite::{
@@ -440,7 +440,7 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<u64, EngineError> {
     let mut removals = crate::worktrees::log::removals(tx)?.into_iter().peekable();
     clear(tx)?;
     let mut chunk_seq = 0;
-    let last = replay::replay(tx, Aggregate::Settings, 0, |logged| {
+    let last = crate::state_log::replay(tx, Aggregate::Settings, 0, |logged| {
         while let Some((_, project)) = removals.next_if(|(seq, _)| *seq < logged.seq) {
             forget_rows(tx, &project)?;
         }
@@ -779,7 +779,7 @@ pub(crate) fn forget_project(
         assert!(seq > 0, "the removal is logged before its redaction");
     }
     let kinds = [KIND_INSTRUCTION, KIND_ROADMAP];
-    let redacted = replay::redact_matching(
+    let redacted = crate::state_log::redact_matching(
         tx,
         &[Aggregate::Settings],
         Some(&kinds),

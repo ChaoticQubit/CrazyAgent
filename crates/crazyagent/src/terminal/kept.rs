@@ -2,7 +2,6 @@ use super::buffer::buffer;
 use super::{
     AgentId, Host, HostError, PaneAt, PaneInfo, PaneRef, TerminalStream, VIEWER_BUFFER_BYTES_MAX,
 };
-use crate::harnesses::interactive::InteractiveCommand;
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
@@ -168,7 +167,11 @@ impl<H: Host> LastScreenHost<H> {
 }
 
 impl<H: Host> Host for LastScreenHost<H> {
-    fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError> {
+    fn spawn(
+        &self,
+        agent: &AgentId,
+        command: &crate::terminal::PaneCommand,
+    ) -> Result<PaneRef, HostError> {
         let _turn = self.turns.take(agent);
         let pane = self.inner.spawn(agent, command)?;
         self.screens().forget(agent);
@@ -314,7 +317,7 @@ impl<H: Host> Host for LastScreenHost<H> {
     fn spawn_own_server(
         &self,
         agent: &AgentId,
-        command: &InteractiveCommand,
+        command: &crate::terminal::PaneCommand,
     ) -> Result<PaneRef, HostError> {
         let _turn = self.turns.take(agent);
         let pane = self.inner.spawn_own_server(agent, command)?;
@@ -353,6 +356,7 @@ impl<H: Host> Host for LastScreenHost<H> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harnesses::interactive::InteractiveCommand;
 
     fn agent(id: usize) -> AgentId {
         AgentId::team(i64::try_from(id).unwrap()).unwrap()
@@ -425,7 +429,11 @@ mod tests {
     }
 
     impl Host for Stalled {
-        fn spawn(&self, agent: &AgentId, _: &InteractiveCommand) -> Result<PaneRef, HostError> {
+        fn spawn(
+            &self,
+            agent: &AgentId,
+            _: &crate::terminal::PaneCommand,
+        ) -> Result<PaneRef, HostError> {
             Ok(PaneRef {
                 agent: agent.clone(),
                 pane: "%1".into(),
@@ -496,7 +504,9 @@ mod tests {
                     env: Vec::new(),
                     transcript: crate::harnesses::interactive::Transcript::Unavailable,
                 };
-                let spawned = host.spawn(&agent(2), &command).is_ok();
+                let spawned = host
+                    .spawn(&agent(2), &crate::terminal::PaneCommand::from(&command))
+                    .is_ok();
                 let killed = host.kill(&agent(3)).is_ok();
                 let kept = host.kept(&agent(1));
                 let _ = done.send((spawned, killed, kept));
@@ -522,7 +532,11 @@ mod tests {
     }
 
     impl Host for KillingSlowly {
-        fn spawn(&self, agent: &AgentId, _: &InteractiveCommand) -> Result<PaneRef, HostError> {
+        fn spawn(
+            &self,
+            agent: &AgentId,
+            _: &crate::terminal::PaneCommand,
+        ) -> Result<PaneRef, HostError> {
             Ok(PaneRef {
                 agent: agent.clone(),
                 pane: "%1".into(),
@@ -658,7 +672,11 @@ mod tests {
             env: Vec::new(),
             transcript: crate::harnesses::interactive::Transcript::Unavailable,
         };
-        host.spawn(&named, &run("first run")).unwrap();
+        host.spawn(
+            &named,
+            &crate::terminal::PaneCommand::from(&run("first run")),
+        )
+        .unwrap();
         assert_eq!(host.alive().unwrap(), vec![named.clone()]);
 
         let held = host.screens();
@@ -681,7 +699,10 @@ mod tests {
         let spawning = {
             let (host, named) = (Arc::clone(&host), named.clone());
             let second = run("second run");
-            std::thread::spawn(move || host.spawn(&named, &second).map(drop))
+            std::thread::spawn(move || {
+                host.spawn(&named, &crate::terminal::PaneCommand::from(&second))
+                    .map(drop)
+            })
         };
         std::thread::sleep(Duration::from_millis(500));
         assert!(
@@ -722,12 +743,20 @@ mod tests {
             transcript: crate::harnesses::interactive::Transcript::Unavailable,
         };
         assert!(!host.kept(&named), "nothing is kept before a run");
-        host.spawn(&named, &run("first run")).unwrap();
+        host.spawn(
+            &named,
+            &crate::terminal::PaneCommand::from(&run("first run")),
+        )
+        .unwrap();
         assert!(!host.kept(&named), "a live terminal keeps no last screen");
         host.kill(&named).unwrap();
         assert!(host.kept(&named), "an ended terminal keeps its last screen");
         assert!(!host.kept(&never), "an agent that never ran keeps nothing");
-        host.spawn(&named, &run("second run")).unwrap();
+        host.spawn(
+            &named,
+            &crate::terminal::PaneCommand::from(&run("second run")),
+        )
+        .unwrap();
         assert!(!host.kept(&named), "a new run forgets the screen kept");
         host.kill(&named).unwrap();
         assert!(host.kept(&named));
@@ -776,7 +805,8 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(50));
             }
         };
-        host.spawn(&named, &run).unwrap();
+        host.spawn(&named, &crate::terminal::PaneCommand::from(&run))
+            .unwrap();
         assert!(shows(true), "the terminal never showed its answer");
         host.keep_last(&named);
         assert!(host.kept(&named));

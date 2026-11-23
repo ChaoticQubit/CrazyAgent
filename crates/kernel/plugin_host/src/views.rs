@@ -97,7 +97,7 @@ pub struct Listing {
 /// the hosts it reaches, the secrets it asks for by name, the SHA-256 of its exact bytes
 /// (the add or trust request must name it), whether it replaces a user plugin of the
 /// same name, and on a re-review whether the text changed since it was trusted and which
-/// hosts it reaches that the trusted version did not (owner O1), false and empty otherwise.
+/// hosts it reaches that the trusted version did not, false and empty otherwise.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustView {

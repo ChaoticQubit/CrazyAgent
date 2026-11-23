@@ -38,6 +38,12 @@ interface wire-types {
     name: string,
     mode: mode,
   }
+
+  record blob-stored {
+    at: u64,
+    data: list<u8>,
+    blob: blob,
+  }
 }
 
 interface wire {

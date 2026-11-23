@@ -1,5 +1,5 @@
 use super::*;
-use kernel_storage::state_log::{Draft, ensure};
+use crate::state_log::{Appender, Draft, ensure};
 use rusqlite::{Connection, params};
 use serde_json::json;
 use std::path::Path;
@@ -8,7 +8,65 @@ const LEASES: &str =
     "CREATE TABLE leases (id INTEGER PRIMARY KEY, path TEXT NOT NULL, at_ms INTEGER NOT NULL)";
 const AGENTS: &str = "CREATE TABLE agents (id INTEGER PRIMARY KEY, pid INTEGER NOT NULL, code INTEGER, signal INTEGER)";
 
-type Projection = fn(&Connection, &Logged) -> Result<(), EngineError>;
+type Projection = fn(&Connection, &Logged) -> Result<(), StorageError>;
+
+/// The aggregate names these rows log, the engine's closed set as data.
+struct Aggregate;
+
+#[allow(non_upper_case_globals)]
+impl Aggregate {
+    const Worktrees: AggregateName = AggregateName::new("worktrees");
+    const Ide: AggregateName = AggregateName::new("ide");
+    const Memory: AggregateName = AggregateName::new("memory");
+    const Projects: AggregateName = AggregateName::new("projects");
+    const Landing: AggregateName = AggregateName::new("landing");
+    const Settings: AggregateName = AggregateName::new("settings");
+    const Plugins: AggregateName = AggregateName::new("plugins");
+    const Sessions: AggregateName = AggregateName::new("sessions");
+    const Intake: AggregateName = AggregateName::new("intake");
+    const Engine: AggregateName = AggregateName::new("engine");
+    const Accounts: AggregateName = AggregateName::new("accounts");
+    const Team: AggregateName = AggregateName::new("team");
+}
+
+/// The names replay reads in these rows, as the engine's set reads them. Input: the stored
+/// name. Output: its name, none for another.
+fn known(name: &str) -> Option<AggregateName> {
+    [
+        Aggregate::Worktrees,
+        Aggregate::Ide,
+        Aggregate::Memory,
+        Aggregate::Projects,
+        Aggregate::Landing,
+        Aggregate::Settings,
+        Aggregate::Plugins,
+        Aggregate::Sessions,
+        Aggregate::Intake,
+        Aggregate::Engine,
+        Aggregate::Accounts,
+        Aggregate::Team,
+    ]
+    .into_iter()
+    .find(|known| known.name() == name)
+}
+
+/// A fence that passes every check, as the engine's own fence does in these rows. Output:
+/// the hook.
+fn passing() -> FenceCheck {
+    Box::new(|_| Ok(()))
+}
+
+/// A fence that refuses with one code, as a stale or foreign writer's does. Input: the code.
+/// Output: the hook.
+fn refusing(code: &'static str) -> FenceCheck {
+    Box::new(move |_| Err(StorageError(code.into())))
+}
+
+/// Starts an own write behind a passing fence with a fixed `events` body. Input: the
+/// transaction. Output: the appender.
+fn own<'a, 'c>(tx: &'a rusqlite::Transaction<'c>) -> Appender<'a, 'c> {
+    Appender::own(tx, passing(), known, |revision| Ok(format!("r{revision}"))).unwrap()
+}
 
 /// An in-memory engine store with the `state` row at revision 0 and the leases table, as
 /// storage.rs and a projection create them. Output: the connection.
@@ -20,19 +78,18 @@ fn store() -> Connection {
         INSERT INTO state VALUES (1,0); {LEASES};"
     ))
     .unwrap();
-    fence::seed(&db);
     db
 }
 
 /// The refusal code of a result, none when it succeeded. Input: the result. Output: the code.
-fn code<T, E: Into<EngineError>>(result: Result<T, E>) -> Option<String> {
-    result.err().map(|error| error.into().0)
+fn code<T>(result: Result<T, StorageError>) -> Option<String> {
+    result.err().map(|error| error.0)
 }
 
 /// The leases projection: a snapshot chunk loads its rows, a taken lease is a row stamped
 /// with the event's time, a released one is gone. Inputs: the store and the event. Output:
 /// any refusal.
-fn leases(db: &Connection, event: &Logged) -> Result<(), EngineError> {
+fn leases(db: &Connection, event: &Logged) -> Result<(), StorageError> {
     let insert = "INSERT INTO leases VALUES (?1,?2,?3)";
     if event.kind == SNAPSHOT_CHUNK {
         let chunk = chunk(event)?;
@@ -68,7 +125,7 @@ fn leases(db: &Connection, event: &Logged) -> Result<(), EngineError> {
 
 /// The agents projection: a started agent is a row, and its process exit records the code
 /// or signal it ended with. Inputs: the store and the event. Output: any refusal.
-fn agents(db: &Connection, event: &Logged) -> Result<(), EngineError> {
+fn agents(db: &Connection, event: &Logged) -> Result<(), StorageError> {
     let changed = match event.kind.as_str() {
         "AgentStarted" => {
             let body: serde_json::Value = serde_json::from_slice(&event.body).map_err(error)?;
@@ -94,7 +151,7 @@ fn agents(db: &Connection, event: &Logged) -> Result<(), EngineError> {
 /// kind, the body, the time and the projection. Output: the event's seq.
 fn record(
     db: &mut Connection,
-    aggregate: Aggregate,
+    aggregate: AggregateName,
     kind: &str,
     body: serde_json::Value,
     at_ms: u64,
@@ -102,9 +159,9 @@ fn record(
 ) -> u64 {
     let body = serde_json::to_vec(&body).unwrap();
     let tx = db.transaction().unwrap();
-    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
+    let mut log = own(&tx);
     let draft = Draft {
-        aggregate: aggregate.into(),
+        aggregate,
         kind,
         schema: 1,
         at_ms,
@@ -131,14 +188,14 @@ fn record(
 /// rebuilt store and the last seq replay read.
 fn rebuild(
     live: &Connection,
-    aggregate: Aggregate,
+    aggregate: AggregateName,
     schema: &str,
     project: Projection,
     skip: Option<u64>,
-) -> Result<(Connection, u64), EngineError> {
+) -> Result<(Connection, u64), StorageError> {
     let rebuilt = Connection::open_in_memory().unwrap();
     rebuilt.execute_batch(schema).unwrap();
-    let last = replay(live, aggregate, 0, |event| {
+    let last = replay(live, aggregate, 0, known, |event| {
         if Some(event.seq) == skip {
             return Ok(());
         }
@@ -205,13 +262,13 @@ fn body_at(db: &Connection, seq: u64) -> Vec<u8> {
 
 /// A projection that applies nothing, for events a row only needs in the log. Inputs: the
 /// store and the event. Output: Ok.
-fn logged_only(_: &Connection, _: &Logged) -> Result<(), EngineError> {
+fn logged_only(_: &Connection, _: &Logged) -> Result<(), StorageError> {
     Ok(())
 }
 
 /// Records each event with no projection. Inputs: the store and the aggregate, kind and body
 /// of each event. Output: their seqs, in order.
-fn note(db: &mut Connection, events: &[(Aggregate, &str, serde_json::Value)]) -> Vec<u64> {
+fn note(db: &mut Connection, events: &[(AggregateName, &str, serde_json::Value)]) -> Vec<u64> {
     events
         .iter()
         .map(|(aggregate, kind, body)| record(db, *aggregate, kind, body.clone(), 1, logged_only))
@@ -270,15 +327,15 @@ fn a_replay_rebuilds_the_live_table_and_a_projection_that_skips_an_event_differs
 #[test]
 fn replay_reads_at_most_its_batch_and_a_store_without_a_log_replays_nothing() {
     let mut db = store();
-    assert_eq!(batch(&db, 0, 0).unwrap(), Vec::new());
+    assert_eq!(batch(&db, 0, 0, known).unwrap(), Vec::new());
     assert_eq!(
-        replay(&db, Aggregate::Ide, 7, |_| Err(error("applied"))).unwrap(),
+        replay(&db, Aggregate::Ide, 7, known, |_| Err(error("applied"))).unwrap(),
         7
     );
     let tx = db.transaction().unwrap();
-    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
+    let mut log = own(&tx);
     let tick = Draft {
-        aggregate: Aggregate::Ide.into(),
+        aggregate: Aggregate::Ide,
         kind: "Tick",
         schema: 1,
         at_ms: 1,
@@ -289,12 +346,12 @@ fn replay_reads_at_most_its_batch_and_a_store_without_a_log_replays_nothing() {
     }
     tx.commit().unwrap();
     let last = REPLAY_BATCH_MAX as u64 + 1;
-    assert_eq!(batch(&db, 0, 0).unwrap().len(), REPLAY_BATCH_MAX);
-    assert_eq!(batch(&db, last - 1, 1).unwrap().len(), 1);
+    assert_eq!(batch(&db, 0, 0, known).unwrap().len(), REPLAY_BATCH_MAX);
+    assert_eq!(batch(&db, last - 1, 1, known).unwrap().len(), 1);
     let mut seen = Vec::new();
-    let read = replay(&db, Aggregate::Ide, 0, |event| {
+    let read = replay(&db, Aggregate::Ide, 0, known, |event| {
         seen.push(event.seq);
-        Ok(())
+        Ok::<(), StorageError>(())
     });
     assert_eq!(read, Ok(last));
     assert_eq!(seen, (1..=last).collect::<Vec<_>>());
@@ -307,7 +364,7 @@ fn replay_refuses_a_gap_in_seq_or_a_revision_that_goes_down_and_resumes_after_a_
         for (seq, revision) in planted {
             plant(&db, *seq, *revision, "worktrees", 1);
         }
-        code(replay(&db, Aggregate::Worktrees, after, |_| Ok(())))
+        code(replay(&db, Aggregate::Worktrees, after, known, |_| Ok(())))
     };
     let gap = Some("state_log_replay_gap".to_string());
     assert_eq!(replayed(&[(2, 1)], 0), gap, "a log whose start is missing");
@@ -328,7 +385,7 @@ fn replay_refuses_a_gap_in_seq_or_a_revision_that_goes_down_and_resumes_after_a_
 fn replay_hands_apply_only_its_aggregate_but_checks_every_event() {
     let mut db = store();
     let tx = db.transaction().unwrap();
-    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
+    let mut log = own(&tx);
     for aggregate in [
         Aggregate::Worktrees,
         Aggregate::Ide,
@@ -336,7 +393,7 @@ fn replay_hands_apply_only_its_aggregate_but_checks_every_event() {
         Aggregate::Ide,
     ] {
         log.append(&Draft {
-            aggregate: aggregate.into(),
+            aggregate,
             kind: "Tick",
             schema: 1,
             at_ms: 1,
@@ -346,15 +403,15 @@ fn replay_hands_apply_only_its_aggregate_but_checks_every_event() {
     }
     tx.commit().unwrap();
     let mut seen = Vec::new();
-    replay(&db, Aggregate::Ide, 0, |event| {
+    replay(&db, Aggregate::Ide, 0, known, |event| {
         seen.push((event.seq, event.aggregate));
-        Ok(())
+        Ok::<(), StorageError>(())
     })
     .unwrap();
     assert_eq!(seen, [(2, Aggregate::Ide), (4, Aggregate::Ide)]);
     plant(&db, 6, 1, "worktrees", 1);
     assert_eq!(
-        code(replay(&db, Aggregate::Ide, 0, |_| Ok(()))),
+        code(replay(&db, Aggregate::Ide, 0, known, |_| Ok(()))),
         Some("state_log_replay_gap".into()),
         "a gap among another aggregate's events"
     );
@@ -365,13 +422,13 @@ fn an_unknown_aggregate_an_out_of_range_schema_or_an_oversize_body_is_refused() 
     let db = store();
     plant(&db, 1, 1, "nowhere", 1);
     assert_eq!(
-        code(replay(&db, Aggregate::Worktrees, 0, |_| Ok(()))),
+        code(replay(&db, Aggregate::Worktrees, 0, known, |_| Ok(()))),
         Some("state_log_replay_aggregate".into())
     );
     let db = store();
     plant(&db, 1, 1, "worktrees", 70_000);
     assert_eq!(
-        code(replay(&db, Aggregate::Worktrees, 0, |_| Ok(()))),
+        code(replay(&db, Aggregate::Worktrees, 0, known, |_| Ok(()))),
         Some("state_log_replay_row".into())
     );
     let db = store();
@@ -386,32 +443,10 @@ fn an_unknown_aggregate_an_out_of_range_schema_or_an_oversize_body_is_refused() 
     )
     .unwrap();
     assert_eq!(
-        code(replay(&db, Aggregate::Worktrees, 0, |_| Ok(()))),
+        code(replay(&db, Aggregate::Worktrees, 0, known, |_| Ok(()))),
         Some("state_log_replay_row".into()),
         "a body over the cap in a log made without the table's checks"
     );
-}
-
-#[test]
-fn every_aggregate_is_read_back_under_its_stored_name() {
-    for aggregate in [
-        Aggregate::Worktrees,
-        Aggregate::Ide,
-        Aggregate::Memory,
-        Aggregate::Projects,
-        Aggregate::Landing,
-        Aggregate::Settings,
-        Aggregate::Plugins,
-        Aggregate::Sessions,
-        Aggregate::Intake,
-        Aggregate::Engine,
-        Aggregate::Accounts,
-        Aggregate::Team,
-    ] {
-        assert_eq!(parse(aggregate.name()), Some(aggregate), "{aggregate:?}");
-    }
-    assert_eq!(parse("Worktrees"), None);
-    assert_eq!(parse(""), None);
 }
 
 #[test]
@@ -428,7 +463,7 @@ fn an_apply_error_stops_the_replay_and_is_returned() {
         );
     }
     let mut calls = 0;
-    let result = replay(&live, Aggregate::Worktrees, 0, |event| {
+    let result = replay(&live, Aggregate::Worktrees, 0, known, |event| {
         calls += 1;
         if event.seq == 2 {
             return Err(error("projection_failed"));
@@ -529,7 +564,7 @@ fn a_log_that_opens_with_a_snapshot_run_rebuilds_equal_and_a_changed_chunk_is_re
     live.execute_batch("INSERT INTO leases VALUES (1,'/a',5),(2,'/b',5);")
         .unwrap();
     let tx = live.transaction().unwrap();
-    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
+    let mut log = own(&tx);
     let run = vec![Chunk {
         table: "leases".into(),
         rows: vec![
@@ -561,13 +596,13 @@ fn a_log_that_opens_with_a_snapshot_run_rebuilds_equal_and_a_changed_chunk_is_re
     let (rebuilt, last) = rebuild(&live, worktrees, LEASES, leases, None).unwrap();
     assert_eq!(last, 4);
     assert_eq!(rows(&rebuilt, "leases").unwrap(), expected);
-    let first = batch(&live, 0, 0).unwrap().remove(0);
+    let first = batch(&live, 0, 0, known).unwrap().remove(0);
     assert_eq!(chunk(&first).unwrap().rows.len(), 2);
     let foreign = Logged {
         aggregate: Aggregate::Ide,
         ..first.clone()
     };
-    let taken = batch(&live, 2, 1).unwrap().remove(0);
+    let taken = batch(&live, 2, 1, known).unwrap().remove(0);
     for event in [&foreign, &taken] {
         assert_eq!(
             code(chunk(event)),
@@ -620,8 +655,8 @@ fn a_redacted_event_keeps_its_place_replay_skips_it_and_the_rebuild_stays_equal(
         .query_row("PRAGMA secure_delete", [], |row| row.get(0))
         .unwrap();
     let tx = live.transaction().unwrap();
-    redact(&tx, taken, &fence::engine()).unwrap();
-    redact(&tx, taken, &fence::engine()).unwrap();
+    redact(&tx, taken, &passing()).unwrap();
+    redact(&tx, taken, &passing()).unwrap();
     let after: i64 = tx
         .query_row("PRAGMA secure_delete", [], |row| row.get(0))
         .unwrap();
@@ -646,7 +681,7 @@ fn a_redacted_event_keeps_its_place_replay_skips_it_and_the_rebuild_stays_equal(
     assert_eq!(last, 3);
     assert_eq!(rows(&rebuilt, "leases").unwrap(), expected);
     let tx = live.transaction().unwrap();
-    redact(&tx, kept, &fence::engine()).unwrap();
+    redact(&tx, kept, &passing()).unwrap();
     let (rebuilt, _) = rebuild(&tx, worktrees, LEASES, leases, None).unwrap();
     assert_ne!(
         rows(&rebuilt, "leases").unwrap(),
@@ -660,14 +695,14 @@ fn redact_refuses_a_missing_event_or_a_snapshot_and_append_refuses_the_tombstone
     let mut empty = store();
     let tx = empty.transaction().unwrap();
     assert_eq!(
-        code(redact(&tx, 1, &fence::engine())),
+        code(redact(&tx, 1, &passing())),
         Some("state_log_redact_missing".into()),
         "a store with no log"
     );
     drop(tx);
     let mut db = store();
     let tx = db.transaction().unwrap();
-    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
+    let mut log = own(&tx);
     let run = vec![Chunk {
         table: "ide".into(),
         rows: Vec::new(),
@@ -675,7 +710,7 @@ fn redact_refuses_a_missing_event_or_a_snapshot_and_append_refuses_the_tombstone
     let done = log.snapshot(Aggregate::Ide, 1, run).unwrap();
     assert_eq!(
         code(log.append(&Draft {
-            aggregate: Aggregate::Ide.into(),
+            aggregate: Aggregate::Ide,
             kind: "Tick",
             schema: 1,
             at_ms: 1,
@@ -685,14 +720,14 @@ fn redact_refuses_a_missing_event_or_a_snapshot_and_append_refuses_the_tombstone
     );
     for seq in [99, u64::MAX] {
         assert_eq!(
-            code(redact(&tx, seq, &fence::engine())),
+            code(redact(&tx, seq, &passing())),
             Some("state_log_redact_missing".into()),
             "{seq}"
         );
     }
     for seq in [done - 1, done] {
         assert_eq!(
-            code(redact(&tx, seq, &fence::engine())),
+            code(redact(&tx, seq, &passing())),
             Some("state_log_redact_snapshot".into()),
             "{seq}"
         );
@@ -706,10 +741,9 @@ fn redact_puts_back_the_secure_delete_mode_it_found_fast_included() {
         db.execute_batch(&format!("PRAGMA secure_delete={mode};"))
             .unwrap();
         let tx = db.transaction().unwrap();
-        let seq = crate::state_log::own(&tx, fence::engine())
-            .unwrap()
+        let seq = own(&tx)
             .append(&Draft {
-                aggregate: Aggregate::Worktrees.into(),
+                aggregate: Aggregate::Worktrees,
                 kind: "Secret",
                 schema: 1,
                 at_ms: 1,
@@ -720,7 +754,7 @@ fn redact_puts_back_the_secure_delete_mode_it_found_fast_included() {
             .query_row("PRAGMA secure_delete", [], |row| row.get(0))
             .unwrap();
         assert_eq!(before, expected, "{mode} before");
-        redact(&tx, seq, &fence::engine()).unwrap();
+        redact(&tx, seq, &passing()).unwrap();
         let after: i64 = tx
             .query_row("PRAGMA secure_delete", [], |row| row.get(0))
             .unwrap();
@@ -743,7 +777,6 @@ fn a_redacted_body_is_gone_from_the_database_file_and_its_wal() {
         INSERT INTO state VALUES (1,0);",
     )
     .unwrap();
-    fence::seed(&db);
     db.execute_batch("PRAGMA secure_delete=OFF;").unwrap();
     let pragma = |name: &str| -> i64 {
         db.query_row(&format!("PRAGMA {name}"), [], |row| row.get(0))
@@ -754,10 +787,10 @@ fn a_redacted_body_is_gone_from_the_database_file_and_its_wal() {
     let marker = b"redact-marker-31d7";
     let body = marker.repeat(1_200);
     let tx = db.transaction().unwrap();
-    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
+    let mut log = own(&tx);
     let seq = log
         .append(&Draft {
-            aggregate: Aggregate::Worktrees.into(),
+            aggregate: Aggregate::Worktrees,
             kind: "Secret",
             schema: 1,
             at_ms: 1,
@@ -768,7 +801,7 @@ fn a_redacted_body_is_gone_from_the_database_file_and_its_wal() {
     checkpoint(&db);
     assert!(holds(&path, marker), "the body spills into the file first");
     let tx = db.transaction().unwrap();
-    redact(&tx, seq, &fence::engine()).unwrap();
+    redact(&tx, seq, &passing()).unwrap();
     tx.commit().unwrap();
     let secure: i64 = db
         .query_row("PRAGMA secure_delete", [], |row| row.get(0))
@@ -803,14 +836,12 @@ fn a_checkpoint_after_a_redact_tries_again_past_a_held_reader_up_to_its_bound() 
         INSERT INTO state VALUES (1,0);",
     )
     .unwrap();
-    fence::seed(&db);
     let marker = b"checkpoint-marker-8e2c";
     let body = marker.repeat(1_000);
     let tx = db.transaction().unwrap();
-    let seq = crate::state_log::own(&tx, fence::engine())
-        .unwrap()
+    let seq = own(&tx)
         .append(&Draft {
-            aggregate: Aggregate::Worktrees.into(),
+            aggregate: Aggregate::Worktrees,
             kind: "Secret",
             schema: 1,
             at_ms: 1,
@@ -825,7 +856,7 @@ fn a_checkpoint_after_a_redact_tries_again_past_a_held_reader_up_to_its_bound() 
         .unwrap();
     assert_eq!(read, 1, "the reader holds a snapshot in the WAL");
     let tx = db.transaction().unwrap();
-    redact(&tx, seq, &fence::engine()).unwrap();
+    redact(&tx, seq, &passing()).unwrap();
     tx.commit().unwrap();
     let wal = path.with_extension("db-wal");
     let mut waits = 0;
@@ -863,10 +894,7 @@ fn redact_matching_tombstones_each_event_whose_top_level_session_is_the_deleted_
         table: "sessions".into(),
         rows: vec![json!({ "session": "s-1" })],
     }];
-    let done = crate::state_log::own(&tx, fence::engine())
-        .unwrap()
-        .snapshot(sessions, 1, run)
-        .unwrap();
+    let done = own(&tx).snapshot(sessions, 1, run).unwrap();
     tx.commit().unwrap();
     let seqs = note(
         &mut db,
@@ -903,7 +931,7 @@ fn redact_matching_tombstones_each_event_whose_top_level_session_is_the_deleted_
             "session",
             "s-1",
             keep,
-            &fence::engine()
+            &passing()
         ),
         Ok(2)
     );
@@ -935,16 +963,16 @@ fn redact_matching_tombstones_each_event_whose_top_level_session_is_the_deleted_
             "session",
             "s-1",
             keep,
-            &fence::engine()
+            &passing()
         ),
         Ok(0),
         "a second delete finds nothing left"
     );
     drop(tx);
     let mut read = Vec::new();
-    replay(&db, sessions, 0, |event| {
+    replay(&db, sessions, 0, known, |event| {
         read.push(event.seq);
-        Ok(())
+        Ok::<(), StorageError>(())
     })
     .unwrap();
     assert_eq!(
@@ -990,7 +1018,7 @@ fn redact_matching_by_project_takes_the_exact_top_level_project_of_the_named_agg
     let keep = seqs[7];
     let bodies: Vec<Vec<u8>> = seqs.iter().map(|seq| body_at(&db, *seq)).collect();
     let tx = db.transaction().unwrap();
-    let owner = Fence::Owner(fence::test_owner());
+    let owner = passing();
     let aggregates = [projects, worktrees];
     let redacted = |gone: usize| {
         for (index, seq) in seqs.iter().enumerate() {
@@ -1037,7 +1065,7 @@ fn redact_matching_refuses_a_bad_match_or_a_failed_fence_and_changes_nothing() {
             "session",
             "s-1",
             0,
-            &fence::engine()
+            &passing()
         ),
         Ok(0),
         "a store with no log"
@@ -1071,26 +1099,20 @@ fn redact_matching_refuses_a_bad_match_or_a_failed_fence_and_changes_nothing() {
                 field,
                 value,
                 0,
-                &fence::engine()
+                &passing()
             )),
             refused,
             "{kinds:?} {field:?} {value:?}"
         );
     }
-    let outside = Fence::Engine(crate::engine::owner::HostStamp {
-        db_instance: "a".repeat(64),
-        engine_epoch: "9".repeat(64),
-    });
+    let outside = refusing("state_log_fence_out_of_process");
     assert_eq!(
         code(redact_matching(
             &tx, &sessions, None, "session", "s-1", 0, &outside
         )),
         Some("state_log_fence_out_of_process".into())
     );
-    let revoked = Fence::Owner(crate::engine::owner::Admission {
-        owner_epoch: 2,
-        ..fence::test_owner()
-    });
+    let revoked = refusing("owner_grant_stale_or_revoked");
     assert_eq!(
         code(redact_matching(
             &tx, &sessions, None, "session", "s-1", 0, &revoked
@@ -1106,7 +1128,7 @@ fn redact_matching_refuses_a_bad_match_or_a_failed_fence_and_changes_nothing() {
             "session",
             "s-1",
             0,
-            &fence::engine()
+            &passing()
         ),
         Ok(1)
     );
@@ -1116,7 +1138,7 @@ fn redact_matching_refuses_a_bad_match_or_a_failed_fence_and_changes_nothing() {
 fn redact_matching_reads_past_a_full_batch_of_hits_it_does_not_redact() {
     let mut db = store();
     let tx = db.transaction().unwrap();
-    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
+    let mut log = own(&tx);
     let body = br#"{"session":"s-1"}"#;
     let draft = |aggregate| Draft {
         aggregate,
@@ -1126,9 +1148,9 @@ fn redact_matching_reads_past_a_full_batch_of_hits_it_does_not_redact() {
         body,
     };
     for _ in 0..REPLAY_BATCH_MAX {
-        log.append(&draft(Aggregate::Worktrees.into())).unwrap();
+        log.append(&draft(Aggregate::Worktrees)).unwrap();
     }
-    let last = log.append(&draft(Aggregate::Sessions.into())).unwrap();
+    let last = log.append(&draft(Aggregate::Sessions)).unwrap();
     assert_eq!(last, REPLAY_BATCH_MAX as u64 + 1);
     assert_eq!(
         redact_matching(
@@ -1138,7 +1160,7 @@ fn redact_matching_reads_past_a_full_batch_of_hits_it_does_not_redact() {
             "session",
             "s-1",
             0,
-            &fence::engine()
+            &passing()
         ),
         Ok(1)
     );

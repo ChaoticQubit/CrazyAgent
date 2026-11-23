@@ -93,3 +93,101 @@ fn a_setup_command_keeps_its_report_fails_plainly_and_stops_at_its_limit() {
     );
     assert!(started.elapsed() < Duration::from_secs(10));
 }
+
+/// A setup command that exits at once while a process it left behind still
+/// holds its standard output is stopped at the limit, not held until that process ends.
+#[cfg(unix)]
+#[test]
+fn a_report_held_open_by_a_background_process_stops_at_the_limit() {
+    let started = Instant::now();
+    assert_eq!(
+        run_bounded(
+            Command::new("/bin/sh").args(["-c", "/bin/sleep 5 & echo tmux 3.4"]),
+            Duration::from_millis(500),
+            true
+        ),
+        Err(InstallError("setup_timeout"))
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+}
+
+/// A process a setup command leaves holding its report past the limit is stopped with the
+/// command's process group: the call returns `setup_timeout` within 3 s and the holder is
+/// gone soon after, not left to run out its 30 s. A shell loop bounded by `run_bounded`
+/// watches the holder, so no row sleeps.
+#[cfg(unix)]
+#[test]
+fn a_report_holder_past_the_limit_is_stopped_with_its_group() {
+    let folder = tempfile::tempdir().unwrap();
+    let holder = folder.path().join("holder");
+    let started = Instant::now();
+    assert_eq!(
+        run_bounded(
+            Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    r#"/bin/sleep 30 & echo $! > "$1"; echo tmux 3.4"#,
+                    "sh"
+                ])
+                .arg(&holder),
+            Duration::from_millis(500),
+            true
+        ),
+        Err(InstallError("setup_timeout"))
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let pid = std::fs::read_to_string(&holder).unwrap();
+    let pid = pid.trim();
+    assert!(pid.parse::<u32>().is_ok_and(|pid| pid > 1), "{pid}");
+    let gone = r#"while kill -0 "$1" 2>/dev/null && ! ps -o stat= -p "$1" | grep -q Z; do /bin/sleep 0.05; done"#;
+    assert_eq!(
+        run_bounded(
+            Command::new("/bin/sh").args(["-c", gone, "sh", pid]),
+            Duration::from_secs(5),
+            false
+        ),
+        Ok(Vec::new()),
+        "the holder {pid} outlived its command's process group"
+    );
+}
+
+/// A process a failing setup command leaves behind is stopped with the command's process
+/// group, with or without a kept report: the call returns `setup_install_failed` and the
+/// holder is gone soon after, not left to run out its 30 s.
+#[cfg(unix)]
+#[test]
+fn a_holder_left_by_a_failed_setup_command_is_stopped_with_its_group() {
+    for capture in [true, false] {
+        let folder = tempfile::tempdir().unwrap();
+        let holder = folder.path().join("holder");
+        let started = Instant::now();
+        assert_eq!(
+            run_bounded(
+                Command::new("/bin/sh")
+                    .args(["-c", r#"/bin/sleep 30 & echo $! > "$1"; exit 1"#, "sh"])
+                    .arg(&holder),
+                Duration::from_secs(5),
+                capture
+            ),
+            Err(InstallError("setup_install_failed")),
+            "capture {capture}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "capture {capture}"
+        );
+        let pid = std::fs::read_to_string(&holder).unwrap();
+        let pid = pid.trim();
+        assert!(pid.parse::<u32>().is_ok_and(|pid| pid > 1), "{pid}");
+        let gone = r#"while kill -0 "$1" 2>/dev/null && ! ps -o stat= -p "$1" | grep -q Z; do /bin/sleep 0.05; done"#;
+        assert_eq!(
+            run_bounded(
+                Command::new("/bin/sh").args(["-c", gone, "sh", pid]),
+                Duration::from_secs(5),
+                false
+            ),
+            Ok(Vec::new()),
+            "the holder {pid} outlived its failed command's process group, capture {capture}"
+        );
+    }
+}

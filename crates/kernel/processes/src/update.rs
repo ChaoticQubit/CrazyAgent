@@ -443,7 +443,8 @@ fn download_failure(exit: Option<i32>, stderr: &[u8]) -> UpdateError {
 
 /// Downloads one URL with the system curl, which honors the system proxy and trust store.
 /// Only https, or http to this computer's loopback address, is fetched; redirects stay on
-/// https. Inputs: the URL, where the bytes go, the byte cap and the time limit.
+/// https, and the URL is fetched as written, never expanded as a curl range or list.
+/// Inputs: the URL, where the bytes go, the byte cap and the time limit.
 /// Output: the byte count, `update_url_refused`, `update_too_large` (nothing past the cap
 /// is written), `update_download_missing` on a 404 or `update_download_failed`, each with
 /// one plain sentence that never quotes curl.
@@ -458,7 +459,13 @@ pub fn download(
     let mut command = Command::new(system_tool("curl"));
     command
         .arg("-q")
-        .args(["--silent", "--show-error", "--fail", "--location"])
+        .args([
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--location",
+            "--globoff",
+        ])
         .args(["--max-redirs", "5", "--proto-redir", "=https", "--proto"])
         .arg(if url.scheme() == "https" {
             "=https"

@@ -54,7 +54,7 @@ fn the_engine_key_store_backs_the_plugin_host() {
     assert_eq!((KEYS.account)(&db, &unknown), Ok(None));
 }
 
-/// Q-8: on Linux the adapter hands the plugin host the range this Linux hands out by
+/// On Linux the adapter hands the plugin host the range this Linux hands out by
 /// itself, read where the sandbox reads it, so a plugin on such a port is refused.
 #[cfg(target_os = "linux")]
 #[test]

@@ -109,12 +109,9 @@ pub fn swap_around_engine(
                 .to_owned(),
         )
     };
-    let engine = crate::service::Service::current_user(
-        crate::paths::Platform::CURRENT,
-        current.clone(),
-        layout,
-    )
-    .map_err(|error| stop_failed(error.0))?;
+    let engine =
+        crate::service::current_user(kernel_common::Platform::CURRENT, current.clone(), layout)
+            .map_err(|error| stop_failed(error.0))?;
     if engine.definition.is_file() {
         let service = |action: &str| {
             service_step(
@@ -160,7 +157,7 @@ pub fn swap_around_engine(
 /// executable. Output: Ok once it answers, or the sentence that says how to start it.
 fn restart_detached(
     layout: &crate::paths::Layout,
-    service: &crate::service::Service,
+    service: &kernel_processes::service::Service,
     executable: &Path,
 ) -> Result<(), String> {
     let again = "The engine didn't start again. Open CrazyAgent to start it: crazyagent tui";
@@ -174,7 +171,7 @@ fn restart_detached(
             service,
             executable,
             std::env::var_os("PATH").as_deref(),
-            crate::service::READY_TIMEOUT,
+            kernel_processes::service::READY_TIMEOUT,
         ))
         .map(|_| ())
         .map_err(|error| format!("{again} ({})", error.0))
