@@ -318,7 +318,11 @@ struct QuitProvider<'t, 'c> {
 }
 
 impl Provide for QuitProvider<'_, '_> {
-    fn save_quit(&self, settings: sdk_settings::QuitSettings) -> Result<(), Refusal> {
+    fn save_quit(
+        &self,
+        _caller: &'static str,
+        settings: sdk_settings::QuitSettings,
+    ) -> Result<(), Refusal> {
         let calls = self.calls.get().saturating_add(1);
         self.calls.set(calls);
         if calls > 1 {

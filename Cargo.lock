@@ -951,6 +951,7 @@ dependencies = [
  "bytemuck",
  "crazyagent",
  "crazyagent-kernel-processes",
+ "crazyagent-kernel-security",
  "getrandom 0.4.3",
  "glyphon",
  "notify",
@@ -985,6 +986,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "crazyagent-kernel-plugin-host"
+version = "2.4.4"
+dependencies = [
+ "toml 1.1.6+spec-1.1.0",
+]
+
+[[package]]
 name = "crazyagent-kernel-processes"
 version = "2.4.4"
 dependencies = [
@@ -1000,6 +1008,9 @@ dependencies = [
 [[package]]
 name = "crazyagent-kernel-security"
 version = "2.4.4"
+dependencies = [
+ "zeroize",
+]
 
 [[package]]
 name = "crazyagent-kernel-storage"
@@ -1041,6 +1052,7 @@ dependencies = [
 name = "crazyagent-plugin-check"
 version = "2.4.4"
 dependencies = [
+ "crazyagent-kernel-plugin-host",
  "proc-macro2",
  "syn 2.0.119",
  "toml 1.1.6+spec-1.1.0",

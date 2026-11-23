@@ -12,7 +12,12 @@ fn sdk(path: &str) -> PathBuf {
 fn parsed<'s>(sources: &[(&'s str, &str)]) -> Vec<(&'s str, File)> {
     sources
         .iter()
-        .map(|(stem, source)| (*stem, crazyagent_cap::parse(source).expect("parses")))
+        .map(|(stem, source)| {
+            (
+                *stem,
+                crazyagent_cap::parse_as(stem, source).expect("parses"),
+            )
+        })
         .collect()
 }
 
@@ -187,5 +192,406 @@ fn generation_fails_closed_without_rustfmt() {
         refused.detail.contains("rustup component add rustfmt"),
         "{}",
         refused.detail
+    );
+}
+
+/// Generates the test module from the fixture `.cap`. Output: its text.
+fn fixture_module() -> String {
+    let source =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("fixture/fixture.cap"))
+            .expect("fixture.cap reads");
+    let file = crazyagent_cap::parse_as("fixture", &source).expect("fixture.cap parses");
+    rust_test_module("fixture", &file).expect("fixture.cap generates")
+}
+
+/// Returns the derive line written above one generated item. Inputs: the module text and
+/// the item's head, such as `pub struct Pair`. Output: the derive line.
+fn derive_of<'t>(module: &'t str, head: &str) -> &'t str {
+    let at = module
+        .find(&format!("{head} {{"))
+        .expect("the item is generated");
+    module[..at]
+        .lines()
+        .rev()
+        .find(|line| line.starts_with("#[derive("))
+        .expect("the item has a derive line")
+}
+
+#[test]
+fn the_fixture_generates_the_checked_in_test_module() {
+    let checked_in =
+        fs::read_to_string(sdk("rust/src/fixture_generated.rs")).expect("the test module reads");
+    assert_eq!(fixture_module(), checked_in);
+}
+
+#[test]
+fn derives_follow_the_fields() {
+    let module = fixture_module();
+    assert_eq!(
+        derive_of(&module, "pub struct Header"),
+        "#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]"
+    );
+    assert_eq!(
+        derive_of(&module, "pub struct Pair"),
+        "#[derive(Clone, Copy, PartialEq, Eq)]"
+    );
+    assert_eq!(
+        derive_of(&module, "pub struct Keyed"),
+        "#[derive(Clone, PartialEq, Eq)]"
+    );
+    assert_eq!(
+        derive_of(&module, "pub struct Secret"),
+        "#[derive(Clone, Copy, PartialEq, Eq, Hash)]"
+    );
+    assert_eq!(
+        derive_of(&module, "pub enum Method"),
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]"
+    );
+    for (head, denies) in [
+        ("pub struct Header", true),
+        ("pub struct Pair", false),
+        ("pub struct Keyed", false),
+    ] {
+        let at = module
+            .find(&format!("{head} {{"))
+            .expect("the item is generated");
+        let block = module[..at]
+            .rsplit("\n\n")
+            .next()
+            .expect("the item's block");
+        assert_eq!(block.contains("deny_unknown_fields"), denies, "{head}");
+    }
+}
+
+#[test]
+fn wrapped_types_use_alloc_and_core_paths() {
+    let module = fixture_module();
+    for line in [
+        "    pub headers: alloc::vec::Vec<Header>,\n",
+        "    pub body: core::option::Option<alloc::vec::Vec<u8>>,\n",
+        "    pub timeout_ms: core::option::Option<u32>,\n",
+    ] {
+        assert!(module.contains(line), "{line}");
+    }
+}
+
+#[test]
+fn bound_checks_are_written_only_where_a_field_is_bounded() {
+    let module = fixture_module();
+    for present in [
+        "pub fn check_send_input(",
+        "pub fn check_send_output(",
+        "pub fn check_reveal_output(",
+        "pub fn check_pair_input(",
+        "pub fn check_count_input(",
+    ] {
+        assert!(module.contains(present), "{present}");
+    }
+    for absent in [
+        "check_reveal_input",
+        "check_pair_output",
+        "check_count_output",
+    ] {
+        assert!(!module.contains(absent), "{absent}");
+    }
+    let settings = generated_from_caps()
+        .into_iter()
+        .find(|(path, _)| path == "settings.rs")
+        .expect("settings.rs")
+        .1;
+    assert!(!settings.contains("check_"), "{settings}");
+    assert!(!settings.contains("alloc::"), "{settings}");
+}
+
+#[test]
+fn settings_changes_only_by_the_caller_and_the_tier() {
+    let settings = generated_from_caps()
+        .into_iter()
+        .find(|(path, _)| path == "settings.rs")
+        .expect("settings.rs")
+        .1;
+    assert!(settings.contains(
+        "    fn save_quit(&self, caller: &'static str, settings: QuitSettings) -> Result<(), Refusal>;\n"
+    ));
+    assert!(settings.contains("    tier: Tier::Kernel,\n"));
+    assert!(settings.contains(
+        "pub fn save_quit(host: &dyn Host, settings: QuitSettings) -> Result<(), Refusal> {\n    host.settings_save_quit(settings)\n}\n"
+    ));
+    assert!(settings.contains(
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]\n#[serde(deny_unknown_fields)]\npub struct QuitSettings {"
+    ));
+}
+
+#[test]
+fn caller_is_a_reserved_input_name() {
+    assert_eq!(
+        refused(&[(
+            "s",
+            "capability s.a(caller: u16) -> unit tier: t1 needs: s.w"
+        )]),
+        "capgen_reserved_name"
+    );
+}
+
+#[test]
+fn a_bounded_type_named_twice_is_written_once() {
+    let source = "type Zeta { t: text }\ntype Alpha { zeta: Zeta, more: list<Zeta> }\n\
+                  capability s.a(alpha: Alpha) -> Zeta tier: t1 needs: s.w";
+    let module =
+        crate::rust::test_module("s", &crazyagent_cap::parse_as("s", source).expect("parses"))
+            .expect("generates");
+    assert_eq!(module.matches("fn fits_zeta(").count(), 1, "{module}");
+    assert_eq!(module.matches("fn fits_alpha(").count(), 1, "{module}");
+}
+
+#[test]
+fn a_capability_named_like_a_generated_check_is_refused() {
+    assert_eq!(
+        refused(&[(
+            "s",
+            "type R { b: bytes }\ncapability s.fits_r() -> R tier: t1 needs: s.w"
+        )]),
+        "capgen_name_collision"
+    );
+    assert_eq!(
+        refused(&[(
+            "s",
+            "capability s.a(x: text) -> unit tier: t1 needs: s.w\ncapability s.check_a_input() -> unit tier: t1 needs: s.w"
+        )]),
+        "capgen_name_collision"
+    );
+}
+
+fn chain(leaf: &str) -> String {
+    let mut source = format!("type T0 {{ a: {leaf} }}\n");
+    for level in 1..=40 {
+        let below = level - 1;
+        source.push_str(&format!("type T{level} {{ a: T{below}, b: T{below} }}\n"));
+    }
+    source.push_str("capability s.a(t: T40) -> unit tier: t1 needs: s.w");
+    source
+}
+
+fn generated_within(source: String, seconds: u64) -> String {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let file = crazyagent_cap::parse_as("s", &source).expect("parses");
+        let module = crate::rust::test_module("s", &file).expect("generates");
+        let _ = sender.send(module);
+    });
+    receiver
+        .recv_timeout(std::time::Duration::from_secs(seconds))
+        .expect("a 41-type chain generates in linear work, not 2^40")
+}
+
+#[test]
+fn a_deep_chain_of_shared_types_generates_without_blowing_up() {
+    let plain = generated_within(chain("u16"), 30);
+    assert!(
+        derive_of(&plain, "pub struct T40").contains("Copy"),
+        "{plain}"
+    );
+    assert!(
+        derive_of(&plain, "pub struct T40").contains("Debug"),
+        "{plain}"
+    );
+    assert!(!plain.contains("fn fits_t40("), "{plain}");
+    assert!(!plain.contains("fn check_a_input("), "{plain}");
+    let bounded = generated_within(chain("text"), 30);
+    assert!(
+        !derive_of(&bounded, "pub struct T40").contains("Copy"),
+        "{bounded}"
+    );
+    assert_eq!(bounded.matches("fn fits_t40(").count(), 1, "{bounded}");
+    assert_eq!(bounded.matches("fn fits_t0(").count(), 1, "{bounded}");
+    assert!(bounded.contains("fn check_a_input("), "{bounded}");
+}
+
+/// Generates the SDK for sources that must generate. Input: stems with sources.
+/// Output: the generated files; panics on a refusal.
+fn generated(sources: &[(&str, &str)]) -> Vec<(String, String)> {
+    rust(&parsed(sources)).expect("generates")
+}
+
+/// The text of one generated file. Inputs: the files and the path. Output: the text.
+fn file_text<'f>(files: &'f [(String, String)], path: &str) -> &'f str {
+    &files
+        .iter()
+        .find(|(name, _)| name == path)
+        .expect("the file is generated")
+        .1
+}
+
+#[test]
+fn an_unknown_foreign_stem_or_name_is_refused() {
+    assert_eq!(
+        refused(&[("net", "type A { s: vault.Secret }")]),
+        "capgen_unknown_type"
+    );
+    assert_eq!(
+        refused(&[
+            ("net", "type A { s: option<secrets.Missing> }"),
+            ("secrets", "handle Secret"),
+        ]),
+        "capgen_unknown_type"
+    );
+}
+
+#[test]
+fn a_foreign_ref_to_a_type_is_refused() {
+    assert_eq!(
+        refused(&[
+            ("net", "type A { k: list<secrets.Key> }"),
+            ("secrets", "type Key { id: u16 }"),
+        ]),
+        "capgen_foreign_not_leaf"
+    );
+}
+
+#[test]
+fn a_foreign_handle_in_an_event_is_refused() {
+    let secrets = ("secrets", "handle Secret\nenum Mode { read, write }");
+    assert_eq!(
+        refused(&[
+            (
+                "net",
+                "capability net.a() -> unit tier: t1 needs: net.w emits: E { s: secrets.Secret }"
+            ),
+            secrets,
+        ]),
+        "capgen_handle_in_event"
+    );
+    assert_eq!(
+        refused(&[
+            (
+                "net",
+                "type W { s: option<secrets.Secret> }\ncapability net.a() -> unit tier: t1 needs: net.w emits: E { w: list<W> }"
+            ),
+            secrets,
+        ]),
+        "capgen_handle_in_event"
+    );
+    generated(&[
+        (
+            "net",
+            "capability net.a() -> unit tier: t1 needs: net.w emits: E { m: secrets.Mode }",
+        ),
+        secrets,
+    ]);
+}
+
+#[test]
+fn a_type_holding_a_foreign_handle_derives_no_debug_or_serde() {
+    let files = generated(&[
+        (
+            "net",
+            "type Held { s: option<secrets.Secret> }\ntype Plain { m: secrets.Mode, n: u16 }",
+        ),
+        ("secrets", "handle Secret\nenum Mode { read, write }"),
+    ]);
+    let net = file_text(&files, "net.rs");
+    assert_eq!(
+        derive_of(net, "pub struct Held"),
+        "#[derive(Clone, Copy, PartialEq, Eq)]"
+    );
+    assert_eq!(
+        derive_of(net, "pub struct Plain"),
+        "#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]"
+    );
+}
+
+#[test]
+fn a_test_module_refuses_a_foreign_ref() {
+    let file = crazyagent_cap::parse_as("net", "type A { s: secrets.Secret }").expect("parses");
+    assert_eq!(
+        rust_test_module("net", &file).unwrap_err().code,
+        "capgen_unknown_type"
+    );
+}
+
+#[test]
+fn a_two_file_fixture_shares_one_handle_type() {
+    let loaded = load(&sdk("capgen/fixture_two")).expect("the fixture loads");
+    let borrowed: Vec<(&str, File)> = loaded
+        .iter()
+        .map(|(stem, file)| (stem.as_str(), file.clone()))
+        .collect();
+    let files = rust(&borrowed).expect("the fixture generates");
+    assert_eq!(
+        files
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["host.rs", "mod.rs", "net.rs", "secrets.rs"]
+    );
+    assert_eq!(
+        drift(&sdk("rust/src/fixture_two"), &files),
+        Vec::<String>::new()
+    );
+    let net = file_text(&files, "net.rs");
+    assert!(
+        net.contains("pub bearer: core::option::Option<super::secrets::Secret>,"),
+        "{net}"
+    );
+    assert!(
+        net.contains("pub keys: alloc::vec::Vec<super::secrets::Secret>,"),
+        "{net}"
+    );
+    assert!(!net.contains("pub struct Secret"), "{net}");
+    let host = generated(&[
+        (
+            "net",
+            "capability net.send(s: secrets.Secret) -> option<secrets.Secret> tier: t1 needs: net.send",
+        ),
+        ("secrets", "handle Secret"),
+    ]);
+    let host = file_text(&host, "host.rs");
+    assert!(host.contains("s: super::secrets::Secret"), "{host}");
+    assert!(
+        host.contains("Result<core::option::Option<super::secrets::Secret>, Refusal>;"),
+        "{host}"
+    );
+}
+
+#[test]
+fn a_self_qualified_ref_parsed_without_its_stem_is_refused() {
+    let file = crazyagent_cap::parse("handle S\ntype A { s: net.S }").expect("parses");
+    assert_eq!(
+        rust(&[("net", file)]).unwrap_err().code,
+        "cap_self_qualified"
+    );
+}
+
+#[test]
+fn a_call_taking_a_foreign_handle_writes_its_checks_and_traits() {
+    let files = generated(&[
+        (
+            "net",
+            "type Ring { keys: list<secrets.Secret> }\ncapability net.send(keys: list<secrets.Secret>, ring: Ring, s: secrets.Secret) -> unit tier: t1 needs: net.send",
+        ),
+        ("secrets", "handle Secret"),
+    ]);
+    let net = file_text(&files, "net.rs");
+    assert!(
+        net.contains("keys: &[super::secrets::Secret], ring: &Ring"),
+        "{net}"
+    );
+    assert!(
+        net.contains("keys.len() <= crate::LIST_ITEMS_MAX && self::fits_ring(ring)"),
+        "{net}"
+    );
+    assert!(
+        net.contains(
+            "fn fits_ring(value: &Ring) -> bool {\n    value.keys.len() <= crate::LIST_ITEMS_MAX\n}"
+        ),
+        "{net}"
+    );
+    assert!(
+        net.contains("s: super::secrets::Secret,\n    ) -> Result<(), Refusal>;"),
+        "{net}"
+    );
+    assert_eq!(
+        derive_of(net, "pub struct Ring"),
+        "#[derive(Clone, PartialEq, Eq)]"
     );
 }

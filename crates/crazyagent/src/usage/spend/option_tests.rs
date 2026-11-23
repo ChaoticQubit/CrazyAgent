@@ -2,10 +2,10 @@ use super::*;
 use crate::config::{
     AccountPool, ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference,
 };
-use crate::credentials::SecretString;
 use crate::github::test_server::{Answer, Server};
 use crate::usage::extras::{Extras, Field, Resets, record_extras};
 use crate::usage::{LimitSource, LimitWindow, Observation, record_observation};
+use kernel_security::secret::SecretString;
 
 const NOW: i64 = 1_793_000_000_000;
 const HOUR: i64 = 60 * 60 * 1000;

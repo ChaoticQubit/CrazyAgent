@@ -89,7 +89,7 @@ pub(crate) async fn get(
         }
         request.extend_from_slice(b"\r\n");
         let sent = stream.write_all(&request).await;
-        crate::credentials::wipe(&mut request);
+        kernel_security::secret::wipe(&mut request);
         sent.map_err(|_| failure("account_url_unreachable"))?;
         let mut reply = Vec::new();
         (&mut stream).take(RESPONSE_MAX as u64 + 1).read_to_end(&mut reply).await.map_err(|_| failure("account_url_unreachable"))?;

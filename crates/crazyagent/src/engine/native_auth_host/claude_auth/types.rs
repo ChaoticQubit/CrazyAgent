@@ -219,7 +219,7 @@ pub(crate) fn completion_bytes(secret: AccountSecret) -> Result<Vec<u8>, EngineE
         && bytes.first() != Some(&b'#')
         && bytes.last() != Some(&b'#');
     if !valid {
-        crate::credentials::wipe(&mut bytes);
+        kernel_security::secret::wipe(&mut bytes);
         return Err(failure("native_auth_claude_input_invalid"));
     }
     bytes.push(b'\n');
