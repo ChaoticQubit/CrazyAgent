@@ -362,7 +362,7 @@ fn not_raised(
         Err(code) => Some(format!(
             "Your access request for {} was not raised: {}",
             grant.label(),
-            grants::refusal_text(&code)
+            kernel_sandbox::grants::refusal_text(&code)
         )),
     }
 }
@@ -411,7 +411,7 @@ pub(in crate::team) fn request_reply(
         ),
         Ok(Requested::AlreadyAllowed) => (REQUEST_HELD.to_owned(), false),
         Err(code) => (
-            format!("Not requested: {}", grants::refusal_text(&code)),
+            format!("Not requested: {}", kernel_sandbox::grants::refusal_text(&code)),
             true,
         ),
     }

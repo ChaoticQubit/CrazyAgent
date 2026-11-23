@@ -265,8 +265,7 @@ fn developer(homes: &ToolHomes) -> Option<(String, PathBuf)> {
         homes.developer().join("SDKs").join("MacOSX.sdk"),
     );
     let xcode = homes
-        .xcode
-        .as_ref()
+        .xcode()
         .map(|xcode| (below(xcode, XCODE_TOOLCHAIN_BIN), below(xcode, XCODE_SDK)));
     let (bin, sdk) = std::iter::once(tools)
         .chain(xcode)
@@ -946,7 +945,7 @@ pub fn prepare_cargo_home(home: &Path, homes: &ToolHomes) -> io::Result<PathBuf>
     };
     for name in CARGO_SHARED {
         let found = rustix::fs::readlinkat(&folder, *name, Vec::new());
-        let Some(shared) = existing(homes.cargo().join(name), true) else {
+        let Some(shared) = existing(&homes.cargo().join(name), true) else {
             if found.is_ok() {
                 remove(name)?;
             }
