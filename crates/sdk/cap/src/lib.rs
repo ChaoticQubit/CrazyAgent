@@ -10,6 +10,8 @@ pub const FIELDS_MAX: usize = 64;
 pub const NAME_BYTES_MAX: usize = 64;
 /// The most `list` and `option` wrappers one field type may nest.
 pub const TYPE_DEPTH_MAX: usize = 4;
+/// The most records one chain of named types may nest, the outer record counted.
+pub const RECORD_DEPTH_MAX: usize = 8;
 
 /// One parsed `.cap` file: its enums, types, handles and capabilities, each in source order.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
