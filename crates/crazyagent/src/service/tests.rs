@@ -302,6 +302,60 @@ fn a_first_start_retires_the_old_appimage_copy_and_repoints_the_command_line_lin
     assert!(!old.exists(), "the empty old folder goes");
 }
 
+/// A command line link that names the old copy by a path relative to its own folder is
+/// pointed at the new copy before the old copy goes, as an absolute one is, so it never
+/// dangles.
+#[cfg(unix)]
+#[test]
+fn retiring_the_old_appimage_copy_repoints_a_relative_command_line_link() {
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    layout.prepare().unwrap();
+    let old = layout.root().join("bin");
+    old_copy(&layout);
+    let cli = temp.path().join("home").join(".local").join("bin");
+    std::fs::create_dir_all(&cli).unwrap();
+    let relative = Path::new("../../../data/engine/bin/crazyagent");
+    std::os::unix::fs::symlink(relative, cli.join("crazyagent")).unwrap();
+    assert!(
+        cli.join("crazyagent").is_file(),
+        "the relative link names the old copy"
+    );
+    let installed = persistable(&bundled, layout.root(), Some(&mount), &HOOKS).unwrap();
+    retire_old_copies_with(layout.root(), &installed, Some(&cli), &HOOKS);
+    assert_eq!(
+        std::fs::read_link(cli.join("crazyagent")).unwrap(),
+        installed
+    );
+    assert!(std::fs::symlink_metadata(old.join("crazyagent")).is_err());
+}
+
+/// A command line link that names the old copy by its absolute path after that file is
+/// already gone is still pointed at the new copy, so the command works again.
+#[cfg(unix)]
+#[test]
+fn retiring_the_old_appimage_copy_repoints_a_link_whose_old_file_is_gone() {
+    let temp = durable_folder();
+    let mount = temp.path().join(".mount_Ab12Cd");
+    let bundled = bundle(&mount.join("usr").join("bin"));
+    let layout = Layout::new(temp.path().join("data").join("engine")).unwrap();
+    layout.prepare().unwrap();
+    let old = layout.root().join("bin");
+    old_copy(&layout);
+    std::fs::remove_file(old.join("crazyagent")).unwrap();
+    let cli = temp.path().join("home").join(".local").join("bin");
+    std::fs::create_dir_all(&cli).unwrap();
+    std::os::unix::fs::symlink(old.join("crazyagent"), cli.join("crazyagent")).unwrap();
+    let installed = persistable(&bundled, layout.root(), Some(&mount), &HOOKS).unwrap();
+    retire_old_copies_with(layout.root(), &installed, Some(&cli), &HOOKS);
+    assert_eq!(
+        std::fs::read_link(cli.join("crazyagent")).unwrap(),
+        installed
+    );
+}
+
 /// `service link-cli` keeps the engine too, but a login service a 2.4.0 AppImage installed
 /// names the old `<data root>/bin` copy until a replacing `service start` rewrites it, so
 /// keeping the engine never removes that copy; retiring it is the start's step after the
