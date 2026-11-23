@@ -267,16 +267,146 @@ pub fn owner_secrets(owner: &Path, harnesses: &[&'static str]) -> impl Iterator<
         .chain(SYSTEM_SECRET_PATHS.iter().map(PathBuf::from))
 }
 
-/// Refuses a root that equals, holds or sits inside one of `secrets`. Inputs: the root and
-/// the secret paths. Output: unit, or `Invalid` with [`SECRET_ROOT_REFUSED`].
+/// Refuses a root that equals, holds or sits inside one of `secrets`, comparing entries on
+/// the volume ([`Walk::sits_in`]) so another spelling of a secret's folder is refused too.
+/// Inputs: the root and the secret paths. Output: unit, or `Invalid` with
+/// [`SECRET_ROOT_REFUSED`], also when a metadata read on either path fails other than not
+/// found.
 pub fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {
-    if secrets
-        .iter()
-        .any(|secret| root.starts_with(secret) || secret.starts_with(root))
-    {
-        return Err(invalid(SECRET_ROOT_REFUSED));
+    let root = Walk::of(root)?;
+    for secret in secrets {
+        let secret = Walk::of(secret)?;
+        if root.sits_in(&secret) || secret.sits_in(&root) {
+            return Err(invalid(SECRET_ROOT_REFUSED));
+        }
     }
     Ok(())
+}
+
+/// The identity of one entry on its volume: device and inode on unix, volume serial number
+/// and file index on Windows.
+type Identity = (u64, u64);
+
+/// Reads the identity of the entry a path names, following links. Input: the path.
+/// Output: the identity, None when the path or a folder above it does not exist, or the
+/// I/O error.
+#[cfg(unix)]
+fn identity(path: &Path) -> io::Result<Option<Identity>> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::metadata(path) {
+        Ok(found) => Ok(Some((found.dev(), found.ino()))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// The Windows open flag that lets a folder be opened as a handle, as `std` opens one for
+/// its metadata.
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+/// Reads the identity of the entry a path names, following links: opened with no access
+/// rights and [`FILE_FLAG_BACKUP_SEMANTICS`], then read from the handle. Input: the path.
+/// Output: the identity, None when the path or a folder above it does not exist, or the
+/// I/O error.
+#[cfg(windows)]
+fn identity(path: &Path) -> io::Result<Option<Identity>> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let opened = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path);
+    match opened {
+        Ok(file) => crazyagent_win_sandbox::file_id(&file).map(Some),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// A path's parts with the identity of each leading run of them, top down: None from the
+/// first run that does not exist on, and None for a Windows drive prefix alone, which names
+/// the drive's current folder.
+struct Walk<'a> {
+    path: &'a Path,
+    parts: Vec<Component<'a>>,
+    ids: Vec<Option<Identity>>,
+}
+
+impl<'a> Walk<'a> {
+    /// Reads the identities of a path's leading runs. Input: the path. Output: the walk, or
+    /// `Invalid` with [`SECRET_ROOT_REFUSED`] when a read fails other than not found.
+    fn of(path: &'a Path) -> Result<Walk<'a>, SandboxError> {
+        let parts: Vec<Component<'a>> = path.components().collect();
+        let mut ids = Vec::with_capacity(parts.len());
+        let mut run = PathBuf::new();
+        let mut gone = false;
+        for part in &parts {
+            run.push(part);
+            let found = if gone || matches!(part, Component::Prefix(_)) {
+                None
+            } else {
+                let found = identity(&run).map_err(|_| invalid(SECRET_ROOT_REFUSED))?;
+                gone = found.is_none();
+                found
+            };
+            ids.push(found);
+        }
+        assert_eq!(ids.len(), parts.len());
+        Ok(Walk { path, parts, ids })
+    }
+
+    /// Tells whether this path equals or lies under `outer`: by text; or by entry, when
+    /// `outer` exists and one of this path's existing runs is that entry; or, on a volume
+    /// that folds names, when this path's new parts start under the same folder as
+    /// `outer`'s ([`Walk::folds_into`]). Input: the outer walk. Output: true when it does.
+    fn sits_in(&self, outer: &Walk) -> bool {
+        if self.path.starts_with(outer.path) {
+            return true;
+        }
+        if let Some(Some(entry)) = outer.ids.last()
+            && self.ids.contains(&Some(*entry))
+        {
+            return true;
+        }
+        cfg!(any(target_os = "macos", windows)) && self.folds_into(outer)
+    }
+
+    /// Compares the parts of this path that do not exist yet, on a volume that folds names.
+    /// When this path's deepest existing run is `outer` or one of `outer`'s existing runs,
+    /// a new part that folds to no ASCII name, or is not a plain name, may name anything
+    /// there and counts as inside; else the new parts sit in `outer` when they are at least
+    /// as many as `outer`'s parts below that run and each is the [`same_name`] as its match.
+    /// Input: the outer walk. Output: true when this path may sit in `outer`.
+    fn folds_into(&self, outer: &Walk) -> bool {
+        let Some(deepest) = self.ids.iter().rposition(Option::is_some) else {
+            return false;
+        };
+        let Some(level) = outer.ids.iter().position(|id| *id == self.ids[deepest]) else {
+            return false;
+        };
+        let Some(new) = self.parts[deepest + 1..]
+            .iter()
+            .map(|part| plain_name(*part).filter(|name| ascii_fold(name).is_some()))
+            .collect::<Option<Vec<&str>>>()
+        else {
+            return true;
+        };
+        let below = &outer.parts[level + 1..];
+        new.len() >= below.len()
+            && new
+                .iter()
+                .zip(below)
+                .all(|(part, step)| plain_name(*step).is_some_and(|step| same_name(part, step)))
+    }
+}
+
+/// The text of a plain folder or file name part. Input: the part. Output: its text, or
+/// None for a root, prefix, `.` or `..` part or a name that is not UTF-8.
+fn plain_name(part: Component<'_>) -> Option<&str> {
+    match part {
+        Component::Normal(name) => name.to_str(),
+        _ => None,
+    }
 }
 
 /// Checks a root a sandbox may grant: absolute, plain and at least two folders deep, not
@@ -296,11 +426,13 @@ pub fn granted_root(
     if !clean_absolute(root) || depth < 2 {
         return Err(invalid("sandbox roots must be absolute, deep and plain"));
     }
-    if owner.starts_with(root) {
+    let walk = Walk::of(root)?;
+    if Walk::of(owner)?.sits_in(&walk) {
         return Err(invalid("sandbox roots must not contain the owner home"));
     }
     for private in harnesses {
-        if root.starts_with(owner.join(private)) {
+        let folder = owner.join(private);
+        if walk.sits_in(&Walk::of(&folder)?) {
             return Err(invalid("sandbox roots must not be owner harness homes"));
         }
     }
@@ -311,6 +443,49 @@ pub fn granted_root(
         ));
     }
     Ok(())
+}
+
+/// The code points a case-insensitive HFS+ volume ignores in names (git's
+/// `core.protectHFS` list), so `HE\u{200c}AD` opens `HEAD` there: the one list every name
+/// compare that must match such a volume leaves out (RV-DS241-148).
+pub const HFS_IGNORED: [char; 16] = [
+    '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+    '\u{202E}', '\u{206A}', '\u{206B}', '\u{206C}', '\u{206D}', '\u{206E}', '\u{206F}', '\u{FEFF}',
+];
+
+/// Folds one path part the way the volume compares names, when the result is ASCII.
+/// Input: the part. Output: the part in ASCII lower case with [`ASCII_FOLDS`] applied and
+/// the code points HFS+ ignores in names left out
+/// ([`HFS_IGNORED`], RV-DS241-148), or None when a code point
+/// stays outside ASCII.
+pub fn ascii_fold(part: &str) -> Option<String> {
+    let mut folded = String::with_capacity(part.len());
+    for point in part.chars() {
+        if HFS_IGNORED.contains(&point) {
+            continue;
+        }
+        if point.is_ascii() {
+            folded.push(point.to_ascii_lowercase());
+        } else {
+            let (_, ascii) = ASCII_FOLDS.iter().find(|(from, _)| *from == point)?;
+            folded.push_str(ascii);
+        }
+    }
+    assert!(folded.is_ascii());
+    Some(folded)
+}
+
+/// Tells whether two path parts may name one entry on a volume that folds names, the one
+/// name compare of the landing checks: both fold onto the same ASCII name under
+/// [`ascii_fold`], or both stay outside ASCII, since the volume may still fold one onto
+/// the other. A part that stays outside ASCII never names the entry of one that folds onto
+/// ASCII. Inputs: the two parts. Output: true when they may.
+pub fn same_name(one: &str, other: &str) -> bool {
+    match (ascii_fold(one), ascii_fold(other)) {
+        (Some(one), Some(other)) => one == other,
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 /// Spells plain text as a Seatbelt regex that matches every name a case-insensitive volume
