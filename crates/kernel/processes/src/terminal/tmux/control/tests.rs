@@ -6,13 +6,13 @@ const BOUND: Duration = Duration::from_secs(5);
 /// A control client over a child that never reads its input, so a large enough write
 /// blocks on the full pipe. Output: the client.
 fn deaf_client() -> Control {
-    let mut child = Command::new("/bin/sh")
+    let mut command = Command::new("/bin/sh");
+    command
         .args(["-c", "exec sleep 30"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("the child starts");
+        .stderr(Stdio::null());
+    let mut child = crate::spawn_gate::spawn(&mut command).expect("the child starts");
     let input = child.stdin.take().expect("the child's input");
     Control {
         child: Mutex::new(Some(child)),
@@ -58,10 +58,12 @@ fn a_stop_ends_a_client_whose_write_blocks_on_a_full_pipe() {
     );
     assert!(control.child.lock().unwrap().is_none());
     assert!(written.join().expect("the writer ended").is_err());
-    let alive = Command::new("/bin/kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .expect("kill runs");
+    let mut probe = Command::new("/bin/kill");
+    probe.args(["-0", &pid.to_string()]).stderr(Stdio::null());
+    let alive = crate::spawn_gate::spawn(&mut probe)
+        .expect("kill runs")
+        .wait()
+        .expect("kill ends");
     assert!(!alive.success(), "the child {pid} is still running");
 }
 
