@@ -106,5 +106,8 @@ pub fn parts(reference: &SecretRef) -> Result<(&str, &str), StoreError> {
     ))
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub mod os_keyring;
+
 #[cfg(test)]
 mod tests;
