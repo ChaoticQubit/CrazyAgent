@@ -1,0 +1,4 @@
+type EditorLaunch { project: text }
+capability editor.spawn(launch: EditorLaunch) -> u32
+  tier: kernel
+  needs: editor.spawn
