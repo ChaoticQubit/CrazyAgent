@@ -6,6 +6,18 @@ use std::path::{Path, PathBuf};
 #[cfg(unix)]
 const PER_USER_TEMP: &str = "/private/var/folders/";
 
+/// The engine's parts the grant checks reach, passed in so this crate names no engine
+/// module. The engine passes its one value; rows pass stand-ins.
+pub struct GrantHooks {
+    /// The folders and files in the owner's home that belong to a harness, which no socket
+    /// grant may sit inside. No input. Output: the names.
+    pub harness_folders: fn() -> Vec<&'static str>,
+    /// The loopback ports the engine recorded for its projects' IDE servers and their
+    /// proxies, which no port grant may take. Input: the engine's data folder. Output: the
+    /// ports, none when there is no IDE folder.
+    pub ide_ports: fn(&Path) -> Vec<u16>,
+}
+
 /// One row of a project's grant log as Agent access lists it: when, what happened, the
 /// grant in the owner's words and who did it (`owner`, or `question <id>` for an Allow).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

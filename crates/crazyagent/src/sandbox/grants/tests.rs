@@ -1,5 +1,6 @@
 use super::*;
 use crate::questions::{Answer, Settlement};
+use crate::sandbox::GRANT_HOOKS;
 use std::os::unix::fs::PermissionsExt;
 
 const PROJECT: &str = "alpha";
@@ -80,13 +81,13 @@ fn a_port_grant_refuses_zero_the_owner_ports_and_the_model_proxy_ports() {
     let data = Path::new("/nonexistent-engine-data");
     for port in [0, 1455, 11_434, *kernel_sandbox::ports::PROXY_PORTS.start()] {
         assert_eq!(
-            checked(&AccessGrant::Port { port }, data),
+            checked(&GRANT_HOOKS, &AccessGrant::Port { port }, data),
             Err("grant_port_reserved"),
             "port {port}"
         );
     }
     assert_eq!(
-        checked(&AccessGrant::Port { port: 47_821 }, data),
+        checked(&GRANT_HOOKS, &AccessGrant::Port { port: 47_821 }, data),
         Ok(AccessGrant::Port { port: 47_821 })
     );
 }
@@ -102,6 +103,7 @@ fn a_socket_grant_is_kept_canonical_and_refused_with_credentials_engine_data_lis
     assert!(typed.starts_with("/tmp"));
     let _listener = kernel_processes::spawn_gate::bind_unix_std(&typed).unwrap();
     let kept = checked(
+        &GRANT_HOOKS,
         &AccessGrant::Socket {
             path: typed.clone(),
         },
@@ -114,12 +116,15 @@ fn a_socket_grant_is_kept_canonical_and_refused_with_credentials_engine_data_lis
     let engine = AccessGrant::Socket {
         path: typed.clone(),
     };
-    assert_eq!(checked(&engine, tmp.path()), Err("grant_socket_engine"));
+    assert_eq!(
+        checked(&GRANT_HOOKS, &engine, tmp.path()),
+        Err("grant_socket_engine")
+    );
     let keys = AccessGrant::Socket {
         path: PathBuf::from("/Library/Keychains/x.sock"),
     };
     assert_eq!(
-        checked(&keys, Path::new("/nonexistent")),
+        checked(&GRANT_HOOKS, &keys, Path::new("/nonexistent")),
         Err("grant_socket_secret")
     );
     let tmux = tmp.path().join("tmux-501");
@@ -128,7 +133,7 @@ fn a_socket_grant_is_kept_canonical_and_refused_with_credentials_engine_data_lis
         path: tmux.join("default"),
     };
     assert_eq!(
-        checked(&pane, Path::new("/nonexistent")),
+        checked(&GRANT_HOOKS, &pane, Path::new("/nonexistent")),
         Err("grant_socket_agent")
     );
     let launchd = tempfile::Builder::new()
@@ -139,7 +144,7 @@ fn a_socket_grant_is_kept_canonical_and_refused_with_credentials_engine_data_lis
         path: launchd.path().join("Listeners"),
     };
     assert_eq!(
-        checked(&agent, Path::new("/nonexistent")),
+        checked(&GRANT_HOOKS, &agent, Path::new("/nonexistent")),
         Err("grant_socket_agent")
     );
     for path in [
@@ -150,6 +155,7 @@ fn a_socket_grant_is_kept_canonical_and_refused_with_credentials_engine_data_lis
     ] {
         assert_eq!(
             checked(
+                &GRANT_HOOKS,
                 &AccessGrant::Socket {
                     path: PathBuf::from(path)
                 },
@@ -163,7 +169,7 @@ fn a_socket_grant_is_kept_canonical_and_refused_with_credentials_engine_data_lis
         path: PathBuf::from(format!("/tmp/{}", "a".repeat(100))),
     };
     assert_eq!(
-        checked(&long, Path::new("/nonexistent")),
+        checked(&GRANT_HOOKS, &long, Path::new("/nonexistent")),
         Err("grant_socket_not_plain")
     );
 }
@@ -380,20 +386,24 @@ fn a_port_grant_never_reaches_the_ide_the_dynamic_range_or_a_kept_model_port() {
     .unwrap();
     for port in [41_001, 41_002] {
         assert_eq!(
-            checked(&AccessGrant::Port { port }, data.path()),
+            checked(&GRANT_HOOKS, &AccessGrant::Port { port }, data.path()),
             Err("grant_port_reserved"),
             "IDE port {port}"
         );
     }
     for port in [*DYNAMIC_PORTS.start(), 60_000, u16::MAX] {
         assert_eq!(
-            checked(&AccessGrant::Port { port }, data.path()),
+            checked(&GRANT_HOOKS, &AccessGrant::Port { port }, data.path()),
             Err("grant_port_dynamic"),
             "port {port}"
         );
     }
     assert_eq!(
-        checked(&AccessGrant::Port { port: 49_151 }, data.path()),
+        checked(
+            &GRANT_HOOKS,
+            &AccessGrant::Port { port: 49_151 },
+            data.path()
+        ),
         Ok(AccessGrant::Port { port: 49_151 })
     );
     let saved = [
@@ -401,7 +411,7 @@ fn a_port_grant_never_reaches_the_ide_the_dynamic_range_or_a_kept_model_port() {
         AccessGrant::Port { port: 8_081 },
     ];
     assert_eq!(
-        held_now(&saved, &[8_081], data.path()),
+        held_now(&GRANT_HOOKS, &saved, &[8_081], data.path()),
         [AccessGrant::Port { port: 8_080 }],
         "a kept model port is left out at launch"
     );
@@ -440,7 +450,7 @@ fn host_escape_and_key_agent_sockets_are_refused_by_class() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let _listener = kernel_processes::spawn_gate::bind_unix_std(&path).unwrap();
         assert_eq!(
-            checked(&AccessGrant::Socket { path }, data),
+            checked(&GRANT_HOOKS, &AccessGrant::Socket { path }, data),
             Err(code),
             "{relative}"
         );
@@ -500,6 +510,7 @@ fn a_socket_must_exist_be_the_user_s_own_and_sit_where_no_one_else_can_swap_it()
         if std::fs::symlink_metadata(rooted).is_ok() {
             assert_eq!(
                 checked(
+                    &GRANT_HOOKS,
                     &AccessGrant::Socket {
                         path: rooted.to_path_buf()
                     },
@@ -513,6 +524,7 @@ fn a_socket_must_exist_be_the_user_s_own_and_sit_where_no_one_else_can_swap_it()
         let gone = tmp.path().join("app.sock");
         assert_eq!(
             checked(
+                &GRANT_HOOKS,
                 &AccessGrant::Socket { path: gone },
                 Path::new("/nonexistent")
             ),
@@ -612,7 +624,7 @@ fn editor_and_terminal_control_sockets_are_refused_by_class() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let _listener = kernel_processes::spawn_gate::bind_unix_std(&path).unwrap();
         assert_eq!(
-            checked(&AccessGrant::Socket { path }, data),
+            checked(&GRANT_HOOKS, &AccessGrant::Socket { path }, data),
             Err("grant_socket_agent"),
             "{relative}"
         );
@@ -641,7 +653,11 @@ fn a_socket_with_a_second_name_is_refused_at_both_names() {
     let lone = base.join("lone.sock");
     let _lone = kernel_processes::spawn_gate::bind_unix_std(&lone).unwrap();
     assert_eq!(
-        checked(&AccessGrant::Socket { path: lone.clone() }, data),
+        checked(
+            &GRANT_HOOKS,
+            &AccessGrant::Socket { path: lone.clone() },
+            data
+        ),
         Ok(AccessGrant::Socket { path: lone })
     );
     let first = base.join("first.sock");
@@ -650,7 +666,11 @@ fn a_socket_with_a_second_name_is_refused_at_both_names() {
     std::fs::hard_link(&first, &second).unwrap();
     for path in [first, second] {
         assert_eq!(
-            checked(&AccessGrant::Socket { path: path.clone() }, data),
+            checked(
+                &GRANT_HOOKS,
+                &AccessGrant::Socket { path: path.clone() },
+                data
+            ),
             Err("grant_socket_owner"),
             "{}",
             path.display()
@@ -666,13 +686,13 @@ fn a_port_grant_never_reaches_docker_s_api_or_a_browser_or_node_debugger() {
     let data = Path::new("/nonexistent-engine-data");
     for port in [2375, 2376, 9222, 9229] {
         assert_eq!(
-            checked(&AccessGrant::Port { port }, data),
+            checked(&GRANT_HOOKS, &AccessGrant::Port { port }, data),
             Err("grant_port_reserved"),
             "port {port}"
         );
     }
     assert_eq!(
-        checked(&AccessGrant::Port { port: 9_223 }, data),
+        checked(&GRANT_HOOKS, &AccessGrant::Port { port: 9_223 }, data),
         Ok(AccessGrant::Port { port: 9_223 })
     );
 }
@@ -762,7 +782,7 @@ fn the_floor_also_refuses_kakoune_dtach_abduco_and_ssh_mux_sockets() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let _listener = kernel_processes::spawn_gate::bind_unix_std(&path).unwrap();
         assert_eq!(
-            checked(&AccessGrant::Socket { path }, data),
+            checked(&GRANT_HOOKS, &AccessGrant::Socket { path }, data),
             Err("grant_socket_agent"),
             "{relative}"
         );
@@ -778,13 +798,13 @@ fn a_port_grant_never_reaches_the_java_python_or_go_debugger_ports() {
     let data = Path::new("/nonexistent-engine-data");
     for port in [5005, 5678, 2345] {
         assert_eq!(
-            checked(&AccessGrant::Port { port }, data),
+            checked(&GRANT_HOOKS, &AccessGrant::Port { port }, data),
             Err("grant_port_reserved"),
             "port {port}"
         );
     }
     assert_eq!(
-        checked(&AccessGrant::Port { port: 5_432 }, data),
+        checked(&GRANT_HOOKS, &AccessGrant::Port { port: 5_432 }, data),
         Ok(AccessGrant::Port { port: 5_432 }),
         "a database port stays the owner's informed choice"
     );
@@ -839,7 +859,7 @@ fn a_port_grant_refuses_the_model_relay_ports() {
     let block = kernel_sandbox::ports::RELAY_PORTS;
     for port in [*block.start(), *block.end()] {
         assert_eq!(
-            checked(&AccessGrant::Port { port }, data),
+            checked(&GRANT_HOOKS, &AccessGrant::Port { port }, data),
             Err("grant_port_reserved"),
             "port {port}"
         );
@@ -868,6 +888,7 @@ fn asked_socket(
     let other_listener = kernel_processes::spawn_gate::bind_unix_std(&other).unwrap();
     assert_eq!(
         checked(
+            &GRANT_HOOKS,
             &AccessGrant::Socket {
                 path: other.clone()
             },

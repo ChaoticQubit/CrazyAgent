@@ -1,6 +1,7 @@
 use kernel_sandbox::access::AccessHooks;
 use kernel_sandbox::elf;
 use kernel_sandbox::error::{SandboxError, invalid};
+use kernel_sandbox::grants::GrantHooks;
 use kernel_sandbox::hidden_paths::HIDDEN_MAX;
 use kernel_sandbox::host::LinuxHost;
 use kernel_sandbox::lines::*;
@@ -1191,6 +1192,14 @@ pub const ACCESS_HOOKS: AccessHooks = AccessHooks {
     harness_folders,
     state_folder: crate::projects_home::state_folder,
     untracked: access_untracked,
+};
+
+/// The engine's real grant hooks, the only [`GrantHooks`] production code passes: the
+/// harness folders ([`harness_folders`]) and the IDE ports the engine recorded
+/// ([`grants::ide_ports`]).
+pub const GRANT_HOOKS: GrantHooks = GrantHooks {
+    harness_folders,
+    ide_ports: grants::ide_ports,
 };
 
 /// The engine's real agent toolchain hooks, the only [`ToolchainHooks`] production code

@@ -2,7 +2,7 @@ use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::protocol::ProjectId;
 use crate::questions::{Ask, Asker, EngineSource, QuestionKind};
-use kernel_sandbox::grants::{LogView, owner_temp_folder};
+use kernel_sandbox::grants::{GrantHooks, LogView, owner_temp_folder};
 use kernel_sandbox::paths::owner_secrets;
 use kernel_sandbox::paths::{canonical, owner_home};
 use kernel_sandbox::policy::{
@@ -126,8 +126,13 @@ pub enum Requested {
 /// editor, or a key agent; a port below the dynamic range other than the owner's fixed
 /// ports, Docker's API and debugger ports, the model proxy ports and every IDE port the
 /// engine recorded; the temp folder only when it is the owner's private one. Inputs: the
-/// grant and the engine's data folder. Output: the grant to keep, or a plain refusal code.
-pub fn checked(grant: &AccessGrant, data_root: &Path) -> Result<AccessGrant, &'static str> {
+/// engine's hooks for the harness folders and IDE ports, the grant and the engine's data
+/// folder. Output: the grant to keep, or a plain refusal code.
+pub fn checked(
+    hooks: &GrantHooks,
+    grant: &AccessGrant,
+    data_root: &Path,
+) -> Result<AccessGrant, &'static str> {
     match grant {
         AccessGrant::Socket { path } => {
             if !cfg!(target_os = "macos") {
@@ -135,7 +140,7 @@ pub fn checked(grant: &AccessGrant, data_root: &Path) -> Result<AccessGrant, &'s
             }
             let real = socket_path(grant, path)?;
             let owner = owner_home().map_err(|_| "grant_socket_secret")?;
-            if owner_secrets(&owner, &super::harness_folders())
+            if owner_secrets(&owner, &(hooks.harness_folders)())
                 .any(|secret| real.starts_with(&secret))
             {
                 return Err("grant_socket_secret");
@@ -162,7 +167,7 @@ pub fn checked(grant: &AccessGrant, data_root: &Path) -> Result<AccessGrant, &'s
                 || CONTROL_PORTS.contains(port)
                 || PROXY_PORTS.contains(port)
                 || RELAY_PORTS.contains(port)
-                || ide_ports(data_root).contains(port);
+                || (hooks.ide_ports)(data_root).contains(port);
             if reserved {
                 return Err("grant_port_reserved");
             }
@@ -178,13 +183,18 @@ pub fn checked(grant: &AccessGrant, data_root: &Path) -> Result<AccessGrant, &'s
 /// The grants of a saved policy a launch builds into the profile now: each still passes
 /// [`checked`] unchanged, so a socket that is gone, changed hands or moved behind a link is
 /// left out, and no port is one the launch keeps free for the owner's model endpoints.
-/// Inputs: the saved grants, the ports the launch keeps free and the engine's data folder.
-/// Output: the grants to build in, in order.
-pub fn held_now(grants: &[AccessGrant], kept: &[u16], data_root: &Path) -> Vec<AccessGrant> {
+/// Inputs: the engine's grant hooks, the saved grants, the ports the launch keeps free and
+/// the engine's data folder. Output: the grants to build in, in order.
+pub fn held_now(
+    hooks: &GrantHooks,
+    grants: &[AccessGrant],
+    kept: &[u16],
+    data_root: &Path,
+) -> Vec<AccessGrant> {
     assert!(grants.len() <= kernel_sandbox::policy::GRANTS_MAX);
     let held: Vec<AccessGrant> = grants
         .iter()
-        .filter(|grant| checked(grant, data_root).is_ok_and(|now| now == **grant))
+        .filter(|grant| checked(hooks, grant, data_root).is_ok_and(|now| now == **grant))
         .filter(|grant| !matches!(grant, AccessGrant::Port { port } if kept.contains(port)))
         .cloned()
         .collect();
@@ -299,7 +309,7 @@ fn ownership(socket: Option<(bool, u32)>, parent: (u32, u32), me: u32) -> Result
 /// read from at most `IDE_FOLDERS_SCANNED_MAX` project folders. Input: the engine's data
 /// folder. Output: the ports, none when there is no IDE folder.
 #[cfg(unix)]
-fn ide_ports(data_root: &Path) -> Vec<u16> {
+pub(crate) fn ide_ports(data_root: &Path) -> Vec<u16> {
     let Ok(folders) = std::fs::read_dir(data_root.join(crate::ide::FOLDER)) else {
         return Vec::new();
     };
@@ -314,7 +324,7 @@ fn ide_ports(data_root: &Path) -> Vec<u16> {
 }
 
 #[cfg(not(unix))]
-fn ide_ports(_data_root: &Path) -> Vec<u16> {
+pub(crate) fn ide_ports(_data_root: &Path) -> Vec<u16> {
     Vec::new()
 }
 
@@ -364,15 +374,16 @@ fn socket_path(grant: &AccessGrant, path: &Path) -> Result<PathBuf, &'static str
 }
 
 /// Checks a whole list of grants as [`checked`] does and as one policy may hold them.
-/// Inputs: the grants and the engine's data folder. Output: the grants to keep, in order,
-/// or the first refusal code.
+/// Inputs: the engine's grant hooks, the grants and the engine's data folder. Output: the
+/// grants to keep, in order, or the first refusal code.
 pub fn checked_all(
+    hooks: &GrantHooks,
     grants: &[AccessGrant],
     data_root: &Path,
 ) -> Result<Vec<AccessGrant>, &'static str> {
     let kept = grants
         .iter()
-        .map(|grant| checked(grant, data_root))
+        .map(|grant| checked(hooks, grant, data_root))
         .collect::<Result<Vec<_>, _>>()?;
     let policy = AgentPolicy {
         grants: kept.clone(),
@@ -499,7 +510,8 @@ pub fn request(
 ) -> Result<Requested, String> {
     let reason = plain_reason(reason)?;
     let data = data_root(db).ok_or("grant_requests_unavailable")?;
-    let grant = checked(grant, &data).map_err(|code| asked_refusal(grant, code))?;
+    let grant =
+        checked(&super::GRANT_HOOKS, grant, &data).map_err(|code| asked_refusal(grant, code))?;
     let identity = match &grant {
         AccessGrant::Socket { path } => Some(socket_identity(path).ok_or(SOCKET_REFUSED)?),
         AccessGrant::Port { .. } | AccessGrant::TempFolder => None,
@@ -626,7 +638,7 @@ pub(crate) fn decide(
         serde_json::from_str(&body).map_err(|_| failure("grant_requests_unavailable"))?;
     let data = data_root(tx).ok_or_else(|| failure("grant_requests_unavailable"))?;
     let kept = if allowed {
-        checked(&grant, &data)
+        checked(&super::GRANT_HOOKS, &grant, &data)
             .ok()
             .filter(|now| *now == grant)
             .filter(|now| match now {

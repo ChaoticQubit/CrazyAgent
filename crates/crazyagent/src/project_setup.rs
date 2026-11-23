@@ -2771,7 +2771,7 @@ fn set_agent_policy(
             kept.push(grant.clone());
             continue;
         }
-        match crate::sandbox::grants::checked(grant, &data) {
+        match crate::sandbox::grants::checked(&crate::sandbox::GRANT_HOOKS, grant, &data) {
             Ok(grant) => kept.push(grant),
             Err(code) => return Ok(rejected(code)),
         }
