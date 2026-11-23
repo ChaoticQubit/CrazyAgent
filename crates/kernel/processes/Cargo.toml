@@ -21,6 +21,7 @@ tokio = { version = "=1.53.2", features = ["net", "time"] }
 getrandom = "=0.4.3"
 nix = { version = "=0.28.0", default-features = false, features = ["net", "socket", "user"] }
 rustix = { version = "=1.1.5", features = ["event", "fs", "process"] }
+sha2 = "=0.10.9"
 
 [target.'cfg(windows)'.dependencies]
 crazyagent-win-sandbox = { path = "../../crazyagent-win-sandbox" }
