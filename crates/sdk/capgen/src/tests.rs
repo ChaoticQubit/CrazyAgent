@@ -48,7 +48,7 @@ fn settings_cap_generates_the_checked_in_files() {
             .iter()
             .map(|(path, _)| path.as_str())
             .collect::<Vec<_>>(),
-        vec!["host.rs", "mod.rs", "secrets.rs", "settings.rs"]
+        vec!["host.rs", "mod.rs", "net.rs", "secrets.rs", "settings.rs"]
     );
     assert_eq!(
         drift(&sdk("rust/src/generated"), &files),
@@ -67,7 +67,13 @@ fn a_renamed_field_changes_the_output() {
     let renamed = source.replace("hours: u16", "hour_count: u16");
     assert_ne!(renamed, source);
     let secrets = fs::read_to_string(sdk("caps/secrets.cap")).expect("secrets.cap reads");
-    let files = rust(&parsed(&[("secrets", &secrets), ("settings", &renamed)])).expect("generates");
+    let net = fs::read_to_string(sdk("caps/net.cap")).expect("net.cap reads");
+    let files = rust(&parsed(&[
+        ("net", &net),
+        ("secrets", &secrets),
+        ("settings", &renamed),
+    ]))
+    .expect("generates");
     assert_eq!(
         drift(&sdk("rust/src/generated"), &files),
         vec!["settings.rs".to_owned()]

@@ -172,9 +172,53 @@ fn the_quit_gateway_never_opens_the_store() {
         Err(absent.clone())
     );
     let grants = Grants::new(&[("github", Tier::T1, &["secrets.find"])]).unwrap();
-    let gateway = Gateway::new(&grants, &Absent, &Absent, &Unreached);
+    let gateway = Gateway::new(&grants, &Absent, &Absent, &Absent, &Unreached);
     assert_eq!(
         secrets::find(&gateway.bind("github"), "token".to_owned()).map(|found| found.is_some()),
         Err(absent)
     );
+}
+
+#[test]
+fn a_net_refusal_keeps_its_code_and_kind() {
+    for code in [
+        "net_url_invalid",
+        "net_header_name_invalid",
+        "net_request_invalid",
+        "net_host_refused",
+    ] {
+        assert_eq!(
+            super::refusal(StoreError::code(code)),
+            Refusal::Rejected {
+                code: code.to_owned()
+            }
+        );
+    }
+    for code in ["net_capture_not_json", "credential_secret_invalid", "curl_failed"] {
+        assert_eq!(
+            super::refusal(StoreError::code(code)),
+            Refusal::Failed {
+                code: code.to_owned()
+            }
+        );
+    }
+    let absent = net::Provide::request(
+        &Absent,
+        "github",
+        net::Request {
+            method: net::Method::Get,
+            url: "https://api.github.com/user".to_owned(),
+            headers: Vec::new(),
+            bearer: None,
+            form: Vec::new(),
+            secret_form: Vec::new(),
+            json: None,
+            reply_headers: Vec::new(),
+            capture: Vec::new(),
+        },
+    );
+    assert!(matches!(
+        absent,
+        Err(Refusal::Failed { code }) if code == "cap_provider_absent"
+    ));
 }

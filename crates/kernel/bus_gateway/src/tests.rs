@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
 
+use sdk::net;
 use sdk::secrets::{self, Secret};
 use sdk::settings::{self, LeftRunning, OnQuit, Provide, QuitSettings};
 use sdk::{Capability, Refusal, TEXT_BYTES_MAX, Tier};
@@ -53,6 +54,36 @@ impl Refusals for RecordingRefusals {
 
 /// The secrets provider of rows that never reach it.
 struct UnusedSecrets;
+
+/// The net provider the rows that never reach it pass: any call panics.
+struct UnusedNet;
+
+/// The one `UnusedNet` the rows pass.
+const UNUSED_NET: UnusedNet = UnusedNet;
+
+impl net::Provide for UnusedNet {
+    fn request(&self, _: &'static str, _: net::Request) -> Result<net::Reply, Refusal> {
+        panic!("this row never reaches the net provider")
+    }
+}
+
+/// The net provider fake: records each caller and answers an empty 200 reply.
+#[derive(Default)]
+struct CountingNet {
+    callers: RefCell<Vec<&'static str>>,
+}
+
+impl net::Provide for CountingNet {
+    fn request(&self, caller: &'static str, _: net::Request) -> Result<net::Reply, Refusal> {
+        self.callers.borrow_mut().push(caller);
+        Ok(net::Reply {
+            status: 200,
+            body: Vec::new(),
+            headers: Vec::new(),
+            captured: Vec::new(),
+        })
+    }
+}
 
 /// The one `UnusedSecrets` the rows pass.
 const UNUSED_SECRETS: UnusedSecrets = UnusedSecrets;
@@ -117,6 +148,7 @@ fn grants() -> Grants {
             &["secrets.put", "secrets.find", "secrets.forget"],
         ),
         ("finder", Tier::T1, &["secrets.find"]),
+        ("fetcher", Tier::T1, &["net.request"]),
     ])
     .expect("the table builds")
 }
@@ -128,7 +160,7 @@ fn a_granted_call_reaches_the_provider_once() {
         CountingProvider::answering(Ok(())),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &UNUSED_NET, &refusals);
     assert_eq!(
         settings::save_quit(&gateway.bind("agent-quit"), quit()),
         Ok(())
@@ -145,7 +177,7 @@ fn an_ungranted_call_is_refused_logged_once_and_never_reaches_the_provider() {
         CountingProvider::answering(Ok(())),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &UNUSED_NET, &refusals);
     let refusal = Refusal::NotGranted {
         capability: "settings.save_quit",
         needs: "settings.write",
@@ -168,7 +200,7 @@ fn an_unknown_plugin_is_refused() {
         CountingProvider::answering(Ok(())),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &UNUSED_NET, &refusals);
     let refusal = Refusal::NotGranted {
         capability: "settings.save_quit",
         needs: "settings.write",
@@ -201,7 +233,7 @@ fn a_t1_plugin_may_not_call_a_t2_capability() {
         CountingProvider::answering(Ok(())),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &UNUSED_NET, &refusals);
     let refusal = Refusal::TierTooHigh {
         capability: "test.t2_only",
     };
@@ -239,7 +271,7 @@ fn the_provider_rejection_comes_back_unchanged() {
         CountingProvider::answering(Err(rejection.clone())),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &UNUSED_NET, &refusals);
     assert_eq!(
         settings::save_quit(&gateway.bind("agent-quit"), quit()),
         Err(rejection)
@@ -296,7 +328,7 @@ fn the_settings_provider_gets_the_bound_plugin_as_caller() {
         CountingProvider::answering(Ok(())),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &UNUSED_NET, &refusals);
     assert_eq!(
         settings::save_quit(&gateway.bind("agent-quit"), quit()),
         Ok(())
@@ -367,7 +399,7 @@ fn an_input_over_its_bound_never_reaches_the_provider() {
         CountingProvider::answering(Ok(())),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &UNUSED_NET, &refusals);
     let ran = Cell::new(0);
     let over = "i".repeat(ROW_BYTES_MAX + 1);
     assert_eq!(
@@ -385,7 +417,7 @@ fn an_input_at_its_bound_reaches_the_provider() {
         CountingProvider::answering(Ok(())),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &UNUSED_NET, &refusals);
     let ran = Cell::new(0);
     let at = "i".repeat(ROW_BYTES_MAX);
     assert_eq!(bounded_call(&gateway, &at, "ok", &ran), Ok("ok".to_owned()));
@@ -400,7 +432,7 @@ fn an_output_over_its_bound_fails_with_cap_output_too_large() {
         CountingProvider::answering(Ok(())),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &UNUSED_NET, &refusals);
     let ran = Cell::new(0);
     let over = "o".repeat(ROW_BYTES_MAX + 1);
     assert_eq!(
@@ -421,7 +453,7 @@ fn an_ungranted_bounded_call_runs_no_check() {
         CountingProvider::answering(Ok(())),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &UNUSED_NET, &refusals);
     let checked = Cell::new(false);
     let refusal = Refusal::NotGranted {
         capability: "test.bounded",
@@ -489,7 +521,7 @@ fn an_owned_input_over_its_bound_never_reaches_the_provider() {
         CountingProvider::answering(Ok(())),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &UNUSED_NET, &refusals);
     let ran = Cell::new(0);
     let (result, checked, provided) =
         owned_call(&gateway, "low", "u".repeat(ROW_BYTES_MAX + 1), &ran);
@@ -506,7 +538,7 @@ fn an_owned_input_at_its_bound_reaches_the_provider_as_the_value_checked() {
         CountingProvider::answering(Ok(())),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &UNUSED_NET, &refusals);
     let ran = Cell::new(0);
     let url = "u".repeat(ROW_BYTES_MAX);
     let sent = url.as_ptr() as usize;
@@ -524,7 +556,7 @@ fn an_ungranted_plugin_with_an_oversized_input_is_refused_not_granted() {
         CountingProvider::answering(Ok(())),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &UNUSED_NET, &refusals);
     let ran = Cell::new(0);
     let refusal = Refusal::NotGranted {
         capability: "test.bounded",
@@ -570,7 +602,7 @@ fn an_ungranted_secrets_call_never_reaches_the_provider() {
         CountingSecrets::default(),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &provider, &secrets, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &secrets, &UNUSED_NET, &refusals);
     assert_eq!(
         secrets_calls(&gateway, "low"),
         [
@@ -591,7 +623,7 @@ fn each_secrets_call_needs_its_own_grant() {
         CountingSecrets::default(),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &provider, &secrets, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &secrets, &UNUSED_NET, &refusals);
     assert_eq!(
         secrets_calls(&gateway, "finder"),
         [
@@ -612,7 +644,7 @@ fn the_caller_passed_to_the_secrets_provider_is_the_bound_plugin() {
         CountingSecrets::default(),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &provider, &secrets, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &secrets, &UNUSED_NET, &refusals);
     assert_eq!(secrets_calls(&gateway, "keeper"), [Ok(()), Ok(()), Ok(())]);
     assert_eq!(
         *secrets.callers.borrow(),
@@ -633,7 +665,7 @@ fn a_secrets_input_over_its_bound_never_reaches_the_provider() {
         CountingSecrets::default(),
         RecordingRefusals::default(),
     );
-    let gateway = Gateway::new(&grants, &provider, &secrets, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &secrets, &UNUSED_NET, &refusals);
     let host = gateway.bind("keeper");
     let over = "n".repeat(TEXT_BYTES_MAX + 1);
     assert_eq!(
@@ -652,4 +684,62 @@ fn a_secrets_input_over_its_bound_never_reaches_the_provider() {
 fn the_settings_checks_are_the_generated_ones() {
     assert_eq!(settings::check_save_quit_input(&quit()), Ok(()));
     assert_eq!(settings::check_save_quit_output(&()), Ok(()));
+}
+
+/// A GET request of one URL. Input: the URL. Output: the request.
+fn net_get(url: String) -> net::Request {
+    net::Request {
+        method: net::Method::Get,
+        url,
+        headers: Vec::new(),
+        bearer: None,
+        form: Vec::new(),
+        secret_form: Vec::new(),
+        json: None,
+        reply_headers: Vec::new(),
+        capture: Vec::new(),
+    }
+}
+
+#[test]
+fn an_ungranted_net_request_never_reaches_egress_allows() {
+    let (grants, provider, refusals) = (grants(), CountingProvider::answering(Ok(())), RecordingRefusals::default());
+    let fetch = CountingNet::default();
+    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &fetch, &refusals);
+    for plugin in ["keeper", "low", "agent-quit", "unknown"] {
+        let refused = gateway
+            .bind(plugin)
+            .net_request(net_get("https://api.github.com/user".to_owned()));
+        assert!(matches!(refused, Err(Refusal::NotGranted { .. })), "{plugin}");
+    }
+    assert!(fetch.callers.borrow().is_empty());
+    let reply = gateway
+        .bind("fetcher")
+        .net_request(net_get("https://api.github.com/user".to_owned()))
+        .unwrap();
+    assert_eq!(reply.status, 200);
+    assert_eq!(*fetch.callers.borrow(), vec!["fetcher"]);
+}
+
+#[test]
+fn net_inputs_over_their_bounds_are_refused() {
+    let (grants, provider, refusals) = (grants(), CountingProvider::answering(Ok(())), RecordingRefusals::default());
+    let fetch = CountingNet::default();
+    let gateway = Gateway::new(&grants, &provider, &UNUSED_SECRETS, &fetch, &refusals);
+    let host = gateway.bind("fetcher");
+    let long = format!("https://api.github.com/{}", "a".repeat(TEXT_BYTES_MAX));
+    assert!(matches!(host.net_request(net_get(long)), Err(Refusal::Rejected { .. })));
+    let mut headers = net_get("https://api.github.com/user".to_owned());
+    headers.headers = vec![
+        net::Field {
+            name: "a".to_owned(),
+            value: "b".to_owned(),
+        };
+        sdk::LIST_ITEMS_MAX + 1
+    ];
+    assert!(matches!(host.net_request(headers), Err(Refusal::Rejected { .. })));
+    let mut json = net_get("https://api.github.com/user".to_owned());
+    json.json = Some(vec![b'a'; sdk::BYTES_MAX + 1]);
+    assert!(matches!(host.net_request(json), Err(Refusal::Rejected { .. })));
+    assert!(fetch.callers.borrow().is_empty());
 }
