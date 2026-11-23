@@ -46,8 +46,55 @@ impl sdk::secrets::Provide for NoSecrets {
 /// A net provider the row never reaches: it times only the quit save.
 struct NoNet;
 
+/// The process provider of the overhead rows, which never call it.
+struct NoProcess;
+
+impl sdk::process::Provide for NoProcess {
+    fn install(
+        &self,
+        _: &'static str,
+        _: sdk::process::InstallRecipe,
+    ) -> Result<sdk::process::InstallResult, Refusal> {
+        unreachable!("the overhead rows call no process capability")
+    }
+}
+
 impl sdk::net::Provide for NoNet {
     fn request(&self, _: &'static str, _: sdk::net::Request) -> Result<sdk::net::Reply, Refusal> {
+        unreachable!("the overhead row calls only settings.save_quit")
+    }
+}
+
+/// A service provider the row never reaches: it times only the quit save.
+struct NoService;
+
+impl sdk::generated::service::Provide for NoService {
+    fn status(&self, _: &'static str) -> Result<sdk::generated::service::ServiceState, Refusal> {
+        unreachable!("the overhead row calls only settings.save_quit")
+    }
+
+    fn repair(&self, _: &'static str) -> Result<(), Refusal> {
+        unreachable!("the overhead row calls only settings.save_quit")
+    }
+
+    fn install(&self, _: &'static str) -> Result<(), Refusal> {
+        unreachable!("the overhead row calls only settings.save_quit")
+    }
+
+    fn uninstall(&self, _: &'static str) -> Result<(), Refusal> {
+        unreachable!("the overhead row calls only settings.save_quit")
+    }
+}
+
+/// An update provider the row never reaches: it times only the quit save.
+struct NoUpdate;
+
+impl sdk::generated::update::Provide for NoUpdate {
+    fn set_channel(
+        &self,
+        _: &'static str,
+        _: sdk::generated::update::UpdateChannel,
+    ) -> Result<(), Refusal> {
         unreachable!("the overhead row calls only settings.save_quit")
     }
 }
@@ -119,8 +166,11 @@ fn overhead_per_sdk_call() {
     let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &NoNet,
+        process: &NoProcess,
         secrets: &NoSecrets,
         settings: &provider,
+        service: &NoService,
+        update: &NoUpdate,
     };
     let bound = Bound::new(gateway.bind(PLUGIN), &providers);
     let input = QuitSettings {
@@ -197,8 +247,11 @@ fn gateway_secrets_call_p95() {
     let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &NoNet,
+        process: &NoProcess,
         secrets: &Found,
         settings: &Noop,
+        service: &NoService,
+        update: &NoUpdate,
     };
     let bound = Bound::new(gateway.bind(PLUGIN), &providers);
     let mut direct_call = || {
@@ -215,5 +268,124 @@ fn gateway_secrets_call_p95() {
     overhead.sort_unstable();
     let p95 = report("secrets", &overhead);
     println!("gateway.secrets_find condition={condition} p95_ps={p95}");
+    assert!(p95 <= budget, "p95 {p95} ps over {budget} ps ({condition})");
+}
+
+/// An update provider that saves nothing, so a timing holds only the call path.
+struct Saved;
+
+impl sdk::generated::update::Provide for Saved {
+    fn set_channel(
+        &self,
+        caller: &'static str,
+        channel: sdk::generated::update::UpdateChannel,
+    ) -> Result<(), Refusal> {
+        black_box((caller, channel));
+        Ok(())
+    }
+}
+
+/// Times one `update.set_channel` call's overhead through the generated binding and the
+/// gateway core against its budget, the way the secrets row does. Run:
+/// `OVERHEAD_MAC=quiet cargo test --release -p crazyagent-sdk-host --lib overhead_tests::gateway_update_set_channel_p95 -- --ignored --nocapture`
+/// (`OVERHEAD_MAC=loaded` on the loaded Mac).
+#[test]
+#[ignore = "timing row, run on demand with OVERHEAD_MAC=quiet or OVERHEAD_MAC=loaded"]
+fn gateway_update_set_channel_p95() {
+    use sdk::generated::update::{self, Provide, UpdateChannel};
+    let (budget, condition) = budget();
+    let grants = Grants::new(&[(PLUGIN, Tier::T2, &["update.write"])]).unwrap();
+    let refusals = Unreached;
+    let gateway = Gateway::new(&grants, &refusals);
+    let providers = Providers {
+        net: &NoNet,
+        process: &NoProcess,
+        secrets: &NoSecrets,
+        settings: &Noop,
+        service: &NoService,
+        update: &Saved,
+    };
+    let bound = Bound::new(gateway.bind(PLUGIN), &providers);
+    let mut direct_call =
+        || black_box(Saved.set_channel(PLUGIN, black_box(UpdateChannel::Dev))).unwrap();
+    let mut sdk_call =
+        || black_box(update::set_channel(&bound, black_box(UpdateChannel::Dev))).unwrap();
+    let mut overhead = Vec::with_capacity(ROUNDS);
+    for _ in 0..ROUNDS {
+        let plain = batch(&mut direct_call);
+        overhead.push(batch(&mut sdk_call).saturating_sub(plain));
+    }
+    overhead.sort_unstable();
+    let p95 = report("update", &overhead);
+    println!("gateway.update_set_channel condition={condition} p95_ps={p95}");
+    assert!(p95 <= budget, "p95 {p95} ps over {budget} ps ({condition})");
+}
+
+/// A service provider that reports a stand-in state at once, so a timing holds only the
+/// call path.
+struct Reported;
+
+impl sdk::generated::service::Provide for Reported {
+    fn status(
+        &self,
+        caller: &'static str,
+    ) -> Result<sdk::generated::service::ServiceState, Refusal> {
+        black_box(caller);
+        Ok(sdk::generated::service::ServiceState {
+            installed: true,
+            running: true,
+            current: true,
+        })
+    }
+
+    fn repair(&self, _: &'static str) -> Result<(), Refusal> {
+        unreachable!("the service row times service.status only")
+    }
+
+    fn install(&self, _: &'static str) -> Result<(), Refusal> {
+        unreachable!("the service row times service.status only")
+    }
+
+    fn uninstall(&self, _: &'static str) -> Result<(), Refusal> {
+        unreachable!("the service row times service.status only")
+    }
+}
+
+/// Times one `service.status` call's overhead, a call with no inputs and a named output,
+/// through the generated binding and the gateway core against its budget, the way the
+/// secrets row does. Run:
+/// `OVERHEAD_MAC=quiet cargo test --release -p crazyagent-sdk-host --lib overhead_tests::gateway_service_status_p95 -- --ignored --nocapture`
+/// (`OVERHEAD_MAC=loaded` on the loaded Mac).
+#[test]
+#[ignore = "timing row, run on demand with OVERHEAD_MAC=quiet or OVERHEAD_MAC=loaded"]
+fn gateway_service_status_p95() {
+    use sdk::generated::service::{self, Provide};
+    let (budget, condition) = budget();
+    let grants = Grants::new(&[(PLUGIN, Tier::T2, &["service.read"])]).unwrap();
+    let refusals = Unreached;
+    let gateway = Gateway::new(&grants, &refusals);
+    let providers = Providers {
+        net: &NoNet,
+        process: &NoProcess,
+        secrets: &NoSecrets,
+        settings: &Noop,
+        service: &Reported,
+        update: &NoUpdate,
+    };
+    let bound = Bound::new(gateway.bind(PLUGIN), &providers);
+    let mut direct_call = || {
+        black_box(Reported.status(PLUGIN)).unwrap();
+    };
+    let mut sdk_call = || {
+        black_box(service::status(&bound)).unwrap();
+    };
+    let mut overhead = Vec::with_capacity(ROUNDS);
+    for _ in 0..ROUNDS {
+        let plain = batch(&mut direct_call);
+        overhead.push(batch(&mut sdk_call).saturating_sub(plain));
+    }
+    overhead.sort_unstable();
+    let p95 = report("service", &overhead);
+    println!("gateway.service_status condition={condition} p95_ps={p95}");
     assert!(p95 <= budget, "p95 {p95} ps over {budget} ps ({condition})");
 }

@@ -128,7 +128,7 @@ impl PinnedInstaller {
             Dependency::Tmux => kernel_processes::finding::resolve_tmux(
                 &self.places,
                 kernel_processes::finding::SHIPS_BUNDLED_TMUX,
-                crate::terminal::tmux::runs,
+                kernel_processes::terminal::tmux::runs,
             ),
             _ => kernel_processes::finding::resolve(dep.program(), &self.places)
                 .map(|found| (found, None)),
@@ -140,12 +140,12 @@ impl PinnedInstaller {
         let version = self.version(dep, &found.argv())?;
         assert!(found.entry.is_absolute());
         if dep == Dependency::Tmux
-            && crate::terminal::tmux::supported(version.as_str()) != Some(true)
+            && kernel_processes::terminal::tmux::supported(version.as_str()) != Some(true)
         {
             return Ok(Err(kernel_processes::finding::Missing {
                 tool: dep.program().to_owned(),
                 reason: kernel_processes::finding::Reason::WrongVersion,
-                needs: Some(crate::terminal::tmux::version_needed()),
+                needs: Some(kernel_processes::terminal::tmux::version_needed()),
                 found: Some(version.as_str().to_owned()),
                 looked: found
                     .entry

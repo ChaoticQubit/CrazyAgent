@@ -53,10 +53,6 @@ const LOOPBACK_HOSTS: [&str; 3] = ["127.0.0.1", "[::1]", "localhost"];
 const EMBEDDING: &str = "embedding";
 const EMBEDDING_TIER: &str = "t2";
 const PLAIN_KEY_BYTES_MAX: usize = 64;
-const HIDDEN_MARKS: [char; 14] = [
-    '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}',
-    '\u{2069}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}',
-];
 const HTTP_KEYS: [&str; 8] = [
     "url",
     "hosts",
@@ -67,6 +63,26 @@ const HTTP_KEYS: [&str; 8] = [
     "dimensions",
     "batch",
 ];
+
+/// Whether a mark reorders, hides or breaks text on the trust screen without showing:
+/// bidi embeddings, overrides, isolates and marks, zero-width and invisible characters, line
+/// and paragraph separators, the soft hyphen, interlinear annotation marks and tag
+/// characters. Input: the mark. Output: the answer.
+fn hidden_mark(mark: char) -> bool {
+    matches!(
+        mark,
+        '\u{00AD}'
+            | '\u{061C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{E0000}'..='\u{E007F}'
+    )
+}
 
 /// Whether a request embeds stored text or an agent's search query; `{{purpose}}` becomes
 /// `document` or `query`.
@@ -394,7 +410,7 @@ impl<'a> Fields<'a> {
                     && text.len() <= bytes_max
                     && !text
                         .chars()
-                        .any(|mark| mark.is_control() || HIDDEN_MARKS.contains(&mark)) =>
+                        .any(|mark| mark.is_control() || hidden_mark(mark)) =>
             {
                 Ok(text.clone())
             }
