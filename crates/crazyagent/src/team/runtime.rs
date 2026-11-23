@@ -1150,7 +1150,8 @@ fn prepare_mates_home(
             return Err(EngineError("team_shared_folder_changed".into()));
         }
     }
-    toolchains::prepare_cargo_home(&mates, homes).map_err(error)?;
+    toolchains::prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, &mates, homes)
+        .map_err(error)?;
     crate::harnesses::interactive::prepare_claude_home(&mates, project)
         .map_err(|e| EngineError(e.0))?;
     Ok(mates)
@@ -9598,7 +9599,8 @@ impl TeamRuntime {
         {
             eprintln!("agent_free_git_not_written kind={:?}", error.kind());
         }
-        toolchains::prepare_cargo_home(&home, &homes).map_err(|e| cargo_home_problem(&e))?;
+        toolchains::prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, &home, &homes)
+            .map_err(|e| cargo_home_problem(&e))?;
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)
             .and_then(|sandbox| sandbox.keep_ports(&kept))
             .map_err(sandboxed)?;

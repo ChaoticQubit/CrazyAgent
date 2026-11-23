@@ -37,6 +37,17 @@ const PYTHON_HOMES: &[&str] = &[".pyenv", ".local/share/uv/python"];
 /// the git checkouts.
 pub const CARGO_SHARED: &[&str] = &["registry", "git"];
 
+/// The engine's parts the agent toolchain setup reaches. Production code passes the engine's
+/// one value; rows pass stand-ins.
+pub struct ToolchainHooks {
+    /// Removes one entry of an agent's own cargo home without following a link, also a
+    /// folder an agent shut. Inputs: the open cargo home, the entry name and the code for a
+    /// refusal the engine has no own code for. Output: done, or the refusal code.
+    #[cfg(unix)]
+    pub remove_home_entry:
+        fn(std::os::fd::BorrowedFd<'_>, &str, &'static str) -> Result<(), &'static str>,
+}
+
 /// The folders the owner's toolchains live in: the owner's home, rustup's home and cargo's
 /// home inside it.
 #[derive(Debug, Clone, PartialEq, Eq)]

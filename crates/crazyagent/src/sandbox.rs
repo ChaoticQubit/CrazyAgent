@@ -13,6 +13,7 @@ use kernel_sandbox::policy::PolicyHooks;
 use kernel_sandbox::ports::BRIDGE_PORT_MIN;
 use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use kernel_sandbox::shared_folders::OPEN_TOPS_MAX;
+use kernel_sandbox::toolchains::ToolchainHooks;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 #[cfg(unix)]
@@ -1225,6 +1226,26 @@ pub const ACCESS_HOOKS: AccessHooks = AccessHooks {
     state_folder: crate::projects_home::state_folder,
     untracked: access_untracked,
 };
+
+/// The engine's real agent toolchain hooks, the only [`ToolchainHooks`] production code
+/// passes: the cargo home entry removal of [`toolchain_remove_home_entry`].
+pub const TOOLCHAIN_HOOKS: ToolchainHooks = ToolchainHooks {
+    #[cfg(unix)]
+    remove_home_entry: toolchain_remove_home_entry,
+};
+
+/// Removes one entry of an agent's own cargo home as the engine's home cleanup does, with
+/// its walk budget code kept and every other refusal given as `otherwise`. Inputs: the open
+/// cargo home, the entry name and the fallback code. Output: done, or the refusal code.
+#[cfg(unix)]
+fn toolchain_remove_home_entry(
+    folder: std::os::fd::BorrowedFd<'_>,
+    name: &str,
+    otherwise: &'static str,
+) -> Result<(), &'static str> {
+    crate::team::cleanup::remove_home_entry(folder, name)
+        .map_err(|problem| crate::team::cleanup::home_code(&problem, otherwise))
+}
 
 /// The paths git leaves untracked in the project folder `root`, as the shared folders plan
 /// reads them: what the onboarding draft lists on Unix, none elsewhere. Input: the folder.

@@ -1408,7 +1408,7 @@ fn link_owner_crates(
     home: &Path,
     homes: &kernel_sandbox::toolchains::ToolHomes,
 ) -> Result<(), AgentHomeError> {
-    crate::sandbox::toolchains::prepare_cargo_home(home, homes)
+    crate::sandbox::toolchains::prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, home, homes)
         .map(drop)
         .map_err(|problem| {
             failure(match crate::team::cleanup::walk_too_long_io(&problem) {

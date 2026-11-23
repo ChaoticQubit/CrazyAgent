@@ -1,6 +1,6 @@
 #[cfg(unix)]
 use kernel_sandbox::toolchains::{CARGO_SHARED, existing};
-use kernel_sandbox::toolchains::{ToolHomes, below};
+use kernel_sandbox::toolchains::{ToolHomes, ToolchainHooks, below};
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::fs;
@@ -913,12 +913,18 @@ impl Drop for ScopedTmp {
 /// agent made goes at its launch's reset ([`crate::agent_home::prepare`]), while a folder in
 /// the owner's IDE terminal home stays. A launch that finds the exact link another launch
 /// of the same home made at a name it saw free takes it (RV-DS241-199). Inputs: the agent
-/// home and the owner's tool homes. Output: the cargo home, or a refusal when `.cargo` is
+/// home, the hooks the removal goes through and the owner's tool homes. Output: the cargo
+/// home, or a refusal when `.cargo` is
 /// not a plain folder or a name will not give way, whose text is `cleanup_walk_too_long`
 /// when removing the name ran past its walk budget (RESET-WALK-CODE).
 #[cfg(unix)]
-pub fn prepare_cargo_home(home: &Path, homes: &ToolHomes) -> io::Result<PathBuf> {
+pub fn prepare_cargo_home(
+    hooks: &ToolchainHooks,
+    home: &Path,
+    homes: &ToolHomes,
+) -> io::Result<PathBuf> {
     use rustix::fs::{CWD, Mode, OFlags};
+    use std::os::fd::AsFd;
     use std::os::unix::ffi::OsStrExt;
     let cargo = home.join(".cargo");
     match fs::DirBuilder::new().mode(0o700).create(&cargo) {
@@ -932,12 +938,8 @@ pub fn prepare_cargo_home(home: &Path, homes: &ToolHomes) -> io::Result<PathBuf>
         Mode::empty(),
     )?;
     let remove = |name: &str| {
-        crate::team::cleanup::remove_home_entry(&folder, name).map_err(|problem| {
-            io::Error::other(crate::team::cleanup::home_code(
-                &problem,
-                "cargo cache name will not give way",
-            ))
-        })
+        (hooks.remove_home_entry)(folder.as_fd(), name, "cargo cache name will not give way")
+            .map_err(io::Error::other)
     };
     let linked = |name: &str, shared: &Path| {
         rustix::fs::readlinkat(&folder, name, Vec::new())
@@ -1017,10 +1019,14 @@ pub fn remove_tmp_keeping(_home: &Path, _kept: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// No agent cargo home outside Unix, where no agent sandbox runs. Takes the agent home and
-/// tool homes, unused. Returns `Unsupported`.
+/// No agent cargo home outside Unix, where no agent sandbox runs. Takes the hooks, agent
+/// home and tool homes, unused. Returns `Unsupported`.
 #[cfg(not(unix))]
-pub fn prepare_cargo_home(_home: &Path, _homes: &ToolHomes) -> io::Result<PathBuf> {
+pub fn prepare_cargo_home(
+    _hooks: &ToolchainHooks,
+    _home: &Path,
+    _homes: &ToolHomes,
+) -> io::Result<PathBuf> {
     Err(io::ErrorKind::Unsupported.into())
 }
 

@@ -1305,11 +1305,20 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
     let home = root.join("ide/home");
 
     let before = planted.load(Ordering::Relaxed);
-    let _ = crate::sandbox::toolchains::prepare_cargo_home(&home, &homes);
+    let _ = crate::sandbox::toolchains::prepare_cargo_home(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
+        &home,
+        &homes,
+    );
     let landed = planted.load(Ordering::Relaxed) - before;
     stop.store(true, Ordering::Relaxed);
     swapper.join().unwrap();
-    let cargo = crate::sandbox::toolchains::prepare_cargo_home(&home, &homes).unwrap();
+    let cargo = crate::sandbox::toolchains::prepare_cargo_home(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
+        &home,
+        &homes,
+    )
+    .unwrap();
 
     assert!(landed > 0, "no link was planted while the reset ran");
     assert_eq!(
@@ -1358,7 +1367,11 @@ fn an_ide_terminal_cargo_cache_reset_never_opens_up_an_owner_folder_swapped_in_a
         OPEN_UP_STEP.with(|slot| *slot.borrow_mut() = Some((point, c"c00".to_owned(), swap)));
         let homes = kernel_sandbox::toolchains::ToolHomes::at(&account);
 
-        let _ = crate::sandbox::toolchains::prepare_cargo_home(&root.join("ide/home"), &homes);
+        let _ = crate::sandbox::toolchains::prepare_cargo_home(
+            &crate::sandbox::TOOLCHAIN_HOOKS,
+            &root.join("ide/home"),
+            &homes,
+        );
         let swapped = OPEN_UP_STEP.with(|slot| slot.borrow_mut().take().is_none());
         let mode = std::fs::symlink_metadata(&owned)
             .unwrap()

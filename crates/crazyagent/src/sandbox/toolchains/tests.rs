@@ -677,7 +677,7 @@ fn a_cargo_home_holds_only_links_to_the_owners_caches_and_never_changes_them() {
     std::os::unix::fs::symlink(&elsewhere, with.join(".cargo/git")).unwrap();
     let homes = ToolHomes::at(&owner);
 
-    let cargo = prepare_cargo_home(&with, &homes).unwrap();
+    let cargo = prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, &with, &homes).unwrap();
 
     for name in CARGO_SHARED {
         assert_eq!(
@@ -695,7 +695,10 @@ fn a_cargo_home_holds_only_links_to_the_owners_caches_and_never_changes_them() {
     );
     assert!(fs::read_dir(&elsewhere).unwrap().next().is_none());
     let link = fs::symlink_metadata(cargo.join("registry")).unwrap().ino();
-    assert_eq!(prepare_cargo_home(&with, &homes).unwrap(), cargo);
+    assert_eq!(
+        prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, &with, &homes).unwrap(),
+        cargo
+    );
     let again = fs::symlink_metadata(cargo.join("registry")).unwrap().ino();
     assert_eq!(again, link, "the exact link was made again");
 
@@ -704,7 +707,7 @@ fn a_cargo_home_holds_only_links_to_the_owners_caches_and_never_changes_them() {
     fs::create_dir_all(without.join(".cargo/git/db")).unwrap();
     std::os::unix::fs::symlink(&elsewhere, without.join(".cargo/registry")).unwrap();
 
-    prepare_cargo_home(&without, &bare).unwrap();
+    prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, &without, &bare).unwrap();
 
     assert!(fs::symlink_metadata(without.join(".cargo/registry")).is_err());
     assert!(without.join(".cargo/git/db").is_dir());
@@ -736,7 +739,7 @@ fn launches_that_prepare_one_cargo_home_at_once_all_get_it() {
                 .map(|_| {
                     scope.spawn(move || {
                         start.wait();
-                        prepare_cargo_home(home, homes)
+                        prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, home, homes)
                     })
                 })
                 .collect();
