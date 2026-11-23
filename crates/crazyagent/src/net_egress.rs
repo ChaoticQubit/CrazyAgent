@@ -90,7 +90,7 @@ impl Egress for CurlEgress {
         if sealed
             .reply_headers()
             .iter()
-            .any(|name| name != SCOPES_HEADER)
+            .any(|name| !name.eq_ignore_ascii_case(SCOPES_HEADER))
         {
             return Err(StoreError::code("net_reply_header_unsupported"));
         }

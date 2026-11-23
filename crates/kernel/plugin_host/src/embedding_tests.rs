@@ -579,8 +579,8 @@ fn a_manifest_with_http_and_net_hosts_is_refused() {
         refused_at(&both),
         ("plugin_manifest_invalid".into(), Some(line))
     );
-    let read = crate::manifest::parse(&both).expect_err("the five-key check refuses net too");
-    assert_eq!(read.code, "plugin_manifest_invalid");
+    let read = crate::manifest::parse(&both).expect_err("net without net.request is refused");
+    assert_eq!(read.code, "plugin_net_without_permission");
 }
 
 #[test]

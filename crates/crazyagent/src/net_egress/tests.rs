@@ -16,7 +16,7 @@ const HOSTS: &[(&str, &[&str])] = &[
         "github",
         &["github.com", "api.github.com", "ghe.example:8443"],
     ),
-    ("local", &["127.0.0.1:8080"]),
+    ("local", &["127.0.0.1:8080", "[::1]:9000"]),
 ];
 
 #[test]
@@ -29,6 +29,8 @@ fn a_host_outside_the_allowlist_is_refused() {
         Ok(())
     );
     assert_eq!(egress.allows("local", "http", "127.0.0.1", 8080), Ok(()));
+    assert_eq!(egress.allows("local", "http", "[::1]", 9000), Ok(()));
+    assert_eq!(egress.allows("local", "http", "::1", 9000), refused);
     assert_eq!(
         egress.allows("github", "https", "evil.example", 443),
         refused
@@ -71,10 +73,12 @@ fn bundled_manifests() -> Vec<kernel_plugin_host::manifest::Manifest> {
     found
 }
 
-#[test]
-fn the_static_net_table_equals_each_bundled_manifest() {
-    let manifests = bundled_manifests();
-    let hosts: BTreeSet<(String, Vec<String>)> = manifests
+/// The (plugin, hosts) rows of some manifests' `[net]` sections. Input: the manifests.
+/// Output: the rows.
+fn net_hosts(
+    manifests: &[kernel_plugin_host::manifest::Manifest],
+) -> BTreeSet<(String, Vec<String>)> {
+    manifests
         .iter()
         .filter_map(|manifest| {
             manifest
@@ -82,7 +86,22 @@ fn the_static_net_table_equals_each_bundled_manifest() {
                 .as_ref()
                 .map(|net| (manifest.plugin.clone(), net.hosts.clone()))
         })
-        .collect();
+        .collect()
+}
+
+#[test]
+fn the_static_net_table_equals_each_bundled_manifest() {
+    let manifests = bundled_manifests();
+    let hosts = net_hosts(&manifests);
+    let with_net = kernel_plugin_host::manifest::parse(
+        "plugin = \"probe\"\ntier = \"t2\"\nkind = \"connector\"\nversion = 1\npermissions = [\"net.request\"]\n\n[net]\nhosts = [\"github.com\"]\n",
+    )
+    .unwrap();
+    assert_eq!(
+        net_hosts(&[with_net]),
+        BTreeSet::from([("probe".to_owned(), vec!["github.com".to_owned()])]),
+        "the comparison reads a [net] section when a manifest holds one"
+    );
     let table: BTreeSet<(String, Vec<String>)> = NET_HOSTS
         .iter()
         .map(|(plugin, hosts)| {
@@ -278,7 +297,7 @@ fn a_reply_header_other_than_the_scopes_is_refused_before_curl() {
             form: Vec::new(),
             secret_form: Vec::new(),
             json: None,
-            reply_headers: vec!["set-cookie".to_owned()],
+            reply_headers: vec!["X-OAuth-Scopes".to_owned(), "set-cookie".to_owned()],
             capture: Vec::new(),
         },
     );
