@@ -194,3 +194,139 @@ fn ascii_folds_has_one_home() {
     }
     assert_eq!(homes, [Path::new("crates/kernel/sandbox/src/paths.rs")]);
 }
+
+/// A temp owner home holding `.ssh`, `Library/Keychains`, `.claude` and an unrelated `work`
+/// folder. Output: the folder guard, the home and its secret paths with `.claude` as the
+/// harness folder.
+fn secret_home() -> (tempfile::TempDir, PathBuf, Vec<PathBuf>) {
+    let folder = tempfile::tempdir().unwrap();
+    let home = folder.path().join("home");
+    for made in [".ssh", "Library/Keychains", ".claude", "work"] {
+        std::fs::create_dir_all(home.join(made)).unwrap();
+    }
+    let secrets = owner_secrets(&home, &[".claude"]).collect();
+    (folder, home, secrets)
+}
+
+/// True when the root is refused as one that holds or sits in a secret path. Inputs: the
+/// root and the secret paths. Output: the answer.
+fn secret_refused(root: &Path, secrets: &[PathBuf]) -> bool {
+    matches!(
+        clear_of_secrets(root, secrets),
+        Err(SandboxError::Invalid(reason)) if reason == SECRET_ROOT_REFUSED
+    )
+}
+
+/// On a volume that folds names, a root spelled in another case than a secret names the
+/// secret: refused whether the secret exists or is still to come, and so is a root below it.
+#[cfg(any(target_os = "macos", windows))]
+#[test]
+fn a_root_spelled_in_another_case_than_a_secret_is_refused() {
+    let (_folder, home, secrets) = secret_home();
+    assert!(secret_refused(&home.join(".SSH"), &secrets));
+    assert!(secret_refused(&home.join(".SSH").join("keys"), &secrets));
+    assert!(secret_refused(&home.join(".Aws").join("new"), &secrets));
+    assert!(secret_refused(
+        &home.join(".s\u{200C}sh").join("new"),
+        &secrets
+    ));
+}
+
+/// A root spelled with KELVIN SIGN U+212A in place of `k`, which a folding volume reads as
+/// `k`, names the keychains folder and is refused, as is a root below it.
+#[cfg(any(target_os = "macos", windows))]
+#[test]
+fn a_root_spelled_with_the_kelvin_sign_is_refused() {
+    let (_folder, home, secrets) = secret_home();
+    let kelvin = home.join("Library").join("\u{212A}eychains");
+    assert!(secret_refused(&kelvin, &secrets));
+    assert!(secret_refused(&kelvin.join("new"), &secrets));
+    assert!(secret_refused(
+        &home.join(".\u{212A}ube").join("new"),
+        &secrets
+    ));
+}
+
+/// A root that holds a secret through another spelling of the secret's folder is refused.
+#[cfg(any(target_os = "macos", windows))]
+#[test]
+fn a_root_holding_a_secret_spelled_in_another_case_is_refused() {
+    let (_folder, home, secrets) = secret_home();
+    assert!(secret_refused(&home.join("library"), &secrets));
+    assert!(secret_refused(&home.join("LIBRARY"), &secrets));
+}
+
+/// A root under a folder its metadata cannot be read through is refused, since the check
+/// cannot tell where it leads.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_metadata_read_error_refuses_the_root() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_folder, home, secrets) = secret_home();
+    let shut = home.join("work").join("shut");
+    std::fs::create_dir_all(shut.join("inner")).unwrap();
+    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let refused = secret_refused(&shut.join("inner"), &secrets);
+    std::fs::set_permissions(&shut, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(refused);
+}
+
+/// A new folder whose name stays outside ASCII is allowed under an unrelated folder, and
+/// refused where it could still name a secret: right under the home that holds them.
+#[cfg(any(target_os = "macos", windows))]
+#[test]
+fn a_new_folder_outside_ascii_is_refused_only_where_a_secret_may_be() {
+    let (_folder, home, secrets) = secret_home();
+    assert!(clear_of_secrets(&home.join("work").join("\u{65B0}"), &secrets).is_ok());
+    assert!(secret_refused(&home.join("\u{65B0}"), &secrets));
+}
+
+/// The owner home inside a root spelled in another case, and a root inside a harness folder
+/// spelled in another case, are each refused for that reason.
+#[cfg(any(target_os = "macos", windows))]
+#[test]
+fn granted_roots_compare_the_owner_and_harness_folders_by_entry() {
+    let (folder, home, secrets) = secret_home();
+    let refusal = |root: &Path| match granted_root(root, &home, &secrets, &[".claude"]) {
+        Err(SandboxError::Invalid(reason)) => reason,
+        other => format!("{other:?}"),
+    };
+    let holder = folder.path().join("HOME");
+    assert_eq!(
+        refusal(&holder),
+        "sandbox roots must not contain the owner home"
+    );
+    let inside = home.join(".CLAUDE").join("projects");
+    std::fs::create_dir_all(&inside).unwrap();
+    assert_eq!(
+        refusal(&inside),
+        "sandbox roots must not be owner harness homes"
+    );
+}
+
+/// On Linux names do not fold: `.SSH` beside `.ssh` is another folder and stays allowed,
+/// while `.ssh` itself is refused.
+#[cfg(target_os = "linux")]
+#[test]
+fn on_linux_a_root_spelled_in_another_case_is_another_folder() {
+    let (_folder, home, secrets) = secret_home();
+    std::fs::create_dir_all(home.join(".SSH")).unwrap();
+    assert!(clear_of_secrets(&home.join(".SSH"), &secrets).is_ok());
+    assert!(secret_refused(&home.join(".ssh"), &secrets));
+}
+
+/// A root that reaches a secret folder through a link is refused, and so is a root that
+/// holds the folder a linked secret leads to.
+#[cfg(unix)]
+#[test]
+fn a_root_reaching_a_secret_through_a_link_is_refused() {
+    let (folder, home, secrets) = secret_home();
+    std::fs::create_dir_all(home.join(".ssh").join("inner")).unwrap();
+    let link = home.join("work").join("link");
+    std::os::unix::fs::symlink(home.join(".ssh").join("inner"), &link).unwrap();
+    assert!(secret_refused(&link.join("new"), &secrets));
+    let dotfiles = folder.path().join("dotfiles");
+    std::fs::create_dir_all(dotfiles.join("aws")).unwrap();
+    std::os::unix::fs::symlink(dotfiles.join("aws"), home.join(".aws")).unwrap();
+    assert!(secret_refused(&dotfiles, &secrets));
+}

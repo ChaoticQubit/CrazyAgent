@@ -4847,7 +4847,7 @@ pub(crate) fn regranted_denies(home: &Path, folders: &[&Path]) -> String {
 /// `.git/config` past every name deny (SA vid 202). A part in another script keeps its
 /// joiners. Output: the rule, ending in a line break.
 pub(crate) fn hfs_ignored_deny() -> String {
-    let ignored: Vec<String> = crate::instruction_files::HFS_IGNORED
+    let ignored: Vec<String> = kernel_sandbox::paths::HFS_IGNORED
         .iter()
         .map(char::to_string)
         .collect();
