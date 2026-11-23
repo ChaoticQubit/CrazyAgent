@@ -722,25 +722,20 @@ fn load_refuses_an_oversized_file_before_reading_it() {
     fs::remove_dir_all(&folder).expect("the scratch folder is removed");
 }
 
-/// Writes an executable shell stub standing in for rustfmt. Inputs: a name unique to the
-/// row and the script body after the `#!/bin/sh` line. Output: the stub's path.
+/// Finds a checked-in executable shell stub standing in for rustfmt, so no row writes and
+/// then runs a program while another row spawns. Input: the stub's name. Output: its path.
 #[cfg(unix)]
-fn rustfmt_stub(name: &str, body: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let folder = load_scratch(&format!("rustfmt-{name}"));
-    let stub = folder.join("rustfmt");
-    fs::write(&stub, format!("#!/bin/sh\n{body}\n")).expect("the stub writes");
-    fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).expect("the stub is executable");
-    stub
+fn rustfmt_stub(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("fixture/rustfmt/{name}.sh"))
 }
 
 #[cfg(unix)]
 #[test]
-fn a_rustfmt_toml_in_the_working_folder_changes_nothing() {
+fn a_rustfmt_toml_in_the_working_folder_changes_nothing() -> Checked {
     let config = crate::rustfmt_config();
     assert!(config.is_file(), "{}", config.display());
-    assert_eq!(read(&config).expect("the config reads"), "");
-    let echo = rustfmt_stub("echo", "cat >/dev/null\nprintf '%s\\n' \"$@\"");
+    assert_eq!(read(&config)?, "");
+    let echo = rustfmt_stub("echo");
     let args = crate::rustfmt_with(
         echo.as_os_str(),
         &config,
@@ -748,7 +743,7 @@ fn a_rustfmt_toml_in_the_working_folder_changes_nothing() {
         "pub mod host;\n",
         crate::RUSTFMT_DEADLINE,
     )
-    .expect("the stub answers");
+    .map_err(|error| format!("{error:?}"))?;
     let expected = format!(
         "--edition\n2024\n--emit\nstdout\n--config-path\n{}\n",
         config.display()
@@ -769,12 +764,13 @@ fn a_rustfmt_toml_in_the_working_folder_changes_nothing() {
         "{}",
         refused.detail
     );
+    Ok(())
 }
 
 #[cfg(unix)]
 #[test]
 fn a_hung_rustfmt_is_stopped_with_a_timeout() {
-    let hung = rustfmt_stub("hung", "exec sleep 30");
+    let hung = rustfmt_stub("hung");
     let started = std::time::Instant::now();
     let refused = crate::rustfmt_with(
         hung.as_os_str(),
@@ -793,7 +789,7 @@ fn a_hung_rustfmt_is_stopped_with_a_timeout() {
 #[cfg(unix)]
 #[test]
 fn an_empty_rustfmt_output_is_a_refusal() {
-    let silent = rustfmt_stub("silent", "cat >/dev/null");
+    let silent = rustfmt_stub("silent");
     let refused = crate::rustfmt_with(
         silent.as_os_str(),
         &crate::rustfmt_config(),
