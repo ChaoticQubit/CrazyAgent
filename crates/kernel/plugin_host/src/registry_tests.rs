@@ -297,7 +297,7 @@ fn cells(db: &rusqlite::Connection, table: &str) -> Vec<String> {
         .concat()
 }
 
-/// H4 (V250-H4-LOCAL-YAML): the three bundled HTTP embedding plugins list first, in screen
+/// The three bundled HTTP embedding plugins list first, in screen
 /// order, and every one starts off.
 #[test]
 fn bundled_plugins_list_first_and_all_start_off() {
@@ -348,7 +348,7 @@ fn bundled_plugins_are_trusted_and_start_off() {
     assert!(cells(&case.db, "app_plugin_trust").is_empty());
 }
 
-/// H4: what an older plugin of the owner's left under a name a bundled plugin now has is
+/// What an older plugin of the owner's left under a name a bundled plugin now has is
 /// dropped the next time the store is used.
 #[test]
 fn leftovers_of_an_older_plugin_under_a_bundled_name_are_dropped() {
@@ -479,7 +479,7 @@ fn add_refuses_a_changed_text_and_a_taken_name_unless_replacing() {
     );
 }
 
-/// O5: add copies the bytes the owner reviewed and nothing else: a plugin.toml changed after
+/// Add copies the bytes the owner reviewed and nothing else: a plugin.toml changed after
 /// its trust screen is refused with nothing copied, and a picked folder holding another
 /// entry, a link, or that is a link is refused.
 #[test]
@@ -635,7 +635,7 @@ fn a_dropped_in_file_needs_review_until_trusted_and_again_after_a_change() {
     );
 }
 
-/// O2: a plugin whose plugin.toml changed after the owner trusted it is off for every call
+/// A plugin whose plugin.toml changed after the owner trusted it is off for every call
 /// until the owner approves the new text; approving it runs it again.
 #[test]
 fn a_changed_plugin_is_refused_until_approved_again() {
@@ -666,7 +666,7 @@ fn a_changed_plugin_is_refused_until_approved_again() {
     );
 }
 
-/// O1: a re-review says the text changed and lists the hosts the trusted version did not
+/// A re-review says the text changed and lists the hosts the trusted version did not
 /// reach, first in the host list; a first review reads unchanged with nothing grown.
 #[test]
 fn a_review_lists_what_grew_first() {
@@ -931,7 +931,7 @@ fn a_secret_binds_to_an_api_key_account_with_a_saved_key() {
     assert!(plugin_keys(&case).is_empty());
 }
 
-/// Leader 23:1x (A): a key reference is built only through the identity check, so a
+/// A key reference is built only through the identity check, so a
 /// stored or entered reference that is not one engine identity never becomes a binding.
 #[test]
 fn a_bad_reference_is_refused_at_construction() {
@@ -1164,7 +1164,7 @@ fn near_on(port: u16) -> String {
         .replace("127.0.0.1:9000", &format!("127.0.0.1:{port}"))
 }
 
-/// Q-8 (DEC-156 15:35 Unresolved, leader 19:12 refuse): a loopback plugin port inside the
+/// A loopback plugin port inside the
 /// ports the system hands out refuses that plugin alone, with a plain reason naming the
 /// range; ports outside it, and hosts that are not loopback, stay usable.
 #[test]
@@ -1202,7 +1202,7 @@ fn a_loopback_plugin_port_inside_the_handed_out_range_is_refused_alone_with_the_
     );
 }
 
-/// Q-8: a plugin on a port the engine says the system hands out reads Refused with the
+/// A plugin on a port the engine says the system hands out reads Refused with the
 /// reason in the listing and the trust screen, never runs, and is left out of the ports a
 /// launch keeps free; the other plugins keep their ports. The engine passes the range in.
 #[test]
@@ -1242,7 +1242,7 @@ fn a_plugin_on_a_handed_out_port_is_refused_and_left_out_of_the_kept_ports() {
     }
 }
 
-/// Q-8: with no handed-out range (macOS keeps every loopback plugin port free of agents in
+/// With no handed-out range (macOS keeps every loopback plugin port free of agents in
 /// its profile), a plugin on any port stays usable and listed for the sandbox.
 #[test]
 fn with_no_handed_out_range_a_plugin_on_any_port_stays_usable() {
@@ -1262,7 +1262,7 @@ fn with_no_handed_out_range_a_plugin_on_any_port_stays_usable() {
     ));
 }
 
-/// H2 sec N3: a crash between a staged write and its rename leaves a `.replace-<id>` key
+/// A crash between a staged write and its rename leaves a `.replace-<id>` key
 /// copy in a key folder, or an `.add-<id>` or `.old-<id>` folder in the plugins folder. The
 /// start sweep deletes them and keeps every saved key and plugin.
 #[test]
@@ -1307,7 +1307,7 @@ fn the_start_sweep_deletes_staged_leftovers_and_keeps_saved_keys_and_files() {
     assert_eq!(loaded.bindings.len(), 1);
 }
 
-/// H2 plan row: a key the owner entered for a plugin is never readable through the plugin
+/// A key the owner entered for a plugin is never readable through the plugin
 /// state read. The listing, its JSON, the three store tables and the loaded plugin hold no
 /// key byte; the key comes back only through `secret_value`.
 #[test]
@@ -1338,7 +1338,7 @@ fn a_saved_key_is_never_readable_through_the_plugin_state_read() {
     assert_eq!(value.expose(), key);
 }
 
-/// H2 plan row: the trust row binds the SHA-256 of the text the owner reviewed.
+/// The trust row binds the SHA-256 of the text the owner reviewed.
 #[test]
 fn the_trust_row_binds_the_sha256_of_the_reviewed_text() {
     let case = case();

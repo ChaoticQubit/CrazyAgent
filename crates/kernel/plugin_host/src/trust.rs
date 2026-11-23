@@ -40,7 +40,7 @@ pub(crate) fn reviewed(
     Ok(trusted.as_deref() == Some(manifest.sha256.as_str()))
 }
 
-/// The trust screen for a re-review (owner O1): whether the text changed since the trust
+/// The trust screen for a re-review: whether the text changed since the trust
 /// row, and the hosts it reaches that the row does not hold, listed first. A plugin with no
 /// trust row reads as a first review: unchanged, nothing grew. Inputs: the database, the
 /// manifest and whether it replaces a user plugin. Output: the trust screen, or

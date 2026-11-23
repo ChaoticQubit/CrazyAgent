@@ -94,7 +94,7 @@ fn a_plugin_id_outside_the_folder_rule_is_refused() {
     }
 }
 
-/// POD-F-F2A-SA1: a FIFO named `plugin.toml` is refused at once, never waited on.
+/// A FIFO named `plugin.toml` is refused at once, never waited on.
 #[cfg(unix)]
 #[test]
 fn a_fifo_plugin_toml_is_refused_without_waiting() {
@@ -111,7 +111,7 @@ fn a_fifo_plugin_toml_is_refused_without_waiting() {
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }
 
-/// POD-F-F2A-SA1: a `plugin.toml` that is a link is refused, even to a valid file.
+/// A `plugin.toml` that is a link is refused, even to a valid file.
 #[cfg(unix)]
 #[test]
 fn a_linked_plugin_toml_is_refused() {
@@ -130,7 +130,7 @@ fn a_linked_plugin_toml_is_refused() {
     );
 }
 
-/// POD-F-F2A-SA1: the guarded open reads a regular file byte for byte.
+/// The guarded open reads a regular file byte for byte.
 #[test]
 fn a_regular_plugin_toml_reads_byte_equal_through_the_guarded_open() {
     let text = manifest_text("agent-quit");
@@ -141,7 +141,7 @@ fn a_regular_plugin_toml_reads_byte_equal_through_the_guarded_open() {
     );
 }
 
-/// POD-F-F2A-SA1: on Windows a `plugin.toml` that is a reparse point (a symbolic link) is
+/// On Windows a `plugin.toml` that is a reparse point (a symbolic link) is
 /// refused.
 #[cfg(windows)]
 #[test]
@@ -320,7 +320,7 @@ fn the_allowlist_walks_target_tables() {
     assert_eq!(outside_allowlist(text).len(), 2);
 }
 
-/// POD-F-F2B1-SA5: a renamed entry is judged by the crate behind it, so an allowed key
+/// A renamed entry is judged by the crate behind it, so an allowed key
 /// cannot carry an SDK or engine crate, and a `workspace = true` entry by its root name.
 #[test]
 fn the_allowlist_judges_the_crate_behind_a_renamed_entry() {

@@ -632,7 +632,7 @@ fn a_body_value_toml_has_and_json_does_not_is_refused() {
     assert_eq!(refused(&nan).0, "app_plugin_field_invalid");
 }
 
-/// POD-F-F2B1-SA1: a key outside the plain key rule under `[http]`, its headers or its
+/// A key outside the plain key rule under `[http]`, its headers or its
 /// body, at any depth, is refused naming only the table it sits in, so no key text reaches
 /// the refusal shown on the trust screen.
 #[test]
@@ -677,7 +677,7 @@ fn a_key_outside_the_plain_rule_is_refused_naming_only_its_table() {
     );
 }
 
-/// POD-F-F2B1-SA2: the title and description refuse every Unicode mark that reorders or
+/// The title and description refuse every Unicode mark that reorders or
 /// hides text on the trust screen.
 #[test]
 fn a_title_or_description_with_a_bidi_or_zero_width_mark_is_refused() {
@@ -705,7 +705,7 @@ fn a_title_or_description_with_a_bidi_or_zero_width_mark_is_refused() {
     }
 }
 
-/// POD-F-F2B1-SA3: an embedding plugin asks the kernel for nothing, since the engine's HTTP
+/// An embedding plugin asks the kernel for nothing, since the engine's HTTP
 /// runner makes its call, so a permission is refused.
 #[test]
 fn an_embedding_plugin_with_permissions_is_refused() {
@@ -721,7 +721,7 @@ fn an_embedding_plugin_with_permissions_is_refused() {
     );
 }
 
-/// POD-F-F2B1-SA3: an embedding source is T2, so any other tier is refused.
+/// An embedding source is T2, so any other tier is refused.
 #[test]
 fn an_embedding_plugin_outside_t2_is_refused() {
     for tier in ["t1", "t3"] {
@@ -736,7 +736,7 @@ fn an_embedding_plugin_outside_t2_is_refused() {
     }
 }
 
-/// POD-F-F2B1-SA4: the declared kind is read from at most `MANIFEST_BYTES_MAX` bytes.
+/// The declared kind is read from at most `MANIFEST_BYTES_MAX` bytes.
 #[test]
 fn the_declared_kind_of_a_text_over_the_bound_is_none() {
     let head = "kind = \"embedding\"\n";
