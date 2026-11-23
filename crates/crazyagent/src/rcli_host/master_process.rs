@@ -484,7 +484,7 @@ mod tests {
     fn cleanup_stops_what_a_sandboxed_rcli_master_detached() {
         use crate::sandbox::warden::fixture::{DetachingRun, survivors};
 
-        let run = DetachingRun::new();
+        let run = DetachingRun::new(&crate::sandbox::PROFILE_HOOKS);
         let mut command = run.command(&run.profile);
         command
             .stdin(Stdio::piped())

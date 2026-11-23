@@ -517,7 +517,7 @@ mod tests {
     #[test]
     fn a_checked_server_in_the_agent_boundary_leaves_nothing_it_detached() {
         use crate::sandbox::warden::fixture::{DetachingRun, survivors};
-        let run = DetachingRun::new();
+        let run = DetachingRun::new(&crate::sandbox::PROFILE_HOOKS);
         let (processes, checked) = std::thread::scope(|scope| {
             let check = scope.spawn(|| {
                 check_command(

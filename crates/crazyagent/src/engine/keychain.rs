@@ -652,7 +652,8 @@ mod tests {
         std::fs::create_dir(&home).unwrap();
         std::fs::set_permissions(&home, std::os::unix::fs::PermissionsExt::from_mode(0o700))
             .unwrap();
-        let agent = crate::sandbox::test_agent::TestAgent::with_home(&home);
+        let agent =
+            crate::sandbox::test_agent::TestAgent::with_home(&crate::sandbox::PROFILE_HOOKS, &home);
         let preferences = agent.peer.join("Preferences");
         let keychains = agent.peer.join("Keychains");
         std::fs::create_dir(&preferences).unwrap();
@@ -926,7 +927,8 @@ mod tests {
         assert!(child.wait().unwrap().success());
         assert_eq!(keychain.find("crazyagent-unnamed-test"), "unnamed");
 
-        let agent = crate::sandbox::test_agent::TestAgent::with_home(&home);
+        let agent =
+            crate::sandbox::test_agent::TestAgent::with_home(&crate::sandbox::PROFILE_HOOKS, &home);
         let seen = agent.run("/usr/bin/security default-keychain -d user");
         assert!(seen.status.success());
         assert!(
@@ -946,7 +948,8 @@ mod tests {
         ];
         let plist = home.join("Library/Preferences/com.apple.security.plist");
         let settings = std::fs::read(&plist).ok();
-        let agent = crate::sandbox::test_agent::TestAgent::with_home(&home);
+        let agent =
+            crate::sandbox::test_agent::TestAgent::with_home(&crate::sandbox::PROFILE_HOOKS, &home);
         for script in [
             "mv \"$HOME/Library\" \"$HOME/moved\"",
             "mv \"$HOME/Library/Keychains\" \"$HOME/moved\"",

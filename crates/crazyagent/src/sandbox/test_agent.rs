@@ -1,5 +1,6 @@
 use super::ProjectSandbox;
 use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::profile::ProfileHooks;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -19,28 +20,34 @@ pub(crate) struct TestAgent {
 }
 
 impl TestAgent {
-    /// Makes the folders 0700, the engine secret file and the installed profile.
-    pub(crate) fn new() -> Self {
-        Self::confined(None, SandboxNetwork::Only(Vec::new()))
+    /// Makes the folders 0700, the engine secret file and the profile installed under the
+    /// given profile hooks. Input: the hooks. Output: the confined agent.
+    pub(crate) fn new(hooks: &'static ProfileHooks) -> Self {
+        Self::confined(hooks, None, SandboxNetwork::Only(Vec::new()))
     }
 
     /// Like `new`, with the network open, as a tools-on agent with network has it: the
     /// agent may bind and listen on any port its profile does not keep from it. Output: the
     /// confined agent.
-    pub(crate) fn open() -> Self {
-        Self::confined(None, SandboxNetwork::Open)
+    pub(crate) fn open(hooks: &'static ProfileHooks) -> Self {
+        Self::confined(hooks, None, SandboxNetwork::Open)
     }
 
     /// Like `new`, with an existing folder as the agent's writable home, as the team runtime
     /// gives each agent a home of its own. Input: the 0700 home. Output: the confined agent.
-    pub(crate) fn with_home(home: &Path) -> Self {
+    pub(crate) fn with_home(hooks: &'static ProfileHooks, home: &Path) -> Self {
         Self::confined(
+            hooks,
             Some(home.canonicalize().unwrap()),
             SandboxNetwork::Only(Vec::new()),
         )
     }
 
-    fn confined(given: Option<PathBuf>, network: SandboxNetwork) -> Self {
+    fn confined(
+        hooks: &'static ProfileHooks,
+        given: Option<PathBuf>,
+        network: SandboxNetwork,
+    ) -> Self {
         let temp = tempfile::tempdir_in("/tmp").unwrap();
         let root = temp.path().canonicalize().unwrap();
         let project = root.join("project");
@@ -58,16 +65,10 @@ impl TestAgent {
             "{\"engine_secret\":\"FIXTURE-ENGINE-SECRET\"}",
         )
         .unwrap();
-        let sandbox = ProjectSandbox::new(
-            &crate::sandbox::PROFILE_HOOKS,
-            &project,
-            &home,
-            &tmp,
-            network,
-        )
-        .unwrap()
-        .guard_engine(&runtime)
-        .unwrap();
+        let sandbox = ProjectSandbox::new(hooks, &project, &home, &tmp, network)
+            .unwrap()
+            .guard_engine(&runtime)
+            .unwrap();
         let profile = profiles.join("agent-1.sb");
         sandbox.install(&profile).unwrap();
         Self {

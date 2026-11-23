@@ -1,4 +1,5 @@
 use super::super::{ProjectSandbox, SandboxNetwork, SandboxRemote, agent_command};
+use kernel_sandbox::profile::ProfileHooks;
 use rustix::process::Pid;
 use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt;
@@ -26,8 +27,9 @@ pub(crate) struct DetachingRun {
 }
 
 impl DetachingRun {
-    /// Makes the folders and installs the profile. Takes nothing. Returns the run.
-    pub(crate) fn new() -> Self {
+    /// Makes the folders and installs the profile under the given profile hooks. Takes the
+    /// hooks. Returns the run.
+    pub(crate) fn new(hooks: &'static ProfileHooks) -> Self {
         let root = tempfile::Builder::new()
             .prefix("crazyagent-warden-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -41,7 +43,7 @@ impl DetachingRun {
         let (project, home, tmp) = (folder("project"), folder("home"), folder("tmp"));
         let profile = root.path().join("agent.sb");
         ProjectSandbox::new(
-            &crate::sandbox::PROFILE_HOOKS,
+            hooks,
             &project,
             &home,
             &tmp,

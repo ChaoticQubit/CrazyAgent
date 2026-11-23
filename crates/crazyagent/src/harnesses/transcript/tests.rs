@@ -1285,7 +1285,7 @@ fn unavailable_transcript_reads_nothing() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_rollout_a_sandboxed_agent_forged_before_the_launch_never_becomes_its_transcript() {
-    let agent = crate::sandbox::test_agent::TestAgent::new();
+    let agent = crate::sandbox::test_agent::TestAgent::new(&crate::sandbox::PROFILE_HOOKS);
     let sessions = agent.home.join("sessions");
     let forged = format!(
         "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"f\",\"cwd\":\"{cwd}\"}}}}\n\

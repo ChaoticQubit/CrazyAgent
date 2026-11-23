@@ -766,7 +766,7 @@ fn a_relay_listens_only_on_a_reserved_relay_port() {
 #[cfg(target_os = "macos")]
 #[test]
 fn an_open_agent_never_listens_on_a_model_relay_port() {
-    let agent = crate::sandbox::test_agent::TestAgent::open();
+    let agent = crate::sandbox::test_agent::TestAgent::open(&crate::sandbox::PROFILE_HOOKS);
     let block = kernel_sandbox::ports::RELAY_PORTS;
     for port in [*block.start(), *block.end()] {
         for host in ["127.0.0.1", "::1", "0.0.0.0", "::"] {
