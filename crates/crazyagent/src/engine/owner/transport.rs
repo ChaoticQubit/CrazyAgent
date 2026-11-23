@@ -194,10 +194,10 @@ impl Root {
     fn open(path: &Path) -> Result<Self, EngineError> {
         use crazyagent_win_sandbox::private;
         use std::os::windows::ffi::OsStrExt;
-        let path = crate::projects_home::one_spelling(path.to_path_buf());
+        let path = kernel_sandbox::paths::one_spelling(path.to_path_buf());
         if !path
             .to_str()
-            .is_some_and(crate::sandbox::windows_clean_text)
+            .is_some_and(kernel_sandbox::paths::windows_clean_text)
         {
             return Err(failure("owner_root_requires_canonical_trusted_path"));
         }
@@ -1776,7 +1776,7 @@ impl OwnerServer {
             while let Some(result) = tasks.terminals.try_join_next() {
                 log_panic(&result, "owner_terminal_panicked");
             }
-            if tasks.terminals.len() >= crate::terminal::CONNECTIONS_MAX {
+            if tasks.terminals.len() >= kernel_processes::terminal::CONNECTIONS_MAX {
                 self.refuse_terminal(stream, auth, deadline, &mut tasks.refusals);
                 return;
             }
@@ -1987,7 +1987,7 @@ impl OwnerServer {
             assert!(handshakes.len() <= HANDSHAKES_MAX);
             assert!(tasks.refusals.len() <= REFUSALS_MAX);
             assert!(tasks.custody.len() <= 1);
-            assert!(tasks.terminals.len() <= crate::terminal::CONNECTIONS_MAX);
+            assert!(tasks.terminals.len() <= kernel_processes::terminal::CONNECTIONS_MAX);
             assert!(tasks.ides.len() <= crate::ide::bridge::CONNECTIONS_MAX);
         };
         drop(upkeep_stop);

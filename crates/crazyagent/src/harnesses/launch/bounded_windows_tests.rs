@@ -4,11 +4,12 @@ use super::{
 };
 use crate::sandbox::windows::{HELPER_NAME, container_name};
 use crate::sandbox::{
-    AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, InstalledSandbox, LineageCheck, LinuxSupervisor,
-    ProjectSandbox, SandboxNetwork,
+    AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, InstalledSandbox, LineageCheck, ProjectSandbox,
 };
 use crazyagent_win_sandbox::private;
 use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
+use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::settings::LinuxSupervisor;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -71,7 +72,7 @@ fn helper_beside() {
 fn case() -> Case {
     helper_beside();
     let temp = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(temp.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(temp.path()).unwrap();
     let project = base.join("project");
     let home = base.join("agent").join("home");
     let tmp = base.join("agent").join("tmp");
@@ -381,7 +382,7 @@ fn a_home_granted_another_container_than_its_boundary_is_refused() {
 #[test]
 fn grants_folder_outside_the_plain_drive_spelling_is_refused() {
     let temp = tempfile::tempdir().unwrap();
-    let plain = crate::sandbox::canonical(temp.path())
+    let plain = kernel_sandbox::paths::canonical(temp.path())
         .unwrap()
         .join("grants");
     assert_eq!(crate::sandbox::plain_grants(plain.clone()).unwrap(), plain);
@@ -393,7 +394,7 @@ fn grants_folder_outside_the_plain_drive_spelling_is_refused() {
     ] {
         let error = crate::sandbox::plain_grants(PathBuf::from(refused)).unwrap_err();
         assert!(
-            matches!(error, crate::sandbox::SandboxError::Invalid(_)),
+            matches!(error, kernel_sandbox::error::SandboxError::Invalid(_)),
             "{refused}: {error:?}"
         );
     }

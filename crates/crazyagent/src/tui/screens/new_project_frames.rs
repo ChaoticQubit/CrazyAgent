@@ -491,7 +491,7 @@ fn an_empty_sub_agent_list_with_a_team_maximum_of_one_says_no_sub_agent_runs() {
 
 #[test]
 fn review_names_nested_git_once_and_only_as_the_engine_sends_it() {
-    use crate::sandbox::LINUX_NESTED_GIT_LINE;
+    use kernel_sandbox::lines::LINUX_NESTED_GIT_LINE;
     let look = Look::plain();
     let shown = |wizard: &Wizard| {
         compose(&wizard_screen(wizard, 80, 120, &look), 80, 120, "", &look)
@@ -524,7 +524,7 @@ fn review_names_nested_git_once_and_only_as_the_engine_sends_it() {
 
 #[test]
 fn review_says_what_this_linux_cannot_hold_for_the_chosen_level() {
-    use crate::sandbox::{LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE};
+    use kernel_sandbox::lines::{LINUX_PROCESS_LIST_LINE, LINUX_SIGNALS_LINE};
     let look = Look::plain();
     let shown = |wizard: &Wizard| {
         compose(&wizard_screen(wizard, 80, 120, &look), 80, 120, "", &look)

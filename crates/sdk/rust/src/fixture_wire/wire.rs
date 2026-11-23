@@ -130,7 +130,7 @@ pub fn check_store_input(blob: &Blob, plain: &Plain, _at: &u64) -> Result<(), Re
         Ok(())
     } else {
         Err(Refusal::Rejected {
-            code: alloc::string::String::from("cap_input_too_large"),
+            code: core::convert::From::from("cap_input_too_large"),
         })
     }
 }
@@ -142,7 +142,7 @@ pub fn check_store_output(output: &Blob) -> Result<(), Refusal> {
         Ok(())
     } else {
         Err(Refusal::Failed {
-            code: alloc::string::String::from("cap_output_too_large"),
+            code: core::convert::From::from("cap_output_too_large"),
         })
     }
 }
@@ -154,7 +154,7 @@ pub fn check_peek_input(plain: &Plain) -> Result<(), Refusal> {
         Ok(())
     } else {
         Err(Refusal::Rejected {
-            code: alloc::string::String::from("cap_input_too_large"),
+            code: core::convert::From::from("cap_input_too_large"),
         })
     }
 }
@@ -172,7 +172,7 @@ pub fn check_blobs_input(plain: &Plain) -> Result<(), Refusal> {
         Ok(())
     } else {
         Err(Refusal::Rejected {
-            code: alloc::string::String::from("cap_input_too_large"),
+            code: core::convert::From::from("cap_input_too_large"),
         })
     }
 }
@@ -184,7 +184,7 @@ pub fn check_blobs_output(output: &[Blob]) -> Result<(), Refusal> {
         Ok(())
     } else {
         Err(Refusal::Failed {
-            code: alloc::string::String::from("cap_output_too_large"),
+            code: core::convert::From::from("cap_output_too_large"),
         })
     }
 }
@@ -196,7 +196,7 @@ pub fn check_nested_input(values: &[core::option::Option<u64>]) -> Result<(), Re
         Ok(())
     } else {
         Err(Refusal::Rejected {
-            code: alloc::string::String::from("cap_input_too_large"),
+            code: core::convert::From::from("cap_input_too_large"),
         })
     }
 }
@@ -208,7 +208,7 @@ pub fn check_nested_output(output: &[core::option::Option<u64>]) -> Result<(), R
         Ok(())
     } else {
         Err(Refusal::Failed {
-            code: alloc::string::String::from("cap_output_too_large"),
+            code: core::convert::From::from("cap_output_too_large"),
         })
     }
 }
@@ -224,7 +224,7 @@ pub fn check_archive_input(
         Ok(())
     } else {
         Err(Refusal::Rejected {
-            code: alloc::string::String::from("cap_input_too_large"),
+            code: core::convert::From::from("cap_input_too_large"),
         })
     }
 }
@@ -236,7 +236,7 @@ pub fn check_archive_output(output: &core::option::Option<Blob>) -> Result<(), R
         Ok(())
     } else {
         Err(Refusal::Failed {
-            code: alloc::string::String::from("cap_output_too_large"),
+            code: core::convert::From::from("cap_output_too_large"),
         })
     }
 }

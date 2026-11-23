@@ -776,7 +776,7 @@ fn check(
     text.push_str(&format!("    if {} {{\n", conditions.join(" && ")));
     text.push_str("        Ok(())\n    } else {\n");
     text.push_str(&format!(
-        "        Err(Refusal::{variant} {{\n            code: alloc::string::String::from(\"{code}\"),\n        }})\n"
+        "        Err(Refusal::{variant} {{\n            code: core::convert::From::from(\"{code}\"),\n        }})\n"
     ));
     text.push_str("    }\n}\n");
 }

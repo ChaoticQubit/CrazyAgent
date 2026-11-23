@@ -194,16 +194,16 @@ pub fn read_channel(root: &Path) -> Result<Channel, UpdateError> {
 }
 
 /// Writes the update channel to `<root>/update.toml` (owner-only on Unix), replacing the
-/// file atomically. The caller has made the data folder. Inputs: the data folder and the
-/// channel. Output: Ok, or `update_io`.
+/// file atomically. Each call writes its own temporary file in that folder, named for this
+/// process and the call, and removes it if the save fails before the rename, so writers at
+/// the same moment never touch each other's file and the last rename wins whole. The caller
+/// has made the data folder. Inputs: the data folder and the channel. Output: Ok, or
+/// `update_io`.
 pub fn write_channel(root: &Path, channel: Channel) -> Result<(), UpdateError> {
+    static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let failed = |error| io_failure("Can't save the update channel", error);
-    let temporary = root.join(".update.toml.new");
-    if let Err(error) = std::fs::remove_file(&temporary)
-        && error.kind() != ErrorKind::NotFound
-    {
-        return Err(failed(error));
-    }
+    let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = root.join(format!(".update.toml.{}.{call}.new", std::process::id()));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -212,10 +212,17 @@ pub fn write_channel(root: &Path, channel: Channel) -> Result<(), UpdateError> {
         options.mode(0o600);
     }
     let mut file = options.open(&temporary).map_err(failed)?;
-    file.write_all(format!("channel = \"{}\"\n", channel.as_str()).as_bytes())
+    let saved = file
+        .write_all(format!("channel = \"{}\"\n", channel.as_str()).as_bytes())
         .and_then(|()| file.sync_all())
-        .map_err(failed)?;
-    std::fs::rename(&temporary, root.join("update.toml")).map_err(failed)
+        .and_then(|()| {
+            drop(file);
+            std::fs::rename(&temporary, root.join("update.toml"))
+        });
+    if saved.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    saved.map_err(failed)
 }
 
 /// A release manifest (`cli-latest.json`): the version and one archive per Rust target.
@@ -287,11 +294,11 @@ pub fn target() -> Option<&'static str> {
     }
 }
 
-/// Whether a published version is newer than the running one, as semver (dev builds sort
-/// below their stable). Inputs: both versions. Output: the answer or
-/// `update_manifest_invalid`.
+/// Whether a published version is newer than the running one, by semver precedence: dev
+/// builds sort below their stable, and build metadata does not count. Inputs: both versions.
+/// Output: the answer or `update_manifest_invalid`.
 pub fn is_newer(available: &str, current: &str) -> Result<bool, UpdateError> {
-    Ok(version(available)? > version(current)?)
+    Ok(version(available)?.cmp_precedence(&version(current)?) == std::cmp::Ordering::Greater)
 }
 
 fn allowed_url(text: &str) -> Result<url::Url, UpdateError> {

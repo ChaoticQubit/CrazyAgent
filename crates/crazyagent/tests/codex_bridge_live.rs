@@ -11,10 +11,12 @@ use crazyagent::harnesses::interactive::{Run, command};
 use crazyagent::harnesses::launch::{AccountBinding, LaunchBoundary, LaunchLimits, LaunchRequest};
 use crazyagent::harnesses::{HarnessStatus, Search, catalog};
 use crazyagent::protocol::ProjectId;
-use crazyagent::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
+use crazyagent::sandbox::ProjectSandbox;
 use crazyagent::team::runtime::agent_home;
+use crazyagent::terminal::FOLDER;
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
-use crazyagent::terminal::{AgentId, FOLDER, Host};
+use kernel_processes::terminal::{AgentId, Host};
+use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use std::collections::BTreeSet;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -276,7 +278,10 @@ fn start_app(base: &Path, home: &Path, agent: &AgentId) -> (Server, Tmux) {
     };
     let host = Tmux::open(Some(tmux), &folder);
     let pane = host
-        .spawn(agent, &crazyagent::terminal::PaneCommand::from(&built))
+        .spawn(
+            agent,
+            &kernel_processes::terminal::PaneCommand::from(&built),
+        )
         .unwrap();
     server.group = Some(pgid_support::pane_group(pane.pid));
     until(START, "the app server's control socket", || {

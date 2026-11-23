@@ -528,7 +528,7 @@ impl Repo {
         }
         let folders = std::iter::once(repository)
             .chain(work_tree)
-            .map(crate::sandbox::canonical)
+            .map(kernel_sandbox::paths::canonical)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| failure("changes_git_failed"))?;
         let includes = repo.exec(&INCLUDE_KEYS, None, &[], LISTING_BYTES_MAX)?;

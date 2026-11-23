@@ -1,4 +1,4 @@
-use crate::terminal::{HostError, SIZE_MAX, SIZE_MIN};
+use kernel_processes::terminal::{HostError, SIZE_MAX, SIZE_MIN};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 

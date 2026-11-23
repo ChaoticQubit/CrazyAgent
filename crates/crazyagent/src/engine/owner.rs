@@ -272,7 +272,7 @@ pub enum OwnerMutation {
         profile: crate::owner_profile::OwnerProfile,
     },
     SetSandboxSettings {
-        settings: crate::sandbox_settings::SandboxSettings,
+        settings: kernel_sandbox::settings::SandboxSettings,
         version: u64,
     },
     SetCleanupSettings {
@@ -283,6 +283,9 @@ pub enum OwnerMutation {
     },
     SetProviderRetry {
         choice: crate::provider_retry::ProviderRetry,
+    },
+    SetLogCompaction {
+        choice: crate::log_compaction::LogCompaction,
     },
     SetMasterStepSettings {
         settings: crate::master_step_limit::MasterStepSettings,
@@ -636,6 +639,7 @@ impl OwnerMutation {
                 settings: *settings,
             },
             Self::SetProviderRetry { choice } => Command::OwnerProviderRetry { choice: *choice },
+            Self::SetLogCompaction { choice } => Command::OwnerLogCompaction { choice: *choice },
             Self::SetMasterStepSettings { settings } => Command::OwnerMasterSteps {
                 settings: *settings,
             },
@@ -851,6 +855,7 @@ pub enum OwnerRead {
     CleanupSettings,
     QuitSettings,
     ProviderRetry,
+    LogCompaction,
     MasterStepSettings,
     MasterTimeSettings,
     MasterFrameSettings,
@@ -957,6 +962,7 @@ impl OwnerRead {
             | Self::CleanupSettings
             | Self::QuitSettings
             | Self::ProviderRetry
+            | Self::LogCompaction
             | Self::MasterStepSettings
             | Self::MasterTimeSettings
             | Self::MasterFrameSettings
@@ -1308,7 +1314,7 @@ pub enum OwnerData {
         profile: Option<crate::owner_profile::OwnerProfile>,
     },
     SandboxSettings {
-        settings: crate::sandbox_settings::SandboxSettings,
+        settings: kernel_sandbox::settings::SandboxSettings,
         version: u64,
     },
     CleanupSettings {
@@ -1319,6 +1325,9 @@ pub enum OwnerData {
     },
     ProviderRetry {
         settings: crate::provider_retry::ProviderRetryView,
+    },
+    LogCompaction {
+        settings: crate::log_compaction::LogCompactionView,
     },
     MasterStepSettings {
         settings: crate::master_step_limit::MasterStepSettings,

@@ -31,15 +31,18 @@ pub fn single_component(text: &str) -> bool {
 pub const IDENTITY_REFUSED: &str = "identity must be 1..128 safe ASCII bytes";
 
 /// Checks one engine identity: 1 to 128 ASCII letters, digits, `-`, `_`, `.` or `:`, no
-/// `..`, and one plain path component ([`single_component`]). Input: the text. Output: Ok,
-/// or [`IDENTITY_REFUSED`].
+/// `..`, not starting with one letter and `:` (a drive on Windows, refused on every OS so
+/// an identity is valid everywhere or nowhere), and one plain path component
+/// ([`single_component`]). Input: the text. Output: Ok, or [`IDENTITY_REFUSED`].
 pub fn validate_identity(value: &str) -> Result<(), &'static str> {
+    let drive = matches!(value.as_bytes(), [letter, b':', ..] if letter.is_ascii_alphabetic());
     if value.is_empty()
         || value.len() > 128
         || !value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
         || value.contains("..")
+        || drive
         || !single_component(value)
     {
         return Err(IDENTITY_REFUSED);

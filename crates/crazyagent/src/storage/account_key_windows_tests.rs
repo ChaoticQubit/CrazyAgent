@@ -2,8 +2,9 @@ use super::{ACCOUNT_KEYS, read_key_file, remove_key_file, replace_key_file, stor
 use crate::harnesses::launch::low_probe::{Try, low_probe, probe};
 use crate::protocol::CredentialRef;
 use crate::sandbox::windows::{HELPER_NAME, WindowsSandbox};
-use crate::sandbox::{ProjectSandbox, Sandbox, SandboxNetwork};
+use crate::sandbox::{ProjectSandbox, Sandbox};
 use crazyagent_win_sandbox::{dacl, private};
+use kernel_sandbox::net::SandboxNetwork;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -169,7 +170,7 @@ fn boxed_read(installed: &WindowsSandbox, project: &Path, path: &Path) -> bool {
 #[test]
 fn an_app_container_agent_cannot_read_a_key_inside_its_project() {
     let temp = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(temp.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(temp.path()).unwrap();
     let project = base.join("project");
     let home = base.join("agent").join("home");
     let tmp = base.join("agent").join("tmp");

@@ -12,7 +12,9 @@ fn name(text: &'static str) -> Name {
 /// on Windows. Output: the temp guard and the folder's canonical path.
 fn private_root() -> (tempfile::TempDir, PathBuf) {
     let temp = tempfile::tempdir().unwrap();
-    let root = crate::sandbox::canonical(temp.path()).unwrap().join("root");
+    let root = kernel_sandbox::paths::canonical(temp.path())
+        .unwrap()
+        .join("root");
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;

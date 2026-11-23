@@ -72,7 +72,7 @@ pub fn check_put_from_owner_input(name: &str) -> Result<(), Refusal> {
         Ok(())
     } else {
         Err(Refusal::Rejected {
-            code: alloc::string::String::from("cap_input_too_large"),
+            code: core::convert::From::from("cap_input_too_large"),
         })
     }
 }
@@ -90,7 +90,7 @@ pub fn check_find_input(name: &str) -> Result<(), Refusal> {
         Ok(())
     } else {
         Err(Refusal::Rejected {
-            code: alloc::string::String::from("cap_input_too_large"),
+            code: core::convert::From::from("cap_input_too_large"),
         })
     }
 }

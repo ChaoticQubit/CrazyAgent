@@ -1,7 +1,7 @@
 use crate::engine::EngineError;
 use crate::engine::owner::{HostStamp, OwnerRuntimeHandle, failure};
 use crate::protocol::ProjectId;
-use crate::terminal::{AgentId, Host};
+use kernel_processes::terminal::{AgentId, Host};
 use rusqlite::{OptionalExtension, params};
 use std::path::{Path, PathBuf};
 

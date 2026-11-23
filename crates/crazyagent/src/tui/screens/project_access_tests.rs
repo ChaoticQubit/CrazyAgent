@@ -14,8 +14,8 @@ use crate::sandbox::shared_folders::{
     CHOSEN_MAX, OFF_MACOS_LINE, SharedAccess, SharedFolders, SharedScope, UNREACHABLE_SECRETS_LINE,
 };
 use crate::sandbox::toolchains::Toolchain;
-use crate::sandbox::{LINUX_NESTED_GIT_LINE, LINUX_PORTS_ANY_HOST_LINE};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use kernel_sandbox::lines::{LINUX_NESTED_GIT_LINE, LINUX_PORTS_ANY_HOST_LINE};
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -717,7 +717,7 @@ fn the_box_names_nested_git_once_and_only_as_the_engine_sends_it_for_the_level()
 
 #[test]
 fn the_box_shows_what_the_engine_says_this_linux_cannot_hold_for_the_level() {
-    use crate::sandbox::LINUX_SIGNALS_LINE;
+    use kernel_sandbox::lines::LINUX_SIGNALS_LINE;
     let mut told = view();
     assert_eq!(told.levels[0].access, AgentAccess::Sandboxed);
     told.levels[0].gaps = vec![LINUX_SIGNALS_LINE.to_owned()];

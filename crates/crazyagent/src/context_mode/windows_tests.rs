@@ -17,7 +17,7 @@ struct Case {
 /// removed when dropped.
 fn case() -> Case {
     let directory = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(directory.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(directory.path()).unwrap();
     let root = base.join("engine");
     let bin = root.join("setup").join("bin");
     fs::create_dir_all(root.join("setup").join("npm")).unwrap();
@@ -116,7 +116,7 @@ fn npm_runs_through_node_exe_and_npm_cli_never_npm_cmd() {
 /// step only, while `node --version` keeps no network (leader 04:22 and 04:36, answer A).
 #[test]
 fn the_install_step_gets_the_open_network_on_windows() {
-    assert_eq!(os::npm_network(), crate::sandbox::SandboxNetwork::Open);
+    assert_eq!(os::npm_network(), kernel_sandbox::net::SandboxNetwork::Open);
 }
 
 /// WIN-CONTEXT-MODE: the program hash never reads through a link at the program path, and a
@@ -262,8 +262,8 @@ fn any_other_server_launches_as_approved_on_windows() {
 /// the call supervisor's default whatever the owner stored, since only Linux reads them.
 #[test]
 fn the_windows_install_steps_take_strict_off_whatever_is_stored() {
-    use crate::sandbox::{LinuxStrict, LinuxSupervisor};
-    use crate::sandbox_settings::SandboxSettings;
+    use kernel_sandbox::settings::SandboxSettings;
+    use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
     let case = case();
     let connection = rusqlite::Connection::open(case.root.join("engine.db")).unwrap();
     crate::sandbox_settings::initialize(&connection).unwrap();
@@ -292,7 +292,7 @@ fn system_bin() -> PathBuf {
     let Some(bin) = found else {
         panic!("UNAVAILABLE: node.exe and npm's npm-cli.js on PATH");
     };
-    let bin = crate::sandbox::canonical(&bin).unwrap();
+    let bin = kernel_sandbox::paths::canonical(&bin).unwrap();
     assert!(bin.join(NODE).is_file());
     bin
 }
@@ -620,8 +620,10 @@ fn the_release_takes_back_what_the_npm_job_was_granted() {
     let work = staging_folder(&npm, &format!("{prefix}-work")).unwrap();
     let staged = staging_folder(&npm, &prefix).unwrap();
     let before = entries(&staged);
-    let job = crate::sandbox::canonical(&staged).unwrap();
-    let home = crate::sandbox::canonical(&work).unwrap().join("home");
+    let job = kernel_sandbox::paths::canonical(&staged).unwrap();
+    let home = kernel_sandbox::paths::canonical(&work)
+        .unwrap()
+        .join("home");
     let (record, package) = container_files(&crate::sandbox::windows::container_for(&job, &home));
     let mut command = npm_command(&case.root, &staged, &work, &case.bin, VERSION).unwrap();
     let ran = kernel_processes::spawn_gate::collected(&mut command).unwrap();
@@ -642,7 +644,7 @@ fn the_release_takes_back_what_the_npm_job_was_granted() {
 #[test]
 fn a_refused_release_reports_false_and_keeps_the_profile() {
     let case = case();
-    let base = crate::sandbox::canonical(&case.root).unwrap();
+    let base = kernel_sandbox::paths::canonical(&case.root).unwrap();
     let folders = ["project", "home", "tmp"].map(|name| base.join("job").join(name));
     for folder in &folders {
         fs::create_dir_all(folder).unwrap();
@@ -658,7 +660,7 @@ fn a_refused_release_reports_false_and_keeps_the_profile() {
         &folders[0],
         &folders[1],
         &folders[2],
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap();
     let mut forged = crate::sandbox::windows::boundary_profile(&sandbox, &grants).unwrap();
@@ -678,7 +680,7 @@ fn a_refused_release_reports_false_and_keeps_the_profile() {
 fn crashed_probe(case: &Case) -> (PathBuf, PathBuf, PathBuf) {
     let npm = case.root.join("setup").join("npm");
     let scratch = staging_folder(&npm, NODE_CHECK).unwrap();
-    let base = crate::sandbox::canonical(&scratch).unwrap();
+    let base = kernel_sandbox::paths::canonical(&scratch).unwrap();
     let name = crate::sandbox::windows::container_for(&base.join("project"), &base.join("home"));
     let (record, package) = container_files(&name);
     let mut command = node_command(&case.root, &scratch, &case.bin).unwrap();
@@ -754,8 +756,10 @@ fn an_npm_install_releases_the_container_a_crashed_install_left() {
     let random = staged.file_name().unwrap().to_str().unwrap()[prefix.len() + 2..].to_owned();
     let work = npm.join(format!(".{prefix}-work-{random}"));
     fs::create_dir(&work).unwrap();
-    let job = crate::sandbox::canonical(&staged).unwrap();
-    let home = crate::sandbox::canonical(&work).unwrap().join("home");
+    let job = kernel_sandbox::paths::canonical(&staged).unwrap();
+    let home = kernel_sandbox::paths::canonical(&work)
+        .unwrap()
+        .join("home");
     let (record, package) = container_files(&crate::sandbox::windows::container_for(&job, &home));
     let mut command = npm_command(&case.root, &staged, &work, &case.bin, VERSION).unwrap();
     let ran = kernel_processes::spawn_gate::collected(&mut command).unwrap();
@@ -803,7 +807,7 @@ fn a_left_pair_the_profile_does_not_name_is_refused_and_still_removed() {
     let staged = staging_folder(&npm, &prefix).unwrap();
     let work = work_folder(&staged, &prefix).unwrap();
     let (job, home) = npm_job(&staged, &work).unwrap();
-    let tmp = crate::sandbox::canonical(&work).unwrap().join("tmp");
+    let tmp = kernel_sandbox::paths::canonical(&work).unwrap().join("tmp");
     for folder in [&home, &tmp] {
         fs::create_dir_all(folder).unwrap();
     }
@@ -813,7 +817,7 @@ fn a_left_pair_the_profile_does_not_name_is_refused_and_still_removed() {
         &job,
         &home,
         &tmp,
-        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+        kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
     )
     .unwrap();
     let mut forged = crate::sandbox::windows::boundary_profile(&sandbox, &grants).unwrap();

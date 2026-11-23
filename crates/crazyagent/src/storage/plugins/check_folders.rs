@@ -23,7 +23,7 @@ pub(crate) fn check_profile(checks: &Path, id: &str) -> PathBuf {
 /// container from (V243-WIN-CHECK-PROFILE-BIND). Inputs: the engine's check folder and the
 /// server id. Output: the three folders, or the error when the check folder is missing.
 pub(crate) fn check_sandbox_folders(checks: &Path, id: &str) -> std::io::Result<[PathBuf; 3]> {
-    let check = crate::sandbox::canonical(checks)?.join(id);
+    let check = kernel_sandbox::paths::canonical(checks)?.join(id);
     Ok(["project", "home", "tmp"].map(|name| check.join(name)))
 }
 

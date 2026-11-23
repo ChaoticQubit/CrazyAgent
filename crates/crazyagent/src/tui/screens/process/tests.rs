@@ -721,7 +721,7 @@ fn stale_save_shows_the_conflict_choices() {
                 outside: false,
             },
             writer: crate::storage::versioned::LastWriter::Agent(
-                crate::terminal::AgentId::team(3).unwrap(),
+                kernel_processes::terminal::AgentId::team(3).unwrap(),
             ),
         }))
     };

@@ -1,5 +1,5 @@
 use super::pane::Input;
-use crazyagent::terminal::INPUT_BYTES_MAX;
+use kernel_processes::terminal::INPUT_BYTES_MAX;
 use unicode_width::UnicodeWidthChar;
 
 #[cfg(any(windows, test))]
