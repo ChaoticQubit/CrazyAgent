@@ -3380,7 +3380,7 @@ fn owner_apply_request(
     tx.commit().map_err(error)?;
     assert_eq!(next > revision, changed);
     assert!(redacted == 0 || changed, "only an applied removal redacts");
-    if redacted > 0 && !crate::state_log::replay::checkpoint(db) {
+    if redacted > 0 && !kernel_storage::state_log::replay::checkpoint(db) {
         eprintln!("state_log_redact_checkpoint_busy");
     }
     if changed

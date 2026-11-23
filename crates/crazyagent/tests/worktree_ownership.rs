@@ -1015,7 +1015,7 @@ fn logged(database: &Path) -> Vec<(i64, String)> {
 /// Asserts that replay of the closed store's log rebuilds both worktree tables as they
 /// stand, inside a transaction that is rolled back. Input: the store's path. Output: none.
 fn replays_to_live(database: &Path) {
-    use crazyagent::state_log::replay::rows;
+    use kernel_storage::state_log::replay::rows;
     let mut db = rusqlite::Connection::open(database).unwrap();
     let tables = |db: &rusqlite::Connection| {
         (

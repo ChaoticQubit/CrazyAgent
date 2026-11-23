@@ -434,7 +434,7 @@ fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_insta
         .tempdir_in(build.parent().unwrap())
         .unwrap();
     let prefix = outside.path().canonicalize().unwrap();
-    if let Some(open) = crate::service::changeable_by_others(&prefix) {
+    if let Some(open) = kernel_processes::service::changeable_by_others(&prefix) {
         panic!("UNAVAILABLE: a build folder no other user can change, not {open:?}");
     }
     let bin = prefix.join("bin");
@@ -465,7 +465,7 @@ fn npm_linked_into_its_package_outside_every_granted_root_starts_under_the_insta
         crate::harnesses::node_prefix(&program).as_deref(),
         Some(prefix.as_path()),
         "the grant takes this prefix as npm's; changeable: {:?}",
-        crate::service::changeable_by_others(&bin.join("node"))
+        kernel_processes::service::changeable_by_others(&bin.join("node"))
     );
     let case = case("/usr/bin/false");
     case.store();
@@ -512,7 +512,7 @@ fn the_engine_s_own_node_passes_the_node_check_and_starts_npm_under_the_install_
         .tempdir_in(build.parent().unwrap())
         .unwrap();
     let base = outside.path().canonicalize().unwrap();
-    if let Some(open) = crate::service::changeable_by_others(&base) {
+    if let Some(open) = kernel_processes::service::changeable_by_others(&base) {
         panic!("UNAVAILABLE: a build folder no other user can change, not {open:?}");
     }
     let root = base.join("engine");

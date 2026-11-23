@@ -85,8 +85,11 @@ impl From<Version> for String {
 /// Runs one setup command with no input and a time limit. Input: the command, the limit,
 /// and whether to keep its standard output, which is only for short version reports;
 /// install output goes nowhere, so it can never fill a pipe. Output: up to 4 KiB of
-/// standard output, `setup_timeout` after killing it at the limit, or
-/// `setup_install_failed` when it cannot start or exits with a failure.
+/// standard output, `setup_timeout` after killing it at the limit or when its output is
+/// still open there, or `setup_install_failed` when it cannot start or exits with a failure.
+/// On Unix the command leads its own process group, and every path that stops it at the
+/// limit or on a failure, a failed exit included, kills that group, so a process it left
+/// behind ends too; a clean exit inside the limit leaves the group alone.
 pub fn run_bounded(
     command: &mut Command,
     limit: Duration,
@@ -105,14 +108,33 @@ pub fn run_bounded(
         use std::os::windows::process::CommandExt;
         command.creation_flags(CREATE_NO_WINDOW);
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child =
         crate::spawn_gate::spawn(command).map_err(|_| InstallError("setup_install_failed"))?;
+    #[cfg(unix)]
+    let pid = child.id();
     let deadline = Instant::now() + limit;
+    let report = match child.stdout.take().map(read_report).transpose() {
+        Ok(report) => report,
+        Err(failed) => {
+            #[cfg(unix)]
+            stop(pid);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(failed);
+        }
+    };
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
             outcome => {
+                #[cfg(unix)]
+                stop(pid);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(InstallError(if outcome.is_ok() {
@@ -124,17 +146,46 @@ pub fn run_bounded(
         }
     };
     if !status.success() {
+        #[cfg(unix)]
+        stop(pid);
         return Err(InstallError("setup_install_failed"));
     }
-    let mut output = Vec::new();
-    if let Some(stdout) = child.stdout.take() {
-        stdout
-            .take(BOUNDED_BYTES_MAX)
-            .read_to_end(&mut output)
-            .map_err(|_| InstallError("setup_version_unreadable"))?;
-    }
+    let Some(report) = report else {
+        return Ok(Vec::new());
+    };
+    let left = deadline.saturating_duration_since(Instant::now());
+    let output = match report.recv_timeout(left) {
+        Ok(read) => read.map_err(|_| InstallError("setup_version_unreadable"))?,
+        Err(_) => {
+            #[cfg(unix)]
+            stop(pid);
+            return Err(InstallError("setup_timeout"));
+        }
+    };
     assert!(output.len() as u64 <= BOUNDED_BYTES_MAX);
     Ok(output)
+}
+
+/// Reads a command's report on its own thread while the command runs: the first
+/// `BOUNDED_BYTES_MAX` bytes are kept and the rest is drained, so neither a full pipe nor a
+/// process that keeps the pipe open past the command's exit holds [`run_bounded`] past its
+/// limit. Input: the command's standard output. Output: where the read arrives, or
+/// `setup_install_failed` when the thread cannot start.
+fn read_report(
+    stdout: std::process::ChildStdout,
+) -> Result<std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>, InstallError> {
+    let (sent, report) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("crazyagent-setup-report".into())
+        .spawn(move || {
+            let mut kept = Vec::new();
+            let mut limited = stdout.take(BOUNDED_BYTES_MAX);
+            let read = limited.read_to_end(&mut kept).map(|_| kept);
+            let _ = std::io::copy(&mut limited.into_inner(), &mut std::io::sink());
+            let _ = sent.send(read);
+        })
+        .map_err(|_| InstallError("setup_install_failed"))?;
+    Ok(report)
 }
 
 /// Reads a tool's version from its version report, such as `tmux 3.4` or

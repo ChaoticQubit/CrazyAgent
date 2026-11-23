@@ -117,7 +117,11 @@ impl Terminals {
             env: Vec::new(),
             transcript: Transcript::Unavailable,
         };
-        host.spawn(&AgentId::team(7).unwrap(), &command).unwrap();
+        host.spawn(
+            &AgentId::team(7).unwrap(),
+            &crate::terminal::PaneCommand::from(&command),
+        )
+        .unwrap();
     }
 }
 

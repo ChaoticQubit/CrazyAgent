@@ -607,3 +607,39 @@ fn the_desktop_config_public_key_is_the_one_read() {
         assert_eq!(public_key().unwrap(), configured);
     }
 }
+
+/// A URL holding `[`, `]`, `{` or `}` reaches the server as the URL parser wrote it, in one
+/// request, never expanded by curl as a range or a list.
+#[test]
+fn a_url_with_brackets_and_braces_reaches_the_server_as_written() {
+    use std::io::{Read, Write};
+    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = crate::spawn_gate::accept_tcp_std(&listener).unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
+            head.push(byte[0]);
+        }
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .unwrap();
+        String::from_utf8(head)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap()
+            .to_owned()
+    });
+    let url = format!("http://127.0.0.1:{port}/release/x[1-2]/y{{a,b}}");
+    let mut received = Vec::new();
+    assert_eq!(
+        download(&url, &mut received, 64, Duration::from_secs(30)).unwrap(),
+        2
+    );
+    assert_eq!(received, b"ok");
+    let path = allowed_url(&url).unwrap().path().to_owned();
+    assert!(path.contains("[1-2]"), "{path}");
+    assert_eq!(server.join().unwrap(), format!("GET {path} HTTP/1.1"));
+}

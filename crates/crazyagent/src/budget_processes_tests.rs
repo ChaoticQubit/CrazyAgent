@@ -1,11 +1,11 @@
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
-use crate::paths::Platform;
-use crate::service::Service;
 use crate::terminal::buffer::Chunk;
 use crate::terminal::tmux::{Tmux, installed};
 use crate::terminal::{AgentId, Host, TerminalStream, type_into};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use kernel_common::Platform;
+use kernel_processes::service::Service;
 use kernel_processes::spawn_gate;
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
@@ -77,7 +77,8 @@ impl Fixtures {
                 env: Vec::new(),
                 transcript: Transcript::Unavailable,
             };
-            host.spawn(agent, &command).unwrap();
+            host.spawn(agent, &crate::terminal::PaneCommand::from(&command))
+                .unwrap();
         };
         let echo = AgentId::team(1).unwrap();
         #[cfg(target_os = "macos")]

@@ -48,7 +48,17 @@ fn settings_cap_generates_the_checked_in_files() {
             .iter()
             .map(|(path, _)| path.as_str())
             .collect::<Vec<_>>(),
-        vec!["host.rs", "mod.rs", "net.rs", "secrets.rs", "settings.rs"]
+        vec![
+            "envelope/mod.rs",
+            "envelope/net.rs",
+            "envelope/secrets.rs",
+            "envelope/settings.rs",
+            "host.rs",
+            "mod.rs",
+            "net.rs",
+            "secrets.rs",
+            "settings.rs"
+        ]
     );
     assert_eq!(
         drift(&sdk("rust/src/generated"), &files),

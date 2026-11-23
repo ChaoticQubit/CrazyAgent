@@ -7,7 +7,8 @@ use crate::ide::workspace::tests::{Case, add_project};
 use crate::ide::workspace::{self, AGENTS_SHOWN_MAX, follow, show_all, write};
 use crate::protocol::{ProjectId, RequestId};
 use crate::state_log::fence::{host_started, host_stopped};
-use crate::state_log::replay::{redact, rows};
+use crate::state_log::redact;
+use kernel_storage::state_log::replay::rows;
 use std::collections::BTreeMap;
 use std::os::unix::fs::MetadataExt;
 
@@ -324,7 +325,7 @@ fn an_ide_snapshot_run_replays_to_the_rows_it_was_taken_from() {
     db.execute("DELETE FROM ide_unlocked WHERE path LIKE '%/1%'", [])
         .unwrap();
     let mut projection = Projection::default();
-    replay::replay(&db, Aggregate::Ide, 0, |event| projection.apply(&db, event)).unwrap();
+    crate::state_log::replay(&db, Aggregate::Ide, 0, |event| projection.apply(&db, event)).unwrap();
     assert_eq!(tables(&db), taken);
 }
 
@@ -369,7 +370,7 @@ fn every_ide_event_body_holds_only_its_kind_keys() {
             (WORKSPACE_WRITTEN, 3),
         ])
     );
-    let read = replay::replay(&case.db, Aggregate::Ide, 0, |event| {
+    let read = crate::state_log::replay(&case.db, Aggregate::Ide, 0, |event| {
         Change::parse(event).map(|_| ())
     });
     assert!(read.is_ok());

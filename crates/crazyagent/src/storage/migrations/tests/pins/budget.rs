@@ -1,5 +1,5 @@
 use super::*;
-use crate::state_log::replay::replay;
+use crate::state_log::replay;
 use crate::state_log::{Aggregate, fence};
 use kernel_storage::state_log::{Chunk, Draft};
 use std::time::Instant;

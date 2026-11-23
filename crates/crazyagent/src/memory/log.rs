@@ -3,10 +3,10 @@ use crate::owner_texts::{self, TextDigest};
 use crate::project_setup::removed::event as removed;
 use crate::protocol::{Command, Outcome, ProjectId, RequestId};
 use crate::state_log::Aggregate;
-use crate::state_log::replay::{self, Logged};
 use crate::storage::opening::Opening;
 use kernel_storage::state_log::Appender;
 use kernel_storage::state_log::Clock;
+use kernel_storage::state_log::replay::{self, Logged};
 use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Transaction, params, params_from_iter};
@@ -829,7 +829,7 @@ fn clear(db: &Connection) -> Result<(), EngineError> {
 /// `memory_log_event_invalid` for a removal body that is not one.
 fn removals(db: &Connection) -> Result<Vec<(u64, removed::ProjectRemoved)>, EngineError> {
     let mut found = Vec::new();
-    replay::replay(db, Aggregate::Projects, 0, |logged| {
+    crate::state_log::replay(db, Aggregate::Projects, 0, |logged| {
         if logged.kind != removed::KIND {
             return Ok(());
         }
@@ -856,7 +856,7 @@ pub fn rebuild(tx: &Transaction<'_>) -> Result<Rebuilt, EngineError> {
     clear(tx)?;
     let mut missing = Vec::new();
     let mut chunk_seq = 0;
-    let last = replay::replay(tx, Aggregate::Memory, 0, |logged| {
+    let last = crate::state_log::replay(tx, Aggregate::Memory, 0, |logged| {
         while let Some((_, removal)) = removals.next_if(|(seq, _)| *seq < logged.seq) {
             forget_removed(tx, &removal.project, removal.kept)?;
         }

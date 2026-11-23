@@ -9,6 +9,7 @@ use crate::manifest::MANIFEST_BYTES_MAX;
 use crate::problem::Problem;
 use crate::store::{Keys, Loaded, binding_rows, drop_binding, refused, resolve, sqlite};
 use crate::trust;
+use crate::usage::{ChangeNotice, Holder, Lease, TurnOff, Usage};
 use crate::views::{
     Binding, Listing, Origin, PluginKind, PluginStatus, PluginView, Preview, SecretView,
 };
@@ -34,7 +35,7 @@ pub const LOOPBACK_PORTS_MAX: usize = BUNDLED.len() + USER_PLUGINS_MAX;
 
 /// What the engine hands the plugin host for one call: its root folder, its key store, and
 /// the ports this machine hands out by itself, where an agent could listen on a loopback
-/// plugin port before the plugin's server does (Q-8): Linux reads
+/// plugin port before the plugin's server does: Linux reads
 /// net.ipv4.ip_local_port_range, other systems none.
 #[derive(Debug, Clone)]
 pub struct Engine<'a> {
@@ -126,7 +127,7 @@ pub(crate) fn user_found(stem: String, read: Result<Vec<u8>, Problem>) -> Found 
 
 /// Refuses a plugin whose loopback port lies in the ports this machine hands out, that
 /// plugin alone with `app_plugin_port_handed_out`, so it never runs and no launch keeps its
-/// port (DEC-156 15:35 addendum: plugin files never stop launches). Inputs: the plugin read
+/// port, since plugin files never stop launches. Inputs: the plugin read
 /// and the range, none when nothing is handed out. Output: the same plugin, refused or not.
 pub(crate) fn outside_handed_out(found: Found, handed: Option<&RangeInclusive<u16>>) -> Found {
     let Found {
@@ -306,7 +307,7 @@ fn loopback_port(manifest: &Manifest) -> Option<u16> {
 }
 
 /// The loopback ports every plugin that can run would send to, trusted or not, on or off,
-/// for a tools-on sandbox to keep free of agent listeners (rv-code V3-PLUGINS-1 F1).
+/// for a tools-on sandbox to keep free of agent listeners.
 /// Folders past the listed cap and plugins on a port this machine hands out are skipped,
 /// since `ready` refuses them. Input: the engine facts. Output: the nonzero ports sorted
 /// once each, at most `LOOPBACK_PORTS_MAX`, none inside the handed-out range, or the
@@ -379,7 +380,7 @@ pub fn preview(db: &Connection, engine: &Engine<'_>, source: &Path) -> Result<Pr
 }
 
 /// The trust screen for a plugin already listed, such as a folder dropped into the plugins
-/// folder, with what changed and grew since the owner trusted it (O1). Inputs: the
+/// folder, with what changed and grew since the owner trusted it. Inputs: the
 /// database, the engine facts and the plugin name. Output: the trust screen, its refusal,
 /// or `app_plugin_not_found`.
 pub fn review(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<Preview, Refused> {
@@ -392,7 +393,7 @@ pub fn review(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<Previe
 }
 
 /// Copies a plugin folder the owner confirmed on its trust screen into the plugins folder,
-/// trusts it and turns it on (owner O5). The plugin.toml is read once, its SHA-256 taken
+/// trusts it and turns it on. The plugin.toml is read once, its SHA-256 taken
 /// over the bytes read, compared with the reviewed one, and only those bytes are written,
 /// so what runs is what was reviewed. Keys bound to an older version stay only while its
 /// hosts are unchanged. Inputs: database, engine facts, the picked folder, the SHA-256 the
@@ -423,24 +424,41 @@ pub fn add(
     trust::settle(db, engine, &manifest, now_ms)
 }
 
+/// Turning a plugin on, or off with what the off does to runs holding it.
+#[derive(Debug, Clone, Copy)]
+pub enum Switch<'u> {
+    On,
+    Off { usage: &'u Usage, when_off: TurnOff },
+}
+
 /// Turns a plugin on or off. A user plugin turns on only while its trusted text is
-/// unchanged. Inputs: database, engine facts, name and the new state. Output: Ok, or
-/// `app_plugin_not_found`, `_refused`, `_needs_review`.
+/// unchanged. Off writes the off state first, so the next call is refused while a call
+/// already running finishes; with [`TurnOff::StopRuns`] each run holding the plugin is then
+/// stopped once. Inputs: database, engine facts, name and the switch. Output: Ok, or
+/// `app_plugin_not_found`, `_refused`, `_needs_review`, `_changed`.
 pub fn set_enabled(
     db: &Connection,
     engine: &Engine<'_>,
     name: &str,
-    enabled: bool,
+    switch: Switch<'_>,
 ) -> Result<(), Refused> {
     prepare(db, engine)?;
     let found = found(engine, name)?;
-    if enabled {
-        let manifest = found.parsed.map_err(|_| refused("app_plugin_refused"))?;
-        if !trust::reviewed(db, found.origin, &manifest)? {
-            return Err(refused("app_plugin_needs_review"));
+    match switch {
+        Switch::On => {
+            let manifest = found.parsed.map_err(|_| refused("app_plugin_refused"))?;
+            trust::check(db, found.origin, &manifest)?;
+            set_flag(db, name, true)
+        }
+        Switch::Off { usage, when_off } => {
+            set_flag(db, name, false)?;
+            if when_off == TurnOff::StopRuns {
+                usage.stop_runs(name);
+            }
+            assert!(!enabled_flag(db, name)?);
+            Ok(())
         }
     }
-    set_flag(db, name, enabled)
 }
 
 /// Removes a user plugin: its folder (or the .yaml file an older version left), trust
@@ -485,15 +503,14 @@ pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Re
 
 /// Loads a plugin to run: valid, trusted as it is now, turned on, and every declared secret
 /// bound to a saved key. A plugin whose plugin.toml changed since it was trusted is refused
-/// until it is approved again (owner O2). Inputs: database, engine facts and name. Output:
-/// the plugin, or `app_plugin_not_found`, `_refused`, `_needs_review`, `_off`, `_needs_key`.
+/// until it is approved again. Inputs: database, engine facts and name. Output:
+/// the plugin, or `app_plugin_not_found`, `_refused`, `_needs_review`, `_changed`, `_off`,
+/// `_needs_key`.
 pub fn ready(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<Loaded, Refused> {
     prepare(db, engine)?;
     let found = found(engine, name)?;
     let manifest = found.parsed.map_err(|_| refused("app_plugin_refused"))?;
-    if !trust::reviewed(db, found.origin, &manifest)? {
-        return Err(refused("app_plugin_needs_review"));
-    }
+    trust::check(db, found.origin, &manifest)?;
     if !enabled_flag(db, &manifest.name)? {
         return Err(refused("app_plugin_off"));
     }
@@ -508,6 +525,42 @@ pub fn ready(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<Loaded,
         origin: found.origin,
         bindings,
     })
+}
+
+/// Loads a plugin for one run and records that the run holds it until the lease drops. A
+/// trusted plugin whose plugin.toml changed is refused and keeps one notice of that change
+/// in `usage`. Inputs: database, engine facts, the engine's usage, name, the run and its
+/// stop. Output: the plugin and its lease, or the refusal of [`ready`], or
+/// `plugin_holders_capacity`.
+pub fn hold(
+    db: &Connection,
+    engine: &Engine<'_>,
+    usage: &Usage,
+    name: &str,
+    holder: Holder,
+    stop: Box<dyn FnOnce() + Send>,
+) -> Result<(Loaded, Lease), Refused> {
+    match ready(db, engine, name) {
+        Ok(loaded) => {
+            usage.settled(name);
+            let lease = usage.hold(&loaded.manifest.name, holder, stop)?;
+            Ok((loaded, lease))
+        }
+        Err(changed) if changed.code == "app_plugin_changed" => {
+            let current = found(engine, name)?
+                .parsed
+                .map_err(|_| refused("app_plugin_refused"))?;
+            let trusted = trust::trusted_sha256(db, name)?.ok_or(changed)?;
+            assert_ne!(trusted, current.sha256);
+            usage.note_change(ChangeNotice {
+                plugin: current.name,
+                trusted_sha256: trusted,
+                current_sha256: current.sha256,
+            });
+            Err(changed)
+        }
+        Err(other) => Err(other),
+    }
 }
 
 /// Deletes the plugin folders a crash between a staged copy and its rename left. Input:
@@ -659,7 +712,7 @@ mod folder {
     }
 
     /// Reads a folder the owner picked to add: not a link itself, opened without following
-    /// one, holding its plugin.toml only (owner O5). Input: the folder. Output: the
+    /// one, holding its plugin.toml only. Input: the folder. Output: the
     /// plugin.toml bytes, or the refusal.
     pub(super) fn read_source(source: &Path) -> Result<Vec<u8>, Problem> {
         let metadata = std::fs::symlink_metadata(source).map_err(|_| unsafe_entry())?;

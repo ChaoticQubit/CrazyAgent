@@ -6,14 +6,15 @@ use rusqlite::OptionalExtension;
 
 use crate::Refused;
 use crate::registry::{
-    Engine, FOLDER, MANIFEST_FILE, USER_PLUGINS_MAX, add, bundled, list, loopback_ports, preview,
-    ready, remove, review, set_enabled,
+    Engine, FOLDER, MANIFEST_FILE, Switch, USER_PLUGINS_MAX, add, bundled, hold, list,
+    loopback_ports, preview, ready, remove, review, set_enabled,
 };
 use crate::store::{
     Bound, KeyFolder, KeyRef, Keys, bind_account, initialize, secret_value, set_key, sweep_staged,
     unbind,
 };
 use crate::trust::trust_file;
+use crate::usage::{ChangeNotice, Holder, TurnOff, Usage};
 use crate::views::{Binding, Listing, Origin, PluginStatus, PluginView, Preview, RunsView};
 
 const ACME: &str = r#"plugin = "acme"
@@ -234,6 +235,29 @@ fn mode(path: &Path) -> u32 {
         & 0o7777
 }
 
+/// Turning a plugin off with the default setting and no run holding it.
+fn off() -> Switch<'static> {
+    static IDLE: std::sync::OnceLock<Usage> = std::sync::OnceLock::new();
+    Switch::Off {
+        usage: IDLE.get_or_init(Usage::default),
+        when_off: TurnOff::RefuseNewCalls,
+    }
+}
+
+fn holder(run: &str) -> Holder {
+    Holder {
+        run_id: run.to_owned(),
+        label: format!("run {run}"),
+    }
+}
+
+fn counted(calls: &std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Box<dyn FnOnce() + Send> {
+    let calls = std::sync::Arc::clone(calls);
+    Box::new(move || {
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    })
+}
+
 fn code<T: std::fmt::Debug>(result: Result<T, Refused>) -> &'static str {
     result.expect_err("refused").code
 }
@@ -297,7 +321,7 @@ fn cells(db: &rusqlite::Connection, table: &str) -> Vec<String> {
         .concat()
 }
 
-/// H4 (V250-H4-LOCAL-YAML): the three bundled HTTP embedding plugins list first, in screen
+/// The three bundled HTTP embedding plugins list first, in screen
 /// order, and every one starts off.
 #[test]
 fn bundled_plugins_list_first_and_all_start_off() {
@@ -343,12 +367,12 @@ fn bundled_plugins_are_trusted_and_start_off() {
         assert_ne!(view.status, PluginStatus::NeedsReview, "{name}");
         assert!(!view.enabled, "{name}");
     }
-    set_enabled(&case.db, &case.engine(), "ollama", true).unwrap();
+    set_enabled(&case.db, &case.engine(), "ollama", Switch::On).unwrap();
     assert!(plugin(&list(&case.db, &case.engine()).unwrap(), "ollama").enabled);
     assert!(cells(&case.db, "app_plugin_trust").is_empty());
 }
 
-/// H4: what an older plugin of the owner's left under a name a bundled plugin now has is
+/// What an older plugin of the owner's left under a name a bundled plugin now has is
 /// dropped the next time the store is used.
 #[test]
 fn leftovers_of_an_older_plugin_under_a_bundled_name_are_dropped() {
@@ -479,7 +503,7 @@ fn add_refuses_a_changed_text_and_a_taken_name_unless_replacing() {
     );
 }
 
-/// O5: add copies the bytes the owner reviewed and nothing else: a plugin.toml changed after
+/// Add copies the bytes the owner reviewed and nothing else: a plugin.toml changed after
 /// its trust screen is refused with nothing copied, and a picked folder holding another
 /// entry, a link, or that is a link is refused.
 #[test]
@@ -606,7 +630,7 @@ fn a_dropped_in_file_needs_review_until_trusted_and_again_after_a_change() {
         (&PluginStatus::NeedsReview, false)
     );
     assert_eq!(
-        code(set_enabled(&case.db, &case.engine(), "near", true)),
+        code(set_enabled(&case.db, &case.engine(), "near", Switch::On)),
         "app_plugin_needs_review"
     );
     let Preview::Ready { trust } = review(&case.db, &case.engine(), "near").unwrap() else {
@@ -631,11 +655,11 @@ fn a_dropped_in_file_needs_review_until_trusted_and_again_after_a_change() {
     assert_eq!(plugin(&listing, "near").status, PluginStatus::NeedsReview);
     assert_eq!(
         code(ready(&case.db, &case.engine(), "near")),
-        "app_plugin_needs_review"
+        "app_plugin_changed"
     );
 }
 
-/// O2: a plugin whose plugin.toml changed after the owner trusted it is off for every call
+/// A plugin whose plugin.toml changed after the owner trusted it is off for every call
 /// until the owner approves the new text; approving it runs it again.
 #[test]
 fn a_changed_plugin_is_refused_until_approved_again() {
@@ -647,7 +671,7 @@ fn a_changed_plugin_is_refused_until_approved_again() {
     std::fs::write(&path, &changed).unwrap();
     assert_eq!(
         code(ready(&case.db, &case.engine(), "near")),
-        "app_plugin_needs_review"
+        "app_plugin_changed"
     );
     let listing = list(&case.db, &case.engine()).unwrap();
     assert!(!plugin(&listing, "near").enabled);
@@ -666,7 +690,7 @@ fn a_changed_plugin_is_refused_until_approved_again() {
     );
 }
 
-/// O1: a re-review says the text changed and lists the hosts the trusted version did not
+/// A re-review says the text changed and lists the hosts the trusted version did not
 /// reach, first in the host list; a first review reads unchanged with nothing grown.
 #[test]
 fn a_review_lists_what_grew_first() {
@@ -841,15 +865,15 @@ fn remove_deletes_a_user_plugin_with_its_keys_and_refuses_bundled_and_unknown_on
 #[test]
 fn bundled_plugins_turn_on_and_off_and_unknown_names_are_refused() {
     let case = case();
-    set_enabled(&case.db, &case.engine(), "ollama", true).unwrap();
-    set_enabled(&case.db, &case.engine(), "voyage", false).unwrap();
+    set_enabled(&case.db, &case.engine(), "ollama", Switch::On).unwrap();
+    set_enabled(&case.db, &case.engine(), "voyage", off()).unwrap();
     let listing = list(&case.db, &case.engine()).unwrap();
     assert!(plugin(&listing, "ollama").enabled);
     assert!(!plugin(&listing, "voyage").enabled);
-    set_enabled(&case.db, &case.engine(), "ollama", false).unwrap();
+    set_enabled(&case.db, &case.engine(), "ollama", off()).unwrap();
     assert!(!plugin(&list(&case.db, &case.engine()).unwrap(), "ollama").enabled);
     assert_eq!(
-        code(set_enabled(&case.db, &case.engine(), "nope", true)),
+        code(set_enabled(&case.db, &case.engine(), "nope", Switch::On)),
         "app_plugin_not_found"
     );
     assert_eq!(
@@ -931,7 +955,7 @@ fn a_secret_binds_to_an_api_key_account_with_a_saved_key() {
     assert!(plugin_keys(&case).is_empty());
 }
 
-/// Leader 23:1x (A): a key reference is built only through the identity check, so a
+/// A key reference is built only through the identity check, so a
 /// stored or entered reference that is not one engine identity never becomes a binding.
 #[test]
 fn a_bad_reference_is_refused_at_construction() {
@@ -1059,7 +1083,7 @@ fn a_ready_plugin_loads_with_its_manifest_and_a_needs_key_or_off_one_is_refused(
     let case = case();
     trusted(&case, NEAR);
     add_text(&case, ACME, false, 2).unwrap();
-    set_enabled(&case.db, &case.engine(), "ollama", true).unwrap();
+    set_enabled(&case.db, &case.engine(), "ollama", Switch::On).unwrap();
     let ollama = ready(&case.db, &case.engine(), "ollama").unwrap();
     assert_eq!(
         (ollama.manifest.name.as_str(), ollama.origin),
@@ -1076,13 +1100,13 @@ fn a_ready_plugin_loads_with_its_manifest_and_a_needs_key_or_off_one_is_refused(
         code(ready(&case.db, &case.engine(), "acme")),
         "app_plugin_needs_key"
     );
-    set_enabled(&case.db, &case.engine(), "near", false).unwrap();
+    set_enabled(&case.db, &case.engine(), "near", off()).unwrap();
     assert_eq!(
         code(ready(&case.db, &case.engine(), "near")),
         "app_plugin_off"
     );
     assert_eq!(
-        code(set_enabled(&case.db, &case.engine(), "nope", true)),
+        code(set_enabled(&case.db, &case.engine(), "nope", Switch::On)),
         "app_plugin_not_found"
     );
     assert_eq!(
@@ -1164,7 +1188,7 @@ fn near_on(port: u16) -> String {
         .replace("127.0.0.1:9000", &format!("127.0.0.1:{port}"))
 }
 
-/// Q-8 (DEC-156 15:35 Unresolved, leader 19:12 refuse): a loopback plugin port inside the
+/// A loopback plugin port inside the
 /// ports the system hands out refuses that plugin alone, with a plain reason naming the
 /// range; ports outside it, and hosts that are not loopback, stay usable.
 #[test]
@@ -1202,7 +1226,7 @@ fn a_loopback_plugin_port_inside_the_handed_out_range_is_refused_alone_with_the_
     );
 }
 
-/// Q-8: a plugin on a port the engine says the system hands out reads Refused with the
+/// A plugin on a port the engine says the system hands out reads Refused with the
 /// reason in the listing and the trust screen, never runs, and is left out of the ports a
 /// launch keeps free; the other plugins keep their ports. The engine passes the range in.
 #[test]
@@ -1242,7 +1266,7 @@ fn a_plugin_on_a_handed_out_port_is_refused_and_left_out_of_the_kept_ports() {
     }
 }
 
-/// Q-8: with no handed-out range (macOS keeps every loopback plugin port free of agents in
+/// With no handed-out range (macOS keeps every loopback plugin port free of agents in
 /// its profile), a plugin on any port stays usable and listed for the sandbox.
 #[test]
 fn with_no_handed_out_range_a_plugin_on_any_port_stays_usable() {
@@ -1262,7 +1286,7 @@ fn with_no_handed_out_range_a_plugin_on_any_port_stays_usable() {
     ));
 }
 
-/// H2 sec N3: a crash between a staged write and its rename leaves a `.replace-<id>` key
+/// A crash between a staged write and its rename leaves a `.replace-<id>` key
 /// copy in a key folder, or an `.add-<id>` or `.old-<id>` folder in the plugins folder. The
 /// start sweep deletes them and keeps every saved key and plugin.
 #[test]
@@ -1307,7 +1331,7 @@ fn the_start_sweep_deletes_staged_leftovers_and_keeps_saved_keys_and_files() {
     assert_eq!(loaded.bindings.len(), 1);
 }
 
-/// H2 plan row: a key the owner entered for a plugin is never readable through the plugin
+/// A key the owner entered for a plugin is never readable through the plugin
 /// state read. The listing, its JSON, the three store tables and the loaded plugin hold no
 /// key byte; the key comes back only through `secret_value`.
 #[test]
@@ -1338,7 +1362,7 @@ fn a_saved_key_is_never_readable_through_the_plugin_state_read() {
     assert_eq!(value.expose(), key);
 }
 
-/// H2 plan row: the trust row binds the SHA-256 of the text the owner reviewed.
+/// The trust row binds the SHA-256 of the text the owner reviewed.
 #[test]
 fn the_trust_row_binds_the_sha256_of_the_reviewed_text() {
     let case = case();
@@ -1359,11 +1383,11 @@ fn the_trust_row_binds_the_sha256_of_the_reviewed_text() {
     std::fs::write(&path, &changed).unwrap();
     assert_eq!(
         code(ready(&case.db, &case.engine(), "near")),
-        "app_plugin_needs_review"
+        "app_plugin_changed"
     );
     assert_eq!(
-        code(set_enabled(&case.db, &case.engine(), "near", true)),
-        "app_plugin_needs_review"
+        code(set_enabled(&case.db, &case.engine(), "near", Switch::On)),
+        "app_plugin_changed"
     );
     case.db
         .execute(
@@ -1375,7 +1399,149 @@ fn the_trust_row_binds_the_sha256_of_the_reviewed_text() {
     std::fs::write(&path, NEAR).unwrap();
     assert_eq!(
         code(ready(&case.db, &case.engine(), "near")),
-        "app_plugin_needs_review"
+        "app_plugin_changed"
     );
     assert_eq!(held(), sha(&changed));
+}
+
+/// Turning a plugin off writes the off state first: the next call is refused with
+/// `app_plugin_off`, while a run already holding the plugin keeps it, is not stopped under
+/// the default setting, and stays listed until it ends.
+#[test]
+fn turning_off_refuses_the_next_call_and_lets_a_running_one_finish() {
+    let case = case();
+    trusted(&case, NEAR);
+    let usage = Usage::default();
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (loaded, lease) = hold(
+        &case.db,
+        &case.engine(),
+        &usage,
+        "near",
+        holder("r1"),
+        counted(&calls),
+    )
+    .unwrap();
+    assert_eq!(loaded.manifest.name, "near");
+    set_enabled(
+        &case.db,
+        &case.engine(),
+        "near",
+        Switch::Off {
+            usage: &usage,
+            when_off: TurnOff::RefuseNewCalls,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        code(hold(
+            &case.db,
+            &case.engine(),
+            &usage,
+            "near",
+            holder("r2"),
+            counted(&calls)
+        )),
+        "app_plugin_off"
+    );
+    assert_eq!(
+        code(ready(&case.db, &case.engine(), "near")),
+        "app_plugin_off"
+    );
+    assert_eq!(usage.users("near"), [holder("r1")]);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    drop(lease);
+    assert!(usage.users("near").is_empty());
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// With `stop_runs`, turning a plugin off stops each run holding it once, after the off
+/// state is written; turning it off again stops none, and other plugins' runs go on.
+#[test]
+fn stop_runs_calls_each_holders_stop_once() {
+    let case = case();
+    trusted(&case, NEAR);
+    add_text(
+        &case,
+        &NEAR.replace("plugin = \"near\"", "plugin = \"far\""),
+        false,
+        2,
+    )
+    .unwrap();
+    let usage = Usage::default();
+    let near_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let far_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let held = |name: &str, run: &str, calls: &std::sync::Arc<std::sync::atomic::AtomicUsize>| {
+        hold(
+            &case.db,
+            &case.engine(),
+            &usage,
+            name,
+            holder(run),
+            counted(calls),
+        )
+        .unwrap()
+        .1
+    };
+    let _first = held("near", "r1", &near_calls);
+    let _second = held("near", "r2", &near_calls);
+    let _far = held("far", "r3", &far_calls);
+    let stop_runs = Switch::Off {
+        usage: &usage,
+        when_off: TurnOff::StopRuns,
+    };
+    set_enabled(&case.db, &case.engine(), "near", stop_runs).unwrap();
+    assert_eq!(near_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        code(ready(&case.db, &case.engine(), "near")),
+        "app_plugin_off"
+    );
+    set_enabled(&case.db, &case.engine(), "near", stop_runs).unwrap();
+    assert_eq!(near_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(far_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(usage.users("far"), [holder("r3")]);
+}
+
+/// A trusted plugin whose plugin.toml changed is refused with `app_plugin_changed` from the
+/// next call, and that change gives one notice naming the trusted and the current SHA-256:
+/// a second call for the same change gives none, a further change gives a new one, and
+/// approving it runs the plugin again.
+#[test]
+fn a_changed_plugin_notifies_once_per_change() {
+    let case = case();
+    trusted(&case, NEAR);
+    let usage = Usage::default();
+    let call = || {
+        hold(
+            &case.db,
+            &case.engine(),
+            &usage,
+            "near",
+            holder("r1"),
+            Box::new(|| {}),
+        )
+    };
+    drop(call().unwrap());
+    assert!(usage.take_notices().is_empty());
+    let path = case.root.join(FOLDER).join("near").join(MANIFEST_FILE);
+    let first = NEAR.replace("dimensions = 128", "dimensions = 256");
+    std::fs::write(&path, &first).unwrap();
+    assert_eq!(code(call()), "app_plugin_changed");
+    assert_eq!(code(call()), "app_plugin_changed");
+    let notice = |current: &str| ChangeNotice {
+        plugin: "near".to_owned(),
+        trusted_sha256: sha(NEAR),
+        current_sha256: sha(current),
+    };
+    assert_eq!(usage.take_notices(), [notice(&first)]);
+    assert_eq!(code(call()), "app_plugin_changed");
+    assert!(usage.take_notices().is_empty());
+    let second = NEAR.replace("dimensions = 128", "dimensions = 512");
+    std::fs::write(&path, &second).unwrap();
+    assert_eq!(code(call()), "app_plugin_changed");
+    assert_eq!(usage.take_notices(), [notice(&second)]);
+    trust_file(&case.db, &case.engine(), "near", &sha(&second), 3).unwrap();
+    drop(call().unwrap());
+    assert!(usage.take_notices().is_empty());
+    assert!(usage.users("near").is_empty());
 }

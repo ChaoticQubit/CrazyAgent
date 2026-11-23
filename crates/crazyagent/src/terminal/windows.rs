@@ -1,9 +1,8 @@
 use super::buffer::{Feed, buffer};
 use super::{
-    AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, PaneRef, SIZE_MAX, SIZE_MIN,
-    TerminalStream, VIEWERS_MAX, failure,
+    AgentId, CHUNK_BYTES_MAX, Host, HostError, INPUT_BYTES_MAX, PaneCommand, PaneRef, SIZE_MAX,
+    SIZE_MIN, TerminalStream, VIEWERS_MAX, failure,
 };
-use crate::harnesses::interactive::InteractiveCommand;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -99,7 +98,7 @@ impl Drop for ConptyHost {
 }
 
 impl Host for ConptyHost {
-    fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError> {
+    fn spawn(&self, agent: &AgentId, command: &PaneCommand) -> Result<PaneRef, HostError> {
         let (program, args) = command
             .argv
             .split_first()
