@@ -296,6 +296,37 @@ fn a_repository_on_another_drive_is_agent_writable_while_its_projects_cannot_be_
     assert!(!places.agent_writable(&shipped), "{}", shipped.display());
 }
 
+/// A canonical hook that spells the `ProgramFiles` folder as `Z:\row-programs`, a third
+/// spelling neither the variable nor `canonicalize` gives, and leaves every other path as it
+/// is. Input: the path. Output: its one spelling.
+fn programs_elsewhere(path: &Path) -> std::io::Result<PathBuf> {
+    let programs =
+        PathBuf::from(std::env::var_os("ProgramFiles").expect("the ProgramFiles variable is set"));
+    Ok(match path.strip_prefix(&programs) {
+        Ok(rest) => Path::new(r"Z:\row-programs").join(rest),
+        Err(_) => path.to_path_buf(),
+    })
+}
+
+/// While the set-up projects cannot be read, a tool under an install root in the spelling
+/// the canonical hook gives that root stays usable, as the engine data folder is met in that
+/// spelling too.
+#[test]
+fn a_tool_in_the_canonical_spelling_of_program_files_stays_usable_while_the_projects_cannot_be_read()
+ {
+    let folder = or_named(tempfile::tempdir(), &std::env::temp_dir());
+    let home = or_named(folder.path().canonicalize(), folder.path());
+    let mut seed = stub_seed();
+    seed.hooks.canonical = programs_elsewhere;
+    let places = Places {
+        projects: None,
+        ..Places::new(Vec::new(), Some(home), seed)
+    };
+    let tool = Path::new(r"Z:\row-programs\Git\cmd\git.exe");
+    assert!(!places.agent_writable(tool), "{}", tool.display());
+    assert!(places.agent_writable(Path::new(r"Z:\elsewhere\git.exe")));
+}
+
 /// A name starting with this drive's letter and `:` joined to a searched folder replaces
 /// that folder and reaches the drive's current folder instead, so a real program planted
 /// there is not resolved through it: the name is not found, whatever file it would reach.
