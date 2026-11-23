@@ -39,7 +39,7 @@ Authorization = "Bearer {{secret.api_key}}"
 input = "{{inputs}}"
 "#;
 
-const NEAR: &str = r#"plugin = "near"
+pub(crate) const NEAR: &str = r#"plugin = "near"
 tier = "t2"
 kind = "embedding"
 version = 1
@@ -152,14 +152,14 @@ const KEYS: Keys = Keys {
     new_ref: test_new_ref,
 };
 
-struct Case {
-    temp: tempfile::TempDir,
-    root: PathBuf,
-    db: rusqlite::Connection,
+pub(crate) struct Case {
+    pub(crate) temp: tempfile::TempDir,
+    pub(crate) root: PathBuf,
+    pub(crate) db: rusqlite::Connection,
 }
 
 impl Case {
-    fn engine(&self) -> Engine<'_> {
+    pub(crate) fn engine(&self) -> Engine<'_> {
         Engine {
             root: &self.root,
             keys: &KEYS,
@@ -168,7 +168,7 @@ impl Case {
     }
 }
 
-fn case() -> Case {
+pub(crate) fn case() -> Case {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("engine");
     std::fs::create_dir(&root).unwrap();
@@ -236,7 +236,7 @@ fn mode(path: &Path) -> u32 {
 }
 
 /// Turning a plugin off with the default setting and no run holding it.
-fn off() -> Switch<'static> {
+pub(crate) fn off() -> Switch<'static> {
     static IDLE: std::sync::OnceLock<Usage> = std::sync::OnceLock::new();
     Switch::Off {
         usage: IDLE.get_or_init(Usage::default),
@@ -274,7 +274,7 @@ fn add_text(case: &Case, text: &str, replace: bool, now_ms: i64) -> Result<(), R
     )
 }
 
-fn trusted(case: &Case, text: &str) {
+pub(crate) fn trusted(case: &Case, text: &str) {
     add_text(case, text, false, 1).unwrap();
 }
 
