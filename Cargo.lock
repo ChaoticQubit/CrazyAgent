@@ -935,6 +935,9 @@ dependencies = [
 [[package]]
 name = "crazyagent-cap"
 version = "2.4.4"
+dependencies = [
+ "crazyagent-kernel-common",
+]
 
 [[package]]
 name = "crazyagent-capgen"
@@ -989,7 +992,11 @@ dependencies = [
 name = "crazyagent-kernel-plugin-host"
 version = "2.4.4"
 dependencies = [
+ "crazyagent-kernel-common",
+ "serde",
+ "serde_json",
  "toml 1.1.6+spec-1.1.0",
+ "url",
 ]
 
 [[package]]
