@@ -623,3 +623,83 @@ fn a_call_taking_a_foreign_handle_writes_its_checks_and_traits() {
         "#[derive(Clone, PartialEq, Eq)]"
     );
 }
+
+/// Makes a fresh folder under the system temp folder for one load row.
+/// Input: a name unique to the row. Output: the empty folder.
+fn load_scratch(name: &str) -> PathBuf {
+    let folder = std::env::temp_dir().join(format!("capgen-load-{}-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&folder);
+    fs::create_dir_all(&folder).expect("the scratch folder is made");
+    folder
+}
+
+#[test]
+fn load_refuses_a_bad_stem_before_any_output() {
+    let mut stems = vec!["Foo", "a-b", "a__b"];
+    if cfg!(unix) {
+        stems.push("a\nb");
+    }
+    for stem in stems {
+        let folder = load_scratch("stem");
+        fs::write(folder.join("good.cap"), "enum A { a }").expect("writes");
+        fs::write(folder.join(format!("{stem}.cap")), "enum B { b }").expect("writes");
+        let refusal = load(&folder).expect_err("a bad stem is refused");
+        assert_eq!(refusal.code, "cap_stem", "{stem:?}");
+        assert_eq!(refusal.file, format!("{stem}.cap"), "{stem:?}");
+        fs::remove_dir_all(&folder).expect("the scratch folder is removed");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn load_refuses_a_symlink_and_a_fifo() {
+    let folder = load_scratch("kind");
+    let outside = load_scratch("kind-target");
+    fs::write(outside.join("real.cap"), "enum A { a }").expect("writes");
+    std::os::unix::fs::symlink(outside.join("real.cap"), folder.join("link.cap"))
+        .expect("the symlink is made");
+    let refusal = load(&folder).expect_err("a symlink is refused");
+    assert_eq!(
+        (refusal.code, refusal.file.as_str()),
+        ("capgen_file_kind", "link.cap")
+    );
+    fs::remove_file(folder.join("link.cap")).expect("the symlink is removed");
+    let made = std::process::Command::new("mkfifo")
+        .arg(folder.join("pipe.cap"))
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success());
+    let refusal = load(&folder).expect_err("a fifo is refused");
+    assert_eq!(
+        (refusal.code, refusal.file.as_str()),
+        ("capgen_file_kind", "pipe.cap")
+    );
+    fs::remove_dir_all(&folder).expect("the scratch folder is removed");
+    fs::remove_dir_all(&outside).expect("the scratch folder is removed");
+}
+
+#[test]
+fn load_refuses_an_oversized_file_before_reading_it() {
+    let folder = load_scratch("size");
+    let mut over = vec![0xFF_u8; crazyagent_cap::SOURCE_BYTES_MAX + 1];
+    over[0] = b'e';
+    fs::write(folder.join("big.cap"), &over).expect("writes");
+    let refusal = load(&folder).expect_err("an oversized file is refused");
+    assert_eq!(
+        (refusal.code, refusal.file.as_str()),
+        ("cap_source_too_large", "big.cap")
+    );
+    fs::remove_file(folder.join("big.cap")).expect("removes");
+    fs::create_dir(folder.join("dir.cap")).expect("the folder is made");
+    let refusal = load(&folder).expect_err("a folder is refused");
+    assert_eq!(
+        (refusal.code, refusal.file.as_str()),
+        ("capgen_file_kind", "dir.cap")
+    );
+    fs::remove_dir(folder.join("dir.cap")).expect("removes");
+    let mut at_bound = b"enum A { a }".to_vec();
+    at_bound.resize(crazyagent_cap::SOURCE_BYTES_MAX, b' ');
+    fs::write(folder.join("edge.cap"), &at_bound).expect("writes");
+    assert_eq!(load(&folder).expect("a file at the bound loads").len(), 1);
+    fs::remove_dir_all(&folder).expect("the scratch folder is removed");
+}
