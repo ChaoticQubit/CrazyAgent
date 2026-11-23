@@ -5096,6 +5096,26 @@ mod access_grant_tests {
 mod profile_string_tests {
     use super::*;
 
+    /// The engine secrets name every engine secret folder the hooks list under the runtime,
+    /// and no engine folder the hooks leave out.
+    #[test]
+    fn the_engine_secrets_name_the_secret_folders_the_hooks_list() {
+        static STAND_IN: ProfileHooks = ProfileHooks {
+            engine_secret_folders: &["stand-in-secrets"],
+            ..PROFILE_HOOKS
+        };
+        let runtime = tempfile::tempdir().unwrap();
+        let secrets = engine_secrets_in(&STAND_IN, runtime.path()).unwrap();
+        assert!(
+            secrets.contains(&runtime.path().join("stand-in-secrets")),
+            "{secrets:?}"
+        );
+        assert!(
+            !secrets.contains(&runtime.path().join(crate::ide::FOLDER)),
+            "{secrets:?}"
+        );
+    }
+
     /// The launch denies keep writes off the launch lock the hooks name, and name no other
     /// lock.
     #[test]
