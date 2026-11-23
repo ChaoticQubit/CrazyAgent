@@ -258,7 +258,7 @@ pub(crate) const PLAIN: &[(&str, &str)] = &[
     ),
     (
         "app_plugin_past_cap",
-        "only the first 64 plugin folders by name are read; remove one to use this plugin.",
+        "the app reads only the first 64 plugins by name, old plugin files included; remove one of them to use this plugin.",
     ),
     ("app_plugin_off", "this plugin is turned off."),
     (
