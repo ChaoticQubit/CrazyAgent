@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use super::*;
 use crate::exposure::holds;
 use crate::net::capture::CaptureRules;
-use crate::secrets::{HANDLES_MAX, Handles, Scopes, Secrets};
+use crate::secrets::{Handles, PLUGIN_HANDLES_MAX, Scopes, Secrets};
 use crate::store::{SecretRef, Store, reference};
 
 const NAMESPACE: &str = "dev.crazyagent.e0123456789ab";
@@ -173,7 +173,7 @@ impl Rig {
             NAMESPACE,
             &self.scopes,
             &self.handles,
-            Some(paste),
+            Some(("github", paste)),
         )
     }
 
@@ -827,9 +827,9 @@ fn a_host_with_a_port_is_captured_by_its_port_key() {
 #[test]
 fn a_full_handle_table_refuses_a_capture_before_send() {
     let rig = Rig::new(&token_reply());
-    for index in 0..HANDLES_MAX {
-        let found = reference(&format!("{NAMESPACE}.notes"), &format!("n{index}")).unwrap();
-        rig.handles.lock().unwrap().mint("notes", found).unwrap();
+    for index in 0..PLUGIN_HANDLES_MAX {
+        let found = reference(&format!("{NAMESPACE}.github"), &format!("n{index}")).unwrap();
+        rig.handles.lock().unwrap().mint("github", found).unwrap();
     }
     let secrets = rig.secrets();
     let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
@@ -1014,4 +1014,124 @@ fn the_curl_config_pins_the_checked_address() {
         assert_eq!(format!("{}\n", lines[1]), line, "{url}");
         assert_eq!(config.matches("resolve = ").count(), 1, "{url}");
     }
+}
+
+#[test]
+fn a_v4_translated_form_of_a_refused_address_is_refused() {
+    refused_address("https://[::ffff:0:a9fe:a9fe]/v1");
+    refused_address("https://[::ffff:0:a00:1]/v1");
+}
+
+#[test]
+fn a_6to4_address_is_refused() {
+    refused_address("https://[2002:a9fe:a9fe::1]/v1");
+    refused_address("https://[2002:8c52:7004::1]/v1");
+}
+
+#[test]
+fn a_teredo_address_is_refused() {
+    refused_address("https://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/v1");
+}
+
+#[test]
+fn a_discard_only_address_is_refused() {
+    refused_address("https://[100::1]/v1");
+}
+
+#[test]
+fn a_192_0_0_address_is_refused() {
+    refused_address("https://192.0.0.170/v1");
+}
+
+#[test]
+fn a_198_18_benchmark_address_is_refused() {
+    refused_address("https://198.18.0.1/v1");
+    refused_address("https://198.19.255.254/v1");
+}
+
+#[test]
+fn a_hex_integer_host_is_refused() {
+    refused_address("https://0xa9fea9fe/v1");
+}
+
+#[test]
+fn a_dotted_hex_host_is_refused() {
+    refused_address("https://0xa9.0xfe.0xa9.0xfe/v1");
+}
+
+#[test]
+fn a_dotted_octal_host_is_refused() {
+    refused_address("https://0251.0376.0251.0376/v1");
+}
+
+#[test]
+fn a_short_form_host_is_refused() {
+    refused_address("https://169.254.43518/v1");
+}
+
+#[test]
+fn an_integer_host_is_refused() {
+    refused_address("https://2852039166/v1");
+}
+
+#[test]
+fn a_hex_last_part_host_is_refused() {
+    refused_address("https://1.2.3.0x4/v1");
+}
+
+#[test]
+fn a_reply_over_its_bound_after_capture_mints_no_handle() {
+    let mut body = String::from(r#"{"access_token":"gho_x","pad":["#);
+    let items = 1_000_000;
+    for index in 0..items {
+        if index > 0 {
+            body.push(',');
+        }
+        body.push_str("1e2");
+    }
+    body.push_str("]}");
+    assert!(body.len() < REPLY_BYTES_MAX);
+    let rig = Rig::new(body.as_bytes());
+    let secrets = rig.secrets();
+    let before = secrets.free_handles("github");
+    let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
+    let mut request = get("https://github.com/login/oauth/access_token");
+    request.capture = vec![capture("access_token", Some("token"))];
+    assert_eq!(
+        requests.request("github", request),
+        Err(StoreError::code("cap_output_too_large"))
+    );
+    assert_eq!(secrets.free_handles("github"), before);
+    assert!(rig.store.items.lock().unwrap().is_empty());
+    assert!(rig.events().contains(&"send".to_owned()));
+}
+
+#[test]
+fn reply_headers_over_their_bounds_mint_no_handle() {
+    for headers in [
+        vec![("X-Long".to_owned(), "a".repeat(REPLY_TEXT_BYTES_MAX + 1))],
+        vec![("X-Many".to_owned(), "1".to_owned()); REPLY_LIST_MAX + 1],
+    ] {
+        let mut rig = Rig::new(&token_reply());
+        rig.egress.headers = headers;
+        let secrets = rig.secrets();
+        let before = secrets.free_handles("github");
+        let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
+        let mut request = get("https://github.com/login/oauth/access_token");
+        request.reply_headers = vec!["x-long".to_owned(), "x-many".to_owned()];
+        assert_eq!(
+            requests.request("github", request),
+            Err(StoreError::code("cap_output_too_large"))
+        );
+        assert_eq!(secrets.free_handles("github"), before);
+    }
+    let rig = Rig::new(&token_reply());
+    let secrets = rig.secrets();
+    let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
+    let mut request = get("https://github.com/login/oauth/access_token");
+    request.reply_headers = vec!["x-oauth-scopes".to_owned()];
+    assert_eq!(
+        requests.request("github", request).unwrap().captured.len(),
+        1
+    );
 }

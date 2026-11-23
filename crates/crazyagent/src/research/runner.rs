@@ -688,7 +688,7 @@ impl ResearchRunner {
     ) -> Result<Self, RunError> {
         if !state.is_absolute()
             || !state.is_dir()
-            || crate::projects_home::one_spelling(state.canonicalize()?) != state
+            || kernel_sandbox::paths::one_spelling(state.canonicalize()?) != state
         {
             return Err(RunError::Invalid(
                 "state directory must be canonical".into(),
@@ -1124,8 +1124,8 @@ impl ResearchRunner {
             return Err(RunError::Invalid("unsafe research kind".into()));
         }
         still_held(jobs, job)?;
-        let root = crate::projects_home::one_spelling(project.root.canonicalize()?);
-        if root != crate::projects_home::one_spelling(project.root.to_path_buf())
+        let root = kernel_sandbox::paths::one_spelling(project.root.canonicalize()?);
+        if root != kernel_sandbox::paths::one_spelling(project.root.to_path_buf())
             || !root.is_dir()
             || root.starts_with(&self.state)
         {
@@ -2011,8 +2011,8 @@ impl ResearchRunner {
         }
         let (behind, relay) = relayed(self.engine_folder()?, run.account)?;
         let account = &behind;
-        let folder = crate::projects_home::one_spelling(run.folder.canonicalize()?);
-        if folder != crate::projects_home::one_spelling(run.folder.to_path_buf())
+        let folder = kernel_sandbox::paths::one_spelling(run.folder.canonicalize()?);
+        if folder != kernel_sandbox::paths::one_spelling(run.folder.to_path_buf())
             || !folder.is_dir()
             || folder.starts_with(&self.state)
         {
@@ -6358,7 +6358,7 @@ mod tests {
                 matches!(
                     &ending,
                     Err(RunError::Sandbox(SandboxError::Invalid(reason)))
-                        if reason == crate::sandbox::SECRET_ROOT_REFUSED
+                        if reason == kernel_sandbox::paths::SECRET_ROOT_REFUSED
                 ),
                 "{name}: {ending:?}"
             );

@@ -5,7 +5,7 @@ use crazyagent_win_sandbox::private;
 /// its plain path.
 fn base() -> (tempfile::TempDir, PathBuf) {
     let temp = tempfile::tempdir().unwrap();
-    let base = crate::sandbox::canonical(temp.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(temp.path()).unwrap();
     (temp, base)
 }
 

@@ -366,18 +366,22 @@ impl AgentFilesRule {
             IdeAgentFiles::NoDeleteOrRename => "file-write-unlink",
             IdeAgentFiles::ReadOnly => "file-write*",
         };
-        assert!(super::clean_absolute(root));
-        let root = super::any_case(root.to_str().expect("a clean absolute path is text"));
-        let state = super::any_case("/.crazyagent");
+        assert!(kernel_sandbox::paths::clean_absolute(root));
+        let root =
+            kernel_sandbox::paths::any_case(root.to_str().expect("a clean absolute path is text"));
+        let state = kernel_sandbox::paths::any_case("/.crazyagent");
         let layout = if self.older_agents {
             format!("({state})?")
         } else {
             state.clone()
         };
-        let agents = format!("{root}{layout}/{}", super::any_case("worktrees"));
+        let agents = format!(
+            "{root}{layout}/{}",
+            kernel_sandbox::paths::any_case("worktrees")
+        );
         format!(
             "(deny {operation}\n  {})\n(deny file-write-unlink\n  (regex #\"^{agents}$\"))\n(deny {operation}\n  (regex #\"^{root}{state}$\"))\n",
-            super::at_or_below(&format!("{agents}/[^/]+"))
+            kernel_sandbox::paths::at_or_below(&format!("{agents}/[^/]+"))
         )
     }
 }

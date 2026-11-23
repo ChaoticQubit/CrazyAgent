@@ -149,23 +149,29 @@ pub(crate) fn sources(dir: &Path, out: &mut Vec<Violation>) {
 
 /// Lists the `.rs` files below `src`, relative to the crate folder, sorted; a symlink, a
 /// file not named exactly `*.rs` (a case-insensitive file system resolves `mod m;` to
-/// `m.RS`), a folder past `DEPTH_MAX` or more than `SOURCE_FILES_MAX` files is a violation.
+/// `m.RS`), a folder past `DEPTH_MAX` or more than `SOURCE_FILES_MAX` files is a violation,
+/// and a folder or entry that cannot be read is `plugin_source_unparsed`.
 /// Inputs: the crate folder and the violation list. Output: the files.
 fn rust_files(dir: &Path, out: &mut Vec<Violation>) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let mut folders = vec![(PathBuf::from("src"), 0usize)];
     while let Some((folder, depth)) = folders.pop() {
         let Ok(entries) = fs::read_dir(dir.join(&folder)) else {
+            out.push(at(&folder, 1, "plugin_source_unparsed"));
             continue;
         };
-        let mut names: Vec<PathBuf> = entries
-            .flatten()
-            .filter(|entry| entry.file_name() != crate::FINDER_FILE)
-            .map(|entry| folder.join(entry.file_name()))
-            .collect();
+        let mut names = Vec::new();
+        for entry in entries {
+            match entry {
+                Ok(entry) if crate::is_finder_file(&dir.join(&folder), &entry.file_name()) => {}
+                Ok(entry) => names.push(folder.join(entry.file_name())),
+                Err(_) => out.push(at(&folder, 1, "plugin_source_unparsed")),
+            }
+        }
         names.sort();
         for name in names {
             let Ok(meta) = fs::symlink_metadata(dir.join(&name)) else {
+                out.push(at(&name, 1, "plugin_source_unparsed"));
                 continue;
             };
             if meta.file_type().is_symlink() {
