@@ -571,3 +571,19 @@ fn more_than_four_capture_fields_are_refused() {
         "hosts = [\"github.com\"]\n\n[net.capture]\n\"github.com\" = [\"a\", \"b\", \"c\", \"d\", \"e\"]\n",
     );
 }
+
+#[test]
+fn a_hex_or_octal_ip_host_is_refused() {
+    for host in [
+        "0xa9fea9fe",
+        "0xa9.0xfe.0xa9.0xfe",
+        "0251.0376.0251.0376",
+        "169.254.43518",
+        "2852039166",
+        "1.2.3.0x4",
+        "0xa9fea9fe:443",
+    ] {
+        refused_net(&format!("hosts = [\"{host}\"]\n"));
+    }
+    assert!(manifest::parse(&net_text("hosts = [\"0xa9.example\", \"api2.example\", \"127.0.0.1\"]\n")).is_ok());
+}
