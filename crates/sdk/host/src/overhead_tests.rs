@@ -296,7 +296,7 @@ fn gateway_update_set_channel_p95() {
     let (budget, condition) = budget();
     let grants = Grants::new(&[(PLUGIN, Tier::T2, &["update.write"])]).unwrap();
     let refusals = Unreached;
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &NoNet,
         process: &NoProcess,
@@ -363,7 +363,7 @@ fn gateway_service_status_p95() {
     let (budget, condition) = budget();
     let grants = Grants::new(&[(PLUGIN, Tier::T2, &["service.read"])]).unwrap();
     let refusals = Unreached;
-    let gateway = Gateway::new(&grants, &refusals);
+    let gateway = Gateway::new(&grants, &refusals, &AllOn);
     let providers = Providers {
         net: &NoNet,
         process: &NoProcess,
