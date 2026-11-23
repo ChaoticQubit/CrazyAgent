@@ -216,7 +216,7 @@ fn a_teammates_server_pid_record_is_read_for_its_own_socket_and_refused_once_dam
     );
 }
 
-/// Slice C (DEC-203, fix5 parity): the engine filters an owner paste as the desktop's
+/// The engine filters an owner paste as the desktop's
 /// `pasteText` does: every C0 control, DEL and C1 control is dropped except tab, line feed
 /// and carriage return, then CR LF and LF become CR, so a paste cannot press Escape, end a
 /// bracketed paste or send a Ctrl key; other text passes unchanged.
@@ -272,7 +272,7 @@ impl Host for PinRefused {
     }
 }
 
-/// #686 r1 sec F1: only a host that answers `PINS_UNSUPPORTED` types a prompt by name. A host
+/// Only a host that answers `PINS_UNSUPPORTED` types a prompt by name. A host
 /// whose app pane request failed otherwise, as a tmux control connect can fail once, fails
 /// the prompt and types nothing by name, where the active pane may be a teammate's.
 #[test]
