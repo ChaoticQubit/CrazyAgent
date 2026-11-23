@@ -1,8 +1,10 @@
 use super::*;
 use crate::master_session::{SESSION_DELETED, SessionDeleted};
+use crate::state_log::Aggregate;
 use crate::state_log::fence::Fence;
-use crate::state_log::replay::{Logged, redact_matching};
-use crate::state_log::{Aggregate, Appender, Draft};
+use crate::state_log::redact_matching;
+use kernel_storage::state_log::Draft;
+use kernel_storage::state_log::replay::Logged;
 
 /// Deletes a project's master session that is not live, for the owner's Delete: first the
 /// harness transcript it kept is removed from its master's private home, then a parked
@@ -68,7 +70,7 @@ pub(super) fn log_deleted(
     session: &SessionId,
 ) -> Result<usize, EngineError> {
     let fence = Fence::Owner(admission.clone());
-    let mut log = Appender::owner(tx, revision, fence.clone())?;
+    let mut log = crate::state_log::owner(tx, revision, fence.clone())?;
     let body = serde_json::to_vec(&SessionDeleted {
         project: project.clone(),
         session: session.clone(),
@@ -76,7 +78,7 @@ pub(super) fn log_deleted(
     .map_err(error)?;
     let at_ms = now_ms()?;
     let seq = log.append(&Draft {
-        aggregate: Aggregate::Sessions,
+        aggregate: Aggregate::Sessions.into(),
         kind: SESSION_DELETED,
         schema: 1,
         at_ms,
@@ -85,7 +87,7 @@ pub(super) fn log_deleted(
     let event = Logged {
         seq,
         revision,
-        aggregate: Aggregate::Sessions,
+        aggregate: Aggregate::Sessions.into(),
         kind: SESSION_DELETED.into(),
         schema: 1,
         at_ms,
@@ -113,7 +115,7 @@ pub(super) fn log_deleted(
 /// still busy is logged, not returned: the delete is already committed. Input: the
 /// connection. Output: none.
 pub(super) fn checkpoint(db: &Connection) {
-    if !crate::state_log::replay::checkpoint(db) {
+    if !kernel_storage::state_log::replay::checkpoint(db) {
         eprintln!("state_log_redact_checkpoint_busy");
     }
 }

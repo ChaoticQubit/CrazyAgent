@@ -19,6 +19,8 @@ crazyagent-kernel-security = { path = "../kernel/security" }
 crazyagent-kernel-storage = { path = "../kernel/storage" }
 crazyagent-kernel-processes = { path = "../kernel/processes" }
 crazyagent-kernel-common = { path = "../kernel/common" }
+crazyagent-kernel-plugin-host = { path = "../kernel/plugin_host" }
+crazyagent-kernel-sandbox = { path = "../kernel/sandbox" }
 crazyagent-plugin-agent-quit = { path = "../../plugins/t2/agent-quit" }
 crazyagent-sdk = { path = "../sdk/rust" }
 crazyagent-win-sandbox = { path = "../crazyagent-win-sandbox" }

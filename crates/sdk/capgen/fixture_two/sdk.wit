@@ -1,0 +1,41 @@
+package crazyagent:sdk;
+
+interface sdk-types {
+  record not-granted {
+    capability: string,
+    needs: string,
+  }
+
+  variant refusal {
+    not-granted(not-granted),
+    tier-too-high(string),
+    rejected(string),
+    failed(string),
+  }
+}
+
+interface net-types {
+  use secrets-types.{mode, secret};
+
+  record request {
+    bearer: option<secret>,
+    keys: list<secret>,
+    mode: mode,
+  }
+
+  record route {
+    mode: mode,
+    port: u16,
+  }
+}
+
+interface secrets-types {
+  enum mode {
+    read,
+    write,
+  }
+
+  type secret = u64;
+}
+
+world plugin {}

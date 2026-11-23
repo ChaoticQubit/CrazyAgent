@@ -1,9 +1,9 @@
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
-use crate::paths::Platform;
-use crate::service::Service;
 use crate::terminal::tmux::{Tmux, installed};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use kernel_common::Platform;
+use kernel_processes::service::Service;
 use kernel_processes::spawn_gate;
 use kernel_processes::terminal::buffer::Chunk;
 use kernel_processes::terminal::{AgentId, Host, TerminalStream, type_into};
@@ -184,7 +184,7 @@ impl Fixtures {
     }
 
     fn update_verify(&self) {
-        crate::update::verify_file(
+        kernel_processes::update::verify_file(
             &self.archive,
             &self.sha256,
             &self.signature,
