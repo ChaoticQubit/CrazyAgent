@@ -56,10 +56,10 @@ fn the_host_binding_is_generated_for_every_capability() {
     let files = binding_from_caps();
     let flat: String = files[0].1.split_whitespace().collect();
     assert!(flat.starts_with(
-        "usebus_gateway::Caller;usesdk::Refusal;usesdk::generated::{net,secrets,settings};"
+        "usebus_gateway::Caller;usesdk::Refusal;usesdk::generated::{net,process,secrets,service,settings,update};"
     ));
     assert!(flat.contains(
-        "pubstructProviders<'p>{pubnet:&'pdynnet::Provide,pubsecrets:&'pdynsecrets::Provide,pubsettings:&'pdynsettings::Provide,}"
+        "pubstructProviders<'p>{pubnet:&'pdynnet::Provide,pubprocess:&'pdynprocess::Provide,pubsecrets:&'pdynsecrets::Provide,pubservice:&'pdynservice::Provide,pubsettings:&'pdynsettings::Provide,pubupdate:&'pdynupdate::Provide,}"
     ));
     assert!(flat.contains("pubstructBound<'g,'p>{caller:Caller<'g>,providers:&'pProviders<'p>,}"));
     let mut count = 0;
