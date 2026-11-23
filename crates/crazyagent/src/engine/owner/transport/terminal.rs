@@ -7,12 +7,14 @@ use crate::protocol::plain_code;
 use crate::terminal::{TerminalFrame, TerminalRequest};
 #[cfg(unix)]
 use crate::terminal::{paste_keys, type_prompt, type_prompt_at};
+#[cfg(unix)]
 use kernel_processes::terminal::attach_again;
 #[cfg(unix)]
 use kernel_processes::terminal::buffer::Chunk;
 use kernel_processes::terminal::{
     AgentId, Host, HostError, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, PaneAt, TerminalStream,
 };
+#[cfg(unix)]
 use kernel_processes::terminal::{CHUNK_BYTES_MAX, PASTE_BYTES_MAX, type_into};
 use tokio::io::AsyncWrite;
 
