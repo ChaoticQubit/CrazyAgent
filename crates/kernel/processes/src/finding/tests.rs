@@ -327,7 +327,7 @@ fn a_link_from_a_place_outside_temp_into_a_temp_folder_leads_into_temp() {
 
 /// A tool in this user's own folder under `/tmp` (root 1777, sticky) is used: no other user
 /// can replace a folder this user owns there, so test stand-ins and engines started from a
-/// `/tmp` folder resolve (leader 17:12, L8c).
+/// `/tmp` folder resolve.
 #[test]
 fn a_tool_in_an_own_folder_under_the_shared_temp_folder_is_used() {
     let folder = tempfile::Builder::new()
@@ -363,7 +363,7 @@ fn bundled_layout(home: &Path) -> (Places, PathBuf, PathBuf) {
     (places, sidecar, brew)
 }
 
-/// DEC-157, leader 15:41 and 18:31: the engine uses the tmux it ships. The name `tmux` finds
+/// The engine uses the tmux it ships. The name `tmux` finds
 /// `<app folder>/crazyagent-tmux` before Homebrew or anything on PATH, read as any entry is,
 /// and its words and the sandbox grants start from that file, never the Homebrew one.
 #[test]
@@ -667,7 +667,7 @@ fn cellar(path: &Path) -> std::io::Result<PathBuf> {
     })
 }
 
-/// C2-H8: a Homebrew tool, whose one spelling lies in its prefix's `Cellar`, stays usable
+/// A Homebrew tool, whose one spelling lies in its prefix's `Cellar`, stays usable
 /// while the set-up projects cannot be read; a link from a prefix outside the install roots
 /// whose every form lies there is agents' to write.
 #[test]
@@ -678,7 +678,7 @@ fn a_cellar_linked_tool_stays_usable_while_the_projects_cannot_be_read() {
     assert!(places.agent_writable(Path::new("/opt/elsewhere/bin/tmux")));
 }
 
-/// C2-H8: the system's tools stay usable while the set-up projects cannot be read.
+/// The system's tools stay usable while the set-up projects cannot be read.
 #[test]
 fn a_system_tool_stays_usable_while_the_projects_cannot_be_read() {
     let (_folder, home) = scratch();
@@ -693,7 +693,7 @@ fn a_system_tool_stays_usable_while_the_projects_cannot_be_read() {
     }
 }
 
-/// C2-H8: the failed-read fallback never trusts more than a successful read with no project
+/// The failed-read fallback never trusts more than a successful read with no project
 /// does: every path agents can write with the projects read is agents' to write without
 /// them, so the fallback only adds refusals.
 #[test]
@@ -725,7 +725,7 @@ fn the_failed_read_fallback_never_trusts_a_path_the_normal_path_refuses() {
     assert!(unread.agent_writable(Path::new("/srv/repo/bin/tool")));
 }
 
-/// C2-H8: when the set-up projects cannot be read, a repository the engine may have
+/// When the set-up projects cannot be read, a repository the engine may have
 /// registered outside HOME still counts as agent-writable, so a tool in it is refused, while
 /// a system folder's tool does not.
 #[test]
@@ -748,4 +748,43 @@ fn a_registered_repository_outside_home_is_agent_writable_while_its_projects_can
         Some(Err(Refusal::AgentsCanWrite))
     );
     assert!(!places.agent_writable(Path::new("/bin/sh")));
+}
+
+/// A name whose first copy has a first line the resolver refuses resolves to a later copy
+/// that runs, so one unreadable script never hides a working one further along the places.
+#[test]
+fn a_refused_first_copy_resolves_to_the_later_copy_that_runs() {
+    let (_folder, home) = scratch();
+    let first = home.join("first");
+    let later = home.join("later");
+    script_at(&first.join("tool"), b"#!/bin/sh\r\n");
+    let runs = script_at(&later.join("tool"), b"#!/bin/sh\n");
+    let places = stub_new(vec![first, later], Some(home.clone()));
+    let resolved = resolve("tool", &places).unwrap();
+    assert_eq!(resolved.entry, runs);
+}
+
+/// When no copy of a name resolves, the refusal reported is the first copy's, not a later
+/// one's.
+#[test]
+fn the_first_copys_refusal_is_kept_when_no_copy_resolves() {
+    let (_folder, home) = scratch();
+    let first = home.join("first");
+    let later = home.join("later");
+    let refused = script_at(&first.join("tool"), b"#!/bin/sh\r\n");
+    script_at(&later.join("tool"), b"#!node\n");
+    let places = stub_new(vec![first, later], Some(home.clone()));
+    let missing = resolve("tool", &places).unwrap_err();
+    assert_eq!(missing.tool, "tool");
+    let kept = missing.refused.expect("the first copy's refusal");
+    assert_eq!((kept.file, kept.why), (refused, Refusal::FirstLine));
+}
+
+/// Writes an executable script with the given bytes, its folders made first. Inputs: the
+/// file and the bytes. Output: the file.
+fn script_at(file: &Path, bytes: &[u8]) -> PathBuf {
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(file, bytes).unwrap();
+    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    file.to_path_buf()
 }

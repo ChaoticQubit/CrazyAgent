@@ -536,7 +536,9 @@ impl TerminalSession {
             None => TranscriptReader::new(command.transcript.clone(), &command.cwd, since),
         };
         let resumed = resume.map(|resume| (resume.record.clone(), reader.start()));
-        let pane = host.spawn(&agent, &command).map_err(host_failure)?;
+        let pane = host
+            .spawn(&agent, &crate::terminal::PaneCommand::from(&command))
+            .map_err(host_failure)?;
         assert_eq!(pane.agent, agent);
         let unkept = host.unkept(&agent);
         let ready = LaunchEvent::Ready {

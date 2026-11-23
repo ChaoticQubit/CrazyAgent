@@ -126,7 +126,7 @@ impl Fixture {
         std::fs::write(&file, script).unwrap();
         host.spawn(
             &crate::terminal::AgentId::team(agent).unwrap(),
-            &InteractiveCommand {
+            &crate::terminal::PaneCommand::from(&InteractiveCommand {
                 argv: vec![
                     "/bin/sh".into(),
                     file.to_str().unwrap().into(),
@@ -135,7 +135,7 @@ impl Fixture {
                 cwd: self.base.clone(),
                 env: Vec::new(),
                 transcript: Transcript::Unavailable,
-            },
+            }),
         )
         .unwrap();
     }
