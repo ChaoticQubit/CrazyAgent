@@ -21,16 +21,16 @@ fn refusal(refused: Refused) -> EngineError {
 /// [`logged_in`], then deletes the keys whose bindings went once the commit is done, and
 /// checkpoints the WAL after a redaction. Inputs: the connection, outside any transaction,
 /// the engine root and the work. Output: the work's result, its refusal with nothing
-/// written, or a fence refusal.
+/// written, a fence refusal, or `app_plugins_unavailable` on a connection already inside
+/// a transaction.
 pub(crate) fn logged<T>(
     db: &Connection,
     root: &Path,
     work: impl FnOnce(&Connection) -> Result<T, EngineError>,
 ) -> Result<T, EngineError> {
-    assert!(
-        db.is_autocommit(),
-        "plugin store work starts outside a transaction"
-    );
+    if !db.is_autocommit() {
+        return Err(EngineError("app_plugins_unavailable".into()));
+    }
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(unavailable)?;
     let (value, captured, redacted) = logged_in(&tx, work)?;
     tx.commit().map_err(unavailable)?;

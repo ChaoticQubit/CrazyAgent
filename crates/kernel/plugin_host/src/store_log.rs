@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 
 use crate::Refused;
-use crate::embedding::{valid_host, valid_name, valid_secret};
-use crate::manifest::{HOST_BYTES_MAX, HOSTS_MAX};
+use crate::embedding::{HOSTS_MAX, valid_host, valid_name, valid_secret};
+use crate::manifest::HOST_BYTES_MAX;
 use crate::registry::{code_key, is_bundled, is_code_plugin, set_flag_row};
 use crate::store::{KeyRef, is_entered_key, refused, sqlite};
 use rusqlite::Connection;
@@ -154,8 +154,8 @@ fn valid_reference(source: Source, reference: &str) -> bool {
     KeyRef::new(reference).is_some() && (source == Source::Account || is_entered_key(reference))
 }
 
-/// Whether trusted hosts are as the trust record keeps them: at most the manifest's count,
-/// each a host a plugin may name, in ascending order. Input: the hosts. Output: the answer.
+/// Whether trusted hosts are as the trust record keeps them: at most an embedding
+/// plugin's count, each a host a plugin may name, in ascending order. Input: the hosts. Output: the answer.
 fn valid_hosts(hosts: &[String]) -> bool {
     hosts.len() <= HOSTS_MAX
         && hosts
