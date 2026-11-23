@@ -464,22 +464,42 @@ fn a_pin_with_no_digest_restores_after_its_integrity_check_as_unverified() {
     assert_eq!(replaced(root.path()), std::slice::from_ref(&restored.kept));
 }
 
-/// A pin with no digest whose integrity check fails (a page no table owns) is refused
-/// before any write: engine.db byte-equal and no `replaced-*` copy.
+/// A pin with no digest whose integrity check fails (one table's root page with a page type
+/// byte no b-tree has, written into the file, so every SQLite build still opens it) is
+/// refused before any write: engine.db byte-equal and no `replaced-*` copy.
 #[test]
 fn a_pin_with_no_digest_that_fails_its_integrity_check_is_refused_before_any_write() {
     let (root, path) = upgraded(true);
     let pinned = pinned_folder(root.path());
     std::fs::write(pinned.join(crate::migrations::CHECKED), b"").unwrap();
     let copy = Connection::open(pinned.join(DATABASE)).unwrap();
-    copy.execute_batch(
-        "CREATE TABLE spare (value TEXT); INSERT INTO spare VALUES ('x');
-         PRAGMA writable_schema = ON;
-         DELETE FROM sqlite_master WHERE name = 'spare';
-         PRAGMA writable_schema = OFF;",
+    copy.execute_batch("CREATE TABLE spare (value TEXT); INSERT INTO spare VALUES ('x');")
+        .unwrap();
+    let journal: String = copy
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(journal, "delete", "every page is in the file");
+    let (root_page, page_size): (i64, i64) = copy
+        .query_row(
+            "SELECT rootpage, (SELECT page_size FROM pragma_page_size)
+            FROM sqlite_master WHERE name = 'spare'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    drop(copy);
+    assert!(root_page > 1, "page 1 keeps the schema readable");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(pinned.join(DATABASE))
+        .unwrap();
+    std::io::Seek::seek(
+        &mut file,
+        std::io::SeekFrom::Start(((root_page - 1) * page_size) as u64),
     )
     .unwrap();
-    drop(copy);
+    std::io::Write::write_all(&mut file, &[0xff]).unwrap();
+    drop(file);
     let before = std::fs::read(&path).unwrap();
 
     let refused = restore_pinned(&path, &refusing_hooks()).unwrap_err().0;
