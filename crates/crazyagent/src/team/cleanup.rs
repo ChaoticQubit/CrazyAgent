@@ -841,6 +841,7 @@ fn retire_claimed(
         #[cfg(target_os = "macos")]
         if let Some(project_root) = place.repository.to_str()
             && crate::sandbox::tool_cache::remove_agent(
+                &crate::sandbox::TOOL_CACHE_HOOKS,
                 runtime,
                 project_root,
                 &target.id.to_string(),

@@ -13,6 +13,8 @@ use kernel_sandbox::policy::PolicyHooks;
 use kernel_sandbox::ports::BRIDGE_PORT_MIN;
 use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use kernel_sandbox::shared_folders::OPEN_TOPS_MAX;
+#[cfg(target_os = "macos")]
+use kernel_sandbox::tool_cache::ToolCacheHooks;
 use kernel_sandbox::toolchains::ToolchainHooks;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -1241,6 +1243,23 @@ pub const TOOLCHAIN_HOOKS: ToolchainHooks = ToolchainHooks {
     launch_state: crate::launch_context::STATE,
     remove_agent_tree: toolchain_remove_agent_tree,
 };
+
+/// The tool cache hooks the engine passes: the pinning flag clearing of
+/// [`tool_cache_unpin`], the agent tree removal of [`toolchain_remove_agent_tree`] and the
+/// engine's priming process.
+#[cfg(target_os = "macos")]
+pub const TOOL_CACHE_HOOKS: ToolCacheHooks = ToolCacheHooks {
+    unpin: tool_cache_unpin,
+    remove_agent_tree: toolchain_remove_agent_tree,
+    priming_command: tool_cache::priming_command,
+};
+
+/// Clears the pinning flags an agent may set on an entry as Clean up does. Inputs: the open
+/// parent and the entry's name. Output: none.
+#[cfg(target_os = "macos")]
+fn tool_cache_unpin(parent: std::os::fd::BorrowedFd<'_>, name: &str) {
+    crate::team::cleanup::unpin(parent, name);
+}
 
 /// Removes a folder an agent wrote as Clean up removes an agent's tree, with the engine's
 /// refusal text as the error. Input: the folder. Output: done, or the error.

@@ -86,7 +86,14 @@ fn tool_cache(case: &Case, uv: bool) -> tool_cache::Prepared {
     fs::create_dir_all(&runtime).unwrap();
     let base = sandbox(case, SandboxNetwork::Only(Vec::new()));
     let program = uv.then(|| base.tool_program("uv").expect("uv missing"));
-    tool_cache::prepare(&runtime, "project-1", "sandboxed-root", program.as_deref()).unwrap()
+    tool_cache::prepare(
+        &crazyagent::sandbox::TOOL_CACHE_HOOKS,
+        &runtime,
+        "project-1",
+        "sandboxed-root",
+        program.as_deref(),
+    )
+    .unwrap()
 }
 
 /// The variables a sandbox's commands start with, by name.

@@ -37,6 +37,7 @@ impl Runtime {
 
     fn prepare(&self) -> Result<Prepared, &'static str> {
         prepare(
+            &crate::sandbox::TOOL_CACHE_HOOKS,
             &self.runtime,
             "project-1",
             "sandboxed-worktree",
@@ -476,7 +477,14 @@ fn clean_up_takes_an_agents_cache_it_pinned_and_closed_inside() {
         "7",
     )
     .unwrap();
-    let prepared = prepare(&runtime.runtime, "project-1", &own, None).unwrap();
+    let prepared = prepare(
+        &crate::sandbox::TOOL_CACHE_HOOKS,
+        &runtime.runtime,
+        "project-1",
+        &own,
+        None,
+    )
+    .unwrap();
     let closed = prepared.root.join(UV).join("closed");
     std::fs::create_dir(&closed).unwrap();
     std::fs::write(closed.join("pinned"), "kept").unwrap();
@@ -484,7 +492,13 @@ fn clean_up_takes_an_agents_cache_it_pinned_and_closed_inside() {
     std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o500)).unwrap();
     let appending = prepared.root.join(PNPM);
     nix::unistd::chflags(appending.as_path(), FileFlag::UF_APPEND).unwrap();
-    remove_agent(&runtime.runtime, "project-1", "7").unwrap();
+    remove_agent(
+        &crate::sandbox::TOOL_CACHE_HOOKS,
+        &runtime.runtime,
+        "project-1",
+        "7",
+    )
+    .unwrap();
     assert!(std::fs::symlink_metadata(&prepared.root).is_err());
     assert!(project_folder(&runtime.runtime, "project-1").is_dir());
 }
@@ -540,7 +554,14 @@ fn a_failed_priming_gives_no_cache_and_no_uv_gives_a_pnpm_cache() {
         assert_eq!(runtime.priming_left(), 0, "{extra}");
     }
     let runtime = Runtime::new("");
-    let prepared = prepare(&runtime.runtime, "project-1", "sandboxed-root", None).unwrap();
+    let prepared = prepare(
+        &crate::sandbox::TOOL_CACHE_HOOKS,
+        &runtime.runtime,
+        "project-1",
+        "sandboxed-root",
+        None,
+    )
+    .unwrap();
     assert!(!prepared.uv && !prepared.primed);
     assert!(prepared.root.join(PNPM).is_dir());
     assert!(!prepared.root.join(UV).join("sdists-v10").exists());
