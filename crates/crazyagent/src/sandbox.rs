@@ -2735,7 +2735,7 @@ impl ProjectSandbox {
         teammates.read_only.extend(
             self.scratch
                 .iter()
-                .map(|scratch| scratch.join(toolchains::GIT_FOLDER)),
+                .map(|scratch| scratch.join(kernel_sandbox::toolchains::GIT_FOLDER)),
         );
         let answers = mailbox.clone();
         teammates.answers = Some(answers.clone());

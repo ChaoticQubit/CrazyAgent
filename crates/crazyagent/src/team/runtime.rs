@@ -9588,19 +9588,24 @@ impl TeamRuntime {
             });
         let catch_up = context.catch_up_main();
         if catch_up
-            && let Err(error) = toolchains::catch_up_git(&crate::sandbox::TOOLCHAIN_HOOKS, &scratch)
+            && let Err(error) =
+                kernel_sandbox::toolchains::catch_up_git(&crate::sandbox::TOOLCHAIN_HOOKS, &scratch)
         {
             eprintln!("agent_catch_up_git_not_written kind={:?}", error.kind());
         }
         if leads
-            && let Err(error) =
-                toolchains::lead_git(&crate::sandbox::TOOLCHAIN_HOOKS, &scratch, catch_up)
+            && let Err(error) = kernel_sandbox::toolchains::lead_git(
+                &crate::sandbox::TOOLCHAIN_HOOKS,
+                &scratch,
+                catch_up,
+            )
         {
             eprintln!("agent_lead_git_not_written kind={:?}", error.kind());
         }
         if role == AgentRole::Master
             && policy.access == AgentAccess::Full
-            && let Err(error) = toolchains::free_git(&crate::sandbox::TOOLCHAIN_HOOKS, &scratch)
+            && let Err(error) =
+                kernel_sandbox::toolchains::free_git(&crate::sandbox::TOOLCHAIN_HOOKS, &scratch)
         {
             eprintln!("agent_free_git_not_written kind={:?}", error.kind());
         }
