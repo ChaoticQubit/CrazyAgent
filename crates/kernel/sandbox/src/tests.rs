@@ -57,7 +57,7 @@ fn naming_upward(folder: &Path) -> Vec<(PathBuf, Vec<String>)> {
 }
 
 /// kernel/sandbox names no item of the engine crate or of the engine's sandbox hub, so it
-/// never grows a dependency back on them (R4); `crazyagent_win_sandbox::` paths are allowed,
+/// never grows a dependency back on them; `crazyagent_win_sandbox::` paths are allowed,
 /// as the scan reads the character before the name.
 #[test]
 fn kernel_sandbox_names_no_crazyagent_item() {
@@ -116,7 +116,7 @@ fn cargo_tree_is_the_allowlist() {
     tree.args(["tree", "-p", "crazyagent-kernel-sandbox", "-e", "normal"])
         .args(["--prefix", "none", "--offline", "--locked"])
         .current_dir(&root);
-    let output = kernel_processes::spawn_gate::output(&mut tree).unwrap();
+    let output = kernel_processes::spawn_gate::collected(&mut tree).unwrap();
     assert!(
         output.status.success(),
         "{}",

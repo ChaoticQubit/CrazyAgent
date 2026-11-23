@@ -1,6 +1,6 @@
 use crate::plugins::{ContextModeOff, ServerSpec, exact_version};
-use crate::setup::InstallError;
 use base64::Engine;
+use kernel_processes::run::InstallError;
 use kernel_sandbox::error::SandboxError;
 use os::{
     NODE, lock, lock_shared, npm_ready, open_plain, private_folder, run_command, run_quiet,

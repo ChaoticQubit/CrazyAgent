@@ -1,7 +1,7 @@
 use super::*;
 use crate::credentials::test_keychain::TestKeychain;
-use crate::credentials::{Store, parts, reference};
 use kernel_security::secret::SecretString;
+use kernel_security::store::{SecretRef, Store, parts, reference};
 use std::process::{Command, Stdio};
 
 struct Scratch {
@@ -261,8 +261,8 @@ fn secrets_are_visible_ascii_bounded_and_redacted() {
     let shown = format!("{:?}", secret("gho_visible"));
     assert!(!shown.contains("gho_visible"));
     assert!(reference("dev.crazyagent.a", "b:c").is_err());
-    assert!(parts(&crate::protocol::CredentialRef::new("no-colon").unwrap()).is_err());
-    assert!(parts(&crate::protocol::CredentialRef::new("a:b:c").unwrap()).is_err());
+    assert!(SecretRef::try_from("no-colon").is_err());
+    assert!(SecretRef::try_from("a:b:c").is_err());
 }
 
 #[test]

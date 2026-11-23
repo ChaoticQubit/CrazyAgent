@@ -529,3 +529,65 @@ fn a_restore_moves_the_sdk_home_and_sign_in_of_accounts_only_2_5_holds_into_its_
         assert_eq!(std::fs::read(&file).unwrap(), b"secret-dummy");
     }
 }
+
+/// A kept copy in WAL mode, checkpointed and with its -wal and -shm files gone, as Apple's
+/// SQLite can leave one, in a canonical private folder so the no-follow open accepts it.
+/// Input: none. Output: the folder, holding engine.db with one row in `kept`.
+fn kept_wal_copy() -> tempfile::TempDir {
+    let copy = tempfile::Builder::new()
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let path = copy.path().join(DATABASE);
+    let made = Connection::open(&path).unwrap();
+    made.execute_batch(
+        "PRAGMA journal_mode = WAL; CREATE TABLE kept (value TEXT); \
+         INSERT INTO kept VALUES ('one'); PRAGMA wal_checkpoint(TRUNCATE);",
+    )
+    .unwrap();
+    drop(made);
+    assert_eq!(
+        &std::fs::read(&path).unwrap()[18..20],
+        &[2, 2],
+        "the copy is in WAL mode"
+    );
+    for side in ["engine.db-wal", "engine.db-shm"] {
+        let side = copy.path().join(side);
+        if side.exists() {
+            std::fs::remove_file(&side).unwrap();
+        }
+    }
+    copy
+}
+
+#[test]
+fn the_sweep_reads_a_kept_wal_copy_that_has_no_wal_or_shm_file() {
+    let copy = kept_wal_copy();
+
+    let rows: i64 = replaced_database(copy.path())
+        .and_then(|db| {
+            db.query_row("SELECT COUNT(*) FROM kept", [], |row| row.get(0))
+                .map_err(error)
+        })
+        .unwrap();
+
+    assert_eq!(rows, 1);
+}
+
+#[test]
+fn the_sweep_connection_refuses_a_write_to_the_kept_copy() {
+    let copy = kept_wal_copy();
+    let db = replaced_database(copy.path()).unwrap();
+
+    let refused = db
+        .execute("INSERT INTO kept VALUES ('two')", [])
+        .unwrap_err()
+        .to_string();
+    drop(db);
+
+    assert!(refused.contains("readonly"), "{refused}");
+    let rows: i64 = Connection::open(copy.path().join(DATABASE))
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM kept", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(rows, 1);
+}

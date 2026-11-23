@@ -6,7 +6,7 @@ use rusqlite::Transaction;
 /// the open's proof; a store with no memory row, or whose memory is already on the log, gets
 /// no run. Input: the open upgrade transaction. Output: Ok or the log's refusal.
 pub(super) fn memory_on_the_log(tx: &Transaction<'_>) -> Result<(), StorageError> {
-    let at_ms = crate::state_log::replay::Clock::System.now_ms();
+    let at_ms = kernel_storage::state_log::Clock::System.now_ms();
     let opening = crate::storage::opening::Opening::new(at_ms);
     crate::memory::log::first_run(tx, opening)?;
     assert!(

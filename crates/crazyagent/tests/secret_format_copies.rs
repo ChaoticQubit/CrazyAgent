@@ -1,9 +1,9 @@
-use crazyagent::credentials::Piece::{Escaped, Form, Hex, Plain};
-use crazyagent::credentials::sized;
 use crazyagent::model_gateway::relay::Relay;
 use crazyagent::usage::extras::Adapter;
 use crazyagent::usage::poll::poll_balance;
+use kernel_security::secret::Piece::{Escaped, Form, Hex, Plain};
 use kernel_security::secret::SecretString;
+use kernel_security::secret::sized;
 use std::alloc::{GlobalAlloc, Layout, System};
 #[cfg(unix)]
 use std::io::{Read, Write};
@@ -121,7 +121,7 @@ fn a_relay_refuses_to_start_where_curl_cannot_take_the_body_pipe() {
     );
 }
 
-/// SECRET-FORMAT-COPIES: `credentials::sized` writes each piece as the formatting it
+/// SECRET-FORMAT-COPIES: `kernel_security::secret::sized` writes each piece as the formatting it
 /// replaced did (the `replace` escaping, the form serializer, `{:02x}`), into a buffer of
 /// exactly that size, and refuses a control byte only in an escaped piece.
 #[test]

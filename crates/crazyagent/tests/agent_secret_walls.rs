@@ -2,7 +2,9 @@
 
 mod keychain_support;
 
-use crazyagent::credentials::{Keychain, Store, reference};
+use kernel_security::store::{Store, reference};
+
+use crazyagent::credentials::Keychain;
 use crazyagent::model_gateway::relay::{LOCAL_PLACEHOLDER, TOKEN_PREFIX};
 use crazyagent::sandbox::toolchains::{self, ToolHomes};
 use crazyagent::sandbox::{

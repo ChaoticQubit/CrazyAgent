@@ -1011,6 +1011,7 @@ dependencies = [
  "nix",
  "rustix 1.1.5",
  "serde",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
 ]
@@ -1032,6 +1033,10 @@ dependencies = [
 name = "crazyagent-kernel-security"
 version = "2.4.4"
 dependencies = [
+ "crazyagent-kernel-common",
+ "form_urlencoded",
+ "serde",
+ "serde_json",
  "zeroize",
 ]
 
@@ -1044,6 +1049,7 @@ dependencies = [
  "rustix 1.1.5",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
 ]
 

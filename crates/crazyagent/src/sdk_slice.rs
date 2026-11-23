@@ -14,7 +14,8 @@ use crate::engine::owner::{HostStamp, failure};
 use crate::protocol::{Cursor, Outcome};
 use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crate::state_log::fence::Fence;
-use crate::state_log::{Aggregate, Appender, Draft};
+use crate::state_log::{Aggregate, Appender};
+use kernel_storage::state_log::Draft;
 
 #[cfg(test)]
 mod tests;
@@ -108,7 +109,7 @@ fn append_refusals(
                 "the engine names only its own ids"
             );
             appender.append(&Draft {
-                aggregate: Aggregate::Plugins,
+                aggregate: Aggregate::Plugins.into(),
                 kind: KIND_CALL_REFUSED,
                 schema: CALL_REFUSED_SCHEMA,
                 at_ms,

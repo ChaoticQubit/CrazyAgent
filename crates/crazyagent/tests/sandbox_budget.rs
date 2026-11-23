@@ -30,8 +30,8 @@ fn timed(row: &str, mut step: impl FnMut()) -> u128 {
 }
 
 /// Building one agent's sandbox for a fixed project, as a macOS launch does: the project
-/// sandbox, its Seatbelt profile written to disk and the confined agent command (E0, leader
-/// L10). Prints `budget profile_build_p95 p95_us=<n> runs=200`.
+/// sandbox, its Seatbelt profile written to disk and the confined agent command. Prints
+/// `budget profile_build_p95 p95_us=<n> runs=200`.
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "budget row, run with --ignored --nocapture --test-threads=1"]
@@ -61,8 +61,8 @@ fn profile_build_p95() {
 }
 
 /// Reading one project's saved agent policy from an engine database file, as every launch
-/// does through `sandbox::policy::load` (E0, leader L10). The policy is saved once first, so
-/// each read finds its row. Prints `budget policy_load_p95 p95_us=<n> runs=200`.
+/// does through `sandbox::policy::load`. The policy is saved once first, so each read finds
+/// its row. Prints `budget policy_load_p95 p95_us=<n> runs=200`.
 #[test]
 #[ignore = "budget row, run with --ignored --nocapture --test-threads=1"]
 fn policy_load_p95() {
@@ -80,7 +80,7 @@ fn policy_load_p95() {
 /// Building one agent's Linux boundary for a fixed project, as a Linux launch does: the
 /// project sandbox, the backend [`LinuxSandbox::detect`] picks with the Landlock helper,
 /// and the wrapped harness command, which carries the Landlock policy to the helper as
-/// arguments; Linux writes no policy file (E0, leader L10, PM C1). Prints
+/// arguments; Linux writes no policy file. Prints
 /// `budget linux_policy_write_p95 p95_us=<n> runs=200`.
 #[cfg(target_os = "linux")]
 #[test]

@@ -5,10 +5,12 @@ use crate::master_session::{MasterSessionView, SESSION_DELETED, SessionDeleted};
 use crate::owner_texts::TextDigest;
 use crate::protocol::{Outcome, ProjectId, SessionId};
 use crate::state_log::fence::Fence;
-use crate::state_log::replay::{self, Clock, Logged};
-use crate::state_log::{Aggregate, Appender, BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
+use crate::state_log::replay::{self, Logged};
+use crate::state_log::{Aggregate, Appender};
 use crate::storage::opening::Opening;
 use crate::storage::versioned::{Refusal, Writer};
+use kernel_storage::state_log::Clock;
+use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -98,7 +100,7 @@ const NOT_NEWER: &str = "state_log_revision_not_newer";
 const RUNTIME_STALE: &str = "owner_runtime_stale";
 
 const _: () = assert!(DROPPED_MAX * 21 + CHUNK_ENVELOPE_BYTES <= BODY_BYTES_MAX);
-const _: () = assert!(MARKS_MAX < crate::state_log::TRANSACTION_EVENTS_MAX);
+const _: () = assert!(MARKS_MAX < kernel_storage::state_log::TRANSACTION_EVENTS_MAX);
 
 /// One master session row: its two ids at the top level, so a Delete's redaction and a demo
 /// clear's find it, the row's `created` revision and the stored session, a closed view of
@@ -477,77 +479,77 @@ fn append(log: &mut Appender<'_, '_>, at_ms: u64, event: &Event) -> Result<u64, 
     let aggregate = Aggregate::Sessions;
     let seq = match event {
         Event::Session(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_SESSION,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Entry(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_ENTRY,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::EntriesDropped(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_ENTRIES_DROPPED,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Text(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_TEXT,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::TextsDropped(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_TEXTS_DROPPED,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Turn(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_TURN,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Preparation(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_PREPARATION,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Resolve(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_RESOLVE,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::ResolvesDropped(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_RESOLVES_DROPPED,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::Profile(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_PROFILE,
             schema: SCHEMA,
             at_ms,
             body: &body,
         }),
         Event::ProfilesDropped(_) => log.append(&Draft {
-            aggregate,
+            aggregate: aggregate.into(),
             kind: KIND_PROFILES_DROPPED,
             schema: SCHEMA,
             at_ms,
