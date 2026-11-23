@@ -36,7 +36,7 @@ pub(super) fn run_checked(command: &[OsString]) -> Result<(), ServiceError> {
 /// Runs one service command to its end with no input, capturing its output. Input: the
 /// command. Output: Ok on success, else an error showing its program, arguments, status
 /// and error text, never its environment.
-pub(super) fn run_process(process: &mut std::process::Command) -> Result<(), ServiceError> {
+fn run_process(process: &mut std::process::Command) -> Result<(), ServiceError> {
     let program = process.get_program().to_string_lossy().into_owned();
     let output = crate::spawn_gate::output(
         process
