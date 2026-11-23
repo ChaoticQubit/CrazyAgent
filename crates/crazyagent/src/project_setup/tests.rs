@@ -207,7 +207,7 @@ fn read_only_folder_lists_are_bounded_before_the_engine_checks_them() {
         version: 0,
         paths,
     };
-    let limit = crate::sandbox::extra_paths::EXTRA_PATHS_MAX;
+    let limit = kernel_sandbox::extra_paths::EXTRA_PATHS_MAX;
     assert!(action(vec!["/tmp/a".into(); limit]).validate().is_ok());
     assert!(action(vec![]).validate().is_ok());
     for paths in [

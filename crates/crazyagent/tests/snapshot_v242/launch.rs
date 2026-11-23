@@ -12,7 +12,6 @@ use crazyagent::engine::owner::{
 };
 use crazyagent::project_setup::{HarnessSlot, ProjectSetup, TeamPlan};
 use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec};
-use crazyagent::sandbox::toolchains;
 use crazyagent::team::{AgentRole, TeamAction, TeamStatus};
 use crazyagent::terminal::FOLDER;
 use crazyagent::terminal::tmux::{SOCKET, installed};
@@ -715,7 +714,7 @@ fn bounded(file: &Path) -> Result<String, String> {
 /// The folders the engine grants every agent read access to only because this Mac has
 /// them installed: the Xcode app's developer folder `xcode-select` names and graphify's
 /// uv tool with its Python, as the engine's own `ToolHomes::owner` and
-/// `toolchains::graphify` find them. Output: the canonical folders, none on a Mac with
+/// `kernel_sandbox::toolchains::graphify` find them. Output: the canonical folders, none on a Mac with
 /// neither.
 fn machine_folders() -> Result<Vec<String>, String> {
     let homes = ToolHomes::owner().map_err(|error| format!("{error:?}"))?;
@@ -723,7 +722,7 @@ fn machine_folders() -> Result<Vec<String>, String> {
         .xcode()
         .map(Path::to_path_buf)
         .into_iter()
-        .chain(toolchains::graphify(&homes))
+        .chain(kernel_sandbox::toolchains::graphify(&homes))
         .map(|folder| {
             folder
                 .to_str()
@@ -763,7 +762,7 @@ pub(super) fn sdkroot_fact(
 ) -> Result<&'static str, String> {
     let homes = ToolHomes::owner().map_err(|error| format!("{error:?}"))?;
     let expected = tool_variables
-        && toolchains::agent_env(Path::new("/"), &homes)
+        && kernel_sandbox::toolchains::agent_env(Path::new("/"), &homes)
             .iter()
             .any(|(name, _)| *name == SDKROOT);
     let given = env_names.iter().any(|name| name == SDKROOT);

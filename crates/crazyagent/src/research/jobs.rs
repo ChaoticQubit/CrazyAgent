@@ -693,12 +693,12 @@ impl ResearchJobs {
     }
 
     /// Reads the extra read-only folders the owner saved for a project's agents, see
-    /// [`crate::sandbox::extra_paths::load`]. Takes the project. Returns the folders.
+    /// [`crate::sandbox::access_store::read::load`]. Takes the project. Returns the folders.
     pub fn read_paths(
         &self,
         project: &crate::protocol::ProjectId,
     ) -> rusqlite::Result<Vec<std::path::PathBuf>> {
-        crate::sandbox::extra_paths::load(&self.connection, project.as_str())
+        crate::sandbox::access_store::read::load(&self.connection, project.as_str())
     }
 
     /// Reads the folders the owner keeps a project's agents out of, see

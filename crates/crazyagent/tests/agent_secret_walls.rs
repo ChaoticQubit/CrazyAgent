@@ -6,7 +6,6 @@ use kernel_security::store::{Store, reference};
 
 use crazyagent::credentials::Keychain;
 use crazyagent::model_gateway::relay::{LOCAL_PLACEHOLDER, TOKEN_PREFIX};
-use crazyagent::sandbox::toolchains;
 use crazyagent::sandbox::{
     AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, ProjectSandbox, agent_command, agent_env_refused,
     agent_variable_allowed,
@@ -576,7 +575,7 @@ fn sandboxed_agent_env_holds_only_the_builder_variables() {
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .collect();
     let homes = ToolHomes::owner().unwrap();
-    let path = toolchains::agent_path(
+    let path = kernel_sandbox::toolchains::agent_path(
         &homes,
         "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
     );
@@ -596,7 +595,7 @@ fn sandboxed_agent_env_holds_only_the_builder_variables() {
     .map(|(name, value)| (name.to_owned(), value.to_owned()))
     .collect();
     expected.extend(
-        toolchains::agent_env(&case.home, &homes)
+        kernel_sandbox::toolchains::agent_env(&case.home, &homes)
             .into_iter()
             .map(|(name, value)| (name.to_owned(), value.into_string().unwrap())),
     );

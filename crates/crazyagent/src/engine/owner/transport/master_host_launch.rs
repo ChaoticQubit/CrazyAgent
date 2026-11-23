@@ -2384,7 +2384,7 @@ mod tests {
         expected.extend(crate::sandbox::AGENT_HOME_ENV);
         let prefix = crate::sandbox::shell_tmp_prefix(&tmp);
         expected.insert("TMPPREFIX", prefix.to_str().unwrap());
-        let tools = crate::sandbox::toolchains::agent_env(&home, &ToolHomes::owner().unwrap());
+        let tools = kernel_sandbox::toolchains::agent_env(&home, &ToolHomes::owner().unwrap());
         expected.extend(
             tools
                 .iter()
@@ -2432,7 +2432,7 @@ mod tests {
             .get_envs()
             .map(|(key, value)| (key.to_str().unwrap(), value.unwrap().to_str().unwrap()))
             .collect::<BTreeMap<_, _>>();
-        let claude_path = crate::sandbox::toolchains::agent_path(
+        let claude_path = kernel_sandbox::toolchains::agent_path(
             &ToolHomes::owner().unwrap(),
             "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin",
         );

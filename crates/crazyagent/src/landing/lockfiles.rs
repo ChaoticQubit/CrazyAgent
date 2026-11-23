@@ -638,7 +638,12 @@ fn confined(
     listed.hid(&hidden);
     let homes = ToolHomes::owner().map_err(|_| "tool_homes_unread")?;
     let tmp = toolchains::make_tmp(&scratch.home).map_err(|_| "tmp_unmade")?;
-    toolchains::prepare_cargo_home(&scratch.home, &homes).map_err(|_| "cargo_home_unmade")?;
+    kernel_sandbox::toolchains::prepare_cargo_home(
+        &crate::sandbox::TOOLCHAIN_HOOKS,
+        &scratch.home,
+        &homes,
+    )
+    .map_err(|_| "cargo_home_unmade")?;
     let mut sandbox = ProjectSandbox::new(
         root,
         &scratch.home,

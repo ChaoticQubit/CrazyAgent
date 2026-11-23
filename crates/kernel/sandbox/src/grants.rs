@@ -106,5 +106,5 @@ pub fn refusal_text(code: &str) -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

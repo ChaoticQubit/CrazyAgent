@@ -1,7 +1,11 @@
 use crate::error::SandboxError;
 use crate::paths::{canonical, owner_home};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::fs;
+use std::io;
+#[cfg(unix)]
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 const RUST_MARKERS: &[&str] = &["Cargo.toml", "rust-toolchain", "rust-toolchain.toml"];
@@ -36,6 +40,17 @@ const PYTHON_HOMES: &[&str] = &[".pyenv", ".local/share/uv/python"];
 /// The crate caches in cargo's home an agent's own cargo home links to: the registry and
 /// the git checkouts.
 pub const CARGO_SHARED: &[&str] = &["registry", "git"];
+
+/// The engine's parts the agent toolchain setup reaches. Production code passes the engine's
+/// one value; rows pass stand-ins.
+pub struct ToolchainHooks {
+    /// Removes one entry of an agent's own cargo home without following a link, also a
+    /// folder an agent shut. Inputs: the open cargo home, the entry name and the code for a
+    /// refusal the engine has no own code for. Output: done, or the refusal code.
+    #[cfg(unix)]
+    pub remove_home_entry:
+        fn(std::os::fd::BorrowedFd<'_>, &str, &'static str) -> Result<(), &'static str>,
+}
 
 /// The folders the owner's toolchains live in: the owner's home, rustup's home and cargo's
 /// home inside it.
@@ -308,5 +323,203 @@ fn xcode_from_link(link: &Path) -> Option<PathBuf> {
     (in_app && plain && real.is_dir() && real != Path::new(DEVELOPER_TOOLS)).then_some(real)
 }
 
-#[cfg(test)]
+/// The compilers of an Xcode app, below its developer folder.
+const XCODE_TOOLCHAIN_BIN: &str = "Toolchains/XcodeDefault.xctoolchain/usr/bin";
+
+/// The macOS SDK of an Xcode app, below its developer folder.
+const XCODE_SDK: &str = "Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk";
+
+/// Where the default pack's `uv tool install graphifyy` keeps graphify's own environment.
+const GRAPHIFY_TOOL: &str = ".local/share/uv/tools/graphifyy";
+
+const RUSTUP_BINS: &[&str] = &["/opt/homebrew/opt/rustup/bin", "/usr/local/opt/rustup/bin"];
+
+/// The base path entry holding the xcrun shims the Command Line Tools' folder goes before.
+const SYSTEM_BIN: &str = "/usr/bin";
+
+/// The variables that keep every agent's toolchains from installing themselves: rustup
+/// never fetches a missing toolchain, uv never downloads a Python, Corepack never fetches a
+/// package manager and Homebrew never updates itself.
+pub const AUTO_INSTALL_ENV: [(&str, &str); 4] = [
+    ("RUSTUP_AUTO_INSTALL", "0"),
+    ("UV_PYTHON_DOWNLOADS", "never"),
+    ("COREPACK_ENABLE_NETWORK", "0"),
+    ("HOMEBREW_NO_AUTO_UPDATE", "1"),
+];
+
+/// The toolchain variables every agent process gets: a writable `CARGO_HOME` in the
+/// agent's own home, the owner's rustup home read-only in `RUSTUP_HOME`,
+/// [`AUTO_INSTALL_ENV`], and `SDKROOT` at the macOS SDK of the developer tools
+/// [`developer`] picks, so rustc and the cc crate never ask xcrun. Inputs: the agent home
+/// and the owner's tool homes. Output: the variables in order.
+pub fn agent_env(home: &Path, homes: &ToolHomes) -> Vec<(&'static str, OsString)> {
+    let mut env = vec![
+        ("CARGO_HOME", home.join(".cargo").into_os_string()),
+        ("RUSTUP_HOME", homes.rustup().as_os_str().to_owned()),
+    ];
+    env.extend(
+        AUTO_INSTALL_ENV
+            .iter()
+            .map(|(name, value)| (*name, OsString::from(value))),
+    );
+    env.extend(
+        developer(homes)
+            .map(|(_, sdk)| sdk)
+            .filter(|sdk| sdk.is_dir())
+            .map(|sdk| ("SDKROOT", sdk.into_os_string())),
+    );
+    env
+}
+
+/// The program folder and macOS SDK of the developer tools an agent runs: the Command Line
+/// Tools when their folder holds `cc`, else the picked Xcode app's default toolchain when
+/// it holds `cc` (F26). Every lookup by an xcrun shim under an agent's own home misses
+/// xcrun's cache, whose write in the per-user temp folder the sandbox denies (R7-XCRUN), so
+/// an agent runs these programs directly. Takes the tool homes. Returns the folder and the
+/// SDK path, none when neither has the tools.
+fn developer(homes: &ToolHomes) -> Option<(String, PathBuf)> {
+    let tools = (
+        homes.developer().join("usr").join("bin"),
+        homes.developer().join("SDKs").join("MacOSX.sdk"),
+    );
+    let xcode = homes
+        .xcode()
+        .map(|xcode| (below(xcode, XCODE_TOOLCHAIN_BIN), below(xcode, XCODE_SDK)));
+    let (bin, sdk) = std::iter::once(tools)
+        .chain(xcode)
+        .find(|(bin, _)| bin.join("cc").is_file())?;
+    let text = bin.to_str().filter(|text| !text.contains(':'))?.to_owned();
+    Some((text, sdk))
+}
+
+/// The read-only folders graphify needs in an agent's sandbox when the default pack
+/// installed it with uv (I3): its own environment, holding the `graphify` program, and the
+/// uv Python install its interpreter runs from when that sits in the owner's home. Takes the
+/// tool homes. Returns the canonical folders, none when graphify is not installed there.
+pub fn graphify(homes: &ToolHomes) -> Vec<PathBuf> {
+    let Ok(tool) = below(homes.home(), GRAPHIFY_TOOL).canonicalize() else {
+        return Vec::new();
+    };
+    let inside = |folder: &Path| folder.starts_with(homes.home()) && folder != homes.home();
+    let program = std::fs::symlink_metadata(tool.join("bin").join("graphify"))
+        .is_ok_and(|metadata| metadata.is_file());
+    if !program || !inside(&tool) || !tool.is_dir() {
+        return Vec::new();
+    }
+    let install = tool
+        .join("bin")
+        .join("python3")
+        .canonicalize()
+        .ok()
+        .and_then(|python| python.parent()?.parent().map(Path::to_path_buf))
+        .filter(|install| inside(install) && !tool.starts_with(install));
+    let folders: Vec<PathBuf> = std::iter::once(tool).chain(install).collect();
+    assert!((1..=2).contains(&folders.len()));
+    folders
+}
+
+/// A tools-on agent's search path: the owner's cargo proxies and Homebrew's rustup proxies
+/// where they hold `cargo`, then `base` with [`developer`]'s folder just before its `/usr/bin`,
+/// then graphify's own program folder when the default pack installed it (see
+/// [`graphify`]), last so it never shadows a toolchain's `python3`. Inputs: the tool homes
+/// and the base path. Output: the joined path.
+pub fn agent_path(homes: &ToolHomes, base: &str) -> String {
+    let mut parts: Vec<String> = std::iter::once(homes.cargo().join("bin"))
+        .chain(RUSTUP_BINS.iter().map(PathBuf::from))
+        .filter(|bin| bin.join("cargo").is_file())
+        .filter_map(|bin| {
+            bin.to_str()
+                .filter(|text| !text.contains(':'))
+                .map(str::to_owned)
+        })
+        .collect();
+    let mut developer = developer(homes).map(|(bin, _)| bin);
+    for entry in base.split(':') {
+        if entry == SYSTEM_BIN {
+            parts.extend(developer.take());
+        }
+        parts.push(entry.to_owned());
+    }
+    parts.extend(
+        graphify(homes)
+            .first()
+            .and_then(|tool| tool.join("bin").to_str().map(str::to_owned))
+            .filter(|bin| !bin.contains(':')),
+    );
+    parts.join(":")
+}
+
+/// Makes the agent's own cargo home, `.cargo` in its home with mode 0700, and links its
+/// `registry` and `git` to the owner's, which the sandbox grants read-only, so offline
+/// builds reuse the owner's crates and never change them. Those names hold only that link
+/// (DEC-173): where the owner has the cache, whatever else is there, a folder or a link
+/// elsewhere, gives way to it; where the owner has none, a link there goes, and a folder an
+/// agent made goes at the engine's launch reset, while a folder in
+/// the owner's IDE terminal home stays. A launch that finds the exact link another launch
+/// of the same home made at a name it saw free takes it (RV-DS241-199). Inputs: the agent
+/// home, the hooks the removal goes through and the owner's tool homes. Output: the cargo
+/// home, or a refusal when `.cargo` is
+/// not a plain folder or a name will not give way, whose text is `cleanup_walk_too_long`
+/// when removing the name ran past its walk budget (RESET-WALK-CODE).
+#[cfg(unix)]
+pub fn prepare_cargo_home(
+    hooks: &ToolchainHooks,
+    home: &Path,
+    homes: &ToolHomes,
+) -> io::Result<PathBuf> {
+    use rustix::fs::{CWD, Mode, OFlags};
+    use std::os::fd::AsFd;
+    use std::os::unix::ffi::OsStrExt;
+    let cargo = home.join(".cargo");
+    match fs::DirBuilder::new().mode(0o700).create(&cargo) {
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
+        _ => {}
+    }
+    let folder = rustix::fs::openat(
+        CWD,
+        &cargo,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?;
+    let remove = |name: &str| {
+        (hooks.remove_home_entry)(folder.as_fd(), name, "cargo cache name will not give way")
+            .map_err(io::Error::other)
+    };
+    let linked = |name: &str, shared: &Path| {
+        rustix::fs::readlinkat(&folder, name, Vec::new())
+            .is_ok_and(|target| target.as_bytes() == shared.as_os_str().as_bytes())
+    };
+    for name in CARGO_SHARED {
+        let found = rustix::fs::readlinkat(&folder, *name, Vec::new());
+        let Some(shared) = existing(&homes.cargo().join(name), true) else {
+            if found.is_ok() {
+                remove(name)?;
+            }
+            continue;
+        };
+        match found {
+            Ok(target) if target.as_bytes() == shared.as_os_str().as_bytes() => continue,
+            Err(rustix::io::Errno::NOENT) => {}
+            _ => remove(name)?,
+        }
+        match rustix::fs::symlinkat(&shared, &folder, *name) {
+            Err(rustix::io::Errno::EXIST) if linked(name, &shared) => {}
+            made => made?,
+        }
+    }
+    Ok(cargo)
+}
+
+/// No agent cargo home outside Unix, where no agent sandbox runs. Takes the hooks, agent
+/// home and tool homes, unused. Returns `Unsupported`.
+#[cfg(not(unix))]
+pub fn prepare_cargo_home(
+    _hooks: &ToolchainHooks,
+    _home: &Path,
+    _homes: &ToolHomes,
+) -> io::Result<PathBuf> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+#[cfg(all(test, unix))]
 mod tests;

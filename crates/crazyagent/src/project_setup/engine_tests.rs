@@ -2646,6 +2646,41 @@ async fn owner_read_project_hidden_paths_returns_the_saved_list_and_version() {
     engine.stop().await;
 }
 
+/// The owner's read of a project's extra read-only folders returns what the project saved:
+/// the folders in saved order and the version the saves made, with nothing taken from the
+/// engine's settings.
+#[tokio::test]
+async fn owner_read_project_read_paths_returns_the_saved_list() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let saved = vec![
+        PathBuf::from("/tmp/read-docs"),
+        PathBuf::from("/tmp/read-specs"),
+    ];
+    let connection = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    crate::sandbox::access_store::read::save(&connection, "setup-pooled", &saved).unwrap();
+    drop(connection);
+    let read = owner.project_read_paths(project).await.unwrap();
+    let shown: Vec<String> = saved
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    assert_eq!(read.paths, shown);
+    assert_eq!(read.version, 0);
+    engine.stop().await;
+}
+
 /// The half of the agent policy that runs on every system, Linux included, at the level every
 /// system offers: a Sandboxed save with toolchain choices and the IDE hooks switch lands at
 /// version 1, a save from the version before it is refused as `stale_revision` and changes

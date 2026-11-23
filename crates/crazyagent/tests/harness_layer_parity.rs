@@ -9,7 +9,6 @@ use crazyagent::harnesses::{HarnessEntry, Search, catalog, specs};
 use crazyagent::model_gateway::relay::TOKEN_PREFIX;
 use crazyagent::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
 use crazyagent::rcli_host::{RcliMasterBinding, RcliMasterLaunch};
-use crazyagent::sandbox::toolchains;
 use kernel_sandbox::toolchains::ToolHomes;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -103,7 +102,7 @@ fn tool_placeholders() -> Vec<(String, String)> {
             .map(|xcode| (xcode.to_path_buf(), "<XCODE_DEVELOPER>")),
     );
     folders.extend(
-        toolchains::graphify(&homes)
+        kernel_sandbox::toolchains::graphify(&homes)
             .into_iter()
             .zip(["<GRAPHIFY_TOOL>", "<GRAPHIFY_PYTHON>"]),
     );

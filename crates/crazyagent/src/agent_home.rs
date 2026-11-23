@@ -198,7 +198,7 @@ enum Kept {
     /// flags and ACLs on the way.
     Cache,
     /// A link, never followed: a cache the engine links to the owner's read-only one
-    /// ([`crate::sandbox::toolchains::prepare_cargo_home`]), which the agent's profile keeps
+    /// ([`kernel_sandbox::toolchains::prepare_cargo_home`]), which the agent's profile keeps
     /// it from moving, removing or making itself.
     Link,
     /// A real folder holding only the entries its list keeps, none when the list is empty.
@@ -1399,7 +1399,7 @@ pub(crate) fn remove_home_code(
 
 /// Links the `registry` and `git` of an rcli master's cargo home to the owner's read-only
 /// caches, as every agent home has them, making the cargo home when it is gone
-/// ([`crate::sandbox::toolchains::prepare_cargo_home`]). Inputs: the home and the owner's
+/// ([`kernel_sandbox::toolchains::prepare_cargo_home`]). Inputs: the home and the owner's
 /// tool homes. Output: unit, or `agent_home_unwritable` when a link will not be made, or
 /// `cleanup_walk_too_long` when clearing a name for it ran past its walk budget
 /// (RESET-WALK-CODE).
@@ -1408,7 +1408,7 @@ fn link_owner_crates(
     home: &Path,
     homes: &kernel_sandbox::toolchains::ToolHomes,
 ) -> Result<(), AgentHomeError> {
-    crate::sandbox::toolchains::prepare_cargo_home(home, homes)
+    kernel_sandbox::toolchains::prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, home, homes)
         .map(drop)
         .map_err(|problem| {
             failure(match crate::team::cleanup::walk_too_long_io(&problem) {

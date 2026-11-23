@@ -420,7 +420,7 @@ test("secret paths are read one per line, the picker keeps a picked folder that 
   assert.deepEqual(access.unreachableSecrets("none", ["program"], sharedBack), sharedBack, "None reaches none");
   const card = readFileSync(new URL("../src/screens/project/access.tsx", import.meta.url), "utf8");
   assert.match(card, /unreachable\.length > 0 && <p className="pj-note" role="note">{SHARED_SECRETS_UNREACHABLE} {unreachable\.join\(", "\)}\.<\/p>}/);
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/shared_folders.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/sandbox/src/shared_folders.rs", import.meta.url), "utf8");
   assert.ok(engine.includes(`"${access.SHARED_SECRETS_UNREACHABLE}"`), "the unreachable line reads as the engine states it");
   assert.equal(access.sameShared(SHARED, { ...SHARED }), true);
   assert.equal(access.sameShared(SHARED, { ...SHARED, chosen: ["program"] }), false);
@@ -447,7 +447,7 @@ test("a new project's access save keeps the toolchains onboarding recorded and t
 });
 
 test("every shared folders refusal has its own sentence in both UIs", () => {
-  const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/shared_folders.rs", import.meta.url), "utf8");
+  const engine = readFileSync(new URL("../../../crates/kernel/sandbox/src/shared_folders.rs", import.meta.url), "utf8");
   const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project.rs", import.meta.url), "utf8");
   const codes = [...new Set([...engine.matchAll(/"(shared_folders_[a-z_]+)"/g)].map((match) => match[1]))];
   assert.deepEqual(codes.sort(), ["shared_folders_need_macos", "shared_folders_refused", "shared_folders_too_many", "shared_folders_unlisted"]);

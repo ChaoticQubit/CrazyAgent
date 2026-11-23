@@ -3810,7 +3810,7 @@ fn owner_read(
         },
         OwnerRead::ProjectReadPaths { project_id } => OwnerData::ProjectReadPaths {
             project_id: project_id.clone(),
-            paths: crate::sandbox::extra_paths::load(&tx, project_id.as_str())
+            paths: crate::sandbox::access_store::read::load(&tx, project_id.as_str())
                 .map_err(error)?
                 .into_iter()
                 .map(|path| path.display().to_string())

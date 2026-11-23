@@ -282,7 +282,8 @@ impl Case {
                 params![agent, PROJECT, worktree],
             )
             .unwrap();
-        crate::sandbox::extra_paths::save(&self.db, PROJECT, &[self.repo.join("docs")]).unwrap();
+        crate::sandbox::access_store::read::save(&self.db, PROJECT, &[self.repo.join("docs")])
+            .unwrap();
         crate::sandbox::access_store::hidden::save(&self.db, PROJECT, &[self.repo.join("secret")])
             .unwrap();
     }

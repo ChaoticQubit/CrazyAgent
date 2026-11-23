@@ -6,7 +6,6 @@ use super::project_access::{
     SHARED_FOLDERS, SHARED_FOLDERS_IGNORED_UNDER_FULL, SHARED_FOLDERS_NEXT_START,
     SHARED_SECRETS_LINE, TOOLCHAIN_OFF_STOPS_AGENTS, agent_files_help, network_help, summary,
 };
-use crate::sandbox::shared_folders::{OFF_MACOS_LINE, UNREACHABLE_SECRETS_LINE};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use kernel_sandbox::lines::{LINUX_NESTED_GIT_LINE, LINUX_PORTS_ANY_HOST_LINE};
 use kernel_sandbox::policy::{
@@ -14,6 +13,7 @@ use kernel_sandbox::policy::{
     ToolchainView,
 };
 use kernel_sandbox::shared_folders::{CHOSEN_MAX, SharedAccess, SharedFolders, SharedScope};
+use kernel_sandbox::shared_folders::{OFF_MACOS_LINE, UNREACHABLE_SECRETS_LINE};
 use kernel_sandbox::toolchains::Toolchain;
 
 fn key(code: KeyCode) -> KeyEvent {

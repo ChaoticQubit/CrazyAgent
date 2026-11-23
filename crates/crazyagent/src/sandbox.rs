@@ -15,6 +15,8 @@ use kernel_sandbox::ports::{
     BRIDGE_PORT_MIN, KEPT_PORTS_MAX, OWNER_PORTS, PROXY_PORTS, RELAY_PORTS, REMOTES_MAX,
 };
 use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
+use kernel_sandbox::shared_folders::OPEN_TOPS_MAX;
+use kernel_sandbox::toolchains::ToolchainHooks;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 #[cfg(unix)]
@@ -30,7 +32,6 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 pub mod access_store;
-pub mod extra_paths;
 #[cfg(all(test, target_os = "macos"))]
 mod git_deny_tests;
 pub mod grants;
@@ -198,9 +199,6 @@ const WORKTREES_MAX: usize = 8;
 /// The most files and folders one sandbox keeps out by name: the graph step's secret-like and
 /// git-ignored project paths (MAP-2). A project with more builds no graph.
 pub const KEPT_OUT_MAX: usize = 1024;
-/// The most top-level names a Chosen folders or None launch keeps open in the project
-/// folder: every present entry, the engine's names and the picked ones.
-pub const OPEN_TOPS_MAX: usize = 512;
 /// The opening of the Seatbelt rule for paths kept out: contents, folder listings and
 /// attribute values are denied with every write, run, link and clone, while names, sizes
 /// and dates stay readable, so a tool that only stats such a path does not fail.
@@ -1169,19 +1167,66 @@ pub fn linux_host_kept() -> Option<LinuxHost> {
 /// The engine's real agent policy hooks, the only [`PolicyHooks`] production code passes:
 /// this Linux read again ([`linux_host`]) and as last kept ([`linux_host_kept`]), the
 /// bounded read for another repository ([`linux_other_git`]) and a project's local folders
-/// ([`shared_folders::local_folders`]).
+/// ([`access_local_folders`]).
 pub const POLICY_HOOKS: PolicyHooks = PolicyHooks {
     linux_host,
     linux_host_kept,
     linux_other_git,
-    local_folders: shared_folders::local_folders,
+    local_folders: access_local_folders,
 };
 
+/// A project's top-level folders the owner may pick for Chosen folders, as
+/// [`kernel_sandbox::shared_folders::local_folders`] reads them with the engine's [`ACCESS_HOOKS`].
+/// Input: the project folder. Output: the names.
+fn access_local_folders(root: &Path) -> Vec<String> {
+    kernel_sandbox::shared_folders::local_folders(&ACCESS_HOOKS, root)
+}
+
 /// The engine's real project access hooks, the only [`AccessHooks`] production code passes:
-/// the owner's git for a project folder ([`access_owner_git`]).
+/// the owner's git for a project folder ([`access_owner_git`]), the harness folders
+/// ([`harness_folders`]), a project's state folder and the paths git leaves untracked
+/// ([`access_untracked`]).
 pub const ACCESS_HOOKS: AccessHooks = AccessHooks {
     owner_git: access_owner_git,
+    harness_folders,
+    state_folder: crate::projects_home::state_folder,
+    untracked: access_untracked,
 };
+
+/// The engine's real agent toolchain hooks, the only [`ToolchainHooks`] production code
+/// passes: the cargo home entry removal of [`toolchain_remove_home_entry`].
+pub const TOOLCHAIN_HOOKS: ToolchainHooks = ToolchainHooks {
+    #[cfg(unix)]
+    remove_home_entry: toolchain_remove_home_entry,
+};
+
+/// Removes one entry of an agent's own cargo home as the engine's home cleanup does, with
+/// its walk budget code kept and every other refusal given as `otherwise`. Inputs: the open
+/// cargo home, the entry name and the fallback code. Output: done, or the refusal code.
+#[cfg(unix)]
+fn toolchain_remove_home_entry(
+    folder: std::os::fd::BorrowedFd<'_>,
+    name: &str,
+    otherwise: &'static str,
+) -> Result<(), &'static str> {
+    crate::team::cleanup::remove_home_entry(folder, name)
+        .map_err(|problem| crate::team::cleanup::home_code(&problem, otherwise))
+}
+
+/// The paths git leaves untracked in the project folder `root`, as the shared folders plan
+/// reads them: what the onboarding draft lists on Unix, none elsewhere. Input: the folder.
+/// Output: the paths, or `None` when they cannot be listed.
+#[cfg(unix)]
+fn access_untracked(root: &Path) -> Option<Vec<String>> {
+    crate::onboarding::draft::untracked(root)
+}
+
+/// The paths git leaves untracked in the project folder, which no system but Unix lists for
+/// the shared folders plan. Input: the folder. Output: always `None`.
+#[cfg(not(unix))]
+fn access_untracked(_root: &Path) -> Option<Vec<String>> {
+    None
+}
 
 /// The owner's git for the project folder `root` as the access lists run it, with the
 /// engine's own git when it has one. Input: the canonical project folder. Output: the
@@ -2128,7 +2173,7 @@ impl ProjectSandbox {
     }
 
     /// Grants the owner's extra read-only folders for this project (see
-    /// [`extra_paths::checked`]) as toolchain folders are granted, with credential names
+    /// [`kernel_sandbox::extra_paths::checked`]) as toolchain folders are granted, with credential names
     /// carved out, skipping each one that is gone or no longer passes
     /// [`Self::allow_read`]'s checks. Input: the saved folders. Output: the widened sandbox
     /// and how many folders were skipped.
@@ -2189,7 +2234,7 @@ impl ProjectSandbox {
     pub fn tool_program(&self, name: &str) -> Option<PathBuf> {
         assert!(!name.is_empty() && !name.contains('/'));
         let homes = kernel_sandbox::toolchains::ToolHomes::at(&self.owner_home);
-        let path = toolchains::agent_path(&homes, AGENT_PATH);
+        let path = kernel_sandbox::toolchains::agent_path(&homes, AGENT_PATH);
         let found = std::env::split_paths(&path)
             .map(|folder| folder.join(name))
             .find(|candidate| candidate.is_file())?;
@@ -2264,7 +2309,7 @@ impl ProjectSandbox {
 
     /// Keeps the secret files and folders of the project folder `root` closed to the agent
     /// (DEC-147.9): contents, attribute values, writes, runs, links and clones of every path
-    /// there with a name in [`shared_folders::SECRET_NAMES`], in any letter case, are denied,
+    /// there with a name in [`kernel_sandbox::shared_folders::SECRET_NAMES`], in any letter case, are denied,
     /// names and sizes stay visible, except under `root/.git` and inside the agent's own
     /// writable roots below it, its worktree or clone, never `root` itself. Each of `revealed`, the secrets the owner
     /// shared back, is readable again, never writable. The deny comes before every older
@@ -2327,12 +2372,12 @@ impl ProjectSandbox {
     /// Lets the agent write one shared top-level folder of the project folder that git does
     /// not track (DEC-147.9 Read-write) as one more writable root, pinned in place; the secret
     /// names inside it stay closed, and every older deny still wins. Never a hidden folder, an
-    /// engine folder or one named `context` ([`shared_folders::never_written`]). Input: a canonical existing folder
+    /// engine folder or one named `context` ([`kernel_sandbox::shared_folders::never_written`]). Input: a canonical existing folder
     /// directly inside the folder [`Self::keep_project_secrets`] named, clear of
     /// [`Self::secret_paths`] and of every other writable root. Output: the widened sandbox, or
     /// `Invalid`; only Seatbelt holds it.
     pub fn allow_shared_write(mut self, folder: &Path) -> Result<Self, SandboxError> {
-        if self.shared_writes.len() >= shared_folders::SHARED_WRITES_MAX {
+        if self.shared_writes.len() >= kernel_sandbox::shared_folders::SHARED_WRITES_MAX {
             return Err(invalid("too many shared writable folders"));
         }
         let in_project = self
@@ -2340,9 +2385,9 @@ impl ProjectSandbox {
             .as_ref()
             .is_some_and(|root| folder.parent() == Some(root.as_path()));
         let kept_read_only = match (self.project_secrets.as_ref(), folder.file_name()) {
-            (Some(root), Some(name)) => name
-                .to_str()
-                .is_none_or(|name| shared_folders::never_written(root, name)),
+            (Some(root), Some(name)) => name.to_str().is_none_or(|name| {
+                kernel_sandbox::shared_folders::never_written(&ACCESS_HOOKS, root, name)
+            }),
             _ => true,
         };
         if !in_project || kept_read_only {
@@ -2366,7 +2411,7 @@ impl ProjectSandbox {
         }
         self.shared_writes.push(folder.to_path_buf());
         assert!(self.writes(folder));
-        assert!(self.shared_writes.len() <= shared_folders::SHARED_WRITES_MAX);
+        assert!(self.shared_writes.len() <= kernel_sandbox::shared_folders::SHARED_WRITES_MAX);
         Ok(self)
     }
 
@@ -2404,7 +2449,7 @@ impl ProjectSandbox {
     /// shared writable folders); no clone of any folder, and no move or removal of a folder
     /// inside a shared writable folder, so no folder that holds a secret leaves the name rule
     /// by a plain-named parent (L4 r1 H2); then the read allow of env templates
-    /// ([`shared_folders::SECRET_TEMPLATES`]) and of each shared-back secret. Output: the
+    /// ([`kernel_sandbox::shared_folders::SECRET_TEMPLATES`]) and of each shared-back secret. Output: the
     /// rules, empty when no folder was named.
     fn project_secret_rules(&self) -> String {
         let Some(root) = self
@@ -2414,7 +2459,7 @@ impl ProjectSandbox {
         else {
             return String::new();
         };
-        let names: Vec<String> = shared_folders::SECRET_NAMES
+        let names: Vec<String> = kernel_sandbox::shared_folders::SECRET_NAMES
             .iter()
             .map(|name| fold_case(name))
             .collect();
@@ -2450,7 +2495,7 @@ impl ProjectSandbox {
         text.push_str(&format!(
             "(allow file-read-data file-read-xattr\n  (regex #\"^{}/(.*/)?{}$\"))\n",
             seatbelt_pattern(root),
-            fold_case(shared_folders::SECRET_TEMPLATES)
+            fold_case(kernel_sandbox::shared_folders::SECRET_TEMPLATES)
         ));
         let revealed: Vec<&PathBuf> = self
             .secrets_revealed
@@ -3714,7 +3759,7 @@ impl ProjectSandbox {
 
     /// The variables every command this sandbox builds starts with: HOME, TMPDIR (the short
     /// temp folder when granted, else the temp dir), PATH with the owner's rust proxies after
-    /// any [`Self::allow_node_for`] folder, the C locale and [`toolchains::agent_env`]. Only a
+    /// any [`Self::allow_node_for`] folder, the C locale and [`kernel_sandbox::toolchains::agent_env`]. Only a
     /// harness's PATH starts with the agent's own `getconf` and `git`
     /// ([`toolchains::with_agent_git`]). Takes whether it is a harness. Returns the variables.
     fn base_env(&self, harness: bool) -> Vec<(&'static str, OsString)> {
@@ -3724,7 +3769,7 @@ impl ProjectSandbox {
             .as_ref()
             .or(self.scratch.as_ref())
             .unwrap_or(&self.agent_tmp);
-        let path = toolchains::agent_path(&homes, AGENT_PATH);
+        let path = kernel_sandbox::toolchains::agent_path(&homes, AGENT_PATH);
         let path = match self.node_bin.as_deref().and_then(Path::to_str) {
             Some(bin) => format!("{bin}:{path}"),
             None => path,
@@ -3741,7 +3786,10 @@ impl ProjectSandbox {
             ("LANG", OsString::from("C")),
             ("LC_ALL", OsString::from("C")),
         ];
-        env.extend(toolchains::agent_env(&self.agent_home, &homes));
+        env.extend(kernel_sandbox::toolchains::agent_env(
+            &self.agent_home,
+            &homes,
+        ));
         if let Some((cache, uv)) = &self.tool_cache {
             if *uv {
                 env.push((TOOL_CACHE_ENV[0], cache.join("uv").into_os_string()));
@@ -5539,7 +5587,7 @@ mod profile_string_tests {
     /// in the shape it had, and no names give no body.
     #[test]
     fn regex_bodies_pack_whole_names_under_the_reader_limit() {
-        let names: Vec<String> = shared_folders::SECRET_NAMES
+        let names: Vec<String> = kernel_sandbox::shared_folders::SECRET_NAMES
             .iter()
             .map(|name| fold_case(name))
             .collect();
@@ -5624,7 +5672,7 @@ mod profile_string_tests {
             fold_case("secrets?"),
             "(s|S|\u{17f})[eE][cC][rR][eE][tT](s|S|\u{17f})?"
         );
-        let templates = fold_case(shared_folders::SECRET_TEMPLATES);
+        let templates = fold_case(kernel_sandbox::shared_folders::SECRET_TEMPLATES);
         assert!(!templates.contains(['\u{df}', '\u{1e9e}']));
     }
 
@@ -5818,7 +5866,11 @@ mod firmlink_tests {
         );
         assert!(ProjectSandbox::new(&root.join("project"), &home, &tmp, network()).is_ok());
         assert_eq!(
-            extra_paths::checked(long(&root).to_str().unwrap(), &root.join("engine")),
+            kernel_sandbox::extra_paths::checked(
+                &ACCESS_HOOKS,
+                long(&root).to_str().unwrap(),
+                &root.join("engine")
+            ),
             Err("read_path_engine_data")
         );
     }

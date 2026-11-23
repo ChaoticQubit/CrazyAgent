@@ -1150,7 +1150,8 @@ fn prepare_mates_home(
             return Err(EngineError("team_shared_folder_changed".into()));
         }
     }
-    toolchains::prepare_cargo_home(&mates, homes).map_err(error)?;
+    kernel_sandbox::toolchains::prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, &mates, homes)
+        .map_err(error)?;
     crate::harnesses::interactive::prepare_claude_home(&mates, project)
         .map_err(|e| EngineError(e.0))?;
     Ok(mates)
@@ -9598,15 +9599,23 @@ impl TeamRuntime {
         {
             eprintln!("agent_free_git_not_written kind={:?}", error.kind());
         }
-        toolchains::prepare_cargo_home(&home, &homes).map_err(|e| cargo_home_problem(&e))?;
+        kernel_sandbox::toolchains::prepare_cargo_home(
+            &crate::sandbox::TOOLCHAIN_HOOKS,
+            &home,
+            &homes,
+        )
+        .map_err(|e| cargo_home_problem(&e))?;
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)
             .and_then(|sandbox| sandbox.keep_ports(&kept))
             .map_err(sandboxed)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime).map_err(sandboxed)?;
         }
-        let extra = crate::sandbox::extra_paths::load(&self.connection, stored.project_id.as_str())
-            .map_err(|_| with_code("the project's read-only folders could not be read", None))?;
+        let extra =
+            crate::sandbox::access_store::read::load(&self.connection, stored.project_id.as_str())
+                .map_err(|_| {
+                    with_code("the project's read-only folders could not be read", None)
+                })?;
         let toolchains = policy.allowed(&root);
         (sandbox, _) = sandbox
             .allow_tools(&Toolchains::grant(&homes, &toolchains))
@@ -9638,7 +9647,7 @@ impl TeamRuntime {
             sandbox = sandbox.allow_engine(engine).map_err(sandboxed)?;
         }
         (sandbox, _) = sandbox
-            .allow_extra_reads(&toolchains::graphify(&homes))
+            .allow_extra_reads(&kernel_sandbox::toolchains::graphify(&homes))
             .map_err(sandboxed)?;
         if kind == Some(crate::coord::settings::HarnessKind::Codex)
             && let Some(socket) = crate::coord::delivery::codex::socket(&home)

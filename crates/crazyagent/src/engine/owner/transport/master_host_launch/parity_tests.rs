@@ -5,7 +5,6 @@ use crate::credentials::test_keychain::TestKeychain;
 use crate::engine::bootstrap::{NativeProfileCustody, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::protocol::{ConfigId, CredentialRef, Cursor};
-use crate::sandbox::toolchains;
 use base64::Engine;
 use kernel_sandbox::toolchains::ToolHomes;
 use serde_json::{Map, Value, json};
@@ -98,7 +97,7 @@ fn tool_placeholders() -> Vec<(String, String)> {
             .map(|xcode| (xcode.to_path_buf(), "<XCODE_DEVELOPER>")),
     );
     folders.extend(
-        toolchains::graphify(&homes)
+        kernel_sandbox::toolchains::graphify(&homes)
             .into_iter()
             .zip(["<GRAPHIFY_TOOL>", "<GRAPHIFY_PYTHON>"]),
     );

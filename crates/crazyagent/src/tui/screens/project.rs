@@ -42,7 +42,7 @@ const MESSAGE_BYTES_MAX: usize = 8192;
 const REINSTALL_TOO_LONG: &str = "Your message and the drafted one don't fit in one message. Send or \
                                   shorten yours, then press a again.";
 const NAME_BYTES_MAX: usize = 256;
-const FOLDERS_BYTES_MAX: usize = crate::sandbox::extra_paths::EXTRA_PATHS_MAX * 1025;
+const FOLDERS_BYTES_MAX: usize = kernel_sandbox::extra_paths::EXTRA_PATHS_MAX * 1025;
 const STACK_BYTES_MAX: usize = 2048;
 pub(in crate::tui) const GENERAL_FIELDS: usize = 3 + Platform::ALL.len() + ResearchKind::ALL.len();
 const STALE_READING: &str = "This project changed since you opened the form. Your edit is kept while the saved one is read.";

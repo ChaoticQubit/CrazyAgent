@@ -107,7 +107,7 @@ pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> 
         .canonicalize()
         .map(kernel_sandbox::paths::one_spelling)
         .map_err(|_| "the project folder is missing".to_owned())?;
-    let extra_reads = super::extra_paths::load(&db, project.as_str())
+    let extra_reads = super::access_store::read::load(&db, project.as_str())
         .map_err(|_| "the project's read-only folders could not be read".to_owned())?;
     let policy = crate::sandbox::policy_store::load(&db, project.as_str())
         .map_err(|_| "the project's saved access could not be read".to_owned())?;
@@ -170,7 +170,7 @@ pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
         .map_err(|_| invalid("the terminal home keeps a shell startup file"))?;
     let homes = ToolHomes::owner()?;
     let scratch = toolchains::make_tmp(&home)?;
-    toolchains::prepare_cargo_home(&home, &homes)?;
+    kernel_sandbox::toolchains::prepare_cargo_home(&super::TOOLCHAIN_HOOKS, &home, &homes)?;
     let network = kernel_sandbox::policy::ide_network(launch.level, launch.network);
     let (sandbox, _) = ProjectSandbox::new(launch.folder, &home, &tmp, network)?
         .guard_engine(&root)?

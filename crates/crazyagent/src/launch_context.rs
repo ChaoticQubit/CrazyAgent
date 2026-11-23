@@ -139,7 +139,7 @@ const _: () = assert!(
         + BRIEF_BYTES_MAX
         + INDEX_BYTES_MAX
         + MEMORY_SECTION_BYTES_MAX
-        + crate::sandbox::shared_folders::SECTION_BYTES_MAX
+        + kernel_sandbox::shared_folders::SECTION_BYTES_MAX
         + 3 * SECTION_SLACK
         <= INSTRUCTIONS_BYTES_MAX
 );
@@ -652,7 +652,7 @@ fn project_instructions(
     let policy = crate::sandbox::policy_store::load(tx, project.as_str()).unwrap_or_default();
     let folder = setup.as_ref().map(StoredSetup::project_folder);
     let instructions = render(project, setup.as_ref(), &memories, layout)
-        + &crate::sandbox::shared_folders::context_section(
+        + &kernel_sandbox::shared_folders::context_section(
             folder.as_deref(),
             policy.access,
             &policy.shared_folders,
