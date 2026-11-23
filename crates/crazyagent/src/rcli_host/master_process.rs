@@ -721,7 +721,7 @@ read -r _
     #[cfg(target_os = "linux")]
     #[test]
     fn a_host_outlives_a_runtime_worker_that_handed_its_core_off() {
-        let bwrap = crate::sandbox::linux::BWRAP_PATHS
+        let bwrap = kernel_sandbox::linux::helper::BWRAP_PATHS
             .iter()
             .map(std::path::Path::new)
             .find(|path| path.is_file())

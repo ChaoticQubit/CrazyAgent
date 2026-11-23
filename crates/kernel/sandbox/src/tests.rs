@@ -171,3 +171,10 @@ fn the_model_proxy_variables_name_its_port_and_its_tunnels_dial_no_local_or_meta
     }
     assert!(may_dial("192.0.2.1".parse().unwrap()));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn the_linux_helper_entry_lives_in_the_kernel() {
+    let main: fn(Vec<std::ffi::OsString>) -> std::process::ExitCode = crate::linux::helper::main;
+    let _ = main;
+}
