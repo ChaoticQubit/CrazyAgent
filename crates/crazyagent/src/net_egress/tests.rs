@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 use super::*;
+use crazyagent_plugin_check as plugin_check;
 use kernel_security::net::{Field, Method, Request, Requests};
 use kernel_security::secret::SecretString;
 use kernel_security::secrets::{Handles, Scopes, Secrets};
@@ -11,7 +12,10 @@ const TOKEN: &str = "ghp_net-egress-fixture-0123456789";
 
 /// The host table of the allowlist rows.
 const HOSTS: &[(&str, &[&str])] = &[
-    ("github", &["github.com", "api.github.com", "ghe.example:8443"]),
+    (
+        "github",
+        &["github.com", "api.github.com", "ghe.example:8443"],
+    ),
     ("local", &["127.0.0.1:8080"]),
 ];
 
@@ -20,11 +24,23 @@ fn a_host_outside_the_allowlist_is_refused() {
     let egress = CurlEgress::with_hosts(HOSTS);
     let refused = Err(StoreError::code("net_host_refused"));
     assert_eq!(egress.allows("github", "https", "github.com", 443), Ok(()));
-    assert_eq!(egress.allows("github", "https", "ghe.example", 8443), Ok(()));
+    assert_eq!(
+        egress.allows("github", "https", "ghe.example", 8443),
+        Ok(())
+    );
     assert_eq!(egress.allows("local", "http", "127.0.0.1", 8080), Ok(()));
-    assert_eq!(egress.allows("github", "https", "evil.example", 443), refused);
-    assert_eq!(egress.allows("github", "https", "github.com", 8443), refused);
-    assert_eq!(egress.allows("github", "https", "ghe.example", 443), refused);
+    assert_eq!(
+        egress.allows("github", "https", "evil.example", 443),
+        refused
+    );
+    assert_eq!(
+        egress.allows("github", "https", "github.com", 8443),
+        refused
+    );
+    assert_eq!(
+        egress.allows("github", "https", "ghe.example", 443),
+        refused
+    );
     assert_eq!(egress.allows("local", "https", "github.com", 443), refused);
     assert_eq!(egress.allows("notes", "https", "github.com", 443), refused);
     assert_eq!(egress.allows("local", "http", "127.0.0.1", 9090), refused);
@@ -81,9 +97,9 @@ fn the_static_net_table_equals_each_bundled_manifest() {
         .iter()
         .flat_map(|manifest| {
             manifest.net.iter().flat_map(move |net| {
-                net.capture
-                    .iter()
-                    .map(move |(host, fields)| (manifest.plugin.clone(), host.clone(), fields.clone()))
+                net.capture.iter().map(move |(host, fields)| {
+                    (manifest.plugin.clone(), host.clone(), fields.clone())
+                })
             })
         })
         .collect();
@@ -100,7 +116,10 @@ fn the_static_net_table_equals_each_bundled_manifest() {
     assert_eq!(table, captures);
     assert!(bundled_captures().is_ok());
     for manifest in &manifests {
-        let asks = manifest.permissions.iter().any(|name| name == "net.request");
+        let asks = manifest
+            .permissions
+            .iter()
+            .any(|name| name == "net.request");
         assert_eq!(asks, manifest.net.is_some(), "{}", manifest.plugin);
     }
 }
@@ -112,7 +131,12 @@ struct OneToken {
 }
 
 impl Store for OneToken {
-    fn put(&self, service: &str, account: &str, secret: &SecretString) -> Result<SecretRef, StoreError> {
+    fn put(
+        &self,
+        service: &str,
+        account: &str,
+        secret: &SecretString,
+    ) -> Result<SecretRef, StoreError> {
         let found = reference(service, account)?;
         self.items
             .lock()
@@ -123,7 +147,10 @@ impl Store for OneToken {
 
     fn get(&self, found: &SecretRef) -> Result<SecretString, StoreError> {
         let items = self.items.lock().unwrap();
-        let value = items.iter().find(|(item, _)| item == found).map(|(_, value)| value.clone());
+        let value = items
+            .iter()
+            .find(|(item, _)| item == found)
+            .map(|(_, value)| value.clone());
         value.map_or_else(
             || Err(StoreError::code("credential_missing")),
             |value| SecretString::new(value.into_bytes()),
@@ -231,7 +258,13 @@ fn a_reply_header_other_than_the_scopes_is_refused_before_curl() {
     let store = OneToken::default();
     let scopes = Scopes::new(&[("github", "github")]).unwrap();
     let handles = Mutex::new(Handles::new());
-    let secrets = Secrets::for_request(&store, "dev.crazyagent.e0123456789ab", &scopes, &handles, None);
+    let secrets = Secrets::for_request(
+        &store,
+        "dev.crazyagent.e0123456789ab",
+        &scopes,
+        &handles,
+        None,
+    );
     let rules = CaptureRules::new(&[]).unwrap();
     let egress = CurlEgress::with_hosts(&[("github", &["127.0.0.1:9"])]);
     let requests = Requests::new(&secrets, &egress, &rules);
@@ -249,5 +282,8 @@ fn a_reply_header_other_than_the_scopes_is_refused_before_curl() {
             capture: Vec::new(),
         },
     );
-    assert_eq!(refused, Err(StoreError::code("net_reply_header_unsupported")));
+    assert_eq!(
+        refused,
+        Err(StoreError::code("net_reply_header_unsupported"))
+    );
 }

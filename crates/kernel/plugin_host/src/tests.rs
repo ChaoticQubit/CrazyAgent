@@ -398,7 +398,12 @@ fn a_valid_net_section_reads_its_hosts_and_captures() {
             )],
         })
     );
-    assert_eq!(manifest::read(&plugin_dir("net-none", &manifest_text("agent-quit"))).unwrap().net, None);
+    assert_eq!(
+        manifest::read(&plugin_dir("net-none", &manifest_text("agent-quit")))
+            .unwrap()
+            .net,
+        None
+    );
 }
 
 #[test]
@@ -415,7 +420,10 @@ fn net_is_required_with_net_request() {
 
 #[test]
 fn net_without_net_request_is_refused() {
-    let text = format!("{}\n[net]\nhosts = [\"github.com\"]\n", manifest_text("agent-quit"));
+    let text = format!(
+        "{}\n[net]\nhosts = [\"github.com\"]\n",
+        manifest_text("agent-quit")
+    );
     assert_eq!(
         manifest::parse(&text),
         Err(Refused {
@@ -475,14 +483,34 @@ fn a_host_with_userinfo_is_refused() {
 
 #[test]
 fn a_non_loopback_ip_host_is_refused() {
-    for host in ["10.0.0.1", "140.82.112.4", "169.254.169.254", "[fe80::1]", "[2606:4700::1111]", "0.0.0.0", "127.1"] {
+    for host in [
+        "10.0.0.1",
+        "140.82.112.4",
+        "169.254.169.254",
+        "[fe80::1]",
+        "[2606:4700::1111]",
+        "0.0.0.0",
+        "127.1",
+    ] {
         refused_net(&format!("hosts = [\"{host}\"]\n"));
     }
 }
 
 #[test]
 fn a_host_with_a_bad_port_or_label_is_refused() {
-    for host in ["github.com:0", "github.com:65536", "github.com:08", "github.com:", ":443", "-github.com", "github-.com", "github..com", ".github.com", "git_hub.com", "github.com."] {
+    for host in [
+        "github.com:0",
+        "github.com:65536",
+        "github.com:08",
+        "github.com:",
+        ":443",
+        "-github.com",
+        "github-.com",
+        "github..com",
+        ".github.com",
+        "git_hub.com",
+        "github.com.",
+    ] {
         refused_net(&format!("hosts = [\"{host}\"]\n"));
     }
 }
@@ -510,18 +538,28 @@ fn more_than_sixteen_hosts_are_refused() {
             .collect::<Vec<_>>()
             .join(", ")
     };
-    assert!(manifest::parse(&net_text(&format!("hosts = [{}]\n", hosts(manifest::HOSTS_MAX)))).is_ok());
+    assert!(
+        manifest::parse(&net_text(&format!(
+            "hosts = [{}]\n",
+            hosts(manifest::HOSTS_MAX)
+        )))
+        .is_ok()
+    );
     refused_net(&format!("hosts = [{}]\n", hosts(manifest::HOSTS_MAX + 1)));
 }
 
 #[test]
 fn a_capture_key_outside_hosts_is_refused() {
-    refused_net("hosts = [\"github.com\"]\n\n[net.capture]\n\"api.github.com\" = [\"access_token\"]\n");
+    refused_net(
+        "hosts = [\"github.com\"]\n\n[net.capture]\n\"api.github.com\" = [\"access_token\"]\n",
+    );
 }
 
 #[test]
 fn a_duplicate_capture_field_is_refused() {
-    refused_net("hosts = [\"github.com\"]\n\n[net.capture]\n\"github.com\" = [\"access_token\", \"access_token\"]\n");
+    refused_net(
+        "hosts = [\"github.com\"]\n\n[net.capture]\n\"github.com\" = [\"access_token\", \"access_token\"]\n",
+    );
     refused_net("hosts = [\"github.com\"]\n\n[net.capture]\n\"github.com\" = [\"access token\"]\n");
     refused_net("hosts = [\"github.com\"]\n\n[net.capture]\n\"github.com\" = [\"\"]\n");
 }
@@ -529,5 +567,7 @@ fn a_duplicate_capture_field_is_refused() {
 #[test]
 fn more_than_four_capture_fields_are_refused() {
     assert!(manifest::parse(&net_text("hosts = [\"github.com\"]\n\n[net.capture]\n\"github.com\" = [\"a\", \"b\", \"c\", \"d\"]\n")).is_ok());
-    refused_net("hosts = [\"github.com\"]\n\n[net.capture]\n\"github.com\" = [\"a\", \"b\", \"c\", \"d\", \"e\"]\n");
+    refused_net(
+        "hosts = [\"github.com\"]\n\n[net.capture]\n\"github.com\" = [\"a\", \"b\", \"c\", \"d\", \"e\"]\n",
+    );
 }
