@@ -1,9 +1,10 @@
 use crate::engine::EngineError;
-use crate::sandbox::{ProjectSandbox, SANDBOX_EXEC, sbpl_overlong, seatbelt_pattern};
+use crate::sandbox::{ProjectSandbox, SANDBOX_EXEC};
 use kernel_sandbox::net::SandboxNetwork;
 use kernel_sandbox::paths::any_case;
 use kernel_sandbox::paths::at_or_below;
 use kernel_sandbox::policy::AgentFilesRule;
+use kernel_sandbox::profile::seatbelt::{hfs_ignored_deny, sbpl_overlong, seatbelt_pattern};
 use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
 use std::fs;
 use std::io::Write;
@@ -60,7 +61,7 @@ pub fn qualified() -> bool {
 /// then the project's `.git/worktrees`, its agents' admin folders, for writing
 /// ([`agent_admin`]), then the owner's agent folders choice is held
 /// ([`AgentFilesRule::seatbelt`], DEC-124), then every path with a name HFS+ opens past a
-/// name deny ([`crate::sandbox::hfs_ignored_deny`]). The project's own git index and its
+/// name deny ([`hfs_ignored_deny`]). The project's own git index and its
 /// lock stay denied: the IDE stages on a private index
 /// the engine carries across ([`super::git::shim_text`], SECAUDIT-IDE-SERVER-INDEX). Network:
 /// listen on 127.0.0.1 at `port`, unix sockets in `tmp`, connect to an owner socket, and
@@ -172,7 +173,7 @@ pub fn profile(
     text.push_str(&agent_config(grants.root));
     text.push_str(&agent_admin(grants.root));
     text.push_str(&agent_files.seatbelt(grants.root));
-    let ignored = crate::sandbox::hfs_ignored_deny();
+    let ignored = hfs_ignored_deny();
     text.push_str(&ignored);
     text.push_str(&format!(
         "(allow network-bind network-inbound\n  (local ip \"localhost:{port}\"))\n(allow network-bind\n  (local unix-socket (subpath \"{tmp}\")))\n(allow network-outbound\n  (remote unix-socket (subpath \"{tmp}\"))\n  (remote unix-socket (regex #\"^{pattern}/[^/]+/owner\\.sock$\")))\n(allow mach-lookup\n  (global-name \"com.apple.FSEvents\"))\n"
