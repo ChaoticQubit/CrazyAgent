@@ -88,8 +88,8 @@ impl From<Version> for String {
 /// standard output, `setup_timeout` after killing it at the limit or when its output is
 /// still open there, or `setup_install_failed` when it cannot start or exits with a failure.
 /// On Unix the command leads its own process group, and every path that stops it at the
-/// limit or on a failure kills that group, so a process it left holding its output ends
-/// too; a clean exit inside the limit leaves the group alone.
+/// limit or on a failure, a failed exit included, kills that group, so a process it left
+/// behind ends too; a clean exit inside the limit leaves the group alone.
 pub fn run_bounded(
     command: &mut Command,
     limit: Duration,
@@ -146,6 +146,8 @@ pub fn run_bounded(
         }
     };
     if !status.success() {
+        #[cfg(unix)]
+        stop(pid);
         return Err(InstallError("setup_install_failed"));
     }
     let Some(report) = report else {
