@@ -47,7 +47,7 @@ fn entering_the_gate_inside_the_gate_panics_instead_of_deadlocking() {
     let _ = guarded(|| spawn(&mut succeeding()));
 }
 
-/// V243 P6: a kept start asked for while this thread holds the gate panics before its keeper
+/// A kept start asked for while this thread holds the gate panics before its keeper
 /// thread starts, as that thread would wait on the gate forever for a start that forks. The
 /// start here forks nothing, so without the guard the call would return and the row fails.
 #[test]
@@ -220,7 +220,7 @@ fn a_stream_accepted_from_a_non_blocking_listener_waits_out_its_read_timeout() {
 }
 
 /// A blocking accept whose client comes 200 ms late waits for it in a few waits, not in a
-/// retry loop that wakes every few milliseconds (V243-POLL-WAITS).
+/// retry loop that wakes every few milliseconds.
 #[cfg(unix)]
 #[test]
 fn a_blocking_accept_waits_for_a_late_client_in_a_few_waits() {
@@ -252,7 +252,7 @@ impl Drop for Planted {
 }
 
 /// Plants a copy of the system `cmd.exe` as `probe.exe` in a new folder at the root of the
-/// current drive, as another local user could (V244-WIN-ROOT-RELATIVE-PROGRAM, probe P9).
+/// current drive, as another local user could.
 /// Input: the folder's name, made unique with this process's id. Output: the folder's
 /// keeper, its name and the planted file's full path.
 #[cfg(windows)]

@@ -1,20 +1,9 @@
 use super::os_keyring::OsKeyring;
-use kernel_security::error::StoreError;
-use kernel_security::store::Store;
+use crate::error::StoreError;
 use keyring_core::{CredentialStore, Entry};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-
-/// Opens Windows Credential Manager for one engine namespace, with a git helper that runs
-/// this executable's `git-credential` command. Input: the namespace. Output: the shared
-/// store, or `credential_namespace_refused` / `credential_store_unavailable`.
-/// Written for Windows and not yet run there.
-pub(super) fn open(namespace: &str) -> Result<Arc<dyn Store>, StoreError> {
-    let executable =
-        std::env::current_exe().map_err(|_| StoreError::code("credential_store_unavailable"))?;
-    Ok(Arc::new(OsKeyring::open(namespace, &executable)?))
-}
 
 impl OsKeyring {
     /// Opens Windows Credential Manager. Each item is a generic credential whose target

@@ -505,7 +505,7 @@ fn icacls(path: &Path, change: &[&str]) {
     );
 }
 
-/// V243-WIN-CHANGEABLE-BY-OTHERS: on Windows both checks read owners and access lists, as
+/// On Windows both checks read owners and access lists, as
 /// the owner-only program check does. A file Users may write, the folder of a file where
 /// Users may add one, and the first folder above a missing part where Users may add a
 /// folder are named. A fresh file, its folders and System32 are not, nor is a folder whose
@@ -559,7 +559,7 @@ fn changeable_by_others_reads_windows_owners_and_access_lists() {
     assert_eq!(changeable_by_others(&program), None);
 }
 
-/// #331 sec F1: on Windows the service PATH keeps a folder that exists and drops one that
+/// On Windows the service PATH keeps a folder that exists and drops one that
 /// does not, under a clean folder or on a drive letter no volume holds, since a drive or
 /// folder added there later would put whatever it holds on the engine's harness lookup.
 #[cfg(windows)]
@@ -696,7 +696,7 @@ fn a_definition_that_runs_another_program_is_told_apart_from_one_with_another_pa
     }
 }
 
-/// rv-code F1: the definition writes the executable escaped (XML in a plist, quoted for
+/// The definition writes the executable escaped (XML in a plist, quoted for
 /// systemd), so an app kept in a folder named with `&` or `$` is still found in its own
 /// definition and still told apart from an install script's.
 #[test]
@@ -970,7 +970,7 @@ fn a_file_directly_in_a_sticky_group_store_passes_and_an_unsticky_parent_does_no
     );
 }
 
-/// RV-DS241-140 r4: on macOS the daemon group, whose only member is root, is trusted like
+/// On macOS the daemon group, whose only member is root, is trusted like
 /// wheel and admin, so /private/var/run (root:daemon 775), where nix-darwin's /run link
 /// leads, passes as a part of a harness chain; the same folder writable by staff, which every
 /// user is in, stays changeable.
@@ -1009,7 +1009,7 @@ fn a_folder_only_root_and_the_daemon_group_can_write_passes_on_macos() {
     }
 }
 
-/// R2-L1: a file a group other than root's can write counts as changeable, like a folder,
+/// A file a group other than root's can write counts as changeable, like a folder,
 /// for the engine service and for the tools the resolver runs: a 0775 staff file in this
 /// user's 0755 folder is refused, 0755 or a root-group 0775 passes, and a link's own mode is
 /// never read.
@@ -1073,7 +1073,7 @@ fn only_a_user_private_group_counts_as_the_user_own_group() {
     );
 }
 
-/// 2.4.1 r1 F3: a group's member list leaves out the accounts whose primary group it is, so
+/// A group's member list leaves out the accounts whose primary group it is, so
 /// a group named as the user that another account has as its primary group is not private,
 /// and neither is one whose own account the local account file does not list, such as a
 /// directory account, whose other primary users cannot be seen.
@@ -1092,7 +1092,7 @@ fn a_group_another_account_has_as_its_primary_group_is_not_private() {
     );
 }
 
-/// 2.4.1 r1 F3: the accounts whose primary group is a gid are read from the local account
+/// The accounts whose primary group is a gid are read from the local account
 /// file's fourth field; comments and blank lines are skipped, and a line that cannot be read
 /// or that pulls accounts in from elsewhere (`+` or `-`) gives none, the stricter rule.
 #[test]

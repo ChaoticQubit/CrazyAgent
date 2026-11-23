@@ -4,9 +4,11 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use bus_gateway::{Gateway, Grants, Refusals};
 use crazyagent_plugin_agent_quit as agent_quit;
+use kernel_plugin_host::generated::permissions::{BUNDLED_GRANTS, PERMISSIONS};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use sdk::settings::{self as sdk_settings, Provide};
-use sdk::{Capability, Refusal, Tier};
+use sdk::{Capability, Refusal};
+use sdk_host::{Bound, Providers};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::EngineError;
@@ -44,7 +46,9 @@ pub(crate) fn call_refused_closed(body: &[u8]) -> bool {
     let Ok(refused) = serde_json::from_slice::<CallRefused>(body) else {
         return false;
     };
-    BUNDLED.iter().any(|(plugin, ..)| *plugin == refused.plugin)
+    BUNDLED_GRANTS
+        .iter()
+        .any(|grant| grant.plugin == refused.plugin)
         && sdk::CAPABILITIES.iter().any(|capability| {
             capability.name == refused.capability && capability.needs == refused.needs
         })
@@ -134,11 +138,6 @@ pub(crate) const REFUSALS_PENDING_MAX: usize = 1_024;
 /// plugin's result, which the engine reads as input, never as an invariant.
 pub(crate) type Entry = fn(&dyn sdk::Host, sdk_settings::QuitSettings) -> Result<(), Refusal>;
 
-/// The bundled plugins the engine binds and grants, by the engine's own id: per plugin
-/// its id (the plugin's folder and `plugin.toml` id), tier and granted permissions.
-pub(crate) const BUNDLED: [(&str, Tier, &[&str]); 1] =
-    [("agent-quit", Tier::T2, &["settings.write"])];
-
 /// Saves the owner's agents-on-quit choice through the bundled agent-quit plugin, the
 /// generated SDK and the bus gateway's grant check. Inputs: the request transaction, the
 /// signed revision and the settings. Output: the same outcome or error as a direct save,
@@ -182,14 +181,16 @@ pub(crate) fn save_quit_with(
         sink: refusals,
         refused: Cell::new(false),
     };
-    let gateway = Gateway::new(
-        grants,
-        &provider,
-        &crate::security_caps::Absent,
-        &crate::security_caps::Absent,
-        &record,
-    );
-    let result = entry(&gateway.bind(BUNDLED[0].0), (*settings).into());
+    let gateway = Gateway::new(grants, &record);
+    let providers = Providers {
+        net: &crate::security_caps::Absent,
+        secrets: &crate::security_caps::Absent,
+        settings: &provider,
+        service: &crate::security_caps::Absent,
+        update: &crate::security_caps::Absent,
+    };
+    let host = Bound::new(gateway.bind(BUNDLED_GRANTS[0].plugin), &providers);
+    let result = entry(&host, (*settings).into());
     if record.refused.get() {
         return Err(EngineError("plugin_call_refused".to_owned()));
     }
@@ -226,11 +227,13 @@ impl Refusals for CallRecord<'_> {
     }
 }
 
-/// The bundled plugins' grant table, built once from `BUNDLED`, which a row proves equal to
-/// every `plugin.toml`. Output: the table.
+/// The bundled plugins' grant table, built once from the generated `BUNDLED_GRANTS` and
+/// checked against the generated `PERMISSIONS`. Output: the table.
 pub(crate) fn bundled_grants() -> &'static Grants {
     static GRANTS: OnceLock<Grants> = OnceLock::new();
-    GRANTS.get_or_init(|| Grants::new(&BUNDLED).expect("the bundled grant table builds"))
+    GRANTS.get_or_init(|| {
+        Grants::from_table(&BUNDLED_GRANTS, &PERMISSIONS).expect("the bundled grant table builds")
+    })
 }
 
 /// The one process-wide refusal sink the bundled path reports to. Output: the sink.

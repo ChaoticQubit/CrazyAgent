@@ -2,8 +2,9 @@
 
 use kernel_security::store::{Store, parts, reference};
 
-use crazyagent::credentials::{GIT_HELPER_COMMAND, OsKeyring, platform_store};
+use crazyagent::credentials::platform_store;
 use kernel_security::secret::SecretString;
+use kernel_security::store::os_keyring::{GIT_HELPER_COMMAND, OsKeyring};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};

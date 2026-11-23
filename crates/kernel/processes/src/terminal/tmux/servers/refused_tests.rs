@@ -1,4 +1,6 @@
 use super::*;
+use crate::terminal::tmux::test_seams::{test_confinement, test_hooks};
+use crate::terminal::{harness_socket, teammates_socket};
 
 /// A host on a fresh engine root, as an engine that started no server holds, and lead 7.
 /// Output: the root folder, which removes the engine's files once dropped, the host and the
@@ -7,9 +9,14 @@ fn fresh_host() -> (tempfile::TempDir, Servers, AgentId) {
     let root = tempfile::tempdir().unwrap();
     let base = root.path().canonicalize().unwrap();
     let program = PathBuf::from("/usr/bin/false");
-    let engine = base.join(crate::terminal::FOLDER);
+    let engine = base.join(crate::terminal::tmux::test_seams::FOLDER);
     let host = Servers::new(
-        Tmux::open(Some(program.clone()), &engine),
+        Tmux::open(
+            Some(program.clone()),
+            &engine,
+            test_confinement(),
+            test_hooks(),
+        ),
         &base,
         Some(program),
     );
@@ -34,11 +41,23 @@ fn private_folder(folder: &Path) {
 /// Takes the host and the lead's id. Returns the lead and the socket.
 fn teammates_lead(host: &Servers, id: i64) -> (AgentId, PathBuf) {
     let lead = AgentId::team(id).unwrap();
-    let record = crate::team::runtime::agent_teammates_socket_name(&host.root.join("team"), id);
+    let record = crate::terminal::tmux::test_seams::test_layout::agent_teammates_socket_name(
+        &host.root.join("team"),
+        id,
+    );
     private_folder(record.parent().unwrap());
-    let socket = crate::terminal::renew_teammates_socket(&host.root, &lead).unwrap();
+    let socket = crate::terminal::renew_teammates_socket(
+        &host.root,
+        &lead,
+        &crate::terminal::tmux::test_seams::test_lead_paths(),
+    )
+    .unwrap();
     assert_eq!(
-        teammates_socket(&host.root, &lead),
+        teammates_socket(
+            &host.root,
+            &lead,
+            &crate::terminal::tmux::test_seams::test_lead_paths()
+        ),
         Ok(socket.clone()),
         "the host reads the teammates' socket the lead's start named"
     );
@@ -61,16 +80,23 @@ fn own_lead(host: &Servers, id: i64) -> (AgentId, PathBuf) {
     use std::os::unix::fs::OpenOptionsExt;
     let lead = AgentId::team(id).unwrap();
     let team = host.root.join("team");
-    let profile = crate::team::runtime::agent_profile(&team, id);
+    let profile = crate::terminal::tmux::test_seams::test_layout::agent_profile(&team, id);
     private_folder(profile.parent().unwrap());
-    private_folder(&crate::team::runtime::agent_home(&team, id));
+    private_folder(&crate::terminal::tmux::test_seams::test_layout::agent_home(
+        &team, id,
+    ));
     std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(&profile)
         .unwrap();
-    let socket = harness_socket(&host.root, &lead).unwrap();
+    let socket = harness_socket(
+        &host.root,
+        &lead,
+        &crate::terminal::tmux::test_seams::test_lead_paths(),
+    )
+    .unwrap();
     private_folder(socket.parent().unwrap());
     (lead, socket)
 }
@@ -85,7 +111,7 @@ fn lead_with_own_socket() -> (tempfile::TempDir, Servers, AgentId, PathBuf) {
 
 /// Starts a stand-in keeper that runs until it is killed. Output: the child.
 fn running_keeper() -> std::process::Child {
-    kernel_processes::spawn_gate::spawn(
+    crate::spawn_gate::spawn(
         std::process::Command::new("/bin/sleep")
             .arg("30")
             .stdin(std::process::Stdio::null())
@@ -104,7 +130,7 @@ fn socket_file(path: &Path) -> bool {
 /// Starts a stand-in keeper and waits for it to exit. Takes its program. Output: the child,
 /// already reaped.
 fn exited_keeper(program: &str) -> std::process::Child {
-    let mut keeper = kernel_processes::spawn_gate::spawn(
+    let mut keeper = crate::spawn_gate::spawn(
         std::process::Command::new(program)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -139,22 +165,27 @@ fn marking_host(id: i64) -> (tempfile::TempDir, Servers, AgentId, PathBuf, PathB
     .unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
     let host = Servers::new(
-        Tmux::open(Some(program.clone()), &base.join(crate::terminal::FOLDER)),
+        Tmux::open(
+            Some(program.clone()),
+            &base.join(crate::terminal::tmux::test_seams::FOLDER),
+            test_confinement(),
+            test_hooks(),
+        ),
         &base,
         Some(program),
     );
     let (lead, socket) = own_lead(&host, id);
     let team = base.join("team");
     for profile in [
-        crate::team::runtime::agent_profile(&team, id),
-        crate::team::runtime::agent_teammates_profile(&team, id),
+        crate::terminal::tmux::test_seams::test_layout::agent_profile(&team, id),
+        crate::terminal::tmux::test_seams::test_layout::agent_teammates_profile(&team, id),
     ] {
         std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
     }
     (root, host, lead, socket, started)
 }
 
-/// v242 (GB-7 row 4 class): a native lead's teammates' socket whose connect is refused
+/// A native lead's teammates' socket whose connect is refused
 /// counts as no teammates' server, while this engine holds a keeper for that server, only
 /// once that keeper exited cleanly: on macOS a live server whose accept queue is full also
 /// refuses, and a teammate can stop the server it runs under. A refused one whose keeper
@@ -168,7 +199,7 @@ fn a_refused_teammates_socket_is_no_server_only_once_its_held_keeper_ended_clean
     let (_root, host, lead, socket) = lead_with_teammates_socket();
     let found = || host.mates(&lead).map(|server| server.is_some());
 
-    let listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
+    let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
     let stays = found();
     assert_ne!(
         stays,
@@ -218,7 +249,7 @@ fn a_refused_teammates_socket_is_no_server_only_once_its_held_keeper_ended_clean
         "a refused teammates' socket whose keeper exited without confirming the end was taken as no server"
     );
 
-    let mut keeper = kernel_processes::spawn_gate::spawn(
+    let mut keeper = crate::spawn_gate::spawn(
         std::process::Command::new("/usr/bin/true")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -231,7 +262,7 @@ fn a_refused_teammates_socket_is_no_server_only_once_its_held_keeper_ended_clean
         .unwrap()
         .insert(lead.clone(), keeper);
     std::fs::remove_file(&socket).unwrap();
-    let listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
+    let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
     assert_eq!(
         found(),
         stays,
@@ -247,7 +278,7 @@ fn a_refused_teammates_socket_is_no_server_only_once_its_held_keeper_ended_clean
     std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
 }
 
-/// v242: a native lead an earlier engine started, whose teammates' server ended while this
+/// A native lead an earlier engine started, whose teammates' server ended while this
 /// engine holds no keeper for it, still ends here. A kill of the lead finds no server and
 /// gives `terminal_agent_unknown`, which the next engine's thaw of a refused frozen lead
 /// (`TeamRuntime::attach_terminal`) and its sweep both take as ended, rather than failing on
@@ -256,7 +287,7 @@ fn a_refused_teammates_socket_is_no_server_only_once_its_held_keeper_ended_clean
 #[test]
 fn an_earlier_engines_lead_whose_teammates_server_ended_is_killed_as_unknown() {
     let (_root, host, lead, socket) = lead_with_teammates_socket();
-    let listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
+    let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
     drop(listener);
     assert!(socket_file(&socket), "the ended server's socket file stays");
     assert!(
@@ -271,7 +302,7 @@ fn an_earlier_engines_lead_whose_teammates_server_ended_is_killed_as_unknown() {
     assert!(
         !host
             .root
-            .join(crate::terminal::FOLDER)
+            .join(crate::terminal::tmux::test_seams::FOLDER)
             .join(super::super::SOCKET)
             .exists(),
         "the kill started the engine's server"
@@ -293,7 +324,7 @@ fn an_unlinked_own_socket_is_no_server_only_once_its_held_keeper_ended_cleanly()
     let found = || host.own(&lead).map(|server| server.is_some());
     let unavailable = || failure(OWN_SERVER_UNAVAILABLE);
 
-    let listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
+    let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
     assert_eq!(
         host.leads_listening(),
         vec![lead.clone()],
@@ -334,7 +365,7 @@ fn an_unlinked_own_socket_is_no_server_only_once_its_held_keeper_ended_cleanly()
         "the lead of an unlinked own socket whose keeper still runs was found gone"
     );
     let (other, other_socket) = own_lead(&host, 8);
-    let other_listener = kernel_processes::spawn_gate::bind_unix_std(&other_socket).unwrap();
+    let other_listener = crate::spawn_gate::bind_unix_std(&other_socket).unwrap();
     assert_eq!(
         host.own(&other).map(|server| server.is_some()),
         Ok(true),
@@ -358,7 +389,7 @@ fn an_unlinked_own_socket_is_no_server_only_once_its_held_keeper_ended_cleanly()
         "an unlinked own socket whose keeper exited without confirming the end was taken as no server"
     );
 
-    let mut keeper = kernel_processes::spawn_gate::spawn(
+    let mut keeper = crate::spawn_gate::spawn(
         std::process::Command::new("/usr/bin/true")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -381,7 +412,7 @@ fn an_unlinked_own_socket_is_no_server_only_once_its_held_keeper_ended_cleanly()
     assert!(
         !host
             .root
-            .join(crate::terminal::FOLDER)
+            .join(crate::terminal::tmux::test_seams::FOLDER)
             .join(super::super::SOCKET)
             .exists(),
         "a call started the engine's server"
@@ -389,7 +420,7 @@ fn an_unlinked_own_socket_is_no_server_only_once_its_held_keeper_ended_cleanly()
     std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
 }
 
-/// v242 MR-1 (rv-code2): a lead's server start, which waits up to `KEEPER_READY` for its
+/// A lead's server start, which waits up to `KEEPER_READY` for its
 /// socket to accept, holds neither keeper map while it waits, so a call on another lead,
 /// which reads those maps in `own()` and `mates()`, never waits on that start. A stand-in
 /// server program that never binds its socket keeps each start waiting until its keeper
@@ -442,7 +473,7 @@ fn a_lead_server_start_waiting_for_its_socket_holds_no_keeper_map() {
     std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
 }
 
-/// v242 (rv-sec2 LOW): a lead server start keeps every other lead's keeper, also one that
+/// A lead server start keeps every other lead's keeper, also one that
 /// exited cleanly, so that lead's own server is still read through its keeper: a refused own
 /// socket whose keeper ended cleanly stays no own server rather than falling back to the
 /// socket file and becoming the lead's own again. The start here fails, since its server
@@ -453,12 +484,12 @@ fn a_lead_server_start_keeps_another_leads_cleanly_exited_keeper() {
     let (starting, starting_socket) = own_lead(&host, 7);
     let (ended, ended_socket) = own_lead(&host, 8);
     let found = || host.own(&ended).map(|server| server.is_some());
-    drop(kernel_processes::spawn_gate::bind_unix_std(&ended_socket).unwrap());
+    drop(crate::spawn_gate::bind_unix_std(&ended_socket).unwrap());
     assert!(
         socket_file(&ended_socket),
         "the ended server's socket file stays"
     );
-    let mut keeper = kernel_processes::spawn_gate::spawn(
+    let mut keeper = crate::spawn_gate::spawn(
         std::process::Command::new("/usr/bin/true")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -491,7 +522,7 @@ fn a_lead_server_start_keeps_another_leads_cleanly_exited_keeper() {
     }
 }
 
-/// v242 MRR2-1 (rv-code2 r2): a kill of a native lead takes its teammates' keeper out of this
+/// A kill of a native lead takes its teammates' keeper out of this
 /// engine's map whatever the kill answers, as the lead's end takes its own keeper out
 /// (`end_kept_server`), so a keeper that exited without confirming the end, which no later
 /// start replaces once its lead ended, never stays for the engine's life. Here the kill fails
@@ -502,7 +533,7 @@ fn a_lead_server_start_keeps_another_leads_cleanly_exited_keeper() {
 #[test]
 fn a_killed_leads_teammates_keeper_leaves_the_map_whatever_the_kill_answers() {
     let (_root, host, lead, socket) = lead_with_teammates_socket();
-    drop(kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap());
+    drop(crate::spawn_gate::bind_unix_std(&socket).unwrap());
     assert!(socket_file(&socket), "the ended server's socket file stays");
     let mut exited = exited_keeper("/usr/bin/false");
     assert!(!exited.wait().unwrap().success());
@@ -529,7 +560,7 @@ fn a_killed_leads_teammates_keeper_leaves_the_map_whatever_the_kill_answers() {
     assert!(
         !host
             .root
-            .join(crate::terminal::FOLDER)
+            .join(crate::terminal::tmux::test_seams::FOLDER)
             .join(super::super::SOCKET)
             .exists(),
         "the kill started the engine's server"
@@ -537,7 +568,7 @@ fn a_killed_leads_teammates_keeper_leaves_the_map_whatever_the_kill_answers() {
     std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
 }
 
-/// v242 MRR2-1 (rv-code2 r2): a 257th lead's teammates' server still starts after 256 leads
+/// A 257th lead's teammates' server still starts after 256 leads
 /// ended whose teammates' keepers all exited without confirming the end, which no later start
 /// replaces, since an ended lead's id does not start again. First those leads were killed, as
 /// a lead's end kills it, at the refused sockets their ended servers left; then, with no
@@ -573,13 +604,17 @@ fn a_teammates_server_start_after_256_ended_leads_still_runs() {
     for killed in [true, false] {
         if killed {
             for (ended, ended_socket) in &ended_leads {
-                drop(kernel_processes::spawn_gate::bind_unix_std(ended_socket).unwrap());
+                drop(crate::spawn_gate::bind_unix_std(ended_socket).unwrap());
                 assert!(
                     socket_file(ended_socket),
                     "the ended server's socket file stays"
                 );
                 assert_eq!(
-                    teammates_socket(&host.root, ended),
+                    teammates_socket(
+                        &host.root,
+                        ended,
+                        &crate::terminal::tmux::test_seams::test_lead_paths()
+                    ),
                     Ok(ended_socket.clone()),
                     "the host reads another teammates' socket than the ended lead's start named"
                 );
@@ -590,13 +625,22 @@ fn a_teammates_server_start_after_256_ended_leads_still_runs() {
             }
         } else {
             for (ended, ended_socket) in &ended_leads {
-                std::fs::remove_file(crate::team::runtime::agent_teammates_socket_name(
-                    &host.root.join("team"),
-                    ended.team_agent().unwrap(),
-                ))
+                std::fs::remove_file(
+                    crate::terminal::tmux::test_seams::test_layout::agent_teammates_socket_name(
+                        &host.root.join("team"),
+                        ended.team_agent().unwrap(),
+                    ),
+                )
                 .unwrap();
                 std::fs::remove_dir_all(ended_socket.parent().unwrap()).unwrap();
-                assert!(teammates_socket(&host.root, ended).is_err());
+                assert!(
+                    teammates_socket(
+                        &host.root,
+                        ended,
+                        &crate::terminal::tmux::test_seams::test_lead_paths()
+                    )
+                    .is_err()
+                );
             }
             fill();
         }
@@ -619,7 +663,7 @@ fn a_teammates_server_start_after_256_ended_leads_still_runs() {
     std::fs::remove_dir_all(socket.parent().unwrap()).unwrap();
 }
 
-/// v242 SEC2-R2 F1: a Stop of an adopted teammate whose teammates' server missed one look,
+/// A Stop of an adopted teammate whose teammates' server missed one look,
 /// while its lead's own server listens, looks at that server again before it answers
 /// `terminal_agent_unknown`, which a Stop takes as ended, so one failed connect never marks
 /// a running teammate stopped. Both looks are armed to miss, so the kill still answers
@@ -628,8 +672,8 @@ fn a_teammates_server_start_after_256_ended_leads_still_runs() {
 fn a_stop_of_a_teammate_whose_teammates_server_missed_one_look_looks_again() {
     let (_root, host, lead, own_socket) = lead_with_own_socket();
     let (_, mates_socket) = teammates_lead(&host, 7);
-    let _own = kernel_processes::spawn_gate::bind_unix_std(&own_socket).unwrap();
-    let _mates = kernel_processes::spawn_gate::bind_unix_std(&mates_socket).unwrap();
+    let _own = crate::spawn_gate::bind_unix_std(&own_socket).unwrap();
+    let _mates = crate::spawn_gate::bind_unix_std(&mates_socket).unwrap();
     let ann = AgentId::team(8).unwrap();
     host.remember(&ann, &lead).unwrap();
     MATES_MISSES.set(2);
@@ -645,7 +689,7 @@ fn a_stop_of_a_teammate_whose_teammates_server_missed_one_look_looks_again() {
     assert!(
         !host
             .root
-            .join(crate::terminal::FOLDER)
+            .join(crate::terminal::tmux::test_seams::FOLDER)
             .join(super::super::SOCKET)
             .exists(),
         "the kill started the engine's server"
@@ -655,7 +699,7 @@ fn a_stop_of_a_teammate_whose_teammates_server_missed_one_look_looks_again() {
     }
 }
 
-/// v242 check-a-open sec r1 F1: once a remembered teammate's teammates' server missed a look,
+/// Once a remembered teammate's teammates' server missed a look,
 /// its Stop looks again only at its own lead's teammates' server, never at another lead's own
 /// server, where that lead may tag a decoy pane with the teammate's name so the Stop ends the
 /// decoy and answers Ok. Lead 9 has no teammates' server and its own socket listens; the Stop
@@ -665,9 +709,9 @@ fn a_stop_of_a_remembered_teammate_after_a_missed_look_never_opens_another_leads
     let (_root, host, lead, own_socket) = lead_with_own_socket();
     let (_, mates_socket) = teammates_lead(&host, 7);
     let (other, other_socket) = own_lead(&host, 9);
-    let _own = kernel_processes::spawn_gate::bind_unix_std(&own_socket).unwrap();
-    let _mates = kernel_processes::spawn_gate::bind_unix_std(&mates_socket).unwrap();
-    let _other = kernel_processes::spawn_gate::bind_unix_std(&other_socket).unwrap();
+    let _own = crate::spawn_gate::bind_unix_std(&own_socket).unwrap();
+    let _mates = crate::spawn_gate::bind_unix_std(&mates_socket).unwrap();
+    let _other = crate::spawn_gate::bind_unix_std(&other_socket).unwrap();
     let ann = AgentId::team(8).unwrap();
     host.remember(&ann, &lead).unwrap();
     MATES_MISSES.set(2);

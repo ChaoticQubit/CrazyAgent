@@ -1,4 +1,6 @@
 use super::*;
+use crate::terminal::harness_socket;
+use crate::terminal::tmux::test_seams::{test_confinement, test_hooks};
 
 /// GB-7 row 4 (2.4.1 gate): a lead's own socket that its ended server left behind, where a
 /// connect is refused, counts as no own server once the keeper this engine started for that
@@ -13,9 +15,14 @@ fn a_lead_socket_whose_keeper_ended_cleanly_and_whose_connect_is_refused_routes_
     let root = tempfile::tempdir().unwrap();
     let base = root.path().canonicalize().unwrap();
     let program = PathBuf::from("/usr/bin/false");
-    let engine = base.join(crate::terminal::FOLDER);
+    let engine = base.join(crate::terminal::tmux::test_seams::FOLDER);
     let host = Servers::new(
-        Tmux::open(Some(program.clone()), &engine),
+        Tmux::open(
+            Some(program.clone()),
+            &engine,
+            test_confinement(),
+            test_hooks(),
+        ),
         &base,
         Some(program),
     );
@@ -24,7 +31,12 @@ fn a_lead_socket_whose_keeper_ended_cleanly_and_whose_connect_is_refused_routes_
         "the host keeps the root the row names sockets by"
     );
     let lead = AgentId::team(7).unwrap();
-    let socket = harness_socket(&base, &lead).unwrap();
+    let socket = harness_socket(
+        &base,
+        &lead,
+        &crate::terminal::tmux::test_seams::test_lead_paths(),
+    )
+    .unwrap();
     let folder = socket.parent().unwrap().to_path_buf();
     std::fs::DirBuilder::new()
         .recursive(true)
@@ -34,7 +46,7 @@ fn a_lead_socket_whose_keeper_ended_cleanly_and_whose_connect_is_refused_routes_
     let own = || failure(OWN_SERVER_UNAVAILABLE);
     let gone = || failure("terminal_agent_unknown");
 
-    let listener = kernel_processes::spawn_gate::bind_unix_std(&socket).unwrap();
+    let listener = crate::spawn_gate::bind_unix_std(&socket).unwrap();
     assert_eq!(
         host.pane_pid(&lead),
         Err(own()),
@@ -54,7 +66,7 @@ fn a_lead_socket_whose_keeper_ended_cleanly_and_whose_connect_is_refused_routes_
         "a refused socket this engine holds no keeper for was taken as gone"
     );
 
-    let keeper = kernel_processes::spawn_gate::spawn(
+    let keeper = crate::spawn_gate::spawn(
         std::process::Command::new("/bin/sleep")
             .arg("30")
             .stdin(std::process::Stdio::null())
@@ -79,7 +91,7 @@ fn a_lead_socket_whose_keeper_ended_cleanly_and_whose_connect_is_refused_routes_
         "a refused socket whose keeper exited without confirming the end was taken as gone"
     );
 
-    let mut keeper = kernel_processes::spawn_gate::spawn(
+    let mut keeper = crate::spawn_gate::spawn(
         std::process::Command::new("/usr/bin/true")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
