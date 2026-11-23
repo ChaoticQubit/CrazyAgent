@@ -377,7 +377,7 @@ fn a_snapshot_chunk_over_the_cap_is_refused_before_any_chunk_is_appended() {
 
 /// Every kind a writer appends to the log. [`no_event_body_can_carry_a_secret`] holds a body
 /// rule for each and fails for a kind listed here without one.
-const KINDS: [&str; 55] = [
+const KINDS: [&str; 56] = [
     SNAPSHOT_CHUNK,
     SNAPSHOT_DONE,
     replay::PROCESS_EXITED,
