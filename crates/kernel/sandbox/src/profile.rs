@@ -93,3 +93,6 @@ pub struct ProfileHooks {
     /// The engine runtime folders that are engine secrets as a whole.
     pub engine_secret_folders: &'static [&'static str],
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests;
