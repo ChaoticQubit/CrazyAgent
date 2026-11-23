@@ -415,7 +415,8 @@ pub fn review(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<Previe
 /// so what runs is what was reviewed. Keys bound to an older version stay only while its
 /// hosts are unchanged. Inputs: database, engine facts, the picked folder, the SHA-256 the
 /// trust screen showed, whether to replace a plugin of that name, and the time. Output: Ok,
-/// or `app_plugin_changed`, `_refused`, `_name_taken`, or the folder's refusal.
+/// or `app_plugin_changed`, `_refused`, `_name_taken`, `_past_cap` (the listing would not
+/// show it, or would drop a listed plugin for it), or the folder's refusal.
 pub fn add(
     db: &Connection,
     engine: &Engine<'_>,
@@ -436,6 +437,9 @@ pub fn add(
     }
     if !replace && folder::read(engine.root, &manifest.name)?.is_some() {
         return Err(refused("app_plugin_name_taken"));
+    }
+    if !folder::fits(engine.root, &manifest.name)? {
+        return Err(refused("app_plugin_past_cap"));
     }
     folder::write(engine.root, &manifest.name, &bytes, engine.keys.new_ref)?;
     trust::settle(db, engine, &manifest, now_ms)
@@ -862,6 +866,18 @@ mod folder {
         Ok(names.contains_key(name))
     }
 
+    /// Whether a plugin of this name, once written, is among the first `USER_PLUGINS_MAX`
+    /// by name without dropping another from them: it is listed already, or the folder
+    /// holds fewer entries than the cap, old plugin files included. Inputs: the engine root
+    /// and a valid plugin name. Output: the answer, or the folder's refusal.
+    pub(super) fn fits(root: &Path, name: &str) -> Result<bool, Refused> {
+        let Some(directory) = open(root, false)? else {
+            return Ok(true);
+        };
+        let (names, _) = names(&directory)?;
+        Ok(names.contains_key(name) || names.len() < USER_PLUGINS_MAX)
+    }
+
     fn exists(directory: &std::fs::File, name: &str) -> Result<bool, Refused> {
         match rustix::fs::statat(directory, name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(_) => Ok(true),
@@ -1063,6 +1079,11 @@ mod folder {
 
     /// No user plugins folder off Unix, so no plugin is past its cap. Output: true.
     pub(super) fn listed(_root: &Path, _name: &str) -> Result<bool, Refused> {
+        Ok(true)
+    }
+
+    /// No user plugins folder off Unix, so no add is past its cap. Output: true.
+    pub(super) fn fits(_root: &Path, _name: &str) -> Result<bool, Refused> {
         Ok(true)
     }
 

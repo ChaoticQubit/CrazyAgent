@@ -822,6 +822,34 @@ fn the_folder_lists_at_most_its_cap_and_says_there_are_more() {
     assert!(listing.more);
 }
 
+/// An add the listing would not show, or that would push a listed plugin out of it, is
+/// refused before anything is written; replacing a listed plugin still works.
+#[test]
+fn an_add_past_the_folder_cap_is_refused_with_nothing_written() {
+    let case = case();
+    let named = |name: &str| ACME.replace("plugin = \"acme\"", &format!("plugin = \"{name}\""));
+    for index in 0..USER_PLUGINS_MAX {
+        let name = format!("p{index:03}");
+        drop_in(&case, &name, &named(&name));
+    }
+    let trust_before = cells(&case.db, "app_plugin_trust");
+    let state_before = cells(&case.db, "app_plugin_state");
+    for (name, now_ms) in [("p064", 1), ("a000", 2)] {
+        assert_eq!(
+            code(add_text(&case, &named(name), false, now_ms)),
+            "app_plugin_past_cap"
+        );
+        assert!(!case.root.join(FOLDER).join(name).exists());
+    }
+    assert_eq!(cells(&case.db, "app_plugin_trust"), trust_before);
+    assert_eq!(cells(&case.db, "app_plugin_state"), state_before);
+    let newer = named("p010").replace("release = \"1.0.0\"", "release = \"1.1.0\"");
+    add_text(&case, &newer, true, 3).unwrap();
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert_eq!(plugin(&listing, "p010").version, "1.1.0");
+    assert!(!listing.more);
+}
+
 #[test]
 fn remove_deletes_a_user_plugin_with_its_keys_and_refuses_bundled_and_unknown_ones() {
     let case = case();
