@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use crate::Refused;
-use crate::manifest::{self, MANIFEST_BYTES_MAX, Manifest, PLUGIN_ID_MAX};
+use crate::manifest::{self, Bounded, MANIFEST_BYTES_MAX, Manifest, PLUGIN_ID_MAX, read_bounded};
 
 /// Writes one `plugin.toml` into a fresh folder of its own. Inputs: a name unique per row
 /// and the text. Output: the folder.
@@ -79,6 +79,9 @@ fn a_plugin_id_outside_the_folder_rule_is_refused() {
         ("id-under", "agent_quit"),
         ("id-dot", "agent.quit"),
         ("id-long", &"a".repeat(PLUGIN_ID_MAX + 1)),
+        ("id-nul", "nul"),
+        ("id-com1", "com1"),
+        ("id-dash", "-x"),
     ] {
         assert_eq!(
             manifest::read(&plugin_dir(row, &manifest_text(id))),
@@ -89,6 +92,74 @@ fn a_plugin_id_outside_the_folder_rule_is_refused() {
             "{id}"
         );
     }
+}
+
+/// POD-F-F2A-SA1: a FIFO named `plugin.toml` is refused at once, never waited on.
+#[cfg(unix)]
+#[test]
+fn a_fifo_plugin_toml_is_refused_without_waiting() {
+    let dir = plugin_dir("fifo", "");
+    let file = dir.join("plugin.toml");
+    std::fs::remove_file(&file).expect("the file is removed");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&file)
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success(), "the fifo is made");
+    let started = std::time::Instant::now();
+    assert_eq!(read_bounded(&file, MANIFEST_BYTES_MAX), Bounded::Unreadable);
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+/// POD-F-F2A-SA1: a `plugin.toml` that is a link is refused, even to a valid file.
+#[cfg(unix)]
+#[test]
+fn a_linked_plugin_toml_is_refused() {
+    let target = plugin_dir("link-target", &manifest_text("agent-quit"));
+    let dir = plugin_dir("linked", "");
+    let file = dir.join("plugin.toml");
+    std::fs::remove_file(&file).expect("the file is removed");
+    std::os::unix::fs::symlink(target.join("plugin.toml"), &file).expect("the link is made");
+    assert_eq!(read_bounded(&file, MANIFEST_BYTES_MAX), Bounded::Unreadable);
+    assert_eq!(
+        manifest::read(&dir),
+        Err(Refused {
+            code: "plugin_manifest_invalid",
+            line: 1,
+        })
+    );
+}
+
+/// POD-F-F2A-SA1: the guarded open reads a regular file byte for byte.
+#[test]
+fn a_regular_plugin_toml_reads_byte_equal_through_the_guarded_open() {
+    let text = manifest_text("agent-quit");
+    let dir = plugin_dir("regular", &text);
+    assert_eq!(
+        read_bounded(&dir.join("plugin.toml"), MANIFEST_BYTES_MAX),
+        Bounded::Text(text)
+    );
+}
+
+/// POD-F-F2A-SA1: on Windows a `plugin.toml` that is a reparse point (a symbolic link) is
+/// refused.
+#[cfg(windows)]
+#[test]
+fn a_reparse_point_plugin_toml_is_refused() {
+    let target = plugin_dir("reparse-target", &manifest_text("agent-quit"));
+    let dir = plugin_dir("reparse", "");
+    let file = dir.join("plugin.toml");
+    std::fs::remove_file(&file).expect("the file is removed");
+    if std::os::windows::fs::symlink_file(target.join("plugin.toml"), &file).is_err() {
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink"])
+            .arg(&file)
+            .arg(target.join("plugin.toml"))
+            .status()
+            .expect("mklink runs");
+        assert!(status.success(), "the reparse point is made");
+    }
+    assert_eq!(read_bounded(&file, MANIFEST_BYTES_MAX), Bounded::Unreadable);
 }
 
 #[test]
@@ -155,10 +226,11 @@ fn a_kind_or_permission_outside_the_character_rule_is_refused() {
     assert!(manifest::read(&plugin_dir("permission-fits", &text)).is_ok());
 }
 
-/// The dependency names of every dependency table in a `Cargo.toml` text, the
-/// `target.*` tables included, each with the table it sits in. Input: the text.
-/// Output: (table, name) pairs, in table then name order.
-fn dependency_names(text: &str) -> Vec<(String, String)> {
+/// The dependencies of every dependency table in a `Cargo.toml` text, the `target.*`
+/// tables included: the table, the entry's key and the crate behind it, which is the
+/// `package` a renamed entry names, else the key (a `workspace = true` entry names its root
+/// entry by the key). Input: the text. Output: (table, key, crate), in table then key order.
+fn dependency_names(text: &str) -> Vec<(String, String, String)> {
     const SECTIONS: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
     let cargo: toml::Table = text.parse().expect("Cargo.toml parses");
     let mut tables: Vec<(String, &toml::Table)> = vec![(String::new(), &cargo)];
@@ -173,8 +245,15 @@ fn dependency_names(text: &str) -> Vec<(String, String)> {
     for (prefix, table) in tables {
         for section in SECTIONS {
             if let Some(deps) = table.get(section).and_then(toml::Value::as_table) {
-                for name in deps.keys() {
-                    names.push((format!("{prefix}{section}"), name.clone()));
+                for (key, entry) in deps {
+                    let package = entry
+                        .get("package")
+                        .map(|package| package.as_str().unwrap_or("").to_owned());
+                    names.push((
+                        format!("{prefix}{section}"),
+                        key.clone(),
+                        package.unwrap_or_else(|| key.clone()),
+                    ));
                 }
             }
         }
@@ -182,43 +261,88 @@ fn dependency_names(text: &str) -> Vec<(String, String)> {
     names
 }
 
-/// The crates plugin_host may depend on: no SDK crate and no engine crate (R4).
-const ALLOWED: [&str; 5] = [
-    "crazyagent-kernel-common",
-    "serde",
-    "serde_json",
-    "toml",
-    "url",
+/// The crates plugin_host may depend on, each in the one table it may sit in: no SDK crate
+/// and no engine crate (R4).
+const ALLOWED: [(&str, &str); 9] = [
+    ("dependencies", "crazyagent-kernel-common"),
+    ("dependencies", "crazyagent-kernel-security"),
+    ("dependencies", "rusqlite"),
+    ("dependencies", "serde"),
+    ("dependencies", "serde_json"),
+    ("dependencies", "toml"),
+    ("dependencies", "url"),
+    ("dev-dependencies", "tempfile"),
+    ("target.cfg(unix).dependencies", "rustix"),
 ];
+
+/// The entries of a `Cargo.toml` text whose crate is not on [`ALLOWED`] in its table,
+/// or whose key names another crate than the one behind it. Input: the text. Output: the
+/// (table, key, crate) of each.
+fn outside_allowlist(text: &str) -> Vec<(String, String, String)> {
+    dependency_names(text)
+        .into_iter()
+        .filter(|(table, key, krate)| {
+            key != krate || !ALLOWED.contains(&(table.as_str(), krate.as_str()))
+        })
+        .collect()
+}
 
 #[test]
 fn plugin_host_depends_on_no_sdk_or_engine_crate() {
-    let names = dependency_names(include_str!("../Cargo.toml"));
-    let outside: Vec<&(String, String)> = names
-        .iter()
-        .filter(|(table, name)| table != "dependencies" || !ALLOWED.contains(&name.as_str()))
-        .collect();
+    let text = include_str!("../Cargo.toml");
+    let outside = outside_allowlist(text);
     assert!(outside.is_empty(), "{outside:?}");
-    let mut direct: Vec<&str> = names.iter().map(|(_, name)| name.as_str()).collect();
+    let mut direct: Vec<(String, String)> = dependency_names(text)
+        .into_iter()
+        .map(|(table, _, krate)| (table, krate))
+        .collect();
     direct.sort_unstable();
-    assert_eq!(direct, ALLOWED);
+    let mut allowed: Vec<(String, String)> = ALLOWED
+        .iter()
+        .map(|(table, krate)| ((*table).to_owned(), (*krate).to_owned()))
+        .collect();
+    allowed.sort_unstable();
+    assert_eq!(direct, allowed);
 }
 
 #[test]
 fn the_allowlist_walks_target_tables() {
     let text = "[dependencies]\ntoml = \"1\"\n\n[target.'cfg(unix)'.dependencies]\ncrazyagent-sdk = { path = \"x\" }\n\n[target.'cfg(windows)'.dev-dependencies]\ncrazyagent = { path = \"y\" }\n";
+    let pair = |table: &str, name: &str| (table.to_owned(), name.to_owned(), name.to_owned());
     assert_eq!(
         dependency_names(text),
         vec![
-            ("dependencies".to_owned(), "toml".to_owned()),
-            (
-                "target.cfg(unix).dependencies".to_owned(),
-                "crazyagent-sdk".to_owned()
-            ),
-            (
-                "target.cfg(windows).dev-dependencies".to_owned(),
-                "crazyagent".to_owned()
-            ),
+            pair("dependencies", "toml"),
+            pair("target.cfg(unix).dependencies", "crazyagent-sdk"),
+            pair("target.cfg(windows).dev-dependencies", "crazyagent"),
         ]
     );
+    assert_eq!(outside_allowlist(text).len(), 2);
+}
+
+/// POD-F-F2B1-SA5: a renamed entry is judged by the crate behind it, so an allowed key
+/// cannot carry an SDK or engine crate, and a `workspace = true` entry by its root name.
+#[test]
+fn the_allowlist_judges_the_crate_behind_a_renamed_entry() {
+    let renamed = "[dependencies]\nserde = { package = \"crazyagent-sdk\", path = \"x\" }\n";
+    assert_eq!(
+        outside_allowlist(renamed),
+        vec![(
+            "dependencies".to_owned(),
+            "serde".to_owned(),
+            "crazyagent-sdk".to_owned()
+        )]
+    );
+    let workspace =
+        "[dependencies]\ntoml = { workspace = true }\ncrazyagent = { workspace = true }\n";
+    assert_eq!(
+        outside_allowlist(workspace),
+        vec![(
+            "dependencies".to_owned(),
+            "crazyagent".to_owned(),
+            "crazyagent".to_owned()
+        )]
+    );
+    let odd = "[dependencies]\nserde = { package = 1 }\n";
+    assert_eq!(outside_allowlist(odd).len(), 1);
 }
