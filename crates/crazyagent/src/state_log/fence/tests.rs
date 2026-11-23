@@ -1,6 +1,6 @@
 use super::*;
 use crate::state_log::Aggregate;
-use crate::state_log::replay::redact;
+use crate::state_log::redact;
 use kernel_storage::state_log::Draft;
 use rusqlite::Connection;
 
