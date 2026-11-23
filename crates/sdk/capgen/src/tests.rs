@@ -838,3 +838,53 @@ fn a_test_module_refuses_two_names_with_one_rust_form() {
     assert_eq!(refused.code, "capgen_name_collision");
     assert_eq!(refused.detail, "check_a_b_input");
 }
+
+#[cfg(unix)]
+#[test]
+fn an_entry_name_that_is_not_utf8_is_marked() {
+    use std::os::unix::ffi::OsStrExt;
+    assert_eq!(
+        crate::entry_name(OsStr::new("mod.rs")),
+        Ok("mod.rs".to_owned())
+    );
+    for bytes in [&b"a\xff"[..], &b"a\xfe"[..]] {
+        assert_eq!(
+            crate::entry_name(OsStr::from_bytes(bytes)),
+            Err("a\u{fffd} (not utf-8)".to_owned())
+        );
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[test]
+fn drift_reports_names_that_are_not_utf8_once() {
+    use std::os::unix::ffi::OsStrExt;
+    let folder = load_scratch("drift-not-utf8");
+    let files = vec![("mod.rs".to_owned(), "pub mod a;\n".to_owned())];
+    fs::write(folder.join("mod.rs"), "pub mod a;\n").expect("mod.rs writes");
+    for bytes in [&b"a\xff"[..], &b"a\xfe"[..]] {
+        fs::write(folder.join(OsStr::from_bytes(bytes)), "x").expect("the odd name writes");
+    }
+    assert_eq!(
+        drift(&folder, &files),
+        vec!["a\u{fffd} (not utf-8)".to_owned()]
+    );
+    fs::remove_dir_all(&folder).expect("the scratch folder is removed");
+}
+
+#[cfg(unix)]
+#[test]
+fn drift_reports_an_unreadable_folder() {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = load_scratch("drift-unreadable");
+    let files = vec![("mod.rs".to_owned(), "pub mod a;\n".to_owned())];
+    fs::write(folder.join("mod.rs"), "pub mod a;\n").expect("mod.rs writes");
+    let inner = folder.join("envelope");
+    fs::create_dir(&inner).expect("the subfolder is made");
+    fs::write(inner.join("stray.rs"), "x").expect("a stray file writes");
+    fs::set_permissions(&inner, fs::Permissions::from_mode(0o000)).expect("locks");
+    let found = drift(&folder, &files);
+    fs::set_permissions(&inner, fs::Permissions::from_mode(0o755)).expect("unlocks");
+    assert_eq!(found, vec!["envelope (unreadable)".to_owned()]);
+    fs::remove_dir_all(&folder).expect("the scratch folder is removed");
+}

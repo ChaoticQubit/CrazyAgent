@@ -281,8 +281,9 @@ fn read_bounded(path: &Path) -> Result<String, (&'static str, String)> {
 }
 
 /// Compares generated files with a folder's files, the folder's subfolders read one level
-/// deep with paths `<subfolder>/<file>`. Inputs: the folder and the generated files.
-/// Output: every path that differs, is missing or is extra in the folder, sorted.
+/// deep with paths `<subfolder>/<file>`. A name that is not UTF-8 and a folder or entry
+/// that cannot be read are drift of their own, never skipped. Inputs: the folder and the
+/// generated files. Output: every path that differs, is missing or is extra, sorted, once.
 pub fn drift(generated: &Path, files: &[(String, String)]) -> Vec<String> {
     let mut differing = Vec::new();
     for (path, text) in files {
@@ -291,14 +292,17 @@ pub fn drift(generated: &Path, files: &[(String, String)]) -> Vec<String> {
         }
     }
     let mut present = Vec::new();
-    for (name, is_folder) in entries(generated) {
-        if !is_folder {
-            present.push(name);
+    for entry in entries(generated, ".") {
+        let Entry::Folder(name) = entry else {
+            present.push(entry.into_name());
             continue;
-        }
-        let inner = entries(&generated.join(&name));
-        for (file, _) in &inner {
-            present.push(format!("{name}/{file}"));
+        };
+        let inner = entries(&generated.join(&name), &name);
+        for entry in &inner {
+            present.push(match entry {
+                Entry::Marked(marked) => marked.clone(),
+                Entry::File(file) | Entry::Folder(file) => format!("{name}/{file}"),
+            });
         }
         if inner.is_empty() {
             present.push(name);
@@ -310,22 +314,73 @@ pub fn drift(generated: &Path, files: &[(String, String)]) -> Vec<String> {
         }
     }
     differing.sort();
-    assert!(differing.windows(2).all(|pair| pair[0] != pair[1]));
+    differing.dedup();
+    assert!(differing.windows(2).all(|pair| pair[0] < pair[1]));
     differing
 }
 
-/// Lists one folder's entries. Input: the folder. Output: each entry's name with whether
-/// it is a folder, empty when the folder does not read.
-fn entries(folder: &Path) -> Vec<(String, bool)> {
-    let Ok(read) = fs::read_dir(folder) else {
-        return Vec::new();
+/// One entry of a folder `drift` reads: a file, a folder, or a marked name that is drift
+/// by itself (not UTF-8, or unreadable), already in its reported form.
+enum Entry {
+    File(String),
+    Folder(String),
+    Marked(String),
+}
+
+impl Entry {
+    /// The entry's name as `drift` reports it. Output: the name.
+    fn into_name(self) -> String {
+        match self {
+            Self::File(name) | Self::Folder(name) | Self::Marked(name) => name,
+        }
+    }
+}
+
+/// Names one folder entry. Input: the raw name. Output: the name, or its lossy text with
+/// ` (not utf-8)` when it is not UTF-8.
+pub(crate) fn entry_name(name: &OsStr) -> Result<String, String> {
+    name.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{} (not utf-8)", name.to_string_lossy()))
+}
+
+/// Lists one folder's entries. A missing folder has none; a folder or entry that cannot be
+/// read is one `<label> (unreadable)` entry, and a marked name is reported below the label.
+/// Inputs: the folder and its label in reports, `.` for the top folder. Output: the entries.
+fn entries(folder: &Path, label: &str) -> Vec<Entry> {
+    let unreadable = || Entry::Marked(format!("{label} (unreadable)"));
+    let below = |name: String| {
+        if label == "." {
+            name
+        } else {
+            format!("{label}/{name}")
+        }
     };
-    read.flatten()
-        .map(|entry| {
-            let is_folder = entry.file_type().is_ok_and(|kind| kind.is_dir());
-            (entry.file_name().to_string_lossy().into_owned(), is_folder)
-        })
-        .collect()
+    let read = match fs::read_dir(folder) {
+        Ok(read) => read,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Vec::new(),
+        Err(_) => return vec![unreadable()],
+    };
+    let mut out = Vec::new();
+    for entry in read {
+        let Ok(entry) = entry else {
+            out.push(unreadable());
+            continue;
+        };
+        let name = match entry_name(&entry.file_name()) {
+            Ok(name) => name,
+            Err(marked) => {
+                out.push(Entry::Marked(below(marked)));
+                continue;
+            }
+        };
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => out.push(Entry::Folder(name)),
+            Ok(_) => out.push(Entry::File(name)),
+            Err(_) => out.push(Entry::Marked(below(format!("{name} (unreadable)")))),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
