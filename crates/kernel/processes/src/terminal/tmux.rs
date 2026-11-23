@@ -710,7 +710,7 @@ impl Tmux {
             .ok_or_else(|| failure("terminal_agent_unknown"))
     }
 
-    /// The pane an agent's prompts go to (V243-PASTE-INTERLEAVE-N0): the one tagged with its
+    /// The pane an agent's prompts go to: the one tagged with its
     /// name, searched on the engine's server in the agent's window only. Only a window no
     /// engine marked (`APP_MARK`) gives its one untagged pane, marked now; any other gives
     /// none, never a pane that may be a teammate's. Takes the control client and the agent.
@@ -875,8 +875,8 @@ impl Tmux {
 
     /// Hands bytes to one tmux target: a request `pastes` takes goes through a named tmux
     /// buffer in one paste, any other is typed as hex keys, one command after another, in
-    /// order, all into the pane a window target names at the start when there are several
-    /// (V243-PASTE-INTERLEAVE-N0). Takes the control client, the target and the bytes.
+    /// order, all into the pane a window target names at the start when there are several.
+    /// Takes the control client, the target and the bytes.
     /// Returns once tmux took them all, `terminal_input_bounds`, or the lookup's code.
     fn send_bytes(control: &Control, target: &str, bytes: &[u8]) -> Result<(), HostError> {
         if bytes.len() > INPUT_BYTES_MAX {

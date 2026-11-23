@@ -70,7 +70,7 @@ fn refusal_of(entry: &Path, places: &Places) -> Option<(PathBuf, Refusal)> {
         .map(|refused| (refused.file, refused.why))
 }
 
-/// rv-sec2 F2 (B11): a script whose first line the resolver cannot read the way the system and
+/// A script whose first line the resolver cannot read the way the system and
 /// `env` run it is refused, never taken for a program with no interpreter: `env` with a
 /// setting or a flag other than -S, an `env` other than /usr/bin/env, a relative interpreter,
 /// one with a `..` part, a line that is not UTF-8, a line longer than the part read, and
@@ -177,7 +177,7 @@ fn an_env_split_argument_holding_a_quote_escape_or_dollar_is_refused() {
     assert!(resolve_entry(&plain, &places).is_ok());
 }
 
-/// rv-sec2 B11 r2 F3: the system ends a first line at its first `#`, so the words the reader
+/// The system ends a first line at its first `#`, so the words the reader
 /// would keep past it are not the ones that run: a line holding `#` anywhere after `#!` is
 /// refused as [`Refusal::FirstLine`], an `env` program named `node#x` with an owner file of
 /// that name in the places included.
@@ -202,7 +202,7 @@ fn a_first_line_holding_a_hash_is_refused() {
     }
 }
 
-/// rv-sec2 B11 r2 F4: the system reads a script's first line whatever its read bit says, so an
+/// The system reads a script's first line whatever its read bit says, so an
 /// executable file the engine cannot read is refused as [`Refusal::FirstLine`], never taken
 /// for a program with no interpreter; the same file readable resolves.
 #[test]
@@ -218,7 +218,7 @@ fn an_executable_file_the_engine_cannot_read_is_refused() {
     assert!(resolve_entry(&locked, &places).is_ok());
 }
 
-/// V243-OWN-PREFIX-NODE-REFUSE trip row: [`own_node_refused`] holds only a tool whose real
+/// [`own_node_refused`] holds only a tool whose real
 /// file is absolute, as every tool [`entry_at`] gives is.
 #[test]
 #[should_panic(expected = "assertion failed: tool.program.is_absolute()")]
@@ -232,7 +232,7 @@ fn the_own_prefix_node_check_trips_on_a_tool_whose_file_is_relative() {
     let _ = own_node_refused(&tool, &home_only(&home));
 }
 
-/// V243-OWN-PREFIX-NODE-REFUSE trip row: [`own_node`] judges only a script named by its
+/// [`own_node`] judges only a script named by its
 /// absolute real file.
 #[test]
 #[should_panic(expected = "assertion failed: script.is_absolute()")]
@@ -245,7 +245,7 @@ fn the_own_prefix_node_trips_on_a_relative_script() {
     );
 }
 
-/// V243-OWN-PREFIX-NODE-REFUSE trip row: [`own_node`] never judges a `node` past
+/// [`own_node`] never judges a `node` past
 /// [`INTERPRETER_DEPTH_MAX`].
 #[test]
 #[should_panic(expected = "assertion failed: depth <= INTERPRETER_DEPTH_MAX")]
@@ -431,7 +431,7 @@ fn a_tool_in_an_own_folder_under_the_shared_temp_folder_is_used() {
 }
 
 /// The app's folder as a release lays it out, holding the engine and the bundled
-/// `crazyagent-tmux` beside it (DEC-157), plus a Homebrew-like folder with its own `tmux`.
+/// `crazyagent-tmux` beside it, plus a Homebrew-like folder with its own `tmux`.
 /// The places look only in that folder, past the app's folder, so no row reads the host's
 /// own tmux. Input: HOME. Output: the places, the sidecar and the Homebrew-like tmux.
 fn bundled_layout(home: &Path) -> (Places, PathBuf, PathBuf) {
