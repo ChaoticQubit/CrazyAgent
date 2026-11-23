@@ -347,3 +347,6 @@ fn end_tree(pid: u32) {
             .creation_flags(CREATE_NO_WINDOW),
     );
 }
+
+#[cfg(test)]
+mod tests;
