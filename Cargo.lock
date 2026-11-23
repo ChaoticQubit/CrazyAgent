@@ -903,7 +903,6 @@ dependencies = [
  "minisign-verify",
  "nix",
  "notify",
- "portable-pty",
  "ratatui",
  "rusqlite",
  "rustix 1.1.5",
@@ -1007,11 +1006,13 @@ dependencies = [
  "crazyagent-win-sandbox",
  "getrandom 0.4.3",
  "nix",
+ "portable-pty",
  "rustix 1.1.5",
  "serde",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "vt100",
 ]
 
 [[package]]

@@ -1,7 +1,7 @@
 #![cfg(target_os = "windows")]
 
-use crazyagent::terminal::windows::ConptyHost;
 use kernel_processes::terminal::buffer::Chunk;
+use kernel_processes::terminal::windows::ConptyHost;
 use kernel_processes::terminal::{
     AgentId, Host, INPUT_BYTES_MAX, PaneCommand, SIZE_MAX, TerminalStream,
 };
@@ -53,7 +53,7 @@ fn read_until(chunks: &Receiver<Vec<u8>>, needle: &str, limit: Duration) -> Stri
 #[test]
 fn a_conpty_terminal_runs_streams_takes_input_and_ends() {
     let temp = tempfile::tempdir().unwrap();
-    let host = ConptyHost::new();
+    let host = ConptyHost::new(crazyagent::sandbox::agent_variable_allowed);
     let agent = AgentId::team(7).unwrap();
     let shell = command(&["/Q", "/K"], temp.path());
     let pane = host.spawn(&agent, &shell).unwrap();
