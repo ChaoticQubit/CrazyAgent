@@ -10,7 +10,11 @@ fn mock() -> keyring_core::Result<Arc<CredentialStore>> {
 
 /// Builds one entry in the mock store. Inputs: the store, service and account.
 /// Output: the entry.
-fn mock_entry(store: &CredentialStore, service: &str, account: &str) -> keyring_core::Result<Entry> {
+fn mock_entry(
+    store: &CredentialStore,
+    service: &str,
+    account: &str,
+) -> keyring_core::Result<Entry> {
     store.build(service, account, None)
 }
 
@@ -29,7 +33,9 @@ fn the_git_helper_value_is_byte_equal() {
     let store = OsKeyring::new(namespace, Path::new(EXECUTABLE), mock, mock_entry, None).unwrap();
     let found = reference("dev.crazyagent.git.github", "token").unwrap();
     assert_eq!(
-        store.git_credential_helper(&found, "x-access-token").unwrap(),
+        store
+            .git_credential_helper(&found, "x-access-token")
+            .unwrap(),
         format!(
             "!'{SHOWN}' git-credential 'dev.crazyagent.git' 'dev.crazyagent.git.github:token' \
              'x-access-token'"

@@ -6,8 +6,6 @@ mod keychain_support;
 
 #[cfg(target_os = "macos")]
 use crazyagent::credentials::Keychain;
-#[cfg(target_os = "linux")]
-use crazyagent::credentials::OsKeyring;
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 use crazyagent::credentials::platform_store;
 use crazyagent::engine::owner::{OwnerClient, OwnerClientKind, OwnerResult};
@@ -15,6 +13,8 @@ use crazyagent::github::{Endpoints, GitHub, GitHubMethod, namespace};
 use crazyagent::projects_home::FoundState;
 use e2e_support::{Engine, Owner, git, hex, named, repository, scratch};
 use kernel_security::secret::SecretString;
+#[cfg(target_os = "linux")]
+use kernel_security::store::os_keyring::OsKeyring;
 use kernel_security::store::{SecretRef, Store, reference};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
