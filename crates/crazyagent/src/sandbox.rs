@@ -5239,6 +5239,22 @@ mod access_grant_tests {
 mod profile_string_tests {
     use super::*;
 
+    /// The launch denies keep writes off the launch lock the hooks name, and name no other
+    /// lock.
+    #[test]
+    fn the_launch_denies_keep_writes_off_the_lock_the_hooks_name() {
+        static STAND_IN: ProfileHooks = ProfileHooks {
+            launch_lock: "stand-in.lock",
+            ..PROFILE_HOOKS
+        };
+        let denies = launch_denies(&STAND_IN, Path::new("/private/tmp/agent/home"));
+        assert!(denies.contains(&any_case("stand-in.lock")), "{denies}");
+        assert!(
+            !denies.contains(&any_case(crate::launch_context::LOCK)),
+            "{denies}"
+        );
+    }
+
     /// v2.4.0 gate: the folded secret names, 1300 bytes as one regex, split into bodies each
     /// Seatbelt reads, every name kept whole and in order; a list that fits stays one body
     /// in the shape it had, and no names give no body.
