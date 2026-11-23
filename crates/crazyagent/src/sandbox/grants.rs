@@ -1,4 +1,3 @@
-use super::OWNER_PORTS;
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::protocol::ProjectId;
@@ -9,6 +8,7 @@ use kernel_sandbox::paths::{canonical, owner_home};
 use kernel_sandbox::policy::{
     AccessGrant, AgentAccess, AgentPolicy, GRANT_PORTS_MAX, GRANT_SOCKETS_MAX,
 };
+use kernel_sandbox::ports::{OWNER_PORTS, PROXY_PORTS, RELAY_PORTS};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::path::{Path, PathBuf};
 
@@ -160,8 +160,8 @@ pub fn checked(grant: &AccessGrant, data_root: &Path) -> Result<AccessGrant, &'s
             let reserved = *port == 0
                 || OWNER_PORTS.contains(port)
                 || CONTROL_PORTS.contains(port)
-                || super::model_proxy::PROXY_PORTS.contains(port)
-                || super::model_proxy::RELAY_PORTS.contains(port)
+                || PROXY_PORTS.contains(port)
+                || RELAY_PORTS.contains(port)
                 || ide_ports(data_root).contains(port);
             if reserved {
                 return Err("grant_port_reserved");

@@ -35,7 +35,7 @@ fn endpoint_runtimes(fixture: &Fixture) -> impl Fn() -> TeamRuntime + '_ {
 fn free_proxy_port() -> u16 {
     let model = ModelHost::new("models.crazyagent.test", 443).unwrap();
     let port = ModelProxy::bind(7, vec![model], None, &[]).unwrap().port();
-    assert!(crate::sandbox::model_proxy::PROXY_PORTS.contains(&port));
+    assert!(kernel_sandbox::ports::PROXY_PORTS.contains(&port));
     port
 }
 

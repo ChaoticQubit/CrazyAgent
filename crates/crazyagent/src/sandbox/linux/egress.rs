@@ -1,8 +1,8 @@
-use super::super::REMOTES_MAX;
 use super::bridge::UNSHARE_NET;
 use super::{
     BWRAP_PATHS, FS_ABI, HelperRequest, NEST_ARGS, accepted, die_with_parent, trusted_file,
 };
+use kernel_sandbox::ports::REMOTES_MAX;
 use landlock::{
     Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, RulesetError, path_beneath_rules,
 };

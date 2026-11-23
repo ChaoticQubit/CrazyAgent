@@ -1,6 +1,7 @@
 use kernel_sandbox::access::AccessHooks;
 use kernel_sandbox::elf;
 use kernel_sandbox::error::{SandboxError, invalid};
+use kernel_sandbox::hidden_paths::HIDDEN_MAX;
 use kernel_sandbox::host::LinuxHost;
 use kernel_sandbox::lines::*;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
@@ -10,7 +11,9 @@ use kernel_sandbox::paths::{
     plain_top, regex_escape,
 };
 use kernel_sandbox::policy::PolicyHooks;
-use kernel_sandbox::ports::BRIDGE_PORT_MIN;
+use kernel_sandbox::ports::{
+    BRIDGE_PORT_MIN, KEPT_PORTS_MAX, OWNER_PORTS, PROXY_PORTS, RELAY_PORTS, REMOTES_MAX,
+};
 use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -99,29 +102,6 @@ pub fn starts_at_boundary(program: &OsStr) -> bool {
     }
 }
 
-/// The fixed ports the owner's tools listen on, which no tools-on agent may bind or listen
-/// on at any address: the Codex sign-in callback and Ollama's local model server. Seatbelt
-/// matches a local address by port only (`localhost` there matches every local address), so
-/// it cannot keep an agent's listener on loopback; it can keep these ports free.
-pub const OWNER_PORTS: [u16; 2] = [1455, 11434];
-const _: () = {
-    use kernel_processes::spawn_gate::LOW_PORTS;
-    use model_proxy::{PICKED_PORTS_START, PROXY_PORTS};
-    assert!(*LOW_PORTS.start() > 1024 && *LOW_PORTS.end() < 30_000);
-    assert!(*LOW_PORTS.end() < PICKED_PORTS_START);
-    assert!(*LOW_PORTS.end() < *PROXY_PORTS.start());
-    let mut index = 0;
-    while index < OWNER_PORTS.len() {
-        let port = OWNER_PORTS[index];
-        assert!(port < *LOW_PORTS.start() || port > *LOW_PORTS.end());
-        index += 1;
-    }
-};
-
-/// The most ports of the owner's configured local model endpoints one tools-on sandbox keeps
-/// free beside [`OWNER_PORTS`], which bounds the profile's deny rules.
-pub const KEPT_PORTS_MAX: usize = 64;
-
 /// The loopback ports the owner's configured model endpoints listen on, which a tools-on
 /// agent must not bind before the owner's model server does. An endpoint URL that does not
 /// parse names no port. Input: the model access settings. Output: the ports, sorted, once
@@ -196,12 +176,6 @@ pub const SHARED_WRITES_NEED_SEATBELT: &str = "writable shared folders need the 
 /// Why a Full access boundary cannot run off macOS: only macOS qualifies Full access in V1.
 pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS in this version";
 
-/// The Linux helper's exit code when its call supervisor could not take back an entry a
-/// case-folding folder read as a held name, and so stopped the run (DEC-185 S2a, rv-sec3
-/// F1). The supervisor crate keeps its own copy, tied to this one in the Linux sandbox; 125
-/// is its other stops, and 126 and up are the shell's and the signals'.
-pub const HELD_NOT_PUT_BACK_EXIT: i32 = 122;
-
 /// What the engine shows for a Linux run that ended with [`HELD_NOT_PUT_BACK_EXIT`].
 pub const HELD_NOT_PUT_BACK: &str =
     "The sandbox stopped this run: a protected name could not be put back";
@@ -224,11 +198,6 @@ const READ_ROOTS_MAX: usize = 16;
 /// its process is started through.
 const LINKS_MAX: usize = 4;
 const WORKTREES_MAX: usize = 8;
-/// The most folders one sandbox hides: every hidden folder a project saves
-/// ([`kernel_sandbox::hidden_paths::HIDDEN_PATHS_MAX`]) plus the two a step adds itself at most, such as the
-/// graph step's `.crazyagent/`, or a native lead's part of the relay mailbox and its own temp
-/// folder, which its teammates' sandbox hides.
-pub const HIDDEN_MAX: usize = kernel_sandbox::hidden_paths::HIDDEN_PATHS_MAX + 2;
 /// The most files and folders one sandbox keeps out by name: the graph step's secret-like and
 /// git-ignored project paths (MAP-2). A project with more builds no graph.
 pub const KEPT_OUT_MAX: usize = 1024;
@@ -273,7 +242,6 @@ const TOOL_ROOTS_MAX: usize = 24;
 const TOOL_FILES_MAX: usize = 5;
 const EXECS_MAX: usize = 4;
 const GIT_LINK_BYTES_MAX: u64 = 2 * PATH_BYTES_MAX as u64;
-const REMOTES_MAX: usize = 8;
 #[cfg(unix)]
 const PROFILE_BYTES_MAX: usize = 64 * 1024;
 const AGENT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin";
@@ -3347,8 +3315,8 @@ impl ProjectSandbox {
                     .iter()
                     .chain(&self.kept_ports)
                     .copied()
-                    .chain(model_proxy::PROXY_PORTS)
-                    .chain(model_proxy::RELAY_PORTS)
+                    .chain(PROXY_PORTS)
+                    .chain(RELAY_PORTS)
                     .map(|port| format!(" (local ip \"*:{port}\")"))
                     .collect::<String>();
                 text.push_str(&format!(

@@ -1264,7 +1264,10 @@ fn live_keyed_codex_and_claude_reach_the_model_through_the_relay_with_their_key_
 #[test]
 fn a_keyed_launch_writes_a_private_placeholder_key_file_that_ends_with_its_session() {
     let (_refusing, port) = kernel_processes::spawn_gate::refusing_tcp_port().unwrap();
-    assert!(!crazyagent::sandbox::OWNER_PORTS.contains(&port), "{port}");
+    assert!(
+        !kernel_sandbox::ports::OWNER_PORTS.contains(&port),
+        "{port}"
+    );
     for (harness, name, base_url) in [
         ("codex", "codex", format!("http://127.0.0.1:{port}/v1")),
         ("claude-code", "claude", format!("http://127.0.0.1:{port}")),

@@ -26340,7 +26340,7 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
     let free = || {
         let model = ModelHost::new("models.crazyagent.test", 443).unwrap();
         let port = ModelProxy::bind(7, vec![model], None, &[]).unwrap().port();
-        assert!(crate::sandbox::model_proxy::PROXY_PORTS.contains(&port));
+        assert!(kernel_sandbox::ports::PROXY_PORTS.contains(&port));
         port
     };
 
@@ -26411,7 +26411,7 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
         .local_addr()
         .unwrap()
         .port();
-    assert!(!crate::sandbox::model_proxy::PROXY_PORTS.contains(&outside));
+    assert!(!kernel_sandbox::ports::PROXY_PORTS.contains(&outside));
     let record = PaneRecord {
         proxy: Some(outside),
         ..fixture.pane(&host, old)

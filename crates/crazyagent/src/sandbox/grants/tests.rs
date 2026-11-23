@@ -78,12 +78,7 @@ impl Case {
 #[test]
 fn a_port_grant_refuses_zero_the_owner_ports_and_the_model_proxy_ports() {
     let data = Path::new("/nonexistent-engine-data");
-    for port in [
-        0,
-        1455,
-        11_434,
-        *crate::sandbox::model_proxy::PROXY_PORTS.start(),
-    ] {
+    for port in [0, 1455, 11_434, *kernel_sandbox::ports::PROXY_PORTS.start()] {
         assert_eq!(
             checked(&AccessGrant::Port { port }, data),
             Err("grant_port_reserved"),
@@ -841,7 +836,7 @@ fn only_on_linux_does_a_port_question_say_the_port_is_open_on_every_host() {
 #[test]
 fn a_port_grant_refuses_the_model_relay_ports() {
     let data = Path::new("/nonexistent-engine-data");
-    let block = crate::sandbox::model_proxy::RELAY_PORTS;
+    let block = kernel_sandbox::ports::RELAY_PORTS;
     for port in [*block.start(), *block.end()] {
         assert_eq!(
             checked(&AccessGrant::Port { port }, data),

@@ -29,7 +29,8 @@ pub mod paths;
 /// A project's agent policy: the access level, network, toolchains, caches, agent files,
 /// grants and shared folders, with the views clients show and the hooks the engine passes.
 pub mod policy;
-/// The lowest port a sandbox bridge may take.
+/// The ports and port counts every sandbox holds: the owner's fixed ports, the model proxy
+/// and relay blocks, where picked ports start, the lowest bridge port and the most remotes.
 pub mod ports;
 /// Boundary qualification: the signed report a release build carries for each sandbox
 /// capability, read and checked against the artifacts it names before the engine admits a

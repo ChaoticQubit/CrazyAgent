@@ -1301,8 +1301,8 @@ fn a_tools_on_agent_serves_on_loopback_but_never_listens_on_an_owner_tool_port()
         ("hello".to_owned(), String::new()),
         "an agent's dev server on loopback takes connections"
     );
-    assert_eq!(crazyagent::sandbox::OWNER_PORTS, [1455, 11434]);
-    for port in crazyagent::sandbox::OWNER_PORTS {
+    assert_eq!(kernel_sandbox::ports::OWNER_PORTS, [1455, 11434]);
+    for port in kernel_sandbox::ports::OWNER_PORTS {
         for host in ["127.0.0.1", "0.0.0.0", "::1"] {
             let name = format!("owner-{port}-{}.sb", host.replace([':', '.'], "-"));
             let (got, said) = listen(&open, &case, &name, host, port, false);
@@ -1487,13 +1487,13 @@ fn only_loopback_model_endpoints_name_kept_ports_and_the_count_is_bounded() {
         Err(SandboxError::Invalid(_))
     ));
     let many: Vec<u16> =
-        (20_000..20_000 + crazyagent::sandbox::KEPT_PORTS_MAX as u16 + 1).collect();
+        (20_000..20_000 + kernel_sandbox::ports::KEPT_PORTS_MAX as u16 + 1).collect();
     assert!(matches!(
         open.clone().keep_ports(&many),
         Err(SandboxError::Invalid(_))
     ));
     let kept = open
-        .keep_ports(&many[..crazyagent::sandbox::KEPT_PORTS_MAX])
+        .keep_ports(&many[..kernel_sandbox::ports::KEPT_PORTS_MAX])
         .unwrap()
         .keep_ports(&[1455, 11434, 20_000])
         .unwrap();
