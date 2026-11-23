@@ -953,12 +953,14 @@ name = "crazyagent-desktop"
 version = "2.4.4"
 dependencies = [
  "alacritty_terminal",
+ "base64 0.22.1",
  "bytemuck",
  "crazyagent",
  "crazyagent-kernel-processes",
  "crazyagent-kernel-security",
  "getrandom 0.4.3",
  "glyphon",
+ "minisign",
  "notify",
  "objc2 0.6.5",
  "objc2-app-kit",
@@ -1008,15 +1010,22 @@ dependencies = [
 name = "crazyagent-kernel-processes"
 version = "2.4.4"
 dependencies = [
+ "base64 0.22.1",
  "crazyagent-kernel-common",
  "crazyagent-win-sandbox",
  "getrandom 0.4.3",
+ "minisign",
+ "minisign-verify",
  "nix",
  "rustix 1.1.5",
+ "semver",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "toml 1.1.6+spec-1.1.0",
+ "url",
 ]
 
 [[package]]

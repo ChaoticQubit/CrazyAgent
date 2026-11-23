@@ -527,7 +527,8 @@ pub(super) fn read_pointer(
 ) -> Result<Vec<u8>, &'static str> {
     assert!(bytes_max <= POINTER_BYTES_MAX);
     let mut body = Vec::new();
-    crate::update::download(url, &mut body, bytes_max, limit).map_err(|_| LOOKUP_FAILED)?;
+    kernel_processes::update::download(url, &mut body, bytes_max, limit)
+        .map_err(|_| LOOKUP_FAILED)?;
     assert!(body.len() as u64 <= bytes_max);
     Ok(body)
 }
