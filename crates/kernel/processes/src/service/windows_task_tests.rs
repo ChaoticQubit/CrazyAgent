@@ -94,3 +94,34 @@ fn a_windows_task_line_past_cmds_limit_is_refused() {
     let refused = task.definition_text().unwrap_err();
     assert!(refused.0.contains("8191"), "{}", refused.0);
 }
+
+/// The installed Windows task is read in the UTF-16 it is written in and judged by the
+/// engine it names: one naming this service's engine runs no other program, whatever PATH
+/// it sets or whether it sets one, while one naming another engine does; with nothing
+/// installed it runs none.
+#[test]
+fn a_written_windows_task_is_judged_by_the_engine_it_names() {
+    let folder = tempfile::tempdir().unwrap();
+    let mut own = windows(r"C:\Tools\bin");
+    own.definition = folder.path().join("crazyagent-engine-task.xml");
+    let install = |service: &Service| {
+        let text = service.definition_text().unwrap();
+        write_definition(&service.definition, &text, Platform::Windows).unwrap();
+    };
+    install(&own);
+    assert!(!own.runs_another_program());
+    let mut other_path = own.clone();
+    other_path.path = OsString::from(r"C:\Other\bin;C:\Tools\bin");
+    assert!(!other_path.runs_another_program());
+    let mut older = own.clone();
+    older.path = OsString::new();
+    install(&older);
+    assert!(!own.runs_another_program());
+    let mut other = own.clone();
+    other.executable = other.executable.with_file_name("crazyagent-old.exe");
+    assert!(other.runs_another_program());
+    install(&other);
+    assert!(own.runs_another_program());
+    std::fs::remove_file(&own.definition).unwrap();
+    assert!(!own.runs_another_program());
+}
