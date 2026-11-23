@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { LIB, ROUTES, bridgeSource, commands, methods, plan, render } from "./bridge-routes.mjs";
+import { nativeSources } from "../native-commands.mjs";
+import { ROUTES, bridgeSource, commands, methods, plan, render } from "./bridge-routes.mjs";
 
-const lib = readFileSync(LIB, "utf8");
+const lib = nativeSources();
 const impls = methods(bridgeSource());
 
 const TWO_IMPLS = `impl NativeBridge {

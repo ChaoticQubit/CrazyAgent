@@ -201,6 +201,15 @@ pub fn restart_refusal(root: &Path, running: bool) -> Option<&'static str> {
     refused
 }
 
+/// [`restart_refusal`] for the engine's login service, as a result a restart path returns
+/// at once. Inputs: the root and the service. Output: Ok, or the refusal's code.
+pub fn refuse_restart(
+    root: &Path,
+    service: &kernel_processes::service::Service,
+) -> Result<(), &'static str> {
+    restart_refusal(root, service_running(service)).map_or(Ok(()), Err)
+}
+
 /// Whether an engine start ended on purpose: the engine refused to open data a restore left
 /// unfinished, so the login service must not start it again. Input: the start's error text.
 /// Output: the answer.
