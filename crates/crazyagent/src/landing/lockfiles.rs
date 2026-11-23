@@ -4,7 +4,7 @@ use super::owner;
 use super::store::{self, Intent, Record};
 use super::{AfterRegeneration, AgentKind, ChangeSetId, ChangeState, diff};
 use crate::engine::EngineError;
-use crate::sandbox::ProjectSandbox;
+use kernel_sandbox::profile::ProjectSandbox;
 use kernel_sandbox::toolchains;
 use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
 use rusqlite::Connection;

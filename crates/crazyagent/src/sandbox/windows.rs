@@ -1,4 +1,3 @@
-use super::ProjectSandbox;
 use crazyagent_win_sandbox::plan::plan;
 use crazyagent_win_sandbox::profile::{BoundaryProfile, Capability, Guard, Guarded, check_path};
 use crazyagent_win_sandbox::request::{PROFILE_FLAG, SEPARATOR};
@@ -6,6 +5,7 @@ use kernel_sandbox::error::{SandboxError, invalid};
 use kernel_sandbox::lines::MODEL_LOOPBACK_WINDOWS_LINE;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::paths::{canonical, clean_absolute};
+use kernel_sandbox::profile::ProjectSandbox;
 use kernel_sandbox::profile::command::Sandbox;
 use kernel_sandbox::profile::env::agent_process_env;
 use kernel_sandbox::windows::{

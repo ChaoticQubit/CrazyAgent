@@ -1,4 +1,3 @@
-use super::ProjectSandbox;
 use crazyagent_linux_supervisor::rules::{GitOwn, Held, Reach, is_git};
 use crazyagent_linux_supervisor::serve::{self, Supervised};
 use kernel_sandbox::error::{SandboxError, invalid};
@@ -10,13 +9,13 @@ use kernel_sandbox::ports::BRIDGE_PORT_MIN;
 use kernel_sandbox::ports::{
     KEPT_PORTS_MAX, OWNER_PORTS, PICKED_PORTS_START, PROXY_PORTS, RELAY_PORTS, REMOTES_MAX,
 };
-use kernel_sandbox::profile::command::Sandbox;
 use kernel_sandbox::profile::consts::{
     ADMIN_LINKS, ADMIN_WRITES, GIT_FALLBACK, GIT_STATE_FILES, GIT_STATE_TREES,
     LINUX_HARNESS_UNCHECKED, LINUX_LIMITED_NETWORK_OFF, LINUX_OPEN_NETWORK_NEEDS_LANDLOCK,
     LINUX_RESOLVER_NEEDS_UDP, MULTI_PACK_INDEX, STORE_ALTERNATES,
 };
 use kernel_sandbox::profile::env::{Routed, agent_process_env};
+use kernel_sandbox::profile::{ProjectSandbox, command::Sandbox, linux_holds_fully};
 use kernel_sandbox::settings::{LinuxSockets, LinuxSupervisor};
 use landlock::{
     ABI, Access, AccessFs, AccessNet, BitFlags, NetPort, RestrictionStatus, Ruleset, RulesetAttr,
@@ -1943,7 +1942,7 @@ impl LinuxSandbox {
         self.routed.as_ref()
     }
 
-    /// Tells whether this launch holds the full Linux sandbox ([`super::linux_holds_fully`]):
+    /// Tells whether this launch holds the full Linux sandbox ([`linux_holds_fully`]):
     /// the nested backend, the call supervisor this launch starts, and its network limits
     /// held, a port on any host through the network of its own detection found. No input.
     /// Output: the answer.
@@ -1951,7 +1950,7 @@ impl LinuxSandbox {
         let nested = matches!(self.backend, LinuxBackend::Nested { .. });
         assert!(self.routed.is_none() || nested);
         let supervised = self.supervision.is_some();
-        super::linux_holds_fully(nested, supervised, self.routed.is_some(), &self.sandbox)
+        linux_holds_fully(nested, supervised, self.routed.is_some(), &self.sandbox)
     }
 
     /// The program every wrapped command starts: the Landlock helper or bwrap.

@@ -2813,7 +2813,7 @@ fn the_prefix_node_follows_a_homebrew_upgrade_that_removes_the_old_keg() {
         std::fs::create_dir_all(&folder).unwrap();
         folder
     });
-    let sandbox = crate::sandbox::ProjectSandbox::new(
+    let sandbox = kernel_sandbox::profile::ProjectSandbox::new(
         &crate::sandbox::PROFILE_HOOKS,
         &project,
         &home,
