@@ -209,7 +209,7 @@ fn calls<'a>(text: &'a str, name: &str) -> Vec<&'a str> {
                 .is_some_and(|c| c == ' ' || c == '(' || c == '\n');
             (plain || before.ends_with("update::")) && !before.ends_with("fn ")
         })
-        .map(|(at, _)| function_holding(text, at))
+        .map(|(at, _)| function_holding(text, at + needle.len()))
         .collect()
 }
 
@@ -234,10 +234,15 @@ fn no_install_path_skips_verification() {
     let mut engine_swaps = Vec::new();
     for path in sources.iter().filter(|path| !test_source(path)) {
         let text = std::fs::read_to_string(path).unwrap();
+        let mut sites = std::collections::BTreeSet::new();
         for needle in &installs {
+            let call = needle.find("install(").expect(needle) + "install(".len();
             for (at, _) in text.match_indices(needle.as_str()) {
-                desktop.push((path.clone(), function_holding(&text, at).to_owned()));
+                sites.insert(at + call);
             }
+        }
+        for site in sites {
+            desktop.push((path.clone(), function_holding(&text, site).to_owned()));
         }
         if !text.contains("kernel_processes::update") && !path.ends_with("src/update.rs") {
             continue;
