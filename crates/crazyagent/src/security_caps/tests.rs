@@ -182,6 +182,8 @@ fn the_quit_gateway_never_opens_the_store() {
         net: &Absent,
         secrets: &Absent,
         settings: &Absent,
+        service: &Absent,
+        update: &Absent,
     };
     let host = Bound::new(gateway.bind("github"), &providers);
     assert_eq!(

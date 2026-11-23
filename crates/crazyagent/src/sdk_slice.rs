@@ -189,6 +189,8 @@ pub(crate) fn save_quit_with(
         net: &crate::security_caps::Absent,
         secrets: &crate::security_caps::Absent,
         settings: &provider,
+        service: &crate::security_caps::Absent,
+        update: &crate::security_caps::Absent,
     };
     let host = Bound::new(gateway.bind(BUNDLED_GRANTS[0].plugin), &providers);
     let result = entry(&host, (*settings).into());
