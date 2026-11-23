@@ -80,4 +80,134 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
+
+    #[test]
+    fn conin_and_conout_are_devices() {
+        for name in [
+            "CONIN$",
+            "conin$",
+            "ConOut$",
+            "conout$.txt",
+            "CONIN$ .log",
+            "conout$:",
+        ] {
+            assert!(super::windows_device(name), "{name:?}");
+        }
+        for name in ["conin", "conout", "conin$$", "xconin$"] {
+            assert!(!super::windows_device(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn com_and_lpt_with_a_superscript_digit_are_devices() {
+        for prefix in ["COM", "com", "LPT", "lpt"] {
+            for digit in ['\u{b9}', '\u{b2}', '\u{b3}'] {
+                for name in [
+                    format!("{prefix}{digit}"),
+                    format!("{prefix}{digit}.txt"),
+                    format!("{prefix}{digit} .txt"),
+                ] {
+                    assert!(super::windows_device(&name), "{name:?}");
+                }
+            }
+            for other in ['\u{b4}', '\u{2074}', '\u{2079}', '\u{2070}'] {
+                let name = format!("{prefix}{other}");
+                assert!(!super::windows_device(&name), "{name:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn com0_and_lpt0_are_devices() {
+        for name in ["COM0", "com0.log", "LPT0", "lpt0 .txt", "com0:"] {
+            assert!(super::windows_device(name), "{name:?}");
+        }
+        for name in ["com00", "lpt01", "com", "lpt"] {
+            assert!(!super::windows_device(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn a_dotless_i_spelling_of_conin_is_a_device() {
+        for name in [
+            "con\u{131}n$",
+            "CON\u{131}N$",
+            "CON\u{131}N$.txt",
+            "con\u{131}n$:",
+        ] {
+            assert!(super::windows_device(name), "{name:?}");
+        }
+        for name in ["con\u{130}n$", "con\u{131}n"] {
+            assert!(!super::windows_device(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn every_ascii_answer_of_the_twenty_two_name_rule_is_kept() {
+        let mut devices = vec!["con", "prn", "aux", "nul"];
+        let numbered: Vec<String> = ["com", "lpt"]
+            .iter()
+            .flat_map(|prefix| (1..=9).map(move |digit| format!("{prefix}{digit}")))
+            .collect();
+        devices.extend(numbered.iter().map(String::as_str));
+        assert_eq!(devices.len(), 22);
+        for device in devices {
+            for name in [
+                device.to_owned(),
+                device.to_ascii_uppercase(),
+                format!("{device}.txt"),
+                format!("{device} .txt"),
+                format!("{device}:"),
+            ] {
+                assert!(super::windows_device(&name), "{name:?}");
+            }
+        }
+        for name in [
+            "com10",
+            "lpt10",
+            "console",
+            "connie",
+            "nuly",
+            "a.con",
+            "v1.2",
+            "owner:abc",
+            "console:",
+            "com10:",
+            "nul-free",
+            "a b",
+        ] {
+            assert!(!super::windows_device(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn the_sandbox_name_rule_device_lists_keep_their_answers() {
+        for name in [
+            "CON",
+            "con.txt",
+            "Prn",
+            "AUX.json",
+            "nul",
+            "COM1",
+            "com0.log",
+            "LPT9",
+            "COM\u{b9}",
+            "lpt\u{b2}.txt",
+            "CONIN$",
+            "conout$",
+            "CON .txt",
+        ] {
+            assert!(super::windows_device(name), "{name:?}");
+        }
+        for name in [
+            "a b",
+            "skill-\u{fc}.md",
+            "COM10",
+            "console",
+            "nul-free",
+            "a.b",
+        ] {
+            assert!(!super::windows_device(name), "{name:?}");
+        }
+    }
 }
