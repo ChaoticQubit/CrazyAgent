@@ -2682,7 +2682,11 @@ fn set_read_paths(
     let Some(data_root) = tx.path().map(Path::new).and_then(Path::parent) else {
         return Ok(rejected("read_path_refused"));
     };
-    let checked = match crate::sandbox::extra_paths::checked_all(paths, data_root) {
+    let checked = match crate::sandbox::extra_paths::checked_all(
+        &crate::sandbox::ACCESS_HOOKS,
+        paths,
+        data_root,
+    ) {
         Ok(checked) => checked,
         Err(code) => return Ok(rejected(code)),
     };

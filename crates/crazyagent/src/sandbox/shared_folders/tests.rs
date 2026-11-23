@@ -175,7 +175,7 @@ fn all_with_read_only_plans_without_git_and_reveals_only_the_shared_back_secrets
         secrets: vec!["config/.env".to_owned()],
         ..SharedFolders::default()
     };
-    let plan = plan(&root, &shared).unwrap();
+    let plan = plan(&crate::sandbox::ACCESS_HOOKS, &root, &shared).unwrap();
     assert!(plan.kept_out.is_empty() && plan.writes.is_empty());
     assert_eq!(plan.revealed, vec![root.join("config").join(".env")]);
 }
@@ -190,7 +190,7 @@ fn none_keeps_out_every_untracked_path_but_the_engine_folders() {
         scope: SharedScope::None,
         ..SharedFolders::default()
     };
-    let plan = plan(&root, &shared).unwrap();
+    let plan = plan(&crate::sandbox::ACCESS_HOOKS, &root, &shared).unwrap();
     for kept in ["program", "build", "notes.txt", "src/local.rs"] {
         assert!(plan.kept_out.contains(&root.join(kept)), "{kept}: {plan:?}");
     }
@@ -222,7 +222,7 @@ fn engine_state_in_the_project_folder_is_never_kept_out_offered_or_opened_for_wr
         scope: SharedScope::None,
         ..SharedFolders::default()
     };
-    let kept = plan(&root, &none).unwrap();
+    let kept = plan(&crate::sandbox::ACCESS_HOOKS, &root, &none).unwrap();
     assert!(kept.kept_out.contains(&root.join("program")), "{kept:?}");
     assert!(
         kept.kept_out
@@ -231,7 +231,7 @@ fn engine_state_in_the_project_folder_is_never_kept_out_offered_or_opened_for_wr
                 && !path.starts_with(root.join("context"))),
         "{kept:?}"
     );
-    let offered = local_folders(&root);
+    let offered = local_folders(&crate::sandbox::ACCESS_HOOKS, &root);
     assert!(offered.contains(&"program".to_owned()), "{offered:?}");
     assert!(
         !offered.contains(&"worktrees".to_owned()) && !offered.contains(&"context".to_owned()),
@@ -241,7 +241,7 @@ fn engine_state_in_the_project_folder_is_never_kept_out_offered_or_opened_for_wr
         access: SharedAccess::ReadWrite,
         ..SharedFolders::default()
     };
-    let opened = plan(&root, &write).unwrap();
+    let opened = plan(&crate::sandbox::ACCESS_HOOKS, &root, &write).unwrap();
     assert!(opened.writes.contains(&root.join("program")), "{opened:?}");
     assert!(
         !opened.writes.contains(&root.join("context"))
@@ -252,12 +252,12 @@ fn engine_state_in_the_project_folder_is_never_kept_out_offered_or_opened_for_wr
     let (_temp, modern) = project();
     std::fs::create_dir_all(modern.join("context")).unwrap();
     std::fs::write(modern.join("context").join("notes.md"), "mine\n").unwrap();
-    let opened = plan(&modern, &write).unwrap();
+    let opened = plan(&crate::sandbox::ACCESS_HOOKS, &modern, &write).unwrap();
     assert!(
         !opened.writes.contains(&modern.join("context")),
         "a user's context folder stays readable but never writable: {opened:?}"
     );
-    assert!(local_folders(&modern).contains(&"context".to_owned()));
+    assert!(local_folders(&crate::sandbox::ACCESS_HOOKS, &modern).contains(&"context".to_owned()));
 }
 
 /// L4 r1 M1: Read-write never opens a hidden folder the owner's own tools run unconfined
@@ -286,7 +286,7 @@ fn read_write_keeps_hidden_and_engine_folders_read_only() {
         access: SharedAccess::ReadWrite,
         ..SharedFolders::default()
     };
-    let opened = plan(&root, &write).unwrap();
+    let opened = plan(&crate::sandbox::ACCESS_HOOKS, &root, &write).unwrap();
     assert!(opened.writes.contains(&root.join("program")), "{opened:?}");
     for open in ["node_modules", "target", "venv"] {
         assert!(
@@ -305,20 +305,25 @@ fn read_write_keeps_hidden_and_engine_folders_read_only() {
             !opened.writes.contains(&root.join(closed)),
             "{closed}: {opened:?}"
         );
-        assert!(never_written(&root, closed), "{closed}");
+        assert!(
+            never_written(&crate::sandbox::ACCESS_HOOKS, &root, closed),
+            "{closed}"
+        );
     }
     let none = SharedFolders {
         scope: SharedScope::None,
         ..SharedFolders::default()
     };
-    let kept = plan(&root, &none).unwrap();
+    let kept = plan(&crate::sandbox::ACCESS_HOOKS, &root, &none).unwrap();
     assert!(
         kept.kept_out
             .iter()
             .all(|path| !path.starts_with(root.join("graphify-out"))),
         "{kept:?}"
     );
-    assert!(!local_folders(&root).contains(&"graphify-out".to_owned()));
+    assert!(
+        !local_folders(&crate::sandbox::ACCESS_HOOKS, &root).contains(&"graphify-out".to_owned())
+    );
     let agent = tempfile::tempdir().unwrap();
     let agent_root = agent.path().canonicalize().unwrap();
     let home = agent_root.join("home");
@@ -353,7 +358,12 @@ fn read_write_keeps_hidden_and_engine_folders_read_only() {
 #[test]
 fn chosen_folders_keeps_out_only_the_untracked_paths_of_folders_not_picked() {
     let (_temp, root) = project();
-    let plan = plan(&root, &chosen(&["program", "src"])).unwrap();
+    let plan = plan(
+        &crate::sandbox::ACCESS_HOOKS,
+        &root,
+        &chosen(&["program", "src"]),
+    )
+    .unwrap();
     assert!(plan.kept_out.contains(&root.join("build")), "{plan:?}");
     assert!(plan.kept_out.contains(&root.join("notes.txt")), "{plan:?}");
     assert!(!plan.kept_out.contains(&root.join("program")), "{plan:?}");
@@ -375,17 +385,24 @@ fn chosen_and_none_keep_open_only_the_engine_picked_and_tracked_top_level_names(
         scope: SharedScope::None,
         ..SharedFolders::default()
     };
-    let open = plan(&root, &none).unwrap().open_tops.unwrap();
+    let open = plan(&crate::sandbox::ACCESS_HOOKS, &root, &none)
+        .unwrap()
+        .open_tops
+        .unwrap();
     for name in [".git", ".crazyagent", "graphify-out", "src", ".gitignore"] {
         assert!(open.iter().any(|open| open == name), "{name}: {open:?}");
     }
     for name in ["program", "build", "notes.txt"] {
         assert!(!open.iter().any(|open| open == name), "{name}: {open:?}");
     }
-    let open = plan(&root, &chosen(&["program", "later"]))
-        .unwrap()
-        .open_tops
-        .unwrap();
+    let open = plan(
+        &crate::sandbox::ACCESS_HOOKS,
+        &root,
+        &chosen(&["program", "later"]),
+    )
+    .unwrap()
+    .open_tops
+    .unwrap();
     assert!(open.iter().any(|name| name == "program"), "{open:?}");
     assert!(open.iter().any(|name| name == "later"), "{open:?}");
     assert!(!open.iter().any(|name| name == "build"), "{open:?}");
@@ -393,7 +410,12 @@ fn chosen_and_none_keep_open_only_the_engine_picked_and_tracked_top_level_names(
         access: SharedAccess::ReadWrite,
         ..SharedFolders::default()
     };
-    assert_eq!(plan(&root, &all).unwrap().open_tops, None);
+    assert_eq!(
+        plan(&crate::sandbox::ACCESS_HOOKS, &root, &all)
+            .unwrap()
+            .open_tops,
+        None
+    );
 }
 
 /// The closed tops rule comes after the keep-outs, keeps the agent's own folder below the
@@ -494,7 +516,7 @@ fn read_write_opens_only_wholly_untracked_shared_top_level_folders() {
         access: SharedAccess::ReadWrite,
         ..SharedFolders::default()
     };
-    let all_plan = plan(&root, &all).unwrap();
+    let all_plan = plan(&crate::sandbox::ACCESS_HOOKS, &root, &all).unwrap();
     assert!(
         all_plan.writes.contains(&root.join("program")),
         "{all_plan:?}"
@@ -517,7 +539,7 @@ fn read_write_opens_only_wholly_untracked_shared_top_level_folders() {
         access: SharedAccess::ReadWrite,
         ..chosen(&["program"])
     };
-    let plan = plan(&root, &picked).unwrap();
+    let plan = plan(&crate::sandbox::ACCESS_HOOKS, &root, &picked).unwrap();
     assert_eq!(plan.writes, vec![root.join("program")]);
 }
 
@@ -534,14 +556,24 @@ fn a_launch_past_the_keep_out_bound_or_without_git_is_refused() {
         scope: SharedScope::None,
         ..SharedFolders::default()
     };
-    assert_eq!(plan(&root, &none), Err(TOO_MANY));
+    assert_eq!(
+        plan(&crate::sandbox::ACCESS_HOOKS, &root, &none),
+        Err(TOO_MANY)
+    );
     let outside = tempfile::tempdir().unwrap();
     let missing = outside.path().canonicalize().unwrap().join("gone");
-    assert_eq!(plan(&missing, &none), Err(UNLISTED));
+    assert_eq!(
+        plan(&crate::sandbox::ACCESS_HOOKS, &missing, &none),
+        Err(UNLISTED)
+    );
     let loose = outside.path().canonicalize().unwrap().join("loose");
     std::fs::create_dir_all(&loose).unwrap();
     std::fs::write(loose.join("notes.txt"), "x").unwrap();
-    assert_eq!(plan(&loose, &none), Err(UNLISTED), "a folder outside git");
+    assert_eq!(
+        plan(&crate::sandbox::ACCESS_HOOKS, &loose, &none),
+        Err(UNLISTED),
+        "a folder outside git"
+    );
 }
 
 /// L4 r1 H1: a read-only run on an empty folder outside git, as instruction cleanup makes,
@@ -555,15 +587,16 @@ fn an_empty_folder_plans_without_git_and_keeps_later_entries_closed() {
         scope: SharedScope::None,
         ..SharedFolders::default()
     };
-    let planned = plan(&empty, &none).unwrap();
+    let planned = plan(&crate::sandbox::ACCESS_HOOKS, &empty, &none).unwrap();
     assert!(planned.kept_out.is_empty() && planned.writes.is_empty());
     let open = planned.open_tops.unwrap();
     assert!(
-        open.iter()
-            .all(|name| engine_names(&empty).contains(&name.as_str())),
+        open.iter().all(
+            |name| engine_names(&crate::sandbox::ACCESS_HOOKS, &empty).contains(&name.as_str())
+        ),
         "{open:?}"
     );
-    let open = plan(&empty, &chosen(&["program"]))
+    let open = plan(&crate::sandbox::ACCESS_HOOKS, &empty, &chosen(&["program"]))
         .unwrap()
         .open_tops
         .unwrap();
@@ -711,7 +744,7 @@ fn the_picker_offers_top_level_real_folders_without_engine_folders_or_links() {
     std::fs::create_dir_all(root.join("elsewhere")).unwrap();
     std::os::unix::fs::symlink(root.join("elsewhere"), root.join("linked")).unwrap();
     assert_eq!(
-        local_folders(&root),
+        local_folders(&crate::sandbox::ACCESS_HOOKS, &root),
         vec!["build", "elsewhere", "program", "src"]
     );
 }
@@ -766,7 +799,10 @@ fn an_engine_name_in_any_spelling_the_volume_opens_is_never_written_or_chosen() 
         "GRAPHIFY-OUT",
         "cont\u{200c}ext",
     ] {
-        assert!(never_written(root, name), "{name}");
+        assert!(
+            never_written(&crate::sandbox::ACCESS_HOOKS, root, name),
+            "{name}"
+        );
     }
     for name in [
         "\u{feff}.git",

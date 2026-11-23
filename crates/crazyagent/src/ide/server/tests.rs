@@ -428,7 +428,14 @@ async fn token_file_is_0600_new_per_launch_and_outside_every_agent_read_allowlis
     assert!(sandbox.clone().allow_read(&ide).is_err());
     assert!(sandbox.clone().allow_read(&folder).is_err());
     assert!(sandbox.clone().allow_worktree(&folder).is_err());
-    assert!(crate::sandbox::extra_paths::checked(folder.to_str().unwrap(), data.path()).is_err());
+    assert!(
+        crate::sandbox::extra_paths::checked(
+            &crate::sandbox::ACCESS_HOOKS,
+            folder.to_str().unwrap(),
+            data.path()
+        )
+        .is_err()
+    );
     let profile = root.join("profiles").join("agent.sb");
     sandbox.install(&profile).unwrap();
     let mut cat = sandbox.command(&profile, Path::new("/bin/cat"));

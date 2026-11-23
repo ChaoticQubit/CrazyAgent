@@ -1,4 +1,5 @@
 use super::{OPEN_TOPS_MAX, ProjectSandbox};
+use kernel_sandbox::access::AccessHooks;
 use kernel_sandbox::shared_folders::{
     ENGINE_NAMES, SECRET_PATH_BYTES_MAX, SharedAccess, SharedFolders, SharedScope, plain_name,
 };
@@ -90,10 +91,14 @@ pub struct Plan {
 /// path git lists (outside `.git` and `.crazyagent`) whose top-level folder is not shared to
 /// keep out, and under Read-write every shared top-level folder git does not track at all to
 /// write. Chosen folders and None also keep open only [`open_tops`], so an entry made after
-/// launch stays closed; an empty folder needs no git. Takes the project folder, canonical,
+/// launch stays closed; an empty folder needs no git. Takes the hooks, the project folder, canonical,
 /// and the choice. Returns the plan, or [`UNLISTED`] when git cannot list the paths and
 /// [`TOO_MANY`] past the bounds.
-pub fn plan(root: &Path, shared: &SharedFolders) -> Result<Plan, &'static str> {
+pub fn plan(
+    hooks: &AccessHooks,
+    root: &Path,
+    shared: &SharedFolders,
+) -> Result<Plan, &'static str> {
     assert!(shared.validate().is_ok());
     let revealed: Vec<PathBuf> = shared
         .secrets
@@ -116,9 +121,9 @@ pub fn plan(root: &Path, shared: &SharedFolders) -> Result<Plan, &'static str> {
     let listed = if present.as_ref().is_some_and(Vec::is_empty) {
         Vec::new()
     } else {
-        untracked(root).ok_or(UNLISTED)?
+        (hooks.untracked)(root).ok_or(UNLISTED)?
     };
-    let engine = engine_names(root);
+    let engine = engine_names(hooks, root);
     let mut kept_out = Vec::new();
     let mut writes = Vec::new();
     for path in &listed {
@@ -137,7 +142,7 @@ pub fn plan(root: &Path, shared: &SharedFolders) -> Result<Plan, &'static str> {
         if shared.access == SharedAccess::ReadWrite
             && whole_folder
             && plain_folder
-            && !never_written(root, top)
+            && !never_written(hooks, root, top)
         {
             writes.push(folder);
         }
@@ -146,7 +151,7 @@ pub fn plan(root: &Path, shared: &SharedFolders) -> Result<Plan, &'static str> {
         return Err(TOO_MANY);
     }
     assert!(writes.iter().all(|folder| folder.parent() == Some(root)));
-    let open_tops = present.map(|present| open_tops(root, shared, &present, &listed));
+    let open_tops = present.map(|present| open_tops(hooks, root, shared, &present, &listed));
     assert!(
         open_tops
             .as_ref()
@@ -181,10 +186,11 @@ fn top_names(root: &Path) -> Result<Vec<String>, &'static str> {
 
 /// The top-level names a Chosen folders or None launch keeps open in `root` (L4 r1 L1): the
 /// engine's, the picked ones and each present one git tracks something in, so any other
-/// entry stays closed, one made later included. Takes the folder, the choice, the present
+/// entry stays closed, one made later included. Takes the hooks, the folder, the choice, the present
 /// names and git's untracked paths. Returns the names, sorted, each
 /// [`kernel_sandbox::paths::plain_top`].
 fn open_tops(
+    hooks: &AccessHooks,
     root: &Path,
     shared: &SharedFolders,
     present: &[String],
@@ -199,7 +205,7 @@ fn open_tops(
         .chosen
         .iter()
         .filter(|_| shared.scope == SharedScope::Chosen);
-    let mut open: Vec<String> = engine_names(root)
+    let mut open: Vec<String> = engine_names(hooks, root)
         .into_iter()
         .map(str::to_owned)
         .chain(
@@ -231,7 +237,7 @@ pub fn apply(
     if cfg!(not(target_os = "macos")) && !shared.plain_reach() {
         return Err(NEEDS_MACOS);
     }
-    let plan = plan(root, shared)?;
+    let plan = plan(&super::ACCESS_HOOKS, root, shared)?;
     let mut sandbox = sandbox
         .keep_project_secrets(root, &plan.revealed)
         .map_err(|_| REFUSED)?;
@@ -249,13 +255,13 @@ pub fn apply(
 
 /// The top-level folders of the project folder the owner may pick for Chosen folders: real
 /// folders, not links, with plain names, never the engine's own ([`engine_names`]), sorted,
-/// at most [`LOCAL_FOLDERS_MAX`]. Takes the project folder. Returns the names, none when it
+/// at most [`LOCAL_FOLDERS_MAX`]. Takes the hooks and the project folder. Returns the names, none when it
 /// cannot be read.
-pub fn local_folders(root: &Path) -> Vec<String> {
+pub fn local_folders(hooks: &AccessHooks, root: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
     };
-    let engine = engine_names(root);
+    let engine = engine_names(hooks, root);
     let mut names: Vec<String> = entries
         .flatten()
         .take(4 * LOCAL_FOLDERS_MAX)
@@ -337,33 +343,23 @@ const CHOSEN_LIST_BYTES_MAX: usize = 512;
 /// Read-write (L4 r1 M1): a hidden folder, which the owner's own tools load and run unconfined
 /// (`.venv`, `.vscode`, `.claude`, `.codex`), the engine's `context` and every engine name,
 /// each in any spelling a case-insensitive volume opens as it (DS-148 F1).
-/// Takes the project folder and the name. Returns true when agents never write it.
-pub(crate) fn never_written(root: &Path, name: &str) -> bool {
+/// Takes the hooks, the project folder and the name. Returns true when agents never write it.
+pub(crate) fn never_written(hooks: &AccessHooks, root: &Path, name: &str) -> bool {
     name.starts_with('.')
         || kernel_sandbox::paths::names_one_of(name, &[CONTEXT_NAME])
-        || kernel_sandbox::paths::names_one_of(name, &engine_names(root))
+        || kernel_sandbox::paths::names_one_of(name, &engine_names(hooks, root))
 }
 
 /// The top-level names in the project folder `root` that belong to the engine: `.git`,
 /// `.crazyagent` and `graphify-out`, and in a project made before the projects home, the
 /// state it keeps there.
-/// Takes the project folder. Returns the names.
-fn engine_names(root: &Path) -> Vec<&'static str> {
+/// Takes the hooks and the project folder. Returns the names.
+fn engine_names(hooks: &AccessHooks, root: &Path) -> Vec<&'static str> {
     let mut names = ENGINE_NAMES.to_vec();
-    if crate::projects_home::state_folder(root) == root {
+    if (hooks.state_folder)(root) == root {
         names.extend(LEGACY_STATE_NAMES);
     }
     names
-}
-
-#[cfg(unix)]
-fn untracked(root: &Path) -> Option<Vec<String>> {
-    crate::onboarding::draft::untracked(root)
-}
-
-#[cfg(not(unix))]
-fn untracked(_root: &Path) -> Option<Vec<String>> {
-    None
 }
 
 #[cfg(test)]

@@ -1203,19 +1203,46 @@ pub fn linux_host_kept() -> Option<LinuxHost> {
 /// The engine's real agent policy hooks, the only [`PolicyHooks`] production code passes:
 /// this Linux read again ([`linux_host`]) and as last kept ([`linux_host_kept`]), the
 /// bounded read for another repository ([`linux_other_git`]) and a project's local folders
-/// ([`shared_folders::local_folders`]).
+/// ([`access_local_folders`]).
 pub const POLICY_HOOKS: PolicyHooks = PolicyHooks {
     linux_host,
     linux_host_kept,
     linux_other_git,
-    local_folders: shared_folders::local_folders,
+    local_folders: access_local_folders,
 };
 
+/// A project's top-level folders the owner may pick for Chosen folders, as
+/// [`shared_folders::local_folders`] reads them with the engine's [`ACCESS_HOOKS`].
+/// Input: the project folder. Output: the names.
+fn access_local_folders(root: &Path) -> Vec<String> {
+    shared_folders::local_folders(&ACCESS_HOOKS, root)
+}
+
 /// The engine's real project access hooks, the only [`AccessHooks`] production code passes:
-/// the owner's git for a project folder ([`access_owner_git`]).
+/// the owner's git for a project folder ([`access_owner_git`]), the harness folders
+/// ([`harness_folders`]), a project's state folder and the paths git leaves untracked
+/// ([`access_untracked`]).
 pub const ACCESS_HOOKS: AccessHooks = AccessHooks {
     owner_git: access_owner_git,
+    harness_folders,
+    state_folder: crate::projects_home::state_folder,
+    untracked: access_untracked,
 };
+
+/// The paths git leaves untracked in the project folder `root`, as the shared folders plan
+/// reads them: what the onboarding draft lists on Unix, none elsewhere. Input: the folder.
+/// Output: the paths, or `None` when they cannot be listed.
+#[cfg(unix)]
+fn access_untracked(root: &Path) -> Option<Vec<String>> {
+    crate::onboarding::draft::untracked(root)
+}
+
+/// The paths git leaves untracked in the project folder, which no system but Unix lists for
+/// the shared folders plan. Input: the folder. Output: always `None`.
+#[cfg(not(unix))]
+fn access_untracked(_root: &Path) -> Option<Vec<String>> {
+    None
+}
 
 /// The owner's git for the project folder `root` as the access lists run it, with the
 /// engine's own git when it has one. Input: the canonical project folder. Output: the
@@ -2376,7 +2403,7 @@ impl ProjectSandbox {
         let kept_read_only = match (self.project_secrets.as_ref(), folder.file_name()) {
             (Some(root), Some(name)) => name
                 .to_str()
-                .is_none_or(|name| shared_folders::never_written(root, name)),
+                .is_none_or(|name| shared_folders::never_written(&ACCESS_HOOKS, root, name)),
             _ => true,
         };
         if !in_project || kept_read_only {
@@ -5848,7 +5875,11 @@ mod firmlink_tests {
         );
         assert!(ProjectSandbox::new(&root.join("project"), &home, &tmp, network()).is_ok());
         assert_eq!(
-            extra_paths::checked(long(&root).to_str().unwrap(), &root.join("engine")),
+            extra_paths::checked(
+                &ACCESS_HOOKS,
+                long(&root).to_str().unwrap(),
+                &root.join("engine")
+            ),
             Err("read_path_engine_data")
         );
     }
