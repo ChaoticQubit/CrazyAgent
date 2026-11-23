@@ -182,24 +182,26 @@ fn dependency_names(text: &str) -> Vec<(String, String)> {
     names
 }
 
-/// The crates plugin_host may depend on: no SDK crate and no engine crate (R4).
-const ALLOWED: [&str; 5] = [
-    "crazyagent-kernel-common",
-    "serde",
-    "serde_json",
-    "toml",
-    "url",
+/// The crates plugin_host may depend on, each with its table, sorted: no SDK crate and no
+/// engine crate (R4). rustix is the unix no-follow asset open; tempfile is for test rows.
+const ALLOWED: [(&str, &str); 8] = [
+    ("dependencies", "crazyagent-kernel-common"),
+    ("dependencies", "rusqlite"),
+    ("dependencies", "serde"),
+    ("dependencies", "serde_json"),
+    ("dependencies", "toml"),
+    ("dependencies", "url"),
+    ("dev-dependencies", "tempfile"),
+    ("target.cfg(unix).dependencies", "rustix"),
 ];
 
 #[test]
 fn plugin_host_depends_on_no_sdk_or_engine_crate() {
     let names = dependency_names(include_str!("../Cargo.toml"));
-    let outside: Vec<&(String, String)> = names
+    let mut direct: Vec<(&str, &str)> = names
         .iter()
-        .filter(|(table, name)| table != "dependencies" || !ALLOWED.contains(&name.as_str()))
+        .map(|(table, name)| (table.as_str(), name.as_str()))
         .collect();
-    assert!(outside.is_empty(), "{outside:?}");
-    let mut direct: Vec<&str> = names.iter().map(|(_, name)| name.as_str()).collect();
     direct.sort_unstable();
     assert_eq!(direct, ALLOWED);
 }

@@ -271,3 +271,39 @@ fn an_image_entry_of_hdiutil_info_holds_its_own_disk_and_never_the_next_images()
             .contains(&disk(later))
     );
 }
+
+#[test]
+fn the_snapshot_hash_bytes_are_unchanged() {
+    let words = b"Use plain words.";
+    let content = |id: &str, name: &str, scope: AssetScope, kind: AssetKind, path: &str| {
+        AssetContent {
+            source: AssetSource {
+                id: RequestId::new(id).unwrap(),
+                name: name.into(),
+                scope,
+                kind,
+                path: path.into(),
+            },
+            content_hash: hash(words),
+            bytes: words.to_vec(),
+        }
+    };
+    let assets = [
+        content(
+            "rules",
+            "rules",
+            AssetScope::Project(ProjectId::new("p").unwrap()),
+            AssetKind::Rules,
+            "/x/rules.md",
+        ),
+        content("g-skill", "skill", AssetScope::Global, AssetKind::Skill, "/x/skill.md"),
+    ];
+    assert_eq!(
+        snapshot_hash(
+            &ProjectId::new("p").unwrap(),
+            &ConfigId::new("c").unwrap(),
+            &assets
+        ),
+        "0c52bd85c6dc9b89d3d27d1011295d8c9cafb5dac0b96bde2429068fea45f378"
+    );
+}
