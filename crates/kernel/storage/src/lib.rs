@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 
 pub mod migrations;
+/// One private key-value namespace per plugin on the state log, rebuilt by replay. A
+/// namespace is not secret custody: its values sit in the log, snapshots and backups, so
+/// secrets stay in the security module.
+pub mod namespace;
 /// The owner's restore of the pinned 2.4 backup, with the engine's parts as hooks, and the
 /// private record that says how the last restore stands while no engine answers.
 #[cfg(unix)]
