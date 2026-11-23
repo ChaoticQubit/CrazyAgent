@@ -221,3 +221,12 @@ fn a_sandbox_on_stand_in_hooks_refuses_a_root_named_through_the_data_volume() {
     assert!(ProjectSandbox::new(&STAND_IN, &long, &home, &tmp, network()).is_err());
     assert!(ProjectSandbox::new(&STAND_IN, &project, &home, &tmp, network()).is_ok());
 }
+
+/// A run with no warden fires nothing and reports a clean stop.
+#[test]
+fn a_run_without_a_warden_reports_a_clean_stop() {
+    assert_eq!(
+        crate::profile::warden::fire_reported(None, "stand-in"),
+        Ok(())
+    );
+}
