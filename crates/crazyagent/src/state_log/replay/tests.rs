@@ -1,5 +1,4 @@
 use super::*;
-use crate::state_log::Appender;
 use kernel_storage::state_log::{Draft, ensure};
 use rusqlite::{Connection, params};
 use serde_json::json;
@@ -26,8 +25,8 @@ fn store() -> Connection {
 }
 
 /// The refusal code of a result, none when it succeeded. Input: the result. Output: the code.
-fn code<T>(result: Result<T, EngineError>) -> Option<String> {
-    result.err().map(|error| error.0)
+fn code<T, E: Into<EngineError>>(result: Result<T, E>) -> Option<String> {
+    result.err().map(|error| error.into().0)
 }
 
 /// The leases projection: a snapshot chunk loads its rows, a taken lease is a row stamped
@@ -103,7 +102,7 @@ fn record(
 ) -> u64 {
     let body = serde_json::to_vec(&body).unwrap();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     let draft = Draft {
         aggregate: aggregate.into(),
         kind,
@@ -277,7 +276,7 @@ fn replay_reads_at_most_its_batch_and_a_store_without_a_log_replays_nothing() {
         7
     );
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     let tick = Draft {
         aggregate: Aggregate::Ide.into(),
         kind: "Tick",
@@ -329,7 +328,7 @@ fn replay_refuses_a_gap_in_seq_or_a_revision_that_goes_down_and_resumes_after_a_
 fn replay_hands_apply_only_its_aggregate_but_checks_every_event() {
     let mut db = store();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     for aggregate in [
         Aggregate::Worktrees,
         Aggregate::Ide,
@@ -530,7 +529,7 @@ fn a_log_that_opens_with_a_snapshot_run_rebuilds_equal_and_a_changed_chunk_is_re
     live.execute_batch("INSERT INTO leases VALUES (1,'/a',5),(2,'/b',5);")
         .unwrap();
     let tx = live.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     let run = vec![Chunk {
         table: "leases".into(),
         rows: vec![
@@ -668,7 +667,7 @@ fn redact_refuses_a_missing_event_or_a_snapshot_and_append_refuses_the_tombstone
     drop(tx);
     let mut db = store();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     let run = vec![Chunk {
         table: "ide".into(),
         rows: Vec::new(),
@@ -707,7 +706,7 @@ fn redact_puts_back_the_secure_delete_mode_it_found_fast_included() {
         db.execute_batch(&format!("PRAGMA secure_delete={mode};"))
             .unwrap();
         let tx = db.transaction().unwrap();
-        let seq = Appender::own(&tx, fence::engine())
+        let seq = crate::state_log::own(&tx, fence::engine())
             .unwrap()
             .append(&Draft {
                 aggregate: Aggregate::Worktrees.into(),
@@ -755,7 +754,7 @@ fn a_redacted_body_is_gone_from_the_database_file_and_its_wal() {
     let marker = b"redact-marker-31d7";
     let body = marker.repeat(1_200);
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     let seq = log
         .append(&Draft {
             aggregate: Aggregate::Worktrees.into(),
@@ -808,7 +807,7 @@ fn a_checkpoint_after_a_redact_tries_again_past_a_held_reader_up_to_its_bound() 
     let marker = b"checkpoint-marker-8e2c";
     let body = marker.repeat(1_000);
     let tx = db.transaction().unwrap();
-    let seq = Appender::own(&tx, fence::engine())
+    let seq = crate::state_log::own(&tx, fence::engine())
         .unwrap()
         .append(&Draft {
             aggregate: Aggregate::Worktrees.into(),
@@ -864,7 +863,7 @@ fn redact_matching_tombstones_each_event_whose_top_level_session_is_the_deleted_
         table: "sessions".into(),
         rows: vec![json!({ "session": "s-1" })],
     }];
-    let done = Appender::own(&tx, fence::engine())
+    let done = crate::state_log::own(&tx, fence::engine())
         .unwrap()
         .snapshot(sessions, 1, run)
         .unwrap();
@@ -1117,7 +1116,7 @@ fn redact_matching_refuses_a_bad_match_or_a_failed_fence_and_changes_nothing() {
 fn redact_matching_reads_past_a_full_batch_of_hits_it_does_not_redact() {
     let mut db = store();
     let tx = db.transaction().unwrap();
-    let mut log = Appender::own(&tx, fence::engine()).unwrap();
+    let mut log = crate::state_log::own(&tx, fence::engine()).unwrap();
     let body = br#"{"session":"s-1"}"#;
     let draft = |aggregate| Draft {
         aggregate,

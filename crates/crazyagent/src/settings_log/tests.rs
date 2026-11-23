@@ -13,9 +13,9 @@ use crate::quit_settings::{LeftRunning, OnQuit, QuitSettings};
 use crate::roadmap_status::Refresh;
 use crate::sandbox::LinuxSockets;
 use crate::sandbox_settings::SandboxSettings;
+use crate::state_log::Aggregate;
 use crate::state_log::fence::{engine, seed};
 use crate::state_log::replay::{Logged, redact, rows};
-use crate::state_log::{Aggregate, Appender};
 use crate::storage::opening::Opening;
 use kernel_storage::state_log::SNAPSHOT_CHUNK;
 use rusqlite::Connection;
@@ -144,7 +144,7 @@ fn every() -> Vec<Event> {
 /// the events. Output: each event's seq.
 fn write(db: &mut Connection, events: &[Event]) -> Vec<u64> {
     let tx = db.transaction().unwrap();
-    let mut appender = Appender::own(&tx, engine()).unwrap();
+    let mut appender = crate::state_log::own(&tx, engine()).unwrap();
     let seqs = events
         .iter()
         .map(|event| record(&mut appender, 5, event).unwrap())
@@ -251,7 +251,7 @@ fn a_snapshot_run_and_the_events_after_it_replay_to_the_same_rows() {
         apply(&db, &roadmap).unwrap();
     }
     let tx = db.transaction().unwrap();
-    let mut appender = Appender::own(&tx, engine()).unwrap();
+    let mut appender = crate::state_log::own(&tx, engine()).unwrap();
     let done = snapshot(&mut appender, 9).unwrap();
     let retry = Event::Retry(Saved {
         settings: ProviderRetry::HarnessDefault,
