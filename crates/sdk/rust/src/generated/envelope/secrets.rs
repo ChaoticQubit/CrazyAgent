@@ -19,7 +19,7 @@ impl PutFromOwnerInput {
 #[derive(Serialize)]
 pub struct PutFromOwnerOutput(pub crate::wire::Id);
 
-impl From<super::super::secrets::Secret> for PutFromOwnerOutput {
+impl core::convert::From<super::super::secrets::Secret> for PutFromOwnerOutput {
     /// Input: the SDK output. Output: the envelope.
     fn from(value: super::super::secrets::Secret) -> Self {
         Self(crate::wire::Id(value.kernel_id()))
@@ -45,7 +45,7 @@ impl FindInput {
 #[derive(Serialize)]
 pub struct FindOutput(pub core::option::Option<crate::wire::Id>);
 
-impl From<core::option::Option<super::super::secrets::Secret>> for FindOutput {
+impl core::convert::From<core::option::Option<super::super::secrets::Secret>> for FindOutput {
     /// Input: the SDK output. Output: the envelope.
     fn from(value: core::option::Option<super::super::secrets::Secret>) -> Self {
         Self(value.map(|item0| crate::wire::Id(item0.kernel_id())))
@@ -71,7 +71,7 @@ impl ForgetInput {
 #[derive(Serialize)]
 pub struct ForgetOutput;
 
-impl From<()> for ForgetOutput {
+impl core::convert::From<()> for ForgetOutput {
     /// Input: the unit output. Output: the envelope.
     fn from(_value: ()) -> Self {
         Self
