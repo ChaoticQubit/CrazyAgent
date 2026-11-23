@@ -377,7 +377,7 @@ fn a_snapshot_chunk_over_the_cap_is_refused_before_any_chunk_is_appended() {
 
 /// Every kind a writer appends to the log. [`no_event_body_can_carry_a_secret`] holds a body
 /// rule for each and fails for a kind listed here without one.
-const KINDS: [&str; 55] = [
+const KINDS: [&str; 56] = [
     SNAPSHOT_CHUNK,
     SNAPSHOT_DONE,
     replay::PROCESS_EXITED,
@@ -431,6 +431,7 @@ const KINDS: [&str; 55] = [
     crate::settings_log::KIND_STEPS,
     crate::settings_log::KIND_TIME,
     crate::settings_log::KIND_FRAMES,
+    crate::settings_log::KIND_COMPACTION,
     crate::settings_log::KIND_PROFILE,
     crate::sdk_slice::KIND_CALL_REFUSED,
 ];
@@ -483,6 +484,7 @@ const WRITERS: [(&str, &[&str]); 10] = [
             "KIND_STEPS",
             "KIND_TIME",
             "KIND_FRAMES",
+            "KIND_COMPACTION",
             "KIND_PROFILE",
         ],
     ),
@@ -1013,6 +1015,10 @@ fn settings_body_is_closed(kind: &str) {
             value(json!(
                 crate::master_frame_limit::MasterFrameSettings::default()
             )),
+            &["settings"],
+        ),
+        settings::KIND_COMPACTION => (
+            value(json!(crate::log_compaction::LogCompaction::default())),
             &["settings"],
         ),
         settings::KIND_PROFILE => (json!({"body": "0".repeat(64)}), &["body"]),
