@@ -1,6 +1,7 @@
 use super::*;
 use kernel_processes::service::test_support::*;
 use kernel_processes::service::*;
+#[cfg(unix)]
 use std::ffi::OsString;
 
 #[test]

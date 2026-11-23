@@ -22,7 +22,9 @@ use crate::sandbox::policy::AgentPolicy;
 use crate::sandbox::toolchains::{ToolHomes, Toolchains};
 use crate::storage::PreparedMasterTurn;
 use crate::worktrees::LeaseState;
+#[cfg(unix)]
 use kernel_sandbox::error::SandboxError;
+#[cfg(unix)]
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 #[cfg(unix)]
 use rustix::fs::{AtFlags, Mode};
