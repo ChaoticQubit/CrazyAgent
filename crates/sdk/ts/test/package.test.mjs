@@ -63,7 +63,11 @@ test("the_sample_saves_quit_and_sees_its_event_through_a_test_host", async () =>
 });
 
 test("the_sample_returns_the_save_refusal_and_does_not_subscribe", async () => {
-  const refused = { kind: "not_granted", capability: "settings.save_quit", needs: "settings.write" };
+  const refused = {
+    kind: "not_granted",
+    capability: "settings.save_quit",
+    needs: "settings.write",
+  };
   const host = {
     call: async () => ({ refused }),
     subscribe: () => assert.fail("no subscribe after a refused save"),
