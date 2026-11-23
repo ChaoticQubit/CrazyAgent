@@ -116,6 +116,53 @@ fn npx_off_the_engine_s_path_runs_with_the_node_beside_it() {
     );
 }
 
+/// The Codex cmd-shim in a folder with its own `node.exe` and the package it names, as a
+/// portable Node or an npm prefix off PATH holds them. Input: the folder. Output: the shim
+/// and the script it starts.
+fn shim_beside_node(real: &Path) -> (PathBuf, PathBuf) {
+    let package = real
+        .join("node_modules")
+        .join("@openai")
+        .join("codex")
+        .join("bin");
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(package.join("codex.js"), "#!/usr/bin/env node\n").unwrap();
+    let shim = real.join("codex.cmd");
+    std::fs::write(&shim, crate::batch::CODEX).unwrap();
+    (shim, package.join("codex.js"))
+}
+
+/// An npm cmd-shim whose folder is off the engine's PATH runs with the `node.exe` beside it,
+/// as the shim's own text does, never refused for want of a node on PATH.
+#[test]
+fn a_cmd_shim_off_the_engine_s_path_runs_with_the_node_beside_it() {
+    let (_folder, real, _places) = node_folder();
+    let (shim, script) = shim_beside_node(&real);
+    let elsewhere = stub_new(Vec::new(), None);
+    let resolved = resolve_entry(&shim, &elsewhere).unwrap();
+    let real_of = |file: PathBuf| file.canonicalize().unwrap().into_os_string();
+    assert_eq!(resolved.entry, shim);
+    assert_eq!(
+        resolved.argv(),
+        vec![real_of(real.join("node.exe")), real_of(script)]
+    );
+}
+
+/// An npm cmd-shim with a `node.exe` beside it runs with that one even when another
+/// `node.exe` comes first on the engine's PATH, as the shim's own text prefers it.
+#[test]
+fn a_cmd_shim_runs_with_the_node_beside_it_over_another_on_the_path() {
+    let (_path_folder, _path_real, path_places) = node_folder();
+    let (_folder, real, _places) = node_folder();
+    let (shim, script) = shim_beside_node(&real);
+    let resolved = resolve_entry(&shim, &path_places).unwrap();
+    let real_of = |file: PathBuf| file.canonicalize().unwrap().into_os_string();
+    assert_eq!(
+        resolved.argv(),
+        vec![real_of(real.join("node.exe")), real_of(script)]
+    );
+}
+
 /// #333 r1 sec F1: on Windows a launcher found under another spelling is still a launcher. A
 /// first line asking `env` for `Env` finds `env.exe`, which is refused as one, and the name
 /// check reads `.exe` and case away, so `ENV.EXE` and `BusyBox.exe` count and `node.exe` not.
@@ -227,4 +274,26 @@ fn a_repository_on_another_drive_is_agent_writable_while_its_projects_cannot_be_
             .starts_with(r"\\?\")
     );
     assert!(!places.agent_writable(&shipped), "{}", shipped.display());
+}
+
+/// A name starting with this drive's letter and `:` joined to a searched folder replaces
+/// that folder and reaches the drive's current folder instead, so a real program planted
+/// there is not resolved through it: the name is not found, whatever file it would reach.
+#[test]
+fn a_drive_prefixed_name_never_reaches_a_file_outside_the_searched_folders() {
+    let (_folder, _real, places) = node_folder();
+    let here = std::env::current_dir().unwrap();
+    let drive = here.to_str().unwrap()[..1].to_owned();
+    assert!(drive.chars().all(|c| c.is_ascii_alphabetic()), "{drive}");
+    let stem = format!("drive-reach-{}", std::process::id());
+    let planted = here.join(format!("{stem}.exe"));
+    let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32")
+        .join("where.exe");
+    std::fs::copy(shipped, &planted).unwrap();
+    let found = resolve(&format!("{drive}:{stem}.exe"), &places);
+    std::fs::remove_file(&planted).unwrap();
+    let missing = found.unwrap_err();
+    assert_eq!(missing.reason, Reason::NotFound);
+    assert!(missing.refused.is_none());
 }

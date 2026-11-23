@@ -15,7 +15,9 @@ use crate::sandbox::InstalledSandbox;
 use crate::sandbox::ProjectSandbox;
 use crate::storage::PreparedMasterTurn;
 use crate::worktrees::LeaseState;
+#[cfg(unix)]
 use kernel_sandbox::error::SandboxError;
+#[cfg(unix)]
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 #[cfg(unix)]
 use kernel_sandbox::policy::AgentAccess;

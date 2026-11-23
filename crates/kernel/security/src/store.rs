@@ -1,7 +1,7 @@
 use crate::error::StoreError;
 use crate::secret::SecretString;
 
-pub const NAME_BYTES_MAX: usize = 63;
+pub const NAME_BYTES_MAX: usize = kernel_common::names::STORE_NAME_BYTES_MAX;
 pub const REFERENCE_BYTES_MAX: usize = NAME_BYTES_MAX * 2 + 1;
 
 /// Names one item in a credential store as `<service>:<account>`, both names checked by
@@ -62,32 +62,29 @@ pub trait Store: Send + Sync {
     ) -> Result<String, StoreError>;
 }
 
-/// Checks one service or account name: 1 to 63 bytes of lowercase ASCII letters, digits,
-/// `.`, `-` and `_`, not starting with `.` or `-`. Output: the name, or `credential_name_invalid`.
+/// Checks one service or account name with [`kernel_common::names::is_store_name`]: 1 to
+/// 63 bytes of lowercase ASCII letters, digits, `.`, `-` and `_`, not starting with `.` or
+/// `-`, no trailing dot and no Windows device name. Output: the name, or
+/// `credential_name_invalid`.
 pub fn checked_name(name: &str) -> Result<&str, StoreError> {
-    if name.is_empty()
-        || name.len() > NAME_BYTES_MAX
-        || name.starts_with(['.', '-'])
-        || name.contains("..")
-        || !name.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".-_".contains(&byte)
-        })
-    {
-        return Err(StoreError::code("credential_name_invalid"));
+    if kernel_common::names::is_store_name(name) {
+        Ok(name)
+    } else {
+        Err(StoreError::code("credential_name_invalid"))
     }
-    Ok(name)
 }
 
-/// Names one stored item as `<service>:<account>`, refusing the shapes the engine's wire
-/// identity refuses, before any store writes: a trailing `.`, a Windows device name as the
-/// stem, and on Windows a one-letter service, which reads as a drive. Inputs: the service
-/// and account. Output: the reference, which holds no secret, or `credential_name_invalid`.
+/// Names one stored item as `<service>:<account>`, both checked by [`checked_name`], so the
+/// join has no trailing `.` or space and no Windows device stem, and refusing a one-letter
+/// service, which reads as a drive on Windows, on every OS. Inputs: the service and account.
+/// Output: the reference, which holds no secret, or `credential_name_invalid`.
 pub fn reference(service: &str, account: &str) -> Result<SecretRef, StoreError> {
     let joined = format!("{}:{}", checked_name(service)?, checked_name(account)?);
-    let drive = cfg!(windows) && service.len() == 1 && service.as_bytes()[0].is_ascii_lowercase();
-    if joined.ends_with(['.', ' ']) || kernel_common::windows_device(&joined) || drive {
+    let drive = service.len() == 1 && service.as_bytes()[0].is_ascii_lowercase();
+    if drive {
         return Err(StoreError::code("credential_name_invalid"));
     }
+    assert!(!joined.ends_with(['.', ' ']) && !kernel_common::windows_device(&joined));
     assert!(joined.len() <= REFERENCE_BYTES_MAX);
     Ok(SecretRef(joined))
 }

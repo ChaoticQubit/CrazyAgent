@@ -7,7 +7,8 @@ use crazyagent::protocol::{Outcome, ProjectId, ProjectSpec, StoredProject};
 use crazyagent::questions::{Answer, Ask, Asker, Settlement};
 use crazyagent::team::TeamAction;
 use crazyagent::terminal::FOLDER;
-use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
+use crazyagent::terminal::tmux::installed;
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use kernel_processes::terminal::{AgentId, Host};
 use rusqlite::{Connection, OptionalExtension};
 use std::fs;
@@ -359,7 +360,12 @@ fn an_answer_settled_before_an_engine_kill_reaches_the_live_master_once_after_th
             version,
         },
     );
-    let host = Tmux::open(Some(tmux.clone()), &root.join(FOLDER));
+    let host = Tmux::open(
+        Some(tmux.clone()),
+        &root.join(FOLDER),
+        crazyagent::sandbox::confinement(),
+        crazyagent::terminal::tmux::tmux_hooks(),
+    );
     until("the live master's pane runs", || {
         live_agent(&database).is_some_and(|agent| {
             host.alive()

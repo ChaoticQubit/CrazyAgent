@@ -23,7 +23,8 @@ const PACKAGE_KEYS: [&str; 6] = ["name", "version", "edition", "license", "publi
 /// The keys a plugin `[lib]` may hold.
 const LIB_KEYS: [&str; 2] = ["name", "path"];
 /// Folders and files cargo would build as other targets, whose code the scan never reads.
-const TARGETS_NOT_ALLOWED: [&str; 5] = ["tests", "examples", "benches", "src/bin", "src/main.rs"];
+pub(crate) const TARGETS_NOT_ALLOWED: [&str; 5] =
+    ["tests", "examples", "benches", "src/bin", "src/main.rs"];
 
 /// Checks a plugin's `Cargo.toml` and the target folders next to it. Inputs: the crate
 /// folder and the violation list. Output: the list grows.

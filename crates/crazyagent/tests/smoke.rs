@@ -11,10 +11,11 @@ use crazyagent::protocol::{
 };
 use crazyagent::setup::{Dependency, DependencyState};
 use crazyagent::team::NodeKind;
-use crazyagent::terminal::tmux::{SOCKET, installed};
+use crazyagent::terminal::tmux::installed;
 use crazyagent::terminal::{FOLDER, TerminalFrame};
 use e2e_support::{ENGINE, Engine, Owner, Survivors, TMUX, hex, scratch, stop_tmux};
 use kernel_processes::terminal::AgentId;
+use kernel_processes::terminal::tmux::SOCKET;
 use std::collections::BTreeSet;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
