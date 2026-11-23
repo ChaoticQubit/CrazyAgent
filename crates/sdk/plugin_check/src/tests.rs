@@ -23,11 +23,8 @@ fn codes(name: &str) -> BTreeSet<&'static str> {
 fn bundled_plugins() -> Vec<PathBuf> {
     let plugins = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../plugins");
     let mut crates = Vec::new();
-    for tier in fs::read_dir(&plugins).expect("plugins reads") {
-        let tier = tier.expect("tier reads").path();
-        for plugin in fs::read_dir(&tier).expect("tier folder reads") {
-            crates.push(plugin.expect("plugin reads").path());
-        }
+    for tier in list(&plugins) {
+        crates.extend(list(&tier));
     }
     crates.sort();
     crates
@@ -96,7 +93,7 @@ fn the_bundled_plugins_pass() {
 fn the_canonical_build_rs_is_what_the_plugins_carry() {
     for plugin in bundled_plugins() {
         assert_eq!(
-            fs::read_to_string(plugin.join("build.rs")).expect("build.rs reads"),
+            read_text(plugin.join("build.rs")),
             CANONICAL_BUILD_RS,
             "{}",
             plugin.display()
@@ -127,7 +124,7 @@ fn a_manifest_permission_list_is_read() {
 fn enforce_here_prints_no_rerun_directive() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     for file in ["lib.rs", "manifest.rs", "source.rs"] {
-        let text = fs::read_to_string(src.join(file)).expect("source reads");
+        let text = read_text(src.join(file));
         for banned in ["rerun-if", "print!", "println!", "cargo:"] {
             assert!(!text.contains(banned), "{file} has {banned}");
         }
@@ -150,16 +147,63 @@ fn scratch(name: &str, below: &str) -> (PathBuf, PathBuf) {
 
 /// Copies a folder tree. Inputs: the source and the target folder. Output: none.
 fn copy_tree(from: &Path, to: &Path) {
-    fs::create_dir_all(to).expect("target folder");
-    for entry in fs::read_dir(from).expect("source reads") {
-        let entry = entry.expect("entry reads");
-        let target = to.join(entry.file_name());
-        if entry.file_type().expect("type reads").is_dir() {
-            copy_tree(&entry.path(), &target);
+    make_dir(to);
+    for path in list(from) {
+        let target = to.join(path.file_name().expect("a listed entry has a name"));
+        if path.is_dir() {
+            copy_tree(&path, &target);
         } else {
-            fs::copy(entry.path(), &target).expect("file copies");
+            copy_file(&path, &target);
         }
     }
+}
+
+/// Panics with the path and the error when a file operation fails. Inputs: the path and
+/// the operation's result. Output: the value.
+fn at_path<T>(path: &Path, result: std::io::Result<T>) -> T {
+    result.unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+/// Reads a file as text. Input: the path. Output: the text; panics naming the path.
+fn read_text(path: impl AsRef<Path>) -> String {
+    at_path(path.as_ref(), fs::read_to_string(path.as_ref()))
+}
+
+/// Writes a file. Inputs: the path and the bytes. Output: none; panics naming the path.
+fn write_file(path: impl AsRef<Path>, bytes: impl AsRef<[u8]>) {
+    at_path(path.as_ref(), fs::write(path.as_ref(), bytes));
+}
+
+/// Makes a folder and its parents. Input: the path. Output: none; panics naming the path.
+fn make_dir(path: impl AsRef<Path>) {
+    at_path(path.as_ref(), fs::create_dir_all(path.as_ref()));
+}
+
+/// Removes a folder tree. Input: the path. Output: none; panics naming the path.
+fn remove_tree(path: impl AsRef<Path>) {
+    at_path(path.as_ref(), fs::remove_dir_all(path.as_ref()));
+}
+
+/// Removes one file. Input: the path. Output: none; panics naming the path.
+fn remove(path: impl AsRef<Path>) {
+    at_path(path.as_ref(), fs::remove_file(path.as_ref()));
+}
+
+/// Copies one file. Inputs: the source and the target. Output: none; panics naming the
+/// source.
+fn copy_file(from: impl AsRef<Path>, to: impl AsRef<Path>) {
+    at_path(from.as_ref(), fs::copy(from.as_ref(), to.as_ref()));
+}
+
+/// Lists a folder's entries. Input: the folder. Output: the entry paths, sorted; panics
+/// naming the folder when it or an entry cannot be read.
+fn list(folder: impl AsRef<Path>) -> Vec<PathBuf> {
+    let folder = folder.as_ref();
+    let mut paths: Vec<PathBuf> = at_path(folder, fs::read_dir(folder))
+        .map(|entry| at_path(folder, entry).path())
+        .collect();
+    paths.sort();
+    paths
 }
 
 #[test]
@@ -174,26 +218,26 @@ fn cr_h1_a_root_import_inside_macro_arguments_is_refused() {
 fn cr_h2_a_path_attribute_inside_cfg_attr_is_refused() {
     assert_eq!(
         codes("cfg_attr_path"),
-        BTreeSet::from(["plugin_attr_not_allowed"])
+        BTreeSet::from(["plugin_attr_not_allowed", "plugin_tree_not_allowed"])
     );
 }
 
 #[test]
 fn cr_h3_a_file_over_its_bound_is_refused_from_a_bounded_read() {
     let dir = std::env::temp_dir().join(format!("plugin-check-bounded-{}", std::process::id()));
-    fs::create_dir_all(&dir).expect("scratch folder");
+    make_dir(&dir);
     let path = dir.join("big.txt");
-    fs::write(&path, vec![b'a'; 100]).expect("writes");
+    write_file(&path, vec![b'a'; 100]);
     assert_eq!(read_bounded(&path, 99), Bounded::TooLarge);
     assert_eq!(read_bounded(&path, 100), Bounded::Text("a".repeat(100)));
-    fs::write(&path, [0xff, 0xfe]).expect("writes");
+    write_file(&path, [0xff, 0xfe]);
     assert_eq!(read_bounded(&path, 10), Bounded::Unreadable);
     assert_eq!(read_bounded(&dir.join("missing"), 10), Bounded::Unreadable);
-    fs::remove_dir_all(&dir).expect("scratch folder removed");
+    remove_tree(&dir);
     let (root, big) = scratch("good", "big_file");
-    let mut text = fs::read_to_string(big.join("src/lib.rs")).expect("reads");
+    let mut text = read_text(big.join("src/lib.rs"));
     text.push_str(&"/// a\n".repeat(source::SOURCE_BYTES_MAX / 6));
-    fs::write(big.join("src/lib.rs"), text).expect("writes");
+    write_file(big.join("src/lib.rs"), text);
     assert_eq!(
         check_crate(&big).expect_err("refused"),
         vec![Violation {
@@ -202,7 +246,7 @@ fn cr_h3_a_file_over_its_bound_is_refused_from_a_bounded_read() {
             code: "plugin_source_too_large",
         }]
     );
-    fs::remove_dir_all(&root).expect("scratch removed");
+    remove_tree(&root);
 }
 
 #[test]
@@ -234,7 +278,7 @@ fn sec_h2_a_use_syn_keeps_as_verbatim_is_still_read() {
 fn sec_h3_items_inside_macro_arguments_are_refused() {
     assert_eq!(
         codes("block_in_macro"),
-        BTreeSet::from(["plugin_macro_item_not_allowed"])
+        BTreeSet::from(["plugin_macro_item_not_allowed", "plugin_tree_not_allowed"])
     );
 }
 
@@ -258,10 +302,10 @@ fn sec_h5_only_the_exact_header_passes() {
 fn sec_h6_the_central_check_refuses_an_unchecked_plugin_folder() {
     let (root, plugin) = scratch("good", "plugins/t2/no-build-rs");
     set_id(&plugin, "\"no-build-rs\"");
-    fs::remove_file(plugin.join("build.rs")).expect("build.rs removed");
+    remove(plugin.join("build.rs"));
     let plugins = root.join("plugins");
-    fs::write(plugins.join("README"), "x").expect("stray file");
-    fs::create_dir_all(plugins.join("t9")).expect("unknown tier");
+    write_file(plugins.join("README"), "x");
+    make_dir(plugins.join("t9"));
     let violations = check_plugins(&plugins).expect_err("refused");
     let found: BTreeSet<(PathBuf, &str)> = violations
         .iter()
@@ -278,7 +322,7 @@ fn sec_h6_the_central_check_refuses_an_unchecked_plugin_folder() {
             ),
         ])
     );
-    fs::remove_dir_all(&root).expect("scratch removed");
+    remove_tree(&root);
 }
 
 #[test]
@@ -287,10 +331,10 @@ fn sec_h7_the_edition_is_pinned_to_2024() {
         codes("edition_2015"),
         BTreeSet::from(["plugin_manifest_not_allowed"])
     );
-    let workspace =
-        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Cargo.toml"))
-            .expect("workspace manifest reads");
-    let table: toml::Table = workspace.parse().expect("workspace manifest parses");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../Cargo.toml");
+    let table: toml::Table = read_text(&path)
+        .parse()
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
     assert_eq!(
         table["workspace"]["package"]["edition"].as_str(),
         Some("2024")
@@ -360,9 +404,9 @@ fn every_manifest_table_outside_the_allowlist_is_refused() {
     ];
     for (name, extra, code) in cases {
         let (root, dir) = scratch("good", &format!("manifest-{name}"));
-        let mut manifest = fs::read_to_string(dir.join("Cargo.toml")).expect("reads");
+        let mut manifest = read_text(dir.join("Cargo.toml"));
         manifest.push_str(extra);
-        fs::write(dir.join("Cargo.toml"), manifest).expect("writes");
+        write_file(dir.join("Cargo.toml"), manifest);
         assert_eq!(
             check_crate(&dir)
                 .expect_err(name)
@@ -372,7 +416,7 @@ fn every_manifest_table_outside_the_allowlist_is_refused() {
             BTreeSet::from([code]),
             "{name}"
         );
-        fs::remove_dir_all(&root).expect("scratch removed");
+        remove_tree(&root);
     }
     let edits = [
         (
@@ -390,9 +434,9 @@ fn every_manifest_table_outside_the_allowlist_is_refused() {
     ];
     for (name, from, to, code) in edits {
         let (root, dir) = scratch("good", &format!("manifest-{name}"));
-        let manifest = fs::read_to_string(dir.join("Cargo.toml")).expect("reads");
+        let manifest = read_text(dir.join("Cargo.toml"));
         assert!(manifest.contains(from), "{name}");
-        fs::write(dir.join("Cargo.toml"), manifest.replace(from, to)).expect("writes");
+        write_file(dir.join("Cargo.toml"), manifest.replace(from, to));
         assert_eq!(
             check_crate(&dir)
                 .expect_err(name)
@@ -402,7 +446,7 @@ fn every_manifest_table_outside_the_allowlist_is_refused() {
             BTreeSet::from([code]),
             "{name}"
         );
-        fs::remove_dir_all(&root).expect("scratch removed");
+        remove_tree(&root);
     }
 }
 
@@ -431,25 +475,25 @@ fn a_finder_ds_store_file_is_the_one_named_exception() {
     set_id(&plugin, "\"finder\"");
     let plugins = root.join("plugins");
     for folder in [plugins.clone(), plugins.join("t2"), plugin.join("src")] {
-        fs::write(folder.join(".DS_Store"), [0u8; 8]).expect("finder file");
+        write_file(folder.join(".DS_Store"), [0u8; 8]);
     }
     assert_eq!(check_plugins(&plugins), Ok(()));
-    fs::write(plugin.join("src").join("._lib.rs"), [0u8; 8]).expect("resource fork file");
+    write_file(plugin.join("src").join("._lib.rs"), [0u8; 8]);
     assert!(
         check_plugins(&plugins).is_err(),
         "only .DS_Store is excepted"
     );
-    fs::remove_dir_all(&root).expect("scratch removed");
+    remove_tree(&root);
 }
 
 /// Sets the `plugin` value of a scratch plugin's `plugin.toml`. Inputs: the plugin folder
 /// and the new value as TOML text. Output: none; panics when the fixture id is missing.
 fn set_id(plugin: &Path, value: &str) {
     let path = plugin.join("plugin.toml");
-    let text = fs::read_to_string(&path).expect("plugin.toml reads");
+    let text = read_text(&path);
     assert!(text.contains("plugin = \"fixture\""), "the fixture id line");
     let text = text.replace("plugin = \"fixture\"", &format!("plugin = {value}"));
-    fs::write(&path, text).expect("plugin.toml written");
+    write_file(&path, text);
 }
 
 /// Collects the (file, code) pairs of a refusal. Input: the violations. Output: the pairs.
@@ -474,7 +518,7 @@ fn a_plugin_id_not_equal_to_its_folder_is_refused() {
     );
     set_id(&plugin, "\"other-name\"");
     assert_eq!(check_plugins(&plugins), Ok(()));
-    fs::remove_dir_all(&root).expect("scratch removed");
+    remove_tree(&root);
 }
 
 #[test]
@@ -495,7 +539,7 @@ fn a_plugin_id_outside_its_charset_or_over_64_bytes_is_refused() {
             pairs(&violations).contains(&(PathBuf::from("plugin.toml"), "plugin_id_invalid")),
             "{name}: {violations:?}"
         );
-        fs::remove_dir_all(&root).expect("scratch removed");
+        remove_tree(&root);
     }
     let edge = "a".repeat(64);
     let (root, plugin) = scratch("good", &format!("plugins/t2/{edge}"));
@@ -505,7 +549,7 @@ fn a_plugin_id_outside_its_charset_or_over_64_bytes_is_refused() {
         Ok(()),
         "64 bytes is allowed"
     );
-    fs::remove_dir_all(&root).expect("scratch removed");
+    remove_tree(&root);
 }
 
 #[test]
@@ -518,5 +562,117 @@ fn a_duplicate_plugin_id_across_tiers_is_refused() {
         pairs(&violations),
         BTreeSet::from([(PathBuf::from("t2/twin/plugin.toml"), "plugin_id_duplicate")])
     );
-    fs::remove_dir_all(&root).expect("scratch removed");
+    remove_tree(&root);
+}
+
+/// Sets a folder's permission bits. Inputs: the folder and the mode. Output: none; panics
+/// naming the folder.
+#[cfg(unix)]
+fn set_mode(folder: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    at_path(
+        folder,
+        fs::set_permissions(folder, fs::Permissions::from_mode(mode)),
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_entry_is_a_violation() {
+    let (root, plugin) = scratch("good", "plugins/t2/locked");
+    set_id(&plugin, "\"locked\"");
+    set_mode(&plugin, 0o000);
+    let refused = check_plugins(&root.join("plugins"));
+    set_mode(&plugin, 0o755);
+    let violations = refused.expect_err("an unreadable crate folder is refused");
+    assert!(
+        pairs(&violations).contains(&(PathBuf::from("t2/locked"), "plugin_tree_not_allowed")),
+        "{violations:?}"
+    );
+    remove_tree(&root);
+}
+
+#[test]
+fn a_folder_named_ds_store_is_checked() {
+    let (root, _) = scratch("good", "plugins/t2/.DS_Store");
+    let violations = check_plugins(&root.join("plugins")).expect_err("the folder is checked");
+    assert_eq!(
+        pairs(&violations),
+        BTreeSet::from([(
+            PathBuf::from("t2/.DS_Store/plugin.toml"),
+            "plugin_id_not_folder"
+        )])
+    );
+    remove_tree(&root);
+    let (root, dir) = scratch("good", "ds-store-folder");
+    make_dir(dir.join(".DS_Store/payload"));
+    assert_eq!(
+        check_crate(&dir).expect_err("refused"),
+        vec![Violation {
+            file: PathBuf::from(".DS_Store"),
+            line: 1,
+            code: "plugin_tree_not_allowed",
+        }]
+    );
+    remove_tree(&root);
+}
+
+#[test]
+fn a_crate_root_entry_outside_the_allowlist_is_refused() {
+    let (root, plugin) = scratch("good", "root-allowlist");
+    make_dir(plugin.join(".cargo"));
+    write_file(
+        plugin.join(".cargo/config.toml"),
+        "[build]\nrustflags = []\n",
+    );
+    write_file(
+        plugin.join("rust-toolchain.toml"),
+        "[toolchain]\nchannel = \"nightly\"\n",
+    );
+    write_file(plugin.join(".DS_Store"), [0u8; 8]);
+    assert_eq!(
+        check_crate(&plugin).expect_err("refused"),
+        vec![
+            Violation {
+                file: PathBuf::from(".cargo"),
+                line: 1,
+                code: "plugin_tree_not_allowed",
+            },
+            Violation {
+                file: PathBuf::from("rust-toolchain.toml"),
+                line: 1,
+                code: "plugin_tree_not_allowed",
+            },
+        ]
+    );
+    assert_eq!(
+        ROOT_ALLOWED,
+        ["Cargo.toml", "build.rs", "plugin.toml", "src"]
+    );
+    assert_eq!(
+        codes("tests_folder"),
+        BTreeSet::from(["plugin_manifest_not_allowed"])
+    );
+    remove_tree(&root);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_source_folder_is_a_violation() {
+    let (root, plugin) = scratch("good", "locked-source");
+    let inner = plugin.join("src/inner");
+    make_dir(&inner);
+    write_file(inner.join("hidden.rs"), "pub fn f() {}\n");
+    set_mode(&inner, 0o000);
+    let refused = check_crate(&plugin);
+    set_mode(&inner, 0o755);
+    assert_eq!(
+        refused.expect_err("refused"),
+        vec![Violation {
+            file: PathBuf::from("src/inner"),
+            line: 1,
+            code: "plugin_source_unparsed",
+        }]
+    );
+    remove_tree(&root);
 }
