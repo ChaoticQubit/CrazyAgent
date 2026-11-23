@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 use super::*;
 use crate::exposure::holds;
 use crate::net::capture::{CaptureRules, SEND_HOSTS_MAX};
-use crate::secrets::{HOSTS_HEADER_BYTES_MAX, Handles, OwnerEntry, PLUGIN_HANDLES_MAX, Scopes, Secrets};
+use crate::secrets::{
+    HOSTS_HEADER_BYTES_MAX, Handles, OwnerEntry, PLUGIN_HANDLES_MAX, Scopes, Secrets,
+};
 use crate::store::{SecretRef, Store, reference};
 
 const NAMESPACE: &str = "dev.crazyagent.e0123456789ab";
@@ -1339,7 +1341,10 @@ fn an_owner_paste_under_a_name_a_capture_used_is_not_sent_to_the_capture_host() 
     let secrets = approved_for_api(&rig.store, &rig, &rig.handles);
     let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
     let reply = requests
-        .request("github", kept("https://evil.example/v1", "access_token", "n"))
+        .request(
+            "github",
+            kept("https://evil.example/v1", "access_token", "n"),
+        )
         .unwrap();
     let pasted = secrets.put_from_owner("github", "n").unwrap();
     assert_eq!(pasted, reply.captured[0].secret);
@@ -1358,14 +1363,21 @@ fn a_new_capture_under_a_kept_name_drops_the_old_hosts() {
     let secrets = rig.secrets();
     let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
     let first = requests
-        .request("github", kept("https://evil.example/v1", "access_token", "n"))
+        .request(
+            "github",
+            kept("https://evil.example/v1", "access_token", "n"),
+        )
         .unwrap()
         .captured[0]
         .secret;
     let second = requests
         .request(
             "github",
-            kept("https://github.com/login/oauth/access_token", "access_token", "n"),
+            kept(
+                "https://github.com/login/oauth/access_token",
+                "access_token",
+                "n",
+            ),
         )
         .unwrap()
         .captured[0]
@@ -1392,7 +1404,11 @@ fn a_failed_put_keeps_the_old_hosts() {
     let held = requests
         .request(
             "github",
-            kept("https://github.com/login/oauth/access_token", "access_token", "n"),
+            kept(
+                "https://github.com/login/oauth/access_token",
+                "access_token",
+                "n",
+            ),
         )
         .unwrap()
         .captured[0]
@@ -1400,7 +1416,10 @@ fn a_failed_put_keeps_the_old_hosts() {
     store.off.store(true, std::sync::atomic::Ordering::SeqCst);
     assert!(
         requests
-            .request("github", kept("https://evil.example/v1", "access_token", "n"))
+            .request(
+                "github",
+                kept("https://evil.example/v1", "access_token", "n")
+            )
             .is_err()
     );
     assert_eq!(
@@ -1427,7 +1446,11 @@ fn a_name_kept_from_another_field_gets_only_its_own_hosts_after_a_restart() {
     requests
         .request(
             "github",
-            kept("https://github.com/login/oauth/access_token", "access_token", "xname"),
+            kept(
+                "https://github.com/login/oauth/access_token",
+                "access_token",
+                "xname",
+            ),
         )
         .unwrap();
     let later = Mutex::new(Handles::new());
@@ -1437,7 +1460,10 @@ fn a_name_kept_from_another_field_gets_only_its_own_hosts_after_a_restart() {
         next.value("github", found, "evil.example").map(|_| ()),
         Err(StoreError::code("secret_handle_refused"))
     );
-    assert_eq!(next.value("github", found, "github.com").unwrap().expose(), CAPTURED);
+    assert_eq!(
+        next.value("github", found, "github.com").unwrap().expose(),
+        CAPTURED
+    );
 }
 
 #[test]
@@ -1457,7 +1483,10 @@ fn an_owner_paste_under_a_send_rule_name_gets_only_the_approved_hosts_after_a_re
         Err(StoreError::code("secret_handle_refused"))
     );
     assert_eq!(
-        next.value("github", found, "api.github.com").unwrap().expose().as_bytes(),
+        next.value("github", found, "api.github.com")
+            .unwrap()
+            .expose()
+            .as_bytes(),
         TOKEN
     );
 }
@@ -1477,7 +1506,11 @@ fn a_found_value_gets_only_the_hosts_it_was_kept_with() {
     requests
         .request(
             "github",
-            kept("https://github.com/login/oauth/access_token", "access_token", "token"),
+            kept(
+                "https://github.com/login/oauth/access_token",
+                "access_token",
+                "token",
+            ),
         )
         .unwrap();
     let later = Mutex::new(Handles::new());
@@ -1488,7 +1521,11 @@ fn a_found_value_gets_only_the_hosts_it_was_kept_with() {
         Err(StoreError::code("secret_handle_refused"))
     );
     for host in ["github.com", "api.github.com"] {
-        assert_eq!(next.value("github", found, host).unwrap().expose(), CAPTURED, "{host}");
+        assert_eq!(
+            next.value("github", found, host).unwrap().expose(),
+            CAPTURED,
+            "{host}"
+        );
     }
 }
 
@@ -1533,7 +1570,7 @@ fn a_host_header_over_its_bound_is_refused_before_the_write() {
     );
     assert_eq!(
         secrets.put_from_owner("github", "token"),
-        Err(StoreError::code("credential_secret_invalid"))
+        Err(StoreError::code("secret_hosts_invalid"))
     );
     assert!(rig.store.items.lock().unwrap().is_empty());
 }

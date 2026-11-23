@@ -64,8 +64,7 @@ pub trait Store: Send + Sync {
 
 /// Checks one service or account name with [`kernel_common::names::is_store_name`]: 1 to
 /// 63 bytes of lowercase ASCII letters, digits, `.`, `-` and `_`, not starting with `.` or
-/// `-`, no trailing dot and no Windows device name. Output: the name, or
-/// `credential_name_invalid`.
+/// `-`. Output: the name, or `credential_name_invalid`.
 pub fn checked_name(name: &str) -> Result<&str, StoreError> {
     if kernel_common::names::is_store_name(name) {
         Ok(name)
@@ -74,17 +73,23 @@ pub fn checked_name(name: &str) -> Result<&str, StoreError> {
     }
 }
 
-/// Names one stored item as `<service>:<account>`, both checked by [`checked_name`], so the
-/// join has no trailing `.` or space and no Windows device stem, and refusing a one-letter
-/// service, which reads as a drive on Windows, on every OS. Inputs: the service and account.
-/// Output: the reference, which holds no secret, or `credential_name_invalid`.
+/// Names one stored item as `<service>:<account>`, refusing the shapes the engine's wire
+/// identity refuses, before any store writes: an account ending in `.`
+/// ([`kernel_common::names::is_store_account`]), a Windows device name as the stem of the
+/// joined reference, and a one-letter service, which reads as a drive on Windows and is
+/// refused on every OS. Inputs: the service and account. Output: the reference, which holds
+/// no secret, or `credential_name_invalid`.
 pub fn reference(service: &str, account: &str) -> Result<SecretRef, StoreError> {
+    let invalid = || StoreError::code("credential_name_invalid");
+    if !kernel_common::names::is_store_account(account) {
+        return Err(invalid());
+    }
     let joined = format!("{}:{}", checked_name(service)?, checked_name(account)?);
     let drive = service.len() == 1 && service.as_bytes()[0].is_ascii_lowercase();
-    if drive {
-        return Err(StoreError::code("credential_name_invalid"));
+    if kernel_common::windows_device(&joined) || drive {
+        return Err(invalid());
     }
-    assert!(!joined.ends_with(['.', ' ']) && !kernel_common::windows_device(&joined));
+    assert!(!joined.ends_with(['.', ' ']));
     assert!(joined.len() <= REFERENCE_BYTES_MAX);
     Ok(SecretRef(joined))
 }
