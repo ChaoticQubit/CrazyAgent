@@ -223,13 +223,16 @@ fn count(db: &Connection, table: &str) -> Result<i64, StorageError> {
 }
 
 /// Records that a backup copy passed its check and makes the record durable: the `checked`
-/// file, then the backup folder and the backups folder synced, so a crash after this point
-/// still finds the backup checked; on Windows each folder is flushed through W1's
+/// file, holding the sha256 of the checked engine.db so a restore can tell the copy has not
+/// changed since, then the backup folder and the backups folder synced, so a crash after
+/// this point still finds the backup checked; on Windows each folder is flushed through W1's
 /// `sync_folder`, as a plain open refuses a folder there. Inputs: the backups folder and the
 /// new backup. Output: Ok once synced.
 pub(crate) fn mark_checked(folder: &Path, target: &Path) -> Result<(), StorageError> {
     assert!(target.starts_with(folder));
-    private_file(&target.join(CHECKED), b"")?;
+    let digest = file_digest(&target.join(DATABASE))?;
+    assert_eq!(digest.len(), DIGEST_HEX_BYTES);
+    private_file(&target.join(CHECKED), digest.as_bytes())?;
     for synced in [target, folder] {
         #[cfg(unix)]
         std::fs::File::open(synced)
@@ -239,6 +242,19 @@ pub(crate) fn mark_checked(folder: &Path, target: &Path) -> Result<(), StorageEr
         private::sync_folder(synced).map_err(backup_failed)?;
     }
     Ok(())
+}
+
+/// How many hex characters a sha256 digest in a `checked` marker holds.
+pub(crate) const DIGEST_HEX_BYTES: usize = 64;
+
+/// The sha256 of a file's bytes, read in a stream so a large engine.db is never held in
+/// memory. Input: the path. Output: the lowercase hex digest, or the read's failure.
+pub(crate) fn file_digest(path: &Path) -> Result<String, StorageError> {
+    use sha2::{Digest, Sha256};
+    let mut file = std::fs::File::open(path).map_err(backup_failed)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).map_err(backup_failed)?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Creates `<root>/backups` when missing, or makes a folder of this user there private

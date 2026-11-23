@@ -10,13 +10,12 @@ use crazyagent::credentials::Keychain;
 use crazyagent::credentials::OsKeyring;
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 use crazyagent::credentials::platform_store;
-use crazyagent::credentials::{Store, reference};
 use crazyagent::engine::owner::{OwnerClient, OwnerClientKind, OwnerResult};
 use crazyagent::github::{Endpoints, GitHub, GitHubMethod, namespace};
 use crazyagent::projects_home::FoundState;
-use crazyagent::protocol::CredentialRef;
 use e2e_support::{Engine, Owner, git, hex, named, repository, scratch};
 use kernel_security::secret::SecretString;
+use kernel_security::store::{SecretRef, Store, reference};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -32,7 +31,7 @@ const OWNER_TIME: Duration = Duration::from_secs(10);
 
 struct Forget {
     store: Arc<dyn Store>,
-    item: CredentialRef,
+    item: SecretRef,
 }
 
 impl Drop for Forget {

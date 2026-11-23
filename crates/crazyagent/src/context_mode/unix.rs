@@ -2,7 +2,7 @@ use super::refused;
 use crate::file_lock::HeldLock;
 use crate::sandbox::{ProjectSandbox, SandboxNetwork, SandboxRemote};
 use crate::sandbox_settings::SandboxSettings;
-use crate::setup::InstallError;
+use kernel_processes::run::InstallError;
 use rustix::fs::{FlockOperation, Mode, OFlags};
 use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
@@ -10,7 +10,19 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-pub(super) use crate::setup::process::{private_folder, run_command, staging_folder};
+pub(super) use kernel_processes::run::{private_folder, run_command};
+
+/// Makes a fresh private staging folder inside a parent with a random suffix, mirroring
+/// the Windows `staging_folder` in `context_mode/windows.rs`. Inputs: the parent folder and
+/// a name prefix. Output: the new folder path, or `setup_store_unavailable`.
+pub(super) fn staging_folder(
+    parent: &Path,
+    prefix: &str,
+) -> Result<std::path::PathBuf, InstallError> {
+    let id =
+        crate::engine::owner::random_id().map_err(|_| InstallError("setup_store_unavailable"))?;
+    kernel_processes::run::staging_folder(parent, prefix, &id)
+}
 
 /// The name of the `node` program beside npx.
 pub(super) const NODE: &str = "node";

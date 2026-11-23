@@ -166,7 +166,7 @@ fn a_restore_brings_the_2_4_data_back_and_keeps_the_replaced_data() {
         },
     };
 
-    let kept = restore_pinned(&path, &hooks).unwrap();
+    let kept = restore_pinned(&path, &hooks).unwrap().kept;
 
     assert_eq!(read(&path), (vec!["one".to_owned()], 11));
     assert_eq!(replaced(root.path()), std::slice::from_ref(&kept));
@@ -207,4 +207,305 @@ fn the_restore_record_reads_back_only_from_a_private_file_and_a_start_forgets_al
     std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o600)).unwrap();
     std::os::unix::fs::symlink(&elsewhere, &record).unwrap();
     assert_eq!(read_restore_record(root.path()), None);
+}
+
+/// A check after the restore wrote that refuses the pinned copy and checks the kept copy as the
+/// restore does, so only the restore's own check fails. Inputs: the connection and the copy.
+/// Output: Ok, or `check_forced`.
+fn fails_the_pinned_copy(db: &Connection, copy: &Path) -> Result<(), StorageError> {
+    let kept = copy
+        .parent()
+        .and_then(|folder| folder.file_name())
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with(REPLACED));
+    if kept {
+        return check_copy(db, copy);
+    }
+    Err(error("check_forced"))
+}
+
+/// A check after the restore wrote that refuses every copy, so the rollback fails as well.
+/// Inputs: the connection and the copy. Output: `check_forced`.
+fn always_fails(_: &Connection, _: &Path) -> Result<(), StorageError> {
+    Err(error("check_forced"))
+}
+
+/// Runs a restore of the upgraded root whose check after the write is `check`, and returns
+/// what it left: the error, the one kept copy and the live data. Input: the check. Output:
+/// the root, the database path, the error text and the kept copy's folder.
+fn failed_after_write(check: CopyCheck) -> (tempfile::TempDir, PathBuf, String, PathBuf) {
+    let (root, path) = upgraded(true);
+    let after = Cell::new(0);
+    let hooks = Hooks {
+        texts: &no_texts,
+        busy: &idle,
+        after_restore: &|_, _, _| after.set(after.get() + 1),
+    };
+
+    let refused = restore_pinned_at(&path, &hooks, SystemTime::now(), check)
+        .unwrap_err()
+        .0;
+
+    assert_eq!(after.get(), 0);
+    let kept = replaced(root.path());
+    assert_eq!(kept.len(), 1, "{refused}");
+    assert_eq!(read(&kept[0].join(DATABASE)), (vec!["two".to_owned()], 12));
+    let folder = kept[0].clone();
+    (root, path, refused, folder)
+}
+
+#[test]
+fn a_check_that_fails_after_the_restore_wrote_rolls_engine_db_back_and_keeps_the_copy() {
+    let (_root, path, refused, kept) = failed_after_write(fails_the_pinned_copy);
+
+    assert!(refused.starts_with(RESTORE_FAILED), "{refused}");
+    assert!(refused.contains("check_forced"), "{refused}");
+    let stays = format!("the replaced data stays in {}", kept.display());
+    assert!(refused.ends_with(&stays), "{refused}");
+    assert_eq!(read(&path), (vec!["two".to_owned()], 12));
+}
+
+#[test]
+fn a_rollback_that_fails_keeps_the_copy_and_names_both_causes() {
+    let (_root, _path, refused, kept) = failed_after_write(always_fails);
+
+    assert!(refused.starts_with(RESTORE_ROLLBACK_FAILED), "{refused}");
+    assert_eq!(refused.matches("check_forced").count(), 2, "{refused}");
+    let stays = format!("the replaced data stays in {}", kept.display());
+    assert!(refused.ends_with(&stays), "{refused}");
+}
+
+#[test]
+fn a_pinned_copy_the_shape_check_refuses_leaves_no_replaced_copy() {
+    let (root, path) = upgraded(true);
+    let pinned = std::fs::read_dir(root.path().join(BACKUPS))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|folder| folder.join(DATABASE).is_file())
+        .unwrap();
+    Connection::open(pinned.join(DATABASE))
+        .unwrap()
+        .pragma_update(None, "user_version", V24_VERSION_MAX + 1)
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    let refused = restore_pinned(
+        &path,
+        &Hooks {
+            texts: &no_texts,
+            busy: &idle,
+            after_restore: &|_, _, _| panic!("no sweep after a refused restore"),
+        },
+    )
+    .unwrap_err()
+    .0;
+
+    assert!(refused.starts_with(RESTORE_FAILED), "{refused}");
+    assert!(!refused.contains("stays in"), "{refused}");
+    assert!(replaced(root.path()).is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// A writer that leaves a partial file behind and fails. Inputs: the path and the bytes.
+/// Output: `write_forced`.
+fn fails_after_a_partial_write(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
+    std::fs::write(path, &bytes[..1]).unwrap();
+    Err(error("write_forced"))
+}
+
+#[test]
+fn a_record_write_that_fails_keeps_the_old_record_and_leaves_no_temp_file() {
+    let root = tempfile::Builder::new()
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    write_restore_record(root.path(), RECORD_PENDING).unwrap();
+    let before = std::fs::read(root.path().join(RESTORE_RECORD_FILE)).unwrap();
+
+    let refused = write_record_with(
+        root.path(),
+        "restored replaced-x",
+        fails_after_a_partial_write,
+    )
+    .unwrap_err()
+    .0;
+
+    assert!(refused.contains("write_forced"), "{refused}");
+    assert_eq!(
+        std::fs::read(root.path().join(RESTORE_RECORD_FILE)).unwrap(),
+        before
+    );
+    let names = std::fs::read_dir(root.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, [RESTORE_RECORD_FILE]);
+    assert_eq!(
+        read_restore_record(root.path()).as_deref(),
+        Some(RECORD_PENDING)
+    );
+}
+
+/// The folder of the pinned backup [`upgraded`] took. Input: the engine root. Output: it.
+fn pinned_folder(root: &Path) -> PathBuf {
+    std::fs::read_dir(root.join(BACKUPS))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|folder| folder.join(DATABASE).is_file())
+        .unwrap()
+}
+
+/// A sweep a refused restore must never reach. Inputs: unused. Output: none; it panics.
+fn no_sweep(_: &Connection, _: &Path, _: &Path) {
+    panic!("no sweep after a refused restore");
+}
+
+/// Hooks for a restore the row expects to be refused before its sweep. Output: the hooks.
+fn refusing_hooks() -> Hooks<'static> {
+    Hooks {
+        texts: &no_texts,
+        busy: &idle,
+        after_restore: &no_sweep,
+    }
+}
+
+/// A start whose restore record exists but cannot be read as a private
+/// regular file of this user refuses, since it may say a restore did not finish; only a
+/// missing record lets the start go on.
+#[test]
+fn a_start_whose_restore_record_cannot_be_read_refuses() {
+    let (root, path) = upgraded(false);
+    let record = root.path().join(RESTORE_RECORD_FILE);
+    assert_eq!(refuse_broken(&path), Ok(()));
+
+    write_restore_record(root.path(), RECORD_PENDING).unwrap();
+    std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let open = refuse_broken(&path).unwrap_err().0;
+    assert!(open.starts_with(ENGINE_RESTORE_BROKEN), "{open}");
+
+    std::fs::remove_file(&record).unwrap();
+    std::fs::create_dir(&record).unwrap();
+    let folder = refuse_broken(&path).unwrap_err().0;
+    assert!(folder.starts_with(ENGINE_RESTORE_BROKEN), "{folder}");
+}
+
+/// A pin carries the sha256 of its checked engine.db in its `checked`
+/// marker, and a copy that still matches it restores as checked by its digest.
+#[test]
+fn a_pinned_copy_that_matches_its_digest_restores_as_checked() {
+    use sha2::{Digest, Sha256};
+    let (root, path) = upgraded(true);
+    let pinned = pinned_folder(root.path());
+    let digest = format!(
+        "{:x}",
+        Sha256::digest(std::fs::read(pinned.join(DATABASE)).unwrap())
+    );
+    assert_eq!(
+        std::fs::read_to_string(pinned.join(crate::migrations::CHECKED)).unwrap(),
+        digest
+    );
+
+    let restored = restore_pinned(
+        &path,
+        &Hooks {
+            texts: &no_texts,
+            busy: &idle,
+            after_restore: &|_, _, _| {},
+        },
+    )
+    .unwrap();
+
+    assert_eq!(restored.pin, PinCheck::Digest);
+    assert_eq!(read(&path), (vec!["one".to_owned()], 11));
+}
+
+/// A pinned copy whose bytes changed after its backup, here a row with the same
+/// version, schema and counts, is refused before any write: engine.db byte-equal and no
+/// `replaced-*` copy.
+#[test]
+fn a_pinned_copy_changed_after_its_backup_is_refused_before_any_write() {
+    let (root, path) = upgraded(true);
+    Connection::open(pinned_folder(root.path()).join(DATABASE))
+        .unwrap()
+        .execute("UPDATE kept SET value='foreign'", [])
+        .unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    let refused = restore_pinned(&path, &refusing_hooks()).unwrap_err().0;
+
+    assert!(refused.starts_with(RESTORE_FAILED), "{refused}");
+    assert!(refused.contains("digest"), "{refused}");
+    assert!(replaced(root.path()).is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// A pin written before digests, with an empty `checked` marker, still
+/// restores once `PRAGMA integrity_check` reads ok, and says so as unverified.
+#[test]
+fn a_pin_with_no_digest_restores_after_its_integrity_check_as_unverified() {
+    let (root, path) = upgraded(true);
+    std::fs::write(
+        pinned_folder(root.path()).join(crate::migrations::CHECKED),
+        b"",
+    )
+    .unwrap();
+
+    let restored = restore_pinned(
+        &path,
+        &Hooks {
+            texts: &no_texts,
+            busy: &idle,
+            after_restore: &|_, _, _| {},
+        },
+    )
+    .unwrap();
+
+    assert_eq!(restored.pin, PinCheck::Unverified);
+    assert_eq!(read(&path), (vec!["one".to_owned()], 11));
+    assert_eq!(replaced(root.path()), std::slice::from_ref(&restored.kept));
+}
+
+/// A pin with no digest whose integrity check fails (one table's root page with a page type
+/// byte no b-tree has, written into the file, so every SQLite build still opens it) is
+/// refused before any write: engine.db byte-equal and no `replaced-*` copy.
+#[test]
+fn a_pin_with_no_digest_that_fails_its_integrity_check_is_refused_before_any_write() {
+    let (root, path) = upgraded(true);
+    let pinned = pinned_folder(root.path());
+    std::fs::write(pinned.join(crate::migrations::CHECKED), b"").unwrap();
+    let copy = Connection::open(pinned.join(DATABASE)).unwrap();
+    copy.execute_batch("CREATE TABLE spare (value TEXT); INSERT INTO spare VALUES ('x');")
+        .unwrap();
+    let journal: String = copy
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(journal, "delete", "every page is in the file");
+    let (root_page, page_size): (i64, i64) = copy
+        .query_row(
+            "SELECT rootpage, (SELECT page_size FROM pragma_page_size)
+            FROM sqlite_master WHERE name = 'spare'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    drop(copy);
+    assert!(root_page > 1, "page 1 keeps the schema readable");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(pinned.join(DATABASE))
+        .unwrap();
+    std::io::Seek::seek(
+        &mut file,
+        std::io::SeekFrom::Start(((root_page - 1) * page_size) as u64),
+    )
+    .unwrap();
+    std::io::Write::write_all(&mut file, &[0xff]).unwrap();
+    drop(file);
+    let before = std::fs::read(&path).unwrap();
+
+    let refused = restore_pinned(&path, &refusing_hooks()).unwrap_err().0;
+
+    assert!(refused.starts_with(RESTORE_FAILED), "{refused}");
+    assert!(refused.contains("integrity"), "{refused}");
+    assert!(replaced(root.path()).is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
