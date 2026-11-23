@@ -529,3 +529,30 @@ fn a_dropped_id_is_never_given_again() {
         Err(StoreError::code("secret_handle_refused"))
     );
 }
+
+#[test]
+fn a_legacy_item_that_looks_framed_reads_back_whole() {
+    let (hosts, secret) =
+        unframed(SecretString::stored(b"ca-hosts1|c.evil|x".to_vec()).unwrap()).unwrap();
+    assert!(hosts.is_empty());
+    assert_eq!(secret.expose(), "ca-hosts1|c.evil|x");
+}
+
+#[test]
+fn a_framed_item_starts_with_a_byte_no_secret_holds() {
+    let (_, item) = framed(
+        &["api.github.com".to_owned()],
+        &SecretString::new(PASTE.to_vec()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(item.expose().as_bytes()[0], b' ');
+    assert!(SecretString::new(item.expose().as_bytes().to_vec()).is_err());
+}
+
+#[test]
+fn a_space_is_refused_past_the_first_byte_of_a_stored_item() {
+    assert_eq!(
+        SecretString::stored(b"ab cd".to_vec()).map(|_| ()),
+        Err(StoreError::code("credential_secret_invalid"))
+    );
+}
