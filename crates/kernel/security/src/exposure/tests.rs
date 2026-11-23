@@ -40,9 +40,10 @@ fn overlapping_values_are_redacted_longest_first() {
         redact(output, &[b"ghp_abc123def", b"ghp_abc"], &[]),
         b"token=[REDACTED] and [REDACTED] alone".to_vec()
     );
+    assert_eq!(redact(b"aaaa", &[b"aa"], &[]), b"[REDACTED]".to_vec());
     assert_eq!(
-        redact(b"aaaa", &[b"aa"], &[]),
-        b"[REDACTED][REDACTED]".to_vec()
+        redact(b"x abcdef y", &[b"abc", b"bcdef"], &[]),
+        b"x [REDACTED] y".to_vec()
     );
 }
 
