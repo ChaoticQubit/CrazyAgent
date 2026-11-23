@@ -756,16 +756,23 @@ pub(super) fn setting_refusal(refused: EngineError) -> EngineError {
     })
 }
 
-/// Runs one App plugins command on the storage worker. Saving the turn-off choice writes the
-/// global settings file first, then the config the files resolve to replaces the worker's
-/// and is stored, and the page is read from it. Inputs: the database, the worker's config,
-/// the settings files and the command. Output: what the command answers.
+/// Where the storage worker sends the answer to one App plugins command.
+pub(crate) type AppPluginsReply =
+    tokio::sync::oneshot::Sender<Result<crate::app_plugins::Done, EngineError>>;
+
+/// Runs one App plugins command on the storage worker. A read-only worker refuses it. Saving
+/// the turn-off choice writes the global settings file first, then the config the files
+/// resolve to replaces the worker's and is stored, and the page is read from it. Inputs: the
+/// database, the worker's config, and whether the worker is read-only, the settings files
+/// and the command. Output: what the command answers.
 pub(super) fn app_plugins(
     db: &Connection,
     config: &mut EffectiveConfig,
-    sources: Option<&SettingsSources>,
-    command: crate::app_plugins::Command,
+    (readonly, sources, command): (bool, Option<&SettingsSources>, crate::app_plugins::Command),
 ) -> Result<crate::app_plugins::Done, EngineError> {
+    if readonly {
+        return Err(error("app_plugins_readonly"));
+    }
     let command = match command {
         crate::app_plugins::Command::SetWhenOff { when_off } => {
             let sources = sources.ok_or_else(|| error("app_plugin_setting_unavailable"))?;
