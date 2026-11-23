@@ -147,15 +147,20 @@ fn test_support_tables(path: &Path, text: &str) -> Vec<String> {
 /// link, so a linked folder never counts a file twice.
 #[cfg(unix)]
 #[test]
-fn files_named_skips_folder_links() {
-    let temporary = tempfile::tempdir().unwrap();
-    let real = temporary.path().canonicalize().unwrap();
-    std::fs::create_dir(real.join("held")).unwrap();
-    std::fs::write(real.join("held").join("one.rs"), "fn one() {}\n").unwrap();
-    std::os::unix::fs::symlink(real.join("held"), real.join("linked")).unwrap();
+fn files_named_skips_folder_links() -> crate::update::test_support::TestResult {
+    use crate::update::test_support::at;
+    let temporary = tempfile::tempdir()?;
+    let real = at(temporary.path(), temporary.path().canonicalize())?;
+    let held = real.join("held");
+    at(&held, std::fs::create_dir(&held))?;
+    let one = held.join("one.rs");
+    at(&one, std::fs::write(&one, "fn one() {}\n"))?;
+    let linked = real.join("linked");
+    at(&linked, std::os::unix::fs::symlink(&held, &linked))?;
     let mut found = Vec::new();
     files_named(&real, &|_| true, &mut found);
-    assert_eq!(found, vec![real.join("held").join("one.rs")]);
+    assert_eq!(found, vec![one]);
+    Ok(())
 }
 
 /// A manifest that turns `test-support` on through a dependency table of its own, with the

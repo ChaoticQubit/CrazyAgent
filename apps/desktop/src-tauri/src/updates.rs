@@ -87,7 +87,9 @@ fn bridged(error: UpdateError) -> BridgeError {
 
 /// Takes the update lock without waiting, so a check, a channel switch, an install and an
 /// engine restart never overlap: an install stops and replaces the engine a restart would
-/// start. Input: the state. Output: the guard to keep for the whole step, or `busy`.
+/// start. The guard is held across the step's awaits on purpose: it is the busy token and
+/// owns the update the step uses. Input: the state. Output: the guard to keep for the
+/// whole step, or `busy`.
 pub fn hold(state: &UpdateState) -> Result<MutexGuard<'_, Option<Update>>, BridgeError> {
     state.0.try_lock().map_err(|_| refused("busy"))
 }
@@ -350,6 +352,14 @@ mod tests {
     use base64::engine::general_purpose::STANDARD;
     use std::io::{Read, Write};
 
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    /// Names the path a filesystem step failed on. Inputs: the path and the step's result.
+    /// Output: the value, or an error naming the path.
+    fn at<T>(path: &std::path::Path, result: std::io::Result<T>) -> TestResult<T> {
+        result.map_err(|error| format!("{path:?}: {error}").into())
+    }
+
     fn key_pair() -> (minisign::KeyPair, String) {
         let pair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
         let key = STANDARD.encode(pair.pk.to_box().unwrap().into_string());
@@ -368,8 +378,8 @@ mod tests {
         STANDARD.encode(signature.into_string())
     }
 
-    fn answer(listener: &std::net::TcpListener, body: &[u8]) {
-        let (mut stream, _) = kernel_processes::spawn_gate::accept_tcp_std(listener).unwrap();
+    fn answer(listener: &std::net::TcpListener, body: &[u8]) -> std::io::Result<()> {
+        let (mut stream, _) = kernel_processes::spawn_gate::accept_tcp_std(listener)?;
         let mut request = Vec::new();
         let mut byte = [0_u8; 1];
         while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
@@ -381,19 +391,20 @@ mod tests {
         );
         let _ = stream.write_all(head.as_bytes());
         let _ = stream.write_all(body);
+        Ok(())
     }
 
     /// The desktop app installs only a release the updater verified: a manifest and archive
     /// signed with a key other than the app's are found by the check, then refused at
     /// download with `update_signature_invalid`, and the sidecar never stops the engine.
     #[test]
-    fn desktop_install_refuses_a_bad_signature_through_the_updater() {
+    fn desktop_install_refuses_a_bad_signature_through_the_updater() -> TestResult {
         let (_release, release_key) = key_pair();
         let (other, _) = key_pair();
         let archive = b"desktop release archive".to_vec();
         let trusted = "timestamp:1761400000\tfile:CrazyAgent.app.tar.gz\tversion:0.2.0";
-        let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
+        let listener = kernel_processes::spawn_gate::bind_tcp_std("127.0.0.1:0")?;
+        let base = format!("http://{}", listener.local_addr()?);
         let target = tauri_plugin_updater::target().expect("an updater target for this build");
         let mut platforms = serde_json::Map::new();
         platforms.insert(
@@ -407,8 +418,8 @@ mod tests {
         let manifest = serde_json::to_vec(&manifest).unwrap();
         let served = archive.clone();
         let server = std::thread::spawn(move || {
-            answer(&listener, &manifest);
-            answer(&listener, &served);
+            answer(&listener, &manifest)?;
+            answer(&listener, &served)
         });
 
         let mut context = tauri::test::mock_context(tauri::test::noop_assets());
@@ -421,14 +432,20 @@ mod tests {
             .build(context)
             .unwrap();
         let state = UpdateState::default();
-        let folder = tempfile::tempdir().unwrap();
+        let folder = tempfile::tempdir()?;
         let stub = folder.path().join("crazyagent");
         let ran = folder.path().join("service-ran");
-        std::fs::write(&stub, format!("#!/bin/sh\ntouch '{}'\n", ran.display())).unwrap();
+        at(
+            &stub,
+            std::fs::write(&stub, format!("#!/bin/sh\ntouch '{}'\n", ran.display())),
+        )?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+            at(
+                &stub,
+                std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)),
+            )?;
         }
 
         let outcome = tauri::async_runtime::block_on(async {
@@ -443,17 +460,20 @@ mod tests {
             let events = Events::new(|_| Ok(()));
             install_with(&state, events, || Ok(stub.clone())).await
         });
-        server.join().unwrap();
+        server
+            .join()
+            .map_err(|_| "the release server thread panicked")??;
         assert_eq!(
             outcome.err().map(|refusal| refusal.code),
             Some("update_signature_invalid")
         );
         assert!(!ran.exists(), "the sidecar ran a service step");
         assert_eq!(
-            std::fs::read_dir(folder.path()).unwrap().count(),
+            at(folder.path(), std::fs::read_dir(folder.path()))?.count(),
             1,
             "nothing but the stub sidecar is in its folder"
         );
+        Ok(())
     }
 
     #[test]

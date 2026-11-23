@@ -5,7 +5,7 @@ use base64::engine::general_purpose::STANDARD;
 use sha2::{Digest, Sha256};
 
 use super::install_release;
-use kernel_processes::update::test_support::{response, serve};
+use kernel_processes::update::test_support::{TestResult, joined, response, serve};
 use kernel_processes::update::{Asset, Manifest, target};
 
 /// The names in a folder with each regular file's bytes, sorted. Input: the folder.
@@ -31,7 +31,7 @@ fn listing(folder: &Path) -> Vec<(String, Option<Vec<u8>>)> {
 /// refused at the install boundary: the install folder keeps every file byte for byte and
 /// no staging folder is left, only the lock file a run always leaves.
 #[test]
-fn a_release_signed_by_another_key_installs_nothing() {
+fn a_release_signed_by_another_key_installs_nothing() -> TestResult {
     let install = tempfile::tempdir().unwrap();
     std::fs::write(install.path().join("crazyagent"), "old engine").unwrap();
     std::fs::write(install.path().join("crazyagent-runner"), "old runner").unwrap();
@@ -56,7 +56,7 @@ fn a_release_signed_by_another_key_installs_nothing() {
     let (url, server) = serve(vec![response(
         "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n",
         &bytes,
-    )]);
+    )])?;
     let manifest = Manifest {
         version: "9.9.9".to_owned(),
         platforms: [(
@@ -71,7 +71,7 @@ fn a_release_signed_by_another_key_installs_nothing() {
         .collect(),
     };
     let refused = install_release(&manifest, install.path(), &key).unwrap_err();
-    server.join().unwrap();
+    joined(server)?;
     assert_eq!(
         refused.code, "update_signature_invalid",
         "{}",
@@ -80,4 +80,5 @@ fn a_release_signed_by_another_key_installs_nothing() {
     let mut after = listing(install.path());
     after.retain(|(name, _)| name != super::UPDATE_LOCK);
     assert_eq!(after, before);
+    Ok(())
 }
