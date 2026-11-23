@@ -872,10 +872,11 @@ fn remove_deletes_a_link_entry_and_leaves_its_target() {
     std::os::unix::fs::symlink(&target, &linked).unwrap();
     remove(&case.db, &case.engine(), "linked").unwrap();
     assert!(std::fs::symlink_metadata(&linked).is_err());
-    assert_eq!(
-        std::fs::read_to_string(target.join(MANIFEST_FILE)).unwrap(),
-        NEAR
-    );
+    let manifest = target.join(MANIFEST_FILE);
+    match std::fs::read_to_string(&manifest) {
+        Ok(text) => assert_eq!(text, NEAR),
+        Err(error) => panic!("{}: {error}", manifest.display()),
+    }
 }
 
 #[test]
