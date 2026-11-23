@@ -944,7 +944,10 @@ fn a_removal_storage_cannot_commit_ends_its_transaction_and_keeps_the_plugin() {
         .unwrap();
     assert!(tables > 0, "the reader holds the database");
     assert!(remove(&case.db, &case.engine(), "acme").is_err());
-    assert!(case.db.is_autocommit(), "the failed removal ended its transaction");
+    assert!(
+        case.db.is_autocommit(),
+        "the failed removal ended its transaction"
+    );
     reader.execute_batch("COMMIT").unwrap();
     assert!(case.root.join(FOLDER).join("acme").exists());
     assert_eq!(plugin_keys(&case).len(), 1);
