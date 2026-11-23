@@ -87,6 +87,9 @@ impl From<Version> for String {
 /// install output goes nowhere, so it can never fill a pipe. Output: up to 4 KiB of
 /// standard output, `setup_timeout` after killing it at the limit or when its output is
 /// still open there, or `setup_install_failed` when it cannot start or exits with a failure.
+/// On Unix the command leads its own process group, and every path that stops it at the
+/// limit or on a failure kills that group, so a process it left holding its output ends
+/// too; a clean exit inside the limit leaves the group alone.
 pub fn run_bounded(
     command: &mut Command,
     limit: Duration,
@@ -105,12 +108,21 @@ pub fn run_bounded(
         use std::os::windows::process::CommandExt;
         command.creation_flags(CREATE_NO_WINDOW);
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child =
         crate::spawn_gate::spawn(command).map_err(|_| InstallError("setup_install_failed"))?;
+    #[cfg(unix)]
+    let pid = child.id();
     let deadline = Instant::now() + limit;
     let report = match child.stdout.take().map(read_report).transpose() {
         Ok(report) => report,
         Err(failed) => {
+            #[cfg(unix)]
+            stop(pid);
             let _ = child.kill();
             let _ = child.wait();
             return Err(failed);
@@ -121,6 +133,8 @@ pub fn run_bounded(
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
             outcome => {
+                #[cfg(unix)]
+                stop(pid);
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(InstallError(if outcome.is_ok() {
@@ -140,7 +154,11 @@ pub fn run_bounded(
     let left = deadline.saturating_duration_since(Instant::now());
     let output = match report.recv_timeout(left) {
         Ok(read) => read.map_err(|_| InstallError("setup_version_unreadable"))?,
-        Err(_) => return Err(InstallError("setup_timeout")),
+        Err(_) => {
+            #[cfg(unix)]
+            stop(pid);
+            return Err(InstallError("setup_timeout"));
+        }
     };
     assert!(output.len() as u64 <= BOUNDED_BYTES_MAX);
     Ok(output)
