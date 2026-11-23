@@ -92,7 +92,7 @@ impl MacInstaller {
             return Err(InstallError("setup_homebrew_missing"));
         }
         let brew = found
-            .find(|path| crate::service::changeable_past_sticky(path).is_none())
+            .find(|path| kernel_processes::service::changeable_past_sticky(path).is_none())
             .ok_or(InstallError("setup_homebrew_unsafe"))?;
         let mut env = self.pinned.env();
         env.extend([

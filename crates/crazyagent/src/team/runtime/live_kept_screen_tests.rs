@@ -9,7 +9,8 @@ use crate::engine::owner::{
 use crate::project_setup::{Platform, ProjectSetup, ResearchKind};
 use crate::protocol::{ProjectId, ProjectSpec};
 use crate::team::{AgentRole, AgentStatus, NodeKind};
-use crate::terminal::{AgentId, Host, TerminalFrame};
+use crate::terminal::TerminalFrame;
+use kernel_processes::terminal::{AgentId, Host};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -205,7 +206,7 @@ impl OwnerEngine {
             .block_on(async { tokio::time::timeout(SHOWN, service.shutdown()).await })
             .unwrap()
             .unwrap();
-        crate::terminal::quit(host.as_ref(), true).unwrap();
+        kernel_processes::terminal::quit(host.as_ref(), true).unwrap();
     }
 }
 

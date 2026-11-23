@@ -212,3 +212,23 @@ export function shadow(
 ): Promise<Result<null>> {
   return call(host, SHADOW, { fits_reply: encodeReply(fits_reply), fits_header }, () => null);
 }
+
+/** The body of a `FixtureSent` event. */
+export type FixtureSent = { readonly status: number; readonly url: string };
+
+/** One event of the `fixture` stem, by kind. */
+export type FixtureEvent = { readonly kind: "FixtureSent"; readonly body: FixtureSent };
+
+/** The event kinds the `fixture` stem emits. */
+export const FIXTURE_EVENT_KINDS = ["FixtureSent"] as const;
+
+/** Decodes one event body of the `fixture` stem. Inputs: the kind and the body as the
+ * kernel sent it. Output: the typed event, or `null` for a kind this stem does not emit. */
+export function decodeFixtureEvent(kind: string, body: Wire): FixtureEvent | null {
+  switch (kind) {
+    case "FixtureSent":
+      return { kind: "FixtureSent", body: body as FixtureSent };
+    default:
+      return null;
+  }
+}

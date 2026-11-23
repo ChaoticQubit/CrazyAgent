@@ -201,9 +201,9 @@ pub fn relay(mailbox: &Path, request: &str, wait: Duration) -> Option<Vec<u8>> {
 fn parse_place(reply: &[u8]) -> Option<(String, Whom)> {
     let text = std::str::from_utf8(reply).ok()?;
     let mut parts = text.split(' ');
-    let pane = parts
-        .next()
-        .filter(|pane| crate::terminal::pane_id_valid(pane) && pane.len() < PANE_REPLY_BYTES_MAX)?;
+    let pane = parts.next().filter(|pane| {
+        kernel_processes::terminal::pane_id_valid(pane) && pane.len() < PANE_REPLY_BYTES_MAX
+    })?;
     let whom = match (parts.next()?, parts.next(), parts.next()) {
         ("lead", None, None) => Whom::Lead,
         ("teammate", Some(name), None) if crate::agent_git::worktree_name_valid(name) => {
@@ -548,7 +548,7 @@ impl Callers {
             .take()
             .filter(|(pane, pid)| self.pinned(pane, *pid))
             .filter(|(pane, _)| {
-                crate::terminal::pane_id_valid(pane) && pane.len() < PANE_REPLY_BYTES_MAX
+                kernel_processes::terminal::pane_id_valid(pane) && pane.len() < PANE_REPLY_BYTES_MAX
             })
             .and_then(|(pane, pid)| match whom(&pane, pid)? {
                 Whom::Lead => Some(format!("{pane} lead\n")),

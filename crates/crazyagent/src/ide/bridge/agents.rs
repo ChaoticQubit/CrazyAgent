@@ -3,7 +3,7 @@ use crate::engine::owner::{OwnerRuntimeHandle, failure};
 use crate::project_setup::StoredSetup;
 use crate::protocol::ProjectId;
 use crate::team::{AgentRole, AgentStatus, TeamAgent};
-use crate::terminal::Host;
+use kernel_processes::terminal::Host;
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};

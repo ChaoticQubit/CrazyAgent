@@ -108,6 +108,13 @@ impl<'a, 'c> Appender<'a, 'c> {
         apply(self.tx)
     }
 
+    /// Tombstones one earlier event of this transaction's writer through
+    /// [`super::replay::redact`], behind the appender's own fence. Input: the seq. Output: Ok,
+    /// or the fence's or redact's refusal.
+    pub(crate) fn redact(&self, seq: u64) -> Result<(), StorageError> {
+        super::replay::redact(self.tx, seq, &self.fence)
+    }
+
     /// Opens the appender at a fenced revision: it must be the `state` revision now and
     /// newer than the last logged one. Inputs: the transaction, the revision, the fence and
     /// the name check. Output: the appender, or `state_log_revision_stale` or
@@ -140,6 +147,12 @@ impl<'a, 'c> Appender<'a, 'c> {
             fence,
             known,
         })
+    }
+
+    /// The transaction the appender writes in, for a kernel step that reads or rewrites the
+    /// log in the same transaction. Output: the transaction.
+    pub(crate) fn tx(&self) -> &'a Transaction<'c> {
+        self.tx
     }
 
     /// The revision this transaction's events carry. Output: the revision.

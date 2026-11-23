@@ -4,8 +4,9 @@ use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::OwnerClientKind;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::team::master::{OwnerTyping, owner_key_ms};
+use crate::terminal::FOLDER;
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
-use crate::terminal::{FOLDER, Host};
+use kernel_processes::terminal::Host;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -136,7 +137,10 @@ async fn attach_sized_mid_session_is_refused() {
         tokio::task::spawn_blocking(move || {
             let launcher = Tmux::open(Some(tmux), &folder);
             launcher
-                .spawn(&agent, &crate::terminal::PaneCommand::from(&command))
+                .spawn(
+                    &agent,
+                    &kernel_processes::terminal::PaneCommand::from(&command),
+                )
                 .unwrap();
             launcher
         })
@@ -245,7 +249,7 @@ async fn a_pane_attach_on_a_lead_whose_servers_ended_is_refused_as_its_teammates
         .map_err(|problem| problem.0);
     assert_eq!(
         refused,
-        Err(crate::terminal::TEAMMATES_SERVER_ENDED.to_owned()),
+        Err(kernel_processes::terminal::TEAMMATES_SERVER_ENDED.to_owned()),
         "a pane attach on a lead whose servers ended was not refused as its teammates' server's end"
     );
 
@@ -378,8 +382,8 @@ impl Host for Holding {
     fn spawn(
         &self,
         _: &AgentId,
-        _: &crate::terminal::PaneCommand,
-    ) -> Result<crate::terminal::PaneRef, HostError> {
+        _: &kernel_processes::terminal::PaneCommand,
+    ) -> Result<kernel_processes::terminal::PaneRef, HostError> {
         Err(HostError("terminal_unavailable".into()))
     }
 
@@ -441,7 +445,7 @@ async fn output_reaches_the_view_while_a_typed_keys_send_is_held() {
         started,
         release: std::sync::Mutex::new(released),
     });
-    let (feed, chunks) = crate::terminal::buffer::buffer();
+    let (feed, chunks) = kernel_processes::terminal::buffer::buffer();
     let viewer = TerminalStream {
         agent: AgentId::team(1).unwrap(),
         cols: 80,
@@ -520,7 +524,7 @@ async fn a_prompt_held_as_its_view_ends_is_still_recorded_as_heard() {
         started,
         release: std::sync::Mutex::new(released),
     });
-    let (feed, chunks) = crate::terminal::buffer::buffer();
+    let (feed, chunks) = kernel_processes::terminal::buffer::buffer();
     let viewer = TerminalStream {
         agent: AgentId::team(1).unwrap(),
         cols: 80,
@@ -606,7 +610,10 @@ async fn fifty_typed_keys_echo_back_within_budget() {
         tokio::task::spawn_blocking(move || {
             let launcher = Tmux::open(Some(tmux), &folder);
             launcher
-                .spawn(&agent, &crate::terminal::PaneCommand::from(&command))
+                .spawn(
+                    &agent,
+                    &kernel_processes::terminal::PaneCommand::from(&command),
+                )
                 .unwrap();
             launcher
         })
@@ -740,8 +747,8 @@ impl Host for Recording {
     fn spawn(
         &self,
         _: &AgentId,
-        _: &crate::terminal::PaneCommand,
-    ) -> Result<crate::terminal::PaneRef, HostError> {
+        _: &kernel_processes::terminal::PaneCommand,
+    ) -> Result<kernel_processes::terminal::PaneRef, HostError> {
         Err(HostError("terminal_unavailable".into()))
     }
 
@@ -1064,7 +1071,10 @@ async fn an_input_only_view_types_and_pastes_without_sending_output() {
         tokio::task::spawn_blocking(move || {
             let launcher = Tmux::open(Some(tmux), &folder);
             launcher
-                .spawn(&agent, &crate::terminal::PaneCommand::from(&command))
+                .spawn(
+                    &agent,
+                    &kernel_processes::terminal::PaneCommand::from(&command),
+                )
                 .unwrap();
             launcher
         })
@@ -1203,10 +1213,16 @@ fn a_live_agent_s_unit_is_its_window_and_an_ended_one_keeps_its_own_key() {
         env: Vec::new(),
         transcript: Transcript::Unavailable,
     };
-    host.spawn(&named, &crate::terminal::PaneCommand::from(&command))
-        .unwrap();
-    host.spawn(&other, &crate::terminal::PaneCommand::from(&command))
-        .unwrap();
+    host.spawn(
+        &named,
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
+    host.spawn(
+        &other,
+        &kernel_processes::terminal::PaneCommand::from(&command),
+    )
+    .unwrap();
     let live = host.unit(&named).unwrap();
     let (server, window) = live.rsplit_once(" @").expect("a socket and a window id");
     assert_eq!(server, socket.display().to_string());
@@ -1263,7 +1279,10 @@ async fn a_follower_sizes_its_window_only_while_no_sizer_is_open() {
         tokio::task::spawn_blocking(move || {
             let launcher = Tmux::open(Some(tmux), &folder);
             launcher
-                .spawn(&agent, &crate::terminal::PaneCommand::from(&command))
+                .spawn(
+                    &agent,
+                    &kernel_processes::terminal::PaneCommand::from(&command),
+                )
                 .unwrap();
             launcher
         })
@@ -1473,7 +1492,10 @@ async fn an_input_only_view_never_moves_to_a_new_terminal_under_its_agents_name(
         tokio::task::spawn_blocking(move || {
             let launcher = Tmux::open(Some(tmux), &folder);
             launcher
-                .spawn(&agent, &crate::terminal::PaneCommand::from(&first))
+                .spawn(
+                    &agent,
+                    &kernel_processes::terminal::PaneCommand::from(&first),
+                )
                 .unwrap();
             Arc::new(launcher)
         })
@@ -1521,7 +1543,10 @@ async fn an_input_only_view_never_moves_to_a_new_terminal_under_its_agents_name(
         tokio::task::spawn_blocking(move || {
             launcher.kill(&agent).unwrap();
             launcher
-                .spawn(&agent, &crate::terminal::PaneCommand::from(&second))
+                .spawn(
+                    &agent,
+                    &kernel_processes::terminal::PaneCommand::from(&second),
+                )
                 .unwrap();
         })
         .await
@@ -1688,7 +1713,7 @@ async fn a_pin_that_is_no_pane_id_trips_every_pinned_path() {
         pane: "first".into(),
         serial: 7,
     };
-    assert!(!crate::terminal::pane_id_valid(&bogus.pane));
+    assert!(!kernel_processes::terminal::pane_id_valid(&bogus.pane));
     let host: Arc<dyn Host> = Recording::new(vec![agent.clone()]);
     let pasting = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         paste(&host, &agent, Some(bogus.clone()), b"p".to_vec())
@@ -1832,7 +1857,10 @@ async fn a_prompt_through_an_input_only_view_lands_in_a_real_tmux_pane() {
         tokio::task::spawn_blocking(move || {
             let launcher = Tmux::open(Some(tmux), &folder);
             launcher
-                .spawn(&agent, &crate::terminal::PaneCommand::from(&stand_in))
+                .spawn(
+                    &agent,
+                    &kernel_processes::terminal::PaneCommand::from(&stand_in),
+                )
                 .unwrap();
             Arc::new(launcher)
         })

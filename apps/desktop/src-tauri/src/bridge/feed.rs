@@ -3,10 +3,8 @@ use super::terminal::{
 };
 use super::{BridgeError, failure};
 use crazyagent::engine::owner::TerminalSession;
-use crazyagent::terminal::{
-    AgentId, INPUT_BYTES_MAX, PASTE_BYTES_MAX, SIZE_MAX, SIZE_MIN, TerminalFrame, TerminalRequest,
-    paste_keys,
-};
+use crazyagent::terminal::{TerminalFrame, TerminalRequest, paste_keys};
+use kernel_processes::terminal::{AgentId, INPUT_BYTES_MAX, PASTE_BYTES_MAX, SIZE_MAX, SIZE_MIN};
 use std::collections::HashMap;
 use std::future::Future;
 use std::io;

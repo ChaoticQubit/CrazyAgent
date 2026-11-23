@@ -68,7 +68,7 @@ impl Fixture {
         };
         host.spawn(
             &AgentId::team(agent).unwrap(),
-            &crate::terminal::PaneCommand::from(&command),
+            &kernel_processes::terminal::PaneCommand::from(&command),
         )
         .unwrap();
     }

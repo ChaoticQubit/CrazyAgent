@@ -118,7 +118,7 @@ pub struct InteractiveCommand {
     pub transcript: Transcript,
 }
 
-impl From<&InteractiveCommand> for crate::terminal::PaneCommand {
+impl From<&InteractiveCommand> for kernel_processes::terminal::PaneCommand {
     /// The fields the terminal host reads, byte-equal: the argument vector, the working
     /// folder and the environment; the session record stays with the harness. Input: the
     /// command. Output: the pane command.

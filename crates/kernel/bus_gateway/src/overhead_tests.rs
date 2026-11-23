@@ -41,6 +41,15 @@ impl sdk::secrets::Provide for NoSecrets {
     }
 }
 
+/// A net provider the row never reaches: it times only the quit save.
+struct NoNet;
+
+impl sdk::net::Provide for NoNet {
+    fn request(&self, _: &'static str, _: sdk::net::Request) -> Result<sdk::net::Reply, Refusal> {
+        unreachable!("the overhead row calls only settings.save_quit")
+    }
+}
+
 /// A refusal sink the row never reaches: the bound plugin holds its grant.
 struct Unreached;
 
@@ -104,7 +113,7 @@ fn overhead_per_sdk_call() {
     let grants = Grants::new(&[(PLUGIN, Tier::T2, &["settings.write"])]).unwrap();
     let provider = Noop;
     let refusals = Unreached;
-    let gateway = Gateway::new(&grants, &provider, &NoSecrets, &refusals);
+    let gateway = Gateway::new(&grants, &provider, &NoSecrets, &NoNet, &refusals);
     let bound = gateway.bind(PLUGIN);
     let input = QuitSettings {
         on_quit: OnQuit::Stop,
@@ -141,4 +150,56 @@ fn overhead_per_sdk_call() {
         p95 as f64 / 1_000.0,
         budget as f64 / 1_000.0
     );
+}
+
+/// A secrets provider that finds every name at once, so a timing holds only the call path.
+struct Found;
+
+impl sdk::secrets::Provide for Found {
+    fn put_from_owner(&self, _: &'static str, _: String) -> Result<sdk::secrets::Secret, Refusal> {
+        unreachable!("the secrets row times secrets.find only")
+    }
+
+    fn find(
+        &self,
+        caller: &'static str,
+        name: String,
+    ) -> Result<Option<sdk::secrets::Secret>, Refusal> {
+        black_box((caller, name));
+        Ok(Some(sdk::secrets::Secret::from_kernel(1)))
+    }
+
+    fn forget(&self, _: &'static str, _: sdk::secrets::Secret) -> Result<(), Refusal> {
+        unreachable!("the secrets row times secrets.find only")
+    }
+}
+
+/// Times one `secrets.find` call's gateway overhead against the overhead budget the way the
+/// quit save row does: the SDK call through a bound host minus the direct provider call. Run:
+/// `OVERHEAD_MAC=quiet cargo test --release -p crazyagent-bus-gateway --lib overhead_tests::gateway_secrets_call_p95 -- --ignored --nocapture`
+/// (`OVERHEAD_MAC=loaded` on the loaded Mac).
+#[test]
+#[ignore = "timing row, run on demand with OVERHEAD_MAC=quiet or OVERHEAD_MAC=loaded"]
+fn gateway_secrets_call_p95() {
+    use sdk::secrets::Provide;
+    let (budget, condition) = budget();
+    let grants = Grants::new(&[(PLUGIN, Tier::T1, &["secrets.find"])]).unwrap();
+    let refusals = Unreached;
+    let gateway = Gateway::new(&grants, &Noop, &Found, &NoNet, &refusals);
+    let bound = gateway.bind(PLUGIN);
+    let mut direct_call = || {
+        black_box(Found.find(PLUGIN, black_box("token".to_owned()))).unwrap();
+    };
+    let mut sdk_call = || {
+        black_box(sdk::secrets::find(&bound, black_box("token".to_owned()))).unwrap();
+    };
+    let mut overhead = Vec::with_capacity(ROUNDS);
+    for _ in 0..ROUNDS {
+        let plain = batch(&mut direct_call);
+        overhead.push(batch(&mut sdk_call).saturating_sub(plain));
+    }
+    overhead.sort_unstable();
+    let p95 = report("secrets", &overhead);
+    println!("gateway.secrets_find condition={condition} p95_ps={p95}");
+    assert!(p95 <= budget, "p95 {p95} ps over {budget} ps ({condition})");
 }

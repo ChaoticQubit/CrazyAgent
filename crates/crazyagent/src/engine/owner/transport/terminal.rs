@@ -4,17 +4,16 @@ use crate::ipc::{OwnedReadHalf, OwnedWriteHalf};
 use crate::protocol::encode_frame;
 #[cfg(unix)]
 use crate::protocol::plain_code;
+use crate::terminal::{TerminalFrame, TerminalRequest};
 #[cfg(unix)]
-use crate::terminal::buffer::Chunk;
-use crate::terminal::{
-    AgentId, Host, HostError, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, PaneAt, TerminalFrame,
-    TerminalRequest, TerminalStream,
-};
+use crate::terminal::{paste_keys, type_prompt, type_prompt_at};
+use kernel_processes::terminal::attach_again;
 #[cfg(unix)]
-use crate::terminal::{
-    CHUNK_BYTES_MAX, PASTE_BYTES_MAX, attach_again, paste_keys, type_into, type_prompt,
-    type_prompt_at,
+use kernel_processes::terminal::buffer::Chunk;
+use kernel_processes::terminal::{
+    AgentId, Host, HostError, INPUT_BYTES_MAX, PROMPT_BYTES_MAX, PaneAt, TerminalStream,
 };
+use kernel_processes::terminal::{CHUNK_BYTES_MAX, PASTE_BYTES_MAX, type_into};
 use tokio::io::AsyncWrite;
 
 pub(super) const MAGIC: &[u8; 4] = b"CAT1";
@@ -506,7 +505,7 @@ fn pin(host: &dyn Host, agent: &AgentId) -> Result<Option<PaneAt>, HostError> {
     match host.own_pane_at(agent) {
         Ok(at) => {
             assert!(
-                crate::terminal::pane_id_valid(&at.pane),
+                kernel_processes::terminal::pane_id_valid(&at.pane),
                 "a pin is a pane id"
             );
             assert!(at.serial > 0, "a pin names the connection that found it");
@@ -626,7 +625,7 @@ fn paste(host: &Arc<dyn Host>, agent: &AgentId, pinned: Option<PaneAt>, keys: Ve
     assert!(
         pinned
             .as_ref()
-            .is_none_or(|at| crate::terminal::pane_id_valid(&at.pane)),
+            .is_none_or(|at| kernel_processes::terminal::pane_id_valid(&at.pane)),
         "a pin is a pane id"
     );
     let host = host.clone();
@@ -650,7 +649,7 @@ async fn agent_gone(host: &Arc<dyn Host>, agent: &AgentId, pinned: Option<&PaneA
     assert!(
         pinned
             .as_ref()
-            .is_none_or(|at| crate::terminal::pane_id_valid(&at.pane)),
+            .is_none_or(|at| kernel_processes::terminal::pane_id_valid(&at.pane)),
         "a pin is a pane id"
     );
     tokio::task::spawn_blocking(move || {
@@ -660,7 +659,7 @@ async fn agent_gone(host: &Arc<dyn Host>, agent: &AgentId, pinned: Option<&PaneA
         };
         match stays {
             Ok(stays) => !stays,
-            Err(error) if crate::terminal::ended_code(&error.0) => true,
+            Err(error) if kernel_processes::terminal::ended_code(&error.0) => true,
             Err(error) if error.0 == "terminal_pane_unknown" => true,
             Err(_) => host.alive().is_ok_and(|alive| !alive.contains(&agent)),
         }
@@ -689,7 +688,7 @@ fn send(
     assert!(
         pinned
             .as_ref()
-            .is_none_or(|at| crate::terminal::pane_id_valid(&at.pane)),
+            .is_none_or(|at| kernel_processes::terminal::pane_id_valid(&at.pane)),
         "a pin is a pane id"
     );
     let host = host.clone();
@@ -755,7 +754,7 @@ async fn open(
             rows,
             follows,
         } => {
-            let size = crate::terminal::SIZE_MIN..=crate::terminal::SIZE_MAX;
+            let size = kernel_processes::terminal::SIZE_MIN..=kernel_processes::terminal::SIZE_MAX;
             if !size.contains(&cols) || !size.contains(&rows) {
                 return Err(failure("terminal_size_bounds"));
             }
@@ -768,7 +767,7 @@ async fn open(
     let member = agent_id.team_agent().filter(|_| pane.is_none());
     let engine_host = terminal_off_worker(engine, authority).await?;
     let host = match &pane {
-        Some(pane) => crate::terminal::pane_view(engine_host, pane)?,
+        Some(pane) => kernel_processes::terminal::pane_view(engine_host, pane)?,
         None => engine_host,
     };
     let attaching = host.clone();
@@ -779,7 +778,7 @@ async fn open(
         match size.filter(|_| input_only) {
             Some((cols, rows)) => {
                 attaching.input_live(&agent_id)?;
-                Ok::<View, crate::terminal::HostError>(View {
+                Ok::<View, kernel_processes::terminal::HostError>(View {
                     agent: agent_id,
                     cols,
                     rows,
@@ -1105,7 +1104,7 @@ async fn pump(
                         }
                         viewer = Some(fresh);
                     }
-                    Err(error) if crate::terminal::ended_code(&error.0) => break "terminal_ended",
+                    Err(error) if kernel_processes::terminal::ended_code(&error.0) => break "terminal_ended",
                     Err(_) => break "terminal_unavailable",
                 },
                 None => break "terminal_ended",
@@ -1115,7 +1114,7 @@ async fn pump(
             }, if sending.is_some() => {
                 sending = None;
                 match sent.unwrap_or_else(|_| Err(HostError("terminal_unavailable".into()))) {
-                    Err(error) if crate::terminal::ended_code(&error.0) => break "terminal_ended",
+                    Err(error) if kernel_processes::terminal::ended_code(&error.0) => break "terminal_ended",
                     Err(error) => refused(&error),
                     Ok(None) => {}
                     Ok(Some(text)) => viewing.heard(text).await,
@@ -1188,7 +1187,7 @@ async fn finish(sending: Option<Sending>, viewing: &impl Viewing) {
 /// view's own end, which the pump reports, so it logs nothing for one.
 #[cfg(unix)]
 fn refused(error: &HostError) {
-    if !crate::terminal::ended_code(&error.0) {
+    if !kernel_processes::terminal::ended_code(&error.0) {
         eprintln!("terminal_send_refused code={}", plain_code(&error.0));
     }
 }

@@ -169,11 +169,11 @@ async fn terminal_waiting(client: &OwnerClient) -> Stream {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn terminal_views_up_to_the_connection_bound_are_held_and_the_next_is_refused_by_name() {
-    assert_eq!(crate::terminal::CONNECTIONS_MAX, 40);
+    assert_eq!(kernel_processes::terminal::CONNECTIONS_MAX, 40);
     let fixture = Fixture::start().await;
     let client = fixture.client().await;
     let mut held = Vec::new();
-    for _ in 0..crate::terminal::CONNECTIONS_MAX {
+    for _ in 0..kernel_processes::terminal::CONNECTIONS_MAX {
         held.push(terminal_waiting(&client).await);
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -190,13 +190,13 @@ async fn terminal_views_up_to_the_connection_bound_are_held_and_the_next_is_refu
     }
     assert_eq!(
         open,
-        crate::terminal::CONNECTIONS_MAX,
+        kernel_processes::terminal::CONNECTIONS_MAX,
         "views 9 to 40 are held like the first 8"
     );
 
     let mut past = terminal_waiting(&client).await;
     let attach = crate::terminal::TerminalRequest::Attach {
-        agent_id: crate::terminal::AgentId::team(1).unwrap(),
+        agent_id: kernel_processes::terminal::AgentId::team(1).unwrap(),
     };
     past.write_all(&encode_frame(&attach).unwrap())
         .await
