@@ -576,7 +576,9 @@ fn the_attached_of_a_live_open_reaches_the_host_only_once_its_view_is_open() {
     };
     let _launcher = {
         let launcher = Tmux::open(Some(tmux), &folder);
-        launcher.spawn(&agent, &command).unwrap();
+        launcher
+            .spawn(&agent, &crazyagent::terminal::PaneCommand::from(&command))
+            .unwrap();
         launcher
     };
     let (_stop, stopped) = tokio::sync::watch::channel(false);

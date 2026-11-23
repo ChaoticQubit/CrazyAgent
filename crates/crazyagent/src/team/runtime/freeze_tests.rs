@@ -142,7 +142,9 @@ impl Proxied {
         };
         let agent = AgentId::team(id).unwrap();
         let since = SystemTime::now();
-        let pane = host.spawn(&agent, &command).unwrap();
+        let pane = host
+            .spawn(&agent, &crate::terminal::PaneCommand::from(&command))
+            .unwrap();
         let record = PaneRecord {
             access: Some(AgentAccess::Sandboxed),
             toolchains: Some(Vec::new()),
@@ -919,7 +921,7 @@ impl Host for ListFails {
     fn spawn(
         &self,
         agent: &AgentId,
-        command: &InteractiveCommand,
+        command: &crate::terminal::PaneCommand,
     ) -> Result<crate::terminal::PaneRef, crate::terminal::HostError> {
         self.0.spawn(agent, command)
     }
