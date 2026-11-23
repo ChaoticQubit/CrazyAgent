@@ -16,8 +16,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 /// The engine answers program finding needs without naming the engine crate: harness
-/// shims and prefixes, the projects the engine registered, and the folder checks that live
-/// with the sandbox until its own move. Built once by crazyagent
+/// shims and prefixes, the projects the engine registered and where their last good read is
+/// kept, and the folder checks that live with the sandbox until its own move. Built once by crazyagent
 /// (crazyagent's `HOOKS`). Inputs: the fields. Output: a value carried on [`Places`].
 #[derive(Clone, Copy)]
 pub struct FindingHooks {
@@ -27,6 +27,8 @@ pub struct FindingHooks {
     pub is_shim: fn(Option<&Path>, &Path) -> bool,
     pub npm_prefix: for<'a> fn(&'a Path) -> Option<&'a Path>,
     pub registered_projects: fn(&Path) -> Option<Vec<PathBuf>>,
+    pub last_good_load: fn(&Path) -> Option<Vec<PathBuf>>,
+    pub last_good_store: fn(&Path, &[PathBuf]),
     pub projects_marker: &'static str,
     pub data_twin: fn(&Path) -> Option<PathBuf>,
     pub one_spelling: fn(PathBuf) -> PathBuf,

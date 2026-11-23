@@ -843,16 +843,51 @@ fn the_failed_read_fallback_never_trusts_a_path_the_normal_path_refuses() {
     assert!(unread.agent_writable(Path::new("/srv/repo/bin/tool")));
 }
 
+/// The stand-in for the engine's last good store: each data folder's stored list, in
+/// memory, so a row sees what the kernel stored and plants what it loads.
+static STORED: std::sync::Mutex<std::collections::BTreeMap<PathBuf, Vec<PathBuf>>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// The stored list of a data folder ([`FindingHooks::last_good_load`]). Input: the data
+/// folder. Output: the list, or none.
+fn stored_load(data_root: &Path) -> Option<Vec<PathBuf>> {
+    STORED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(data_root)
+        .cloned()
+}
+
+/// Stores a data folder's list ([`FindingHooks::last_good_store`]). Inputs: the data folder
+/// and the list.
+fn stored_store(data_root: &Path, roots: &[PathBuf]) {
+    STORED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(data_root.to_path_buf(), roots.to_vec());
+}
+
+/// A fresh data folder's real path. Output: the folder, kept alive by the caller, and its
+/// path.
+fn data_folder() -> (tempfile::TempDir, PathBuf) {
+    let folder = tempfile::tempdir().unwrap_or_else(|error| panic!("temp folder: {error}"));
+    let root = or_named(folder.path().canonicalize(), folder.path());
+    (folder, root)
+}
+
 /// A data folder's last good read of the set-up projects outlives the engine process that
-/// made it: once a new process (here, the data folder's in-memory entry dropped) reads
-/// engine.db and fails on its first read, a repository the earlier read registered under an
-/// install root still counts as agents' to write, so a tool planted there is refused.
+/// made it: the good read goes to the engine's store, and once a new process (here, the
+/// data folder's in-memory entry dropped) reads engine.db and fails on its first read, it
+/// takes what the store holds, so a repository the earlier read registered under an install
+/// root still counts as agents' to write and a tool planted there is refused.
 #[test]
 fn a_last_good_read_outlives_the_engine_process_that_made_it() {
     let tool = Path::new("/usr/local/src/repo/bin/tool");
     let read = FindingSeed {
         hooks: FindingHooks {
             registered_projects: |_| Some(vec![PathBuf::from("/usr/local/src/repo")]),
+            last_good_load: stored_load,
+            last_good_store: stored_store,
             ..STUB_HOOKS
         },
         ..stub_seed()
@@ -860,41 +895,45 @@ fn a_last_good_read_outlives_the_engine_process_that_made_it() {
     let failed = FindingSeed {
         hooks: FindingHooks {
             registered_projects: |_| None,
+            last_good_load: stored_load,
+            last_good_store: stored_store,
             ..STUB_HOOKS
         },
         ..stub_seed()
     };
-    let data = tempfile::tempdir().unwrap();
-    let root = data.path().canonicalize().unwrap();
+    let (_data, root) = data_folder();
     assert!(Places::at_roots(Some(&root), None, read).agent_writable(tool));
-    super::LAST_GOOD
+    assert_eq!(
+        stored_load(&root),
+        Some(vec![PathBuf::from("/usr/local/src/repo")])
+    );
+    super::test_support::forget_last_good(&root);
+    assert!(Places::at_roots(Some(&root), None, failed).agent_writable(tool));
+    super::test_support::forget_last_good(&root);
+    STORED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(&root);
-    assert!(Places::at_roots(Some(&root), None, failed).agent_writable(tool));
 }
 
 /// A last good read can only add refusals: one that names a folder makes a tool under it
 /// agents' to write while engine.db cannot be read, and every path agents can write with no
-/// last good read stays agents' to write with that one, a forged entry included.
+/// last good read stays agents' to write with that one, a forged stored entry included.
 #[test]
 fn a_forged_last_good_entry_only_adds_refusals() {
     let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set for the rows"));
     let failed = FindingSeed {
         hooks: FindingHooks {
             registered_projects: |_| None,
+            last_good_load: stored_load,
+            last_good_store: stored_store,
             ..STUB_HOOKS
         },
         ..stub_seed()
     };
-    let bare = tempfile::tempdir().unwrap();
-    let bare_root = bare.path().canonicalize().unwrap();
-    let forged = tempfile::tempdir().unwrap();
-    let forged_root = forged.path().canonicalize().unwrap();
-    super::LAST_GOOD
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(forged_root.clone(), vec![PathBuf::from("/usr/bin")]);
+    let (_bare, bare_root) = data_folder();
+    let (_forged, forged_root) = data_folder();
+    stored_store(&forged_root, &[PathBuf::from("/usr/bin")]);
     let without = Places::at_roots(Some(&bare_root), None, failed.clone());
     let with = Places::at_roots(Some(&forged_root), None, failed);
     let paths = [
@@ -911,7 +950,8 @@ fn a_forged_last_good_entry_only_adds_refusals() {
     }
     assert!(!without.agent_writable(Path::new("/usr/bin/env")));
     assert!(with.agent_writable(Path::new("/usr/bin/env")));
-    super::LAST_GOOD
+    super::test_support::forget_last_good(&forged_root);
+    STORED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(&forged_root);

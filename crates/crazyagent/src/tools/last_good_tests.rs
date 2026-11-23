@@ -1,18 +1,13 @@
 use super::finding_seed;
+use super::last_good::{FILE_BYTES_MAX, NAME as SIDE_FILE};
 use super::tests::engine_with_projects;
 use kernel_processes::finding::Places;
 use kernel_processes::finding::test_support::{at_roots, forget_last_good};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-/// The side file a data folder's last good read of the set-up projects is kept in.
-const SIDE_FILE: &str = "places-last-good";
-
 /// The first line of the side file, naming its format and version.
 const MAGIC: &[u8] = b"crazyagent places-last-good 1\n";
-
-/// The most bytes a side file may hold and still be read.
-const SIDE_FILE_BYTES_MAX: u64 = 16 << 20;
 
 /// A repository the rows register under an install root, where a failed read with no last
 /// good read trusts every path as installed. It need not exist: the read keeps the folder as
@@ -185,7 +180,7 @@ fn an_unsafe_or_malformed_side_file_is_ignored() {
                 std::fs::OpenOptions::new()
                     .write(true)
                     .open(side)
-                    .and_then(|file| file.set_len(SIDE_FILE_BYTES_MAX + 1))
+                    .and_then(|file| file.set_len(FILE_BYTES_MAX + 1))
                     .unwrap_or_else(|error| panic!("{}: {error}", side.display()))
             }),
         ),
