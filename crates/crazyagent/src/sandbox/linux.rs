@@ -2697,7 +2697,7 @@ impl Grants {
         assert!(hidden.len() <= HIDDEN_MAX);
         assert!(write.iter().all(|path| {
             sandbox
-                .hidden
+                .hidden()
                 .iter()
                 .all(|hidden| !hidden.starts_with(path))
         }));
