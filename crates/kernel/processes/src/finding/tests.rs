@@ -3,12 +3,13 @@ use super::*;
 
 use std::os::unix::fs::PermissionsExt;
 
-/// A scratch HOME with no tools in it, its real path, so found files compare equal.
+/// A scratch HOME with no tools in it, its real path, so found files compare equal. It lies
+/// beside the test binary, where no other user can change it
+/// ([`crate::service::test_support::durable_folder`]): the resolver's own kernel check drops
+/// a folder under a temp folder every user can write, such as Linux `/tmp`. Output: the
+/// folder and its real path.
 fn scratch() -> (tempfile::TempDir, PathBuf) {
-    let folder = tempfile::Builder::new()
-        .prefix("tools-resolve-")
-        .tempdir()
-        .unwrap();
+    let folder = crate::service::test_support::durable_folder();
     let home = folder.path().canonicalize().unwrap();
     (folder, home)
 }
