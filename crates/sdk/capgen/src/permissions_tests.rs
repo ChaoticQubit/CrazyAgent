@@ -28,10 +28,8 @@ fn borrowed(loaded: &[(String, File)]) -> Vec<(&str, File)> {
 /// stray file at each level. Inputs: a name unique to the row and (tier folder, plugin
 /// folder, plugin.toml text) triples. Output: the folder.
 fn plugins(name: &str, manifests: &[(&str, &str, &str)]) -> PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "capgen-permissions-{}-{name}",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("capgen-permissions-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).expect("the plugins folder is made");
     fs::write(root.join(".DS_Store"), "x").expect("the stray file writes");
@@ -67,7 +65,10 @@ fn permissions_rs_equals_capgen_output() {
     let loaded = caps();
     let files = permissions(&borrowed(&loaded), &repo("plugins")).expect("the tables generate");
     assert_eq!(
-        files.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(),
+        files
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>(),
         ["permissions.rs"]
     );
     assert_eq!(
@@ -92,10 +93,15 @@ fn the_permission_table_lists_every_capability() {
         .map(|rest| rest.trim_end_matches("\","))
         .collect();
     assert_eq!(listed, names);
-    assert!(text.contains(&format!("pub const PERMISSIONS: [Permission; {}]", names.len())));
-    assert!(text.contains("name: \"settings.save_quit\",\n        tier: Tier::Kernel,\n        needs: \"settings.write\",\n        emits: &[\"AgentQuitSaved\"],"));
-    assert!(text.contains("pub const BUNDLED_GRANTS: [BundledGrant; 1]"));
-    assert!(text.contains("plugin: \"agent-quit\",\n        tier: Tier::T2,\n        permissions: &[\"settings.write\"],"));
+    let flat: String = text.split_whitespace().collect();
+    assert!(flat.contains(&format!("pubconstPERMISSIONS:[Permission;{}]", names.len())));
+    assert!(flat.contains(
+        "name:\"settings.save_quit\",tier:Tier::Kernel,needs:\"settings.write\",emits:&[\"AgentQuitSaved\"],"
+    ));
+    assert!(flat.contains("pubconstBUNDLED_GRANTS:[BundledGrant;1]"));
+    assert!(
+        flat.contains("plugin:\"agent-quit\",tier:Tier::T2,permissions:&[\"settings.write\"],")
+    );
 }
 
 #[test]
@@ -104,8 +110,16 @@ fn bundled_grants_are_sorted_by_plugin_id_whatever_the_folders() {
         "sorted",
         &[
             ("t3", "b-plugin", &manifest("b-plugin", "t3", "[]")),
-            ("t1", "c-plugin", &manifest("c-plugin", "t1", "[\"secrets.find\"]")),
-            ("t2", "a-plugin", &manifest("a-plugin", "t2", "[\"settings.write\"]")),
+            (
+                "t1",
+                "c-plugin",
+                &manifest("c-plugin", "t1", "[\"secrets.find\"]"),
+            ),
+            (
+                "t2",
+                "a-plugin",
+                &manifest("a-plugin", "t2", "[\"settings.write\"]"),
+            ),
         ],
     );
     let loaded = caps();
@@ -117,8 +131,9 @@ fn bundled_grants_are_sorted_by_plugin_id_whatever_the_folders() {
         .map(|rest| rest.trim_end_matches("\","))
         .collect();
     assert_eq!(ids, ["a-plugin", "b-plugin", "c-plugin"]);
-    assert!(text.contains("pub const BUNDLED_GRANTS: [BundledGrant; 3]"));
-    assert!(text.contains("tier: Tier::T3,\n        permissions: &[],"));
+    let flat: String = text.split_whitespace().collect();
+    assert!(flat.contains("pubconstBUNDLED_GRANTS:[BundledGrant;3]"));
+    assert!(flat.contains("plugin:\"b-plugin\",tier:Tier::T3,permissions:&[],"));
     fs::remove_dir_all(&root).expect("the folder is removed");
 }
 

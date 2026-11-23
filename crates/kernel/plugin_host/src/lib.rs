@@ -10,7 +10,12 @@ pub struct Refused {
 
 #[cfg(feature = "store")]
 pub mod embedding;
+/// Tables capgen writes from the `.cap` files and the bundled plugins' manifests.
+pub mod generated {
+    pub mod permissions;
+}
 pub mod manifest;
+pub mod permission;
 pub mod problem;
 pub mod views;
 

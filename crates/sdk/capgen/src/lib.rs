@@ -52,6 +52,23 @@ pub fn wit(files: &[(&str, File)]) -> Result<Vec<(String, String)>, CapgenError>
     wit::files(files)
 }
 
+/// Writes plugin_host's permission table and bundled grants, `permissions.rs`, after every
+/// check the Rust SDK runs, laid out by rustfmt. Inputs: stems with parsed files, any
+/// order, and the plugins folder of `t1`/`t2`/`t3` tier folders. Output: the one file, or
+/// the first refusal (`capgen_plugin_tier`, `capgen_plugin_folder`, a manifest refusal, ...).
+pub fn permissions(
+    files: &[(&str, File)],
+    plugins: &Path,
+) -> Result<Vec<(String, String)>, CapgenError> {
+    permissions::files(files, plugins)?
+        .into_iter()
+        .map(|(path, text)| {
+            let formatted = rustfmt(&path, &text)?;
+            Ok((path, formatted))
+        })
+        .collect()
+}
+
 /// Writes one `.cap` file as a single test module with its own `Host` trait, laid out by
 /// rustfmt, for the SDK's tests to compile every emitter. Inputs: the stem and the parsed
 /// file. Output: the module text, or the first refusal.
@@ -194,6 +211,7 @@ pub fn drift(generated: &Path, files: &[(String, String)]) -> Vec<String> {
     differing
 }
 
+mod permissions;
 #[cfg(test)]
 mod permissions_tests;
 mod rust;

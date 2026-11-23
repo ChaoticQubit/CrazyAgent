@@ -2,6 +2,7 @@ use kernel_plugin_host::generated::permissions::{BUNDLED_GRANTS, PERMISSIONS};
 use kernel_plugin_host::permission::{self, BundledGrant, Permission};
 
 use super::*;
+use crate::grants::sdk_tier;
 
 /// A one-capability permission table: `x.use` needs `x.use` at the given tier and emits
 /// nothing. Input: the tier. Output: the table.
@@ -35,7 +36,12 @@ fn every_plugin_host_tier_maps_to_the_sdk_tier_in_order() {
     let mapped: Vec<sdk::Tier> = tiers.iter().map(|tier| sdk_tier(*tier)).collect();
     assert_eq!(
         mapped,
-        [sdk::Tier::Kernel, sdk::Tier::T1, sdk::Tier::T2, sdk::Tier::T3]
+        [
+            sdk::Tier::Kernel,
+            sdk::Tier::T1,
+            sdk::Tier::T2,
+            sdk::Tier::T3
+        ]
     );
     for pair in tiers.windows(2) {
         assert!(pair[0] < pair[1]);

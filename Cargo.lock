@@ -885,6 +885,7 @@ dependencies = [
  "crazyagent-bus-gateway",
  "crazyagent-cap",
  "crazyagent-kernel-common",
+ "crazyagent-kernel-plugin-host",
  "crazyagent-kernel-processes",
  "crazyagent-kernel-security",
  "crazyagent-kernel-storage",
