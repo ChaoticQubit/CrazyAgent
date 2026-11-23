@@ -105,3 +105,10 @@ pub(super) fn forward_logged(
         }
     }
 }
+
+/// Hands each line of a harness's stdout to the session until the output ends. A line
+/// longer than `LINE_BYTES_MAX` is passed over to its newline and reported once as
+/// skipped, so no amount of output ends the session. Takes the stdout and the sender.
+pub(super) fn forward(stdout: ChildStdout, sender: SyncSender<Line>) {
+    forward_logged(stdout, sender, None);
+}

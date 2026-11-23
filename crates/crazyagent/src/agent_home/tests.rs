@@ -2874,11 +2874,8 @@ fn git_python_and_cargo_in_an_agent_run_nothing_its_home_config_names() {
     if let Some(toolchain) = &toolchain {
         base.push(("RUSTUP_TOOLCHAIN", toolchain.as_os_str()));
     }
-    let env = kernel_sandbox::profile::env::agent_process_env(
-        &base,
-        std::iter::empty::<(&OsStr, Option<&OsStr>)>(),
-    )
-    .unwrap();
+    use kernel_sandbox::profile::env::agent_process_env;
+    let env = agent_process_env(&base, std::iter::empty::<(&OsStr, Option<&OsStr>)>()).unwrap();
     let mut ran = Vec::new();
     for (program, arguments, folder) in [
         (

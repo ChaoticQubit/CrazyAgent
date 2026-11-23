@@ -14,7 +14,7 @@ use crate::sandbox::InstalledSandbox;
 use crate::usage::capture::Tokens;
 #[cfg(unix)]
 use kernel_processes::group::Ending;
-use kernel_sandbox::profile::env::{LINEAGE_VARIABLE, LineageToken};
+use kernel_sandbox::profile::env::{Handed, LINEAGE_VARIABLE, LineageToken};
 #[cfg(not(windows))]
 use kernel_sandbox::toolchains;
 #[cfg(not(windows))]
@@ -892,7 +892,7 @@ fn sandboxed(
         .map(|(name, _)| name.as_str())
         .collect();
     let handed = handover
-        .map(|handover| kernel_sandbox::profile::env::Handed::new(&names, handover.token()))
+        .map(|handover| Handed::new(&names, handover.token()))
         .transpose()
         .map_err(|_| failure("launch_environment_refused"))?;
     assert_eq!(handed.is_some(), handover.is_some());
@@ -931,7 +931,7 @@ pub fn listed_command(
     request: &LaunchRequest,
     arguments: &[OsString],
     environment: &[(OsString, OsString)],
-    handed: kernel_sandbox::profile::env::Handed<'_>,
+    handed: Handed<'_>,
 ) -> Result<Command, LaunchError> {
     validate(request)?;
     let harness_env = environment
@@ -949,7 +949,7 @@ fn confined<'a>(
     installed: Option<&Installed>,
     arguments: &[OsString],
     harness_env: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
-    handed: Option<kernel_sandbox::profile::env::Handed<'_>>,
+    handed: Option<Handed<'_>>,
 ) -> Result<Command, LaunchError> {
     let home = request.account.home();
     let tool_home = installed.and_then(Installed::tool_home).unwrap_or(home);
@@ -1008,9 +1008,10 @@ fn confined<'a>(
 }
 
 /// Builds the harness command inside the request's boundary, in its working folder: on
-/// macOS the confined profile through [`kernel_sandbox::profile::env::agent_command`], with the launch's
-/// exception to the variable guard through [`kernel_sandbox::profile::env::agent_command_handing`], or the
-/// Full access session shim, which carries no exception; on Linux and Windows an installed
+/// macOS the confined profile through [`kernel_sandbox::profile::env::agent_command`], with
+/// the launch's exception to the variable guard through
+/// [`kernel_sandbox::profile::env::agent_command_handing`], or the Full access session shim,
+/// which carries no exception; on Linux and Windows an installed
 /// sandbox with the account's home, through [`InstalledSandbox::wrap`], on Windows once
 /// [`home_containers`] passes, and never with an exception, which only macOS carries so far;
 /// anything else is `launch_sandbox_unavailable`. Inputs: the request, program, script
@@ -1023,24 +1024,19 @@ fn bounded<'a>(
     arguments: &[OsString],
     base: &[(&str, &OsStr)],
     harness_env: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
-    handed: Option<kernel_sandbox::profile::env::Handed<'_>>,
+    handed: Option<Handed<'_>>,
 ) -> Result<Command, LaunchError> {
     #[cfg(target_os = "macos")]
     {
+        use kernel_sandbox::profile::env::{
+            agent_command, agent_command_handing, unconfined_command,
+        };
         let mut command = match (request.boundary.confined_profile(), handed) {
-            (Some(profile), Some(handed)) => kernel_sandbox::profile::env::agent_command_handing(
-                profile,
-                program,
-                base,
-                harness_env,
-                handed,
-            ),
-            (Some(profile), None) => {
-                kernel_sandbox::profile::env::agent_command(profile, program, base, harness_env)
+            (Some(profile), Some(handed)) => {
+                agent_command_handing(profile, program, base, harness_env, handed)
             }
-            (None, None) => {
-                kernel_sandbox::profile::env::unconfined_command(program, base, harness_env)
-            }
+            (Some(profile), None) => agent_command(profile, program, base, harness_env),
+            (None, None) => unconfined_command(program, base, harness_env),
             (None, Some(_)) => return Err(failure("launch_environment_refused")),
         }
         .map_err(|_| failure("launch_environment_refused"))?;
@@ -2801,13 +2797,6 @@ pub struct RunLogs {
     pub bytes_max: u64,
 }
 
-/// Hands each line of a harness's stdout to the session until the output ends. A line
-/// longer than `LINE_BYTES_MAX` is passed over to its newline and reported once as
-/// skipped, so no amount of output ends the session. Takes the stdout and the sender.
-fn forward(stdout: ChildStdout, sender: SyncSender<Line>) {
-    forward_logged(stdout, sender, None);
-}
-
 mod turn_session;
 pub use turn_session::TurnSession;
 
@@ -2824,4 +2813,4 @@ mod home_windows_tests;
 mod bounded_windows_tests;
 
 mod output_tail;
-use output_tail::{forward_logged, tail};
+use output_tail::{forward, forward_logged, tail};

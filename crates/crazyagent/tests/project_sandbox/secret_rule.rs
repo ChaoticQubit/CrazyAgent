@@ -154,3 +154,28 @@ fn an_agent_starts_in_a_project_named_with_long_fold_runs_and_runs_no_app_plante
     let stderr = String::from_utf8_lossy(&planted.stderr);
     assert!(stderr.contains("Operation not permitted"), "{stderr}");
 }
+
+#[test]
+fn an_agent_still_runs_framework_python_whose_launcher_starts_its_python_app() {
+    let case = case();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let profile = case.profiles.join("python.sb");
+    let python = Path::new("/opt/homebrew/bin/python3");
+    let real = fs::canonicalize(python).unwrap();
+    assert!(
+        real.to_str().unwrap().contains(".framework/Versions/"),
+        "the probe needs a framework build at {}",
+        python.display()
+    );
+    let output = run(
+        &sandbox,
+        &profile,
+        &format!("{} -c 'print(\"ok\")'", quoted(python)),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
+}

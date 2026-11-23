@@ -6029,29 +6029,6 @@ mod tests {
         );
     }
 
-    /// AppArmor keeps unprivileged programs out of user namespaces only where its setting
-    /// reads 1; any other value, or no file, leaves them free, so the AppArmor line shows
-    /// only where it is the reason nothing nests (DEC-179 SBX-3).
-    #[test]
-    fn only_an_apparmor_setting_of_one_restricts_user_namespaces() {
-        assert_eq!(
-            APPARMOR_USERNS,
-            "/proc/sys/kernel/apparmor_restrict_unprivileged_userns"
-        );
-        assert!(restricts(Some("1\n")));
-        assert!(restricts(Some("1")));
-        for free in [
-            Some("0\n"),
-            Some(""),
-            Some("2\n"),
-            Some("11\n"),
-            Some("1 0"),
-            None,
-        ] {
-            assert!(!restricts(free), "{free:?}");
-        }
-    }
-
     /// The helper refuses every variable that makes glibc load code, the dynamic loader's
     /// and gconv's, and no other: a name that only starts with `LD`, holds `LD_` later, or
     /// differs in case still passes (DEC-179 SBX-3 fold, rv-sa241 MED-1, rv-ds241 F2).

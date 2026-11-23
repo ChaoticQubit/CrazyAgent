@@ -4054,31 +4054,6 @@ fn the_harness_the_engine_launches_from_an_app_bundle_still_starts_but_its_bundl
     refused(many.allow_exec(&program("tool-4")));
 }
 
-#[test]
-fn an_agent_still_runs_framework_python_whose_launcher_starts_its_python_app() {
-    let case = case();
-    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
-    let profile = case.profiles.join("python.sb");
-    let python = Path::new("/opt/homebrew/bin/python3");
-    let real = fs::canonicalize(python).unwrap();
-    assert!(
-        real.to_str().unwrap().contains(".framework/Versions/"),
-        "the probe needs a framework build at {}",
-        python.display()
-    );
-    let output = run(
-        &sandbox,
-        &profile,
-        &format!("{} -c 'print(\"ok\")'", quoted(python)),
-    );
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
-}
-
 /// SECAUDIT sandbox-seatbelt-unfiltered-sysctl-read-procargs: a confined child reads neither
 /// the arguments nor the environment of a process outside its sandbox through either
 /// process-arguments sysctl, and still reads a process of its own sandbox and an ordinary
