@@ -117,14 +117,24 @@ pub(crate) fn sweep_staged(root: &Path) {
     kernel_plugin_host::store::sweep_staged(&engine(root));
 }
 
-/// Runs the plugin store's start sweeps: what a crash left staged, then every entered
-/// plugin key file in `plugin-keys` that no binding row names, as a committed removal or a
-/// crash between a binding change and its file delete leaves it. A name that is no entered
-/// plugin key and the account key folder are never touched, and when the binding rows do
-/// not read, no key is deleted. Inputs: the engine connection and root. Output: none.
-#[cfg(unix)]
+/// Runs the plugin store's start sweeps: what a crash left staged, then on Unix every
+/// entered plugin key file in `plugin-keys` that no binding row names, as a committed
+/// removal or a crash between a binding change and its file delete leaves it. Off Unix no
+/// plugin key file is ever saved. Inputs: the engine connection and root. Output: none.
 pub(crate) fn sweep_at_start(db: &Connection, root: &Path) {
     sweep_staged(root);
+    #[cfg(unix)]
+    sweep_unnamed_keys(db, root);
+    #[cfg(not(unix))]
+    let _ = db;
+}
+
+/// Deletes every entered plugin key file in `plugin-keys` that no binding row names. A name
+/// that is no entered plugin key and the account key folder are never touched, and when the
+/// binding rows do not read, no key is deleted. Inputs: the engine connection and root.
+/// Output: none.
+#[cfg(unix)]
+fn sweep_unnamed_keys(db: &Connection, root: &Path) {
     let Ok(named) = kernel_plugin_host::store::named_keys(db) else {
         return;
     };
