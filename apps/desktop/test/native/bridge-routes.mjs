@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { nativeSources } from "../native-commands.mjs";
 
 export const LIB = fileURLToPath(new URL("../../src-tauri/src/lib.rs", import.meta.url));
 export const ROUTES = fileURLToPath(new URL("../../src-tauri/e2e_bridge/routes.rs", import.meta.url));
@@ -91,7 +92,7 @@ export function commandArgs(source) {
 export function commands(source) {
   const custom = commandArgs(source);
   const found = [];
-  const head = /#\[tauri::command\]\s*(?:pub\s+)?(?:async\s+)?fn\s+(desktop_\w+)\s*(?:<[^>]*>)?\(/g;
+  const head = /#\[tauri::command\]\s*(?:pub(?:\(crate\))?\s+)?(?:async\s+)?fn\s+(desktop_\w+)\s*(?:<[^>]*>)?\(/g;
   for (let match = head.exec(source); match; match = head.exec(source)) {
     let index = head.lastIndex;
     let depth = 1;
@@ -242,7 +243,7 @@ function imports(source) {
     const base = brace === -1 ? text.slice(0, text.lastIndexOf("::")) : text.slice(0, brace).replace(/::$/, "");
     const leaves = brace === -1 ? [text.slice(text.lastIndexOf("::") + 2)] : splitTop(text.slice(brace + 1, text.lastIndexOf("}")));
     const root = base.startsWith("bridge") ? `crazyagent_desktop::${base}` : base;
-    if (!/^(crazyagent|crazyagent_desktop|std)\b/.test(root)) continue;
+    if (!/^(crazyagent|crazyagent_desktop|std|kernel_\w+)\b/.test(root)) continue;
     for (const leaf of leaves) if (/^\w+$/.test(leaf)) paths.set(leaf, `${root}::${leaf}`);
   }
   return paths;
@@ -292,5 +293,5 @@ ${arms}        _ => Routed::Unknown,
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   mkdirSync(dirname(ROUTES), { recursive: true });
-  writeFileSync(ROUTES, render(readFileSync(LIB, "utf8"), methods(bridgeSource())));
+  writeFileSync(ROUTES, render(nativeSources(), methods(bridgeSource())));
 }

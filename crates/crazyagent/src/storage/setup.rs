@@ -1202,6 +1202,9 @@ pub(crate) fn execute(
     }
 }
 
+#[cfg(all(test, unix))]
+#[path = "setup_restore_tests.rs"]
+mod restore_tests;
 #[cfg(test)]
 #[path = "setup_switch_tests.rs"]
 mod switch_tests;
