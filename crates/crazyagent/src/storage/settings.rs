@@ -647,7 +647,10 @@ impl SettingsSources {
     /// and a text that does not resolve are refused and left as they are. Input: the edit,
     /// from the global and project texts to the new global text and its config. Output: the
     /// config the files now resolve to.
-    pub(super) fn write_global(&self, edit: &GlobalEdit) -> Result<EffectiveConfig, EngineError> {
+    pub(super) fn write_global(
+        &self,
+        edit: &GlobalEdit<'_>,
+    ) -> Result<EffectiveConfig, EngineError> {
         #[cfg(unix)]
         {
             self.global.verify()?;
@@ -735,8 +738,8 @@ impl SettingsSources {
 
 /// One plain key edit of the global settings text: from the global and project texts to
 /// the new global text and the config both then resolve to, or the config refusal.
-type GlobalEdit =
-    dyn Fn(&str, &str) -> Result<(String, EffectiveConfig), crate::config::ConfigError>;
+type GlobalEdit<'a> =
+    dyn Fn(&str, &str) -> Result<(String, EffectiveConfig), crate::config::ConfigError> + 'a;
 
 /// The name a plain key edit is staged under in the global file's folder before its rename.
 const SETTING_STAGED: &str = ".crazyagent-setting-staged";
