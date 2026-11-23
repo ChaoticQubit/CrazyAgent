@@ -38,10 +38,13 @@ impl FakeStore {
             .map_or(Ok(()), |code| Err(StoreError::code(code)))
     }
 
-    /// The stored bytes of one item. Inputs: service and account. Output: the bytes.
+    /// The secret of one stored item, read through its frame of host keys. Inputs:
+    /// service and account. Output: the secret's bytes, or `None` when nothing is stored.
     fn held(&self, service: &str, account: &str) -> Option<Vec<u8>> {
         let found = reference(service, account).unwrap();
-        self.items.lock().unwrap().get(&found).cloned()
+        let item = self.items.lock().unwrap().get(&found).cloned()?;
+        let (_, secret) = unframed(SecretString::stored(item).unwrap()).unwrap();
+        Some(secret.expose().as_bytes().to_vec())
     }
 }
 
