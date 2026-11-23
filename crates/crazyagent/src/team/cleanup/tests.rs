@@ -2579,7 +2579,7 @@ fn removing_an_agents_worktree_takes_its_own_tool_caches_and_keeps_the_shared_on
     .collect();
     let folder = project_folder(runtime, project);
     for name in &names {
-        prepare(runtime, project, name, None).unwrap();
+        prepare(&crate::sandbox::TOOL_CACHE_HOOKS, runtime, project, name, None).unwrap();
         write(&folder.join(format!("{name}.primed")), b"record\n");
     }
     assert_eq!(case.remove(&[1]), removed(&[1]));
