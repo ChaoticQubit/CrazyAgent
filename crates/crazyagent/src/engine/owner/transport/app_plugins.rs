@@ -35,6 +35,9 @@ pub const APP_PLUGINS_CODES: &[&str] = &[
     "app_plugin_request_bounds",
     "app_plugin_request_invalid",
     "app_plugin_secret_not_declared",
+    "app_plugin_setting_unavailable",
+    "app_plugin_setting_unreadable",
+    "app_plugin_setting_unsafe",
     "app_plugins_readonly",
     "app_plugins_unavailable",
     "owner_authentication_failed",
@@ -100,6 +103,9 @@ enum Action {
         name: String,
         secret: String,
     },
+    SetWhenOff {
+        when_off: TurnOff,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -133,6 +139,16 @@ pub struct AppPluginsPage {
     pub listing: Listing,
     pub words: Vec<PermissionWords>,
     pub notices: Vec<PluginChanged>,
+    pub when_turned_off: WhenTurnedOff,
+}
+
+/// The "When a plugin is turned off" setting in force, and whether a project settings file
+/// sets it, which wins over the choice saved here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WhenTurnedOff {
+    pub value: TurnOff,
+    pub project_override: bool,
 }
 
 /// One change notice: the plugin and the SHA-256 it was trusted at and holds now.
@@ -289,6 +305,16 @@ impl OwnerClient {
             .await
     }
 
+    /// Saves what happens to running work when a plugin is turned off, in the global
+    /// settings file. Input: the choice. Output: the page, with the choice now in force.
+    pub async fn app_plugin_set_when_off(
+        &self,
+        when_off: TurnOff,
+    ) -> Result<AppPluginsPage, EngineError> {
+        self.app_plugins_page(Action::SetWhenOff { when_off }, None)
+            .await
+    }
+
     async fn app_plugins_page(
         &self,
         action: Action,
@@ -422,7 +448,12 @@ async fn handle(
         .owner_job(|reply| Job::AppPlugins(command, reply))
         .await?;
     Ok(match done {
-        Done::Page { listing, notices } => Reply::Plugins {
+        Done::Page {
+            listing,
+            notices,
+            when_turned_off,
+            project_override,
+        } => Reply::Plugins {
             page: Box::new(AppPluginsPage {
                 listing,
                 words: crate::app_plugins::words::WORDS
@@ -433,6 +464,10 @@ async fn handle(
                     })
                     .collect(),
                 notices: notices.into_iter().map(PluginChanged::from).collect(),
+                when_turned_off: WhenTurnedOff {
+                    value: when_turned_off,
+                    project_override,
+                },
             }),
         },
         Done::Preview(preview) => Reply::Preview {
@@ -493,6 +528,7 @@ fn command(action: Action, key: Option<Vec<u8>>) -> Command {
             key: key.expect("parse admits set_key only with its key frame"),
         },
         Action::Unbind { name, secret } => Command::Unbind { name, secret },
+        Action::SetWhenOff { when_off } => Command::SetWhenOff { when_off },
     }
 }
 
@@ -521,7 +557,9 @@ fn parse(bytes: &[u8]) -> Result<(Action, bool), EngineError> {
         Action::BindAccount { name, secret, .. }
         | Action::SetKey { name, secret }
         | Action::Unbind { name, secret } => vec![name, secret],
-        Action::List | Action::Preview { .. } | Action::Add { .. } => Vec::new(),
+        Action::List | Action::Preview { .. } | Action::Add { .. } | Action::SetWhenOff { .. } => {
+            Vec::new()
+        }
     };
     let folder_invalid =
         |folder: &PathBuf| !folder.is_absolute() || folder.as_os_str().len() > FOLDER_BYTES_MAX;

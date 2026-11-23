@@ -730,6 +730,60 @@ pub(crate) fn edit_model_access(
     Ok((bytes, config))
 }
 
+/// Sets what happens to running work when a plugin is turned off in the global settings
+/// text, changing only that value so every other byte, comment and key stays as written.
+/// Inputs: the global and project texts and the choice. Output: the new global text and the
+/// config both texts resolve to; a global text that does not resolve today is refused.
+pub(crate) fn edit_when_turned_off(
+    global: &str,
+    project: &str,
+    when_off: kernel_plugin_host::usage::TurnOff,
+) -> Result<(String, EffectiveConfig), ConfigError> {
+    resolve_config_bytes(global, project)?;
+    let shape = || ConfigError("plugins_shape".into());
+    let mut document = global
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|_| ConfigError("invalid_configuration_format".into()))?;
+    let word = match when_off {
+        kernel_plugin_host::usage::TurnOff::RefuseNewCalls => "refuse_new_calls",
+        kernel_plugin_host::usage::TurnOff::StopRuns => "stop_runs",
+    };
+    let bytes = match document.get_mut("plugins") {
+        None => {
+            let gap = if global.is_empty() {
+                ""
+            } else if global.ends_with('\n') {
+                "\n"
+            } else {
+                "\n\n"
+            };
+            format!("{global}{gap}[plugins]\nwhen_turned_off = \"{word}\"\n")
+        }
+        Some(item) => {
+            let plugins = item.as_table_like_mut().ok_or_else(shape)?;
+            match plugins.get_mut("when_turned_off") {
+                Some(item) => {
+                    let value = item.as_value_mut().ok_or_else(shape)?;
+                    let decor = value.decor().clone();
+                    *value = toml_edit::Value::from(word);
+                    *value.decor_mut() = decor;
+                }
+                None => {
+                    plugins.insert("when_turned_off", toml_edit::value(word));
+                }
+            }
+            document.to_string()
+        }
+    };
+    let config = resolve_config_bytes(&bytes, project)?;
+    let from_project = config
+        .descriptors
+        .get("plugins.when_turned_off")
+        .is_some_and(|descriptor| descriptor.origin == Origin::Project);
+    assert!(from_project || config.settings.plugins.when_turned_off == when_off);
+    Ok((bytes, config))
+}
+
 /// The most accounts one pool may hold when it is created or changed.
 pub const POOL_MEMBERS_MAX: usize = 15;
 /// The most projects one pool may serve.
@@ -1277,6 +1331,10 @@ impl ConfigState {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "config/when_off_tests.rs"]
+mod when_off_tests;
 
 #[cfg(test)]
 mod tests {

@@ -9,7 +9,7 @@ use kernel_plugin_host::usage::{ChangeNotice, Holder, TurnOff, Usage};
 use kernel_plugin_host::views::{Listing, Preview};
 use rusqlite::Connection;
 
-use crate::config::PluginsPolicy;
+use crate::config::EffectiveConfig;
 use crate::engine::EngineError;
 use crate::protocol::CredentialRef;
 use crate::storage::accounts::{self, ACCOUNT_KEYS, PLUGIN_KEYS};
@@ -223,15 +223,20 @@ pub(crate) enum Command {
         name: String,
         secret: String,
     },
+    SetWhenOff {
+        when_off: TurnOff,
+    },
 }
 
 /// What one App plugins request answers: the listing with the change notices drained after
-/// it, a trust screen, or the runs holding a plugin.
+/// it and the turn-off choice in force, a trust screen, or the runs holding a plugin.
 #[derive(Debug)]
 pub(crate) enum Done {
     Page {
         listing: Listing,
         notices: Vec<ChangeNotice>,
+        when_turned_off: TurnOff,
+        project_override: bool,
     },
     Preview(Preview),
     Users(Vec<Holder>),
@@ -247,13 +252,14 @@ pub(crate) fn usage() -> &'static Usage {
 /// Runs one App plugins request on the engine connection outside a transaction. A change
 /// answers with the listing after it. Turning a plugin off follows the owner's setting for
 /// runs holding it unless the request picks a choice for this one call. Inputs: the engine
-/// connection, the owner's plugin settings and the command. Output: the answer, or the
-/// plugin store's refusal code.
+/// connection, the resolved settings and the command; saving the choice itself is the
+/// storage worker's. Output: the answer, or the plugin store's refusal code.
 pub(crate) fn execute(
     db: &Connection,
-    policy: &PluginsPolicy,
+    config: &EffectiveConfig,
     command: Command,
 ) -> Result<Done, EngineError> {
+    let policy = &config.settings.plugins;
     let root = crate::storage::trash::engine_root(db)?;
     let engine = engine(root);
     let now = crate::team::now_ms();
@@ -307,12 +313,20 @@ pub(crate) fn execute(
         Command::Unbind { name, secret } => {
             store::unbind(db, &engine, &name, &secret).map_err(error)?;
         }
+        Command::SetWhenOff { .. } => {
+            return Err(EngineError("app_plugin_setting_unavailable".into()));
+        }
     }
     let listing = registry::list(db, &engine).map_err(error)?;
     usage().note_listed(&listing);
     Ok(Done::Page {
         listing,
         notices: usage().take_notices(),
+        when_turned_off: policy.when_turned_off,
+        project_override: config
+            .descriptors
+            .get("plugins.when_turned_off")
+            .is_some_and(|descriptor| descriptor.origin == crate::config::Origin::Project),
     })
 }
 

@@ -116,4 +116,15 @@ impl OwnerController {
             .app_plugin_unbind(name, secret)
             .await
     }
+
+    /// Saves what happens to running work when a plugin is turned off. Input: the choice.
+    /// Output: the page.
+    pub async fn app_plugin_set_when_off(
+        &self,
+        when_off: TurnOff,
+    ) -> Result<AppPluginsPage, EngineError> {
+        self.app_plugins_client()?
+            .app_plugin_set_when_off(when_off)
+            .await
+    }
 }

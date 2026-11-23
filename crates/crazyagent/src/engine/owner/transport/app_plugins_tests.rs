@@ -58,6 +58,12 @@ fn every_action_reads_from_its_json_shape() {
                 name: "acme".into(),
             },
         ),
+        (
+            r#"{"kind":"set_when_off","when_off":"stop_runs"}"#.to_string(),
+            Action::SetWhenOff {
+                when_off: TurnOff::StopRuns,
+            },
+        ),
     ];
     for (action, expected) in cases {
         let body = format!(r#"{{"app_plugins":{action},"secret_present":false}}"#);
@@ -99,6 +105,8 @@ fn bad_requests_are_refused_before_anything_runs() {
         r#"{"kind":"add","folder":"acme","sha256":"ab","replace":true}"#.to_string(),
         r#"{"kind":"list","extra":1}"#.to_string(),
         r#"{"kind":"search"}"#.to_string(),
+        r#"{"kind":"set_when_off"}"#.to_string(),
+        r#"{"kind":"set_when_off","when_off":"later"}"#.to_string(),
     ];
     for action in bodies {
         let body = format!(r#"{{"app_plugins":{action},"secret_present":false}}"#);
@@ -124,6 +132,9 @@ fn the_protocol_refusals_are_listed_for_the_clients() {
         "app_plugin_essential",
         "app_plugin_past_cap",
         "app_plugin_port_handed_out",
+        "app_plugin_setting_unavailable",
+        "app_plugin_setting_unreadable",
+        "app_plugin_setting_unsafe",
     ] {
         assert!(APP_PLUGINS_CODES.contains(&listed), "{listed}");
     }
