@@ -1706,7 +1706,7 @@ impl LinuxSandbox {
     /// on Landlock a hidden folder, or hidden folders with no private mount tree ([`cuts`]).
     pub fn new(sandbox: ProjectSandbox, backend: LinuxBackend) -> Result<Self, SandboxError> {
         admitted(&sandbox)?;
-        if matches!(backend, LinuxBackend::Landlock { .. }) && !sandbox.hidden.is_empty() {
+        if matches!(backend, LinuxBackend::Landlock { .. }) && !sandbox.hidden().is_empty() {
             return Err(SandboxError::Unavailable(HIDDEN_NEEDS_NAMESPACES.into()));
         }
         mounts_hold(&sandbox)?;
@@ -1748,7 +1748,7 @@ impl LinuxSandbox {
             kept_outside_picked(&kept_free(&sandbox), read_picked_ports().as_ref())
                 .map_err(SandboxError::Unavailable)?;
         }
-        if !sandbox.hidden.is_empty() && !cuts(&backend) {
+        if !sandbox.hidden().is_empty() && !cuts(&backend) {
             return Err(SandboxError::Unavailable(HIDDEN_MOUNTS_NOT_PRIVATE.into()));
         }
         Ok(Self {
@@ -2500,7 +2500,7 @@ pub(crate) fn host_kept() -> kernel_sandbox::host::LinuxHost {
 /// limited network under [`LinuxSockets::Refuse`]. Input: the policy. Output: Ok, or the
 /// plain `Unavailable` reason.
 fn admitted(sandbox: &ProjectSandbox) -> Result<(), SandboxError> {
-    if sandbox.checkout.is_some() || sandbox.clone.is_some() {
+    if sandbox.checkout().is_some() || sandbox.clone_root().is_some() {
         return Err(SandboxError::Unavailable(CONFINED_UNAVAILABLE.into()));
     }
     if matches!(sandbox.network(), SandboxNetwork::Only(_))
@@ -2532,10 +2532,10 @@ impl Sandbox for LinuxSandbox {
         }
         let cwd = harness
             .get_current_dir()
-            .unwrap_or(&self.sandbox.project_root);
+            .unwrap_or(self.sandbox.project_root());
         if !clean_absolute(cwd)
-            || !std::iter::once(&self.sandbox.project_root)
-                .chain(self.sandbox.worktrees.iter())
+            || !std::iter::once(self.sandbox.project_root())
+                .chain(self.sandbox.worktrees().iter().map(PathBuf::as_path))
                 .any(|root| cwd.starts_with(root))
         {
             return Err(invalid(
@@ -2543,7 +2543,7 @@ impl Sandbox for LinuxSandbox {
             ));
         }
         let grants = Grants::of(&self.sandbox)?;
-        let confined = self.sandbox.checkout.is_some() || self.sandbox.clone.is_some();
+        let confined = self.sandbox.checkout().is_some() || self.sandbox.clone_root().is_some();
         if confined && matches!(self.backend, LinuxBackend::Bubblewrap { .. }) {
             return Err(SandboxError::Unavailable(CONFINED_NEEDS_LANDLOCK.into()));
         }
@@ -2646,14 +2646,14 @@ impl Grants {
             .collect();
         let followed: Vec<&PathBuf> = followed.iter().collect();
         let folder = |path: &Path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
-        let checkout = sandbox.checkout.as_ref();
+        let checkout = sandbox.checkout();
         let mut write = Vec::new();
         let mut git_write = Vec::new();
         for root in sandbox.writable_roots() {
-            if checkout.is_some_and(|checkout| *root == checkout.objects) {
+            if checkout.is_some_and(|checkout| root == checkout.objects()) {
                 continue;
             }
-            if checkout.is_some_and(|checkout| *root == checkout.admin) {
+            if checkout.is_some_and(|checkout| root == checkout.admin()) {
                 git_write.push(root.clone());
                 continue;
             }
@@ -2672,17 +2672,17 @@ impl Grants {
                 writable_children(&state, &[], &protected, &mut write)?;
             }
         }
-        for hidden in &sandbox.hidden {
+        for hidden in sandbox.hidden() {
             split_above(hidden, &protected, &mut write)?;
         }
         if git_write
             .iter()
-            .any(|root| sandbox.hidden.iter().any(|hidden| hidden.starts_with(root)))
+            .any(|root| sandbox.hidden().iter().any(|path| path.starts_with(root)))
         {
             return Err(invalid("a git folder grant holds a hidden folder"));
         }
         let mut hidden = Vec::new();
-        for path in &sandbox.hidden {
+        for path in sandbox.hidden() {
             match fs::create_dir(path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -2693,7 +2693,7 @@ impl Grants {
             }
             hidden.push(path.clone());
         }
-        assert_eq!(hidden.len(), sandbox.hidden.len());
+        assert_eq!(hidden.len(), sandbox.hidden().len());
         assert!(hidden.len() <= HIDDEN_MAX);
         assert!(write.iter().all(|path| {
             sandbox
@@ -2738,24 +2738,24 @@ impl Grants {
             ..Held::default()
         };
         if let Some(checkout) = checkout {
-            if git_write.contains(&checkout.admin) {
+            if git_write.contains(checkout.admin()) {
                 let held = ADMIN_WRITES.iter().chain(&ADMIN_LINKS);
                 guarded
                     .trees
-                    .extend(held.map(|name| checkout.admin.join(name)));
+                    .extend(held.map(|name| checkout.admin().join(name)));
             }
-            if write.contains(&checkout.worktree) {
-                guarded.trees.push(checkout.worktree.join(".git"));
+            if write.contains(checkout.worktree()) {
+                guarded.trees.push(checkout.worktree().join(".git"));
             }
         }
-        if let Some(clone) = sandbox.clone.as_ref() {
+        if let Some(clone) = sandbox.clone_root() {
             let store = clone_store(clone);
             guarded.entries.extend(store.entries);
             guarded.trees.extend(store.trees);
             guarded.stores.extend(store.stores);
         }
         let secrets = sandbox.secret_paths();
-        let carved = sandbox.carved_home.as_ref();
+        let carved = sandbox.carved_home();
         assert!(read.iter().chain(&write).chain(&git_write).all(|grant| {
             secrets.iter().all(|secret| {
                 carved.is_some_and(|(home, folder)| home == grant && folder == secret)
@@ -2778,12 +2778,12 @@ impl Grants {
 /// limit (leader 19:09 Q6): one made between this read and that cut still reaches the agent.
 /// Input: the policy. Output: Ok, or the refusal.
 fn mounts_hold(sandbox: &ProjectSandbox) -> Result<(), SandboxError> {
-    if sandbox.hidden.is_empty() {
+    if sandbox.hidden().is_empty() {
         return Ok(());
     }
     let text = fs::read_to_string("/proc/self/mountinfo")
         .map_err(|_| SandboxError::Unavailable(HIDDEN_MOUNTS_UNREAD.into()))?;
-    mounted_again(&sandbox.hidden, &text)
+    mounted_again(sandbox.hidden(), &text)
 }
 
 /// Refuses hidden folders whose disk the mount list shows mounted a second time at the
@@ -3111,18 +3111,18 @@ fn clone_store(clone: &Path) -> Held {
 fn git_own(sandbox: &ProjectSandbox) -> GitOwn {
     let (working, _) = sandbox.git_deny_roots();
     let mut kids = Vec::new();
-    if sandbox.adds_worktrees {
+    if sandbox.adds_worktrees() {
         let project = sandbox.project_root();
         let state = project.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
         kids.extend([project.join("worktrees"), state.join("worktrees")]);
     }
-    if let Some(setup) = &sandbox.setup {
-        kids.push(setup.folder.clone());
+    if let Some(setup) = sandbox.teammates_setup() {
+        kids.push(setup.folder().clone());
     }
-    let common = sandbox.checkout.as_ref().and_then(|checkout| {
+    let common = sandbox.checkout().and_then(|checkout| {
         let plain = |folder: &&Path| folder.file_name() == Some(OsStr::new(".git"));
         checkout
-            .admin
+            .admin()
             .ancestors()
             .find(plain)
             .map(Path::to_path_buf)
@@ -3135,8 +3135,7 @@ fn git_own(sandbox: &ProjectSandbox) -> GitOwn {
     assert!(!own.trees.is_empty());
     assert!(
         sandbox
-            .clone
-            .as_ref()
+            .clone_root()
             .is_none_or(|clone| own.trees.contains(clone))
     );
     own
@@ -3192,7 +3191,7 @@ fn landlock_policy(grants: &Grants, sandbox: &ProjectSandbox) -> LandlockPolicy 
 fn kept_free(sandbox: &ProjectSandbox) -> Vec<u16> {
     let mut ports: Vec<u16> = OWNER_PORTS
         .iter()
-        .chain(&sandbox.kept_ports)
+        .chain(sandbox.kept_ports())
         .copied()
         .chain(PROXY_PORTS)
         .chain(RELAY_PORTS)

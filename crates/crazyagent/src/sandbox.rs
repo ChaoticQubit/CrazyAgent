@@ -578,16 +578,23 @@ pub struct ProjectSandbox {
 /// native teammates' linked worktrees (OP-9b): the teammates' folder inside the lead's
 /// worktree and the project repository's worktree records.
 #[derive(Debug, Clone)]
-struct TeammatesSetup {
+pub struct TeammatesSetup {
     folder: PathBuf,
     records: PathBuf,
+}
+
+impl TeammatesSetup {
+    /// The folder the teammates' clones sit in.
+    pub fn folder(&self) -> &PathBuf {
+        &self.folder
+    }
 }
 
 /// The one git worktree a confined agent writes in place of the whole project folder,
 /// with the two parts of the project repository its commits need: the worktree's own
 /// admin folder under `.git/worktrees` and the shared object store.
 #[derive(Debug, Clone)]
-struct Checkout {
+pub struct Checkout {
     worktree: PathBuf,
     admin: PathBuf,
     objects: PathBuf,
@@ -2159,6 +2166,68 @@ impl ProjectSandbox {
         self.linux_sockets
     }
 
+    /// The extra worktrees, beside the project folder, the agent writes in and may start in.
+    pub fn worktrees(&self) -> &[PathBuf] {
+        &self.worktrees
+    }
+
+    /// The paths the agent can neither read nor list: secrets inside the project and the
+    /// folders [`Self::hide`] took.
+    pub fn hidden(&self) -> &[PathBuf] {
+        &self.hidden
+    }
+
+    /// The project folders [`Self::keep_out`] keeps the agent out of.
+    pub fn kept_out(&self) -> &[PathBuf] {
+        &self.kept_out
+    }
+
+    /// The top-level project folders the agent alone may open, when [`Self::open_only_tops`]
+    /// set them. Output: the names, or none when every top is open.
+    pub fn open_tops(&self) -> Option<&[String]> {
+        self.open_tops.as_deref()
+    }
+
+    /// The loopback ports [`Self::keep_ports`] keeps free of the agent's own servers.
+    pub fn kept_ports(&self) -> &[u16] {
+        &self.kept_ports
+    }
+
+    /// The carved home and the real home it stands in for, when the agent's home is carved
+    /// out of the owner's. Output: the two folders, or none.
+    pub fn carved_home(&self) -> Option<&(PathBuf, PathBuf)> {
+        self.carved_home.as_ref()
+    }
+
+    /// The worktree [`Self::confine_to_worktree`] confines the agent to, with its admin folder
+    /// and object store. Output: the checkout, or none.
+    pub fn checkout(&self) -> Option<&Checkout> {
+        self.checkout.as_ref()
+    }
+
+    /// The clone [`Self::confine_to_clone`] confines the agent to. Output: its root, or none.
+    pub fn clone_root(&self) -> Option<&PathBuf> {
+        self.clone.as_ref()
+    }
+
+    /// The teammates' folder and records [`Self::confine_to_teammates_setup`] grants. Output:
+    /// the setup, or none.
+    pub fn teammates_setup(&self) -> Option<&TeammatesSetup> {
+        self.setup.as_ref()
+    }
+
+    /// Tells whether [`Self::adding_worktrees`] lets the engine's worktree-add step write the
+    /// project's worktree folders. Output: the answer.
+    pub fn adds_worktrees(&self) -> bool {
+        self.adds_worktrees
+    }
+
+    /// The project's agent folders choice this sandbox holds, if any. Output: a copy of the
+    /// rule, or none.
+    pub fn agent_files(&self) -> Option<kernel_sandbox::policy::AgentFilesRule> {
+        self.agent_files
+    }
+
     /// The loopback ports a Linux that nests agents carries for this one over a bridge, the
     /// agent then having a network namespace of its own: the sockets setting is `TcpOnly`
     /// and the limited network names loopback ports only, each [`BRIDGE_PORT_MIN`] or
@@ -3183,22 +3252,22 @@ impl InstalledSandbox {
     ) -> Result<Self, SandboxError> {
         #[cfg(not(target_os = "linux"))]
         let _ = strict;
-        if HIDDEN_UNHELD && !sandbox.hidden.is_empty() {
+        if HIDDEN_UNHELD && !sandbox.hidden().is_empty() {
             return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
         }
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if !sandbox.kept_out.is_empty() || sandbox.open_tops.is_some() {
+        if !sandbox.kept_out().is_empty() || sandbox.open_tops().is_some() {
             return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
         }
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if !sandbox.shared_writes.is_empty() {
+        if !sandbox.shared_writes().is_empty() {
             return Err(SandboxError::Unavailable(
                 SHARED_WRITES_NEED_SEATBELT.into(),
             ));
         }
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if sandbox
-            .agent_files
+            .agent_files()
             .is_some_and(|rule| rule.choice != kernel_sandbox::policy::IdeAgentFiles::AllowAll)
         {
             return Err(SandboxError::Unavailable(AGENT_FILES_NEED_SEATBELT.into()));
@@ -3370,6 +3439,21 @@ impl Sandbox for InstalledSandbox {
 }
 
 impl Checkout {
+    /// The worktree the agent is confined to.
+    pub fn worktree(&self) -> &PathBuf {
+        &self.worktree
+    }
+
+    /// The worktree's admin folder in the project's `.git/worktrees`.
+    pub fn admin(&self) -> &PathBuf {
+        &self.admin
+    }
+
+    /// The object store the worktree's commits land in.
+    pub fn objects(&self) -> &PathBuf {
+        &self.objects
+    }
+
     /// The Seatbelt rules that keep a confined agent from adding to or changing the git
     /// objects the owner and the other agents share: no write in `info/` or `pack/`, nor of
     /// either folder entry, in any letter case, no new, moved or removed fan-out folder, no
@@ -3788,7 +3872,7 @@ mod linux_sockets_tests {
                     full,
                     line.is_none(),
                     "{:?} under {choice:?}: {line:?}",
-                    launched.network
+                    launched.network()
                 );
             }
         }

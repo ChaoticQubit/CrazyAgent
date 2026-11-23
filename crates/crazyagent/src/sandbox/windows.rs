@@ -175,10 +175,10 @@ impl Sandbox for WindowsSandbox {
         }
         let cwd = harness
             .get_current_dir()
-            .unwrap_or(&self.sandbox.project_root);
+            .unwrap_or(self.sandbox.project_root());
         if !clean_absolute(cwd)
-            || !std::iter::once(&self.sandbox.project_root)
-                .chain(self.sandbox.worktrees.iter())
+            || !std::iter::once(self.sandbox.project_root())
+                .chain(self.sandbox.worktrees().iter().map(PathBuf::as_path))
                 .any(|root| cwd.starts_with(root))
         {
             return Err(invalid(
