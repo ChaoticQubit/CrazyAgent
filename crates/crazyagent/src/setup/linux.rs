@@ -419,20 +419,27 @@ mod tests {
     /// setup calls too old is a version the terminal refuses, and both lines say too old; a
     /// missing tmux gives the resolver's tmux line and no program to start.
     #[test]
-    fn setup_and_the_live_start_agree_on_this_machines_tmux() {
-        let root = tempfile::tempdir().unwrap();
+    fn setup_and_the_live_start_agree_on_this_machines_tmux()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
         let places = crate::tools::tools_places(Some(root.path()));
         let shared = PinnedInstaller::with_places(root.path(), vec![], places);
         let installer = LinuxInstaller::new(Box::new(shared));
         let started = crate::terminal::tmux::installed(root.path());
         match installer.lookup(Dependency::Tmux) {
             Ok(Ok(_)) => {
-                let found = installer.program("tmux").expect("setup found tmux");
-                let started = started.expect("the start finds the tmux setup found");
-                assert_eq!(
-                    found.canonicalize().unwrap(),
-                    started.canonicalize().unwrap()
+                let found = installer.program("tmux");
+                assert!(
+                    found.is_some(),
+                    "setup's lookup found tmux, its program did not"
                 );
+                assert!(
+                    started.is_some(),
+                    "setup found tmux at {found:?}, the start found none"
+                );
+                if let (Some(found), Some(started)) = (found, started) {
+                    assert_eq!(found.canonicalize()?, started.canonicalize()?);
+                }
             }
             Ok(Err(missing))
                 if missing.reason == kernel_processes::finding::Reason::WrongVersion =>
@@ -460,5 +467,6 @@ mod tests {
             }
             Err(code) => assert_eq!(code, InstallError("setup_version_unreadable")),
         }
+        Ok(())
     }
 }
