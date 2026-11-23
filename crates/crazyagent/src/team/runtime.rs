@@ -1173,7 +1173,7 @@ impl TeamRuntime {
             return Err(EngineError("team_state_not_canonical".into()));
         }
         private_directory(state)?;
-        if crate::projects_home::one_spelling(state.canonicalize().map_err(error)?) != state {
+        if kernel_sandbox::paths::one_spelling(state.canonicalize().map_err(error)?) != state {
             return Err(EngineError("team_state_not_canonical".into()));
         }
         for directory in ["agents", "profiles"] {
@@ -2647,7 +2647,7 @@ impl TeamRuntime {
             .state
             .parent()
             .zip(AgentId::team(lead).ok())
-            .and_then(|(root, lead)| crate::terminal::teammates_socket(root, &lead).ok()));
+            .and_then(|(root, lead)| crate::terminal::tmux::teammates_socket(root, &lead).ok()));
         #[cfg(not(unix))]
         {
             let _ = lead;
@@ -4251,7 +4251,7 @@ impl TeamRuntime {
             .project_folder()
             .canonicalize()
             .ok()
-            .map(crate::projects_home::one_spelling);
+            .map(kernel_sandbox::paths::one_spelling);
         for id in stale {
             let worker = self.workers.get_mut(&id).expect("worker exists");
             let running =
@@ -8593,7 +8593,7 @@ impl TeamRuntime {
         let sandbox = ProjectSandbox::new(
             &repository
                 .canonicalize()
-                .map(crate::projects_home::one_spelling)
+                .map(kernel_sandbox::paths::one_spelling)
                 .map_err(|_| "lead_sandbox_unavailable")?,
             &agent_home(&self.state, lead),
             &self.agent_folder(lead).join("tmp"),
@@ -9314,12 +9314,14 @@ impl TeamRuntime {
                     Some(kernel_processes::terminal::OWN_SERVER_UNAVAILABLE),
                 )
             })?;
-        let socket = scratch.join(crate::terminal::HARNESS_SOCKET);
+        let socket = scratch.join(kernel_processes::terminal::HARNESS_SOCKET);
         assert!(
             self.state
                 .parent()
                 .zip(AgentId::team(id).ok())
-                .and_then(|(runtime, lead)| crate::terminal::harness_socket(runtime, &lead).ok())
+                .and_then(
+                    |(runtime, lead)| crate::terminal::tmux::harness_socket(runtime, &lead).ok()
+                )
                 .is_some_and(|named| named == socket),
             "the lead's own socket is the one the terminal host routes to"
         );
@@ -9329,11 +9331,11 @@ impl TeamRuntime {
             .ok_or("the team state folder has no engine root")?;
         let lead = AgentId::team(id)
             .map_err(|e| with_code("the lead has no terminal name", Some(&e.0)))?;
-        let mates_socket = crate::terminal::renew_teammates_socket(runtime, &lead)
+        let mates_socket = crate::terminal::tmux::renew_teammates_socket(runtime, &lead)
             .map_err(|e| with_code("the teammates' socket could not be named", Some(&e.0)))?;
         assert!(
             mates_socket.parent() == Some(scratch)
-                && crate::terminal::teammates_socket(runtime, &lead)
+                && crate::terminal::tmux::teammates_socket(runtime, &lead)
                     .is_ok_and(|named| named == mates_socket),
             "the teammates' socket is the one the terminal host routes to"
         );
@@ -9410,7 +9412,7 @@ impl TeamRuntime {
         let root = stored
             .project_folder()
             .canonicalize()
-            .map(crate::projects_home::one_spelling)
+            .map(kernel_sandbox::paths::one_spelling)
             .map_err(|e| with_code("the project folder could not be opened", Some(io_code(&e))))?;
         if root.starts_with(&self.state) {
             return Err("project folder overlaps engine state".into());
@@ -14771,7 +14773,7 @@ pub fn start_for_engine(
 ) -> Result<TeamService, String> {
     let runtime = runtime
         .canonicalize()
-        .map(crate::projects_home::one_spelling)
+        .map(kernel_sandbox::paths::one_spelling)
         .map_err(|e| format!("team runtime: {e}"))?;
     let state = runtime.join("team");
     private_directory(&state).map_err(|e| e.0)?;

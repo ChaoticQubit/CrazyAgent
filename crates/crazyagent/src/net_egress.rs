@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 
 use crate::github::http::exchange;
 use kernel_security::error::StoreError;
-use kernel_security::net::{CaptureRules, Egress, RawReply, Sealed};
+use kernel_security::net::{CaptureRules, Egress, RawReply, Sealed, SendRow};
 
 /// The hosts each bundled plugin's `plugin.toml` `[net].hosts` lists; equal to the
 /// manifests, which no runtime code reads. Empty while no bundled plugin asks for
@@ -13,6 +13,10 @@ pub const NET_HOSTS: &[(&str, &[&str])] = &[];
 /// The reply fields each bundled plugin's `[net.capture]` names, per host; equal to the
 /// manifests.
 pub const NET_CAPTURES: &[(&str, &str, &[&str])] = &[];
+
+/// The `[net.send]` rows of each bundled plugin's manifest: the field, the hosts its value
+/// may also go to, and its `keep_as` name; equal to the manifests.
+pub const NET_SENDS: &[SendRow<'static>] = &[];
 
 /// The one reply header today's curl exchange reads back.
 const SCOPES_HEADER: &str = "x-oauth-scopes";
@@ -41,7 +45,7 @@ impl CurlEgress {
 /// The capture rules of the bundled plugins, over [`NET_CAPTURES`]. Output: the rules,
 /// or the refusal of a malformed table.
 pub fn bundled_captures() -> Result<CaptureRules, StoreError> {
-    CaptureRules::new(NET_CAPTURES)
+    CaptureRules::new(NET_CAPTURES)?.with_sends(NET_SENDS)
 }
 
 /// The key a `[net].hosts` entry names an origin by: the host, with `:port` only for a

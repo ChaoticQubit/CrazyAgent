@@ -66,7 +66,7 @@ pub(crate) fn list(
     if !folder.is_absolute() {
         return Err(failure("project_files_folder_missing"));
     }
-    let root = crate::sandbox::canonical(folder)
+    let root = kernel_sandbox::paths::canonical(folder)
         .ok()
         .filter(|root| root.is_dir())
         .ok_or_else(|| failure("project_files_folder_missing"))?;
@@ -271,7 +271,7 @@ fn inside(root: &Path, path: &str) -> bool {
     std::fs::symlink_metadata(&full).is_ok_and(|meta| meta.is_file())
         && full
             .parent()
-            .and_then(|parent| crate::sandbox::canonical(parent).ok())
+            .and_then(|parent| kernel_sandbox::paths::canonical(parent).ok())
             .is_some_and(|parent| {
                 parent.strip_prefix(root).is_ok_and(|below| {
                     below.components().all(|part| {

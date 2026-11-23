@@ -279,12 +279,32 @@ pub(crate) fn trusted(case: &Case, text: &str) {
     add_text(case, text, false, 1).unwrap();
 }
 
+/// Reads a fixture a row checks. Inputs: its path and the read. Output: what the read
+/// returned; a failed read stops the row naming the path and the I/O error.
+fn fixture<'p, T>(path: &'p Path, read: impl FnOnce(&'p Path) -> std::io::Result<T>) -> T {
+    read(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+}
+
+/// A fixture read that fails stops the row with the path it read and the I/O error.
+#[test]
+#[should_panic(expected = "missing.toml: No such file")]
+fn a_failed_fixture_read_names_its_path_and_error() {
+    let case = case();
+    fixture(&case.root.join("missing.toml"), std::fs::read);
+}
+
 fn plugin_keys(case: &Case) -> Vec<PathBuf> {
     let keys = case.root.join("plugin-keys");
     let Ok(entries) = std::fs::read_dir(&keys) else {
         return Vec::new();
     };
-    let mut files: Vec<PathBuf> = entries.map(|entry| entry.unwrap().path()).collect();
+    let mut files: Vec<PathBuf> = entries
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|error| panic!("{}: {error}", keys.display()))
+                .path()
+        })
+        .collect();
     files.sort();
     files
 }
@@ -449,12 +469,12 @@ fn add_saves_a_private_file_trusts_it_and_turns_it_on() {
     let folder = case.root.join(FOLDER);
     let plugin_folder = folder.join("acme");
     let file = plugin_folder.join(MANIFEST_FILE);
-    assert_eq!(std::fs::read_to_string(&file).unwrap(), ACME);
+    assert_eq!(fixture(&file, std::fs::read), ACME.as_bytes());
     assert_eq!(
         (mode(&folder), mode(&plugin_folder), mode(&file)),
         (0o700, 0o700, 0o600)
     );
-    assert_eq!(std::fs::read_dir(&plugin_folder).unwrap().count(), 1);
+    assert_eq!(fixture(&plugin_folder, std::fs::read_dir).count(), 1);
     let listing = list(&case.db, &case.engine()).unwrap();
     let acme = plugin(&listing, "acme");
     assert_eq!(
@@ -489,7 +509,7 @@ fn add_refuses_a_changed_text_and_a_taken_name_unless_replacing() {
     let listing = list(&case.db, &case.engine()).unwrap();
     assert_eq!(plugin(&listing, "acme").version, "1.1.0");
     assert_eq!(
-        std::fs::read_dir(case.root.join(FOLDER)).unwrap().count(),
+        fixture(&case.root.join(FOLDER), std::fs::read_dir).count(),
         1,
         "no staged or retired folder is left"
     );
@@ -551,7 +571,10 @@ fn add_copies_only_the_reviewed_content() {
     assert!(!case.root.join(FOLDER).join("acme").exists());
     add(&case.db, &case.engine(), &source, &sha(ACME), false, 5).unwrap();
     assert_eq!(
-        std::fs::read(case.root.join(FOLDER).join("acme").join(MANIFEST_FILE)).unwrap(),
+        fixture(
+            &case.root.join(FOLDER).join("acme").join(MANIFEST_FILE),
+            std::fs::read
+        ),
         ACME.as_bytes()
     );
 }
@@ -613,7 +636,7 @@ fn a_left_over_yaml_plugin_is_listed_refused_and_kept() {
     );
     assert!(legacy.is_file());
     assert_eq!(
-        std::fs::read_to_string(&legacy).unwrap(),
+        fixture(&legacy, std::fs::read_to_string),
         "schema: 1\nkind: embedding\nname: acme\n"
     );
     remove(&case.db, &case.engine(), "acme").unwrap();
@@ -822,6 +845,34 @@ fn the_folder_lists_at_most_its_cap_and_says_there_are_more() {
     assert!(listing.more);
 }
 
+/// An add the listing would not show, or that would push a listed plugin out of it, is
+/// refused before anything is written; replacing a listed plugin still works.
+#[test]
+fn an_add_past_the_folder_cap_is_refused_with_nothing_written() {
+    let case = case();
+    let named = |name: &str| ACME.replace("plugin = \"acme\"", &format!("plugin = \"{name}\""));
+    for index in 0..USER_PLUGINS_MAX {
+        let name = format!("p{index:03}");
+        drop_in(&case, &name, &named(&name));
+    }
+    let trust_before = cells(&case.db, "app_plugin_trust");
+    let state_before = cells(&case.db, "app_plugin_state");
+    for (name, now_ms) in [("p064", 1), ("a000", 2)] {
+        assert_eq!(
+            code(add_text(&case, &named(name), false, now_ms)),
+            "app_plugin_past_cap"
+        );
+        assert!(!case.root.join(FOLDER).join(name).exists());
+    }
+    assert_eq!(cells(&case.db, "app_plugin_trust"), trust_before);
+    assert_eq!(cells(&case.db, "app_plugin_state"), state_before);
+    let newer = named("p010").replace("release = \"1.0.0\"", "release = \"1.1.0\"");
+    add_text(&case, &newer, true, 3).unwrap();
+    let listing = list(&case.db, &case.engine()).unwrap();
+    assert_eq!(plugin(&listing, "p010").version, "1.1.0");
+    assert!(!listing.more);
+}
+
 #[test]
 fn remove_deletes_a_user_plugin_with_its_keys_and_refuses_bundled_and_unknown_ones() {
     let case = case();
@@ -861,6 +912,23 @@ fn remove_deletes_a_user_plugin_with_its_keys_and_refuses_bundled_and_unknown_on
     add_text(&case, ACME, false, 2).unwrap();
     let listing = list(&case.db, &case.engine()).unwrap();
     assert_eq!(plugin(&listing, "acme").secrets[0].binding, Binding::None);
+}
+
+/// A plugin entry that is a link is removed as the link itself: the folder it points to
+/// and the plugin.toml inside stay untouched.
+#[test]
+fn remove_deletes_a_link_entry_and_leaves_its_target() {
+    let case = case();
+    let target = picked(&case, "target", NEAR);
+    let linked = plugins_folder(&case).join("linked");
+    std::os::unix::fs::symlink(&target, &linked).unwrap();
+    remove(&case.db, &case.engine(), "linked").unwrap();
+    assert!(std::fs::symlink_metadata(&linked).is_err());
+    let manifest = target.join(MANIFEST_FILE);
+    match std::fs::read_to_string(&manifest) {
+        Ok(text) => assert_eq!(text, NEAR),
+        Err(error) => panic!("{}: {error}", manifest.display()),
+    }
 }
 
 #[test]
@@ -1047,7 +1115,7 @@ fn a_key_entered_for_a_plugin_is_a_private_file_replaced_in_place_and_deleted_on
     )
     .unwrap();
     assert_eq!(plugin_keys(&case), files);
-    assert_eq!(std::fs::read(&files[0]).unwrap(), b"pa-second-key-002");
+    assert_eq!(fixture(&files[0], std::fs::read), b"pa-second-key-002");
     let listing = list(&case.db, &case.engine()).unwrap();
     assert_eq!(plugin(&listing, "acme").secrets[0].binding, Binding::Key);
     assert_eq!(plugin(&listing, "acme").status, PluginStatus::Ready);
@@ -1267,6 +1335,38 @@ fn a_plugin_on_a_handed_out_port_is_refused_and_left_out_of_the_kept_ports() {
     }
 }
 
+/// The handed-out range is read again when the owner confirms an add: a port the range
+/// took between the trust screen and the add is refused with nothing written, and a plugin
+/// on a port outside the range installs.
+#[test]
+fn an_add_rechecks_the_handed_out_range_before_writing() {
+    let case = case();
+    let range = 32_768..=60_999;
+    let engine = Engine {
+        handed_out: Some(range.clone()),
+        ..case.engine()
+    };
+    let text = near_on(*range.start());
+    let source = picked(&case, "handed", &text);
+    assert!(matches!(
+        preview(&case.db, &case.engine(), &source).unwrap(),
+        Preview::Ready { .. }
+    ));
+    let trust_before = cells(&case.db, "app_plugin_trust");
+    let state_before = cells(&case.db, "app_plugin_state");
+    assert_eq!(
+        code(add(&case.db, &engine, &source, &sha(&text), false, 1)),
+        "app_plugin_port_handed_out"
+    );
+    assert!(!case.root.join(FOLDER).join("handed").exists());
+    assert_eq!(cells(&case.db, "app_plugin_trust"), trust_before);
+    assert_eq!(cells(&case.db, "app_plugin_state"), state_before);
+    let allowed = near_on(9000);
+    let source = picked(&case, "allowed", &allowed);
+    add(&case.db, &engine, &source, &sha(&allowed), false, 2).unwrap();
+    assert!(case.root.join(FOLDER).join("handed").exists());
+}
+
 /// With no handed-out range (macOS keeps every loopback plugin port free of agents in
 /// its profile), a plugin on any port stays usable and listed for the sandbox.
 #[test]
@@ -1326,7 +1426,7 @@ fn the_start_sweep_deletes_staged_leftovers_and_keeps_saved_keys_and_files() {
         assert!(!leftover.exists(), "{}", leftover.display());
     }
     assert_eq!(plugin_keys(&case), kept);
-    assert_eq!(std::fs::read(&kept[0]).unwrap(), b"sk-kept-key-00001");
+    assert_eq!(fixture(&kept[0], std::fs::read), b"sk-kept-key-00001");
     assert!(plugins.join("acme").join(MANIFEST_FILE).is_file());
     let loaded = ready(&case.db, &case.engine(), "acme").unwrap();
     assert_eq!(loaded.bindings.len(), 1);
@@ -1447,6 +1547,45 @@ fn a_failed_binding_write_keeps_the_old_key_working() {
     assert_eq!(loaded.bindings[0].folder(), KeyFolder::Plugin);
     let value = secret_value(&case.engine(), &loaded.bindings[0]).unwrap();
     assert_eq!(value.expose(), "sk-own-plugin-01");
+}
+
+/// A new key entered for a secret already bound to an entered key replaces that key in
+/// place and writes no binding row, so a failing binding write cannot fail it, and the
+/// plugin reads the new key.
+#[test]
+fn a_new_key_at_the_same_reference_needs_no_binding_write() {
+    let case = case();
+    trusted(&case, ACME);
+    set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"sk-own-plugin-01".to_vec(),
+    )
+    .unwrap();
+    let before = cells(&case.db, "app_plugin_secrets");
+    case.db
+        .execute_batch(
+            "CREATE TEMP TRIGGER refuse_insert BEFORE INSERT ON app_plugin_secrets
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;
+             CREATE TEMP TRIGGER refuse_update BEFORE UPDATE ON app_plugin_secrets
+             BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+        )
+        .unwrap();
+    set_key(
+        &case.db,
+        &case.engine(),
+        "acme",
+        "api_key",
+        b"sk-own-plugin-02".to_vec(),
+    )
+    .unwrap();
+    assert_eq!(cells(&case.db, "app_plugin_secrets"), before);
+    assert_eq!(plugin_keys(&case).len(), 1);
+    let loaded = ready(&case.db, &case.engine(), "acme").unwrap();
+    let value = secret_value(&case.engine(), &loaded.bindings[0]).unwrap();
+    assert_eq!(value.expose(), "sk-own-plugin-02");
 }
 
 /// Turning a plugin off writes the off state first: the next call is refused with

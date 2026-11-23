@@ -6,9 +6,10 @@ use crazyagent::engine::owner::{OwnerResult, TerminalOutput, TerminalSession};
 use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::NodeKind;
-use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
+use crazyagent::terminal::tmux::installed;
 use crazyagent::terminal::{FOLDER, TerminalFrame};
 use e2e_support::{Engine, Owner, TMUX, hex, scratch};
+use kernel_processes::terminal::tmux::{SOCKET, Tmux};
 use kernel_processes::terminal::{AgentId, Host};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -93,7 +94,12 @@ async fn the_owner_types_into_an_engine_terminal_and_the_team_graph_shows_the_ma
         let agent = agent.clone();
         let folder = folder.clone();
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder);
+            let launcher = Tmux::open(
+                Some(tmux),
+                &folder,
+                crazyagent::sandbox::confinement(),
+                crazyagent::terminal::tmux::tmux_hooks(),
+            );
             launcher
                 .spawn(
                     &agent,
@@ -295,7 +301,12 @@ async fn an_engine_stop_ends_its_terminal_server_unless_a_team_agent_lives_on() 
         let folder = folder.clone();
         let tmux = tmux.clone();
         tokio::task::spawn_blocking(move || {
-            let launcher = Tmux::open(Some(tmux), &folder);
+            let launcher = Tmux::open(
+                Some(tmux),
+                &folder,
+                crazyagent::sandbox::confinement(),
+                crazyagent::terminal::tmux::tmux_hooks(),
+            );
             for agent in &agents {
                 launcher
                     .spawn(

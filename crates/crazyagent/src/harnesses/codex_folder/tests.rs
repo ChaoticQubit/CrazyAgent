@@ -16,7 +16,7 @@ fn scratch() -> (tempfile::TempDir, PathBuf) {
         .prefix("ca-codex-folder-")
         .tempdir_in(parent)
         .unwrap();
-    let base = crate::sandbox::canonical(root.path()).unwrap();
+    let base = kernel_sandbox::paths::canonical(root.path()).unwrap();
     (root, base)
 }
 

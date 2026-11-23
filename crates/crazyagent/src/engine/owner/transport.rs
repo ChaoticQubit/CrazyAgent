@@ -1,6 +1,8 @@
 use super::*;
 #[cfg(all(test, unix))]
 mod barrier_tests;
+#[cfg(unix)]
+mod dispatch_git;
 #[cfg(all(test, unix))]
 mod dispatch_identity_tests;
 pub(crate) mod master_activity;
@@ -194,10 +196,10 @@ impl Root {
     fn open(path: &Path) -> Result<Self, EngineError> {
         use crazyagent_win_sandbox::private;
         use std::os::windows::ffi::OsStrExt;
-        let path = crate::projects_home::one_spelling(path.to_path_buf());
+        let path = kernel_sandbox::paths::one_spelling(path.to_path_buf());
         if !path
             .to_str()
-            .is_some_and(crate::sandbox::windows_clean_text)
+            .is_some_and(kernel_sandbox::paths::windows_clean_text)
         {
             return Err(failure("owner_root_requires_canonical_trusted_path"));
         }
@@ -3433,17 +3435,6 @@ fn dispatch_files(seal: &DispatchLeaseSeal) -> Result<PathBuf, EngineError> {
     Ok(metadata)
 }
 
-#[cfg(unix)]
-struct DispatchGit(std::process::Child);
-
-#[cfg(unix)]
-impl Drop for DispatchGit {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
 /// Refuses to observe a dispatch Git head without non-blocking Unix pipe reads.
 /// Takes the snapshot and timeout, both unused.
 /// Returns `dispatch_filesystem_unavailable`.
@@ -3461,44 +3452,40 @@ async fn observe_dispatch(
     timeout: Duration,
 ) -> Result<DispatchSnapshot, EngineError> {
     let metadata = dispatch_files(&snapshot.seal)?;
-    let mut child = DispatchGit(
-        kernel_processes::spawn_gate::spawn(
-            std::process::Command::new("/usr/bin/git")
-                .env_clear()
-                .env("PATH", "/usr/bin:/bin")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .envs(crate::research::runner::GIT_SAFE_ENV)
-                .env("GIT_OPTIONAL_LOCKS", "0")
-                .args([
-                    "--no-replace-objects",
-                    "--no-optional-locks",
-                    "-c",
-                    "core.hooksPath=/dev/null",
-                    "-c",
-                    "core.fsmonitor=false",
-                    "-c",
-                    "core.pager=cat",
-                    "-c",
-                    "protocol.allow=never",
-                ])
-                .arg("--git-dir")
-                .arg(&metadata)
-                .arg("--work-tree")
-                .arg(&snapshot.seal.path)
-                .args(["rev-parse", "--verify", "HEAD"])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null()),
-        )
-        .map_err(io_error)?,
-    );
+    let mut command = std::process::Command::new("/usr/bin/git");
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .envs(crate::research::runner::GIT_SAFE_ENV)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .args([
+            "--no-replace-objects",
+            "--no-optional-locks",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.pager=cat",
+            "-c",
+            "protocol.allow=never",
+        ])
+        .arg("--git-dir")
+        .arg(&metadata)
+        .arg("--work-tree")
+        .arg(&snapshot.seal.path)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let (mut child, started) = dispatch_git::spawn_within(command, timeout).await?;
     let mut output = child
         .0
         .stdout
         .take()
         .ok_or_else(|| failure("dispatch_git_stdout_missing"))?;
     rustix::fs::fcntl_setfl(&output, OFlags::NONBLOCK).map_err(io_error)?;
-    let started = std::time::Instant::now();
     let mut bytes = Vec::new();
     let mut eof = false;
     loop {
@@ -3944,7 +3931,10 @@ mod tests {
         let engine = Engine::open(&root.path().join("db"), config).await.unwrap();
         let bin = root.path().join("setup/bin");
         let found = || {
-            crate::terminal::tmux::installed_at(&crate::tools::tools_new(vec![bin.clone()], None))
+            kernel_processes::terminal::tmux::installed_at(&crate::tools::tools_new(
+                vec![bin.clone()],
+                None,
+            ))
         };
         let host = || engine.terminal_on(root.path(), found).unwrap();
         assert_eq!(found(), None);

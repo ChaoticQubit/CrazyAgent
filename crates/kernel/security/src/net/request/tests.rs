@@ -4,8 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::exposure::holds;
-use crate::net::capture::CaptureRules;
-use crate::secrets::{HANDLES_MAX, Handles, Scopes, Secrets};
+use crate::net::capture::{CaptureRules, SEND_HOSTS_MAX};
+use crate::secrets::{Handles, KeptHosts, OwnerEntry, PLUGIN_HANDLES_MAX, Scopes, Secrets};
 use crate::store::{SecretRef, Store, reference};
 
 const NAMESPACE: &str = "dev.crazyagent.e0123456789ab";
@@ -161,6 +161,8 @@ impl Rig {
                 body: body.to_vec(),
             },
             rules: CaptureRules::new(&[("github", "github.com", &["access_token", "device_code"])])
+                .unwrap()
+                .with_sends(&[("github", "access_token", &["api.github.com"], None)])
                 .unwrap(),
         }
     }
@@ -173,7 +175,26 @@ impl Rig {
             NAMESPACE,
             &self.scopes,
             &self.handles,
-            Some(paste),
+            Some(OwnerEntry {
+                plugin: "github",
+                hosts: [
+                    "github.com",
+                    "api.github.com",
+                    "ghe.example:8443",
+                    "127.0.0.1:8080",
+                    "[::1]:8080",
+                    "localhost:8080",
+                    "v6.example:8443",
+                    "mixed.example",
+                    "private.example",
+                    "unresolved.example",
+                    "evil.example",
+                    "140.82.112.4",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+                value: paste,
+            }),
         )
     }
 
@@ -317,7 +338,9 @@ fn a_request_without_capture_still_gets_a_handle_for_a_manifest_field() {
         .request("github", get("https://github.com/login/oauth/access_token"))
         .unwrap();
     assert_eq!(reply.captured.len(), 1);
-    let held = secrets.value("github", reply.captured[0].secret).unwrap();
+    let held = secrets
+        .value("github", reply.captured[0].secret, "github.com")
+        .unwrap();
     assert_eq!(held.expose(), CAPTURED);
 }
 
@@ -448,7 +471,13 @@ fn a_kept_capture_is_found_again_by_name() {
     let reply = requests.request("github", request).unwrap();
     let found = secrets.find("github", "token").unwrap().unwrap();
     assert_eq!(found, reply.captured[0].secret);
-    assert_eq!(secrets.value("github", found).unwrap().expose(), CAPTURED);
+    assert_eq!(
+        secrets
+            .value("github", found, "github.com")
+            .unwrap()
+            .expose(),
+        CAPTURED
+    );
 }
 
 #[test]
@@ -827,9 +856,9 @@ fn a_host_with_a_port_is_captured_by_its_port_key() {
 #[test]
 fn a_full_handle_table_refuses_a_capture_before_send() {
     let rig = Rig::new(&token_reply());
-    for index in 0..HANDLES_MAX {
-        let found = reference(&format!("{NAMESPACE}.notes"), &format!("n{index}")).unwrap();
-        rig.handles.lock().unwrap().mint("notes", found).unwrap();
+    for index in 0..PLUGIN_HANDLES_MAX {
+        let found = reference(&format!("{NAMESPACE}.github"), &format!("n{index}")).unwrap();
+        rig.handles.lock().unwrap().mint("github", found).unwrap();
     }
     let secrets = rig.secrets();
     let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
@@ -857,7 +886,7 @@ fn a_held_capture_fills_a_later_bearer_without_a_store_read() {
     assert!(holds(CAPTURED.as_bytes(), later.config().as_bytes()));
     assert!(!rig.events().contains(&"get".to_owned()));
     assert_eq!(
-        secrets.value("notes", held).map(|_| ()),
+        secrets.value("notes", held, "api.github.com").map(|_| ()),
         Err(StoreError::code("secret_handle_refused"))
     );
 }
@@ -1014,4 +1043,272 @@ fn the_curl_config_pins_the_checked_address() {
         assert_eq!(format!("{}\n", lines[1]), line, "{url}");
         assert_eq!(config.matches("resolve = ").count(), 1, "{url}");
     }
+}
+
+#[test]
+fn a_v4_translated_form_of_a_refused_address_is_refused() {
+    refused_address("https://[::ffff:0:a9fe:a9fe]/v1");
+    refused_address("https://[::ffff:0:a00:1]/v1");
+}
+
+#[test]
+fn a_6to4_address_is_refused() {
+    refused_address("https://[2002:a9fe:a9fe::1]/v1");
+    refused_address("https://[2002:8c52:7004::1]/v1");
+}
+
+#[test]
+fn a_teredo_address_is_refused() {
+    refused_address("https://[2001:0:4136:e378:8000:63bf:3fff:fdd2]/v1");
+}
+
+#[test]
+fn a_discard_only_address_is_refused() {
+    refused_address("https://[100::1]/v1");
+}
+
+#[test]
+fn a_192_0_0_address_is_refused() {
+    refused_address("https://192.0.0.170/v1");
+}
+
+#[test]
+fn a_198_18_benchmark_address_is_refused() {
+    refused_address("https://198.18.0.1/v1");
+    refused_address("https://198.19.255.254/v1");
+}
+
+#[test]
+fn a_hex_integer_host_is_refused() {
+    refused_address("https://0xa9fea9fe/v1");
+}
+
+#[test]
+fn a_dotted_hex_host_is_refused() {
+    refused_address("https://0xa9.0xfe.0xa9.0xfe/v1");
+}
+
+#[test]
+fn a_dotted_octal_host_is_refused() {
+    refused_address("https://0251.0376.0251.0376/v1");
+}
+
+#[test]
+fn a_short_form_host_is_refused() {
+    refused_address("https://169.254.43518/v1");
+}
+
+#[test]
+fn an_integer_host_is_refused() {
+    refused_address("https://2852039166/v1");
+}
+
+#[test]
+fn a_hex_last_part_host_is_refused() {
+    refused_address("https://1.2.3.0x4/v1");
+}
+
+#[test]
+fn a_reply_over_its_bound_after_capture_mints_no_handle() {
+    let mut body = String::from(r#"{"access_token":"gho_x","pad":["#);
+    let items = 1_000_000;
+    for index in 0..items {
+        if index > 0 {
+            body.push(',');
+        }
+        body.push_str("1e2");
+    }
+    body.push_str("]}");
+    assert!(body.len() < REPLY_BYTES_MAX);
+    let rig = Rig::new(body.as_bytes());
+    let secrets = rig.secrets();
+    let before = secrets.free_handles("github");
+    let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
+    let mut request = get("https://github.com/login/oauth/access_token");
+    request.capture = vec![capture("access_token", Some("token"))];
+    assert_eq!(
+        requests.request("github", request),
+        Err(StoreError::code("cap_output_too_large"))
+    );
+    assert_eq!(secrets.free_handles("github"), before);
+    assert!(rig.store.items.lock().unwrap().is_empty());
+    assert!(rig.events().contains(&"send".to_owned()));
+}
+
+#[test]
+fn reply_headers_over_their_bounds_mint_no_handle() {
+    for headers in [
+        vec![("X-Long".to_owned(), "a".repeat(REPLY_TEXT_BYTES_MAX + 1))],
+        vec![("X-Many".to_owned(), "1".to_owned()); REPLY_LIST_MAX + 1],
+    ] {
+        let mut rig = Rig::new(&token_reply());
+        rig.egress.headers = headers;
+        let secrets = rig.secrets();
+        let before = secrets.free_handles("github");
+        let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
+        let mut request = get("https://github.com/login/oauth/access_token");
+        request.reply_headers = vec!["x-long".to_owned(), "x-many".to_owned()];
+        assert_eq!(
+            requests.request("github", request),
+            Err(StoreError::code("cap_output_too_large"))
+        );
+        assert_eq!(secrets.free_handles("github"), before);
+    }
+    let rig = Rig::new(&token_reply());
+    let secrets = rig.secrets();
+    let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
+    let mut request = get("https://github.com/login/oauth/access_token");
+    request.reply_headers = vec!["x-oauth-scopes".to_owned()];
+    assert_eq!(
+        requests.request("github", request).unwrap().captured.len(),
+        1
+    );
+}
+
+#[test]
+fn a_captured_token_is_refused_at_a_listed_host_outside_its_set() {
+    let rig = Rig::new(&token_reply());
+    let secrets = rig.secrets();
+    let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
+    let reply = requests
+        .request("github", get("https://github.com/login/oauth/access_token"))
+        .unwrap();
+    let held = reply.captured[0].secret;
+    let mut request = get("https://uploads.github.com/v1");
+    request.bearer = Some(held);
+    assert_eq!(
+        requests.request("github", request),
+        Err(StoreError::code("secret_handle_refused"))
+    );
+    let sends = rig.events().iter().filter(|event| *event == "send").count();
+    assert_eq!(sends, 1);
+}
+
+#[test]
+fn an_owner_paste_is_refused_at_a_host_the_owner_did_not_approve() {
+    let rig = Rig::new(b"{}");
+    let secrets = rig.secrets();
+    let token = secrets.put_from_owner("github", "token").unwrap();
+    rig.egress.events.lock().unwrap().clear();
+    let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
+    let mut request = get("https://uploads.github.com/v1");
+    request.bearer = Some(token);
+    assert_eq!(
+        requests.request("github", request),
+        Err(StoreError::code("secret_handle_refused"))
+    );
+    let events = rig.events();
+    assert!(!events.contains(&"get".to_owned()), "{events:?}");
+    assert!(!events.contains(&"send".to_owned()), "{events:?}");
+}
+
+#[test]
+fn a_found_name_without_a_declared_keep_as_cannot_be_sent() {
+    let rig = Rig::new(&token_reply());
+    let secrets = rig.secrets();
+    let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
+    let mut request = get("https://github.com/login/oauth/access_token");
+    request.capture = vec![capture("access_token", Some("token"))];
+    requests.request("github", request).unwrap();
+    let later = Mutex::new(Handles::new());
+    let next = Secrets::for_request(&rig.store, NAMESPACE, &rig.scopes, &later, None);
+    let found = next.find("github", "token").unwrap().unwrap();
+    for host in ["github.com", "api.github.com"] {
+        assert_eq!(
+            next.value("github", found, host).map(|_| ()),
+            Err(StoreError::code("secret_handle_refused")),
+            "{host}"
+        );
+    }
+    assert_eq!(next.forget("github", found), Ok(()));
+}
+
+#[test]
+fn a_found_name_with_a_declared_keep_as_gets_its_rule_hosts() {
+    let mut rig = Rig::new(&token_reply());
+    rig.rules = CaptureRules::new(&[("github", "github.com", &["access_token"])])
+        .unwrap()
+        .with_sends(&[("github", "access_token", &["api.github.com"], Some("token"))])
+        .unwrap();
+    let secrets = rig.secrets();
+    let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
+    let mut request = get("https://github.com/login/oauth/access_token");
+    request.capture = vec![capture("access_token", Some("token"))];
+    requests.request("github", request).unwrap();
+    let kept: KeptHosts = rig.rules.kept_hosts();
+    let later = Mutex::new(Handles::new());
+    let next =
+        Secrets::for_request(&rig.store, NAMESPACE, &rig.scopes, &later, None).with_kept(&kept);
+    let found = next.find("github", "token").unwrap().unwrap();
+    for host in ["github.com", "api.github.com"] {
+        assert_eq!(
+            next.value("github", found, host).unwrap().expose(),
+            CAPTURED,
+            "{host}"
+        );
+    }
+    assert_eq!(
+        next.value("github", found, "uploads.github.com")
+            .map(|_| ()),
+        Err(StoreError::code("secret_handle_refused"))
+    );
+}
+
+#[test]
+fn send_rules_refuse_an_uncaptured_field_a_bad_host_list_and_a_reused_keep_as() {
+    let invalid = Err(StoreError::code("net_capture_rules_invalid"));
+    let rules = || {
+        CaptureRules::new(&[("github", "github.com", &["access_token", "device_code"])]).unwrap()
+    };
+    let many: Vec<String> = (0..=SEND_HOSTS_MAX)
+        .map(|index| format!("h{index}.example"))
+        .collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    for rows in [
+        vec![("github", "refresh_token", &["api.github.com"][..], None)],
+        vec![("github", "access_token", &[][..], None)],
+        vec![(
+            "github",
+            "access_token",
+            &["api.github.com", "api.github.com"][..],
+            None,
+        )],
+        vec![("github", "access_token", &many[..], None)],
+        vec![(
+            "github",
+            "access_token",
+            &["api.github.com"][..],
+            Some("Token"),
+        )],
+        vec![
+            (
+                "github",
+                "access_token",
+                &["api.github.com"][..],
+                Some("token"),
+            ),
+            (
+                "github",
+                "device_code",
+                &["api.github.com"][..],
+                Some("token"),
+            ),
+        ],
+        vec![
+            ("github", "access_token", &["api.github.com"][..], None),
+            ("github", "access_token", &["github.com"][..], None),
+        ],
+    ] {
+        assert_eq!(rules().with_sends(&rows).map(|_| ()), invalid, "{rows:?}");
+    }
+    assert!(
+        rules()
+            .with_sends(&[(
+                "github",
+                "access_token",
+                &many[..SEND_HOSTS_MAX],
+                Some("token")
+            )])
+            .is_ok()
+    );
 }

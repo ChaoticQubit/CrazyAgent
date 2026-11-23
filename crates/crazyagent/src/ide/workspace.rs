@@ -212,7 +212,7 @@ pub fn listed(db: &Connection, project: &ProjectId) -> Result<Vec<Section>, Engi
 pub fn folder(root: &Path, project: &ProjectId) -> Result<PathBuf, EngineError> {
     let db = open(root)?;
     let folder = project_folder(&db, project)?;
-    crate::sandbox::canonical(&folder).map_err(|_| failure("ide_project_folder_invalid"))
+    kernel_sandbox::paths::canonical(&folder).map_err(|_| failure("ide_project_folder_invalid"))
 }
 
 /// What a project's IDE server starts from, as the owner saved it in the project's agent

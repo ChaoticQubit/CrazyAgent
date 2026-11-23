@@ -328,7 +328,9 @@ pub fn bind_account(
 }
 
 /// Saves a key the owner entered for one declared secret through the engine's key store,
-/// replacing the one entered before in place. The key is never logged, shown or put in argv
+/// replacing the one entered before in place with no binding write; a first key or one
+/// that replaces an account binding writes the binding and is deleted again if that write
+/// fails. The key is never logged, shown or put in argv
 /// or env, and is wiped. Inputs: database, engine facts, plugin, secret and key bytes.
 /// Output: Ok, or `app_plugin_key_invalid`, `_key_store_unavailable`,
 /// `_secret_not_declared`, `_needs_review`, `_not_found`.
@@ -366,8 +368,11 @@ pub fn set_key(
             std::mem::take(&mut key),
         )
         .map_err(|()| refused("app_plugin_key_store_unavailable"))?;
+        if kept.is_some() {
+            return Ok(());
+        }
         let bound = save_binding(db, engine, name, secret, KEY, reference.as_str());
-        if bound.is_err() && kept.is_none() {
+        if bound.is_err() {
             let _ = (engine.keys.remove)(engine.root, KeyFolder::Plugin, &reference);
         }
         bound
