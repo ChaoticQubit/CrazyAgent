@@ -1,9 +1,9 @@
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::state_log::Aggregate;
-use crate::state_log::replay::{self, Logged};
 use kernel_storage::state_log::Appender;
 use kernel_storage::state_log::Clock;
+use kernel_storage::state_log::replay::{self, Logged};
 use kernel_storage::state_log::{BODY_BYTES_MAX, Chunk, Draft, SNAPSHOT_CHUNK};
 
 mod kept;
@@ -1205,7 +1205,7 @@ pub(crate) fn forget_project(
     fence: &crate::state_log::fence::Fence,
 ) -> Result<usize, EngineError> {
     assert!(!tx.is_autocommit(), "the redaction is part of the clear");
-    let redacted = replay::redact_matching(
+    let redacted = crate::state_log::redact_matching(
         tx,
         &[Aggregate::Landing],
         Some(PROJECT_KINDS.as_slice()),
@@ -1301,7 +1301,7 @@ pub(crate) fn forget_worktrees(
     }
     let named: std::collections::BTreeSet<&str> = worktrees.iter().map(String::as_str).collect();
     let mut found = Vec::new();
-    replay::replay(tx, Aggregate::Landing, 0, |event| {
+    crate::state_log::replay(tx, Aggregate::Landing, 0, |event| {
         if WORKTREE_KINDS.contains(&event.kind.as_str()) {
             let body: serde_json::Map<String, serde_json::Value> =
                 serde_json::from_slice(&event.body).map_err(|_| failure("changes_unavailable"))?;
@@ -1313,7 +1313,7 @@ pub(crate) fn forget_worktrees(
         Ok(())
     })?;
     for seq in &found {
-        replay::redact(tx, *seq, fence)?;
+        crate::state_log::redact(tx, *seq, fence)?;
     }
     for table in WORKTREE_TABLES {
         if has(tx, table)? {
@@ -1342,7 +1342,7 @@ pub fn rebuild(db: &Connection) -> Result<u64, EngineError> {
     let mut removals = removals(db)?.into_iter().peekable();
     clear(db)?;
     let mut chunk_seq = 0;
-    let last = replay::replay(db, Aggregate::Landing, 0, |event| {
+    let last = crate::state_log::replay(db, Aggregate::Landing, 0, |event| {
         while let Some((_, removal)) = removals.next_if(|(seq, _)| *seq < event.seq) {
             forget_removed(db, &removal)?;
         }
@@ -1412,7 +1412,7 @@ fn removals(
     use crate::project_setup::removed::event as removed;
     let mut found = Vec::new();
     let mut read = 0;
-    replay::replay(db, Aggregate::Projects, 0, |logged| {
+    crate::state_log::replay(db, Aggregate::Projects, 0, |logged| {
         if logged.kind != removed::KIND {
             return Ok(());
         }

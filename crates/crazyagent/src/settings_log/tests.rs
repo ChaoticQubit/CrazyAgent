@@ -15,9 +15,10 @@ use crate::sandbox::LinuxSockets;
 use crate::sandbox_settings::SandboxSettings;
 use crate::state_log::Aggregate;
 use crate::state_log::fence::{engine, seed};
-use crate::state_log::replay::{Logged, redact, rows};
+use crate::state_log::redact;
 use crate::storage::opening::Opening;
 use kernel_storage::state_log::SNAPSHOT_CHUNK;
+use kernel_storage::state_log::replay::{Logged, rows};
 use rusqlite::Connection;
 use rusqlite::types::Value;
 
@@ -296,7 +297,7 @@ fn replay_refuses_a_settings_event_it_does_not_know() {
     let logged = |aggregate: Aggregate, kind: &str, schema: u16, body: &str| Logged {
         seq: 1,
         revision: 1,
-        aggregate,
+        aggregate: aggregate.into(),
         kind: kind.into(),
         schema,
         at_ms: 1,
