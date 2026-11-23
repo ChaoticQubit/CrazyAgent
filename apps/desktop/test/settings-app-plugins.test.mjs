@@ -148,7 +148,8 @@ test("App plugins: a change notice becomes one app notification naming the plugi
   ] }));
   assert.match(two, /^2 plugins changed since you trusted them: Dock embeddings, gone\./u);
   const state = source("../src/state.ts");
-  assert.match(state, /changedLine\(/u, "the app reads the notices once it connects, not only on this page");
+  assert.match(state, /useAppPluginNotices\(engine, showToast\)/u, "the app reads the notices once it connects, not only on this page");
+  assert.match(source("../src/app-plugin-notices.ts"), /changedLine\(/u);
 });
 
 test("App plugins: loading, not ready and a refused read each keep the title", () => {

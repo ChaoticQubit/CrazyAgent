@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { LIB, ROUTES, bridgeSource, commands, methods, plan, render } from "./bridge-routes.mjs";
+import { LIB, ROUTES, bridgeSource, commands, methods, plan, render, withCommandFiles } from "./bridge-routes.mjs";
 
 const lib = readFileSync(LIB, "utf8");
 const impls = methods(bridgeSource());
@@ -128,6 +128,20 @@ test("only the canonical Tauri CommandArg body is followed, whatever its layout;
   for (const [shape, parts] of Object.entries(shapes)) {
     assert.throws(() => commands(limitsSource(parts)), /routes: Limits reads its fields in a way the generator cannot follow/, shape);
   }
+});
+
+test("a module file of lib.rs that holds Tauri commands is read where its mod line stands, so routes keep the source order", () => {
+  const files = { early: "#[tauri::command]\nasync fn desktop_early() -> Result<(), BridgeError> {\n    Ok(())\n}\n", plain: "fn helper() {}\n" };
+  const read = (name) => files[name] ?? null;
+  const source = "#[tauri::command]\nasync fn desktop_first() -> Result<(), BridgeError> {\n    Ok(())\n}\nmod early;\nmod plain;\n#[tauri::command]\nasync fn desktop_last() -> Result<(), BridgeError> {\n    Ok(())\n}\n";
+  const joined = withCommandFiles(source, read);
+  assert.deepEqual(commands(joined).map((command) => command.name), ["desktop_first", "desktop_early", "desktop_last"]);
+  assert.ok(joined.includes("mod plain;"), "a module without commands stays a mod line");
+  assert.equal(withCommandFiles("mod missing;\n", read), "mod missing;\n");
+  const names = commands(withCommandFiles(lib)).map((command) => command.name);
+  assert.ok(names.includes("desktop_app_plugin_set_when_off"), "the App plugins commands are read from their own file");
+  assert.doesNotMatch(lib, /fn desktop_app_plugin/u, "lib.rs keeps none of them");
+  assert.equal(new Set(names).size, names.length, "each command is read once");
 });
 
 test("the end-to-end bridge routes match the app's commands", () => {

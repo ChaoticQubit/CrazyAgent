@@ -100,7 +100,10 @@ fn the_webview_terminal_commands_are_built_and_granted_only_off_macos() {
 
 #[test]
 fn every_bound_command_is_built_and_granted_to_the_window_that_calls_it() {
-    let bound = bound_commands(include_str!("../src/lib.rs"));
+    let bound = bound_commands(concat!(
+        include_str!("../src/lib.rs"),
+        include_str!("../src/app_plugin_commands.rs")
+    ));
     assert!(bound.len() > 100, "{}", bound.len());
     for hooks in [
         "desktop_plugin_hooks",

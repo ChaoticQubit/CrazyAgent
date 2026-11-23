@@ -29,7 +29,7 @@ function called() {
  * Output: lib.rs, every name, the names the window calls and the trial names.
  */
 function registered() {
-  const lib = read("src-tauri/src/lib.rs");
+  const lib = read("src-tauri/src/lib.rs") + read("src-tauri/src/app_plugin_commands.rs");
   const handler = lib.slice(lib.indexOf("native_commands! {"));
   const groups = handler.slice(0, handler.indexOf("\n}")).split(/\n\s*;\s*\n/)
     .map((group) => [...group.matchAll(/\b(desktop_[a-z_]+)\b/g)].map((match) => match[1]));
@@ -65,7 +65,7 @@ test("every command any window file calls, through invoke or call, is registered
   for (const command of commands) {
     assert.ok(list.includes(command), `${command} missing from invoke_handler`);
     assert.ok(build.includes(`"${command}"`), `${command} missing from build.rs`);
-    assert.match(lib, new RegExp(`#\\[tauri::command\\]\\s*(?:async )?fn ${command}(?:<[^>]*>)?\\(`), `${command} has no tauri command`);
+    assert.match(lib, new RegExp(`#\\[tauri::command\\]\\s*(?:pub )?(?:async )?fn ${command}(?:<[^>]*>)?\\(`), `${command} has no tauri command`);
   }
 });
 
