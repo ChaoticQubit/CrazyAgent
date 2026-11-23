@@ -202,20 +202,6 @@ fn a_launch_gets_the_tool_cache_of_its_policy_level_and_shape() {
     );
 }
 
-/// T8: a tool cache inside another root, or a second one, is refused.
-#[test]
-fn a_tool_cache_inside_another_root_or_a_second_one_is_refused() {
-    let case = case();
-    let cache = tool_cache(&case, false);
-    let inside = case.project.join("cache");
-    fs::create_dir(&inside).unwrap();
-    let base = sandbox(&case, SandboxNetwork::Only(Vec::new()));
-    assert!(base.clone().allow_tool_cache(&inside, false).is_err());
-    assert!(base.clone().allow_tool_cache(&case.home, false).is_err());
-    let once = base.allow_tool_cache(&cache.root, false).unwrap();
-    assert!(once.allow_tool_cache(&cache.root, false).is_err());
-}
-
 /// T8 row 5 and P5: a sandbox with a tool cache points `pnpm_config_store_dir` into it, and
 /// `UV_CACHE_DIR` only when its uv markers are in place; one without sets neither; and a
 /// harness's own values never replace the ones the cache set.
@@ -492,93 +478,6 @@ fn sandboxed_child_writes_only_inside_the_project_and_its_own_dirs() {
     assert_eq!(fs::read_to_string(&inside).unwrap(), "inside\n");
     assert_eq!(fs::read_to_string(&home_file).unwrap(), "home\n");
     assert_eq!(fs::read_to_string(&tmp_file).unwrap(), "tmp\n");
-}
-
-#[test]
-fn sandboxed_child_cannot_write_outside_the_project_or_into_the_owner_home() {
-    let case = case();
-    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
-    let profile = case.profiles.join("denied.sb");
-    let outside = case.outside.join("escape.txt");
-    let marker = format!("crazyagent-sandbox-probe-{}", std::process::id());
-    let in_home = owner_home().join(&marker);
-    let in_context = case.project.join("context").join("tampered.md");
-    let sibling = case.root.join("sibling.txt");
-    for target in [&outside, &in_home, &in_context, &sibling] {
-        let script = format!("echo escaped > {}", quoted(target));
-        let output = run(&sandbox, &profile, &script);
-        assert!(!output.status.success(), "{}", target.display());
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("Operation not permitted"),
-            "{}: {}",
-            target.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(!target.exists(), "{}", target.display());
-    }
-    let brief = case.project.join("context").join("brief.md");
-    let output = run(
-        &sandbox,
-        &profile,
-        &format!("echo tampered >> {}", quoted(&brief)),
-    );
-    assert!(!output.status.success());
-    assert_eq!(fs::read_to_string(&brief).unwrap(), "brief\n");
-    let link = case.project.join("worktrees").join("context-link");
-    let output = run(
-        &sandbox,
-        &profile,
-        &format!(
-            "ln -s {} {} && echo tampered > {}/via-link.md",
-            quoted(&case.project.join("context")),
-            quoted(&link),
-            quoted(&link)
-        ),
-    );
-    assert!(!output.status.success());
-    assert!(!case.project.join("context").join("via-link.md").exists());
-}
-
-#[test]
-fn sandboxed_child_cannot_read_outside_files_or_the_owner_codex_and_claude_dirs() {
-    let case = case();
-    let sandbox = sandbox(&case, SandboxNetwork::Open);
-    let profile = case.profiles.join("reads.sb");
-    let output = run(
-        &sandbox,
-        &profile,
-        &format!(
-            "cat {} > /dev/null",
-            quoted(&case.outside.join("fixture.txt"))
-        ),
-    );
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Operation not permitted"));
-    assert!(!String::from_utf8_lossy(&output.stderr).contains("outside fixture"));
-    let home = owner_home();
-    for private in [home.join(".codex"), home.join(".claude")] {
-        assert!(
-            sandbox
-                .profile()
-                .contains(&format!("(subpath \"{}\")", private.display())),
-            "{}",
-            private.display()
-        );
-        if !private.exists() {
-            continue;
-        }
-        let script = format!(
-            "ls -d {dir} > /dev/null 2>&1 && exit 10; cat {dir}/config.toml > /dev/null 2>&1 && exit 11; ls {dir} > /dev/null 2>&1 && exit 12; ls -d {dir} 2>&1 >/dev/null; exit 0",
-            dir = quoted(&private)
-        );
-        let output = run(&sandbox, &profile, &script);
-        assert_eq!(output.status.code(), Some(0), "{}", private.display());
-        assert!(
-            String::from_utf8_lossy(&output.stdout).contains("Operation not permitted"),
-            "{}",
-            private.display()
-        );
-    }
 }
 
 /// A sandboxed child commits in a worktree inside the project that the engine's own git
@@ -4444,3 +4343,6 @@ fn a_profile_with_every_grant_kind_parses_and_keeps_its_rules() {
 
 #[path = "project_sandbox/secret_rule.rs"]
 mod secret_rule;
+
+#[path = "project_sandbox/tool_cache_roots.rs"]
+mod tool_cache_roots;

@@ -2190,12 +2190,6 @@ pub fn engine_lock_released(root: &Path) -> bool {
     }
 }
 
-/// Releases the engine database lock and reports whether the unlock succeeded.
-/// Takes the hold. Returns once the lock is released, or `database_lock_release_failed`.
-fn release_database_lock(lock: EngineLock) -> Result<(), EngineError> {
-    unlock_database(&lock.file)
-}
-
 /// Unlocks the engine database lock file on Windows over the range `private::lock` took.
 /// Takes the locked file. Returns `database_lock_release_failed` when the unlock fails.
 #[cfg(windows)]
@@ -4670,3 +4664,6 @@ fallback_allowed = false
 /// frame.
 mod state_snapshot;
 use state_snapshot::{enforce_snapshot_bound, snapshot};
+
+mod database_lock;
+use database_lock::release_database_lock;
