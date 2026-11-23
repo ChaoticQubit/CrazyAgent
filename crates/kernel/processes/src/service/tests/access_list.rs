@@ -137,16 +137,20 @@ fn a_listing_of_several_entries_is_read_block_by_block() {
         line("/c")
     );
     assert_eq!(
-        acl::listed_shared_all(&text, &entries, me),
+        acl::listed_shared_all(&text, &entries, me, &|_| Some(false)),
         vec![Some(false), Some(false), Some(true), Some(false)]
     );
     assert_eq!(
-        acl::listed_shared_all(&line("/Users/me"), &["/Users/me", "/gone"], me),
+        acl::listed_shared_all(&line("/Users/me"), &["/Users/me", "/gone"], me, &|_| Some(
+            false
+        )),
         vec![Some(false), None],
         "an entry the listing left out"
     );
     assert_eq!(
-        acl::listed_shared_all(&format!("{0}{0}", line("/a")), &["/a"], me),
+        acl::listed_shared_all(&format!("{0}{0}", line("/a")), &["/a"], me, &|_| Some(
+            false
+        )),
         vec![None],
         "an entry listed twice"
     );
@@ -154,7 +158,8 @@ fn a_listing_of_several_entries_is_read_block_by_block() {
         acl::listed_shared_all(
             &format!("{} 0: group:staff\n{}{open}", line("/a"), line("/b")),
             &["/a", "/b"],
-            me
+            me,
+            &|_| Some(false)
         ),
         vec![None, Some(true)],
         "a block that does not read fails alone"
@@ -165,11 +170,43 @@ fn a_listing_of_several_entries_is_read_block_by_block() {
         String::new(),
     ] {
         assert_eq!(
-            acl::listed_shared_all(&whole, &["/a", "/b"], me),
+            acl::listed_shared_all(&whole, &["/a", "/b"], me, &|_| Some(false)),
             vec![None, None],
             "{whole:?}"
         );
     }
+}
+
+/// An entry whose block printed no access-list lines takes the direct read's answer, as
+/// `ls` prints a list it could not read exactly as no list; an entry whose block printed
+/// lines is read from them and never read again.
+#[cfg(unix)]
+#[test]
+fn an_entry_listed_with_no_access_lines_takes_the_direct_read() {
+    let me = Some("me");
+    let line = |name: &str| format!("drwxr-xr-x  2 me  staff  64 Nov 14 03:33 {name}\n");
+    let text = format!("{}{} 0: user:me allow write\n", line("/a"), line("/b"));
+    let unreadable = |index: usize| {
+        assert_eq!(index, 0, "an entry with access lines was read again");
+        None
+    };
+    assert_eq!(
+        acl::listed_shared_all(&text, &["/a", "/b"], me, &unreadable),
+        vec![None, Some(false)]
+    );
+}
+
+/// A direct read that finds no list confirms none; one that finds a list `ls` did not print,
+/// or cannot read, is not known, so the entry counts as changeable.
+#[cfg(unix)]
+#[test]
+fn a_direct_read_confirms_only_a_list_that_is_not_there() {
+    assert_eq!(acl::confirmed(Ok(false)), Some(false));
+    assert_eq!(acl::confirmed(Ok(true)), None);
+    assert_eq!(
+        acl::confirmed(Err(std::io::Error::from_raw_os_error(13))),
+        None
+    );
 }
 
 /// RV-DS241-18: a Linux `system.posix_acl_access` value names an entry changeable by others

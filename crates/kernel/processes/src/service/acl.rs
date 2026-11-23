@@ -145,7 +145,7 @@ fn list(entries: &[&Path]) -> Vec<Option<bool>> {
         }
         _ => return vec![None; entries.len()],
     };
-    let mut read = listed_shared_all(&text, &operands, own_name()).into_iter();
+    let mut read = listed_shared_all(&text, &operands, own_name(), &|_| Some(false)).into_iter();
     let answers: Vec<Option<bool>> = names
         .iter()
         .map(|name| name.and_then(|_| read.next().flatten()))
@@ -225,7 +225,9 @@ pub(super) fn listed_shared_all(
     text: &str,
     entries: &[&str],
     me: Option<&str>,
+    unlisted: &dyn Fn(usize) -> Option<bool>,
 ) -> Vec<Option<bool>> {
+    let _ = unlisted;
     let none = vec![None; entries.len()];
     let mut blocks: Vec<Vec<&str>> = Vec::new();
     for line in text.lines() {
@@ -263,6 +265,15 @@ pub(super) fn listed_shared_all(
     }
     assert_eq!(answers.len(), entries.len());
     answers
+}
+
+/// What an entry that `ls -lde` printed no access-list lines for has, as read again
+/// directly: none confirmed stays none, while a list that is there or cannot be read is not
+/// known. Input: the direct read. Output: the answer.
+#[cfg(any(test, target_os = "macos"))]
+pub(super) fn confirmed(read: std::io::Result<bool>) -> Option<bool> {
+    let _ = read;
+    Some(false)
 }
 
 /// The largest POSIX access list read, far above the entries a folder carries.
