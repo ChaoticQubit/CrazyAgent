@@ -108,7 +108,7 @@ fn with_git_env(mut env: Vec<(String, String)>) -> Vec<(String, String)> {
         .map(|(_, home)| PathBuf::from(home))
         .unwrap();
     env.extend(
-        toolchains::agent_env(&home, &ToolHomes::owner().unwrap())
+        kernel_sandbox::toolchains::agent_env(&home, &ToolHomes::owner().unwrap())
             .into_iter()
             .map(|(name, value)| (name.to_owned(), value.into_string().unwrap())),
     );
@@ -1178,7 +1178,7 @@ fn the_owner_git_identity_reaches_a_pane_agent_environment() {
 }
 
 fn tools_on_path() -> String {
-    toolchains::agent_path(&ToolHomes::owner().unwrap(), TOOLS_ON_PATH)
+    kernel_sandbox::toolchains::agent_path(&ToolHomes::owner().unwrap(), TOOLS_ON_PATH)
 }
 
 #[test]

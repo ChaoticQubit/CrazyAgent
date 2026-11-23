@@ -2268,7 +2268,7 @@ impl ProjectSandbox {
     pub fn tool_program(&self, name: &str) -> Option<PathBuf> {
         assert!(!name.is_empty() && !name.contains('/'));
         let homes = kernel_sandbox::toolchains::ToolHomes::at(&self.owner_home);
-        let path = toolchains::agent_path(&homes, AGENT_PATH);
+        let path = kernel_sandbox::toolchains::agent_path(&homes, AGENT_PATH);
         let found = std::env::split_paths(&path)
             .map(|folder| folder.join(name))
             .find(|candidate| candidate.is_file())?;
@@ -3791,7 +3791,7 @@ impl ProjectSandbox {
 
     /// The variables every command this sandbox builds starts with: HOME, TMPDIR (the short
     /// temp folder when granted, else the temp dir), PATH with the owner's rust proxies after
-    /// any [`Self::allow_node_for`] folder, the C locale and [`toolchains::agent_env`]. Only a
+    /// any [`Self::allow_node_for`] folder, the C locale and [`kernel_sandbox::toolchains::agent_env`]. Only a
     /// harness's PATH starts with the agent's own `getconf` and `git`
     /// ([`toolchains::with_agent_git`]). Takes whether it is a harness. Returns the variables.
     fn base_env(&self, harness: bool) -> Vec<(&'static str, OsString)> {
@@ -3801,7 +3801,7 @@ impl ProjectSandbox {
             .as_ref()
             .or(self.scratch.as_ref())
             .unwrap_or(&self.agent_tmp);
-        let path = toolchains::agent_path(&homes, AGENT_PATH);
+        let path = kernel_sandbox::toolchains::agent_path(&homes, AGENT_PATH);
         let path = match self.node_bin.as_deref().and_then(Path::to_str) {
             Some(bin) => format!("{bin}:{path}"),
             None => path,
@@ -3818,7 +3818,10 @@ impl ProjectSandbox {
             ("LANG", OsString::from("C")),
             ("LC_ALL", OsString::from("C")),
         ];
-        env.extend(toolchains::agent_env(&self.agent_home, &homes));
+        env.extend(kernel_sandbox::toolchains::agent_env(
+            &self.agent_home,
+            &homes,
+        ));
         if let Some((cache, uv)) = &self.tool_cache {
             if *uv {
                 env.push((TOOL_CACHE_ENV[0], cache.join("uv").into_os_string()));

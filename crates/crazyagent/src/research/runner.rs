@@ -1293,7 +1293,11 @@ impl ResearchRunner {
         let scratch = toolchains::ScopedTmp::make(&home)?;
         #[cfg(target_os = "macos")]
         toolchains::write_getconf(&home, false)?;
-        toolchains::prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, &home, &homes)?;
+        kernel_sandbox::toolchains::prepare_cargo_home(
+            &crate::sandbox::TOOLCHAIN_HOOKS,
+            &home,
+            &homes,
+        )?;
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)?.keep_ports(&kept)?;
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime)?;

@@ -4730,7 +4730,7 @@ fn tools_on_profile(
         .unwrap()
         .allow_scratch(&scratch)
         .unwrap()
-        .allow_extra_reads(&toolchains::graphify(&homes))
+        .allow_extra_reads(&kernel_sandbox::toolchains::graphify(&homes))
         .unwrap();
     for install in installs {
         sandbox = sandbox.allow_read(install).unwrap();

@@ -1162,7 +1162,7 @@ fn launch_base(
     let path = toolchains::with_agent_git(
         tool_home,
         if tools {
-            toolchains::agent_path(&homes, TOOLS_ON_PATH)
+            kernel_sandbox::toolchains::agent_path(&homes, TOOLS_ON_PATH)
         } else {
             TOOLS_OFF_PATH.to_owned()
         },
@@ -1176,7 +1176,7 @@ fn launch_base(
         ("LC_ALL", OsString::from("C")),
     ];
     if tools {
-        base.extend(toolchains::agent_env(tool_home, &homes));
+        base.extend(kernel_sandbox::toolchains::agent_env(tool_home, &homes));
     }
     assert_eq!(base[0].0, "HOME");
     assert_eq!(base[2].0, "PATH");

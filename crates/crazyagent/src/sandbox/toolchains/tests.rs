@@ -1,5 +1,5 @@
 use super::*;
-use kernel_sandbox::toolchains::{Toolchain, Toolchains};
+use kernel_sandbox::toolchains::{CARGO_SHARED, ToolHomes, prepare_cargo_home};
 
 #[test]
 fn the_agent_git_script_is_refused_for_the_xcrun_shim_and_any_path_that_is_not_plain() {
@@ -103,45 +103,6 @@ fn a_folder_swapped_in_for_the_lead_s_new_temp_folder_is_refused_with_what_it_ho
         matches!(&sealed, Err(error) if error.kind() == io::ErrorKind::PermissionDenied),
         "{sealed:?}"
     );
-}
-
-#[test]
-fn without_the_command_line_tools_cc_the_agent_path_and_variables_stay_as_they_were() {
-    let scratch = tempfile::tempdir().unwrap();
-    let home = scratch.path().join("home");
-    let developer = scratch.path().join("developer");
-    let bin = developer.join("usr").join("bin");
-    let sdk = developer.join("SDKs").join("MacOSX.sdk");
-    fs::create_dir_all(&bin).unwrap();
-    fs::create_dir_all(&sdk).unwrap();
-    let homes = ToolHomes::at(&home).with_developer(&developer);
-    let proxies: String = RUSTUP_BINS
-        .iter()
-        .filter(|folder| Path::new(folder).join("cargo").is_file())
-        .map(|folder| format!("{folder}:"))
-        .collect();
-    let base = "/opt/homebrew/bin:/usr/bin:/bin";
-    let before = agent_env(&home, &homes);
-    assert_eq!(agent_path(&homes, base), format!("{proxies}{base}"));
-    assert!(before.iter().all(|(name, _)| *name != "SDKROOT"));
-
-    fs::write(bin.join("cc"), "cc fixture\n").unwrap();
-    let bin = bin.to_str().unwrap();
-    assert_eq!(
-        agent_path(&homes, base),
-        format!("{proxies}/opt/homebrew/bin:{bin}:/usr/bin:/bin")
-    );
-    assert_eq!(
-        agent_path(&homes, "/usr/bin:/bin:/usr/bin"),
-        format!("{proxies}{bin}:/usr/bin:/bin:/usr/bin")
-    );
-    assert_eq!(agent_path(&homes, "/bin"), format!("{proxies}/bin"));
-    let after = agent_env(&home, &homes);
-    assert_eq!(after[..before.len()], before[..]);
-    assert_eq!(after[before.len()..], [("SDKROOT", sdk.into_os_string())]);
-
-    fs::remove_dir(developer.join("SDKs").join("MacOSX.sdk")).unwrap();
-    assert_eq!(agent_env(&home, &homes), before);
 }
 
 #[cfg(target_os = "macos")]
@@ -559,98 +520,6 @@ fn the_strict_copy_refuses_crazyagent_main_with_the_plain_reason() {
         "{stderr}"
     );
     assert!(!stderr.contains("crazyagent/main"), "{stderr}");
-}
-
-/// F26: a project's toolchains are found by the newer marker names (`.nvmrc`,
-/// `.node-version`, `uv.lock`, `.python-version`, `requirements.txt`) and one folder down,
-/// never inside a hidden folder, `node_modules`, `target` or the older agents root.
-#[test]
-fn toolchains_are_found_by_every_marker_name_and_one_folder_down() {
-    let root = tempfile::tempdir().unwrap();
-    let project = root.path();
-    for toolchain in Toolchain::ALL {
-        assert!(
-            !toolchain.used_by(project),
-            "{toolchain:?} in an empty project"
-        );
-    }
-    for (name, toolchain) in [
-        (".nvmrc", Toolchain::Node),
-        (".node-version", Toolchain::Node),
-        ("uv.lock", Toolchain::Python),
-        (".python-version", Toolchain::Python),
-        ("requirements.txt", Toolchain::Python),
-        ("rust-toolchain.toml", Toolchain::Rust),
-    ] {
-        let one = tempfile::tempdir().unwrap();
-        fs::write(one.path().join(name), "x\n").unwrap();
-        assert!(toolchain.used_by(one.path()), "{name}");
-    }
-    for skipped in [
-        ".crazyagent",
-        "node_modules",
-        "target",
-        "worktrees",
-        ".hidden",
-    ] {
-        fs::create_dir_all(project.join(skipped)).unwrap();
-        fs::write(project.join(skipped).join("Cargo.toml"), "[package]\n").unwrap();
-    }
-    assert!(
-        !Toolchain::Rust.used_by(project),
-        "skipped folders hold no project marker"
-    );
-    fs::create_dir_all(project.join("bot")).unwrap();
-    fs::write(project.join("bot").join("Cargo.toml"), "[package]\n").unwrap();
-    assert!(
-        Toolchain::Rust.used_by(project),
-        "a crate one folder down is found"
-    );
-    fs::create_dir_all(project.join("web").join("app")).unwrap();
-    fs::write(project.join("web").join("app").join("package.json"), "{}\n").unwrap();
-    assert!(
-        !Toolchain::Node.used_by(project),
-        "two folders down is not looked at"
-    );
-}
-
-/// F26: without the Command Line Tools' `cc`, an agent runs the picked Xcode app's compilers
-/// and its macOS SDK, and that app's developer folder is granted read-only with every choice.
-#[test]
-fn without_the_command_line_tools_an_agent_uses_the_picked_xcode_compilers_and_sdk() {
-    let scratch = tempfile::tempdir().unwrap();
-    let root = scratch.path().canonicalize().unwrap();
-    let home = root.join("home");
-    let developer = root.join("developer");
-    fs::create_dir_all(developer.join("usr").join("bin")).unwrap();
-    let xcode = root.join("Xcode.app").join("Contents").join("Developer");
-    let bin = below(&xcode, XCODE_TOOLCHAIN_BIN);
-    let sdk = below(&xcode, XCODE_SDK);
-    fs::create_dir_all(&bin).unwrap();
-    fs::create_dir_all(&sdk).unwrap();
-    fs::write(bin.join("cc"), "cc fixture\n").unwrap();
-    let homes = ToolHomes::at(&home)
-        .with_developer(&developer)
-        .with_xcode(&xcode);
-    let env = agent_env(&home, &homes);
-    assert!(
-        env.contains(&("SDKROOT", sdk.clone().into_os_string())),
-        "{env:?}"
-    );
-    let path = agent_path(&homes, "/usr/bin:/bin");
-    assert!(
-        path.ends_with(&format!("{}:/usr/bin:/bin", bin.display())),
-        "{path}"
-    );
-    let granted = Toolchains::grant(&homes, &[]);
-    assert_eq!(granted.roots(), std::slice::from_ref(&xcode));
-    fs::write(developer.join("usr").join("bin").join("cc"), "cc fixture\n").unwrap();
-    let env = agent_env(&home, &homes);
-    assert!(
-        env.iter()
-            .all(|(name, value)| *name != "SDKROOT" || *value != sdk.clone().into_os_string()),
-        "the Command Line Tools win when they hold cc: {env:?}"
-    );
 }
 
 /// RV-DS241-137 code r2 F4: a cargo home's crate caches hold only the links to the owner's

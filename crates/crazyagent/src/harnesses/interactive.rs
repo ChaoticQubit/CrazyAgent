@@ -396,7 +396,7 @@ pub fn command_with(
             toolchains::with_agent_git(
                 tool_home,
                 if request.tools {
-                    toolchains::agent_path(&homes, TOOLS_ON_PATH)
+                    kernel_sandbox::toolchains::agent_path(&homes, TOOLS_ON_PATH)
                 } else {
                     TOOLS_OFF_PATH.to_owned()
                 },
@@ -534,7 +534,7 @@ pub fn command_with(
             Transcript::Unavailable
         }
     };
-    for (name, value) in toolchains::agent_env(tool_home, &homes) {
+    for (name, value) in kernel_sandbox::toolchains::agent_env(tool_home, &homes) {
         env.push((name.to_owned(), text(Path::new(&value))?));
     }
     if let Some(tmp) = toolchains::existing_tmp(tool_home) {

@@ -170,7 +170,7 @@ pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
         .map_err(|_| invalid("the terminal home keeps a shell startup file"))?;
     let homes = ToolHomes::owner()?;
     let scratch = toolchains::make_tmp(&home)?;
-    toolchains::prepare_cargo_home(&super::TOOLCHAIN_HOOKS, &home, &homes)?;
+    kernel_sandbox::toolchains::prepare_cargo_home(&super::TOOLCHAIN_HOOKS, &home, &homes)?;
     let network = kernel_sandbox::policy::ide_network(launch.level, launch.network);
     let (sandbox, _) = ProjectSandbox::new(launch.folder, &home, &tmp, network)?
         .guard_engine(&root)?

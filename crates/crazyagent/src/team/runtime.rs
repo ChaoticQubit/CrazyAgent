@@ -1150,7 +1150,7 @@ fn prepare_mates_home(
             return Err(EngineError("team_shared_folder_changed".into()));
         }
     }
-    toolchains::prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, &mates, homes)
+    kernel_sandbox::toolchains::prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, &mates, homes)
         .map_err(error)?;
     crate::harnesses::interactive::prepare_claude_home(&mates, project)
         .map_err(|e| EngineError(e.0))?;
@@ -9599,8 +9599,12 @@ impl TeamRuntime {
         {
             eprintln!("agent_free_git_not_written kind={:?}", error.kind());
         }
-        toolchains::prepare_cargo_home(&crate::sandbox::TOOLCHAIN_HOOKS, &home, &homes)
-            .map_err(|e| cargo_home_problem(&e))?;
+        kernel_sandbox::toolchains::prepare_cargo_home(
+            &crate::sandbox::TOOLCHAIN_HOOKS,
+            &home,
+            &homes,
+        )
+        .map_err(|e| cargo_home_problem(&e))?;
         let mut sandbox = ProjectSandbox::new(&root, &home, &tmp, network)
             .and_then(|sandbox| sandbox.keep_ports(&kept))
             .map_err(sandboxed)?;
@@ -9643,7 +9647,7 @@ impl TeamRuntime {
             sandbox = sandbox.allow_engine(engine).map_err(sandboxed)?;
         }
         (sandbox, _) = sandbox
-            .allow_extra_reads(&toolchains::graphify(&homes))
+            .allow_extra_reads(&kernel_sandbox::toolchains::graphify(&homes))
             .map_err(sandboxed)?;
         if kind == Some(crate::coord::settings::HarnessKind::Codex)
             && let Some(socket) = crate::coord::delivery::codex::socket(&home)

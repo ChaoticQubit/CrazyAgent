@@ -477,8 +477,12 @@ fn an_agent_builds_and_tests_a_tiny_crate_offline_with_the_owner_toolchain() {
         "pub fn add(a: u32, b: u32) -> u32 {\n    a + b\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn adds() {\n        assert_eq!(super::add(2, 3), 5);\n    }\n}\n",
     );
     let tmp = toolchains::make_tmp(&case.home).unwrap();
-    toolchains::prepare_cargo_home(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home, &homes)
-        .unwrap();
+    kernel_sandbox::toolchains::prepare_cargo_home(
+        &crazyagent::sandbox::TOOLCHAIN_HOOKS,
+        &case.home,
+        &homes,
+    )
+    .unwrap();
     let sandbox = ProjectSandbox::new(
         &case.project,
         &case.home,
@@ -548,8 +552,12 @@ fn an_agent_compiles_links_and_runs_git_without_an_xcrun_cache_error() {
         "int main(void) {\n    return 0;\n}\n",
     );
     let tmp = toolchains::make_tmp(&case.home).unwrap();
-    toolchains::prepare_cargo_home(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home, &homes)
-        .unwrap();
+    kernel_sandbox::toolchains::prepare_cargo_home(
+        &crazyagent::sandbox::TOOLCHAIN_HOOKS,
+        &case.home,
+        &homes,
+    )
+    .unwrap();
     let sandbox = ProjectSandbox::new(
         &case.project,
         &case.home,
@@ -593,8 +601,12 @@ fn a_missing_toolchain_is_never_installed_by_an_agent() {
         &case.project.join("rust-toolchain.toml"),
         "[toolchain]\nchannel = \"1.70.0\"\n",
     );
-    toolchains::prepare_cargo_home(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home, &homes)
-        .unwrap();
+    kernel_sandbox::toolchains::prepare_cargo_home(
+        &crazyagent::sandbox::TOOLCHAIN_HOOKS,
+        &case.home,
+        &homes,
+    )
+    .unwrap();
     let sandbox = ProjectSandbox::new(&case.project, &case.home, &case.tmp, SandboxNetwork::Open)
         .unwrap()
         .allow_tools(&Toolchains::detect(&case.project, &homes))
@@ -659,8 +671,12 @@ fn an_agent_never_writes_the_owner_toolchains_or_reads_their_credentials() {
     let case = case();
     let homes = fake_tool_homes(&case.tools);
     write(&case.project.join("Cargo.toml"), "[package]\n");
-    toolchains::prepare_cargo_home(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home, &homes)
-        .unwrap();
+    kernel_sandbox::toolchains::prepare_cargo_home(
+        &crazyagent::sandbox::TOOLCHAIN_HOOKS,
+        &case.home,
+        &homes,
+    )
+    .unwrap();
     let sandbox = ProjectSandbox::new(
         &case.project,
         &case.home,
@@ -2586,8 +2602,12 @@ fn a_confined_agent_plants_nothing_a_later_run_executes_or_a_launch_trips_on() {
     let case = case();
     let homes = fake_tool_homes(&case.tools);
     write(&case.project.join("Cargo.toml"), "[package]\n");
-    toolchains::prepare_cargo_home(&crazyagent::sandbox::TOOLCHAIN_HOOKS, &case.home, &homes)
-        .unwrap();
+    kernel_sandbox::toolchains::prepare_cargo_home(
+        &crazyagent::sandbox::TOOLCHAIN_HOOKS,
+        &case.home,
+        &homes,
+    )
+    .unwrap();
     let registry = case.tools.join(".cargo/registry");
     assert_eq!(
         fs::read_link(case.home.join(".cargo/registry")).unwrap(),

@@ -5,8 +5,8 @@ use crate::harnesses::leftovers::LINEAGE_VARIABLE;
 use crate::harnesses::manifest::{VALUE, parse};
 use crate::harnesses::registry::Registry;
 use crate::sandbox::model_proxy;
-use crate::sandbox::toolchains::AUTO_INSTALL_ENV;
 use crate::sandbox::{AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, TOOL_CACHE_ENV};
+use kernel_sandbox::toolchains::AUTO_INSTALL_ENV;
 
 const SMALL: &str = "schema: 1\nkind: harness\nid: \"sample\"\nname: \"Sample\"\nbinaries:\n  - \"sample\"\nheadless: \"sample --json\"\nmodel_selection: true\naccount_kinds:\n  - \"api_key\"\n";
 
@@ -549,7 +549,7 @@ fn the_package_index_module_proxy_and_openssl_families_are_owned_at_both_sites()
     );
 }
 
-/// Env-name rule, the pinned SDK (fix8 re-check at 4f66cf20e): `toolchains::agent_env` sets
+/// Env-name rule, the pinned SDK (fix8 re-check at 4f66cf20e): `kernel_sandbox::toolchains::agent_env` sets
 /// `SDKROOT` on every launch and a harness variable of the same name replaces it, so an
 /// account entry cannot set it and no home prefix can cover it, as for every name the engine
 /// sets.

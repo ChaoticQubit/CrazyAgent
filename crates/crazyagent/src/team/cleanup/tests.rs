@@ -1224,7 +1224,7 @@ fn removing_an_agent_tree_never_changes_an_owner_folder_a_swapped_folder_points_
 }
 
 /// RV-DS241-204: while the next IDE terminal's launch gives its cargo `git` cache's name to the
-/// owner's ([`crate::sandbox::toolchains::prepare_cargo_home`]), a process left in a terminal
+/// owner's ([`kernel_sandbox::toolchains::prepare_cargo_home`]), a process left in a terminal
 /// keeps swapping that cache's folders, each at mode 000, for links to owner folders. No ACL
 /// or mode of an owner folder changes, and a launch with nothing swapping still links the
 /// owner's cache.
@@ -1305,7 +1305,7 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
     let home = root.join("ide/home");
 
     let before = planted.load(Ordering::Relaxed);
-    let _ = crate::sandbox::toolchains::prepare_cargo_home(
+    let _ = kernel_sandbox::toolchains::prepare_cargo_home(
         &crate::sandbox::TOOLCHAIN_HOOKS,
         &home,
         &homes,
@@ -1313,7 +1313,7 @@ fn an_ide_terminal_cargo_cache_reset_never_changes_an_owner_folder_a_swapped_fol
     let landed = planted.load(Ordering::Relaxed) - before;
     stop.store(true, Ordering::Relaxed);
     swapper.join().unwrap();
-    let cargo = crate::sandbox::toolchains::prepare_cargo_home(
+    let cargo = kernel_sandbox::toolchains::prepare_cargo_home(
         &crate::sandbox::TOOLCHAIN_HOOKS,
         &home,
         &homes,
@@ -1367,7 +1367,7 @@ fn an_ide_terminal_cargo_cache_reset_never_opens_up_an_owner_folder_swapped_in_a
         OPEN_UP_STEP.with(|slot| *slot.borrow_mut() = Some((point, c"c00".to_owned(), swap)));
         let homes = kernel_sandbox::toolchains::ToolHomes::at(&account);
 
-        let _ = crate::sandbox::toolchains::prepare_cargo_home(
+        let _ = kernel_sandbox::toolchains::prepare_cargo_home(
             &crate::sandbox::TOOLCHAIN_HOOKS,
             &root.join("ide/home"),
             &homes,
