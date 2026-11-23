@@ -117,6 +117,16 @@ pub(crate) fn sweep_staged(root: &Path) {
     kernel_plugin_host::store::sweep_staged(&engine(root));
 }
 
+/// The owner read of every plugin with the capabilities it is granted, for the engine root
+/// the database sits in. Input: the engine connection. Output: the listing as owner data,
+/// or the plugin host's refusal code, or `file_trash_root_unknown` for an in-memory database.
+pub(crate) fn grants(db: &Connection) -> Result<crate::engine::owner::OwnerData, EngineError> {
+    let root = crate::storage::trash::engine_root(db)?;
+    let plugins = kernel_plugin_host::grants::list(db, &engine(root)).map_err(error)?;
+    assert!(plugins.len() <= kernel_plugin_host::grants::GRANTS_MAX);
+    Ok(crate::engine::owner::OwnerData::PluginGrants { plugins })
+}
+
 /// Runs the plugin store's start sweeps: what a crash left staged, then on Unix every
 /// entered plugin key file in `plugin-keys` that no binding row names, as a committed
 /// removal or a crash between a binding change and its file delete leaves it. Off Unix no
