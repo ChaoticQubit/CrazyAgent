@@ -145,7 +145,14 @@ fn list(entries: &[&Path]) -> Vec<Option<bool>> {
         }
         _ => return vec![None; entries.len()],
     };
-    let mut read = listed_shared_all(&text, &operands, own_name(), &|_| Some(false)).into_iter();
+    let mut read = listed_shared_all(&text, &operands, own_name(), &|index| {
+        confirmed(
+            std::ffi::CString::new(operands[index])
+                .map_err(std::io::Error::other)
+                .and_then(|path| crazyagent_macos_fs::acl_listed(&path)),
+        )
+    })
+    .into_iter();
     let answers: Vec<Option<bool>> = names
         .iter()
         .map(|name| name.and_then(|_| read.next().flatten()))
@@ -227,7 +234,6 @@ pub(super) fn listed_shared_all(
     me: Option<&str>,
     unlisted: &dyn Fn(usize) -> Option<bool>,
 ) -> Vec<Option<bool>> {
-    let _ = unlisted;
     let none = vec![None; entries.len()];
     let mut blocks: Vec<Vec<&str>> = Vec::new();
     for line in text.lines() {
@@ -257,6 +263,9 @@ pub(super) fn listed_shared_all(
         };
         blocks_of[index] += 1;
         answers[index] = listed_shared(&block.join("\n"), me);
+        if block.len() == 1 && answers[index] == Some(false) {
+            answers[index] = unlisted(index);
+        }
     }
     for (answer, count) in answers.iter_mut().zip(&blocks_of) {
         if *count != 1 {
@@ -272,8 +281,7 @@ pub(super) fn listed_shared_all(
 /// known. Input: the direct read. Output: the answer.
 #[cfg(any(test, target_os = "macos"))]
 pub(super) fn confirmed(read: std::io::Result<bool>) -> Option<bool> {
-    let _ = read;
-    Some(false)
+    matches!(read, Ok(false)).then_some(false)
 }
 
 /// The largest POSIX access list read, far above the entries a folder carries.

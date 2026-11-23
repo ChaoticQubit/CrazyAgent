@@ -482,14 +482,52 @@ pub fn tcp_listeners(port: u16) -> std::io::Result<Vec<(i32, std::net::IpAddr)>>
     Ok(found)
 }
 
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+unsafe extern "C" {
+    fn acl_get_link_np(path: *const std::ffi::c_char, kind: std::ffi::c_int) -> *mut libc::c_void;
+    fn acl_get_entry(
+        acl: *mut libc::c_void,
+        entry_id: std::ffi::c_int,
+        entry: *mut *mut libc::c_void,
+    ) -> std::ffi::c_int;
+    fn acl_free(object: *mut libc::c_void) -> std::ffi::c_int;
+}
+
+/// The extended access-list type of `<sys/acl.h>`.
+#[cfg(target_os = "macos")]
+const ACL_TYPE_EXTENDED: std::ffi::c_int = 0x100;
+
+/// The entry id that asks `acl_get_entry` for a list's first entry.
+#[cfg(target_os = "macos")]
+const ACL_FIRST_ENTRY: std::ffi::c_int = 0;
+
 /// Whether one entry carries an extended access list with at least one entry, read with
 /// `acl_get_link_np` and `ACL_TYPE_EXTENDED`, so a link's own list is read and its target's
 /// never. Input: the entry's path. Output: Ok(true) for a list with an entry, Ok(false) for
-/// none, or the system error of a list that could not be read.
+/// none, or the system error of a list that could not be read. Safety contract of its unsafe
+/// calls: the path is a valid C string for the call, and a list read is freed exactly once.
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 pub fn acl_listed(path: &std::ffi::CStr) -> std::io::Result<bool> {
-    let _ = path;
-    Ok(false)
+    let acl = unsafe { acl_get_link_np(path.as_ptr(), ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        let error = std::io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::ENOENT) => Ok(false),
+            _ => Err(error),
+        };
+    }
+    let mut entry: *mut libc::c_void = std::ptr::null_mut();
+    let got = unsafe { acl_get_entry(acl, ACL_FIRST_ENTRY, &mut entry) };
+    let error = std::io::Error::last_os_error();
+    let freed = unsafe { acl_free(acl) };
+    assert_eq!(freed, 0, "a list just read could not be freed");
+    match got {
+        0 => Ok(true),
+        _ if error.raw_os_error() == Some(libc::EINVAL) => Ok(false),
+        _ => Err(error),
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
