@@ -1,6 +1,6 @@
 use super::*;
 use crate::accounts::{AccountStatus, Provider};
-use crate::engine::owner::{APP_PLUGINS_CODES, PermissionWords, PluginChanged};
+use crate::engine::owner::{APP_PLUGINS_CODES, PermissionWords, PluginChanged, WhenTurnedOff};
 use crate::protocol::CredentialRef;
 use crate::tui::client::OwnerEvent;
 use crate::tui::frame::{HINT_ROWS_MAX, wrapped_footer};
@@ -30,6 +30,7 @@ struct Fake {
     review: Preview,
     users: Vec<PluginUser>,
     stored: TurnOff,
+    project_override: bool,
     accounts: Vec<AccountView>,
     refuse: Option<String>,
     refuse_grants: Option<String>,
@@ -276,6 +277,7 @@ impl Fake {
                 label: "Fix the login page".into(),
             }],
             stored: TurnOff::RefuseNewCalls,
+            project_override: false,
             accounts: vec![
                 account(1, "Claude Pro", SignInMethod::Subscription),
                 account(2, "Work OpenAI", SignInMethod::ApiKey),
@@ -301,6 +303,10 @@ impl Fake {
             listing: self.listing.clone(),
             words: self.words.clone(),
             notices: std::mem::take(&mut self.notices),
+            when_turned_off: WhenTurnedOff {
+                value: self.stored,
+                project_override: self.project_override,
+            },
         }))
     }
 
@@ -360,8 +366,14 @@ impl Fake {
             }
             AppPluginsJob::Users { name } => AppPluginsEvent::Users {
                 name,
-                result: Ok((self.users.clone(), self.stored)),
+                result: Ok(self.users.clone()),
             },
+            AppPluginsJob::SetWhenOff { when_off } => {
+                if self.refuse.is_none() {
+                    self.stored = when_off;
+                }
+                self.page()
+            }
             AppPluginsJob::Remove { name } => {
                 self.listing.plugins.retain(|plugin| plugin.name != name);
                 self.page()
@@ -796,6 +808,53 @@ fn turning_off_confirms_with_the_users_and_the_stored_choice_and_tab_changes_thi
 }
 
 #[test]
+fn w_switches_the_stored_turn_off_choice_and_names_a_project_override() {
+    let mut fake = Fake::new();
+    let mut shell = page(&mut fake);
+    assert!(shows(&mut shell, "When turned off: Refuse new calls"));
+    assert!(!shows(&mut shell, "A project settings file sets this"));
+    assert!(bar(&mut shell).contains("w When turned off"));
+    shell.key(Key::Char('w'));
+    let job = one(&mut shell);
+    assert!(matches!(
+        job,
+        AppPluginsJob::SetWhenOff {
+            when_off: TurnOff::StopRuns
+        }
+    ));
+    answer(&mut shell, &mut fake, job);
+    assert!(shows(&mut shell, "When turned off: Stop runs using it"));
+    assert!(said(&shell).contains("Saved. When turned off: Stop runs using it."));
+    select(&mut shell, 2);
+    shell.key(Key::Enter);
+    let job = one(&mut shell);
+    answer(&mut shell, &mut fake, job);
+    assert!(
+        shows(
+            &mut shell,
+            "Stop runs using it: the runs listed above stop."
+        ),
+        "the confirm starts from the saved choice"
+    );
+    shell.key(Key::Esc);
+
+    fake.refuse = Some("app_plugin_setting_unsafe".into());
+    shell.key(Key::Char('w'));
+    let job = one(&mut shell);
+    answer(&mut shell, &mut fake, job);
+    assert!(said(&shell).contains("Not saved. Your settings file is a link"));
+    assert!(shows(&mut shell, "When turned off: Stop runs using it"));
+
+    fake.project_override = true;
+    shell.key(Key::Char('r'));
+    serve(&mut shell, &mut fake);
+    assert!(shows(
+        &mut shell,
+        "A project settings file sets this, and it wins over what you save here."
+    ));
+}
+
+#[test]
 fn the_essential_row_has_no_switch_and_enter_sends_nothing() {
     let mut fake = Fake::new();
     let mut shell = page(&mut fake);
@@ -1102,10 +1161,10 @@ fn fed(fake: &mut Fake, index: usize) -> AppPluginsPage {
 fn the_key_bar_wraps_as_modelled_and_never_drops_a_hint() {
     let mut fake = Fake::new();
     let model: [(&str, usize, [[usize; 3]; 3]); 4] = [
-        ("bundled", 1, [[2, 2, 2], [1, 1, 1], [1, 1, 1]]),
-        ("added, keys bound", 2, [[2, 2, 2], [1, 2, 2], [1, 1, 1]]),
-        ("changed", 4, [[1, 2, 2], [1, 1, 1], [1, 1, 1]]),
-        ("essential", 6, [[1, 1, 1], [1, 1, 1], [1, 1, 1]]),
+        ("bundled", 1, [[2, 2, 2], [1, 2, 2], [1, 1, 1]]),
+        ("added, keys bound", 2, [[2, 2, 2], [2, 2, 2], [1, 1, 1]]),
+        ("changed", 4, [[2, 2, 2], [1, 1, 1], [1, 1, 1]]),
+        ("essential", 6, [[1, 2, 2], [1, 1, 1], [1, 1, 1]]),
     ];
     for (mix, index, counts) in model {
         let page = fed(&mut fake, index);
