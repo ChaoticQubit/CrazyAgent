@@ -4049,7 +4049,7 @@ fn codex_retry_limited(line: &str) -> bool {
 fn endpoint_keychain(state: &Path, harness: ResearchHarness, home: &Path) -> Result<(), RunError> {
     #[cfg(target_os = "macos")]
     if matches!(harness, ResearchHarness::ClaudeCode) {
-        crate::engine::keychain::fresh_profile_keychain(state, home, &[])
+        kernel_security::keychain::fresh_profile_keychain(state, home, &[])
             .map_err(|_| RunError::Account("agent_keychain_unavailable".into()))?;
     }
     #[cfg(not(target_os = "macos"))]

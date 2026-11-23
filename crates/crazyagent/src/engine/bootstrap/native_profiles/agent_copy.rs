@@ -173,7 +173,7 @@ impl AgentKeychain {
     /// A native lead's teammates' home, when there is one beside it, gets the same keychain
     /// as its default, since teammates file the lead's sign-in under the lead's item name.
     /// The home must lie below the engine's own folder and outside the account profiles,
-    /// see [`crate::engine::keychain::fresh_profile_keychain`]. Every call names the
+    /// see [`kernel_security::keychain::fresh_profile_keychain`]. Every call names the
     /// keychain or runs with `HOME` set to an agent home, so the owner's keychain settings
     /// are untouched. Inputs: the engine folder and the agent home. Output: the keychain,
     /// or `native_profile_agent_keychain_unavailable`.
@@ -192,7 +192,7 @@ impl AgentKeychain {
             } else {
                 Vec::new()
             };
-        let keychain = crate::engine::keychain::fresh_profile_keychain(engine, home, &sharers)
+        let keychain = kernel_security::keychain::fresh_profile_keychain(engine, home, &sharers)
             .map_err(|_| keychain_unavailable())?;
         assert_eq!(
             keychain.parent(),
@@ -210,7 +210,7 @@ impl AgentKeychain {
     /// handoff already replaced is fine. Input: the keychain. Output: done, or
     /// `native_profile_agent_keychain_unavailable`.
     pub(super) fn forget(&self) -> Result<(), EngineError> {
-        crate::engine::keychain::forget_record(&self.home, &self.keychain, &self.service)
+        kernel_security::keychain::forget_record(&self.home, &self.keychain, &self.service)
             .map_err(|_| keychain_unavailable())
     }
 }
@@ -1018,7 +1018,7 @@ fn keychain_record(home: &File, path: &Path) -> Result<Vec<u8>, EngineError> {
     let library = open_folder(home, "Library")?;
     let keychains = open_folder(&library, "Keychains")?;
     let keychain =
-        crate::engine::keychain::open_profile_keychain(path).map_err(|_| unavailable())?;
+        kernel_security::keychain::open_profile_keychain(path).map_err(|_| unavailable())?;
     let name = keychain.file_name().ok_or_else(unavailable)?;
     let stat = rustix::fs::statat(&keychains, name, AtFlags::SYMLINK_NOFOLLOW)
         .map_err(|_| unavailable())?;
