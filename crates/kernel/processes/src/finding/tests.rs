@@ -693,6 +693,24 @@ fn a_system_tool_stays_usable_while_the_projects_cannot_be_read() {
     }
 }
 
+/// On a nix-darwin Mac the system profile, the per-user profiles and the default Nix profile
+/// hold the tools the PATH names, so a tool under each stays usable while the set-up
+/// projects cannot be read, in the form the PATH spells it. The names are made up, so no
+/// file on this computer is read.
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn a_nix_darwin_profile_tool_stays_usable_while_the_projects_cannot_be_read() {
+    let (_folder, home) = scratch();
+    let places = with_canonical(&home, |path| Ok(path.to_path_buf()), None);
+    for tool in [
+        "/run/current-system/sw/bin/crazyagent-row-tool",
+        "/etc/profiles/per-user/someone/bin/crazyagent-row-tool",
+        "/nix/var/nix/profiles/default/bin/crazyagent-row-tool",
+    ] {
+        assert!(!places.agent_writable(Path::new(tool)), "{tool}");
+    }
+}
+
 /// The failed-read fallback never trusts more than a successful read with no project
 /// does: every path agents can write with the projects read is agents' to write without
 /// them, so the fallback only adds refusals.
