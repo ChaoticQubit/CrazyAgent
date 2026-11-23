@@ -26,6 +26,10 @@ pub struct Bytes(pub Vec<u8>);
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Id(pub u64);
 
+/// The most bytes one stored event body may hold, the kernel event log's own bound,
+/// checked before any JSON is read.
+pub const EVENT_BODY_BYTES_MAX: usize = 65_536;
+
 /// Why a stored event body did not convert to its wire form: the body is not the stored
 /// shape of its kind, and the reason is the JSON decoder's message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,7 +39,8 @@ pub struct EventError {
 
 /// Converts one stored event body to its wire JSON through the kind's two generated forms.
 /// Input: the stored body bytes. Output: the wire JSON, or the [`EventError`] when the
-/// bytes are not the stored shape; never a panic.
+/// bytes pass [`EVENT_BODY_BYTES_MAX`] (`sdk_event_body_bounds`, before any decoding) or
+/// are not the stored shape; never a panic.
 pub fn event_body<S, W>(body: &[u8]) -> Result<serde_json::Value, EventError>
 where
     S: serde::de::DeserializeOwned,
@@ -44,6 +49,11 @@ where
     let refuse = |error: serde_json::Error| EventError {
         reason: alloc::string::ToString::to_string(&error),
     };
+    if body.len() > EVENT_BODY_BYTES_MAX {
+        return Err(EventError {
+            reason: alloc::string::String::from("sdk_event_body_bounds"),
+        });
+    }
     let stored: S = serde_json::from_slice(body).map_err(refuse)?;
     serde_json::to_value(W::from(stored)).map_err(refuse)
 }

@@ -58,3 +58,28 @@ fn rust_event_to_wire_refuses_a_bad_body_and_ignores_a_foreign_kind() {
     );
     assert!(wire("AgentQuitSaved", QUIT_BODY).is_none());
 }
+
+#[test]
+fn rust_event_to_wire_refuses_a_body_over_the_cap_before_decoding() {
+    assert_eq!(crate::wire::EVENT_BODY_BYTES_MAX, 65_536);
+    let padded = |len: usize| {
+        let mut body = QUIT_BODY.to_vec();
+        body.resize(len, b' ');
+        body
+    };
+    let settings = crate::generated::envelope::settings::event_to_wire;
+    let at_cap = padded(crate::wire::EVENT_BODY_BYTES_MAX);
+    assert!(
+        settings("AgentQuitSaved", &at_cap)
+            .expect("settings emits AgentQuitSaved")
+            .is_ok()
+    );
+    let over = padded(crate::wire::EVENT_BODY_BYTES_MAX + 1);
+    assert!(serde_json::from_slice::<Value>(&over).is_ok());
+    assert_eq!(
+        settings("AgentQuitSaved", &over).expect("settings emits AgentQuitSaved"),
+        Err(crate::wire::EventError {
+            reason: "sdk_event_body_bounds".to_owned()
+        })
+    );
+}
