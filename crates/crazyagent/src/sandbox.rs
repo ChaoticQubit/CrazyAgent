@@ -3,7 +3,9 @@ use kernel_sandbox::error::{SandboxError, invalid};
 use kernel_sandbox::lines::*;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::paths::{
-    PATH_BYTES_MAX, at_or_below, canonical, clean_absolute, owner_home, plain_top,
+    PATH_BYTES_MAX, SYSTEM_SECRET_PATHS, any_case, at_or_below, canonical, clean_absolute,
+    clear_of_secrets, fold_case, granted_root, owner_home, owner_secret_paths, owner_secrets,
+    plain_top, regex_escape,
 };
 use kernel_sandbox::ports::BRIDGE_PORT_MIN;
 use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
@@ -349,34 +351,6 @@ const KEYCHAIN_SERVICES: &[&str] = &[
     "com.apple.security.keychain-circle-notification",
 ];
 
-const OWNER_SECRET_PATHS_BEFORE_HARNESSES: &[&str] = &[
-    "Library/Keychains",
-    ".ssh",
-    ".gnupg",
-    ".netrc",
-    ".git-credentials",
-    ".config/gh",
-    ".config/git/credentials",
-    ".aws",
-    ".docker",
-    ".kube",
-];
-
-const OWNER_SECRET_PATHS_AFTER_HARNESSES: &[&str] = &[
-    ".cargo/credentials",
-    ".cargo/credentials.toml",
-    ".npmrc",
-    ".pypirc",
-    ".config/gcloud",
-];
-
-const SYSTEM_SECRET_PATHS: &[&str] = &[
-    "/Library/Keychains",
-    "/private/var/db/SystemKey",
-    "/opt/homebrew/etc/npmrc",
-    "/usr/local/etc/npmrc",
-];
-
 const CREDENTIAL_NAMES: &[&str] = &[
     ".npmrc",
     "etc/npmrc",
@@ -414,11 +388,6 @@ const ENGINE_SECRET_FOLDERS: &[&str] = &[
 ];
 
 const RUNTIME_ENTRIES_MAX: usize = 1024;
-
-/// Why a sandbox root is refused when it equals, holds or sits inside a secret path from
-/// [`ProjectSandbox::secret_paths`]: an allow-list boundary such as Landlock or bubblewrap
-/// cannot carve the secret back out of a granted root.
-pub const SECRET_ROOT_REFUSED: &str = "sandbox roots must not hold or sit in a secret path";
 
 const AGENT_KEY_VARIABLES: &[&str] = &["ANTHROPIC_API_KEY"];
 
@@ -1373,9 +1342,9 @@ impl ProjectSandbox {
         network: SandboxNetwork,
     ) -> Result<Self, SandboxError> {
         let owner = owner_home()?;
-        let secrets: Vec<PathBuf> = owner_secrets(&owner).collect();
+        let secrets: Vec<PathBuf> = owner_secrets(&owner, &harness_folders()).collect();
         for root in [project_root, agent_home, agent_tmp] {
-            granted_root(root, &owner, &secrets)?;
+            granted_root(root, &owner, &secrets, &harness_folders())?;
         }
         if let SandboxNetwork::Only(remotes) = &network
             && (remotes.len() > REMOTES_MAX
@@ -1495,8 +1464,8 @@ impl ProjectSandbox {
                     let tmp = owner_tmp
                         .ok_or_else(|| invalid("the owner's temp folder cannot be given"))?;
                     let owner = owner_home()?;
-                    let secrets: Vec<PathBuf> = owner_secrets(&owner).collect();
-                    granted_root(tmp, &owner, &secrets)?;
+                    let secrets: Vec<PathBuf> = owner_secrets(&owner, &harness_folders()).collect();
+                    granted_root(tmp, &owner, &secrets, &harness_folders())?;
                     clear_of_secrets(tmp, &self.engine_secrets)?;
                     self.owner_tmp = Some(tmp.to_path_buf());
                 }
@@ -1729,7 +1698,7 @@ impl ProjectSandbox {
     /// it: the owner's Keychains, SSH, GPG, cloud, gh, git, Codex and Claude credentials,
     /// the system Keychains and, once guarded, the engine runtime's secrets.
     pub fn secret_paths(&self) -> Vec<PathBuf> {
-        let mut paths: Vec<PathBuf> = owner_secrets(&self.owner_home).collect();
+        let mut paths: Vec<PathBuf> = owner_secrets(&self.owner_home, &harness_folders()).collect();
         paths.extend(self.engine_secrets.iter().cloned());
         paths
     }
@@ -1742,7 +1711,12 @@ impl ProjectSandbox {
         if self.worktrees.len() >= WORKTREES_MAX {
             return Err(invalid("too many worktrees"));
         }
-        granted_root(worktree, &owner_home()?, &self.secret_paths())?;
+        granted_root(
+            worktree,
+            &owner_home()?,
+            &self.secret_paths(),
+            &harness_folders(),
+        )?;
         self.worktrees.push(worktree.to_path_buf());
         assert!(self.worktrees.len() <= WORKTREES_MAX);
         Ok(self)
@@ -1941,7 +1915,12 @@ impl ProjectSandbox {
         if self.read_roots.len() >= READ_ROOTS_MAX {
             return Err(invalid("too many read roots"));
         }
-        granted_root(root, &owner_home()?, &self.secret_paths())?;
+        granted_root(
+            root,
+            &owner_home()?,
+            &self.secret_paths(),
+            &harness_folders(),
+        )?;
         self.read_roots.push(root.to_path_buf());
         Ok(self)
     }
@@ -2067,7 +2046,12 @@ impl ProjectSandbox {
         if self.tool_roots.len() >= TOOL_ROOTS_MAX {
             return Err(invalid("too many toolchain folders"));
         }
-        granted_root(folder, &owner_home()?, &self.secret_paths())?;
+        granted_root(
+            folder,
+            &owner_home()?,
+            &self.secret_paths(),
+            &harness_folders(),
+        )?;
         self.tool_roots.push(folder.to_path_buf());
         assert!(self.tool_roots.len() <= TOOL_ROOTS_MAX);
         Ok(self)
@@ -2162,7 +2146,7 @@ impl ProjectSandbox {
             if self.tool_roots.len() >= TOOL_ROOTS_MAX {
                 return Err(invalid("too many toolchain folders"));
             }
-            granted_root(root, &owner, &secrets)?;
+            granted_root(root, &owner, &secrets, &harness_folders())?;
             self.tool_roots.push(root.clone());
         }
         for file in tools.files() {
@@ -2197,7 +2181,7 @@ impl ProjectSandbox {
                 continue;
             }
             if self.tool_roots.len() >= TOOL_ROOTS_MAX
-                || granted_root(path, &owner, &secrets).is_err()
+                || granted_root(path, &owner, &secrets, &harness_folders()).is_err()
             {
                 skipped += 1;
                 continue;
@@ -2219,7 +2203,12 @@ impl ProjectSandbox {
         if self.tool_cache.is_some() {
             return Err(invalid("the sandbox already has a tool cache"));
         }
-        granted_root(root, &owner_home()?, &self.secret_paths())?;
+        granted_root(
+            root,
+            &owner_home()?,
+            &self.secret_paths(),
+            &harness_folders(),
+        )?;
         let overlaps = self
             .writable_roots()
             .chain(self.read_roots.iter())
@@ -2272,7 +2261,12 @@ impl ProjectSandbox {
         if self.scratch.is_some() {
             return Err(invalid("the sandbox already has a temp folder"));
         }
-        granted_root(tmp, &owner_home()?, &self.secret_paths())?;
+        granted_root(
+            tmp,
+            &owner_home()?,
+            &self.secret_paths(),
+            &harness_folders(),
+        )?;
         self.scratch = Some(tmp.to_path_buf());
         Ok(self)
     }
@@ -2396,7 +2390,12 @@ impl ProjectSandbox {
                 "a shared writable folder must be a top-level project folder kept under its secret rule",
             ));
         }
-        granted_root(folder, &owner_home()?, &self.secret_paths())?;
+        granted_root(
+            folder,
+            &owner_home()?,
+            &self.secret_paths(),
+            &harness_folders(),
+        )?;
         if self
             .writable_roots()
             .any(|root| root.starts_with(folder) || folder.starts_with(root))
@@ -2642,7 +2641,12 @@ impl ProjectSandbox {
         mates_home: &Path,
     ) -> Result<(Self, Self), SandboxError> {
         let home = self.agent_home.clone();
-        granted_root(mates_home, &self.owner_home, &self.secret_paths())?;
+        granted_root(
+            mates_home,
+            &self.owner_home,
+            &self.secret_paths(),
+            &harness_folders(),
+        )?;
         if mates_home.starts_with(&home) || home.starts_with(mates_home) {
             return Err(invalid("the teammates' home must sit beside the lead's"));
         }
@@ -2651,7 +2655,12 @@ impl ProjectSandbox {
             .map(|folder| home.join(folder))
             .collect();
         for folder in &shared {
-            granted_root(folder, &self.owner_home, &self.secret_paths())?;
+            granted_root(
+                folder,
+                &self.owner_home,
+                &self.secret_paths(),
+                &harness_folders(),
+            )?;
         }
         let binding = crate::team::caller::binding_path(callers);
         let mailbox = self.agent_tmp.join(crate::team::tool::MAILBOX_FOLDER);
@@ -4260,242 +4269,6 @@ fn teammates_clone_denies(clone: &Path, lead: Option<&str>) -> String {
     text
 }
 
-/// Spells plain text as a Seatbelt regex that matches every name a case-insensitive volume
-/// finds under it: each letter in both cases with every code point that folds onto it or
-/// onto a run of two or three letters ([`spelled`]), so the rule never leans on how Seatbelt
-/// folds names itself (SA vid 202). A stretch with more than [`SPELLINGS_MAX`] spellings, a
-/// long run of `s` or `f` in path text, is spelled as the [`superset`], which matches more,
-/// so the result holds in a deny. Input: text without a quote or backslash. Output: the
-/// pattern text, without anchors.
-pub(crate) fn any_case(text: &str) -> String {
-    spelled(&regex_escape(text), false)
-}
-
-/// A Seatbelt regex fragment matched as [`any_case`] matches plain text, every character
-/// that is not a letter, regex syntax included, staying as written; a letter run next to a
-/// wildcard also takes a fold reaching into it ([`spelled_run`]). Every stretch is listed
-/// whole, so a rule that gives access back stays exact. Input: a fragment with no bracket
-/// class or quote. Output: the pattern.
-pub(crate) fn fold_case(pattern: &str) -> String {
-    assert!(!pattern.contains('[') && !pattern.contains('"'));
-    spelled(pattern, true)
-}
-
-/// The most spellings one stretch of letters between two places no fold spans lists one by
-/// one; past it path text takes the [`superset`] (B5 r2).
-const SPELLINGS_MAX: usize = 8;
-
-/// Spells text run by run from [`crate::instruction_files::ASCII_FOLDS`]: each run of ASCII
-/// letters through [`spelled_run`], every other character through [`spelled_char`]. In a
-/// regex fragment a letter a quantifier follows stands alone, and no fold may join it to a
-/// letter beside it. Inputs: the text and whether it is a regex fragment. Output: the pattern.
-fn spelled(text: &str, regex: bool) -> String {
-    let characters: Vec<char> = text.chars().collect();
-    let letter = |at: usize| characters.get(at).is_some_and(char::is_ascii_alphabetic);
-    let quantified =
-        |at: usize| regex && matches!(characters.get(at + 1), Some('?' | '*' | '+' | '{'));
-    let mut pattern = String::with_capacity(text.len() * 8);
-    let mut at = 0;
-    while at < characters.len() {
-        if !letter(at) || quantified(at) {
-            assert!(!letter(at) || !joins_fold(&characters, at));
-            pattern.push_str(&spelled_char(characters[at]));
-            at += 1;
-            continue;
-        }
-        let start = at;
-        while letter(at) && !quantified(at) {
-            at += 1;
-        }
-        let before = regex && start > 0 && matches!(characters[start - 1], '*' | '+');
-        let after = regex
-            && characters.get(at) == Some(&'.')
-            && matches!(characters.get(at + 1), Some('*' | '+'));
-        pattern.push_str(&spelled_run(&characters[start..at], before, after, regex));
-    }
-    pattern
-}
-
-/// Tells whether a fold of two or three letters would join the letter at `at` to the letter
-/// before it or to the one after its quantifier. Inputs: the characters and the letter's
-/// place. Output: true when one would.
-fn joins_fold(characters: &[char], at: usize) -> bool {
-    let joined = |left: Option<&char>, right: Option<&char>| match (left, right) {
-        (Some(left), Some(right)) if left.is_ascii_alphabetic() && right.is_ascii_alphabetic() => {
-            let pair = format!("{left}{right}").to_ascii_lowercase();
-            crate::instruction_files::ASCII_FOLDS
-                .iter()
-                .any(|(_, folded)| folded.contains(pair.as_str()))
-        }
-        _ => false,
-    };
-    let previous = at.checked_sub(1).and_then(|before| characters.get(before));
-    joined(previous, characters.get(at)) || joined(characters.get(at), characters.get(at + 2))
-}
-
-/// Spells one character as a case-insensitive volume finds it: an ASCII letter in both
-/// cases, with every code point that folds onto it alone, the non-ASCII ones in a group so
-/// each matches its whole UTF-8 sequence (LL2S-2). Input: the character. Output: the pattern.
-fn spelled_char(character: char) -> String {
-    let lower = character.to_ascii_lowercase();
-    let mut alternatives = vec![lower.to_string()];
-    if character.is_ascii_alphabetic() {
-        alternatives.push(character.to_ascii_uppercase().to_string());
-    }
-    for (point, folded) in crate::instruction_files::ASCII_FOLDS {
-        if folded.len() == 1 && folded.starts_with(lower) {
-            alternatives.push(point.to_string());
-        }
-    }
-    if alternatives.len() == 1 {
-        character.to_string()
-    } else if alternatives
-        .iter()
-        .all(|alternative| alternative.is_ascii())
-    {
-        format!("[{}]", alternatives.concat())
-    } else {
-        format!("({})", alternatives.join("|"))
-    }
-}
-
-/// Spells one run of ASCII letters with every fold of two or three letters inside it and,
-/// next to a wildcard, every fold reaching past its first or last letter into the wildcard.
-/// The run splits where no fold spans, each stretch listing all its spellings, or past
-/// [`SPELLINGS_MAX`] taking the [`superset`] unless it must stay exact. Inputs: the letters,
-/// whether a wildcard comes before and after them and whether every stretch must be listed
-/// whole. Output: the pattern text.
-fn spelled_run(run: &[char], before: bool, after: bool, exact: bool) -> String {
-    let lower: String = run.iter().map(char::to_ascii_lowercase).collect();
-    let count = run.len();
-    let mut folds: Vec<(usize, usize, char)> = Vec::new();
-    for (point, folded) in crate::instruction_files::ASCII_FOLDS {
-        let width = folded.len();
-        if width < 2 {
-            continue;
-        }
-        for at in (0..count).filter(|&at| lower[at..].starts_with(folded)) {
-            folds.push((at, at + width, point));
-        }
-        for split in 1..width {
-            if before && lower.starts_with(&folded[split..]) {
-                folds.push((0, width - split, point));
-            }
-            if after && lower.ends_with(&folded[..split]) {
-                folds.push((count - split, count, point));
-            }
-        }
-        for inner in 1..width.saturating_sub(count) {
-            if before && after && folded[inner..inner + count] == lower {
-                folds.push((0, count, point));
-            }
-        }
-    }
-    folds.sort_unstable();
-    folds.dedup();
-    let mut pieces: Vec<(usize, usize, String)> = (0..count)
-        .map(|at| (at, at + 1, spelled_char(run[at])))
-        .collect();
-    pieces.extend(
-        folds
-            .into_iter()
-            .map(|(start, end, point)| (start, end, point.to_string())),
-    );
-    let cuts: Vec<usize> = (0..=count)
-        .filter(|&cut| {
-            !pieces
-                .iter()
-                .any(|(start, end, _)| *start < cut && cut < *end)
-        })
-        .collect();
-    let mut pattern = String::new();
-    for stretch in cuts.windows(2) {
-        let (at, to) = (stretch[0], stretch[1]);
-        let (count, fewest) = tally(&pieces, at, to);
-        assert!(count >= 1 && (1..=to - at).contains(&fewest));
-        if count > SPELLINGS_MAX {
-            assert!(!exact, "a pattern stretch lists every spelling");
-            pattern.push_str(&superset(&pieces, at, to, fewest));
-            continue;
-        }
-        let mut spellings = Vec::new();
-        spell_stretch(&pieces, at, to, String::new(), &mut spellings);
-        assert_eq!(spellings.len(), count);
-        if let [only] = spellings.as_slice() {
-            pattern.push_str(only);
-        } else {
-            pattern.push_str(&format!("({})", spellings.join("|")));
-        }
-    }
-    pattern
-}
-
-/// Counts the spellings of the letters from `at` to `to` that the pieces give, up to one
-/// past [`SPELLINGS_MAX`], and the fewest pieces one spelling takes, place by place from the
-/// end, so no long run is listed to be counted. Inputs: the pieces as start, end and
-/// pattern, and the stretch. Output: the count and the fewest pieces.
-fn tally(pieces: &[(usize, usize, String)], at: usize, to: usize) -> (usize, usize) {
-    assert!(at < to);
-    let mut counts = vec![0; to - at + 1];
-    let mut fewest = vec![0; to - at + 1];
-    counts[to - at] = 1;
-    for place in (at..to).rev() {
-        let ends: Vec<usize> = pieces
-            .iter()
-            .filter(|(start, end, _)| *start == place && *end <= to)
-            .map(|(_, end, _)| end - at)
-            .collect();
-        assert!(!ends.is_empty());
-        counts[place - at] = ends
-            .iter()
-            .fold(0, |sum, &end| (sum + counts[end]).min(SPELLINGS_MAX + 1));
-        fewest[place - at] = 1 + ends.iter().map(|&end| fewest[end]).min().unwrap_or(0);
-    }
-    (counts[0], fewest[0])
-}
-
-/// Spells the letters from `at` to `to` as one of the stretch's pieces at each place, at
-/// least `fewest` places and at most one per letter, the extra places optional, since
-/// Seatbelt reads no `{m,n}` count (probe 2026-11-15). It matches every spelling and more,
-/// so it holds only in a deny. Inputs: the pieces, the stretch and its fewest pieces.
-/// Output: the pattern.
-fn superset(pieces: &[(usize, usize, String)], at: usize, to: usize, fewest: usize) -> String {
-    let mut alternatives: Vec<&str> = Vec::new();
-    for (start, end, piece) in pieces {
-        if at <= *start && *end <= to && !alternatives.contains(&piece.as_str()) {
-            alternatives.push(piece);
-        }
-    }
-    let place = format!("({})", alternatives.join("|"));
-    let optional = format!("{place}?");
-    let pattern = place.repeat(fewest) + &optional.repeat(to - at - fewest);
-    assert!(fewest <= to - at && pattern.len() <= (to - at) * optional.len());
-    pattern
-}
-
-/// Lists every spelling of the letters from `at` to `to` that the pieces give, in order.
-/// Inputs: the pieces as start, end and pattern, the stretch, the spelling so far and the
-/// list it adds to. Output: none; the list grows.
-fn spell_stretch(
-    pieces: &[(usize, usize, String)],
-    at: usize,
-    to: usize,
-    so_far: String,
-    spellings: &mut Vec<String>,
-) {
-    if at == to {
-        spellings.push(so_far);
-        return;
-    }
-    assert!(at < to);
-    for (start, end, piece) in pieces {
-        if *start == at && *end <= to {
-            assert!(start < end);
-            spell_stretch(pieces, *end, to, format!("{so_far}{piece}"), spellings);
-        }
-    }
-}
-
 /// Seatbelt regex bodies `{prefix}(a|b|...){suffix}` that together match each of
 /// `alternatives`, packed whole, in order, so each body fits [`SBPL_STRING_MAX`] bytes; one
 /// alternative too long beside the prefix keeps a body of its own, which [`sbpl_overlong`]
@@ -4538,20 +4311,6 @@ pub(crate) fn sbpl_overlong(profile: &str) -> Vec<&str> {
         overlong.push(parts[parts.len() - 1]);
     }
     overlong
-}
-
-/// Escapes plain text for a Seatbelt regex, so every character matches itself. Input: text
-/// without a quote or backslash. Output: the pattern text, without anchors.
-fn regex_escape(text: &str) -> String {
-    assert!(!text.contains('"') && !text.contains('\\'));
-    let mut pattern = String::with_capacity(text.len() * 2);
-    for character in text.chars() {
-        if ".^$*+?()[]{}|".contains(character) {
-            pattern.push('\\');
-        }
-        pattern.push(character);
-    }
-    pattern
 }
 
 fn borrowed<'a>(env: &'a [(&'static str, OsString)]) -> Vec<(&'static str, &'a OsStr)> {
@@ -4626,7 +4385,9 @@ pub(crate) fn ensure_store(path: &Path) -> io::Result<()> {
 /// owner's under the home, the system's without their leading `/` and the credential names
 /// no allowed root may hold. Takes nothing. Returns the names.
 pub(crate) fn credential_places() -> impl Iterator<Item = &'static str> {
-    owner_secret_paths()
+    let owner: Vec<&'static str> = owner_secret_paths(&harness_folders()).collect();
+    owner
+        .into_iter()
         .chain(CREDENTIAL_NAMES.iter().copied())
         .chain(
             SYSTEM_SECRET_PATHS
@@ -4638,28 +4399,12 @@ pub(crate) fn credential_places() -> impl Iterator<Item = &'static str> {
 /// The folders and files in the owner's home that belong to a harness, as every harness
 /// manifest names them, in catalog order: agents never read them and no project or sandbox
 /// root may sit inside one. Takes nothing. Returns the names, relative to the home.
-pub(crate) fn harness_folders() -> impl Iterator<Item = &'static str> {
+pub(crate) fn harness_folders() -> Vec<&'static str> {
     crate::harnesses::registry::registry()
         .all()
         .iter()
         .flat_map(|harness| harness.owner_folders().iter().map(String::as_str))
-}
-
-fn owner_secret_paths() -> impl Iterator<Item = &'static str> {
-    OWNER_SECRET_PATHS_BEFORE_HARNESSES
-        .iter()
-        .copied()
-        .chain(harness_folders())
-        .chain(OWNER_SECRET_PATHS_AFTER_HARNESSES.iter().copied())
-}
-
-fn owner_secrets(owner: &Path) -> impl Iterator<Item = PathBuf> {
-    owner_secret_paths()
-        .map(move |path| {
-            path.split('/')
-                .fold(owner.to_path_buf(), |at, part| at.join(part))
-        })
-        .chain(SYSTEM_SECRET_PATHS.iter().map(PathBuf::from))
+        .collect()
 }
 
 /// The engine runtime's secrets: the fixed secret files and folders, plus every Unix socket
@@ -4776,16 +4521,6 @@ fn listed_master_folder(engine: &Path, home: &Path) -> Option<PathBuf> {
 #[cfg(not(unix))]
 fn listed_master_folder(_engine: &Path, _home: &Path) -> Option<PathBuf> {
     None
-}
-
-fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {
-    if secrets
-        .iter()
-        .any(|secret| root.starts_with(secret) || secret.starts_with(root))
-    {
-        return Err(invalid(SECRET_ROOT_REFUSED));
-    }
-    Ok(())
 }
 
 /// The Seatbelt rules that keep an agent from changing what its harness loads from its own
@@ -5084,7 +4819,7 @@ pub(crate) fn regranted_denies(home: &Path, folders: &[&Path]) -> String {
 }
 
 /// The Seatbelt rule that refuses reading, writing, linking or cloning any path with a part
-/// made of ASCII, [`crate::instruction_files::ASCII_FOLDS`] points and at least one code
+/// made of ASCII, [`kernel_sandbox::paths::ASCII_FOLDS`] points and at least one code
 /// point HFS+ ignores in names, since such a volume opens `.g\u{200c}it/config` as
 /// `.git/config` past every name deny (SA vid 202). A part in another script keeps its
 /// joiners. Output: the rule, ending in a line break.
@@ -5093,7 +4828,7 @@ pub(crate) fn hfs_ignored_deny() -> String {
         .iter()
         .map(char::to_string)
         .collect();
-    let folds: Vec<String> = crate::instruction_files::ASCII_FOLDS
+    let folds: Vec<String> = kernel_sandbox::paths::ASCII_FOLDS
         .iter()
         .map(|(point, _)| point.to_string())
         .collect();
@@ -5127,31 +4862,6 @@ fn shared_denies(folder: &Path) -> String {
     format!(
         "(deny file-write-create (require-all (subpath \"{folder}\") (vnode-type SYMLINK)))\n(deny file-write-create (require-all (subpath \"{folder}\") (vnode-type DIRECTORY) (require-not (regex #\"{LOCK_FOLDER}\"))))\n"
     )
-}
-
-fn granted_root(root: &Path, owner: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {
-    let depth = root
-        .components()
-        .filter(|component| matches!(component, Component::Normal(_)))
-        .count();
-    if !clean_absolute(root) || depth < 2 {
-        return Err(invalid("sandbox roots must be absolute, deep and plain"));
-    }
-    if owner.starts_with(root) {
-        return Err(invalid("sandbox roots must not contain the owner home"));
-    }
-    for private in harness_folders() {
-        if root.starts_with(owner.join(private)) {
-            return Err(invalid("sandbox roots must not be owner harness homes"));
-        }
-    }
-    clear_of_secrets(root, secrets)?;
-    if !root.is_dir() || canonical(root)? != root {
-        return Err(invalid(
-            "sandbox roots must be existing canonical directories",
-        ));
-    }
-    Ok(())
 }
 
 /// The engine's grants folder when it is a plain drive path, which `install_with_grants`

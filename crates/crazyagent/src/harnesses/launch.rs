@@ -1594,7 +1594,9 @@ fn validate_home_for(home: &Path, owner: Option<&Path>) -> Result<(), LaunchErro
     let canonical = kernel_sandbox::paths::canonical(home)
         .map_err(|_| failure("launch_account_home_unavailable"))?;
     if let Some(owner) = owner {
-        let folders = crate::sandbox::harness_folders().map(|folder| owner.join(folder));
+        let folders = crate::sandbox::harness_folders()
+            .into_iter()
+            .map(|folder| owner.join(folder));
         for forbidden in std::iter::once(owner.to_path_buf()).chain(folders) {
             if kernel_sandbox::paths::canonical(&forbidden)
                 .is_ok_and(|forbidden| forbidden == canonical)

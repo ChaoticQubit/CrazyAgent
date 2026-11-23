@@ -1,5 +1,5 @@
-use super::{clear_of_secrets, granted_root, owner_secrets};
 use kernel_sandbox::paths::{canonical, owner_home};
+use kernel_sandbox::paths::{clear_of_secrets, granted_root, owner_secrets};
 use rusqlite::{Connection, params};
 use std::path::{Path, PathBuf};
 
@@ -33,7 +33,7 @@ pub fn checked(text: &str, data_root: &Path) -> Result<PathBuf, &'static str> {
     if owner.starts_with(&real) {
         return Err("read_path_holds_home");
     }
-    let secrets: Vec<PathBuf> = owner_secrets(&owner).collect();
+    let secrets: Vec<PathBuf> = owner_secrets(&owner, &super::harness_folders()).collect();
     if clear_of_secrets(&real, &secrets).is_err() {
         return Err("read_path_credentials");
     }
@@ -41,7 +41,8 @@ pub fn checked(text: &str, data_root: &Path) -> Result<PathBuf, &'static str> {
     if real.starts_with(&data) || data.starts_with(&real) {
         return Err("read_path_engine_data");
     }
-    granted_root(&real, &owner, &secrets).map_err(|_| "read_path_refused")?;
+    granted_root(&real, &owner, &secrets, &super::harness_folders())
+        .map_err(|_| "read_path_refused")?;
     Ok(real)
 }
 

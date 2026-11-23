@@ -6358,7 +6358,7 @@ mod tests {
                 matches!(
                     &ending,
                     Err(RunError::Sandbox(SandboxError::Invalid(reason)))
-                        if reason == crate::sandbox::SECRET_ROOT_REFUSED
+                        if reason == kernel_sandbox::paths::SECRET_ROOT_REFUSED
                 ),
                 "{name}: {ending:?}"
             );

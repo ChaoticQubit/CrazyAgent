@@ -120,3 +120,77 @@ fn a_home_named_through_the_data_volume_settles_to_its_short_name() {
     assert_eq!(settled_home(long).unwrap(), short);
     assert_eq!(settled_home(short.clone()).unwrap(), short);
 }
+
+/// The harness folders a caller hands in reach the owner's secret list between the fixed
+/// names before and after them, each under the owner home, followed by the system's
+/// secret paths, in that order.
+#[test]
+fn the_harness_folders_reach_the_secret_list() {
+    let owner = Path::new("/home/owner");
+    let found: Vec<PathBuf> = owner_secrets(owner, &[".fixture-a", ".fixture-b/inner"]).collect();
+    let under = |parts: &[&str]| {
+        parts
+            .iter()
+            .fold(owner.to_path_buf(), |at, part| at.join(part))
+    };
+    let mut expected: Vec<PathBuf> = [
+        &["Library", "Keychains"][..],
+        &[".ssh"],
+        &[".gnupg"],
+        &[".netrc"],
+        &[".git-credentials"],
+        &[".config", "gh"],
+        &[".config", "git", "credentials"],
+        &[".aws"],
+        &[".docker"],
+        &[".kube"],
+        &[".fixture-a"],
+        &[".fixture-b", "inner"],
+        &[".cargo", "credentials"],
+        &[".cargo", "credentials.toml"],
+        &[".npmrc"],
+        &[".pypirc"],
+        &[".config", "gcloud"],
+    ]
+    .into_iter()
+    .map(under)
+    .collect();
+    expected.extend(
+        [
+            "/Library/Keychains",
+            "/private/var/db/SystemKey",
+            "/opt/homebrew/etc/npmrc",
+            "/usr/local/etc/npmrc",
+        ]
+        .map(PathBuf::from),
+    );
+    assert_eq!(found, expected);
+}
+
+/// The table of code points a case-insensitive volume folds onto ASCII is defined in one
+/// place in the workspace, the sandbox path module, so the landing checks, the name compares
+/// and the Seatbelt spellings read the same folds.
+#[test]
+fn ascii_folds_has_one_home() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
+    let needle = ["const ASCII", "_FOLDS"].concat();
+    let mut homes = Vec::new();
+    let mut folders = vec![root.join("crates"), root.join("apps/desktop/src-tauri")];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy();
+            if path.is_dir() && name != "target" && !name.starts_with('.') {
+                folders.push(path);
+            } else if name.ends_with(".rs")
+                && std::fs::read_to_string(&path)
+                    .unwrap()
+                    .lines()
+                    .any(|line| line.contains(&needle))
+            {
+                homes.push(path.strip_prefix(&root).unwrap().to_path_buf());
+            }
+        }
+    }
+    assert_eq!(homes, [Path::new("crates/kernel/sandbox/src/paths.rs")]);
+}
