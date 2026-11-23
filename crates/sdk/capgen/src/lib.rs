@@ -221,6 +221,8 @@ fn entries(folder: &Path) -> Vec<(String, bool)> {
         .collect()
 }
 
+#[cfg(test)]
+mod events_tests;
 mod rust;
 mod rust_wire;
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crazyagent_cap::{Capability, Enum, File, Handle, Tier, Type, TypeRef};
+use crazyagent_cap::{Capability, Enum, Event, Field, File, Handle, Tier, Type, TypeRef};
 
 use crate::CapgenError;
 use crate::rust::pascal;
@@ -129,10 +129,12 @@ struct Call<'f> {
     capability: &'f Capability,
 }
 
-/// Names every capability of a file after refusing each name TS cannot carry, and each
-/// function name taken twice: by another capability, a generated codec (`encode<T>`,
-/// `decode<T>` of a mapped type) or a foreign stem's import alias. Inputs: the stem and the
-/// file. Output: the calls in `.cap` order, or `capgen_reserved_name` / `capgen_name_collision`.
+/// Names every capability of a file after refusing each name TS cannot carry, the event
+/// union named like an item or kind, and each function or const name taken twice: by
+/// another capability, a generated codec (`encode<T>`, `decode<T>` of a mapped type or
+/// event), the event decoder and kinds, or a foreign stem's import alias. Inputs: the stem
+/// and the file. Output: the calls in `.cap` order, or `capgen_reserved_name` /
+/// `capgen_name_collision`.
 fn calls<'f>(stem: &str, file: &'f File) -> Result<Vec<Call<'f>>, CapgenError> {
     check_names(stem, file)?;
     let mapped = mapped(file);
@@ -146,6 +148,28 @@ fn calls<'f>(stem: &str, file: &'f File) -> Result<Vec<Call<'f>>, CapgenError> {
             .into_iter()
             .map(str::to_owned),
     );
+    let events = crate::rust_wire::events(file);
+    if !events.is_empty() {
+        let union = union_name(stem);
+        let mut items = file
+            .enums
+            .iter()
+            .map(|item| &item.name)
+            .chain(file.handles.iter().map(|item| &item.name))
+            .chain(file.types.iter().map(|item| &item.name))
+            .chain(events.iter().map(|event| &event.kind));
+        if items.any(|name| *name == union) {
+            return Err(refuse(stem, "capgen_name_collision", union));
+        }
+        taken.insert(format!("decode{union}"));
+        taken.insert(kinds_name(stem));
+        taken.extend(
+            events
+                .iter()
+                .filter(|event| event_mapped(event, &mapped))
+                .map(|event| format!("decode{}", event.kind)),
+        );
+    }
     let mut calls = Vec::with_capacity(file.capabilities.len());
     for capability in &file.capabilities {
         let rest: Vec<&str> = capability.name.split('.').skip(1).collect();
@@ -153,13 +177,16 @@ fn calls<'f>(stem: &str, file: &'f File) -> Result<Vec<Call<'f>>, CapgenError> {
         let snake = rest.join("_");
         let function = camel(&snake);
         reserved(stem, &function)?;
-        if taken.contains(&function) {
-            return Err(refuse(stem, "capgen_name_collision", function));
+        let constant = snake.to_ascii_uppercase();
+        for name in [&function, &constant] {
+            if taken.contains(name) {
+                return Err(refuse(stem, "capgen_name_collision", name.clone()));
+            }
         }
         taken.insert(function.clone());
         calls.push(Call {
             function,
-            constant: snake.to_ascii_uppercase(),
+            constant,
             capability,
         });
     }
@@ -167,8 +194,9 @@ fn calls<'f>(stem: &str, file: &'f File) -> Result<Vec<Call<'f>>, CapgenError> {
     Ok(calls)
 }
 
-/// Refuses the stem, every enum, handle and type name, and every capability input name
-/// that TS cannot carry. Inputs: the stem and the file. Output: nothing or the refusal.
+/// Refuses the stem, every enum, handle, type and event kind name, and every capability
+/// input name that TS cannot carry. Inputs: the stem and the file. Output: nothing or the
+/// refusal.
 fn check_names(stem: &str, file: &File) -> Result<(), CapgenError> {
     reserved(stem, stem)?;
     let items = file
@@ -176,7 +204,12 @@ fn check_names(stem: &str, file: &File) -> Result<(), CapgenError> {
         .iter()
         .map(|item| &item.name)
         .chain(file.handles.iter().map(|item| &item.name))
-        .chain(file.types.iter().map(|item| &item.name));
+        .chain(file.types.iter().map(|item| &item.name))
+        .chain(
+            file.capabilities
+                .iter()
+                .flat_map(|capability| capability.emits.iter().map(|event| &event.kind)),
+        );
     let inputs = file
         .capabilities
         .iter()
@@ -278,8 +311,8 @@ fn named_in(ty: &TypeRef) -> Option<&str> {
     }
 }
 
-/// The type refs generated TS writes for a file's calls and types: type fields, capability
-/// inputs and outputs, never event fields. Input: the file. Output: the refs.
+/// The type refs generated TS writes for a file: type fields, capability inputs and
+/// outputs, and event fields. Input: the file. Output: the refs.
 fn called_refs(file: &File) -> impl Iterator<Item = &TypeRef> {
     let fields = file
         .types
@@ -291,8 +324,35 @@ fn called_refs(file: &File) -> impl Iterator<Item = &TypeRef> {
             .iter()
             .map(|field| &field.ty)
             .chain(capability.output.as_ref())
+            .chain(
+                capability
+                    .emits
+                    .iter()
+                    .flat_map(|event| event.fields.iter().map(|field| &field.ty)),
+            )
     });
     fields.chain(calls)
+}
+
+/// The name of a file's event union: its Pascal stem and `Event`. Input: the stem.
+/// Output: the name.
+fn union_name(stem: &str) -> String {
+    format!("{}Event", pascal(stem))
+}
+
+/// The name of a file's event kinds const: its upper-case stem and `_EVENT_KINDS`.
+/// Input: the stem. Output: the name.
+fn kinds_name(stem: &str) -> String {
+    format!("{}_EVENT_KINDS", stem.to_ascii_uppercase())
+}
+
+/// Whether an event body holds `u64` or `bytes` in a field, so it gets a decoder.
+/// Inputs: the event and the file's mapped answers. Output: the answer.
+fn event_mapped(event: &Event, mapped: &BTreeMap<&str, bool>) -> bool {
+    event
+        .fields
+        .iter()
+        .any(|field| holds_wide(&field.ty, mapped))
 }
 
 /// The foreign stems a set of type refs names, sorted. Input: the refs. Output: the stems.
@@ -318,8 +378,8 @@ struct Uses {
 }
 
 /// Writes one file's module: its imports, enums, handles, types each with its codecs when
-/// mapped, and per capability its facts and call function, one blank line between items.
-/// Inputs: the stem, the file and its calls. Output: the text.
+/// mapped, per capability its facts and call function, then its events, one blank line
+/// between items. Inputs: the stem, the file and its calls. Output: the text.
 fn module(stem: &str, file: &File, calls: &[Call<'_>]) -> String {
     let mapped = mapped(file);
     let mut uses = Uses::default();
@@ -330,12 +390,31 @@ fn module(stem: &str, file: &File, calls: &[Call<'_>]) -> String {
         blocks.push(record(stem, item));
         if mapped[item.name.as_str()] {
             blocks.push(encoder(stem, item, &mapped, &mut uses));
-            blocks.push(decoder(stem, item, &mapped, &mut uses));
+            blocks.push(decoder(stem, &item.name, &item.fields, &mapped, &mut uses));
         }
     }
     for call in calls {
         blocks.push(facts(stem, call));
         blocks.push(function(stem, call, &mapped, &mut uses));
+    }
+    let events = crate::rust_wire::events(file);
+    if !events.is_empty() {
+        uses.types.insert("Wire");
+        for event in &events {
+            blocks.push(event_type(event));
+            if event_mapped(event, &mapped) {
+                blocks.push(decoder(
+                    stem,
+                    &event.kind,
+                    &event.fields,
+                    &mapped,
+                    &mut uses,
+                ));
+            }
+        }
+        blocks.push(event_union(stem, &events));
+        blocks.push(event_kinds(stem, &events));
+        blocks.push(event_decoder(stem, &events, &mapped));
     }
     if !calls.is_empty() {
         uses.types.extend(["Capability", "Host", "Result"]);
@@ -529,12 +608,17 @@ fn encoder(stem: &str, item: &Type, mapped: &BTreeMap<&str, bool>, uses: &mut Us
     text
 }
 
-/// Writes a mapped record's decoder: an object guard, then one line per field, a mapped
-/// field through its codec, any other cast. Inputs: the stem, the type, the file's mapped
-/// answers and the uses. Output: the block; the uses grow.
-fn decoder(stem: &str, item: &Type, mapped: &BTreeMap<&str, bool>, uses: &mut Uses) -> String {
+/// Writes a mapped record's or event body's decoder: an object guard, then one line per
+/// field, a mapped field through its codec, any other cast. Inputs: the stem, the name, its
+/// fields, the file's mapped answers and the uses. Output: the block; the uses grow.
+fn decoder(
+    stem: &str,
+    name: &str,
+    fields: &[Field],
+    mapped: &BTreeMap<&str, bool>,
+    uses: &mut Uses,
+) -> String {
     uses.types.insert("Wire");
-    let name = &item.name;
     let mut text = format!(
         "/** Generated by capgen from {stem}.cap: reads a {name} the kernel sent.\n \
          * Input: the wire value. Output: the value; a value off the wire contract throws. */\n\
@@ -544,7 +628,7 @@ fn decoder(stem: &str, item: &Type, mapped: &BTreeMap<&str, bool>, uses: &mut Us
          const record = value as {{ readonly [key: string]: Wire }};\n  return {{\n",
         snake = snake(name)
     );
-    for field in &item.fields {
+    for field in fields {
         let value = format!("record.{}", field.name);
         text.push_str(&format!(
             "    {}: {},\n",
@@ -553,6 +637,108 @@ fn decoder(stem: &str, item: &Type, mapped: &BTreeMap<&str, bool>, uses: &mut Us
         ));
     }
     text.push_str("  };\n}\n");
+    text
+}
+
+/// Writes one event body as a record type with its exact `.cap` field names, on one line
+/// when it fits. Input: the event. Output: the block.
+fn event_type(event: &Event) -> String {
+    let kind = &event.kind;
+    let fields: Vec<String> = event
+        .fields
+        .iter()
+        .map(|field| format!("readonly {}: {}", field.name, ts_type(&field.ty)))
+        .collect();
+    assert!(!fields.is_empty());
+    let article = if kind.starts_with(['A', 'E', 'I', 'O', 'U']) {
+        "an"
+    } else {
+        "a"
+    };
+    let mut text = format!("/** The body of {article} `{kind}` event. */\n");
+    let line = format!("export type {kind} = {{ {} }};", fields.join("; "));
+    if line.len() <= LINE_MAX {
+        text.push_str(&line);
+        text.push('\n');
+        return text;
+    }
+    text.push_str(&format!("export type {kind} = {{\n"));
+    for field in &fields {
+        text.push_str(&format!("  {field};\n"));
+    }
+    text.push_str("};\n");
+    text
+}
+
+/// Writes a file's event union, one arm per kind, on one line when it fits. Inputs: the
+/// stem and its events. Output: the block.
+fn event_union(stem: &str, events: &[&Event]) -> String {
+    let union = union_name(stem);
+    let arms: Vec<String> = events
+        .iter()
+        .map(|event| {
+            format!(
+                "{{ readonly kind: \"{kind}\"; readonly body: {kind} }}",
+                kind = event.kind
+            )
+        })
+        .collect();
+    let mut text = format!("/** One event of the `{stem}` stem, by kind. */\n");
+    let line = format!("export type {union} = {};", arms.join(" | "));
+    if line.len() <= LINE_MAX {
+        text.push_str(&line);
+        text.push('\n');
+        return text;
+    }
+    text.push_str(&format!("export type {union} =\n"));
+    for (index, arm) in arms.iter().enumerate() {
+        let end = if index + 1 == arms.len() { ";" } else { "" };
+        text.push_str(&format!("  | {arm}{end}\n"));
+    }
+    text
+}
+
+/// Writes a file's event kinds as a readonly tuple const. Inputs: the stem and its events.
+/// Output: the block.
+fn event_kinds(stem: &str, events: &[&Event]) -> String {
+    let head = format!("export const {} = [", kinds_name(stem));
+    let entries: Vec<String> = events
+        .iter()
+        .map(|event| format!("\"{}\"", event.kind))
+        .collect();
+    let mut text = format!("/** The event kinds the `{stem}` stem emits. */\n");
+    text.push_str(&wrapped(
+        &head,
+        &head,
+        &entries,
+        "] as const;",
+        "] as const;",
+    ));
+    text
+}
+
+/// Writes a file's event decoder: per kind, the body cast, or through its decoder when
+/// mapped, and `null` for any other kind. Inputs: the stem, its events and the file's
+/// mapped answers. Output: the block.
+fn event_decoder(stem: &str, events: &[&Event], mapped: &BTreeMap<&str, bool>) -> String {
+    let union = union_name(stem);
+    let mut text = format!(
+        "/** Decodes one event body of the `{stem}` stem. Inputs: the kind and the body as the\n \
+         * kernel sent it. Output: the typed event, or `null` for a kind this stem does not emit. */\n\
+         export function decode{union}(kind: string, body: Wire): {union} | null {{\n  switch (kind) {{\n"
+    );
+    for event in events {
+        let kind = &event.kind;
+        let body = if event_mapped(event, mapped) {
+            format!("decode{kind}(body)")
+        } else {
+            format!("body as {kind}")
+        };
+        text.push_str(&format!(
+            "    case \"{kind}\":\n      return {{ kind: \"{kind}\", body: {body} }};\n"
+        ));
+    }
+    text.push_str("    default:\n      return null;\n  }\n}\n");
     text
 }
 

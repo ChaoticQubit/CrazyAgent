@@ -9,8 +9,9 @@ use crate::protocol::{CredentialRef, ProjectId};
 use crate::sandbox::policy::AgentAccess;
 use crate::team::runtime::{TeamLimits, TeamRuntime};
 use crate::team::{AgentRole, AgentStatus};
+use crate::terminal::FOLDER;
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
-use crate::terminal::{AgentId, FOLDER, Host};
+use kernel_processes::terminal::{AgentId, Host};
 use rusqlite::{Connection, params};
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
@@ -228,7 +229,7 @@ impl Fixture {
         let pane = host
             .spawn(
                 &AgentId::team(id).unwrap(),
-                &crate::terminal::PaneCommand::from(&command),
+                &kernel_processes::terminal::PaneCommand::from(&command),
             )
             .unwrap();
         let record = PaneRecord {
@@ -565,7 +566,7 @@ fn a_codex_agent_interrupted_mid_turn_names_its_own_rollout_file() {
     let pane = host
         .spawn(
             &AgentId::team(sub).unwrap(),
-            &crate::terminal::PaneCommand::from(&command),
+            &kernel_processes::terminal::PaneCommand::from(&command),
         )
         .unwrap();
     let record = PaneRecord::new(&command.transcript, &worktree, since, pane.pid, None).unwrap();

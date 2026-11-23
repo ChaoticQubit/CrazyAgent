@@ -27,7 +27,7 @@ use crate::sandbox::warden::Warden;
 use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 #[cfg(unix)]
 use crate::setup::AGENT_GIT_NEEDS_TOOLS;
-use crate::terminal::{AgentId, Host};
+use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
@@ -565,7 +565,7 @@ fn allow_harness(sandbox: ProjectSandbox, program: &Path) -> Result<ProjectSandb
 /// started, since that engine's jobs went back to the queue. Takes the host. Returns the
 /// host's plain code when it cannot list or end them.
 fn end_left_panes(host: &dyn Host) -> Result<(), RunError> {
-    let host_error = |problem: crate::terminal::HostError| RunError::Invalid(problem.0);
+    let host_error = |problem: kernel_processes::terminal::HostError| RunError::Invalid(problem.0);
     for agent in host.alive().map_err(host_error)? {
         if !agent.as_str().starts_with(PANE_PREFIX) {
             continue;
@@ -5336,26 +5336,38 @@ mod tests {
 
     /// A terminal host that lists the panes it was given and fails every other call, or
     /// fails its listing too, as a tmux server that cannot answer.
-    struct Listed(Result<Vec<AgentId>, crate::terminal::HostError>);
+    struct Listed(Result<Vec<AgentId>, kernel_processes::terminal::HostError>);
 
     impl Host for Listed {
         fn spawn(
             &self,
             _agent: &AgentId,
-            _command: &crate::terminal::PaneCommand,
-        ) -> Result<crate::terminal::PaneRef, crate::terminal::HostError> {
-            Err(crate::terminal::HostError("terminal_unavailable".into()))
+            _command: &kernel_processes::terminal::PaneCommand,
+        ) -> Result<kernel_processes::terminal::PaneRef, kernel_processes::terminal::HostError>
+        {
+            Err(kernel_processes::terminal::HostError(
+                "terminal_unavailable".into(),
+            ))
         }
 
         fn attach(
             &self,
             _agent: &AgentId,
-        ) -> Result<crate::terminal::TerminalStream, crate::terminal::HostError> {
-            Err(crate::terminal::HostError("terminal_unavailable".into()))
+        ) -> Result<kernel_processes::terminal::TerminalStream, kernel_processes::terminal::HostError>
+        {
+            Err(kernel_processes::terminal::HostError(
+                "terminal_unavailable".into(),
+            ))
         }
 
-        fn input(&self, _agent: &AgentId, _bytes: &[u8]) -> Result<(), crate::terminal::HostError> {
-            Err(crate::terminal::HostError("terminal_unavailable".into()))
+        fn input(
+            &self,
+            _agent: &AgentId,
+            _bytes: &[u8],
+        ) -> Result<(), kernel_processes::terminal::HostError> {
+            Err(kernel_processes::terminal::HostError(
+                "terminal_unavailable".into(),
+            ))
         }
 
         fn resize(
@@ -5363,15 +5375,19 @@ mod tests {
             _agent: &AgentId,
             _cols: u16,
             _rows: u16,
-        ) -> Result<(), crate::terminal::HostError> {
-            Err(crate::terminal::HostError("terminal_unavailable".into()))
+        ) -> Result<(), kernel_processes::terminal::HostError> {
+            Err(kernel_processes::terminal::HostError(
+                "terminal_unavailable".into(),
+            ))
         }
 
-        fn kill(&self, _agent: &AgentId) -> Result<(), crate::terminal::HostError> {
-            Err(crate::terminal::HostError("terminal_agent_unknown".into()))
+        fn kill(&self, _agent: &AgentId) -> Result<(), kernel_processes::terminal::HostError> {
+            Err(kernel_processes::terminal::HostError(
+                "terminal_agent_unknown".into(),
+            ))
         }
 
-        fn alive(&self) -> Result<Vec<AgentId>, crate::terminal::HostError> {
+        fn alive(&self) -> Result<Vec<AgentId>, kernel_processes::terminal::HostError> {
             self.0.clone()
         }
     }
@@ -5405,7 +5421,7 @@ mod tests {
             2,
             "each agent's start looks again"
         );
-        let broken: Arc<dyn Host> = Arc::new(Listed(Err(crate::terminal::HostError(
+        let broken: Arc<dyn Host> = Arc::new(Listed(Err(kernel_processes::terminal::HostError(
             "terminal_unavailable".into(),
         ))));
         *found.lock().unwrap() = Some(broken);

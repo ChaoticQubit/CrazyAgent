@@ -375,8 +375,9 @@ mod failed {
     use crate::protocol::{CredentialRef, ProjectId};
     use crate::recovery::{self, Interrupted, RunState};
     use crate::team::runtime::{TeamLimits, TeamRuntime};
+    use crate::terminal::FOLDER;
     use crate::terminal::tmux::{SOCKET, Tmux, installed};
-    use crate::terminal::{AgentId, FOLDER, Host};
+    use kernel_processes::terminal::{AgentId, Host};
     use rusqlite::{Connection, OptionalExtension, params};
     use std::collections::BTreeMap;
     use std::os::unix::fs::PermissionsExt;
@@ -1247,8 +1248,9 @@ mod live {
         AGENT, ManagedAgent, PROJECT, SignedIn, claude, codex,
     };
     use crate::team::runtime::{Grant, Order, Plan, Report, TurnEnd, TurnRules, per_turn};
+    use crate::terminal::FOLDER;
     use crate::terminal::tmux::{Tmux, installed};
-    use crate::terminal::{AgentId, FOLDER, Host};
+    use kernel_processes::terminal::{AgentId, Host};
     use rusqlite::{Connection, params};
     use std::path::Path;
     use std::sync::Arc;

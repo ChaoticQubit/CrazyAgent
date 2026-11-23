@@ -34,7 +34,7 @@ use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
 /// The longest agent window name a view may ask for, in bytes.
-const NAME_BYTES_MAX: usize = crazyagent::terminal::AGENT_ID_BYTES_MAX;
+const NAME_BYTES_MAX: usize = kernel_processes::terminal::AGENT_ID_BYTES_MAX;
 
 /// Whether a socket path names an engine's own tmux server by its shape: absolute, plain
 /// parts, `tmux.sock` in a `terminal` folder, never a default tmux socket folder. Input:

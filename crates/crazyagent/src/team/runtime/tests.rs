@@ -211,7 +211,7 @@ impl Fixture {
         let pane = host
             .spawn(
                 &AgentId::team(id).unwrap(),
-                &crate::terminal::PaneCommand::from(&command),
+                &kernel_processes::terminal::PaneCommand::from(&command),
             )
             .unwrap();
         PaneRecord {
@@ -5883,15 +5883,18 @@ fn an_owner_line_reaches_a_live_master_once_its_first_screen_can_be_watched() {
         transcript: Transcript::Unavailable,
     };
     let (all, per_pane) = (
-        crate::terminal::CONNECTIONS_MAX,
-        crate::terminal::VIEWERS_MAX,
+        kernel_processes::terminal::CONNECTIONS_MAX,
+        kernel_processes::terminal::VIEWERS_MAX,
     );
     let held: Vec<AgentId> = (0..=all.div_ceil(per_pane))
         .map(|at| AgentId::new(&format!("viewers-held-{at}")).unwrap())
         .collect();
     for pane in &held {
-        host.spawn(pane, &crate::terminal::PaneCommand::from(&command))
-            .unwrap();
+        host.spawn(
+            pane,
+            &kernel_processes::terminal::PaneCommand::from(&command),
+        )
+        .unwrap();
     }
     let (fresh, filled) = held.split_last().unwrap();
     let mut viewers = Vec::new();
@@ -27967,7 +27970,7 @@ fn teammate_split_running(fixture: &Fixture, lead_pane: &str, command: &str) -> 
         ],
     );
     test_tmux(fixture, &["select-layout", "-t", lead_pane, "tiled"]);
-    assert!(crate::terminal::pane_id_valid(&pane), "{pane}");
+    assert!(kernel_processes::terminal::pane_id_valid(&pane), "{pane}");
     pane
 }
 
@@ -28587,7 +28590,7 @@ fn a_panicking_teammate_end_leaves_no_id_behind_and_reads_as_uncertain() {
         end_reported(
             mate,
             sender,
-            || -> Result<bool, crate::terminal::HostError> { panic!("the end failed") },
+            || -> Result<bool, kernel_processes::terminal::HostError> { panic!("the end failed") },
         );
     })
     .join();
@@ -28746,7 +28749,8 @@ fn an_over_cap_lead_is_noted_once_its_teammates_end_is_marked() {
             )
             .unwrap()
     };
-    let hand = |team: &mut TeamRuntime, outcome: Result<bool, crate::terminal::HostError>| {
+    let hand = |team: &mut TeamRuntime,
+                outcome: Result<bool, kernel_processes::terminal::HostError>| {
         team.unmanaged_ending.insert(
             mate,
             PendingEnd {
@@ -28765,7 +28769,9 @@ fn an_over_cap_lead_is_noted_once_its_teammates_end_is_marked() {
 
     hand(
         &mut team,
-        Err(crate::terminal::HostError("terminal_host_failed".into())),
+        Err(kernel_processes::terminal::HostError(
+            "terminal_host_failed".into(),
+        )),
     );
     assert_eq!(notes(), 0, "a failed end noted the lead");
     let status: String = fixture
@@ -30381,9 +30387,12 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
         transcript: Transcript::ClaudeSession { file: session },
     };
     let placed = host
-        .spawn_own_server(&lead, &crate::terminal::PaneCommand::from(&command))
+        .spawn_own_server(
+            &lead,
+            &kernel_processes::terminal::PaneCommand::from(&command),
+        )
         .unwrap();
-    assert!(crate::terminal::pane_id_valid(&placed.pane));
+    assert!(kernel_processes::terminal::pane_id_valid(&placed.pane));
 
     let marker = work.join("reached.txt");
     let probe = work.join(crate::agent_git::TEAMMATES_FOLDER).join("probe");
@@ -30417,7 +30426,10 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
     )
     .unwrap();
     let teammate = lines_written(&split, 1).trim().to_owned();
-    assert!(crate::terminal::pane_id_valid(&teammate), "{teammate:?}");
+    assert!(
+        kernel_processes::terminal::pane_id_valid(&teammate),
+        "{teammate:?}"
+    );
     let attempts = lines_written(&tried, 2);
     let after = work.join("after.txt");
     host.input(

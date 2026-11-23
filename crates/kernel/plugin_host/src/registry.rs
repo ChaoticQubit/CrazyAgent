@@ -9,6 +9,7 @@ use crate::manifest::MANIFEST_BYTES_MAX;
 use crate::problem::Problem;
 use crate::store::{Keys, Loaded, binding_rows, drop_binding, refused, resolve, sqlite};
 use crate::trust;
+use crate::usage::{ChangeNotice, Holder, Lease, TurnOff, Usage};
 use crate::views::{
     Binding, Listing, Origin, PluginKind, PluginStatus, PluginView, Preview, SecretView,
 };
@@ -423,24 +424,41 @@ pub fn add(
     trust::settle(db, engine, &manifest, now_ms)
 }
 
+/// Turning a plugin on, or off with what the off does to runs holding it.
+#[derive(Debug, Clone, Copy)]
+pub enum Switch<'u> {
+    On,
+    Off { usage: &'u Usage, when_off: TurnOff },
+}
+
 /// Turns a plugin on or off. A user plugin turns on only while its trusted text is
-/// unchanged. Inputs: database, engine facts, name and the new state. Output: Ok, or
-/// `app_plugin_not_found`, `_refused`, `_needs_review`.
+/// unchanged. Off writes the off state first, so the next call is refused while a call
+/// already running finishes; with [`TurnOff::StopRuns`] each run holding the plugin is then
+/// stopped once. Inputs: database, engine facts, name and the switch. Output: Ok, or
+/// `app_plugin_not_found`, `_refused`, `_needs_review`, `_changed`.
 pub fn set_enabled(
     db: &Connection,
     engine: &Engine<'_>,
     name: &str,
-    enabled: bool,
+    switch: Switch<'_>,
 ) -> Result<(), Refused> {
     prepare(db, engine)?;
     let found = found(engine, name)?;
-    if enabled {
-        let manifest = found.parsed.map_err(|_| refused("app_plugin_refused"))?;
-        if !trust::reviewed(db, found.origin, &manifest)? {
-            return Err(refused("app_plugin_needs_review"));
+    match switch {
+        Switch::On => {
+            let manifest = found.parsed.map_err(|_| refused("app_plugin_refused"))?;
+            trust::check(db, found.origin, &manifest)?;
+            set_flag(db, name, true)
+        }
+        Switch::Off { usage, when_off } => {
+            set_flag(db, name, false)?;
+            if when_off == TurnOff::StopRuns {
+                usage.stop_runs(name);
+            }
+            assert!(!enabled_flag(db, name)?);
+            Ok(())
         }
     }
-    set_flag(db, name, enabled)
 }
 
 /// Removes a user plugin: its folder (or the .yaml file an older version left), trust
@@ -486,14 +504,13 @@ pub fn remove(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<(), Re
 /// Loads a plugin to run: valid, trusted as it is now, turned on, and every declared secret
 /// bound to a saved key. A plugin whose plugin.toml changed since it was trusted is refused
 /// until it is approved again. Inputs: database, engine facts and name. Output:
-/// the plugin, or `app_plugin_not_found`, `_refused`, `_needs_review`, `_off`, `_needs_key`.
+/// the plugin, or `app_plugin_not_found`, `_refused`, `_needs_review`, `_changed`, `_off`,
+/// `_needs_key`.
 pub fn ready(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<Loaded, Refused> {
     prepare(db, engine)?;
     let found = found(engine, name)?;
     let manifest = found.parsed.map_err(|_| refused("app_plugin_refused"))?;
-    if !trust::reviewed(db, found.origin, &manifest)? {
-        return Err(refused("app_plugin_needs_review"));
-    }
+    trust::check(db, found.origin, &manifest)?;
     if !enabled_flag(db, &manifest.name)? {
         return Err(refused("app_plugin_off"));
     }
@@ -508,6 +525,42 @@ pub fn ready(db: &Connection, engine: &Engine<'_>, name: &str) -> Result<Loaded,
         origin: found.origin,
         bindings,
     })
+}
+
+/// Loads a plugin for one run and records that the run holds it until the lease drops. A
+/// trusted plugin whose plugin.toml changed is refused and keeps one notice of that change
+/// in `usage`. Inputs: database, engine facts, the engine's usage, name, the run and its
+/// stop. Output: the plugin and its lease, or the refusal of [`ready`], or
+/// `plugin_holders_capacity`.
+pub fn hold(
+    db: &Connection,
+    engine: &Engine<'_>,
+    usage: &Usage,
+    name: &str,
+    holder: Holder,
+    stop: Box<dyn FnOnce() + Send>,
+) -> Result<(Loaded, Lease), Refused> {
+    match ready(db, engine, name) {
+        Ok(loaded) => {
+            usage.settled(name);
+            let lease = usage.hold(&loaded.manifest.name, holder, stop)?;
+            Ok((loaded, lease))
+        }
+        Err(changed) if changed.code == "app_plugin_changed" => {
+            let current = found(engine, name)?
+                .parsed
+                .map_err(|_| refused("app_plugin_refused"))?;
+            let trusted = trust::trusted_sha256(db, name)?.ok_or(changed)?;
+            assert_ne!(trusted, current.sha256);
+            usage.note_change(ChangeNotice {
+                plugin: current.name,
+                trusted_sha256: trusted,
+                current_sha256: current.sha256,
+            });
+            Err(changed)
+        }
+        Err(other) => Err(other),
+    }
 }
 
 /// Deletes the plugin folders a crash between a staged copy and its rename left. Input:

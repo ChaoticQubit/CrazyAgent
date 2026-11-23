@@ -750,6 +750,26 @@ fn a_registered_repository_outside_home_is_agent_writable_while_its_projects_can
     assert!(!places.agent_writable(Path::new("/bin/sh")));
 }
 
+/// A tool in a folder every user can write, with no sticky bit, is refused as changeable by
+/// others, the folder named: the resolver asks the kernel's own path check, which no seed can
+/// answer for it.
+#[test]
+fn a_tool_in_a_folder_others_can_change_is_refused_by_the_kernel_check() {
+    let (_folder, home) = scratch();
+    let fixture = crate::service::test_support::durable_folder();
+    let open = fixture.path().canonicalize().unwrap().join("open");
+    std::fs::create_dir(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let tool = program(&open.join("tool"), "#!/bin/sh\n");
+    let places = stub_new(Vec::new(), Some(home));
+    assert_eq!(
+        check_place(&places, &tool),
+        Some(Err(Refusal::OthersCanChange(open.clone())))
+    );
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(check_place(&places, &tool), Some(Ok(())));
+}
+
 /// A name whose first copy has a first line the resolver refuses resolves to a later copy
 /// that runs, so one unreadable script never hides a working one further along the places.
 #[test]
