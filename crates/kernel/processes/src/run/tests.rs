@@ -191,3 +191,71 @@ fn a_holder_left_by_a_failed_setup_command_is_stopped_with_its_group() {
         );
     }
 }
+
+/// Windows PowerShell under the `SystemRoot` folder. Input: none. Output: its path.
+#[cfg(windows)]
+fn powershell() -> std::path::PathBuf {
+    let root = std::env::var_os("SystemRoot").expect("the SystemRoot variable is set");
+    std::path::PathBuf::from(root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe")
+}
+
+/// On Windows, a process a setup command starts that holds the report past the limit is
+/// ended with the command: the call returns `setup_timeout` and the holder, a `PING.EXE`
+/// that inherits the report pipe, is gone soon after, not left to run out its 60 s. A
+/// PowerShell loop bounded by `run_bounded` watches the holder, so no row sleeps.
+#[cfg(windows)]
+#[test]
+fn a_report_holder_past_the_limit_is_ended_with_its_command_on_windows() {
+    let folder = tempfile::tempdir().unwrap();
+    let holder = folder.path().join("holder");
+    let quoted = holder.display().to_string().replace('\'', "''");
+    let start = format!(
+        "$i = New-Object System.Diagnostics.ProcessStartInfo \
+         ([IO.Path]::Combine($env:SystemRoot, 'System32', 'PING.EXE')), '-n 60 127.0.0.1'; \
+         $i.UseShellExecute = $false; \
+         $p = [System.Diagnostics.Process]::Start($i); \
+         Set-Content -LiteralPath '{quoted}' -Value $p.Id; \
+         'tmux 3.4'"
+    );
+    let started = Instant::now();
+    assert_eq!(
+        run_bounded(
+            Command::new(powershell()).args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                start.as_str()
+            ]),
+            Duration::from_secs(10),
+            true
+        ),
+        Err(InstallError("setup_timeout"))
+    );
+    assert!(started.elapsed() < Duration::from_secs(20));
+    let pid = std::fs::read_to_string(&holder)
+        .unwrap_or_else(|error| panic!("{}: {error}", holder.display()));
+    let pid = pid.trim();
+    assert!(pid.parse::<u32>().is_ok_and(|pid| pid > 4), "{pid}");
+    let gone = format!(
+        "while (Get-Process -Id {pid} -ErrorAction SilentlyContinue) \
+         {{ Start-Sleep -Milliseconds 50 }}"
+    );
+    assert_eq!(
+        run_bounded(
+            Command::new(powershell()).args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                gone.as_str()
+            ]),
+            Duration::from_secs(10),
+            false
+        ),
+        Ok(Vec::new()),
+        "the holder {pid} outlived its command"
+    );
+}
