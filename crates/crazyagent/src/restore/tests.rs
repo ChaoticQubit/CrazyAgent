@@ -58,8 +58,14 @@ fn the_record_reads_back_as_each_state_and_nothing_else() {
                 copy: Some(copy.into()),
             }),
         ),
-        ("restoring replaced-2026.11.17", None),
-        ("failed storage_restore_rollback_failed ../elsewhere", None),
+        (
+            "restoring replaced-2026.11.17",
+            Some(RestoreState::Restoring { copy: None }),
+        ),
+        (
+            "failed storage_restore_rollback_failed ../elsewhere",
+            Some(RestoreState::Broken { copy: None }),
+        ),
         (
             "failed storage_restore_busy replaced-20261117T001500000Z",
             None,
@@ -68,7 +74,10 @@ fn the_record_reads_back_as_each_state_and_nothing_else() {
             "restored replaced-20261117T001500000Z unverified_pin",
             Some(RestoreState::Restored { copy: copy.into() }),
         ),
-        ("restoring now", None),
+        (
+            "restoring now",
+            Some(RestoreState::Restoring { copy: None }),
+        ),
         ("restored replaced-20261117T001500000Z unchecked", None),
         (
             "restored replaced-20261117T001500000Z",

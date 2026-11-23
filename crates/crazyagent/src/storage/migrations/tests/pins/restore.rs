@@ -384,9 +384,9 @@ fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_acc
         assert_eq!(std::fs::read(&moved).unwrap(), b"sk-restore");
     }
 
-    let sources = sources(&root);
+    let settings = super::sources(&root);
     let name = copy.file_name().unwrap().to_str().unwrap().to_owned();
-    let finished = finish_restore(&root.database(), Some(&sources)).unwrap();
+    let finished = finish_restore(&root.database(), Some(&settings)).unwrap();
     assert_eq!(finished, name, "the second sweep runs over the same copy");
     assert!(key_files(root.path(), PLUGIN_KEYS).is_empty());
     assert_eq!(key_files(root.path(), ACCOUNT_KEYS), ["restore-old-key"]);

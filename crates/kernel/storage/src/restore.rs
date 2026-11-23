@@ -123,6 +123,12 @@ fn restore_pinned_at(
         shape(&pinned_copy, pin).map_err(|cause| restore_failed(cause.0))?;
     let (version_live, schema_live) = (version(&db)?, schema(&db)?);
     let kept = keep_replaced(&db, &folder, hooks.texts, now)?;
+    let named = kept
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    assert!(recovery::copy_name(named));
+    write_restore_record(root, &format!("{RECORD_RESTORING} {named}"))?;
     let restored = restore(&mut db, &source, version_pinned, &schema_pinned).and_then(|()| {
         check(&db, &pinned_copy)?;
         assert_eq!(version(&db)?, version_pinned);
@@ -280,8 +286,9 @@ fn shape(copy: &Path, pin: PinCheck) -> Result<(i64, Vec<String>), StorageError>
 pub const RESTORE_RECORD_FILE: &str = "restore-record";
 /// The record of a restore the engine stops for.
 pub const RECORD_PENDING: &str = "pending";
-/// The record a restore writes before it starts, which its outcome replaces; left behind by a
-/// crash or a failed outcome write, it refuses the next start.
+/// The record a restore writes before it starts, which its outcome replaces; once the copy of
+/// the replaced data is kept, the copy's name follows it. Left behind by a crash or a failed
+/// outcome write, it refuses the next start.
 pub const RECORD_RESTORING: &str = "restoring";
 /// The word a restored record ends with when the pinned copy had no digest to check.
 pub const RECORD_UNVERIFIED_PIN: &str = "unverified_pin";
@@ -333,17 +340,22 @@ fn write_record_with(
 }
 
 /// Refuses an engine start while the restore record says a restore wrote engine.db and could
-/// not roll it back, or started and never recorded how it ended, or cannot be read, so data
-/// that did not pass its check is never migrated. Input: the database path. Output: Ok, or
+/// not roll it back, or started and never recorded how it ended, with or without the kept
+/// copy's name, or cannot be read, so data that did not pass its check is never migrated. Input: the database path. Output: Ok, or
 /// `engine_restore_broken`.
 pub(crate) fn refuse_broken(path: &Path) -> Result<(), StorageError> {
     let Some(root) = path.parent() else {
         return Ok(());
     };
-    let broken = format!("{RECORD_FAILED} {RESTORE_ROLLBACK_FAILED}");
     let refused = match read_record_strict(root) {
         Ok(None) => false,
-        Ok(Some(line)) => line == broken || line == RECORD_RESTORING,
+        Ok(Some(line)) => {
+            let words: Vec<&str> = line.split(' ').collect();
+            matches!(
+                words.as_slice(),
+                [RECORD_RESTORING, ..] | [RECORD_FAILED, RESTORE_ROLLBACK_FAILED, ..]
+            )
+        }
         Err(()) => true,
     };
     if refused {
@@ -401,7 +413,8 @@ pub(crate) fn forget_restore(path: &Path) {
     let Some(line) = read_restore_record(root) else {
         return;
     };
-    if line == RECORD_RESTORING || line.split(' ').next() == Some(RECORD_FAILED) {
+    let first = line.split(' ').next();
+    if first == Some(RECORD_RESTORING) || first == Some(RECORD_FAILED) {
         return;
     }
     if std::fs::remove_file(root.join(RESTORE_RECORD_FILE)).is_err() {

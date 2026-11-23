@@ -363,6 +363,22 @@ pub(crate) fn restore_pinned(
     })
 }
 
+/// Finishes a restore that wrote the 2.4 data and stopped before it recorded so, through
+/// [`kernel_storage::restore::recovery::finish`] with this engine's key sweep. Inputs: the
+/// database path and the settings sources. Output: the kept copy's name, or the refusal.
+#[cfg(unix)]
+pub(crate) fn finish_restore(
+    path: &Path,
+    settings: Option<&SettingsSources>,
+) -> Result<String, EngineError> {
+    with_hooks(settings, |hooks| {
+        Ok(kernel_storage::restore::recovery::finish(
+            path,
+            hooks.after_restore,
+        )?)
+    })
+}
+
 /// Runs `run` with this engine's restore hooks: the settings texts, whether a team agent or
 /// a research run still runs, and the key sweep. Inputs: the settings sources and the call.
 /// Output: the call's result.

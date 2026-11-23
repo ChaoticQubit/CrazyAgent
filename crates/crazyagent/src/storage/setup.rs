@@ -794,7 +794,12 @@ pub(crate) fn restore_after_stop(
             Some(&sources),
         )
     });
-    let line = restore_line(&restored);
+    let named = kernel_storage::restore::read_restore_record(root).and_then(|line| {
+        line.strip_prefix(kernel_storage::restore::RECORD_RESTORING)
+            .and_then(|rest| rest.strip_prefix(' '))
+            .map(str::to_owned)
+    });
+    let line = restore_line(&restored, named.as_deref());
     if let Err(problem) = kernel_storage::restore::write_restore_record(root, &line) {
         eprintln!("{}", problem.0);
     }
@@ -803,10 +808,14 @@ pub(crate) fn restore_after_stop(
 
 /// The record line a finished restore leaves: `restored <copy>`, followed by
 /// `unverified_pin` when the pinned copy had no digest, or `failed <code>` with the code alone
-/// so no path reaches the record. A failed rollback is recorded as its own code, which the
-/// next start refuses. Input: how it ended. Output: the line.
+/// so no path reaches the record. A failed rollback is recorded as its own code followed by
+/// the kept copy's name, which the put-back uses, and the next start refuses it. Inputs: how
+/// it ended and the copy the restoring record names. Output: the line.
 #[cfg(unix)]
-fn restore_line(restored: &Result<kernel_storage::restore::Restored, EngineError>) -> String {
+fn restore_line(
+    restored: &Result<kernel_storage::restore::Restored, EngineError>,
+    named: Option<&str>,
+) -> String {
     use kernel_storage::restore::{PinCheck, RECORD_RESTORED, RECORD_UNVERIFIED_PIN};
     let cause = match restored {
         Ok(done) => {
@@ -834,7 +843,27 @@ fn restore_line(restored: &Result<kernel_storage::restore::Restored, EngineError
     .into_iter()
     .find(|code| cause.0.starts_with(code))
     .unwrap_or(kernel_storage::restore::RESTORE_FAILED);
-    format!("{} {code}", kernel_storage::restore::RECORD_FAILED)
+    let copy = named.filter(|_| code == kernel_storage::restore::RESTORE_ROLLBACK_FAILED);
+    match copy {
+        Some(copy) => format!("{} {code} {copy}", kernel_storage::restore::RECORD_FAILED),
+        None => format!("{} {code}", kernel_storage::restore::RECORD_FAILED),
+    }
+}
+
+/// Finishes a restore that wrote the 2.4 data and stopped before it recorded so, with this
+/// engine's key sweep and the settings files. Inputs: the engine root and the settings files.
+/// Output: the kept copy's name, or the refusal.
+#[cfg(unix)]
+pub(crate) fn finish_restore(
+    root: &Path,
+    global: &Path,
+    project: &Path,
+) -> Result<String, EngineError> {
+    let sources = super::settings::SettingsSources::open(global, project)?;
+    migrations::finish_restore(
+        &root.join(kernel_storage::migrations::DATABASE),
+        Some(&sources),
+    )
 }
 
 /// The restore record of the engine at `root`, read without an engine. Input: the root.

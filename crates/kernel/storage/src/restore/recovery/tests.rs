@@ -137,6 +137,7 @@ fn put_back_refuses_while_another_holds_the_restore_lock_and_writes_nothing() {
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(root.path().join(RESTORE_LOCK_FILE))
         .unwrap();
     rustix::fs::flock(&held, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
