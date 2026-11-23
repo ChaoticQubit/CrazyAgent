@@ -1,4 +1,4 @@
-use super::request::{Capture, Captured};
+use super::request::{Capture, Captured, REPLY_BYTES_MAX, REPLY_LIST_MAX};
 use crate::error::StoreError;
 use crate::secret::{SecretString, wipe};
 use crate::secrets::Secrets;
@@ -119,7 +119,9 @@ pub fn fields(
 /// module, the plugin, the fields and the raw body, which is wiped. Output: the body the
 /// plugin gets, re-serialized without the captured fields, and their handles; or
 /// `net_capture_not_json` when a field is to be captured and the body is not one JSON
-/// object or a present field is not a string, so no body reaches the plugin.
+/// object or a present field is not a string, so no body reaches the plugin;
+/// `cap_output_too_large` when the body left over is past `REPLY_BYTES_MAX`, checked before
+/// any handle is minted. A failed save frees the handles this call minted.
 pub fn take(
     secrets: &Secrets<'_>,
     caller: &'static str,
@@ -147,18 +149,35 @@ pub fn take(
             Some(_) => return Err(StoreError::code("net_capture_not_json")),
         }
     }
+    let reply =
+        serde_json::to_vec(&object).map_err(|_| StoreError::code("net_capture_not_json"))?;
+    if reply.len() > REPLY_BYTES_MAX {
+        return Err(StoreError::code("cap_output_too_large"));
+    }
     let mut captured = Vec::with_capacity(values.len());
+    let mut minted = Vec::with_capacity(values.len());
     for (wanted, value) in values {
-        let secret = match &wanted.keep_as {
-            Some(name) => secrets.keep(caller, name, &value)?,
-            None => secrets.hold(caller, value)?,
+        let saved = match &wanted.keep_as {
+            Some(name) => secrets.keep(caller, name, &value),
+            None => secrets.hold(caller, value).map(|id| (id, true)),
         };
+        let (secret, fresh) = match saved {
+            Ok(saved) => saved,
+            Err(error) => {
+                for id in minted {
+                    secrets.release(caller, id);
+                }
+                return Err(error);
+            }
+        };
+        if fresh {
+            minted.push(secret);
+        }
         captured.push(Captured {
             field: wanted.field.clone(),
             secret,
         });
     }
-    let reply =
-        serde_json::to_vec(&object).map_err(|_| StoreError::code("net_capture_not_json"))?;
+    assert!(captured.len() <= REPLY_LIST_MAX);
     Ok((reply, captured))
 }

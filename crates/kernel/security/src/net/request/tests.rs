@@ -1130,5 +1130,8 @@ fn reply_headers_over_their_bounds_mint_no_handle() {
     let requests = Requests::new(&secrets, &rig.egress, &rig.rules);
     let mut request = get("https://github.com/login/oauth/access_token");
     request.reply_headers = vec!["x-oauth-scopes".to_owned()];
-    assert_eq!(requests.request("github", request).unwrap().captured.len(), 1);
+    assert_eq!(
+        requests.request("github", request).unwrap().captured.len(),
+        1
+    );
 }
