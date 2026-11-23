@@ -1066,7 +1066,20 @@ impl Tmux {
         if self.confined.is_some() {
             Self::lead_environment(&control, command)?;
         }
-        let lines = control.run(&line)?;
+        self.settle(&control, agent, control.run(&line))
+    }
+
+    /// Reads where a new agent window's pane runs from the reply that made it, or asks tmux
+    /// when the reply holds no whole line, then checks the pane is served and tags it as the
+    /// agent's app. Takes the control, the agent and the reply. Returns the pane, or
+    /// `terminal_command_failed`, the lookup's code or the reply's error.
+    fn settle(
+        &self,
+        control: &Control,
+        agent: &AgentId,
+        made: Result<Vec<Vec<u8>>, HostError>,
+    ) -> Result<PaneRef, HostError> {
+        let lines = made?;
         let placed = match lines.first().and_then(|line| whole(line)) {
             Some(placed) => placed.to_vec(),
             None => control
@@ -1444,6 +1457,9 @@ mod control;
 mod groups;
 /// The tmux command lines the host builds and the screen it renders from a pane.
 mod lines;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "tmux/placement_tests.rs"]
+mod placement_tests;
 mod servers;
 
 /// The tmux program a row runs, found through the resolver with the stub seed. Input: the
