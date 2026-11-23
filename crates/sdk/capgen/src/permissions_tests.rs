@@ -187,7 +187,7 @@ fn every_essential_plugin_is_marked_in_its_plugin_file() {
             .map(|tier| repo("plugins").join(tier).join(grant.plugin))
             .find(|dir| dir.join("plugin.toml").is_file())
             .unwrap_or_else(|| panic!("no plugin folder for {}", grant.plugin));
-        let read = manifest::read(&dir).expect("the bundled manifest reads");
+        let read = kernel_plugin_host::manifest::read(&dir).expect("the bundled manifest reads");
         assert_eq!(read.essential, grant.essential, "{}", grant.plugin);
     }
 }

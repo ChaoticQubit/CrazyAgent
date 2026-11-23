@@ -28,11 +28,13 @@ pub struct Settings {
     pub plugins: PluginsPolicy,
 }
 
-/// The owner's plugin settings: what turning a plugin off does to runs holding it.
+/// The owner's plugin settings: what turning a plugin off does to runs holding it, and
+/// whether essential bundled code plugins may be turned off.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PluginsPolicy {
     pub when_turned_off: kernel_plugin_host::usage::TurnOff,
+    pub essential_unlocked: bool,
 }
 
 impl PluginsPolicy {
@@ -420,6 +422,7 @@ struct ConfigFile {
 #[serde(deny_unknown_fields)]
 struct PluginsFile {
     when_turned_off: Option<kernel_plugin_host::usage::TurnOff>,
+    essential_unlocked: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -508,7 +511,7 @@ fn resolve_files(global: ConfigFile, project: ConfigFile) -> Result<EffectiveCon
                 n if n.starts_with("routing.") => EffectTiming::NewTask,
                 "knowledge.processing_destinations" => EffectTiming::Immediate,
                 n if n.starts_with("knowledge.") => EffectTiming::NewTask,
-                "plugins.when_turned_off" => EffectTiming::Immediate,
+                "plugins.when_turned_off" | "plugins.essential_unlocked" => EffectTiming::Immediate,
                 _ => EffectTiming::Restart,
             };
             (
@@ -1157,9 +1160,15 @@ fn apply_file(
             asset_sources_max
         );
     }
-    if let Some(when_turned_off) = file.plugins.and_then(|plugins| plugins.when_turned_off) {
-        settings.plugins.when_turned_off = when_turned_off;
-        origins.insert("plugins.when_turned_off".into(), origin.clone());
+    if let Some(plugins) = file.plugins {
+        if let Some(when_turned_off) = plugins.when_turned_off {
+            settings.plugins.when_turned_off = when_turned_off;
+            origins.insert("plugins.when_turned_off".into(), origin.clone());
+        }
+        if let Some(essential_unlocked) = plugins.essential_unlocked {
+            settings.plugins.essential_unlocked = essential_unlocked;
+            origins.insert("plugins.essential_unlocked".into(), origin.clone());
+        }
     }
 }
 
@@ -1193,6 +1202,10 @@ fn setting_values(settings: &Settings, shown: Shown) -> BTreeMap<String, serde_j
         values.insert(
             "plugins.when_turned_off".into(),
             serde_json::to_value(settings.plugins.when_turned_off).unwrap(),
+        );
+        values.insert(
+            "plugins.essential_unlocked".into(),
+            serde_json::Value::Bool(settings.plugins.essential_unlocked),
         );
     }
     if include_model_access {
@@ -1246,7 +1259,7 @@ fn from_settings(
     let id = ConfigId::new(format!("{:x}", Sha256::digest(bytes)))
         .map_err(|e| ConfigError(e.to_string()))?;
     assert_eq!(id.as_str().len(), 64);
-    assert!(descriptors.len() <= 26 + usize::from(settings.model_access.is_some()));
+    assert!(descriptors.len() <= 27 + usize::from(settings.model_access.is_some()));
     Ok(EffectiveConfig {
         id,
         settings,

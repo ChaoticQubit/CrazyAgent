@@ -32,9 +32,12 @@ pub const CAPTURE_FIELD_BYTES_MAX: usize = 64;
 /// The keys only an embedding plugin's `plugin.toml` holds; the embedding reader judges
 /// their values.
 pub const EMBEDDING_KEYS: [&str; 4] = ["title", "release", "description", "http"];
+/// The optional key marking a code plugin the app relies on, so its switch stays locked
+/// on; an embedding plugin, the only kind a user adds, never holds it.
+const ESSENTIAL_KEY: &str = "essential";
 
-/// A plugin's `plugin.toml`: its id, tier word, kind, manifest version and the
-/// permissions it asks the kernel for.
+/// A plugin's `plugin.toml`: its id, tier word, kind, manifest version, the permissions it
+/// asks the kernel for, its `[net]` hosts and whether it is essential.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Manifest {
     pub plugin: String,
@@ -43,6 +46,7 @@ pub struct Manifest {
     pub version: i64,
     pub permissions: Vec<String>,
     pub net: Option<Net>,
+    pub essential: bool,
 }
 
 /// A plugin's `[net]` section: the hosts `net.request` may reach, each a lowercase DNS
@@ -176,7 +180,7 @@ pub fn read(dir: &Path) -> Result<Manifest, Refused> {
 }
 
 /// Checks one `plugin.toml` text: exactly its five keys, plus [`EMBEDDING_KEYS`] when the
-/// kind is `embedding`, a tier word, a snake kind, a positive version and at most
+/// kind is `embedding` and an optional bool `essential` when it is not, a tier word, a snake kind, a positive version and at most
 /// `PERMISSIONS_MAX` distinct dotted permissions. Input: the text. Output: the manifest, or
 /// `plugin_manifest_invalid` or `plugin_id_invalid` with the line of the refused key.
 pub fn parse(text: &str) -> Result<Manifest, Refused> {
@@ -193,6 +197,7 @@ pub fn parse(text: &str) -> Result<Manifest, Refused> {
         !PLUGIN_KEYS.contains(&key.as_str())
             && key.as_str() != NET_KEY
             && !(embedding && EMBEDDING_KEYS.contains(&key.as_str()))
+            && !(!embedding && key.as_str() == ESSENTIAL_KEY)
     }) {
         return Err(invalid(key));
     }
@@ -261,6 +266,10 @@ pub fn parse(text: &str) -> Result<Manifest, Refused> {
             });
         }
     };
+    let essential = match table.get(ESSENTIAL_KEY) {
+        None => false,
+        Some(value) => value.as_bool().ok_or_else(|| invalid(ESSENTIAL_KEY))?,
+    };
     Ok(Manifest {
         plugin,
         tier,
@@ -268,6 +277,7 @@ pub fn parse(text: &str) -> Result<Manifest, Refused> {
         version,
         permissions,
         net,
+        essential,
     })
 }
 
