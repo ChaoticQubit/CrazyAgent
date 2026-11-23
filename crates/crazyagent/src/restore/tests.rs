@@ -41,7 +41,29 @@ fn the_record_reads_back_as_each_state_and_nothing_else() {
     let copy = "replaced-20261117T001500000Z";
     let cases = [
         ("pending", Some(RestoreState::Pending)),
-        ("restoring", Some(RestoreState::Pending)),
+        ("restoring", Some(RestoreState::Restoring { copy: None })),
+        (
+            "restoring replaced-20261117T001500000Z",
+            Some(RestoreState::Restoring {
+                copy: Some(copy.into()),
+            }),
+        ),
+        (
+            "failed storage_restore_rollback_failed",
+            Some(RestoreState::Broken { copy: None }),
+        ),
+        (
+            "failed storage_restore_rollback_failed replaced-20261117T001500000Z",
+            Some(RestoreState::Broken {
+                copy: Some(copy.into()),
+            }),
+        ),
+        ("restoring replaced-2026.11.17", None),
+        ("failed storage_restore_rollback_failed ../elsewhere", None),
+        (
+            "failed storage_restore_busy replaced-20261117T001500000Z",
+            None,
+        ),
         (
             "restored replaced-20261117T001500000Z unverified_pin",
             Some(RestoreState::Restored { copy: copy.into() }),
@@ -154,4 +176,60 @@ fn a_restore_that_cannot_run_records_its_code_alone_and_changes_nothing() {
     assert!(code.starts_with("storage_restore_"), "{code}");
     assert!(!code.contains('/'), "{code}");
     assert_eq!(blocks_start(dir.path(), true), None);
+}
+
+/// A restore whose rollback failed, or one that stopped part way and whose engine process is
+/// gone, holds every start for the recovery screen; a restoring record whose process still
+/// runs is a restore in progress.
+#[test]
+fn a_broken_or_abandoned_restore_holds_every_start_for_the_recovery_screen() {
+    let dir = root();
+    for text in [
+        "failed storage_restore_rollback_failed",
+        "failed storage_restore_rollback_failed replaced-20261117T001500000Z",
+    ] {
+        record(dir.path(), text, 0o600);
+        assert_eq!(blocks_start(dir.path(), true), Some(ENGINE_RESTORE_BROKEN));
+        assert_eq!(blocks_start(dir.path(), false), Some(ENGINE_RESTORE_BROKEN));
+    }
+    for text in ["restoring", "restoring replaced-20261117T001500000Z"] {
+        record(dir.path(), text, 0o600);
+        assert_eq!(blocks_start(dir.path(), true), Some(ENGINE_RESTORING));
+        assert_eq!(blocks_start(dir.path(), false), Some(ENGINE_RESTORE_BROKEN));
+        assert!(holds_restart(dir.path(), true));
+        assert!(!holds_restart(dir.path(), false));
+    }
+}
+
+/// While the engine's login service still runs a process, no recovery action reads or writes:
+/// each refuses as busy and the record and engine.db stay as they were.
+#[test]
+fn recovery_refuses_every_action_while_the_engine_service_runs() {
+    let dir = root();
+    let before = database(dir.path());
+    record(
+        dir.path(),
+        "failed storage_restore_rollback_failed replaced-20261117T001500000Z",
+        0o600,
+    );
+    let global = dir.path().join("global.toml");
+    let project = dir.path().join("project.toml");
+
+    let refused = [
+        recovery(dir.path(), true).unwrap_err(),
+        put_back(dir.path(), true).unwrap_err(),
+        continue_2_5(dir.path(), true).unwrap_err(),
+        finish(dir.path(), true, &global, &project).unwrap_err(),
+    ];
+
+    for code in refused {
+        assert!(code.starts_with("storage_putback_busy"), "{code}");
+    }
+    assert_eq!(std::fs::read(dir.path().join("engine.db")).unwrap(), before);
+    assert_eq!(
+        state(dir.path()),
+        Some(RestoreState::Broken {
+            copy: Some("replaced-20261117T001500000Z".into())
+        })
+    );
 }

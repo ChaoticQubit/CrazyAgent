@@ -383,6 +383,19 @@ fn a_restore_moves_the_keys_only_2_5_rows_name_into_its_copy_and_keeps_a_2_4_acc
         assert_eq!(mode(&moved), 0o600);
         assert_eq!(std::fs::read(&moved).unwrap(), b"sk-restore");
     }
+
+    let sources = sources(&root);
+    let name = copy.file_name().unwrap().to_str().unwrap().to_owned();
+    let finished = finish_restore(&root.database(), Some(&sources)).unwrap();
+    assert_eq!(finished, name, "the second sweep runs over the same copy");
+    assert!(key_files(root.path(), PLUGIN_KEYS).is_empty());
+    assert_eq!(key_files(root.path(), ACCOUNT_KEYS), ["restore-old-key"]);
+    assert_eq!(key_files(&copy, PLUGIN_KEYS), ["plugin-key-restore"]);
+    assert_eq!(key_files(&copy, ACCOUNT_KEYS), ["restore-new-key"]);
+    assert_eq!(
+        kernel_storage::restore::read_restore_record(root.path()),
+        Some(format!("restored {name}"))
+    );
 }
 
 /// Saves one account row as the accounts store writes it: a local connection with the given

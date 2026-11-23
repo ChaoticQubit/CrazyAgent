@@ -10,6 +10,7 @@ use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+pub mod recovery;
 #[cfg(test)]
 mod tests;
 
