@@ -172,6 +172,19 @@ fn windows_agent_command_hook(
     windows::agent_command(profile, program, base, harness)
 }
 
+/// The engine's grants folder, [`kernel_sandbox::windows::GRANTS_FOLDER`] in its data root,
+/// made when missing. Output: the folder, `Unavailable` when the data root is unknown, or the
+/// I/O error.
+#[cfg(target_os = "windows")]
+pub(super) fn grants_folder() -> Result<PathBuf, SandboxError> {
+    let layout =
+        crate::paths::Layout::current().map_err(|error| SandboxError::Unavailable(error.0))?;
+    let grants = layout.root().join(GRANTS_FOLDER);
+    fs::create_dir_all(&grants)?;
+    assert!(grants.is_dir());
+    Ok(grants)
+}
+
 /// The code a launch refusal has of its own, so a caller shows its plain line: the strict
 /// setting's ([`LINUX_NOT_FULL`]), the Windows loopback's
 /// ([`MODEL_LOOPBACK_UNAVAILABLE_WINDOWS`]) and, on Linux, the hidden folders' three
@@ -1608,17 +1621,4 @@ mod firmlink_tests {
             Err("read_path_engine_data")
         );
     }
-}
-
-/// The engine's grants folder, [`kernel_sandbox::windows::GRANTS_FOLDER`] in its data root,
-/// made when missing. Output: the folder, `Unavailable` when the data root is unknown, or the
-/// I/O error.
-#[cfg(target_os = "windows")]
-pub(super) fn grants_folder() -> Result<PathBuf, SandboxError> {
-    let layout =
-        crate::paths::Layout::current().map_err(|error| SandboxError::Unavailable(error.0))?;
-    let grants = layout.root().join(GRANTS_FOLDER);
-    fs::create_dir_all(&grants)?;
-    assert!(grants.is_dir());
-    Ok(grants)
 }
