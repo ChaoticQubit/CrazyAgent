@@ -510,6 +510,26 @@ fn a_link_chain_through_a_shared_folder_is_changeable_though_both_ends_are_priva
 
 #[cfg(unix)]
 #[test]
+fn a_folder_link_mid_path_through_a_shared_folder_is_changeable() {
+    let temp = durable_folder();
+    let private = temp.path().join("private");
+    write_mode(&private.join("real-dir").join("engine"), "engine", 0o755);
+    let shared = shared_folder(&temp.path().join("shared"), 0o777);
+    let middle = shared.join("d2");
+    std::os::unix::fs::symlink(private.join("real-dir"), &middle).unwrap();
+    let folder = private.join("dir");
+    std::os::unix::fs::symlink(&middle, &folder).unwrap();
+    let engine = folder.join("engine");
+    assert_eq!(
+        changeable_by_others(&private.join("real-dir").join("engine")),
+        None
+    );
+    assert_eq!(changeable_by_others(&engine), Some(shared.clone()));
+    assert_eq!(changeable_past_sticky(&engine), Some(shared));
+}
+
+#[cfg(unix)]
+#[test]
 fn a_link_chain_through_private_folders_only_still_passes() {
     let temp = durable_folder();
     let private = temp.path().join("private");
