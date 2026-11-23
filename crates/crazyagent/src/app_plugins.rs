@@ -156,3 +156,7 @@ fn sweep_unnamed_keys(db: &Connection, root: &Path) {
 #[cfg(all(test, unix))]
 #[path = "app_plugins/host_tests.rs"]
 mod host_tests;
+
+#[cfg(test)]
+#[path = "app_plugins/switch_tests.rs"]
+mod switch_tests;

@@ -1,4 +1,4 @@
-use bus_gateway::{Grants, Refusals};
+use bus_gateway::{AllOn, Grants, Refusals};
 use crazyagent_cap as cap;
 use crazyagent_plugin_agent_quit as agent_quit;
 use crazyagent_plugin_check as plugin_check;
@@ -108,6 +108,7 @@ fn refused_moves_nothing(grants: &Grants, refusals: &EngineRefusals) {
     let result = save_quit_with(
         agent_quit::save,
         grants,
+        &AllOn,
         refusals,
         &tx,
         revision,
@@ -149,6 +150,7 @@ fn the_granted_quit_save_through_the_slice_logs_the_same_event() {
         save_quit_with(
             agent_quit::save,
             bundled_grants(),
+            &AllOn,
             &refusals,
             &tx,
             revision,
@@ -282,7 +284,7 @@ fn shape(entry: Entry, grants: &Grants, refusals: &EngineRefusals) -> String {
     let before = moved(&db);
     let revision = u64::try_from(before.0).unwrap();
     let tx = db.transaction().unwrap();
-    let result = save_quit_with(entry, grants, refusals, &tx, revision, &stop_never_12());
+    let result = save_quit_with(entry, grants, &AllOn, refusals, &tx, revision, &stop_never_12());
     tx.rollback().unwrap();
     assert_eq!(moved(&db), before, "the store's revision is unchanged");
     assert!(!quit_row(&db), "no agent_quit_settings change");
@@ -411,4 +413,40 @@ fn every_generated_capability_may_be_named_in_a_refusal() {
             capability.name
         );
     }
+}
+
+/// The switch fake of the off rows: the agent-quit plugin reads as turned off.
+struct QuitOff;
+
+impl bus_gateway::Switches for QuitOff {
+    fn is_on(&self, plugin: &str) -> bool {
+        plugin != QUIT
+    }
+}
+
+#[test]
+fn the_quit_save_of_an_off_plugin_is_refused_and_queues_no_missing_permission() {
+    let mut db = store();
+    let tx = db.transaction().unwrap();
+    let before = moved(&tx);
+    let revision = u64::try_from(before.0).unwrap();
+    let refusals = EngineRefusals::new();
+    let result = save_quit_with(
+        agent_quit::save,
+        bundled_grants(),
+        &QuitOff,
+        &refusals,
+        &tx,
+        revision,
+        &stop_never_12(),
+    );
+    assert_eq!(
+        result.err().map(|error| error.0),
+        Some("plugin_call_refused".to_owned())
+    );
+    assert_eq!(moved(&tx), before, "an off plugin's save moves and logs nothing");
+    assert!(!quit_row(&tx));
+    assert!(logged(&tx).is_empty());
+    assert_eq!(refusals.count(QUIT), 1);
+    assert_eq!(refusals.pending_len(), 0);
 }

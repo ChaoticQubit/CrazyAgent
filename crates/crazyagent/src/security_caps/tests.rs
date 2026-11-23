@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 
-use bus_gateway::{Gateway, Grants, Refusals};
+use bus_gateway::{AllOn, Gateway, Grants, Refusals};
 use kernel_security::error::StoreError;
 use kernel_security::secret::SecretString;
 use kernel_security::secrets::{Handles, Scopes, Secrets};
@@ -173,7 +173,7 @@ fn the_quit_gateway_never_opens_the_store() {
         Err(absent.clone())
     );
     let grants = Grants::new(&[("github", Tier::T1, &["secrets.find"])]).unwrap();
-    let gateway = Gateway::new(&grants, &Unreached);
+    let gateway = Gateway::new(&grants, &Unreached, &AllOn);
     let providers = Providers {
         net: &Absent,
         secrets: &Absent,
