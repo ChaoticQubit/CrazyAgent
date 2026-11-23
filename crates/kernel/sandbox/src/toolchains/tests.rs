@@ -46,6 +46,7 @@ fn a_cargo_cache_name_that_will_not_give_way_refuses_with_the_hooks_code() {
     }
     let hooks = ToolchainHooks {
         remove_home_entry: refuse,
+        sandboxed_git: || Path::new("/usr/bin/git"),
     };
     let scratch = tempfile::tempdir().unwrap();
     let root = canonical(scratch.path()).unwrap();
@@ -189,4 +190,95 @@ fn without_the_command_line_tools_an_agent_uses_the_picked_xcode_compilers_and_s
             .all(|(name, value)| *name != "SDKROOT" || *value != sdk.clone().into_os_string()),
         "the Command Line Tools win when they hold cc: {env:?}"
     );
+}
+
+/// A lead's copy of the agent's own `git` runs the git the hooks name: the script written to
+/// `bin/git` of the agent's temp folder holds that path, marks the lead's copy, and is a
+/// 0700 file of this user.
+#[test]
+fn a_leads_copy_runs_the_git_the_hooks_name() {
+    use std::os::unix::fs::PermissionsExt;
+    fn refuse(
+        _folder: std::os::fd::BorrowedFd<'_>,
+        _name: &str,
+        otherwise: &'static str,
+    ) -> Result<(), &'static str> {
+        Err(otherwise)
+    }
+    let hooks = ToolchainHooks {
+        remove_home_entry: refuse,
+        sandboxed_git: || Path::new("/opt/stand-in/bin/git"),
+    };
+    let scratch = tempfile::tempdir().unwrap();
+    let tmp = canonical(scratch.path()).unwrap();
+    lead_git(&hooks, &tmp, false).unwrap();
+    let written = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
+    let script = fs::read_to_string(&written).unwrap();
+    assert!(script.contains("git='/opt/stand-in/bin/git'\nlead=1\nfree=0\nmain=0\n"));
+    let metadata = fs::symlink_metadata(&written).unwrap();
+    assert!(metadata.is_file());
+    assert_eq!(metadata.permissions().mode() & 0o7777, 0o700);
+}
+
+#[test]
+fn the_agent_git_script_is_refused_for_the_xcrun_shim_and_any_path_that_is_not_plain() {
+    let system = Path::new("/usr/bin/git");
+    assert!(xcrun_shim(system, true), "a Mac has the xcrun shim there");
+    assert!(
+        !xcrun_shim(system, false),
+        "on Linux /usr/bin/git is the real git, so agents get their own git that runs it"
+    );
+    for real in [
+        "/opt/homebrew/bin/git",
+        "/usr/bin/git2",
+        "/usr/local/bin/git",
+    ] {
+        assert!(!xcrun_shim(Path::new(real), true), "{real}");
+        assert!(!xcrun_shim(Path::new(real), false), "{real}");
+    }
+    for copy in [GitCopy::Worker, GitCopy::Lead, GitCopy::Free] {
+        let script = git_script(system, copy, true);
+        assert_eq!(script.is_none(), cfg!(target_os = "macos"), "{copy:?}");
+        assert!(
+            script.is_none_or(|script| script.starts_with("#!/bin/sh\ngit='/usr/bin/git'\n")),
+            "{copy:?}"
+        );
+    }
+    for git in [
+        "usr/bin/git",
+        "/opt/it's/git",
+        "/opt/a\"b/git",
+        "/opt/$HOME/git",
+        "/opt/a`b`/git",
+        "/opt/new\nline/git",
+        "/opt/semi;colon/git",
+    ] {
+        for copy in [GitCopy::Worker, GitCopy::Lead, GitCopy::Free] {
+            for main in [true, false] {
+                assert_eq!(git_script(Path::new(git), copy, main), None, "{git:?}");
+            }
+        }
+    }
+    let real = Path::new("/Applications/X code.app/usr/bin/git");
+    let worker = git_script(real, GitCopy::Worker, true).unwrap();
+    let lead = git_script(real, GitCopy::Lead, true).unwrap();
+    let free = git_script(real, GitCopy::Free, true).unwrap();
+    let strict = git_script(real, GitCopy::Worker, false).unwrap();
+    for (script, flags) in [
+        (&worker, ["lead=0", "free=0", "main=1"]),
+        (&lead, ["lead=1", "free=0", "main=1"]),
+        (&free, ["lead=0", "free=1", "main=1"]),
+        (&strict, ["lead=0", "free=0", "main=0"]),
+    ] {
+        assert!(script.starts_with("#!/bin/sh\ngit='/Applications/X code.app/usr/bin/git'\n"));
+        for flag in flags {
+            assert!(script.lines().any(|line| line == flag), "{flag}");
+        }
+        assert!(!script.contains("@GIT@") && !script.contains("@LEAD@"));
+        assert!(!script.contains("@FREE@") && !script.contains("@MAIN@"));
+        assert!(script.len() as u64 <= GIT_SCRIPT_BYTES_MAX);
+    }
+    assert_eq!(worker.replace("\nlead=0\n", "\nlead=1\n"), lead);
+    assert_eq!(worker.replace("\nfree=0\n", "\nfree=1\n"), free);
+    assert_eq!(worker.replace("\nmain=1\n", "\nmain=0\n"), strict);
 }

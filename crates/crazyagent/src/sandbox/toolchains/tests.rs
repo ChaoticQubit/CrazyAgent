@@ -1,68 +1,7 @@
 use super::*;
-use kernel_sandbox::toolchains::{CARGO_SHARED, ToolHomes, prepare_cargo_home};
-
-#[test]
-fn the_agent_git_script_is_refused_for_the_xcrun_shim_and_any_path_that_is_not_plain() {
-    let system = Path::new("/usr/bin/git");
-    assert!(xcrun_shim(system, true), "a Mac has the xcrun shim there");
-    assert!(
-        !xcrun_shim(system, false),
-        "on Linux /usr/bin/git is the real git, so agents get their own git that runs it"
-    );
-    for real in [
-        "/opt/homebrew/bin/git",
-        "/usr/bin/git2",
-        "/usr/local/bin/git",
-    ] {
-        assert!(!xcrun_shim(Path::new(real), true), "{real}");
-        assert!(!xcrun_shim(Path::new(real), false), "{real}");
-    }
-    for copy in [GitCopy::Worker, GitCopy::Lead, GitCopy::Free] {
-        let script = git_script(system, copy, true);
-        assert_eq!(script.is_none(), cfg!(target_os = "macos"), "{copy:?}");
-        assert!(
-            script.is_none_or(|script| script.starts_with("#!/bin/sh\ngit='/usr/bin/git'\n")),
-            "{copy:?}"
-        );
-    }
-    for git in [
-        "usr/bin/git",
-        "/opt/it's/git",
-        "/opt/a\"b/git",
-        "/opt/$HOME/git",
-        "/opt/a`b`/git",
-        "/opt/new\nline/git",
-        "/opt/semi;colon/git",
-    ] {
-        for copy in [GitCopy::Worker, GitCopy::Lead, GitCopy::Free] {
-            for main in [true, false] {
-                assert_eq!(git_script(Path::new(git), copy, main), None, "{git:?}");
-            }
-        }
-    }
-    let real = Path::new("/Applications/X code.app/usr/bin/git");
-    let worker = git_script(real, GitCopy::Worker, true).unwrap();
-    let lead = git_script(real, GitCopy::Lead, true).unwrap();
-    let free = git_script(real, GitCopy::Free, true).unwrap();
-    let strict = git_script(real, GitCopy::Worker, false).unwrap();
-    for (script, flags) in [
-        (&worker, ["lead=0", "free=0", "main=1"]),
-        (&lead, ["lead=1", "free=0", "main=1"]),
-        (&free, ["lead=0", "free=1", "main=1"]),
-        (&strict, ["lead=0", "free=0", "main=0"]),
-    ] {
-        assert!(script.starts_with("#!/bin/sh\ngit='/Applications/X code.app/usr/bin/git'\n"));
-        for flag in flags {
-            assert!(script.lines().any(|line| line == flag), "{flag}");
-        }
-        assert!(!script.contains("@GIT@") && !script.contains("@LEAD@"));
-        assert!(!script.contains("@FREE@") && !script.contains("@MAIN@"));
-        assert!(script.len() as u64 <= GIT_SCRIPT_BYTES_MAX);
-    }
-    assert_eq!(worker.replace("\nlead=0\n", "\nlead=1\n"), lead);
-    assert_eq!(worker.replace("\nfree=0\n", "\nfree=1\n"), free);
-    assert_eq!(worker.replace("\nmain=1\n", "\nmain=0\n"), strict);
-}
+use kernel_sandbox::toolchains::{
+    CARGO_SHARED, ToolHomes, catch_up_git, free_git, lead_git, prepare_cargo_home,
+};
 
 #[test]
 fn a_link_swapped_in_for_the_lead_s_new_temp_folder_is_refused_and_never_followed() {
@@ -182,7 +121,7 @@ fn the_free_copy_merges_another_branch_that_the_worker_copy_refuses() {
     );
     assert!(!refused.status.success());
     assert!(String::from_utf8_lossy(&refused.stderr).contains("git merge is refused"));
-    free_git(&tmp).unwrap();
+    free_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp).unwrap();
     let merged = git_run(
         &wrapper,
         repo.path(),
@@ -225,7 +164,7 @@ fn the_worker_copy_merges_crazyagent_main_and_still_refuses_any_other_branch() {
     }
     let tmp = make_tmp(home.path()).unwrap();
     let _removed = Removed(home.path().to_path_buf());
-    catch_up_git(&tmp).unwrap();
+    catch_up_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp).unwrap();
     let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
     let merged = git_run(
         &wrapper,
@@ -293,7 +232,7 @@ fn a_leads_copy_merges_main_and_its_own_workers_and_names_the_main_merge_when_re
         }
         let tmp = make_tmp(home.path()).unwrap();
         let _removed = Removed(home.path().to_path_buf());
-        lead_git(&tmp, catch_up).unwrap();
+        lead_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp, catch_up).unwrap();
         let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
         let main = git_run(
             &wrapper,
@@ -364,7 +303,7 @@ fn a_workers_refused_merge_of_its_leads_branch_names_update_on_its_change_set() 
         let tmp = make_tmp(home.path()).unwrap();
         let _removed = Removed(home.path().to_path_buf());
         if catch_up {
-            catch_up_git(&tmp).unwrap();
+            catch_up_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp).unwrap();
         }
         let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
         let before = git_run(git, repo.path(), home.path(), &["rev-parse", "HEAD"]);
@@ -415,7 +354,7 @@ fn the_worker_copy_refuses_a_crazyagent_main_that_is_not_the_engine_s_ref() {
     }
     let tmp = make_tmp(home.path()).unwrap();
     let _removed = Removed(home.path().to_path_buf());
-    catch_up_git(&tmp).unwrap();
+    catch_up_git(&crate::sandbox::TOOLCHAIN_HOOKS, &tmp).unwrap();
     let wrapper = tmp.join(GIT_FOLDER).join(GIT_PROGRAM);
     let before = git_run(git, repo.path(), home.path(), &["rev-parse", "HEAD"]);
     for name in ["crazyagent/main", "refs/crazyagent/main"] {

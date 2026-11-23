@@ -1,3 +1,8 @@
+#[cfg(target_os = "macos")]
+use kernel_sandbox::toolchains::plain_path;
+use kernel_sandbox::toolchains::{GIT_FOLDER, GIT_PROGRAM};
+#[cfg(unix)]
+use kernel_sandbox::toolchains::{GitCopy, git_script, write_git};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io;
@@ -15,9 +20,6 @@ const TMP_PREFIX: &str = "ca-";
 const TMP_HASH_BYTES: usize = 8;
 /// The folder of a native lead's short temp folder that is the lead's own temp folder.
 const NATIVE_LEAD_TMP: &str = "lead";
-/// The folder of an agent's short temp folder that holds its own `git`, and that program.
-pub(super) const GIT_FOLDER: &str = "bin";
-const GIT_PROGRAM: &str = "git";
 /// The folder of an agent's launch folder ([`crate::launch_context::STATE`]) that holds its
 /// own `getconf` ([`write_getconf`]), and that program.
 const GETCONF_FOLDER: &str = "bin";
@@ -40,172 +42,6 @@ if [ "$#" -eq 1 ] && [ "$1" = DARWIN_USER_TEMP_DIR ]; then
 fi
 exec /usr/bin/getconf "$@"
 "#;
-/// The xcrun shim a Mac has at `/usr/bin/git`, whose cache file write Seatbelt denies (Q73).
-#[cfg(unix)]
-const GIT_SHIM: &str = "/usr/bin/git";
-
-/// Tells whether a git path is the xcrun shim, which only a Mac has: on any other system
-/// `/usr/bin/git` is the real git and the agent's own `git` runs it. Inputs: the git path
-/// and whether this system is a Mac. Output: the answer.
-#[cfg(unix)]
-fn xcrun_shim(git: &Path, macos: bool) -> bool {
-    macos && git == Path::new(GIT_SHIM)
-}
-/// The most bytes of an agent's `git` script read to tell whether it is current.
-#[cfg(unix)]
-const GIT_SCRIPT_BYTES_MAX: u64 = 8192;
-/// The script an agent's own `git` holds, with `@GIT@` for the real git, `@LEAD@` for 1 in
-/// a lead's copy, `@FREE@` for 1 in the free copy and `@MAIN@` for 1 while "Catch up with
-/// main" is on, else 0. It refuses merge, pull, rebase and cherry-pick, and aliases for
-/// them, with a plain reason (DEC-107 rule 2); with main on any copy merges
-/// `crazyagent/main` only while that name resolves to the commit `refs/crazyagent/main`
-/// holds, a courtesy check, since the copy lets an agent set that ref and the engine's turn
-/// end check is what refuses a merge of anything else, a lead its own workers'
-/// `BRANCH--NAME` branches, telling a lead with main on how to merge main (F19), and the
-/// free copy runs every command as is.
-#[cfg(unix)]
-const GIT_SCRIPT: &str = r##"#!/bin/sh
-git='@GIT@'
-lead=@LEAD@
-free=@FREE@
-main=@MAIN@
-main_reason='You work only on your own branch: never merge, pull, rebase or cherry-pick another agent branch into it (DEC-107). To bring the project main into your branch, run: git merge crazyagent/main. Work from the lead branch reaches yours through Update on your change set: stop and tell your lead what you need; the master tells the owner.'
-worker_reason='You work only on your own branch: never merge, pull, rebase or cherry-pick another branch into it (DEC-107). Work from the lead branch reaches yours through Update on your change set: stop and tell your lead what you need; the master tells the owner.'
-lead_reason='A lead merges only the branches of its own workers, named BRANCH--NAME after its own branch, and never pulls, rebases or cherry-picks other branches (DEC-107). The engine merge tool merges app-spawned workers. If you need other work, stop and tell the master what you need.'
-lead_main_reason='A lead merges only the branches of its own workers, named BRANCH--NAME after its own branch, and the project main, and never pulls, rebases or cherry-picks other branches (DEC-107). To bring the project main into your branch, run: git merge crazyagent/main. The engine merge tool merges app-spawned workers. If you need other work, stop and tell the master what you need.'
-refuse() {
-  printf 'crazyagent: git %s is refused. %s\n' "$1" "$2" >&2
-  exit 1
-}
-reason() {
-  if [ "$lead" = 1 ] && [ "$main" = 1 ]; then
-    printf '%s' "$lead_main_reason"
-  elif [ "$lead" = 1 ]; then
-    printf '%s' "$lead_reason"
-  elif [ "$main" = 1 ]; then
-    printf '%s' "$main_reason"
-  else
-    printf '%s' "$worker_reason"
-  fi
-}
-aliased() {
-  [ "$free" = 1 ] && return 0
-  case "$1" in
-    [Aa][Ll][Ii][Aa][Ss].*) refuse "$2" "Aliases set on the command line are refused. $(reason)" ;;
-  esac
-}
-sub=
-at=0
-skip=
-moved=0
-for word do
-  at=$((at + 1))
-  if [ -n "$skip" ]; then
-    if [ "$skip" = c ]; then
-      aliased "$word" "-c $word"
-    fi
-    skip=
-    continue
-  fi
-  case "$word" in
-    -c|--config-env) skip=c ;;
-    --config-env=*) aliased "${word#--config-env=}" "$word" ;;
-    -C|--git-dir|--work-tree)
-      skip=v
-      moved=1
-      ;;
-    --namespace|--super-prefix) skip=v ;;
-    --git-dir=*|--work-tree=*) moved=1 ;;
-    -*) ;;
-    *)
-      sub=$word
-      break
-      ;;
-  esac
-done
-own_workers() {
-  [ "$moved" = 0 ] || return 1
-  branch=$("$git" symbolic-ref --short -q HEAD) || return 1
-  [ -n "$branch" ] || return 1
-  named=0
-  value=0
-  for word do
-    if [ "$value" = 1 ]; then
-      value=0
-      continue
-    fi
-    case "$word" in
-      -m|-F|-s|-X|--message|--file|--strategy|--strategy-option|--into-name|--cleanup) value=1 ;;
-      -*) ;;
-      *)
-        word=${word#refs/heads/}
-        case "$word" in
-          "$branch"--*) ;;
-          *) return 1 ;;
-        esac
-        name=${word#"$branch"--}
-        case "$name" in
-          ''|*/*|*--*|.*|*[!A-Za-z0-9._-]*) return 1 ;;
-        esac
-        named=1
-        ;;
-    esac
-  done
-  [ "$named" = 1 ]
-}
-only_main() {
-  [ "$moved" = 0 ] || return 1
-  held=$("$git" show-ref --verify --hash refs/crazyagent/main 2>/dev/null) || return 1
-  held=$("$git" rev-parse --verify -q "$held^{commit}" 2>/dev/null) || return 1
-  named=0
-  value=0
-  for word do
-    if [ "$value" = 1 ]; then
-      value=0
-      continue
-    fi
-    case "$word" in
-      -m|-F|-s|-X|--message|--file|--strategy|--strategy-option|--into-name|--cleanup) value=1 ;;
-      -*) ;;
-      crazyagent/main|refs/crazyagent/main)
-        [ "$("$git" rev-parse --verify -q "$word^{commit}" 2>/dev/null)" = "$held" ] || return 1
-        named=1
-        ;;
-      *) return 1 ;;
-    esac
-  done
-  [ "$named" = 1 ]
-}
-gate() {
-  shift "$1"
-  shift
-  if [ "$#" = 1 ]; then
-    case "$1" in
-      --abort|--quit|--continue|--skip) return 0 ;;
-    esac
-  fi
-  [ "$free" = 1 ] && return 0
-  [ "$main" = 1 ] && [ "$sub" = merge ] && only_main "$@" && return 0
-  [ "$lead" = 1 ] && [ "$sub" = merge ] && own_workers "$@"
-}
-case "$sub" in
-  '') ;;
-  merge|pull|rebase|cherry-pick)
-    gate "$at" "$@" || refuse "$sub" "$(reason)"
-    ;;
-  add|am|apply|archive|bisect|blame|branch|bundle|cat-file|checkout|cherry|clean|clone|commit|config|describe|diff|diff-files|diff-index|diff-tree|difftool|fetch|for-each-ref|format-patch|fsck|gc|grep|hash-object|help|init|log|ls-files|ls-remote|ls-tree|merge-base|merge-file|merge-tree|mergetool|mv|name-rev|notes|push|range-diff|reflog|remote|reset|restore|rev-list|rev-parse|revert|rm|shortlog|show|show-ref|sparse-checkout|stash|status|submodule|switch|symbolic-ref|tag|update-index|update-ref|version|worktree) ;;
-  *)
-    if [ "$free" != 1 ]; then
-      expanded=$("$git" config --get "alias.$sub" 2>/dev/null)
-      case "$expanded" in
-        merge|'merge '*|pull|'pull '*|rebase|'rebase '*|cherry-pick|'cherry-pick '*) refuse "$sub" "Aliases for merge, pull, rebase or cherry-pick are refused as those commands are. $(reason)" ;;
-      esac
-    fi
-    ;;
-esac
-exec "$git" "$@"
-"##;
-
 /// The short temp folder of the agent whose home is `home`: `ca-` and 16 hex digits of the
 /// home path's SHA-256 in [`TMP_PARENT`] (`/private/tmp` on macOS, `/tmp` elsewhere), short enough for Unix socket paths. Input: the agent
 /// home. Output: the path, which may not exist.
@@ -247,7 +83,7 @@ pub(crate) fn in_agent_tmp(path: &Path) -> bool {
 /// Makes the agent's short temp folder with mode 0700, or reuses the one this user already
 /// owns there and makes it private again, and writes the agent's own `git` into it (see
 /// [`with_agent_git`]) as the worker copy that refuses `crazyagent/main` too, which
-/// [`catch_up_git`] widens while "Catch up with main" is on, so a copy that cannot be
+/// [`kernel_sandbox::toolchains::catch_up_git`] widens while "Catch up with main" is on, so a copy that cannot be
 /// widened keeps the refusal; a `git` that cannot be written is logged and the agent keeps
 /// the system one. Input: the agent home. Output: the folder, or a refusal when the path is a
 /// link, a file or another user's folder.
@@ -275,48 +111,6 @@ pub fn make_tmp(home: &Path) -> io::Result<PathBuf> {
         eprintln!("agent_git_not_written kind={:?}", error.kind());
     }
     Ok(path)
-}
-
-/// Which copy of the agent's own `git` a script is: the worker's, a lead's that may
-/// merge its own workers' branches, or the free copy that runs every command as is.
-#[cfg(unix)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum GitCopy {
-    Worker,
-    Lead,
-    Free,
-}
-
-/// The script an agent's own `git` holds: it runs the real git the engine itself resolved,
-/// so the agent's git calls never reach the `/usr/bin/git` xcrun shim, whose `xcrun_db`
-/// cache write Seatbelt denies, and git still finds its helpers beside its real path, which
-/// a link to it would lose; it refuses merges as [`GIT_SCRIPT`] says. Inputs: the real
-/// git, the copy and whether it merges `crazyagent/main`. Output: the script, or none when
-/// git is a Mac's shim ([`xcrun_shim`]) or its path is not plain.
-#[cfg(unix)]
-fn git_script(git: &Path, copy: GitCopy, main: bool) -> Option<String> {
-    let text = plain_path(git).filter(|_| !xcrun_shim(git, cfg!(target_os = "macos")))?;
-    let script = GIT_SCRIPT
-        .replace("@GIT@", text)
-        .replace("@LEAD@", if copy == GitCopy::Lead { "1" } else { "0" })
-        .replace("@FREE@", if copy == GitCopy::Free { "1" } else { "0" })
-        .replace("@MAIN@", if main { "1" } else { "0" });
-    assert!(!script.contains("@GIT@") && !script.contains("@LEAD@") && !script.contains("@FREE@"));
-    assert!(!script.contains("@MAIN@"));
-    assert!(script.len() as u64 <= GIT_SCRIPT_BYTES_MAX);
-    Some(script)
-}
-
-/// A path as text a script may hold in single quotes as is: absolute and of letters,
-/// digits, spaces and `/._-+` only. Input: the path. Output: the text, or none.
-#[cfg(unix)]
-fn plain_path(path: &Path) -> Option<&str> {
-    let text = path.to_str()?;
-    let plain = path.is_absolute()
-        && text
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"/._-+ ".contains(&byte));
-    plain.then_some(text)
 }
 
 /// The script of an agent's own `getconf` ([`GETCONF_SCRIPT`]). Inputs: a native lead's
@@ -436,125 +230,6 @@ fn holds_getconf(folder: &Path, path: &Path, script: &str) -> bool {
 /// home. Output: the path, which may not exist.
 fn getconf_folder(home: &Path) -> PathBuf {
     home.join(crate::launch_context::STATE).join(GETCONF_FOLDER)
-}
-
-/// Rewrites the agent's own `git` in its short temp folder as a lead's copy, which lets the
-/// lead merge its own workers' branches (DEC-107 rule 2), and `crazyagent/main` while
-/// "Catch up with main" is on, after [`make_tmp`] wrote the copy every agent gets. Inputs:
-/// the folder `make_tmp` returned and the setting. Output: Ok, also when git is the shim
-/// and no copy is written, or the write failure.
-#[cfg(unix)]
-pub fn lead_git(tmp: &Path, catch_up: bool) -> io::Result<()> {
-    match git_script(
-        crate::research::runner::sandboxed_git(),
-        GitCopy::Lead,
-        catch_up,
-    ) {
-        Some(script) => write_git(tmp, &script),
-        None => Ok(()),
-    }
-}
-
-/// Rewrites the agent's own `git` in its short temp folder as the free copy, which runs
-/// every git command as is: the master's at Full access (DEC-117 Q2), after [`make_tmp`]
-/// wrote the worker copy. Input: the folder `make_tmp` returned. Output: Ok, also when
-/// git is the shim and no copy is written, or the write failure.
-#[cfg(unix)]
-pub fn free_git(tmp: &Path) -> io::Result<()> {
-    match git_script(
-        crate::research::runner::sandboxed_git(),
-        GitCopy::Free,
-        true,
-    ) {
-        Some(script) => write_git(tmp, &script),
-        None => Ok(()),
-    }
-}
-
-/// Rewrites the agent's own `git` in its short temp folder as the worker copy that merges
-/// `crazyagent/main`, for a project with "Catch up with main" on, after [`make_tmp`] wrote
-/// the copy that refuses it. Input: the folder `make_tmp` returned. Output: Ok, also when
-/// git is the shim and no copy is written, or the write failure.
-#[cfg(unix)]
-pub fn catch_up_git(tmp: &Path) -> io::Result<()> {
-    match git_script(
-        crate::research::runner::sandboxed_git(),
-        GitCopy::Worker,
-        true,
-    ) {
-        Some(script) => write_git(tmp, &script),
-        None => Ok(()),
-    }
-}
-
-/// Writes the agent's own `git` into `bin` of its short temp folder as a 0700 file of this
-/// user, replacing a copy that differs, through descriptors that never follow a link the
-/// agent left there. Inputs: the temp folder and the script. Output: done, or the refusal.
-#[cfg(unix)]
-fn write_git(tmp: &Path, script: &str) -> io::Result<()> {
-    use rustix::fs::{AtFlags, CWD, Mode, OFlags};
-    use std::io::{Read, Write};
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static STAGED: AtomicU64 = AtomicU64::new(0);
-    let folder_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let tmp = rustix::fs::openat(CWD, tmp, folder_flags, Mode::empty())?;
-    match rustix::fs::mkdirat(&tmp, GIT_FOLDER, Mode::from_raw_mode(0o700)) {
-        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-        Err(error) => return Err(error.into()),
-    }
-    let folder = rustix::fs::openat(&tmp, GIT_FOLDER, folder_flags, Mode::empty())?;
-    if rustix::fs::fstat(&folder)?.st_uid != nix::unistd::getuid().as_raw() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "the agent git folder is not this user's",
-        ));
-    }
-    rustix::fs::fchmod(&folder, Mode::from_raw_mode(0o700))?;
-    let current = rustix::fs::openat(
-        &folder,
-        GIT_PROGRAM,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .ok()
-    .map(fs::File::from)
-    .and_then(|file| {
-        let metadata = file.metadata().ok()?;
-        if !metadata.is_file() || metadata.mode() & 0o7777 != 0o700 {
-            return None;
-        }
-        let mut text = String::new();
-        file.take(GIT_SCRIPT_BYTES_MAX + 1)
-            .read_to_string(&mut text)
-            .ok()?;
-        Some(text)
-    });
-    if current.as_deref() == Some(script) {
-        return Ok(());
-    }
-    let staged = format!(
-        ".{GIT_PROGRAM}-{}-{}",
-        std::process::id(),
-        STAGED.fetch_add(1, Ordering::Relaxed)
-    );
-    let file = rustix::fs::openat(
-        &folder,
-        staged.as_str(),
-        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::from_raw_mode(0o700),
-    )?;
-    let mut file = fs::File::from(file);
-    let placed = file
-        .write_all(script.as_bytes())
-        .and_then(|()| file.set_permissions(fs::Permissions::from_mode(0o700)))
-        .and_then(|()| {
-            rustix::fs::renameat(&folder, staged.as_str(), &folder, GIT_PROGRAM)
-                .map_err(io::Error::from)
-        });
-    if placed.is_err() {
-        let _ = rustix::fs::unlinkat(&folder, staged.as_str(), AtFlags::empty());
-    }
-    placed
 }
 
 /// Puts the agent's own `getconf` (see [`write_getconf`]) and then its own `git` (see
@@ -798,25 +473,6 @@ pub fn make_tmp(_home: &Path) -> io::Result<PathBuf> {
 /// short temp folder, unused. Returns `Unsupported`.
 #[cfg(not(unix))]
 pub fn fresh_native_lead_tmp(_scratch: &Path) -> io::Result<PathBuf> {
-    Err(io::ErrorKind::Unsupported.into())
-}
-
-/// No agent `git` outside Unix. Takes the agent temp folder and the setting, unused.
-/// Returns `Unsupported`.
-#[cfg(not(unix))]
-pub fn lead_git(_tmp: &Path, _catch_up: bool) -> io::Result<()> {
-    Err(io::ErrorKind::Unsupported.into())
-}
-
-/// No agent `git` outside Unix. Takes the agent temp folder, unused. Returns `Unsupported`.
-#[cfg(not(unix))]
-pub fn free_git(_tmp: &Path) -> io::Result<()> {
-    Err(io::ErrorKind::Unsupported.into())
-}
-
-/// No agent `git` outside Unix. Takes the agent temp folder, unused. Returns `Unsupported`.
-#[cfg(not(unix))]
-pub fn catch_up_git(_tmp: &Path) -> io::Result<()> {
     Err(io::ErrorKind::Unsupported.into())
 }
 

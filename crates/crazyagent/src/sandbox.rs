@@ -1204,10 +1204,13 @@ pub const GRANT_HOOKS: GrantHooks = GrantHooks {
 };
 
 /// The engine's real agent toolchain hooks, the only [`ToolchainHooks`] production code
-/// passes: the cargo home entry removal of [`toolchain_remove_home_entry`].
+/// passes: the cargo home entry removal of [`toolchain_remove_home_entry`] and the real git
+/// the research runner resolved.
 pub const TOOLCHAIN_HOOKS: ToolchainHooks = ToolchainHooks {
     #[cfg(unix)]
     remove_home_entry: toolchain_remove_home_entry,
+    #[cfg(unix)]
+    sandboxed_git: crate::research::runner::sandboxed_git,
 };
 
 /// Removes one entry of an agent's own cargo home as the engine's home cleanup does, with
@@ -2708,7 +2711,7 @@ impl ProjectSandbox {
         teammates.read_only.extend(
             self.scratch
                 .iter()
-                .map(|scratch| scratch.join(toolchains::GIT_FOLDER)),
+                .map(|scratch| scratch.join(kernel_sandbox::toolchains::GIT_FOLDER)),
         );
         let answers = mailbox.clone();
         teammates.answers = Some(answers.clone());
