@@ -93,7 +93,7 @@ pub(crate) fn opening<'a, 'c>(
 }
 
 /// The engine's name check for the kernel writer: only the closed [`Aggregate`] set that
-/// replay reads may be written (CodeRabbit b01 H1). Input: the name. Output: whether replay
+/// replay reads may be written. Input: the name. Output: whether replay
 /// reads it.
 fn known(name: &str) -> bool {
     replay::parse(name).is_some()

@@ -149,7 +149,7 @@ fn an_events_body_over_the_bound_is_refused_and_nothing_is_written() {
     assert_eq!(kind, "text");
 }
 
-/// H1 (CodeRabbit b01): a name the engine's check refuses is refused by an append and by a
+/// A name the engine's check refuses is refused by an append and by a
 /// snapshot with `state_log_aggregate_unknown` before any row is written, while a name it
 /// reads still appends.
 #[test]

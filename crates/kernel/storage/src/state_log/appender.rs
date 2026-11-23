@@ -15,7 +15,7 @@ mod tests;
 pub type FenceCheck = Box<dyn Fn(&Transaction<'_>) -> Result<(), StorageError>>;
 
 /// The engine's check of an aggregate name before it is written: true only for a name its
-/// replay reads, so the log never holds a row replay refuses (CodeRabbit b01 H1). Input:
+/// replay reads, so the log never holds a row replay refuses. Input:
 /// the name. Output: whether it may be written.
 pub type KnownName = fn(&str) -> bool;
 
