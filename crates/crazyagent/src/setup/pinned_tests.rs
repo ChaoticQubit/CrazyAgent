@@ -131,7 +131,7 @@ fn setup_and_the_terminal_use_the_system_tmux_when_the_bundled_one_cannot_run() 
             "{broken}"
         );
         assert_eq!(
-            crate::terminal::tmux::installed_at(&places),
+            kernel_processes::terminal::tmux::installed_at(&places),
             Some(tmux.canonicalize().unwrap()),
             "{broken}"
         );
@@ -151,7 +151,7 @@ fn setup_and_the_terminal_use_the_system_tmux_when_the_bundled_one_cannot_run() 
         "a failed read is never kept once the bundled file is replaced"
     );
     assert_eq!(
-        crate::terminal::tmux::installed_at(&places),
+        kernel_processes::terminal::tmux::installed_at(&places),
         Some(sidecar.canonicalize().unwrap())
     );
 }
@@ -211,14 +211,17 @@ fn a_tmux_only_on_the_login_path_is_the_one_setup_shows_and_the_terminal_starts(
     std::fs::write(&tmux, "#!/bin/sh\necho 'tmux 3.7a'\n").unwrap();
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
     let before = crate::tools::tools_new(Vec::new(), None);
-    assert_eq!(crate::terminal::tmux::installed_at(&before), None);
+    assert_eq!(
+        kernel_processes::terminal::tmux::installed_at(&before),
+        None
+    );
     let installer = PinnedInstaller::with_places(root.path(), Vec::new(), before.clone());
     assert_eq!(installer.locate(Dependency::Tmux), None);
     let places = before.with_probed(vec![login]);
     let installer = PinnedInstaller::with_places(root.path(), Vec::new(), places.clone());
     let (entry, version) = installer.locate(Dependency::Tmux).unwrap();
     assert_eq!(version, Version::parse("3.7a").unwrap());
-    let started = crate::terminal::tmux::installed_at(&places).unwrap();
+    let started = kernel_processes::terminal::tmux::installed_at(&places).unwrap();
     assert_eq!(started, entry.canonicalize().unwrap());
     assert_eq!(started, tmux.canonicalize().unwrap());
 }
