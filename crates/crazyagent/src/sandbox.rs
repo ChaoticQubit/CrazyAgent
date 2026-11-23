@@ -228,13 +228,8 @@ pub fn linux_host_kept() -> Option<LinuxHost> {
 }
 
 /// The engine's real agent policy hooks, the only [`PolicyHooks`] production code passes:
-/// this Linux read again ([`linux_host`]) and as last kept ([`linux_host_kept`]), the
-/// bounded read for another repository ([`linux_other_git`]) and a project's local folders
-/// ([`access_local_folders`]).
+/// a project's local folders ([`access_local_folders`]).
 pub const POLICY_HOOKS: PolicyHooks = PolicyHooks {
-    linux_host,
-    linux_host_kept,
-    linux_other_git,
     local_folders: access_local_folders,
 };
 

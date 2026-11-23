@@ -1,9 +1,6 @@
 use super::*;
 
 const HOOKS: PolicyHooks = PolicyHooks {
-    linux_host: || None,
-    linux_host_kept: || None,
-    linux_other_git: |_| false,
     local_folders: |_| Vec::new(),
 };
 
@@ -53,6 +50,7 @@ fn a_policy_saved_before_the_tool_cache_setting_reads_shared_and_the_view_lists_
     assert!(saved.contains(r#""tool_cache":"per_agent""#), "{saved}");
     let view = own.view(
         &HOOKS,
+        None,
         folder.path(),
         &ToolHomes::at(folder.path()),
         1,
@@ -100,6 +98,7 @@ fn a_policy_saved_before_the_access_change_settings_reads_when_idle_and_no_grant
     assert!(saved.contains(r#"{"kind":"temp_folder"}"#), "{saved}");
     let view = own.view(
         &HOOKS,
+        None,
         folder.path(),
         &ToolHomes::at(folder.path()),
         1,
