@@ -2,6 +2,14 @@
 
 use sha2::{Digest, Sha256};
 
+pub mod names;
+pub mod net;
+
+#[cfg(test)]
+mod names_tests;
+#[cfg(test)]
+mod net_tests;
+
 /// Hashes bytes with SHA-256, the digest the engine keys socket names, profile references
 /// and stored records by. Input: the bytes. Output: the digest as 64 lowercase hex digits.
 pub fn hash(bytes: &[u8]) -> String {
