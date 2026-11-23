@@ -171,11 +171,11 @@ fn a_research_job_on_a_listed_acp_harness_at_full_access_ends_at_once_in_plain_w
     let root = engine_root();
     let (folder, runner, jobs, id) = listed_job(&root, &replying_standin(REPORT));
     let connection = rusqlite::Connection::open(&root.database).unwrap();
-    let policy = crate::sandbox::policy::AgentPolicy {
+    let policy = kernel_sandbox::policy::AgentPolicy {
         access: AgentAccess::Full,
         ..Default::default()
     };
-    crate::sandbox::policy::save(&connection, "alpha", &policy).unwrap();
+    crate::sandbox::policy_store::save(&connection, "alpha", &policy).unwrap();
     drop(connection);
     let (access, pool) = local_access();
     let picked = crate::research::accounts::pool_account(&access, &pool, "standin-acp", &|_| true);

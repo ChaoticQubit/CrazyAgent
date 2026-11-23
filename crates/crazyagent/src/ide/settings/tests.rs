@@ -1,5 +1,5 @@
 use super::*;
-use crate::sandbox::policy::AgentAccess;
+use kernel_sandbox::policy::AgentAccess;
 use serde_json::json;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -566,7 +566,7 @@ fn sandboxed(case: &Case, script: &str) -> bool {
         45_733,
         kernel_sandbox::net::SandboxNetwork::Only(Vec::new()),
         &[],
-        crate::sandbox::policy::AgentFilesRule::default(),
+        kernel_sandbox::policy::AgentFilesRule::default(),
     )
     .unwrap();
     let mut shell = command(&profile, Path::new("/bin/sh"));

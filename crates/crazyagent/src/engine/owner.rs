@@ -175,7 +175,7 @@ pub enum OwnerMutation {
     SetProjectAgentPolicy {
         project_id: ProjectId,
         version: u64,
-        policy: crate::sandbox::policy::AgentPolicy,
+        policy: kernel_sandbox::policy::AgentPolicy,
     },
     Team {
         action: crate::team::TeamAction,
@@ -1259,7 +1259,7 @@ pub enum OwnerData {
     },
     ProjectAgentPolicy {
         project_id: ProjectId,
-        policy: crate::sandbox::policy::PolicyView,
+        policy: kernel_sandbox::policy::PolicyView,
     },
     ResearchJobs {
         project_id: ProjectId,

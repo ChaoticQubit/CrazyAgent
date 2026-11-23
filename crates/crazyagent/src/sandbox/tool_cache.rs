@@ -1,5 +1,5 @@
 use super::ProjectSandbox;
-use super::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
+use kernel_sandbox::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use rustix::io::Errno;
 use sha2::{Digest, Sha256};

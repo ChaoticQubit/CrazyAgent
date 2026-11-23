@@ -21,6 +21,9 @@ pub mod net;
 /// canonical form, the plain-path tests for Unix and Windows, the owner's home and the
 /// Seatbelt filter for a path and what is below it.
 pub mod paths;
+/// A project's agent policy: the access level, network, toolchains, caches, agent files,
+/// grants and shared folders, with the views clients show and the hooks the engine passes.
+pub mod policy;
 /// The lowest port a sandbox bridge may take.
 pub mod ports;
 /// Boundary qualification: the signed report a release build carries for each sandbox

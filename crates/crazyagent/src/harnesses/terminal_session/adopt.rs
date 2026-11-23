@@ -8,8 +8,8 @@ use crate::harnesses::launch::{LaunchError, LaunchLimits, failure};
 use crate::harnesses::leftovers::LineageToken;
 use crate::harnesses::transcript::{READ_BYTES_MAX, TranscriptEvent, TranscriptReader};
 use crate::launch_context::{Installed, InstalledFiles};
-use crate::sandbox::policy::{AgentAccess, AgentNetwork};
 use kernel_processes::terminal::{AgentId, Host};
+use kernel_sandbox::policy::{AgentAccess, AgentNetwork};
 use kernel_sandbox::toolchains::Toolchain;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, VecDeque};
@@ -90,7 +90,7 @@ pub struct PaneRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<LineageToken>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub grants: Option<Vec<crate::sandbox::policy::AccessGrant>>,
+    pub grants: Option<Vec<kernel_sandbox::policy::AccessGrant>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freeze: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -196,7 +196,7 @@ impl PaneRecord {
             .as_ref()
             .is_none_or(|files| files.home.is_absolute());
         let grants = record.grants.as_ref().is_none_or(|grants| {
-            crate::sandbox::policy::AgentPolicy {
+            kernel_sandbox::policy::AgentPolicy {
                 grants: grants.clone(),
                 ..Default::default()
             }

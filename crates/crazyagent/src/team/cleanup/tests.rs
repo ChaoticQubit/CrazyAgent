@@ -2522,8 +2522,8 @@ fn a_removal_preview_names_each_agent_s_unlanded_work_without_running_git_in_a_c
 #[cfg(target_os = "macos")]
 #[test]
 fn removing_an_agents_worktree_takes_its_own_tool_caches_and_keeps_the_shared_ones() {
-    use crate::sandbox::policy::{AgentAccess, ToolCacheScope};
     use crate::sandbox::tool_cache::{CacheShape, key, prepare, project_folder};
+    use kernel_sandbox::policy::{AgentAccess, ToolCacheScope};
     let case = Case::new();
     case.agent(1, "sub", "stopped");
     case.agent(2, "sub", "stopped");

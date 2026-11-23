@@ -1,10 +1,10 @@
 #![cfg(target_os = "macos")]
 
-use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
 use crazyagent::sandbox::tool_cache::CacheShape;
 use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox, Sandbox, agent_env, tool_cache};
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::policy::{AgentAccess, AgentPolicy, ToolCacheScope};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
@@ -4203,7 +4203,7 @@ fn a_confined_shell_lists_its_own_running_child() {
 /// TMPDIR and takes a new file there, and a port grant joins the limited network.
 #[test]
 fn access_grants_reach_one_socket_hand_over_the_temp_folder_and_keep_its_sockets() {
-    use crazyagent::sandbox::policy::AccessGrant;
+    use kernel_sandbox::policy::AccessGrant;
     let case = case();
     let owner_tmp = case.root.join("otmp");
     fs::create_dir_all(&owner_tmp).unwrap();
@@ -4272,8 +4272,8 @@ fn access_grants_reach_one_socket_hand_over_the_temp_folder_and_keep_its_sockets
 /// the first and last open name and a plain file read, an unlisted name stays closed.
 #[test]
 fn a_profile_with_every_grant_kind_parses_and_keeps_its_rules() {
-    use crazyagent::sandbox::policy::AccessGrant;
     use crazyagent::sandbox::shared_folders::apply;
+    use kernel_sandbox::policy::AccessGrant;
     use kernel_sandbox::shared_folders::SharedFolders;
     use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
     let case = case();

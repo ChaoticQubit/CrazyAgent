@@ -3,8 +3,8 @@ use crate::engine::EngineError;
 use crate::project_setup::{CONTEXT_DIRECTORY, ProjectSetup};
 use crate::projects_home::{CRAZYAGENT_DIRECTORY, holds_owner_home};
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
-use crate::sandbox::policy::{AgentAccess, AgentPolicy};
 use kernel_sandbox::paths::one_spelling;
+use kernel_sandbox::policy::{AgentAccess, AgentPolicy};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -630,8 +630,8 @@ pub(crate) fn start(
     let homes = kernel_sandbox::toolchains::ToolHomes::owner().ok();
     let policy = AgentPolicy {
         access,
-        toolchains: crate::sandbox::policy::recorded_toolchains(&repo, homes.as_ref()),
-        network: crate::sandbox::policy::AgentNetwork::default(),
+        toolchains: kernel_sandbox::policy::recorded_toolchains(&repo, homes.as_ref()),
+        network: kernel_sandbox::policy::AgentNetwork::default(),
         ide_git_hooks: false,
         tool_cache: Default::default(),
         home_caches: Default::default(),
@@ -639,7 +639,7 @@ pub(crate) fn start(
         shared_folders: Default::default(),
         ..Default::default()
     };
-    crate::sandbox::policy::save(tx, project_id.as_str(), &policy).map_err(error)?;
+    crate::sandbox::policy_store::save(tx, project_id.as_str(), &policy).map_err(error)?;
     let stored = crate::project_setup::load_setup(tx, &project_id)?
         .ok_or_else(|| failure("project_setup_missing"))?;
     crate::project_setup::write_brief_at(&layout, &stored).map_err(failure)?;

@@ -2,7 +2,7 @@ use crate::config::{EffectiveConfig, ModelAuthentication};
 use crate::engine::EngineError;
 use crate::protocol::{CredentialRef, Outcome, ProjectId, ProjectSpec};
 use crate::research::jobs::RUN_AGAIN;
-use crate::sandbox::policy::LevelView;
+use kernel_sandbox::policy::LevelView;
 use retry::retry_research;
 pub use retry::{RESEARCH_UNAVAILABLE_HERE, retryable};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -816,7 +816,7 @@ pub enum SetupView {
     Context(ProjectContext),
     ReadPaths(ReadPaths),
     HiddenPaths(HiddenPaths),
-    AgentPolicy(crate::sandbox::policy::PolicyView),
+    AgentPolicy(kernel_sandbox::policy::PolicyView),
     Item(ContextChunk),
     Log(Vec<String>),
     Changed(crate::engine::owner::OwnerResult),
@@ -903,7 +903,7 @@ pub enum SetupAction {
     SetAgentPolicy {
         project_id: ProjectId,
         version: u64,
-        policy: crate::sandbox::policy::AgentPolicy,
+        policy: kernel_sandbox::policy::AgentPolicy,
     },
 }
 
@@ -2737,7 +2737,7 @@ fn set_agent_policy(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
     version: u64,
-    policy: &crate::sandbox::policy::AgentPolicy,
+    policy: &kernel_sandbox::policy::AgentPolicy,
 ) -> Result<Outcome, EngineError> {
     let exists: bool = tx
         .query_row(
@@ -2755,7 +2755,7 @@ fn set_agent_policy(
     if let Some((_, code)) = policy.access.refusal() {
         return Ok(rejected(code));
     }
-    let before = crate::sandbox::policy::load(tx, project_id.as_str())
+    let before = crate::sandbox::policy_store::load(tx, project_id.as_str())
         .map(|saved| saved.grants)
         .unwrap_or_default();
     let data = crate::sandbox::grants::data_root(tx).unwrap_or_default();
@@ -2770,7 +2770,7 @@ fn set_agent_policy(
             Err(code) => return Ok(rejected(code)),
         }
     }
-    let policy = crate::sandbox::policy::AgentPolicy {
+    let policy = kernel_sandbox::policy::AgentPolicy {
         grants: kept,
         ..policy.clone()
     };
@@ -2781,7 +2781,7 @@ fn set_agent_policy(
     if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
         return Ok(rejected(crate::storage::versioned::STALE_CODE));
     }
-    crate::sandbox::policy::save(tx, project_id.as_str(), &policy).map_err(error)?;
+    crate::sandbox::policy_store::save(tx, project_id.as_str(), &policy).map_err(error)?;
     crate::sandbox::grants::log_changes(
         tx,
         project_id.as_str(),
@@ -3179,16 +3179,16 @@ pub(crate) fn record_new(
     if outcome == Outcome::Applied {
         crate::storage::reinstall::forget(tx, &staged.folder)?;
         let stored = load_setup(tx, project_id)?.ok_or_else(|| failure("project_setup_missing"))?;
-        if !crate::sandbox::policy::saved(tx, project_id.as_str()).map_err(error)? {
+        if !crate::sandbox::policy_store::saved(tx, project_id.as_str()).map_err(error)? {
             let homes = kernel_sandbox::toolchains::ToolHomes::owner().ok();
-            let policy = crate::sandbox::policy::AgentPolicy {
-                toolchains: crate::sandbox::policy::recorded_toolchains(
+            let policy = kernel_sandbox::policy::AgentPolicy {
+                toolchains: kernel_sandbox::policy::recorded_toolchains(
                     &staged.staging,
                     homes.as_ref(),
                 ),
                 ..Default::default()
             };
-            crate::sandbox::policy::save(tx, project_id.as_str(), &policy).map_err(error)?;
+            crate::sandbox::policy_store::save(tx, project_id.as_str(), &policy).map_err(error)?;
         }
         let state = crate::projects_home::state_folder(&staged.staging);
         assert_ne!(state, staged.staging);

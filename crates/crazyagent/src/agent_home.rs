@@ -1,6 +1,6 @@
 use crate::harnesses::manifest::DriverKind;
 use crate::protocol::ProjectId;
-use crate::sandbox::policy::{AgentAccess, HomeCaches};
+use kernel_sandbox::policy::{AgentAccess, HomeCaches};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};

@@ -577,12 +577,12 @@ impl NativeLead {
             std::fs::Permissions::from_mode(0o600),
         )
         .unwrap();
-        crate::sandbox::policy::save(
+        crate::sandbox::policy_store::save(
             &fixture.connection,
             PROJECT,
-            &crate::sandbox::policy::AgentPolicy {
-                network: crate::sandbox::policy::AgentNetwork::None,
-                ..crate::sandbox::policy::AgentPolicy::default()
+            &kernel_sandbox::policy::AgentPolicy {
+                network: kernel_sandbox::policy::AgentNetwork::None,
+                ..kernel_sandbox::policy::AgentPolicy::default()
             },
         )
         .unwrap();

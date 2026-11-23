@@ -1,10 +1,10 @@
 use super::new_project_view::{Look, Row, wrap_words};
 use super::project_team::window;
-use crate::sandbox::policy::{
-    AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles, PolicyView, ToolchainChoice,
-};
 use crate::sandbox::shared_folders::{OFF_MACOS_LINE, UNREACHABLE_SECRETS_LINE};
 use crossterm::event::{KeyCode, KeyEvent};
+use kernel_sandbox::policy::{
+    AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles, PolicyView, ToolchainChoice,
+};
 use kernel_sandbox::shared_folders::{CHOSEN_MAX, SharedAccess, SharedFolders, SharedScope};
 
 /// The plain warning the owner confirms before giving a project's agents Full access.

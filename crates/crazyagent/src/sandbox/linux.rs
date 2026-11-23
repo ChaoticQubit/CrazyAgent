@@ -4763,9 +4763,9 @@ mod tests {
 
     #[test]
     fn a_launch_left_on_this_network_by_a_low_port_says_so_with_the_port() {
-        use super::super::policy::AgentNetwork;
         use super::super::{LinuxHost, linux_unbridged_line, linux_unbridged_notice_on};
         use SandboxRemote::{AnyHost, Loopback};
+        use kernel_sandbox::policy::AgentNetwork;
         let host = |nested| {
             Some(LinuxHost {
                 nested,
@@ -4826,10 +4826,10 @@ mod tests {
 
     #[test]
     fn every_unrouted_launch_that_could_route_says_why_and_a_low_port_names_itself() {
-        use super::super::policy::AgentNetwork;
         use super::super::{LINUX_UNROUTED_ANY_HOST_LINE, LINUX_UNROUTED_LINE, LinuxHost};
         use super::super::{linux_unbridged_line, linux_unbridged_notice_on};
         use SandboxRemote::{AnyHost, Loopback};
+        use kernel_sandbox::policy::AgentNetwork;
         let host = |routed, supervised| {
             Some(LinuxHost {
                 nested: true,
@@ -5050,9 +5050,9 @@ mod tests {
 
     #[test]
     fn a_launch_that_could_have_a_network_of_its_own_says_why_it_has_none() {
-        use super::super::policy::AgentNetwork;
         use super::super::{LINUX_UNROUTED_LINE, LinuxHost, linux_unbridged_notice_on};
         use SandboxRemote::{AnyHost, Loopback};
+        use kernel_sandbox::policy::AgentNetwork;
         let host = |nested, routed| {
             Some(LinuxHost {
                 nested,

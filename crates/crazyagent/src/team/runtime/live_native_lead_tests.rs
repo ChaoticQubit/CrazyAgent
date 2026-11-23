@@ -1,9 +1,9 @@
 use super::managed_agent::{AGENT, ManagedAgent, NativeTeam, SignedIn, claude, shown};
 use super::{Order, Report, TurnEnd, TurnRules};
-use crate::sandbox::policy::AgentAccess;
 use crate::terminal::tmux::installed;
 use crate::terminal::{harness_socket, teammates_socket};
 use kernel_processes::terminal::AgentId;
+use kernel_sandbox::policy::AgentAccess;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

@@ -1,10 +1,10 @@
 use super::*;
 use crate::ide::workspace::{IdePolicy, ide_policy};
 use crate::sandbox::ProjectSandbox;
-use crate::sandbox::policy::{
+use kernel_sandbox::net::SandboxNetwork;
+use kernel_sandbox::policy::{
     AgentAccess, AgentFilesRule, AgentNetwork, AgentPolicy, IdeAgentFiles,
 };
-use kernel_sandbox::net::SandboxNetwork;
 use std::ffi::OsString;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2562,7 +2562,7 @@ fn set_level(data: &Path, project: &ProjectId, access: AgentAccess) {
         access,
         ..AgentPolicy::default()
     };
-    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+    crate::sandbox::policy_store::save(&db, project.as_str(), &policy).unwrap();
 }
 
 /// Saves a project's access level and IDE hooks switch in the engine database of a test
@@ -2575,7 +2575,7 @@ fn set_policy(data: &Path, project: &ProjectId, access: AgentAccess, hooks: bool
         ide_git_hooks: hooks,
         ..AgentPolicy::default()
     };
-    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+    crate::sandbox::policy_store::save(&db, project.as_str(), &policy).unwrap();
 }
 
 /// Saves a project's access level and agent folders choice in the engine database of a test
@@ -2588,25 +2588,25 @@ fn set_agent_files(data: &Path, project: &ProjectId, access: AgentAccess, choice
         ide_agent_files: choice,
         ..AgentPolicy::default()
     };
-    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+    crate::sandbox::policy_store::save(&db, project.as_str(), &policy).unwrap();
 }
 
 /// Changes only the agent folders choice of a project's saved policy in a test data root.
 /// Inputs: the data root, the project and the choice.
 fn change_agent_files(data: &Path, project: &ProjectId, choice: IdeAgentFiles) {
     let db = crate::landing::open(data).unwrap();
-    let mut policy = crate::sandbox::policy::load(&db, project.as_str()).unwrap();
+    let mut policy = crate::sandbox::policy_store::load(&db, project.as_str()).unwrap();
     policy.ide_agent_files = choice;
-    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+    crate::sandbox::policy_store::save(&db, project.as_str(), &policy).unwrap();
 }
 
 /// Changes only the network choice of a project's saved policy in a test data root. Inputs:
 /// the data root, the project and the choice.
 fn set_network(data: &Path, project: &ProjectId, network: AgentNetwork) {
     let db = crate::landing::open(data).unwrap();
-    let mut policy = crate::sandbox::policy::load(&db, project.as_str()).unwrap();
+    let mut policy = crate::sandbox::policy_store::load(&db, project.as_str()).unwrap();
     policy.network = network;
-    crate::sandbox::policy::save(&db, project.as_str(), &policy).unwrap();
+    crate::sandbox::policy_store::save(&db, project.as_str(), &policy).unwrap();
 }
 
 /// Opens a project's server in a new checkout and data root at a saved level and hooks

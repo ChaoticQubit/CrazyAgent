@@ -8,9 +8,9 @@ use kernel_sandbox::paths::{
     clear_of_secrets, fold_case, granted_root, owner_home, owner_secret_paths, owner_secrets,
     plain_top, regex_escape,
 };
+use kernel_sandbox::policy::PolicyHooks;
 use kernel_sandbox::ports::BRIDGE_PORT_MIN;
 use kernel_sandbox::settings::{LinuxSockets, LinuxStrict, LinuxSupervisor};
-use policy::PolicyHooks;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 #[cfg(unix)]
@@ -36,7 +36,7 @@ pub mod linux;
 #[cfg(test)]
 mod low_ports_tests;
 pub mod model_proxy;
-pub mod policy;
+pub mod policy_store;
 pub mod shared_folders;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod test_agent;
@@ -1102,7 +1102,7 @@ pub const MULTI_PACK_INDEX: &str = "multi-pack-index";
 /// the network choice, the sandbox as launched. Output: the sentences, or none.
 pub fn linux_unbridged_notice_on(
     host: Option<LinuxHost>,
-    choice: policy::AgentNetwork,
+    choice: kernel_sandbox::policy::AgentNetwork,
     sandbox: &ProjectSandbox,
 ) -> Option<String> {
     let host = host.filter(|host| host.nested)?;
@@ -1142,7 +1142,8 @@ pub fn linux_unbridged_notice_on(
         assert!(port < BRIDGE_PORT_MIN);
         return Some(linux_unbridged_line(port));
     }
-    let unsaid = choice == policy::AgentNetwork::None && sandbox.bridged_ports().is_none();
+    let unsaid =
+        choice == kernel_sandbox::policy::AgentNetwork::None && sandbox.bridged_ports().is_none();
     (reaches && unsaid).then(|| LINUX_PORTS_ANY_HOST_LINE.to_owned())
 }
 
@@ -1151,7 +1152,7 @@ pub fn linux_unbridged_notice_on(
 /// the agent's sandbox as launched and the setting, none when it cannot be read, which
 /// counts as no supervisor. Output: the sentences, or none.
 pub fn linux_unbridged_notice(
-    choice: policy::AgentNetwork,
+    choice: kernel_sandbox::policy::AgentNetwork,
     sandbox: &ProjectSandbox,
     calls: Option<LinuxSupervisor>,
 ) -> Option<String> {
@@ -1266,7 +1267,7 @@ pub struct ProjectSandbox {
     tool_cache: Option<(PathBuf, bool)>,
     lead_branch: Option<String>,
     adds_worktrees: bool,
-    agent_files: Option<policy::AgentFilesRule>,
+    agent_files: Option<kernel_sandbox::policy::AgentFilesRule>,
     granted: Vec<PathBuf>,
     owner_tmp: Option<PathBuf>,
     project_secrets: Option<PathBuf>,
@@ -1382,10 +1383,10 @@ impl ProjectSandbox {
     /// Output: the widened sandbox, or `Invalid`; sockets and the temp folder need Seatbelt.
     pub fn grant_access(
         mut self,
-        grants: &[policy::AccessGrant],
+        grants: &[kernel_sandbox::policy::AccessGrant],
         owner_tmp: Option<&Path>,
     ) -> Result<Self, SandboxError> {
-        if grants.len() > policy::GRANTS_MAX {
+        if grants.len() > kernel_sandbox::policy::GRANTS_MAX {
             return Err(invalid("too many access grants"));
         }
         for grant in grants {
@@ -1393,7 +1394,7 @@ impl ProjectSandbox {
                 return Err(invalid("an access grant is not plain"));
             }
             match grant {
-                policy::AccessGrant::Socket { path } => {
+                kernel_sandbox::policy::AccessGrant::Socket { path } => {
                     if !cfg!(target_os = "macos") {
                         return Err(invalid("unix socket grants need Seatbelt"));
                     }
@@ -1408,13 +1409,15 @@ impl ProjectSandbox {
                         .chain(&self.shut)
                         .chain(&self.granted)
                         .any(|socket| socket == path);
-                    if folder.is_none() || known || self.granted.len() >= policy::GRANT_SOCKETS_MAX
+                    if folder.is_none()
+                        || known
+                        || self.granted.len() >= kernel_sandbox::policy::GRANT_SOCKETS_MAX
                     {
                         return Err(invalid("a socket grant cannot be held"));
                     }
                     self.granted.push(path.clone());
                 }
-                policy::AccessGrant::Port { port } => {
+                kernel_sandbox::policy::AccessGrant::Port { port } => {
                     if let SandboxNetwork::Only(remotes) = &mut self.network {
                         let remote = SandboxRemote::Loopback(*port);
                         if !remotes.contains(&remote) {
@@ -1425,7 +1428,7 @@ impl ProjectSandbox {
                         }
                     }
                 }
-                policy::AccessGrant::TempFolder => {
+                kernel_sandbox::policy::AccessGrant::TempFolder => {
                     if !cfg!(target_os = "macos") {
                         return Err(invalid("the temp folder grant needs Seatbelt"));
                     }
@@ -1439,7 +1442,7 @@ impl ProjectSandbox {
                 }
             }
         }
-        assert!(self.granted.len() <= policy::GRANT_SOCKETS_MAX);
+        assert!(self.granted.len() <= kernel_sandbox::policy::GRANT_SOCKETS_MAX);
         Ok(self)
     }
 
@@ -2492,7 +2495,7 @@ impl ProjectSandbox {
     /// terminal keeps to what the owner chose for the IDE. Only Seatbelt holds it, so the
     /// Linux and Windows boundaries refuse a sandbox with a choice other than Allow all
     /// changes. Input: the rule. Output: the sandbox.
-    pub fn protect_agent_files(mut self, rule: policy::AgentFilesRule) -> Self {
+    pub fn protect_agent_files(mut self, rule: kernel_sandbox::policy::AgentFilesRule) -> Self {
         self.agent_files = Some(rule);
         self
     }
@@ -3889,7 +3892,7 @@ impl InstalledSandbox {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         if sandbox
             .agent_files
-            .is_some_and(|rule| rule.choice != policy::IdeAgentFiles::AllowAll)
+            .is_some_and(|rule| rule.choice != kernel_sandbox::policy::IdeAgentFiles::AllowAll)
         {
             return Err(SandboxError::Unavailable(AGENT_FILES_NEED_SEATBELT.into()));
         }
@@ -5204,9 +5207,9 @@ mod linux_sockets_tests {
             let routed = launched.routed().is_some();
             let full = linux_holds_fully(true, true, routed, &launched);
             for choice in [
-                policy::AgentNetwork::None,
-                policy::AgentNetwork::Https,
-                policy::AgentNetwork::Open,
+                kernel_sandbox::policy::AgentNetwork::None,
+                kernel_sandbox::policy::AgentNetwork::Https,
+                kernel_sandbox::policy::AgentNetwork::Open,
             ] {
                 let line = linux_unbridged_notice_on(Some(host), choice, &launched);
                 assert_eq!(
@@ -5232,7 +5235,7 @@ mod linux_sockets_tests {
         )));
         for code in [
             MODEL_LOOPBACK_UNAVAILABLE_WINDOWS,
-            crate::sandbox::policy::SANDBOX_FULL_UNAVAILABLE_WINDOWS,
+            kernel_sandbox::policy::SANDBOX_FULL_UNAVAILABLE_WINDOWS,
         ] {
             assert!(
                 crate::config::plain_problem(code).is_some(),
@@ -5419,7 +5422,7 @@ mod order_tests {
 #[cfg(all(test, target_os = "macos"))]
 mod access_grant_tests {
     use super::*;
-    use policy::AccessGrant;
+    use kernel_sandbox::policy::AccessGrant;
 
     fn case() -> (tempfile::TempDir, PathBuf) {
         let temp = tempfile::tempdir().unwrap();

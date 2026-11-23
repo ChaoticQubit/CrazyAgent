@@ -648,7 +648,7 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             struct Args {
                 id: String,
                 version: u64,
-                policy: crazyagent::sandbox::policy::AgentPolicy,
+                policy: kernel_sandbox::policy::AgentPolicy,
                 generation: u64,
             }
             let Args { id, version, policy, generation } = match parse(args) {

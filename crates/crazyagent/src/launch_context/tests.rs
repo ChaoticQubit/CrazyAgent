@@ -2048,7 +2048,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
 #[cfg(unix)]
 #[test]
 fn a_launch_clears_its_home_caches_when_its_context_names_a_wider_level() {
-    use crate::sandbox::policy::AgentAccess;
+    use kernel_sandbox::policy::AgentAccess;
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let data = root.join("data");
@@ -4715,9 +4715,9 @@ fn tools_on_profile(
     installs: &[&Path],
 ) -> PathBuf {
     use crate::sandbox::ProjectSandbox;
-    use crate::sandbox::policy::AgentPolicy;
     use crate::sandbox::toolchains;
     use kernel_sandbox::net::SandboxRemote;
+    use kernel_sandbox::policy::AgentPolicy;
     use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
     let policy = AgentPolicy::default();
     let homes = ToolHomes::owner().unwrap();

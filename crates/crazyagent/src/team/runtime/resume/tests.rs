@@ -1196,12 +1196,12 @@ done
     #[test]
     fn a_kept_pane_whose_takeover_cleanup_is_unconfirmed_holds_its_task() {
         let fixture = Team::new();
-        crate::sandbox::policy::save(
+        crate::sandbox::policy_store::save(
             &fixture.connection,
             PROJECT,
-            &crate::sandbox::policy::AgentPolicy {
-                access: crate::sandbox::policy::AgentAccess::Full,
-                ..crate::sandbox::policy::AgentPolicy::default()
+            &kernel_sandbox::policy::AgentPolicy {
+                access: kernel_sandbox::policy::AgentAccess::Full,
+                ..kernel_sandbox::policy::AgentPolicy::default()
             },
         )
         .unwrap();
@@ -1332,7 +1332,7 @@ mod live {
                 Some(Box::new(Grant {
                     profile: signed_in.acquire(launch),
                     context,
-                    access: crate::sandbox::policy::AgentAccess::Sandboxed,
+                    access: kernel_sandbox::policy::AgentAccess::Sandboxed,
                 })),
                 TurnRules {
                     limit: Some(TURN_TIME),

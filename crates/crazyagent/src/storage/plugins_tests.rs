@@ -1402,10 +1402,10 @@ fn a_project_server_check_is_refused_when_the_project_network_cannot_be_read() {
     .unwrap() else {
         panic!("server view required");
     };
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &connection,
         "app",
-        &crate::sandbox::policy::AgentPolicy::default(),
+        &kernel_sandbox::policy::AgentPolicy::default(),
     )
     .unwrap();
     connection
@@ -1423,13 +1423,13 @@ fn a_project_server_check_is_refused_when_the_project_network_cannot_be_read() {
 
 #[test]
 fn a_global_server_check_uses_the_strictest_network_among_projects_that_enable_it() {
-    use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+    use kernel_sandbox::policy::{AgentNetwork, AgentPolicy};
     let (dir, mut connection) = database();
     let root = dir.path();
     connection
         .execute("INSERT INTO projects(id, body) VALUES('beta','{}')", [])
         .unwrap();
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &connection,
         "app",
         &AgentPolicy {
@@ -1438,7 +1438,7 @@ fn a_global_server_check_uses_the_strictest_network_among_projects_that_enable_i
         },
     )
     .unwrap();
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &connection,
         "beta",
         &AgentPolicy {

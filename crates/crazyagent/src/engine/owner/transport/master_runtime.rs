@@ -113,7 +113,7 @@ pub(super) struct MasterHostLaunch {
     pub(super) capture: File,
     pub(super) folder: super::master_host_launch::MasterRuntimeFolder,
     pub(super) tool_record: Option<std::path::PathBuf>,
-    pub(super) access: crate::sandbox::policy::AgentAccess,
+    pub(super) access: kernel_sandbox::policy::AgentAccess,
     pub(super) toolchains: Vec<kernel_sandbox::toolchains::Toolchain>,
 }
 
@@ -136,7 +136,7 @@ struct ActiveMaster {
     capture_ref: RequestId,
     provenance: Provenance,
     reported: Tokens,
-    access: crate::sandbox::policy::AgentAccess,
+    access: kernel_sandbox::policy::AgentAccess,
     toolchains: Vec<kernel_sandbox::toolchains::Toolchain>,
 }
 
@@ -411,9 +411,9 @@ impl OwnerRuntimeHandle {
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
-        access: crate::sandbox::policy::AgentAccess,
+        access: kernel_sandbox::policy::AgentAccess,
         toolchains: &[kernel_sandbox::toolchains::Toolchain],
-    ) -> Result<Option<crate::sandbox::policy::Narrowing>, EngineError> {
+    ) -> Result<Option<kernel_sandbox::policy::Narrowing>, EngineError> {
         let saved = match self
             .master_runtime_command(MasterRuntimeCommand::Policy {
                 host: self.identity(),
@@ -426,7 +426,7 @@ impl OwnerRuntimeHandle {
             MasterRuntimeResult::Policy(saved) => *saved,
             _ => return Err(failure("master_runtime_result")),
         };
-        Ok(crate::sandbox::policy::narrowing(
+        Ok(kernel_sandbox::policy::narrowing(
             saved.as_ref(),
             Some(prepared.repository.as_path()),
             Some(access),
@@ -1486,7 +1486,7 @@ fn listed_master_turn(
 /// the turn runs unconfined and hides none (SA-VID14 r1 sec F3). Input: the prepared turn.
 /// Output: the folders.
 fn master_turn_hides(prepared: &PreparedMasterTurn) -> &[std::path::PathBuf] {
-    if prepared.agent_policy.access == crate::sandbox::policy::AgentAccess::Full {
+    if prepared.agent_policy.access == kernel_sandbox::policy::AgentAccess::Full {
         &[]
     } else {
         &prepared.hidden_paths

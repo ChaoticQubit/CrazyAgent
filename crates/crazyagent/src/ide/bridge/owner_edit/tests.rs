@@ -1,9 +1,9 @@
 use super::*;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::ide::workspace::tests::{Agent, Case, add_project};
-use crate::sandbox::policy::{AgentAccess, AgentPolicy, IdeAgentFiles};
 use crate::terminal::FOLDER;
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use kernel_sandbox::policy::{AgentAccess, AgentPolicy, IdeAgentFiles};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -264,7 +264,7 @@ fn edit_anyway_is_refused_while_agent_folders_are_read_only_below_full_access() 
             ide_agent_files: choice,
             ..AgentPolicy::default()
         };
-        crate::sandbox::policy::save(&case.db, case.project.as_str(), &policy).unwrap();
+        crate::sandbox::policy_store::save(&case.db, case.project.as_str(), &policy).unwrap();
     };
     let edit_anyway = |path: &str| {
         edit(

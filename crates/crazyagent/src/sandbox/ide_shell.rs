@@ -1,7 +1,7 @@
-use super::policy::{AgentAccess, AgentFilesRule, AgentNetwork, IdeAgentFiles};
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::protocol::ProjectId;
 use kernel_sandbox::error::SandboxError;
+use kernel_sandbox::policy::{AgentAccess, AgentFilesRule, AgentNetwork, IdeAgentFiles};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -109,7 +109,7 @@ pub fn project_place(root: &Path, project: &ProjectId) -> Result<Place, String> 
         .map_err(|_| "the project folder is missing".to_owned())?;
     let extra_reads = super::extra_paths::load(&db, project.as_str())
         .map_err(|_| "the project's read-only folders could not be read".to_owned())?;
-    let policy = super::policy::load(&db, project.as_str())
+    let policy = crate::sandbox::policy_store::load(&db, project.as_str())
         .map_err(|_| "the project's saved access could not be read".to_owned())?;
     assert!(folder.is_absolute());
     Ok(Place {
@@ -171,7 +171,7 @@ pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
     let homes = ToolHomes::owner()?;
     let scratch = toolchains::make_tmp(&home)?;
     toolchains::prepare_cargo_home(&home, &homes)?;
-    let network = super::policy::ide_network(launch.level, launch.network);
+    let network = kernel_sandbox::policy::ide_network(launch.level, launch.network);
     let (sandbox, _) = ProjectSandbox::new(launch.folder, &home, &tmp, network)?
         .guard_engine(&root)?
         .keep_ports(launch.kept_ports)?

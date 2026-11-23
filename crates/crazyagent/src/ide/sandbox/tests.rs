@@ -1,6 +1,6 @@
 use super::*;
 use crate::ide::bridge::engine_step::{FORWARD_REQUEST, FORWARDER_VARIABLES};
-use crate::sandbox::policy::{
+use kernel_sandbox::policy::{
     AgentAccess, AgentFilesRule, AgentNetwork, IdeAgentFiles, ide_network,
 };
 use std::ffi::OsStr;
@@ -1107,7 +1107,7 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
         &home,
         &data,
         None,
-        crate::sandbox::policy::AgentAccess::Sandboxed,
+        kernel_sandbox::policy::AgentAccess::Sandboxed,
         Some(&root),
     )
     .unwrap();
@@ -1199,7 +1199,7 @@ fn ide_git_refuses_agent_folders_and_runs_project_hooks_only_when_on() {
         &home,
         &data,
         Some(&root),
-        crate::sandbox::policy::AgentAccess::Sandboxed,
+        kernel_sandbox::policy::AgentAccess::Sandboxed,
         Some(&root),
     )
     .unwrap();
@@ -1350,7 +1350,7 @@ fn stage_all_in_an_older_layout_project_stages_no_agent_file() {
         &home,
         &data,
         None,
-        crate::sandbox::policy::AgentAccess::Sandboxed,
+        kernel_sandbox::policy::AgentAccess::Sandboxed,
         Some(&root),
     )
     .unwrap();
@@ -1476,7 +1476,7 @@ fn an_older_agent_keeps_its_git_stop_after_the_project_gains_a_crazyagent_folder
         &home,
         &data,
         None,
-        crate::sandbox::policy::AgentAccess::Sandboxed,
+        kernel_sandbox::policy::AgentAccess::Sandboxed,
         Some(&root),
     )
     .unwrap();
@@ -1602,7 +1602,7 @@ fn a_research_worktree_keeps_its_git_stop_after_the_project_gains_a_crazyagent_f
         &home,
         &data,
         None,
-        crate::sandbox::policy::AgentAccess::Sandboxed,
+        kernel_sandbox::policy::AgentAccess::Sandboxed,
         Some(&root),
     )
     .unwrap();
@@ -1705,7 +1705,7 @@ fn ide_git_never_prunes_an_agent_worktree() {
         &home,
         &data,
         None,
-        crate::sandbox::policy::AgentAccess::Sandboxed,
+        kernel_sandbox::policy::AgentAccess::Sandboxed,
         Some(&root),
     )
     .unwrap();
@@ -1809,7 +1809,7 @@ fn ide_git_runs_no_xcrun_shim_under_the_profile_with_the_engines_path() {
         &home,
         &data,
         None,
-        crate::sandbox::policy::AgentAccess::Sandboxed,
+        kernel_sandbox::policy::AgentAccess::Sandboxed,
         Some(&root),
     )
     .unwrap();
@@ -2040,7 +2040,7 @@ fn server_with(agent_files: AgentFilesRule) -> Server {
         &home,
         &data,
         None,
-        crate::sandbox::policy::AgentAccess::Sandboxed,
+        kernel_sandbox::policy::AgentAccess::Sandboxed,
         Some(&root),
     )
     .unwrap();

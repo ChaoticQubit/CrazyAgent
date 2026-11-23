@@ -547,7 +547,7 @@ mod tests {
                 "expected the loopback refusal, got {refusal:?}"
             );
         }
-        let model_only = crate::sandbox::policy::AgentNetwork::None
+        let model_only = kernel_sandbox::policy::AgentNetwork::None
             .reach("windows", true, SandboxRemote::AnyHost(443), None)
             .unwrap();
         assert_eq!(capabilities(&model_only).unwrap(), client);

@@ -129,10 +129,10 @@ fn a_pane_taken_over_after_a_folder_was_hidden_is_listed_by_what_its_record_hid(
     let fixture = Fixture::new(1);
     let host = fixture.host();
     let secrets = fixture.setup.project_folder().join("secrets");
-    crate::sandbox::policy::save(
+    crate::sandbox::policy_store::save(
         &fixture.connection,
         PROJECT,
-        &crate::sandbox::policy::AgentPolicy {
+        &kernel_sandbox::policy::AgentPolicy {
             access: AgentAccess::Sandboxed,
             ..Default::default()
         },

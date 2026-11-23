@@ -325,7 +325,7 @@ fn for_project_skills(
     let catch_up_main = crate::team::catch_up_main(&tx, project)
         .map_err(|problem| LaunchError(problem.0, None))?
         == crate::team::CatchUpMain::On;
-    let home_caches = crate::sandbox::policy::load(&tx, project.as_str())
+    let home_caches = crate::sandbox::policy_store::load(&tx, project.as_str())
         .map_err(unavailable)?
         .home_caches;
     drop(tx);
@@ -649,7 +649,7 @@ fn project_instructions(
     let memories = crate::memory::library::approved_for_project(tx, project)
         .map_err(unavailable)?
         .render();
-    let policy = crate::sandbox::policy::load(tx, project.as_str()).unwrap_or_default();
+    let policy = crate::sandbox::policy_store::load(tx, project.as_str()).unwrap_or_default();
     let folder = setup.as_ref().map(StoredSetup::project_folder);
     let instructions = render(project, setup.as_ref(), &memories, layout)
         + &crate::sandbox::shared_folders::context_section(
@@ -847,7 +847,7 @@ impl AgentContext {
     /// Names the access level this launch runs at, which decides whether the launch keeps
     /// the download caches an earlier run left in its home (DEC-173 add.1). A launch that
     /// never names one is treated as unknown. Input: the level. Output: the context.
-    pub fn at_access(mut self, level: crate::sandbox::policy::AgentAccess) -> Self {
+    pub fn at_access(mut self, level: kernel_sandbox::policy::AgentAccess) -> Self {
         if let Some(process) = self.process.as_mut() {
             process.caches.level = Some(level);
         }

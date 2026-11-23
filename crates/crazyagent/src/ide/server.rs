@@ -4,7 +4,7 @@ use super::{bridge, env, extensions, output, proxy, sandbox, settings, token};
 use crate::engine::EngineError;
 use crate::harnesses::leftovers::{self, LINEAGE_VARIABLE, Lineage, LineageToken, Unstopped};
 use crate::protocol::ProjectId;
-use crate::sandbox::policy::AgentAccess;
+use kernel_sandbox::policy::AgentAccess;
 use rustix::process::{Pid, Signal};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
@@ -1357,7 +1357,7 @@ fn recorded_tmp(record: &Path) -> Option<PathBuf> {
 
 /// The launcher's command at the project's level: under the Seatbelt profile installed for
 /// this launch at Sandboxed and Own branch, with the network
-/// [`crate::sandbox::policy::ide_network`] gives that level, and with no profile at Full
+/// [`kernel_sandbox::policy::ide_network`] gives that level, and with no profile at Full
 /// access. The profile keeps the Remote settings folder locked, the extensions folder read
 /// only and agent folders as the owner chose ([`super::workspace::agent_files_rule`]). Inputs: the launch, the server's info and its places. Output: the command, or the
 /// profile's refusal.
@@ -1390,7 +1390,7 @@ fn launcher_command(
         ],
         locked: &[machine.as_path()],
     };
-    let network = crate::sandbox::policy::ide_network(level, launch.policy.network);
+    let network = kernel_sandbox::policy::ide_network(level, launch.policy.network);
     let agent_files = super::workspace::agent_files_rule(
         places.data,
         launch.project,

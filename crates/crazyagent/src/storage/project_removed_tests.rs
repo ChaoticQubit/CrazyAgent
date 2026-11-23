@@ -128,7 +128,7 @@ fn seed(db: &mut Connection, project: &str, first: i64) {
     )
     .unwrap();
     crate::sandbox::hidden_paths::save(&tx, project, &[PathBuf::from("/hidden")]).unwrap();
-    crate::sandbox::policy::remove(&tx, project).unwrap();
+    crate::sandbox::policy_store::remove(&tx, project).unwrap();
     tx.execute(
         "INSERT INTO project_agent_policy(project, body) VALUES (?1, '{}')",
         [project],

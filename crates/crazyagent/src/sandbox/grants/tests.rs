@@ -37,7 +37,7 @@ impl Case {
     }
 
     fn policy(&self) -> AgentPolicy {
-        super::super::policy::load(&self.db, PROJECT).unwrap()
+        crate::sandbox::policy_store::load(&self.db, PROJECT).unwrap()
     }
 
     fn version(&self) -> u64 {
@@ -272,7 +272,7 @@ fn a_held_grant_or_full_access_asks_nothing_and_requests_are_bounded() {
         grants: vec![AccessGrant::Port { port: 47_821 }],
         ..AgentPolicy::default()
     };
-    super::super::policy::save(&case.db, PROJECT, &held).unwrap();
+    crate::sandbox::policy_store::save(&case.db, PROJECT, &held).unwrap();
     let again = request(
         &case.db,
         &case.project,
@@ -304,7 +304,7 @@ fn a_held_grant_or_full_access_asks_nothing_and_requests_are_bounded() {
         access: AgentAccess::Full,
         ..AgentPolicy::default()
     };
-    super::super::policy::save(&case.db, PROJECT, &full).unwrap();
+    crate::sandbox::policy_store::save(&case.db, PROJECT, &full).unwrap();
     let reached = request(
         &case.db,
         &case.project,

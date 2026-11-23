@@ -145,7 +145,7 @@ fn claude_runtime(fixture: &Fixture) -> TeamRuntime {
 /// then deletes it. Inputs: the fixture, the account reach and whether to save its key
 /// first. Output: none.
 fn assert_full_access_claude_keychain(fixture: &Fixture, reach: TeamReach, keyed: bool) {
-    save_access(fixture, crate::sandbox::policy::AgentAccess::Full);
+    save_access(fixture, kernel_sandbox::policy::AgentAccess::Full);
     let runtime = claude_runtime(fixture);
     if keyed {
         save_key(&fixture.base);

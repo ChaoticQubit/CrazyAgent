@@ -1,6 +1,6 @@
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
-use crate::sandbox::policy::AgentAccess;
+use kernel_sandbox::policy::AgentAccess;
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 

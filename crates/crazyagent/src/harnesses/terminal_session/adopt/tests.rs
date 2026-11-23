@@ -444,7 +444,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     let zero = text.replace("\"proxy\":49152", "\"proxy\":0");
     assert_eq!(PaneRecord::decode(&zero), None);
     let started = PaneRecord {
-        access: Some(crate::sandbox::policy::AgentAccess::OwnBranch),
+        access: Some(kernel_sandbox::policy::AgentAccess::OwnBranch),
         ..record.clone()
     };
     let leveled = started.encode().unwrap();
@@ -470,7 +470,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     );
     assert_eq!(PaneRecord::decode(&too_many), None);
     let narrowed = PaneRecord {
-        network: Some(crate::sandbox::policy::AgentNetwork::None),
+        network: Some(kernel_sandbox::policy::AgentNetwork::None),
         ..record.clone()
     };
     let networked = narrowed.encode().unwrap();

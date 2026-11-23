@@ -21,7 +21,6 @@ use crate::protocol::{CredentialRef, ProjectId, RequestId};
 use crate::provider_reach::ProviderReach;
 use crate::sandbox::hidden_paths::HiddenRun;
 use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
-use crate::sandbox::policy::{AgentAccess, Narrowing, narrowing};
 use crate::sandbox::toolchains;
 use crate::sandbox::warden::Warden;
 use crate::sandbox::{InstalledSandbox, ProjectSandbox};
@@ -30,6 +29,7 @@ use crate::setup::AGENT_GIT_NEEDS_TOOLS;
 use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::policy::{AgentAccess, Narrowing, narrowing};
 use kernel_sandbox::settings::{LinuxStrict, LinuxSupervisor};
 use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
 use std::fmt;
@@ -2359,7 +2359,7 @@ fn job_kept_ports(
 /// refusal of a model this OS cannot reach, an endpoint no proxy names or a proxy that failed.
 pub(crate) fn job_reach(
     os: &str,
-    policy: &crate::sandbox::policy::AgentPolicy,
+    policy: &kernel_sandbox::policy::AgentPolicy,
     tools: bool,
     account: &ResearchAccount,
     job: i64,
@@ -4790,7 +4790,7 @@ mod tests {
 
     #[test]
     fn a_research_job_network_follows_the_project_choice_only_with_tools() {
-        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        use kernel_sandbox::policy::{AgentNetwork, AgentPolicy};
         let model = SandboxRemote::AnyHost(8443);
         let profile = |choice: AgentNetwork, tools: bool| {
             let policy = AgentPolicy {
@@ -4906,7 +4906,7 @@ mod tests {
     /// model directly, and an endpoint no proxy can name is refused (S4B-M1).
     #[test]
     fn a_research_job_with_tools_under_no_network_reaches_its_model_only_through_a_model_proxy() {
-        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        use kernel_sandbox::policy::{AgentNetwork, AgentPolicy};
         use std::io::{BufRead, Write};
         let none = AgentPolicy {
             network: AgentNetwork::None,
@@ -4981,7 +4981,7 @@ mod tests {
     /// and the job fails once with the plain sentence for `model_loopback_unavailable_windows`.
     #[test]
     fn a_research_job_on_windows_with_a_model_on_this_computer_is_refused_under_every_choice() {
-        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        use kernel_sandbox::policy::{AgentNetwork, AgentPolicy};
         let local = ResearchAccount::Endpoint {
             base_url: "http://localhost:11434/v1".into(),
             model: "qwen2.5:0.5b".into(),
@@ -5026,7 +5026,7 @@ mod tests {
     /// 06:42); on Linux and macOS the proxy row above still holds.
     #[test]
     fn a_windows_research_job_with_tools_under_no_network_starts_no_model_proxy() {
-        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        use kernel_sandbox::policy::{AgentNetwork, AgentPolicy};
         let none = AgentPolicy {
             network: AgentNetwork::None,
             ..AgentPolicy::default()
@@ -6025,14 +6025,14 @@ mod tests {
         fs::write(folder.join(".env"), "TOKEN=1\n").unwrap();
         let project = ProjectId::new("alpha").unwrap();
         let connection = rusqlite::Connection::open(&root.database).unwrap();
-        let policy = crate::sandbox::policy::AgentPolicy {
+        let policy = kernel_sandbox::policy::AgentPolicy {
             shared_folders: kernel_sandbox::shared_folders::SharedFolders {
                 secrets: vec![".env".into()],
                 ..Default::default()
             },
             ..Default::default()
         };
-        crate::sandbox::policy::save(&connection, project.as_str(), &policy).unwrap();
+        crate::sandbox::policy_store::save(&connection, project.as_str(), &policy).unwrap();
         drop(connection);
         let account = ResearchAccount::Endpoint {
             base_url: "http://127.0.0.1:9/v1".into(),
@@ -6164,7 +6164,7 @@ mod tests {
         }
         let project = ProjectId::new("alpha").unwrap();
         let connection = rusqlite::Connection::open(&root.database).unwrap();
-        let policy = crate::sandbox::policy::AgentPolicy {
+        let policy = kernel_sandbox::policy::AgentPolicy {
             shared_folders: kernel_sandbox::shared_folders::SharedFolders {
                 scope: kernel_sandbox::shared_folders::SharedScope::Chosen,
                 access: kernel_sandbox::shared_folders::SharedAccess::ReadWrite,
@@ -6173,7 +6173,7 @@ mod tests {
             },
             ..Default::default()
         };
-        crate::sandbox::policy::save(&connection, project.as_str(), &policy).unwrap();
+        crate::sandbox::policy_store::save(&connection, project.as_str(), &policy).unwrap();
         drop(connection);
         let account = ResearchAccount::Endpoint {
             base_url: "http://127.0.0.1:9/v1".into(),

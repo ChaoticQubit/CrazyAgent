@@ -7,7 +7,7 @@ use crazyagent::harnesses::launch::{
 };
 use crazyagent::model_gateway::relay::Relay;
 use crazyagent::protocol::ProjectId;
-use crazyagent::sandbox::policy::{
+use kernel_sandbox::policy::{
     AgentAccess, AgentPolicy, PolicyView, ToolchainChoice, ToolchainView,
 };
 use kernel_sandbox::toolchains::{ToolHomes, Toolchain};

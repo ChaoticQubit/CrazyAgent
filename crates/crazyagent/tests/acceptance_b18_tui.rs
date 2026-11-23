@@ -5,10 +5,10 @@ mod e2e_support;
 use crazyagent::engine::owner::OwnerResult;
 use crazyagent::landing::{AgentKind, ChangeAgent, TurnEnd, TurnOutcome, Workspace};
 use crazyagent::protocol::ProjectId;
-#[cfg(target_os = "macos")]
-use crazyagent::sandbox::policy::AgentAccess;
 use crazyagent::terminal::tmux::installed;
 use e2e_support::{ENGINE, Engine, Owner, TMUX, git, profile, repository, scratch, stop_tmux};
+#[cfg(target_os = "macos")]
+use kernel_sandbox::policy::AgentAccess;
 #[cfg(target_os = "macos")]
 use kernel_sandbox::toolchains::Toolchain;
 use rusqlite::{Connection, params};
@@ -171,7 +171,7 @@ where
 /// Reads the project's agent policy the engine stores. Inputs: the engine and the project.
 /// Output: the policy view.
 #[cfg(target_os = "macos")]
-fn policy(engine: &Engine, project: &ProjectId) -> crazyagent::sandbox::policy::PolicyView {
+fn policy(engine: &Engine, project: &ProjectId) -> kernel_sandbox::policy::PolicyView {
     let mut view = None;
     owner(engine, |mut owner| {
         let view = &mut view;

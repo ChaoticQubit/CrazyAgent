@@ -1,5 +1,4 @@
 use super::OWNER_PORTS;
-use super::policy::{AccessGrant, AgentAccess, AgentPolicy, GRANT_PORTS_MAX, GRANT_SOCKETS_MAX};
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::protocol::ProjectId;
@@ -7,6 +6,9 @@ use crate::questions::{Ask, Asker, EngineSource, QuestionKind};
 use kernel_sandbox::grants::{LogView, owner_temp_folder};
 use kernel_sandbox::paths::owner_secrets;
 use kernel_sandbox::paths::{canonical, owner_home};
+use kernel_sandbox::policy::{
+    AccessGrant, AgentAccess, AgentPolicy, GRANT_PORTS_MAX, GRANT_SOCKETS_MAX,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use std::path::{Path, PathBuf};
 
@@ -104,8 +106,9 @@ const SSH_MUX_HASH_HEX: usize = 40;
 const KEY_STARTS: [&str; 2] = ["gpg", "ssh"];
 const KEY_NAME_WORDS: [&str; 3] = ["agent", "gpg", "ssh"];
 
-const _: () = assert!(super::policy::GRANT_SOCKET_BYTES_MAX + 64 <= GRANT_JSON_BYTES_MAX);
-const _: () = assert!(GRANT_SOCKETS_MAX + GRANT_PORTS_MAX + 1 == super::policy::GRANTS_MAX);
+const _: () = assert!(kernel_sandbox::policy::GRANT_SOCKET_BYTES_MAX + 64 <= GRANT_JSON_BYTES_MAX);
+const _: () =
+    assert!(GRANT_SOCKETS_MAX + GRANT_PORTS_MAX + 1 == kernel_sandbox::policy::GRANTS_MAX);
 const _: () = assert!(REASON_BYTES_MAX < crate::questions::CONTEXT_BYTES_MAX / 2);
 
 /// How an access request ended for the agent that made it: asked as an owner question,
@@ -178,7 +181,7 @@ pub fn checked(grant: &AccessGrant, data_root: &Path) -> Result<AccessGrant, &'s
 /// Inputs: the saved grants, the ports the launch keeps free and the engine's data folder.
 /// Output: the grants to build in, in order.
 pub fn held_now(grants: &[AccessGrant], kept: &[u16], data_root: &Path) -> Vec<AccessGrant> {
-    assert!(grants.len() <= super::policy::GRANTS_MAX);
+    assert!(grants.len() <= kernel_sandbox::policy::GRANTS_MAX);
     let held: Vec<AccessGrant> = grants
         .iter()
         .filter(|grant| checked(grant, data_root).is_ok_and(|now| now == **grant))
@@ -501,8 +504,8 @@ pub fn request(
         AccessGrant::Socket { path } => Some(socket_identity(path).ok_or(SOCKET_REFUSED)?),
         AccessGrant::Port { .. } | AccessGrant::TempFolder => None,
     };
-    let policy =
-        super::policy::load(db, project.as_str()).map_err(|_| "grant_requests_unavailable")?;
+    let policy = crate::sandbox::policy_store::load(db, project.as_str())
+        .map_err(|_| "grant_requests_unavailable")?;
     let full_reach = policy.access == AgentAccess::Full && grant != AccessGrant::TempFolder;
     if full_reach || policy.grants.contains(&grant) {
         return Ok(Requested::AlreadyAllowed);
@@ -516,7 +519,8 @@ pub fn request(
     let calls = settings.map(|settings| settings.linux_supervisor);
     let host = crate::sandbox::linux_host_kept().map(|host| host.under(calls));
     let sockets = settings.map(|settings| settings.linux_sockets);
-    let gap = super::policy::linux_network_gap(policy.network, host, sockets, &grown.grants);
+    let gap =
+        kernel_sandbox::policy::linux_network_gap(policy.network, host, sockets, &grown.grants);
     let body = serde_json::to_string(&grant).map_err(|_| "grant_requests_unavailable")?;
     requests_table(db).map_err(|_| "grant_requests_unavailable")?;
     let waiting: i64 = db
@@ -634,7 +638,8 @@ pub(crate) fn decide(
     } else {
         None
     };
-    let mut policy = super::policy::load(tx, project.as_str()).map_err(unavailable)?;
+    let mut policy =
+        crate::sandbox::policy_store::load(tx, project.as_str()).map_err(unavailable)?;
     let granted = match kept {
         Some(kept) if policy.grants.contains(&kept) => true,
         Some(kept) => {
@@ -645,7 +650,8 @@ pub(crate) fn decide(
                 if crate::storage::versioned::owner_write(tx, &item, current)?.is_err() {
                     return Err(failure(crate::storage::versioned::STALE_CODE));
                 }
-                super::policy::save(tx, project.as_str(), &policy).map_err(unavailable)?;
+                crate::sandbox::policy_store::save(tx, project.as_str(), &policy)
+                    .map_err(unavailable)?;
                 true
             } else {
                 false
@@ -700,7 +706,7 @@ pub fn meaning(grant: &AccessGrant) -> &'static str {
 
 /// What one grant lets agents do as its access question says it: [`meaning`], and for a
 /// port the line that says what this Linux cannot hold for it, when there is one
-/// ([`super::policy::linux_network_gap`]). Inputs: the grant and that line, if any.
+/// ([`kernel_sandbox::policy::linux_network_gap`]). Inputs: the grant and that line, if any.
 /// Output: the sentences.
 pub fn asked_meaning(grant: &AccessGrant, gap: Option<&str>) -> String {
     match (grant, gap) {

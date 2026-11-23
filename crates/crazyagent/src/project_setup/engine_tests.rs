@@ -2499,7 +2499,7 @@ async fn agent_access_of_a_project_made_before_setup_says_so_and_a_gone_project_
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn on_linux_the_owner_sees_why_wider_levels_cannot_run_and_saving_one_is_rejected() {
-    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    use kernel_sandbox::policy::{AgentAccess, AgentPolicy};
     let engine = Engine::start().await;
     let mut owner = engine.owner().await;
     let project = ProjectId::new("setup-pooled").unwrap();
@@ -2537,7 +2537,7 @@ async fn on_linux_the_owner_sees_why_wider_levels_cannot_run_and_saving_one_is_r
                 fresh.version,
                 AgentPolicy {
                     access,
-                    network: crate::sandbox::policy::AgentNetwork::default(),
+                    network: kernel_sandbox::policy::AgentNetwork::default(),
                     toolchains: Vec::new(),
                     ide_git_hooks: false,
                     tool_cache: Default::default(),
@@ -2560,13 +2560,61 @@ async fn on_linux_the_owner_sees_why_wider_levels_cannot_run_and_saving_one_is_r
     engine.stop().await;
 }
 
+/// The owner's read of a project's agent policy returns what the project saved: the level,
+/// the network, the IDE hooks switch and the toolchain choices of the stored body, each
+/// level listed, and the version the save made.
+#[tokio::test]
+async fn owner_read_project_agent_policy_returns_the_saved_policy() {
+    use kernel_sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy, ToolchainChoice};
+    use kernel_sandbox::toolchains::Toolchain;
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let saved = AgentPolicy {
+        access: AgentAccess::Sandboxed,
+        network: AgentNetwork::Https,
+        toolchains: vec![ToolchainChoice {
+            toolchain: Toolchain::Python,
+            allowed: false,
+        }],
+        ide_git_hooks: true,
+        ..Default::default()
+    };
+    let connection = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    crate::sandbox::policy_store::save(&connection, "setup-pooled", &saved).unwrap();
+    drop(connection);
+    let read = owner.project_agent_policy(project).await.unwrap();
+    assert_eq!(
+        (read.access, read.network, read.ide_git_hooks, read.version),
+        (AgentAccess::Sandboxed, AgentNetwork::Https, true, 0)
+    );
+    assert_eq!(read.levels.len(), AgentAccess::ALL.len());
+    let python = read
+        .toolchains
+        .iter()
+        .find(|row| row.toolchain == Toolchain::Python)
+        .expect("a toolchain the owner chose is listed");
+    assert!(!python.allowed);
+    engine.stop().await;
+}
+
 /// The half of the agent policy that runs on every system, Linux included, at the level every
 /// system offers: a Sandboxed save with toolchain choices and the IDE hooks switch lands at
 /// version 1, a save from the version before it is refused as `stale_revision` and changes
 /// nothing, and a toolchain named twice is `agent_policy_invalid` before it is sent.
 #[tokio::test]
 async fn owner_saves_sandboxed_toolchains_and_stale_or_invalid_policies_are_refused() {
-    use crate::sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice};
+    use kernel_sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice};
     use kernel_sandbox::toolchains::Toolchain;
     let engine = Engine::start().await;
     let mut owner = engine.owner().await;
@@ -2587,7 +2635,7 @@ async fn owner_saves_sandboxed_toolchains_and_stale_or_invalid_policies_are_refu
 
     let sandboxed = |toolchains: Vec<ToolchainChoice>, ide_git_hooks: bool| AgentPolicy {
         access: AgentAccess::Sandboxed,
-        network: crate::sandbox::policy::AgentNetwork::default(),
+        network: kernel_sandbox::policy::AgentNetwork::default(),
         toolchains,
         ide_git_hooks,
         tool_cache: Default::default(),
@@ -2597,7 +2645,7 @@ async fn owner_saves_sandboxed_toolchains_and_stale_or_invalid_policies_are_refu
         ..Default::default()
     };
     let choice = |toolchain: Toolchain, allowed: bool| ToolchainChoice { toolchain, allowed };
-    let chosen = |view: &crate::sandbox::policy::PolicyView, toolchain: Toolchain| {
+    let chosen = |view: &kernel_sandbox::policy::PolicyView, toolchain: Toolchain| {
         view.toolchains
             .iter()
             .find(|row| row.toolchain == toolchain)
@@ -2667,11 +2715,11 @@ async fn owner_saves_sandboxed_toolchains_and_stale_or_invalid_policies_are_refu
 }
 
 /// macOS only: Linux runs agents Sandboxed alone in this version, so Own branch and Full
-/// access are refused there (`LINUX_UNAVAILABLE`, asserted in `sandbox::policy::tests`).
+/// access are refused there (`LINUX_UNAVAILABLE`, asserted in `kernel_sandbox::policy::tests`).
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_policies() {
-    use crate::sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice};
+    use kernel_sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice};
     use kernel_sandbox::toolchains::Toolchain;
     let engine = Engine::start().await;
     let mut owner = engine.owner().await;
@@ -2706,7 +2754,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
 
     let policy = AgentPolicy {
         access: AgentAccess::OwnBranch,
-        network: crate::sandbox::policy::AgentNetwork::default(),
+        network: kernel_sandbox::policy::AgentNetwork::default(),
         toolchains: vec![ToolchainChoice {
             toolchain: Toolchain::Rust,
             allowed: !rust.allowed,
@@ -2739,7 +2787,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 home_caches: Default::default(),
                 ide_agent_files: Default::default(),
                 shared_folders: Default::default(),
-                network: crate::sandbox::policy::AgentNetwork::default(),
+                network: kernel_sandbox::policy::AgentNetwork::default(),
                 ..Default::default()
             },
             7,
@@ -2770,7 +2818,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
 
     let twice = AgentPolicy {
         access: AgentAccess::Full,
-        network: crate::sandbox::policy::AgentNetwork::default(),
+        network: kernel_sandbox::policy::AgentNetwork::default(),
         toolchains: vec![
             ToolchainChoice {
                 toolchain: Toolchain::Node,
@@ -2806,7 +2854,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
 
     let full = AgentPolicy {
         access: AgentAccess::Full,
-        network: crate::sandbox::policy::AgentNetwork::default(),
+        network: kernel_sandbox::policy::AgentNetwork::default(),
         toolchains: Vec::new(),
         ide_git_hooks: false,
         tool_cache: Default::default(),
@@ -2898,7 +2946,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 home_caches: Default::default(),
                 ide_agent_files: Default::default(),
                 shared_folders: Default::default(),
-                network: crate::sandbox::policy::AgentNetwork::default(),
+                network: kernel_sandbox::policy::AgentNetwork::default(),
                 ..Default::default()
             },
             6,
@@ -2931,7 +2979,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 home_caches: Default::default(),
                 ide_agent_files: Default::default(),
                 shared_folders: Default::default(),
-                network: crate::sandbox::policy::AgentNetwork::default(),
+                network: kernel_sandbox::policy::AgentNetwork::default(),
                 ..Default::default()
             },
             7,
@@ -3500,7 +3548,7 @@ async fn the_owner_reads_a_sub_agent_s_messages_timeline_and_saves_its_settings_
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn an_applied_access_save_stops_the_projects_running_ide() {
-    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    use kernel_sandbox::policy::{AgentAccess, AgentPolicy};
     let engine = Engine::start().await;
     let mut owner = engine.owner().await;
     let project = ProjectId::new("setup-pooled").unwrap();
@@ -3557,7 +3605,7 @@ async fn an_applied_access_save_stops_the_projects_running_ide() {
 /// Agent access view lists that log newest first with the Apply access changes choice.
 #[tokio::test]
 async fn owner_saves_allowed_extras_checked_and_logged_and_reads_them_back() {
-    use crate::sandbox::policy::{AccessApply, AccessGrant, AgentPolicy};
+    use kernel_sandbox::policy::{AccessApply, AccessGrant, AgentPolicy};
     let engine = Engine::start().await;
     let mut owner = engine.owner().await;
     let project = ProjectId::new("setup-pooled").unwrap();
@@ -3630,7 +3678,7 @@ async fn owner_saves_allowed_extras_checked_and_logged_and_reads_them_back() {
 /// owner has installed, at version 0, and a later save keeps exactly the choices sent.
 #[tokio::test]
 async fn a_new_project_records_the_toolchains_the_owner_has_installed_in_its_first_policy() {
-    use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+    use kernel_sandbox::policy::{AgentAccess, AgentPolicy};
     let engine = Engine::start().await;
     let mut owner = engine.owner().await;
     let project = ProjectId::new("f26-tools").unwrap();

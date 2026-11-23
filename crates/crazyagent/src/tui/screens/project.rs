@@ -730,7 +730,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub hidden: Option<AddFile>,
     pub hidden_paths: Option<crate::project_setup::HiddenPaths>,
     pub access: Option<AccessEdit>,
-    pub agent_policy: Option<crate::sandbox::policy::PolicyView>,
+    pub agent_policy: Option<kernel_sandbox::policy::PolicyView>,
     pub schedule: Option<crate::scheduling::Schedule>,
     pub general: Option<GeneralEdit>,
     pub removed: bool,
@@ -973,7 +973,7 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
                 str::to_owned,
             );
         }
-        code @ (crate::sandbox::policy::SANDBOX_FULL_UNAVAILABLE_WINDOWS
+        code @ (kernel_sandbox::policy::SANDBOX_FULL_UNAVAILABLE_WINDOWS
         | kernel_sandbox::lines::MODEL_LOOPBACK_UNAVAILABLE_WINDOWS) => {
             return crate::config::plain_problem(code).map_or_else(
                 || coded("That didn't work. Try again.", code),

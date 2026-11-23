@@ -6,7 +6,7 @@ use crate::engine::EngineError;
 use crate::protocol::{ProjectId, SessionId};
 use crate::questions::{Asker, Settlement};
 use crate::sandbox::grants::{self, Requested};
-use crate::sandbox::policy::AccessGrant;
+use kernel_sandbox::policy::AccessGrant;
 use rusqlite::Connection;
 use serde_json::Value;
 use std::io::{Read, Write};

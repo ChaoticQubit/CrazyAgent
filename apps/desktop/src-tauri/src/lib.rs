@@ -1011,7 +1011,7 @@ async fn desktop_project_agent_policy(
     webview: Webview,
     state: State<'_, NativeState>,
     id: String,
-) -> Result<crazyagent::sandbox::policy::PolicyView, BridgeError> {
+) -> Result<kernel_sandbox::policy::PolicyView, BridgeError> {
     main_window(&webview)?;
     lock(&state).await?.project_agent_policy(&id).await
 }
@@ -1022,7 +1022,7 @@ async fn desktop_set_project_agent_policy(
     state: State<'_, NativeState>,
     id: String,
     version: u64,
-    policy: crazyagent::sandbox::policy::AgentPolicy,
+    policy: kernel_sandbox::policy::AgentPolicy,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&webview)?;

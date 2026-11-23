@@ -276,7 +276,7 @@ pub fn local_folders(root: &Path) -> Vec<String> {
 /// access level and the choice. Returns at most [`SECTION_BYTES_MAX`] bytes of markdown.
 pub fn context_section(
     folder: Option<&Path>,
-    level: super::policy::AgentAccess,
+    level: kernel_sandbox::policy::AgentAccess,
     shared: &SharedFolders,
 ) -> String {
     let mut text = String::from("\n## Shared project folders\n\n");
@@ -284,7 +284,7 @@ pub fn context_section(
         .map(|folder| folder.display().to_string())
         .filter(|place| place.len() <= SECRET_PATH_BYTES_MAX * 2)
         .unwrap_or_else(|| "the project folder".to_owned());
-    if level == super::policy::AgentAccess::Full {
+    if level == kernel_sandbox::policy::AgentAccess::Full {
         text.push_str(&format!(
             "You run with the owner's permissions: {place} and all of its folders are open to you. Never read or copy secret files there (.env files, keys, certificates, credential files) unless the task asks for one.\n"
         ));

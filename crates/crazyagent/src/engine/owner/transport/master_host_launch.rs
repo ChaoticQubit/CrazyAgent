@@ -13,15 +13,15 @@ use crate::protocol::RequestId;
 use crate::sandbox::InstalledSandbox;
 #[cfg(unix)]
 use crate::sandbox::ProjectSandbox;
-#[cfg(unix)]
-use crate::sandbox::policy::AgentAccess;
-#[cfg(unix)]
-use crate::sandbox::policy::AgentNetwork;
-use crate::sandbox::policy::AgentPolicy;
 use crate::storage::PreparedMasterTurn;
 use crate::worktrees::LeaseState;
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+#[cfg(unix)]
+use kernel_sandbox::policy::AgentAccess;
+#[cfg(unix)]
+use kernel_sandbox::policy::AgentNetwork;
+use kernel_sandbox::policy::AgentPolicy;
 #[cfg(unix)]
 use kernel_sandbox::toolchains::{ToolHomes, Toolchains};
 #[cfg(unix)]
@@ -2162,7 +2162,7 @@ mod tests {
 
     #[test]
     fn the_live_master_keeps_only_its_model_port_under_every_project_choice() {
-        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        use kernel_sandbox::policy::{AgentNetwork, AgentPolicy};
         let temporary = private_root();
         let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
@@ -2213,7 +2213,7 @@ mod tests {
     /// cannot run (Own branch on Linux) is refused as `agent_access_unavailable`.
     #[test]
     fn the_live_master_sandbox_is_confined_under_sandboxed_and_own_branch() {
-        use crate::sandbox::policy::AgentPolicy;
+        use kernel_sandbox::policy::AgentPolicy;
         let temporary = private_root();
         let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();
@@ -3236,7 +3236,7 @@ mod tests {
     /// tools-off turn still runs, reaching only its model (S4B-M1).
     #[test]
     fn a_tools_on_master_turn_under_no_network_is_refused_rather_than_reaching_every_host() {
-        use crate::sandbox::policy::AgentNetwork;
+        use kernel_sandbox::policy::AgentNetwork;
         let temporary = private_root();
         let base = owner_generation(&temporary);
         let root = Root::open(&base).unwrap();

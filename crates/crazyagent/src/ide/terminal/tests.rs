@@ -3,11 +3,11 @@ use super::*;
 use crate::protocol::ProjectId;
 #[cfg(unix)]
 use crate::sandbox::ide_shell;
-use crate::sandbox::policy::AgentAccess;
+use kernel_sandbox::policy::AgentAccess;
 #[cfg(target_os = "macos")]
-use crate::sandbox::policy::{AgentFilesRule, IdeAgentFiles};
+use kernel_sandbox::policy::{AgentFilesRule, IdeAgentFiles};
 #[cfg(unix)]
-use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+use kernel_sandbox::policy::{AgentNetwork, AgentPolicy};
 use serde_json::json;
 #[cfg(unix)]
 use std::ffi::OsString;
@@ -1084,7 +1084,7 @@ fn saved_policy(base: &std::path::Path, policy: &AgentPolicy) -> PathBuf {
     let db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     crate::storage::initialize_authority_schemas(&db).unwrap();
     crate::ide::workspace::tests::add_project(&db, PROJECT, &folder);
-    crate::sandbox::policy::save(&db, PROJECT, policy).unwrap();
+    crate::sandbox::policy_store::save(&db, PROJECT, policy).unwrap();
     root
 }
 

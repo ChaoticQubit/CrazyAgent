@@ -37,15 +37,15 @@ use crate::research::runner::{
     confined_unavailable, endpoint_model_host, ensure_repository, model_remote,
 };
 use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
-use crate::sandbox::policy::{
-    AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing,
-};
 use crate::sandbox::toolchains;
 use crate::sandbox::{InstalledSandbox, ProjectSandbox};
 use crate::terminal::PANES_PER_PROJECT_MAX;
 use kernel_processes::terminal::{AgentId, Host};
 use kernel_sandbox::error::SandboxError;
 use kernel_sandbox::net::{SandboxNetwork, SandboxRemote};
+use kernel_sandbox::policy::{
+    AccessApply, AccessGrant, AgentAccess, AgentNetwork, AgentPolicy, Narrowing,
+};
 use kernel_sandbox::settings::LinuxStrict;
 use kernel_sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -1604,7 +1604,7 @@ impl TeamRuntime {
         if !in_plan {
             return Ok(Err("the team plan no longer has room for it".into()));
         }
-        let saved = crate::sandbox::policy::load(&self.connection, project.as_str())
+        let saved = crate::sandbox::policy_store::load(&self.connection, project.as_str())
             .map_or(AgentNetwork::None, |policy| policy.network);
         let started = record.network.unwrap_or(AgentNetwork::Open);
         if tools && started.wider_than(saved) {
@@ -4237,7 +4237,7 @@ impl TeamRuntime {
     /// choice for, each under its own reason. Takes the project's stored setup.
     fn retire_narrowed(&mut self, stored: &StoredSetup) {
         let project = &stored.project_id;
-        let saved = crate::sandbox::policy::load(&self.connection, project.as_str()).ok();
+        let saved = crate::sandbox::policy_store::load(&self.connection, project.as_str()).ok();
         let stale: Vec<i64> = self
             .workers
             .iter()
@@ -4257,7 +4257,7 @@ impl TeamRuntime {
             let worker = self.workers.get_mut(&id).expect("worker exists");
             let running =
                 !worker.managed || worker.live || worker.kept_session || worker.busy.is_some();
-            let narrowed = crate::sandbox::policy::narrowing(
+            let narrowed = kernel_sandbox::policy::narrowing(
                 saved.as_ref(),
                 root.as_deref(),
                 running.then_some(worker.access),
@@ -4320,7 +4320,7 @@ impl TeamRuntime {
             return Ok(());
         }
         assert!(ids.len() <= self.access_restarts.len());
-        let apply = crate::sandbox::policy::load(&self.connection, project.as_str())
+        let apply = crate::sandbox::policy_store::load(&self.connection, project.as_str())
             .map(|policy| policy.apply_changes)
             .unwrap_or_default();
         if announce {
@@ -4539,7 +4539,7 @@ impl TeamRuntime {
             layout,
             self.workers[&id].live,
         )?;
-        let access = crate::sandbox::policy::load(&self.connection, project.as_str())
+        let access = crate::sandbox::policy_store::load(&self.connection, project.as_str())
             .map_err(|_| with_code("the project's agent access could not be read", None))?
             .access;
         if let Some((reason, code)) = access.refusal() {
@@ -6981,8 +6981,9 @@ impl TeamRuntime {
                     } else {
                         self.agent_layout(project, pinned).map_err(error)?
                     };
-                    let refused = crate::sandbox::policy::load(&self.connection, project.as_str())
-                        .is_ok_and(|policy| confinement(layout, policy.access).is_err());
+                    let refused =
+                        crate::sandbox::policy_store::load(&self.connection, project.as_str())
+                            .is_ok_and(|policy| confinement(layout, policy.access).is_err());
                     if refused
                         && self
                             .connection
@@ -8291,7 +8292,7 @@ impl TeamRuntime {
     }
 
     fn git_layout(&self, project: &ProjectId) -> Layout {
-        match crate::sandbox::policy::load(&self.connection, project.as_str()) {
+        match crate::sandbox::policy_store::load(&self.connection, project.as_str()) {
             Ok(policy) if policy.access != AgentAccess::Sandboxed => Layout::Clone,
             _ => Layout::Linked,
         }
@@ -9535,8 +9536,9 @@ impl TeamRuntime {
             AgentRole::Sub | AgentRole::Master => context.task_start(launch, tools),
             AgentRole::Teammate => None,
         };
-        let policy = crate::sandbox::policy::load(&self.connection, stored.project_id.as_str())
-            .map_err(|_| with_code("the project's agent access could not be read", None))?;
+        let policy =
+            crate::sandbox::policy_store::load(&self.connection, stored.project_id.as_str())
+                .map_err(|_| with_code("the project's agent access could not be read", None))?;
         if let Some((reason, code)) = policy.access.refusal() {
             return Err(with_code(reason, Some(code)));
         }

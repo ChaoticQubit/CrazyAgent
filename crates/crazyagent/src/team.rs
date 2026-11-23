@@ -4432,10 +4432,10 @@ pub fn master_lands(
     connection: &Connection,
     project: &ProjectId,
 ) -> Result<MasterLands, EngineError> {
-    let access = crate::sandbox::policy::load(connection, project.as_str())
+    let access = crate::sandbox::policy_store::load(connection, project.as_str())
         .map_err(error)?
         .access;
-    if access != crate::sandbox::policy::AgentAccess::Full {
+    if access != kernel_sandbox::policy::AgentAccess::Full {
         return Ok(MasterLands::Waits);
     }
     saved_master_lands(connection, project)
@@ -4451,12 +4451,12 @@ fn offered_master_lands(
     connection: &Connection,
     project: &ProjectId,
 ) -> Result<(Option<MasterLands>, bool), EngineError> {
-    let access = match crate::sandbox::policy::load(connection, project.as_str()) {
+    let access = match crate::sandbox::policy_store::load(connection, project.as_str()) {
         Ok(policy) => policy.access,
         Err(rusqlite::Error::FromSqlConversionFailure(..)) => return Ok((None, true)),
         Err(failed) => return Err(error(failed)),
     };
-    if access != crate::sandbox::policy::AgentAccess::Full {
+    if access != kernel_sandbox::policy::AgentAccess::Full {
         return Ok((None, false));
     }
     saved_master_lands(connection, project).map(|lands| (Some(lands), false))

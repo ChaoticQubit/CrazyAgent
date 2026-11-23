@@ -271,12 +271,12 @@ fn plant(tx: &Transaction<'_>) {
 /// transaction that recorded the demo and its id. Output: done, or the database error.
 pub(crate) fn assert_confined(db: &Connection, project_id: &ProjectId) -> Result<(), EngineError> {
     assert_eq!(project_id.as_str(), PROJECT_ID);
-    let policy = crate::sandbox::policy::load(db, PROJECT_ID).map_err(error)?;
+    let policy = crate::sandbox::policy_store::load(db, PROJECT_ID).map_err(error)?;
     let read = crate::sandbox::extra_paths::load(db, PROJECT_ID).map_err(error)?;
     let hidden = crate::sandbox::hidden_paths::load(db, PROJECT_ID).map_err(error)?;
     assert_eq!(
         policy.access,
-        crate::sandbox::policy::AgentAccess::Sandboxed
+        kernel_sandbox::policy::AgentAccess::Sandboxed
     );
     assert!(policy.grants.is_empty(), "demo_policy_grants");
     assert!(read.is_empty(), "demo_read_paths");

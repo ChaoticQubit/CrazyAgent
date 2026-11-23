@@ -6,13 +6,13 @@ use super::project_access::{
     SHARED_FOLDERS, SHARED_FOLDERS_IGNORED_UNDER_FULL, SHARED_FOLDERS_NEXT_START,
     SHARED_SECRETS_LINE, TOOLCHAIN_OFF_STOPS_AGENTS, agent_files_help, network_help, summary,
 };
-use crate::sandbox::policy::{
-    AgentAccess, AgentNetwork, HomeCaches, IdeAgentFiles, LevelView, NetworkView, PolicyView,
-    ToolchainView,
-};
 use crate::sandbox::shared_folders::{OFF_MACOS_LINE, UNREACHABLE_SECRETS_LINE};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use kernel_sandbox::lines::{LINUX_NESTED_GIT_LINE, LINUX_PORTS_ANY_HOST_LINE};
+use kernel_sandbox::policy::{
+    AgentAccess, AgentNetwork, HomeCaches, IdeAgentFiles, LevelView, NetworkView, PolicyView,
+    ToolchainView,
+};
 use kernel_sandbox::shared_folders::{CHOSEN_MAX, SharedAccess, SharedFolders, SharedScope};
 use kernel_sandbox::toolchains::Toolchain;
 
@@ -78,7 +78,7 @@ fn view() -> PolicyView {
 /// so saving the level from the TUI never revokes a grant.
 #[test]
 fn a_tui_save_keeps_the_saved_grants_and_apply_choice() {
-    use crate::sandbox::policy::{AccessApply, AccessGrant, GrantView};
+    use kernel_sandbox::policy::{AccessApply, AccessGrant, GrantView};
     let grant = AccessGrant::Port { port: 47_821 };
     let edit = AccessEdit::of(&PolicyView {
         apply_changes: AccessApply::NextStart,
@@ -286,7 +286,7 @@ fn the_access_box_saves_the_ide_hooks_switch_on_its_row_with_its_line() {
 /// T8: the access box keeps the project's tool cache choice when it saves.
 #[test]
 fn the_access_box_keeps_the_tool_cache_choice_when_it_saves() {
-    let scope = crate::sandbox::policy::ToolCacheScope::PerAgent;
+    let scope = kernel_sandbox::policy::ToolCacheScope::PerAgent;
     let edit = AccessEdit::of(&PolicyView {
         tool_cache: scope,
         ..view()
@@ -442,7 +442,7 @@ fn the_access_box_says_beside_the_level_that_saving_restarts_the_projects_ide() 
 
 /// The Full access confirm box says what Full access means for the IDE, in the desktop's words.
 /// macOS only: Linux runs agents Sandboxed alone in this version, so Own branch and Full
-/// access are refused there (`LINUX_UNAVAILABLE`, asserted in `sandbox::policy::tests`).
+/// access are refused there (`LINUX_UNAVAILABLE`, asserted in `kernel_sandbox::policy::tests`).
 #[cfg(target_os = "macos")]
 #[test]
 fn the_full_access_box_says_what_full_access_means_for_the_ide() {

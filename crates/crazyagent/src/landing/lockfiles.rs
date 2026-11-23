@@ -626,7 +626,8 @@ fn confined(
         None => Vec::new(),
     };
     let project = record.project.as_str();
-    let policy = crate::sandbox::policy::load(db, project).map_err(|_| "agent_access_unread")?;
+    let policy =
+        crate::sandbox::policy_store::load(db, project).map_err(|_| "agent_access_unread")?;
     let listed = crate::sandbox::hidden_paths::starting(
         crate::sandbox::hidden_paths::RunKind::Lockfiles,
         project,

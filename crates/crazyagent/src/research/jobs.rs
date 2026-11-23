@@ -722,12 +722,12 @@ impl ResearchJobs {
     }
 
     /// Reads the agent policy the owner saved for a project, see
-    /// [`crate::sandbox::policy::load`]. Takes the project. Returns the policy.
+    /// [`crate::sandbox::policy_store::load`]. Takes the project. Returns the policy.
     pub fn agent_policy(
         &self,
         project: &crate::protocol::ProjectId,
-    ) -> rusqlite::Result<crate::sandbox::policy::AgentPolicy> {
-        crate::sandbox::policy::load(&self.connection, project.as_str())
+    ) -> rusqlite::Result<kernel_sandbox::policy::AgentPolicy> {
+        crate::sandbox::policy_store::load(&self.connection, project.as_str())
     }
 
     /// Reads the owner's Leftover processes setting for a project (DEC-147.4), see

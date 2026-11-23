@@ -3737,7 +3737,7 @@ fn project_other_git(
         .map(|settings| settings.linux_supervisor);
     drop(tx);
     let host = crate::sandbox::linux_host_kept().map(|host| host.under(calls));
-    let other_git = crate::sandbox::policy::LevelView::other_git;
+    let other_git = kernel_sandbox::policy::LevelView::other_git;
     let folder = setup.map(|setup| setup.project_folder());
     Ok(folder.is_none_or(|folder| other_git(&crate::sandbox::POLICY_HOOKS, host, &folder)))
 }
@@ -3753,7 +3753,7 @@ fn owner_read(
         query,
         OwnerRead::ProjectCatalog { .. } | OwnerRead::ProjectAgentPolicy { .. }
     ) {
-        crate::sandbox::policy::LevelView::refresh(&crate::sandbox::POLICY_HOOKS);
+        kernel_sandbox::policy::LevelView::refresh(&crate::sandbox::POLICY_HOOKS);
     }
     let other_git = match query {
         OwnerRead::ProjectAgentPolicy { project_id } => project_other_git(db, a, project_id)?,
@@ -3838,7 +3838,7 @@ fn owner_read(
             };
             let homes = kernel_sandbox::toolchains::ToolHomes::owner()
                 .map_err(|_| error("agent_policy_unreadable"))?;
-            let mut policy = crate::sandbox::policy::load(&tx, project_id.as_str())
+            let mut policy = crate::sandbox::policy_store::load(&tx, project_id.as_str())
                 .map_err(error)?
                 .view(
                     &crate::sandbox::POLICY_HOOKS,

@@ -398,7 +398,8 @@ fn cancelling_running_research_stops_its_process_group() {
 /// back in the queue without spending its attempt, so its next run starts without it.
 #[test]
 fn turning_a_toolchain_off_stops_running_research_and_queues_it_again() {
-    use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice, save};
+    use crazyagent::sandbox::policy_store::save;
+    use kernel_sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice};
     use kernel_sandbox::toolchains::Toolchain;
     let case = case("A plain project.");
     let jobs = ResearchJobs::open(&case.database).unwrap();
@@ -414,7 +415,7 @@ fn turning_a_toolchain_off_stops_running_research_and_queues_it_again() {
         home_caches: Default::default(),
         ide_agent_files: Default::default(),
         shared_folders: Default::default(),
-        network: crazyagent::sandbox::policy::AgentNetwork::default(),
+        network: kernel_sandbox::policy::AgentNetwork::default(),
         ..Default::default()
     };
     save(&connection, "project-a", &rust(true)).unwrap();
@@ -1326,13 +1327,13 @@ exit 0
 /// (S4B-R2-L1).
 #[test]
 fn a_tools_on_research_job_under_no_network_runs_with_its_model_proxy_bound() {
-    use crazyagent::sandbox::policy::{AgentNetwork, AgentPolicy};
+    use kernel_sandbox::policy::{AgentNetwork, AgentPolicy};
     let case = case("A plain project.");
     let none = AgentPolicy {
         network: AgentNetwork::None,
         ..AgentPolicy::default()
     };
-    crazyagent::sandbox::policy::save(
+    crazyagent::sandbox::policy_store::save(
         &rusqlite::Connection::open(&case.database).unwrap(),
         "project-a",
         &none,

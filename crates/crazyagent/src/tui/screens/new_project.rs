@@ -9,9 +9,9 @@ use crate::project_setup::{
     SUB_HARNESSES_MAX, TEAM_AGENTS_MAX, TECH_ENTRIES_MAX, TECH_ENTRY_BYTES_MAX, TeamPlan,
 };
 use crate::protocol::{CredentialRef, ProjectSpec};
-use crate::sandbox::policy::AgentAccess;
 use crate::tui::text::coded;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use kernel_sandbox::policy::AgentAccess;
 use std::path::{Path, PathBuf};
 
 pub(in crate::tui) const NAME_BYTES_MAX: usize = 256;
