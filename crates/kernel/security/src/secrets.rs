@@ -9,6 +9,8 @@ use crate::store::{NAME_BYTES_MAX, SecretRef, Store, checked_name, reference};
 pub const HANDLES_MAX: usize = 4_096;
 /// The most handles one plugin holds at once: its own share of `HANDLES_MAX`.
 pub const PLUGIN_HANDLES_MAX: usize = 256;
+/// The most host keys one handle may be sent to.
+pub const HANDLE_HOSTS_MAX: usize = 32;
 /// The most plugins that hold handles at once, so every one of them gets its full share.
 pub const PLUGINS_MAX: usize = HANDLES_MAX / PLUGIN_HANDLES_MAX;
 
@@ -78,7 +80,45 @@ pub struct Handles {
 /// One plugin's handles: the next id and the entries by id.
 struct Share {
     next: u64,
-    by_id: BTreeMap<u64, Entry>,
+    by_id: BTreeMap<u64, (Entry, Vec<String>)>,
+}
+
+/// The owner's paste of one request: the plugin the owner addressed, the host keys the
+/// owner approved it for, and the value.
+pub struct OwnerEntry {
+    pub plugin: &'static str,
+    pub hosts: Vec<String>,
+    pub value: SecretString,
+}
+
+/// The host keys a stored name may be sent to after `find`, per plugin and name: the
+/// capture hosts and `[net.send]` hosts of the capture rule that keeps it. A name with no
+/// rule gets none.
+#[derive(Default)]
+pub struct KeptHosts {
+    by_name: BTreeMap<(&'static str, String), Vec<String>>,
+}
+
+impl KeptHosts {
+    /// The table. Input: (plugin, name, host keys) rows. Output: the table, or
+    /// `secret_scope_duplicate` for a name twice in one plugin.
+    pub fn new(rows: Vec<(&'static str, String, Vec<String>)>) -> Result<Self, StoreError> {
+        let mut by_name = BTreeMap::new();
+        for (plugin, name, hosts) in rows {
+            assert!(hosts.len() <= HANDLE_HOSTS_MAX);
+            if by_name.insert((plugin, name), hosts).is_some() {
+                return Err(StoreError::code("secret_scope_duplicate"));
+            }
+        }
+        Ok(Self { by_name })
+    }
+
+    /// The host keys of one plugin's name. Output: them, empty when no rule keeps it.
+    fn of(&self, plugin: &'static str, name: &str) -> &[String] {
+        self.by_name
+            .get(&(plugin, name.to_owned()))
+            .map_or(&[], Vec::as_slice)
+    }
 }
 
 impl Default for Handles {
@@ -101,10 +141,9 @@ impl Handles {
     /// `secret_handles_full` when `HANDLES_MAX` handles are held.
     pub fn mint(&mut self, caller: &'static str, reference: SecretRef) -> Result<u64, StoreError> {
         let held = self.shares.get(caller).and_then(|share| {
-            share
-                .by_id
-                .iter()
-                .find(|(_, found)| matches!(found, Entry::Stored(stored) if *stored == reference))
+            share.by_id.iter().find(
+                |(_, (found, _))| matches!(found, Entry::Stored(stored) if *stored == reference),
+            )
         });
         if let Some((id, _)) = held {
             return Ok(*id);
@@ -158,7 +197,7 @@ impl Handles {
             .next
             .checked_add(1)
             .expect("handle ids never run out of u64");
-        assert!(share.by_id.insert(id, entry).is_none());
+        assert!(share.by_id.insert(id, (entry, Vec::new())).is_none());
         assert!(share.by_id.len() <= PLUGIN_HANDLES_MAX);
         self.total += 1;
         assert!(self.total <= HANDLES_MAX && self.shares.len() <= PLUGINS_MAX);
@@ -212,6 +251,52 @@ impl Handles {
         self.shares
             .get(caller)
             .and_then(|share| share.by_id.get(&id))
+            .map(|(entry, _)| entry)
+    }
+
+    /// Adds host keys one handle may be sent to; a new handle may be sent nowhere. Inputs:
+    /// the plugin, the id and the host keys. Output: nothing, or `secret_handle_refused`
+    /// for another plugin's id, or `secret_handles_full` past `HANDLE_HOSTS_MAX` keys.
+    pub fn bind(
+        &mut self,
+        caller: &'static str,
+        id: u64,
+        hosts: &[String],
+    ) -> Result<(), StoreError> {
+        let Some((_, bound)) = self
+            .shares
+            .get_mut(caller)
+            .and_then(|share| share.by_id.get_mut(&id))
+        else {
+            return Err(StoreError::code("secret_handle_refused"));
+        };
+        let mut merged = bound.clone();
+        for host in hosts {
+            if !merged.contains(host) {
+                merged.push(host.clone());
+            }
+        }
+        if merged.len() > HANDLE_HOSTS_MAX {
+            return Err(StoreError::code("secret_handles_full"));
+        }
+        *bound = merged;
+        Ok(())
+    }
+
+    /// Whether one handle of the calling plugin may be sent to a host key. Inputs: the
+    /// plugin, the id and the host key. Output: nothing, or `secret_handle_refused` for an
+    /// unknown id, another plugin's, or a host outside its set.
+    fn sendable(&self, caller: &'static str, id: u64, host: &str) -> Result<(), StoreError> {
+        let bound = self
+            .shares
+            .get(caller)
+            .and_then(|share| share.by_id.get(&id))
+            .is_some_and(|(_, hosts)| hosts.iter().any(|known| known == host));
+        if bound {
+            Ok(())
+        } else {
+            Err(StoreError::code("secret_handle_refused"))
+        }
     }
 
     /// Drops one handle of one plugin. The plugin keeps its share and its counter, so an id
@@ -234,19 +319,21 @@ pub struct Secrets<'r> {
     namespace: &'r str,
     scopes: &'r Scopes,
     handles: &'r Mutex<Handles>,
-    owner_entry: Mutex<Option<(&'static str, SecretString)>>,
+    owner_entry: Mutex<Option<OwnerEntry>>,
+    kept: Option<&'r KeptHosts>,
 }
 
 impl<'r> Secrets<'r> {
     /// Builds the secrets module for one owner request; `owner_entry` is the plugin the owner
-    /// addressed and the value pasted for it, moved from the client to here and never to a
-    /// plugin; only that plugin's `put_from_owner` may save it.
+    /// addressed, the host keys the owner approved and the value pasted, moved from the
+    /// client to here and never to a plugin; only that plugin's `put_from_owner` may save
+    /// it, and its handle may be sent only to those hosts.
     pub fn for_request(
         store: &'r dyn Store,
         namespace: &'r str,
         scopes: &'r Scopes,
         handles: &'r Mutex<Handles>,
-        owner_entry: Option<(&'static str, SecretString)>,
+        owner_entry: Option<OwnerEntry>,
     ) -> Self {
         assert!(!namespace.is_empty() && namespace.len() <= NAMESPACE_BYTES_MAX);
         Self {
@@ -255,7 +342,32 @@ impl<'r> Secrets<'r> {
             scopes,
             handles,
             owner_entry: Mutex::new(owner_entry),
+            kept: None,
         }
+    }
+
+    /// The same module with the host keys `find` binds to a found name. Input: the table.
+    /// Output: the module; without one, a found handle may be sent nowhere.
+    pub fn with_kept(mut self, kept: &'r KeptHosts) -> Self {
+        self.kept = Some(kept);
+        self
+    }
+
+    /// Binds host keys to a handle this call reserved, dropping a fresh handle when the
+    /// binding is refused. Inputs: the plugin, the reservation and the host keys. Output:
+    /// nothing, or the refusal.
+    fn bind_reserved(
+        &self,
+        caller: &'static str,
+        (id, fresh): (u64, bool),
+        hosts: &[String],
+    ) -> Result<(), StoreError> {
+        let mut handles = self.lock();
+        let bound = handles.bind(caller, id, hosts);
+        if bound.is_err() && fresh {
+            handles.drop_id(caller, id);
+        }
+        bound
     }
 
     /// The service and reference one plugin's name stands for. Inputs: the plugin and the
@@ -280,17 +392,19 @@ impl<'r> Secrets<'r> {
             .owner_entry
             .lock()
             .expect("the owner entry lock is never poisoned");
-        if !owner
-            .as_ref()
-            .is_some_and(|(addressed, _)| *addressed == caller)
-        {
+        if !owner.as_ref().is_some_and(|entry| entry.plugin == caller) {
             return Err(StoreError::code("secret_owner_entry_missing"));
         }
-        let (id, fresh) = self.lock().reserve(caller, &found)?;
-        let (addressed, entry) = owner.take().expect("the entry was checked just above");
-        assert_eq!(addressed, caller);
+        let reserved = self.lock().reserve(caller, &found)?;
+        let hosts = &owner
+            .as_ref()
+            .expect("the entry was checked just above")
+            .hosts;
+        self.bind_reserved(caller, reserved, hosts)?;
+        let entry = owner.take().expect("the entry was checked just above");
+        assert_eq!(entry.plugin, caller);
         drop(owner);
-        self.save(caller, (&service, name, &found), (id, fresh), &entry)
+        self.save(caller, (&service, name, &found), reserved, &entry.value)
     }
 
     /// Checks that a name fits the calling plugin's scope, without touching the store.
@@ -299,20 +413,22 @@ impl<'r> Secrets<'r> {
         self.reference_of(caller, name).map(|_| ())
     }
 
-    /// Keeps a value the kernel captured under a name of the calling plugin. Inputs: the
-    /// plugin, the name and the value. Output: the handle id and whether this call minted
-    /// it, or a refusal; a refused scope, name or full handle table comes before the store
-    /// write.
+    /// Keeps a value the kernel captured under a name of the calling plugin, sendable to
+    /// the given host keys. Inputs: the plugin, the name, the value and the host keys.
+    /// Output: the handle id and whether this call minted it, or a refusal; a refused scope,
+    /// name, full handle table or host set comes before the store write.
     pub fn keep(
         &self,
         caller: &'static str,
         name: &str,
         value: &SecretString,
+        hosts: &[String],
     ) -> Result<(u64, bool), StoreError> {
         let (service, found) = self.reference_of(caller, name)?;
-        let (id, fresh) = self.lock().reserve(caller, &found)?;
-        let saved = self.save(caller, (&service, name, &found), (id, fresh), value)?;
-        Ok((saved, fresh))
+        let reserved = self.lock().reserve(caller, &found)?;
+        self.bind_reserved(caller, reserved, hosts)?;
+        let saved = self.save(caller, (&service, name, &found), reserved, value)?;
+        Ok((saved, reserved.1))
     }
 
     /// Drops one handle of the calling plugin without touching the store: a held value is
@@ -321,18 +437,33 @@ impl<'r> Secrets<'r> {
         self.lock().drop_id(caller, id);
     }
 
-    /// Holds a captured value for the calling plugin for this engine run, never stored.
-    /// Inputs: the plugin and the value. Output: the handle id, or `secret_handles_full`.
-    pub fn hold(&self, caller: &'static str, value: SecretString) -> Result<u64, StoreError> {
+    /// Holds a captured value for the calling plugin for this engine run, never stored,
+    /// sendable to the given host keys. Inputs: the plugin, the value and the host keys.
+    /// Output: the handle id, or `secret_handles_full`.
+    pub fn hold(
+        &self,
+        caller: &'static str,
+        value: SecretString,
+        hosts: &[String],
+    ) -> Result<u64, StoreError> {
         self.scopes.service(self.namespace, caller)?;
-        self.lock().hold(caller, value)
+        let id = self.lock().hold(caller, value)?;
+        self.bind_reserved(caller, (id, true), hosts)?;
+        Ok(id)
     }
 
     /// The value behind a handle of the calling plugin, read from the store or the held
-    /// values, for the kernel to send only. Inputs: the plugin and the id. Output: the
-    /// value, or a refusal; another plugin's handle is refused before any store read.
-    pub fn value(&self, caller: &'static str, id: u64) -> Result<SecretString, StoreError> {
+    /// values, for the kernel to send to one host only. Inputs: the plugin, the id and the
+    /// request's host key. Output: the value, or a refusal; another plugin's handle, or a
+    /// host outside the handle's set, is refused before any store read.
+    pub fn value(
+        &self,
+        caller: &'static str,
+        id: u64,
+        host: &str,
+    ) -> Result<SecretString, StoreError> {
         let handles = self.lock();
+        handles.sendable(caller, id, host)?;
         if handles.is_held(caller, id)? {
             return handles.held_value(caller, id);
         }
@@ -373,11 +504,17 @@ impl<'r> Secrets<'r> {
     }
 
     /// Finds a name of the calling plugin. Inputs: the plugin and the name. Output: its
-    /// handle id, `None` when no item exists, or a refusal; never the value.
+    /// handle id, sendable to the hosts [`KeptHosts`] names for it and nowhere else, `None`
+    /// when no item exists, or a refusal; never the value.
     pub fn find(&self, caller: &'static str, name: &str) -> Result<Option<u64>, StoreError> {
         let (_, found) = self.reference_of(caller, name)?;
         match self.store.get(&found) {
-            Ok(_) => self.lock().mint(caller, found).map(Some),
+            Ok(_) => {
+                let hosts = self.kept.map_or(&[][..], |kept| kept.of(caller, name));
+                let reserved = self.lock().reserve(caller, &found)?;
+                self.bind_reserved(caller, reserved, hosts)?;
+                Ok(Some(reserved.0))
+            }
             Err(error) if error.0 == "credential_missing" => Ok(None),
             Err(error) => Err(error),
         }

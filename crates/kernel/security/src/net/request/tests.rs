@@ -338,7 +338,9 @@ fn a_request_without_capture_still_gets_a_handle_for_a_manifest_field() {
         .request("github", get("https://github.com/login/oauth/access_token"))
         .unwrap();
     assert_eq!(reply.captured.len(), 1);
-    let held = secrets.value("github", reply.captured[0].secret, "github.com").unwrap();
+    let held = secrets
+        .value("github", reply.captured[0].secret, "github.com")
+        .unwrap();
     assert_eq!(held.expose(), CAPTURED);
 }
 
@@ -469,7 +471,13 @@ fn a_kept_capture_is_found_again_by_name() {
     let reply = requests.request("github", request).unwrap();
     let found = secrets.find("github", "token").unwrap().unwrap();
     assert_eq!(found, reply.captured[0].secret);
-    assert_eq!(secrets.value("github", found, "github.com").unwrap().expose(), CAPTURED);
+    assert_eq!(
+        secrets
+            .value("github", found, "github.com")
+            .unwrap()
+            .expose(),
+        CAPTURED
+    );
 }
 
 #[test]
@@ -1233,10 +1241,15 @@ fn a_found_name_with_a_declared_keep_as_gets_its_rule_hosts() {
         Secrets::for_request(&rig.store, NAMESPACE, &rig.scopes, &later, None).with_kept(&kept);
     let found = next.find("github", "token").unwrap().unwrap();
     for host in ["github.com", "api.github.com"] {
-        assert_eq!(next.value("github", found, host).unwrap().expose(), CAPTURED, "{host}");
+        assert_eq!(
+            next.value("github", found, host).unwrap().expose(),
+            CAPTURED,
+            "{host}"
+        );
     }
     assert_eq!(
-        next.value("github", found, "uploads.github.com").map(|_| ()),
+        next.value("github", found, "uploads.github.com")
+            .map(|_| ()),
         Err(StoreError::code("secret_handle_refused"))
     );
 }
@@ -1244,18 +1257,42 @@ fn a_found_name_with_a_declared_keep_as_gets_its_rule_hosts() {
 #[test]
 fn send_rules_refuse_an_uncaptured_field_a_bad_host_list_and_a_reused_keep_as() {
     let invalid = Err(StoreError::code("net_capture_rules_invalid"));
-    let rules = || CaptureRules::new(&[("github", "github.com", &["access_token", "device_code"])]).unwrap();
-    let many: Vec<String> = (0..=SEND_HOSTS_MAX).map(|index| format!("h{index}.example")).collect();
+    let rules = || {
+        CaptureRules::new(&[("github", "github.com", &["access_token", "device_code"])]).unwrap()
+    };
+    let many: Vec<String> = (0..=SEND_HOSTS_MAX)
+        .map(|index| format!("h{index}.example"))
+        .collect();
     let many: Vec<&str> = many.iter().map(String::as_str).collect();
     for rows in [
         vec![("github", "refresh_token", &["api.github.com"][..], None)],
         vec![("github", "access_token", &[][..], None)],
-        vec![("github", "access_token", &["api.github.com", "api.github.com"][..], None)],
+        vec![(
+            "github",
+            "access_token",
+            &["api.github.com", "api.github.com"][..],
+            None,
+        )],
         vec![("github", "access_token", &many[..], None)],
-        vec![("github", "access_token", &["api.github.com"][..], Some("Token"))],
+        vec![(
+            "github",
+            "access_token",
+            &["api.github.com"][..],
+            Some("Token"),
+        )],
         vec![
-            ("github", "access_token", &["api.github.com"][..], Some("token")),
-            ("github", "device_code", &["api.github.com"][..], Some("token")),
+            (
+                "github",
+                "access_token",
+                &["api.github.com"][..],
+                Some("token"),
+            ),
+            (
+                "github",
+                "device_code",
+                &["api.github.com"][..],
+                Some("token"),
+            ),
         ],
         vec![
             ("github", "access_token", &["api.github.com"][..], None),
@@ -1264,7 +1301,14 @@ fn send_rules_refuse_an_uncaptured_field_a_bad_host_list_and_a_reused_keep_as() 
     ] {
         assert_eq!(rules().with_sends(&rows).map(|_| ()), invalid, "{rows:?}");
     }
-    assert!(rules()
-        .with_sends(&[("github", "access_token", &many[..SEND_HOSTS_MAX], Some("token"))])
-        .is_ok());
+    assert!(
+        rules()
+            .with_sends(&[(
+                "github",
+                "access_token",
+                &many[..SEND_HOSTS_MAX],
+                Some("token")
+            )])
+            .is_ok()
+    );
 }

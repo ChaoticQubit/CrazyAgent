@@ -626,12 +626,16 @@ fn a_valid_send_row_reads_its_hosts_and_keep_as() {
 
 #[test]
 fn a_send_row_for_an_uncaptured_field_is_refused() {
-    refused_net(&with_send("refresh_token = { hosts = [\"api.github.com\"] }\n"));
+    refused_net(&with_send(
+        "refresh_token = { hosts = [\"api.github.com\"] }\n",
+    ));
 }
 
 #[test]
 fn a_send_host_outside_hosts_is_refused() {
-    refused_net(&with_send("access_token = { hosts = [\"uploads.github.com\"] }\n"));
+    refused_net(&with_send(
+        "access_token = { hosts = [\"uploads.github.com\"] }\n",
+    ));
     refused_net(&with_send("access_token = { hosts = [] }\n"));
 }
 
@@ -664,5 +668,7 @@ fn an_unknown_send_key_or_type_is_refused() {
         "access_token = { hosts = [\"api.github.com\"], to = [\"github.com\"] }\n",
     ));
     refused_net(&with_send("access_token = [\"api.github.com\"]\n"));
-    refused_net(&with_send("access_token = { hosts = [\"api.github.com\"], keep_as = 1 }\n"));
+    refused_net(&with_send(
+        "access_token = { hosts = [\"api.github.com\"], keep_as = 1 }\n",
+    ));
 }

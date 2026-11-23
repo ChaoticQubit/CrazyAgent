@@ -29,6 +29,10 @@ pub const HOST_BYTES_MAX: usize = 253;
 pub const NET_CAPTURES_MAX: usize = 4;
 /// The most bytes of one capture field name.
 pub const CAPTURE_FIELD_BYTES_MAX: usize = 64;
+/// The most hosts one `[net.send]` row names.
+pub const SEND_HOSTS_MAX: usize = 16;
+/// The most bytes of one `keep_as` name, the secret store's name bound.
+pub const KEEP_AS_BYTES_MAX: usize = 63;
 /// The keys only an embedding plugin's `plugin.toml` holds; the embedding reader judges
 /// their values.
 pub const EMBEDDING_KEYS: [&str; 4] = ["title", "release", "description", "http"];
@@ -52,6 +56,16 @@ pub struct Manifest {
 pub struct Net {
     pub hosts: Vec<String>,
     pub capture: Vec<(String, Vec<String>)>,
+    pub send: Vec<NetSend>,
+}
+
+/// One `[net.send]` row: a captured field, the listed hosts its value may also be sent
+/// to, and the name it is kept under, which `secrets.find` binds to the same hosts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetSend {
+    pub field: String,
+    pub hosts: Vec<String>,
+    pub keep_as: Option<String>,
 }
 
 /// What a bounded read of one file found: its UTF-8 text, more bytes than the bound, or a
@@ -286,13 +300,17 @@ fn net_line(text: &str) -> usize {
         .map_or(1, |index| index + 1)
 }
 
-/// Reads one `[net]` section: only `hosts`, 1 to `HOSTS_MAX` distinct [`net_host`]s, and
-/// an optional `[net.capture]` table whose keys are listed hosts, each naming 1 to
-/// `NET_CAPTURES_MAX` distinct [`capture_field`]s. Input: the section's value. Output: the
-/// section, or none for any other key, type or value.
+/// Reads one `[net]` section: only `hosts`, 1 to `HOSTS_MAX` distinct [`net_host`]s, an
+/// optional `[net.capture]` table whose keys are listed hosts, each naming 1 to
+/// `NET_CAPTURES_MAX` distinct [`capture_field`]s, and an optional `[net.send]` table read
+/// by [`net_send`]. Input: the section's value. Output: the section, or none for any other
+/// key, type or value.
 fn net(section: &Value) -> Option<Net> {
     let section = section.as_table()?;
-    if section.keys().any(|key| key != "hosts" && key != "capture") {
+    if section
+        .keys()
+        .any(|key| !matches!(key.as_str(), "hosts" | "capture" | "send"))
+    {
         return None;
     }
     let hosts = section
@@ -339,8 +357,78 @@ fn net(section: &Value) -> Option<Net> {
             capture.push((host.clone(), fields));
         }
     }
+    let send = match section.get("send") {
+        Some(table) => net_send(table, &hosts, &capture)?,
+        None => Vec::new(),
+    };
     assert!(hosts.len() <= HOSTS_MAX && capture.len() <= hosts.len());
-    Some(Net { hosts, capture })
+    Some(Net {
+        hosts,
+        capture,
+        send,
+    })
+}
+
+/// Reads a `[net.send]` table: each key a field some `[net.capture]` row names, each
+/// value a table of `hosts`, 1 to `SEND_HOSTS_MAX` distinct listed hosts, and an optional
+/// `keep_as` [`keep_as_fits`] name used by no other row. Inputs: the table, the listed
+/// hosts and the capture rows. Output: the rows, or none for any other key, type or value.
+fn net_send(
+    table: &Value,
+    hosts: &[String],
+    capture: &[(String, Vec<String>)],
+) -> Option<Vec<NetSend>> {
+    let mut send: Vec<NetSend> = Vec::new();
+    for (field, row) in table.as_table()? {
+        let row = row.as_table()?;
+        if row.keys().any(|key| key != "hosts" && key != "keep_as") {
+            return None;
+        }
+        let to = row
+            .get("hosts")?
+            .as_array()?
+            .iter()
+            .map(|host| {
+                host.as_str()
+                    .filter(|host| hosts.iter().any(|listed| listed == host))
+                    .map(str::to_owned)
+            })
+            .collect::<Option<Vec<String>>>()?;
+        let keep_as = match row.get("keep_as") {
+            Some(name) => Some(name.as_str().filter(|name| keep_as_fits(name))?.to_owned()),
+            None => None,
+        };
+        let distinct = to
+            .iter()
+            .enumerate()
+            .all(|(index, host)| !to[..index].contains(host));
+        let captured = capture.iter().any(|(_, fields)| fields.contains(field));
+        let name_taken = keep_as
+            .as_ref()
+            .is_some_and(|name| send.iter().any(|row| row.keep_as.as_ref() == Some(name)));
+        if !captured || to.is_empty() || to.len() > SEND_HOSTS_MAX || !distinct || name_taken {
+            return None;
+        }
+        send.push(NetSend {
+            field: field.clone(),
+            hosts: to,
+            keep_as,
+        });
+    }
+    Some(send)
+}
+
+/// Whether a `keep_as` name fits the secret store's name rule: 1 to `KEEP_AS_BYTES_MAX`
+/// bytes of lowercase letters, digits, `.`, `-` or `_`, not starting with `.` or `-` and
+/// without `..`. Input: the name. Output: the answer.
+fn keep_as_fits(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= KEEP_AS_BYTES_MAX
+        && !name.starts_with(['.', '-'])
+        && !name.contains("..")
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || b".-_".contains(&byte)
+        })
 }
 
 /// Whether one `[net]` host fits: a lowercase DNS name of at most `HOST_BYTES_MAX` bytes
