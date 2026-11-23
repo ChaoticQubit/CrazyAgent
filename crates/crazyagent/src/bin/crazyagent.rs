@@ -252,7 +252,7 @@ fn main() -> ExitCode {
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     if args
         .first()
-        .is_some_and(|arg| arg == crazyagent::credentials::GIT_HELPER_COMMAND)
+        .is_some_and(|arg| arg == kernel_security::store::os_keyring::GIT_HELPER_COMMAND)
     {
         return match run_git_credential(&args) {
             Ok(()) => ExitCode::SUCCESS,
@@ -289,7 +289,7 @@ fn run_git_credential(args: &[OsString]) -> Result<(), String> {
     let [_, namespace, reference, username, operation] = args else {
         return Err(format!(
             "usage: crazyagent {} NAMESPACE REFERENCE USERNAME OPERATION",
-            crazyagent::credentials::GIT_HELPER_COMMAND
+            kernel_security::store::os_keyring::GIT_HELPER_COMMAND
         ));
     };
     let text = |arg: &OsString| {
@@ -297,7 +297,7 @@ fn run_git_credential(args: &[OsString]) -> Result<(), String> {
             .map(str::to_owned)
             .ok_or_else(|| "credential_name_invalid".to_owned())
     };
-    crazyagent::credentials::answer_git_credential(
+    kernel_security::store::os_keyring::answer_git_credential(
         &text(namespace)?,
         &text(reference)?,
         &text(username)?,
