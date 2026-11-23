@@ -314,3 +314,19 @@ fn on_linux_a_root_spelled_in_another_case_is_another_folder() {
     assert!(clear_of_secrets(&home.join(".SSH"), &secrets).is_ok());
     assert!(secret_refused(&home.join(".ssh"), &secrets));
 }
+
+/// A root that reaches a secret folder through a link is refused, and so is a root that
+/// holds the folder a linked secret leads to.
+#[cfg(unix)]
+#[test]
+fn a_root_reaching_a_secret_through_a_link_is_refused() {
+    let (folder, home, secrets) = secret_home();
+    std::fs::create_dir_all(home.join(".ssh").join("inner")).unwrap();
+    let link = home.join("work").join("link");
+    std::os::unix::fs::symlink(home.join(".ssh").join("inner"), &link).unwrap();
+    assert!(secret_refused(&link.join("new"), &secrets));
+    let dotfiles = folder.path().join("dotfiles");
+    std::fs::create_dir_all(dotfiles.join("aws")).unwrap();
+    std::os::unix::fs::symlink(dotfiles.join("aws"), home.join(".aws")).unwrap();
+    assert!(secret_refused(&dotfiles, &secrets));
+}
