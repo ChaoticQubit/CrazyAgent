@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+/// The watch's event log in the engine store: the bodies after a cursor, read in bounded
+/// pages, and the write that logs one revision's body and prunes the old ones.
+pub mod events;
 pub mod migrations;
 /// The owner's restore of the pinned 2.4 backup, with the engine's parts as hooks, and the
 /// private record that says how the last restore stands while no engine answers.
