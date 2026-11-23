@@ -1000,6 +1000,28 @@ fn a_registered_repository_outside_home_is_agent_writable_while_its_projects_can
     assert!(!places.agent_writable(Path::new("/bin/sh")));
 }
 
+/// While the set-up projects cannot be read, the app's own folder outside HOME and the
+/// install roots stays an ordinary place for every tool it ships, not only the bundled ones.
+#[cfg(unix)]
+#[test]
+fn the_app_folder_stays_a_place_while_the_projects_cannot_be_read() {
+    let (_folder, home) = scratch();
+    let outside = tempfile::Builder::new()
+        .prefix("tools-app-")
+        .tempdir()
+        .unwrap();
+    let app = outside.path().canonicalize().unwrap();
+    assert!(!app.starts_with(&home));
+    let engine = stub_engine(None, Some(&app), Some(home.clone()), Some(OsStr::new("")));
+    assert!(engine.folders.contains(&app), "{:?}", engine.folders);
+    let places = Places {
+        projects: None,
+        ..engine
+    }
+    .with_probed(Vec::new());
+    assert!(places.folders.contains(&app), "{:?}", places.folders);
+}
+
 /// A tool in a folder every user can write, with no sticky bit, is refused as changeable by
 /// others, the folder named: the resolver asks the kernel's own path check, which no seed can
 /// answer for it.
@@ -1032,6 +1054,28 @@ fn a_refused_first_copy_resolves_to_the_later_copy_that_runs() {
     let places = stub_new(vec![first, later], Some(home.clone()));
     let resolved = resolve("tool", &places).unwrap();
     assert_eq!(resolved.entry, runs);
+}
+
+/// A name whose first copy names an interpreter that is not there resolves to a later copy
+/// that runs; alone, that first copy needs its interpreter.
+#[test]
+fn a_first_copy_needing_a_missing_interpreter_resolves_to_the_later_copy_that_runs() {
+    let (_folder, home) = scratch();
+    let first = home.join("first");
+    let later = home.join("later");
+    script_at(
+        &first.join("tool"),
+        b"#!/nonexistent-crazyagent-row/interp\n",
+    );
+    let runs = script_at(&later.join("tool"), b"#!/bin/sh\n");
+    let alone = stub_new(vec![first.clone()], Some(home.clone()));
+    let missing = resolve("tool", &alone).unwrap_err();
+    assert_eq!(
+        (missing.reason, missing.needs.as_deref()),
+        (Reason::NeedsInterpreter, Some("interp"))
+    );
+    let places = stub_new(vec![first, later], Some(home.clone()));
+    assert_eq!(resolve("tool", &places).unwrap().entry, runs);
 }
 
 /// When no copy of a name resolves, the refusal reported is the first copy's, not a later
