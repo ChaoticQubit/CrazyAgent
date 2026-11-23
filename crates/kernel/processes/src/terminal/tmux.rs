@@ -684,7 +684,7 @@ impl Tmux {
                 .run(&option)
                 .map_err(|_| failure("terminal_unavailable"))?;
         }
-        clear_environment(&control)?;
+        clear_unmarked_environment(&control)?;
         Ok(control)
     }
 
@@ -1461,9 +1461,9 @@ pub(crate) fn installed(engine_root: &Path) -> Option<PathBuf> {
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_seams;
 
-#[cfg(test)]
-#[path = "tmux/tests.rs"]
-mod tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "tmux/reattach_tests.rs"]
 mod reattach_tests;
+#[cfg(test)]
+#[path = "tmux/tests.rs"]
+mod tests;

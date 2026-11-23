@@ -47,6 +47,32 @@ pub(super) enum Pending {
     Spent,
 }
 
+/// The server option a connect sets once it emptied the server's environment. A server
+/// started again lacks it, so it is emptied again.
+const EMPTIED: &str = "@crazyagent-environment-emptied";
+
+/// Empties the environment of a server no connect emptied yet, as [`clear_environment`]
+/// does, then marks it emptied; a reattach to a marked server keeps what a lead's
+/// environment set there. Either way no attaching client's variables are copied.
+/// Input: the control client. Output: Ok, or `terminal_environment_unclean`.
+pub(super) fn clear_unmarked_environment(control: &Control) -> Result<(), HostError> {
+    let unclean = || failure("terminal_environment_unclean");
+    control
+        .run("set-option -g update-environment \"\"")
+        .map_err(|_| unclean())?;
+    let mark = control
+        .run(&format!("show-options -gqv {EMPTIED}"))
+        .map_err(|_| unclean())?;
+    if mark.iter().any(|line| line.as_slice() == b"on") {
+        return Ok(());
+    }
+    clear_environment(control)?;
+    control
+        .run(&format!("set-option -g {EMPTIED} on"))
+        .map_err(|_| unclean())?;
+    Ok(())
+}
+
 /// Empties the private server's environment so nothing reaches a pane from it: no
 /// variables copied from an attaching client (`update-environment` empty) and none left in
 /// the global or session environment, then checks both are empty.
