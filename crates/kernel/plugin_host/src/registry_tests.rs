@@ -1951,3 +1951,39 @@ fn a_user_plugin_named_like_a_code_plugin_is_refused() {
     );
     assert!(off_code_plugins(&case.db).unwrap().is_empty());
 }
+
+
+/// Replacing a trusted plugin whose folder holds a subfolder succeeds: the new text is
+/// what is trusted, so the plugin is not left waiting for a review, and no folder stays
+/// under the old name.
+#[test]
+fn replacing_a_plugin_whose_folder_holds_a_subfolder_succeeds_and_settles_trust() {
+    let case = case();
+    trusted(&case, ACME);
+    let folder = plugins_folder(&case).join("acme");
+    std::fs::create_dir(folder.join("assets")).unwrap();
+    std::fs::write(folder.join("assets").join("note.txt"), b"kept aside").unwrap();
+    let text = ACME.replace("Acme embeddings", "Acme embeddings two");
+
+    add_text(&case, &text, true, 2).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(folder.join(MANIFEST_FILE)).unwrap(),
+        text
+    );
+    assert!(!folder.join("assets").exists());
+    let listing = list(&case.db, &case.engine()).unwrap();
+    let view = plugin(&listing, "acme");
+    assert_eq!(view.sha256, sha(&text));
+    assert_ne!(view.status, PluginStatus::NeedsReview);
+    assert!(
+        !matches!(view.status, PluginStatus::Changed { .. }),
+        "{:?}",
+        view.status
+    );
+    let left = left_over(&case);
+    assert!(
+        left.iter().all(|name| !name.starts_with(".old-acme.") && !name.starts_with(".add-")),
+        "{left:?}"
+    );
+}
