@@ -1,0 +1,25 @@
+plugin = "voyage"
+tier = "t2"
+kind = "embedding"
+version = 1
+permissions = []
+title = "Voyage AI embeddings"
+release = "1.0.0"
+description = "voyage-3.5-lite through the Voyage AI API at 256 dimensions. Enter a Voyage API key."
+
+[http]
+url = "https://api.voyageai.com/v1/embeddings"
+hosts = ["api.voyageai.com"]
+secrets = ["api_key"]
+vectors = "data.*.embedding"
+dimensions = 256
+batch = 64
+
+[http.headers]
+Authorization = "Bearer {{secret.api_key}}"
+
+[http.body]
+model = "voyage-3.5-lite"
+input = "{{inputs}}"
+input_type = "{{purpose}}"
+output_dimension = 256
