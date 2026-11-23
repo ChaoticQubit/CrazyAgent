@@ -275,7 +275,9 @@ fn start_app(base: &Path, home: &Path, agent: &AgentId) -> (Server, Tmux) {
         group: None,
     };
     let host = Tmux::open(Some(tmux), &folder);
-    let pane = host.spawn(agent, &built).unwrap();
+    let pane = host
+        .spawn(agent, &crazyagent::terminal::PaneCommand::from(&built))
+        .unwrap();
     server.group = Some(pgid_support::pane_group(pane.pid));
     until(START, "the app server's control socket", || {
         std::fs::metadata(home.join(CONTROL_SOCKET))

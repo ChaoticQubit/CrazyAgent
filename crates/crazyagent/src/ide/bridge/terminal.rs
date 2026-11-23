@@ -274,7 +274,7 @@ fn start(
     command: &InteractiveCommand,
     (cols, rows): (u16, u16),
 ) -> Result<TerminalStream, EngineError> {
-    host.spawn(name, command)?;
+    host.spawn(name, &crate::terminal::PaneCommand::from(command))?;
     let attached = host
         .resize(name, cols, rows)
         .and_then(|()| host.attach(name));

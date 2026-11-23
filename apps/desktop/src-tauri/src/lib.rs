@@ -414,14 +414,16 @@ async fn desktop_restore_pinned(
 /// finish, writing nothing (L5).
 #[tauri::command]
 async fn desktop_restore_recovery(webview: Webview) -> Result<restore::RecoveryView, BridgeError> {
-    let (layout, running) = restore::engine(&webview)?;
+    main_window(&webview)?;
+    let (layout, running) = restore::engine()?;
     restore::blocking(move || restore::recovery(layout.root(), running)).await
 }
 
 /// Runs one recovery action on the default engine: `put_back`, `continue` or `finish` (L5).
 #[tauri::command]
 async fn desktop_restore_recover(webview: Webview, action: String) -> Result<(), BridgeError> {
-    let (layout, running) = restore::engine(&webview)?;
+    main_window(&webview)?;
+    let (layout, running) = restore::engine()?;
     let settings = (layout.global_settings(), layout.project_settings());
     restore::blocking(move || {
         restore::recover(layout.root(), running, &action, (&settings.0, &settings.1))
@@ -432,7 +434,8 @@ async fn desktop_restore_recover(webview: Webview, action: String) -> Result<(),
 /// Opens the default engine's backups folder, which keeps the copies a restore left (L5).
 #[tauri::command]
 async fn desktop_restore_open_backups(webview: Webview) -> Result<(), BridgeError> {
-    let (layout, _) = restore::engine(&webview)?;
+    main_window(&webview)?;
+    let (layout, _) = restore::engine()?;
     let folder = crazyagent::restore::backups(layout.root());
     restore::blocking(move || crazyagent::platform::reveal(&folder)).await
 }

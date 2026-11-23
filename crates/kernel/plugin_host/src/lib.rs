@@ -14,13 +14,21 @@ pub mod assets;
 pub mod embedding;
 pub mod manifest;
 pub mod problem;
+#[cfg(feature = "store")]
+pub mod registry;
+#[cfg(feature = "store")]
+pub mod store;
+#[cfg(feature = "store")]
+pub mod trust;
 pub mod views;
 
 #[cfg(all(test, feature = "store"))]
 mod embedding_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "store"))]
 mod problem_tests;
+#[cfg(all(test, feature = "store", unix))]
+mod registry_tests;
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "store"))]
 mod views_tests;

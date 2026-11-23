@@ -94,7 +94,7 @@ fn a_setup_command_keeps_its_report_fails_plainly_and_stops_at_its_limit() {
     assert!(started.elapsed() < Duration::from_secs(10));
 }
 
-/// POD-C-C3-H6: a setup command that exits at once while a process it left behind still
+/// A setup command that exits at once while a process it left behind still
 /// holds its standard output is stopped at the limit, not held until that process ends.
 #[cfg(unix)]
 #[test]

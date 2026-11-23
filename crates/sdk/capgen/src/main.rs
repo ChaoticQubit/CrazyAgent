@@ -86,7 +86,14 @@ fn write(generated: &Path, files: &[(String, String)]) -> ExitCode {
         }
     }
     for (path, text) in files {
-        if let Err(error) = std::fs::write(generated.join(path), text) {
+        let target = generated.join(path);
+        if let Some(parent) = target.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            eprintln!("capgen_write {path}: {error}");
+            return ExitCode::from(2);
+        }
+        if let Err(error) = std::fs::write(&target, text) {
             eprintln!("capgen_write {path}: {error}");
             return ExitCode::from(2);
         }
