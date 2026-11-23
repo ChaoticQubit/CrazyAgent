@@ -9,17 +9,14 @@ fn scratch() -> (tempfile::TempDir, PathBuf) {
         .prefix("tools-resolve-")
         .tempdir()
         .unwrap();
-    let home = folder.path().canonicalize().unwrap();
+    let home = or_named(folder.path().canonicalize(), folder.path());
     (folder, home)
 }
 
 /// Writes an executable file with the given text, its folders made first.
 /// Inputs: the file and the text. Output: the file.
 fn program(file: &Path, text: &str) -> PathBuf {
-    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    std::fs::write(file, text).unwrap();
-    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
-    file.to_path_buf()
+    script_at(file, text.as_bytes())
 }
 
 /// A stand-in `node`: a shell script that says it ran the file it was given.
@@ -54,10 +51,12 @@ fn the_newest_node_version_of_a_manager_is_found_first() {
 /// Writes a script with the given bytes and mode into the scratch HOME's `scripts` folder.
 /// Inputs: HOME, the script's name, its bytes and its mode. Output: the script.
 fn script(home: &Path, name: &str, bytes: &[u8], mode: u32) -> PathBuf {
-    let script = home.join("scripts").join(name);
-    std::fs::create_dir_all(script.parent().unwrap()).unwrap();
-    std::fs::write(&script, bytes).unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(mode)).unwrap();
+    let folder = home.join("scripts");
+    or_named(std::fs::create_dir_all(&folder), &folder);
+    let script = folder.join(name);
+    or_named(std::fs::write(&script, bytes), &script);
+    let permissions = std::fs::Permissions::from_mode(mode);
+    or_named(std::fs::set_permissions(&script, permissions), &script);
     script
 }
 
@@ -120,6 +119,30 @@ fn a_first_line_the_resolver_cannot_read_as_the_system_runs_it_is_refused() {
             "{name}"
         );
     }
+}
+
+/// A program name that starts like a Windows drive, one ASCII letter and `:`, is not
+/// looked up on any OS: on Windows `C:node` joined to a folder replaces that folder, so the
+/// file reached would lie outside every searched folder. Each such name is not found, even
+/// with a file of that name in a searched folder, an `env` line naming one is refused as
+/// [`Refusal::FirstLine`], and a `:` later in a name is still looked up.
+#[test]
+fn a_program_name_starting_with_a_drive_is_refused() {
+    let (_folder, home) = scratch();
+    let places = home_only(&home);
+    for name in ["C:node", "c:tool"] {
+        program(&home.join(".local/bin").join(name), NODE);
+        let missing = resolve(name, &places).unwrap_err();
+        assert_eq!(missing.reason, Reason::NotFound, "{name}");
+        assert!(missing.refused.is_none(), "{name}");
+    }
+    let named = script(&home, "named", b"#!/usr/bin/env C:node\n", 0o755);
+    assert_eq!(
+        refusal_of(&named, &places),
+        Some((named, Refusal::FirstLine))
+    );
+    let later = program(&home.join(".local/bin/node:stream"), NODE);
+    assert_eq!(resolve("node:stream", &places).unwrap().entry, later);
 }
 
 /// Under `env -S` the system splits the arguments itself, honouring quotes, escapes and
@@ -262,6 +285,41 @@ fn a_path_folder_in_the_engine_data_folder_is_refused_and_its_setup_folder_is_ke
         own,
         "the setup folder is kept, though an owner tmux found first wins by name"
     );
+}
+
+/// However many ordinary folders the PATH and the probes name, the system folders and the
+/// engine's own folders are kept, last and in order, and a tool found only in the engine's
+/// `setup/bin` still resolves: the ordinary folders fill only the room those leave. The
+/// ordinary folders are made up, so none is read.
+#[test]
+fn the_system_and_engine_folders_are_kept_past_a_full_path() {
+    let (_folder, home) = scratch();
+    let root = home.join("engine");
+    let own = program(&root.join("setup/bin/crazyagent-row-tool"), NODE);
+    let ordinary: Vec<PathBuf> = (0..200)
+        .map(|n| PathBuf::from(format!("/opt/crazyagent-row-{n:03}/bin")))
+        .collect();
+    let path = std::env::join_paths(&ordinary).unwrap();
+    let mut tail: Vec<PathBuf> = SYSTEM_FOLDERS.iter().map(PathBuf::from).collect();
+    tail.extend(engine_folders(&STUB_HOOKS, &root));
+    let from_path = stub_engine(Some(&root), None, Some(home.clone()), Some(&path));
+    let from_probes = stub_engine(Some(&root), None, Some(home.clone()), Some(OsStr::new("")))
+        .with_probed(ordinary.clone());
+    for (name, places) in [("path", from_path), ("probes", from_probes)] {
+        let folders = places.folders();
+        assert!(folders.len() <= PLACES_MAX, "{name}");
+        assert!(
+            folders.ends_with(&tail),
+            "{name}: {:?}",
+            &folders[folders.len() - tail.len()..]
+        );
+        assert!(folders.contains(&ordinary[0]), "{name}");
+        assert_eq!(
+            resolve("crazyagent-row-tool", &places).unwrap().program,
+            own,
+            "{name}"
+        );
+    }
 }
 
 /// R-M1: a folder of the PATH the engine inherited, frozen from the shell that installed it,
@@ -611,10 +669,9 @@ fn the_release_build_sees_the_bundled_tmux_flag() {
 
 #[test]
 fn release_yml_sets_the_flag_for_the_kernel_crate() {
-    let text = std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../.github/workflows/release.yml"),
-    )
-    .unwrap();
+    let release =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../.github/workflows/release.yml");
+    let text = or_named(std::fs::read_to_string(&release), &release);
     let build = "cargo build --release --locked --target \"$TARGET\" -p crazyagent --bins";
     let build_at = text
         .find(build)
@@ -692,10 +749,20 @@ fn with_canonical(
 /// another prefix's `bin` as that prefix's `Cellar` file. Input: the path. Output: its one
 /// spelling.
 fn cellar(path: &Path) -> std::io::Result<PathBuf> {
-    let text = path.to_str().unwrap();
-    Ok(match text.rsplit_once("/bin/") {
-        Some((prefix, name)) => PathBuf::from(format!("{prefix}/Cellar/{name}/1/bin/{name}")),
-        None => path.to_path_buf(),
+    let parts: Vec<_> = path.components().collect();
+    let bin = parts.iter().rposition(|part| part.as_os_str() == "bin");
+    Ok(match bin {
+        Some(at) if at + 1 < parts.len() => {
+            let prefix: PathBuf = parts[..at].iter().collect();
+            let name: PathBuf = parts[at + 1..].iter().collect();
+            prefix
+                .join("Cellar")
+                .join(&name)
+                .join("1")
+                .join("bin")
+                .join(&name)
+        }
+        _ => path.to_path_buf(),
     })
 }
 
@@ -743,9 +810,10 @@ fn a_nix_darwin_profile_tool_stays_usable_while_the_projects_cannot_be_read() {
     }
 }
 
-/// The failed-read fallback never trusts more than a successful read with no project
-/// does: every path agents can write with the projects read is agents' to write without
-/// them, so the fallback only adds refusals.
+/// The failed-read fallback never trusts more than a successful read that registers no
+/// project: every listed path agents can write after a read of an empty project list is
+/// agents' to write without the read. A read that registers a project is compared in
+/// [`a_first_failed_read_trusts_a_registered_repository_under_an_install_root`].
 #[test]
 fn the_failed_read_fallback_never_trusts_a_path_the_normal_path_refuses() {
     let (_folder, home) = scratch();
@@ -773,6 +841,24 @@ fn the_failed_read_fallback_never_trusts_a_path_the_normal_path_refuses() {
     assert!(read.agent_writable(&marked.join("bin/tool")));
     assert!(!read.agent_writable(Path::new("/srv/repo/bin/tool")));
     assert!(unread.agent_writable(Path::new("/srv/repo/bin/tool")));
+}
+
+/// A repository the engine registered under `/usr/local` or `/opt/homebrew` is agents' to
+/// write after a good read, and should stay so when the first read of engine.db fails with
+/// no last good read. Today the fallback reads every path under an install root as
+/// installed, so a tool in such a repository is trusted until one read succeeds.
+#[test]
+#[ignore = "known gap: a first failed read with no last good read trusts a repository registered under an install root"]
+fn a_first_failed_read_trusts_a_registered_repository_under_an_install_root() {
+    let (_folder, home) = scratch();
+    let canonical: fn(&Path) -> std::io::Result<PathBuf> = |path| Ok(path.to_path_buf());
+    for repo in ["/usr/local/src/repo", "/opt/homebrew/src/repo"] {
+        let tool = Path::new(repo).join("bin/tool");
+        let read = with_canonical(&home, canonical, Some(vec![PathBuf::from(repo)]));
+        let unread = with_canonical(&home, canonical, None);
+        assert!(read.agent_writable(&tool), "{}", tool.display());
+        assert!(unread.agent_writable(&tool), "{}", tool.display());
+    }
 }
 
 /// When the set-up projects cannot be read, a repository the engine may have
@@ -853,9 +939,13 @@ fn the_first_copys_refusal_is_kept_when_no_copy_resolves() {
 /// Writes an executable script with the given bytes, its folders made first. Inputs: the
 /// file and the bytes. Output: the file.
 fn script_at(file: &Path, bytes: &[u8]) -> PathBuf {
-    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-    std::fs::write(file, bytes).unwrap();
-    std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let folder = file
+        .parent()
+        .unwrap_or_else(|| panic!("{} has a parent folder", file.display()));
+    or_named(std::fs::create_dir_all(folder), folder);
+    or_named(std::fs::write(file, bytes), file);
+    let permissions = std::fs::Permissions::from_mode(0o755);
+    or_named(std::fs::set_permissions(file, permissions), file);
     file.to_path_buf()
 }
 

@@ -3,16 +3,28 @@ use super::*;
 
 use crate::batch::{batch_file, fixed_program};
 
+/// The `where.exe` Windows ships, a real program, under the `SystemRoot` folder. Input: none.
+/// Output: its path.
+fn shipped_where() -> PathBuf {
+    let root = std::env::var_os("SystemRoot").expect("the SystemRoot variable is set");
+    PathBuf::from(root).join("System32").join("where.exe")
+}
+
+/// Copies a file a row's setup needs, or panics naming both paths. Inputs: the source and the
+/// copy. Output: none.
+fn copy_named(from: &Path, to: &Path) {
+    if let Err(error) = std::fs::copy(from, to) {
+        panic!("{} to {}: {error}", from.display(), to.display());
+    }
+}
+
 /// A folder with a stand-in `node.exe` (a copy of the `where.exe` Windows ships, a real
 /// program) and places that look there. Input: none. Output: the folder guard, its real
 /// spelling and the places.
 fn node_folder() -> (tempfile::TempDir, PathBuf, Places) {
     let folder = tempfile::tempdir().unwrap();
-    let real = folder.path().canonicalize().unwrap();
-    let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-        .join("System32")
-        .join("where.exe");
-    std::fs::copy(shipped, real.join("node.exe")).unwrap();
+    let real = or_named(folder.path().canonicalize(), folder.path());
+    copy_named(&shipped_where(), &real.join("node.exe"));
     let places = stub_new(vec![real.clone()], None);
     (folder, real, places)
 }
@@ -29,10 +41,11 @@ fn an_npm_cmd_shim_runs_as_node_and_the_script_it_names() {
         .join("@openai")
         .join("codex")
         .join("bin");
-    std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(package.join("codex.js"), "#!/usr/bin/env node\n").unwrap();
+    or_named(std::fs::create_dir_all(&package), &package);
+    let written = package.join("codex.js");
+    or_named(std::fs::write(&written, "#!/usr/bin/env node\n"), &written);
     let shim = real.join("codex.cmd");
-    std::fs::write(&shim, crate::batch::CODEX).unwrap();
+    or_named(std::fs::write(&shim, crate::batch::CODEX), &shim);
 
     let resolved = resolve_entry(&shim, &places).unwrap();
     assert_eq!(resolved.entry, shim);
@@ -59,10 +72,11 @@ fn an_npm_cmd_shim_runs_as_node_and_the_script_it_names() {
 fn npx_runs_by_its_layout_and_every_other_batch_file_is_refused() {
     let (_folder, real, places) = node_folder();
     let npm = real.join("node_modules").join("npm").join("bin");
-    std::fs::create_dir_all(&npm).unwrap();
-    std::fs::write(npm.join("npx-cli.js"), "#!/usr/bin/env node\n").unwrap();
+    or_named(std::fs::create_dir_all(&npm), &npm);
+    let written = npm.join("npx-cli.js");
+    or_named(std::fs::write(&written, "#!/usr/bin/env node\n"), &written);
     let npx = real.join("npx.cmd");
-    std::fs::write(&npx, "@ECHO off\r\ncalc.exe\r\n").unwrap();
+    or_named(std::fs::write(&npx, "@ECHO off\r\ncalc.exe\r\n"), &npx);
     let resolved = resolve_entry(&npx, &places).unwrap();
     assert_eq!(
         resolved.argv(),
@@ -79,13 +93,16 @@ fn npx_runs_by_its_layout_and_every_other_batch_file_is_refused() {
     );
 
     let other = tempfile::tempdir().unwrap();
-    let other = other.path().canonicalize().unwrap();
+    let other = or_named(other.path().canonicalize(), other.path());
     let lone_npx = other.join("npx.cmd");
-    std::fs::copy(&npx, &lone_npx).unwrap();
+    copy_named(&npx, &lone_npx);
     let tool = other.join("tool.cmd");
-    std::fs::write(&tool, crate::batch::CODEX.replace("CALL", "calc & CALL")).unwrap();
+    or_named(
+        std::fs::write(&tool, crate::batch::CODEX.replace("CALL", "calc & CALL")),
+        &tool,
+    );
     let script = other.join("tool.BAT");
-    std::fs::write(&script, "@ECHO off\r\n").unwrap();
+    or_named(std::fs::write(&script, "@ECHO off\r\n"), &script);
     for file in [lone_npx, tool, script] {
         let missing = resolve_entry(&file, &places).unwrap_err();
         let refused = missing.refused.unwrap();
@@ -100,10 +117,11 @@ fn npx_runs_by_its_layout_and_every_other_batch_file_is_refused() {
 fn npx_off_the_engine_s_path_runs_with_the_node_beside_it() {
     let (_folder, real, _places) = node_folder();
     let npm = real.join("node_modules").join("npm").join("bin");
-    std::fs::create_dir_all(&npm).unwrap();
-    std::fs::write(npm.join("npx-cli.js"), "#!/usr/bin/env node\n").unwrap();
+    or_named(std::fs::create_dir_all(&npm), &npm);
+    let written = npm.join("npx-cli.js");
+    or_named(std::fs::write(&written, "#!/usr/bin/env node\n"), &written);
     let npx = real.join("npx.cmd");
-    std::fs::write(&npx, "@ECHO off\r\n").unwrap();
+    or_named(std::fs::write(&npx, "@ECHO off\r\n"), &npx);
     let elsewhere = stub_new(Vec::new(), None);
     let resolved = resolve_entry(&npx, &elsewhere).unwrap();
     let real_of = |file: PathBuf| file.canonicalize().unwrap().into_os_string();
@@ -125,10 +143,11 @@ fn shim_beside_node(real: &Path) -> (PathBuf, PathBuf) {
         .join("@openai")
         .join("codex")
         .join("bin");
-    std::fs::create_dir_all(&package).unwrap();
-    std::fs::write(package.join("codex.js"), "#!/usr/bin/env node\n").unwrap();
+    or_named(std::fs::create_dir_all(&package), &package);
+    let written = package.join("codex.js");
+    or_named(std::fs::write(&written, "#!/usr/bin/env node\n"), &written);
     let shim = real.join("codex.cmd");
-    std::fs::write(&shim, crate::batch::CODEX).unwrap();
+    or_named(std::fs::write(&shim, crate::batch::CODEX), &shim);
     (shim, package.join("codex.js"))
 }
 
@@ -169,13 +188,10 @@ fn a_cmd_shim_runs_with_the_node_beside_it_over_another_on_the_path() {
 #[test]
 fn a_launcher_found_under_another_spelling_is_refused_on_windows() {
     let folder = tempfile::tempdir().unwrap();
-    let real = folder.path().canonicalize().unwrap();
-    let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-        .join("System32")
-        .join("where.exe");
-    std::fs::copy(shipped, real.join("env.exe")).unwrap();
+    let real = or_named(folder.path().canonicalize(), folder.path());
+    copy_named(&shipped_where(), &real.join("env.exe"));
     let script = real.join("tool.js");
-    std::fs::write(&script, "#!/usr/bin/env Env\n").unwrap();
+    or_named(std::fs::write(&script, "#!/usr/bin/env Env\n"), &script);
     let places = stub_new(vec![real.clone()], None);
     let missing = resolve_entry(&script, &places).unwrap_err();
     assert_eq!(missing.refused.unwrap().why, Refusal::FirstLine);
@@ -210,7 +226,10 @@ fn no_batch_file_is_ever_started_on_windows() {
     let folder = tempfile::tempdir().unwrap();
     let marker = folder.path().join("ran");
     let script = folder.path().join("x.cmd");
-    std::fs::write(&script, format!("@echo ran> \"{}\"\r\n", marker.display())).unwrap();
+    or_named(
+        std::fs::write(&script, format!("@echo ran> \"{}\"\r\n", marker.display())),
+        &script,
+    );
     let refused = crate::spawn_gate::spawn(&mut std::process::Command::new(&script)).unwrap_err();
     assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
     assert!(!marker.exists());
@@ -257,15 +276,17 @@ fn a_repository_on_another_drive_is_agent_writable_while_its_projects_cannot_be_
     let home = tempfile::tempdir().unwrap();
     let places = Places {
         projects: None,
-        ..stub_new(Vec::new(), Some(home.path().canonicalize().unwrap()))
+        ..stub_new(
+            Vec::new(),
+            Some(or_named(home.path().canonicalize(), home.path())),
+        )
     };
     assert!(places.agent_writable(Path::new(r"D:\repo\bin\tool.exe")));
-    let programs = PathBuf::from(std::env::var_os("ProgramFiles").unwrap());
+    let programs =
+        PathBuf::from(std::env::var_os("ProgramFiles").expect("the ProgramFiles variable is set"));
     let kept = programs.join("Git").join("cmd").join("git.exe");
     assert!(!places.agent_writable(&kept), "{}", kept.display());
-    let shipped = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-        .join("System32")
-        .join("where.exe");
+    let shipped = shipped_where();
     assert!(
         shipped
             .canonicalize()
@@ -274,4 +295,31 @@ fn a_repository_on_another_drive_is_agent_writable_while_its_projects_cannot_be_
             .starts_with(r"\\?\")
     );
     assert!(!places.agent_writable(&shipped), "{}", shipped.display());
+}
+
+/// A name starting with this drive's letter and `:` joined to a searched folder replaces
+/// that folder and reaches the drive's current folder instead, so a real program planted
+/// there is not resolved through it: the name is not found, whatever file it would reach.
+#[test]
+fn a_drive_prefixed_name_never_reaches_a_file_outside_the_searched_folders() {
+    let (_folder, _real, places) = node_folder();
+    let here = std::env::current_dir().expect("the test's current folder is readable");
+    let drive = match here.components().next() {
+        Some(std::path::Component::Prefix(prefix)) => match prefix.kind() {
+            std::path::Prefix::Disk(letter) | std::path::Prefix::VerbatimDisk(letter) => {
+                char::from(letter)
+            }
+            other => panic!("{} is on no drive letter: {other:?}", here.display()),
+        },
+        other => panic!("{} starts with no prefix: {other:?}", here.display()),
+    };
+    assert!(drive.is_ascii_alphabetic(), "{drive}");
+    let stem = format!("drive-reach-{}", std::process::id());
+    let planted = here.join(format!("{stem}.exe"));
+    copy_named(&shipped_where(), &planted);
+    let found = resolve(&format!("{drive}:{stem}.exe"), &places);
+    or_named(std::fs::remove_file(&planted), &planted);
+    let missing = found.unwrap_err();
+    assert_eq!(missing.reason, Reason::NotFound);
+    assert!(missing.refused.is_none());
 }
