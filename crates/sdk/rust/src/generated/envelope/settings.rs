@@ -19,7 +19,7 @@ impl SaveQuitInput {
 #[derive(Serialize)]
 pub struct SaveQuitOutput;
 
-impl From<()> for SaveQuitOutput {
+impl core::convert::From<()> for SaveQuitOutput {
     /// Input: the unit output. Output: the envelope.
     fn from(_value: ()) -> Self {
         Self
