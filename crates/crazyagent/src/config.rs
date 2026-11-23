@@ -530,7 +530,7 @@ fn resolve_files(global: ConfigFile, project: ConfigFile) -> Result<EffectiveCon
     assert!(origins.len() <= values.len());
     assert_eq!(
         values.len(),
-        17 + 8 * usize::from(knowledge) + usize::from(plugins) + usize::from(model_access)
+        17 + 8 * usize::from(knowledge) + 2 * usize::from(plugins) + usize::from(model_access)
     );
     from_settings(settings, descriptors)
 }

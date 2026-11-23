@@ -203,9 +203,14 @@ pub(crate) fn found(engine: &Engine<'_>, name: &str) -> Result<Found, Refused> {
 /// bundled code plugin now has: its secret bindings with the keys entered for it, its switch
 /// and its trust record. Neither kind ever gets a trust record, so one is the mark of such a
 /// leftover, and it goes last so an interrupted pass runs again. Each binding row goes
-/// before its key file, as [`drop_binding`] does. Inputs: database and engine facts.
-/// Output: Ok, or `app_plugins_unavailable`.
+/// before its key file, as [`drop_binding`] does. A switch row under a bare code plugin id
+/// always goes, trust record or not, since a code plugin's own switch sits under
+/// `code:<id>`. Inputs: database and engine facts. Output: Ok, or `app_plugins_unavailable`.
 pub(crate) fn prepare(db: &Connection, engine: &Engine<'_>) -> Result<(), Refused> {
+    for grant in BUNDLED_GRANTS {
+        db.execute("DELETE FROM app_plugin_state WHERE name=?1", [grant.plugin])
+            .map_err(sqlite)?;
+    }
     let reserved = BUNDLED
         .iter()
         .map(|(name, _)| *name)
@@ -496,8 +501,16 @@ pub fn set_enabled(
     }
 }
 
-/// Turns a bundled code plugin on or off by its plugin id in the switch table, where no row
-/// reads as on. An essential one is refused with `app_plugin_essential` while the
+/// The switch table key of a bundled code plugin: `code:<id>`, which no user plugin name can
+/// carry. Input: the plugin id. Output: the key.
+fn code_key(name: &str) -> String {
+    format!("{CODE_KEY_PREFIX}{name}")
+}
+
+const CODE_KEY_PREFIX: &str = "code:";
+
+/// Turns a bundled code plugin on or off under its `code:<id>` key in the switch table,
+/// where no row reads as on. An essential one is refused with `app_plugin_essential` while the
 /// `plugins.essential_unlocked` setting is false; turning off with `stop_runs` stops each
 /// run holding it once the off state is written. Inputs: database, plugin id and switch.
 /// Output: Ok, `app_plugin_essential`, or `app_plugins_unavailable`.
@@ -506,8 +519,10 @@ fn switch_code_plugin(db: &Connection, name: &str, switch: Switch<'_>) -> Result
         .iter()
         .find(|grant| grant.plugin == name)
         .expect("only a bundled code plugin id switches here");
+    let key = code_key(name);
+    assert!(!embedding::valid_name(&key));
     match switch {
-        Switch::On => set_flag(db, name, true),
+        Switch::On => set_flag(db, &key, true),
         Switch::Off {
             usage,
             when_off,
@@ -516,7 +531,7 @@ fn switch_code_plugin(db: &Connection, name: &str, switch: Switch<'_>) -> Result
             if grant.essential && !essential_unlocked {
                 return Err(refused("app_plugin_essential"));
             }
-            set_flag(db, name, false)?;
+            set_flag(db, &key, false)?;
             if when_off == TurnOff::StopRuns {
                 usage.stop_runs(name);
             }
@@ -527,15 +542,12 @@ fn switch_code_plugin(db: &Connection, name: &str, switch: Switch<'_>) -> Result
 }
 
 /// The bundled code plugins turned off, by plugin id, for the engine's in-memory off set.
-/// A switch row under a code plugin id that also has a trust record belongs to an older
-/// plugin of the owner's and is left out. Input: the database. Output: the ids, or
-/// `app_plugins_unavailable`.
+/// Only `code:<id>` switch rows count, so a row an older plugin of the owner's left under a
+/// bare code plugin id never turns that plugin off; an id no bundled code plugin has is
+/// left out. Input: the database. Output: the ids, or `app_plugins_unavailable`.
 pub fn off_code_plugins(db: &Connection) -> Result<std::collections::BTreeSet<String>, Refused> {
     let mut statement = db
-        .prepare(
-            "SELECT name FROM app_plugin_state WHERE enabled=0
-             AND NOT EXISTS (SELECT 1 FROM app_plugin_trust WHERE app_plugin_trust.name=app_plugin_state.name)",
-        )
+        .prepare("SELECT name FROM app_plugin_state WHERE enabled=0 AND name LIKE 'code:%'")
         .map_err(sqlite)?;
     let names: Vec<String> = statement
         .query_map([], |row| row.get(0))
@@ -543,8 +555,10 @@ pub fn off_code_plugins(db: &Connection) -> Result<std::collections::BTreeSet<St
         .collect::<Result<_, _>>()
         .map_err(sqlite)?;
     Ok(names
-        .into_iter()
+        .iter()
+        .filter_map(|key| key.strip_prefix(CODE_KEY_PREFIX))
         .filter(|name| is_code_plugin(name))
+        .map(str::to_owned)
         .collect())
 }
 
