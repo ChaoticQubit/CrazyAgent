@@ -808,3 +808,33 @@ fn script_at(file: &Path, bytes: &[u8]) -> PathBuf {
     std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755)).unwrap();
     file.to_path_buf()
 }
+
+/// A folder the engine named for agents under an install root still counts as one agents can
+/// write while engine.db cannot be read, when an earlier read of the same data folder named
+/// it: the failed read takes that data folder's last good read, so a tool planted there is
+/// refused, and a data folder with no good read gains nothing from another one's.
+#[test]
+fn a_registered_folder_under_an_install_root_stays_writable_after_a_failed_read() {
+    let tool = Path::new("/usr/local/src/repo/bin/tool");
+    let read = FindingSeed {
+        hooks: FindingHooks {
+            registered_projects: |_| Some(vec![PathBuf::from("/usr/local/src/repo")]),
+            ..STUB_HOOKS
+        },
+        ..stub_seed()
+    };
+    let failed = FindingSeed {
+        hooks: FindingHooks {
+            registered_projects: |_| None,
+            ..STUB_HOOKS
+        },
+        ..stub_seed()
+    };
+    let named = tempfile::tempdir().unwrap();
+    let root = named.path().canonicalize().unwrap();
+    assert!(Places::at_roots(Some(&root), None, read).agent_writable(tool));
+    assert!(Places::at_roots(Some(&root), None, failed.clone()).agent_writable(tool));
+    let unread = tempfile::tempdir().unwrap();
+    let other = unread.path().canonicalize().unwrap();
+    assert!(!Places::at_roots(Some(&other), None, failed).agent_writable(tool));
+}
