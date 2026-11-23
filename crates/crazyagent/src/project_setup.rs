@@ -948,7 +948,7 @@ impl SetupAction {
                 Ok(())
             }
             Self::SetReadPaths { paths, .. } => {
-                if paths.len() > crate::sandbox::extra_paths::EXTRA_PATHS_MAX
+                if paths.len() > kernel_sandbox::extra_paths::EXTRA_PATHS_MAX
                     || paths
                         .iter()
                         .any(|path| path.len() > 1024 || path.chars().any(char::is_control))
@@ -2659,7 +2659,7 @@ pub(crate) fn forget_removed(db: &Connection, tables: &[&str]) -> Result<usize, 
 }
 
 /// Saves a project's extra read-only folders once each passes
-/// [`crate::sandbox::extra_paths::checked`] and the owner's screen showed the current ones.
+/// [`kernel_sandbox::extra_paths::checked`] and the owner's screen showed the current ones.
 /// Takes the transaction, project, the version the screen showed and the typed paths.
 /// Returns Applied, or a plain rejection for an unknown project, a refused path or
 /// `stale_revision` when the folders changed since.
@@ -2682,7 +2682,7 @@ fn set_read_paths(
     let Some(data_root) = tx.path().map(Path::new).and_then(Path::parent) else {
         return Ok(rejected("read_path_refused"));
     };
-    let checked = match crate::sandbox::extra_paths::checked_all(
+    let checked = match kernel_sandbox::extra_paths::checked_all(
         &crate::sandbox::ACCESS_HOOKS,
         paths,
         data_root,
@@ -2694,7 +2694,7 @@ fn set_read_paths(
     if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
         return Ok(rejected(crate::storage::versioned::STALE_CODE));
     }
-    crate::sandbox::extra_paths::save(tx, project_id.as_str(), &checked).map_err(error)?;
+    crate::sandbox::access_store::read::save(tx, project_id.as_str(), &checked).map_err(error)?;
     Ok(Outcome::Applied)
 }
 
@@ -2848,7 +2848,7 @@ fn remove(
         )
         .map_err(error)?;
     }
-    crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
+    crate::sandbox::access_store::read::save(tx, project_id.as_str(), &[]).map_err(error)?;
     for item in [
         crate::storage::versioned::read_paths_item(project_id),
         crate::storage::versioned::hidden_paths_item(project_id),

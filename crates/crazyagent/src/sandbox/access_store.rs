@@ -2,3 +2,6 @@
 /// after they started, kept in the engine database; the checks on them are in
 /// [`kernel_sandbox::hidden_paths`].
 pub mod hidden;
+/// A project's extra read-only folders, kept in the engine database; the checks on them are
+/// in [`kernel_sandbox::extra_paths`].
+pub mod read;

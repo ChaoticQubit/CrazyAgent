@@ -1139,7 +1139,8 @@ fn ide_shell_finds_the_project_folder_and_its_read_folders_in_the_engine_databas
         let db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
         crate::storage::initialize_authority_schemas(&db).unwrap();
         crate::ide::workspace::tests::add_project(&db, PROJECT, &folder);
-        crate::sandbox::extra_paths::save(&db, PROJECT, std::slice::from_ref(&extra)).unwrap();
+        crate::sandbox::access_store::read::save(&db, PROJECT, std::slice::from_ref(&extra))
+            .unwrap();
     }
     let before = std::fs::read(root.join("engine.db")).unwrap();
     let project = ProjectId::new(PROJECT).unwrap();

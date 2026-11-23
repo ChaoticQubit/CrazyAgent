@@ -1,11 +1,11 @@
 use super::new_project_view::{Look, Row, wrap_words};
 use super::project_team::window;
-use crate::sandbox::shared_folders::{OFF_MACOS_LINE, UNREACHABLE_SECRETS_LINE};
 use crossterm::event::{KeyCode, KeyEvent};
 use kernel_sandbox::policy::{
     AgentAccess, AgentNetwork, AgentPolicy, HomeCaches, IdeAgentFiles, PolicyView, ToolchainChoice,
 };
 use kernel_sandbox::shared_folders::{CHOSEN_MAX, SharedAccess, SharedFolders, SharedScope};
+use kernel_sandbox::shared_folders::{OFF_MACOS_LINE, UNREACHABLE_SECRETS_LINE};
 
 /// The plain warning the owner confirms before giving a project's agents Full access.
 pub(in crate::tui) const FULL_ACCESS_WARNING: &str = "Agents run with your user's permissions: they can read your keys and change any file. Processes an agent starts outside its terminal can keep running after it stops.";

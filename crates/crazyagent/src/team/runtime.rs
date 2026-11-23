@@ -9605,8 +9605,11 @@ impl TeamRuntime {
         if let Some(runtime) = self.state.parent() {
             sandbox = sandbox.guard_engine(runtime).map_err(sandboxed)?;
         }
-        let extra = crate::sandbox::extra_paths::load(&self.connection, stored.project_id.as_str())
-            .map_err(|_| with_code("the project's read-only folders could not be read", None))?;
+        let extra =
+            crate::sandbox::access_store::read::load(&self.connection, stored.project_id.as_str())
+                .map_err(|_| {
+                    with_code("the project's read-only folders could not be read", None)
+                })?;
         let toolchains = policy.allowed(&root);
         (sandbox, _) = sandbox
             .allow_tools(&Toolchains::grant(&homes, &toolchains))

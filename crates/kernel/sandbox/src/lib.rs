@@ -8,6 +8,9 @@ pub mod elf;
 /// Why a project sandbox is refused: the one error type every sandbox build and install
 /// returns, with the plain reason a refused Windows read root reads as.
 pub mod error;
+/// The checks on a project's extra read-only folders: an absolute existing folder clear of
+/// the owner's home, credentials, the engine's data and every harness home.
+pub mod extra_paths;
 /// The plain refusal sentences, the log row and the owner's private temp folder a grant
 /// of extra access reads.
 pub mod grants;
