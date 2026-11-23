@@ -954,6 +954,7 @@ dependencies = [
  "base64 0.22.1",
  "bytemuck",
  "crazyagent",
+ "crazyagent-kernel-common",
  "crazyagent-kernel-processes",
  "crazyagent-kernel-security",
  "getrandom 0.4.3",

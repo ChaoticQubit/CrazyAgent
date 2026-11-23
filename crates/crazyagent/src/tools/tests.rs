@@ -821,7 +821,7 @@ fn a_group_writable_folder_is_passed_over_unless_its_group_is_admin() {
     {
         assert_eq!(
             resolve("node", &home_only(&home)).is_ok(),
-            crate::service::own_group_private(),
+            kernel_processes::service::own_group_private(),
             "only this user's private group is trusted"
         );
         let shared = nix::unistd::getgroups()
