@@ -290,7 +290,7 @@ mod launch {
     use super::*;
     use crate::harnesses::launch::{AccountBinding, LaunchLimits};
     use crate::harnesses::registry::Registry;
-    use crate::model_gateway::relay::{LOCAL_PLACEHOLDER, is_relay_token};
+    use kernel_security::relay_token::{LOCAL_PLACEHOLDER, is_relay_token};
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 

@@ -43,7 +43,16 @@ fn a_token_with_upper_hex_is_refused() {
     assert!(is_relay_token(&lower));
     assert!(!is_relay_token(&upper));
     assert!(!is_placeholder(&upper));
-    assert!(!is_relay_token(&format!("{TOKEN_PREFIX}{}", "a".repeat(TOKEN_HEX - 1))));
-    assert!(!is_relay_token(&format!("{TOKEN_PREFIX}{}", "a".repeat(TOKEN_HEX + 1))));
-    assert!(!is_relay_token(&format!("{TOKEN_PREFIX}{}g", "a".repeat(TOKEN_HEX - 1))));
+    assert!(!is_relay_token(&format!(
+        "{TOKEN_PREFIX}{}",
+        "a".repeat(TOKEN_HEX - 1)
+    )));
+    assert!(!is_relay_token(&format!(
+        "{TOKEN_PREFIX}{}",
+        "a".repeat(TOKEN_HEX + 1)
+    )));
+    assert!(!is_relay_token(&format!(
+        "{TOKEN_PREFIX}{}g",
+        "a".repeat(TOKEN_HEX - 1)
+    )));
 }

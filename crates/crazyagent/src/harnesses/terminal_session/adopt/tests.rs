@@ -687,7 +687,7 @@ fn key_folder() -> tempfile::TempDir {
 fn longest_key() -> String {
     format!(
         "{}{}",
-        crate::model_gateway::relay::TOKEN_PREFIX,
+        kernel_security::relay_token::TOKEN_PREFIX,
         "a".repeat(64)
     )
 }
