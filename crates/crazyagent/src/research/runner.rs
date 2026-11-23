@@ -552,7 +552,7 @@ fn harness_words(program: &Path) -> Result<Vec<String>, RunError> {
 /// ([`ProjectSandbox::allow_interpreters`]), the same grants a team agent gets. Inputs: the
 /// sandbox and the harness's real file. Output: the sandbox, or the resolver's owner line.
 fn allow_harness(sandbox: ProjectSandbox, program: &Path) -> Result<ProjectSandbox, RunError> {
-    let places = crate::tools::Places::from_environment(None);
+    let places = crate::tools::tools_places(None);
     let launched = crate::harnesses::interactive::launch_tool(program, &places)
         .map_err(|problem| RunError::Invalid(problem.0))?;
     let sandbox = sandbox
@@ -5443,7 +5443,7 @@ mod tests {
         fs::write(&script, "#!/usr/bin/env sh\nexit 0\n").unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
         let interpreter =
-            crate::tools::resolve("sh", &crate::tools::Places::from_environment(None)).unwrap();
+            kernel_processes::finding::resolve("sh", &crate::tools::tools_places(None)).unwrap();
         assert_eq!(
             harness_words(&script).unwrap(),
             vec![
@@ -5481,7 +5481,7 @@ mod tests {
         fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
         fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
         let line =
-            crate::tools::resolve_entry(&program, &crate::tools::Places::from_environment(None))
+            kernel_processes::finding::resolve_entry(&program, &crate::tools::tools_places(None))
                 .unwrap_err()
                 .line();
         assert!(matches!(harness_words(&program), Err(RunError::Invalid(code)) if code == line));

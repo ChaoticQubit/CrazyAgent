@@ -1219,7 +1219,7 @@ fn the_graph_step_runs_the_graphify_setup_installed_for_this_engine() {
     let installer = crate::setup::pinned::PinnedInstaller::with_places(
         root.path(),
         Vec::new(),
-        crate::tools::Places::new(vec![bin.clone()], None),
+        crate::tools::tools_new(vec![bin.clone()], None),
     );
     let graphify = crate::setup::Dependency::Graphify.program();
     std::fs::create_dir_all(&bin).unwrap();

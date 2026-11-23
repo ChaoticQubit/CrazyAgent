@@ -296,7 +296,6 @@
   "crates/crazyagent/src/terminal/kept.rs": 3,
   "crates/crazyagent/src/terminal/tmux/servers/refused_tests.rs": 1,
   "crates/crazyagent/src/terminal/tmux/tests.rs": 23,
-  "crates/crazyagent/src/tools/probe/tests.rs": 2,
   "crates/crazyagent/src/tui/client.rs": 4,
   "crates/crazyagent/src/tui/client/accounts.rs": 1,
   "crates/crazyagent/src/tui/client/editor/tests.rs": 2,
@@ -400,6 +399,7 @@
   "crates/crazyagent/tests/tui_rcli_setup.rs": 2,
   "crates/crazyagent/tests/worker_engine_boundary.rs": 1,
   "crates/crazyagent/tests/worktree_ownership/checkouts.rs": 1,
+  "crates/kernel/processes/src/finding/probe/tests.rs": 2,
   "scripts/rcli/host.test.ts": 1,
   "scripts/trial/report.test.mjs": 2,
   "scripts/trial/run.test.mjs": 3

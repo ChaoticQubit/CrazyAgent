@@ -57,7 +57,7 @@ fn installer(case: &Case) -> WindowsInstaller {
     WindowsInstaller::new(
         &case.base.join("app"),
         Some(&case.base.join("local")),
-        crate::tools::Places::new(Vec::new(), None),
+        crate::tools::tools_new(Vec::new(), None),
     )
     .unwrap()
 }
@@ -161,7 +161,7 @@ fn context_mode_is_set_up_on_windows_as_the_pinned_launch_the_engine_runs() {
             .join("npx-cli.js"),
     );
     let places =
-        crate::tools::Places::engine(Some(&root), None, None, Some(std::ffi::OsStr::new("")));
+        crate::tools::tools_engine(Some(&root), None, None, Some(std::ffi::OsStr::new("")));
     let installer = WindowsInstaller::new(
         &root.join("setup"),
         Some(&case.base.join("local")),

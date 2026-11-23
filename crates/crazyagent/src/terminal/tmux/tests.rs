@@ -3433,16 +3433,16 @@ fn counted_tmux(
     folder: &std::path::Path,
     ran: &std::path::Path,
     rest: &str,
-) -> crate::tools::Resolved {
+) -> kernel_processes::finding::Resolved {
     use std::os::unix::fs::PermissionsExt;
-    let program = folder.join(crate::tools::BUNDLED_TMUX);
+    let program = folder.join(kernel_processes::finding::BUNDLED_TMUX);
     let script = format!("#!/bin/sh\necho ran >> '{}'\n{rest}\n", ran.display());
     std::fs::write(&program, script).unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-    crate::tools::Resolved {
+    kernel_processes::finding::Resolved {
         entry: program.clone(),
         program,
-        kind: crate::tools::Kind::Native,
+        kind: kernel_processes::finding::Kind::Native,
     }
 }
 

@@ -3,7 +3,7 @@ use crate::plugins::{Scope, ServerSpec};
 use crate::setup::pack::{GRAPH_ENTRY, PackKind, PackManifest, PackManifestEntry};
 use crate::setup::{RefusedTool, SetupAction, SetupStatus, progress};
 use crate::storage::versioned;
-use crate::tools::permission_fix;
+use kernel_processes::finding::permission_fix;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 

@@ -1404,7 +1404,7 @@ pub fn start_for_engine(
 }
 
 /// The graphify an engine's graph step runs, looked up again on each step the way
-/// setup finds it ([`crate::tools::Places::engine`]): the app's folder and the owner's own
+/// setup finds it ([`kernel_processes::finding::Places::engine`]): the app's folder and the owner's own
 /// installs first, then `<engine root>/setup/bin`, where setup installs it, last. Input:
 /// the engine root. Output: the program, or the line the graph step fails with when none
 /// of them has one it can run.
@@ -1419,9 +1419,9 @@ pub(crate) fn engine_graphify(runtime: &Path) -> Result<PathBuf, String> {
 /// over (DEC-162), or where setup shows it when that line is longer than a step keeps,
 /// else that none is installed. Input: why graphify cannot run. Output: the line.
 #[cfg(unix)]
-pub(crate) fn graphify_failure(missing: &crate::tools::Missing) -> String {
+pub(crate) fn graphify_failure(missing: &kernel_processes::finding::Missing) -> String {
     match missing.reason {
-        crate::tools::Reason::Refused => {
+        kernel_processes::finding::Reason::Refused => {
             let line = missing.line();
             if line.len() <= super::REASON_BYTES_MAX {
                 line

@@ -25,12 +25,12 @@ fn install(folder: &Path) -> PathBuf {
 }
 
 /// A clean-Mac gate build maps Homebrew's folders for every search the tool resolver makes
-/// ([`crate::tools::homebrew_folders`]); the catalog's built-in folders come from there too,
+/// ([`kernel_processes::finding::homebrew_folders`]); the catalog's built-in folders come from there too,
 /// so the catalog and the pin never find this Mac's own Homebrew harness under the gate.
 #[cfg(target_os = "macos")]
 #[test]
 fn the_catalog_looks_in_homebrew_where_the_tool_resolver_does() {
-    let homebrew = crate::tools::homebrew_folders();
+    let homebrew = kernel_processes::finding::homebrew_folders(&crate::tools::HOOKS);
     let directories = Search::from_environment().directories;
     for folder in &homebrew {
         assert!(
@@ -244,7 +244,7 @@ fn a_found_harness_the_resolver_cant_start_is_cant_run_over_ready_and_limited() 
         None,
         Vec::new(),
     ));
-    let places = crate::tools::Places::new(vec![folder.path().to_path_buf()], None);
+    let places = crate::tools::tools_new(vec![folder.path().to_path_buf()], None);
     let line = "codex needs ca-catalog-missing-runtime, which is missing. Install it, or run \
                 setup again from Settings. Then try again.";
     let cant_run = HarnessStatus::CantRun {
