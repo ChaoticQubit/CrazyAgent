@@ -88,6 +88,7 @@ fn name(purpose: FolderPurpose) -> &'static str {
         FolderPurpose::ProjectsHome => "projects_home",
         FolderPurpose::Memory => "memory",
         FolderPurpose::Plugin => "plugin",
+        FolderPurpose::AppPlugin => "app_plugin",
     }
 }
 

@@ -2,6 +2,7 @@ import { useLayoutEffect, type ReactNode } from "react";
 import { PageHeader, formatRoute } from "../../ui";
 import { SETTINGS_TABS, isUserMenuTab, type ListedSettingsTab, type SettingsAction } from "../../ui/router";
 import { Accounts } from "./accounts";
+import { AppPluginsSettings } from "./app-plugins";
 import { FinishedAgentsSettings } from "./finished-agents";
 import { Harnesses } from "./harnesses";
 import { MasterSettings } from "./master";
@@ -34,7 +35,7 @@ export const SETTINGS_GROUPS: SettingsGroup[] = [
     { id: "master", label: "Master" },
   ] },
   { title: "App", items: [
-    { id: "sandbox", label: "Sandbox" }, { id: "alerts", label: "Team alerts" }, { id: "restore", label: "Restore 2.4" }, { id: "terminal", label: "Terminal" },
+    { id: "sandbox", label: "Sandbox" }, { id: "alerts", label: "Team alerts" }, { id: "restore", label: "Restore 2.4" }, { id: "terminal", label: "Terminal" }, { id: "app-plugins", label: "App plugins" },
   ] },
 ];
 
@@ -92,6 +93,7 @@ export function Settings({ tab, action, account, skill }: { tab: ListedSettingsT
       : tab === "master" ? <MasterSettings />
       : tab === "restore" ? <RestoreSettings />
       : tab === "terminal" ? <TerminalSettings />
+      : tab === "app-plugins" ? <AppPluginsSettings />
       : <TeamAlertsSettings />}
   </SettingsFrame>;
 }
