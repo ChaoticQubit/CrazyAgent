@@ -1208,3 +1208,6 @@ mod switch_tests;
 #[cfg(all(test, unix))]
 #[path = "setup_tests.rs"]
 mod tests;
+#[cfg(all(test, unix))]
+#[path = "setup_restore_tests.rs"]
+mod restore_tests;

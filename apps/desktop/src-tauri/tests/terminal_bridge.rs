@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 mod engine_support;
+mod native_sources;
 
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::project_setup::{HarnessSlot, ProjectSetup, TeamPlan};
@@ -112,10 +113,10 @@ const PROJECT_WALL_COMMANDS: [&str; 7] = [
 const WALL_GUARD: &str = "terminal_window(&webview)?;";
 const PROJECT_WALL_GUARD: &str = "terminal_window_for(&webview, &id)?;";
 
-/// Every `#[tauri::command]` in lib.rs with its name and body. Takes nothing. Returns the
-/// pairs in source order.
+/// Every `#[tauri::command]` in lib.rs and the command files it includes with its name and
+/// body. Takes nothing. Returns the pairs in source order.
 fn command_bodies() -> Vec<(&'static str, &'static str)> {
-    include_str!("../src/lib.rs")
+    native_sources::native_sources()
         .split("#[tauri::command]")
         .skip(1)
         .map(|body| {

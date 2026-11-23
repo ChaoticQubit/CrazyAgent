@@ -374,11 +374,7 @@ async fn desktop_restart_engine(
     let _update = updates::hold(&update)?;
     let mut bridge = lock(&state).await?;
     let (layout, service) = default_engine()?;
-    if let Some(code) =
-        crazyagent::restore::restart_refusal(layout.root(), restore::service_running(&service))
-    {
-        return Err(engine_failure(code));
-    }
+    crazyagent::restore::refuse_restart(layout.root(), &service).map_err(engine_failure)?;
     start_engine(&layout, &service, true).await?;
     ensure_default_engine().await?;
     bridge.connect().await
