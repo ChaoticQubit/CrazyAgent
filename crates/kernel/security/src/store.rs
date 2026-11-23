@@ -108,6 +108,8 @@ pub fn parts(reference: &SecretRef) -> Result<(&str, &str), StoreError> {
 
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+pub mod macos;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod os_keyring;
 #[cfg(target_os = "windows")]

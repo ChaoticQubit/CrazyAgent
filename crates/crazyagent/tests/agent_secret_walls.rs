@@ -4,7 +4,6 @@ mod keychain_support;
 
 use kernel_security::store::{Store, reference};
 
-use crazyagent::credentials::Keychain;
 use crazyagent::sandbox::toolchains::{self, ToolHomes};
 use crazyagent::sandbox::{
     AGENT_GIT_ENV, AGENT_HOME_ENV, AGENT_TLS_ENV, ProjectSandbox, SECRET_ROOT_REFUSED,
@@ -12,6 +11,7 @@ use crazyagent::sandbox::{
 };
 use kernel_security::relay_token::{LOCAL_PLACEHOLDER, TOKEN_PREFIX};
 use kernel_security::secret::SecretString;
+use kernel_security::store::macos::Keychain;
 use keychain_support::TemporaryKeychain;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
