@@ -209,6 +209,10 @@ pub(crate) enum NativeAuthAsk {
 }
 
 pub(crate) enum Job {
+    AppPlugins(
+        crate::app_plugins::Command,
+        oneshot::Sender<Result<crate::app_plugins::Done, EngineError>>,
+    ),
     Accounts(
         Admission,
         accounts::Command,
@@ -903,6 +907,14 @@ impl Storage {
                         job => job,
                     };
                     match job {
+                        Job::AppPlugins(command, reply) => {
+                            let result = if readonly {
+                                Err(error("app_plugins_readonly"))
+                            } else {
+                                crate::app_plugins::execute(&connection, &config.settings.plugins, command)
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::Accounts(admission, command, reply) => {
                             let result = if readonly {
                                 Err(error("accounts_readonly"))

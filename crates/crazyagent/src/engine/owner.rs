@@ -21,6 +21,9 @@ pub use native_auth::{
 
 pub use transport::accounts::{AccountCheck, AccountPage};
 pub use transport::agents::{AGENT_CONTROL_CODES, AGENTS_PAGE, AgentPage, RELEASE_WAIT};
+pub use transport::app_plugins::{
+    APP_PLUGINS_CODES, AppPluginsPage, PermissionWords, PluginChanged, PluginUser,
+};
 pub use transport::changes::CHANGES_CODES;
 pub use transport::cleanup::CLEANUP_CODES;
 pub use transport::ide::IDE_CODES;

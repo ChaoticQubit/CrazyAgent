@@ -47,6 +47,7 @@ use tokio::time::Instant;
 mod account_profile;
 pub(crate) mod accounts;
 pub(crate) mod agents;
+pub(crate) mod app_plugins;
 pub(crate) mod changes;
 pub(crate) mod cleanup;
 mod deferral;
@@ -2595,6 +2596,7 @@ enum Protocol {
     Ide,
     IdeTab,
     Icloud,
+    AppPlugins,
     Watch,
     Owner,
     #[cfg(test)]
@@ -2631,6 +2633,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("ide", Protocol::Ide),
         ("ide_tab", Protocol::IdeTab),
         ("icloud", Protocol::Icloud),
+        ("app_plugins", Protocol::AppPlugins),
         ("watch", Protocol::Watch),
     ];
     Ok(named
@@ -2725,6 +2728,11 @@ async fn serve_admitted(
             Protocol::IdeTab => return Ok(Some(Deferred::IdeTab(a))),
             Protocol::Icloud => {
                 return icloud::serve(stream, engine, authority, auth, &a, body)
+                    .await
+                    .map(|()| None);
+            }
+            Protocol::AppPlugins => {
+                return app_plugins::serve(stream, engine, authority, auth, &a, body)
                     .await
                     .map(|()| None);
             }
@@ -3050,6 +3058,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Ide => ide::refusal(code)?,
         Protocol::IdeTab => ide_tab::refusal(code)?,
         Protocol::Icloud => icloud::refusal(code)?,
+        Protocol::AppPlugins => app_plugins::refusal(code)?,
         Protocol::Watch => watch::refusal(code)?,
         #[cfg(test)]
         Protocol::TestPanic => accounts::refusal(code)?,
