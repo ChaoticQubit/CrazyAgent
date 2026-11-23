@@ -60,9 +60,7 @@ pub mod tool_cache;
 mod toolchains_tests;
 pub mod warden;
 #[cfg(target_os = "windows")]
-use kernel_sandbox::windows::GRANTS_FOLDER;
-#[cfg(target_os = "windows")]
-use kernel_sandbox::windows::profile as windows;
+use kernel_sandbox::windows::{GRANTS_FOLDER, profile as windows};
 /// What the share-stop rows share on the test farm: the shares and the runner user that
 /// `.github/farm/unc-share-setup.ps1` sets up, the server session that is the measure (P1),
 /// and the planted shapes that point git at those shares (V244-WIN-GIT-UNC-SIBLINGS N1).
